@@ -5,8 +5,12 @@
       "cmake_target":            "Ninja/CMake target(s) to build. Multiple targets space-separated.",
       "bench_kind":              "'native' when the engine ships a *-bench binary or a --bench mode that we invoke once and parse the emitted JSON; 'time-wrapped' when we shell-time N invocations of a CLI and take the median wall-clock ourselves.",
       "binary":                  "Path (relative to build/) of the executable to invoke.",
+      "source":                  "Where to fetch models from. 's3' (default) uses aws s3 cp against s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/<s3_prefix>/<key>. 'huggingface' uses curl against https://huggingface.co/<hf_repo>/resolve/<hf_ref>/<name> — vanilla whisper GGMLs (ggml-tiny.bin etc.) live on HuggingFace, not S3.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
       "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally.",
+      "hf_repo":                 "HuggingFace repo id (e.g. 'ggerganov/whisper.cpp'). Required when source='huggingface'.",
+      "hf_ref":                  "HuggingFace ref (commit SHA) pinned so the download can't silently drift with upstream re-uploads. Required when source='huggingface'.",
+      "models_by_size":          "Only for the whisper family. Object keyed by size ('tiny' / 'base' / 'small'). Each value is either a {name, sha256?} object (source='huggingface') or a list of S3 keys (source='s3'). sha256 is optional; when set the download is verified against it via sha256sum/shasum.",
       "args":                    "Command-line arguments as a JSON array (one element per argv token, so multi-word values stay a single token). Placeholders expanded by run-family.sh per-element: ${MODEL_DIR}, ${MODELS_ROOT}, ${AUDIO_DIR}, ${MODEL_PATH}, and for bench_kind=native also ${RUNS}, ${WARMUP}, ${JSON_OUT}. Native families put the runs/warmup/json-out flags in `args` because their spellings differ (--json-out vs --bench-json, --runs vs --bench-runs).",
       "audio_duration_seconds":  "Length of the reference input audio (for ASR) or requested output audio (for TTS/music). Used to compute wall-based RTF when the bench binary does not report one. Null when the wall-clock isn't a fair RTF proxy (e.g. TTS with variable-length output).",
       "notes":                   "Free text; surfaced in the summary table's 'notes' column."
@@ -14,18 +18,20 @@
   },
 
   "whisper": {
-    "cmake_target": "whisper-bench",
+    "cmake_target": "whisper-cli",
     "bench_kind":   "time-wrapped",
-    "binary":       "bin/whisper-bench",
-    "s3_prefix":    "whisper",
+    "binary":       "bin/whisper-cli",
+    "source":       "huggingface",
+    "hf_repo":      "ggerganov/whisper.cpp",
+    "hf_ref":       "5359861c739e955e79d9a303bcbc70fb988958b1",
     "models_by_size": {
-      "tiny":  ["2026-01-01/tiny-ggml-model.bin"],
-      "base":  ["2026-03-05/en-base-ggml-model-q8_0.bin"],
-      "small": []
+      "tiny":  {"name": "ggml-tiny.bin"},
+      "base":  {"name": "ggml-base.bin"},
+      "small": {"name": "ggml-small.bin"}
     },
-    "args":                    ["-m", "${MODEL_PATH}", "-t", "4"],
-    "audio_duration_seconds":  null,
-    "notes": "whisper-bench prints per-op timings but has no --json-out or --runs; wrapped by run-family.sh which invokes it N times and takes the median wall-clock. 'small' has no registry path yet — surfaced as 'not-in-registry'."
+    "args":                    ["-m", "${MODEL_PATH}", "-f", "${AUDIO_DIR}/jfk.wav", "-t", "4", "-nt"],
+    "audio_duration_seconds":  11.0,
+    "notes": "Real ASR wall-time via whisper-cli on jfk.wav (11.0 s). RTF is wall_ms / 11000 — meaningful because the input is fixed-length. -nt suppresses timestamps in transcript output. Vanilla whisper GGMLs live on HuggingFace; hf_ref is the commit whisper-ci.yml pins."
   },
 
   "parakeet": {
@@ -34,12 +40,12 @@
     "binary":       "engines/parakeet/parakeet",
     "s3_prefix":    "parakeet",
     "models": [
-      "2026-08-13/parakeet-unified-en-0.6b.q8_0.gguf",
+      "2026-05-11/parakeet-ctc-0.6b.q8_0.gguf",
       "2026-05-11/parakeet-tdt-0.6b-v3.q8_0.gguf"
     ],
     "args": [
       "--verbose",
-      "--model",       "${MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf",
+      "--model",       "${MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf",
       "--wav",         "${AUDIO_DIR}/jfk.wav",
       "--bench",
       "--bench-runs",    "${RUNS}",
@@ -57,11 +63,11 @@
     "s3_prefix":    "parakeet",
     "models": [
       "2026-05-20/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf",
-      "2026-08-13/parakeet-unified-en-0.6b.q8_0.gguf"
+      "2026-05-11/parakeet-ctc-0.6b.q8_0.gguf"
     ],
     "args": [
       "--verbose",
-      "--model",              "${MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf",
+      "--model",              "${MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf",
       "--diarization-model",  "${MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf",
       "--wav",                "${AUDIO_DIR}/jfk.wav",
       "--bench",
@@ -100,14 +106,15 @@
     "s3_prefix":    "supertonic",
     "models": ["2026-06-15/supertonic3-q8_0.gguf"],
     "args": [
-      "--model",     "${MODEL_DIR}/supertonic3-q8_0.gguf",
-      "--text",      "benchmark run",
-      "--runs",      "${RUNS}",
-      "--warmup",    "${WARMUP}",
-      "--json-out",  "${JSON_OUT}"
+      "--model",         "${MODEL_DIR}/supertonic3-q8_0.gguf",
+      "--text",          "benchmark run",
+      "--n-gpu-layers",  "999",
+      "--runs",          "${RUNS}",
+      "--warmup",        "${WARMUP}",
+      "--json-out",      "${JSON_OUT}"
     ],
     "audio_duration_seconds":  null,
-    "notes": "Native bench: --json-out reports both e2e wall and RTF."
+    "notes": "Native bench: --json-out reports both e2e wall and RTF. --n-gpu-layers 999 means 'all layers on GPU' — on Linux this is a no-op (no GPU compiled into ggml on the hosted-Linux perf build); on the self-hosted macOS runner it flips supertonic-bench onto the Metal backend that GGML_METAL=ON provides."
   },
 
   "parler": {
@@ -117,14 +124,15 @@
     "s3_prefix":    "parler-tts",
     "models": ["2026-07-20/parler-mini-v1-q8_0.gguf"],
     "args": [
-      "--model",     "${MODEL_DIR}/parler-mini-v1-q8_0.gguf",
-      "--text",      "benchmark run",
-      "--runs",      "${RUNS}",
-      "--warmup",    "${WARMUP}",
-      "--json-out",  "${JSON_OUT}"
+      "--model",         "${MODEL_DIR}/parler-mini-v1-q8_0.gguf",
+      "--text",          "benchmark run",
+      "--n-gpu-layers",  "999",
+      "--runs",          "${RUNS}",
+      "--warmup",        "${WARMUP}",
+      "--json-out",      "${JSON_OUT}"
     ],
     "audio_duration_seconds":  null,
-    "notes": "Native bench; JSON schema matches supertonic-bench."
+    "notes": "Native bench; JSON schema matches supertonic-bench. --n-gpu-layers 999 for the macOS Metal path (no-op on Linux without GPU compiled)."
   },
 
   "cosyvoice": {
@@ -136,15 +144,17 @@
       "2026-07-23/cosyvoice3-llm-q8_0.gguf",
       "2026-07-23/cosyvoice3-flow-f32.gguf",
       "2026-07-23/cosyvoice3-hift-f32.gguf",
-      "2026-07-23/cosyvoice3-voice-en.gguf",
+      {"s3": "2026-07-23/voice-en.gguf", "as": "voice.gguf"},
+      "2026-07-23/vocab.json",
+      "2026-07-23/merges.txt",
       "2026-08-14/cosyvoice3-s3tok-q8_0.gguf",
-      "2026-08-14/campplus-f32.gguf"
+      "2026-08-14/cosyvoice3-campplus-f32.gguf"
     ],
     "args": [
-      "--model-dir", "${MODEL_DIR}",
-      "--runs",      "${RUNS}",
-      "--warmup",    "${WARMUP}",
-      "--json-out",  "${JSON_OUT}"
+      "--model-dir",     "${MODEL_DIR}",
+      "--runs",          "${RUNS}",
+      "--warmup",        "${WARMUP}",
+      "--json-out",      "${JSON_OUT}"
     ],
     "audio_duration_seconds":  null,
     "notes": "Model-dir mode: bench discovers the six shards under one directory."
