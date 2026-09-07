@@ -300,6 +300,53 @@ void test_loop_graph_matches_per_step(const supertonic_model & model) {
                  latent_len, text_len, total_steps, loop_out.size(), max_abs, bad);
     CHECK(bad == 0);
 }
+
+std::vector<int64_t> make_synthetic_ids(int text_len, int64_t vocab_size, uint32_t seed) {
+    std::vector<int64_t> ids((size_t) text_len);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int64_t> dist(0, vocab_size - 1);
+    for (auto & id : ids) id = dist(rng);
+    return ids;
+}
+
+// The one-graph text encoder must match the per-island path on the same backend.
+void check_text_encoder_one_graph(const supertonic_model & model, const std::vector<float> & style_ttl, int text_len) {
+    ggml_tensor * emb = require_source_tensor(model,
+        "text_encoder:tts.ttl.text_encoder.text_embedder.char_embedder.weight");
+    const std::vector<int64_t> ids = make_synthetic_ids(text_len, emb->ne[1], 0x7E47u + (uint32_t) text_len);
+    std::string err;
+    std::vector<float> one_graph, islands;
+    const bool ok_one = supertonic_text_encoder_forward_one_graph_ggml(model, ids.data(), text_len,
+                                                                       style_ttl.data(), one_graph, &err);
+    if (!ok_one) std::fprintf(stderr, "  one-graph failed: %s\n", err.c_str());
+    CHECK(ok_one);
+    const bool ok_islands = supertonic_text_encoder_forward_islands_ggml(model, ids.data(), text_len,
+                                                                         style_ttl.data(), islands, &err);
+    if (!ok_islands) std::fprintf(stderr, "  islands failed: %s\n", err.c_str());
+    CHECK(ok_islands);
+    if (!ok_one || !ok_islands) return;
+    CHECK(one_graph.size() == islands.size());
+    float max_abs = 0.0f;
+    const int bad = count_mismatches(one_graph, islands, max_abs);
+    std::fprintf(stderr, "  text_len=%d, n=%zu, max_abs_err=%.3e, bad=%d\n",
+                 text_len, one_graph.size(), max_abs, bad);
+    CHECK(bad == 0);
+}
+
+void test_text_encoder_one_graph_matches_islands(const supertonic_model & model) {
+    std::fprintf(stderr, "[one-graph text encoder vs per-island path]\n");
+    if (model.voices.empty()) {
+        std::fprintf(stderr, "  SKIP: no voices in model\n");
+        return;
+    }
+    const auto & voice = model.voices.begin()->second;
+    std::vector<float> style_ttl((size_t) ggml_nelements(voice.ttl));
+    ggml_backend_tensor_get(voice.ttl, style_ttl.data(), 0, ggml_nbytes(voice.ttl));
+    // Lengths on both sides of the relative-position window (9 offsets).
+    for (int text_len : { 3, 8, 9, 24, 151 }) {
+        check_text_encoder_one_graph(model, style_ttl, text_len);
+    }
+}
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -317,6 +364,7 @@ int main(int argc, char ** argv) {
     test_f11_duration_cache_parity(model);
     test_f8_style_residual_cache_parity(model);
     test_loop_graph_matches_per_step(model);
+    test_text_encoder_one_graph_matches_islands(model);
 
     free_supertonic_model(model);
 

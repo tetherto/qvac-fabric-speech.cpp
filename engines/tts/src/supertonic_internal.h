@@ -767,6 +767,22 @@ bool supertonic_text_encoder_forward_ggml(const supertonic_model & model,
                                           std::vector<float> & text_emb_out,
                                           std::string * error = nullptr);
 
+// Per-island path: one graph per stage with host residual adds and layer norms.
+bool supertonic_text_encoder_forward_islands_ggml(const supertonic_model & model,
+                                                  const int64_t * text_ids,
+                                                  int text_len,
+                                                  const float * style_ttl,
+                                                  std::vector<float> & text_emb_out,
+                                                  std::string * error = nullptr);
+
+// Whole encoder in one graph compute (the default off the CPU backend).
+bool supertonic_text_encoder_forward_one_graph_ggml(const supertonic_model & model,
+                                                    const int64_t * text_ids,
+                                                    int text_len,
+                                                    const float * style_ttl,
+                                                    std::vector<float> & text_emb_out,
+                                                    std::string * error = nullptr);
+
 // round 12 #6 — text-encoder speech-prompted-attention
 // GPU bridge.
 //
@@ -794,6 +810,10 @@ bool supertonic_text_encoder_forward_ggml(const supertonic_model & model,
 // test can SFINAE-pin the field contract + free-default
 // destructor without dragging the whole text-encoder TU into
 // the test binary.
+struct speech_prompted_sources {
+    std::string q_w, q_b, v_w, v_b, out_w, out_b, tanh_k;
+};
+
 struct speech_prompted_merged_cache {
     const supertonic_model * model = nullptr;
     uint64_t generation_id = 0;
