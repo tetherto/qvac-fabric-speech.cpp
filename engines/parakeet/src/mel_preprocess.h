@@ -66,14 +66,29 @@ int load_wav_mono_f32(const std::string & wav_path,
 // `window_padded_n_fft` is the cache key for the precomputed
 // zero-padded analysis window: re-derives only when `cfg.n_fft`
 // changes (which is once per engine lifetime in practice).
+// Column range [lo, hi) of one mel filter's non-zero weights.
+struct MelFilterBand {
+    int lo = 0;
+    int hi = 0;
+};
+
+std::vector<MelFilterBand> make_filter_bands(const std::vector<float> & filterbank, int n_mels, int n_bins);
+
+// One log-mel frame from a power spectrum: banded filterbank dot products, then the log.
+void log_mel_frame(const float * frame_power, int n_bins, int n_mels,
+                   const float * filterbank, const MelFilterBand * bands,
+                   float log_zero_guard, float * mel_out);
+
 struct MelState {
     std::vector<float>               x;
     std::vector<float>               x_padded;
     std::vector<float>               window_padded;
     std::vector<float>               power;
+    std::vector<MelFilterBand>       filter_bands;
 
     int                              window_padded_n_fft = 0;
     const std::vector<float> *       window_padded_src   = nullptr;
+    const std::vector<float> *       filter_bands_src    = nullptr;
 };
 
 struct IncrementalMelState {

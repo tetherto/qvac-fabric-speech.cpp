@@ -1,4 +1,4 @@
-// Fused attention is a build option that only CUDA and Metal take; every other
+// Fused attention is a build option that only CUDA, Metal and Vulkan take; every other
 // backend, CPU included, keeps the unfused graph so its output does not depend
 // on which GPU backend the binary carries.
 //   test-attn-path                                  policy checks on the live backends
@@ -65,10 +65,11 @@ int check_policy() {
     ggml_backend_free(cpu);
 
     if (ggml_backend_t gpu = init_first_gpu()) {
-        const bool fused_backend = parakeet::backend_is_cuda(gpu) || parakeet::backend_is_metal(gpu);
+        const bool fused_backend = parakeet::backend_is_cuda(gpu) || parakeet::backend_is_metal(gpu) ||
+                                   parakeet::backend_is_vulkan(gpu);
         std::printf("[attn-path] GPU backend %s, fused attention backend: %s\n",
                     parakeet::backend_reg_name(gpu), fused_backend ? "yes" : "no");
-        failures += check(parakeet::flash_attn_allowed(true, gpu) == fused_backend, "GPU takes the fused graph only on CUDA and Metal");
+        failures += check(parakeet::flash_attn_allowed(true, gpu) == fused_backend, "GPU takes the fused graph only on CUDA, Metal and Vulkan");
         failures += check(!parakeet::flash_attn_allowed(false, gpu),               "GPU keeps the unfused graph when compiled out");
         ggml_backend_free(gpu);
     } else {
@@ -86,14 +87,14 @@ int check_graph(const char * gguf, int n_gpu_layers) {
     }
     const std::string backend = model_encoder_backend_name(model);
     ggml_backend_t    active  = model_active_backend(model);
-    const bool fused_backend  = active && (backend_is_cuda(active) || backend_is_metal(active));
+    const bool fused_backend  = active && (backend_is_cuda(active) || backend_is_metal(active) || backend_is_vulkan(active));
     const bool uses_fa        = encoder_graph_uses_op(model, GGML_OP_FLASH_ATTN_EXT);
     std::printf("[attn-path] encoder backend %s, flash-attn compiled %d, graph uses it %d\n",
                 backend.c_str(), (int) flash_attn_compiled(), (int) uses_fa);
     if (n_gpu_layers <= 0 || !fused_backend) {
         return check(!uses_fa, "encoder graph on this backend has no fused attention node");
     }
-    return check(uses_fa == flash_attn_compiled(), "encoder graph on CUDA/Metal follows the build option");
+    return check(uses_fa == flash_attn_compiled(), "encoder graph on CUDA/Metal/Vulkan follows the build option");
 }
 
 } // namespace

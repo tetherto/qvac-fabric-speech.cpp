@@ -143,6 +143,14 @@ emit_json() {
   cat "$OUT" >&2
 }
 
+# The `source` field per family (default "s3"): "s3" for the tetherto S3
+# registry via aws s3 cp, "huggingface" for `curl` against a pinned HF
+# revision. Vanilla whisper GGMLs (tiny/base/small) live on HuggingFace,
+# not S3 — the whisper family sets source="huggingface" and provides
+# hf_repo / hf_ref / models_by_size[<size>] = {name, sha256?} entries.
+SOURCE="$(spec_field source)"
+[[ -n "$SOURCE" ]] || SOURCE="s3"
+
 # ---- resolve MODEL_LABEL + placeholders -------------------------------------
 if [[ "$FAMILY" == "whisper" ]]; then
   MODEL_LABEL="whisper-$WHISPER_SIZE"
@@ -151,8 +159,45 @@ else
   MODEL_LABEL="$FAMILY: ${first_model##*/}"
 fi
 
+# ---- fetch models from HuggingFace (curl, optional sha256 verification) ----
+fetch_from_hf() {
+  local repo ref name dest sha256 url
+  repo="$(jq -r '.whisper.hf_repo' "$FAMILIES_JSON")"
+  ref="$(jq -r '.whisper.hf_ref'  "$FAMILIES_JSON")"
+  name="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].name // ""' "$FAMILIES_JSON")"
+  sha256="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].sha256 // ""' "$FAMILIES_JSON")"
+
+  if [[ -z "$name" || "$name" == "null" ]]; then
+    echo "$FAMILY-$WHISPER_SIZE: no HF model name in registry (not-in-registry)"
+    return 66
+  fi
+  if [[ -z "$repo" || "$repo" == "null" || -z "$ref" || "$ref" == "null" ]]; then
+    echo "whisper: missing hf_repo / hf_ref in families.json" >&2
+    return 1
+  fi
+
+  dest="$MODEL_DIR/$name"
+  if [[ -f "$dest" ]]; then return 0; fi
+  url="https://huggingface.co/${repo}/resolve/${ref}/${name}"
+  echo "fetch $url -> $dest"
+  # curl -f: fail on HTTP >= 400 rather than writing an HTML error page and
+  # returning success. -L: follow redirects (HF uses them). Explicit
+  # || return $? so a fetch failure propagates instead of the loop swallowing
+  # it (bash's `set -e` is disabled inside a function called with `||`).
+  curl -fL -o "$dest" "$url" --silent --show-error || return $?
+
+  if [[ -n "$sha256" && "$sha256" != "null" ]]; then
+    if command -v sha256sum >/dev/null; then
+      echo "$sha256  $dest" | sha256sum -c - || return $?
+    elif command -v shasum >/dev/null; then
+      echo "$sha256  $dest" | shasum -a 256 -c - || return $?
+    fi
+  fi
+  return 0
+}
+
 # ---- fetch models from S3 (skipped when models[] empty / no bucket) --------
-fetch_models() {
+fetch_from_s3() {
   local bucket="${MODEL_S3_BUCKET:-}"
   if [[ -z "$bucket" ]]; then
     echo "MODEL_S3_BUCKET not set — skipping fetch (assuming local models present)" >&2
@@ -161,40 +206,52 @@ fetch_models() {
 
   # `mapfile -t` is bash 4+, so the macOS self-hosted runner would break if
   # /usr/bin/env bash resolved to the system 3.2. Use a portable read loop.
+  # Each row is "s3-key<TAB>rename-to" — rename-to is empty for string
+  # entries and the engine-expected filename for object entries like
+  # {"s3": "2026-07-23/voice-en.gguf", "as": "voice.gguf"} (cosyvoice's
+  # baked voice is stored language-suffixed in S3 but the engine looks
+  # for the canonical `voice.gguf`).
   local -a keys=()
   local line
-  if [[ "$FAMILY" == "whisper" ]]; then
-    while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg size "$WHISPER_SIZE" \
-      '.whisper.models_by_size[$size][]?' "$FAMILIES_JSON")
-    if [[ ${#keys[@]} -eq 0 ]]; then
-      echo "$FAMILY-$WHISPER_SIZE: no S3 key in registry (not-in-registry)"
-      return 66
-    fi
-  else
-    while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg family "$FAMILY" \
-      '.[$family].models[]?' "$FAMILIES_JSON")
-    if [[ ${#keys[@]} -eq 0 ]]; then
-      return 65      # minimax shape: no S3 path
-    fi
+  while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg family "$FAMILY" \
+    '.[$family].models[]? | if type == "string" then "\(.)\t" else "\(.s3)\t\(.as // "")" end' \
+    "$FAMILIES_JSON")
+  if [[ ${#keys[@]} -eq 0 ]]; then
+    return 65      # minimax shape: no S3 path
   fi
 
-  for key in "${keys[@]}"; do
-    local basename="${key##*/}"
+  for row in "${keys[@]}"; do
+    local key="${row%%$'\t'*}"
+    local rename_to="${row#*$'\t'}"
+    local basename="${rename_to:-${key##*/}}"
     local dest="$MODEL_DIR/$basename"
     if [[ -f "$dest" ]]; then continue; fi
     local s3url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$key"
     echo "fetch $s3url -> $dest"
-    aws s3 cp "$s3url" "$dest" --no-progress
+    # `|| return $?` so an S3 failure (404, denied, network) propagates as a
+    # non-zero exit from the function — otherwise `set -e` is disabled by
+    # the caller's `||` guard and the loop continues past a missing model,
+    # eventually running the bench binary against nothing and mis-reporting
+    # `run-failed` for what's actually a `fetch-failed`.
+    aws s3 cp "$s3url" "$dest" --no-progress || return $?
   done
   return 0
+}
+
+fetch_models() {
+  case "$SOURCE" in
+    huggingface) fetch_from_hf ;;
+    s3|"")       fetch_from_s3 ;;
+    *) echo "unknown source '$SOURCE' for family '$FAMILY'" >&2; return 1 ;;
+  esac
 }
 
 # ---- pick the model path for whisper (single -m arg) ------------------------
 MODEL_PATH=""
 if [[ "$FAMILY" == "whisper" ]]; then
-  wkey="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size][0] // ""' "$FAMILIES_JSON")"
-  if [[ -n "$wkey" ]]; then
-    MODEL_PATH="$MODEL_DIR/${wkey##*/}"
+  wname="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].name // ""' "$FAMILIES_JSON")"
+  if [[ -n "$wname" && "$wname" != "null" ]]; then
+    MODEL_PATH="$MODEL_DIR/$wname"
   fi
 fi
 
@@ -328,6 +385,14 @@ run_native() {
       > "$stderr_log.stdout" 2>> "$stderr_log"; then
     :
   else
+    # Surface the child's actual failure to the step log so debugging a
+    # run-failed cell doesn't require local repro.
+    { echo "--- native bench failed; last 30 lines of stdout ---"
+      tail -n 30 "$stderr_log.stdout" 2>/dev/null || true
+      echo "--- last 30 lines of stderr ---"
+      tail -n 30 "$stderr_log"        2>/dev/null || true
+      echo "--- end ---"
+    } >&2
     return 1
   fi
 
