@@ -575,14 +575,17 @@ Current status:
   BLAS worker threads are capped by default to avoid nested oversubscription
   under GGML task-level threading.
 - Off the CPU backend the duration encoder, the text encoder, the whole CFM
-  loop (every step, classifier-free guidance batched along time) and the
-  vocoder each run as one graph compute; the relative-position bias is a
-  strided view over a padded tensor instead of a mask chain.  ggml-metal fuses
+  loop and the vocoder each run as one graph compute, and the
+  relative-position bias is a strided view over a padded tensor instead of a
+  mask chain.  Where the fused Supertonic kernels exist (Metal) the CFM step
+  runs in `[C, T]` layout with classifier-free guidance batched along time;
+  other GPU backends keep the per-pass step inside the one graph.  ggml-metal fuses
   the Supertonic depthwise convolution into the following channel layer norm
   and the mat-mat epilogues (bias, bias + residual, bias + GELU, gamma +
-  residual) into its mat-mat kernels.  `SUPERTONIC_DISABLE_TEXT_ONE_GRAPH=1`,
-  `SUPERTONIC_DISABLE_DURATION_ONE_GRAPH=1`, `GGML_METAL_FUSION_MM_EPILOGUE_DISABLE=1`
-  and `GGML_METAL_FUSION_DW_LN_DISABLE=1` restore the previous paths for A/B runs.
+  residual) into its mat-mat kernels.  `SUPERTONIC_DISABLE_CT_STEP=1`,
+  `SUPERTONIC_DISABLE_TEXT_ONE_GRAPH=1`, `SUPERTONIC_DISABLE_DURATION_ONE_GRAPH=1`,
+  `GGML_METAL_FUSION_MM_EPILOGUE_DISABLE=1` and `GGML_METAL_FUSION_DW_LN_DISABLE=1`
+  restore the previous paths for A/B runs.
 - `SUPERTONIC_VECTOR_PROFILE=1` and `SUPERTONIC_TEXT_PROFILE=1` print
   per-island timings for tuning graph boundaries.  Current text profiling shows
   stock-op relpos is ~0.7-0.8 ms/layer on the quick prompt, so a fused relpos
