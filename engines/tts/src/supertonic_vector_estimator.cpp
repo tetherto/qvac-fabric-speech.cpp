@@ -4490,6 +4490,13 @@ static std::string matmul_name(int suffix) {
 // `t_emb_in` varies per step (one time embedding per CFM step index).
 // All other inputs are constant across the 5 CFM steps and bind to a
 // single shared input tensor regardless of which path is used.
+// K/V projections of the step-invariant text and style inputs; an unrolled
+// multi-step graph builds them once and shares them across its steps.
+struct vector_step_kv {
+    ggml_tensor * k = nullptr;  // text: roped keys, style: tanh keys, ne=[H*D, kv_len]
+    ggml_tensor * v = nullptr;  // ne=[H*D, kv_len]
+};
+
 struct vector_step_inputs {
     ggml_tensor * x_in           = nullptr;  // ne=[L, Cin]    f32
     ggml_tensor * mask_in        = nullptr;  // ne=[L]         f32
@@ -4502,7 +4509,61 @@ struct vector_step_inputs {
     ggml_tensor * pos_k          = nullptr;  // ne=[text_len]  i32
     ggml_tensor * freq_factors_q = nullptr;  // ne=[D/2]       f32
     ggml_tensor * freq_factors_k = nullptr;  // ne=[D/2]       f32
+    vector_step_kv text_kv[4];               // per group; null k = build inside the step
+    vector_step_kv style_kv[4];
 };
+
+vector_step_kv text_attention_kv_ggml(ggml_context * gctx,
+                                      const supertonic_model & model,
+                                      const vector_step_inputs & inputs,
+                                      int group, int text_len, int H, int D) {
+    const auto & names = kGroupNames[group];
+    const std::string attn = "vector_estimator:tts.ttl.vector_field.main_blocks." +
+                             std::to_string(group * 6 + 3) + ".attn.";
+    vector_step_kv kv;
+    kv.k = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.text_in,
+        require_source_tensor(model, matmul_name(names.attn_k)),
+        require_source_tensor(model, attn + "W_key.linear.bias"));
+    kv.k = apply_supertonic_rope_ggml(gctx, kv.k, inputs.pos_k, inputs.freq_factors_k, text_len, H, D);
+    kv.v = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.text_in,
+        require_source_tensor(model, matmul_name(names.attn_v)),
+        require_source_tensor(model, attn + "W_value.linear.bias"));
+    return kv;
+}
+
+vector_step_kv style_attention_kv_ggml(ggml_context * gctx,
+                                       const supertonic_model & model,
+                                       const vector_step_inputs & inputs,
+                                       int group) {
+    const auto & names = kGroupNames[group];
+    const std::string attn = "vector_estimator:tts.ttl.vector_field.main_blocks." +
+                             std::to_string(group * 6 + 5) + ".attention.";
+    vector_step_kv kv;
+    kv.k = ggml_tanh(gctx, dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.style_kctx_in,
+        require_source_tensor(model, matmul_name(names.style_k)),
+        require_source_tensor(model, attn + "W_key.linear.bias")));
+    kv.v = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.style_v_raw_in,
+        require_source_tensor(model, matmul_name(names.style_v)),
+        require_source_tensor(model, attn + "W_value.linear.bias"));
+    return kv;
+}
+
+void append_vector_step_kv_projections(ggml_context * gctx,
+                                       const supertonic_model & model,
+                                       vector_step_inputs & inputs,
+                                       int text_len, int H, int D) {
+    for (int g = 0; g < 4; ++g) {
+        inputs.text_kv[g]  = text_attention_kv_ggml(gctx, model, inputs, g, text_len, H, D);
+        inputs.style_kv[g] = style_attention_kv_ggml(gctx, model, inputs, g);
+    }
+}
+
+void copy_vector_step_kv(const vector_step_inputs & from, vector_step_inputs & to) {
+    for (int g = 0; g < 4; ++g) {
+        to.text_kv[g]  = from.text_kv[g];
+        to.style_kv[g] = from.style_kv[g];
+    }
+}
 
 // Append one CFM step's subgraph (proj_in → 4 groups → tail → proj_out
 // → velocity → next = noise + velocity / total_steps) to `gf`.  All
@@ -4670,17 +4731,13 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, matmul_name(names.attn_q)),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(attn_block) + ".attn.W_query.linear.bias"));
-        ggml_tensor * k_wt = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.text_in,
-            require_source_tensor(model, matmul_name(names.attn_k)),
-            require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(attn_block) + ".attn.W_key.linear.bias"));
-        ggml_tensor * v_wt = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.text_in,
-            require_source_tensor(model, matmul_name(names.attn_v)),
-            require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(attn_block) + ".attn.W_value.linear.bias"));
+        const vector_step_kv text_kv = inputs.text_kv[group].k
+            ? inputs.text_kv[group]
+            : text_attention_kv_ggml(gctx, model, inputs, group, text_len, H, D);
+        ggml_tensor * k_wt = text_kv.k;
+        ggml_tensor * v_wt = text_kv.v;
 
         q_wt = apply_supertonic_rope_ggml(gctx, q_wt, inputs.pos_q, inputs.freq_factors_q, L, H, D);
-        k_wt = apply_supertonic_rope_ggml(gctx, k_wt, inputs.pos_k, inputs.freq_factors_k, text_len, H, D);
 
         ggml_tensor * attn_out = append_text_attention_subgraph(gctx, model,
             q_wt, k_wt, v_wt, L, text_len, H, D,
@@ -4708,15 +4765,11 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, matmul_name(names.style_q)),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(style_block) + ".attention.W_query.linear.bias"));
-        ggml_tensor * sk_wt = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.style_kctx_in,
-            require_source_tensor(model, matmul_name(names.style_k)),
-            require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(style_block) + ".attention.W_key.linear.bias"));
-        sk_wt = ggml_tanh(gctx, sk_wt);
-        ggml_tensor * sv_wt = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.style_v_raw_in,
-            require_source_tensor(model, matmul_name(names.style_v)),
-            require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(style_block) + ".attention.W_value.linear.bias"));
+        const vector_step_kv style_kv = inputs.style_kv[group].k
+            ? inputs.style_kv[group]
+            : style_attention_kv_ggml(gctx, model, inputs, group);
+        ggml_tensor * sk_wt = style_kv.k;
+        ggml_tensor * sv_wt = style_kv.v;
 
         ggml_tensor * style_out = append_text_attention_subgraph(gctx, model,
             sq_wt, sk_wt, sv_wt, L, kv_style, SH, SD,
@@ -5205,21 +5258,34 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                 ggml_set_input(cache.t_emb_in[s]);
             }
 
+            // --- Step-invariant K/V projections, once per conditioning branch ---
+            const int H = model.hparams.vector_text_attn_heads;
+            vector_step_inputs shared;
+            shared.text_in        = cache.text_in;
+            shared.style_v_raw_in = cache.style_v_raw_in;
+            shared.style_kctx_in  = cache.style_kctx_in;
+            shared.pos_k          = cache.pos_k;
+            shared.freq_factors_k = cache.freq_factors_k;
+            append_vector_step_kv_projections(cache.ctx, model, shared, text_len, H, D);
+            vector_step_inputs shared_u;
+            if (model.hparams.cfg_enabled()) {
+                shared_u = shared;
+                shared_u.text_in        = cache.text_in_u;
+                shared_u.style_v_raw_in = cache.style_v_raw_in_u;
+                shared_u.style_kctx_in  = cache.style_kctx_in_u;
+                append_vector_step_kv_projections(cache.ctx, model, shared_u, text_len, H, D);
+            }
+
             // --- Chain N CFM steps together ---
             ggml_tensor * cur_latent = cache.x0_in;
             for (int s = 0; s < total_steps; ++s) {
-                vector_step_inputs inputs;
+                vector_step_inputs inputs = shared;
                 inputs.x_in           = cur_latent;       // previous step's output
                 inputs.mask_in        = cache.mask_in;
                 inputs.t_emb_in       = cache.t_emb_in[s];
-                inputs.text_in        = cache.text_in;
-                inputs.style_v_raw_in = cache.style_v_raw_in;
-                inputs.style_kctx_in  = cache.style_kctx_in;
                 inputs.noise_in       = cur_latent;       // CFM: next = noise_in + v/N
                 inputs.pos_q          = cache.pos_q;
-                inputs.pos_k          = cache.pos_k;
                 inputs.freq_factors_q = cache.freq_factors_q;
-                inputs.freq_factors_k = cache.freq_factors_k;
 
                 ggml_tensor * next = append_supertonic_vector_step_subgraph(
                     cache.ctx, cache.gf, model, inputs, L, text_len, total_steps);
@@ -5228,6 +5294,7 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                     inputs_u.text_in        = cache.text_in_u;
                     inputs_u.style_v_raw_in = cache.style_v_raw_in_u;
                     inputs_u.style_kctx_in  = cache.style_kctx_in_u;
+                    copy_vector_step_kv(shared_u, inputs_u);
                     ggml_tensor * next_u = append_supertonic_vector_step_subgraph(
                         cache.ctx, cache.gf, model, inputs_u, L, text_len, total_steps);
                     next = ggml_sub(cache.ctx,

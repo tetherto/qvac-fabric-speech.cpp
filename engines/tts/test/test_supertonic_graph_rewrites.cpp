@@ -227,6 +227,79 @@ void test_f8_style_residual_cache_parity(const supertonic_model & model) {
     CHECK(bad == 0);
 }
 
+
+bool run_per_step_chain(const supertonic_model & model,
+                        const std::vector<float> & latent, int latent_len,
+                        const std::vector<float> & text_emb, int text_len,
+                        const std::vector<float> & style_ttl,
+                        const std::vector<float> & latent_mask,
+                        int total_steps, std::vector<float> & out, std::string & err) {
+    std::vector<float> cur = latent, next;
+    for (int s = 0; s < total_steps; ++s) {
+        if (!supertonic_vector_step_ggml(model, cur.data(), latent_len, text_emb.data(), text_len,
+                                         style_ttl.data(), latent_mask.data(), s, total_steps,
+                                         next, &err)) {
+            return false;
+        }
+        cur.swap(next);
+    }
+    out.swap(cur);
+    return true;
+}
+
+int count_mismatches(const std::vector<float> & a, const std::vector<float> & b, float & max_abs) {
+    int bad = 0;
+    max_abs = 0.0f;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+        max_abs = std::max(max_abs, std::fabs(a[i] - b[i]));
+        if (!close_enough(a[i], b[i], /*atol=*/1e-3f, /*rtol=*/1e-3f)) ++bad;
+    }
+    return bad;
+}
+
+// The unrolled loop graph shares the step-invariant K/V projections across
+// its steps; it must still equal the per-step chain.
+void test_loop_graph_matches_per_step(const supertonic_model & model) {
+    std::fprintf(stderr, "[unrolled CFM loop graph vs per-step chain]\n");
+
+    const int text_len    = 16;
+    const int latent_len  = 8;
+    const int total_steps = 5;
+    const int Cin         = model.hparams.latent_channels;
+
+    auto latent   = make_synthetic_latent(Cin, latent_len, 0x5EED1234);
+    auto text_emb = make_synthetic_latent(256, text_len,   0x7E57);
+    std::vector<float> latent_mask((size_t) latent_len, 1.0f);
+
+    if (model.voices.empty()) {
+        std::fprintf(stderr, "  SKIP: no voices in model\n");
+        return;
+    }
+    const auto & voice = model.voices.begin()->second;
+    std::vector<float> style_ttl((size_t) ggml_nelements(voice.ttl));
+    ggml_backend_tensor_get(voice.ttl, style_ttl.data(), 0, ggml_nbytes(voice.ttl));
+
+    std::string err;
+    std::vector<float> loop_out, chain_out;
+    if (!supertonic_vector_loop_ggml(model, latent.data(), latent_len, text_emb.data(), text_len,
+                                     style_ttl.data(), latent_mask.data(), total_steps,
+                                     loop_out, &err)) {
+        std::fprintf(stderr, "  SKIP loop graph: %s\n", err.c_str());
+        return;
+    }
+    if (!run_per_step_chain(model, latent, latent_len, text_emb, text_len, style_ttl, latent_mask,
+                            total_steps, chain_out, err)) {
+        std::fprintf(stderr, "  SKIP per-step chain: %s\n", err.c_str());
+        return;
+    }
+
+    CHECK(loop_out.size() == chain_out.size());
+    float max_abs = 0.0f;
+    const int bad = count_mismatches(loop_out, chain_out, max_abs);
+    std::fprintf(stderr, "  L=%d, text_len=%d, steps=%d, n=%zu, max_abs_err=%.3e, bad=%d\n",
+                 latent_len, text_len, total_steps, loop_out.size(), max_abs, bad);
+    CHECK(bad == 0);
+}
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -243,6 +316,7 @@ int main(int argc, char ** argv) {
     test_f3_vocoder_unpack_parity(model);
     test_f11_duration_cache_parity(model);
     test_f8_style_residual_cache_parity(model);
+    test_loop_graph_matches_per_step(model);
 
     free_supertonic_model(model);
 

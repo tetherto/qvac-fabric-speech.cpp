@@ -2640,6 +2640,11 @@ if (TTS_CPP_BUILD_TESTS)
     # OpenCL optimization audit follow-up harnesses (F1–F11).
     add_supertonic_harness(test-supertonic-load-caches    test/test_supertonic_load_caches.cpp)
     add_supertonic_harness(test-supertonic-graph-rewrites test/test_supertonic_graph_rewrites.cpp)
+    tts_cpp_register_test(test-supertonic-graph-rewrites-v3
+        EXE      test-supertonic-graph-rewrites
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}"
+        REQUIRES "${_tcb_super3_gguf}")
     # OpenCL audit follow-up #2 — text-encoder caches (F13, F16),
     # Phase 2A F16-weight roster (predicate-level), Phase 2D
     # profile-CSV emitter (unit-only).
