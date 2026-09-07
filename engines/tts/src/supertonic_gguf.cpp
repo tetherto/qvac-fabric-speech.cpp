@@ -1850,7 +1850,8 @@ void supertonic_sched_alloc(const supertonic_model & model, ggml_cgraph * graph)
     // USAGE_WEIGHTS at load; buffer_w_extra is deliberately NOT passed — it is
     // unmarked today and the sched path is proven bit-identical with it
     // unmarked, so marking it would be a separate, tested change.
-    if (!det::sched_fallback_ensure(model.sched_fb, model.backend, /*graph_size=*/8192,
+    if (!det::sched_fallback_ensure(model.sched_fb, model.backend,
+                                    kSupertonicSchedGraphSize,
                                     {model.buffer_w})) {
         throw std::runtime_error("supertonic_sched_alloc: scheduler creation failed");
     }

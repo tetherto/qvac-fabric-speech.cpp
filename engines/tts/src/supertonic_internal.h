@@ -738,6 +738,13 @@ inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
 void supertonic_sched_alloc(const supertonic_model & model, ggml_cgraph * graph);
 void supertonic_sched_compute(const supertonic_model & model, ggml_cgraph * graph);
 
+// Graph size the [backend, CPU-last] scheduler bundle is created with
+// (sched_fallback_ensure in supertonic_sched_alloc).  ONE definition shared
+// with the memory-fit vocoder pricer (fit_price_graph in
+// supertonic_fit_measure_vocoder): the sched hash size shifts the scheduler's
+// own allocation, so the priced scheduler must be the runtime's.
+constexpr size_t kSupertonicSchedGraphSize = 8192;
+
 // Dispatch gate shared by every dual-path stage: supports_op walk over the
 // graph + the TTS_CPP_FORCE_SCHED escape hatch (safe: every dual-path site
 // rebuilds its graph before a sched pass — see the contract note above —

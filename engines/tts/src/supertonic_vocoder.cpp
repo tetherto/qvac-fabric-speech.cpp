@@ -1259,8 +1259,8 @@ bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
         vocoder_graph_cache cache;
         build_supertonic_vocoder_cache(cache, m, latent_len);
         ::tts_cpp::detail::fit_graph_price price;
-        // 8192 mirrors supertonic_sched_alloc's sched_fallback_ensure size.
-        const bool ok = ::tts_cpp::detail::fit_price_graph(m.backend, cache.gf, 8192, price);
+        const bool ok = ::tts_cpp::detail::fit_price_graph(m.backend, cache.gf,
+                                                           kSupertonicSchedGraphSize, price);
         free_vocoder_cache(cache);
         if (!ok) {
             if (error) *error = "vocoder graph pricing failed";
