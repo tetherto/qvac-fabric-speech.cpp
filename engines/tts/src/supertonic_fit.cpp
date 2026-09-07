@@ -117,19 +117,14 @@ FitResult fit_params(const FitOptions & opts) {
         r.device_total_bytes = total_b;
     }
 
-    // Only the non-CPU dispatch path is modelled: the CPU vector-estimator
-    // multi-cache set is a documented follow-up.  Refusing (Error) beats a
-    // wrong FITS.
-    if (det::model_prefers_cpu_kernels(m.model)) {
-        r.reason = "compute-path-not-supported";
-        return r;
-    }
-
     // ── Workload → shapes, exactly as Engine::Impl::run_single_chunk ────────
+    // Validated BEFORE the compute-path refusal below: an oversized workload
+    // is invalid on every backend, so it reports workload-too-large even
+    // where the CPU refusal would also apply.
     const det::supertonic_hparams & hp = m.model.hparams;
     const int L_text = opts.text_tokens;
-    // The relative-position caches hold 9 persistent L x L masks; widen the
-    // product before it can wrap.
+    // The text encoder's one-graph cache holds a persistent L x L rel_band;
+    // widen the product before it can wrap.
     if ((long long) L_text * L_text > (long long) std::numeric_limits<int>::max() / 64) {
         r.reason = "workload-too-large";
         return r;
@@ -146,6 +141,14 @@ FitResult fit_params(const FitOptions & opts) {
     }
     const int latent_len = (int) latent_u;
     const int T_wav      = latent_len * chunk;
+
+    // Only the non-CPU dispatch path is modelled: the CPU vector-estimator
+    // multi-cache set is a documented follow-up.  Refusing (Error) beats a
+    // wrong FITS.
+    if (det::model_prefers_cpu_kernels(m.model)) {
+        r.reason = "compute-path-not-supported";
+        return r;
+    }
 
     // ── Stage graph-cache arenas (all resident at once, so they sum) ────────
     std::string error;
