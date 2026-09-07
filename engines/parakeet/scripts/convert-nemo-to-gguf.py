@@ -6,11 +6,9 @@ Auto-detects the model flavour from ``cfg['target']``:
 
   - ``EncDecCTCModelBPE``                -> CTC head      (parakeet-ctc-0.6b, -1.1b)
   - ``EncDecHybridRNNTCTCBPEModel`` (no TDT durations)
-                                         -> CTC head      (IndicConformer-600M
-                                            hybrid; CTC-only v1 export.
-                                            CTC weights live under
-                                            ``ctc_decoder.*``; vocab under
-                                            ``aux_ctc.decoder``)
+                                         -> CTC head by default
+                                            (``--head rnnt`` exports the
+                                            Transducer branch instead)
   - ``EncDecHybridRNNTCTCBPEModel`` (with TDT durations)
                                          -> TDT           (hybrid TDT+CTC ckpts
                                             such as parakeet-tdt_ctc-110m)
@@ -538,7 +536,9 @@ def nemotron_prompt_entries(cfg: dict):
     return aliases, prompt_ids
 
 
-def detect_model_type(cfg: dict) -> str:
+def detect_model_type(cfg: dict, head: str = "auto") -> str:
+    if head != "auto":
+        return head
     target = str(cfg.get("target", ""))
     if "sortformer" in target.lower() or "sortformer_modules" in cfg:
         return "sortformer"
@@ -566,6 +566,39 @@ def detect_model_type(cfg: dict) -> str:
     return "ctc"
 
 
+def rnnt_max_symbols(cfg: dict) -> int:
+    greedy = (cfg.get("decoding") or {}).get("greedy") or {}
+    configured = greedy.get("max_symbols", greedy.get("max_symbols_per_step"))
+    if not configured:
+        return 10
+    return int(configured)
+
+
+def validate_rnnt_contract(cfg: dict, sd: dict):
+    decoder = cfg.get("decoder") or {}
+    if "prednet" not in decoder or "joint" not in cfg:
+        raise ValueError(
+            "rnnt head requires a Transducer checkpoint "
+            "(decoder.prednet / joint config missing)"
+        )
+
+    vocab_size = int(decoder["vocab_size"])
+    joint_classes = int(cfg["joint"]["num_classes"])
+    if joint_classes != vocab_size:
+        raise ValueError(
+            f"rnnt: joint.num_classes ({joint_classes}) != "
+            f"decoder.vocab_size ({vocab_size})"
+        )
+
+    output_shape = tensor_shape(sd, "joint.joint_net.2.weight")
+    if not output_shape or output_shape[0] != vocab_size + 1:
+        raise ValueError(
+            "rnnt: joint output shape="
+            f"{output_shape}, expected ({vocab_size + 1}, joint_hidden); "
+            "duration logits present?"
+        )
+
+
 def write_transducer_metadata(writer, cfg: dict, model_type: str):
     dec = cfg["decoder"]
     prefix = f"parakeet.{model_type}"
@@ -582,7 +615,7 @@ def write_transducer_metadata(writer, cfg: dict, model_type: str):
     writer.add_uint32(f"{prefix}.joint_hidden", joint_hidden)
 
     if model_type in ("rnnt", "nemotron"):
-        max_symbols = int(cfg.get("decoding", {}).get("greedy", {}).get("max_symbols", 10))
+        max_symbols = rnnt_max_symbols(cfg)
         writer.add_uint32(f"{prefix}.max_symbols_per_step", max_symbols)
         return
 
@@ -739,8 +772,10 @@ def detect_sortformer_variant(ckpt: Path) -> str:
 
 
 def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
-               multilingual_tok: dict, quant: str):
-    model_type = detect_model_type(cfg)
+               multilingual_tok: dict, quant: str, head: str = "auto"):
+    model_type = detect_model_type(cfg, head)
+    if model_type == "rnnt":
+        validate_rnnt_contract(cfg, sd)
     if model_type == "nemotron":
         validate_nemotron_contract(cfg, sd)
 
@@ -1127,7 +1162,7 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     elif model_type == "rnnt":
         vocab_note = (
             f"rnnt_vocab={int(cfg['decoder']['vocab_size'])} "
-            f"max_symbols={int(cfg.get('decoding', {}).get('greedy', {}).get('max_symbols', 10))}"
+            f"max_symbols={rnnt_max_symbols(cfg)}"
         )
     elif model_type == "nemotron":
         vocab_note = (
@@ -1145,7 +1180,10 @@ def main():
     ckpt = ensure_ckpt(args.ckpt, args.hf_repo)
     cfg, sd, tok_bytes, multilingual_tok = load_nemo(ckpt)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    write_gguf(args.out, ckpt, cfg, sd, tok_bytes, multilingual_tok, args.quant)
+    write_gguf(
+        args.out, ckpt, cfg, sd, tok_bytes, multilingual_tok, args.quant,
+        args.head,
+    )
 
 
 if __name__ == "__main__":

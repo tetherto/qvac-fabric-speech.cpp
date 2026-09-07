@@ -62,6 +62,12 @@ class ConverterArgsTest(unittest.TestCase):
         self.assertEqual(args.ckpt, Path("models/parakeet-ctc-0.6b.nemo"))
         self.assertEqual(args.hf_repo, "nvidia/parakeet-ctc-0.6b")
 
+    def test_head_defaults_to_auto(self):
+        self.assertEqual(parse_args(argv=[]).head, "auto")
+
+    def test_rnnt_head_override(self):
+        self.assertEqual(parse_args(argv=["--head", "rnnt"]).head, "rnnt")
+
 
 if __name__ == "__main__":
     unittest.main()
