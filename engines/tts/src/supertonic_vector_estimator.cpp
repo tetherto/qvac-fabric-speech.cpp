@@ -889,7 +889,8 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
                                       const supertonic_model & model,
                                       const std::string & p,
                                       ggml_tensor * x_ct,
-                                      int dilation) {
+                                      int dilation,
+                                      int seg_len = 0) {
     // CPU rounds-trips to the legacy [T,C] block for the AMX-cblas fast path;
     // backends WITHOUT the fused _ct supertonic ops (Vulkan / OpenCL) must also
     // take the legacy path, whose helpers carry pure-GGML fallbacks — otherwise
@@ -921,11 +922,12 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
     };
 
     ggml_tensor * residual = x_ct;
-    // depthwise_1d_ct: [C, T] -> [C, T]
-    ggml_tensor * y = ggml_supertonic_depthwise_1d_ct(ctx, x_ct,
-        require_source_tensor(model, p + ".dwconv.weight"),
-        flatten_1d(require_source_tensor(model, p + ".dwconv.bias")),
-        dilation);
+    // depthwise_1d_ct: [C, T] -> [C, T]; seg_len > 0 keeps the edge clamp inside each sequence
+    ggml_tensor * dw_w = require_source_tensor(model, p + ".dwconv.weight");
+    ggml_tensor * dw_b = flatten_1d(require_source_tensor(model, p + ".dwconv.bias"));
+    ggml_tensor * y = seg_len > 0
+        ? ggml_supertonic_depthwise_1d_ct_segmented(ctx, x_ct, dw_w, dw_b, dilation, seg_len)
+        : ggml_supertonic_depthwise_1d_ct(ctx, x_ct, dw_w, dw_b, dilation);
     // layer_norm_channel_ct: [C, T] -> [C, T]
     y = ggml_supertonic_layer_norm_channel_ct(ctx, y,
         flatten_1d(require_source_tensor(model, p + ".norm.norm.weight")),
@@ -4526,6 +4528,7 @@ struct vector_step_inputs {
     vector_step_kv text_kv[4];               // per group; null k = build inside the step
     vector_step_kv style_kv[4];
     bool io_ct = false;                      // x_in, noise_in and the result are [Cin, L]
+    int batch = 1;                           // sequences concatenated along T (cond | uncond)
 };
 
 vector_step_kv text_attention_kv_ggml(ggml_context * gctx,
@@ -4578,6 +4581,42 @@ void copy_vector_step_kv(const vector_step_inputs & from, vector_step_inputs & t
         to.text_kv[g]  = from.text_kv[g];
         to.style_kv[g] = from.style_kv[g];
     }
+}
+
+ggml_tensor * concat_batch(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
+    return ggml_concat(ctx, ggml_reshape_3d(ctx, a, a->ne[0], a->ne[1], 1),
+                            ggml_reshape_3d(ctx, b, b->ne[0], b->ne[1], 1), 2);
+}
+
+// Stack the unconditional K/V behind the conditional ones as a batch of two.
+void concat_vector_step_kv(ggml_context * ctx, const vector_step_inputs & uncond, vector_step_inputs & cond) {
+    for (int g = 0; g < 4; ++g) {
+        cond.text_kv[g].k  = concat_batch(ctx, cond.text_kv[g].k,  uncond.text_kv[g].k);
+        cond.text_kv[g].v  = concat_batch(ctx, cond.text_kv[g].v,  uncond.text_kv[g].v);
+        cond.style_kv[g].k = concat_batch(ctx, cond.style_kv[g].k, uncond.style_kv[g].k);
+        cond.style_kv[g].v = concat_batch(ctx, cond.style_kv[g].v, uncond.style_kv[g].v);
+    }
+}
+
+// next is [Cin, 2L] (cond | uncond); scale_row holds cond_scale | -uncond_scale per column.
+ggml_tensor * combine_cfg_batch(ggml_context * ctx, ggml_tensor * next, ggml_tensor * scale_row, int L) {
+    ggml_tensor * scaled = ggml_mul(ctx, next, scale_row);
+    const size_t half = (size_t) L * scaled->nb[1];
+    ggml_tensor * cond   = ggml_view_2d(ctx, scaled, scaled->ne[0], L, scaled->nb[1], 0);
+    ggml_tensor * uncond = ggml_view_2d(ctx, scaled, scaled->ne[0], L, scaled->nb[1], half);
+    return ggml_add(ctx, cond, uncond);
+}
+
+void upload_repeated(ggml_tensor * dst, const void * data, size_t nbytes, int repeat) {
+    for (int b = 0; b < repeat; ++b) {
+        ggml_backend_tensor_set(dst, data, (size_t) b * nbytes, nbytes);
+    }
+}
+
+void upload_cfg_scale_row(ggml_tensor * dst, float cond_scale, float uncond_scale, int L) {
+    std::vector<float> row((size_t) 2 * L, cond_scale);
+    std::fill(row.begin() + L, row.end(), uncond_scale);
+    ggml_backend_tensor_set(dst, row.data(), 0, row.size() * sizeof(float));
 }
 
 // Append one CFM step's subgraph (proj_in → 4 groups → tail → proj_out
@@ -4713,26 +4752,37 @@ ggml_tensor * time_projection_ggml(ggml_context * ctx, const supertonic_model & 
 }
 
 ggml_tensor * convnext_chain_ct_ggml(ggml_context * ctx, const supertonic_model & model,
-                                     const std::string & block, ggml_tensor * x_ct, const int * dilations) {
+                                     const std::string & block, ggml_tensor * x_ct, const int * dilations,
+                                     int seg_len) {
     for (int j = 0; j < 4; ++j) {
-        x_ct = vector_convnext_ggml_ct(ctx, model, block + ".convnext." + std::to_string(j), x_ct, dilations[j]);
+        x_ct = vector_convnext_ggml_ct(ctx, model, block + ".convnext." + std::to_string(j), x_ct,
+                                       dilations[j], seg_len);
     }
     return x_ct;
 }
 
+// Segment length for the depthwise clamp: 0 (whole row) unless sequences are batched along T.
+int step_segment_len(const vector_step_inputs & inputs, int L) {
+    return inputs.batch > 1 ? L : 0;
+}
+
+// q_wt is [width, q_len * batch]; kv.k / kv.v are [width, kv_len, batch].
 ggml_tensor * attention_block_ct_ggml(ggml_context * ctx, const supertonic_model & model,
                                       ggml_tensor * residual_ct, ggml_tensor * q_wt, const vector_step_kv & kv,
-                                      int q_len, int kv_len, int n_heads, int head_dim,
+                                      int q_len, int kv_len, int n_heads, int head_dim, int batch,
                                       const std::string & attn_prefix, const std::string & block,
                                       int out_w_name) {
     const int width = n_heads * head_dim;
     const size_t time_stride = (size_t) width * sizeof(float);
     const size_t head_stride = (size_t) head_dim * sizeof(float);
-    ggml_tensor * q_in = ggml_view_3d(ctx, q_wt, head_dim, q_len,  n_heads, time_stride, head_stride, 0);
-    ggml_tensor * k_in = ggml_view_3d(ctx, kv.k, head_dim, kv_len, n_heads, time_stride, head_stride, 0);
-    ggml_tensor * v_in = ggml_view_3d(ctx, kv.v, head_dim, kv_len, n_heads, time_stride, head_stride, 0);
+    ggml_tensor * q_in = ggml_view_4d(ctx, q_wt, head_dim, q_len, n_heads, batch,
+                                      time_stride, head_stride, time_stride * q_len, 0);
+    ggml_tensor * k_in = ggml_view_4d(ctx, kv.k, head_dim, kv_len, n_heads, batch,
+                                      time_stride, head_stride, time_stride * kv_len, 0);
+    ggml_tensor * v_in = ggml_view_4d(ctx, kv.v, head_dim, kv_len, n_heads, batch,
+                                      time_stride, head_stride, time_stride * kv_len, 0);
     ggml_tensor * attn = supertonic_attention_ctx_wt_ggml(ctx, model, q_in, k_in, v_in,
-                                                          q_len, n_heads, head_dim, kAttentionScale);
+                                                          q_len * batch, n_heads, head_dim, kAttentionScale);
     ggml_tensor * out = dense_matmul_ct_ggml(ctx, model, attn,
         require_source_tensor(model, matmul_name(out_w_name)),
         require_source_tensor(model, attn_prefix + "out_fc.linear.bias"));
@@ -4750,17 +4800,19 @@ ggml_tensor * run_group_ct_ggml(ggml_context * ctx, const supertonic_model & mod
     const std::string post  = vector_block_name(group * 6 + 4);
     const std::string style = vector_block_name(group * 6 + 5);
 
+    GGML_ASSERT(inputs.batch == 1 || (inputs.text_kv[group].k && inputs.style_kv[group].k));
     ggml_tensor * q = dense_matmul_ct_ggml(ctx, model, x_pre_attn,
         require_source_tensor(model, matmul_name(names.attn_q)),
         require_source_tensor(model, attn + ".attn.W_query.linear.bias"));
-    q = apply_supertonic_rope_ggml(ctx, q, inputs.pos_q, inputs.freq_factors_q, L, H, D);
+    q = apply_supertonic_rope_ggml(ctx, q, inputs.pos_q, inputs.freq_factors_q, L * inputs.batch, H, D);
     const vector_step_kv text_kv = inputs.text_kv[group].k
         ? inputs.text_kv[group]
         : text_attention_kv_ggml(ctx, model, inputs, group, text_len, H, D);
     ggml_tensor * normed = attention_block_ct_ggml(ctx, model, x_pre_attn, q, text_kv,
-        L, text_len, H, D, attn + ".attn.", attn, names.attn_out);
+        L, text_len, H, D, inputs.batch, attn + ".attn.", attn, names.attn_out);
 
-    ggml_tensor * post_x = vector_convnext_ggml_ct(ctx, model, post + ".convnext.0", normed, 1);
+    ggml_tensor * post_x = vector_convnext_ggml_ct(ctx, model, post + ".convnext.0", normed, 1,
+                                                   step_segment_len(inputs, L));
     ggml_tensor * masked_post = ggml_mul(ctx, post_x, mask_row);
     ggml_tensor * sq = dense_matmul_ct_ggml(ctx, model, masked_post,
         require_source_tensor(model, matmul_name(names.style_q)),
@@ -4769,14 +4821,16 @@ ggml_tensor * run_group_ct_ggml(ggml_context * ctx, const supertonic_model & mod
         ? inputs.style_kv[group]
         : style_attention_kv_ggml(ctx, model, inputs, group);
     return attention_block_ct_ggml(ctx, model, post_x, sq, style_kv,
-        L, kStyleKvLen, kStyleHeads, kStyleHeadDim, style + ".attention.", style, names.style_out);
+        L, kStyleKvLen, kStyleHeads, kStyleHeadDim, inputs.batch, style + ".attention.", style, names.style_out);
 }
 
 ggml_tensor * group_prep_ct_ggml(ggml_context * ctx, const supertonic_model & model,
-                                 const vector_step_inputs & inputs, int group, ggml_tensor * x_ct) {
-    ggml_tensor * y = convnext_chain_ct_ggml(ctx, model, vector_block_name(group * 6 + 0), x_ct, kGroupDilations);
+                                 const vector_step_inputs & inputs, int group, ggml_tensor * x_ct, int L) {
+    const int seg = step_segment_len(inputs, L);
+    ggml_tensor * y = convnext_chain_ct_ggml(ctx, model, vector_block_name(group * 6 + 0), x_ct,
+                                             kGroupDilations, seg);
     y = ggml_add(ctx, y, time_projection_ggml(ctx, model, group, inputs.t_emb_in));
-    return vector_convnext_ggml_ct(ctx, model, vector_block_name(group * 6 + 2) + ".convnext.0", y, 1);
+    return vector_convnext_ggml_ct(ctx, model, vector_block_name(group * 6 + 2) + ".convnext.0", y, 1, seg);
 }
 
 ggml_tensor * run_groups_ct_ggml(ggml_context * ctx, const supertonic_model & model,
@@ -4784,7 +4838,7 @@ ggml_tensor * run_groups_ct_ggml(ggml_context * ctx, const supertonic_model & mo
                                  ggml_tensor * mask_row, int L, int text_len, int H, int D) {
     ggml_tensor * x_after = run_group_ct_ggml(ctx, model, inputs, 0, x_pre_attn, mask_row, L, text_len, H, D);
     for (int g = 1; g < 4; ++g) {
-        ggml_tensor * x_pre = group_prep_ct_ggml(ctx, model, inputs, g, x_after);
+        ggml_tensor * x_pre = group_prep_ct_ggml(ctx, model, inputs, g, x_after, L);
         x_after = run_group_ct_ggml(ctx, model, inputs, g, x_pre, mask_row, L, text_len, H, D);
     }
     return x_after;
@@ -4792,9 +4846,9 @@ ggml_tensor * run_groups_ct_ggml(ggml_context * ctx, const supertonic_model & mo
 
 ggml_tensor * step_tail_ct_ggml(ggml_context * ctx, const supertonic_model & model,
                                 ggml_tensor * x_ct, ggml_tensor * noise_ct, ggml_tensor * mask_row,
-                                int total_steps) {
+                                int total_steps, int seg_len) {
     ggml_tensor * tail = convnext_chain_ct_ggml(ctx, model,
-        "vector_estimator:tts.ttl.vector_field.last_convnext", x_ct, kTailDilations);
+        "vector_estimator:tts.ttl.vector_field.last_convnext", x_ct, kTailDilations, seg_len);
     ggml_tensor * velocity = pointwise_matmul_ct(ctx, tail,
         require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_out.net.weight"), nullptr);
     ggml_tensor * scaled = ggml_scale(ctx, ggml_mul(ctx, velocity, mask_row), 1.0f / (float) total_steps);
@@ -4810,17 +4864,21 @@ ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertoni
                                              int L, int text_len, int total_steps) {
     const int H = model.hparams.vector_text_attn_heads;
     const int D = kTextHeadDim;
+    const int T = L * inputs.batch;
+    GGML_ASSERT(inputs.batch == 1 || inputs.io_ct);
+    GGML_ASSERT(inputs.mask_in->ne[0] == T && inputs.pos_q->ne[0] == T);
     ggml_tensor * x_ct = inputs.io_ct ? inputs.x_in : to_channel_time(ctx, inputs.x_in);
     ggml_tensor * noise_ct = inputs.noise_in == inputs.x_in ? x_ct
                            : inputs.io_ct ? inputs.noise_in : to_channel_time(ctx, inputs.noise_in);
-    ggml_tensor * mask_row = ggml_reshape_2d(ctx, inputs.mask_in, 1, L);
+    ggml_tensor * mask_row = ggml_reshape_2d(ctx, inputs.mask_in, 1, T);
 
     ggml_tensor * cur = pointwise_matmul_ct(ctx, x_ct,
         require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_in.net.weight"), nullptr);
     cur = ggml_mul(ctx, cur, mask_row);
-    cur = group_prep_ct_ggml(ctx, model, inputs, 0, cur);
+    cur = group_prep_ct_ggml(ctx, model, inputs, 0, cur, L);
     cur = run_groups_ct_ggml(ctx, model, inputs, cur, mask_row, L, text_len, H, D);
-    ggml_tensor * next = step_tail_ct_ggml(ctx, model, cur, noise_ct, mask_row, total_steps);
+    ggml_tensor * next = step_tail_ct_ggml(ctx, model, cur, noise_ct, mask_row, total_steps,
+                                           step_segment_len(inputs, L));
     return inputs.io_ct ? next : to_channel_time(ctx, next);
 }
 
@@ -5331,6 +5389,9 @@ struct vector_loop_one_graph_cache {
     // Per-step time embedding (one tensor per CFM step).
     std::vector<ggml_tensor *> t_emb_in;
 
+    int batch = 1;                         // 2 = cond | uncond batched along T
+    ggml_tensor * cfg_scale_in = nullptr;  // ne=[1, L * batch]: cond_scale | -uncond_scale
+
     // Final output — last step's `next` tensor.
     ggml_tensor * final_latent_out = nullptr;
 };
@@ -5356,6 +5417,8 @@ void free_vector_loop_one_graph_cache(vector_loop_one_graph_cache & cache) {
     cache.text_in_u = cache.style_v_raw_in_u = cache.style_kctx_in_u = nullptr;
     cache.pos_q = cache.pos_k = cache.freq_factors_q = cache.freq_factors_k = nullptr;
     cache.t_emb_in.clear();
+    cache.batch = 1;
+    cache.cfg_scale_in = nullptr;
     cache.final_latent_out = nullptr;
 }
 
@@ -5394,6 +5457,9 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
             cache.L = L;
             cache.text_len = text_len;
             cache.total_steps = total_steps;
+            const bool io_ct = use_ct_vector_step(model, supertonic_use_cpu_custom_ops());
+            cache.batch = (io_ct && model.hparams.cfg_enabled()) ? 2 : 1;
+            const int T = L * cache.batch;
 
             // ~5x the per-step node budget.  Each per-step build registered ~1056
             // ggml nodes pre-Tier-2; post-Tier-2 it's ~928.  Round up to 8192/step
@@ -5411,7 +5477,7 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
             // --- Shared inputs ---
             cache.x0_in = ggml_new_tensor_2d(cache.ctx, GGML_TYPE_F32, L, Cin);
             ggml_set_name(cache.x0_in, "loop_x0_in"); ggml_set_input(cache.x0_in);
-            cache.mask_in = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_F32, L);
+            cache.mask_in = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_F32, T);
             ggml_set_name(cache.mask_in, "loop_mask"); ggml_set_input(cache.mask_in);
             cache.text_in = ggml_new_tensor_2d(cache.ctx, GGML_TYPE_F32, text_len, text_C);
             ggml_set_name(cache.text_in, "loop_text_in"); ggml_set_input(cache.text_in);
@@ -5428,7 +5494,7 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                 ggml_set_name(cache.style_kctx_in_u, "loop_style_kctx_u"); ggml_set_input(cache.style_kctx_in_u);
             }
 
-            cache.pos_q = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_I32, L);
+            cache.pos_q = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_I32, T);
             ggml_set_name(cache.pos_q, "loop_pos_q"); ggml_set_input(cache.pos_q);
             cache.pos_k = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_I32, text_len);
             ggml_set_name(cache.pos_k, "loop_pos_k"); ggml_set_input(cache.pos_k);
@@ -5436,6 +5502,10 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
             ggml_set_name(cache.freq_factors_q, "loop_ff_q"); ggml_set_input(cache.freq_factors_q);
             cache.freq_factors_k = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_F32, D / 2);
             ggml_set_name(cache.freq_factors_k, "loop_ff_k"); ggml_set_input(cache.freq_factors_k);
+            if (cache.batch > 1) {
+                cache.cfg_scale_in = ggml_new_tensor_2d(cache.ctx, GGML_TYPE_F32, 1, T);
+                ggml_set_name(cache.cfg_scale_in, "loop_cfg_scale"); ggml_set_input(cache.cfg_scale_in);
+            }
 
             cache.t_emb_in.resize(total_steps, nullptr);
             for (int s = 0; s < total_steps; ++s) {
@@ -5462,13 +5532,15 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                 shared_u.style_kctx_in  = cache.style_kctx_in_u;
                 append_vector_step_kv_projections(cache.ctx, model, shared_u, text_len, H, D);
             }
+            if (cache.batch > 1) concat_vector_step_kv(cache.ctx, shared_u, shared);
 
             // --- Chain N CFM steps together ---
-            const bool io_ct = use_ct_vector_step(model, supertonic_use_cpu_custom_ops());
             ggml_tensor * cur_latent = io_ct ? to_channel_time(cache.ctx, cache.x0_in) : cache.x0_in;
+            if (cache.batch > 1) cur_latent = ggml_concat(cache.ctx, cur_latent, cur_latent, 1);
             for (int s = 0; s < total_steps; ++s) {
                 vector_step_inputs inputs = shared;
                 inputs.io_ct          = io_ct;
+                inputs.batch          = cache.batch;
                 inputs.x_in           = cur_latent;       // previous step's output
                 inputs.mask_in        = cache.mask_in;
                 inputs.t_emb_in       = cache.t_emb_in[s];
@@ -5478,7 +5550,9 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
 
                 ggml_tensor * next = append_supertonic_vector_step_subgraph(
                     cache.ctx, cache.gf, model, inputs, L, text_len, total_steps);
-                if (model.hparams.cfg_enabled()) {
+                if (cache.batch > 1) {
+                    next = combine_cfg_batch(cache.ctx, next, cache.cfg_scale_in, L);
+                } else if (model.hparams.cfg_enabled()) {
                     vector_step_inputs inputs_u = inputs;
                     inputs_u.text_in        = cache.text_in_u;
                     inputs_u.style_v_raw_in = cache.style_v_raw_in_u;
@@ -5492,7 +5566,8 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                 }
                 const std::string step_name = "loop_next_" + std::to_string(s);
                 ggml_set_name(next, step_name.c_str());
-                cur_latent = next;
+                cur_latent = (cache.batch > 1 && s + 1 < total_steps)
+                           ? ggml_concat(cache.ctx, next, next, 1) : next;
             }
             if (io_ct) cur_latent = to_channel_time(cache.ctx, cur_latent);
             ggml_set_output(cur_latent);
@@ -5510,7 +5585,11 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
         // --- Per-call inputs (constants across CFM steps) ---
         ggml_backend_tensor_set(cache.x0_in, initial_noisy_latent, 0,
                                  (size_t) L * Cin * sizeof(float));
-        ggml_backend_tensor_set(cache.mask_in, latent_mask, 0, (size_t) L * sizeof(float));
+        upload_repeated(cache.mask_in, latent_mask, (size_t) L * sizeof(float), cache.batch);
+        if (cache.cfg_scale_in) {
+            upload_cfg_scale_row(cache.cfg_scale_in, model.hparams.cfg_cond_scale,
+                                 -model.hparams.cfg_uncond_scale, L);
+        }
         ggml_backend_tensor_set(cache.text_in, text_emb, 0, (size_t) text_len * 256 * sizeof(float));
 
         const std::vector<float> * style_v_raw_ptr = nullptr;
@@ -5540,8 +5619,7 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
         {
             std::vector<int32_t> pos_q_host(L);
             for (int i = 0; i < L; ++i) pos_q_host[i] = i;
-            ggml_backend_tensor_set(cache.pos_q, pos_q_host.data(), 0,
-                                     pos_q_host.size() * sizeof(int32_t));
+            upload_repeated(cache.pos_q, pos_q_host.data(), pos_q_host.size() * sizeof(int32_t), cache.batch);
             std::vector<int32_t> pos_k_host(text_len);
             for (int i = 0; i < text_len; ++i) pos_k_host[i] = i;
             ggml_backend_tensor_set(cache.pos_k, pos_k_host.data(), 0,
