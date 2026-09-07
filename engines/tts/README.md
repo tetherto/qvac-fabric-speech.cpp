@@ -1837,6 +1837,27 @@ Generation** (`backend=vulkan`), benchmarking the published
 2026-08-03#1). This run adds the previously missing Supertonic GPU lanes, so
 the Vulkan columns are now recorded for all engines._
 
+### speech-cpp CI (2026-09-07, CPU + macOS)
+
+Fresh CPU baseline from `speech-benchmark-desktop.yml` on the hosted-Linux and
+self-hosted macOS runners (5 timed runs + 1 warmup); parler on macOS runs on
+Metal (`MTL0`).
+
+| Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Chatterbox: chatterbox-t3-turbo-q8_0 | linux | CPU | 8078 | — | 1835 |
+| Chatterbox: chatterbox-t3-turbo-q8_0 | macos | CPU | 2626 | — | 1746 |
+| Supertonic: supertonic3-q8_0 | linux | (CPU) | 708 | 0.484 | 876 |
+| Supertonic: supertonic3-q8_0 | macos | (CPU) | 49 | 0.0340 | 584 |
+| Parler: parler-mini-v1-q8_0 | linux | CPU | 249362 | 18.8 | 1964 |
+| Parler: parler-mini-v1-q8_0 | macos | MTL0 (Metal) | 12204 | 0.582 | 1307 |
+| Cosyvoice: cosyvoice3-llm-q8_0 | linux | CPU | 67695 | 18.0 | 1416 |
+| Cosyvoice: cosyvoice3-llm-q8_0 | macos | CPU | 46825 | 12.3 | 1467 |
+
+`—` RTF for chatterbox because it is text-driven variable output.
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
+
 ### Mac Studio M3 Ultra (96 GB unified memory)
 
 | Implementation                        | Backend         | T3 gen             | S3Gen+HiFT gen | Total inference | RTF   | vs real-time |

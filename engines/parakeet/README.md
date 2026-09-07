@@ -576,6 +576,25 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
 
+### speech-cpp CI (2026-09-07)
+
+Fresh CPU-baseline snapshot from `speech-benchmark-desktop.yml` on the
+hosted-Linux and self-hosted macOS runners (5 timed runs + 1 warmup, `jfk.wav`
+fixture, ~11 s).
+
+| Model | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|---:|---:|---:|
+| Parakeet CTC 0.6b q8_0 | linux | ggml-cpu | 2111 | 0.192 | 858 |
+| Parakeet CTC 0.6b q8_0 | macos | ggml-cpu | 184 | 0.0170 | 914 |
+| Whisper base | linux | (CPU) | 1906 | 0.173 | 298 |
+| Whisper base | macos | Metal | 584 | 0.0530 | 360 |
+| Whisper small | linux | (CPU) | 6122 | 0.557 | 797 |
+| Whisper small | macos | Metal | 564 | 0.0510 | 878 |
+| Whisper tiny | linux | (CPU) | 1035 | 0.0940 | 182 |
+| Whisper tiny | macos | Metal | 565 | 0.0510 | 240 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
+
 ### TDT decode on CUDA and Metal
 
 The fused decoder ops, the unrolled greedy loop and the per-backend lowerings
