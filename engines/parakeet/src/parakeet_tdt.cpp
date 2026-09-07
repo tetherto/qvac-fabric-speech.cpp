@@ -1204,8 +1204,9 @@ static int tdt_prepare_runtime_impl(const ParakeetCtcModel & model, TdtRuntimeWe
     // persistent state (h/c/pred), so the state never advances and the decode
     // emits one constant token per frame. Run the per-step decode on the host on
     // OpenCL; the encoder still runs on the GPU. (EOU/Sortformer don't use this
-    // persistent-state pattern and stay on the GPU.)
-    if (W.use_graphs && std::strcmp(backend_reg_name(W.backend), "OpenCL") == 0) {
+    // persistent-state pattern and stay on the GPU.) This also applies to
+    // Nemotron, which shares this decode path via tdt_prepare_runtime.
+    if (W.use_graphs && backend_is_opencl(W.backend)) {
         W.use_graphs = false;
     }
     W.fused_lstm_cell = W.use_graphs && allow_fused_lstm && backend_runs_lstm_cell(W.backend, W.H_pred);
