@@ -137,8 +137,16 @@ int main(int argc, char ** argv) {
             json = true;
         } else if (a == "--verbose" || a == "-v") {
             opts.verbose = true;
+        } else if (a == "--model" || a == "--vad-model" || a == "--audio-seconds" ||
+                   a == "--n-decoders" || a == "--gpu-device" || a == "--margin-mib" ||
+                   a == "--backends-dir") {
+            // a value-taking flag in last position: every such flag only
+            // matches its branch above when a value follows it
+            fprintf(stderr, "%s requires a value\n\n", a.c_str());
+            print_usage(argv[0]);
+            return (int) WHISPER_FIT_ERROR;
         } else {
-            fprintf(stderr, "unknown or incomplete argument: %s\n\n", a.c_str());
+            fprintf(stderr, "unknown argument: %s\n\n", a.c_str());
             print_usage(argv[0]);
             return (int) WHISPER_FIT_ERROR;
         }
@@ -178,7 +186,9 @@ int main(int argc, char ** argv) {
     if (verify && r.status != WHISPER_FIT_ERROR) {
         whisper_fit_breakdown actual;
         // measure the post-init resident set from a REAL load; compare against
-        // an n_decoders = 1 projection (whisper_fit_actual's contract)
+        // an n_decoders = 1 projection -- the one point where every line,
+        // compute included, is byte-comparable (whisper_fit_actual's contract:
+        // at n_decoders > 1 the schedulers still hold their post-init size)
         whisper_fit_options vopts = opts;
         vopts.n_decoders = 1;
         whisper_fit_result pr1;
