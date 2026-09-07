@@ -717,6 +717,7 @@ if (TTS_CPP_BUILD_TESTS)
     set(_tcb_s3gen_mtl_gguf     "${TTS_CPP_TEST_MODEL_DIR}/chatterbox-s3gen-mtl.gguf")
     set(_tcb_super_gguf         "${TTS_CPP_TEST_MODEL_DIR}/supertonic.gguf")
     set(_tcb_super2_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic2.gguf")
+    set(_tcb_super3_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
     set(_tcb_super_ref          "${TTS_CPP_TEST_REF_DIR}/supertonic-ref-quick")
     set(_tcb_super_ref_noise    "${_tcb_super_ref}/noise.npy")
     set(_tcb_s3gen_ref          "${TTS_CPP_TEST_REF_DIR}/s3gen-ref")
@@ -2570,13 +2571,17 @@ if (TTS_CPP_BUILD_TESTS)
                  "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
 
     # Supertonic fit parity: metadata-only weight/arena projection vs a real
-    # load + real reservations, byte for byte.  Fixture-gated only: the
-    # vocoder / vector-estimator channel plans are hardcoded to the real
-    # architecture, so no tiny synthetic form exists.
+    # load + real reservations, byte for byte.  The no-argument form
+    # synthesizes a metadata-only supertonic GGUF on the fly (the loader's
+    # exact tensor contract at tiny dims), pinning weight-sizing parity and
+    # the refusal paths with no fixture; the stage-arena parity gates stay
+    # fixture-gated because the vocoder / vector-estimator channel plans are
+    # hardcoded to the real architecture.
     add_executable(test-supertonic-fit-params test/test_supertonic_fit_params.cpp)
     target_link_libraries(test-supertonic-fit-params PRIVATE tts-cpp ggml)
     target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-supertonic-fit-params)
+    tts_cpp_register_test(test-supertonic-fit-params LABEL "unit")
     tts_cpp_register_test(test-supertonic-fit-params-v2
         EXE      test-supertonic-fit-params
         LABEL    "fixture"
@@ -2587,6 +2592,14 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_super_gguf}" "99"
         REQUIRES "${_tcb_super_gguf}")
+    # v3 is the only variant with CFG (cfg_uncond_scale != 0): this lane is
+    # what pins the batch=2 [C, T] CFM loop arena and the unconditional-pass
+    # host slabs -- neither v1 nor v2 reaches that branch.
+    tts_cpp_register_test(test-supertonic-fit-params-v3
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}" "99"
+        REQUIRES "${_tcb_super3_gguf}")
 
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.
@@ -2689,7 +2702,8 @@ if (TTS_CPP_BUILD_TESTS)
     # through the v3 model — the v3-only languages are covered by the
     # model-free test-supertonic-languages unit test — so that both the old
     # and the new languages get exercised end-to-end on Supertonic 3.
-    set(_tcb_super3_gguf "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
+    # (_tcb_super3_gguf is set with the other fixture paths near the top of
+    # the fixture block; the fit-parity v3 lane uses it too.)
     set(SUPERTONIC3_REF_LANGS en ko es pt fr
         CACHE STRING "tts-cpp: languages exercised end-to-end against the Supertonic 3 fixture")
 

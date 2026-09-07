@@ -192,11 +192,15 @@ FitResult fit_params(const FitOptions & opts) {
     synth_host = sat_add(synth_host, sat_mul((uint64_t) latent_len, f32));
     synth_host = sat_add(synth_host, sat_mul((uint64_t) T_wav, 2 * f32));
     if (hp.cfg_enabled()) {
-        // supertonic3's unconditional-pass host inputs.
+        // supertonic3's unconditional-pass host staging in the [C, T] loop
+        // (supertonic_vector_loop_one_graph_ggml): text_u [256 x L_text], the
+        // style special-token layouts sv_u / sk_u [256 x 50] each alongside
+        // their read_f32 sources (~4 x 50 x 256 + 256 floats), and the
+        // batch=2 mask / pos_q / cfg-scale upload rows (~2 x latent_len
+        // elements each).
         synth_host = sat_add(synth_host, sat_mul(sat_mul((uint64_t) L_text, 256), f32));
-        synth_host = sat_add(synth_host,
-                             sat_mul(sat_mul((uint64_t) latent_len,
-                                             (uint64_t) hp.latent_channels), 2 * f32));
+        synth_host = sat_add(synth_host, sat_mul((uint64_t) 4 * 50 * 256 + 256, f32));
+        synth_host = sat_add(synth_host, sat_mul((uint64_t) latent_len, 6 * f32));
     }
     synth_host = sat_add(synth_host, voc_host);
     const uint64_t load_host = sat_add(load.host_bytes, load.host_transient_bytes);
