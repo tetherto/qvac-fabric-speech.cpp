@@ -525,11 +525,12 @@ into one GGUF, then a ggml C++ runtime runs the known Supertonic stages on
 CPU or, with `--n-gpu-layers > 0`, on Metal (Apple), Vulkan, OpenCL (Adreno),
 or CUDA when that backend is compiled in.  Metal is the fastest backend
 measured so far: on an Apple M5 (10-core GPU) Supertonic 3 `q8_0` renders a
-3.1 s / 9.6 s / 16.3 s utterance in `32.8 / 55.4 / 77.8 ms` (`RTF 0.011 /
-0.006 / 0.005`, medians of 20 warm runs), 2.2x / 2.0x / 2.1x faster than the
-Metal path before the one-graph stages and kernel fusions below; the `f16`
-GGUF lands within 1 ms of `q8_0`.  Supertonic 2 `q8_0` measured `91.4 ms`
-total on an M2 (see [`PROGRESS_SUPERTONIC.md`](PROGRESS_SUPERTONIC.md)).
+3.1 s / 9.6 s / 16.3 s utterance in `32.5 / 52.8 / 77.0 ms` (`RTF 0.010 /
+0.005 / 0.005`, medians of 40 warm runs), 2.2x / 2.0x / 2.0x faster than the
+Metal path before the one-graph stages and kernel fusions below, measured back
+to back against it; the `f16` GGUF renders the same texts in `31.6 / 51.7 /
+75.9 ms`.  Supertonic 2 `q8_0` measured `91.4 ms` total on an M2 (see
+[`PROGRESS_SUPERTONIC.md`](PROGRESS_SUPERTONIC.md)).
 
 There are three related upstream bundles:
 
