@@ -882,4 +882,69 @@ void release_duration_thread_local_caches() {
     }
 }
 
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the F11 duration graph cache at sentence length L (= text_len + 1),
+// building the same graph the cached path builds (any drift is pinned by the
+// fixture parity gate against a real synthesis).  Nothing is allocated.
+static bool duration_fit_impl(const supertonic_model & m, int L,
+                              uint64_t & bytes, std::string * error, bool real_alloc) {
+    bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        const int C = 64;
+        constexpr int MAX_NODES = 512;
+        const size_t buf_size = ggml_tensor_overhead() * MAX_NODES +
+                                ggml_graph_overhead_custom(MAX_NODES, false);
+        std::vector<uint8_t> buf(buf_size);
+        ggml_init_params gp = { buf_size, buf.data(), true };
+        ggml_context * ctx = ggml_init(gp);
+        ggml_cgraph * gf = ggml_new_graph_custom(ctx, MAX_NODES, false);
+        ggml_tensor * in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, L, C);
+        ggml_set_input(in);
+        ggml_tensor * y = in;
+        for (int i = 0; i < 6; ++i) {
+            const std::string p = "duration:tts.dp.sentence_encoder.convnext.convnext." + std::to_string(i);
+            y = duration_convnext_ggml(ctx, m, p, y);
+            ggml_set_output(y);
+            ggml_build_forward_expand(gf, y);
+        }
+        const std::string a = "duration:tts.dp.sentence_encoder.attn_encoder.attn_layers.0.";
+        for (const char * head : { "conv_q", "conv_k", "conv_v" }) {
+            ggml_tensor * h = conv1d_f32(ctx,
+                require_source_tensor(m, a + head + ".weight"), y, 1, 0, 1);
+            h = ggml_add(ctx, h,
+                repeat_like(ctx, require_source_tensor(m, a + head + ".bias"), h));
+            ggml_set_output(h);
+            ggml_build_forward_expand(gf, h);
+        }
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("duration pricer failed");
+        size_t sz = 0;
+        if (real_alloc) {
+            if (ggml_gallocr_reserve(pricer, gf) && ggml_gallocr_alloc_graph(pricer, gf)) {
+                sz = ggml_gallocr_get_buffer_size(pricer, 0);
+            }
+        } else {
+            ggml_gallocr_reserve_n_size(pricer, gf, nullptr, nullptr, &sz);
+        }
+        ggml_gallocr_free(pricer);
+        ggml_free(ctx);
+        bytes = sz;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool supertonic_fit_measure_duration(const supertonic_model & m, int L,
+                                     uint64_t & bytes, std::string * error) {
+    return duration_fit_impl(m, L, bytes, error, /*real_alloc=*/false);
+}
+
+bool supertonic_fit_parity_probe_duration(const supertonic_model & m, int L,
+                                          uint64_t & bytes, std::string * error) {
+    return duration_fit_impl(m, L, bytes, error, /*real_alloc=*/true);
+}
+
 } // namespace tts_cpp::supertonic::detail

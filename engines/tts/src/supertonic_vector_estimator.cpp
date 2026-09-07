@@ -5119,35 +5119,20 @@ void free_vector_loop_one_graph_cache(vector_loop_one_graph_cache & cache) {
     cache.final_latent_out = nullptr;
 }
 
-bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
-                                            const float * initial_noisy_latent,
-                                            int latent_len,
-                                            const float * text_emb,
-                                            int text_len,
-                                            const float * style_ttl,
-                                            const float * latent_mask,
-                                            int total_steps,
-                                            std::vector<float> & final_latent_out,
-                                            std::string * error) {
-    // Public entry point — set the thread-local dispatch flag so the
-    // helpers' `supertonic_use_cpu_custom_ops()` reads consistently
-    // (false on non-CPU backends, true on CPU + accelerate/cblas).
-    supertonic_op_dispatch_scope dispatch(model);
-    try {
-        const int L = latent_len;
-        const int Cin = model.hparams.latent_channels;
-        const int text_C = 256;
-        const int D = 64;
-        const int kv_style = 50;
-
-        thread_local vector_loop_one_graph_cache cache;
-        SUPERTONIC_REGISTER_TL_CACHE(cache, free_vector_loop_one_graph_cache);
-        const bool need_rebuild = cache.model != &model ||
-                                  cache.generation_id != model.generation_id ||
-                                  cache.L != L ||
-                                  cache.text_len != text_len ||
-                                  cache.total_steps != total_steps;
-        if (need_rebuild) {
+// Graph-build half of supertonic_vector_loop_one_graph_ggml, shared with the
+// memory-fit measure (supertonic_fit_measure_vector) so the priced graph is
+// the executed graph by construction.  When `measure` is non-null the arena
+// is sized (ggml_gallocr_reserve_n_size) instead of allocated.
+static void build_vector_loop_one_graph_cache(vector_loop_one_graph_cache & cache,
+                                              const supertonic_model & model,
+                                              int L, int text_len, int total_steps,
+                                              size_t * measure) {
+    const int Cin = model.hparams.latent_channels;
+    const int text_C = 256;
+    const int D = 64;
+    const int kv_style = 50;
+    {
+        {
             free_vector_loop_one_graph_cache(cache);
             cache.model = &model;
             cache.generation_id = model.generation_id;
@@ -5242,12 +5227,54 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
             ggml_build_forward_expand(cache.gf, cur_latent);
             cache.final_latent_out = cur_latent;
 
+            if (measure) {
+                ggml_gallocr_t pricer =
+                    ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+                if (!pricer) throw std::runtime_error("ggml_gallocr_new vector loop (measure) failed");
+                size_t sz = 0;
+                ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+                ggml_gallocr_free(pricer);
+                *measure = sz;
+                return;
+            }
             cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
             if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new vector loop one-graph failed");
             if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
                 throw std::runtime_error("ggml_gallocr_reserve vector loop one-graph failed");
             }
             ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
+        }
+    }
+}
+
+bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
+                                            const float * initial_noisy_latent,
+                                            int latent_len,
+                                            const float * text_emb,
+                                            int text_len,
+                                            const float * style_ttl,
+                                            const float * latent_mask,
+                                            int total_steps,
+                                            std::vector<float> & final_latent_out,
+                                            std::string * error) {
+    // Public entry point — set the thread-local dispatch flag so the
+    // helpers' `supertonic_use_cpu_custom_ops()` reads consistently
+    // (false on non-CPU backends, true on CPU + accelerate/cblas).
+    supertonic_op_dispatch_scope dispatch(model);
+    try {
+        const int L = latent_len;
+        const int Cin = model.hparams.latent_channels;
+
+        thread_local vector_loop_one_graph_cache cache;
+        SUPERTONIC_REGISTER_TL_CACHE(cache, free_vector_loop_one_graph_cache);
+        const bool need_rebuild = cache.model != &model ||
+                                  cache.generation_id != model.generation_id ||
+                                  cache.L != L ||
+                                  cache.text_len != text_len ||
+                                  cache.total_steps != total_steps;
+        if (need_rebuild) {
+            build_vector_loop_one_graph_cache(cache, model, L, text_len, total_steps,
+                                              /*measure=*/nullptr);
         }
 
         // --- Per-call inputs (constants across CFM steps) ---
@@ -5486,6 +5513,59 @@ void release_vector_estimator_thread_local_caches() {
     // cycle's destructor finds an already-empty cache and no-ops.
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
+    }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the vector estimator's dominant resident cache -- the all-steps-in-one
+// loop graph the non-CPU dispatch path builds -- at (L = latent_len,
+// text_len, total_steps), through the exact builder the runtime uses.
+// The CPU multi-cache path and the SUPERTONIC_DISABLE_LOOP_GRAPH per-step
+// path are not modelled; the caller must refuse those configurations rather
+// than understate them.
+bool supertonic_fit_measure_vector(const supertonic_model & m, int L, int text_len,
+                                   int total_steps, uint64_t & bytes, std::string * error) {
+    bytes = 0;
+    if (model_prefers_cpu_kernels(m) ||
+        std::getenv("SUPERTONIC_DISABLE_LOOP_GRAPH") != nullptr ||
+        std::getenv("SUPERTONIC_DISABLE_ONE_GRAPH") != nullptr) {
+        if (error) {
+            *error = "vector-estimator dispatch path not modelled "
+                     "(CPU multi-cache / loop-graph disabled)";
+        }
+        return false;
+    }
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vector_loop_one_graph_cache cache;
+        size_t sz = 0;
+        build_vector_loop_one_graph_cache(cache, m, L, text_len, total_steps, &sz);
+        free_vector_loop_one_graph_cache(cache);
+        bytes = sz;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+// Real-allocation parity probe (test support): the same builder, reserved and
+// allocated for real; anchors the size-only measure above byte for byte.
+bool supertonic_fit_parity_probe_vector(const supertonic_model & m, int L, int text_len,
+                                        int total_steps, uint64_t & bytes,
+                                        std::string * error) {
+    bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vector_loop_one_graph_cache cache;
+        build_vector_loop_one_graph_cache(cache, m, L, text_len, total_steps,
+                                          /*measure=*/nullptr);
+        if (cache.allocr) bytes = ggml_gallocr_get_buffer_size(cache.allocr, 0);
+        free_vector_loop_one_graph_cache(cache);
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
     }
 }
 

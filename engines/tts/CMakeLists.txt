@@ -352,6 +352,8 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/fit_main.cpp
     src/cosyvoice_fit.cpp
     src/cosyvoice_fit_main.cpp
+    src/supertonic_fit.cpp
+    src/supertonic_fit_main.cpp
 )
 
 if (TTS_CPP_BUILD_LIBRARY)
@@ -614,6 +616,10 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     add_executable(cosyvoice-fit-params src/cosyvoice_fit_params.cpp)
     target_link_libraries(cosyvoice-fit-params PRIVATE tts-cpp)
     tts_cpp_apply_ccache(cosyvoice-fit-params)
+
+    add_executable(supertonic-fit-params src/supertonic_fit_params.cpp)
+    target_link_libraries(supertonic-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(supertonic-fit-params)
 endif()
 
 if (TTS_CPP_BUILD_TESTS)
@@ -2559,6 +2565,25 @@ if (TTS_CPP_BUILD_TESTS)
                  "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf"
         REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
                  "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+
+    # Supertonic fit parity: metadata-only weight/arena projection vs a real
+    # load + real reservations, byte for byte.  Fixture-gated only: the
+    # vocoder / vector-estimator channel plans are hardcoded to the real
+    # architecture, so no tiny synthetic form exists.
+    add_executable(test-supertonic-fit-params test/test_supertonic_fit_params.cpp)
+    target_link_libraries(test-supertonic-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-supertonic-fit-params)
+    tts_cpp_register_test(test-supertonic-fit-params-v2
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super2_gguf}" "99"
+        REQUIRES "${_tcb_super2_gguf}")
+    tts_cpp_register_test(test-supertonic-fit-params-v1
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super_gguf}" "99"
+        REQUIRES "${_tcb_super_gguf}")
 
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.

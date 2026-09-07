@@ -1,5 +1,6 @@
 #include "supertonic_internal.h"
 
+#include "fit_price.h"
 #include "ggml-alloc.h"
 
 #if defined(TTS_CPP_USE_ACCELERATE)
@@ -49,6 +50,12 @@ f32_tensor read_f32(const supertonic_model & m, const std::string & source_name)
 }
 
 float scalar_f32_tensor(ggml_tensor * tensor) {
+    if (!tensor->buffer) {
+        // Metadata-only (memory-fit) model: there is no data to read.  Scalar
+        // weights only parameterise op VALUES (scales, PReLU slopes), never
+        // graph shapes, so the priced allocation is unchanged.
+        return 0.0f;
+    }
     f32_tensor t = read_f32_tensor(tensor);
     if (t.data.empty()) throw std::runtime_error("empty scalar tensor");
     return t.data[0];
@@ -1234,6 +1241,65 @@ void release_vocoder_thread_local_caches() {
     // See `release_vector_estimator_thread_local_caches` for the contract.
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
+    }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the vocoder graph cache at latent_len, through the exact builder the
+// runtime dispatches, priced with the same dual-path policy the forward
+// applies: the direct gallocr where the backend fully supports the graph,
+// the [backend, CPU-last] scheduler shape otherwise (its CPU portion is
+// charged to host_bytes).  Nothing is allocated and nothing runs.
+bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
+                                    uint64_t & device_bytes, uint64_t & host_bytes,
+                                    std::string * error) {
+    device_bytes = host_bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vocoder_graph_cache cache;
+        build_supertonic_vocoder_cache(cache, m, latent_len);
+        ::tts_cpp::detail::fit_graph_price price;
+        // 8192 mirrors supertonic_sched_alloc's sched_fallback_ensure size.
+        const bool ok = ::tts_cpp::detail::fit_price_graph(m.backend, cache.gf, 8192, price);
+        free_vocoder_cache(cache);
+        if (!ok) {
+            if (error) *error = "vocoder graph pricing failed";
+            return false;
+        }
+        device_bytes = price.device_bytes;
+        host_bytes   = price.host_bytes;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+// Real-allocation parity probe (test support): the same builder reserved and
+// allocated through the direct gallocr path; reports 0 when the backend
+// cannot run the graph directly (the scheduler path), which the test skips.
+bool supertonic_fit_parity_probe_vocoder(const supertonic_model & m, int latent_len,
+                                         uint64_t & bytes, std::string * error) {
+    bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vocoder_graph_cache cache;
+        build_supertonic_vocoder_cache(cache, m, latent_len);
+        if (!::tts_cpp::detail::sched_force_enabled() &&
+            ::tts_cpp::detail::graph_fully_supported(m.backend, cache.gf)) {
+            ggml_gallocr_t al =
+                ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+            if (al && ggml_gallocr_reserve(al, cache.gf) &&
+                ggml_gallocr_alloc_graph(al, cache.gf)) {
+                bytes = ggml_gallocr_get_buffer_size(al, 0);
+            }
+            if (al) ggml_gallocr_free(al);
+        }
+        free_vocoder_cache(cache);
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
     }
 }
 

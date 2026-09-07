@@ -1909,14 +1909,33 @@ static void bind_vocoder_weights(supertonic_model & model) {
     v.head2_w = require_source_tensor(model, "vocoder:tts.ae.decoder.head.layer2.weight");
 }
 
-bool load_supertonic_gguf(const std::string & path,
-                          supertonic_model & model,
-                          int n_gpu_layers,
-                          bool verbose,
-                          int f16_weights,
-                          supertonic_precision precision,
-                          int vulkan_device,
-                          const std::vector<std::string> & f16_weights_deny_list) {
+// Mark every unallocated tensor in `ctx` externally allocated (dummy non-null
+// data, the same trick ggml's own measure paths use) so graph pricing via
+// ggml_gallocr / ggml_backend_sched excludes it from the measured compute
+// buffers.  The context must never have tensor data read or written after.
+static void supertonic_mark_externally_allocated(ggml_context * ctx) {
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t;
+         t = ggml_get_next_tensor(ctx, t)) {
+        if (!t->data && !t->view_src) {
+            t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+        }
+    }
+}
+
+// Shared body of load_supertonic_gguf and load_supertonic_gguf_metadata_only.
+// When `measure` is non-null the load is metadata-only: the GGUF opens
+// no_alloc, the per-tensor type decisions and every declaration still run
+// (they determine the buffer sizes), but no tensor data is read, converted,
+// or uploaded, and both weight buffers are sized instead of allocated.
+static bool load_supertonic_gguf_impl(const std::string & path,
+                                      supertonic_model & model,
+                                      int n_gpu_layers,
+                                      bool verbose,
+                                      int f16_weights,
+                                      supertonic_precision precision,
+                                      int vulkan_device,
+                                      const std::vector<std::string> & f16_weights_deny_list,
+                                      supertonic_fit_load_measure * measure) {
     model.generation_id = next_supertonic_generation_id();
     model.precision_id = static_cast<int>(precision);
     // The load path supports F32 / F16 / Q8_0 destination types.
@@ -1932,7 +1951,9 @@ bool load_supertonic_gguf(const std::string & path,
     //   plain `ggml_mul`) expand to f32 so they don't trip `ggml_metal_op_bin`'s
     //   f32-only assertion.  Pretranspose pass covers f16 alongside f32/q8_0.
     ggml_context * tmp_ctx = nullptr;
-    gguf_init_params gp = { /*.no_alloc=*/ false, /*.ctx=*/ &tmp_ctx };
+    // Measure mode reads shapes only; the real load keeps the historical
+    // full-copy open (its transient host cost is charged by the measure).
+    gguf_init_params gp = { /*.no_alloc=*/ measure != nullptr, /*.ctx=*/ &tmp_ctx };
     gguf_context * gguf_ctx = gguf_init_from_file(path.c_str(), gp);
     if (!gguf_ctx) {
         fprintf(stderr, "load_supertonic_gguf: failed to open '%s'\n", path.c_str());
@@ -2252,7 +2273,17 @@ bool load_supertonic_gguf(const std::string & path,
             ggml_set_name(dst, name);
             model.tensors[name] = dst;
 
-            if (f16_materialise) {
+            if (measure) {
+                // No data leaves the disk.  Charge the transient host staging
+                // the real load holds until its upload loop finishes: the
+                // gguf full-copy bytes, plus (for every retyped tensor) the
+                // f32 intermediate and the destination-type payload.
+                measure->host_transient_bytes += (uint64_t) ggml_nbytes(src);
+                if (dst_type != src->type) {
+                    measure->host_transient_bytes += (uint64_t) ggml_nelements(src) * 4;
+                    measure->host_transient_bytes += (uint64_t) ggml_nbytes(dst);
+                }
+            } else if (f16_materialise) {
                 // Phase 2A F16 materialise path.
                 std::vector<float> src_f32;
                 if (should_expand_supertonic_tensor(src->type)) {
@@ -2320,8 +2351,14 @@ bool load_supertonic_gguf(const std::string & path,
             }
         }
 
+        if (measure) {
+            measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+                model.ctx_w, ggml_backend_get_default_buffer_type(model.backend));
+            supertonic_mark_externally_allocated(model.ctx_w);
+        } else {
         model.buffer_w = ggml_backend_alloc_ctx_tensors(model.ctx_w, model.backend);
         if (!model.buffer_w) throw std::runtime_error("ggml_backend_alloc_ctx_tensors failed");
+        }
 
         // Mark the weight buffer as WEIGHTS so the scheduler treats these
         // tensors as immovable and inserts GPU->CPU copies when a CPU-only op
@@ -2330,8 +2367,10 @@ bool load_supertonic_gguf(const std::string & path,
         // weight-aware split/copy path (ggml-backend.cpp) does not fire, some
         // weights stay on the GPU buffer, and the CPU custom op dereferences a
         // device offset -> SIGSEGV. Standard llama.cpp/whisper.cpp pattern.
+        if (!measure)
         ggml_backend_buffer_set_usage(model.buffer_w, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
+        if (!measure)
         for (ggml_tensor * cur = ggml_get_first_tensor(model.ctx_w);
              cur;
              cur = ggml_get_next_tensor(model.ctx_w, cur)) {
@@ -2373,7 +2412,11 @@ bool load_supertonic_gguf(const std::string & path,
         {
             ggml_tensor * unicode = require_tensor(model, "supertonic/unicode_indexer");
             model.unicode_indexer.resize((size_t) ggml_nelements(unicode));
-            ggml_backend_tensor_get(unicode, model.unicode_indexer.data(), 0, ggml_nbytes(unicode));
+            if (!measure) {
+                ggml_backend_tensor_get(unicode, model.unicode_indexer.data(), 0, ggml_nbytes(unicode));
+            } else {
+                measure->host_bytes += (uint64_t) ggml_nelements(unicode) * sizeof(int32_t);
+            }
         }
 
         // Populate the model's source_tensors lookup from the
@@ -2492,9 +2535,13 @@ bool load_supertonic_gguf(const std::string & path,
             ggml_tensor * theta_src = require_source_tensor(model,
                 "vector_estimator:tts.ttl.vector_field.main_blocks.3.attn.theta");
             model.vector_rope_theta.resize((size_t) ggml_nelements(theta_src));
-            ggml_backend_tensor_get(theta_src,
-                                    model.vector_rope_theta.data(),
-                                    0, ggml_nbytes(theta_src));
+            if (!measure) {
+                ggml_backend_tensor_get(theta_src,
+                                        model.vector_rope_theta.data(),
+                                        0, ggml_nbytes(theta_src));
+            } else {
+                measure->host_bytes += (uint64_t) ggml_nbytes(theta_src);
+            }
         }
 
         // Audit finding F2 — compute the vocoder BN scale / shift
@@ -2506,7 +2553,7 @@ bool load_supertonic_gguf(const std::string & path,
         // directly as weights.  Every subsequent synth call skips
         // the 4 reads + CPU compute + 2 uploads that the old path
         // did.  See AUDIT_SUPERTONIC_OPENCL.md F2.
-        {
+        if (!measure) {
             auto download = [](ggml_tensor * t, std::vector<float> & out) {
                 out.resize((size_t) ggml_nelements(t));
                 ggml_backend_tensor_get(t, out.data(), 0, ggml_nbytes(t));
@@ -2559,6 +2606,14 @@ bool load_supertonic_gguf(const std::string & path,
                     orig->ne[2] != 1   || orig->ne[3] != 1) {
                     continue;
                 }
+                if (measure) {
+                    // Size-only: the tensor was declared (and priced) with
+                    // buffer_w above; register the lookup key so the graph
+                    // builders take the same pre-transposed path a real
+                    // load enables, and skip the data fill.
+                    model.source_tensors[std::string(kF6Sources[i]) + "__T"] = pretrans_t_proj[i];
+                    continue;
+                }
                 std::vector<float> src((size_t) ggml_nelements(orig));
                 ggml_backend_tensor_get(orig, src.data(), 0, ggml_nbytes(orig));
                 std::vector<float> dst((size_t) 64 * 512);
@@ -2591,7 +2646,11 @@ bool load_supertonic_gguf(const std::string & path,
                 if (it == model.source_tensors.end() || !it->second) return;
                 std::vector<float> & dst = model.text_encoder_ln_weights[name];
                 dst.resize((size_t) ggml_nelements(it->second));
-                ggml_backend_tensor_get(it->second, dst.data(), 0, ggml_nbytes(it->second));
+                if (!measure) {
+                    ggml_backend_tensor_get(it->second, dst.data(), 0, ggml_nbytes(it->second));
+                } else {
+                    measure->host_bytes += (uint64_t) ggml_nbytes(it->second);
+                }
             };
             static const char * const kLnStems[] = {
                 "text_encoder:tts.ttl.text_encoder.attn_encoder.norm_layers_1.0",
@@ -2626,9 +2685,13 @@ bool load_supertonic_gguf(const std::string & path,
                 auto it = model.source_tensors.find(kTanhKSources[i]);
                 if (it == model.source_tensors.end() || !it->second) continue;
                 model.speech_tanh_k_cache[i].resize((size_t) ggml_nelements(it->second));
-                ggml_backend_tensor_get(it->second,
-                                        model.speech_tanh_k_cache[i].data(),
-                                        0, ggml_nbytes(it->second));
+                if (!measure) {
+                    ggml_backend_tensor_get(it->second,
+                                            model.speech_tanh_k_cache[i].data(),
+                                            0, ggml_nbytes(it->second));
+                } else {
+                    measure->host_bytes += (uint64_t) ggml_nbytes(it->second);
+                }
             }
         }
 
@@ -2698,6 +2761,17 @@ bool load_supertonic_gguf(const std::string & path,
                     model.source_tensors[src_name + ":T"] = tt;
                     orig_to_pre.push_back({t, tt});
                 }
+                if (measure) {
+                    measure->extra_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+                        model.ctx_w_extra, ggml_backend_get_default_buffer_type(model.backend));
+                    supertonic_mark_externally_allocated(model.ctx_w_extra);
+                    // Register the pointer map so the graph builders take the
+                    // same pretransposed dispatch a real load enables; the
+                    // per-weight transpose staging is skipped (data-free).
+                    for (const auto & [orig, pre] : orig_to_pre) {
+                        model.pretransposed_weights[orig] = pre;
+                    }
+                } else {
                 model.buffer_w_extra =
                     ggml_backend_alloc_ctx_tensors(model.ctx_w_extra, model.backend);
                 if (!model.buffer_w_extra) {
@@ -2756,7 +2830,18 @@ bool load_supertonic_gguf(const std::string & path,
                     }
                     model.pretransposed_weights[orig] = pre;
                 }
+                }  // !measure
             }
+        }
+
+        if (measure) {
+            // Persistent host baseline a real load keeps beyond the tensor
+            // caches counted above: the GGUF's tts.json payload and the
+            // lazily-filled duration scalar-weight cache (documented ~3-5 MiB
+            // steady state; charged at the top of that range -- the strict
+            // direction).
+            measure->host_bytes += (uint64_t) model.tts_json.size();
+            measure->host_bytes += 5ull * 1024 * 1024;
         }
 
         // The scheduler (model.sched_fb) is created lazily by
@@ -2779,6 +2864,33 @@ bool load_supertonic_gguf(const std::string & path,
     // backend that's already been torn down.
     register_supertonic_alive(model.generation_id);
     return true;
+}
+
+bool load_supertonic_gguf(const std::string & path,
+                          supertonic_model & model,
+                          int n_gpu_layers,
+                          bool verbose,
+                          int f16_weights,
+                          supertonic_precision precision,
+                          int vulkan_device,
+                          const std::vector<std::string> & f16_weights_deny_list) {
+    return load_supertonic_gguf_impl(path, model, n_gpu_layers, verbose, f16_weights,
+                                     precision, vulkan_device, f16_weights_deny_list,
+                                     /*measure=*/nullptr);
+}
+
+bool load_supertonic_gguf_metadata_only(const std::string & path,
+                                        supertonic_model & model,
+                                        int n_gpu_layers,
+                                        int f16_weights,
+                                        supertonic_precision precision,
+                                        int vulkan_device,
+                                        const std::vector<std::string> & f16_weights_deny_list,
+                                        supertonic_fit_load_measure & out) {
+    out = supertonic_fit_load_measure{};
+    return load_supertonic_gguf_impl(path, model, n_gpu_layers, /*verbose=*/false,
+                                     f16_weights, precision, vulkan_device,
+                                     f16_weights_deny_list, &out);
 }
 
 void free_supertonic_model(supertonic_model & model) {

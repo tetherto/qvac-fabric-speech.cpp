@@ -9,6 +9,7 @@
 #include "tts-cpp/chatterbox/fit.h"
 #include "tts-cpp/cosyvoice/fit.h"
 #include "tts-cpp/parler/fit.h"
+#include "tts-cpp/supertonic/fit.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -228,6 +229,34 @@ void test_cosyvoice_cli_contract() {
            "cosyvoice unreadable models exit 2");
 }
 
+void test_supertonic_cli_contract() {
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params", "--help"}) == 0,
+           "supertonic --help exits 0");
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params"}) == 2,
+           "supertonic missing required flags exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--text-tokens", "0"}) == 2,
+           "supertonic non-positive --text-tokens exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--audio-seconds", "-1"}) == 2,
+           "supertonic negative --audio-seconds exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--precision", "int4"}) == 2,
+           "supertonic junk --precision exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--steps", "1x"}) == 2,
+           "supertonic junk --steps exits 2 (never coerced)");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--margin-mib", "abc"}) == 2,
+           "supertonic junk --margin-mib exits 2");
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params", "--not-a-flag"}) == 2,
+           "supertonic unknown flag exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "/nonexistent-fit-test.gguf",
+                    "--json"}) == 2,
+           "supertonic unreadable model exits 2");
+}
+
 }  // namespace
 
 int main() {
@@ -238,6 +267,7 @@ int main() {
     test_chatterbox_cli_contract();
     test_parler_cli_contract();
     test_cosyvoice_cli_contract();
+    test_supertonic_cli_contract();
 
     if (g_failures == 0) {
         std::printf("test-fit-cli: all checks passed\n");

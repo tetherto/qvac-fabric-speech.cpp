@@ -484,7 +484,8 @@ void build_relpos_cache(text_relpos_graph_cache & cache,
                         const supertonic_model & m,
                         int idx,
                         int L,
-                        int C) {
+                        int C,
+                        size_t * measure = nullptr) {
     free_relpos_cache(cache);
     cache.model = &m;
     cache.generation_id = m.generation_id;
@@ -572,6 +573,18 @@ void build_relpos_cache(text_relpos_graph_cache & cache,
     ggml_set_name(out_lc_t, "relpos_out"); ggml_set_output(out_lc_t);
     ggml_build_forward_expand(cache.gf, out_lc_t);
 
+    if (measure) {
+        // Memory-fit preflight: size the arena this cache would reserve
+        // (masks included -- they are INPUT+OUTPUT leafs the gallocr keeps
+        // alive) without allocating or uploading anything.
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new text relpos (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
     cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new text relpos failed");
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
@@ -644,7 +657,8 @@ void build_ffn_cache(text_ffn_graph_cache & cache,
                      const supertonic_model & m,
                      int idx,
                      int L,
-                     int C) {
+                     int C,
+                     size_t * measure = nullptr) {
     free_ffn_cache(cache);
     cache.model = &m;
     cache.generation_id = m.generation_id;
@@ -669,6 +683,15 @@ void build_ffn_cache(text_ffn_graph_cache & cache,
     ggml_set_name(y, "text_ffn_out"); ggml_set_output(y);
     ggml_build_forward_expand(cache.gf, y);
 
+    if (measure) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new text ffn (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
     cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new text ffn failed");
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
@@ -874,7 +897,8 @@ void build_speech_prompted_merged_cache(speech_prompted_merged_cache & cache,
                                         const std::string & out_b_source,
                                         const std::string & tanh_k_source,
                                         const std::string & q_b_source,
-                                        const std::string & v_b_source) {
+                                        const std::string & v_b_source,
+                                        size_t * measure) {
     const int C = 256;
     const int half = 128;
     const int H = 2;
@@ -937,6 +961,15 @@ void build_speech_prompted_merged_cache(speech_prompted_merged_cache & cache,
     ggml_set_name(cache.out, "spm_out"); ggml_set_output(cache.out);
     ggml_build_forward_expand(cache.gf, cache.out);
 
+    if (measure) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new speech_prompted_merged (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
     cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new speech_prompted_merged failed");
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
@@ -1582,6 +1615,117 @@ void release_text_encoder_thread_local_caches() {
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
     }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the text encoder's resident thread_local cache set at text length L,
+// on the non-CPU-kernel dispatch path (convnext front + 4 relpos + 4 ffn +
+// 2 speech-prompted merged caches).  All of them stay resident once the stage
+// has run, so they SUM.  In measure mode (real_alloc=false, the fit path)
+// nothing is allocated and nothing runs; the parity probe (real_alloc=true,
+// test-only) reserves the same graphs for real to anchor the sizes.
+static bool text_encoder_fit_impl(const supertonic_model & m, int L,
+                                  uint64_t & bytes, std::string * error,
+                                  bool real_alloc) {
+    bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        const int C = 256;
+        const int Lctx = 50;
+        auto price_or_alloc = [&](ggml_cgraph * gf) -> size_t {
+            ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+            if (!al) throw std::runtime_error("gallocr_new failed");
+            size_t sz = 0;
+            if (real_alloc) {
+                if (ggml_gallocr_reserve(al, gf) && ggml_gallocr_alloc_graph(al, gf)) {
+                    sz = ggml_gallocr_get_buffer_size(al, 0);
+                }
+            } else {
+                ggml_gallocr_reserve_n_size(al, gf, nullptr, nullptr, &sz);
+            }
+            ggml_gallocr_free(al);
+            return sz;
+        };
+        // ConvNeXt front graph -- the same op sequence the F18 cache in
+        // supertonic_text_encoder_forward_ggml builds (any drift here is
+        // pinned by the fixture parity gate against a real synthesis).
+        {
+            constexpr int MAX_NODES = 640;
+            const size_t buf_size = ggml_tensor_overhead() * MAX_NODES +
+                                    ggml_graph_overhead_custom(MAX_NODES, false);
+            std::vector<uint8_t> buf(buf_size);
+            ggml_init_params gp = { buf_size, buf.data(), true };
+            ggml_context * ctx = ggml_init(gp);
+            ggml_cgraph * gf = ggml_new_graph_custom(ctx, MAX_NODES, false);
+            ggml_tensor * emb_table = require_source_tensor(m,
+                "text_encoder:tts.ttl.text_encoder.text_embedder.char_embedder.weight");
+            ggml_tensor * ids_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, L);
+            ggml_set_input(ids_in);
+            ggml_tensor * gathered = ggml_get_rows(ctx, emb_table, ids_in);
+            ggml_tensor * y_t = ggml_cont(ctx, ggml_transpose(ctx, gathered));
+            for (int i = 0; i < 6; ++i) {
+                y_t = text_convnext_ggml(ctx, m,
+                    "text_encoder:tts.ttl.text_encoder.convnext.convnext." + std::to_string(i), y_t,
+                    m.hparams.text_convnext_dilation((size_t) i));
+            }
+            ggml_set_output(y_t);
+            ggml_build_forward_expand(gf, y_t);
+            bytes += price_or_alloc(gf);
+            ggml_free(ctx);
+        }
+        for (int idx = 0; idx < 4; ++idx) {
+            text_relpos_graph_cache c;
+            size_t sz = 0;
+            build_relpos_cache(c, m, idx, L, C, real_alloc ? nullptr : &sz);
+            if (real_alloc && c.allocr) sz = ggml_gallocr_get_buffer_size(c.allocr, 0);
+            free_relpos_cache(c);
+            bytes += sz;
+        }
+        for (int idx = 0; idx < 4; ++idx) {
+            text_ffn_graph_cache c;
+            size_t sz = 0;
+            build_ffn_cache(c, m, idx, L, C, real_alloc ? nullptr : &sz);
+            if (real_alloc && c.allocr) sz = ggml_gallocr_get_buffer_size(c.allocr, 0);
+            free_ffn_cache(c);
+            bytes += sz;
+        }
+        for (int idx = 0; idx < 2; ++idx) {
+            // Same instance arguments as the merged-cache dispatch in
+            // speech_prompted_attention_ggml.
+            const int attn_num = idx + 1;
+            const std::string p = "text_encoder:tts.ttl.speech_prompted_text_encoder.attention" +
+                                  std::to_string(attn_num);
+            speech_prompted_merged_cache c;
+            size_t sz = 0;
+            build_speech_prompted_merged_cache(c, m, idx, L, Lctx,
+                p + ".W_query.linear.weight",
+                p + ".W_value.linear.weight",
+                p + ".out_fc.linear.weight",
+                p + ".out_fc.linear.bias",
+                "text_encoder:/speech_prompted_text_encoder/attention" +
+                    std::to_string(attn_num) + "/tanh/Tanh_output_0",
+                p + ".W_query.linear.bias",
+                p + ".W_value.linear.bias",
+                real_alloc ? nullptr : &sz);
+            if (real_alloc && c.allocr) sz = ggml_gallocr_get_buffer_size(c.allocr, 0);
+            free_speech_prompted_merged_cache(c);
+            bytes += sz;
+        }
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool supertonic_fit_measure_text_encoder(const supertonic_model & m, int L,
+                                         uint64_t & bytes, std::string * error) {
+    return text_encoder_fit_impl(m, L, bytes, error, /*real_alloc=*/false);
+}
+
+bool supertonic_fit_parity_probe_text_encoder(const supertonic_model & m, int L,
+                                              uint64_t & bytes, std::string * error) {
+    return text_encoder_fit_impl(m, L, bytes, error, /*real_alloc=*/true);
 }
 
 } // namespace tts_cpp::supertonic::detail
