@@ -566,7 +566,9 @@ void build_duration_one_graph(duration_one_graph_cache & cache, const supertonic
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
         throw std::runtime_error("ggml_gallocr_reserve duration one-graph failed");
     }
-    ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, cache.gf)) {
+        throw std::runtime_error("ggml_gallocr_alloc_graph duration one-graph failed");
+    }
     const std::vector<float> band = make_rel_band(L, 1.0f / std::sqrt((float) (kDurationChannels / kDurationHeads)));
     ggml_backend_tensor_set(cache.rel_band, band.data(), 0, band.size() * sizeof(float));
 }
@@ -582,9 +584,8 @@ void run_duration_one_graph(duration_one_graph_cache & cache,
 }
 
 std::vector<float> combine_projection_and_style(const std::vector<float> & projected, const float * style_dp) {
-    std::vector<float> combined((size_t) kDurationChannels + kDurationStyleDim);
-    for (int c = 0; c < kDurationChannels; ++c) combined[(size_t) c] = projected[(size_t) c];
-    for (int i = 0; i < kDurationStyleDim; ++i) combined[(size_t) kDurationChannels + i] = style_dp[i];
+    std::vector<float> combined(projected.begin(), projected.begin() + kDurationChannels);
+    combined.insert(combined.end(), style_dp, style_dp + kDurationStyleDim);
     return combined;
 }
 

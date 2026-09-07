@@ -875,7 +875,9 @@ inline void build_speech_attention_cache(speech_attention_cache & cache,
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
         throw std::runtime_error("ggml_gallocr_reserve speech attention cache failed");
     }
-    ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, cache.gf)) {
+        throw std::runtime_error("ggml_gallocr_alloc_graph text-encoder one-graph failed");
+    }
 }
 
 // View over a zero-padded copy of rel [P, L, H] whose element (kj, qi, h) reads
