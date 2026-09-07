@@ -815,7 +815,7 @@ int main(int argc, char ** argv) {
             stderr,
             "GPU execution requested, but active backend is %s\n",
             parakeet::model_active_backend_name(model).c_str());
-        return 3;
+        return 1;
     }
 
     parakeet::TdtRuntimeWeights runtime;
