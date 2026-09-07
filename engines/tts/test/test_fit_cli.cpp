@@ -7,6 +7,7 @@
 #include "fit_util.h"
 #include "tts-cpp/audio8/fit.h"
 #include "tts-cpp/chatterbox/fit.h"
+#include "tts-cpp/cosyvoice/fit.h"
 #include "tts-cpp/parler/fit.h"
 
 #include <cstdint>
@@ -197,6 +198,36 @@ void test_parler_cli_contract() {
            "parler unreadable model exits 2");
 }
 
+void test_cosyvoice_cli_contract() {
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params", "--help"}) == 0,
+           "cosyvoice --help exits 0");
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params"}) == 2,
+           "cosyvoice missing required flags exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c"}) == 2,
+           "cosyvoice missing --voice exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--text-tokens", "0"}) == 2,
+           "cosyvoice non-positive --text-tokens exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--speech-tokens", "1e3"}) == 2,
+           "cosyvoice junk --speech-tokens exits 2 (never coerced)");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--margin-mib", "abc"}) == 2,
+           "cosyvoice junk --margin-mib exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params", "--not-a-flag"}) == 2,
+           "cosyvoice unknown flag exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "/nonexistent-fit-1.gguf",
+                    "--flow", "/nonexistent-fit-2.gguf", "--hift", "/nonexistent-fit-3.gguf",
+                    "--voice", "/nonexistent-fit-4.gguf", "--json"}) == 2,
+           "cosyvoice unreadable models exit 2");
+}
+
 }  // namespace
 
 int main() {
@@ -206,6 +237,7 @@ int main() {
     test_audio8_cli_contract();
     test_chatterbox_cli_contract();
     test_parler_cli_contract();
+    test_cosyvoice_cli_contract();
 
     if (g_failures == 0) {
         std::printf("test-fit-cli: all checks passed\n");

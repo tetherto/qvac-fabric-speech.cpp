@@ -350,6 +350,8 @@ set(TTS_CPP_LIB_SOURCES
     src/chatterbox_fit_main.cpp
     src/parler/fit.cpp
     src/parler/fit_main.cpp
+    src/cosyvoice_fit.cpp
+    src/cosyvoice_fit_main.cpp
 )
 
 if (TTS_CPP_BUILD_LIBRARY)
@@ -608,6 +610,10 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     add_executable(parler-fit-params src/parler_fit_params.cpp)
     target_link_libraries(parler-fit-params PRIVATE tts-cpp)
     tts_cpp_apply_ccache(parler-fit-params)
+
+    add_executable(cosyvoice-fit-params src/cosyvoice_fit_params.cpp)
+    target_link_libraries(cosyvoice-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(cosyvoice-fit-params)
 endif()
 
 if (TTS_CPP_BUILD_TESTS)
@@ -2531,6 +2537,28 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_parler_gguf}"
         REQUIRES "${_tcb_parler_gguf}")
+
+    # CosyVoice3 fit parity.  The no-argument form synthesizes the model set
+    # on the fly (tiny metadata-driven LM/flow + full-geometry HiFT + voice),
+    # so the byte-parity gates (weights, KV, LM/flow/HiFT arenas vs real
+    # dispatches) need no fixture at all; the fixture form runs the same gates
+    # on the real converted set.
+    add_executable(test-cosyvoice-fit-params test/test_cosyvoice_fit_params.cpp)
+    target_link_libraries(test-cosyvoice-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-cosyvoice-fit-params)
+    tts_cpp_register_test(test-cosyvoice-fit-params LABEL "unit")
+    tts_cpp_register_test(test-cosyvoice-fit-params-gpu
+        EXE   test-cosyvoice-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-cosyvoice-fit-params-fixture
+        EXE      test-cosyvoice-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf"
+        REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
 
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.
