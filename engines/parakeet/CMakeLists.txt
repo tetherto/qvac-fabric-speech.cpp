@@ -946,6 +946,24 @@ if (PARAKEET_BUILD_TESTS)
             "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
     endif()
 
+    if (GGML_OPENCL)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
+
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
         add_test(

@@ -180,6 +180,13 @@ CUDA. CPU and OpenCL use the scalar decoder path; OpenCL lacks the graph
 operation support required by this decoder path. The EOU encoder can still run
 on OpenCL while its decoder runs scalar.
 
+Nemotron 3.5 ASR streaming is supported on OpenCL (Adreno 700+). The encoder
+runs on the GPU and the cache-aware streaming operating points (80, 160, 320,
+560, 1120 ms) are honoured. The transducer decode runs host-side on OpenCL,
+same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
+that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
+opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
+
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control
