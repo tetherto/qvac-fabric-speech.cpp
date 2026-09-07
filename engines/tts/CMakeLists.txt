@@ -348,6 +348,8 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/fit_main.cpp
     src/chatterbox_fit.cpp
     src/chatterbox_fit_main.cpp
+    src/parler/fit.cpp
+    src/parler/fit_main.cpp
 )
 
 if (TTS_CPP_BUILD_LIBRARY)
@@ -602,6 +604,10 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     add_executable(chatterbox-fit-params src/chatterbox_fit_params.cpp)
     target_link_libraries(chatterbox-fit-params PRIVATE tts-cpp)
     tts_cpp_apply_ccache(chatterbox-fit-params)
+
+    add_executable(parler-fit-params src/parler_fit_params.cpp)
+    target_link_libraries(parler-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(parler-fit-params)
 endif()
 
 if (TTS_CPP_BUILD_TESTS)
@@ -2505,6 +2511,26 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}")
+
+    # Parler fit parity.  The no-argument form synthesizes a tiny but complete
+    # parler GGUF on the fly, so the byte-parity gates (weights, KV slab,
+    # cross-K/V, decoder/T5/DAC arenas vs a real load + runs) need no fixture
+    # at all; the fixture form runs the same gates on the real model (plus the
+    # GPU fused-weight stack when n_gpu_layers > 0).
+    add_executable(test-parler-fit-params test/parler/test_fit_params.cpp)
+    target_link_libraries(test-parler-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-parler-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-parler-fit-params)
+    tts_cpp_register_test(test-parler-fit-params LABEL "unit")
+    tts_cpp_register_test(test-parler-fit-params-gpu
+        EXE   test-parler-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-parler-fit-params-fixture
+        EXE      test-parler-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_parler_gguf}"
+        REQUIRES "${_tcb_parler_gguf}")
 
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.
