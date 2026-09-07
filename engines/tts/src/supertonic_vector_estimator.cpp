@@ -1050,17 +1050,17 @@ void free_text_attention_cache(vector_text_attention_cache & cache) {
     cache = {};
 }
 
-// Attention context for the out-projection. Normally flash_attn_ext; when a backend
+// Attention context as [width, q_len]. Normally flash_attn_ext; when a backend
 // routes FA to CPU the bridge goes stale on per-step graph reuse, so use explicit ops.
-static ggml_tensor * supertonic_attention_ctx_ggml(ggml_context * ctx,
-                                                    const supertonic_model & model,
-                                                    ggml_tensor * q_in,
-                                                    ggml_tensor * k_in,
-                                                    ggml_tensor * v_in,
-                                                    int q_len,
-                                                    int n_heads,
-                                                    int head_dim,
-                                                    float scale) {
+static ggml_tensor * supertonic_attention_ctx_wt_ggml(ggml_context * ctx,
+                                                       const supertonic_model & model,
+                                                       ggml_tensor * q_in,
+                                                       ggml_tensor * k_in,
+                                                       ggml_tensor * v_in,
+                                                       int q_len,
+                                                       int n_heads,
+                                                       int head_dim,
+                                                       float scale) {
     ggml_tensor * attn = ggml_flash_attn_ext(ctx, q_in, k_in, v_in,
                                              nullptr, scale, 0.0f, 0.0f);
     if (!ggml_backend_supports_op(model.backend, attn)) {
@@ -1075,7 +1075,21 @@ static ggml_tensor * supertonic_attention_ctx_ggml(ggml_context * ctx,
         ggml_tensor * kqv = st_mul_mat(ctx, v_t, kq);                           // [head_dim, q_len, n_heads]
         attn = ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3));                // [head_dim, n_heads, q_len] (== FA layout)
     }
-    attn = ggml_reshape_2d(ctx, attn, (int64_t) n_heads * head_dim, q_len);
+    return ggml_reshape_2d(ctx, attn, (int64_t) n_heads * head_dim, q_len);
+}
+
+// Attention context for the [q_len, width] out-projection.
+static ggml_tensor * supertonic_attention_ctx_ggml(ggml_context * ctx,
+                                                    const supertonic_model & model,
+                                                    ggml_tensor * q_in,
+                                                    ggml_tensor * k_in,
+                                                    ggml_tensor * v_in,
+                                                    int q_len,
+                                                    int n_heads,
+                                                    int head_dim,
+                                                    float scale) {
+    ggml_tensor * attn = supertonic_attention_ctx_wt_ggml(ctx, model, q_in, k_in, v_in,
+                                                          q_len, n_heads, head_dim, scale);
     return ggml_cont(ctx, ggml_transpose(ctx, attn));
 }
 
@@ -4511,6 +4525,7 @@ struct vector_step_inputs {
     ggml_tensor * freq_factors_k = nullptr;  // ne=[D/2]       f32
     vector_step_kv text_kv[4];               // per group; null k = build inside the step
     vector_step_kv style_kv[4];
+    bool io_ct = false;                      // x_in, noise_in and the result are [Cin, L]
 };
 
 vector_step_kv text_attention_kv_ggml(ggml_context * gctx,
@@ -4649,6 +4664,175 @@ void free_vector_step_one_graph_cache(vector_step_one_graph_cache & cache) {
     cache.next_latent_out = nullptr;
 }
 
+// [C, T]-layout step builder: every block consumes and produces [C, T], so
+// there are no im2col copies before the projections and no layout permutes.
+namespace {
+
+constexpr int   kVectorChannels  = 512;
+constexpr int   kTextHeadDim     = 64;
+constexpr int   kStyleHeads      = 2;
+constexpr int   kStyleHeadDim    = 128;
+constexpr int   kStyleKvLen      = 50;
+constexpr float kAttentionScale  = 1.0f / 16.0f;
+constexpr int   kGroupDilations[4] = {1, 2, 4, 8};
+constexpr int   kTailDilations[4]  = {1, 1, 1, 1};
+
+std::string vector_block_name(int block) {
+    return "vector_estimator:tts.ttl.vector_field.main_blocks." + std::to_string(block);
+}
+
+ggml_tensor * flatten_channel_param(ggml_context * ctx, ggml_tensor * t) {
+    const int64_t n = ggml_nelements(t);
+    if (t->ne[0] == n && t->ne[1] == 1 && t->ne[2] == 1 && t->ne[3] == 1) return t;
+    return ggml_reshape_1d(ctx, t, n);
+}
+
+ggml_tensor * layer_norm_ct_ggml(ggml_context * ctx, ggml_tensor * x_ct, ggml_tensor * g, ggml_tensor * b) {
+    return ggml_supertonic_layer_norm_channel_ct(ctx, x_ct,
+        flatten_channel_param(ctx, g), flatten_channel_param(ctx, b), 1e-6f);
+}
+
+// y[OC, T] from x[IC, T] with the MatMul_ weight as src0: no im2col copy of x.
+ggml_tensor * dense_matmul_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                   ggml_tensor * x_ct, ggml_tensor * w, ggml_tensor * b) {
+    ggml_tensor * w_pre = try_pretransposed_weight(model, w);
+    if (!w_pre) w_pre = ggml_cont(ctx, ggml_transpose(ctx, w));
+    ggml_tensor * y = st_mul_mat(ctx, w_pre, x_ct);
+    if (b) y = ggml_add(ctx, y, ggml_reshape_2d(ctx, flatten_channel_param(ctx, b), y->ne[0], 1));
+    return y;
+}
+
+ggml_tensor * time_projection_ggml(ggml_context * ctx, const supertonic_model & model,
+                                   int group, ggml_tensor * t_emb_in) {
+    ggml_tensor * w = require_source_tensor(model, matmul_name(kGroupNames[group].t_linear));
+    ggml_tensor * b = require_source_tensor(model, vector_block_name(group * 6 + 1) + ".linear.linear.bias");
+    ggml_tensor * w_t = try_pretransposed_weight(model, w);
+    if (!w_t) w_t = ggml_cont(ctx, ggml_transpose(ctx, w));
+    ggml_tensor * t_proj = st_mul_mat(ctx, w_t, ggml_reshape_2d(ctx, t_emb_in, t_emb_in->ne[0], 1));
+    return ggml_add(ctx, t_proj, ggml_reshape_2d(ctx, b, kVectorChannels, 1));
+}
+
+ggml_tensor * convnext_chain_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                     const std::string & block, ggml_tensor * x_ct, const int * dilations) {
+    for (int j = 0; j < 4; ++j) {
+        x_ct = vector_convnext_ggml_ct(ctx, model, block + ".convnext." + std::to_string(j), x_ct, dilations[j]);
+    }
+    return x_ct;
+}
+
+ggml_tensor * attention_block_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                      ggml_tensor * residual_ct, ggml_tensor * q_wt, const vector_step_kv & kv,
+                                      int q_len, int kv_len, int n_heads, int head_dim,
+                                      const std::string & attn_prefix, const std::string & block,
+                                      int out_w_name) {
+    const int width = n_heads * head_dim;
+    const size_t time_stride = (size_t) width * sizeof(float);
+    const size_t head_stride = (size_t) head_dim * sizeof(float);
+    ggml_tensor * q_in = ggml_view_3d(ctx, q_wt, head_dim, q_len,  n_heads, time_stride, head_stride, 0);
+    ggml_tensor * k_in = ggml_view_3d(ctx, kv.k, head_dim, kv_len, n_heads, time_stride, head_stride, 0);
+    ggml_tensor * v_in = ggml_view_3d(ctx, kv.v, head_dim, kv_len, n_heads, time_stride, head_stride, 0);
+    ggml_tensor * attn = supertonic_attention_ctx_wt_ggml(ctx, model, q_in, k_in, v_in,
+                                                          q_len, n_heads, head_dim, kAttentionScale);
+    ggml_tensor * out = dense_matmul_ct_ggml(ctx, model, attn,
+        require_source_tensor(model, matmul_name(out_w_name)),
+        require_source_tensor(model, attn_prefix + "out_fc.linear.bias"));
+    return layer_norm_ct_ggml(ctx, ggml_add(ctx, residual_ct, out),
+        require_source_tensor(model, block + ".norm.norm.weight"),
+        require_source_tensor(model, block + ".norm.norm.bias"));
+}
+
+ggml_tensor * run_group_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                const vector_step_inputs & inputs, int group,
+                                ggml_tensor * x_pre_attn, ggml_tensor * mask_row,
+                                int L, int text_len, int H, int D) {
+    const auto & names = kGroupNames[group];
+    const std::string attn  = vector_block_name(group * 6 + 3);
+    const std::string post  = vector_block_name(group * 6 + 4);
+    const std::string style = vector_block_name(group * 6 + 5);
+
+    ggml_tensor * q = dense_matmul_ct_ggml(ctx, model, x_pre_attn,
+        require_source_tensor(model, matmul_name(names.attn_q)),
+        require_source_tensor(model, attn + ".attn.W_query.linear.bias"));
+    q = apply_supertonic_rope_ggml(ctx, q, inputs.pos_q, inputs.freq_factors_q, L, H, D);
+    const vector_step_kv text_kv = inputs.text_kv[group].k
+        ? inputs.text_kv[group]
+        : text_attention_kv_ggml(ctx, model, inputs, group, text_len, H, D);
+    ggml_tensor * normed = attention_block_ct_ggml(ctx, model, x_pre_attn, q, text_kv,
+        L, text_len, H, D, attn + ".attn.", attn, names.attn_out);
+
+    ggml_tensor * post_x = vector_convnext_ggml_ct(ctx, model, post + ".convnext.0", normed, 1);
+    ggml_tensor * masked_post = ggml_mul(ctx, post_x, mask_row);
+    ggml_tensor * sq = dense_matmul_ct_ggml(ctx, model, masked_post,
+        require_source_tensor(model, matmul_name(names.style_q)),
+        require_source_tensor(model, style + ".attention.W_query.linear.bias"));
+    const vector_step_kv style_kv = inputs.style_kv[group].k
+        ? inputs.style_kv[group]
+        : style_attention_kv_ggml(ctx, model, inputs, group);
+    return attention_block_ct_ggml(ctx, model, post_x, sq, style_kv,
+        L, kStyleKvLen, kStyleHeads, kStyleHeadDim, style + ".attention.", style, names.style_out);
+}
+
+ggml_tensor * group_prep_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                 const vector_step_inputs & inputs, int group, ggml_tensor * x_ct) {
+    ggml_tensor * y = convnext_chain_ct_ggml(ctx, model, vector_block_name(group * 6 + 0), x_ct, kGroupDilations);
+    y = ggml_add(ctx, y, time_projection_ggml(ctx, model, group, inputs.t_emb_in));
+    return vector_convnext_ggml_ct(ctx, model, vector_block_name(group * 6 + 2) + ".convnext.0", y, 1);
+}
+
+ggml_tensor * run_groups_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                 const vector_step_inputs & inputs, ggml_tensor * x_pre_attn,
+                                 ggml_tensor * mask_row, int L, int text_len, int H, int D) {
+    ggml_tensor * x_after = run_group_ct_ggml(ctx, model, inputs, 0, x_pre_attn, mask_row, L, text_len, H, D);
+    for (int g = 1; g < 4; ++g) {
+        ggml_tensor * x_pre = group_prep_ct_ggml(ctx, model, inputs, g, x_after);
+        x_after = run_group_ct_ggml(ctx, model, inputs, g, x_pre, mask_row, L, text_len, H, D);
+    }
+    return x_after;
+}
+
+ggml_tensor * step_tail_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                ggml_tensor * x_ct, ggml_tensor * noise_ct, ggml_tensor * mask_row,
+                                int total_steps) {
+    ggml_tensor * tail = convnext_chain_ct_ggml(ctx, model,
+        "vector_estimator:tts.ttl.vector_field.last_convnext", x_ct, kTailDilations);
+    ggml_tensor * velocity = pointwise_matmul_ct(ctx, tail,
+        require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_out.net.weight"), nullptr);
+    ggml_tensor * scaled = ggml_scale(ctx, ggml_mul(ctx, velocity, mask_row), 1.0f / (float) total_steps);
+    return ggml_add(ctx, noise_ct, scaled);
+}
+
+ggml_tensor * to_channel_time(ggml_context * ctx, ggml_tensor * x) {
+    return ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
+}
+
+ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertonic_model & model,
+                                             const vector_step_inputs & inputs,
+                                             int L, int text_len, int total_steps) {
+    const int H = model.hparams.vector_text_attn_heads;
+    const int D = kTextHeadDim;
+    ggml_tensor * x_ct = inputs.io_ct ? inputs.x_in : to_channel_time(ctx, inputs.x_in);
+    ggml_tensor * noise_ct = inputs.noise_in == inputs.x_in ? x_ct
+                           : inputs.io_ct ? inputs.noise_in : to_channel_time(ctx, inputs.noise_in);
+    ggml_tensor * mask_row = ggml_reshape_2d(ctx, inputs.mask_in, 1, L);
+
+    ggml_tensor * cur = pointwise_matmul_ct(ctx, x_ct,
+        require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_in.net.weight"), nullptr);
+    cur = ggml_mul(ctx, cur, mask_row);
+    cur = group_prep_ct_ggml(ctx, model, inputs, 0, cur);
+    cur = run_groups_ct_ggml(ctx, model, inputs, cur, mask_row, L, text_len, H, D);
+    ggml_tensor * next = step_tail_ct_ggml(ctx, model, cur, noise_ct, mask_row, total_steps);
+    return inputs.io_ct ? next : to_channel_time(ctx, next);
+}
+
+} // namespace
+
+bool use_ct_vector_step(const supertonic_model & model, bool use_cpu_custom) {
+    static const bool disabled = std::getenv("SUPERTONIC_DISABLE_CT_STEP") != nullptr ||
+                                 std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
+    return !disabled && !use_cpu_custom && !model_prefers_cpu_kernels(model) &&
+           supertonic_use_fused_supertonic_ops();
+}
+
 ggml_tensor * append_supertonic_vector_step_subgraph(
         ggml_context * gctx,
         ggml_cgraph * gf,
@@ -4658,6 +4842,9 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
         int text_len,
         int total_steps) {
     const bool use_cpu_custom = supertonic_use_cpu_custom_ops();
+    if (use_ct_vector_step(model, use_cpu_custom)) {
+        return append_vector_step_subgraph_ct(gctx, model, inputs, L, text_len, total_steps);
+    }
     // Shape constants that aren't dependent on L / text_len.  Mirror the
     // values from supertonic_vector_step_one_graph_ggml.
     const int C = 512;
@@ -5277,9 +5464,11 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
             }
 
             // --- Chain N CFM steps together ---
-            ggml_tensor * cur_latent = cache.x0_in;
+            const bool io_ct = use_ct_vector_step(model, supertonic_use_cpu_custom_ops());
+            ggml_tensor * cur_latent = io_ct ? to_channel_time(cache.ctx, cache.x0_in) : cache.x0_in;
             for (int s = 0; s < total_steps; ++s) {
                 vector_step_inputs inputs = shared;
+                inputs.io_ct          = io_ct;
                 inputs.x_in           = cur_latent;       // previous step's output
                 inputs.mask_in        = cache.mask_in;
                 inputs.t_emb_in       = cache.t_emb_in[s];
@@ -5305,6 +5494,7 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
                 ggml_set_name(next, step_name.c_str());
                 cur_latent = next;
             }
+            if (io_ct) cur_latent = to_channel_time(cache.ctx, cur_latent);
             ggml_set_output(cur_latent);
             ggml_build_forward_expand(cache.gf, cur_latent);
             cache.final_latent_out = cur_latent;
