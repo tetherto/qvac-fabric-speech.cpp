@@ -4494,6 +4494,17 @@ static std::string matmul_name(int suffix) {
 // the per-step cache (one step per ggml_cgraph) and by the
 // 5-steps-unrolled-into-one-graph cache (Phase A1+A2).
 //
+// K/V projections of the step-invariant text and style inputs; an unrolled
+// multi-step graph builds them once and shares them across its steps.
+struct vector_step_kv {
+    ggml_tensor * k = nullptr;  // text: roped keys, style: tanh keys, ne=[H*D, kv_len]
+    ggml_tensor * v = nullptr;  // ne=[H*D, kv_len]
+};
+
+// Four attention groups of six blocks each; the K/V slots and the block names index by group.
+constexpr int kVectorGroups        = 4;
+constexpr int kVectorBlocksPerGroup = 6;
+
 // `x_in` / `noise_in` vary per step (x_in = latent for this step,
 // noise_in is the "residual" we add the velocity to — for Supertonic's
 // CFM equation `next = noise_in + velocity * (1 / total_steps)` they
@@ -4506,13 +4517,6 @@ static std::string matmul_name(int suffix) {
 // `t_emb_in` varies per step (one time embedding per CFM step index).
 // All other inputs are constant across the 5 CFM steps and bind to a
 // single shared input tensor regardless of which path is used.
-// K/V projections of the step-invariant text and style inputs; an unrolled
-// multi-step graph builds them once and shares them across its steps.
-struct vector_step_kv {
-    ggml_tensor * k = nullptr;  // text: roped keys, style: tanh keys, ne=[H*D, kv_len]
-    ggml_tensor * v = nullptr;  // ne=[H*D, kv_len]
-};
-
 struct vector_step_inputs {
     ggml_tensor * x_in           = nullptr;  // ne=[L, Cin]    f32
     ggml_tensor * mask_in        = nullptr;  // ne=[L]         f32
@@ -4525,8 +4529,8 @@ struct vector_step_inputs {
     ggml_tensor * pos_k          = nullptr;  // ne=[text_len]  i32
     ggml_tensor * freq_factors_q = nullptr;  // ne=[D/2]       f32
     ggml_tensor * freq_factors_k = nullptr;  // ne=[D/2]       f32
-    vector_step_kv text_kv[4];               // per group; null k = build inside the step
-    vector_step_kv style_kv[4];
+    vector_step_kv text_kv[kVectorGroups];               // per group; null k = build inside the step
+    vector_step_kv style_kv[kVectorGroups];
     bool io_ct = false;                      // x_in, noise_in and the result are [Cin, L]
     int batch = 1;                           // sequences concatenated along T (cond | uncond)
 };
@@ -4537,7 +4541,7 @@ vector_step_kv text_attention_kv_ggml(ggml_context * gctx,
                                       int group, int text_len, int H, int D) {
     const auto & names = kGroupNames[group];
     const std::string attn = "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                             std::to_string(group * 6 + 3) + ".attn.";
+                             std::to_string(group * kVectorBlocksPerGroup + 3) + ".attn.";
     vector_step_kv kv;
     kv.k = dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.text_in,
         require_source_tensor(model, matmul_name(names.attn_k)),
@@ -4555,7 +4559,7 @@ vector_step_kv style_attention_kv_ggml(ggml_context * gctx,
                                        int group) {
     const auto & names = kGroupNames[group];
     const std::string attn = "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                             std::to_string(group * 6 + 5) + ".attention.";
+                             std::to_string(group * kVectorBlocksPerGroup + 5) + ".attention.";
     vector_step_kv kv;
     kv.k = ggml_tanh(gctx, dense_matmul_time_wt_pretransposed_ggml(gctx, model, inputs.style_kctx_in,
         require_source_tensor(model, matmul_name(names.style_k)),
@@ -4570,14 +4574,14 @@ void append_vector_step_kv_projections(ggml_context * gctx,
                                        const supertonic_model & model,
                                        vector_step_inputs & inputs,
                                        int text_len, int H, int D) {
-    for (int g = 0; g < 4; ++g) {
+    for (int g = 0; g < kVectorGroups; ++g) {
         inputs.text_kv[g]  = text_attention_kv_ggml(gctx, model, inputs, g, text_len, H, D);
         inputs.style_kv[g] = style_attention_kv_ggml(gctx, model, inputs, g);
     }
 }
 
 void copy_vector_step_kv(const vector_step_inputs & from, vector_step_inputs & to) {
-    for (int g = 0; g < 4; ++g) {
+    for (int g = 0; g < kVectorGroups; ++g) {
         to.text_kv[g]  = from.text_kv[g];
         to.style_kv[g] = from.style_kv[g];
     }
@@ -4590,7 +4594,7 @@ ggml_tensor * concat_batch(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b)
 
 // Stack the unconditional K/V behind the conditional ones as a batch of two.
 void concat_vector_step_kv(ggml_context * ctx, const vector_step_inputs & uncond, vector_step_inputs & cond) {
-    for (int g = 0; g < 4; ++g) {
+    for (int g = 0; g < kVectorGroups; ++g) {
         cond.text_kv[g].k  = concat_batch(ctx, cond.text_kv[g].k,  uncond.text_kv[g].k);
         cond.text_kv[g].v  = concat_batch(ctx, cond.text_kv[g].v,  uncond.text_kv[g].v);
         cond.style_kv[g].k = concat_batch(ctx, cond.style_kv[g].k, uncond.style_kv[g].k);
@@ -4713,8 +4717,10 @@ constexpr int   kStyleHeads      = 2;
 constexpr int   kStyleHeadDim    = 128;
 constexpr int   kStyleKvLen      = 50;
 constexpr float kAttentionScale  = 1.0f / 16.0f;
-constexpr int   kGroupDilations[4] = {1, 2, 4, 8};
-constexpr int   kTailDilations[4]  = {1, 1, 1, 1};
+constexpr int   kConvnextPerChain = 4;
+constexpr int   kGroupDilations[kConvnextPerChain] = {1, 2, 4, 8};
+constexpr int   kTailDilations[kConvnextPerChain]  = {1, 1, 1, 1};
+constexpr float kLayerNormEps     = 1e-6f;
 
 std::string vector_block_name(int block) {
     return "vector_estimator:tts.ttl.vector_field.main_blocks." + std::to_string(block);
@@ -4728,7 +4734,7 @@ ggml_tensor * flatten_channel_param(ggml_context * ctx, ggml_tensor * t) {
 
 ggml_tensor * layer_norm_ct_ggml(ggml_context * ctx, ggml_tensor * x_ct, ggml_tensor * g, ggml_tensor * b) {
     return ggml_supertonic_layer_norm_channel_ct(ctx, x_ct,
-        flatten_channel_param(ctx, g), flatten_channel_param(ctx, b), 1e-6f);
+        flatten_channel_param(ctx, g), flatten_channel_param(ctx, b), kLayerNormEps);
 }
 
 // y[OC, T] from x[IC, T] with the MatMul_ weight as src0: no im2col copy of x.
@@ -4744,7 +4750,7 @@ ggml_tensor * dense_matmul_ct_ggml(ggml_context * ctx, const supertonic_model & 
 ggml_tensor * time_projection_ggml(ggml_context * ctx, const supertonic_model & model,
                                    int group, ggml_tensor * t_emb_in) {
     ggml_tensor * w = require_source_tensor(model, matmul_name(kGroupNames[group].t_linear));
-    ggml_tensor * b = require_source_tensor(model, vector_block_name(group * 6 + 1) + ".linear.linear.bias");
+    ggml_tensor * b = require_source_tensor(model, vector_block_name(group * kVectorBlocksPerGroup + 1) + ".linear.linear.bias");
     ggml_tensor * w_t = try_pretransposed_weight(model, w);
     if (!w_t) w_t = ggml_cont(ctx, ggml_transpose(ctx, w));
     ggml_tensor * t_proj = st_mul_mat(ctx, w_t, ggml_reshape_2d(ctx, t_emb_in, t_emb_in->ne[0], 1));
@@ -4754,7 +4760,7 @@ ggml_tensor * time_projection_ggml(ggml_context * ctx, const supertonic_model & 
 ggml_tensor * convnext_chain_ct_ggml(ggml_context * ctx, const supertonic_model & model,
                                      const std::string & block, ggml_tensor * x_ct, const int * dilations,
                                      int seg_len) {
-    for (int j = 0; j < 4; ++j) {
+    for (int j = 0; j < kConvnextPerChain; ++j) {
         x_ct = vector_convnext_ggml_ct(ctx, model, block + ".convnext." + std::to_string(j), x_ct,
                                        dilations[j], seg_len);
     }
@@ -4796,9 +4802,9 @@ ggml_tensor * run_group_ct_ggml(ggml_context * ctx, const supertonic_model & mod
                                 ggml_tensor * x_pre_attn, ggml_tensor * mask_row,
                                 int L, int text_len, int H, int D) {
     const auto & names = kGroupNames[group];
-    const std::string attn  = vector_block_name(group * 6 + 3);
-    const std::string post  = vector_block_name(group * 6 + 4);
-    const std::string style = vector_block_name(group * 6 + 5);
+    const std::string attn  = vector_block_name(group * kVectorBlocksPerGroup + 3);
+    const std::string post  = vector_block_name(group * kVectorBlocksPerGroup + 4);
+    const std::string style = vector_block_name(group * kVectorBlocksPerGroup + 5);
 
     GGML_ASSERT(inputs.batch == 1 || (inputs.text_kv[group].k && inputs.style_kv[group].k));
     ggml_tensor * q = dense_matmul_ct_ggml(ctx, model, x_pre_attn,
@@ -4827,10 +4833,10 @@ ggml_tensor * run_group_ct_ggml(ggml_context * ctx, const supertonic_model & mod
 ggml_tensor * group_prep_ct_ggml(ggml_context * ctx, const supertonic_model & model,
                                  const vector_step_inputs & inputs, int group, ggml_tensor * x_ct, int L) {
     const int seg = step_segment_len(inputs, L);
-    ggml_tensor * y = convnext_chain_ct_ggml(ctx, model, vector_block_name(group * 6 + 0), x_ct,
+    ggml_tensor * y = convnext_chain_ct_ggml(ctx, model, vector_block_name(group * kVectorBlocksPerGroup + 0), x_ct,
                                              kGroupDilations, seg);
     y = ggml_add(ctx, y, time_projection_ggml(ctx, model, group, inputs.t_emb_in));
-    return vector_convnext_ggml_ct(ctx, model, vector_block_name(group * 6 + 2) + ".convnext.0", y, 1, seg);
+    return vector_convnext_ggml_ct(ctx, model, vector_block_name(group * kVectorBlocksPerGroup + 2) + ".convnext.0", y, 1, seg);
 }
 
 ggml_tensor * run_groups_ct_ggml(ggml_context * ctx, const supertonic_model & model,
@@ -4964,9 +4970,9 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
     // Per-group attention block.
     auto run_group = [&](ggml_tensor * x, int group, ggml_tensor * x_pre_attn) -> ggml_tensor * {
         const auto & names = kGroupNames[group];
-        const int attn_block = group * 6 + 3;
-        const int post_attn_block = group * 6 + 4;
-        const int style_block = group * 6 + 5;
+        const int attn_block = group * kVectorBlocksPerGroup + 3;
+        const int post_attn_block = group * kVectorBlocksPerGroup + 4;
+        const int style_block = group * kVectorBlocksPerGroup + 5;
 
         // Text attention QKV — output directly in [A, T] (width-major)
         // layout so the cont(transpose) before rope/flash_attn is gone.
@@ -5035,9 +5041,9 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
 
     // Group prep for groups 1-3.
     auto group_prep = [&](ggml_tensor * x, int group) -> ggml_tensor * {
-        const int conv_block = group * 6 + 0;
-        const int linear_block = group * 6 + 1;
-        const int post_block = group * 6 + 2;
+        const int conv_block = group * kVectorBlocksPerGroup + 0;
+        const int linear_block = group * kVectorBlocksPerGroup + 1;
+        const int post_block = group * kVectorBlocksPerGroup + 2;
         int dils2[4] = {1, 2, 4, 8};
         ggml_tensor * y = x;
         if (use_ct_convnext) {

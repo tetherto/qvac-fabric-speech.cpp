@@ -901,13 +901,15 @@ ggml_tensor * skew_keys_to_relative_ggml(ggml_context * ctx, ggml_tensor * attn,
 } // namespace (close anonymous; below symbols are detail-namespace
   // scope so the round-12 #6 test can link against them)
 
+void fill_rel_band_row(std::vector<float> & band, int L, int qi, float scale) {
+    const int lo = std::max(0, qi - kRelMaxDistance);
+    const int hi = std::min(L - 1, qi + kRelMaxDistance);
+    for (int kj = lo; kj <= hi; ++kj) band[(size_t) qi * L + kj] = scale;
+}
+
 std::vector<float> make_rel_band(int L, float scale) {
     std::vector<float> band((size_t) L * L, 0.0f);
-    for (int qi = 0; qi < L; ++qi) {
-        const int lo = std::max(0, qi - kRelMaxDistance);
-        const int hi = std::min(L - 1, qi + kRelMaxDistance);
-        for (int kj = lo; kj <= hi; ++kj) band[(size_t) qi * L + kj] = scale;
-    }
+    for (int qi = 0; qi < L; ++qi) fill_rel_band_row(band, L, qi, scale);
     return band;
 }
 

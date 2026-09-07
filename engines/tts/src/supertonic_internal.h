@@ -826,6 +826,11 @@ ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
                                           int C,
                                           int H);
 
+// Weight names of one speech-prompted attention layer, resolved once per cache build.
+struct speech_prompted_sources {
+    std::string q_w, q_b, v_w, v_b, out_w, out_b, tanh_k;
+};
+
 // round 12 #6 — text-encoder speech-prompted-attention
 // GPU bridge.
 //
@@ -853,10 +858,6 @@ ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
 // test can SFINAE-pin the field contract + free-default
 // destructor without dragging the whole text-encoder TU into
 // the test binary.
-struct speech_prompted_sources {
-    std::string q_w, q_b, v_w, v_b, out_w, out_b, tanh_k;
-};
-
 struct speech_prompted_merged_cache {
     const supertonic_model * model = nullptr;
     uint64_t generation_id = 0;
