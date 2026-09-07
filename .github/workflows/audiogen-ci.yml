@@ -33,7 +33,13 @@ env:
   GGML_BRANCH: speech # single ggml pin shared with parakeet-ci.yml / tts-ci.yml
 
 jobs:
+  runner_names:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-runner-names.yml
+
   build-test:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
@@ -47,8 +53,7 @@ jobs:
           # QVAC-22775. This is the runner the qvac monorepo uses for its
           # Metal lanes (integration-test-asr-ggml.yml, cpp-tests-*.yml).
           - os: macos-26
-            runner: qvac-macos26-arm64-gpu
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-26' && needs.runner_names.outputs.macos_arm64_gpu || needs.runner_names.outputs.ubuntu_2404 }}
     timeout-minutes: 60
     steps:
       # Self-hosted runners are persistent, so a previous run's tree can survive
@@ -168,3 +173,4 @@ jobs:
   # hollow pass. When audiogen grows a Vulkan/CUDA gpu-labeled test, add the
   # lane back mirroring tts-ci.yml's gpu job (qvac-ubuntu2204-x64-gpu +
   # runnable-arms reporter).
+

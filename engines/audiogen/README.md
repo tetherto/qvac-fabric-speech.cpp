@@ -196,8 +196,10 @@ request before synthesis: the caption is rewritten into a detailed musical
 description and the lyrics are regenerated preserving their content, with any
 unset metadata filled through the same FSM the inspire pass uses. Unlike
 Simple Mode — which expands a bare query and writes lyrics from scratch —
-Query Rewriting takes caption AND lyrics as input, so both are required; the
-two modes are mutually exclusive. The rewritten request is reported back in
+Query Rewriting takes caption AND lyrics as input, so both are required, and
+the lyrics must be real lyric text: an `"[Instrumental]"` request belongs to
+Simple Mode, which forwards the instrumental hint. The two modes are mutually
+exclusive. The rewritten request is reported back in
 `GenerateResult::metadata`. Faithful rewriting needs the 1.7B LM
 (`acestep-5Hz-lm-1.7B`): the 0.6B drifts genre, voice, and language.
 

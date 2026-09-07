@@ -154,6 +154,10 @@ inline std::string validate_rewrite_query(const GenerateParams & params, const s
     if (params.lyrics.empty()) {
         return "acestep engine: rewrite_query requires lyrics to format (use simple_mode for a bare query)";
     }
+    if (params.lyrics == INSTRUMENTAL_LYRICS) {
+        return "acestep engine: rewrite_query requires lyric text to preserve (use simple_mode with "
+               "\"[Instrumental]\" lyrics for an instrumental request)";
+    }
     if (task_type != TASK_TEXT2MUSIC) {
         return "acestep engine: rewrite_query supports only task 'text2music', got '" + task_type + "'";
     }

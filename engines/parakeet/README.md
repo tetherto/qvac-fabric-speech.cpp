@@ -101,7 +101,7 @@ defaults follow `SPEECH_BUILD_EXECUTABLES` and `SPEECH_BUILD_TESTS`, and force
 | `PARAKEET_GGML_LIB_PREFIX` | `ON` | no effect with system ggml | Name bundled libraries `speech-ggml-*` |
 | `PARAKEET_COREML` | `OFF` | `OFF` | Apple-only offline TDT encoder sidecar |
 | `PARAKEET_OPENMP` | `ON` | `ON` | Link OpenMP when available; auto-disabled on Windows non-MinGW unless explicitly overridden |
-| `PARAKEET_FLASH_ATTN` | Metal and CUDA `ON`, otherwise `OFF` | same | Fused encoder attention with the rel-pos bias folded into the mask; selected per backend at load, the CPU path always keeps the unfused graph |
+| `PARAKEET_FLASH_ATTN` | Metal, CUDA and Vulkan `ON`, otherwise `OFF` | same | Fused encoder attention with the rel-pos bias folded into the mask; selected per backend at load, the CPU path always keeps the unfused graph |
 | `PARAKEET_CCACHE` | `ON` | `ON` | Use ccache for Parakeet targets when available |
 
 ### Installed package
@@ -194,9 +194,9 @@ depthwise convolution (`GGML_OP_CONV_2D_DW` in place where the backend
 reports it, `im2col` and matmul elsewhere; the subsampler switches only on a
 GPU that passed the probe, CPU keeps its previous lowering) and to the gated
 GLU (`a * sigmoid(b)` as one op where the backend reports it). Fused attention
-is a build option (`PARAKEET_FLASH_ATTN`) that only CUDA and Metal take, and
-only after the backend accepts the exact node the encoder builds; CPU, Vulkan
-and OpenCL keep the unfused graph in every build. The mel front-end runs on up
+is a build option (`PARAKEET_FLASH_ATTN`) that CUDA, Metal and Vulkan take, and
+only after the backend accepts the exact node the encoder builds; CPU and
+OpenCL keep the unfused graph in every build. The mel front-end runs on up
 to eight host threads with output byte-equal to the single-thread result.
 
 The CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0 transcripts,

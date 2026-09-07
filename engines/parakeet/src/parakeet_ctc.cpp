@@ -46,6 +46,7 @@ struct EncoderGraph {
     ggml_context * graph_ctx = nullptr;
     ggml_cgraph  * cgraph    = nullptr;
     int            T_mel     = 0;
+    int            T_mel_valid = 0;        // non-zero mel frames the subsampling was built for
     int            T_enc     = 0;          // post-subsampling frame count
     int            n_run_layers = 0;
     bool           all_valid = false;
@@ -54,28 +55,7 @@ struct EncoderGraph {
     std::vector<float> pe_host;
     std::vector<float> att_mask_host;   // (T_enc, T_enc) row-major; 0 for visible, -inf for masked
 
-    // Subsampling time-pad masks. When `all_valid == true` these are
-    // pre-built once at graph construction (every value is 1.0 over
-    // the corresponding L_i). When `all_valid == false` they are
-    // re-built per call from the actual `mel_valid` count and cached
-    // in `mN_dynamic`; the cached buffers are reused across calls
-    // with the same `(L_i, V_i)` layout to avoid the per-call
-    // std::vector allocations. See `run_encoder` for the cache
-    // invalidation logic. Unused when bypass_pre_encode is true.
-    std::vector<float> m0_host;
-    std::vector<float> m1_host;
-    std::vector<float> m2_host;
-    std::vector<float> m3_host;
-    int                m0_v = -1;
-    int                m1_v = -1;
-    int                m2_v = -1;
-    int                m3_v = -1;
-
     ggml_tensor * mel_in   = nullptr;
-    ggml_tensor * mask_t0  = nullptr;
-    ggml_tensor * mask_t1  = nullptr;
-    ggml_tensor * mask_t2  = nullptr;
-    ggml_tensor * mask_t3  = nullptr;
     ggml_tensor * pre_encode_in = nullptr;  // set only when bypass_pre_encode is true; shape (d_model, T_enc)
     ggml_tensor * pe_in    = nullptr;
     ggml_tensor * att_mask = nullptr;   // null when the encoder uses unrestricted attention
@@ -114,19 +94,18 @@ struct EncoderGraph {
         if (alloc) { ggml_gallocr_free(alloc); alloc = nullptr; }
         if (graph_ctx) { ggml_free(graph_ctx);     graph_ctx = nullptr; }
         cgraph = nullptr;
-        mel_in = mask_t0 = mask_t1 = mask_t2 = mask_t3 = pe_in = nullptr;
+        mel_in = pe_in = nullptr;
         pre_encode_in = nullptr;
         sub_out_node = post_ff1_0_node = post_attn_0_node = nullptr;
         post_conv_0_node = post_ff2_0_node = block_0_out_node = nullptr;
         block_last_out_node = encoder_out_node = logits_node = nullptr;
         T_mel = 0;
+        T_mel_valid = 0;
         T_enc = 0;
         all_valid = false;
         bypass_pre_encode = false;
         pe_host.clear();
         att_mask_host.clear();
-        m0_host.clear(); m1_host.clear(); m2_host.clear(); m3_host.clear();
-        m0_v = m1_v = m2_v = m3_v = -1;
         src_backup.clear();
     }
 
@@ -2251,8 +2230,12 @@ ggml_tensor * conv_bias_bcast(ggml_context * ctx, ggml_tensor * bias, int64_t C)
     return ggml_reshape_4d(ctx, bias, 1, 1, C, 1);
 }
 
-ggml_tensor * apply_time_mask(ggml_context * ctx, ggml_tensor * x, ggml_tensor * mask) {
-    return ggml_mul(ctx, x, mask);
+// The mel front-end zero-fills every frame past the valid count, so the subsampling runs on
+// the valid prefix alone and its output is zero-padded back to the padded frame count.
+ggml_tensor * valid_mel_prefix(ggml_context * ctx, ggml_tensor * mel_in, int n_valid_frames) {
+    if (n_valid_frames >= mel_in->ne[1]) return mel_in;
+    return ggml_view_4d(ctx, mel_in, mel_in->ne[0], n_valid_frames, mel_in->ne[2], mel_in->ne[3],
+                        mel_in->nb[1], mel_in->nb[2], mel_in->nb[3], 0);
 }
 
 // ggml_conv_2d's trailing permute+cont only reorders the batch dim, so for N == 1 the matmul
@@ -2271,18 +2254,11 @@ ggml_tensor * subsampling_graph(ggml_context    * gctx,
                                 const SubsamplingWeights & S,
                                 int               subsampling_channels,
                                 int               /*d_model*/,
-                                ggml_tensor     * mask_t0,
-                                ggml_tensor     * mask_t1,
-                                ggml_tensor     * mask_t2,
-                                ggml_tensor     * mask_t3,
-                                bool              all_valid,
+                                int               n_valid_frames,
+                                int               n_out_frames,
                                 bool              causal_downsampling,
                                 bool              dw_direct) {
-    ggml_tensor * x = mel_in;
-
-    auto maybe_mask = [&](ggml_tensor * xin, ggml_tensor * m) {
-        return all_valid ? xin : apply_time_mask(gctx, xin, m);
-    };
+    ggml_tensor * x = valid_mel_prefix(gctx, mel_in, n_valid_frames);
 
     // NeMo's CausalConv2D for `causal_downsampling=true` applies an
     // asymmetric (L=stride, R=stride-1) zero-pad on **both** the freq
@@ -2328,31 +2304,23 @@ ggml_tensor * subsampling_graph(ggml_context    * gctx,
         return ggml_reshape_4d(gctx, summed, im2col->ne[1], im2col->ne[2], b->ne[2], b->ne[3]);
     };
 
-    x = maybe_mask(x, mask_t0);
     x = causal_pad(x);
     x = conv_2d_im2col(gctx, S.conv0_w, x, 2, conv_pad);
     x = ggml_add(gctx, x, conv_bias_bcast(gctx, S.conv0_b, subsampling_channels));
-    x = maybe_mask(x, mask_t1);
     x = ggml_relu(gctx, x);
 
-    x = maybe_mask(x, mask_t1);
     x = causal_pad(x);
     x = conv_2d_dw_f32(S.conv1_dw_w, x, 2, 2, conv_pad, conv_pad, 1, 1);
     x = ggml_add(gctx, x, conv_bias_bcast(gctx, S.conv1_dw_b, subsampling_channels));
-    x = maybe_mask(x, mask_t2);
     x = conv_2d_im2col(gctx, S.conv1_pw_w, x, 1, 0);
     x = ggml_add(gctx, x, conv_bias_bcast(gctx, S.conv1_pw_b, subsampling_channels));
-    x = maybe_mask(x, mask_t2);
     x = ggml_relu(gctx, x);
 
-    x = maybe_mask(x, mask_t2);
     x = causal_pad(x);
     x = conv_2d_dw_f32(S.conv2_dw_w, x, 2, 2, conv_pad, conv_pad, 1, 1);
     x = ggml_add(gctx, x, conv_bias_bcast(gctx, S.conv2_dw_b, subsampling_channels));
-    x = maybe_mask(x, mask_t3);
     x = conv_2d_im2col(gctx, S.conv2_pw_w, x, 1, 0);
     x = ggml_add(gctx, x, conv_bias_bcast(gctx, S.conv2_pw_b, subsampling_channels));
-    x = maybe_mask(x, mask_t3);
     x = ggml_relu(gctx, x);
 
     const int64_t W = x->ne[0];
@@ -2362,6 +2330,7 @@ ggml_tensor * subsampling_graph(ggml_context    * gctx,
     x = ggml_permute(gctx, x, 0, 2, 1, 3);
     x = ggml_cont(gctx, x);
     x = ggml_reshape_2d(gctx, x, W * C, H);
+    x = zero_pad_dim1(gctx, x, 0, n_out_frames - (int) H);
 
     x = ggml_mul_mat(gctx, S.out_w, x);
     x = ggml_add(gctx, x, S.out_b);
@@ -2906,21 +2875,6 @@ int run_subsampling(ParakeetCtcModel   & model,
     const int L2 = sub_out_len(L1);
     const int L3 = sub_out_len(L2);
 
-    const int V0 = mel_valid;
-    const int V1 = sub_out_len(V0);
-    const int V2 = sub_out_len(V1);
-    const int V3 = sub_out_len(V2);
-
-    auto make_mask = [](int L, int V) {
-        std::vector<float> m(L, 0.0f);
-        for (int t = 0; t < L && t < V; ++t) m[t] = 1.0f;
-        return m;
-    };
-    std::vector<float> m0 = make_mask(L0, V0);
-    std::vector<float> m1 = make_mask(L1, V1);
-    std::vector<float> m2 = make_mask(L2, V2);
-    std::vector<float> m3 = make_mask(L3, V3);
-
     const size_t overhead = ggml_tensor_overhead() * (GGML_DEFAULT_GRAPH_SIZE + 64)
                           + ggml_graph_overhead();
     ggml_init_params gp = { overhead, nullptr, /*no_alloc=*/ true };
@@ -2930,22 +2884,9 @@ int run_subsampling(ParakeetCtcModel   & model,
     ggml_tensor * mel_in  = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, n_mels, L0, 1, 1);
     ggml_set_name(mel_in, "mel_in");
     ggml_set_input(mel_in);
-    ggml_tensor * mask_t0 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L0, 1, 1);
-    ggml_tensor * mask_t1 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L1, 1, 1);
-    ggml_tensor * mask_t2 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L2, 1, 1);
-    ggml_tensor * mask_t3 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L3, 1, 1);
-    ggml_set_name(mask_t0, "mask_t0");
-    ggml_set_name(mask_t1, "mask_t1");
-    ggml_set_name(mask_t2, "mask_t2");
-    ggml_set_name(mask_t3, "mask_t3");
-    ggml_set_input(mask_t0);
-    ggml_set_input(mask_t1);
-    ggml_set_input(mask_t2);
-    ggml_set_input(mask_t3);
 
     ggml_tensor * out = subsampling_graph(gctx, mel_in, model.subsampling, C_sub, d_model,
-                                          mask_t0, mask_t1, mask_t2, mask_t3, false,
-                                          causal_ds, model.impl->dw_direct_planar);
+                                          mel_valid, L3, causal_ds, model.impl->dw_direct_planar);
     ggml_set_name(out, "sub_out");
     ggml_set_output(out);
 
@@ -2961,10 +2902,6 @@ int run_subsampling(ParakeetCtcModel   & model,
     }
 
     ggml_backend_tensor_set(mel_in, mel, 0, (size_t) n_mels * L0 * sizeof(float));
-    ggml_backend_tensor_set(mask_t0, m0.data(), 0, m0.size() * sizeof(float));
-    ggml_backend_tensor_set(mask_t1, m1.data(), 0, m1.size() * sizeof(float));
-    ggml_backend_tensor_set(mask_t2, m2.data(), 0, m2.size() * sizeof(float));
-    ggml_backend_tensor_set(mask_t3, m3.data(), 0, m3.size() * sizeof(float));
 
     if (ggml_backend_sched_graph_compute(model.impl->sched, gf) != GGML_STATUS_SUCCESS) {
         ggml_free(gctx);
@@ -3020,7 +2957,7 @@ static void restore_encoder_graph_srcs(EncoderGraph & g) {
 // the measurement would count the weights as graph-owned leafs.
 static int build_encoder_graph_cached(const ParakeetCtcModel & model,
                                       EncoderGraph & g,
-                                      int n_mel_frames, int n_mels,
+                                      int n_mel_frames, int mel_valid, int n_mels,
                                       int n_run_layers_override,
                                       bool all_valid,
                                       ggml_backend_t backend,
@@ -3106,26 +3043,13 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         // speaker cache + FIFO + chunk are concatenated in pre-encode space and
         // re-contextualised by the conformer layers in a single forward.
         g.mel_in  = nullptr;
-        g.mask_t0 = g.mask_t1 = g.mask_t2 = g.mask_t3 = nullptr;
         g.pre_encode_in = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d_model, T);
         ggml_set_name(g.pre_encode_in, "pre_encode_in");
         ggml_set_input(g.pre_encode_in);
     } else {
         g.mel_in  = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, n_mels, L0, 1, 1);
-        g.mask_t0 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L0, 1, 1);
-        g.mask_t1 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L1, 1, 1);
-        g.mask_t2 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L2, 1, 1);
-        g.mask_t3 = ggml_new_tensor_4d(gctx, GGML_TYPE_F32, 1, L3, 1, 1);
         ggml_set_name(g.mel_in,  "mel_in");
-        ggml_set_name(g.mask_t0, "mask_t0");
-        ggml_set_name(g.mask_t1, "mask_t1");
-        ggml_set_name(g.mask_t2, "mask_t2");
-        ggml_set_name(g.mask_t3, "mask_t3");
         ggml_set_input(g.mel_in);
-        ggml_set_input(g.mask_t0);
-        ggml_set_input(g.mask_t1);
-        ggml_set_input(g.mask_t2);
-        ggml_set_input(g.mask_t3);
         g.pre_encode_in = nullptr;
     }
     g.pe_in   = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, d_model, 2 * T - 1);
@@ -3145,8 +3069,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         g.sub_out_node = nullptr;
     } else {
         x = subsampling_graph(gctx, g.mel_in, model.subsampling, C_sub, d_model,
-                              g.mask_t0, g.mask_t1, g.mask_t2, g.mask_t3, all_valid,
-                              enc.causal_downsampling, model.impl->dw_direct_planar);
+                              mel_valid, L3, enc.causal_downsampling, model.impl->dw_direct_planar);
         g.sub_out_node = x;
         ggml_set_name(g.sub_out_node, "subsampling_out");
         ggml_set_output(g.sub_out_node);
@@ -3278,6 +3201,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     }
 
     g.T_mel = bypass_pre_encode ? 0 : n_mel_frames;
+    g.T_mel_valid = bypass_pre_encode ? 0 : mel_valid;
     g.T_enc = T;
     g.all_valid = all_valid;
     g.bypass_pre_encode = bypass_pre_encode;
@@ -3507,7 +3431,7 @@ int run_encoder(ParakeetCtcModel   & model,
     for (size_t i = 0; i < cache.size(); ++i) {
         EncoderGraph & e = *cache[i];
         const bool layers_match = (layers_key < 0) || (e.n_run_layers == layers_key);
-        if (!e.bypass_pre_encode && e.T_mel == n_mel_frames && layers_match && e.all_valid == all_valid) {
+        if (!e.bypass_pre_encode && e.T_mel == n_mel_frames && e.T_mel_valid == mel_valid && layers_match) {
             if (i + 1 != cache.size()) {
                 auto moved = std::move(cache[i]);
                 cache.erase(cache.begin() + i);
@@ -3525,8 +3449,8 @@ int run_encoder(ParakeetCtcModel   & model,
         }
         cache.push_back(std::make_unique<EncoderGraph>());
         EncoderGraph & e = *cache.back();
-        if (int rc = build_encoder_graph_cached(model, e, n_mel_frames, n_mels, max_layers, all_valid, backend,
-                                                /*bypass_pre_encode=*/false, /*T_enc_override=*/0); rc != 0) {
+        if (int rc = build_encoder_graph_cached(model, e, n_mel_frames, mel_valid, n_mels, max_layers, all_valid,
+                                                backend, /*bypass_pre_encode=*/false, /*T_enc_override=*/0); rc != 0) {
             cache.pop_back();
             return rc;
         }
@@ -3551,24 +3475,6 @@ int run_encoder(ParakeetCtcModel   & model,
     const int T = L3;
     const int vocab_size = model.vocab_size;
 
-    // Refresh the cached subsampling masks if the valid-frame count
-    // changed since last call (or if this is the first call against
-    // this cached graph). For long-form transcribe / Mode 2 streaming
-    // the same `g_ptr` graph is reused across many `run_encoder` calls
-    // with `all_valid == true` (graph cache key includes `all_valid`),
-    // so the cache hit-rate here is essentially 100 % and we save four
-    // std::vector allocations + the corresponding fills every call.
-    auto refresh_mask = [](std::vector<float> & buf, int & v_cache, int L, int V) {
-        if (v_cache == V && (int) buf.size() == L) return;
-        buf.assign((size_t) L, 0.0f);
-        for (int t = 0; t < L && t < V; ++t) buf[t] = 1.0f;
-        v_cache = V;
-    };
-    refresh_mask(g.m0_host, g.m0_v, L0, V0);
-    refresh_mask(g.m1_host, g.m1_v, L1, V1);
-    refresh_mask(g.m2_host, g.m2_v, L2, V2);
-    refresh_mask(g.m3_host, g.m3_v, L3, V3);
-
     // Restore the pristine source pointers before allocation (dormant on this path,
     // kept defensively): only a scheduler split rewrites node->src[j] in place, and
     // the encoder no longer runs through the shared sched.
@@ -3584,10 +3490,6 @@ int run_encoder(ParakeetCtcModel   & model,
         if (t && t->buffer) ggml_backend_tensor_set(t, src, 0, bytes);
     };
     safe_set(g.mel_in,  mel,                 (size_t) n_mels * L0 * sizeof(float));
-    safe_set(g.mask_t0, g.m0_host.data(),    g.m0_host.size()     * sizeof(float));
-    safe_set(g.mask_t1, g.m1_host.data(),    g.m1_host.size()     * sizeof(float));
-    safe_set(g.mask_t2, g.m2_host.data(),    g.m2_host.size()     * sizeof(float));
-    safe_set(g.mask_t3, g.m3_host.data(),    g.m3_host.size()     * sizeof(float));
     safe_set(g.pe_in,   g.pe_host.data(),    g.pe_host.size()     * sizeof(float));
     if (g.att_mask) {
         safe_set(g.att_mask, g.att_mask_host.data(),
@@ -3645,7 +3547,7 @@ int measure_encoder_compute(ParakeetCtcModel & model,
     if (!model.impl || !model.impl->backend_active) return -1;
     out_bytes = 0;
     EncoderGraph tmp;  // RAII: destructor frees the graph ctx (no gallocr is created)
-    return build_encoder_graph_cached(model, tmp, n_mel_frames, n_mels,
+    return build_encoder_graph_cached(model, tmp, n_mel_frames, /*mel_valid=*/n_mel_frames, n_mels,
                                       /*n_run_layers_override=*/-1,
                                       /*all_valid=*/true,
                                       model.impl->backend_active,
@@ -3698,7 +3600,7 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
         }
         cache.push_back(std::make_unique<EncoderGraph>());
         EncoderGraph & e = *cache.back();
-        if (int rc = build_encoder_graph_cached(model, e, /*n_mel_frames=*/0, /*n_mels=*/0,
+        if (int rc = build_encoder_graph_cached(model, e, /*n_mel_frames=*/0, /*mel_valid=*/0, /*n_mels=*/0,
                                                 max_layers, /*all_valid=*/true, backend,
                                                 /*bypass_pre_encode=*/true,
                                                 /*T_enc_override=*/n_pre_encode_frames); rc != 0) {
@@ -4042,7 +3944,7 @@ bool flash_attn_compiled() { return k_flash_attn_compiled; }
 bool encoder_graph_uses_op(const ParakeetCtcModel & model, enum ggml_op op) {
     constexpr int probe_mel_frames = 128;
     EncoderGraph g;
-    if (build_encoder_graph_cached(model, g, probe_mel_frames, model.mel_cfg.n_mels,
+    if (build_encoder_graph_cached(model, g, probe_mel_frames, probe_mel_frames, model.mel_cfg.n_mels,
                                    /*n_run_layers_override=*/1, /*all_valid=*/true,
                                    model.impl->backend_active) != 0) {
         return false;

@@ -36,12 +36,18 @@ env:
   GGML_BRANCH: speech # single ggml pin shared with the engine lanes
 
 jobs:
+  runner_names:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-runner-names.yml
+
   umbrella:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-14' && needs.runner_names.outputs.macos_14 || needs.runner_names.outputs.ubuntu_2404 }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -212,3 +218,4 @@ jobs:
           [ "$last_start" -ge 30 ] \
             || { echo "::error::JFK sentence missing past 30 s — the seek loop never reached the second mel window"; exit 1; }
           rm -f models-cache/jfk-x4.wav
+

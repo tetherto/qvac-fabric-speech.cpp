@@ -74,8 +74,8 @@ inline bool backend_is_cpu(ggml_backend_t b) {
 
 // Which attention graph the encoder builds. Fused attention is compiled in per
 // build (PARAKEET_FLASH_ATTN) but used only on the backends it was compared
-// against the unfused graph on, CUDA and Metal, and only when the backend
-// accepts the node; CPU, Vulkan and OpenCL keep the unfused graph whatever the
+// against the unfused graph on, CUDA, Metal and Vulkan, and only when the
+// backend accepts the node; CPU and OpenCL keep the unfused graph whatever the
 // binary carries.
 struct AttnPath {
     bool flash_attn    = false;
@@ -95,8 +95,12 @@ inline bool backend_is_cuda(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "CUDA") == 0;
 }
 
+inline bool backend_is_vulkan(ggml_backend_t b) {
+    return std::strcmp(backend_reg_name(b), "Vulkan") == 0;
+}
+
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {
-    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b));
+    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b));
 }
 
 inline void backend_set_n_threads(ggml_backend_t b, int n_threads) {
