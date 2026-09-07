@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -753,6 +754,24 @@ bool supertonic_duration_trace_ggml(const supertonic_model & model,
                                     bool include_ggml_trace = true,
                                     std::vector<float> * sentence_proj_out = nullptr);
 
+// Hybrid path: one convnext graph, then the attention encoder and projection on the host.
+bool supertonic_duration_forward_hybrid_ggml(const supertonic_model & model,
+                                             const int64_t * text_ids,
+                                             int text_len,
+                                             const float * style_dp,
+                                             float & duration_out,
+                                             std::string * error = nullptr,
+                                             std::vector<float> * sentence_proj_out = nullptr);
+
+// Whole sentence encoder in one graph compute (the default off the CPU backend).
+bool supertonic_duration_forward_one_graph_ggml(const supertonic_model & model,
+                                                const int64_t * text_ids,
+                                                int text_len,
+                                                const float * style_dp,
+                                                float & duration_out,
+                                                std::string * error = nullptr,
+                                                std::vector<float> * sentence_proj_out = nullptr);
+
 bool supertonic_text_encoder_forward_cpu(const supertonic_model & model,
                                          const int64_t * text_ids,
                                          int text_len,
@@ -782,6 +801,30 @@ bool supertonic_text_encoder_forward_one_graph_ggml(const supertonic_model & mod
                                                     const float * style_ttl,
                                                     std::vector<float> & text_emb_out,
                                                     std::string * error = nullptr);
+
+inline std::vector<int32_t> text_ids_as_i32(const ggml_tensor * emb_table, const int64_t * text_ids, int L) {
+    const int64_t vocab_size = emb_table->ne[1];
+    std::vector<int32_t> ids((size_t) L);
+    for (int t = 0; t < L; ++t) {
+        if (text_ids[t] < 0 || text_ids[t] >= vocab_size) throw std::runtime_error("text id out of range");
+        ids[(size_t) t] = (int32_t) text_ids[t];
+    }
+    return ids;
+}
+
+// [L, L] band holding `scale` inside the relative-position window and zero elsewhere.
+std::vector<float> make_rel_band(int L, float scale);
+
+// Relative-position self-attention of x [L, C] with H heads under weight prefix `p`;
+// rel_band carries the softmax scale so the relative-key term matches the scalar reference.
+ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
+                                          const supertonic_model & m,
+                                          const std::string & p,
+                                          ggml_tensor * x,
+                                          ggml_tensor * rel_band,
+                                          int L,
+                                          int C,
+                                          int H);
 
 // round 12 #6 — text-encoder speech-prompted-attention
 // GPU bridge.

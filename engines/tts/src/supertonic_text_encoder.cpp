@@ -878,8 +878,60 @@ inline void build_speech_attention_cache(speech_attention_cache & cache,
     ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
 }
 
+// View over a zero-padded copy of rel [P, L, H] whose element (kj, qi, h) reads
+// rel (kj - qi + kRelMaxDistance, qi, h); out-of-band elements are garbage the band mask zeroes.
+ggml_tensor * skew_relative_to_keys_ggml(ggml_context * ctx, ggml_tensor * rel, int L) {
+    const int stride = std::max(L + 1, kRelPositions);
+    ggml_tensor * padded = ggml_pad(ctx, rel, stride - kRelPositions, 0, 0, 0);
+    return ggml_view_3d(ctx, padded, L, L, rel->ne[2],
+                        (size_t) (stride - 1) * sizeof(float), padded->nb[2],
+                        (size_t) kRelMaxDistance * sizeof(float));
+}
+
+// View gathering attn (qi + ri - kRelMaxDistance, qi, h) into [P, L, H]; every
+// out-of-band read lands on the zero padding.
+ggml_tensor * skew_keys_to_relative_ggml(ggml_context * ctx, ggml_tensor * attn, int L) {
+    ggml_tensor * padded = ggml_pad_ext(ctx, attn, kRelMaxDistance, 0, 0, 1, 0, 0, 0, 0);
+    return ggml_view_3d(ctx, padded, kRelPositions, L, attn->ne[2],
+                        (size_t) (L + kRelMaxDistance + 1) * sizeof(float), padded->nb[2], 0);
+}
+
 } // namespace (close anonymous; below symbols are detail-namespace
   // scope so the round-12 #6 test can link against them)
+
+std::vector<float> make_rel_band(int L, float scale) {
+    std::vector<float> band((size_t) L * L, 0.0f);
+    for (int qi = 0; qi < L; ++qi) {
+        const int lo = std::max(0, qi - kRelMaxDistance);
+        const int hi = std::min(L - 1, qi + kRelMaxDistance);
+        for (int kj = lo; kj <= hi; ++kj) band[(size_t) qi * L + kj] = scale;
+    }
+    return band;
+}
+
+ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
+                                          const supertonic_model & m,
+                                          const std::string & p,
+                                          ggml_tensor * x,
+                                          ggml_tensor * rel_band,
+                                          int L,
+                                          int C,
+                                          int H) {
+    const int D = C / H;
+    const float scale = 1.0f / std::sqrt((float) D);
+    const relpos_heads heads = relpos_project_heads_ggml(ctx, m, p, x, L, C, H);
+    ggml_tensor * scores = ggml_scale(ctx, st_mul_mat(ctx, heads.k, heads.q), scale);
+    ggml_tensor * rel_scores = st_mul_mat(ctx, require_source_tensor(m, p + ".emb_rel_k"), heads.q);
+    scores = ggml_add(ctx, scores, ggml_mul(ctx, skew_relative_to_keys_ggml(ctx, rel_scores, L), rel_band));
+    ggml_tensor * attn = ggml_soft_max(ctx, scores);
+    ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, heads.v, 1, 0, 2, 3));
+    ggml_tensor * out = st_mul_mat(ctx, v_for_mm, attn);
+    ggml_tensor * rel_probs = ggml_cont(ctx, skew_keys_to_relative_ggml(ctx, attn, L));
+    ggml_tensor * rel_v = ggml_reshape_2d(ctx, require_source_tensor(m, p + ".emb_rel_v"), D, kRelPositions);
+    ggml_tensor * rel_v_t = ggml_cont(ctx, ggml_transpose(ctx, rel_v));
+    out = ggml_add(ctx, out, st_mul_mat(ctx, rel_v_t, rel_probs));
+    return relpos_output_projection_ggml(ctx, m, p, out, L, C);
+}
 
 // Phase A4 / round-12 #6: speech_prompted_attention as ONE merged
 // ggml graph.  Master's Metal-port branch built the cache + builder
@@ -1291,70 +1343,6 @@ void free_text_encoder_one_graph_cache(text_encoder_one_graph_cache & cache) {
     cache = {};
 }
 
-std::vector<int32_t> text_ids_as_i32(ggml_tensor * emb_table, const int64_t * text_ids, int L) {
-    const int64_t vocab_size = emb_table->ne[1];
-    std::vector<int32_t> ids((size_t) L);
-    for (int t = 0; t < L; ++t) {
-        if (text_ids[t] < 0 || text_ids[t] >= vocab_size) throw std::runtime_error("text id out of range");
-        ids[(size_t) t] = (int32_t) text_ids[t];
-    }
-    return ids;
-}
-
-// [L, L] band holding `scale` where |kj - qi| <= kRelMaxDistance and zero elsewhere.
-std::vector<float> make_rel_band(int L, float scale) {
-    std::vector<float> band((size_t) L * L, 0.0f);
-    for (int qi = 0; qi < L; ++qi) {
-        const int lo = std::max(0, qi - kRelMaxDistance);
-        const int hi = std::min(L - 1, qi + kRelMaxDistance);
-        for (int kj = lo; kj <= hi; ++kj) band[(size_t) qi * L + kj] = scale;
-    }
-    return band;
-}
-
-// View over a zero-padded copy of rel [P, L, H] whose element (kj, qi, h) reads
-// rel (kj - qi + kRelMaxDistance, qi, h); out-of-band elements are garbage the band mask zeroes.
-ggml_tensor * skew_relative_to_keys_ggml(ggml_context * ctx, ggml_tensor * rel, int L) {
-    const int stride = std::max(L + 1, kRelPositions);
-    ggml_tensor * padded = ggml_pad(ctx, rel, stride - kRelPositions, 0, 0, 0);
-    return ggml_view_3d(ctx, padded, L, L, rel->ne[2],
-                        (size_t) (stride - 1) * sizeof(float), padded->nb[2],
-                        (size_t) kRelMaxDistance * sizeof(float));
-}
-
-// View gathering attn (qi + ri - kRelMaxDistance, qi, h) into [P, L, H]; every
-// out-of-band read lands on the zero padding.
-ggml_tensor * skew_keys_to_relative_ggml(ggml_context * ctx, ggml_tensor * attn, int L) {
-    ggml_tensor * padded = ggml_pad_ext(ctx, attn, kRelMaxDistance, 0, 0, 1, 0, 0, 0, 0);
-    return ggml_view_3d(ctx, padded, kRelPositions, L, attn->ne[2],
-                        (size_t) (L + kRelMaxDistance + 1) * sizeof(float), padded->nb[2], 0);
-}
-
-ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
-                                          const supertonic_model & m,
-                                          int idx,
-                                          ggml_tensor * x,
-                                          ggml_tensor * rel_band,
-                                          int L) {
-    const int C = kTextChannels;
-    const int H = kTextHeads;
-    const int D = C / H;
-    const float scale = 1.0f / std::sqrt((float) D);
-    const std::string p = relpos_layer_prefix(idx);
-    const relpos_heads heads = relpos_project_heads_ggml(ctx, m, p, x, L, C, H);
-    ggml_tensor * scores = ggml_scale(ctx, st_mul_mat(ctx, heads.k, heads.q), scale);
-    ggml_tensor * rel_scores = st_mul_mat(ctx, require_source_tensor(m, p + ".emb_rel_k"), heads.q);
-    scores = ggml_add(ctx, scores, ggml_mul(ctx, skew_relative_to_keys_ggml(ctx, rel_scores, L), rel_band));
-    ggml_tensor * attn = ggml_soft_max(ctx, scores);
-    ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, heads.v, 1, 0, 2, 3));
-    ggml_tensor * out = st_mul_mat(ctx, v_for_mm, attn);
-    ggml_tensor * rel_probs = ggml_cont(ctx, skew_keys_to_relative_ggml(ctx, attn, L));
-    ggml_tensor * rel_v = ggml_reshape_2d(ctx, require_source_tensor(m, p + ".emb_rel_v"), D, kRelPositions);
-    ggml_tensor * rel_v_t = ggml_cont(ctx, ggml_transpose(ctx, rel_v));
-    out = ggml_add(ctx, out, st_mul_mat(ctx, rel_v_t, rel_probs));
-    return relpos_output_projection_ggml(ctx, m, p, out, L, C);
-}
-
 ggml_tensor * text_layer_norm_ggml(ggml_context * ctx,
                                    const supertonic_model & m,
                                    ggml_tensor * x,
@@ -1370,7 +1358,8 @@ ggml_tensor * attn_encoder_layer_graph_ggml(ggml_context * ctx,
                                             int L) {
     const std::string norms = "text_encoder:tts.ttl.text_encoder.attn_encoder.norm_layers_";
     const std::string layer = std::to_string(idx) + ".norm";
-    x = ggml_add(ctx, x, relpos_attention_graph_ggml(ctx, m, idx, x, rel_band, L));
+    x = ggml_add(ctx, x, relpos_attention_graph_ggml(ctx, m, relpos_layer_prefix(idx), x, rel_band, L,
+                                                     kTextChannels, kTextHeads));
     x = text_layer_norm_ggml(ctx, m, x, norms + "1." + layer);
     x = ggml_add(ctx, x, ffn_block_graph_ggml(ctx, m, idx, x));
     return text_layer_norm_ggml(ctx, m, x, norms + "2." + layer);

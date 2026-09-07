@@ -347,6 +347,46 @@ void test_text_encoder_one_graph_matches_islands(const supertonic_model & model)
         check_text_encoder_one_graph(model, style_ttl, text_len);
     }
 }
+
+// The one-graph duration encoder must match the hybrid path on the same backend.
+void check_duration_one_graph(const supertonic_model & model, const std::vector<float> & style_dp, int text_len) {
+    ggml_tensor * emb = require_source_tensor(model,
+        "duration:tts.dp.sentence_encoder.text_embedder.char_embedder.weight");
+    const std::vector<int64_t> ids = make_synthetic_ids(text_len, emb->ne[1], 0x5D1Au + (uint32_t) text_len);
+    std::string err;
+    float dur_one = 0.0f, dur_hybrid = 0.0f;
+    std::vector<float> proj_one, proj_hybrid;
+    const bool ok_one = supertonic_duration_forward_one_graph_ggml(model, ids.data(), text_len, style_dp.data(),
+                                                                   dur_one, &err, &proj_one);
+    if (!ok_one) std::fprintf(stderr, "  one-graph failed: %s\n", err.c_str());
+    CHECK(ok_one);
+    const bool ok_hybrid = supertonic_duration_forward_hybrid_ggml(model, ids.data(), text_len, style_dp.data(),
+                                                                   dur_hybrid, &err, &proj_hybrid);
+    if (!ok_hybrid) std::fprintf(stderr, "  hybrid failed: %s\n", err.c_str());
+    CHECK(ok_hybrid);
+    if (!ok_one || !ok_hybrid) return;
+    CHECK(proj_one.size() == proj_hybrid.size());
+    float max_abs = 0.0f;
+    const int bad = count_mismatches(proj_one, proj_hybrid, max_abs);
+    std::fprintf(stderr, "  text_len=%d, n=%zu, max_abs_err=%.3e, bad=%d, dur_one=%.6g, dur_hybrid=%.6g\n",
+                 text_len, proj_one.size(), max_abs, bad, dur_one, dur_hybrid);
+    CHECK(bad == 0);
+    CHECK(close_enough(dur_one, dur_hybrid));
+}
+
+void test_duration_one_graph_matches_hybrid(const supertonic_model & model) {
+    std::fprintf(stderr, "[one-graph duration encoder vs hybrid path]\n");
+    if (model.voices.empty()) {
+        std::fprintf(stderr, "  SKIP: no voices in model\n");
+        return;
+    }
+    const auto & voice = model.voices.begin()->second;
+    std::vector<float> style_dp((size_t) ggml_nelements(voice.dp));
+    ggml_backend_tensor_get(voice.dp, style_dp.data(), 0, ggml_nbytes(voice.dp));
+    for (int text_len : { 3, 8, 9, 24, 151 }) {
+        check_duration_one_graph(model, style_dp, text_len);
+    }
+}
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -365,6 +405,7 @@ int main(int argc, char ** argv) {
     test_f8_style_residual_cache_parity(model);
     test_loop_graph_matches_per_step(model);
     test_text_encoder_one_graph_matches_islands(model);
+    test_duration_one_graph_matches_hybrid(model);
 
     free_supertonic_model(model);
 
