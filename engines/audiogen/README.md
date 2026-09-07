@@ -786,6 +786,21 @@ For a reproducible engine-to-engine measurement against upstream
 `acestep.cpp` (`ace-lm` + `ace-synth`, no addon), see
 [`benchmarks/comparison/README.md`](benchmarks/comparison/README.md).
 
+### speech-cpp CI (2026-09-07, CPU + macOS)
+
+| Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Audio8: audio8-lm-q8_0 | linux | (CPU) | 4906 | — | 1193 |
+| Audio8: audio8-lm-q8_0 | macos | (CPU) | 1602 | — | 1208 |
+| Lavasr: lavasr-denoiser-f16 | linux | (CPU) | 4102 | 0.684 | 155 |
+| Lavasr: lavasr-denoiser-f16 | macos | (CPU) | 2090 | 0.348 | 209 |
+| Acestep: Qwen3-Embedding-0.6B-Q8_0 | linux | (CPU) | 36817 | 9.20 | 1702 |
+| Acestep: Qwen3-Embedding-0.6B-Q8_0 | macos | (CPU) | 6698 | 1.67 | 2222 |
+
+`—` RTF for audio8 (text-driven variable output).
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
+
 ## License
 
 `audiogen-cpp` is MIT licensed; see [LICENSE](LICENSE). Model weights and upstream model code carry their own terms, listed in [NOTICE](NOTICE).

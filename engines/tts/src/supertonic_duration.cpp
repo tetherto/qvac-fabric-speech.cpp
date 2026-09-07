@@ -430,6 +430,203 @@ inline void free_duration_graph_cache(duration_graph_cache & cache) {
     cache = {};
 }
 
+constexpr int kDurationChannels = 64;
+constexpr int kDurationHeads = 2;
+constexpr int kDurationConvnextBlocks = 6;
+constexpr int kDurationAttnLayers = 2;
+constexpr int kDurationStyleDim = 128;
+constexpr int kDurationPredictorHidden = 128;
+const char * const kDurationEncoderPrefix = "duration:tts.dp.sentence_encoder";
+const char * const kDurationPredictorPrefix = "duration:tts.dp.predictor";
+
+std::string duration_attn_layer_prefix(int idx) {
+    return std::string(kDurationEncoderPrefix) + ".attn_encoder.attn_layers." + std::to_string(idx);
+}
+
+std::string duration_ffn_layer_prefix(int idx) {
+    return std::string(kDurationEncoderPrefix) + ".attn_encoder.ffn_layers." + std::to_string(idx);
+}
+
+std::string duration_norm_prefix(int stage, int idx) {
+    return std::string(kDurationEncoderPrefix) + ".attn_encoder.norm_layers_" + std::to_string(stage) +
+           "." + std::to_string(idx) + ".norm";
+}
+
+ggml_tensor * duration_layer_norm_ggml(ggml_context * ctx,
+                                       const supertonic_model & m,
+                                       ggml_tensor * x,
+                                       const std::string & norm) {
+    return layer_norm_ggml(ctx, x, require_source_tensor(m, norm + ".weight"), require_source_tensor(m, norm + ".bias"));
+}
+
+ggml_tensor * duration_ffn_graph_ggml(ggml_context * ctx, const supertonic_model & m, int idx, ggml_tensor * x) {
+    const std::string p = duration_ffn_layer_prefix(idx);
+    ggml_tensor * y = conv1d_f32(ctx, require_source_tensor(m, p + ".conv_1.weight"), x, 1, 0, 1);
+    y = ggml_add(ctx, y, repeat_like(ctx, require_source_tensor(m, p + ".conv_1.bias"), y));
+    y = ggml_relu(ctx, y);
+    y = conv1d_f32(ctx, require_source_tensor(m, p + ".conv_2.weight"), y, 1, 0, 1);
+    return ggml_add(ctx, y, repeat_like(ctx, require_source_tensor(m, p + ".conv_2.bias"), y));
+}
+
+ggml_tensor * duration_attn_layer_graph_ggml(ggml_context * ctx,
+                                             const supertonic_model & m,
+                                             int idx,
+                                             ggml_tensor * x,
+                                             ggml_tensor * rel_band,
+                                             int L) {
+    x = ggml_add(ctx, x, relpos_attention_graph_ggml(ctx, m, duration_attn_layer_prefix(idx), x, rel_band, L,
+                                                     kDurationChannels, kDurationHeads));
+    x = duration_layer_norm_ggml(ctx, m, x, duration_norm_prefix(1, idx));
+    x = ggml_add(ctx, x, duration_ffn_graph_ggml(ctx, m, idx, x));
+    return duration_layer_norm_ggml(ctx, m, x, duration_norm_prefix(2, idx));
+}
+
+// Sentence token followed by the gathered character embeddings, as [L, C] with L = text_len + 1.
+ggml_tensor * duration_embed_graph_ggml(ggml_context * ctx, const supertonic_model & m, ggml_tensor * ids_in) {
+    ggml_tensor * emb_table = require_source_tensor(m,
+        std::string(kDurationEncoderPrefix) + ".text_embedder.char_embedder.weight");
+    ggml_tensor * sentence = require_source_tensor(m, std::string(kDurationEncoderPrefix) + ".sentence_token");
+    ggml_tensor * gathered = ggml_get_rows(ctx, emb_table, ids_in);
+    ggml_tensor * sentence_col = ggml_reshape_2d(ctx, sentence, kDurationChannels, 1);
+    ggml_tensor * x_cl = ggml_concat(ctx, sentence_col, gathered, 1);
+    return ggml_cont(ctx, ggml_transpose(ctx, x_cl));
+}
+
+ggml_tensor * duration_convnext_chain_ggml(ggml_context * ctx, const supertonic_model & m, ggml_tensor * x) {
+    for (int i = 0; i < kDurationConvnextBlocks; ++i) {
+        x = duration_convnext_ggml(ctx, m,
+            std::string(kDurationEncoderPrefix) + ".convnext.convnext." + std::to_string(i), x);
+    }
+    return x;
+}
+
+ggml_tensor * duration_attn_encoder_graph_ggml(ggml_context * ctx,
+                                               const supertonic_model & m,
+                                               ggml_tensor * x,
+                                               ggml_tensor * rel_band,
+                                               int L) {
+    for (int i = 0; i < kDurationAttnLayers; ++i) x = duration_attn_layer_graph_ggml(ctx, m, i, x, rel_band, L);
+    return x;
+}
+
+// Projection of the sentence-token row (row 0 of x [L, C]) to the C-vector the predictor consumes.
+ggml_tensor * duration_sentence_proj_graph_ggml(ggml_context * ctx, const supertonic_model & m, ggml_tensor * x) {
+    ggml_tensor * row0 = ggml_cont(ctx, ggml_view_2d(ctx, x, 1, kDurationChannels, x->nb[1], 0));
+    return conv1d_f32(ctx, require_source_tensor(m, std::string(kDurationEncoderPrefix) + ".proj_out.net.weight"),
+                      row0, 1, 0, 1);
+}
+
+struct duration_one_graph_cache {
+    const supertonic_model * model = nullptr;
+    uint64_t generation_id = 0;
+    int text_len = 0;
+    std::vector<uint8_t> buf;
+    ggml_context * ctx = nullptr;
+    ggml_cgraph * gf = nullptr;
+    ggml_gallocr_t allocr = nullptr;
+    ggml_tensor * ids_in = nullptr;
+    ggml_tensor * rel_band = nullptr;
+    ggml_tensor * out = nullptr;
+};
+
+inline void free_duration_one_graph_cache(duration_one_graph_cache & cache) {
+    supertonic_safe_gallocr_free(cache.allocr, cache.generation_id);
+    if (cache.ctx) ggml_free(cache.ctx);
+    cache = {};
+}
+
+// When `measure` is non-null the graph is built identically but the arena is
+// sized (ggml_gallocr_reserve_n_size) instead of allocated, and nothing is
+// uploaded — the memory-fit share point (supertonic_fit_measure_duration) so
+// the priced graph is the executed graph by construction.
+void build_duration_one_graph(duration_one_graph_cache & cache, const supertonic_model & m, int text_len,
+                              size_t * measure = nullptr) {
+    free_duration_one_graph_cache(cache);
+    cache.model = &m;
+    cache.generation_id = m.generation_id;
+    cache.text_len = text_len;
+    const int L = text_len + 1;
+    constexpr int MAX_NODES = 1024;
+    const size_t buf_size = ggml_tensor_overhead() * MAX_NODES + ggml_graph_overhead_custom(MAX_NODES, false);
+    cache.buf.assign(buf_size, 0);
+    ggml_init_params gp = { buf_size, cache.buf.data(), true };
+    cache.ctx = ggml_init(gp);
+    cache.gf = ggml_new_graph_custom(cache.ctx, MAX_NODES, false);
+
+    cache.ids_in = ggml_new_tensor_1d(cache.ctx, GGML_TYPE_I32, text_len);
+    ggml_set_name(cache.ids_in, "duration_ids"); ggml_set_input(cache.ids_in);
+    cache.rel_band = ggml_new_tensor_2d(cache.ctx, GGML_TYPE_F32, L, L);
+    ggml_set_name(cache.rel_band, "duration_rel_band");
+    // Input and output so gallocr keeps the constant band alive across computes.
+    ggml_set_input(cache.rel_band); ggml_set_output(cache.rel_band);
+
+    ggml_tensor * skip = duration_convnext_chain_ggml(cache.ctx, m, duration_embed_graph_ggml(cache.ctx, m, cache.ids_in));
+    ggml_tensor * x = ggml_add(cache.ctx, duration_attn_encoder_graph_ggml(cache.ctx, m, skip, cache.rel_band, L), skip);
+    cache.out = duration_sentence_proj_graph_ggml(cache.ctx, m, x);
+    ggml_set_name(cache.out, "duration_sentence_proj"); ggml_set_output(cache.out);
+    ggml_build_forward_expand(cache.gf, cache.out);
+
+    if (measure) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new duration one-graph (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
+    cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+    if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new duration one-graph failed");
+    if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
+        throw std::runtime_error("ggml_gallocr_reserve duration one-graph failed");
+    }
+    if (!ggml_gallocr_alloc_graph(cache.allocr, cache.gf)) {
+        throw std::runtime_error("ggml_gallocr_alloc_graph duration one-graph failed");
+    }
+    const std::vector<float> band = make_rel_band(L, 1.0f / std::sqrt((float) (kDurationChannels / kDurationHeads)));
+    ggml_backend_tensor_set(cache.rel_band, band.data(), 0, band.size() * sizeof(float));
+}
+
+void run_duration_one_graph(duration_one_graph_cache & cache,
+                            const supertonic_model & m,
+                            const std::vector<int32_t> & ids,
+                            std::vector<float> & projected) {
+    ggml_backend_tensor_set(cache.ids_in, ids.data(), 0, ids.size() * sizeof(int32_t));
+    supertonic_graph_compute(m, cache.gf);
+    projected.resize((size_t) ggml_nelements(cache.out));
+    ggml_backend_tensor_get(cache.out, projected.data(), 0, ggml_nbytes(cache.out));
+}
+
+std::vector<float> combine_projection_and_style(const std::vector<float> & projected, const float * style_dp) {
+    std::vector<float> combined(projected.begin(), projected.begin() + kDurationChannels);
+    combined.insert(combined.end(), style_dp, style_dp + kDurationStyleDim);
+    return combined;
+}
+
+void apply_prelu(std::vector<float> & h, float slope) {
+    for (float & v : h) if (v < 0.0f) v *= slope;
+}
+
+// Predictor MLP on the host: dense, PReLU, dense, exp. Style is per-call input, so it stays uncached.
+float duration_predictor_host(const supertonic_model & m, const std::vector<float> & projected, const float * style_dp) {
+    if (projected.size() != (size_t) kDurationChannels) throw std::runtime_error("missing duration sentence projection");
+    const std::string p(kDurationPredictorPrefix);
+    const std::vector<float> combined = combine_projection_and_style(projected, style_dp);
+    std::vector<float> h;
+    dense(combined, cached_read_f32(m, p + ".layers.0.weight"), cached_read_f32(m, p + ".layers.0.bias"),
+          kDurationChannels + kDurationStyleDim, kDurationPredictorHidden, h);
+    apply_prelu(h, cached_read_f32(m, p + ".activation.weight").data[0]);
+    std::vector<float> out;
+    dense(h, cached_read_f32(m, p + ".layers.1.weight"), cached_read_f32(m, p + ".layers.1.bias"),
+          kDurationPredictorHidden, 1, out);
+    return std::exp(out[0]);
+}
+
+bool use_duration_one_graph(const supertonic_model & model) {
+    static const bool disabled = std::getenv("SUPERTONIC_DISABLE_DURATION_ONE_GRAPH") != nullptr;
+    return !disabled && !model_prefers_cpu_kernels(model);
+}
+
 } // namespace
 
 bool supertonic_duration_forward_cpu(const supertonic_model & model,
@@ -835,44 +1032,67 @@ bool supertonic_duration_trace_ggml(const supertonic_model & model,
                                            sentence_proj_out);
 }
 
-bool supertonic_duration_forward_ggml(const supertonic_model & model,
-                                      const int64_t * text_ids,
-                                      int text_len,
-                                      const float * style_dp,
-                                      float & duration_out,
-                                      std::string * error) {
+bool supertonic_duration_forward_hybrid_ggml(const supertonic_model & model,
+                                             const int64_t * text_ids,
+                                             int text_len,
+                                             const float * style_dp,
+                                             float & duration_out,
+                                             std::string * error,
+                                             std::vector<float> * sentence_proj_out) {
     supertonic_op_dispatch_scope dispatch(model);
     try {
-        std::vector<supertonic_trace_tensor> scalar;
-        std::vector<supertonic_trace_tensor> ggml;
         std::vector<float> projected;
         if (!duration_sentence_proj_ggml_impl(model, text_ids, text_len, nullptr, nullptr, error,
                                               false, false, &projected)) return false;
-        if (projected.size() != 64) throw std::runtime_error("missing duration sentence projection");
-        std::vector<float> combined(192);
-        for (int c = 0; c < 64; ++c) combined[c] = projected[c];
-        for (int i = 0; i < 128; ++i) combined[64 + i] = style_dp[i];
-        std::vector<float> h;
-        // F17 — host-cached predictor weights.  Style is per-call
-        // input data, not a backend weight, so it stays uncached.
-        dense(combined,
-              cached_read_f32(model, "duration:tts.dp.predictor.layers.0.weight"),
-              cached_read_f32(model, "duration:tts.dp.predictor.layers.0.bias"),
-              192, 128, h);
-        float prelu = cached_read_f32(model, "duration:tts.dp.predictor.activation.weight").data[0];
-        for (float & v : h) if (v < 0.0f) v *= prelu;
-        std::vector<float> out;
-        dense(h,
-              cached_read_f32(model, "duration:tts.dp.predictor.layers.1.weight"),
-              cached_read_f32(model, "duration:tts.dp.predictor.layers.1.bias"),
-              128, 1, out);
-        duration_out = std::exp(out[0]);
+        duration_out = duration_predictor_host(model, projected, style_dp);
+        if (sentence_proj_out) *sentence_proj_out = projected;
         if (error) error->clear();
         return true;
     } catch (const std::exception & e) {
         if (error) *error = e.what();
         return false;
     }
+}
+
+bool supertonic_duration_forward_one_graph_ggml(const supertonic_model & model,
+                                                const int64_t * text_ids,
+                                                int text_len,
+                                                const float * style_dp,
+                                                float & duration_out,
+                                                std::string * error,
+                                                std::vector<float> * sentence_proj_out) {
+    supertonic_op_dispatch_scope dispatch(model);
+    try {
+        ggml_tensor * emb_table = require_source_tensor(model,
+            std::string(kDurationEncoderPrefix) + ".text_embedder.char_embedder.weight");
+        const std::vector<int32_t> ids = text_ids_as_i32(emb_table, text_ids, text_len);
+        thread_local duration_one_graph_cache cache;
+        thread_local tl_register_once _tl_reg_one_graph([&]() { free_duration_one_graph_cache(cache); });
+        if (cache.model != &model || cache.generation_id != model.generation_id || cache.text_len != text_len) {
+            build_duration_one_graph(cache, model, text_len);
+        }
+        std::vector<float> projected;
+        run_duration_one_graph(cache, model, ids, projected);
+        duration_out = duration_predictor_host(model, projected, style_dp);
+        if (sentence_proj_out) *sentence_proj_out = projected;
+        if (error) error->clear();
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool supertonic_duration_forward_ggml(const supertonic_model & model,
+                                      const int64_t * text_ids,
+                                      int text_len,
+                                      const float * style_dp,
+                                      float & duration_out,
+                                      std::string * error) {
+    if (use_duration_one_graph(model)) {
+        return supertonic_duration_forward_one_graph_ggml(model, text_ids, text_len, style_dp, duration_out, error);
+    }
+    return supertonic_duration_forward_hybrid_ggml(model, text_ids, text_len, style_dp, duration_out, error);
 }
 
 void release_duration_thread_local_caches() {
@@ -883,52 +1103,33 @@ void release_duration_thread_local_caches() {
 }
 
 // ---- memory-fit measure (supertonic_internal.h) -----------------------------
-// Sizes the F11 duration graph cache at sentence length L (= text_len + 1),
-// building the same graph the cached path builds (any drift is pinned by the
-// fixture parity gate against a real synthesis).  Nothing is allocated.
+// Sizes the duration stage's resident arena at sentence length L (= text_len
+// + 1) on the non-CPU dispatch path -- the ONE-GRAPH sentence encoder
+// (embedding + convnext chain + attn encoder + sentence projection in a single
+// graph compute), through the exact builder the runtime uses
+// (supertonic_duration_forward_one_graph_ggml), so the priced graph is the
+// executed graph by construction.  In measure mode (real_alloc=false, the fit
+// path) nothing is allocated and nothing runs; the parity probe
+// (real_alloc=true, test-only) builds + allocates the same graph for real to
+// anchor the size.  The hybrid fallback (one-graph disabled by env) is not
+// modelled; the caller must refuse it rather than misprice it.
 static bool duration_fit_impl(const supertonic_model & m, int L,
                               uint64_t & bytes, std::string * error, bool real_alloc) {
     bytes = 0;
+    if (std::getenv("SUPERTONIC_DISABLE_DURATION_ONE_GRAPH") != nullptr) {
+        if (error) {
+            *error = "duration dispatch path not modelled "
+                     "(one-graph disabled by env)";
+        }
+        return false;
+    }
     try {
         supertonic_op_dispatch_scope dispatch(m);
-        const int C = 64;
-        constexpr int MAX_NODES = 512;
-        const size_t buf_size = ggml_tensor_overhead() * MAX_NODES +
-                                ggml_graph_overhead_custom(MAX_NODES, false);
-        std::vector<uint8_t> buf(buf_size);
-        ggml_init_params gp = { buf_size, buf.data(), true };
-        ggml_context * ctx = ggml_init(gp);
-        ggml_cgraph * gf = ggml_new_graph_custom(ctx, MAX_NODES, false);
-        ggml_tensor * in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, L, C);
-        ggml_set_input(in);
-        ggml_tensor * y = in;
-        for (int i = 0; i < 6; ++i) {
-            const std::string p = "duration:tts.dp.sentence_encoder.convnext.convnext." + std::to_string(i);
-            y = duration_convnext_ggml(ctx, m, p, y);
-            ggml_set_output(y);
-            ggml_build_forward_expand(gf, y);
-        }
-        const std::string a = "duration:tts.dp.sentence_encoder.attn_encoder.attn_layers.0.";
-        for (const char * head : { "conv_q", "conv_k", "conv_v" }) {
-            ggml_tensor * h = conv1d_f32(ctx,
-                require_source_tensor(m, a + head + ".weight"), y, 1, 0, 1);
-            h = ggml_add(ctx, h,
-                repeat_like(ctx, require_source_tensor(m, a + head + ".bias"), h));
-            ggml_set_output(h);
-            ggml_build_forward_expand(gf, h);
-        }
-        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
-        if (!pricer) throw std::runtime_error("duration pricer failed");
+        duration_one_graph_cache cache;
         size_t sz = 0;
-        if (real_alloc) {
-            if (ggml_gallocr_reserve(pricer, gf) && ggml_gallocr_alloc_graph(pricer, gf)) {
-                sz = ggml_gallocr_get_buffer_size(pricer, 0);
-            }
-        } else {
-            ggml_gallocr_reserve_n_size(pricer, gf, nullptr, nullptr, &sz);
-        }
-        ggml_gallocr_free(pricer);
-        ggml_free(ctx);
+        build_duration_one_graph(cache, m, /*text_len=*/L - 1, real_alloc ? nullptr : &sz);
+        if (real_alloc && cache.allocr) sz = ggml_gallocr_get_buffer_size(cache.allocr, 0);
+        free_duration_one_graph_cache(cache);
         bytes = sz;
         return true;
     } catch (const std::exception & e) {

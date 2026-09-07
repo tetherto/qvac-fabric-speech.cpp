@@ -23,7 +23,7 @@
 set -euo pipefail
 
 GGML_REPO_URL="https://github.com/tetherto/qvac-ext-ggml.git"
-GGML_REF="60a172e48f699bd0a00575ef911feed9473b2187"   # merge of qvac-ext-ggml#8 (speech HEAD)
+GGML_REF="0455cb621e09012dd3f3fa8cffda76811f5bb664"   # merge of qvac-ext-ggml#84 (speech HEAD; supertonic Metal fused ops)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTS_CPP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"

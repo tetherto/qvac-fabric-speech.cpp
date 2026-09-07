@@ -1,5 +1,6 @@
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
+#include "backend_util.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -39,6 +40,18 @@ int encoder_subsampling_factor(const ParakeetCtcModel & model) {
     return model.encoder_cfg.subsampling_factor > 0
         ? model.encoder_cfg.subsampling_factor
         : kDefaultSubsamplingFactor;
+}
+
+// ggml-opencl mis-handles a handful of non-contiguous view feeds (byte-offset
+// views into a concat, depthwise conv on a view). Force a materialised copy on
+// OpenCL so downstream ops see a contiguous src. No-op on other backends.
+ggml_tensor * ensure_contig_on_opencl(
+    ggml_context * ctx,
+    const ParakeetCtcModel & model,
+    ggml_tensor * tensor) {
+    return backend_is_opencl(model.backend_active())
+        ? ggml_cont(ctx, tensor)
+        : tensor;
 }
 
 struct NemotronStepGraph {
@@ -318,6 +331,7 @@ ggml_tensor * update_channel_cache(
 
 ggml_tensor * cached_convolution(
     ggml_context * context,
+    const ParakeetCtcModel & model,
     ggml_tensor * value,
     ggml_tensor * time_cache,
     const BlockWeights & weights,
@@ -374,7 +388,7 @@ ggml_tensor * cached_convolution(
     ggml_tensor * convolved = ggml_conv_1d_dw(
         context,
         weights.conv_dw_w,
-        convolution_input,
+        ensure_contig_on_opencl(context, model, convolution_input),
         1,
         0,
         1);
@@ -411,6 +425,7 @@ ggml_tensor * cached_convolution(
 
 ggml_tensor * build_cached_block(
     ggml_context * context,
+    const ParakeetCtcModel & model,
     ggml_tensor * value,
     ggml_tensor * channel_cache,
     ggml_tensor * time_cache,
@@ -477,6 +492,7 @@ ggml_tensor * build_cached_block(
         config.layer_norm_eps);
     transformed = cached_convolution(
         context,
+        model,
         normalized_convolution,
         time_cache,
         weights,
@@ -578,6 +594,7 @@ int build_step_graph(
         ggml_tensor * next_time_cache = nullptr;
         value = build_cached_block(
             context,
+            model,
             value,
             channel_cache,
             time_cache,

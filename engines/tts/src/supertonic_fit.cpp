@@ -151,17 +151,20 @@ FitResult fit_params(const FitOptions & opts) {
     std::string error;
     uint64_t text_bytes = 0, dur_bytes = 0, ve_bytes = 0;
     uint64_t voc_dev = 0, voc_host = 0;
+    // Each measure refuses unmodelled dispatch paths (one-graph / loop graph
+    // disabled by env); distinguish that from a real failure.
+    const auto measure_reason = [&error]() {
+        return error.find("not modelled") != std::string::npos
+                   ? "compute-path-not-supported" : "measurement-failed";
+    };
     if (!det::supertonic_fit_measure_text_encoder(m.model, L_text, text_bytes, &error) ||
         !det::supertonic_fit_measure_duration(m.model, L_text + 1, dur_bytes, &error)) {
-        r.reason = "measurement-failed";
+        r.reason = measure_reason();
         return r;
     }
     if (!det::supertonic_fit_measure_vector(m.model, latent_len, L_text, steps,
                                             ve_bytes, &error)) {
-        // The measure itself refuses unmodelled dispatch paths (loop graph
-        // disabled by env); distinguish that from a real failure.
-        r.reason = error.find("not modelled") != std::string::npos
-                       ? "compute-path-not-supported" : "measurement-failed";
+        r.reason = measure_reason();
         return r;
     }
     if (!det::supertonic_fit_measure_vocoder(m.model, latent_len, voc_dev, voc_host,

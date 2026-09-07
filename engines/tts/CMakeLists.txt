@@ -2503,11 +2503,14 @@ if (TTS_CPP_BUILD_TESTS)
     # ---- Memory-fit preflight (include/tts-cpp/fit.h + *-fit-params) ----
     # Model-free: strict CLI parsers, saturating math, JSON escaping, and the
     # exit-code contract of both fit CLIs.
-    add_executable(test-fit-cli test/test_fit_cli.cpp)
-    target_link_libraries(test-fit-cli PRIVATE tts-cpp ggml)
-    target_include_directories(test-fit-cli PRIVATE ggml/include src include)
-    tts_cpp_apply_ccache(test-fit-cli)
-    tts_cpp_register_test(test-fit-cli LABEL "unit")
+    # tts- prefix: engines/parakeet already owns the bare test-fit-cli target
+    # name, and the umbrella build (SPEECH_BUILD_TESTS=ON) puts every engine in
+    # one CMake project, where duplicate target names are a configure error.
+    add_executable(test-tts-fit-cli test/test_fit_cli.cpp)
+    target_link_libraries(test-tts-fit-cli PRIVATE tts-cpp ggml)
+    target_include_directories(test-tts-fit-cli PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-tts-fit-cli)
+    tts_cpp_register_test(test-tts-fit-cli LABEL "unit")
 
     # Audio8 fit parity.  The no-argument form synthesizes a tiny audio8-lm
     # GGUF on the fly, so the LM-side byte-parity gates (weights, KV slabs,
@@ -2719,6 +2722,18 @@ if (TTS_CPP_BUILD_TESTS)
     # OpenCL optimization audit follow-up harnesses (F1–F11).
     add_supertonic_harness(test-supertonic-load-caches    test/test_supertonic_load_caches.cpp)
     add_supertonic_harness(test-supertonic-graph-rewrites test/test_supertonic_graph_rewrites.cpp)
+    tts_cpp_register_test(test-supertonic-graph-rewrites-v3
+        EXE      test-supertonic-graph-rewrites
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}"
+        REQUIRES "${_tcb_super3_gguf}")
+    # gpu: the one-graph CFM loop, its [C, T] step and the batched CFG pass only
+    # exist off the CPU backend, so this arm is the one that exercises them.
+    tts_cpp_register_test(test-supertonic-graph-rewrites-v3-gpu
+        EXE      test-supertonic-graph-rewrites
+        LABEL    "gpu"
+        ARGS     "${_tcb_super3_gguf}" "99"
+        REQUIRES "${_tcb_super3_gguf}")
     # OpenCL audit follow-up #2 — text-encoder caches (F13, F16),
     # Phase 2A F16-weight roster (predicate-level), Phase 2D
     # profile-CSV emitter (unit-only).
