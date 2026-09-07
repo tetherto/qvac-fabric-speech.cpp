@@ -1508,6 +1508,13 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     if (impl->backend_gpu && impl->backend_active == impl->backend_gpu && !gpu_is_mali_vulkan) {
         impl->dw_direct_planar   = backend_runs_conv_2d_dw(impl->backend_gpu, false);
         impl->dw_direct_channels = backend_runs_conv_2d_dw(impl->backend_gpu, true);
+        // Force the subsampler im2col+mul+sum_rows lowering on OpenCL for the
+        // same reason Mali-Vulkan takes it: the ggml_conv_2d_dw_direct path
+        // miscomputes on ggml-opencl. The conformer conv2d_dw path is
+        // unaffected and keeps its probe result.
+        if (backend_is_opencl(impl->backend_gpu)) {
+            impl->dw_direct_planar = false;
+        }
         if (verbose) {
             PARAKEET_LOG_INFO("parakeet: depthwise conv lowering: subsampler %s, conformer %s\n",
                               impl->dw_direct_planar   ? "direct" : "im2col",

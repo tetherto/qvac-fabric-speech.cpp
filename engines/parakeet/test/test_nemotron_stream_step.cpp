@@ -780,21 +780,44 @@ int check_incremental_pcm(
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 5) {
+    if (argc != 5 && argc != 7) {
         std::fprintf(
             stderr,
             "usage: %s <nemotron.gguf> <reference-dir> "
-            "<right-context> <wav>\n",
+            "<right-context> <wav> "
+            "[--n-gpu-layers N]\n",
             argv[0]);
         return 2;
     }
+
+    int n_gpu_layers = 0;
+    if (argc == 7) {
+        if (std::strcmp(argv[5], "--n-gpu-layers") != 0) {
+            std::fprintf(stderr, "expected --n-gpu-layers, got %s\n", argv[5]);
+            return 2;
+        }
+        n_gpu_layers = std::atoi(argv[6]);
+        if (n_gpu_layers < 0) {
+            std::fprintf(stderr, "--n-gpu-layers must be non-negative\n");
+            return 2;
+        }
+    }
+
     const int right_context = std::atoi(argv[3]);
 
     parakeet::ParakeetCtcModel model;
     if (int rc = parakeet::load_from_gguf(
-            argv[1], model, 0, 0, false); rc != 0) {
+            argv[1], model, 0, n_gpu_layers, false); rc != 0) {
         return rc;
     }
+    if (n_gpu_layers > 0 && !parakeet::model_has_gpu_backend(model)) {
+        std::fprintf(
+            stderr,
+            "GPU execution requested, but active backend is %s\n",
+            parakeet::model_active_backend_name(model).c_str());
+        return 1;
+    }
+
     parakeet::TdtRuntimeWeights runtime;
     if (int rc = parakeet::tdt_prepare_runtime(
             model, runtime); rc != 0) {

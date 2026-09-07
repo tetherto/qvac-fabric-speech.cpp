@@ -905,14 +905,19 @@ if (PARAKEET_BUILD_TESTS)
     target_include_directories(test-nemotron-stream-step PRIVATE src include ggml/include)
     parakeet_apply_backend_defs(test-nemotron-stream-step)
     function(parakeet_register_nemotron_stream_case test_name reference_dir right_context)
+        set(_qvp_nemotron_stream_label "fixture")
+        if (ARGN)
+            set(_qvp_nemotron_stream_label "gpu")
+        endif()
         parakeet_register_test(${test_name}
             EXE test-nemotron-stream-step
-            LABEL "fixture"
+            LABEL "${_qvp_nemotron_stream_label}"
             ARGS
                 "${_qvp_nemotron_f16_gguf}"
                 "${reference_dir}"
                 "${right_context}"
                 "${_qvp_jfk_wav}"
+                ${ARGN}
             REQUIRES
                 "${_qvp_nemotron_f16_gguf}"
                 "${reference_dir}/step-000/processed_signal.npy"
@@ -937,6 +942,30 @@ if (PARAKEET_BUILD_TESTS)
         test-nemotron-stream-step-560 "${_qvp_nemotron_stream_560_ref}" 6)
     parakeet_register_nemotron_stream_case(
         test-nemotron-stream-step-1120 "${_qvp_nemotron_stream_1120_ref}" 13)
+
+    if (GGML_METAL)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-metal
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+    endif()
+
+    if (GGML_OPENCL)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)

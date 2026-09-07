@@ -99,6 +99,10 @@ inline bool backend_is_vulkan(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "Vulkan") == 0;
 }
 
+inline bool backend_is_opencl(ggml_backend_t b) {
+    return std::strcmp(backend_reg_name(b), "OpenCL") == 0;
+}
+
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {
     return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b));
 }
