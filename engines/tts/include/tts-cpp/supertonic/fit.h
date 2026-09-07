@@ -17,13 +17,17 @@
 //              second copy of the matmul set)
 //   compute -- the resident per-stage graph-cache arenas, which all stay
 //              alive across the whole synthesis and across calls, so they
-//              SUM: text encoder (ConvNeXt front + 4 relative-position
-//              caches, whose 9 persistent L x L masks make this quadratic in
-//              the text length + 4 FFN + 2 speech-prompted merged caches),
-//              the duration graph, the vector estimator's all-steps-in-one
-//              loop graph (the dominant arena; CFG doubles it on
-//              supertonic3), and the vocoder graph (dual-path priced: its
-//              CPU-fallback portion lands in host extras)
+//              SUM.  Each stage is priced through the ONE-GRAPH builder the
+//              runtime dispatches off the CPU backend, so the priced graph is
+//              the executed graph by construction: the one-graph text encoder
+//              (embedding + convnext chain + relpos attn/ffn stack + speech-
+//              prompted tail; its persistent L x L rel_band makes it
+//              quadratic in the text length), the one-graph duration sentence
+//              encoder, the vector estimator's all-steps-in-one [C, T] loop
+//              graph (the dominant arena; CFG batches cond | uncond along
+//              time, roughly doubling it on supertonic3), and the vocoder
+//              graph (dual-path priced: its CPU-fallback portion lands in
+//              host extras)
 //
 // Host extras cover the persistent host caches a load keeps (unicode
 // indexer, RoPE theta, layer-norm/tanh_k pre-downloads, the ~5 MiB scalar
@@ -35,12 +39,15 @@
 //
 // COVERAGE / REFUSALS (honest partial coverage; a wrong FITS is never
 // emitted):
-//   * Only the non-CPU compute path is modelled.  When the resolved backend
-//     is the CPU (n_gpu_layers <= 0, no validated GPU present, or
-//     SUPERTONIC_DISABLE_LOOP_GRAPH / SUPERTONIC_DISABLE_ONE_GRAPH set),
-//     fit_params returns Error / "compute-path-not-supported": the CPU
-//     vector-estimator dispatch runs a ~21-graph multi-cache set this
-//     projection does not model yet (follow-up under QVAC-24283).
+//   * Only the non-CPU one-graph dispatch paths are modelled.  When the
+//     resolved backend is the CPU (n_gpu_layers <= 0, no validated GPU
+//     present) or a one-graph path is env-disabled
+//     (SUPERTONIC_DISABLE_LOOP_GRAPH / SUPERTONIC_DISABLE_ONE_GRAPH /
+//     SUPERTONIC_DISABLE_TEXT_ONE_GRAPH /
+//     SUPERTONIC_DISABLE_DURATION_ONE_GRAPH), fit_params returns
+//     Error / "compute-path-not-supported": the CPU dispatch runs per-island
+//     multi-cache sets this projection does not model yet (follow-up under
+//     QVAC-24283).
 //   * The projection covers the batch path; streaming runs the same stages
 //     per chunk at smaller shapes, so the batch projection at the same text
 //     length bounds it.
