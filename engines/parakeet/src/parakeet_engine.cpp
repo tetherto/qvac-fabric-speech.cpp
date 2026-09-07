@@ -127,11 +127,33 @@ int decode_transducer(const ParakeetCtcModel & model,
 LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
                                     const EngineOptions & opts,
                                     int n_mel_frames) {
-    return resolve_long_form_plan_frames(opts.long_form_window_frames,
-                                         opts.long_form_context_frames,
-                                         model.encoder_cfg.pos_emb_max_len,
-                                         model.encoder_cfg.subsampling_factor,
-                                         n_mel_frames);
+    const LongFormPlan normal =
+        resolve_long_form_plan_frames(opts.long_form_window_frames,
+                                      opts.long_form_context_frames,
+                                      model.encoder_cfg.pos_emb_max_len,
+                                      model.encoder_cfg.subsampling_factor,
+                                      n_mel_frames);
+
+    // A negative window request explicitly disables automatic windowing. An
+    // oversized fixed-shape Core ML call will then fail its capacity check and
+    // run_encoder() will preserve the existing ggml single-pass fallback.
+    if (opts.long_form_window_frames < 0) {
+        return normal;
+    }
+
+    const LongFormPlan coreml = resolve_coreml_fixed_shape_plan(
+        model_coreml_fixed_mel_frames(model),
+        opts.long_form_context_frames,
+        model.encoder_cfg.subsampling_factor,
+        n_mel_frames);
+
+    // Respect a smaller user/model long-form limit, but force fixed-shape
+    // windowing when that is the only way the complete input fits the sidecar.
+    if (coreml.enabled &&
+        (!normal.enabled || coreml.window_frames < normal.window_frames)) {
+        return coreml;
+    }
+    return normal;
 }
 
 struct WindowedEncoderStats {
@@ -173,7 +195,8 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         EncoderOutputs win_out;
         if (int rc = run_encoder(model, win_mel, w.window_len, n_mels, win_out,
                                  /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false);
+                                 /*capture_intermediates=*/false,
+                                 /*allow_coreml_padded=*/true);
             rc != 0) {
             return rc;
         }
@@ -466,7 +489,8 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
                                  pimpl_->model.mel_cfg.n_mels, enc_out,
                                  /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false); rc != 0) {
+                                 /*capture_intermediates=*/false,
+                                 /*allow_coreml_padded=*/true); rc != 0) {
             throw std::runtime_error("parakeet::Engine::transcribe_samples: run_encoder failed (rc=" +
                                      std::to_string(rc) + ")");
         }
@@ -698,7 +722,8 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
                                  pimpl_->model.mel_cfg.n_mels, enc_out,
                                  /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false); rc != 0) {
+                                 /*capture_intermediates=*/false,
+                                 /*allow_coreml_padded=*/true); rc != 0) {
             throw std::runtime_error("parakeet::Engine::transcribe_samples_stream: run_encoder failed (rc=" +
                                      std::to_string(rc) + ")");
         }

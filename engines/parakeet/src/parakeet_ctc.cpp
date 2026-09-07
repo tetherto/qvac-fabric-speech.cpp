@@ -2093,6 +2093,21 @@ bool model_encoder_on_coreml(const ParakeetCtcModel & m) {
 #endif
 }
 
+int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->ctx_coreml) {
+        const int64_t frames =
+            parakeet_coreml_fixed_mel_frames(m.impl->ctx_coreml, m.mel_cfg.n_mels);
+        if (frames > 0 && frames <= std::numeric_limits<int>::max()) {
+            return (int) frames;
+        }
+    }
+#else
+    (void) m;
+#endif
+    return 0;
+}
+
 std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->ctx_coreml) {
@@ -3232,9 +3247,10 @@ static bool encoder_is_offline(const EncoderConfig & enc) {
 
 static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool all_valid,
-                                      bool capture_intermediates) {
+                                      bool capture_intermediates,
+                                      bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (!all_valid)            return false;  // partial / streaming windows -> ggml (time masks not replicated)
+    if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
     if (model.model_type == ParakeetModelType::CTC) return false;  // CTC logits come from the ggml head
     return encoder_is_offline(model.encoder_cfg);
@@ -3387,7 +3403,8 @@ int run_encoder(ParakeetCtcModel   & model,
                 int                  n_mels,
                 EncoderOutputs     & out,
                 int                  max_layers,
-                bool                 capture_intermediates) {
+                bool                 capture_intermediates,
+                bool                 allow_coreml_padded) {
     if (!model.impl || !model.impl->backend_active) return -1;
 
     ggml_backend_t backend = model.impl->backend_active;
@@ -3417,7 +3434,8 @@ int run_encoder(ParakeetCtcModel   & model,
     // Apple Neural Engine sidecar: run the offline FastConformer encoder
     // on Core ML and hand encoder_out back to the ggml TDT/EOU/Sortformer decoders. On
     // any failure fall through to the ggml encoder below (silent, presence-driven).
-    if (should_use_coreml_encoder(model, all_valid, capture_intermediates)) {
+    if (should_use_coreml_encoder(model, all_valid, capture_intermediates,
+                                  allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
         if (rc == 0) return 0;
         PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);

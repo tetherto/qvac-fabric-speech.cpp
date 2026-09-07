@@ -18,6 +18,7 @@
 #include "parakeet_ctc.h"
 #include "mel_preprocess.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -106,6 +107,26 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Numerical encoder parity must compare identical full fixed-shape inputs.
+    // Production's shorter-input zero padding intentionally changes full-context
+    // attention relative to an unpadded ggml encode and is covered separately by
+    // test-transcribe-coreml-parity. Extend/crop this fixture to the sidecar's
+    // declared capacity, repeating real mel rows rather than adding padding.
+    const int fixed_mel_frames = model_coreml_fixed_mel_frames(model);
+    if (fixed_mel_frames > 0 && fixed_mel_frames != n_mel_frames) {
+        const int original_frames = n_mel_frames;
+        const int n_mels = model.mel_cfg.n_mels;
+        std::vector<float> fixed_mel((size_t) fixed_mel_frames * n_mels);
+        for (int t = 0; t < fixed_mel_frames; ++t) {
+            const int src_t = t % original_frames;
+            std::copy_n(mel.data() + (size_t) src_t * n_mels,
+                        n_mels,
+                        fixed_mel.data() + (size_t) t * n_mels);
+        }
+        mel = std::move(fixed_mel);
+        n_mel_frames = fixed_mel_frames;
+    }
+
     EncoderOutputs out_ggml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
                              out_ggml, /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
@@ -115,7 +136,9 @@ int main(int argc, char ** argv) {
 
     EncoderOutputs out_coreml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_coreml, /*max_layers=*/-1, /*capture_intermediates=*/false); rc != 0) {
+                             out_coreml, /*max_layers=*/-1,
+                             /*capture_intermediates=*/false,
+                             /*allow_coreml_padded=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] Core ML run_encoder rc=%d\n", rc);
         return 1;
     }

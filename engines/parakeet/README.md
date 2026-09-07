@@ -243,7 +243,8 @@ Export and compile a fixed-shape sidecar:
 ```bash
 python engines/parakeet/scripts/export-encoder-coreml.py \
   --gguf engines/parakeet/models/parakeet-tdt-0.6b-v3.f16.gguf \
-  --wav engines/parakeet/test/samples/jfk.wav \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
@@ -253,17 +254,39 @@ Benchmark fixed lengths and inspect ANE/GPU/CPU placement:
 ```bash
 python engines/parakeet/scripts/bench-encoder-coreml.py \
   --gguf engines/parakeet/models/parakeet-tdt-0.6b-v3.f16.gguf \
-  --mel-frames 138 826 2201
+  --mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16
 ```
 
-The default export is fixed-shape and accelerates only the exported mel length;
-other lengths fall back to ggml. `--flexible` exports a RangeDim model, but it
-is a correctness/experimentation path: measured flexible graphs place no
-operations on ANE and can be substantially slower than ggml Metal.
+The default export uses Float16 input, output, weights, and intermediates. It is
+fixed-shape: shorter inputs are zero-padded to the exported mel-frame capacity,
+while longer offline inputs are automatically divided into overlapping windows
+that each fit that capacity. The example uses this addon's 15-second shape (1501
+mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional 6-bit
+grouped-channel LUT weights. Grouped palettization requires coremltools 8+ and
+macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS 16
+compatible Float16 model. `--flexible` exports a RangeDim model, but it is a
+correctness/experimentation path: measured flexible graphs place no operations
+on ANE and can be substantially slower than ggml Metal.
+
+At runtime the sidecar lets Core ML use all compute units and reuses its input,
+feature-provider, and fixed-shape output-backing objects across predictions. The
+graph is predominantly Neural Engine-backed, but a small number of operations
+may prefer the GPU; forcing CPU + Neural Engine can move those operations onto
+the CPU and reduce the speedup. Set `PARAKEET_COREML_COMPUTE_UNITS=cpu_and_gpu`,
+`cpu_only`, or `cpu_and_ane` to override the default for placement comparisons.
 
 A missing sidecar, load failure, incompatible shape, or runtime prediction
 failure falls back to the ggml encoder. Set `PARAKEET_COREML_DISABLE=1` to
-force ggml, including for parity or benchmarking.
+force ggml, including for parity or benchmarking. Setting
+`EngineOptions::long_form_window_frames` below zero disables automatic
+windowing; an input larger than a fixed Core ML sidecar then falls back to the
+single-pass ggml encoder.
+
+Windowing bounds Core ML input shapes and memory, but full-context attention is
+then local to each overlapping window. The stitched result should therefore be
+treated as close to, rather than bit-identical with, a single full-length encode;
+validate accuracy on representative long recordings before production use.
 
 ## Models and conversion
 
