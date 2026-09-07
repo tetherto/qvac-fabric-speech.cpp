@@ -39,7 +39,13 @@ env:
   GGML_BRANCH: speech # single ggml pin shared with parakeet-ci.yml / tts-ci.yml
 
 jobs:
+  runner_names:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-runner-names.yml
+
   windows:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +60,7 @@ jobs:
           - engine: audiogen
             src: engines/audiogen
             cmake_flags: -DAUDIOGEN_BUILD_TESTS=ON -DAUDIOGEN_BUILD_EXECUTABLES=OFF
-    runs-on: windows-2022
+    runs-on: ${{ needs.runner_names.outputs.windows_2022 }}
     timeout-minutes: 90
     defaults:
       run:
@@ -105,6 +111,7 @@ jobs:
         run: ctest --test-dir build -C Release -LE 'gpu|perf' --output-on-failure --timeout 600
 
   android:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +126,7 @@ jobs:
           - engine: audiogen
             src: engines/audiogen
             cmake_flags: -DAUDIOGEN_BUILD_TESTS=OFF -DAUDIOGEN_BUILD_EXECUTABLES=OFF
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -172,6 +179,7 @@ jobs:
           cmake --build build -j4
 
   ios:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +194,7 @@ jobs:
           - engine: audiogen
             src: engines/audiogen
             cmake_flags: -DAUDIOGEN_BUILD_TESTS=OFF -DAUDIOGEN_BUILD_EXECUTABLES=OFF
-    runs-on: macos-14
+    runs-on: ${{ needs.runner_names.outputs.macos_14 }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -241,3 +249,4 @@ jobs:
             ${{ matrix.cmake_flags }} \
             -DCMAKE_FIND_ROOT_PATH="$PWD/ggml-install"
           cmake --build build -j4
+

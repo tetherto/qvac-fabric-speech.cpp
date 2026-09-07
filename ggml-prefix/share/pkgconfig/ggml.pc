@@ -1,0 +1,10 @@
+prefix=/Users/ogad/tether/qvac-ext-lib-whisper.cpp/.claude/worktrees/admiring-agnesi-4657b7/ggml-prefix
+exec_prefix=${prefix}
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: ggml
+Description: The GGML Tensor Library for Machine Learning
+Version: 0.10.2
+Cflags: -I${includedir}
+Libs: -L${libdir} -lggml

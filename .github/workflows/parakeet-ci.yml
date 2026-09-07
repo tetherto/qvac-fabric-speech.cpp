@@ -39,12 +39,18 @@ env:
   GGML_BRANCH: speech # keep in sync with engines/parakeet/scripts/setup-ggml.sh
 
 jobs:
+  runner_names:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-runner-names.yml
+
   build-test:
+    needs: runner_names
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-14' && needs.runner_names.outputs.macos_14 || needs.runner_names.outputs.ubuntu_2404 }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -142,8 +148,9 @@ jobs:
   # pin the NVIDIA Linux runner the qvac monorepo's benchmark and e2e lanes
   # use (it exposes nvidia-smi and a Vulkan ICD).
   gpu:
+    needs: runner_names
     if: github.event_name == 'workflow_dispatch' && inputs.run_gpu
-    runs-on: qvac-ubuntu2204-x64-gpu
+    runs-on: ${{ needs.runner_names.outputs.linux_x64_gpu }}
     timeout-minutes: 90
     steps:
       # Self-hosted runners are persistent, so the previous job's tree can
@@ -234,3 +241,4 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: ctest --test-dir build -L gpu --output-on-failure --timeout 1200
+

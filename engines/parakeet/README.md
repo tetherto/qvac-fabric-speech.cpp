@@ -101,7 +101,7 @@ defaults follow `SPEECH_BUILD_EXECUTABLES` and `SPEECH_BUILD_TESTS`, and force
 | `PARAKEET_GGML_LIB_PREFIX` | `ON` | no effect with system ggml | Name bundled libraries `speech-ggml-*` |
 | `PARAKEET_COREML` | `OFF` | `OFF` | Apple-only offline TDT encoder sidecar |
 | `PARAKEET_OPENMP` | `ON` | `ON` | Link OpenMP when available; auto-disabled on Windows non-MinGW unless explicitly overridden |
-| `PARAKEET_FLASH_ATTN` | Metal and CUDA `ON`, otherwise `OFF` | same | Fused encoder attention with the rel-pos bias folded into the mask; selected per backend at load, the CPU path always keeps the unfused graph |
+| `PARAKEET_FLASH_ATTN` | Metal, CUDA and Vulkan `ON`, otherwise `OFF` | same | Fused encoder attention with the rel-pos bias folded into the mask; selected per backend at load, the CPU path always keeps the unfused graph |
 | `PARAKEET_CCACHE` | `ON` | `ON` | Use ccache for Parakeet targets when available |
 
 ### Installed package
@@ -180,6 +180,13 @@ CUDA. CPU and OpenCL use the scalar decoder path; OpenCL lacks the graph
 operation support required by this decoder path. The EOU encoder can still run
 on OpenCL while its decoder runs scalar.
 
+Nemotron 3.5 ASR streaming is supported on OpenCL (Adreno 700+). The encoder
+runs on the GPU and the cache-aware streaming operating points (80, 160, 320,
+560, 1120 ms) are honoured. The transducer decode runs host-side on OpenCL,
+same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
+that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
+opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
+
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control
@@ -194,9 +201,9 @@ depthwise convolution (`GGML_OP_CONV_2D_DW` in place where the backend
 reports it, `im2col` and matmul elsewhere; the subsampler switches only on a
 GPU that passed the probe, CPU keeps its previous lowering) and to the gated
 GLU (`a * sigmoid(b)` as one op where the backend reports it). Fused attention
-is a build option (`PARAKEET_FLASH_ATTN`) that only CUDA and Metal take, and
-only after the backend accepts the exact node the encoder builds; CPU, Vulkan
-and OpenCL keep the unfused graph in every build. The mel front-end runs on up
+is a build option (`PARAKEET_FLASH_ATTN`) that CUDA, Metal and Vulkan take, and
+only after the backend accepts the exact node the encoder builds; CPU and
+OpenCL keep the unfused graph in every build. The mel front-end runs on up
 to eight host threads with output byte-equal to the single-thread result.
 
 The CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0 transcripts,
@@ -589,6 +596,25 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 12 August 2026, runner `qvac-ubuntu2204-x64-gpu`, benchmarking the published
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
+
+### speech-cpp CI (2026-09-07)
+
+Fresh CPU-baseline snapshot from `speech-benchmark-desktop.yml` on the
+hosted-Linux and self-hosted macOS runners (5 timed runs + 1 warmup, `jfk.wav`
+fixture, ~11 s).
+
+| Model | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|---:|---:|---:|
+| Parakeet CTC 0.6b q8_0 | linux | ggml-cpu | 2111 | 0.192 | 858 |
+| Parakeet CTC 0.6b q8_0 | macos | ggml-cpu | 184 | 0.0170 | 914 |
+| Whisper base | linux | (CPU) | 1906 | 0.173 | 298 |
+| Whisper base | macos | Metal | 584 | 0.0530 | 360 |
+| Whisper small | linux | (CPU) | 6122 | 0.557 | 797 |
+| Whisper small | macos | Metal | 564 | 0.0510 | 878 |
+| Whisper tiny | linux | (CPU) | 1035 | 0.0940 | 182 |
+| Whisper tiny | macos | Metal | 565 | 0.0510 | 240 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
 ### TDT decode on CUDA and Metal
 
