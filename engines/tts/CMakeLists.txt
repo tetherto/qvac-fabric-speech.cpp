@@ -2645,6 +2645,13 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_super3_gguf}"
         REQUIRES "${_tcb_super3_gguf}")
+    # gpu: the one-graph CFM loop, its [C, T] step and the batched CFG pass only
+    # exist off the CPU backend, so this arm is the one that exercises them.
+    tts_cpp_register_test(test-supertonic-graph-rewrites-v3-gpu
+        EXE      test-supertonic-graph-rewrites
+        LABEL    "gpu"
+        ARGS     "${_tcb_super3_gguf}" "99"
+        REQUIRES "${_tcb_super3_gguf}")
     # OpenCL audit follow-up #2 — text-encoder caches (F13, F16),
     # Phase 2A F16-weight roster (predicate-level), Phase 2D
     # profile-CSV emitter (unit-only).

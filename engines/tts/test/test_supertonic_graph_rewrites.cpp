@@ -35,8 +35,11 @@
 
 #include "supertonic_internal.h"
 #include "npy.h"
+#include "test_env_portable.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -83,6 +86,10 @@ std::vector<float> make_synthetic_latent(int latent_channels, int latent_len, ui
 // end-to-end gate, plenty for a vocoder-only check.
 void test_f3_vocoder_unpack_parity(const supertonic_model & model) {
     std::fprintf(stderr, "[F3 vocoder unpack parity]\n");
+    if (!model_prefers_cpu_kernels(model)) {
+        std::fprintf(stderr, "  SKIP: the scalar reference reads the model from host memory (CPU backend only)\n");
+        return;
+    }
 
     const int C = model.hparams.latent_channels;
     const int L = 8;  // small latent_len for the test
@@ -257,38 +264,89 @@ int count_mismatches(const std::vector<float> & a, const std::vector<float> & b,
     return bad;
 }
 
-// The unrolled loop graph shares the step-invariant K/V projections across
-// its steps; it must still equal the per-step chain.
-void test_loop_graph_matches_per_step(const supertonic_model & model) {
-    std::fprintf(stderr, "[unrolled CFM loop graph vs per-step chain]\n");
+// 45 latent frames is the shortest production utterance; the batched loop and
+// the per-step chain are bit-identical on Metal from that length (not at 8).
+struct cfm_loop_inputs {
+    int text_len    = 16;
+    int latent_len  = 45;
+    int total_steps = 5;
+    std::vector<float> latent, text_emb, style_ttl, latent_mask;
+};
 
-    const int text_len    = 16;
-    const int latent_len  = 8;
-    const int total_steps = 5;
-    const int Cin         = model.hparams.latent_channels;
-
-    auto latent   = make_synthetic_latent(Cin, latent_len, 0x5EED1234);
-    auto text_emb = make_synthetic_latent(256, text_len,   0x7E57);
-    std::vector<float> latent_mask((size_t) latent_len, 1.0f);
-
+bool make_cfm_loop_inputs(const supertonic_model & model, cfm_loop_inputs & in) {
     if (model.voices.empty()) {
         std::fprintf(stderr, "  SKIP: no voices in model\n");
-        return;
+        return false;
     }
+    in.latent      = make_synthetic_latent(model.hparams.latent_channels, in.latent_len, 0x5EED1234);
+    in.text_emb    = make_synthetic_latent(256, in.text_len, 0x7E57);
+    in.latent_mask.assign((size_t) in.latent_len, 1.0f);
     const auto & voice = model.voices.begin()->second;
-    std::vector<float> style_ttl((size_t) ggml_nelements(voice.ttl));
-    ggml_backend_tensor_get(voice.ttl, style_ttl.data(), 0, ggml_nbytes(voice.ttl));
+    in.style_ttl.resize((size_t) ggml_nelements(voice.ttl));
+    ggml_backend_tensor_get(voice.ttl, in.style_ttl.data(), 0, ggml_nbytes(voice.ttl));
+    return true;
+}
+
+bool run_cfm_loop_graph(const supertonic_model & model, const cfm_loop_inputs & in,
+                        std::vector<float> & out, std::string & err) {
+    return supertonic_vector_loop_ggml(model, in.latent.data(), in.latent_len, in.text_emb.data(),
+                                       in.text_len, in.style_ttl.data(), in.latent_mask.data(),
+                                       in.total_steps, out, &err);
+}
+
+bool run_cfm_step_chain(const supertonic_model & model, const cfm_loop_inputs & in,
+                        std::vector<float> & out, std::string & err) {
+    return run_per_step_chain(model, in.latent, in.latent_len, in.text_emb, in.text_len,
+                              in.style_ttl, in.latent_mask, in.total_steps, out, err);
+}
+
+// Off the CPU backend the two arms of a parity check run different kernels and
+// summation orders, so they agree to a cosine rather than element by element.
+constexpr float kGpuMinCosine = 0.9999f;
+// The predicted duration only steers the wav length; Metal lands within 4e-4 of the host MLP.
+constexpr float kGpuDurationRtol = 1e-3f;
+
+float cosine_similarity(const std::vector<float> & a, const std::vector<float> & b);
+
+void check_parity(const supertonic_model & model, const std::vector<float> & a, const std::vector<float> & b,
+                  const char * label) {
+    CHECK(a.size() == b.size());
+    float max_abs = 0.0f;
+    const int bad = count_mismatches(a, b, max_abs);
+    const float cos = cosine_similarity(a, b);
+    std::fprintf(stderr, "  %s n=%zu, max_abs_err=%.3e, off_tolerance=%d, cosine=%.7f\n",
+                 label, a.size(), max_abs, bad, cos);
+    if (model_prefers_cpu_kernels(model)) {
+        CHECK(bad == 0);
+    } else {
+        CHECK(cos >= kGpuMinCosine);
+    }
+}
+
+float cosine_similarity(const std::vector<float> & a, const std::vector<float> & b) {
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+        dot += (double) a[i] * b[i];
+        na  += (double) a[i] * a[i];
+        nb  += (double) b[i] * b[i];
+    }
+    return (na > 0.0 && nb > 0.0) ? (float) (dot / std::sqrt(na * nb)) : 0.0f;
+}
+
+// The unrolled loop graph shares the step-invariant K/V projections across
+// its steps and batches the CFG passes; it must still equal the per-step chain.
+void test_loop_graph_matches_per_step(const supertonic_model & model) {
+    std::fprintf(stderr, "[unrolled CFM loop graph vs per-step chain]\n");
+    cfm_loop_inputs in;
+    if (!make_cfm_loop_inputs(model, in)) return;
 
     std::string err;
     std::vector<float> loop_out, chain_out;
-    if (!supertonic_vector_loop_ggml(model, latent.data(), latent_len, text_emb.data(), text_len,
-                                     style_ttl.data(), latent_mask.data(), total_steps,
-                                     loop_out, &err)) {
+    if (!run_cfm_loop_graph(model, in, loop_out, err)) {
         std::fprintf(stderr, "  SKIP loop graph: %s\n", err.c_str());
         return;
     }
-    if (!run_per_step_chain(model, latent, latent_len, text_emb, text_len, style_ttl, latent_mask,
-                            total_steps, chain_out, err)) {
+    if (!run_cfm_step_chain(model, in, chain_out, err)) {
         std::fprintf(stderr, "  SKIP per-step chain: %s\n", err.c_str());
         return;
     }
@@ -297,8 +355,38 @@ void test_loop_graph_matches_per_step(const supertonic_model & model) {
     float max_abs = 0.0f;
     const int bad = count_mismatches(loop_out, chain_out, max_abs);
     std::fprintf(stderr, "  L=%d, text_len=%d, steps=%d, n=%zu, max_abs_err=%.3e, bad=%d\n",
-                 latent_len, text_len, total_steps, loop_out.size(), max_abs, bad);
+                 in.latent_len, in.text_len, in.total_steps, loop_out.size(), max_abs, bad);
     CHECK(bad == 0);
+}
+
+// Off the CPU backend the loop runs the [C, T] step; it must agree with the
+// legacy [T, C] per-step chain up to the summation-order drift of the two layouts.
+void test_ct_loop_matches_legacy_chain(const supertonic_model & model) {
+    std::fprintf(stderr, "[[C, T] CFM loop vs legacy [T, C] per-step chain]\n");
+    if (model_prefers_cpu_kernels(model)) {
+        std::fprintf(stderr, "  SKIP: the [C, T] step only runs off the CPU backend\n");
+        return;
+    }
+    cfm_loop_inputs in;
+    if (!make_cfm_loop_inputs(model, in)) return;
+
+    std::string err;
+    std::vector<float> legacy_out, ct_out;
+    setenv("SUPERTONIC_DISABLE_CT_STEP", "1", 1);
+    release_vector_estimator_thread_local_caches();
+    const bool legacy_ok = run_cfm_step_chain(model, in, legacy_out, err);
+    unsetenv("SUPERTONIC_DISABLE_CT_STEP");
+    release_vector_estimator_thread_local_caches();
+    if (!legacy_ok) {
+        std::fprintf(stderr, "  SKIP legacy chain: %s\n", err.c_str());
+        return;
+    }
+    if (!run_cfm_loop_graph(model, in, ct_out, err)) {
+        std::fprintf(stderr, "  SKIP loop graph: %s\n", err.c_str());
+        return;
+    }
+
+    check_parity(model, ct_out, legacy_out, "[C, T] loop vs legacy chain");
 }
 
 std::vector<int64_t> make_synthetic_ids(int text_len, int64_t vocab_size, uint32_t seed) {
@@ -325,12 +413,8 @@ void check_text_encoder_one_graph(const supertonic_model & model, const std::vec
     if (!ok_islands) std::fprintf(stderr, "  islands failed: %s\n", err.c_str());
     CHECK(ok_islands);
     if (!ok_one || !ok_islands) return;
-    CHECK(one_graph.size() == islands.size());
-    float max_abs = 0.0f;
-    const int bad = count_mismatches(one_graph, islands, max_abs);
-    std::fprintf(stderr, "  text_len=%d, n=%zu, max_abs_err=%.3e, bad=%d\n",
-                 text_len, one_graph.size(), max_abs, bad);
-    CHECK(bad == 0);
+    std::fprintf(stderr, "  text_len=%d\n", text_len);
+    check_parity(model, one_graph, islands, "one-graph vs islands");
 }
 
 void test_text_encoder_one_graph_matches_islands(const supertonic_model & model) {
@@ -365,13 +449,13 @@ void check_duration_one_graph(const supertonic_model & model, const std::vector<
     if (!ok_hybrid) std::fprintf(stderr, "  hybrid failed: %s\n", err.c_str());
     CHECK(ok_hybrid);
     if (!ok_one || !ok_hybrid) return;
-    CHECK(proj_one.size() == proj_hybrid.size());
-    float max_abs = 0.0f;
-    const int bad = count_mismatches(proj_one, proj_hybrid, max_abs);
-    std::fprintf(stderr, "  text_len=%d, n=%zu, max_abs_err=%.3e, bad=%d, dur_one=%.6g, dur_hybrid=%.6g\n",
-                 text_len, proj_one.size(), max_abs, bad, dur_one, dur_hybrid);
-    CHECK(bad == 0);
-    CHECK(close_enough(dur_one, dur_hybrid));
+    std::fprintf(stderr, "  text_len=%d, dur_one=%.6g, dur_hybrid=%.6g\n", text_len, dur_one, dur_hybrid);
+    check_parity(model, proj_one, proj_hybrid, "one-graph vs hybrid");
+    if (model_prefers_cpu_kernels(model)) {
+        CHECK(close_enough(dur_one, dur_hybrid));
+    } else {
+        CHECK(close_enough(dur_one, dur_hybrid, 0.0f, kGpuDurationRtol));
+    }
 }
 
 void test_duration_one_graph_matches_hybrid(const supertonic_model & model) {
@@ -391,19 +475,22 @@ void test_duration_one_graph_matches_hybrid(const supertonic_model & model) {
 
 int main(int argc, char ** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s MODEL.gguf\n", argv[0]);
+        std::fprintf(stderr, "usage: %s MODEL.gguf [N_GPU_LAYERS]\n", argv[0]);
         return 2;
     }
+    const int n_gpu_layers = (argc > 2) ? std::atoi(argv[2]) : 0;
     supertonic_model model;
-    if (!load_supertonic_gguf(argv[1], model)) {
+    if (!load_supertonic_gguf(argv[1], model, n_gpu_layers)) {
         std::fprintf(stderr, "failed to load model: %s\n", argv[1]);
         return 1;
     }
+    std::fprintf(stderr, "backend: %s\n", model.backend ? ggml_backend_name(model.backend) : "none");
 
     test_f3_vocoder_unpack_parity(model);
     test_f11_duration_cache_parity(model);
     test_f8_style_residual_cache_parity(model);
     test_loop_graph_matches_per_step(model);
+    test_ct_loop_matches_legacy_chain(model);
     test_text_encoder_one_graph_matches_islands(model);
     test_duration_one_graph_matches_hybrid(model);
 

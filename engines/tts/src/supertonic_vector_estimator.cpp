@@ -4884,9 +4884,9 @@ ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertoni
 
 } // namespace
 
-bool use_ct_vector_step(const supertonic_model & model, bool use_cpu_custom) {
-    static const bool disabled = std::getenv("SUPERTONIC_DISABLE_CT_STEP") != nullptr ||
-                                 std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
+static bool use_ct_vector_step(const supertonic_model & model, bool use_cpu_custom) {
+    const bool disabled = std::getenv("SUPERTONIC_DISABLE_CT_STEP") != nullptr ||
+                          std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
     return !disabled && !use_cpu_custom && !model_prefers_cpu_kernels(model) &&
            supertonic_use_fused_supertonic_ops();
 }
