@@ -277,18 +277,12 @@ void power_spectrum_rows(int t0, int t1, int n_fft, int hop, int n_bins,
 // Mel filterbank projection for frames [t0, t1): out[t,m] = sum_k fb[m,k] * power[t,k].
 // The inner loop is left exactly as the serial version so the reduction order is unchanged.
 void filterbank_rows(int t0, int t1, int n_bins, int n_mels,
-                     const float * __restrict fb, const float * __restrict power_data,
+                     const float * __restrict fb, const MelFilterBand * __restrict bands,
+                     float log_zero_guard, const float * __restrict power_data,
                      float * __restrict mel_data) {
     for (int t = t0; t < t1; ++t) {
-        const float * __restrict frame_power = power_data + t * n_bins;
-        float * __restrict mel_t = mel_data + t * n_mels;
-        for (int m = 0; m < n_mels; ++m) {
-            const float * __restrict row = fb + m * n_bins;
-            float acc = 0.0f;
-            #pragma GCC ivdep
-            for (int k = 0; k < n_bins; ++k) acc += row[k] * frame_power[k];
-            mel_t[m] = acc;
-        }
+        log_mel_frame(power_data + t * n_bins, n_bins, n_mels, fb, bands, log_zero_guard,
+                      mel_data + t * n_mels);
     }
 }
 
@@ -323,6 +317,34 @@ std::vector<float> make_padded_window(const std::vector<float> & hann400, int n_
     return out;
 }
 
+}
+
+std::vector<MelFilterBand> make_filter_bands(const std::vector<float> & filterbank, int n_mels, int n_bins) {
+    std::vector<MelFilterBand> bands((size_t) n_mels);
+    for (int m = 0; m < n_mels; ++m) {
+        const float * row = filterbank.data() + (size_t) m * n_bins;
+        int lo = 0;
+        while (lo < n_bins && row[lo] == 0.0f) ++lo;
+        int hi = n_bins;
+        while (hi > lo && row[hi - 1] == 0.0f) --hi;
+        bands[(size_t) m] = { lo, hi };
+    }
+    return bands;
+}
+
+// Skipped weights are exact zeros, so the banded sum is bit-identical to the dense loop.
+void log_mel_frame(const float * __restrict frame_power, int n_bins, int n_mels,
+                   const float * __restrict filterbank, const MelFilterBand * __restrict bands,
+                   float log_zero_guard, float * __restrict mel_out) {
+    for (int m = 0; m < n_mels; ++m) {
+        const float * __restrict row = filterbank + m * n_bins;
+        const int lo = bands[m].lo;
+        const int hi = bands[m].hi;
+        float acc = 0.0f;
+        #pragma GCC ivdep
+        for (int k = lo; k < hi; ++k) acc += row[k] * frame_power[k];
+        mel_out[m] = std::log(acc + log_zero_guard);
+    }
 }
 
 namespace {
@@ -404,17 +426,17 @@ int compute_log_mel_impl(const float        * samples,
 
     const int n_mels = cfg.n_mels;
     out_mel.resize((size_t) n_frames * n_mels);
+    if (state.filter_bands_src != &cfg.filterbank || state.filter_bands.size() != (size_t) n_mels) {
+        state.filter_bands     = make_filter_bands(cfg.filterbank, n_mels, n_bins);
+        state.filter_bands_src = &cfg.filterbank;
+    }
     const float * __restrict fb = cfg.filterbank.data();
+    const MelFilterBand * __restrict bands = state.filter_bands.data();
+    const float guard = cfg.log_zero_guard_value;
     float * __restrict mel_data = out_mel.data();
     parallel_over_frames(n_frames, cfg.n_threads, [&](int t0, int t1) {
-        filterbank_rows(t0, t1, n_bins, n_mels, fb, power_data, mel_data);
+        filterbank_rows(t0, t1, n_bins, n_mels, fb, bands, guard, power_data, mel_data);
     });
-
-    const float guard = cfg.log_zero_guard_value;
-    #pragma GCC ivdep
-    for (size_t i = 0; i < out_mel.size(); ++i) {
-        out_mel[i] = std::log(out_mel[i] + guard);
-    }
 
     const int seq_len = cfg.normalize == MelNormalize::None
         ? std::max(1, n_samples / cfg.hop_length)
@@ -446,6 +468,8 @@ struct IncrementalMelState::Impl {
     std::vector<float> windowed;
     std::vector<float> power;
     std::vector<std::complex<float>> fft;
+    std::vector<MelFilterBand> filter_bands;
+    const std::vector<float> * filter_bands_src = nullptr;
 
     int64_t sample_base = 0;
     int64_t total_samples = 0;
@@ -572,19 +596,13 @@ void compute_incremental_frame(
         state.fft.data());
 
     const int bins = config.n_fft / 2 + 1;
-    for (int mel = 0; mel < config.n_mels; ++mel) {
-        const float * filter =
-            config.filterbank.data() +
-            static_cast<size_t>(mel) * bins;
-        float value = 0.0f;
-        #pragma GCC ivdep
-        for (int bin = 0; bin < bins; ++bin) {
-            value += filter[bin] *
-                state.power[static_cast<size_t>(bin)];
-        }
-        destination[mel] =
-            std::log(value + config.log_zero_guard_value);
+    if (state.filter_bands_src != &config.filterbank ||
+        state.filter_bands.size() != static_cast<size_t>(config.n_mels)) {
+        state.filter_bands     = make_filter_bands(config.filterbank, config.n_mels, bins);
+        state.filter_bands_src = &config.filterbank;
     }
+    log_mel_frame(state.power.data(), bins, config.n_mels, config.filterbank.data(),
+                  state.filter_bands.data(), config.log_zero_guard_value, destination);
 }
 
 void compact_incremental_samples(

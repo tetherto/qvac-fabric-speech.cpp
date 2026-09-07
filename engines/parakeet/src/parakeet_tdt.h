@@ -183,21 +183,22 @@ struct TdtRuntimeWeights {
 
     // Frame advance per duration index and the RNN-T placeholder index, both
     // uploaded once with the persistent state and read by the control op.
-    ggml_tensor *  dur_table    = nullptr;  // f32[num_durations]
+    ggml_tensor *  dur_table    = nullptr;  // i32[num_durations]
     ggml_tensor *  zero_dur_idx = nullptr;  // i32[1], always 0
 
     // (4) Unrolled decode graph: `unroll_steps` greedy steps (joint -> argmax ->
     //     LSTM -> ggml_tdt_step control -> masked state update) in one commit,
-    //     with the host reading back the (token, duration index) pairs at the
-    //     end and replaying the same integer rules. Blank id and
+    //     with the host reading back the control rows at the end and replaying
+    //     the same integer rules over their pairs. Blank id and
     //     max_symbols_per_step only arrive with the decode call, so the graph is
     //     built lazily and rebuilt when either changes. It owns its context so
     //     a rebuild does not consume gctx slots.
     ggml_context * unroll_ctx        = nullptr;
     ggml_cgraph *  g_unroll          = nullptr;
     ggml_gallocr_t alloc_unroll      = nullptr;
-    ggml_tensor *  un_counters_in    = nullptr;  // f32[GGML_TDT_STEP_N_INS], the only upload per launch
-    ggml_tensor *  un_out            = nullptr;  // i32[2 * unroll_steps]: (token, duration index) per step, one readback
+    // i32[GGML_TDT_STEP_N_OUTS, unroll_steps + 1]: row 0 is the counters the
+    // host uploads, row k + 1 is the control row step k writes.
+    ggml_tensor *  un_ctl            = nullptr;
     int            unroll_blank_id    = -1;
     int            unroll_max_symbols = 0;
 

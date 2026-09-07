@@ -1546,8 +1546,6 @@ void test_format_user_message() {
 
     CHECK(lm_format_user_message("a salsa song", "[verse]\nhello") ==
           "# Caption\na salsa song\n\n# Lyric\n[verse]\nhello");
-    CHECK(lm_format_user_message("a groove", "[Instrumental]") ==
-          "# Caption\na groove\n\n# Lyric\n[Instrumental]");
 }
 
 void test_rewrite_query_policy() {
@@ -1574,6 +1572,10 @@ void test_rewrite_query_policy() {
 
     params.lyrics.clear();
     CHECK(resolve_generate_task(params, task).find("requires lyrics to format") != std::string::npos);
+
+    params.lyrics = "[Instrumental]";
+    CHECK(resolve_generate_task(params, task).find("requires lyric text to preserve") !=
+          std::string::npos);
     params.lyrics = "[verse]\nhello";
 
     params.task_type = tts_cpp::acestep::TASK_COVER_NOFSQ;
