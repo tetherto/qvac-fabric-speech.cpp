@@ -10053,7 +10053,8 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
 }
 
 int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out) {
-    if (opts == nullptr || opts->model_path == nullptr || out == nullptr) {
+    if (opts == nullptr || opts->model_path == nullptr || out == nullptr ||
+        opts->n_decoders < 1 || opts->n_decoders > WHISPER_MAX_DECODERS) {
         return 1;
     }
     memset(out, 0, sizeof(*out));
@@ -10075,8 +10076,39 @@ int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_f
         return 1;
     }
 
+    // n_decoders > 1: reproduce whisper_full_with_state's KV recreation (the
+    // same whisper_kv_cache_free + (n+2)x whisper_kv_cache_init call it makes
+    // the first time it decodes with that many decoders) so the measured
+    // kv_bytes are the real worst-case figure the projection prices. The
+    // compute figure stays the post-init measurement: the schedulers grow
+    // lazily on the first decode against the larger cache.
+    if (opts->n_decoders > 1) {
+        whisper_kv_cache_free(state->kv_self);
+
+        // overallocate to workaround KV cache fragmentation issues
+        const int factor = opts->n_decoders + 2;
+
+        if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
+                    ctx->model.hparams.n_text_state,
+                    ctx->model.hparams.n_text_layer,
+                    GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*factor)) {
+            whisper_free_state(state);
+            whisper_free(ctx);
+            return 1;
+        }
+
+        state->kv_self_n_dec = opts->n_decoders;
+    }
+
     ggml_backend_dev_t main_dev = whisper_fit_main_device(state->backends);
-    const bool main_pool_is_host = main_dev && ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (main_dev == nullptr) {
+        // same guard as whisper_fit_params: with no device to charge against,
+        // a breakdown would silently classify everything as host overflow
+        whisper_free_state(state);
+        whisper_free(ctx);
+        return 1;
+    }
+    const bool main_pool_is_host = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
 
     whisper_fit_charge weights, kv, compute;
     weights.main_dev = kv.main_dev = compute.main_dev = main_dev;

@@ -845,10 +845,13 @@ extern "C" {
 
     // Parity/diagnostic companion: measure the same breakdown from a REAL
     // load (whisper_init_from_file_with_params + state init -- this DOES
-    // allocate device memory, then frees it). n_decoders is ignored: the
-    // measured set is the post-init resident set (one decoder), matching a
-    // whisper_fit_params projection with n_decoders = 1. Returns 0 on
-    // success, non-zero on load failure.
+    // allocate device memory, then frees it). n_decoders > 1 additionally
+    // reproduces whisper_full's worst-case KV recreation (the (n+2)x
+    // whisper_kv_cache_init) before measuring, so kv_bytes matches the
+    // projection at any n_decoders; compute_bytes stays the post-init
+    // measurement (the schedulers grow lazily on the first decode against
+    // the larger cache), so it matches the projection only at n_decoders = 1.
+    // Returns 0 on success, non-zero on load failure.
     WHISPER_API int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out);
 
     ////////////////////////////////////////////////////////////////////////////
