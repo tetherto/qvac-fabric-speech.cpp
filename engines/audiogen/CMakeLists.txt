@@ -269,19 +269,22 @@ if (AUDIOGEN_BUILD_TESTS)
     audiogen_register_test(test-acestep-integration LABEL "integration")
     set_property(TEST test-acestep-integration PROPERTY SKIP_RETURN_CODE 77)
 
-    # Memory-fit preflight. test-fit-cli is model-free (strict parsers,
-    # saturating arithmetic, JSON escaping, CLI exit codes). test-fit-params
+    # Memory-fit preflight. test-acestep-fit-cli is model-free (strict parsers,
+    # saturating arithmetic, JSON escaping, CLI exit codes). test-acestep-fit-params
     # asserts the metadata-only projection matches real allocations
     # byte-for-byte; it reads the same AUDIOGEN_TEST_MODELS_DIR fixture as the
     # integration test and self-skips (77) where it is not staged.
-    add_executable(test-fit-cli test/test_fit_cli.cpp)
-    audiogen_link_in_tree_binary(test-fit-cli)
-    audiogen_register_test(test-fit-cli LABEL "unit")
+    # acestep- prefix: engines/parakeet already owns the bare test-fit-* target
+    # names, and the umbrella build (SPEECH_BUILD_TESTS=ON) puts both engines in
+    # one CMake project, where duplicate target names are a configure error.
+    add_executable(test-acestep-fit-cli test/test_fit_cli.cpp)
+    audiogen_link_in_tree_binary(test-acestep-fit-cli)
+    audiogen_register_test(test-acestep-fit-cli LABEL "unit")
 
-    add_executable(test-fit-params test/test_fit_params.cpp)
-    audiogen_link_in_tree_binary(test-fit-params)
-    audiogen_register_test(test-fit-params LABEL "integration")
-    set_property(TEST test-fit-params PROPERTY SKIP_RETURN_CODE 77)
+    add_executable(test-acestep-fit-params test/test_fit_params.cpp)
+    audiogen_link_in_tree_binary(test-acestep-fit-params)
+    audiogen_register_test(test-acestep-fit-params LABEL "integration")
+    set_property(TEST test-acestep-fit-params PROPERTY SKIP_RETURN_CODE 77)
 
     find_package(Python3 COMPONENTS Interpreter)
     if (Python3_Interpreter_FOUND)
