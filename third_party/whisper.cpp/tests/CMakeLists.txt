@@ -130,8 +130,18 @@ set_tests_properties(${FIT_CLI_TEST} PROPERTIES LABELS "unit;gh")
 
 # Memory-fit preflight: byte-parity gates against a REAL load of the committed
 # tiny + silero fixtures -- the projection must equal what whisper actually
-# allocates (QVAC patch, see PATCHES.md). Pass "gpu" manually as a third arg
-# to re-run the parity check on a GPU backend.
+# allocates (QVAC patch, see PATCHES.md). Registered twice:
+#   - ${FIT_TEST}: CPU parity (`unit` label, model-download-free, every CI lane).
+#     On CPU the main pool IS host memory, so the device/host split is trivial
+#     there -- the split is only really exercised by:
+#   - ${FIT_TEST}-gpu: the same parity gates on a GPU/IGPU backend, plus a
+#     driver-truth check of the device/host classifier (see the test source).
+#     Labeled `gpu`: the CPU CI lanes exclude it (`ctest -LE 'gpu|...'`,
+#     whisper-ci.yml) and any lane with a real GPU picks it up via
+#     `ctest -L gpu` -- the same gate the engines' self-hosted GPU lanes use
+#     (parakeet-ci.yml / tts-ci.yml). Exits 77 (= ctest SKIP, green but
+#     reported as skipped, never as passed) when the build or machine
+#     exposes no GPU device, so a mislabeled lane cannot green-wash it.
 set(FIT_TEST test-whisper-fit-params)
 add_executable(${FIT_TEST} ${FIT_TEST}.cpp)
 target_include_directories(${FIT_TEST} PRIVATE ../include ../ggml/include)
@@ -141,6 +151,11 @@ target_compile_definitions(${FIT_TEST} PRIVATE
     WHISPER_FIT_TEST_VAD_MODEL="${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.bin")
 add_test(NAME ${FIT_TEST} COMMAND ${FIT_TEST})
 set_tests_properties(${FIT_TEST} PROPERTIES LABELS "unit;tiny;gh")
+add_test(NAME ${FIT_TEST}-gpu COMMAND ${FIT_TEST}
+    ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.bin
+    ${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.bin
+    gpu)
+set_tests_properties(${FIT_TEST}-gpu PROPERTIES LABELS "gpu;tiny" SKIP_RETURN_CODE 77)
 
 # VAD test tests VAD in isolation
 set(VAD_TEST test-vad)
