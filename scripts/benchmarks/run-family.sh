@@ -13,7 +13,9 @@
 #     "model":          "whisper-tiny",
 #     "runner":         "linux",
 #     "os":             "Linux",
-#     "backend":        "CUDA" | "Metal" | "Vulkan" | "OpenCL" | "unknown",
+#     "backend":        "CUDA" | "Metal" | "Vulkan" | "OpenCL" | "CPU" | "unknown"
+#                       ("unknown" only on failed runs — a green run with no
+#                        GPU-engagement evidence is reported as "CPU"),
 #     "wall_ms_median": 1234.5,
 #     "wall_ms_min":    1210.0,
 #     "wall_ms_max":    1301.2,
@@ -70,7 +72,10 @@ done
 if [[ -z "$FAMILY" ]]; then usage; exit 2; fi
 
 # ---- read families.json -----------------------------------------------------
-FAMILIES_JSON="$(dirname "$0")/families.json"
+# BENCH_FAMILIES_JSON overrides the spec path so the driver's own test suite
+# (test-run-family.sh) can exercise it against synthetic families and stub
+# binaries without touching the real spec.
+FAMILIES_JSON="${BENCH_FAMILIES_JSON:-$(dirname "$0")/families.json}"
 if ! [[ -f "$FAMILIES_JSON" ]]; then
   echo "families.json not found at $FAMILIES_JSON" >&2; exit 1
 fi
@@ -143,16 +148,116 @@ emit_json() {
   cat "$OUT" >&2
 }
 
+# The `source` field per family (default "s3"): "s3" for the tetherto S3
+# registry via aws s3 cp, "huggingface" for `curl` against a pinned HF
+# revision. Vanilla whisper GGMLs (tiny/base/small) live on HuggingFace,
+# not S3 — the whisper family sets source="huggingface" and provides
+# hf_repo / hf_ref / models_by_size[<size>] = {name, sha256?} entries.
+SOURCE="$(spec_field source)"
+[[ -n "$SOURCE" ]] || SOURCE="s3"
+
 # ---- resolve MODEL_LABEL + placeholders -------------------------------------
+# models[] entries may be strings or objects ({s3, as} for renamed S3 keys,
+# {name, sha256?} for HuggingFace files) — the label wants the filename the
+# bench actually loads.
 if [[ "$FAMILY" == "whisper" ]]; then
   MODEL_LABEL="whisper-$WHISPER_SIZE"
 else
-  first_model="$(jq -r --arg f "$FAMILY" '.[$f].models[0] // ""' "$FAMILIES_JSON")"
+  first_model="$(jq -r --arg f "$FAMILY" \
+    '.[$f].models[0] // "" | if type == "object" then (.name // .as // .s3 // "") else . end' \
+    "$FAMILIES_JSON")"
   MODEL_LABEL="$FAMILY: ${first_model##*/}"
 fi
 
+# ---- fetch models from HuggingFace (curl, optional sha256 verification) ----
+# whisper picks one size-keyed entry from models_by_size; every other HF
+# family lists its files in models[] as {name, sha256?} objects (or plain
+# name strings), resolved against the family's pinned hf_repo@hf_ref.
+fetch_from_hf() {
+  local repo ref entries
+  repo="$(spec_field hf_repo)"
+  ref="$(spec_field hf_ref)"
+  if [[ -z "$repo" || -z "$ref" ]]; then
+    echo "$FAMILY: missing hf_repo / hf_ref in families.json" >&2
+    return 1
+  fi
+
+  if [[ "$FAMILY" == "whisper" ]]; then
+    local wname wsha
+    wname="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].name // ""' "$FAMILIES_JSON")"
+    wsha="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].sha256 // ""' "$FAMILIES_JSON")"
+    if [[ -z "$wname" || "$wname" == "null" ]]; then
+      echo "$FAMILY-$WHISPER_SIZE: no HF model name in registry (not-in-registry)"
+      return 66
+    fi
+    entries="$wname"$'\t'"$wsha"
+  else
+    entries="$(jq -r --arg family "$FAMILY" \
+      '.[$family].models[]? | if type == "object" then "\(.name // "")\t\(.sha256 // "")" else "\(.)\t" end' \
+      "$FAMILIES_JSON")"
+    if [[ -z "$entries" ]]; then
+      return 65      # same shape as the S3 path: no files pinned yet
+    fi
+  fi
+
+  local line name sha256 dest url
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    name="${line%%$'\t'*}"
+    sha256="${line#*$'\t'}"
+    if [[ -z "$name" ]]; then
+      echo "$FAMILY: HF model entry without a name in families.json" >&2
+      return 1
+    fi
+    dest="$MODEL_DIR/$name"
+    if [[ -f "$dest" ]]; then continue; fi
+    url="https://huggingface.co/${repo}/resolve/${ref}/${name}"
+    echo "fetch $url -> $dest"
+    # curl -f: fail on HTTP >= 400 rather than writing an HTML error page and
+    # returning success. -L: follow redirects (HF uses them). --retry rides
+    # out transient network resets. Explicit || return $? so a fetch failure
+    # propagates instead of the loop swallowing it (bash's `set -e` is
+    # disabled inside a function called with `||`).
+    curl -fL -o "$dest" "$url" --silent --show-error \
+      --retry 3 --retry-delay 5 || return $?
+
+    if [[ -n "$sha256" && "$sha256" != "null" ]]; then
+      if command -v sha256sum >/dev/null; then
+        echo "$sha256  $dest" | sha256sum -c - || return $?
+      elif command -v shasum >/dev/null; then
+        echo "$sha256  $dest" | shasum -a 256 -c - || return $?
+      fi
+    fi
+  done <<< "$entries"
+  return 0
+}
+
+# aws s3 cp retries API-level throttles internally, but a mid-stream
+# connection reset (acestep's ~5 GB shard has hit ConnectionResetError(104))
+# aborts the transfer and leaves a partial file. Retry the whole copy,
+# removing the partial first so a truncated file can never satisfy the
+# already-downloaded check on the next attempt or the next dispatch.
+s3_cp_retry() {
+  local s3url="$1" dest="$2"
+  local attempt rc=1
+  for attempt in 1 2 3; do
+    if aws s3 cp "$s3url" "$dest" --no-progress; then
+      return 0
+    else
+      rc=$?
+    fi
+    rm -f "$dest"
+    if [[ $attempt -lt 3 ]]; then
+      echo "aws s3 cp $s3url failed (exit $rc, attempt $attempt/3) — retrying" >&2
+      # BENCH_RETRY_SLEEP_S: test hook (test-run-family.sh sets 0).
+      sleep $(( attempt * ${BENCH_RETRY_SLEEP_S:-5} ))
+    fi
+  done
+  return $rc
+}
+
 # ---- fetch models from S3 (skipped when models[] empty / no bucket) --------
-fetch_models() {
+fetch_from_s3() {
   local bucket="${MODEL_S3_BUCKET:-}"
   if [[ -z "$bucket" ]]; then
     echo "MODEL_S3_BUCKET not set — skipping fetch (assuming local models present)" >&2
@@ -161,40 +266,52 @@ fetch_models() {
 
   # `mapfile -t` is bash 4+, so the macOS self-hosted runner would break if
   # /usr/bin/env bash resolved to the system 3.2. Use a portable read loop.
+  # Each row is "s3-key<TAB>rename-to" — rename-to is empty for string
+  # entries and the engine-expected filename for object entries like
+  # {"s3": "2026-07-23/voice-en.gguf", "as": "voice.gguf"} (cosyvoice's
+  # baked voice is stored language-suffixed in S3 but the engine looks
+  # for the canonical `voice.gguf`).
   local -a keys=()
   local line
-  if [[ "$FAMILY" == "whisper" ]]; then
-    while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg size "$WHISPER_SIZE" \
-      '.whisper.models_by_size[$size][]?' "$FAMILIES_JSON")
-    if [[ ${#keys[@]} -eq 0 ]]; then
-      echo "$FAMILY-$WHISPER_SIZE: no S3 key in registry (not-in-registry)"
-      return 66
-    fi
-  else
-    while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg family "$FAMILY" \
-      '.[$family].models[]?' "$FAMILIES_JSON")
-    if [[ ${#keys[@]} -eq 0 ]]; then
-      return 65      # minimax shape: no S3 path
-    fi
+  while IFS= read -r line; do keys+=("$line"); done < <(jq -r --arg family "$FAMILY" \
+    '.[$family].models[]? | if type == "string" then "\(.)\t" else "\(.s3)\t\(.as // "")" end' \
+    "$FAMILIES_JSON")
+  if [[ ${#keys[@]} -eq 0 ]]; then
+    return 65      # minimax shape: no S3 path
   fi
 
-  for key in "${keys[@]}"; do
-    local basename="${key##*/}"
+  for row in "${keys[@]}"; do
+    local key="${row%%$'\t'*}"
+    local rename_to="${row#*$'\t'}"
+    local basename="${rename_to:-${key##*/}}"
     local dest="$MODEL_DIR/$basename"
     if [[ -f "$dest" ]]; then continue; fi
     local s3url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$key"
     echo "fetch $s3url -> $dest"
-    aws s3 cp "$s3url" "$dest" --no-progress
+    # `|| return $?` so an S3 failure (404, denied, network) propagates as a
+    # non-zero exit from the function — otherwise `set -e` is disabled by
+    # the caller's `||` guard and the loop continues past a missing model,
+    # eventually running the bench binary against nothing and mis-reporting
+    # `run-failed` for what's actually a `fetch-failed`.
+    s3_cp_retry "$s3url" "$dest" || return $?
   done
   return 0
+}
+
+fetch_models() {
+  case "$SOURCE" in
+    huggingface) fetch_from_hf ;;
+    s3|"")       fetch_from_s3 ;;
+    *) echo "unknown source '$SOURCE' for family '$FAMILY'" >&2; return 1 ;;
+  esac
 }
 
 # ---- pick the model path for whisper (single -m arg) ------------------------
 MODEL_PATH=""
 if [[ "$FAMILY" == "whisper" ]]; then
-  wkey="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size][0] // ""' "$FAMILIES_JSON")"
-  if [[ -n "$wkey" ]]; then
-    MODEL_PATH="$MODEL_DIR/${wkey##*/}"
+  wname="$(jq -r --arg size "$WHISPER_SIZE" '.whisper.models_by_size[$size].name // ""' "$FAMILIES_JSON")"
+  if [[ -n "$wname" && "$wname" != "null" ]]; then
+    MODEL_PATH="$MODEL_DIR/$wname"
   fi
 fi
 
@@ -283,18 +400,39 @@ parse_rss_from_time_stderr() {
 }
 
 # ---- backend extraction ----------------------------------------------------
-# The engines log a `using <NAME> backend` line only when verbose/bench flags
-# are set (parakeet-cli --verbose, native *-bench binaries always). If the
-# marker is absent we return "unknown" rather than defaulting to "CPU" —
-# assuming CPU based on the mere presence of /usr/bin/time stderr would
-# mis-label every GPU run whose engine happened to log at a lower verbosity.
-parse_backend_from_stderr() {
-  local file="$1"
-  local hit
-  hit="$(grep -oE 'using [A-Za-z0-9]+ backend' "$file" 2>/dev/null | head -1 | awk '{print $2}' || true)"
-  if [[ -n "$hit" ]]; then
-    echo "$hit"; return
-  fi
+# Attribution chain over the run's stdout AND stderr, most explicit first:
+#   1. `using <NAME> backend`  — parakeet-cli / whisper / tts-cli style line.
+#   2. `backend: <NAME>`       — the *-bench binaries print this on stdout
+#      (matches lavasr's "denoiser backend: <NAME>" too).
+#   3. GPU-engagement evidence — ggml's own compute-init logs, independent of
+#      engine verbosity: creating a Metal compute context always logs
+#      ggml_metal_library_init, Vulkan compiles shaders, OpenCL compiles its
+#      program. Device *enumeration* alone (which also happens on CPU runs of
+#      GPU-enabled builds) does not print these, so enumeration cannot
+#      mis-label a CPU run.
+# When every pattern misses, the caller labels a green run "CPU": with no
+# compute-init evidence, nothing ran on a GPU. The residual risk is an engine
+# that installs a silent ggml log handler AND prints no backend line of its
+# own; none of the benched binaries do. Failed runs keep "unknown" — their
+# logs may be truncated mid-init.
+parse_backend_from_logs() {
+  local hit f
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    hit="$(grep -oE 'using [A-Za-z0-9_]+ backend' "$f" 2>/dev/null | head -1 | awk '{print $2}' || true)"
+    if [[ -n "$hit" ]]; then echo "$hit"; return; fi
+  done
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    hit="$(grep -oE 'backend: [A-Za-z0-9_]+' "$f" 2>/dev/null | head -1 | awk '{print $2}' || true)"
+    if [[ -n "$hit" ]]; then echo "$hit"; return; fi
+  done
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    if grep -q  'ggml_metal_library_init'            "$f" 2>/dev/null; then echo "Metal";  return; fi
+    if grep -q  'ggml_vulkan: Compiling shaders'     "$f" 2>/dev/null; then echo "Vulkan"; return; fi
+    if grep -qiE 'ggml_opencl:.*(compil|program)'    "$f" 2>/dev/null; then echo "OpenCL"; return; fi
+  done
   echo ""
 }
 
@@ -320,7 +458,7 @@ run_native() {
   local native_json="$1"; shift
   local stderr_log="$1"; shift
   # Ensure stderr_log exists even if wrap_time fails to write it, so the
-  # caller can safely `parse_backend_from_stderr "$stderr_log"` on either
+  # caller can safely `parse_backend_from_logs "$stderr_log" ...` on either
   # success or failure paths.
   : > "$stderr_log"
 
@@ -328,11 +466,29 @@ run_native() {
       > "$stderr_log.stdout" 2>> "$stderr_log"; then
     :
   else
+    # Surface the child's actual failure to the step log so debugging a
+    # run-failed cell doesn't require local repro.
+    { echo "--- native bench failed; last 30 lines of stdout ---"
+      tail -n 30 "$stderr_log.stdout" 2>/dev/null || true
+      echo "--- last 30 lines of stderr ---"
+      tail -n 30 "$stderr_log"        2>/dev/null || true
+      echo "--- end ---"
+    } >&2
     return 1
   fi
 
   if ! [[ -s "$native_json" ]]; then
-    echo "native bench did not emit --json-out file" >&2
+    # Exit 0 without the JSON means the binary took a code path that never
+    # reaches its bench writer (this is how the sortformer diarization cells
+    # failed invisibly) — dump the child's output so the step log shows what
+    # actually ran, exactly like the non-zero-exit branch above.
+    { echo "native bench exited 0 but did not emit the --json-out file"
+      echo "--- last 30 lines of stdout ---"
+      tail -n 30 "$stderr_log.stdout" 2>/dev/null || true
+      echo "--- last 30 lines of stderr ---"
+      tail -n 30 "$stderr_log"        2>/dev/null || true
+      echo "--- end ---"
+    } >&2
     return 1
   fi
 
@@ -373,7 +529,7 @@ case "$BENCH_KIND" in
     stderr_log="$tmp_dir/stderr.log"
     parsed=""
     if ! parsed="$(run_native "$JSON_OUT" "$stderr_log")"; then
-      BACKEND="$(parse_backend_from_stderr "$stderr_log")"
+      BACKEND="$(parse_backend_from_logs "$stderr_log" "$stderr_log.stdout")"
       BACKEND="${BACKEND:-unknown}"
       emit_json "run-failed" null null null " (native bench invocation failed)"
       exit 0
@@ -385,12 +541,13 @@ case "$BENCH_KIND" in
     if [[ -n "$n_rtf" ]]; then RTF_MEDIAN="$n_rtf"; fi
 
     # Prefer the backend the bench JSON declared (parakeet reports the
-    # post-fallback active backend); fall back to stderr scraping.
+    # post-fallback active backend); fall back to log scraping, then to CPU —
+    # the run finished green with no GPU-engagement evidence.
     if [[ -n "$n_backend" ]]; then
       BACKEND="$n_backend"
     else
-      BACKEND="$(parse_backend_from_stderr "$stderr_log")"
-      BACKEND="${BACKEND:-unknown}"
+      BACKEND="$(parse_backend_from_logs "$stderr_log" "$stderr_log.stdout")"
+      BACKEND="${BACKEND:-CPU}"
     fi
     rss="$(parse_rss_from_time_stderr "$stderr_log")"
     [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
@@ -403,7 +560,7 @@ case "$BENCH_KIND" in
       wu_stderr="$tmp_dir/warmup-$i.err"
       wu_rss="$tmp_dir/warmup-$i.rss"
       if ! run_one_time_wrapped "$i" "$wu_stderr" "$wu_rss" >/dev/null; then
-        BACKEND="$(parse_backend_from_stderr "$wu_stderr")"; BACKEND="${BACKEND:-unknown}"
+        BACKEND="$(parse_backend_from_logs "$wu_stderr" "$wu_stderr.stdout")"; BACKEND="${BACKEND:-unknown}"
         emit_json "run-failed" null null null " (warmup failed)"; exit 0
       fi
     done
@@ -411,18 +568,22 @@ case "$BENCH_KIND" in
     declare -a wall_ms=()
     max_rss_seen=""
     combined_stderr="$tmp_dir/combined.err"
+    combined_stdout="$tmp_dir/combined.out"
     : > "$combined_stderr"
+    : > "$combined_stdout"
     for i in $(seq 1 "$RUNS"); do
       echo "run $i/$RUNS" >&2
       r_stderr="$tmp_dir/run-$i.err"
       r_rss="$tmp_dir/run-$i.rss"
       if ! ms="$(run_one_time_wrapped "$i" "$r_stderr" "$r_rss")"; then
         cat "$r_stderr" >> "$combined_stderr"
-        BACKEND="$(parse_backend_from_stderr "$combined_stderr")"; BACKEND="${BACKEND:-unknown}"
+        cat "$r_stderr.stdout" >> "$combined_stdout" 2>/dev/null || true
+        BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"; BACKEND="${BACKEND:-unknown}"
         emit_json "run-failed" null null null " (timed run $i failed)"; exit 0
       fi
       wall_ms+=("$ms")
       cat "$r_stderr" >> "$combined_stderr"
+      cat "$r_stderr.stdout" >> "$combined_stdout" 2>/dev/null || true
       rss_i="$(parse_rss_from_time_stderr "$r_stderr")"
       if [[ -n "$rss_i" ]]; then
         if [[ -z "$max_rss_seen" ]] || awk -v a="$rss_i" -v b="$max_rss_seen" 'BEGIN{exit !(a>b)}'; then
@@ -440,8 +601,8 @@ case "$BENCH_KIND" in
     mn="$(echo "$stats" | jq '.min')"
     mx="$(echo "$stats" | jq '.max')"
 
-    BACKEND="$(parse_backend_from_stderr "$combined_stderr")"
-    BACKEND="${BACKEND:-unknown}"
+    BACKEND="$(parse_backend_from_logs "$combined_stderr" "$combined_stdout")"
+    BACKEND="${BACKEND:-CPU}"
     if [[ -n "$max_rss_seen" ]]; then PEAK_RSS_MIB="$max_rss_seen"; fi
 
     # Compute RTF only when families.json declared audio_duration_seconds.

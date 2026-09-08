@@ -567,6 +567,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_ctc_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf")
     set(_qvp_ctc_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.f16.gguf")
     set(_qvp_rnnt_q8_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf")
+    set(_qvp_rnnt_hybrid_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/stt_ka_fastconformer_hybrid_large_pc.q8_0.gguf")
     set(_qvp_tdt_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf")
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
@@ -582,6 +583,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_diar_wav      "${PARAKEET_TEST_AUDIO_DIR}/diarization-sample-16k.wav")
     set(_qvp_fr_multipiece_wav "${PARAKEET_TEST_AUDIO_DIR}/fr-multipiece-16k.wav")
     set(_qvp_hi_wav        "${PARAKEET_TEST_AUDIO_DIR}/hi-16k.wav")
+    set(_qvp_rnnt_hybrid_wav "${PARAKEET_TEST_AUDIO_DIR}/rnnt-ka-16k.wav")
     set(_qvp_hi_expected   "${PARAKEET_TEST_AUDIO_DIR}/hi-16k.expected.txt")
     set(_qvp_abcba_wav     "${PARAKEET_TEST_AUDIO_DIR}/abcba.wav")
     set(_qvp_abcba_rttm    "${PARAKEET_TEST_AUDIO_DIR}/abcba.rttm")
@@ -589,6 +591,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_abcdba_rttm   "${PARAKEET_TEST_AUDIO_DIR}/abcdba.rttm")
     set(_qvp_ctc_ref       "${PARAKEET_TEST_REF_DIR}/ctc-ref")
     set(_qvp_tdt_ref       "${PARAKEET_TEST_REF_DIR}/tdt-ref")
+    set(_qvp_rnnt_hybrid_ref "${PARAKEET_TEST_REF_DIR}/rnnt-ref")
     set(_qvp_sf_ref        "${PARAKEET_TEST_REF_DIR}/sortformer-ref")
     set(_qvp_nemotron_en_ref
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-320/offline")
@@ -902,14 +905,19 @@ if (PARAKEET_BUILD_TESTS)
     target_include_directories(test-nemotron-stream-step PRIVATE src include ggml/include)
     parakeet_apply_backend_defs(test-nemotron-stream-step)
     function(parakeet_register_nemotron_stream_case test_name reference_dir right_context)
+        set(_qvp_nemotron_stream_label "fixture")
+        if (ARGN)
+            set(_qvp_nemotron_stream_label "gpu")
+        endif()
         parakeet_register_test(${test_name}
             EXE test-nemotron-stream-step
-            LABEL "fixture"
+            LABEL "${_qvp_nemotron_stream_label}"
             ARGS
                 "${_qvp_nemotron_f16_gguf}"
                 "${reference_dir}"
                 "${right_context}"
                 "${_qvp_jfk_wav}"
+                ${ARGN}
             REQUIRES
                 "${_qvp_nemotron_f16_gguf}"
                 "${reference_dir}/step-000/processed_signal.npy"
@@ -934,6 +942,30 @@ if (PARAKEET_BUILD_TESTS)
         test-nemotron-stream-step-560 "${_qvp_nemotron_stream_560_ref}" 6)
     parakeet_register_nemotron_stream_case(
         test-nemotron-stream-step-1120 "${_qvp_nemotron_stream_1120_ref}" 13)
+
+    if (GGML_METAL)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-metal
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+    endif()
+
+    if (GGML_OPENCL)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-opencl-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
@@ -1185,6 +1217,13 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_ref}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-rnnt-decoder-parity
+        LABEL    "fixture"
+        EXE      test-tdt-decoder-parity
+        ARGS     "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
+                 "${_qvp_rnnt_hybrid_ref}" "--require-reference"
+        REQUIRES "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
+                 "${_qvp_rnnt_hybrid_ref}/token_ids.npy")
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)

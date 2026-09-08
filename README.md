@@ -42,7 +42,7 @@ Every component consumes one system ggml, so the whole stack shares a single ggm
 
 ```
 whisper   wav  -> log-mel -> encoder -> decoder -> text            (+ Silero VAD, + Core ML encoder)
-parakeet  wav  -> log-mel -> FastConformer encoder -> CTC | TDT | EOU | Sortformer
+parakeet  wav  -> log-mel -> FastConformer encoder -> CTC | RNN-T | TDT | EOU | Nemotron | Sortformer
                                                    -> text | speaker segments | turn boundary
 tts       text -> LM (T3 / Llama / Qwen2.5) -> acoustic tokens -> CFM or flow -> vocoder -> wav
                                                    (+ LavaSR denoise -> bandwidth extension)
@@ -97,7 +97,7 @@ engine-specific guides qualify model-level validation.
 | `silero-v6.2.0` | whisper | language agnostic | 2 M | `f16` | CPU, Metal, Vulkan, CUDA | voice activity detection; GPU is opt-in via `use_gpu`, default CPU |
 | `nvidia/parakeet-ctc-0.6b` | parakeet | English | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
 | `nvidia/parakeet-ctc-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
-| `ai4bharat/indic-conformer-600m-multilingual` | parakeet | 22 Indic (CTC-only export) | 600 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan | OpenCL/CUDA share the CTC path but remain unvalidated; requires `--language` / `EngineOptions::language` |
+| `ai4bharat/indic-conformer-600m-multilingual` | parakeet | 22 Indic | 600 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan | CTC export by default; `--head rnnt` exports the Transducer branch; CTC requires `--language` / `EngineOptions::language` |
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA | cache-aware streaming at 80/160/320/560/1120 ms; empty language selects `auto` |
@@ -117,7 +117,7 @@ LibriSpeech WER within noise of the CPU reference) but is not yet covered by
 hardware decoder parity CI. CUDA in these rows denotes hardware-validated
 availability, not CI coverage.
 
-Pair any CTC, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-model` for an attributed "who said what" transcript. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
+Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-model` for an attributed "who said what" transcript. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
 
 ### Text-to-speech and voice cloning
 
@@ -242,8 +242,13 @@ Models are converted from NeMo checkpoints with `download-all-models.sh` and
 including the AI4Bharat IndicConformer hybrid; see
 [engines/parakeet/README.md](engines/parakeet/README.md).
 
+Hybrid RNNT+CTC checkpoints export CTC by default. Pass `--head rnnt` to export
+their Transducer branch; conversion validates that the joint output is exactly
+vocabulary plus blank. `dump-rnnt-reference.py` selects the same NeMo branch
+for token-level parity testing.
+
 ```sh
-# transcribe (the GGUF metadata selects CTC / TDT / EOU)
+# transcribe (the GGUF metadata selects CTC / RNN-T / TDT / EOU / Nemotron)
 ./build/engines/parakeet/parakeet --model models/parakeet-tdt-0.6b-v3.q8_0.gguf \
                                   --wav engines/parakeet/test/samples/jfk.wav
 
@@ -348,6 +353,23 @@ CI numbers from the published `@qvac/asr-ggml@0.1.1` addon ([run 31603189415](ht
 | Whisper base | 0.035 | 699 ms | 0.0057 | 117 ms |
 | Whisper small | 0.122 | 2453 ms | 0.0098 | 200 ms |
 
+#### speech-cpp CI (2026-09-07, CPU + macOS)
+
+CPU only on Linux; macOS whisper rows run on Metal (`MTL0`).
+
+| Model | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Parakeet CTC 0.6b q8_0 | linux | ggml-cpu | 2111 | 0.192 | 858 |
+| Parakeet CTC 0.6b q8_0 | macos | ggml-cpu | 184 | 0.0170 | 914 |
+| Whisper tiny | linux | (CPU) | 1035 | 0.0940 | 182 |
+| Whisper tiny | macos | Metal | 565 | 0.0510 | 240 |
+| Whisper base | linux | (CPU) | 1906 | 0.173 | 298 |
+| Whisper base | macos | Metal | 584 | 0.0530 | 360 |
+| Whisper small | linux | (CPU) | 6122 | 0.557 | 797 |
+| Whisper small | macos | Metal | 564 | 0.0510 | 878 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
+
 ### Text-to-speech
 
 CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](https://github.com/tetherto/qvac/actions/runs/31603192731), 2026-08-12), `q4_0` GGUFs, same host. Full table: [engines/tts/README.md](engines/tts/README.md#performance).
@@ -359,6 +381,34 @@ CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](ht
 | Supertonic | 0.113 | 0.018 | 78 ms | 952 |
 | Supertonic Multilingual | 0.101 | 0.013 | 84 ms | 1087 |
 | Supertonic 3 | 0.225 | 0.029 | 118 ms | 631 |
+
+#### speech-cpp CI (2026-09-07, CPU + macOS)
+
+| Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Chatterbox: chatterbox-t3-turbo-q8_0 | linux | CPU | 8078 | — | 1835 |
+| Chatterbox: chatterbox-t3-turbo-q8_0 | macos | CPU | 2626 | — | 1746 |
+| Supertonic: supertonic3-q8_0 | linux | (CPU) | 708 | 0.484 | 876 |
+| Supertonic: supertonic3-q8_0 | macos | (CPU) | 49 | 0.0340 | 584 |
+| Parler: parler-mini-v1-q8_0 | linux | CPU | 249362 | 18.8 | 1964 |
+| Parler: parler-mini-v1-q8_0 | macos | MTL0 (Metal) | 12204 | 0.582 | 1307 |
+| Cosyvoice: cosyvoice3-llm-q8_0 | linux | CPU | 67695 | 18.0 | 1416 |
+| Cosyvoice: cosyvoice3-llm-q8_0 | macos | CPU | 46825 | 12.3 | 1467 |
+
+`—` RTF for chatterbox because it is text-driven variable output.
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
+
+### Music generation & other engines (speech-cpp CI, 2026-09-07)
+
+| Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Acestep: Qwen3-Embedding-0.6B-Q8_0 | linux | (CPU) | 36817 | 9.20 | 1702 |
+| Acestep: Qwen3-Embedding-0.6B-Q8_0 | macos | (CPU) | 6698 | 1.67 | 2222 |
+| Lavasr: lavasr-denoiser-f16 | linux | (CPU) | 4102 | 0.684 | 155 |
+| Lavasr: lavasr-denoiser-f16 | macos | (CPU) | 2090 | 0.348 | 209 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
 ### Brain-computer interface
 

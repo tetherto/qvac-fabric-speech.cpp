@@ -180,6 +180,13 @@ CUDA. CPU and OpenCL use the scalar decoder path; OpenCL lacks the graph
 operation support required by this decoder path. The EOU encoder can still run
 on OpenCL while its decoder runs scalar.
 
+Nemotron 3.5 ASR streaming is supported on OpenCL (Adreno 700+). The encoder
+runs on the GPU and the cache-aware streaming operating points (80, 160, 320,
+560, 1120 ms) are honoured. The transducer decode runs host-side on OpenCL,
+same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
+that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
+opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
+
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control
@@ -305,8 +312,10 @@ Keep the quantization in explicit filenames:
 
 Use f16 for numerical parity against NeMo references and q8_0 for normal runtime
 fixtures. Small tensors or dimensions unsuitable for block quantization remain
-f16. Hybrid IndicConformer exports are CTC-only and include per-language token
-ranges.
+f16. Hybrid RNNT+CTC checkpoints export their CTC branch by default; pass
+`--head rnnt` to export the Transducer branch instead. RNN-T conversion rejects
+checkpoints whose joint output is not exactly vocabulary plus blank, preventing
+a duration-bearing TDT head from being mislabeled as plain RNN-T.
 
 Recorded CTC 0.6B quantization results on an M4 Air CPU:
 
@@ -330,6 +339,10 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --out engines/parakeet/models/indic-conformer-600m-multilingual.q8_0.gguf \
   --quant q8_0
 ```
+
+To select the same checkpoint's RNN-T branch, add `--head rnnt` and use a
+distinct output filename. The auxiliary `ctc_decoder.*` tensors are then
+ignored.
 
 ## Public C++ API
 
@@ -425,7 +438,11 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
 Useful groups include `--threads`, `--n-gpu-layers`, `--backends-dir`,
 `--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
-and `--dump-mel`. Run `parakeet --help` for the complete list.
+and `--dump-mel`. Run `parakeet --help` for the complete list. `--bench`
+covers the transcription models only: the diarization path (a Sortformer GGUF
+at `--model`) and the attributed path (`--diarization-model`) return before
+the bench loop, ignoring the `--bench*` flags — time the invocation externally
+to benchmark those.
 
 ```bash
 build-parakeet/parakeet \
@@ -523,6 +540,12 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
 python engines/parakeet/scripts/dump-ctc-reference.py \
   --wav engines/parakeet/test/samples/jfk.wav
 
+# Hybrid checkpoint: select its RNN-T branch in both conversion and NeMo.
+python engines/parakeet/scripts/dump-rnnt-reference.py \
+  --nemo-model engines/parakeet/models/stt_ka_fastconformer_hybrid_large_pc.nemo \
+  --wav engines/parakeet/test/samples/rnnt-ka-16k.wav \
+  --out engines/parakeet/artifacts/rnnt-ref
+
 cmake -S engines/parakeet -B build-parakeet -DCMAKE_BUILD_TYPE=Release
 cmake --build build-parakeet -j
 ctest --test-dir build-parakeet -N
@@ -539,6 +562,10 @@ GPU-bound and timing-bound labels:
 ```bash
 ctest --test-dir build-parakeet -LE 'gpu|perf' --output-on-failure
 ```
+
+`test-rnnt-decoder-parity` is enabled when the hybrid RNN-T GGUF, its WAV, and
+the NeMo `token_ids.npy` dump are available. It requires bit-exact token IDs
+between the reference and the current shared RNN-T/TDT decoder.
 
 Model-free logic tests (`-L unit`) cover the CTC language mask, mel FFT
 parity and per-feature CMVN, RNN-T graph construction, long-form window
@@ -575,6 +602,25 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 12 August 2026, runner `qvac-ubuntu2204-x64-gpu`, benchmarking the published
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
+
+### speech-cpp CI (2026-09-07)
+
+Fresh CPU-baseline snapshot from `speech-benchmark-desktop.yml` on the
+hosted-Linux and self-hosted macOS runners (5 timed runs + 1 warmup, `jfk.wav`
+fixture, ~11 s).
+
+| Model | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|---:|---:|---:|
+| Parakeet CTC 0.6b q8_0 | linux | ggml-cpu | 2111 | 0.192 | 858 |
+| Parakeet CTC 0.6b q8_0 | macos | ggml-cpu | 184 | 0.0170 | 914 |
+| Whisper base | linux | (CPU) | 1906 | 0.173 | 298 |
+| Whisper base | macos | Metal | 584 | 0.0530 | 360 |
+| Whisper small | linux | (CPU) | 6122 | 0.557 | 797 |
+| Whisper small | macos | Metal | 564 | 0.0510 | 878 |
+| Whisper tiny | linux | (CPU) | 1035 | 0.0940 | 182 |
+| Whisper tiny | macos | Metal | 565 | 0.0510 | 240 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
 ### TDT decode on CUDA and Metal
 

@@ -4,6 +4,7 @@ from typing import Sequence
 
 
 QUANT_CHOICES = ["f32", "f16", "q8_0", "q5_0", "q4_0"]
+HEAD_CHOICES = ["auto", "ctc", "rnnt", "tdt", "eou", "sortformer"]
 DEFAULT_MODEL_STEM = "parakeet-ctc-0.6b"
 
 
@@ -45,6 +46,16 @@ def parse_args(
         "--hf-repo",
         default="nvidia/parakeet-ctc-0.6b",
         help="HF model id to download from if --ckpt is missing.",
+    )
+    parser.add_argument(
+        "--head",
+        choices=HEAD_CHOICES,
+        default="auto",
+        help=(
+            "Override the auto-detected head. Use 'rnnt' to export the "
+            "Transducer branch of a hybrid RNNT+CTC checkpoint instead of "
+            "its default CTC branch."
+        ),
     )
     args = parser.parse_args(argv)
     if args.out is None:
