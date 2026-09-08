@@ -7,8 +7,6 @@
       "binary":                  "Path (relative to build/) of the executable to invoke.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
       "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally.",
-      "darwin_archives":         "Optional archives fetched only on Darwin and extracted into models/<family>/. Used for directory-shaped runtime assets such as compiled Core ML .mlmodelc bundles.",
-      "darwin_required_paths":   "Paths, relative to models/<family>/, that must exist after Darwin archives are extracted.",
       "coreml_compare_on_darwin":"Run the native benchmark twice on Darwin: required Core ML first, then the same command with PARAKEET_COREML_DISABLE=1 as the ggml baseline.",
       "args":                    "Command-line arguments as a JSON array (one element per argv token, so multi-word values stay a single token). Placeholders expanded by run-family.sh per-element: ${MODEL_DIR}, ${MODELS_ROOT}, ${AUDIO_DIR}, ${MODEL_PATH}, and for bench_kind=native also ${RUNS}, ${WARMUP}, ${JSON_OUT}. Native families put the runs/warmup/json-out flags in `args` because their spellings differ (--json-out vs --bench-json, --runs vs --bench-runs).",
       "audio_duration_seconds":  "Length of the reference input audio (for ASR) or requested output audio (for TTS/music). Used to compute wall-based RTF when the bench binary does not report one. Null when the wall-clock isn't a fair RTF proxy (e.g. TTS with variable-length output).",
@@ -37,18 +35,12 @@
     "binary":       "engines/parakeet/parakeet",
     "s3_prefix":    "parakeet",
     "models": [
-      "2026-05-11/parakeet-tdt-0.6b-v3.q8_0.gguf"
-    ],
-    "darwin_archives": [
-      "2026-09-08/parakeet-tdt-0.6b-v3-encoder.mlmodelc.tar.gz"
-    ],
-    "darwin_required_paths": [
-      "parakeet-tdt-0.6b-v3-encoder.mlmodelc"
+      "2026-05-11/parakeet-tdt-0.6b-v3.f16.gguf"
     ],
     "coreml_compare_on_darwin": true,
     "args": [
       "--verbose",
-      "--model",       "${MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf",
+      "--model",       "${MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf",
       "--wav",         "${AUDIO_DIR}/jfk.wav",
       "--n-gpu-layers", "999",
       "--bench",

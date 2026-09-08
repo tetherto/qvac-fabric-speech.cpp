@@ -272,6 +272,28 @@ jobs:
               notes:"pre-flight seed — an infrastructure step (AWS OIDC, ggml build, cmake configure) did not complete; the row was never overwritten by run-family.sh."}' \
             > artifacts/result.json
 
+      # The compiled bundle is generated on the benchmark machine from the
+      # exact F16 GGUF under test. Cache it in GitHub Actions (not the model
+      # registry) so only the first run for a given exporter revision pays the
+      # conversion cost.
+      - name: Cache generated Parakeet Core ML sidecar
+        if: runner.os == 'macOS' && matrix.family == 'parakeet'
+        id: parakeet-coreml-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet/parakeet-tdt-0.6b-v3-encoder.mlmodelc
+          key: parakeet-tdt-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Install Core ML exporter dependencies
+        if: runner.os == 'macOS' && matrix.family == 'parakeet' && steps.parakeet-coreml-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          command -v python3.11 >/dev/null || brew install python@3.11
+          python3.11 -m venv .venv-coreml
+          .venv-coreml/bin/python -m pip install --upgrade pip
+          .venv-coreml/bin/python -m pip install \
+            -r engines/parakeet/scripts/requirements-coreml.txt
+
       - name: Install ccache
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -396,6 +418,7 @@ jobs:
         env:
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
           RUNS_PER_BENCH:  ${{ needs.plan.outputs.runs_per_bench }}
+          PARAKEET_COREML_PYTHON: ${{ github.workspace }}/.venv-coreml/bin/python
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           set -euo pipefail

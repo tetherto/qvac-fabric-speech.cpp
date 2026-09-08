@@ -224,42 +224,6 @@ fetch_models() {
     aws s3 cp "$s3url" "$dest" --no-progress
   done
 
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    local assets_ready="true"
-    local required_path
-    while IFS= read -r required_path; do
-      [[ -z "$required_path" ]] && continue
-      if [[ ! -e "$MODEL_DIR/$required_path" ]]; then assets_ready="false"; fi
-    done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_required_paths[]?' "$FAMILIES_JSON")
-
-    if [[ "$assets_ready" != "true" ]]; then
-      local archive_key archive_name archive_dest
-      while IFS= read -r archive_key; do
-        [[ -z "$archive_key" ]] && continue
-        archive_name="${archive_key##*/}"
-        archive_dest="$MODEL_DIR/$archive_name"
-        if [[ ! -f "$archive_dest" ]]; then
-          if [[ -z "$bucket" ]]; then
-            echo "required local Darwin archive is missing: $archive_dest" >&2
-            return 1
-          fi
-          local archive_url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$archive_key"
-          echo "fetch $archive_url -> $archive_dest"
-          aws s3 cp "$archive_url" "$archive_dest" --no-progress
-        fi
-        echo "extract $archive_dest -> $MODEL_DIR"
-        tar -xzf "$archive_dest" -C "$MODEL_DIR"
-      done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_archives[]?' "$FAMILIES_JSON")
-    fi
-
-    while IFS= read -r required_path; do
-      [[ -z "$required_path" ]] && continue
-      if [[ ! -e "$MODEL_DIR/$required_path" ]]; then
-        echo "required Darwin runtime asset is missing after extraction: $MODEL_DIR/$required_path" >&2
-        return 1
-      fi
-    done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_required_paths[]?' "$FAMILIES_JSON")
-  fi
   return 0
 }
 
@@ -286,6 +250,37 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 JSON_OUT="$tmp_dir/native.json"
+
+# The Core ML bundle is derived from the exact F16 model under test. A restored
+# Actions cache makes this a no-op on subsequent runs; the first run exports and
+# compiles locally on the Apple Silicon benchmark host.
+if [[ "$(uname -s)" == "Darwin" ]] &&
+   [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
+  coreml_sidecar="$MODEL_DIR/parakeet-tdt-0.6b-v3-encoder.mlmodelc"
+  if [[ ! -d "$coreml_sidecar" ]]; then
+    coreml_python="${PARAKEET_COREML_PYTHON:-python3}"
+    if [[ ! -x "$coreml_python" ]] && ! command -v "$coreml_python" >/dev/null 2>&1; then
+      emit_json "run-failed" null null null " (Core ML exporter Python not found: $coreml_python)"
+      exit 0
+    fi
+    coreml_package="$tmp_dir/parakeet-tdt-0.6b-v3-encoder.mlpackage"
+    echo "generating Core ML encoder sidecar from the benchmark GGUF" >&2
+    if ! "$coreml_python" engines/parakeet/scripts/export-encoder-coreml.py \
+        --gguf "$MODEL_DIR/parakeet-tdt-0.6b-v3.f16.gguf" \
+        --n-mel-frames 1501 \
+        --palettize-bits 6 \
+        --palettize-group-size 16 \
+        --out "$coreml_package" \
+        --compile-dir "$MODEL_DIR"; then
+      emit_json "run-failed" null null null " (Core ML sidecar generation failed)"
+      exit 0
+    fi
+  fi
+  if [[ ! -d "$coreml_sidecar" ]]; then
+    emit_json "run-failed" null null null " (Core ML exporter did not produce $coreml_sidecar)"
+    exit 0
+  fi
+fi
 
 # ---- build the argv array from the JSON-array `args` field -----------------
 # families.json stores `args` as a JSON array so multi-word values (e.g.
@@ -484,6 +479,10 @@ case "$BENCH_KIND" in
 
       if [[ "$(jq -r '.encoder_coreml_all_runs // false' "$baseline_json")" == "true" ]]; then
         emit_json "run-failed" null null null " (PARAKEET_COREML_DISABLE was ignored by the baseline run)"
+        exit 0
+      fi
+      if [[ "$(jq -r '.transcript // ""' "$coreml_json")" != "$(jq -r '.transcript // ""' "$baseline_json")" ]]; then
+        emit_json "run-failed" null null null " (Core ML and forced-ggml transcripts differ)"
         exit 0
       fi
 
