@@ -2303,9 +2303,13 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 // Precision-driven conversion (ours).  Covers f32 → q8_0,
                 // q8_0 → f32, f16 → f32 etc.  Buffered here, uploaded later.
                 convert_supertonic_tensor_data(src, dst_type, converted_tensors[name]);
-            } else if (should_expand_supertonic_tensor(src->type)) {
+            } else if (dst_type == GGML_TYPE_F32 &&
+                       should_expand_supertonic_tensor(src->type)) {
                 // Legacy fallback: f16/q8_0 src with f32 dst that
-                // didn't go through the conversion helper above.
+                // didn't go through the conversion helper above.  The dst
+                // test matters: a packed src kept at its own type needs no
+                // expansion, and staging one here would upload four bytes
+                // per element into a block-quantized tensor.
                 expanded_f32_tensors[name] = expand_supertonic_tensor_to_f32(src);
             }
         }
