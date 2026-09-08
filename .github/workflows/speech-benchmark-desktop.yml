@@ -275,20 +275,27 @@ jobs:
               notes:"pre-flight seed — an infrastructure step (AWS OIDC, ggml build, cmake configure) did not complete; the row was never overwritten by run-family.sh."}' \
             > artifacts/result.json
 
-      # The compiled bundle is generated on the benchmark machine from the
-      # exact F16 GGUF under test. Cache it in GitHub Actions (not the model
-      # registry) so only the first run for a given exporter revision pays the
-      # conversion cost.
+      # The F16 GGUF and compiled bundle are generated on the benchmark machine.
+      # Cache them independently: if Core ML export fails after GGUF conversion,
+      # the next run can reuse the GGUF while retrying only the sidecar export.
+      - name: Cache generated Parakeet F16 GGUF
+        if: runner.os == 'macOS' && matrix.family == 'parakeet'
+        id: parakeet-f16-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet/parakeet-tdt-0.6b-v3.f16.gguf
+          key: parakeet-tdt-f16-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/convert-nemo-to-gguf.py', 'engines/parakeet/scripts/converter_args.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
       - name: Cache generated Parakeet Core ML sidecar
         if: runner.os == 'macOS' && matrix.family == 'parakeet'
         id: parakeet-coreml-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: bench-models/parakeet/parakeet-tdt-0.6b-v3-encoder.mlmodelc
-          key: parakeet-tdt-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          key: parakeet-tdt-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/convert-nemo-to-gguf.py', 'engines/parakeet/scripts/converter_args.py', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Install Core ML exporter dependencies
-        if: runner.os == 'macOS' && matrix.family == 'parakeet' && steps.parakeet-coreml-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'macOS' && matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')
         run: |
           set -euo pipefail
           coreml_python="$(command -v python3.11 || true)"
@@ -304,6 +311,21 @@ jobs:
           .venv-coreml/bin/python -m pip install --upgrade pip
           .venv-coreml/bin/python -m pip install \
             -r engines/parakeet/scripts/requirements-coreml.txt
+
+      - name: Generate Parakeet F16 GGUF
+        if: runner.os == 'macOS' && matrix.family == 'parakeet' && steps.parakeet-f16-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p bench-models/parakeet
+          nemo_checkpoint="$RUNNER_TEMP/parakeet-tdt-0.6b-v3.nemo"
+          curl --fail --location --retry 3 \
+            --output "$nemo_checkpoint" \
+            https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo
+          .venv-coreml/bin/python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+            --ckpt "$nemo_checkpoint" \
+            --hf-repo nvidia/parakeet-tdt-0.6b-v3 \
+            --quant f16 \
+            --out bench-models/parakeet/parakeet-tdt-0.6b-v3.f16.gguf
 
       - name: Install ccache
         run: |

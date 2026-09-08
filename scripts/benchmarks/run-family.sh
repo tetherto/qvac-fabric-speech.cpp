@@ -221,7 +221,9 @@ fetch_models() {
     fi
     local s3url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$key"
     echo "fetch $s3url -> $dest"
-    aws s3 cp "$s3url" "$dest" --no-progress
+    if ! aws s3 cp "$s3url" "$dest" --no-progress; then
+      return 1
+    fi
   done
 
   return 0
