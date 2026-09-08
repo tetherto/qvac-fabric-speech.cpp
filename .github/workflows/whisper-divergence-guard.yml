@@ -19,6 +19,13 @@ on:
 permissions:
   contents: read
 
+# Dedupe per PR and per branch: a newer push or dispatch supersedes the
+# in-flight guard. master is exempt on purpose — pushes to the default branch
+# must not cancel each other.
+concurrency:
+  group: whisper-divergence-guard-${{ (github.ref == 'refs/heads/master' && github.run_id) || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   runner_names:
     permissions:
