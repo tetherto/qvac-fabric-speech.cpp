@@ -14,6 +14,11 @@
 #     "runner":         "linux",
 #     "os":             "Linux",
 #     "backend":        "CUDA" | "Metal" | "Vulkan" | "OpenCL" | "unknown",
+#     "encoder_backend":"coreml-all" | "ggml-metal" | ... | "unknown",
+#     "encoder_coreml_all_runs": true | false | null,
+#     "encoder_ms_median": 32.1,       # native engines that report it
+#     "baseline_encoder_ms_median": 121.3, # Darwin Core ML comparisons
+#     "encoder_speedup": 3.78,         # baseline / Core ML
 #     "wall_ms_median": 1234.5,
 #     "wall_ms_min":    1210.0,
 #     "wall_ms_max":    1301.2,
@@ -115,6 +120,16 @@ mkdir -p "$MODEL_DIR"
 
 # ---- output-JSON emitter (used from every exit path) ------------------------
 BACKEND="unknown"     # populated from JSON or stderr scrape on a successful run
+ENCODER_BACKEND="unknown"
+ENCODER_COREML_ALL_RUNS="null"
+ENCODER_MS_MEDIAN="null"
+BASELINE_BACKEND=""
+BASELINE_ENCODER_BACKEND=""
+BASELINE_ENCODER_MS_MEDIAN="null"
+BASELINE_INFERENCE_MS_MEDIAN="null"
+BASELINE_RTF_MEDIAN="null"
+ENCODER_SPEEDUP="null"
+INFERENCE_SPEEDUP="null"
 PEAK_RSS_MIB="null"   # tracked across runs; max seen
 RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ audio_duration_seconds)
 
@@ -127,6 +142,16 @@ emit_json() {
     --arg  runner "$RUNNER_LABEL" \
     --arg  os     "$uname_s" \
     --arg  backend "$BACKEND" \
+    --arg  encoder_backend "$ENCODER_BACKEND" \
+    --argjson encoder_coreml_all_runs "$ENCODER_COREML_ALL_RUNS" \
+    --argjson encoder_ms_median "$ENCODER_MS_MEDIAN" \
+    --arg  baseline_backend "$BASELINE_BACKEND" \
+    --arg  baseline_encoder_backend "$BASELINE_ENCODER_BACKEND" \
+    --argjson baseline_encoder_ms_median "$BASELINE_ENCODER_MS_MEDIAN" \
+    --argjson baseline_inference_ms_median "$BASELINE_INFERENCE_MS_MEDIAN" \
+    --argjson baseline_rtf_median "$BASELINE_RTF_MEDIAN" \
+    --argjson encoder_speedup "$ENCODER_SPEEDUP" \
+    --argjson inference_speedup "$INFERENCE_SPEEDUP" \
     --argjson wall_median "$median" \
     --argjson wall_min    "$wmin" \
     --argjson wall_max    "$wmax" \
@@ -136,6 +161,15 @@ emit_json() {
     --arg  status "$status" \
     --arg  notes  "$NOTES$extra" \
     '{family:$family, model:$model, runner:$runner, os:$os, backend:$backend,
+      encoder_backend:$encoder_backend,
+      encoder_coreml_all_runs:$encoder_coreml_all_runs,
+      encoder_ms_median:$encoder_ms_median,
+      baseline_backend:(if $baseline_backend == "" then null else $baseline_backend end),
+      baseline_encoder_backend:(if $baseline_encoder_backend == "" then null else $baseline_encoder_backend end),
+      baseline_encoder_ms_median:$baseline_encoder_ms_median,
+      baseline_inference_ms_median:$baseline_inference_ms_median,
+      baseline_rtf_median:$baseline_rtf_median,
+      encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
@@ -155,8 +189,7 @@ fi
 fetch_models() {
   local bucket="${MODEL_S3_BUCKET:-}"
   if [[ -z "$bucket" ]]; then
-    echo "MODEL_S3_BUCKET not set — skipping fetch (assuming local models present)" >&2
-    return 0
+    echo "MODEL_S3_BUCKET not set — skipping remote fetch (assuming local models present)" >&2
   fi
 
   # `mapfile -t` is bash 4+, so the macOS self-hosted runner would break if
@@ -182,10 +215,51 @@ fetch_models() {
     local basename="${key##*/}"
     local dest="$MODEL_DIR/$basename"
     if [[ -f "$dest" ]]; then continue; fi
+    if [[ -z "$bucket" ]]; then
+      echo "required local model is missing: $dest" >&2
+      return 1
+    fi
     local s3url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$key"
     echo "fetch $s3url -> $dest"
     aws s3 cp "$s3url" "$dest" --no-progress
   done
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local assets_ready="true"
+    local required_path
+    while IFS= read -r required_path; do
+      [[ -z "$required_path" ]] && continue
+      if [[ ! -e "$MODEL_DIR/$required_path" ]]; then assets_ready="false"; fi
+    done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_required_paths[]?' "$FAMILIES_JSON")
+
+    if [[ "$assets_ready" != "true" ]]; then
+      local archive_key archive_name archive_dest
+      while IFS= read -r archive_key; do
+        [[ -z "$archive_key" ]] && continue
+        archive_name="${archive_key##*/}"
+        archive_dest="$MODEL_DIR/$archive_name"
+        if [[ ! -f "$archive_dest" ]]; then
+          if [[ -z "$bucket" ]]; then
+            echo "required local Darwin archive is missing: $archive_dest" >&2
+            return 1
+          fi
+          local archive_url="s3://$bucket/qvac_models_compiled/ggml/$S3_PREFIX/$archive_key"
+          echo "fetch $archive_url -> $archive_dest"
+          aws s3 cp "$archive_url" "$archive_dest" --no-progress
+        fi
+        echo "extract $archive_dest -> $MODEL_DIR"
+        tar -xzf "$archive_dest" -C "$MODEL_DIR"
+      done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_archives[]?' "$FAMILIES_JSON")
+    fi
+
+    while IFS= read -r required_path; do
+      [[ -z "$required_path" ]] && continue
+      if [[ ! -e "$MODEL_DIR/$required_path" ]]; then
+        echo "required Darwin runtime asset is missing after extraction: $MODEL_DIR/$required_path" >&2
+        return 1
+      fi
+    done < <(jq -r --arg family "$FAMILY" '.[$family].darwin_required_paths[]?' "$FAMILIES_JSON")
+  fi
   return 0
 }
 
@@ -232,10 +306,14 @@ expand_placeholder() {
 }
 
 BENCH_ARGS=()
-_line=""
-while IFS= read -r _line; do
-  BENCH_ARGS+=("$(expand_placeholder "$_line")")
-done < <(jq -r --arg family "$FAMILY" '.[$family].args[]?' "$FAMILIES_JSON")
+build_bench_args() {
+  BENCH_ARGS=()
+  local line=""
+  while IFS= read -r line; do
+    BENCH_ARGS+=("$(expand_placeholder "$line")")
+  done < <(jq -r --arg family "$FAMILY" '.[$family].args[]?' "$FAMILIES_JSON")
+}
+build_bench_args
 
 BINARY="$BUILD_DIR/$BINARY_REL"
 if ! [[ -x "$BINARY" ]]; then
@@ -370,6 +448,85 @@ run_one_time_wrapped() {
 # ---- run --------------------------------------------------------------------
 case "$BENCH_KIND" in
   native)
+    coreml_compare="$(spec_field coreml_compare_on_darwin)"
+    if [[ "$(uname -s)" == "Darwin" && "$coreml_compare" == "true" ]]; then
+      coreml_json="$tmp_dir/native-coreml.json"
+      coreml_stderr="$tmp_dir/coreml.err"
+      JSON_OUT="$coreml_json"
+      build_bench_args
+      BENCH_ARGS+=("--require-coreml")
+      if ! run_native "$coreml_json" "$coreml_stderr" >/dev/null; then
+        tail -40 "$coreml_stderr" >&2 || true
+        BACKEND="$(parse_backend_from_stderr "$coreml_stderr")"
+        BACKEND="${BACKEND:-unknown}"
+        emit_json "run-failed" null null null " (required Core ML benchmark failed; verify the sidecar and runner compatibility)"
+        exit 0
+      fi
+
+      if [[ "$(jq -r '.encoder_coreml_all_runs // false' "$coreml_json")" != "true" ]] ||
+         [[ "$(jq -r '.encoder_backend // ""' "$coreml_json")" != coreml-* ]]; then
+        emit_json "run-failed" null null null " (benchmark completed without Core ML on every encoder invocation)"
+        exit 0
+      fi
+
+      baseline_json="$tmp_dir/native-metal.json"
+      baseline_stderr="$tmp_dir/metal.err"
+      JSON_OUT="$baseline_json"
+      build_bench_args
+      if ! PARAKEET_COREML_DISABLE=1 run_native "$baseline_json" "$baseline_stderr" >/dev/null; then
+        tail -40 "$baseline_stderr" >&2 || true
+        BACKEND="$(jq -r '.backend // "unknown"' "$coreml_json")"
+        ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$coreml_json")"
+        ENCODER_COREML_ALL_RUNS="true"
+        emit_json "run-failed" null null null " (forced-ggml baseline benchmark failed)"
+        exit 0
+      fi
+
+      if [[ "$(jq -r '.encoder_coreml_all_runs // false' "$baseline_json")" == "true" ]]; then
+        emit_json "run-failed" null null null " (PARAKEET_COREML_DISABLE was ignored by the baseline run)"
+        exit 0
+      fi
+
+      BACKEND="$(jq -r '.backend // "unknown"' "$coreml_json")"
+      ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$coreml_json")"
+      ENCODER_COREML_ALL_RUNS="true"
+      ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$coreml_json")"
+      BASELINE_BACKEND="$(jq -r '.backend // "unknown"' "$baseline_json")"
+      BASELINE_ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$baseline_json")"
+      BASELINE_ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$baseline_json")"
+      BASELINE_INFERENCE_MS_MEDIAN="$(jq -r '.inference_ms.median // null' "$baseline_json")"
+      BASELINE_RTF_MEDIAN="$(jq -r '.rtf_median // null' "$baseline_json")"
+      coreml_inference="$(jq -r '.inference_ms.median // null' "$coreml_json")"
+      RTF_MEDIAN="$(jq -r '.rtf_median // null' "$coreml_json")"
+
+      if [[ "$ENCODER_MS_MEDIAN" != "null" && "$BASELINE_ENCODER_MS_MEDIAN" != "null" ]]; then
+        ENCODER_SPEEDUP="$(jq -n --argjson base "$BASELINE_ENCODER_MS_MEDIAN" --argjson active "$ENCODER_MS_MEDIAN" 'if $active > 0 then $base / $active else null end')"
+      fi
+      if [[ "$coreml_inference" != "null" && "$BASELINE_INFERENCE_MS_MEDIAN" != "null" ]]; then
+        INFERENCE_SPEEDUP="$(jq -n --argjson base "$BASELINE_INFERENCE_MS_MEDIAN" --argjson active "$coreml_inference" 'if $active > 0 then $base / $active else null end')"
+      fi
+
+      coreml_rss="$(parse_rss_from_time_stderr "$coreml_stderr")"
+      baseline_rss="$(parse_rss_from_time_stderr "$baseline_stderr")"
+      if [[ -n "$coreml_rss" && -n "$baseline_rss" ]]; then
+        PEAK_RSS_MIB="$(awk -v a="$coreml_rss" -v b="$baseline_rss" 'BEGIN { print (a > b ? a : b) }')"
+      elif [[ -n "$coreml_rss" ]]; then
+        PEAK_RSS_MIB="$coreml_rss"
+      elif [[ -n "$baseline_rss" ]]; then
+        PEAK_RSS_MIB="$baseline_rss"
+      fi
+
+      artifact_dir="$(dirname "$OUT")"
+      mkdir -p "$artifact_dir"
+      cp "$coreml_json" "$artifact_dir/parakeet-tdt-coreml-native.json"
+      cp "$baseline_json" "$artifact_dir/parakeet-tdt-metal-native.json"
+
+      coreml_min="$(jq -r '.inference_ms.min // null' "$coreml_json")"
+      coreml_max="$(jq -r '.inference_ms.max // null' "$coreml_json")"
+      emit_json "ok" "$coreml_inference" "$coreml_min" "$coreml_max"
+      exit 0
+    fi
+
     stderr_log="$tmp_dir/stderr.log"
     parsed=""
     if ! parsed="$(run_native "$JSON_OUT" "$stderr_log")"; then
@@ -392,6 +549,9 @@ case "$BENCH_KIND" in
       BACKEND="$(parse_backend_from_stderr "$stderr_log")"
       BACKEND="${BACKEND:-unknown}"
     fi
+    ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$JSON_OUT")"
+    ENCODER_COREML_ALL_RUNS="$(jq -r '.encoder_coreml_all_runs // null' "$JSON_OUT")"
+    ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$JSON_OUT")"
     rss="$(parse_rss_from_time_stderr "$stderr_log")"
     [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
     emit_json "ok" "$n_med" "$n_min" "$n_max"

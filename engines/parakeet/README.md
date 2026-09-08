@@ -323,6 +323,24 @@ continues to use Metal. Confirm encoder execution using `encoder_backend` and
 `encoder_coreml_all_runs`. A `coreml-all` encoder label means Core ML may place
 operations across ANE, GPU, and CPU; it does not mean ANE-only execution.
 
+The desktop benchmark workflow expects the compiled sidecar as a compressed
+model-registry asset. Package the directory produced by the exporter and upload
+it once (the workflow downloads and extracts it beside the TDT GGUF):
+
+```bash
+tar -C engines/parakeet/models -czf \
+  /tmp/parakeet-tdt-0.6b-v3-encoder.mlmodelc.tar.gz \
+  parakeet-tdt-0.6b-v3-encoder.mlmodelc
+
+aws s3 cp /tmp/parakeet-tdt-0.6b-v3-encoder.mlmodelc.tar.gz \
+  "s3://${MODEL_S3_BUCKET}/qvac_models_compiled/ggml/parakeet/2026-09-08/parakeet-tdt-0.6b-v3-encoder.mlmodelc.tar.gz"
+```
+
+On the self-hosted macOS runner the workflow builds with `PARAKEET_COREML=ON`,
+runs a Core ML-required benchmark, then repeats the identical workload with
+`PARAKEET_COREML_DISABLE=1`. Its job summary reports both raw medians and the
+baseline/Core ML speedups; both native benchmark JSON files are also uploaded.
+
 Windowing bounds Core ML input shapes and memory, but full-context attention is
 then local to each overlapping window. The stitched result should therefore be
 treated as close to, rather than bit-identical with, a single full-length encode;

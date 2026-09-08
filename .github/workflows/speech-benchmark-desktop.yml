@@ -15,7 +15,7 @@ on:
       model_families:
         description: >-
           Comma-separated family names, or "all". Families:
-          whisper, parakeet, sortformer, chatterbox, supertonic, parler,
+          whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, chatterbox, supertonic, parler,
           cosyvoice, audio8, lavasr, acestep, minimax.
         required: false
         default: "all"
@@ -262,6 +262,10 @@ jobs:
             --arg os     "$(uname -s)" \
             '{family:$family, model:$model, runner:$runner, os:$os,
               backend:"unknown",
+              encoder_backend:"unknown", encoder_coreml_all_runs:null,
+              encoder_ms_median:null, baseline_encoder_ms_median:null,
+              baseline_inference_ms_median:null,
+              encoder_speedup:null, inference_speedup:null,
               wall_ms_median:null, wall_ms_min:null, wall_ms_max:null,
               rtf_median:null, peak_rss_mib:null,
               runs:0, status:"infrastructure-failed",
@@ -357,11 +361,14 @@ jobs:
           cmake --install ggml-src/build
 
       - name: Configure umbrella build
+        env:
+          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && matrix.family == 'parakeet' && 'ON' || 'OFF' }}
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DSPEECH_BUILD_TESTS=OFF \
             -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DPARAKEET_COREML="$PARAKEET_COREML_FLAG" \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build bench target
@@ -393,8 +400,12 @@ jobs:
         run: |
           set -euo pipefail
           extra_args=()
+          warmup_runs=1
           if [[ -n "$WHISPER_SIZE" ]]; then
             extra_args+=(--whisper-size "$WHISPER_SIZE")
+          fi
+          if [[ "$FAMILY" == "parakeet" && "$RUNNER_OS" == "macOS" ]]; then
+            warmup_runs=3
           fi
           # run-family.sh handles all failure paths (missing binary, fetch
           # error, warmup/run failure) by writing a result.json with the
@@ -406,6 +417,7 @@ jobs:
           scripts/benchmarks/run-family.sh \
             --family "$FAMILY" \
             --runs "$RUNS_PER_BENCH" \
+            --warmup "$warmup_runs" \
             --build-dir build \
             --models-root "$PWD/bench-models" \
             --audio-dir engines/parakeet/test/samples \
@@ -419,7 +431,7 @@ jobs:
         if: always()
         with:
           name: bench-${{ matrix.family }}${{ matrix.whisper_size && format('-{0}', matrix.whisper_size) || '' }}-${{ matrix.runner_label }}
-          path: artifacts/result.json
+          path: artifacts/
           retention-days: 14
 
   # ---------- 3. Aggregate + render summary table -------------------------

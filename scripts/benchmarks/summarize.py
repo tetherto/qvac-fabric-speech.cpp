@@ -12,8 +12,9 @@
 #
 # Column shape mirrors engines/audiogen/benchmarks/comparison/reports/*.md
 # (the closest in-repo precedent for this project's benchmark tables):
-# Family | Model | Runner | OS | Backend | Wall ms (median/min/max) | RTF
-# (median) | Peak RSS MiB | Runs | Status | Notes.
+# The shared columns cover every family. Native engines can additionally report
+# encoder backend/timing; the Parakeet Darwin comparison adds its forced-ggml
+# baseline and baseline/Core ML speedups.
 
 from __future__ import annotations
 
@@ -81,26 +82,52 @@ def fmt_rss(v: Any) -> str:
         return "—"
 
 
+def fmt_speedup(v: Any) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.2f}×"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_coreml_verified(v: Any) -> str:
+    if v is True:
+        return "yes"
+    if v is False:
+        return "no"
+    return "—"
+
+
 def render_markdown(results: list[dict[str, Any]]) -> str:
     """Single fixed-column table. Empty result set still produces a valid table."""
     header = (
-        "| Family | Model | Runner | OS | Backend | Median wall ms | Min | Max "
-        "| Median RTF | Peak RSS MiB | Runs | Status | Notes |\n"
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|\n"
+        "| Family | Model | Runner | OS | Decoder | Encoder | Baseline encoder | Core ML verified "
+        "| Encoder ms | Baseline encoder ms | Encoder speedup | End-to-end ms "
+        "| Baseline end-to-end ms | E2E speedup | RTF | Peak RSS MiB | Runs | Status | Notes |\n"
+        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
     rows = []
     for r in results:
         rows.append(
-            "| {family} | {model} | {runner} | {os} | {backend} | {median} | {min} | {max} "
-            "| {rtf} | {rss} | {runs} | {status} | {notes} |".format(
+            "| {family} | {model} | {runner} | {os} | {backend} | {encoder_backend} | {baseline_encoder_backend} "
+            "| {coreml_verified} | {encoder_ms} | {baseline_encoder_ms} | {encoder_speedup} "
+            "| {median} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {rss} "
+            "| {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
                 runner=r.get("runner", "?"),
                 os=r.get("os", "?"),
                 backend=r.get("backend", "?") or "unknown",
+                encoder_backend=r.get("encoder_backend", "—") or "unknown",
+                baseline_encoder_backend=r.get("baseline_encoder_backend") or "—",
+                coreml_verified=fmt_coreml_verified(r.get("encoder_coreml_all_runs")),
+                encoder_ms=fmt_ms(r.get("encoder_ms_median")),
+                baseline_encoder_ms=fmt_ms(r.get("baseline_encoder_ms_median")),
+                encoder_speedup=fmt_speedup(r.get("encoder_speedup")),
                 median=fmt_ms(r.get("wall_ms_median")),
-                min=fmt_ms(r.get("wall_ms_min")),
-                max=fmt_ms(r.get("wall_ms_max")),
+                baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
+                inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
@@ -109,7 +136,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
             )
         )
     if not rows:
-        rows.append("| _no results collected_ | | | | | | | | | | | | |")
+        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | |")
     return header + "\n".join(rows) + "\n"
 
 
@@ -129,6 +156,10 @@ def render_legend() -> str:
         "- **Backend** — extracted from the engine's `using <NAME> backend` stderr "
         "line. `unknown` means the log line was absent (usually a build-failed or "
         "CPU-only path that didn't emit it).\n"
+        "- **Core ML comparison** — the Parakeet Darwin row runs TDT twice on the "
+        "same Apple Silicon runner. `Core ML verified=yes` means every measured "
+        "encoder invocation used the sidecar; the baseline is forced through ggml "
+        "with `PARAKEET_COREML_DISABLE=1`. Speedup is baseline divided by Core ML.\n"
         "- **Status** — `ok` / `not-in-registry` (whisper `small`) / `missing-model` "
         "(minimax — no S3 path yet) / `build-failed` / `run-failed` / `fetch-failed` / "
         "`infrastructure-failed` (a pre-bench workflow step — AWS OIDC, ggml build, "
