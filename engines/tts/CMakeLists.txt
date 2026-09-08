@@ -2741,8 +2741,10 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_super3_gguf}"
         REQUIRES "${_tcb_super3_gguf}")
-    # gpu: the one-graph CFM loop, its [C, T] step and the batched CFG pass only
-    # exist off the CPU backend, so this arm is the one that exercises them.
+    # gpu: on a build with an Accelerate/CBLAS pointwise path the one-graph CFM
+    # loop, its [C, T] step and the batched CFG pass are off on CPU, so that arm
+    # is the one exercising them there. Without such a path the CPU arm takes
+    # them too.
     tts_cpp_register_test(test-supertonic-graph-rewrites-v3-gpu
         EXE      test-supertonic-graph-rewrites
         LABEL    "gpu"

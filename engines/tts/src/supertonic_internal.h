@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -724,6 +725,26 @@ inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
     // `ggml_backend_is_cpu` lives in the CPU backend shared library, which is
     // unlinkable under GGML_BACKEND_DL. Route through the registry-based shim.
     return model.backend == nullptr || ::tts_cpp::detail::backend_is_cpu(model.backend);
+}
+
+// The per-island CPU path runs many small graphs and stops scaling almost
+// immediately, so it keeps the conservative cap it was given.
+inline constexpr int kLegacyCpuThreadCap = 4;
+
+// Pure-logic resolver for the default thread count. A positive `requested`
+// always wins. Otherwise only the CPU backend on the fused one-graph path is
+// allowed past the legacy cap: a GPU backend runs a handful of host-side ops
+// and did not ask for more threads.
+//
+// The fused path leaves an eighth of the logical CPUs unsubscribed. Measured on
+// two 16-core / 32-thread Zen boxes across two prompt lengths: full
+// subscription costs 13 to 70 percent against this, and the regression survives
+// an OpenMP barrier, so it is oversubscription rather than ggml's spin barrier.
+inline int resolve_supertonic_thread_count(int requested, int hw, bool fused_cpu_path) {
+    if (requested > 0) return requested;
+    hw = std::max(1, hw);
+    if (!fused_cpu_path) return std::min(hw, kLegacyCpuThreadCap);
+    return std::max(1, hw - hw / 8);
 }
 
 // scheduler-based alloc + compute (Option A), used by stages

@@ -59,7 +59,7 @@ void test_scope_mirrors_cpu_model() {
     model.use_f16_attn   = false;
     {
         supertonic_op_dispatch_scope scope(model);
-        CHECK(supertonic_use_cpu_custom_ops() == true);
+        CHECK(supertonic_use_cpu_custom_ops() == cpu_pointwise_accel_compiled());
         CHECK(supertonic_use_f16_attn() == false);
     }
     CHECK(supertonic_use_cpu_custom_ops() == true);
@@ -133,7 +133,7 @@ void test_nested_scopes() {
         CHECK(supertonic_use_f16_attn() == true);
         {
             supertonic_op_dispatch_scope inner(cpu_model);
-            CHECK(supertonic_use_cpu_custom_ops() == true);
+            CHECK(supertonic_use_cpu_custom_ops() == cpu_pointwise_accel_compiled());
             CHECK(supertonic_use_f16_attn() == false);
         }
         // After inner unwinds, outer's state restored.
@@ -156,7 +156,7 @@ void test_independent_flags() {
     m.use_f16_attn   = true;
     {
         supertonic_op_dispatch_scope scope(m);
-        CHECK(supertonic_use_cpu_custom_ops() == true);
+        CHECK(supertonic_use_cpu_custom_ops() == cpu_pointwise_accel_compiled());
         CHECK(supertonic_use_f16_attn() == true);
     }
 
@@ -169,9 +169,51 @@ void test_independent_flags() {
     }
 }
 
+// Test 7 - The CPU-kernel preference tracks the compiled fast paths.
+//
+// The per-stage CPU fast paths (conv1d_f32, dense_matmul_time, the tail update)
+// only exist behind TTS_CPP_USE_ACCELERATE / TTS_CPP_USE_CBLAS. Without one,
+// preferring them would pick im2col + mul_mat over the fused and [C, T] graph
+// paths, so both predicates must follow the build, not the backend identity.
+void test_cpu_kernel_preference_tracks_compiled_accel() {
+    supertonic_model cpu_model;
+    cpu_model.backend        = nullptr;   // treated as the CPU path
+    cpu_model.backend_is_cpu = true;
+    CHECK(model_prefers_cpu_kernels(cpu_model) == cpu_pointwise_accel_compiled());
+    {
+        supertonic_op_dispatch_scope scope(cpu_model);
+        CHECK(supertonic_use_cpu_custom_ops() == cpu_pointwise_accel_compiled());
+    }
+}
+
+// Test 8 - Thread-count resolver.
+//
+// An explicit request always wins. Everything that is not the CPU backend on
+// the fused one-graph path keeps the legacy cap; the fused path leaves an
+// eighth of the logical CPUs unsubscribed because full subscription regresses.
+void test_thread_count_resolver() {
+    CHECK(resolve_supertonic_thread_count(7, 32, true)  == 7);
+    CHECK(resolve_supertonic_thread_count(7, 32, false) == 7);
+
+    CHECK(resolve_supertonic_thread_count(0, 32, false) == kLegacyCpuThreadCap);
+    CHECK(resolve_supertonic_thread_count(0, 2,  false) == 2);
+
+    CHECK(resolve_supertonic_thread_count(0, 32, true)  == 28);
+    CHECK(resolve_supertonic_thread_count(0, 16, true)  == 14);
+    CHECK(resolve_supertonic_thread_count(0, 8,  true)  == 7);
+
+    // Never zero, whatever hardware_concurrency reports.
+    CHECK(resolve_supertonic_thread_count(0, 1, true)  == 1);
+    CHECK(resolve_supertonic_thread_count(0, 0, true)  == 1);
+    CHECK(resolve_supertonic_thread_count(0, -1, true) == 1);
+    CHECK(resolve_supertonic_thread_count(0, 0, false) == 1);
+}
+
 } // namespace
 
 int main() {
+    test_cpu_kernel_preference_tracks_compiled_accel();
+    test_thread_count_resolver();
     test_default_flags();
     test_scope_mirrors_cpu_model();
     test_scope_mirrors_gpu_model();

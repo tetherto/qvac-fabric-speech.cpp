@@ -1781,33 +1781,11 @@ ggml_tensor * try_pretransposed_weight(const supertonic_model & model, const ggm
     return it->second;
 }
 
-// The per-island CPU path runs many small graphs and stops scaling almost
-// immediately, so it keeps the conservative cap it was given. The fused
-// one-graph path does not, and capping it there costs most of the machine.
-static constexpr int kLegacyCpuThreadCap = 4;
-
-// Leave an eighth of the logical CPUs unsubscribed. Measured on two 16-core /
-// 32-thread Zen boxes across two prompt lengths: full subscription costs 13% to
-// 70% against this, and the regression survives an OpenMP barrier, so it is
-// oversubscription rather than ggml's spin barrier.
-static int default_supertonic_thread_count(const supertonic_model & model) {
-    const int hw = std::max(1, (int) std::thread::hardware_concurrency());
-    // Only the CPU backend on the fused one-graph path benefits. A GPU backend
-    // runs a handful of host-side ops, so raising its thread count would change
-    // behaviour nobody asked to change.
-    const bool fused_cpu_path = model.backend_is_cpu && !model_prefers_cpu_kernels(model);
-    if (!fused_cpu_path) {
-        return std::min(hw, kLegacyCpuThreadCap);
-    }
-    return std::max(1, hw - hw / 8);
-}
-
 void supertonic_set_n_threads(supertonic_model & model, int n_threads) {
     configure_supertonic_blas_threads_once();
-    if (n_threads <= 0) {
-        n_threads = default_supertonic_thread_count(model);
-    }
-    model.n_threads = std::max(1, n_threads);
+    const bool fused_cpu_path = model.backend_is_cpu && !model_prefers_cpu_kernels(model);
+    model.n_threads = std::max(1, resolve_supertonic_thread_count(
+        n_threads, (int) std::thread::hardware_concurrency(), fused_cpu_path));
 }
 
 // Throw boundary for both compute paths: Supertonic is exception-based, the
