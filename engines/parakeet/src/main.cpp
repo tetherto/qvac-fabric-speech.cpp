@@ -152,6 +152,9 @@ void print_usage(const char * argv0) {
         "  --bench-runs N       timed runs for --bench (default 3)\n"
         "  --bench-warmup N     warmup runs NOT counted in stats (default 2)\n"
         "  --bench-json PATH    in --bench mode, also write the stats as JSON to PATH\n"
+        "  --require-coreml     require every benchmark encoder invocation to use\n"
+        "                       the TDT Core ML sidecar; fail instead of accepting\n"
+        "                       a missing sidecar or per-invocation ggml fallback\n"
         "  --profile            per-sub-stage encoder profiling: runs the encoder\n"
         "                       with n_layers = {0, 1, N/2, N} (N from the GGUF) and\n"
         "                       attributes time to subsampling / CTC-head / per-block.\n"
@@ -255,6 +258,7 @@ struct ExtraCliOpts {
     int         bench_runs    = 3;
     int         bench_warmup  = 2;
     std::string bench_json_path;
+    bool        require_coreml = false;
     bool        profile       = false;
     int         profile_runs  = 5;
     int         profile_warmup = 2;
@@ -334,6 +338,7 @@ struct RunTimes {
     double inference_ms   = 0.0;
     int    tokens         = 0;
     int    encoder_frames = 0;
+    bool   encoder_coreml = false;
 };
 
 struct AggStats {
@@ -426,6 +431,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.bench_warmup = std::max(0, std::atoi(argv[++i]));
         } else if (a == "--bench-json" && i + 1 < argc) {
             extra.bench_json_path = argv[++i];
+        } else if (a == "--require-coreml") {
+            extra.require_coreml = true;
         } else if (a == "--profile") {
             extra.profile = true;
         } else if (a == "--profile-runs" && i + 1 < argc) {
@@ -510,6 +517,26 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         return 3;
     }
     const double load_ms = ms_since(t_load);
+
+    if (extra.require_coreml) {
+        if (!extra.bench) {
+            PARAKEET_LOG_ERROR("error: --require-coreml is valid only with --bench\n");
+            return 3;
+        }
+        if (model.model_type != ParakeetModelType::TDT) {
+            PARAKEET_LOG_ERROR(
+                "error: --require-coreml currently supports only TDT models; loaded %s\n",
+                model_type_name(model.model_type));
+            return 3;
+        }
+        if (!model_encoder_on_coreml(model)) {
+            PARAKEET_LOG_ERROR(
+                "error: --require-coreml requested, but no TDT Core ML sidecar loaded; "
+                "build with PARAKEET_COREML=ON and place <model>-encoder.mlmodelc beside "
+                "the GGUF\n");
+            return 3;
+        }
+    }
 
     const auto t_wav = clock::now();
     std::vector<float> samples;
@@ -735,6 +762,14 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                                  /*capture_intermediates=*/false); rc != 0) return rc;
         times.enc_ms = ms_since(t2);
         times.encoder_frames = enc_out.n_enc_frames;
+        times.encoder_coreml = enc_out.used_coreml;
+
+        if (extra.require_coreml && !times.encoder_coreml) {
+            PARAKEET_LOG_ERROR(
+                "error: TDT Core ML encoder fell back to %s during benchmark\n",
+                model_active_backend_name(model).c_str());
+            return 31;
+        }
 
         if (const char * dump_path = std::getenv("PARAKEET_DUMP_OUR_MEL")) {
             FILE * fp = std::fopen(dump_path, "wb");
@@ -1145,6 +1180,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     enc_v.reserve(extra.bench_runs);
     dec_v.reserve(extra.bench_runs);
     inf_v.reserve(extra.bench_runs);
+    bool any_coreml = false;
+    bool all_coreml = true;
 
     int enc_frames_last = 0;
     for (int r = 0; r < extra.bench_runs; ++r) {
@@ -1155,6 +1192,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         dec_v.push_back(t.dec_ms);
         inf_v.push_back(t.inference_ms);
         enc_frames_last = t.encoder_frames;
+        any_coreml = any_coreml || t.encoder_coreml;
+        all_coreml = all_coreml && t.encoder_coreml;
         PARAKEET_LOG_INFO("[bench] run %d/%d    mel=%.1fms enc=%.1fms dec=%.1fms inference=%.1fms  RTF=%.3f\n",
                      r + 1, extra.bench_runs, t.mel_ms, t.enc_ms, t.dec_ms,
                      t.inference_ms, t.inference_ms / audio_ms);
@@ -1170,6 +1209,16 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     const double   rtf_best   = s_inf.min    / audio_ms;
     const double   rtf_mean   = s_inf.mean   / audio_ms;
     const bool     noisy      = s_inf.stdev > 0.2 * s_inf.mean;
+    const std::string encoder_backend =
+        all_coreml
+            ? model_encoder_backend_name(model)
+            : (any_coreml ? std::string("mixed")
+                          : model_active_backend_name(model));
+
+    PARAKEET_LOG_INFO(
+        "[bench] encoder_backend=%s  decoder_backend=%s\n",
+        encoder_backend.c_str(),
+        model_active_backend_name(model).c_str());
 
     PARAKEET_LOG_INFO(
         "[bench] ----------- summary (%d timed runs, warmup excluded) -----------\n"
@@ -1235,6 +1284,10 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             backend_label = "ggml-cpu";
         }
         std::fprintf(fp, "  \"backend\": \"%s\",\n", backend_label.c_str());
+        std::fprintf(fp, "  \"encoder_backend\": \"%s\",\n",
+                     encoder_backend.c_str());
+        std::fprintf(fp, "  \"encoder_coreml_all_runs\": %s,\n",
+                     all_coreml ? "true" : "false");
         std::fprintf(fp, "  \"n_gpu_layers\": %d,\n", opts.n_gpu_layers);
         std::fprintf(fp, "  \"threads\": %d,\n",    opts.n_threads);
         std::fprintf(fp, "  \"warmup_runs\": %d,\n", extra.bench_warmup);

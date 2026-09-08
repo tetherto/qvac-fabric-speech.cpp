@@ -133,6 +133,11 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[coreml-parity] ggml run_encoder rc=%d\n", rc);
         return 1;
     }
+    if (out_ggml.used_coreml) {
+        std::fprintf(stderr,
+            "[coreml-parity] FAIL: capture baseline unexpectedly used Core ML\n");
+        return 1;
+    }
 
     EncoderOutputs out_coreml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
@@ -140,6 +145,11 @@ int main(int argc, char ** argv) {
                              /*capture_intermediates=*/false,
                              /*allow_coreml_padded=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] Core ML run_encoder rc=%d\n", rc);
+        return 1;
+    }
+    if (!out_coreml.used_coreml) {
+        std::fprintf(stderr,
+            "[coreml-parity] FAIL: requested Core ML comparison fell back to ggml\n");
         return 1;
     }
 

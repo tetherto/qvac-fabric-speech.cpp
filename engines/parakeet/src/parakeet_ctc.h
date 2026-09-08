@@ -542,6 +542,11 @@ struct EncoderOutputs {
     int n_enc_frames = 0;
     int d_model      = 0;
     int vocab_size   = 0;
+
+    // True only when this invocation completed through the Core ML sidecar.
+    // Loading a sidecar is insufficient: an incompatible shape or prediction
+    // failure can still make run_encoder fall back to ggml.
+    bool used_coreml = false;
 };
 
 // `capture_intermediates`: when true (default, kept for backward compat with

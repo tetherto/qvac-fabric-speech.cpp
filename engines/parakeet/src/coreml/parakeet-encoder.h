@@ -3,7 +3,7 @@
 // Mirrors the whisper.cpp `whisper_coreml_*` C shim: an opaque context wraps a
 // compiled `.mlmodelc` encoder that runs on the Apple Neural Engine, and the
 // caller hands log-mel features in / reads encoder hidden states out. The rest
-// of the pipeline (mel preprocessing, TDT/CTC decode, tokenizer) stays on ggml.
+// of the validated pipeline (mel preprocessing, TDT decode, tokenizer) stays on ggml.
 //
 // This header is Apple-only; it is compiled and referenced solely when the
 // PARAKEET_USE_COREML build definition is set. All entry points return failure

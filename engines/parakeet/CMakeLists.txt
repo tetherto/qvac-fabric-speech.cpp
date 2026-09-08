@@ -372,7 +372,7 @@ if (PARAKEET_BUILD_LIBRARY)
     # (src/coreml/parakeet-encoder.mm) into the parakeet library and defines
     # PARAKEET_USE_COREML so run_encoder can route the offline FastConformer
     # forward through a `<model>-encoder.mlmodelc` on the Apple Neural Engine.
-    # Mel preprocessing, TDT/CTC decode and the tokenizer stay on ggml, and any
+    # Mel preprocessing, TDT decode and the tokenizer stay on ggml, and any
     # non-Apple build or missing/incompatible sidecar falls back to the ggml
     # encoder. Modelled on the whisper.cpp WHISPER_COREML pattern; the encoder
     # I/O contract the exported .mlmodelc must honour is documented in
@@ -569,6 +569,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_rnnt_q8_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf")
     set(_qvp_tdt_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf")
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
+    set(_qvp_tdt_coreml     "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3-encoder.mlmodelc")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
     set(_qvp_nemotron_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b.f16.gguf")
     set(_qvp_sf_q8_gguf    "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.q8_0.gguf")
@@ -1065,6 +1066,24 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture"
             ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    endif()
+
+    # CLI-level Core ML gate: --require-coreml must prove every measured encoder
+    # invocation used the TDT sidecar while the decoder remains on ggml.
+    if (PARAKEET_COREML AND Python3_Interpreter_FOUND AND TARGET parakeet-cli)
+        add_test(
+            NAME test-cli-coreml-bench
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_tdt_q8_gguf}"
+                    "--wav" "${_qvp_jfk_wav}")
+        set_property(TEST test-cli-coreml-bench PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_tdt_q8_gguf}" OR
+            NOT EXISTS "${_qvp_jfk_wav}" OR
+            NOT EXISTS "${_qvp_tdt_coreml}")
+            set_property(TEST test-cli-coreml-bench PROPERTY DISABLED TRUE)
+        endif()
     endif()
 
     # Regression gate for cached-encoder-graph reuse determinism. Compiles the

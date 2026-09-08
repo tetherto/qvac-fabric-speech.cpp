@@ -211,8 +211,10 @@ process-global: the first `Engine` construction loads from that directory and
 later engines reuse the populated registry. Leave it empty for ggml's default
 search path. In static `GGML_BACKEND_DL=OFF` builds the setting is a no-op.
 
-Use `Engine::backend_device()`, `backend_name()`, and `encoder_backend()` to
-observe the post-fallback result rather than inferring it from build flags.
+`Engine::backend_name()` reports the ggml backend used by the decoder.
+`Engine::encoder_backend()` reports the loaded encoder-sidecar configuration;
+benchmark JSON additionally reports whether every measured invocation actually
+completed through Core ML.
 
 Example backend configurations:
 
@@ -226,9 +228,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ## Core ML encoder sidecar
 
 `PARAKEET_COREML=ON` is Apple-only. It enables an optional offline TDT
-FastConformer encoder sidecar; CTC and EOU do not use it. Mel preprocessing and
-TDT decoding remain in the normal pipeline. The compiled sidecar must sit next
-to the GGUF and use this name:
+FastConformer encoder sidecar. This first implementation intentionally leaves
+CTC, RNNT/Nemotron, EOU, and Sortformer on ggml. Mel preprocessing and TDT
+decoding remain in the normal pipeline. The compiled sidecar must sit next to
+the GGUF and use this name:
 
 ```text
 <model-basename-with-quant-stripped>-encoder.mlmodelc
@@ -282,6 +285,29 @@ force ggml, including for parity or benchmarking. Setting
 `EngineOptions::long_form_window_frames` below zero disables automatic
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
+
+For an unambiguous TDT benchmark, configure the exact build directory with
+Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
+
+```bash
+cmake -S engines/parakeet -B build-parakeet-coreml \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPARAKEET_COREML=ON \
+  -DGGML_METAL=ON
+cmake --build build-parakeet-coreml --target parakeet-cli -j
+
+./build-parakeet-coreml/parakeet \
+  --model engines/parakeet/models/parakeet-tdt-0.6b-v3.q8_0.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --bench --bench-warmup 2 --bench-runs 5 \
+  --bench-json /tmp/parakeet-tdt-coreml.json \
+  --require-coreml --verbose
+```
+
+The JSON may still contain `"backend": "ggml-metal"` because the TDT decoder
+continues to use Metal. Confirm encoder execution using `encoder_backend` and
+`encoder_coreml_all_runs`. A `coreml-all` encoder label means Core ML may place
+operations across ANE, GPU, and CPU; it does not mean ANE-only execution.
 
 Windowing bounds Core ML input shapes and memory, but full-context attention is
 then local to each overlapping window. The stitched result should therefore be
