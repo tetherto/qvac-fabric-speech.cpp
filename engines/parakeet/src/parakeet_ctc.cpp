@@ -1533,6 +1533,13 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                               impl->dw_direct_planar   ? "direct" : "im2col",
                               impl->dw_direct_channels ? "direct" : "im2col");
         }
+    } else if (impl->backend_active == impl->backend_cpu) {
+        // ggml-cpu runs CONV_2D_DW directly; the im2col+mul+sum_rows lowering exists for Mali/OpenCL.
+        impl->dw_direct_planar = backend_runs_conv_2d_dw(impl->backend_cpu, false);
+        if (verbose) {
+            PARAKEET_LOG_INFO("parakeet: depthwise conv lowering: subsampler %s (cpu)\n",
+                              impl->dw_direct_planar ? "direct" : "im2col");
+        }
     }
     if (impl->sortformer_force_cpu && verbose) {
         PARAKEET_LOG_INFO(
