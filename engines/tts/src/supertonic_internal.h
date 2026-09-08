@@ -705,13 +705,22 @@ void release_text_encoder_thread_local_caches();
 void release_vocoder_thread_local_caches();
 void release_duration_thread_local_caches();
 
-// True when the model's compute backend supports the per-stage CPU fast paths
-// (the `ggml_custom_4d` callbacks in conv1d_f32 / depthwise_same_ggml /
-// layer_norm_ggml etc.).  ggml custom ops are CPU-only by design; on Metal /
-// CUDA / Vulkan the helpers must fall through to their stock-ggml-op paths.
-// Mirrors the `!ggml_backend_is_cpu(backend)` idiom Chatterbox uses to gate
-// its Metal-only batched-CFG path.
+// True when the per-stage CPU fast paths exist AND the model runs on them.
+// Those paths (conv1d_f32, dense_matmul_time, the tail update) are compiled
+// only behind TTS_CPP_USE_ACCELERATE / TTS_CPP_USE_CBLAS, so on a build without
+// a pointwise BLAS they do not exist and preferring them would select plain
+// im2col + mul_mat over the fused and [C, T] graph paths every other backend
+// takes.
+inline constexpr bool cpu_pointwise_accel_compiled() {
+#if defined(TTS_CPP_USE_ACCELERATE) || defined(TTS_CPP_USE_CBLAS)
+    return true;
+#else
+    return false;
+#endif
+}
+
 inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
+    if (!cpu_pointwise_accel_compiled()) return false;
     // `ggml_backend_is_cpu` lives in the CPU backend shared library, which is
     // unlinkable under GGML_BACKEND_DL. Route through the registry-based shim.
     return model.backend == nullptr || ::tts_cpp::detail::backend_is_cpu(model.backend);
