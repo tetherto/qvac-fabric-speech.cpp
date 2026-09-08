@@ -175,10 +175,12 @@ Adreno 6xx OpenCL is skipped because it produces incorrect output. Set
 encoder and CTC/TDT/EOU computation, but the Sortformer diarization head is
 routed to CPU because that head is incorrect on Mali Vulkan.
 
-TDT and EOU predictor/joint decoding uses ggml graphs on Metal, Vulkan, and
-CUDA. CPU and OpenCL use the scalar decoder path; OpenCL lacks the graph
-operation support required by this decoder path. The EOU encoder can still run
-on OpenCL while its decoder runs scalar.
+TDT predictor/joint decoding uses ggml graphs on every backend, including
+ggml-cpu, where the quantised joint matmuls run about ten times faster than the
+former host f32 gemv loop. OpenCL keeps the host scalar decoder because it lacks
+the graph operation support this path needs, and `PARAKEET_TDT_HOST_DECODE=1`
+forces it elsewhere for parity testing. EOU decoding uses graphs on Metal,
+Vulkan and CUDA and the scalar path on CPU and OpenCL.
 
 Nemotron 3.5 ASR streaming is supported on OpenCL (Adreno 700+). The encoder
 runs on the GPU and the cache-aware streaming operating points (80, 160, 320,
@@ -198,12 +200,18 @@ ops keeps one graph per step. Either path produces the same token sequence as
 the sequential loop; the `test-tdt-unroll-parity` and `test-tdt-lstm-parity`
 harnesses guard that. The encoder applies the same rule to the conformer's
 depthwise convolution (`GGML_OP_CONV_2D_DW` in place where the backend
-reports it, `im2col` and matmul elsewhere; the subsampler switches only on a
-GPU that passed the probe, CPU keeps its previous lowering) and to the gated
+reports it, `im2col` and matmul elsewhere; the subsampler switches on a GPU
+that passed the probe and on ggml-cpu, Mali and OpenCL keep the im2col
+lowering) and to the gated
 GLU (`a * sigmoid(b)` as one op where the backend reports it). Fused attention
 is a build option (`PARAKEET_FLASH_ATTN`) that CUDA, Metal and Vulkan take, and
 only after the backend accepts the exact node the encoder builds; CPU and
-OpenCL keep the unfused graph in every build. The mel front-end runs on up
+OpenCL keep the unfused graph in every build. A cached encoder graph computes
+the 24 per-layer positional projections once per graph size (up to 256 MiB of
+projections per graph) and the attention blocks read them from that buffer on
+every forward; `PARAKEET_POS_PROJ_CACHE=0` recomputes them in-graph instead,
+and `test-pos-proj-cache-parity` checks the encoder output is byte-identical
+either way. The mel front-end runs on up
 to eight host threads with output byte-equal to the single-thread result.
 
 The CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0 transcripts,

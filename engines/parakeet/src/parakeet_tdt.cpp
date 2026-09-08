@@ -13,9 +13,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace parakeet {
@@ -983,6 +983,11 @@ const TdtRuntimeWeights::EncProjGraph * get_enc_proj_graph(TdtRuntimeWeights & r
     return &rt.enc_proj_cache.back();
 }
 
+bool tdt_host_decode_forced() {
+    const char * v = std::getenv("PARAKEET_TDT_HOST_DECODE");
+    return v && v[0] == '1';
+}
+
 bool compute_graph(TdtRuntimeWeights & rt, ggml_cgraph * cg) {
     if (rt.n_threads > 0 && backend_is_cpu(rt.backend)) {
         backend_set_n_threads(rt.backend, rt.n_threads);
@@ -1180,12 +1185,9 @@ static int tdt_prepare_runtime_impl(const ParakeetCtcModel & model, TdtRuntimeWe
         return 1;
     }
 
-    // Defensive thread-count for the rare case where graphs run on a CPU
-    // backend (today they don't; CPU goes through the scalar fallback below).
-    {
-        const unsigned hc = std::thread::hardware_concurrency();
-        W.n_threads = hc > 0 ? (int) hc : 4;
-    }
+    // The CPU backend keeps the thread count the encoder configured at load;
+    // compute_graph only overrides it when n_threads is set explicitly.
+    W.n_threads = 0;
 
     if (!W.weights->predict_embed || W.weights->lstm.empty() ||
         !W.weights->joint_out_w) {
@@ -1193,12 +1195,10 @@ static int tdt_prepare_runtime_impl(const ParakeetCtcModel & model, TdtRuntimeWe
         return 2;
     }
 
-    // Decide the implementation path. The per-step graph dispatch overhead on
-    // the CPU backend (thread-pool wakeup x ~250 emission steps) regresses
-    // ~6x vs. a hand-rolled scalar gemv loop, so CPU keeps the legacy path.
-    // GPU backends (Metal / CUDA / Vulkan) win even with per-step dispatch
-    // because of native quantised matmul and faster argmax / large gemvs.
-    W.use_graphs = !backend_is_cpu(W.backend);
+    // The ggml decode graphs run on every backend, CPU included: the quantised
+    // joint matmuls beat the host f32 gemv loop by an order of magnitude there.
+    // PARAKEET_TDT_HOST_DECODE=1 keeps the host loop for parity testing.
+    W.use_graphs = !tdt_host_decode_forced();
 
     // ggml-opencl drops the in-place ggml_cpy writes that update the TDT LSTM
     // persistent state (h/c/pred), so the state never advances and the decode
@@ -1725,9 +1725,9 @@ int tdt_decode_window(const ParakeetCtcModel & model,
         model.model_type == ParakeetModelType::RNNT ||
         model.model_type == ParakeetModelType::NEMOTRON;
 
-    // GPU path: stash the full-window encoder-side projection into
-    // enc_proj_persist on-device once at the top of the window so per-step
-    // joint reads can ggml_get_rows directly. CPU path keeps the original
+    // Graph path: stash the full-window encoder-side projection into
+    // enc_proj_persist on the backend once at the top of the window so per-step
+    // joint reads can ggml_get_rows directly. The host fallback keeps the
     // per-step gemv inside host_joint_step (better cache locality).
     if (W.use_graphs) {
         if (!run_enc_proj(W, encoder_out_window, n_frames)) return 6;
