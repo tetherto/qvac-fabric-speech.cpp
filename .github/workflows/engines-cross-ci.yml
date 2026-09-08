@@ -30,9 +30,16 @@ on:
 permissions:
   contents: read
 
+# Dedupe per PR and per branch: a re-push or re-dispatch supersedes the
+# in-flight run. The guard below previously excluded every event but
+# pull_request, so a push or a re-dispatch stacked a second run instead of
+# replacing the first.
+#
+# master is exempt on purpose — pushes to the default branch must not cancel
+# each other, or a merged commit ends with no CI verdict.
 concurrency:
-  group: engines-cross-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: engines-cross-ci-${{ (github.ref == 'refs/heads/master' && github.run_id) || github.ref }}
+  cancel-in-progress: true
 
 env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git

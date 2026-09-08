@@ -535,7 +535,12 @@ inline void free_duration_one_graph_cache(duration_one_graph_cache & cache) {
     cache = {};
 }
 
-void build_duration_one_graph(duration_one_graph_cache & cache, const supertonic_model & m, int text_len) {
+// When `measure` is non-null the graph is built identically but the arena is
+// sized (ggml_gallocr_reserve_n_size) instead of allocated, and nothing is
+// uploaded — the memory-fit share point (supertonic_fit_measure_duration) so
+// the priced graph is the executed graph by construction.
+void build_duration_one_graph(duration_one_graph_cache & cache, const supertonic_model & m, int text_len,
+                              size_t * measure = nullptr) {
     free_duration_one_graph_cache(cache);
     cache.model = &m;
     cache.generation_id = m.generation_id;
@@ -561,6 +566,15 @@ void build_duration_one_graph(duration_one_graph_cache & cache, const supertonic
     ggml_set_name(cache.out, "duration_sentence_proj"); ggml_set_output(cache.out);
     ggml_build_forward_expand(cache.gf, cache.out);
 
+    if (measure) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new duration one-graph (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
     cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new duration one-graph failed");
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
@@ -1086,6 +1100,52 @@ void release_duration_thread_local_caches() {
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
     }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the duration stage's resident arena at sentence length L (= text_len
+// + 1) on the non-CPU dispatch path -- the ONE-GRAPH sentence encoder
+// (embedding + convnext chain + attn encoder + sentence projection in a single
+// graph compute), through the exact builder the runtime uses
+// (supertonic_duration_forward_one_graph_ggml), so the priced graph is the
+// executed graph by construction.  In measure mode (real_alloc=false, the fit
+// path) nothing is allocated and nothing runs; the parity probe
+// (real_alloc=true, test-only) builds + allocates the same graph for real to
+// anchor the size.  The hybrid fallback (one-graph disabled by env) is not
+// modelled; the caller must refuse it rather than misprice it.
+static bool duration_fit_impl(const supertonic_model & m, int L,
+                              uint64_t & bytes, std::string * error, bool real_alloc) {
+    bytes = 0;
+    if (std::getenv("SUPERTONIC_DISABLE_DURATION_ONE_GRAPH") != nullptr) {
+        if (error) {
+            *error = "duration dispatch path not modelled "
+                     "(one-graph disabled by env)";
+        }
+        return false;
+    }
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        duration_one_graph_cache cache;
+        size_t sz = 0;
+        build_duration_one_graph(cache, m, /*text_len=*/L - 1, real_alloc ? nullptr : &sz);
+        if (real_alloc && cache.allocr) sz = ggml_gallocr_get_buffer_size(cache.allocr, 0);
+        free_duration_one_graph_cache(cache);
+        bytes = sz;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool supertonic_fit_measure_duration(const supertonic_model & m, int L,
+                                     uint64_t & bytes, std::string * error) {
+    return duration_fit_impl(m, L, bytes, error, /*real_alloc=*/false);
+}
+
+bool supertonic_fit_parity_probe_duration(const supertonic_model & m, int L,
+                                          uint64_t & bytes, std::string * error) {
+    return duration_fit_impl(m, L, bytes, error, /*real_alloc=*/true);
 }
 
 } // namespace tts_cpp::supertonic::detail

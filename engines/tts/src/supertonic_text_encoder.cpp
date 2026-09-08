@@ -1401,7 +1401,12 @@ ggml_tensor * speech_prompted_tail_graph_ggml(ggml_context * ctx,
     return text_layer_norm_ggml(ctx, m, x, "text_encoder:tts.ttl.speech_prompted_text_encoder.norm.norm");
 }
 
-void build_text_encoder_one_graph(text_encoder_one_graph_cache & cache, const supertonic_model & m, int L) {
+// When `measure` is non-null the graph is built identically but the arena is
+// sized (ggml_gallocr_reserve_n_size) instead of allocated, and nothing is
+// uploaded — the memory-fit share point (supertonic_fit_measure_text_encoder)
+// so the priced graph is the executed graph by construction.
+void build_text_encoder_one_graph(text_encoder_one_graph_cache & cache, const supertonic_model & m, int L,
+                                  size_t * measure = nullptr) {
     free_text_encoder_one_graph_cache(cache);
     cache.model = &m;
     cache.generation_id = m.generation_id;
@@ -1432,6 +1437,15 @@ void build_text_encoder_one_graph(text_encoder_one_graph_cache & cache, const su
     ggml_set_name(cache.out, "text_encoder_out"); ggml_set_output(cache.out);
     ggml_build_forward_expand(cache.gf, cache.out);
 
+    if (measure) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        if (!pricer) throw std::runtime_error("ggml_gallocr_new text encoder one-graph (measure) failed");
+        size_t sz = 0;
+        ggml_gallocr_reserve_n_size(pricer, cache.gf, nullptr, nullptr, &sz);
+        ggml_gallocr_free(pricer);
+        *measure = sz;
+        return;
+    }
     cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!cache.allocr) throw std::runtime_error("ggml_gallocr_new text encoder one-graph failed");
     if (!ggml_gallocr_reserve(cache.allocr, cache.gf)) {
@@ -1867,6 +1881,53 @@ void release_text_encoder_thread_local_caches() {
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
     }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the text encoder's resident thread_local arena at text length L on the
+// non-CPU dispatch path -- the ONE-GRAPH encoder (embedding + convnext chain +
+// relpos attn/ffn stack + speech-prompted tail in a single graph compute),
+// through the exact builder the runtime uses
+// (supertonic_text_encoder_forward_one_graph_ggml), so the priced graph is the
+// executed graph by construction.  In measure mode (real_alloc=false, the fit
+// path) nothing is allocated and nothing runs; the parity probe
+// (real_alloc=true, test-only) builds + allocates the same graph for real to
+// anchor the size.  The per-island fallback (one-graph disabled by env) is not
+// modelled; the caller must refuse it rather than misprice it.
+static bool text_encoder_fit_impl(const supertonic_model & m, int L,
+                                  uint64_t & bytes, std::string * error,
+                                  bool real_alloc) {
+    bytes = 0;
+    if (std::getenv("SUPERTONIC_DISABLE_TEXT_ONE_GRAPH") != nullptr) {
+        if (error) {
+            *error = "text-encoder dispatch path not modelled "
+                     "(one-graph disabled by env)";
+        }
+        return false;
+    }
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        text_encoder_one_graph_cache cache;
+        size_t sz = 0;
+        build_text_encoder_one_graph(cache, m, L, real_alloc ? nullptr : &sz);
+        if (real_alloc && cache.allocr) sz = ggml_gallocr_get_buffer_size(cache.allocr, 0);
+        free_text_encoder_one_graph_cache(cache);
+        bytes = sz;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool supertonic_fit_measure_text_encoder(const supertonic_model & m, int L,
+                                         uint64_t & bytes, std::string * error) {
+    return text_encoder_fit_impl(m, L, bytes, error, /*real_alloc=*/false);
+}
+
+bool supertonic_fit_parity_probe_text_encoder(const supertonic_model & m, int L,
+                                              uint64_t & bytes, std::string * error) {
+    return text_encoder_fit_impl(m, L, bytes, error, /*real_alloc=*/true);
 }
 
 } // namespace tts_cpp::supertonic::detail

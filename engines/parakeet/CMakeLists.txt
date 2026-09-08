@@ -567,6 +567,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_ctc_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf")
     set(_qvp_ctc_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.f16.gguf")
     set(_qvp_rnnt_q8_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf")
+    set(_qvp_rnnt_hybrid_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/stt_ka_fastconformer_hybrid_large_pc.q8_0.gguf")
     set(_qvp_tdt_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf")
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
@@ -582,6 +583,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_diar_wav      "${PARAKEET_TEST_AUDIO_DIR}/diarization-sample-16k.wav")
     set(_qvp_fr_multipiece_wav "${PARAKEET_TEST_AUDIO_DIR}/fr-multipiece-16k.wav")
     set(_qvp_hi_wav        "${PARAKEET_TEST_AUDIO_DIR}/hi-16k.wav")
+    set(_qvp_rnnt_hybrid_wav "${PARAKEET_TEST_AUDIO_DIR}/rnnt-ka-16k.wav")
     set(_qvp_hi_expected   "${PARAKEET_TEST_AUDIO_DIR}/hi-16k.expected.txt")
     set(_qvp_abcba_wav     "${PARAKEET_TEST_AUDIO_DIR}/abcba.wav")
     set(_qvp_abcba_rttm    "${PARAKEET_TEST_AUDIO_DIR}/abcba.rttm")
@@ -589,6 +591,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_abcdba_rttm   "${PARAKEET_TEST_AUDIO_DIR}/abcdba.rttm")
     set(_qvp_ctc_ref       "${PARAKEET_TEST_REF_DIR}/ctc-ref")
     set(_qvp_tdt_ref       "${PARAKEET_TEST_REF_DIR}/tdt-ref")
+    set(_qvp_rnnt_hybrid_ref "${PARAKEET_TEST_REF_DIR}/rnnt-ref")
     set(_qvp_sf_ref        "${PARAKEET_TEST_REF_DIR}/sortformer-ref")
     set(_qvp_nemotron_en_ref
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-320/offline")
@@ -1214,6 +1217,13 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_ref}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-rnnt-decoder-parity
+        LABEL    "fixture"
+        EXE      test-tdt-decoder-parity
+        ARGS     "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
+                 "${_qvp_rnnt_hybrid_ref}" "--require-reference"
+        REQUIRES "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
+                 "${_qvp_rnnt_hybrid_ref}/token_ids.npy")
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)

@@ -135,8 +135,8 @@ def transducer_state_dict():
         "joint.enc.bias": "joint_enc_b",
         "joint.pred.weight": "joint_pred_w",
         "joint.pred.bias": "joint_pred_b",
-        "joint.joint_net.2.weight": "joint_out_w",
-        "joint.joint_net.2.bias": "joint_out_b",
+        "joint.joint_net.2.weight": FakeTensor((1025, 640)),
+        "joint.joint_net.2.bias": FakeTensor((1025,)),
     }
 
 
@@ -233,6 +233,31 @@ class ConverterRnntTests(unittest.TestCase):
         config = unified_config()
         config["labels"] = ["<unk>", "<EOU>"]
         self.assertEqual(CONVERTER.detect_model_type(config), "eou")
+
+    def test_can_select_hybrid_rnnt_branch(self):
+        config = unified_config()
+        config["target"] = (
+            "nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models."
+            "EncDecHybridRNNTCTCBPEModel"
+        )
+        self.assertEqual(CONVERTER.detect_model_type(config), "ctc")
+        self.assertEqual(
+            CONVERTER.detect_model_type(config, "rnnt"), "rnnt")
+
+    def test_validates_rnnt_contract(self):
+        CONVERTER.validate_rnnt_contract(
+            unified_config(), transducer_state_dict())
+
+    def test_rejects_tdt_shaped_joint_for_rnnt(self):
+        state_dict = transducer_state_dict()
+        state_dict["joint.joint_net.2.weight"] = FakeTensor((1028, 640))
+        with self.assertRaisesRegex(ValueError, "duration logits present"):
+            CONVERTER.validate_rnnt_contract(unified_config(), state_dict)
+
+    def test_uncapped_max_symbols_uses_runtime_guard(self):
+        config = unified_config()
+        config["decoding"]["greedy"]["max_symbols"] = None
+        self.assertEqual(CONVERTER.rnnt_max_symbols(config), 10)
 
     def test_writes_rnnt_metadata_without_durations(self):
         writer = RecordingWriter()

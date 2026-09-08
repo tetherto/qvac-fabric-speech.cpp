@@ -7,7 +7,7 @@
       "binary":                  "Path (relative to build/) of the executable to invoke.",
       "source":                  "Where to fetch models from. 's3' (default) uses aws s3 cp against s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/<s3_prefix>/<key>. 'huggingface' uses curl against https://huggingface.co/<hf_repo>/resolve/<hf_ref>/<name> — vanilla whisper GGMLs (ggml-tiny.bin etc.) live on HuggingFace, not S3.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
-      "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally.",
+      "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally. For source='s3' an entry is an S3 key string or a {s3, as} object (fetched as `as`). For source='huggingface' families other than whisper, an entry is a {name, sha256?} object resolved against hf_repo@hf_ref.",
       "hf_repo":                 "HuggingFace repo id (e.g. 'ggerganov/whisper.cpp'). Required when source='huggingface'.",
       "hf_ref":                  "HuggingFace ref (commit SHA) pinned so the download can't silently drift with upstream re-uploads. Required when source='huggingface'.",
       "models_by_size":          "Only for the whisper family. Object keyed by size ('tiny' / 'base' / 'small'). Each value is either a {name, sha256?} object (source='huggingface') or a list of S3 keys (source='s3'). sha256 is optional; when set the download is verified against it via sha256sum/shasum.",
@@ -58,25 +58,39 @@
 
   "sortformer": {
     "cmake_target": "parakeet-cli",
-    "bench_kind":   "native",
+    "bench_kind":   "time-wrapped",
     "binary":       "engines/parakeet/parakeet",
     "s3_prefix":    "parakeet",
     "models": [
-      "2026-05-20/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf",
-      "2026-05-11/parakeet-ctc-0.6b.q8_0.gguf"
+      "2026-05-11/sortformer-4spk-v1.q8_0.gguf"
     ],
     "args": [
       "--verbose",
-      "--model",              "${MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf",
-      "--diarization-model",  "${MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf",
-      "--wav",                "${AUDIO_DIR}/jfk.wav",
-      "--bench",
-      "--bench-runs",           "${RUNS}",
-      "--bench-warmup",         "${WARMUP}",
-      "--bench-json",           "${JSON_OUT}"
+      "--model", "${MODEL_DIR}/sortformer-4spk-v1.q8_0.gguf",
+      "--wav",   "${AUDIO_DIR}/jfk.wav"
     ],
     "audio_duration_seconds":  11.0,
-    "notes": "Diarization mode; RTF divides by the ASR fixture (jfk.wav) duration."
+    "notes": "Pure batch diarization: a Sortformer GGUF at --model takes parakeet-cli's diarize path (sortformer-4spk-v1 is the batch checkpoint; diar_streaming_sortformer_4spk-v2.1 belongs to the streaming API). The CLI's --bench mode covers transcription models only — the diarize and attributed paths return before the bench loop and emit no --bench-json — so the family is time-wrapped; wall includes model load like every time-wrapped row. RTF divides by the jfk.wav duration (11.0 s)."
+  },
+
+  "vad": {
+    "cmake_target": "whisper-vad-speech-segments",
+    "bench_kind":   "time-wrapped",
+    "binary":       "bin/whisper-vad-speech-segments",
+    "source":       "huggingface",
+    "hf_repo":      "ggml-org/whisper-vad",
+    "hf_ref":       "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+    "models": [
+      {"name": "ggml-silero-v5.1.2.bin", "sha256": "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"}
+    ],
+    "args": [
+      "--vad-model", "${MODEL_DIR}/ggml-silero-v5.1.2.bin",
+      "--file",      "${AUDIO_DIR}/jfk.wav",
+      "--threads",   "4",
+      "--use-gpu"
+    ],
+    "audio_duration_seconds":  11.0,
+    "notes": "Silero VAD v5.1.2 via the whisper-vad-speech-segments example on jfk.wav (11.0 s). --use-gpu takes the QVAC-24420-validated GPU path (Metal on the macOS runner) and falls back to CPU on GPU-less builds."
   },
 
   "chatterbox": {
@@ -152,12 +166,13 @@
     ],
     "args": [
       "--model-dir",     "${MODEL_DIR}",
+      "--n-gpu-layers",  "999",
       "--runs",          "${RUNS}",
       "--warmup",        "${WARMUP}",
       "--json-out",      "${JSON_OUT}"
     ],
     "audio_duration_seconds":  null,
-    "notes": "Model-dir mode: bench discovers the six shards under one directory."
+    "notes": "Model-dir mode: bench discovers the shards under one directory. --n-gpu-layers 999 selects the parity-gated GPU (Metal on the macOS runner) and falls back to CPU where no admitted GPU exists, so it is a no-op on the CPU-only Linux build."
   },
 
   "audio8": {
@@ -178,7 +193,7 @@
       "--out",            "/dev/null"
     ],
     "audio_duration_seconds":  null,
-    "notes": "audio8-cli has no --bench flag; wall-clock via time. --verbose surfaces the 'using <backend>' marker. RTF omitted (text-driven variable output)."
+    "notes": "audio8-cli has no --bench flag; wall-clock via time. Runs on CPU (no --n-gpu-layers in args) and prints no backend marker of its own — the driver's GPU-evidence scrape / CPU default labels the Backend column. RTF omitted (text-driven variable output)."
   },
 
   "lavasr": {

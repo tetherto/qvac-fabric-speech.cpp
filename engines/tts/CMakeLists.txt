@@ -348,6 +348,12 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/fit_main.cpp
     src/chatterbox_fit.cpp
     src/chatterbox_fit_main.cpp
+    src/parler/fit.cpp
+    src/parler/fit_main.cpp
+    src/cosyvoice_fit.cpp
+    src/cosyvoice_fit_main.cpp
+    src/supertonic_fit.cpp
+    src/supertonic_fit_main.cpp
 )
 
 if (TTS_CPP_BUILD_LIBRARY)
@@ -602,6 +608,18 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     add_executable(chatterbox-fit-params src/chatterbox_fit_params.cpp)
     target_link_libraries(chatterbox-fit-params PRIVATE tts-cpp)
     tts_cpp_apply_ccache(chatterbox-fit-params)
+
+    add_executable(parler-fit-params src/parler_fit_params.cpp)
+    target_link_libraries(parler-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(parler-fit-params)
+
+    add_executable(cosyvoice-fit-params src/cosyvoice_fit_params.cpp)
+    target_link_libraries(cosyvoice-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(cosyvoice-fit-params)
+
+    add_executable(supertonic-fit-params src/supertonic_fit_params.cpp)
+    target_link_libraries(supertonic-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(supertonic-fit-params)
 endif()
 
 if (TTS_CPP_BUILD_TESTS)
@@ -699,6 +717,7 @@ if (TTS_CPP_BUILD_TESTS)
     set(_tcb_s3gen_mtl_gguf     "${TTS_CPP_TEST_MODEL_DIR}/chatterbox-s3gen-mtl.gguf")
     set(_tcb_super_gguf         "${TTS_CPP_TEST_MODEL_DIR}/supertonic.gguf")
     set(_tcb_super2_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic2.gguf")
+    set(_tcb_super3_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
     set(_tcb_super_ref          "${TTS_CPP_TEST_REF_DIR}/supertonic-ref-quick")
     set(_tcb_super_ref_noise    "${_tcb_super_ref}/noise.npy")
     set(_tcb_s3gen_ref          "${TTS_CPP_TEST_REF_DIR}/s3gen-ref")
@@ -2509,6 +2528,79 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}")
 
+    # Parler fit parity.  The no-argument form synthesizes a tiny but complete
+    # parler GGUF on the fly, so the byte-parity gates (weights, KV slab,
+    # cross-K/V, decoder/T5/DAC arenas vs a real load + runs) need no fixture
+    # at all; the fixture form runs the same gates on the real model (plus the
+    # GPU fused-weight stack when n_gpu_layers > 0).
+    add_executable(test-parler-fit-params test/parler/test_fit_params.cpp)
+    target_link_libraries(test-parler-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-parler-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-parler-fit-params)
+    tts_cpp_register_test(test-parler-fit-params LABEL "unit")
+    tts_cpp_register_test(test-parler-fit-params-gpu
+        EXE   test-parler-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-parler-fit-params-fixture
+        EXE      test-parler-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_parler_gguf}"
+        REQUIRES "${_tcb_parler_gguf}")
+
+    # CosyVoice3 fit parity.  The no-argument form synthesizes the model set
+    # on the fly (tiny metadata-driven LM/flow + full-geometry HiFT + voice),
+    # so the byte-parity gates (weights, KV, LM/flow/HiFT arenas vs real
+    # dispatches) need no fixture at all; the fixture form runs the same gates
+    # on the real converted set.
+    add_executable(test-cosyvoice-fit-params test/test_cosyvoice_fit_params.cpp)
+    target_link_libraries(test-cosyvoice-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-cosyvoice-fit-params)
+    tts_cpp_register_test(test-cosyvoice-fit-params LABEL "unit")
+    tts_cpp_register_test(test-cosyvoice-fit-params-gpu
+        EXE   test-cosyvoice-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-cosyvoice-fit-params-fixture
+        EXE      test-cosyvoice-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf"
+        REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+
+    # Supertonic fit parity: metadata-only weight/arena projection vs a real
+    # load + real reservations, byte for byte.  The no-argument form
+    # synthesizes a metadata-only supertonic GGUF on the fly (the loader's
+    # exact tensor contract at tiny dims), pinning weight-sizing parity and
+    # the refusal paths with no fixture; the stage-arena parity gates stay
+    # fixture-gated because the vocoder / vector-estimator channel plans are
+    # hardcoded to the real architecture.
+    add_executable(test-supertonic-fit-params test/test_supertonic_fit_params.cpp)
+    target_link_libraries(test-supertonic-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-supertonic-fit-params)
+    tts_cpp_register_test(test-supertonic-fit-params LABEL "unit")
+    tts_cpp_register_test(test-supertonic-fit-params-v2
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super2_gguf}" "99"
+        REQUIRES "${_tcb_super2_gguf}")
+    tts_cpp_register_test(test-supertonic-fit-params-v1
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super_gguf}" "99"
+        REQUIRES "${_tcb_super_gguf}")
+    # v3 is the only variant with CFG (cfg_uncond_scale != 0): this lane is
+    # what pins the batch=2 [C, T] CFM loop arena and the unconditional-pass
+    # host slabs -- neither v1 nor v2 reaches that branch.
+    tts_cpp_register_test(test-supertonic-fit-params-v3
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}" "99"
+        REQUIRES "${_tcb_super3_gguf}")
+
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.
     add_executable(test-chatterbox-fit-params test/test_chatterbox_fit_params.cpp)
@@ -2610,7 +2702,8 @@ if (TTS_CPP_BUILD_TESTS)
     # through the v3 model — the v3-only languages are covered by the
     # model-free test-supertonic-languages unit test — so that both the old
     # and the new languages get exercised end-to-end on Supertonic 3.
-    set(_tcb_super3_gguf "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
+    # (_tcb_super3_gguf is set with the other fixture paths near the top of
+    # the fixture block; the fit-parity v3 lane uses it too.)
     set(SUPERTONIC3_REF_LANGS en ko es pt fr
         CACHE STRING "tts-cpp: languages exercised end-to-end against the Supertonic 3 fixture")
 

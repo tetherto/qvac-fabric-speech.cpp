@@ -610,6 +610,74 @@ void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
 void supertonic_graph_compute(const supertonic_model & model, ggml_cgraph * graph);
 
+// ---- memory-fit preflight (include/tts-cpp/supertonic/fit.h) ---------------
+// Sizes of everything one load_supertonic_gguf allocates, filled by
+// load_supertonic_gguf_metadata_only.
+struct supertonic_fit_load_measure {
+    uint64_t weights_bytes        = 0;  // buffer_w (converted dst types + pre-baked F2/F6)
+    uint64_t extra_bytes          = 0;  // buffer_w_extra (GPU pre-transposed matmul weights)
+    // Persistent host caches a real load keeps (unicode indexer, RoPE theta,
+    // layer-norm / tanh_k pre-downloads) plus the scalar-weight cache's
+    // documented ~5 MiB steady state.
+    uint64_t host_bytes           = 0;
+    // Transient host peak of the load itself: gguf_init_from_file's full
+    // tensor-data copy plus the conversion staging maps, alive alongside
+    // buffer_w until the upload loop finishes.  Often the true process peak.
+    uint64_t host_transient_bytes = 0;
+};
+
+// Metadata-only twin of load_supertonic_gguf: same backend policy, capability
+// probes, per-tensor destination-type decisions, pre-baked tensor
+// declarations, alias/pretranspose registration, and the same two buffers --
+// sized via ggml_backend_alloc_ctx_tensors_from_buft_size instead of
+// allocated, with no tensor data read from disk or converted.  All tensors
+// come back marked externally allocated so the stage graph builders below can
+// price their graphs over them.  Free with free_supertonic_model as usual.
+bool load_supertonic_gguf_metadata_only(const std::string & path,
+                                        supertonic_model & model,
+                                        int n_gpu_layers,
+                                        int f16_weights,
+                                        supertonic_precision precision,
+                                        int vulkan_device,
+                                        const std::vector<std::string> & f16_weights_deny_list,
+                                        supertonic_fit_load_measure & out);
+
+// Size-only pricing of the per-stage thread_local graph-cache arenas at the
+// given shapes -- the SAME one-graph builders the runtime dispatches off the
+// CPU backend (text encoder / duration / CFM loop), reserved through ggml's
+// size-only APIs; nothing is allocated and nothing runs.  Every one of these
+// caches stays resident once its stage has run, so a projection SUMS them.
+// GPU (non-CPU-kernel) dispatch paths only: the CPU multi-cache paths and the
+// env-disabled one-graph fallbacks are not modelled -- each measure refuses
+// them with a "not modelled" error (the fitter maps that to
+// compute-path-not-supported; see fit.h).
+bool supertonic_fit_measure_text_encoder(const supertonic_model & m, int L,
+                                         uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_duration(const supertonic_model & m, int L,
+                                     uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_vector(const supertonic_model & m, int L, int text_len,
+                                   int total_steps, uint64_t & bytes, std::string * error);
+// The vocoder dual-paths through the [backend, CPU-last] scheduler when the
+// backend cannot run some op; its CPU portion lands in host_bytes.
+bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
+                                    uint64_t & device_bytes, uint64_t & host_bytes,
+                                    std::string * error);
+
+// Real-allocation parity probes (test support): the same builders at the same
+// shapes, but reserved + allocated for real; the reported bytes anchor the
+// size-only measures above byte for byte.  Only for tests on REAL models --
+// these allocate the full arena set.  A probe reports 0 for a graph the
+// direct path cannot allocate (scheduler-dispatched); the test skips those.
+bool supertonic_fit_parity_probe_text_encoder(const supertonic_model & m, int L,
+                                              uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_duration(const supertonic_model & m, int L,
+                                          uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_vector(const supertonic_model & m, int L, int text_len,
+                                        int total_steps, uint64_t & bytes,
+                                        std::string * error);
+bool supertonic_fit_parity_probe_vocoder(const supertonic_model & m, int latent_len,
+                                         uint64_t & bytes, std::string * error);
+
 // Per-TU thread-local cache release helpers — called from
 // `free_supertonic_model` BEFORE `ggml_backend_free`, so the
 // gallocators inside each per-stage thread_local graph cache
@@ -669,6 +737,13 @@ inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
 // docs/supertonic-sched-graph-reuse-investigation.md.
 void supertonic_sched_alloc(const supertonic_model & model, ggml_cgraph * graph);
 void supertonic_sched_compute(const supertonic_model & model, ggml_cgraph * graph);
+
+// Graph size the [backend, CPU-last] scheduler bundle is created with
+// (sched_fallback_ensure in supertonic_sched_alloc).  ONE definition shared
+// with the memory-fit vocoder pricer (fit_price_graph in
+// supertonic_fit_measure_vocoder): the sched hash size shifts the scheduler's
+// own allocation, so the priced scheduler must be the runtime's.
+constexpr size_t kSupertonicSchedGraphSize = 8192;
 
 // Dispatch gate shared by every dual-path stage: supports_op walk over the
 // graph + the TTS_CPP_FORCE_SCHED escape hatch (safe: every dual-path site

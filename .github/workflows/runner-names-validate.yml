@@ -20,6 +20,13 @@ on:
 permissions:
   contents: read
 
+# Dedupe per PR and per branch: a newer push supersedes the in-flight
+# validation (this workflow has no workflow_dispatch trigger). master is exempt
+# on purpose — pushes to the default branch must not cancel each other.
+concurrency:
+  group: runner-names-validate-${{ (github.ref == 'refs/heads/master' && github.run_id) || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
