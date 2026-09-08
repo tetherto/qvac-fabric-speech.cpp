@@ -732,6 +732,128 @@ extern "C" {
     WHISPER_API void whisper_vad_free_segments(struct whisper_vad_segments * segments);
     WHISPER_API void whisper_vad_free         (struct whisper_vad_context  * ctx);
 
+    //
+    // Memory-fit preflight (QVAC, see PATCHES.md)
+    //
+    // Project whether a whisper model + workload fits the device memory
+    // available right now, WITHOUT reading any weight data. The projection
+    // mirrors the real runtime by construction: it drives the same loader
+    // (metadata-only), the same graph builders and the same allocation
+    // policies through ggml's size-only APIs, so nothing is allocated on the
+    // device and no graph runs.
+    //
+    // Status semantics follow the SDK's @qvac/model-fit contract:
+    //   Success (0) -- a projection was made and it fits.
+    //   Failure (1) -- a projection was made and it does NOT fit (a valid
+    //                  answer, not an error).
+    //   Error   (2) -- no projection could be made (unreadable model, no
+    //                  backend device, measurement failure).
+
+    enum whisper_fit_status {
+        WHISPER_FIT_SUCCESS = 0,
+        WHISPER_FIT_FAILURE = 1,
+        WHISPER_FIT_ERROR   = 2,
+    };
+
+    struct whisper_fit_options {
+        const char * model_path;      // whisper ggml model to project (required)
+        const char * vad_model_path;  // optional VAD model projected alongside (NULL = no VAD)
+
+        // same semantics as the whisper_context_params fields of the same
+        // name; defaults mirror whisper_context_default_params()
+        bool use_gpu;
+        bool flash_attn;
+        int  gpu_device;
+
+        // worst-case number of resident decoders the run may use: the
+        // greedy best_of / beam_search beam_size whisper_full will be called
+        // with (its temperature fallback recreates the self-attention KV
+        // cache (n+2)x larger the first time it decodes with n > 1 decoders,
+        // and the decode graph grows with it). 1..WHISPER_MAX_DECODERS (8);
+        // whisper_full_default_params uses 5.
+        int n_decoders;
+
+        // longest single whisper_full input. Device-side buffers are sized by
+        // the model's fixed 30 s processing window at state-init time and do
+        // NOT grow with this; only host-side buffers (full-input mel
+        // spectrogram, padded sample copies) scale with it.
+        float audio_seconds;
+
+        // free-memory headroom that must remain on the device for the
+        // projection to count as fitting
+        uint64_t margin_bytes;
+
+        bool verbose; // loader diagnostics on stderr
+    };
+
+    WHISPER_API struct whisper_fit_options whisper_fit_default_options(void);
+
+    // Projected bytes on the resolved compute device, split the way the
+    // runtime allocates them. host_overflow_bytes is the part of these
+    // components the runtime places in host RAM instead (CPU-fallback weight
+    // buffers, oversized KV caches, CPU portions of split compute graphs);
+    // it is reported inside whisper_fit_result.host_bytes, never in total_bytes.
+    struct whisper_fit_breakdown {
+        uint64_t weights_bytes;        // model weight buffers on the device
+        uint64_t kv_bytes;             // kv_self (worst-case n_decoders) + kv_cross + kv_pad
+        uint64_t compute_bytes;        // conv + encode + cross + decode scheduler buffers
+        uint64_t vad_bytes;            // VAD weights + state + compute (0 when no VAD model)
+        uint64_t total_bytes;          // sum of the above
+        uint64_t host_overflow_bytes;  // device-component bytes that land in host RAM instead
+    };
+
+    struct whisper_fit_result {
+        enum whisper_fit_status status;
+        bool fits; // status == WHISPER_FIT_SUCCESS
+
+        // "fits" | "does-not-fit" | "model-unreadable" | "vad-model-unreadable" |
+        // "no-backend-device" | "measurement-failed" | "invalid-arguments"
+        char reason[64];
+
+        char model_type[32];   // "tiny" | "base" | ... | "large v3"
+
+        // resolved compute device (the backend a real load would run on)
+        char device_name[128];
+        bool device_is_cpu;
+        // true when the device's memory pool IS system RAM (CPU backend,
+        // integrated GPUs, Apple unified memory): host_bytes then competes
+        // with the device projection for the same physical memory and the
+        // verdict charges both against the free figure
+        bool     device_shares_host_memory;
+        uint64_t device_free_bytes;
+        uint64_t device_total_bytes;
+
+        struct whisper_fit_breakdown device;
+
+        // host RAM the workload needs in addition to the device projection:
+        // the full-input mel spectrogram and padded sample copies (these
+        // scale with audio_seconds), the init-time logits/decoder reserves,
+        // scheduler metadata, and the host_overflow_bytes above
+        uint64_t host_bytes;
+
+        // human-readable projection table (multi-line, for logging)
+        char report[4096];
+    };
+
+    // Project the model + workload in `opts` against the device memory
+    // available right now. Reads only model metadata (headers, hparams,
+    // vocab, tensor shapes -- weight payloads are seeked past); builds and
+    // measures the real graphs but never allocates or executes them.
+    // Returns the status (== exit-code contract above); `result` is always
+    // filled when non-NULL.
+    WHISPER_API int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_fit_result * result);
+
+    // Parity/diagnostic companion: measure the same breakdown from a REAL
+    // load (whisper_init_from_file_with_params + state init -- this DOES
+    // allocate device memory, then frees it). n_decoders > 1 additionally
+    // reproduces whisper_full's worst-case KV recreation (the (n+2)x
+    // whisper_kv_cache_init) before measuring, so kv_bytes matches the
+    // projection at any n_decoders; compute_bytes stays the post-init
+    // measurement (the schedulers grow lazily on the first decode against
+    // the larger cache), so it matches the projection only at n_decoders = 1.
+    // Returns 0 on success, non-zero on load failure.
+    WHISPER_API int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out);
+
     ////////////////////////////////////////////////////////////////////////////
 
     // Temporary helpers needed for exposing ggml interface

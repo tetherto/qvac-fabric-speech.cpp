@@ -312,8 +312,10 @@ Keep the quantization in explicit filenames:
 
 Use f16 for numerical parity against NeMo references and q8_0 for normal runtime
 fixtures. Small tensors or dimensions unsuitable for block quantization remain
-f16. Hybrid IndicConformer exports are CTC-only and include per-language token
-ranges.
+f16. Hybrid RNNT+CTC checkpoints export their CTC branch by default; pass
+`--head rnnt` to export the Transducer branch instead. RNN-T conversion rejects
+checkpoints whose joint output is not exactly vocabulary plus blank, preventing
+a duration-bearing TDT head from being mislabeled as plain RNN-T.
 
 Recorded CTC 0.6B quantization results on an M4 Air CPU:
 
@@ -337,6 +339,10 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --out engines/parakeet/models/indic-conformer-600m-multilingual.q8_0.gguf \
   --quant q8_0
 ```
+
+To select the same checkpoint's RNN-T branch, add `--head rnnt` and use a
+distinct output filename. The auxiliary `ctc_decoder.*` tensors are then
+ignored.
 
 ## Public C++ API
 
@@ -432,7 +438,11 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
 Useful groups include `--threads`, `--n-gpu-layers`, `--backends-dir`,
 `--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
-and `--dump-mel`. Run `parakeet --help` for the complete list.
+and `--dump-mel`. Run `parakeet --help` for the complete list. `--bench`
+covers the transcription models only: the diarization path (a Sortformer GGUF
+at `--model`) and the attributed path (`--diarization-model`) return before
+the bench loop, ignoring the `--bench*` flags — time the invocation externally
+to benchmark those.
 
 ```bash
 build-parakeet/parakeet \
@@ -530,6 +540,12 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
 python engines/parakeet/scripts/dump-ctc-reference.py \
   --wav engines/parakeet/test/samples/jfk.wav
 
+# Hybrid checkpoint: select its RNN-T branch in both conversion and NeMo.
+python engines/parakeet/scripts/dump-rnnt-reference.py \
+  --nemo-model engines/parakeet/models/stt_ka_fastconformer_hybrid_large_pc.nemo \
+  --wav engines/parakeet/test/samples/rnnt-ka-16k.wav \
+  --out engines/parakeet/artifacts/rnnt-ref
+
 cmake -S engines/parakeet -B build-parakeet -DCMAKE_BUILD_TYPE=Release
 cmake --build build-parakeet -j
 ctest --test-dir build-parakeet -N
@@ -546,6 +562,10 @@ GPU-bound and timing-bound labels:
 ```bash
 ctest --test-dir build-parakeet -LE 'gpu|perf' --output-on-failure
 ```
+
+`test-rnnt-decoder-parity` is enabled when the hybrid RNN-T GGUF, its WAV, and
+the NeMo `token_ids.npy` dump are available. It requires bit-exact token IDs
+between the reference and the current shared RNN-T/TDT decoder.
 
 Model-free logic tests (`-L unit`) cover the CTC language mask, mel FFT
 parity and per-feature CMVN, RNN-T graph construction, long-form window
