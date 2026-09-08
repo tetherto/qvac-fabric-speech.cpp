@@ -236,7 +236,10 @@ jobs:
       - name: Install jq
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            command -v jq >/dev/null || brew install jq
+            if ! command -v jq >/dev/null; then
+              echo "jq must be preinstalled on the self-hosted macOS benchmark runner" >&2
+              exit 1
+            fi
           else
             command -v jq >/dev/null || (sudo apt-get update -q && sudo apt-get install -y jq)
           fi
@@ -305,7 +308,9 @@ jobs:
       - name: Install ccache
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            command -v ccache >/dev/null || brew install ccache
+            if ! command -v ccache >/dev/null; then
+              echo "::notice::ccache is not installed; continuing without compiler caching"
+            fi
           else
             command -v ccache >/dev/null || (sudo apt-get update -q && sudo apt-get install -y ccache)
           fi
