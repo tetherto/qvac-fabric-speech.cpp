@@ -230,8 +230,21 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 `PARAKEET_COREML=ON` is Apple-only. It enables an optional offline TDT
 FastConformer encoder sidecar. This first implementation intentionally leaves
 CTC, RNNT/Nemotron, EOU, and Sortformer on ggml. Mel preprocessing and TDT
-decoding remain in the normal pipeline. The compiled sidecar must sit next to
-the GGUF and use this name:
+decoding remain in the normal pipeline.
+
+Create an export environment with versions supported by Core ML Tools. NumPy 2
+is not currently compatible with its TorchScript scalar conversion, and the
+optional grouped-channel LUT pass uses scikit-learn:
+
+```bash
+python3.11 -m venv .venv-coreml
+. .venv-coreml/bin/activate
+python -m pip install --upgrade pip
+python -m pip install "numpy<2" "torch==2.7.*" "coremltools==9.*" gguf pyyaml
+python -m pip install "scikit-learn<=1.5.1"  # only for --palettize-bits
+```
+
+The compiled sidecar must sit next to the GGUF and use this name:
 
 ```text
 <model-basename-with-quant-stripped>-encoder.mlmodelc
@@ -299,6 +312,7 @@ cmake --build build-parakeet-coreml --target parakeet-cli -j
 ./build-parakeet-coreml/parakeet \
   --model engines/parakeet/models/parakeet-tdt-0.6b-v3.q8_0.gguf \
   --wav engines/parakeet/test/samples/jfk.wav \
+  --n-gpu-layers 999 \
   --bench --bench-warmup 2 --bench-runs 5 \
   --bench-json /tmp/parakeet-tdt-coreml.json \
   --require-coreml --verbose

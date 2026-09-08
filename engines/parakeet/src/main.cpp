@@ -759,7 +759,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EncoderOutputs enc_out;
         if (int rc = run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
                                  /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false); rc != 0) return rc;
+                                 /*capture_intermediates=*/false,
+                                 /*allow_coreml_padded=*/true); rc != 0) return rc;
         times.enc_ms = ms_since(t2);
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
