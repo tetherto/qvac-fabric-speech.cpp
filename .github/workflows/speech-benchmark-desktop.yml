@@ -288,8 +288,16 @@ jobs:
         if: runner.os == 'macOS' && matrix.family == 'parakeet' && steps.parakeet-coreml-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          command -v python3.11 >/dev/null || brew install python@3.11
-          python3.11 -m venv .venv-coreml
+          coreml_python="$(command -v python3.11 || true)"
+          if [[ -z "$coreml_python" ]]; then
+            coreml_python="$(command -v python3 || true)"
+          fi
+          if [[ -z "$coreml_python" ]]; then
+            echo "python3 is required to generate the Core ML sidecar" >&2
+            exit 1
+          fi
+          "$coreml_python" -c 'import sys; assert sys.version_info >= (3, 9), sys.version'
+          "$coreml_python" -m venv .venv-coreml
           .venv-coreml/bin/python -m pip install --upgrade pip
           .venv-coreml/bin/python -m pip install \
             -r engines/parakeet/scripts/requirements-coreml.txt
