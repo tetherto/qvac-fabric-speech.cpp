@@ -115,15 +115,20 @@ if [[ -z "$BENCH_KIND" ]]; then
   echo "family '$FAMILY' not found in families.json" >&2; exit 1
 fi
 
-# Config sanity: a `correctness` block is only meaningful for native-mode
-# families whose bench binary writes .transcript into --json-out. Warn loudly
-# but don't fail — the field is optional and the perf path still works.
+# Config sanity: correctness is honored for both bench kinds — native families
+# feed compute-wer.py their .transcript field from --json-out; time-wrapped
+# families feed the last run's captured stdout. Anything else (TTS-style
+# families with no transcript at all, or a hypothetical third bench kind)
+# is flagged but not fatal — the perf portion still works.
 if jq -e --arg family "$FAMILY" '.[$family].correctness // empty' \
      "$FAMILIES_JSON" > /dev/null 2>&1; then
-  if [[ "$BENCH_KIND" != "native" ]]; then
-    echo "warning: family '$FAMILY' declares correctness but bench_kind='$BENCH_KIND'" >&2
-    echo "  correctness scoring is native-mode only; block will be ignored." >&2
-  fi
+  case "$BENCH_KIND" in
+    native|time-wrapped) : ;;
+    *)
+      echo "warning: family '$FAMILY' declares correctness but bench_kind='$BENCH_KIND'" >&2
+      echo "  correctness scoring requires a hypothesis source; block will be ignored." >&2
+      ;;
+  esac
 fi
 
 MODEL_DIR="$MODELS_ROOT/$FAMILY"
@@ -461,17 +466,23 @@ parse_backend_from_logs() {
 
 # ---- correctness scoring (WER) ---------------------------------------------
 # When a family in families.json carries a `correctness` block, score the
-# native-bench transcript against the checked-in reference and echo
+# hypothesis transcript against the checked-in reference and echo
 # "wer|kind|reference" (or empty when scoring is skipped). Callers set the
 # emitter's WER_MEDIAN / CORRECTNESS_* vars from the returned values.
 #
+# Two hypothesis sources, one per bench kind:
+#   mode="bench-json" <path>  — native families whose --json-out carries
+#                               .transcript (parakeet).
+#   mode="text-file"  <path>  — time-wrapped families whose CLI prints its
+#                               transcript on stdout (whisper -nt).
+#
 # All error paths are non-fatal: a missing reference file, missing transcript
-# in the bench JSON, or compute-wer.py failure logs to stderr and returns
-# empty so the perf portion of the run still succeeds — a green benchmark
-# with correctness=null tells the reader "perf is fine, correctness didn't
-# run" instead of dragging the whole cell to run-failed.
+# in the bench JSON, missing stdout capture, or compute-wer.py failure logs
+# to stderr and returns empty so the perf portion of the run still succeeds
+# — a green benchmark with correctness=null tells the reader "perf is fine,
+# correctness didn't run" instead of dragging the whole cell to run-failed.
 score_correctness() {
-  local bench_json="$1"
+  local mode="$1" src_path="$2"
   local spec_kind spec_ref spec_norm
   spec_kind="$(jq -r --arg family "$FAMILY" \
     '.[$family].correctness.kind // ""'       "$FAMILIES_JSON")"
@@ -500,24 +511,42 @@ score_correctness() {
     return 0
   fi
 
-  # Distinguish "field absent" from "field present but empty string" — an
-  # empty transcript is a catastrophic model regression (parakeet emitted
-  # nothing) and MUST score as WER 1.0, not be silently skipped. `// empty`
-  # would flatten both to "" and hide the collapse. Test presence + string
-  # type with `-e`, then pull the value (which may legitimately be "").
-  local hyp
-  if ! jq -e 'has("transcript") and (.transcript | type == "string")' \
-         "$bench_json" > /dev/null 2>&1; then
-    echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
-    return 0
-  fi
-  hyp="$(jq -r '.transcript' "$bench_json" 2>/dev/null || true)"
+  # Build the --hypothesis-* args for compute-wer.py. Both modes preserve the
+  # "present-but-empty transcript => WER 1.0" invariant: bench-json checks
+  # field presence separately from truthiness so `.transcript=""` reaches
+  # compute-wer.py rather than being conflated with field-absent; text-file
+  # passes even an empty stdout capture through, which compute-wer.py scores
+  # as a full miss when the reference is non-empty.
+  local -a hyp_args=()
+  case "$mode" in
+    bench-json)
+      local hyp
+      if ! jq -e 'has("transcript") and (.transcript | type == "string")' \
+             "$src_path" > /dev/null 2>&1; then
+        echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
+        return 0
+      fi
+      hyp="$(jq -r '.transcript' "$src_path" 2>/dev/null || true)"
+      hyp_args=(--hypothesis-text "$hyp")
+      ;;
+    text-file)
+      if ! [[ -f "$src_path" ]]; then
+        echo "$FAMILY: hypothesis stdout capture missing: $src_path — correctness skipped" >&2
+        return 0
+      fi
+      hyp_args=(--hypothesis-file "$src_path")
+      ;;
+    *)
+      echo "$FAMILY: internal error: unknown score_correctness mode '$mode'" >&2
+      return 0
+      ;;
+  esac
 
   local wer_out wer
   # Prefer the caller-python interpreter that ran the workflow's other Python
   # steps (python3). No venv assumed — compute-wer.py imports only stdlib.
   if ! wer_out="$(python3 "$(dirname "$0")/compute-wer.py" \
-       --hypothesis-text "$hyp" \
+       "${hyp_args[@]}" \
        --reference       "$ref_path" \
        --normalizer      "$spec_norm" 2>&1)"; then
     echo "$FAMILY: compute-wer.py failed: $wer_out" >&2
@@ -655,7 +684,7 @@ case "$BENCH_KIND" in
     # block. Runs after perf is captured so a scoring failure never
     # downgrades a green perf run.
     corr_out=""
-    corr_out="$(score_correctness "$JSON_OUT" || true)"
+    corr_out="$(score_correctness bench-json "$JSON_OUT" || true)"
     if [[ -n "$corr_out" ]]; then
       IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
       [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
@@ -720,6 +749,20 @@ case "$BENCH_KIND" in
     # Compute RTF only when families.json declared audio_duration_seconds.
     if [[ "$AUDIO_DURATION_S" != "null" && -n "$AUDIO_DURATION_S" ]]; then
       RTF_MEDIAN="$(awk -v m="$med" -v s="$AUDIO_DURATION_S" 'BEGIN { printf "%.3f", m / (s * 1000.0) }')"
+    fi
+
+    # Correctness scoring — no-op unless the family declares a correctness
+    # block. The hypothesis is the last successful run's captured stdout
+    # ($r_stderr.stdout from the final loop iteration, still on disk in
+    # $tmp_dir). Runs after perf is captured so a scoring failure never
+    # downgrades a green perf run.
+    corr_out=""
+    corr_out="$(score_correctness text-file "$r_stderr.stdout" || true)"
+    if [[ -n "$corr_out" ]]; then
+      IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
+      [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
+      [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
+      [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
     fi
 
     emit_json "ok" "$med" "$mn" "$mx"

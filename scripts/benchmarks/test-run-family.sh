@@ -64,6 +64,20 @@ parakeet_ref_repo_rel="$(jq -r '.parakeet.correctness.reference' "$REAL_SPEC")"
   || fail "parakeet correctness.reference file missing: $parakeet_ref_repo_rel"
 ok "parakeet declares a WER correctness block pointing at a real reference file"
 
+# whisper is the time-wrapped ASR family and must reuse the same JFK reference
+# parakeet does — same jfk.wav audio, so a WER delta between the two rows is a
+# real model-quality delta, not a normalizer or reference drift.
+jq -e '.whisper.correctness.kind == "wer"' "$REAL_SPEC" > /dev/null \
+  || fail "whisper must declare a correctness.kind='wer' block (time-wrapped path via captured stdout)"
+jq -e '.whisper.correctness.reference == .parakeet.correctness.reference' "$REAL_SPEC" > /dev/null \
+  || fail "whisper correctness.reference must match parakeet's — both bench the same jfk.wav"
+whisper_ref_repo_rel="$(jq -r '.whisper.correctness.reference' "$REAL_SPEC")"
+[[ -f "$HERE/../../$whisper_ref_repo_rel" ]] \
+  || fail "whisper correctness.reference file missing: $whisper_ref_repo_rel"
+jq -e '.whisper.args | index("-nt") != null' "$REAL_SPEC" > /dev/null \
+  || fail "whisper must invoke whisper-cli with -nt so its stdout carries only the decoded transcript (the time-wrapped correctness hypothesis)"
+ok "whisper declares a WER correctness block reusing parakeet's JFK reference and keeps -nt on"
+
 # compute-wer.py: shipped self-test must pass. Catches accidental regressions
 # in the normalizer / DP without needing a real bench run.
 python3 "$HERE/compute-wer.py" --self-test > /dev/null \
@@ -146,11 +160,17 @@ jq -n --arg sha "$hello_sha" --arg ref_perfect "$REF_DIR/ref-perfect.txt" --arg 
     correctness: {kind: "wer", reference: "/does/not/exist.txt", normalizer: "english"},
     notes: "missing reference file — correctness skipped, perf still ok"
   },
-  "wer-tw-warns": {
+  "wer-tw-perfect": {
+    bench_kind: "time-wrapped", binary: "bin/tw-transcript-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 1.0,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
+    notes: "time-wrapped WER path: stdout carries the transcript; exact match => WER 0.0"
+  },
+  "wer-tw-empty": {
     bench_kind: "time-wrapped", binary: "bin/tw-silent", cmake_target: "x",
     args: [], audio_duration_seconds: 1.0,
     correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
-    notes: "time-wrapped families cannot score correctness; driver should warn"
+    notes: "time-wrapped catastrophic-miss guard: empty stdout capture must score WER 1.0, not skip"
   },
   "tw-marker": {
     bench_kind: "time-wrapped", binary: "bin/tw-marker", cmake_target: "x",
@@ -212,6 +232,14 @@ STUB
 cat > "$BUILD/bin/tw-silent" <<'STUB'
 #!/usr/bin/env bash
 exit 0
+STUB
+
+# Whisper-shape stub for the time-wrapped correctness path: prints the exact
+# reference transcript on stdout. whisper-cli -nt behaves the same way — the
+# only stdout content is the decoded text.
+cat > "$BUILD/bin/tw-transcript-perfect" <<'STUB'
+#!/usr/bin/env bash
+echo "the quick brown fox"
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -402,12 +430,22 @@ grep -q 'reference file not found' "$OUT/wer-badref.err" \
   || fail "wer-badref: missing-reference diagnosis not surfaced"
 ok "correctness: missing reference file => wer_median=null + diagnostic (perf still ok)"
 
-run_driver wer-tw-warns "$OUT/wer-tw-warns.json" "$OUT/wer-tw-warns.err" BENCH_FAMILIES_JSON="$SPEC"
-jq -e '.status == "ok" and .wer_median == null' \
-  "$OUT/wer-tw-warns.json" > /dev/null \
-  || fail "wer-tw-warns: $(cat "$OUT/wer-tw-warns.json")"
-grep -q "declares correctness but bench_kind='time-wrapped'" "$OUT/wer-tw-warns.err" \
-  || fail "wer-tw-warns: time-wrapped correctness warning not printed"
-ok "correctness: time-wrapped family with a correctness block warns and is skipped"
+run_driver wer-tw-perfect "$OUT/wer-tw-perfect.json" "$OUT/wer-tw-perfect.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == 0.0 and .correctness_kind == "wer"
+       and (.correctness_reference | test("ref-perfect\\.txt$"))' \
+  "$OUT/wer-tw-perfect.json" > /dev/null \
+  || fail "wer-tw-perfect: $(cat "$OUT/wer-tw-perfect.json")"
+ok "correctness (time-wrapped): captured stdout matching the reference scores WER 0.0"
+
+# Time-wrapped variant of the catastrophic-miss regression guard from PR #230.
+# A binary that exits 0 with an empty stdout capture must score 1.0, not
+# silently skip — that's exactly the "model collapsed to silence" case this
+# feature exists to catch, whether the transcript came from --json-out or the
+# CLI's stdout.
+run_driver wer-tw-empty "$OUT/wer-tw-empty.json" "$OUT/wer-tw-empty.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == 1.0 and .correctness_kind == "wer"' \
+  "$OUT/wer-tw-empty.json" > /dev/null \
+  || fail "wer-tw-empty: $(cat "$OUT/wer-tw-empty.json")"
+ok "correctness (time-wrapped): empty stdout capture => wer_median=1.0 (catastrophic-miss regression guard)"
 
 echo "all $PASS checks passed"
