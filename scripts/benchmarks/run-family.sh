@@ -500,12 +500,18 @@ score_correctness() {
     return 0
   fi
 
+  # Distinguish "field absent" from "field present but empty string" — an
+  # empty transcript is a catastrophic model regression (parakeet emitted
+  # nothing) and MUST score as WER 1.0, not be silently skipped. `// empty`
+  # would flatten both to "" and hide the collapse. Test presence + string
+  # type with `-e`, then pull the value (which may legitimately be "").
   local hyp
-  hyp="$(jq -r '.transcript // empty' "$bench_json" 2>/dev/null || true)"
-  if [[ -z "$hyp" ]]; then
+  if ! jq -e 'has("transcript") and (.transcript | type == "string")' \
+         "$bench_json" > /dev/null 2>&1; then
     echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
     return 0
   fi
+  hyp="$(jq -r '.transcript' "$bench_json" 2>/dev/null || true)"
 
   local wer_out wer
   # Prefer the caller-python interpreter that ran the workflow's other Python

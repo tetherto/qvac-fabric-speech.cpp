@@ -93,8 +93,10 @@ def _edit_counts(ref: list[str], hyp: list[str]) -> tuple[int, int, int]:
 
     Insertion = word in hyp but not in ref (extra word). Deletion = word in
     ref but not in hyp (missing word). Substitution = word replaced by
-    another. Cost is 1 for each; ties resolved sub > del > ins so the
-    breakdown is deterministic across Python versions.
+    another. Cost is 1 for each; on equal-cost ties `min()` compares the
+    tuple's next element (substitution count), so the breakdown minimizes
+    subs, then ins, then dels — deterministic across Python versions but
+    arbitrary among equally-optimal alignments. Total WER is unaffected.
     """
     n, m = len(ref), len(hyp)
     # dp[i][j] = (cost, sub, ins, del) to align ref[:i] with hyp[:j].
@@ -252,15 +254,18 @@ def main() -> int:
 
     if not args.reference:
         print("--reference is required", file=sys.stderr); return 2
-    if bool(args.hypothesis_text) == bool(args.hypothesis_file):
+    # Presence check (is-None), not truthiness — an empty `--hypothesis-text ""`
+    # is a legitimate 100%-miss case (model emitted nothing); the driver relies
+    # on this so it can score empty transcripts as WER 1.0 instead of skipping.
+    if (args.hypothesis_text is None) == (args.hypothesis_file is None):
         print("exactly one of --hypothesis-text / --hypothesis-file is required",
               file=sys.stderr); return 2
 
     ref_text = args.reference.read_text(encoding="utf-8")
-    if args.hypothesis_file:
+    if args.hypothesis_file is not None:
         hyp_text = args.hypothesis_file.read_text(encoding="utf-8")
     else:
-        hyp_text = args.hypothesis_text or ""
+        hyp_text = args.hypothesis_text
 
     result = compute_wer(hyp_text, ref_text, normalizer=args.normalizer)
     result["reference"] = str(args.reference)

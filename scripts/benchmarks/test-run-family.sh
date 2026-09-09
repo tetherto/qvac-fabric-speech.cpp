@@ -128,6 +128,12 @@ jq -n --arg sha "$hello_sha" --arg ref_perfect "$REF_DIR/ref-perfect.txt" --arg 
     correctness: {kind: "wer", reference: $ref_2subs, normalizer: "english"},
     notes: "expects wer_median>0"
   },
+  "wer-empty": {
+    bench_kind: "native", binary: "bin/nat-transcript-empty", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
+    notes: "expects wer_median=1.0 (present-but-empty transcript = full miss)"
+  },
   "wer-notranscript": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
@@ -221,6 +227,17 @@ cat > "$BUILD/bin/nat-transcript-wrong" <<'STUB'
 #!/usr/bin/env bash
 cat > "$1" <<'EOJ'
 {"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"the SLOW brown RED fox"}
+EOJ
+STUB
+
+# Catastrophic-collapse case: model shipped `.transcript=""` (present but
+# empty). MUST NOT be conflated with the field-absent case — an empty
+# transcript is exactly the regression correctness scoring exists to catch,
+# so it must score WER 1.0, not skip.
+cat > "$BUILD/bin/nat-transcript-empty" <<'STUB'
+#!/usr/bin/env bash
+cat > "$1" <<'EOJ'
+{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":""}
 EOJ
 STUB
 
@@ -367,6 +384,15 @@ jq -e '.status == "ok" and .wer_median == null and .correctness_kind == null' \
 grep -q 'has no .transcript field' "$OUT/wer-notranscript.err" \
   || fail "wer-notranscript: missing transcript diagnosis not surfaced"
 ok "correctness: bench JSON without .transcript => wer_median=null + diagnostic"
+
+# Regression guard for the field-absent-vs-field-empty conflation. A model
+# collapse that emits `.transcript=""` MUST score 1.0, not null, or the very
+# regression this feature exists to catch would be silently hidden.
+run_driver wer-empty "$OUT/wer-empty.json" "$OUT/wer-empty.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == 1.0 and .correctness_kind == "wer"' \
+  "$OUT/wer-empty.json" > /dev/null \
+  || fail "wer-empty: $(cat "$OUT/wer-empty.json")"
+ok "correctness: present-but-empty transcript => wer_median=1.0 (catastrophic-miss regression guard)"
 
 run_driver wer-badref "$OUT/wer-badref.json" "$OUT/wer-badref.err" BENCH_FAMILIES_JSON="$SPEC"
 jq -e '.status == "ok" and .wer_median == null and .correctness_kind == null' \
