@@ -591,8 +591,16 @@ Current status:
   per-island timings for tuning graph boundaries.  Current text profiling shows
   stock-op relpos is ~0.7-0.8 ms/layer on the quick prompt, so a fused relpos
   op is deferred until backend profiling proves it necessary.
-- CPU thread count is controlled by `--threads`; the default caps at 4 threads
-  because the current small-graph Supertonic path regresses when oversubscribed.
+- CPU thread count is controlled by `--threads`.  The default follows the graph
+  path the build takes.  Where an Accelerate / CBLAS pointwise path is compiled
+  (Apple), the CPU backend runs the per-island path, which regresses when
+  oversubscribed, so the default stays at 4 threads.  Where it is not (a Linux
+  or Windows build without a pointwise BLAS), the CPU backend runs the same
+  fused one-graph path the GPU backends take and the default leaves an eighth of
+  the logical CPUs unsubscribed.  Full subscription regresses on both boxes
+  measured (Ryzen 9 7950X3D, Ryzen AI MAX+ 395) and the regression survives an
+  OpenMP barrier, so it is oversubscription rather than ggml's spin barrier.
+  GPU backends keep the 4-thread default: they run only a handful of host ops.
 - Current CPU benchmark artifacts live in
   `artifacts/supertonic-thread-matrix/`.  The final matched matrix on this
   machine uses F1, 5 denoise steps, speed `1.05`, `runs=3`, `warmup=1`, and

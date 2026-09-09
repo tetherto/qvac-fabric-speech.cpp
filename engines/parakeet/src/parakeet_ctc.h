@@ -538,8 +538,8 @@ int nemotron_measure_stream(ParakeetCtcModel         & model,
 // Total bytes of the allocated weight buffers (default buffer + CPU repack
 // extra buffers; excludes the Mali Sortformer CPU head copy).
 size_t model_weights_buffer_bytes(const ParakeetCtcModel & m);
-// Backend buffer held by the most recently built cached encoder graph's
-// allocator (0 when no encoder graph has been built yet).
+// Backend bytes held by the most recently built cached encoder graph: its
+// allocator's buffer plus its positional-projection cache (0 before any build).
 size_t model_encoder_compute_buffer_bytes(const ParakeetCtcModel & m);
 // Backend buffer held by the cached Nemotron prompt-projection graph's
 // allocator (0 until run_nemotron_prompt_projection has built one).

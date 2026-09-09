@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -608,6 +609,18 @@ bool load_supertonic_gguf(const std::string & path,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
+
+// Weight-staging decisions taken during load, exposed so the loader's
+// packed-source handling can be regression-tested without a GGUF.
+ggml_type target_supertonic_storage_type(const std::string & name,
+                                         enum ggml_type src_type,
+                                         supertonic_precision precision,
+                                         bool backend_is_cpu);
+bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
+                                        enum ggml_type dst_type);
+bool should_expand_supertonic_tensor(enum ggml_type type);
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type);
+bool is_supertonic_matmul_weight_name(const std::string & name);
 void supertonic_graph_compute(const supertonic_model & model, ggml_cgraph * graph);
 
 // ---- memory-fit preflight (include/tts-cpp/supertonic/fit.h) ---------------
@@ -705,16 +718,42 @@ void release_text_encoder_thread_local_caches();
 void release_vocoder_thread_local_caches();
 void release_duration_thread_local_caches();
 
-// True when the model's compute backend supports the per-stage CPU fast paths
-// (the `ggml_custom_4d` callbacks in conv1d_f32 / depthwise_same_ggml /
-// layer_norm_ggml etc.).  ggml custom ops are CPU-only by design; on Metal /
-// CUDA / Vulkan the helpers must fall through to their stock-ggml-op paths.
-// Mirrors the `!ggml_backend_is_cpu(backend)` idiom Chatterbox uses to gate
-// its Metal-only batched-CFG path.
+// True when the per-stage CPU fast paths exist AND the model runs on them.
+// Those paths (conv1d_f32, dense_matmul_time, the tail update) are compiled
+// only behind TTS_CPP_USE_ACCELERATE / TTS_CPP_USE_CBLAS, so on a build without
+// a pointwise BLAS they do not exist and preferring them would select plain
+// im2col + mul_mat over the fused and [C, T] graph paths every other backend
+// takes.
+// Defined once in supertonic_gguf.cpp: TTS_CPP_USE_ACCELERATE and
+// TTS_CPP_USE_CBLAS are PRIVATE to the library's own targets, so an inline body
+// here would differ between translation units and violate the ODR.
+bool cpu_pointwise_accel_compiled();
+
 inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
+    if (!cpu_pointwise_accel_compiled()) return false;
     // `ggml_backend_is_cpu` lives in the CPU backend shared library, which is
     // unlinkable under GGML_BACKEND_DL. Route through the registry-based shim.
     return model.backend == nullptr || ::tts_cpp::detail::backend_is_cpu(model.backend);
+}
+
+// The per-island CPU path runs many small graphs and stops scaling almost
+// immediately, so it keeps the conservative cap it was given.
+inline constexpr int kLegacyCpuThreadCap = 4;
+
+// Pure-logic resolver for the default thread count. A positive `requested`
+// always wins. Otherwise only the CPU backend on the fused one-graph path is
+// allowed past the legacy cap: a GPU backend runs a handful of host-side ops
+// and did not ask for more threads.
+//
+// The fused path leaves an eighth of the logical CPUs unsubscribed. Measured on
+// two 16-core / 32-thread Zen boxes across two prompt lengths: full
+// subscription costs 13 to 70 percent against this, and the regression survives
+// an OpenMP barrier, so it is oversubscription rather than ggml's spin barrier.
+inline int resolve_supertonic_thread_count(int requested, int hw, bool fused_cpu_path) {
+    if (requested > 0) return requested;
+    hw = std::max(1, hw);
+    if (!fused_cpu_path) return std::min(hw, kLegacyCpuThreadCap);
+    return std::max(1, hw - hw / 8);
 }
 
 // scheduler-based alloc + compute (Option A), used by stages

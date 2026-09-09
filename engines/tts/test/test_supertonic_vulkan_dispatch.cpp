@@ -78,7 +78,7 @@ void test_scope_mirrors_cpu_model() {
     model.use_native_leaky_relu = true;
     {
         supertonic_op_dispatch_scope scope(model);
-        CHECK(supertonic_use_cpu_custom_ops() == true);
+        CHECK(supertonic_use_cpu_custom_ops() == cpu_pointwise_accel_compiled());
         CHECK(supertonic_use_native_leaky_relu() == true);
     }
     CHECK(supertonic_use_native_leaky_relu() == true);
@@ -231,7 +231,7 @@ void test_independent_flags() {
     m.use_native_leaky_relu = false;
     {
         supertonic_op_dispatch_scope scope(m);
-        CHECK(supertonic_use_cpu_custom_ops()    == true);
+        CHECK(supertonic_use_cpu_custom_ops()    == cpu_pointwise_accel_compiled());
         CHECK(supertonic_use_f16_attn()          == true);
         CHECK(supertonic_use_native_leaky_relu() == false);
     }

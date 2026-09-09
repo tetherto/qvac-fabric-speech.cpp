@@ -116,6 +116,8 @@ ggml_tensor * get_tensor_or_null(const supertonic_model & model, const std::stri
 //   Q8_0 (Phase A3)           | F32  | F32  | Q8_0   <-- key win: Metal keeps q8_0
 //
 // F32 row preserves the historical behaviour exactly.
+} // namespace
+
 // Predicate: is `tensor_name` a true matmul weight that lands in a
 // `ggml_mul_mat(weight, activation)` call (weight as src0) where Metal
 // can dispatch `kernel_mul_mm_q8_0_f32` directly?
@@ -210,6 +212,16 @@ bool should_expand_supertonic_tensor(enum ggml_type type) {
            type == GGML_TYPE_Q8_0 ||
            type == GGML_TYPE_Q4_0;
 }
+
+// Whether the loader stages a dequantized f32 copy for upload. Only an f32
+// destination wants one: a packed source kept at its own type is uploaded
+// verbatim, and staging four bytes per element into a block-quantized tensor
+// overruns it.
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type) {
+    return dst_type == GGML_TYPE_F32 && should_expand_supertonic_tensor(src_type);
+}
+
+namespace {
 
 std::vector<float> expand_supertonic_tensor_to_f32(const ggml_tensor * src) {
     const int64_t n = ggml_nelements(src);
@@ -922,6 +934,14 @@ inline std::unordered_set<uint64_t> & supertonic_alive_ids() {
 
 } // namespace
 
+bool cpu_pointwise_accel_compiled() {
+#if defined(TTS_CPP_USE_ACCELERATE) || defined(TTS_CPP_USE_CBLAS)
+    return true;
+#else
+    return false;
+#endif
+}
+
 void register_supertonic_alive(uint64_t generation_id) {
     std::lock_guard<std::mutex> lk(supertonic_alive_mu());
     supertonic_alive_ids().insert(generation_id);
@@ -1535,7 +1555,9 @@ supertonic_op_dispatch_scope::supertonic_op_dispatch_scope(const supertonic_mode
     // otherwise only run on GPU/Metal backends).
     static const bool disable_cpu_custom_ops =
         std::getenv("SUPERTONIC_DISABLE_CPU_CUSTOM_OPS") != nullptr;
-    g_supertonic_use_cpu_custom_ops       = model.backend_is_cpu && !disable_cpu_custom_ops;
+    g_supertonic_use_cpu_custom_ops       = model.backend_is_cpu &&
+                                            cpu_pointwise_accel_compiled() &&
+                                            !disable_cpu_custom_ops;
     g_supertonic_use_f16_attn             = model.use_f16_attn;
     g_supertonic_use_native_leaky_relu    = model.use_native_leaky_relu;
     g_supertonic_use_fused_supertonic_ops = model.backend_supports_fused_supertonic_ops;
@@ -1781,11 +1803,9 @@ ggml_tensor * try_pretransposed_weight(const supertonic_model & model, const ggm
 
 void supertonic_set_n_threads(supertonic_model & model, int n_threads) {
     configure_supertonic_blas_threads_once();
-    if (n_threads <= 0) {
-        const int hw = (int) std::thread::hardware_concurrency();
-        n_threads = std::min(std::max(1, hw), 4);
-    }
-    model.n_threads = std::max(1, n_threads);
+    const bool fused_cpu_path = model.backend_is_cpu && !model_prefers_cpu_kernels(model);
+    model.n_threads = std::max(1, resolve_supertonic_thread_count(
+        n_threads, (int) std::thread::hardware_concurrency(), fused_cpu_path));
 }
 
 // Throw boundary for both compute paths: Supertonic is exception-based, the
@@ -2303,9 +2323,9 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 // Precision-driven conversion (ours).  Covers f32 → q8_0,
                 // q8_0 → f32, f16 → f32 etc.  Buffered here, uploaded later.
                 convert_supertonic_tensor_data(src, dst_type, converted_tensors[name]);
-            } else if (should_expand_supertonic_tensor(src->type)) {
-                // Legacy fallback: f16/q8_0 src with f32 dst that
-                // didn't go through the conversion helper above.
+            } else if (should_stage_f32_expansion(src->type, dst_type)) {
+                // Legacy fallback: f16/q8_0 src with f32 dst that didn't go
+                // through the conversion helper above.
                 expanded_f32_tensors[name] = expand_supertonic_tensor_to_f32(src);
             }
         }

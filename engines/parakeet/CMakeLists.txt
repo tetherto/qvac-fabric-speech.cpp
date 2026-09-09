@@ -1224,6 +1224,31 @@ if (PARAKEET_BUILD_TESTS)
                  "${_qvp_rnnt_hybrid_ref}" "--require-reference"
         REQUIRES "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
                  "${_qvp_rnnt_hybrid_ref}/token_ids.npy")
+    # Cached positional projections must not change the encoder output.
+    add_executable(test-pos-proj-cache-parity
+        test/test_pos_proj_cache_parity.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_link_libraries(test-pos-proj-cache-parity PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-pos-proj-cache-parity PRIVATE include src ggml/include)
+    parakeet_apply_backend_defs(test-pos-proj-cache-parity)
+    parakeet_register_test(test-pos-proj-cache-parity
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-pos-proj-cache-parity-gpu
+        LABEL    "gpu"
+        EXE      test-pos-proj-cache-parity
+        ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "1"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)
