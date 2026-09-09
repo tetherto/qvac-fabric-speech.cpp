@@ -81,18 +81,33 @@ def fmt_rss(v: Any) -> str:
         return "—"
 
 
+def fmt_wer(v: Any) -> str:
+    """Format WER as a percentage rounded to two decimals.
+
+    Blank ("—") when the family didn't declare a correctness block or the
+    scoring step was skipped — so a reader can distinguish "no correctness
+    signal" from "correctness = 0.00%". A perfect run reads "0.00%".
+    """
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v) * 100.0:.2f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def render_markdown(results: list[dict[str, Any]]) -> str:
     """Single fixed-column table. Empty result set still produces a valid table."""
     header = (
         "| Family | Model | Runner | OS | Backend | Median wall ms | Min | Max "
-        "| Median RTF | Peak RSS MiB | Runs | Status | Notes |\n"
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|\n"
+        "| Median RTF | WER | Peak RSS MiB | Runs | Status | Notes |\n"
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
     rows = []
     for r in results:
         rows.append(
             "| {family} | {model} | {runner} | {os} | {backend} | {median} | {min} | {max} "
-            "| {rtf} | {rss} | {runs} | {status} | {notes} |".format(
+            "| {rtf} | {wer} | {rss} | {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
                 runner=r.get("runner", "?"),
@@ -102,6 +117,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 min=fmt_ms(r.get("wall_ms_min")),
                 max=fmt_ms(r.get("wall_ms_max")),
                 rtf=fmt_rtf(r.get("rtf_median")),
+                wer=fmt_wer(r.get("wer_median")),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -109,7 +125,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
             )
         )
     if not rows:
-        rows.append("| _no results collected_ | | | | | | | | | | | | |")
+        rows.append("| _no results collected_ | | | | | | | | | | | | | |")
     return header + "\n".join(rows) + "\n"
 
 
@@ -124,6 +140,12 @@ def render_legend() -> str:
         "- **Median RTF** — real-time factor; wall / audio-seconds. `< 1.0` means "
         "faster than real-time. Blank when the family's output length isn't fixed "
         "(text-driven TTS, chatterbox, audio8).\n"
+        "- **WER** — Word Error Rate of the bench transcript against the family's "
+        "`correctness.reference` file, English-normalized (case-folded, punctuation "
+        "stripped). `0.00%` is a healthy build; a non-trivial WER means either the "
+        "model regressed or the reference drifted with a checkpoint bump. Blank when "
+        "the family didn't declare a `correctness` block (all non-ASR families today) "
+        "or the scoring step was skipped — see the row's notes.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "

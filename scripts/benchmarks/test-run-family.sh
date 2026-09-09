@@ -55,6 +55,21 @@ jq -e '.cosyvoice.args | index("--n-gpu-layers") != null' "$REAL_SPEC" > /dev/nu
   || fail "cosyvoice args lost --n-gpu-layers (Metal offload on the macOS runner)"
 ok "cosyvoice requests GPU offload"
 
+jq -e '.parakeet.correctness.kind == "wer"' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet must declare a correctness.kind='wer' block — the pilot for the WER-scoring path"
+jq -e '.parakeet.correctness.reference | test("parakeet-expected-jfk-output\\.txt$")' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet correctness.reference must point at the checked-in JFK expected transcript"
+parakeet_ref_repo_rel="$(jq -r '.parakeet.correctness.reference' "$REAL_SPEC")"
+[[ -f "$HERE/../../$parakeet_ref_repo_rel" ]] \
+  || fail "parakeet correctness.reference file missing: $parakeet_ref_repo_rel"
+ok "parakeet declares a WER correctness block pointing at a real reference file"
+
+# compute-wer.py: shipped self-test must pass. Catches accidental regressions
+# in the normalizer / DP without needing a real bench run.
+python3 "$HERE/compute-wer.py" --self-test > /dev/null \
+  || fail "compute-wer.py --self-test failed"
+ok "compute-wer.py self-test passes"
+
 jq -e '.vad.source == "huggingface" and (.vad.hf_repo | length > 0) and (.vad.hf_ref | test("^[0-9a-f]{40}$"))' "$REAL_SPEC" > /dev/null \
   || fail "vad family must pin an HF repo at a full commit sha"
 jq -e '.vad.models[0].sha256 | test("^[0-9a-f]{64}$")' "$REAL_SPEC" > /dev/null \
@@ -87,7 +102,12 @@ else
   hello_sha="$(printf 'hello' | shasum -a 256 | awk '{print $1}')"
 fi
 
-jq -n --arg sha "$hello_sha" '{
+REF_DIR="$TMP/refs"
+mkdir -p "$REF_DIR"
+printf 'the quick brown fox' > "$REF_DIR/ref-perfect.txt"
+printf 'the quick brown fox' > "$REF_DIR/ref-2subs.txt"    # same ref; the stub hyp will differ
+
+jq -n --arg sha "$hello_sha" --arg ref_perfect "$REF_DIR/ref-perfect.txt" --arg ref_2subs "$REF_DIR/ref-2subs.txt" '{
   "nat-ok": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: null, notes: "n"
@@ -95,6 +115,36 @@ jq -n --arg sha "$hello_sha" '{
   "nat-nojson": {
     bench_kind: "native", binary: "bin/nat-nojson", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: null, notes: "n"
+  },
+  "wer-perfect": {
+    bench_kind: "native", binary: "bin/nat-transcript-perfect", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
+    notes: "expects wer_median=0.0"
+  },
+  "wer-nonzero": {
+    bench_kind: "native", binary: "bin/nat-transcript-wrong", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    correctness: {kind: "wer", reference: $ref_2subs, normalizer: "english"},
+    notes: "expects wer_median>0"
+  },
+  "wer-notranscript": {
+    bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
+    notes: "nat-ok emits no .transcript field; correctness must be gracefully skipped"
+  },
+  "wer-badref": {
+    bench_kind: "native", binary: "bin/nat-transcript-perfect", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    correctness: {kind: "wer", reference: "/does/not/exist.txt", normalizer: "english"},
+    notes: "missing reference file — correctness skipped, perf still ok"
+  },
+  "wer-tw-warns": {
+    bench_kind: "time-wrapped", binary: "bin/tw-silent", cmake_target: "x",
+    args: [], audio_duration_seconds: 1.0,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
+    notes: "time-wrapped families cannot score correctness; driver should warn"
   },
   "tw-marker": {
     bench_kind: "time-wrapped", binary: "bin/tw-marker", cmake_target: "x",
@@ -156,6 +206,22 @@ STUB
 cat > "$BUILD/bin/tw-silent" <<'STUB'
 #!/usr/bin/env bash
 exit 0
+STUB
+
+# Parakeet-shape JSON emitters for correctness tests. The driver expands
+# ${JSON_OUT} into args; both binaries take that as their sole arg.
+cat > "$BUILD/bin/nat-transcript-perfect" <<'STUB'
+#!/usr/bin/env bash
+cat > "$1" <<'EOJ'
+{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"the quick brown fox"}
+EOJ
+STUB
+
+cat > "$BUILD/bin/nat-transcript-wrong" <<'STUB'
+#!/usr/bin/env bash
+cat > "$1" <<'EOJ'
+{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"the SLOW brown RED fox"}
+EOJ
 STUB
 
 cat > "$STUBBIN/aws" <<'STUB'
@@ -274,5 +340,48 @@ env -i PATH="$STUBBIN:$PATH" HOME="$TMP" BENCH_FAMILIES_JSON="$SPEC" \
 jq -e '.status == "not-in-registry" and .model == "whisper-base"' \
   "$OUT/whisper-66.json" > /dev/null || fail "whisper-66: $(cat "$OUT/whisper-66.json")"
 ok "whisper size missing from the registry reports not-in-registry"
+
+# ---- correctness scoring (WER path) -----------------------------------------
+# The perf portion of every cell here is the nat-transcript-{perfect,wrong}
+# stub or nat-ok — all emit a valid perf JSON. The tests below only assert
+# the correctness fields the driver merged into result.json.
+
+run_driver wer-perfect "$OUT/wer-perfect.json" "$OUT/wer-perfect.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == 0.0 and .correctness_kind == "wer"
+       and (.correctness_reference | test("ref-perfect\\.txt$"))' \
+  "$OUT/wer-perfect.json" > /dev/null \
+  || fail "wer-perfect: $(cat "$OUT/wer-perfect.json")"
+ok "correctness: exact-match transcript scores WER 0.0"
+
+run_driver wer-nonzero "$OUT/wer-nonzero.json" "$OUT/wer-nonzero.err" BENCH_FAMILIES_JSON="$SPEC"
+# 4 ref words, 1 substitution + 1 insertion = 2 edits / 4 words = 0.5
+jq -e '.status == "ok" and .wer_median == 0.5 and .correctness_kind == "wer"' \
+  "$OUT/wer-nonzero.json" > /dev/null \
+  || fail "wer-nonzero: $(cat "$OUT/wer-nonzero.json")"
+ok "correctness: 1 sub + 1 insertion scores WER 0.5"
+
+run_driver wer-notranscript "$OUT/wer-notranscript.json" "$OUT/wer-notranscript.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == null and .correctness_kind == null' \
+  "$OUT/wer-notranscript.json" > /dev/null \
+  || fail "wer-notranscript: $(cat "$OUT/wer-notranscript.json")"
+grep -q 'has no .transcript field' "$OUT/wer-notranscript.err" \
+  || fail "wer-notranscript: missing transcript diagnosis not surfaced"
+ok "correctness: bench JSON without .transcript => wer_median=null + diagnostic"
+
+run_driver wer-badref "$OUT/wer-badref.json" "$OUT/wer-badref.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == null and .correctness_kind == null' \
+  "$OUT/wer-badref.json" > /dev/null \
+  || fail "wer-badref: $(cat "$OUT/wer-badref.json")"
+grep -q 'reference file not found' "$OUT/wer-badref.err" \
+  || fail "wer-badref: missing-reference diagnosis not surfaced"
+ok "correctness: missing reference file => wer_median=null + diagnostic (perf still ok)"
+
+run_driver wer-tw-warns "$OUT/wer-tw-warns.json" "$OUT/wer-tw-warns.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wer_median == null' \
+  "$OUT/wer-tw-warns.json" > /dev/null \
+  || fail "wer-tw-warns: $(cat "$OUT/wer-tw-warns.json")"
+grep -q "declares correctness but bench_kind='time-wrapped'" "$OUT/wer-tw-warns.err" \
+  || fail "wer-tw-warns: time-wrapped correctness warning not printed"
+ok "correctness: time-wrapped family with a correctness block warns and is skipped"
 
 echo "all $PASS checks passed"

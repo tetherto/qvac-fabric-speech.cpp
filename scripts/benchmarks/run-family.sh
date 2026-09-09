@@ -115,6 +115,17 @@ if [[ -z "$BENCH_KIND" ]]; then
   echo "family '$FAMILY' not found in families.json" >&2; exit 1
 fi
 
+# Config sanity: a `correctness` block is only meaningful for native-mode
+# families whose bench binary writes .transcript into --json-out. Warn loudly
+# but don't fail — the field is optional and the perf path still works.
+if jq -e --arg family "$FAMILY" '.[$family].correctness // empty' \
+     "$FAMILIES_JSON" > /dev/null 2>&1; then
+  if [[ "$BENCH_KIND" != "native" ]]; then
+    echo "warning: family '$FAMILY' declares correctness but bench_kind='$BENCH_KIND'" >&2
+    echo "  correctness scoring is native-mode only; block will be ignored." >&2
+  fi
+fi
+
 MODEL_DIR="$MODELS_ROOT/$FAMILY"
 mkdir -p "$MODEL_DIR"
 
@@ -122,6 +133,13 @@ mkdir -p "$MODEL_DIR"
 BACKEND="unknown"     # populated from JSON or stderr scrape on a successful run
 PEAK_RSS_MIB="null"   # tracked across runs; max seen
 RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ audio_duration_seconds)
+# Correctness fields — populated only when the family carries a `correctness`
+# block AND the run produced enough output to score against a reference. All
+# three stay null on families without a correctness spec so the result.json
+# schema is stable (summarize.py renders "—" for null).
+WER_MEDIAN="null"          # numeric WER in [0,1] or null
+CORRECTNESS_KIND="null"    # "wer" (currently the only kind) or null
+CORRECTNESS_REF="null"     # repo-relative path to the reference file or null
 
 emit_json() {
   local status="$1" median="${2:-null}" wmin="${3:-null}" wmax="${4:-null}" extra="${5:-}"
@@ -138,11 +156,16 @@ emit_json() {
     --argjson rtf_median  "$RTF_MEDIAN" \
     --argjson peak_rss    "$PEAK_RSS_MIB" \
     --argjson runs        "$RUNS" \
+    --argjson wer_median  "$WER_MEDIAN" \
+    --argjson correctness_kind "$CORRECTNESS_KIND" \
+    --argjson correctness_reference "$CORRECTNESS_REF" \
     --arg  status "$status" \
     --arg  notes  "$NOTES$extra" \
     '{family:$family, model:$model, runner:$runner, os:$os, backend:$backend,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
+      wer_median:$wer_median, correctness_kind:$correctness_kind,
+      correctness_reference:$correctness_reference,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
   echo "wrote $OUT"
   cat "$OUT" >&2
@@ -436,6 +459,76 @@ parse_backend_from_logs() {
   echo ""
 }
 
+# ---- correctness scoring (WER) ---------------------------------------------
+# When a family in families.json carries a `correctness` block, score the
+# native-bench transcript against the checked-in reference and echo
+# "wer|kind|reference" (or empty when scoring is skipped). Callers set the
+# emitter's WER_MEDIAN / CORRECTNESS_* vars from the returned values.
+#
+# All error paths are non-fatal: a missing reference file, missing transcript
+# in the bench JSON, or compute-wer.py failure logs to stderr and returns
+# empty so the perf portion of the run still succeeds — a green benchmark
+# with correctness=null tells the reader "perf is fine, correctness didn't
+# run" instead of dragging the whole cell to run-failed.
+score_correctness() {
+  local bench_json="$1"
+  local spec_kind spec_ref spec_norm
+  spec_kind="$(jq -r --arg family "$FAMILY" \
+    '.[$family].correctness.kind // ""'       "$FAMILIES_JSON")"
+  spec_ref="$(jq  -r --arg family "$FAMILY" \
+    '.[$family].correctness.reference // ""'  "$FAMILIES_JSON")"
+  spec_norm="$(jq -r --arg family "$FAMILY" \
+    '.[$family].correctness.normalizer // "english"' "$FAMILIES_JSON")"
+
+  # No correctness block — silent no-op (the common case).
+  if [[ -z "$spec_kind" ]]; then return 0; fi
+
+  if [[ "$spec_kind" != "wer" ]]; then
+    echo "$FAMILY: unsupported correctness.kind '$spec_kind' (only 'wer' today)" >&2
+    return 0
+  fi
+
+  # Resolve the reference path against the repo root (two levels up from
+  # $(dirname "$0")/../..), or accept it as absolute. This mirrors how the
+  # workflow invokes us with the repo checked out at $PWD.
+  local ref_path="$spec_ref"
+  if [[ "$ref_path" != /* ]]; then
+    ref_path="$(cd "$(dirname "$0")/../.." && pwd)/$spec_ref"
+  fi
+  if ! [[ -f "$ref_path" ]]; then
+    echo "$FAMILY: correctness reference file not found: $ref_path" >&2
+    return 0
+  fi
+
+  local hyp
+  hyp="$(jq -r '.transcript // empty' "$bench_json" 2>/dev/null || true)"
+  if [[ -z "$hyp" ]]; then
+    echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
+    return 0
+  fi
+
+  local wer_out wer
+  # Prefer the caller-python interpreter that ran the workflow's other Python
+  # steps (python3). No venv assumed — compute-wer.py imports only stdlib.
+  if ! wer_out="$(python3 "$(dirname "$0")/compute-wer.py" \
+       --hypothesis-text "$hyp" \
+       --reference       "$ref_path" \
+       --normalizer      "$spec_norm" 2>&1)"; then
+    echo "$FAMILY: compute-wer.py failed: $wer_out" >&2
+    return 0
+  fi
+  wer="$(echo "$wer_out" | jq -r '.wer // empty' 2>/dev/null || true)"
+  if [[ -z "$wer" ]]; then
+    echo "$FAMILY: could not parse WER from compute-wer.py output: $wer_out" >&2
+    return 0
+  fi
+
+  # Emit the tuple the caller expects. Reference is echoed as the
+  # families.json-declared (repo-relative) path so the summary table stays
+  # stable across runners with different absolute checkout paths.
+  echo "$wer|$spec_kind|$spec_ref"
+}
+
 # Nanosecond timestamp. macOS 26 / arm64's /bin/date does support %N despite
 # being a GNU extension; the script-start guard above bails loudly if we
 # land on an older date that would silently return zeros. Invokes /bin/date
@@ -551,6 +644,19 @@ case "$BENCH_KIND" in
     fi
     rss="$(parse_rss_from_time_stderr "$stderr_log")"
     [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
+
+    # Correctness scoring — no-op unless the family declares a correctness
+    # block. Runs after perf is captured so a scoring failure never
+    # downgrades a green perf run.
+    corr_out=""
+    corr_out="$(score_correctness "$JSON_OUT" || true)"
+    if [[ -n "$corr_out" ]]; then
+      IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
+      [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
+      [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
+      [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
+    fi
+
     emit_json "ok" "$n_med" "$n_min" "$n_max"
     ;;
 
