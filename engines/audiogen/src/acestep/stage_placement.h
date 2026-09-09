@@ -42,10 +42,17 @@ inline bool backend_name_is_cuda(const char * name) {
     return name && std::strcmp(name, "CUDA") == 0;
 }
 
-// Per-device Vulkan LM allowlist: Mesa RADV is validated against the
-// F32-dequantized reference (README "Backends"); other devices stay on CPU.
+inline bool device_desc_has_marker(const char * device_desc, const char * marker) {
+    return device_desc && std::strstr(device_desc, marker) != nullptr;
+}
+
+// Per-device Vulkan LM allowlist, keyed on the driver family that appears in the
+// device description: Mesa RADV and the NVIDIA proprietary driver are validated
+// against the F32-dequantized reference (README "Backends"). Other devices stay
+// on the CPU.
 inline bool vulkan_device_lm_validated(const char * device_desc) {
-    return device_desc && std::strstr(device_desc, "RADV") != nullptr;
+    return device_desc_has_marker(device_desc, "RADV") ||
+           device_desc_has_marker(device_desc, "NVIDIA");
 }
 
 // Environment escape hatches, read once at create(). Presence is what counts:

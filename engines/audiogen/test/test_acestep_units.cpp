@@ -870,15 +870,17 @@ void test_stage_placement() {
     CHECK(!backend_name_is_cuda(nullptr));
 
     const PlacementOverrides none;
-    const char * const radv_desc = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const radv_desc   = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const nvidia_desc = "NVIDIA GeForce RTX 3080";
 
     // -- device predicate: the Vulkan LM allowlist is per-device --------------
     using tts_cpp::acestep::vulkan_device_lm_validated;
     CHECK(vulkan_device_lm_validated(radv_desc));
     CHECK(vulkan_device_lm_validated("AMD Radeon Graphics (RADV GFX1100)"));
+    CHECK(vulkan_device_lm_validated(nvidia_desc));
+    CHECK(vulkan_device_lm_validated("NVIDIA GeForce RTX 4090"));
     CHECK(!vulkan_device_lm_validated("Mali-G715"));
     CHECK(!vulkan_device_lm_validated("Samsung Xclipse 920"));
-    CHECK(!vulkan_device_lm_validated("NVIDIA GeForce RTX 4090"));
     CHECK(!vulkan_device_lm_validated("AMD Radeon RX 7900 XTX"));  // proprietary driver
     CHECK(!vulkan_device_lm_validated(""));
     CHECK(!vulkan_device_lm_validated(nullptr));
@@ -895,6 +897,15 @@ void test_stage_placement() {
     // Strix Halo: ~2x faster LM, closer to the F32 reference than the CPU path).
     {
         StagePlacement p = resolve_stage_placement("Vulkan", radv_desc, none);
+        CHECK(p.lm_on_gpu);
+        CHECK(p.detok_on_gpu);
+        CHECK(p.enc_on_gpu);
+    }
+
+    // Vulkan on an NVIDIA device runs every stage on the GPU (measured on an
+    // RTX 3080: argmax-identical to the F32 reference where CPU Q8_0 diverges).
+    {
+        StagePlacement p = resolve_stage_placement("Vulkan", nvidia_desc, none);
         CHECK(p.lm_on_gpu);
         CHECK(p.detok_on_gpu);
         CHECK(p.enc_on_gpu);
