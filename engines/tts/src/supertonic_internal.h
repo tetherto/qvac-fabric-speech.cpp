@@ -609,6 +609,18 @@ bool load_supertonic_gguf(const std::string & path,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
+
+// Weight-staging decisions taken during load, exposed so the loader's
+// packed-source handling can be regression-tested without a GGUF.
+ggml_type target_supertonic_storage_type(const std::string & name,
+                                         enum ggml_type src_type,
+                                         supertonic_precision precision,
+                                         bool backend_is_cpu);
+bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
+                                        enum ggml_type dst_type);
+bool should_expand_supertonic_tensor(enum ggml_type type);
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type);
+bool is_supertonic_matmul_weight_name(const std::string & name);
 void supertonic_graph_compute(const supertonic_model & model, ggml_cgraph * graph);
 
 // ---- memory-fit preflight (include/tts-cpp/supertonic/fit.h) ---------------
@@ -712,13 +724,10 @@ void release_duration_thread_local_caches();
 // a pointwise BLAS they do not exist and preferring them would select plain
 // im2col + mul_mat over the fused and [C, T] graph paths every other backend
 // takes.
-inline constexpr bool cpu_pointwise_accel_compiled() {
-#if defined(TTS_CPP_USE_ACCELERATE) || defined(TTS_CPP_USE_CBLAS)
-    return true;
-#else
-    return false;
-#endif
-}
+// Defined once in supertonic_gguf.cpp: TTS_CPP_USE_ACCELERATE and
+// TTS_CPP_USE_CBLAS are PRIVATE to the library's own targets, so an inline body
+// here would differ between translation units and violate the ODR.
+bool cpu_pointwise_accel_compiled();
 
 inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
     if (!cpu_pointwise_accel_compiled()) return false;

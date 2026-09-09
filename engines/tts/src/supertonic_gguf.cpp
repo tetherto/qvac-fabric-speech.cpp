@@ -116,6 +116,8 @@ ggml_tensor * get_tensor_or_null(const supertonic_model & model, const std::stri
 //   Q8_0 (Phase A3)           | F32  | F32  | Q8_0   <-- key win: Metal keeps q8_0
 //
 // F32 row preserves the historical behaviour exactly.
+} // namespace
+
 // Predicate: is `tensor_name` a true matmul weight that lands in a
 // `ggml_mul_mat(weight, activation)` call (weight as src0) where Metal
 // can dispatch `kernel_mul_mm_q8_0_f32` directly?
@@ -210,6 +212,16 @@ bool should_expand_supertonic_tensor(enum ggml_type type) {
            type == GGML_TYPE_Q8_0 ||
            type == GGML_TYPE_Q4_0;
 }
+
+// Whether the loader stages a dequantized f32 copy for upload. Only an f32
+// destination wants one: a packed source kept at its own type is uploaded
+// verbatim, and staging four bytes per element into a block-quantized tensor
+// overruns it.
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type) {
+    return dst_type == GGML_TYPE_F32 && should_expand_supertonic_tensor(src_type);
+}
+
+namespace {
 
 std::vector<float> expand_supertonic_tensor_to_f32(const ggml_tensor * src) {
     const int64_t n = ggml_nelements(src);
@@ -921,6 +933,14 @@ inline std::unordered_set<uint64_t> & supertonic_alive_ids() {
 }
 
 } // namespace
+
+bool cpu_pointwise_accel_compiled() {
+#if defined(TTS_CPP_USE_ACCELERATE) || defined(TTS_CPP_USE_CBLAS)
+    return true;
+#else
+    return false;
+#endif
+}
 
 void register_supertonic_alive(uint64_t generation_id) {
     std::lock_guard<std::mutex> lk(supertonic_alive_mu());
@@ -2303,13 +2323,9 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 // Precision-driven conversion (ours).  Covers f32 → q8_0,
                 // q8_0 → f32, f16 → f32 etc.  Buffered here, uploaded later.
                 convert_supertonic_tensor_data(src, dst_type, converted_tensors[name]);
-            } else if (dst_type == GGML_TYPE_F32 &&
-                       should_expand_supertonic_tensor(src->type)) {
-                // Legacy fallback: f16/q8_0 src with f32 dst that
-                // didn't go through the conversion helper above.  The dst
-                // test matters: a packed src kept at its own type needs no
-                // expansion, and staging one here would upload four bytes
-                // per element into a block-quantized tensor.
+            } else if (should_stage_f32_expansion(src->type, dst_type)) {
+                // Legacy fallback: f16/q8_0 src with f32 dst that didn't go
+                // through the conversion helper above.
                 expanded_f32_tensors[name] = expand_supertonic_tensor_to_f32(src);
             }
         }

@@ -17,8 +17,11 @@
 
 #include "supertonic_internal.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
+#include <thread>
 
 using namespace tts_cpp::supertonic::detail;
 
@@ -209,11 +212,85 @@ void test_thread_count_resolver() {
     CHECK(resolve_supertonic_thread_count(0, 0, false) == 1);
 }
 
+// Test 9 - supertonic_set_n_threads classifies the backend, not just the request.
+//
+// Test 8 covers the pure resolver. This covers the wiring in front of it: which
+// arm a model lands on is decided by backend_is_cpu together with whether the
+// pointwise accel is compiled, and only the CPU backend off that accel path is
+// allowed past the legacy cap.
+void test_set_n_threads_backend_classification() {
+    const int hw = std::max(1, (int) std::thread::hardware_concurrency());
+    const int fused_default  = std::max(1, hw - hw / 8);
+    const int capped_default = std::min(hw, kLegacyCpuThreadCap);
+    // A CPU model reaches the fused path only where no pointwise accel exists.
+    const int cpu_default = cpu_pointwise_accel_compiled() ? capped_default
+                                                           : fused_default;
+
+    supertonic_model cpu_model;
+    cpu_model.backend_is_cpu = true;
+    supertonic_set_n_threads(cpu_model, 0);
+    CHECK(cpu_model.n_threads == cpu_default);
+
+    supertonic_model gpu_model;
+    gpu_model.backend_is_cpu = false;
+    supertonic_set_n_threads(gpu_model, 0);
+    CHECK(gpu_model.n_threads == capped_default);
+
+    // An explicit request wins on either classification.
+    supertonic_set_n_threads(cpu_model, 3);
+    CHECK(cpu_model.n_threads == 3);
+    supertonic_set_n_threads(gpu_model, 3);
+    CHECK(gpu_model.n_threads == 3);
+}
+
+// Test 10 - a packed Q8_0 weight kept at Q8_0 must not stage an F32 expansion.
+//
+// The loader stages a dequantized copy for a packed source, then uploads it.
+// That is correct only when the destination is F32. A matmul weight kept at
+// q8_0 needs no expansion, and staging one uploaded four bytes per element into
+// a block-quantized tensor, which aborts in ggml_backend_tensor_set. Pins the
+// whole decision chain, since the bug was that the branch tested the source
+// type alone.
+void test_packed_q8_0_weight_is_not_expanded() {
+    const std::string weight = "vector_estimator:onnx::MatMul_1234";
+    CHECK(is_supertonic_matmul_weight_name(weight));
+
+    const ggml_type dst = target_supertonic_storage_type(
+        weight, GGML_TYPE_Q8_0, supertonic_precision::Q8_0,
+        /*backend_is_cpu=*/false);
+    CHECK(dst == GGML_TYPE_Q8_0);
+
+    // No conversion helper runs, so the staging decision is the one reached.
+    CHECK(needs_supertonic_tensor_conversion(GGML_TYPE_Q8_0, dst) == false);
+    // The source alone still looks expandable: that is what made the bug.
+    CHECK(should_expand_supertonic_tensor(GGML_TYPE_Q8_0) == true);
+    // ...but nothing may be staged for a destination that stays packed.
+    CHECK(should_stage_f32_expansion(GGML_TYPE_Q8_0, dst) == false);
+
+    // The f32 destination still expands, so the guard did not disable the path.
+    const ggml_type dst_f32 = target_supertonic_storage_type(
+        weight, GGML_TYPE_Q8_0, supertonic_precision::F32,
+        /*backend_is_cpu=*/false);
+    CHECK(dst_f32 == GGML_TYPE_F32);
+    CHECK(should_stage_f32_expansion(GGML_TYPE_Q8_0, dst_f32) == true);
+    CHECK(should_stage_f32_expansion(GGML_TYPE_F16,  GGML_TYPE_F32) == true);
+    CHECK(should_stage_f32_expansion(GGML_TYPE_F32,  GGML_TYPE_F32) == false);
+    CHECK(should_stage_f32_expansion(GGML_TYPE_F16,  GGML_TYPE_F16) == false);
+
+    // A non-matmul tensor is never kept packed, whatever the precision asks for.
+    const ggml_type dst_other = target_supertonic_storage_type(
+        "vocoder:conv1d_kernel", GGML_TYPE_Q8_0, supertonic_precision::Q8_0,
+        /*backend_is_cpu=*/false);
+    CHECK(dst_other == GGML_TYPE_F32);
+}
+
 } // namespace
 
 int main() {
     test_cpu_kernel_preference_tracks_compiled_accel();
     test_thread_count_resolver();
+    test_set_n_threads_backend_classification();
+    test_packed_q8_0_weight_is_not_expanded();
     test_default_flags();
     test_scope_mirrors_cpu_model();
     test_scope_mirrors_gpu_model();
