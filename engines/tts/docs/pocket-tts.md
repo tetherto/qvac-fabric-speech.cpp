@@ -510,3 +510,38 @@ public fit API and ran successfully. The existing older registry package is
 rejected during configuration for lacking this component. The registry source
 pin still needs a published revision containing this implementation; these
 checks do not claim the release is available from that registry already.
+
+
+## Current Fabric main validation (September 10, 2026)
+
+The integration is also ported to Fabric main `59b80b7`, where the addon is
+written in TypeScript and the in-process engine lives in `@qvac/inference`
+0.19.0. `@qvac/sdk` 0.19.0 remains the public transport facade. The native
+source includes speech master `8db5c437` and builds against registry
+`ggml-speech` source `70179b2b` (2026-09-09#1). All eight Pocket native CTests
+pass on that combination.
+
+The rebuilt addon passes its real-model integration test and 282 addon unit
+tests (878 assertions across all engines). The inference plugin passes batch
+and streaming real-model tests, schema tests, and request lifecycle tests.
+The current public Node SDK passes batch/stream PCM comparison, duplex output
+before input closes, cancellation/recovery, and worker shutdown using its
+production socket transport with a custom worker registering only TTS.
+The SDK compiles successfully. A focused inference test build compiles with
+`noEmitOnError`; the full inference build has existing errors in safe-fetch,
+AudioGen and sdcpp, outside the Pocket changes.
+
+Adversarial review identified and verified fixes for overlapping model loads,
+use of disposed handles after unload, requests on destroyed instances,
+AbortSignal cancellation that failed to stop native work, and unhandled chunk
+completion rejections when native dispatch failed. Requests hold admission
+until native terminal callbacks drain. Model lifecycle operations reject
+overlap. The IPC test runs under a process supervisor and selects an explicit
+test-owned config/cache directory, so inherited configuration cannot redirect
+its cache writes.
+
+The current addon recording contains 63,360 PCM16 samples at 24 kHz (2.64 s),
+peak 0.57874, and no clipped samples. Automated transcription recovers
+“Hello, we can generate speech with fabric.” This is a fresh current-main
+runtime sample; the prior iOS worklet results above refer to the earlier
+Fabric checkpoint until that port is rebuilt for mobile.
