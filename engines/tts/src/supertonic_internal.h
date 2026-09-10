@@ -415,6 +415,11 @@ struct supertonic_model {
     // ARM Mali/Valhall Vulkan miscomputes a GEMM mul_mat whose output dim < ~48; set via
     // device-identity (not supports_op: driver claims support). st_mul_mat pads to 64; harmless elsewhere.
     bool mulmat_needs_pad = false;
+    // Vulkan drivers other than NVIDIA reorder a weight-first GEMM's
+    // reduction, which moves the channel-major step's waveform off the F32
+    // reference.  When true the step multiplies activation-first and
+    // transposes the result back into [C, T].
+    bool ct_matmul_activation_first = false;
     // When true, the per-step vector-estimator attention graphs materialise
     // K/V into contiguous F16 before calling ggml_flash_attn_ext so OpenCL
     // (and other backends carrying the mixed-precision kernel) dispatch
@@ -572,14 +577,13 @@ struct supertonic_model {
 // See Phase 2A in `aiDocs/PLAN_SUPERTONIC_OPENCL.md` for the
 // roster + auto-policy rationale.
 //
-// `precision` (separate concern): selects the storage type for
-// matmul weights at GGUF load time.  Mirrors the public
-// `tts_cpp::supertonic::Precision` enum.  F32 is the historical
-// default; Q8_0 / F16 trigger asymmetric loads on Metal.
+// `precision` (separate concern): selects model weight storage at load time.
+// Mirrors the public `tts_cpp::supertonic::Precision` values.
 enum class supertonic_precision {
     F32 = 0,
     F16 = 1,
     Q8_0 = 2,
+    Auto = 3,
 };
 
 // `vulkan_device`:
@@ -604,7 +608,7 @@ bool load_supertonic_gguf(const std::string & path,
                           int n_gpu_layers = 0,
                           bool verbose = false,
                           int f16_weights = -1,
-                          supertonic_precision precision = supertonic_precision::F32,
+                          supertonic_precision precision = supertonic_precision::Auto,
                           int vulkan_device = 0,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
@@ -615,7 +619,8 @@ void supertonic_set_n_threads(supertonic_model & model, int n_threads);
 ggml_type target_supertonic_storage_type(const std::string & name,
                                          enum ggml_type src_type,
                                          supertonic_precision precision,
-                                         bool backend_is_cpu);
+                                         bool backend_is_cpu,
+                                         bool backend_is_vk);
 bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
                                         enum ggml_type dst_type);
 bool should_expand_supertonic_tensor(enum ggml_type type);
@@ -1305,12 +1310,16 @@ bool supertonic_use_f16_attn();
 // pure-GGML decomposition.  Defaults to `false` (pure-GGML) when no scope
 // is active, so a helper called outside a scope never emits a backend-
 // unsupported fused op.
+// Thread-local mirror of "this backend's fused channel layer-norm reproduces
+// the stock NORM + MUL + ADD chain".  False on Vulkan, whose kernel shifts a
+// knife-edge tail alignment in the q8 short case; the graph builders then
+// emit the stock decomposition.  Defaults to false outside any scope.
+bool supertonic_use_fused_layer_norm();
 bool supertonic_use_fused_supertonic_ops();
 
 // Thread-local mirror of `supertonic_model::mulmat_needs_pad`, set by the dispatch scope.
 // Defaults to false outside any scope, so st_mul_mat emits a plain ggml_mul_mat.
 bool supertonic_mulmat_needs_pad();
-
 // Drop-in for ggml_mul_mat: when mulmat_needs_pad, zero-pad a GEMM output dim < 64 up to 64,
 // then slice back the [M,N] block (exact). No-op on healthy backends, mat-vec, or non-F32 operands.
 inline ggml_tensor * st_mul_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
@@ -1671,6 +1680,8 @@ struct supertonic_op_dispatch_scope {
     bool prev_use_fused_supertonic_ops;
     // saved `mulmat_needs_pad` flag for RAII teardown.
     bool prev_mulmat_needs_pad;
+    // saved fused-layer-norm flag for RAII teardown.
+    bool prev_use_fused_layer_norm;
     // round 4 — saved K/V dispatch dtype for RAII
     // teardown.  Restored on scope destruction so a follow-on
     // engine on the same thread sees the default value, not the

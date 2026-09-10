@@ -47,9 +47,42 @@ jq -e '[.sortformer.args[] | select(startswith("--bench"))] | length == 0' "$REA
   || fail "sortformer args carry --bench flags the diarize path ignores"
 jq -e '.sortformer.models | length == 1' "$REAL_SPEC" > /dev/null \
   || fail "pure-diarization sortformer needs exactly its own GGUF"
-jq -e '.sortformer.audio_duration_seconds == 11.0' "$REAL_SPEC" > /dev/null \
-  || fail "sortformer RTF divides by the jfk.wav duration"
-ok "sortformer benches the diarize path time-wrapped"
+# sortformer benches abcba.wav (~160.6 s, 3 speakers) so DER is a real signal;
+# jfk.wav (single speaker, 11 s) would score trivially 0.0 and catch nothing.
+jq -e '[.sortformer.args[] | select(endswith("/abcba.wav"))] | length == 1' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer --wav must be abcba.wav (multi-speaker fixture — jfk.wav gives trivial DER)"
+jq -e '.sortformer.audio_duration_seconds == 160.6' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer RTF divides by the abcba.wav duration (~160.6 s)"
+# parakeet-cli defaults to n_gpu_layers=0, i.e. CPU-only. Whisper's macOS row
+# engages Metal automatically; sortformer needs the flag explicitly. Cosyvoice/
+# supertonic/parler already pass it — keeping sortformer in sync so the macos
+# row reports Metal, not CPU. On hosted linux (no GPU compiled into ggml) the
+# flag is a documented no-op — falls back to CPU.
+jq -e '.sortformer.args | index("--n-gpu-layers") != null' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer must request GPU offload with --n-gpu-layers (else macOS runner idles on CPU when Metal is available)"
+ok "sortformer benches the diarize path time-wrapped on abcba.wav with GPU offload requested"
+
+# sortformer DER: correctness block must declare kind='der' with the checked-in
+# RTTM that matches the abcba.wav audio, and --emit jsonl must be in argv so
+# parakeet-cli's stdout is machine-parseable segment output for compute-der.py.
+jq -e '.sortformer.correctness.kind == "der"' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer must declare a correctness.kind='der' block (time-wrapped path via captured --emit jsonl stdout)"
+jq -e '.sortformer.correctness.reference | test("abcba\\.rttm$")' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer correctness.reference must be the abcba.rttm alongside abcba.wav"
+sortformer_ref_repo_rel="$(jq -r '.sortformer.correctness.reference' "$REAL_SPEC")"
+[[ -f "$HERE/../../$sortformer_ref_repo_rel" ]] \
+  || fail "sortformer correctness.reference file missing: $sortformer_ref_repo_rel"
+# --emit jsonl gates parakeet-cli into printing one {speaker,start,end} JSON
+# per segment on stdout — that's the DER hypothesis source.
+emit_pos="$(jq -r '[.sortformer.args[]] | to_entries[] | select(.value == "--emit") | .key' "$REAL_SPEC" | head -1)"
+[[ -n "$emit_pos" ]] \
+  || fail "sortformer args missing --emit flag"
+emit_val="$(jq -r --argjson i "$((emit_pos + 1))" '.sortformer.args[$i]' "$REAL_SPEC")"
+[[ "$emit_val" == "jsonl" ]] \
+  || fail "sortformer --emit must be 'jsonl' (got '$emit_val') — compute-der.py needs JSONL segments on stdout"
+jq -e '(.sortformer.correctness.collar_ms // 250) >= 0' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer correctness.collar_ms must be a non-negative integer"
+ok "sortformer declares a DER correctness block against abcba.rttm with --emit jsonl"
 
 jq -e '.cosyvoice.args | index("--n-gpu-layers") != null' "$REAL_SPEC" > /dev/null \
   || fail "cosyvoice args lost --n-gpu-layers (Metal offload on the macOS runner)"
@@ -83,6 +116,13 @@ ok "whisper declares a WER correctness block reusing parakeet's JFK reference an
 python3 "$HERE/compute-wer.py" --self-test > /dev/null \
   || fail "compute-wer.py --self-test failed"
 ok "compute-wer.py self-test passes"
+
+# compute-der.py: same discipline as compute-wer.py's self-test — catches
+# regressions in the RTTM parser, framing, collar, and permutation mapping
+# without needing sortformer or the abcba fixture to run.
+python3 "$HERE/compute-der.py" --self-test > /dev/null \
+  || fail "compute-der.py --self-test failed"
+ok "compute-der.py self-test passes"
 
 jq -e '.vad.source == "huggingface" and (.vad.hf_repo | length > 0) and (.vad.hf_ref | test("^[0-9a-f]{40}$"))' "$REAL_SPEC" > /dev/null \
   || fail "vad family must pin an HF repo at a full commit sha"
@@ -121,7 +161,18 @@ mkdir -p "$REF_DIR"
 printf 'the quick brown fox' > "$REF_DIR/ref-perfect.txt"
 printf 'the quick brown fox' > "$REF_DIR/ref-2subs.txt"    # same ref; the stub hyp will differ
 
-jq -n --arg sha "$hello_sha" --arg ref_perfect "$REF_DIR/ref-perfect.txt" --arg ref_2subs "$REF_DIR/ref-2subs.txt" '{
+# Minimal RTTM for the DER driver tests: 4 s of speaker A followed by 4 s of
+# speaker B (matches compute-der.py's self-test shape). Total ref-speech = 8 s,
+# so a stub that gets one speaker right and misses the other scores DER 0.5.
+cat > "$REF_DIR/ref-der.rttm" <<'RTTM'
+SPEAKER stub 1 0.000 4.000 <NA> <NA> A <NA> <NA>
+SPEAKER stub 1 4.000 4.000 <NA> <NA> B <NA> <NA>
+RTTM
+
+jq -n --arg sha "$hello_sha" \
+      --arg ref_perfect "$REF_DIR/ref-perfect.txt" \
+      --arg ref_2subs   "$REF_DIR/ref-2subs.txt" \
+      --arg ref_der     "$REF_DIR/ref-der.rttm" '{
   "nat-ok": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: null, notes: "n"
@@ -171,6 +222,54 @@ jq -n --arg sha "$hello_sha" --arg ref_perfect "$REF_DIR/ref-perfect.txt" --arg 
     args: [], audio_duration_seconds: 1.0,
     correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english"},
     notes: "time-wrapped catastrophic-miss guard: empty stdout capture must score WER 1.0, not skip"
+  },
+  "der-tw-perfect": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "time-wrapped DER path: stdout JSONL matches ref (speaker IDs may permute) => DER 0.0"
+  },
+  "der-tw-nonzero": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-confused", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "collapsed-to-one-speaker hyp gets ref-A right and ref-B as confusion => DER 0.5"
+  },
+  "der-tw-empty": {
+    bench_kind: "time-wrapped", binary: "bin/tw-silent", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "diarizer emitted nothing: full miss => DER 1.0"
+  },
+  "der-tw-badref": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: "/does/not/exist.rttm", collar_ms: 0},
+    notes: "missing RTTM: correctness skipped, perf still ok"
+  },
+  "der-tw-collar": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-slop", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 250},
+    notes: "boundary-slop hyp + 250 ms collar; the slop falls inside the collar so DER 0.0. Proves collar_ms>0 is threaded from families.json through to compute-der.py."
+  },
+  "der-tw-duration-shape": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-duration", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "hyp uses {start,duration} instead of {start,end}; must parse identically"
+  },
+  "der-tw-mixed-stdout": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-mixed", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "hyp interleaves non-JSON banner/verbose lines with JSONL segments — parser must skip the noise and score to the same DER 0.0 as the pure-JSONL case"
+  },
+  "der-nat-warns": {
+    bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "native families have no diarize schema in bench JSON; DER must be skipped with a diagnostic"
   },
   "tw-marker": {
     bench_kind: "time-wrapped", binary: "bin/tw-marker", cmake_target: "x",
@@ -240,6 +339,60 @@ STUB
 cat > "$BUILD/bin/tw-transcript-perfect" <<'STUB'
 #!/usr/bin/env bash
 echo "the quick brown fox"
+STUB
+
+# Sortformer-shape stub for the time-wrapped DER path: prints one JSONL segment
+# object per line on stdout. Matches parakeet-cli --emit jsonl output. Speaker
+# IDs are numeric (as parakeet-cli emits); the DER mapping search remaps them
+# onto ref ids A/B — the "perfect" hyp can therefore label speakers 0/1 while
+# the ref uses A/B and still score 0.0.
+cat > "$BUILD/bin/tw-jsonl-perfect" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"end":4.000}'
+printf '%s\n' '{"speaker":1,"start":4.000,"end":8.000}'
+STUB
+
+# Collapsed hyp: single speaker across both ref segments. Gets ref-A right
+# (correct) and ref-B as speaker confusion. 4 s confusion / 8 s ref-speech
+# = DER 0.5.
+cat > "$BUILD/bin/tw-jsonl-confused" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"end":8.000}'
+STUB
+
+# Boundary-slop hyp: speaker change 100 ms before the true 4.0 s boundary.
+# Without a collar this scores 10 confusion frames / 800 = DER 0.0125; a
+# 250 ms collar around the boundary hides the slop so DER goes to 0.0.
+# The der-tw-collar cell exercises the collar_ms>0 branch of the driver.
+cat > "$BUILD/bin/tw-jsonl-slop" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"end":3.900}'
+printf '%s\n' '{"speaker":1,"start":3.900,"end":8.000}'
+STUB
+
+# Duration-shape hyp: same content as tw-jsonl-perfect but with `duration`
+# instead of `end` — parse_hypothesis_jsonl accepts both, and this pins
+# that a future parakeet-cli switch between the two shapes doesn't silently
+# break DER.
+cat > "$BUILD/bin/tw-jsonl-duration" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"duration":4.000}'
+printf '%s\n' '{"speaker":1,"start":4.000,"duration":4.000}'
+STUB
+
+# Mixed-stdout hyp: real parakeet-cli --verbose leaks non-JSON banner /
+# summary lines to stdout alongside the JSONL segments. compute-der.py
+# must skip the noise and score the JSONL portion — a single stray print
+# from a future --verbose change (or a new backend init log) would
+# otherwise null DER on every dispatch. Segments are identical to
+# tw-jsonl-perfect, so the expected DER is 0.0.
+cat > "$BUILD/bin/tw-jsonl-mixed" <<'STUB'
+#!/usr/bin/env bash
+echo "parakeet: using Metal backend"
+echo "load=42.1ms audio=8.00s samples=128000@16000Hz"
+printf '%s\n' '{"speaker":0,"start":0.000,"end":4.000}'
+printf '%s\n' '{"speaker":1,"start":4.000,"end":8.000}'
+echo "[diarize] total=123.4ms RTF=0.015 segments=2"
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -435,7 +588,14 @@ jq -e '.status == "ok" and .wer_median == 0.0 and .correctness_kind == "wer"
        and (.correctness_reference | test("ref-perfect\\.txt$"))' \
   "$OUT/wer-tw-perfect.json" > /dev/null \
   || fail "wer-tw-perfect: $(cat "$OUT/wer-tw-perfect.json")"
-ok "correctness (time-wrapped): captured stdout matching the reference scores WER 0.0"
+# Raw-hypothesis artifact: stashed next to result.json as .hypothesis.txt so
+# a reviewer of a workflow run can see the actual transcript that scored,
+# not just the aggregate WER. .txt for WER (whisper-cli plain text).
+[[ -f "$OUT/wer-tw-perfect.hypothesis.txt" ]] \
+  || fail "wer-tw-perfect: hypothesis sibling not created next to result.json"
+grep -q 'the quick brown fox' "$OUT/wer-tw-perfect.hypothesis.txt" \
+  || fail "wer-tw-perfect: hypothesis sibling did not capture the stub's stdout"
+ok "correctness (time-wrapped): captured stdout matching the reference scores WER 0.0 + hypothesis stashed as .hypothesis.txt"
 
 # Time-wrapped variant of the catastrophic-miss regression guard from PR #230.
 # A binary that exits 0 with an empty stdout capture must score 1.0, not
@@ -447,5 +607,110 @@ jq -e '.status == "ok" and .wer_median == 1.0 and .correctness_kind == "wer"' \
   "$OUT/wer-tw-empty.json" > /dev/null \
   || fail "wer-tw-empty: $(cat "$OUT/wer-tw-empty.json")"
 ok "correctness (time-wrapped): empty stdout capture => wer_median=1.0 (catastrophic-miss regression guard)"
+
+# ---- correctness scoring (DER path, time-wrapped) --------------------------
+# All DER cells declare the same 8 s / 2 speaker reference; only the stub's
+# JSONL output varies. The kind='der' branch must (a) route the score into
+# der_median, not wer_median, (b) remap hyp speaker IDs to ref via the
+# permutation search (so `speaker:0/1` labels can match ref `A/B`), and
+# (c) preserve the "empty stdout => full miss" invariant from the WER path.
+
+run_driver der-tw-perfect "$OUT/der-tw-perfect.json" "$OUT/der-tw-perfect.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .wer_median == null and .correctness_kind == "der"
+       and (.correctness_reference | test("ref-der\\.rttm$"))' \
+  "$OUT/der-tw-perfect.json" > /dev/null \
+  || fail "der-tw-perfect: $(cat "$OUT/der-tw-perfect.json")"
+# Raw-hypothesis artifact: stashed next to result.json as .hypothesis.jsonl.
+# For DER debugging, the per-segment JSONL is what a reviewer needs to see
+# which speaker labels came out wrong or which boundaries slipped past the
+# collar — none of that is recoverable from der_median alone.
+[[ -f "$OUT/der-tw-perfect.hypothesis.jsonl" ]] \
+  || fail "der-tw-perfect: hypothesis sibling not created next to result.json"
+jq -e '.speaker == 0 and .start == 0.0 and .end == 4.0' \
+  "$OUT/der-tw-perfect.hypothesis.jsonl" > /dev/null 2>&1 || {
+  # File may have multiple JSONL lines; parse the first one explicitly.
+  first_line="$(head -1 "$OUT/der-tw-perfect.hypothesis.jsonl")"
+  echo "$first_line" | jq -e '.speaker == 0 and .start == 0.0 and .end == 4.0' > /dev/null \
+    || fail "der-tw-perfect.hypothesis.jsonl first line unexpected: $first_line"
+}
+ok "correctness (DER, time-wrapped): matching JSONL segments score DER 0.0 + hypothesis stashed as .hypothesis.jsonl"
+
+run_driver der-tw-nonzero "$OUT/der-tw-nonzero.json" "$OUT/der-tw-nonzero.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.5 and .correctness_kind == "der"' \
+  "$OUT/der-tw-nonzero.json" > /dev/null \
+  || fail "der-tw-nonzero: $(cat "$OUT/der-tw-nonzero.json")"
+ok "correctness (DER, time-wrapped): collapsed-to-one-speaker hyp scores DER 0.5"
+
+# Empty stdout => diarizer emitted nothing => full miss => DER 1.0. Mirrors
+# the WER empty-transcript regression guard: correctness scoring must not
+# silently skip the catastrophic-collapse case this feature exists to catch.
+run_driver der-tw-empty "$OUT/der-tw-empty.json" "$OUT/der-tw-empty.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 1.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-empty.json" > /dev/null \
+  || fail "der-tw-empty: $(cat "$OUT/der-tw-empty.json")"
+ok "correctness (DER, time-wrapped): empty JSONL stdout => der_median=1.0 (catastrophic-miss regression guard)"
+
+run_driver der-tw-badref "$OUT/der-tw-badref.json" "$OUT/der-tw-badref.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == null and .correctness_kind == null' \
+  "$OUT/der-tw-badref.json" > /dev/null \
+  || fail "der-tw-badref: $(cat "$OUT/der-tw-badref.json")"
+grep -q 'reference file not found' "$OUT/der-tw-badref.err" \
+  || fail "der-tw-badref: missing-RTTM diagnosis not surfaced"
+# When correctness is skipped no hypothesis sibling should be left behind —
+# otherwise a reader sees a stale hypothesis file next to a null der_median
+# and wonders why the scorer didn't run.
+[[ ! -f "$OUT/der-tw-badref.hypothesis.jsonl" ]] \
+  || fail "der-tw-badref: hypothesis sibling should NOT exist when correctness was skipped"
+ok "correctness (DER, time-wrapped): missing RTTM => der_median=null + diagnostic + no hypothesis sibling (perf still ok)"
+
+# Non-zero collar plumbing: proves families.json's correctness.collar_ms
+# reaches compute-der.py's --collar-ms. The 100 ms boundary slop scores
+# non-zero without a collar (compute-der.py self-test pins that at 0.0125);
+# a 250 ms collar hides it entirely, so DER=0.0 here. If the driver ever
+# stripped collar_ms and compute-der.py's default (250) also gave 0.0 this
+# would still pass, so pair this with the compute-der.py self-test's
+# "boundary slop, no collar" case which pins the DER-without-collar value.
+run_driver der-tw-collar "$OUT/der-tw-collar.json" "$OUT/der-tw-collar.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-collar.json" > /dev/null \
+  || fail "der-tw-collar: $(cat "$OUT/der-tw-collar.json")"
+ok "correctness (DER, time-wrapped): 250 ms collar hides boundary slop => DER 0.0 (collar_ms plumbed through)"
+
+# Duration-shape hypothesis: parakeet-cli today emits {speaker,start,end}
+# but the JSONL contract accepts either end or duration. Pin that a future
+# CLI switch between the two shapes doesn't silently regress DER — same
+# hyp content in the two shapes must score identically (DER 0.0 here).
+run_driver der-tw-duration-shape "$OUT/der-tw-duration-shape.json" "$OUT/der-tw-duration-shape.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-duration-shape.json" > /dev/null \
+  || fail "der-tw-duration-shape: $(cat "$OUT/der-tw-duration-shape.json")"
+ok "correctness (DER, time-wrapped): {start,duration}-shape JSONL parses identically to {start,end}"
+
+# Mixed-stdout robustness: parakeet-cli --verbose could leak non-JSON banner
+# and summary lines to stdout alongside the JSONL segments. compute-der.py
+# must skip those and score just the JSONL portion — otherwise a single
+# upstream --verbose change (or a new backend init log) would silently null
+# DER on every dispatch. This test would fail loudly under the pre-review
+# `raise ValueError` behavior, which aborted the whole score on the first
+# non-JSON line.
+run_driver der-tw-mixed-stdout "$OUT/der-tw-mixed-stdout.json" "$OUT/der-tw-mixed-stdout.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-mixed-stdout.json" > /dev/null \
+  || fail "der-tw-mixed-stdout: $(cat "$OUT/der-tw-mixed-stdout.json")"
+grep -q 'skipping non-JSON hypothesis line' "$OUT/der-tw-mixed-stdout.err" \
+  || fail "der-tw-mixed-stdout: expected 'skipping non-JSON' diagnostic on stderr"
+ok "correctness (DER, time-wrapped): non-JSON stdout chatter (--verbose banners) is skipped and JSONL portion still scores correctly"
+
+# Native-mode families have no diarize schema in --json-out today, so a
+# native family declaring correctness.kind='der' must be skipped with a
+# diagnostic rather than trying to score against garbage. This guards
+# against a future WER→DER copy-paste in a native family's spec.
+run_driver der-nat-warns "$OUT/der-nat-warns.json" "$OUT/der-nat-warns.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == null and .correctness_kind == null' \
+  "$OUT/der-nat-warns.json" > /dev/null \
+  || fail "der-nat-warns: $(cat "$OUT/der-nat-warns.json")"
+grep -q "correctness.kind='der' requires text-file mode" "$OUT/der-nat-warns.err" \
+  || fail "der-nat-warns: native-DER config diagnostic not surfaced"
+ok "correctness (DER): native-mode families with kind='der' are skipped with a diagnostic"
 
 echo "all $PASS checks passed"

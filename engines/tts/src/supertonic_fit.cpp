@@ -56,12 +56,14 @@ FitResult fit_params(const FitOptions & opts) {
     FitResult r;
     r.model_variant = "supertonic";
 
-    det::supertonic_precision precision = det::supertonic_precision::F32;
+    det::supertonic_precision precision = det::supertonic_precision::Auto;
     if (opts.precision == "f16") {
         precision = det::supertonic_precision::F16;
     } else if (opts.precision == "q8_0") {
         precision = det::supertonic_precision::Q8_0;
-    } else if (opts.precision != "f32" && !opts.precision.empty()) {
+    } else if (opts.precision == "f32") {
+        precision = det::supertonic_precision::F32;
+    } else if (opts.precision != "auto" && !opts.precision.empty()) {
         r.reason = "invalid-arguments";
         return r;
     }

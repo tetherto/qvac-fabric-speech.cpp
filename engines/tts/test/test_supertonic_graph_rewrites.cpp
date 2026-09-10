@@ -264,11 +264,11 @@ int count_mismatches(const std::vector<float> & a, const std::vector<float> & b,
     return bad;
 }
 
-// 45 latent frames is the shortest production utterance; the batched loop and
-// the per-step chain are bit-identical on Metal from that length (not at 8).
+// 139 latent frames exercises the medium production shape where CFG batching
+// must preserve branch-local attention and ConvNeXt semantics.
 struct cfm_loop_inputs {
-    int text_len    = 16;
-    int latent_len  = 45;
+    int text_len    = 151;
+    int latent_len  = 139;
     int total_steps = 5;
     std::vector<float> latent, text_emb, style_ttl, latent_mask;
 };
@@ -388,6 +388,7 @@ void test_ct_loop_matches_legacy_chain(const supertonic_model & model) {
 
     check_parity(model, ct_out, legacy_out, "[C, T] loop vs legacy chain");
 }
+
 
 std::vector<int64_t> make_synthetic_ids(int text_len, int64_t vocab_size, uint32_t seed) {
     std::vector<int64_t> ids((size_t) text_len);
