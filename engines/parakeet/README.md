@@ -189,6 +189,12 @@ same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
 that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
 opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
 
+Nemotron 3.5 ASR streaming is supported on CUDA. The encoder and the
+transducer decode both run on the GPU at all five operating points, with the
+fused LSTM-cell and transducer-step decode running up to eight greedy steps
+per graph. Validated against the NeMo stream-step references at
+80/160/320/560/1120 ms on an RTX 3090 (`test-nemotron-stream-step-cuda*`).
+
 Nemotron 3.5 ASR streaming is also supported on Vulkan. The encoder and the
 transducer decode both run on the GPU at all five operating points, and the
 decode takes the same fused LSTM-cell and transducer-step graphs as CUDA and

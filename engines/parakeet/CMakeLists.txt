@@ -950,6 +950,24 @@ if (PARAKEET_BUILD_TESTS)
             "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
     endif()
 
+    if (GGML_CUDA)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
+
     if (GGML_VULKAN)
         parakeet_register_nemotron_stream_case(
             test-nemotron-stream-step-vulkan-80
