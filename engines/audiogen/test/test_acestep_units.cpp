@@ -870,18 +870,20 @@ void test_stage_placement() {
     CHECK(!backend_name_is_cuda(nullptr));
 
     const PlacementOverrides none;
-    const char * const radv_desc = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const radv_desc   = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const nvidia_desc = "NVIDIA GeForce RTX 3080";
 
-    // -- device predicate: the Vulkan LM allowlist is per-device --------------
-    using tts_cpp::acestep::vulkan_device_lm_validated;
-    CHECK(vulkan_device_lm_validated(radv_desc));
-    CHECK(vulkan_device_lm_validated("AMD Radeon Graphics (RADV GFX1100)"));
-    CHECK(!vulkan_device_lm_validated("Mali-G715"));
-    CHECK(!vulkan_device_lm_validated("Samsung Xclipse 920"));
-    CHECK(!vulkan_device_lm_validated("NVIDIA GeForce RTX 4090"));
-    CHECK(!vulkan_device_lm_validated("AMD Radeon RX 7900 XTX"));  // proprietary driver
-    CHECK(!vulkan_device_lm_validated(""));
-    CHECK(!vulkan_device_lm_validated(nullptr));
+    // -- device predicate: the Vulkan LM denylist is per-device ---------------
+    using tts_cpp::acestep::vulkan_device_lm_blocked;
+    CHECK(vulkan_device_lm_blocked("Mali-G715"));
+    CHECK(vulkan_device_lm_blocked("Mali-G78"));
+    CHECK(!vulkan_device_lm_blocked(radv_desc));
+    CHECK(!vulkan_device_lm_blocked(nvidia_desc));
+    CHECK(!vulkan_device_lm_blocked("Samsung Xclipse 920"));
+    CHECK(!vulkan_device_lm_blocked("AMD Radeon RX 7900 XTX"));  // proprietary driver
+    CHECK(!vulkan_device_lm_blocked("Intel(R) Arc(tm) A770 Graphics"));
+    CHECK(!vulkan_device_lm_blocked(""));
+    CHECK(!vulkan_device_lm_blocked(nullptr));
 
     // -- allowlist: Metal, OpenCL, and CUDA keep LM + detokenizer on GPU --------
     for (const char * allowed : { "MTL", "Metal", "OpenCL", "CUDA" }) {
@@ -891,20 +893,21 @@ void test_stage_placement() {
         CHECK(p.enc_on_gpu);  // encoders follow the GPU on every backend
     }
 
-    // Vulkan on a Mesa RADV device runs every stage on the GPU (measured on
-    // Strix Halo: ~2x faster LM, closer to the F32 reference than the CPU path).
-    {
-        StagePlacement p = resolve_stage_placement("Vulkan", radv_desc, none);
+    // Vulkan runs every stage on the GPU on any device that is not denylisted.
+    // RADV (Strix Halo) and NVIDIA (RTX 3080) are measured against the
+    // F32-dequantized reference; the rest inherit the GPU placement.
+    for (const char * device : { radv_desc, nvidia_desc, "Samsung Xclipse 920",
+                                 "Intel(R) Arc(tm) A770 Graphics", "" }) {
+        StagePlacement p = resolve_stage_placement("Vulkan", device, none);
         CHECK(p.lm_on_gpu);
         CHECK(p.detok_on_gpu);
         CHECK(p.enc_on_gpu);
     }
 
-    // Vulkan on any other device keeps the LM on the CPU (README "Backends"
-    // records the per-backend rationale).
+    // Mali keeps the LM on the CPU: the GPU LM collapses to repeated semantic
+    // codes and truncates the song there (README "Backends").
     check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Mali-G715");
-    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Samsung Xclipse 920");
-    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "");
+    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Mali-G78");
 
     // -- fallback: everything else keeps the shipping CPU placement -----------
     // Unmeasured backends must not silently pick up the GPU path. "MTL0" is in
@@ -969,7 +972,7 @@ void test_stage_placement() {
         ov.detok_cpu     = true;
         StagePlacement p = resolve_stage_placement("Vulkan", "", ov);
         CHECK(!p.detok_on_gpu);
-        CHECK(!p.lm_on_gpu);
+        CHECK(p.lm_on_gpu);  // the detokenizer hatch leaves the LM where it was
     }
 
     // Precedence: CPU wins when both hatches are set for the same stage, on an
@@ -992,7 +995,7 @@ void test_stage_placement() {
         StagePlacement p = resolve_stage_placement(name, "", ov);
         CHECK(!p.enc_on_gpu);
         CHECK(p.lm_on_gpu == (backend_name_is_metal(name) || backend_name_is_opencl(name) ||
-                              backend_name_is_cuda(name)));
+                              backend_name_is_cuda(name) || backend_name_is_vulkan(name)));
     }
 }
 
