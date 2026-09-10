@@ -342,6 +342,13 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_encode.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
+    # Pocket TTS numerical core; Mimi synthesis is not exposed yet.
+    src/pocket/flow_lm.cpp
+    src/pocket/mimi.cpp
+    src/pocket/frontend.cpp
+    src/pocket/engine.cpp
+    src/pocket/fit.cpp
+    src/pocket/reference_audio.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -403,6 +410,8 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
     target_link_libraries(tts-cpp PUBLIC ggml)
+    find_package(Threads REQUIRED)
+    target_link_libraries(tts-cpp PRIVATE Threads::Threads)
 
     # ------------------------------------------------------------------
     # Optional native preprocessors for the MTL non-Latin tier:
@@ -517,6 +526,10 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     endif()
 
     add_executable(tts-cli src/cli_main.cpp)
+    add_executable(pocket-cli src/pocket/cli.cpp)
+    target_link_libraries(pocket-cli PRIVATE tts-cpp)
+    target_include_directories(pocket-cli PRIVATE src)
+    tts_cpp_apply_ccache(pocket-cli)
     target_link_libraries(tts-cli PRIVATE tts-cpp)
     tts_cpp_apply_ccache(tts-cli)
 
@@ -1176,6 +1189,73 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-backend-selection PRIVATE src)
     tts_cpp_apply_ccache(test-backend-selection)
     tts_cpp_register_test(test-backend-selection LABEL "unit")
+
+    # ---- Pocket numerical core (fixtures from dump-pocket-flow-reference.py) ----
+    add_executable(test-pocket-reference-audio test/pocket/test_reference_audio.cpp src/pocket/reference_audio.cpp)
+    target_include_directories(test-pocket-reference-audio PRIVATE src)
+    tts_cpp_register_test(test-pocket-reference-audio LABEL "unit")
+    set(TTS_CPP_POCKET_MODEL_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket"
+        CACHE PATH "Complete Pocket bundle for frontend and engine fixtures")
+    add_executable(test-pocket-frontend test/pocket/test_frontend.cpp src/pocket/frontend.cpp)
+    target_include_directories(test-pocket-frontend PRIVATE src)
+    tts_cpp_register_test(test-pocket-frontend LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json"
+        REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json")
+    if (TARGET tts-cpp)
+        add_executable(test-pocket-fit test/pocket/test_fit.cpp)
+        target_link_libraries(test-pocket-fit PRIVATE tts-cpp ggml)
+        tts_cpp_register_test(test-pocket-fit LABEL "fixture"
+            ARGS "${TTS_CPP_POCKET_MODEL_DIR}"
+            REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
+                     "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+        add_executable(test-pocket-engine test/pocket/test_engine.cpp)
+        target_link_libraries(test-pocket-engine PRIVATE tts-cpp)
+        tts_cpp_register_test(test-pocket-engine LABEL "fixture"
+            ARGS "${TTS_CPP_POCKET_MODEL_DIR}" "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf"
+            REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
+                     "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+    endif()
+    set(TTS_CPP_POCKET_REFERENCE_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket-reference"
+        CACHE PATH "Pocket FlowLM fixtures from dump-pocket-flow-reference.py")
+    # Exercise the shipped objects (including their optimization flags) for
+    # static builds. Shared builds intentionally hide this internal stage API.
+    set(_pocket_test_sources src/pocket/flow_lm.cpp src/pocket/mimi.cpp src/backend_selection.cpp src/log.cpp)
+    set(_pocket_test_library ggml)
+    if (TARGET tts-cpp AND NOT TTS_CPP_BUILD_SHARED)
+        set(_pocket_test_sources)
+        set(_pocket_test_library tts-cpp)
+    endif()
+    add_executable(test-pocket-load test/pocket/test_load.cpp
+        ${_pocket_test_sources})
+    target_link_libraries(test-pocket-load PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-load PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-load)
+    tts_cpp_register_test(test-pocket-load LABEL "unit")
+    add_executable(test-pocket-flow-lm test/pocket/test_flow_lm.cpp
+        ${_pocket_test_sources})
+    target_link_libraries(test-pocket-flow-lm PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-flow-lm PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-flow-lm)
+    tts_cpp_register_test(test-pocket-flow-lm LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f32.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}" "0.0001"
+        REQUIRES "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f32.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}/provenance.json")
+    tts_cpp_register_test(test-pocket-flow-lm-f16 LABEL "fixture" EXE test-pocket-flow-lm
+        ARGS "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f16.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}" "0.01"
+        REQUIRES "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f16.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}/provenance.json")
+
+    add_executable(test-pocket-mimi test/pocket/test_mimi.cpp ${_pocket_test_sources})
+    target_link_libraries(test-pocket-mimi PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-mimi PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-mimi)
+    set(TTS_CPP_POCKET_MIMI_REFERENCE_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket-mimi-reference"
+        CACHE PATH "Pocket Mimi fixtures from dump-pocket-mimi-reference.py")
+    tts_cpp_register_test(test-pocket-mimi LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/mimi.gguf" "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}"
+        REQUIRES "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/mimi.gguf"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/provenance.json"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/latents.npy"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/pcm.npy"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/encoded.npy")
 
     # ---- Audio8 tests (fixtures from scripts/dump-audio8-*-reference.py) ----
     set(_tcb_audio8_core_srcs
