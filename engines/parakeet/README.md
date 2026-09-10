@@ -189,12 +189,20 @@ same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
 that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
 opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
 
+Nemotron 3.5 ASR streaming is also supported on Vulkan. The encoder and the
+transducer decode both run on the GPU at all five operating points, and the
+decode takes the same fused LSTM-cell and transducer-step graphs as CUDA and
+Metal because ggml-vulkan implements `GGML_OP_LSTM_CELL` and
+`GGML_OP_TDT_STEP`. Validated against the NeMo stream-step references at
+80/160/320/560/1120 ms on an RTX 3090 (`test-nemotron-stream-step-vulkan*`).
+
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control
-(`GGML_OP_TDT_STEP`), which ggml-speech implements for CPU, CUDA and Metal, the
-TDT decoder runs up to eight greedy steps per graph: the joint, argmax, LSTM
-update, duration bookkeeping and state selection stay on the device and the
+(`GGML_OP_TDT_STEP`), which ggml-speech implements for CPU, CUDA, Metal and
+Vulkan, the TDT decoder runs up to eight greedy steps per graph: the joint,
+argmax, LSTM update, duration bookkeeping and state selection stay on the
+device and the
 host reads the emitted tokens back once per graph. A backend without those
 ops keeps one graph per step. Either path produces the same token sequence as
 the sequential loop; the `test-tdt-unroll-parity` and `test-tdt-lstm-parity`
