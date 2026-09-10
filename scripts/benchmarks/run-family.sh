@@ -159,7 +159,8 @@ RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ au
 # schema is stable (summarize.py renders "—" for null).
 WER_MEDIAN="null"          # numeric WER in [0,1] or null (kind='wer' only)
 DER_MEDIAN="null"          # numeric DER in [0,1] or null (kind='der' only)
-CORRECTNESS_KIND="null"    # "wer" | "der" | null
+F1_MEDIAN="null"           # numeric F1  in [0,1] or null (kind='f1'  only)
+CORRECTNESS_KIND="null"    # "wer" | "der" | "f1" | null
 CORRECTNESS_REF="null"     # repo-relative path to the reference file or null
 
 emit_json() {
@@ -189,6 +190,7 @@ emit_json() {
     --argjson runs        "$RUNS" \
     --argjson wer_median  "$WER_MEDIAN" \
     --argjson der_median  "$DER_MEDIAN" \
+    --argjson f1_median   "$F1_MEDIAN" \
     --argjson correctness_kind "$CORRECTNESS_KIND" \
     --argjson correctness_reference "$CORRECTNESS_REF" \
     --arg  status "$status" \
@@ -205,7 +207,7 @@ emit_json() {
       encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
-      wer_median:$wer_median, der_median:$der_median,
+      wer_median:$wer_median, der_median:$der_median, f1_median:$f1_median,
       correctness_kind:$correctness_kind,
       correctness_reference:$correctness_reference,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
@@ -558,23 +560,25 @@ parse_backend_from_logs() {
 # didn't run" instead of dragging the whole cell to run-failed.
 score_correctness() {
   local mode="$1" src_path="$2"
-  local spec_kind spec_ref spec_norm spec_collar
-  spec_kind="$(jq   -r --arg family "$FAMILY" \
+  local spec_kind spec_ref spec_norm spec_collar spec_tolerance
+  spec_kind="$(jq      -r --arg family "$FAMILY" \
     '.[$family].correctness.kind // ""'              "$FAMILIES_JSON")"
-  spec_ref="$(jq    -r --arg family "$FAMILY" \
+  spec_ref="$(jq       -r --arg family "$FAMILY" \
     '.[$family].correctness.reference // ""'         "$FAMILIES_JSON")"
-  spec_norm="$(jq   -r --arg family "$FAMILY" \
+  spec_norm="$(jq      -r --arg family "$FAMILY" \
     '.[$family].correctness.normalizer // "english"' "$FAMILIES_JSON")"
-  spec_collar="$(jq -r --arg family "$FAMILY" \
+  spec_collar="$(jq    -r --arg family "$FAMILY" \
     '.[$family].correctness.collar_ms // 250'        "$FAMILIES_JSON")"
+  spec_tolerance="$(jq -r --arg family "$FAMILY" \
+    '.[$family].correctness.tolerance_ms // 100'     "$FAMILIES_JSON")"
 
   # No correctness block — silent no-op (the common case).
   if [[ -z "$spec_kind" ]]; then return 0; fi
 
   case "$spec_kind" in
-    wer|der) : ;;
+    wer|der|f1) : ;;
     *)
-      echo "$FAMILY: unsupported correctness.kind '$spec_kind' (known: wer, der)" >&2
+      echo "$FAMILY: unsupported correctness.kind '$spec_kind' (known: wer, der, f1)" >&2
       return 0
       ;;
   esac
@@ -672,6 +676,33 @@ score_correctness() {
       fi
       cat "$script_err" >&2 2>/dev/null || true
       score="$(echo "$script_out" | jq -r '.der // empty' 2>/dev/null || true)"
+      ;;
+
+    f1)
+      # F1 (VAD) needs a text-file hypothesis source: whisper-vad-speech-segments
+      # stdout with --no-prints (or JSON-array format for local tools).
+      # Bench-json mode has no VAD-equivalent schema, mirroring DER's constraint.
+      if [[ "$mode" != "text-file" ]]; then
+        echo "$FAMILY: correctness.kind='f1' requires text-file mode; got mode='$mode' — skipped" >&2
+        return 0
+      fi
+      if ! [[ -f "$src_path" ]]; then
+        echo "$FAMILY: hypothesis stdout capture missing: $src_path — correctness skipped" >&2
+        return 0
+      fi
+      # See the WER branch above for the stderr-vs-stdout separation rationale.
+      local script_err
+      script_err="$tmp_dir/${spec_kind}-score.err"
+      script_name="compute-f1.py"
+      if ! script_out="$(python3 "$(dirname "$0")/compute-f1.py" \
+           --hypothesis-file "$src_path" \
+           --reference       "$ref_path" \
+           --collar-ms       "$spec_tolerance" 2> "$script_err")"; then
+        echo "$FAMILY: compute-f1.py failed: $(cat "$script_err" 2>/dev/null)" >&2
+        return 0
+      fi
+      cat "$script_err" >&2 2>/dev/null || true
+      score="$(echo "$script_out" | jq -r '.f1 // empty' 2>/dev/null || true)"
       ;;
   esac
 
@@ -856,8 +887,12 @@ case "$BENCH_KIND" in
       corr_out=""
       corr_out="$(score_correctness "$coreml_json" || true)"
       if [[ -n "$corr_out" ]]; then
-        IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
-        [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
+        IFS='|' read -r c_score c_kind c_ref <<< "$corr_out"
+        case "$c_kind" in
+          wer) [[ -n "$c_score" ]] && WER_MEDIAN="$c_score" ;;
+          der) [[ -n "$c_score" ]] && DER_MEDIAN="$c_score" ;;
+          f1)  [[ -n "$c_score" ]] && F1_MEDIAN="$c_score"  ;;
+        esac
         [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
         [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s' "$c_ref" | jq -R .)"
       fi
@@ -899,8 +934,8 @@ case "$BENCH_KIND" in
 
     # Correctness scoring — no-op unless the family declares a correctness
     # block. Runs after perf is captured so a scoring failure never
-    # downgrades a green perf run. Score is routed to WER_MEDIAN or
-    # DER_MEDIAN based on the kind the family declared.
+    # downgrades a green perf run. Score is routed into WER_MEDIAN /
+    # DER_MEDIAN / F1_MEDIAN based on the kind the family declared.
     corr_out=""
     corr_out="$(score_correctness bench-json "$JSON_OUT" || true)"
     if [[ -n "$corr_out" ]]; then
@@ -908,6 +943,7 @@ case "$BENCH_KIND" in
       case "$c_kind" in
         wer) [[ -n "$c_score" ]] && WER_MEDIAN="$c_score" ;;
         der) [[ -n "$c_score" ]] && DER_MEDIAN="$c_score" ;;
+        f1)  [[ -n "$c_score" ]] && F1_MEDIAN="$c_score"  ;;
       esac
       [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
       [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
@@ -976,8 +1012,8 @@ case "$BENCH_KIND" in
     # block. The hypothesis is the last successful run's captured stdout
     # ($r_stderr.stdout from the final loop iteration, still on disk in
     # $tmp_dir). Runs after perf is captured so a scoring failure never
-    # downgrades a green perf run. Score is routed to WER_MEDIAN or
-    # DER_MEDIAN based on the kind the family declared.
+    # downgrades a green perf run. Score is routed into WER_MEDIAN /
+    # DER_MEDIAN / F1_MEDIAN based on the kind the family declared.
     corr_out=""
     corr_out="$(score_correctness text-file "$r_stderr.stdout" || true)"
     if [[ -n "$corr_out" ]]; then
@@ -985,22 +1021,24 @@ case "$BENCH_KIND" in
       case "$c_kind" in
         wer) [[ -n "$c_score" ]] && WER_MEDIAN="$c_score" ;;
         der) [[ -n "$c_score" ]] && DER_MEDIAN="$c_score" ;;
+        f1)  [[ -n "$c_score" ]] && F1_MEDIAN="$c_score"  ;;
       esac
       [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
       [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
 
       # Preserve the raw hypothesis alongside result.json so a workflow
       # reviewer can inspect the actual per-segment output that produced
-      # a given DER / WER number, not just the aggregate. $tmp_dir gets
-      # trap-cleaned at script exit, so the copy has to happen here
+      # a given DER / WER / F1 number, not just the aggregate. $tmp_dir
+      # gets trap-cleaned at script exit, so the copy has to happen here
       # (before emit_json returns). Extension mirrors the source shape:
       # .jsonl for parakeet-cli --emit jsonl (DER), .txt for whisper-cli
-      # -nt plain text (WER). The workflow's upload-artifact step picks
-      # up artifacts/*, so the sibling rides along with result.json.
+      # -nt plain text (WER) and whisper-vad-speech-segments --no-prints
+      # text (F1). The workflow's upload-artifact step picks up artifacts/*,
+      # so the sibling rides along with result.json.
       case "$c_kind" in
-        der) hyp_ext="jsonl" ;;
-        wer) hyp_ext="txt"   ;;
-        *)   hyp_ext=""      ;;
+        der)     hyp_ext="jsonl" ;;
+        wer|f1)  hyp_ext="txt"   ;;
+        *)       hyp_ext=""      ;;
       esac
       if [[ -n "$hyp_ext" && -f "$r_stderr.stdout" ]]; then
         cp "$r_stderr.stdout" "${OUT%.json}.hypothesis.$hyp_ext" 2>/dev/null || \

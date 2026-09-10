@@ -124,6 +124,14 @@ python3 "$HERE/compute-der.py" --self-test > /dev/null \
   || fail "compute-der.py --self-test failed"
 ok "compute-der.py self-test passes"
 
+# compute-f1.py: shipped self-test must pass. Catches regressions in the
+# frame-based F1 math, the collar handling, and the whisper-vad-text /
+# JSON-array parser dual-shape parity without needing silero or jfk.wav
+# to run.
+python3 "$HERE/compute-f1.py" --self-test > /dev/null \
+  || fail "compute-f1.py --self-test failed"
+ok "compute-f1.py self-test passes"
+
 jq -e '.vad.source == "huggingface" and (.vad.hf_repo | length > 0) and (.vad.hf_ref | test("^[0-9a-f]{40}$"))' "$REAL_SPEC" > /dev/null \
   || fail "vad family must pin an HF repo at a full commit sha"
 jq -e '.vad.models[0].sha256 | test("^[0-9a-f]{64}$")' "$REAL_SPEC" > /dev/null \
@@ -131,6 +139,23 @@ jq -e '.vad.models[0].sha256 | test("^[0-9a-f]{64}$")' "$REAL_SPEC" > /dev/null 
 jq -e '.vad.audio_duration_seconds == 11.0' "$REAL_SPEC" > /dev/null \
   || fail "vad RTF divides by the jfk.wav duration"
 ok "vad family pins its HF source and checksum"
+
+# vad F1 correctness: kind='f1' with a JSON-array reference that exists on
+# disk, plus --no-prints in argv so whisper-vad-speech-segments' stdout is
+# only the "Detected N... / Speech segment N:" lines the compute-f1.py
+# parser understands. Mirrors the parakeet/whisper/sortformer spec pins.
+jq -e '.vad.correctness.kind == "f1"' "$REAL_SPEC" > /dev/null \
+  || fail "vad must declare a correctness.kind='f1' block (frame-based P/R/F1 against a JSON-array reference)"
+jq -e '.vad.correctness.reference | test("jfk\\.vad-ref\\.json$")' "$REAL_SPEC" > /dev/null \
+  || fail "vad correctness.reference must be jfk.vad-ref.json (the hand-labeled speech-segment reference for jfk.wav)"
+vad_ref_repo_rel="$(jq -r '.vad.correctness.reference' "$REAL_SPEC")"
+[[ -f "$HERE/../../$vad_ref_repo_rel" ]] \
+  || fail "vad correctness.reference file missing: $vad_ref_repo_rel"
+jq -e '.vad.args | index("--no-prints") != null' "$REAL_SPEC" > /dev/null \
+  || fail "vad must invoke whisper-vad-speech-segments with --no-prints so stdout carries only the segment listing (the F1 hypothesis source)"
+jq -e '(.vad.correctness.tolerance_ms // 100) >= 0' "$REAL_SPEC" > /dev/null \
+  || fail "vad correctness.tolerance_ms must be a non-negative integer"
+ok "vad declares an F1 correctness block against jfk.vad-ref.json with --no-prints"
 
 hf_bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
   | select(.value.source == "huggingface")
@@ -169,10 +194,19 @@ SPEAKER stub 1 0.000 4.000 <NA> <NA> A <NA> <NA>
 SPEAKER stub 1 4.000 4.000 <NA> <NA> B <NA> <NA>
 RTTM
 
+# Minimal JSON-array reference for the F1 (VAD) driver tests: one speech
+# segment from 2.0 to 6.0 out of an 8 s window (400 speech frames, 400
+# silence frames — matches compute-f1.py's self-test shape). A stub that
+# emits the same range scores F1 1.0; one that emits half scores 2/3.
+cat > "$REF_DIR/ref-f1.json" <<'JSON'
+[{"start": 2.0, "end": 6.0}]
+JSON
+
 jq -n --arg sha "$hello_sha" \
       --arg ref_perfect "$REF_DIR/ref-perfect.txt" \
       --arg ref_2subs   "$REF_DIR/ref-2subs.txt" \
-      --arg ref_der     "$REF_DIR/ref-der.rttm" '{
+      --arg ref_der     "$REF_DIR/ref-der.rttm" \
+      --arg ref_f1      "$REF_DIR/ref-f1.json" '{
   "nat-ok": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: null, notes: "n"
@@ -270,6 +304,42 @@ jq -n --arg sha "$hello_sha" \
     args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
     correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
     notes: "native families have no diarize schema in bench JSON; DER must be skipped with a diagnostic"
+  },
+  "f1-tw-perfect": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadtext-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "whisper-vad text-format stdout matching the reference exactly => F1 1.0"
+  },
+  "f1-tw-partial": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadtext-partial", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "hyp covers half the ref (2.0-4.0 vs ref 2.0-6.0); precision=1.0 recall=0.5 F1=2/3"
+  },
+  "f1-tw-empty": {
+    bench_kind: "time-wrapped", binary: "bin/tw-silent", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "VAD emitted nothing: full recall miss => F1 0.0"
+  },
+  "f1-tw-jsonarr": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadjson-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "hyp emits JSON-array shape instead of whisper-vad text; parser must accept both and score F1 1.0"
+  },
+  "f1-tw-badref": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadtext-perfect", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: "/does/not/exist.json", tolerance_ms: 0},
+    notes: "missing reference: correctness skipped, perf still ok"
+  },
+  "f1-nat-warns": {
+    bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "native families have no VAD schema in bench JSON; F1 must be skipped with a diagnostic"
   },
   "tw-marker": {
     bench_kind: "time-wrapped", binary: "bin/tw-marker", cmake_target: "x",
@@ -393,6 +463,35 @@ echo "load=42.1ms audio=8.00s samples=128000@16000Hz"
 printf '%s\n' '{"speaker":0,"start":0.000,"end":4.000}'
 printf '%s\n' '{"speaker":1,"start":4.000,"end":8.000}'
 echo "[diarize] total=123.4ms RTF=0.015 segments=2"
+STUB
+
+# whisper-vad-speech-segments-shape stubs for the F1 (VAD) driver tests.
+# Format matches the real example's output under --no-prints: a blank line,
+# "Detected N speech segments:" header, "Speech segment N: start=X, end=Y"
+# per detected range, and a trailing blank line. compute-f1.py's parser
+# skips the header and blanks and pulls (start,end) from the segment lines.
+cat > "$BUILD/bin/tw-vadtext-perfect" <<'STUB'
+#!/usr/bin/env bash
+printf '\n'
+printf 'Detected 1 speech segments:\n'
+printf 'Speech segment 0: start = 2.00, end = 6.00\n'
+printf '\n'
+STUB
+
+cat > "$BUILD/bin/tw-vadtext-partial" <<'STUB'
+#!/usr/bin/env bash
+printf '\n'
+printf 'Detected 1 speech segments:\n'
+printf 'Speech segment 0: start = 2.00, end = 4.00\n'
+printf '\n'
+STUB
+
+# JSON-array-shape stub for the F1 parser dual-shape test. compute-f1.py
+# auto-detects on a leading '[' and parses via the JSON path; this stub
+# proves the driver plumbs both shapes identically.
+cat > "$BUILD/bin/tw-vadjson-perfect" <<'STUB'
+#!/usr/bin/env bash
+printf '[{"start": 2.0, "end": 6.0}]\n'
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -712,5 +811,77 @@ jq -e '.status == "ok" and .der_median == null and .correctness_kind == null' \
 grep -q "correctness.kind='der' requires text-file mode" "$OUT/der-nat-warns.err" \
   || fail "der-nat-warns: native-DER config diagnostic not surfaced"
 ok "correctness (DER): native-mode families with kind='der' are skipped with a diagnostic"
+
+# ---- correctness scoring (F1 path, time-wrapped) ---------------------------
+# Every F1 cell uses ref_f1 = [{"start":2.0,"end":6.0}] (400 speech frames out
+# of 800 total). Stubs vary only in what they emit on stdout; the driver must
+# route the returned f1 into f1_median (not wer_median or der_median), accept
+# both whisper-vad text and JSON-array hypothesis shapes, preserve the
+# empty-hypothesis => F1 0.0 invariant, and reject a native family declaring
+# kind='f1' with a config-error diagnostic.
+
+run_driver f1-tw-perfect "$OUT/f1-tw-perfect.json" "$OUT/f1-tw-perfect.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == 1.0 and .wer_median == null and .der_median == null
+       and .correctness_kind == "f1"
+       and (.correctness_reference | test("ref-f1\\.json$"))' \
+  "$OUT/f1-tw-perfect.json" > /dev/null \
+  || fail "f1-tw-perfect: $(cat "$OUT/f1-tw-perfect.json")"
+[[ -f "$OUT/f1-tw-perfect.hypothesis.txt" ]] \
+  || fail "f1-tw-perfect: hypothesis sibling not stashed next to result.json"
+grep -q 'Speech segment 0' "$OUT/f1-tw-perfect.hypothesis.txt" \
+  || fail "f1-tw-perfect: hypothesis sibling did not capture the stub's stdout"
+ok "correctness (F1, time-wrapped): whisper-vad text stdout matching the reference scores F1 1.0 + hypothesis stashed as .hypothesis.txt"
+
+# 2 s of hyp against 4 s of ref: precision = 200/200 = 1.0, recall = 200/400
+# = 0.5, F1 = 2*1*0.5/1.5 = 2/3 ≈ 0.6666...
+run_driver f1-tw-partial "$OUT/f1-tw-partial.json" "$OUT/f1-tw-partial.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .correctness_kind == "f1"
+       and (.f1_median > 0.66 and .f1_median < 0.67)' \
+  "$OUT/f1-tw-partial.json" > /dev/null \
+  || fail "f1-tw-partial: $(cat "$OUT/f1-tw-partial.json")"
+ok "correctness (F1, time-wrapped): hyp covering half the ref scores F1 ~2/3 (precision 1.0, recall 0.5)"
+
+# Empty stdout => VAD emitted nothing => full recall miss => F1 0.0. Mirrors
+# the WER/DER catastrophic-collapse regression guard: correctness scoring
+# must not silently skip the "model returned nothing" case.
+run_driver f1-tw-empty "$OUT/f1-tw-empty.json" "$OUT/f1-tw-empty.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == 0.0 and .correctness_kind == "f1"' \
+  "$OUT/f1-tw-empty.json" > /dev/null \
+  || fail "f1-tw-empty: $(cat "$OUT/f1-tw-empty.json")"
+ok "correctness (F1, time-wrapped): empty stdout capture => f1_median=0.0 (catastrophic-miss regression guard)"
+
+# Parser dual-shape parity at the driver level: a stub emitting the same
+# content as JSON-array must score identically to the whisper-vad text stub
+# (both are F1 1.0). Pins the parse_hypothesis auto-detect path against a
+# future regression where the driver could accidentally strip or normalize
+# the leading '['.
+run_driver f1-tw-jsonarr "$OUT/f1-tw-jsonarr.json" "$OUT/f1-tw-jsonarr.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == 1.0 and .correctness_kind == "f1"' \
+  "$OUT/f1-tw-jsonarr.json" > /dev/null \
+  || fail "f1-tw-jsonarr: $(cat "$OUT/f1-tw-jsonarr.json")"
+ok "correctness (F1, time-wrapped): JSON-array hypothesis shape parses identically to whisper-vad text"
+
+# Missing reference => skip + diagnostic + no hypothesis sibling (matches
+# the wer/der bad-ref handling).
+run_driver f1-tw-badref "$OUT/f1-tw-badref.json" "$OUT/f1-tw-badref.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == null and .correctness_kind == null' \
+  "$OUT/f1-tw-badref.json" > /dev/null \
+  || fail "f1-tw-badref: $(cat "$OUT/f1-tw-badref.json")"
+grep -q 'reference file not found' "$OUT/f1-tw-badref.err" \
+  || fail "f1-tw-badref: missing-reference diagnosis not surfaced"
+[[ ! -f "$OUT/f1-tw-badref.hypothesis.txt" ]] \
+  || fail "f1-tw-badref: hypothesis sibling should NOT exist when correctness was skipped"
+ok "correctness (F1, time-wrapped): missing reference => f1_median=null + diagnostic + no hypothesis sibling (perf still ok)"
+
+# Native families have no VAD schema in --json-out, so a native spec that
+# declares kind='f1' must be skipped with a diagnostic — guards against a
+# WER→F1 copy-paste in a native family spec, same principle as der-nat-warns.
+run_driver f1-nat-warns "$OUT/f1-nat-warns.json" "$OUT/f1-nat-warns.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == null and .correctness_kind == null' \
+  "$OUT/f1-nat-warns.json" > /dev/null \
+  || fail "f1-nat-warns: $(cat "$OUT/f1-nat-warns.json")"
+grep -q "correctness.kind='f1' requires text-file mode" "$OUT/f1-nat-warns.err" \
+  || fail "f1-nat-warns: native-F1 config diagnostic not surfaced"
+ok "correctness (F1): native-mode families with kind='f1' are skipped with a diagnostic"
 
 echo "all $PASS checks passed"

@@ -14,7 +14,7 @@
       "models_by_size":          "Only for the whisper family. Object keyed by size ('tiny' / 'base' / 'small'). Each value is either a {name, sha256?} object (source='huggingface') or a list of S3 keys (source='s3'). sha256 is optional; when set the download is verified against it via sha256sum/shasum.",
       "args":                    "Command-line arguments as a JSON array (one element per argv token, so multi-word values stay a single token). Placeholders expanded by run-family.sh per-element: ${MODEL_DIR}, ${MODELS_ROOT}, ${AUDIO_DIR}, ${MODEL_PATH}, and for bench_kind=native also ${RUNS}, ${WARMUP}, ${JSON_OUT}. Native families put the runs/warmup/json-out flags in `args` because their spellings differ (--json-out vs --bench-json, --runs vs --bench-runs).",
       "audio_duration_seconds":  "Length of the reference input audio (for ASR) or requested output audio (for TTS/music). Used to compute wall-based RTF when the bench binary does not report one. Null when the wall-clock isn't a fair RTF proxy (e.g. TTS with variable-length output).",
-      "correctness":             "Optional. When present, run-family.sh computes an accuracy metric against a reference and merges it into result.json as wer_median (kind='wer') or der_median (kind='der'). Object shape by kind: {kind:'wer', reference:'<repo-relative transcript path>', normalizer:'english'|'none'} for ASR; {kind:'der', reference:'<repo-relative RTTM path>', collar_ms:N} for diarization (collar_ms default 250). Hypothesis source depends on bench_kind: native families supply it via `.transcript` in --json-out (parakeet WER); time-wrapped families supply it via the CLI's captured stdout (whisper -nt for WER; parakeet-cli --emit jsonl for sortformer DER). TTS families need a different metric (no transcript). Absent block == correctness step skipped.",
+      "correctness":             "Optional. When present, run-family.sh computes an accuracy metric against a reference and merges it into result.json as wer_median (kind='wer'), der_median (kind='der'), or f1_median (kind='f1'). Object shape by kind: {kind:'wer', reference:'<repo-relative transcript path>', normalizer:'english'|'none'} for ASR; {kind:'der', reference:'<repo-relative RTTM path>', collar_ms:N} for diarization (collar_ms default 250); {kind:'f1', reference:'<repo-relative JSON-array path>', tolerance_ms:N} for VAD (frame-based precision/recall/F1, tolerance_ms default 100). Hypothesis source depends on bench_kind: native families supply it via `.transcript` in --json-out (parakeet WER); time-wrapped families supply it via the CLI's captured stdout (whisper -nt for WER; parakeet-cli --emit jsonl for sortformer DER; whisper-vad-speech-segments --no-prints for VAD F1). TTS families need a different metric (no transcript). Absent block == correctness step skipped.",
       "notes":                   "Free text; surfaced in the summary table's 'notes' column."
     }
   },
@@ -104,13 +104,19 @@
       {"name": "ggml-silero-v5.1.2.bin", "sha256": "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"}
     ],
     "args": [
-      "--vad-model", "${MODEL_DIR}/ggml-silero-v5.1.2.bin",
-      "--file",      "${AUDIO_DIR}/jfk.wav",
-      "--threads",   "4",
-      "--use-gpu"
+      "--vad-model",  "${MODEL_DIR}/ggml-silero-v5.1.2.bin",
+      "--file",       "${AUDIO_DIR}/jfk.wav",
+      "--threads",    "4",
+      "--use-gpu",
+      "--no-prints"
     ],
     "audio_duration_seconds":  11.0,
-    "notes": "Silero VAD v5.1.2 via the whisper-vad-speech-segments example on jfk.wav (11.0 s). --use-gpu takes the QVAC-24420-validated GPU path (Metal on the macOS runner) and falls back to CPU on GPU-less builds."
+    "correctness": {
+      "kind":         "f1",
+      "reference":    "engines/parakeet/test/samples/jfk.vad-ref.json",
+      "tolerance_ms": 100
+    },
+    "notes": "Silero VAD v5.1.2 via the whisper-vad-speech-segments example on jfk.wav (11.0 s). --use-gpu takes the QVAC-24420-validated GPU path (Metal on the macOS runner) and falls back to CPU on GPU-less builds. --no-prints suppresses the example's non-result chatter so stdout carries only 'Detected N speech segments:' + 'Speech segment N: start=X, end=Y' lines — the compute-f1.py parser expects exactly that whisper.cpp example format and skips anything else with a stderr diagnostic (defensive against upstream format drift). Correctness: frame-based F1 against a hand-labeled reference for jfk.wav (one continuous 'Ask not…' segment, ~0.30-10.90 s) with a 100 ms boundary-tolerance collar — the standard VAD-eval collar convention."
   },
 
   "chatterbox": {
