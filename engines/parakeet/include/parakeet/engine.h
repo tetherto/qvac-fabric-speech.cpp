@@ -302,9 +302,11 @@ public:
 
     // True when an Apple Core ML encoder sidecar loaded. This is a load-status
     // query, not a guarantee that every call shape uses Core ML: unsupported
-    // or streaming shapes fall back to ggml. Supported deployments are TDT and
-    // EOU encoders. Always false on non-Apple builds and when the
-    // sidecar is absent or failed to initialise.
+    // or streaming shapes fall back to ggml. Longer offline EOU inputs may be
+    // spliced into overlapping exact-sidecar-shape windows, but shorter EOU
+    // calls are never padded. Supported deployments are TDT and EOU encoders.
+    // Always false on non-Apple builds and when the sidecar is absent or failed
+    // to initialise.
     bool encoder_on_coreml() const;
 
     // True when a GPU was detected but the engine fell back to CPU because the

@@ -267,11 +267,14 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --compile-dir engines/parakeet/models
 ```
 
-EOU Core ML is correctness-first: only calls with exactly the sidecar's fixed
-mel-frame shape are accelerated. Startup, tail, custom-sized, and other
-streaming windows fall back to ggml. Use `PARAKEET_COREML_DISABLE=1` for a
-forced-ggml comparison, or run the `parakeet-eou` desktop benchmark family for
-required-Core-ML versus Metal timing and normalized JFK WER.
+EOU Core ML is correctness-first: direct calls use Core ML only at the
+sidecar's exact mel-frame shape, while longer offline inputs are divided into
+overlapping exact-shape windows made entirely from real mel frames. Shorter
+inputs, startup/tail streaming windows, and other mismatching calls fall back
+to ggml; EOU never pads a short call to activate Core ML. Use
+`PARAKEET_COREML_DISABLE=1` for a forced-ggml comparison, or run the
+`parakeet-eou` desktop benchmark family for required-Core-ML versus Metal
+timing and normalized JFK WER.
 
 Hybrid RNNT+CTC checkpoints export CTC by default. Pass `--head rnnt` to export
 their Transducer branch; conversion validates that the joint output is exactly

@@ -33,6 +33,14 @@ def ggml_to_torch(t):
         arr = raw.view(np.float32).reshape(tuple(reversed(t.shape)))
     elif t.tensor_type == gguf.GGMLQuantizationType.F16:
         arr = raw.view(np.float16).reshape(tuple(reversed(t.shape))).astype(np.float32)
+    elif t.tensor_type in (
+        gguf.GGMLQuantizationType.BF16,
+        gguf.GGMLQuantizationType.Q8_0,
+        gguf.GGMLQuantizationType.Q5_0,
+        gguf.GGMLQuantizationType.Q4_0,
+    ):
+        arr = gguf.quants.dequantize(raw, t.tensor_type)
+        arr = np.asarray(arr, dtype=np.float32).reshape(tuple(reversed(t.shape)))
     else:
         raise RuntimeError(f"unexpected tensor type {t.tensor_type}")
     return torch.from_numpy(np.ascontiguousarray(arr))

@@ -491,11 +491,15 @@ class ConverterNemotronTests(unittest.TestCase):
         )
 
     def test_supports_float_and_block_quantized_output_routes(self):
-        for quant in ("f16", "q8_0", "q4_0"):
+        for quant in ("f16", "bf16", "q8_0", "q4_0"):
             with self.subTest(quant=quant):
                 self.assertIn(quant, CONVERTER.FILE_TYPE_MAP)
         self.assertIn("q8_0", CONVERTER.QUANT_MAP)
         self.assertIn("q4_0", CONVERTER.QUANT_MAP)
+        self.assertEqual(
+            CONVERTER.QUANT_MAP["bf16"],
+            CONVERTER.gguf.GGMLQuantizationType.BF16,
+        )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@
 #include "sentencepiece_bpe.h"
 #include "energy_vad.h"
 #include "long_form.h"
+#include "parakeet_log.h"
 #include "sortformer_finalize.h"
 
 #include <algorithm>
@@ -141,16 +142,23 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    // Padding to a fixed capacity is validated only for the full-context TDT
-    // graph. EOU uses exact-shape Core ML routing, so loading an EOU sidecar
-    // must not alter the existing long-form window plan.
-    const LongFormPlan coreml = model.model_type == ParakeetModelType::TDT
-        ? resolve_coreml_fixed_shape_plan(
-              model_coreml_fixed_mel_frames(model),
-              opts.long_form_context_frames,
-              model.encoder_cfg.subsampling_factor,
-              n_mel_frames)
-        : LongFormPlan{};
+    LongFormPlan coreml;
+    if (model.model_type == ParakeetModelType::TDT) {
+        coreml = resolve_coreml_fixed_shape_plan(
+            model_coreml_fixed_mel_frames(model),
+            opts.long_form_context_frames,
+            model.encoder_cfg.subsampling_factor,
+            n_mel_frames);
+    } else if (model.model_type == ParakeetModelType::EOU) {
+        // EOU cannot use TDT's short-input padding contract. Oversized inputs
+        // instead use overlapping windows made entirely of real mel frames,
+        // each exactly matching the compiled sidecar shape.
+        coreml = resolve_coreml_exact_shape_plan(
+            model_coreml_fixed_mel_frames(model),
+            opts.long_form_context_frames,
+            model.encoder_cfg.subsampling_factor,
+            n_mel_frames);
+    }
 
     // Respect a smaller user/model long-form limit, but force fixed-shape
     // windowing when that is the only way the complete input fits the sidecar.
@@ -163,6 +171,8 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
 
 struct WindowedEncoderStats {
     double encoder_ms = 0.0;
+    int coreml_windows = 0;
+    int ggml_windows = 0;
 };
 
 // Bounded-memory replacement for a single full-length run_encoder() call on long
@@ -185,7 +195,8 @@ int run_encoder_windowed(ParakeetCtcModel & model,
     const int center_mel = plan.center_frames  * plan.sub;
     const int ctx_mel    = plan.context_frames * plan.sub;
     const std::vector<LongFormWindow> windows =
-        plan_long_form_windows(n_mel_frames, center_mel, ctx_mel);
+        plan_long_form_windows(n_mel_frames, center_mel, ctx_mel,
+                               plan.exact_mel_frames);
 
     out = EncoderOutputs{};
 
@@ -206,14 +217,20 @@ int run_encoder_windowed(ParakeetCtcModel & model,
             return rc;
         }
         stats.encoder_ms += ms_since(t_enc);
+        if (win_out.used_coreml) {
+            ++stats.coreml_windows;
+        } else {
+            ++stats.ggml_windows;
+        }
 
         if (out.d_model == 0) {
             out.d_model    = win_out.d_model;
             out.vocab_size = win_out.vocab_size;
         }
 
-        const WindowTrim trim =
-            compute_window_trim(w, win_out.n_enc_frames, plan.sub);
+        const WindowTrim trim = plan.causal_downsampling
+            ? compute_causal_window_trim(w, win_out.n_enc_frames, plan.sub)
+            : compute_window_trim(w, win_out.n_enc_frames, plan.sub);
         if (trim.center_cnt <= 0) {
             continue;
         }
@@ -229,6 +246,14 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         }
         out.n_enc_frames += trim.center_cnt;
     }
+
+    out.used_coreml = !windows.empty() &&
+                      stats.coreml_windows == (int) windows.size();
+    PARAKEET_LOG_INFO(
+        "parakeet: long-form encoder windows=%zu coreml=%d ggml=%d"
+        " exact_mel_frames=%d\n",
+        windows.size(), stats.coreml_windows, stats.ggml_windows,
+        plan.exact_mel_frames);
 
     return 0;
 }

@@ -340,9 +340,11 @@ The default export uses Float16 input, output, weights, and intermediates. TDT
 shorter inputs are zero-padded to the exported mel-frame capacity, while longer
 offline inputs are automatically divided into overlapping windows that fit that
 capacity. EOU uses exact-shape routing because padding future frames can change
-token and end-of-turn decisions: only an invocation matching the compiled mel
-shape uses Core ML, and all other batch or streaming windows use ggml. The TDT
-example uses this addon's 15-second shape (1501
+token and end-of-turn decisions. Longer offline inputs are divided into
+overlapping windows that each exactly match the compiled shape, with the final
+window shifted backward so it contains only real mel frames. Shorter inputs and
+mismatching streaming windows use ggml; EOU never pads them. The TDT example
+uses this addon's 15-second shape (1501
 mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional 6-bit
 grouped-channel LUT weights. Grouped palettization requires coremltools 8+ and
 macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS 16

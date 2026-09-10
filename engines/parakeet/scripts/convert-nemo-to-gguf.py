@@ -132,6 +132,7 @@ EOU_REPO = "nvidia/parakeet_realtime_eou_120m-v1"
 EOU_LICENSE = "NVIDIA Open Model License"
 
 QUANT_MAP = {
+    "bf16": gguf.GGMLQuantizationType.BF16,
     "q8_0": gguf.GGMLQuantizationType.Q8_0,
     "q5_0": gguf.GGMLQuantizationType.Q5_0,
     "q4_0": gguf.GGMLQuantizationType.Q4_0,
@@ -140,6 +141,7 @@ QUANT_MAP = {
 FILE_TYPE_MAP = {
     "f32":  gguf.LlamaFileType.ALL_F32,
     "f16":  gguf.LlamaFileType.MOSTLY_F16,
+    "bf16": gguf.LlamaFileType.MOSTLY_BF16,
     "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0,
     "q5_0": gguf.LlamaFileType.MOSTLY_Q5_0,
     "q4_0": gguf.LlamaFileType.MOSTLY_Q4_0,
@@ -1105,25 +1107,40 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         arr = as_np(t, np.float32)
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = arr.squeeze(-1)
-        if qtype is None or arr.shape[-1] % 32 != 0:
+        block_quant = quant in {"q8_0", "q5_0", "q4_0"}
+        if qtype is None or (block_quant and arr.shape[-1] % 32 != 0):
             writer.add_tensor(name, arr.astype(fallback_dtype, copy=False))
             return
         packed = gguf.quants.quantize(arr, qtype)
         writer.add_tensor(name, packed, raw_dtype=qtype)
 
+    def add_conv(name: str, t: torch.Tensor):
+        # ggml-metal supports BF16 matrix multiplication on recent Apple GPUs,
+        # but its convolution IM2COL path does not accept BF16 kernels, and the
+        # subsampler's pointwise lowering casts activations to its kernel type.
+        # A MOSTLY_BF16 file therefore keeps all subsampling plus depthwise
+        # kernels in F16; encoder/decoder projection matrices remain BF16.
+        if quant != "bf16":
+            add_2d(name, t)
+            return
+        arr = as_np(t, np.float32)
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr.squeeze(-1)
+        writer.add_tensor(name, arr.astype(np.float16, copy=False))
+
     def try_bias(name: str, key: str):
         if key in sd:
             add_f32(name, sd[key])
 
-    add_2d ("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
+    add_conv("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
     try_bias("encoder.subsampling.conv0.bias",    "encoder.pre_encode.conv.0.bias")
-    add_2d ("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
+    add_conv("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
     try_bias("encoder.subsampling.conv1_dw.bias",   "encoder.pre_encode.conv.2.bias")
-    add_2d ("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
+    add_conv("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
     try_bias("encoder.subsampling.conv1_pw.bias",   "encoder.pre_encode.conv.3.bias")
-    add_2d ("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
+    add_conv("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
     try_bias("encoder.subsampling.conv2_dw.bias",   "encoder.pre_encode.conv.5.bias")
-    add_2d ("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
+    add_conv("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
     try_bias("encoder.subsampling.conv2_pw.bias",   "encoder.pre_encode.conv.6.bias")
     add_2d ("encoder.subsampling.out.weight",      sd["encoder.pre_encode.out.weight"])
     try_bias("encoder.subsampling.out.bias",        "encoder.pre_encode.out.bias")
@@ -1167,7 +1184,7 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         add_f32(f"{p}.norm_conv.bias",    sd[f"{k}.norm_conv.bias"])
         add_2d (f"{p}.conv.pw1.weight",   sd[f"{k}.conv.pointwise_conv1.weight"])
         try_bias(f"{p}.conv.pw1.bias",    f"{k}.conv.pointwise_conv1.bias")
-        add_2d (f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
+        add_conv(f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
         try_bias(f"{p}.conv.dw.bias",     f"{k}.conv.depthwise_conv.bias")
 
         if conv_norm_type == "layer_norm":

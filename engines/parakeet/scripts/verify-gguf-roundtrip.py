@@ -218,7 +218,8 @@ def ggml_to_numpy(t):
         return data.view(np.float32).reshape(tuple(reversed(t.shape))).astype(np.float32)
     if t.tensor_type in (gguf.GGMLQuantizationType.F16,):
         return data.view(np.float16).reshape(tuple(reversed(t.shape))).astype(np.float32)
-    if t.tensor_type in (gguf.GGMLQuantizationType.Q8_0,
+    if t.tensor_type in (gguf.GGMLQuantizationType.BF16,
+                         gguf.GGMLQuantizationType.Q8_0,
                          gguf.GGMLQuantizationType.Q5_0,
                          gguf.GGMLQuantizationType.Q4_0):
         deq = gguf.quants.dequantize(data, t.tensor_type)
