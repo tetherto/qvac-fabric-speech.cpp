@@ -34,8 +34,10 @@ struct LongFormWindow {
 
 // Tiles [0, n_units) into gap-free, non-overlapping committed centres of
 // `center_units` each (the final centre is the remainder), padding every centre
-// with up to `ctx_units` of left/right context clamped to the bounds. Units are
-// mel frames in the offline windowed path; the planner itself is unit-agnostic.
+// with context clamped to the bounds. At the start/end, context that cannot be
+// placed on one side is moved to the other side when input remains, keeping the
+// encoder input at its full bounded size. Units are mel frames in the offline
+// windowed path; the planner itself is unit-agnostic.
 // The context is what the encoder needs to produce committed frames that match
 // the single-pass encoder; run_encoder_windowed() trims it off after the encoder
 // runs, so no committed unit is ever emitted twice.
@@ -72,6 +74,26 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units) {
         int window_end = center_end + ctx_units;
         if (window_end > n_units) {
             window_end = n_units;
+        }
+
+        // Fill unused boundary context from the opposite side. Besides giving
+        // boundary frames more useful context, this keeps fixed-shape Core ML
+        // windows near their exported capacity instead of adding a large block
+        // of synthetic zero padding to the first and final predictions.
+        const long long requested_len_ll =
+            (long long) center_units + 2LL * ctx_units;
+        const int target_len = requested_len_ll < n_units
+                             ? (int) requested_len_ll : n_units;
+        int missing = target_len - (window_end - window_start);
+        if (missing > 0) {
+            int grow_right = n_units - window_end;
+            if (grow_right > missing) grow_right = missing;
+            window_end += grow_right;
+            missing -= grow_right;
+            if (missing > 0) {
+                window_start -= missing;
+                if (window_start < 0) window_start = 0;
+            }
         }
 
         LongFormWindow w;
@@ -135,6 +157,49 @@ struct LongFormPlan {
     int  center_frames  = 0;  // committed encoder frames per window
     int  sub            = 0;  // subsampling factor (mel frames per encoder frame)
 };
+
+// Resolve the window required by a fixed-shape Core ML encoder. The sidecar's
+// capacity is expressed in mel frames while LongFormPlan uses post-subsampling
+// encoder frames, so floor to a whole encoder frame. This guarantees every
+// generated mel window is no larger than the sidecar input.
+inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
+                                                    int requested_context_frames,
+                                                    int subsampling_factor,
+                                                    long long n_mel_frames) {
+    LongFormPlan plan;
+    if (fixed_mel_frames <= 0 || n_mel_frames <= fixed_mel_frames) {
+        return plan;
+    }
+
+    const int sub = subsampling_factor > 0 ? subsampling_factor : 8;
+    const int window_frames = fixed_mel_frames / sub;
+    if (window_frames <= 0) {
+        return plan;
+    }
+
+    int context_frames = requested_context_frames;
+    if (context_frames == 0) {
+        context_frames = kLongFormAutoContextFrames;
+    }
+    if (context_frames < 0) {
+        context_frames = 0;
+    }
+    if (context_frames > window_frames / 4) {
+        context_frames = window_frames / 4;
+    }
+
+    const int center_frames = window_frames - 2 * context_frames;
+    if (center_frames <= 0) {
+        return plan;
+    }
+
+    plan.enabled        = true;
+    plan.window_frames  = window_frames;
+    plan.context_frames = context_frames;
+    plan.center_frames  = center_frames;
+    plan.sub            = sub;
+    return plan;
+}
 
 // Pure core of the engine's long-form resolution: decide the effective window
 // from the requested EngineOptions values (`requested_window_frames` /

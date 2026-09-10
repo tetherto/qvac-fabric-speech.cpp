@@ -7,6 +7,7 @@
       "binary":                  "Path (relative to build/) of the executable to invoke.",
       "source":                  "Where to fetch models from. 's3' (default) uses aws s3 cp against s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/<s3_prefix>/<key>. 'huggingface' uses curl against https://huggingface.co/<hf_repo>/resolve/<hf_ref>/<name> — vanilla whisper GGMLs (ggml-tiny.bin etc.) live on HuggingFace, not S3.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
+      "coreml_compare_on_darwin":"Run the native benchmark twice on Darwin: required Core ML first, then the same command with PARAKEET_COREML_DISABLE=1 as the ggml baseline.",
       "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally. For source='s3' an entry is an S3 key string or a {s3, as} object (fetched as `as`). For source='huggingface' families other than whisper, an entry is a {name, sha256?} object resolved against hf_repo@hf_ref.",
       "hf_repo":                 "HuggingFace repo id (e.g. 'ggerganov/whisper.cpp'). Required when source='huggingface'.",
       "hf_ref":                  "HuggingFace ref (commit SHA) pinned so the download can't silently drift with upstream re-uploads. Required when source='huggingface'.",
@@ -46,13 +47,14 @@
     "binary":       "engines/parakeet/parakeet",
     "s3_prefix":    "parakeet",
     "models": [
-      "2026-05-11/parakeet-ctc-0.6b.q8_0.gguf",
-      "2026-05-11/parakeet-tdt-0.6b-v3.q8_0.gguf"
+      "2026-05-11/parakeet-tdt-0.6b-v3.f16.gguf"
     ],
+    "coreml_compare_on_darwin": true,
     "args": [
       "--verbose",
-      "--model",       "${MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf",
+      "--model",       "${MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf",
       "--wav",         "${AUDIO_DIR}/jfk.wav",
+      "--n-gpu-layers", "999",
       "--bench",
       "--bench-runs",    "${RUNS}",
       "--bench-warmup",  "${WARMUP}",
@@ -64,7 +66,7 @@
       "reference":  "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt",
       "normalizer": "english"
     },
-    "notes": "parakeet-cli's --bench mode emits inference_ms + rtf_median + backend directly. jfk.wav is a ~11 s fixture; RTF < 1 means faster than real-time. --verbose surfaces the 'parakeet: using <backend>' line the driver falls back to when the JSON doesn't carry a backend field. Correctness: WER of parakeet's --bench transcript against the checked-in reference — should be ~0.0 on a healthy build; a non-trivial WER means either the model regressed or the reference drifted with a checkpoint bump."
+    "notes": "TDT benchmark. On Darwin the driver requires the Core ML encoder for one run, repeats the same benchmark with PARAKEET_COREML_DISABLE=1, and reports encoder/end-to-end speedups. The TDT decoder remains on ggml Metal. jfk.wav is a ~11 s fixture; RTF < 1 means faster than real-time. Correctness: WER of the benchmark transcript against the checked-in reference; a non-trivial WER means either the model regressed or the reference drifted with a checkpoint bump."
   },
 
   "sortformer": {

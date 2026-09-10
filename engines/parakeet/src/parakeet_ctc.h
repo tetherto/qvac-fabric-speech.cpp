@@ -566,6 +566,9 @@ ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 // True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
 // instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+// Fixed mel-frame capacity advertised by the active Core ML sidecar, or 0 when
+// Core ML is unavailable, disabled, flexible-shape, or has an unknown layout.
+int         model_coreml_fixed_mel_frames(const ParakeetCtcModel & m);
 // Encoder compute-backend label for stats/logging: the Core ML label (e.g. "coreml")
 // when the sidecar is active, otherwise the ggml active-backend name.
 std::string model_encoder_backend_name(const ParakeetCtcModel & m);
@@ -602,6 +605,11 @@ struct EncoderOutputs {
     int n_enc_frames = 0;
     int d_model      = 0;
     int vocab_size   = 0;
+
+    // True only when this invocation completed through the Core ML sidecar.
+    // Loading a sidecar is insufficient: an incompatible shape or prediction
+    // failure can still make run_encoder fall back to ggml.
+    bool used_coreml = false;
 };
 
 // `capture_intermediates`: when true (default, kept for backward compat with
@@ -616,14 +624,17 @@ struct EncoderOutputs {
 // per-call cost on GPU/OpenCL backends and negligible-but-noisy on
 // CPU. The graph topology is unchanged either way -- only the
 // host-copy step is gated, so this is safe regardless of backend
-// scheduling.
+// scheduling. `allow_coreml_padded` is reserved for offline callers that know
+// trailing zero mel frames represent padding, not an in-progress streaming
+// window; it lets a fixed-shape Core ML sidecar consume that padded input.
 int run_encoder(ParakeetCtcModel   & model,
                 const float        * mel,
                 int                  n_mel_frames,
                 int                  n_mels,
                 EncoderOutputs     & out,
                 int                  max_layers = -1,
-                bool                 capture_intermediates = true);
+                bool                 capture_intermediates = true,
+                bool                 allow_coreml_padded = false);
 
 // Apply Nemotron's locale one-hot concatenation and two-layer projection to
 // row-major encoder output shaped (n_frames, d_model).

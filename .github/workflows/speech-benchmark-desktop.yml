@@ -15,7 +15,7 @@ on:
       model_families:
         description: >-
           Comma-separated family names, or "all". Families:
-          whisper, parakeet, sortformer, vad, chatterbox, supertonic, parler,
+          whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
           cosyvoice, audio8, lavasr, acestep, minimax.
         required: false
         default: "all"
@@ -244,7 +244,10 @@ jobs:
       - name: Install jq
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            command -v jq >/dev/null || brew install jq
+            if ! command -v jq >/dev/null; then
+              echo "jq must be preinstalled on the self-hosted macOS benchmark runner" >&2
+              exit 1
+            fi
           else
             command -v jq >/dev/null || (sudo apt-get update -q && sudo apt-get install -y jq)
           fi
@@ -270,16 +273,74 @@ jobs:
             --arg os     "$(uname -s)" \
             '{family:$family, model:$model, runner:$runner, os:$os,
               backend:"unknown",
+              encoder_backend:"unknown", encoder_coreml_all_runs:null,
+              encoder_ms_median:null, baseline_encoder_ms_median:null,
+              baseline_inference_ms_median:null,
+              encoder_speedup:null, inference_speedup:null,
               wall_ms_median:null, wall_ms_min:null, wall_ms_max:null,
               rtf_median:null, peak_rss_mib:null,
               runs:0, status:"infrastructure-failed",
               notes:"pre-flight seed — an infrastructure step (AWS OIDC, ggml build, cmake configure) did not complete; the row was never overwritten by run-family.sh."}' \
             > artifacts/result.json
 
+      # The F16 GGUF and compiled bundle are generated on the benchmark machine.
+      # Cache them independently: if Core ML export fails after GGUF conversion,
+      # the next run can reuse the GGUF while retrying only the sidecar export.
+      - name: Cache generated Parakeet F16 GGUF
+        if: runner.os == 'macOS' && matrix.family == 'parakeet'
+        id: parakeet-f16-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet/parakeet-tdt-0.6b-v3.f16.gguf
+          key: parakeet-tdt-f16-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/convert-nemo-to-gguf.py', 'engines/parakeet/scripts/converter_args.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Cache generated Parakeet Core ML sidecar
+        if: runner.os == 'macOS' && matrix.family == 'parakeet'
+        id: parakeet-coreml-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet/parakeet-tdt-0.6b-v3-encoder.mlmodelc
+          key: parakeet-tdt-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/convert-nemo-to-gguf.py', 'engines/parakeet/scripts/converter_args.py', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Install Core ML exporter dependencies
+        if: runner.os == 'macOS' && matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')
+        run: |
+          set -euo pipefail
+          coreml_python="$(command -v python3.11 || true)"
+          if [[ -z "$coreml_python" ]]; then
+            coreml_python="$(command -v python3 || true)"
+          fi
+          if [[ -z "$coreml_python" ]]; then
+            echo "python3 is required to generate the Core ML sidecar" >&2
+            exit 1
+          fi
+          "$coreml_python" -c 'import sys; assert sys.version_info >= (3, 9), sys.version'
+          "$coreml_python" -m venv .venv-coreml
+          .venv-coreml/bin/python -m pip install --upgrade pip
+          .venv-coreml/bin/python -m pip install \
+            -r engines/parakeet/scripts/requirements-coreml.txt
+
+      - name: Generate Parakeet F16 GGUF
+        if: runner.os == 'macOS' && matrix.family == 'parakeet' && steps.parakeet-f16-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p bench-models/parakeet
+          nemo_checkpoint="$RUNNER_TEMP/parakeet-tdt-0.6b-v3.nemo"
+          curl --fail --location --retry 3 \
+            --output "$nemo_checkpoint" \
+            https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo
+          .venv-coreml/bin/python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+            --ckpt "$nemo_checkpoint" \
+            --hf-repo nvidia/parakeet-tdt-0.6b-v3 \
+            --quant f16 \
+            --out bench-models/parakeet/parakeet-tdt-0.6b-v3.f16.gguf
+
       - name: Install ccache
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            command -v ccache >/dev/null || brew install ccache
+            if ! command -v ccache >/dev/null; then
+              echo "::notice::ccache is not installed; continuing without compiler caching"
+            fi
           else
             command -v ccache >/dev/null || (sudo apt-get update -q && sudo apt-get install -y ccache)
           fi
@@ -365,11 +426,14 @@ jobs:
           cmake --install ggml-src/build
 
       - name: Configure umbrella build
+        env:
+          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && matrix.family == 'parakeet' && 'ON' || 'OFF' }}
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DSPEECH_BUILD_TESTS=OFF \
             -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DPARAKEET_COREML="$PARAKEET_COREML_FLAG" \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build bench target
@@ -397,12 +461,17 @@ jobs:
         env:
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
           RUNS_PER_BENCH:  ${{ needs.plan.outputs.runs_per_bench }}
+          PARAKEET_COREML_PYTHON: ${{ github.workspace }}/.venv-coreml/bin/python
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           set -euo pipefail
           extra_args=()
+          warmup_runs=1
           if [[ -n "$WHISPER_SIZE" ]]; then
             extra_args+=(--whisper-size "$WHISPER_SIZE")
+          fi
+          if [[ "$FAMILY" == "parakeet" && "$RUNNER_OS" == "macOS" ]]; then
+            warmup_runs=3
           fi
           # run-family.sh handles all failure paths (missing binary, fetch
           # error, warmup/run failure) by writing a result.json with the
@@ -414,6 +483,7 @@ jobs:
           scripts/benchmarks/run-family.sh \
             --family "$FAMILY" \
             --runs "$RUNS_PER_BENCH" \
+            --warmup "$warmup_runs" \
             --build-dir build \
             --models-root "$PWD/bench-models" \
             --audio-dir engines/parakeet/test/samples \
@@ -427,7 +497,7 @@ jobs:
         if: always()
         with:
           name: bench-${{ matrix.family }}${{ matrix.whisper_size && format('-{0}', matrix.whisper_size) || '' }}-${{ matrix.runner_label }}
-          path: artifacts/result.json
+          path: artifacts/
           retention-days: 14
 
   # ---------- 3. Aggregate + render summary table -------------------------

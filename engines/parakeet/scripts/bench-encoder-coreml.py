@@ -41,17 +41,22 @@ def per_frame_cosine(reference, actual):
     return float(cosines.mean()), float(cosines.min())
 
 
-def convert_fixed_length(export, model, n_mels, n_mel_frames, out_path):
+def convert_fixed_length(export, model, n_mels, n_mel_frames, out_path,
+                         palettize_bits, palettize_group_size):
     example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
     traced = torch.jit.trace(model, example, check_trace=False)
     mlmodel = ct.convert(
         traced,
-        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=np.float32)],
+        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=np.float16)],
         outputs=[ct.TensorType(name="encoder_out", dtype=np.float16)],
         compute_units=ct.ComputeUnit.ALL,
         compute_precision=ct.precision.FLOAT16,
-        minimum_deployment_target=ct.target.macOS13,
+        minimum_deployment_target=(ct.target.macOS15 if palettize_bits is not None
+                                   else ct.target.macOS13),
     )
+    if palettize_bits is not None:
+        mlmodel = export.palettize_encoder(mlmodel, palettize_bits,
+                                           palettize_group_size)
     mlmodel.save(str(out_path))
     return mlmodel
 
@@ -78,19 +83,22 @@ def predict_latency_ms(mlmodel, mel, iters):
     return 1000.0 * (time.perf_counter() - start) / iters
 
 
-def measure_length(export, ref, model, n_mels, n_mel_frames, iters, work_dir):
+def measure_length(export, ref, model, n_mels, n_mel_frames, iters, work_dir,
+                   palettize_bits, palettize_group_size):
     mel = np.random.default_rng(0).standard_normal((n_mels, n_mel_frames)).astype(np.float32) * 2.0 - 4.0
     with torch.inference_mode():
         reference_out = model(torch.from_numpy(mel)).cpu().numpy().astype(np.float32)
 
     package = work_dir / f"bench-{n_mel_frames}.mlpackage"
-    mlmodel = convert_fixed_length(export, model, n_mels, n_mel_frames, package)
+    mlmodel = convert_fixed_length(export, model, n_mels, n_mel_frames, package,
+                                   palettize_bits, palettize_group_size)
     export.compile_mlmodelc(package, work_dir)
     compiled = next(work_dir.glob(f"bench-{n_mel_frames}.mlmodelc"))
 
-    coreml_out = np.asarray(mlmodel.predict({"mel": mel})["encoder_out"]).astype(np.float32)
+    coreml_mel = mel.astype(np.float16)
+    coreml_out = np.asarray(mlmodel.predict({"mel": coreml_mel})["encoder_out"]).astype(np.float32)
     mean_cos, min_cos = per_frame_cosine(reference_out, coreml_out)
-    latency = predict_latency_ms(mlmodel, mel, iters)
+    latency = predict_latency_ms(mlmodel, coreml_mel, iters)
     placement = op_placement(compiled)
     return {
         "enc_frames": reference_out.shape[0],
@@ -109,7 +117,12 @@ def main():
     ap.add_argument("--mel-frames", type=int, nargs="+", required=True,
                     help="fixed mel-frame lengths to benchmark")
     ap.add_argument("--iters", type=int, default=10)
+    ap.add_argument("--palettize-bits", type=int, choices=[4, 6, 8], default=None,
+                    help="benchmark grouped-channel palettization at this bit width")
+    ap.add_argument("--palettize-group-size", type=int, default=16)
     args = ap.parse_args()
+    if args.palettize_group_size <= 0:
+        ap.error("--palettize-group-size must be greater than zero")
 
     export = load_export_module(args.scripts)
     weights, meta = export.load_reference_encoder(args.scripts).load_gguf(args.gguf)
@@ -122,7 +135,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         work_dir = Path(tmp)
         for n_mel_frames in args.mel_frames:
-            r = measure_length(export, ref, model, n_mels, n_mel_frames, args.iters, work_dir)
+            r = measure_length(export, ref, model, n_mels, n_mel_frames, args.iters,
+                               work_dir, args.palettize_bits,
+                               args.palettize_group_size)
             p = r["placement"]
             ane = p.get("MLNeuralEngineComputeDevice", 0)
             gpu = p.get("MLGPUComputeDevice", 0)
