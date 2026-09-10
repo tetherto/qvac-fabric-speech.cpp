@@ -294,6 +294,29 @@ size_t parler_dac_compute_buffer_size(const parler_model & model, int n_frames) 
     return size;
 }
 
+// Fit-graph twin of one decode window (memory-fit preflight): the same graph,
+// window bound, and convt dispatch parler_dac_decode uses, built but never
+// run, so the caller can price it through the same dual-path dispatch the
+// runtime allocates with (parler_dac_compute_buffer_size above prices only
+// the direct-gallocr path).
+ggml_cgraph * parler_build_dac_fit_graph(const parler_model & model, int n_frames,
+                                         ggml_context ** ctx_out) {
+    *ctx_out = nullptr;
+    if (n_frames <= 0) return nullptr;
+    const bool convt_mm = model.on_gpu || std::getenv("PARLER_DAC_CONVT_MATMUL") != nullptr;
+    const int  rf    = parler_dac_rf_frames(model);
+    const int  n_win = std::min(n_frames, PARLER_DAC_WINDOW_FRAMES + 2 * rf);
+
+    const size_t ctx_size = ggml_tensor_overhead() * PARLER_MAX_NODES +
+                            ggml_graph_overhead_custom(PARLER_MAX_NODES, false);
+    ggml_init_params ip = { ctx_size, nullptr, /*no_alloc=*/ true };
+    ggml_context * ctx = ggml_init(ip);
+    if (!ctx) return nullptr;
+    ggml_cgraph * gf = build_dac_graph(ctx, model, n_win, convt_mm);
+    *ctx_out = ctx;
+    return gf;
+}
+
 bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_frames,
                        int n_threads, std::vector<float> & pcm_out,
                        std::vector<float> * latent_out,

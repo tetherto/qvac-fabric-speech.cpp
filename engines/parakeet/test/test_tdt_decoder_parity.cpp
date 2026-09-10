@@ -1,9 +1,9 @@
-// TDT decoder parity vs reference token IDs (NeMo dump or cross-backend).
+// TDT / plain RNN-T decoder parity vs reference token IDs.
 //
 // Greedy decoding is deterministic; this compares integer token IDs only.
 //
 // Usage:
-//   test-tdt-decoder-parity <gguf> <wav> [<ref-dir>]
+//   test-tdt-decoder-parity <gguf> <wav> [<ref-dir> [--require-reference]]
 //
 // Exit 0 on success; non-zero on failure or invalid arguments.
 
@@ -12,8 +12,10 @@
 #include "mel_preprocess.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -45,6 +47,9 @@ int load_npy_i32(const std::string & path,
 
     std::string header(header_len, '\0');
     f.read(header.data(), header_len);
+
+    if (header.find("'descr': '<i4'") == std::string::npos) return 6;
+    if (header.find("'fortran_order': False") == std::string::npos) return 7;
 
     // Crude shape parser: looks for "'shape': (N,)" or "(N, M)".
     const size_t shp_s = header.find("'shape':");
@@ -83,11 +88,11 @@ int load_npy_i32(const std::string & path,
 // using the requested n_gpu_layers, returning the produced token IDs and
 // the decoded transcript. Loads its own model so that backend selection is
 // honoured per-call.
-int transcribe_tdt(const std::string & gguf_path,
-                   const std::string & wav_path,
-                   int                 n_gpu_layers,
-                   std::vector<int32_t> & out_tokens,
-                   std::string         & out_text) {
+int transcribe_transducer(const std::string & gguf_path,
+                          const std::string & wav_path,
+                          int                 n_gpu_layers,
+                          std::vector<int32_t> & out_tokens,
+                          std::string         & out_text) {
     using namespace parakeet;
 
     ParakeetCtcModel model;
@@ -96,8 +101,9 @@ int transcribe_tdt(const std::string & gguf_path,
         std::fprintf(stderr, "  load_from_gguf failed rc=%d\n", rc);
         return 100 + rc;
     }
-    if (model.model_type != ParakeetModelType::TDT) {
-        std::fprintf(stderr, "  error: expected TDT model in %s\n",
+    if (model.model_type != ParakeetModelType::TDT &&
+        model.model_type != ParakeetModelType::RNNT) {
+        std::fprintf(stderr, "  error: expected TDT or RNNT model in %s\n",
                      gguf_path.c_str());
         return 110;
     }
@@ -107,6 +113,11 @@ int transcribe_tdt(const std::string & gguf_path,
     if (int rc = load_wav_mono_f32(wav_path, samples, sr); rc != 0) {
         std::fprintf(stderr, "  load_wav failed rc=%d\n", rc);
         return 120 + rc;
+    }
+    if (sr != model.mel_cfg.sample_rate) {
+        std::fprintf(stderr, "  error: wav is %d Hz; model expects %d Hz\n",
+                     sr, model.mel_cfg.sample_rate);
+        return 125;
     }
 
     std::vector<float> mel;
@@ -131,13 +142,21 @@ int transcribe_tdt(const std::string & gguf_path,
     }
 
     TdtDecodeOptions dopts;
+    if (model.model_type == ParakeetModelType::RNNT) {
+        dopts.max_symbols_per_step =
+            model.encoder_cfg.rnnt_max_symbols_per_step;
+    }
     TdtDecodeResult  dres;
-    if (int rc = tdt_greedy_decode(model, rt,
-                                   enc_out.encoder_out.data(),
-                                   enc_out.n_enc_frames, enc_out.d_model,
-                                   dopts, dres); rc != 0) {
-        std::fprintf(stderr, "  tdt_greedy_decode failed rc=%d\n", rc);
-        return 160 + rc;
+    const int decode_rc = model.model_type == ParakeetModelType::RNNT
+        ? rnnt_greedy_decode(model, rt, enc_out.encoder_out.data(),
+                             enc_out.n_enc_frames, enc_out.d_model,
+                             dopts, dres)
+        : tdt_greedy_decode(model, rt, enc_out.encoder_out.data(),
+                            enc_out.n_enc_frames, enc_out.d_model,
+                            dopts, dres);
+    if (decode_rc != 0) {
+        std::fprintf(stderr, "  transducer greedy decode failed rc=%d\n", decode_rc);
+        return 160 + decode_rc;
     }
 
     out_tokens = std::move(dres.token_ids);
@@ -159,16 +178,26 @@ void print_first_diff(const std::vector<int32_t> & a,
                  a.size(), b.size());
 }
 
+// Toggles the host scalar decoder via the env switch parakeet_tdt.cpp reads at prepare time.
+void set_host_decode(bool on) {
+#ifdef _WIN32
+    _putenv_s("PARAKEET_TDT_HOST_DECODE", on ? "1" : "");
+#else
+    if (on) setenv("PARAKEET_TDT_HOST_DECODE", "1", 1); else unsetenv("PARAKEET_TDT_HOST_DECODE");
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
     if (argc < 3) {
         std::fprintf(stderr,
-            "usage: %s <parakeet-tdt.gguf> <wav> [<ref-dir>]\n"
+            "usage: %s <parakeet-tdt-or-rnnt.gguf> <wav> "
+            "[<ref-dir> [--require-reference]]\n"
             "\n"
-            "Validates the C++ TDT greedy decoder.\n"
+            "Validates the C++ TDT or plain RNN-T greedy decoder.\n"
             "  Pass <ref-dir> containing token_ids.npy from\n"
-            "    `scripts/dump-tdt-reference.py --wav <wav>`\n"
+            "    `scripts/dump-{tdt,rnnt}-reference.py --wav <wav>`\n"
             "  to compare against the NeMo reference.\n"
             "\n"
             "Always cross-checks the n_gpu_layers=0 (scalar CPU fallback) path\n"
@@ -181,13 +210,18 @@ int main(int argc, char ** argv) {
     const std::string gguf_path = argv[1];
     const std::string wav_path  = argv[2];
     const std::string ref_dir   = (argc >= 4) ? argv[3] : "";
+    const bool require_reference =
+        argc >= 5 && std::strcmp(argv[4], "--require-reference") == 0;
 
-    // ---- Run the CPU-fallback scalar path (n_gpu_layers=0). ----
-    std::fprintf(stderr, "[tdt-decode-parity] running CPU fallback (n_gpu_layers=0)...\n");
+    // ---- Run the host scalar path (n_gpu_layers=0, PARAKEET_TDT_HOST_DECODE=1). ----
+    std::fprintf(stderr, "[tdt-decode-parity] running host fallback (n_gpu_layers=0)...\n");
     std::vector<int32_t> ids_cpu;
     std::string text_cpu;
-    if (int rc = transcribe_tdt(gguf_path, wav_path, 0, ids_cpu, text_cpu); rc != 0) {
-        return rc;
+    set_host_decode(true);
+    const int rc_cpu = transcribe_transducer(gguf_path, wav_path, 0, ids_cpu, text_cpu);
+    set_host_decode(false);
+    if (rc_cpu != 0) {
+        return rc_cpu;
     }
     std::fprintf(stderr, "[tdt-decode-parity] CPU: tokens=%zu text=%.80s%s\n",
                  ids_cpu.size(), text_cpu.c_str(),
@@ -195,12 +229,11 @@ int main(int argc, char ** argv) {
 
     // ---- Run the ggml-graph path (n_gpu_layers=1). On a Metal-enabled
     //      build this exercises the graph code on the GPU; on a CPU-only
-    //      build n_gpu_layers=1 falls back to CPU and the call still
-    //      validates that no path regressed. ----
+    //      build the graphs run on ggml-cpu, which is the shipping CPU decoder. ----
     std::fprintf(stderr, "[tdt-decode-parity] running graph path (n_gpu_layers=1)...\n");
     std::vector<int32_t> ids_gpu;
     std::string text_gpu;
-    if (int rc = transcribe_tdt(gguf_path, wav_path, 1, ids_gpu, text_gpu); rc != 0) {
+    if (int rc = transcribe_transducer(gguf_path, wav_path, 1, ids_gpu, text_gpu); rc != 0) {
         return rc;
     }
     std::fprintf(stderr, "[tdt-decode-parity] GPU: tokens=%zu text=%.80s%s\n",
@@ -224,10 +257,11 @@ int main(int argc, char ** argv) {
     if (!ref_dir.empty()) {
         std::vector<int32_t> ids_ref;
         const std::string p = ref_dir + "/token_ids.npy";
-        if (load_npy_i32(p, ids_ref) != 0) {
+        if (int rc = load_npy_i32(p, ids_ref); rc != 0) {
             std::fprintf(stderr,
-                "[tdt-decode-parity] WARN: could not load %s; skipping NeMo reference check\n",
-                p.c_str());
+                "[tdt-decode-parity] %s: could not load %s (rc=%d)\n",
+                require_reference ? "FAIL" : "WARN", p.c_str(), rc);
+            if (require_reference) ok = false;
         } else {
             if (ids_ref.size() != ids_gpu.size() ||
                 !std::equal(ids_ref.begin(), ids_ref.end(), ids_gpu.begin())) {

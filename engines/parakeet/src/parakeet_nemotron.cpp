@@ -1,5 +1,6 @@
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
+#include "backend_util.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -39,6 +40,18 @@ int encoder_subsampling_factor(const ParakeetCtcModel & model) {
     return model.encoder_cfg.subsampling_factor > 0
         ? model.encoder_cfg.subsampling_factor
         : kDefaultSubsamplingFactor;
+}
+
+// ggml-opencl mis-handles a handful of non-contiguous view feeds (byte-offset
+// views into a concat, depthwise conv on a view). Force a materialised copy on
+// OpenCL so downstream ops see a contiguous src. No-op on other backends.
+ggml_tensor * ensure_contig_on_opencl(
+    ggml_context * ctx,
+    const ParakeetCtcModel & model,
+    ggml_tensor * tensor) {
+    return backend_is_opencl(model.backend_active())
+        ? ggml_cont(ctx, tensor)
+        : tensor;
 }
 
 struct NemotronStepGraph {
@@ -318,6 +331,7 @@ ggml_tensor * update_channel_cache(
 
 ggml_tensor * cached_convolution(
     ggml_context * context,
+    const ParakeetCtcModel & model,
     ggml_tensor * value,
     ggml_tensor * time_cache,
     const BlockWeights & weights,
@@ -374,7 +388,7 @@ ggml_tensor * cached_convolution(
     ggml_tensor * convolved = ggml_conv_1d_dw(
         context,
         weights.conv_dw_w,
-        convolution_input,
+        ensure_contig_on_opencl(context, model, convolution_input),
         1,
         0,
         1);
@@ -411,6 +425,7 @@ ggml_tensor * cached_convolution(
 
 ggml_tensor * build_cached_block(
     ggml_context * context,
+    const ParakeetCtcModel & model,
     ggml_tensor * value,
     ggml_tensor * channel_cache,
     ggml_tensor * time_cache,
@@ -477,6 +492,7 @@ ggml_tensor * build_cached_block(
         config.layer_norm_eps);
     transformed = cached_convolution(
         context,
+        model,
         normalized_convolution,
         time_cache,
         weights,
@@ -510,10 +526,16 @@ ggml_tensor * build_cached_block(
         config.layer_norm_eps);
 }
 
+// `measure_bytes` (fit projection): when non-null the graph is built normally
+// but its device buffer is only *sized* into `*measure_bytes`
+// (ggml_gallocr_reserve_n_size, the size-only twin of the reserve the real
+// path performs) and `output` is cleared before returning -- nothing is
+// allocated and no host mirrors are filled.
 int build_step_graph(
     const ParakeetCtcModel & model,
     int encoder_frames,
-    NemotronStepGraph & output) {
+    NemotronStepGraph & output,
+    size_t * measure_bytes = nullptr) {
     output.clear();
     const EncoderConfig & config = model.encoder_cfg;
     const int channel_frames = channel_cache_frames(model);
@@ -578,6 +600,7 @@ int build_step_graph(
         ggml_tensor * next_time_cache = nullptr;
         value = build_cached_block(
             context,
+            model,
             value,
             channel_cache,
             time_cache,
@@ -607,6 +630,21 @@ int build_step_graph(
         ggml_build_forward_expand(output.graph, cache);
     }
     ggml_build_forward_expand(output.graph, output.encoder_output);
+
+    if (measure_bytes) {
+        ggml_gallocr_t pricer = ggml_gallocr_new(
+            ggml_backend_get_default_buffer_type(model.backend_active()));
+        if (!pricer) {
+            output.clear();
+            return -2;
+        }
+        *measure_bytes = 0;
+        ggml_gallocr_reserve_n_size(
+            pricer, output.graph, nullptr, nullptr, measure_bytes);
+        ggml_gallocr_free(pricer);
+        output.clear();
+        return 0;
+    }
 
     output.allocator = ggml_gallocr_new(
         ggml_backend_get_default_buffer_type(model.backend_active()));
@@ -1152,6 +1190,96 @@ int run_nemotron_stream_step(
         state.finalized = true;
     }
     return 0;
+}
+
+int nemotron_measure_stream(ParakeetCtcModel         & model,
+                            int                        right_context_frames,
+                            NemotronStreamFitMeasure & out) {
+    out = NemotronStreamFitMeasure{};
+    if (model.model_type != ParakeetModelType::NEMOTRON ||
+        !model.backend_active()) {
+        return -1;
+    }
+    const auto & allowed = model.nemotron_cfg.allowed_right_context_frames;
+    if (std::find(allowed.begin(), allowed.end(), right_context_frames) ==
+        allowed.end()) {
+        return -2;
+    }
+
+    const EncoderConfig & config = model.encoder_cfg;
+    const int factor = encoder_subsampling_factor(model);
+    const int channel_frames = channel_cache_frames(model);
+    const int convolution_frames = convolution_cache_frames(model);
+    // Steady-state step geometry (run_nemotron_stream_step): every non-final
+    // chunk yields right_context + 1 encoder frames, and the session rebuilds
+    // its single step graph only when that count changes -- the final partial
+    // chunk is never larger, so the steady-state graph is the session's peak.
+    const int encoder_frames = right_context_frames + 1;
+    const int key_frames = channel_frames + encoder_frames;
+
+    {
+        NemotronStepGraph scratch;  // measure mode clears it before returning
+        size_t graph_bytes = 0;
+        if (int rc = build_step_graph(
+                model, encoder_frames, scratch, &graph_bytes); rc != 0) {
+            return rc;
+        }
+        out.device_step_graph_bytes = graph_bytes;
+    }
+
+    // Per-chunk pre-encode: next_nemotron_processed_signal hands
+    // run_subsampling kPreEncodeCacheFrames of mel history plus the
+    // factor * (right_context + 1) freshly consumed frames. The history-free
+    // first chunk (1 + factor * right_context mel frames) is smaller, so the
+    // steady chunk is the per-chunk peak.
+    const int n_mels = model.mel_cfg.n_mels;
+    const int steady_mel = factor * encoder_frames;
+    const int chunk_mel = kPreEncodeCacheFrames + steady_mel;
+    size_t sub_active = 0;
+    size_t sub_host_inputs = 0;
+    if (int rc = measure_subsampling_compute(
+            model, chunk_mel, n_mels, sub_active, sub_host_inputs);
+        rc != 0) {
+        return rc;
+    }
+    out.device_subsampling_bytes = sub_active;
+    out.host_subsampling_input_bytes = sub_host_inputs;
+
+    // Host-resident session state, in f32 elements. Geometry is
+    // GGUF-validated (validate_nemotron_model), so plain size_t arithmetic
+    // cannot overflow here: every factor is bounded by the fixed contract
+    // (24 layers, d_model 1024, right context <= 13).
+    size_t host_f32 = 0;
+    const size_t d_model = (size_t) config.d_model;
+    const size_t n_layers = (size_t) config.n_layers;
+    host_f32 += n_layers * channel_frames * d_model;      // state.cache_channel
+    host_f32 += n_layers * d_model * convolution_frames;  // state.cache_time
+    host_f32 += (size_t) (2 * key_frames - 1) * d_model;  // graph.positions mirror
+    host_f32 += (size_t) key_frames * encoder_frames;     // attention-mask staging
+    host_f32 += (size_t) chunk_mel * n_mels;              // processed_signal
+    host_f32 += (size_t) kPreEncodeCacheFrames * n_mels;  // impl->mel_history
+    host_f32 += (size_t) steady_mel * n_mels;             // impl->pending_mel (one steady chunk)
+    host_f32 += ((size_t) encoder_frames + kSubsamplingOverlapFrames)
+                * d_model;                                // run_subsampling output
+    host_f32 += (size_t) encoder_frames * d_model;        // step encoder_input
+    host_f32 += 2 * (size_t) encoder_frames * d_model;    // result raw + conditioned
+    host_f32 += (size_t) encoder_frames *
+                ((size_t) model.nemotron_cfg.prompt_input_width + d_model);
+                                                          // per-step prompt staging
+    host_f32 += (2 * (size_t) model.nemotron_cfg.pred_rnn_layers + 1) *
+                (size_t) model.nemotron_cfg.pred_hidden;  // RnntDecodeState h/c/pred
+    // GPU runs: the scheduler keeps the subsampling graph-input originals in
+    // a CPU-side buffer and copies them into the device split (host RAM;
+    // zero on CPU-only runs).
+    out.host_bytes = host_f32 * sizeof(float) + sub_host_inputs;
+    return 0;
+}
+
+size_t nemotron_stream_graph_buffer_bytes(const NemotronStreamState & state) {
+    if (!state.impl || !state.impl->graph || !state.impl->graph->allocator) {
+        return 0;
+    }
+    return ggml_gallocr_get_buffer_size(state.impl->graph->allocator, 0);
 }
 
 }

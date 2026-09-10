@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -607,7 +609,87 @@ bool load_supertonic_gguf(const std::string & path,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
+
+// Weight-staging decisions taken during load, exposed so the loader's
+// packed-source handling can be regression-tested without a GGUF.
+ggml_type target_supertonic_storage_type(const std::string & name,
+                                         enum ggml_type src_type,
+                                         supertonic_precision precision,
+                                         bool backend_is_cpu);
+bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
+                                        enum ggml_type dst_type);
+bool should_expand_supertonic_tensor(enum ggml_type type);
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type);
+bool is_supertonic_matmul_weight_name(const std::string & name);
 void supertonic_graph_compute(const supertonic_model & model, ggml_cgraph * graph);
+
+// ---- memory-fit preflight (include/tts-cpp/supertonic/fit.h) ---------------
+// Sizes of everything one load_supertonic_gguf allocates, filled by
+// load_supertonic_gguf_metadata_only.
+struct supertonic_fit_load_measure {
+    uint64_t weights_bytes        = 0;  // buffer_w (converted dst types + pre-baked F2/F6)
+    uint64_t extra_bytes          = 0;  // buffer_w_extra (GPU pre-transposed matmul weights)
+    // Persistent host caches a real load keeps (unicode indexer, RoPE theta,
+    // layer-norm / tanh_k pre-downloads) plus the scalar-weight cache's
+    // documented ~5 MiB steady state.
+    uint64_t host_bytes           = 0;
+    // Transient host peak of the load itself: gguf_init_from_file's full
+    // tensor-data copy plus the conversion staging maps, alive alongside
+    // buffer_w until the upload loop finishes.  Often the true process peak.
+    uint64_t host_transient_bytes = 0;
+};
+
+// Metadata-only twin of load_supertonic_gguf: same backend policy, capability
+// probes, per-tensor destination-type decisions, pre-baked tensor
+// declarations, alias/pretranspose registration, and the same two buffers --
+// sized via ggml_backend_alloc_ctx_tensors_from_buft_size instead of
+// allocated, with no tensor data read from disk or converted.  All tensors
+// come back marked externally allocated so the stage graph builders below can
+// price their graphs over them.  Free with free_supertonic_model as usual.
+bool load_supertonic_gguf_metadata_only(const std::string & path,
+                                        supertonic_model & model,
+                                        int n_gpu_layers,
+                                        int f16_weights,
+                                        supertonic_precision precision,
+                                        int vulkan_device,
+                                        const std::vector<std::string> & f16_weights_deny_list,
+                                        supertonic_fit_load_measure & out);
+
+// Size-only pricing of the per-stage thread_local graph-cache arenas at the
+// given shapes -- the SAME one-graph builders the runtime dispatches off the
+// CPU backend (text encoder / duration / CFM loop), reserved through ggml's
+// size-only APIs; nothing is allocated and nothing runs.  Every one of these
+// caches stays resident once its stage has run, so a projection SUMS them.
+// GPU (non-CPU-kernel) dispatch paths only: the CPU multi-cache paths and the
+// env-disabled one-graph fallbacks are not modelled -- each measure refuses
+// them with a "not modelled" error (the fitter maps that to
+// compute-path-not-supported; see fit.h).
+bool supertonic_fit_measure_text_encoder(const supertonic_model & m, int L,
+                                         uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_duration(const supertonic_model & m, int L,
+                                     uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_vector(const supertonic_model & m, int L, int text_len,
+                                   int total_steps, uint64_t & bytes, std::string * error);
+// The vocoder dual-paths through the [backend, CPU-last] scheduler when the
+// backend cannot run some op; its CPU portion lands in host_bytes.
+bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
+                                    uint64_t & device_bytes, uint64_t & host_bytes,
+                                    std::string * error);
+
+// Real-allocation parity probes (test support): the same builders at the same
+// shapes, but reserved + allocated for real; the reported bytes anchor the
+// size-only measures above byte for byte.  Only for tests on REAL models --
+// these allocate the full arena set.  A probe reports 0 for a graph the
+// direct path cannot allocate (scheduler-dispatched); the test skips those.
+bool supertonic_fit_parity_probe_text_encoder(const supertonic_model & m, int L,
+                                              uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_duration(const supertonic_model & m, int L,
+                                          uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_vector(const supertonic_model & m, int L, int text_len,
+                                        int total_steps, uint64_t & bytes,
+                                        std::string * error);
+bool supertonic_fit_parity_probe_vocoder(const supertonic_model & m, int latent_len,
+                                         uint64_t & bytes, std::string * error);
 
 // Per-TU thread-local cache release helpers — called from
 // `free_supertonic_model` BEFORE `ggml_backend_free`, so the
@@ -636,16 +718,42 @@ void release_text_encoder_thread_local_caches();
 void release_vocoder_thread_local_caches();
 void release_duration_thread_local_caches();
 
-// True when the model's compute backend supports the per-stage CPU fast paths
-// (the `ggml_custom_4d` callbacks in conv1d_f32 / depthwise_same_ggml /
-// layer_norm_ggml etc.).  ggml custom ops are CPU-only by design; on Metal /
-// CUDA / Vulkan the helpers must fall through to their stock-ggml-op paths.
-// Mirrors the `!ggml_backend_is_cpu(backend)` idiom Chatterbox uses to gate
-// its Metal-only batched-CFG path.
+// True when the per-stage CPU fast paths exist AND the model runs on them.
+// Those paths (conv1d_f32, dense_matmul_time, the tail update) are compiled
+// only behind TTS_CPP_USE_ACCELERATE / TTS_CPP_USE_CBLAS, so on a build without
+// a pointwise BLAS they do not exist and preferring them would select plain
+// im2col + mul_mat over the fused and [C, T] graph paths every other backend
+// takes.
+// Defined once in supertonic_gguf.cpp: TTS_CPP_USE_ACCELERATE and
+// TTS_CPP_USE_CBLAS are PRIVATE to the library's own targets, so an inline body
+// here would differ between translation units and violate the ODR.
+bool cpu_pointwise_accel_compiled();
+
 inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
+    if (!cpu_pointwise_accel_compiled()) return false;
     // `ggml_backend_is_cpu` lives in the CPU backend shared library, which is
     // unlinkable under GGML_BACKEND_DL. Route through the registry-based shim.
     return model.backend == nullptr || ::tts_cpp::detail::backend_is_cpu(model.backend);
+}
+
+// The per-island CPU path runs many small graphs and stops scaling almost
+// immediately, so it keeps the conservative cap it was given.
+inline constexpr int kLegacyCpuThreadCap = 4;
+
+// Pure-logic resolver for the default thread count. A positive `requested`
+// always wins. Otherwise only the CPU backend on the fused one-graph path is
+// allowed past the legacy cap: a GPU backend runs a handful of host-side ops
+// and did not ask for more threads.
+//
+// The fused path leaves an eighth of the logical CPUs unsubscribed. Measured on
+// two 16-core / 32-thread Zen boxes across two prompt lengths: full
+// subscription costs 13 to 70 percent against this, and the regression survives
+// an OpenMP barrier, so it is oversubscription rather than ggml's spin barrier.
+inline int resolve_supertonic_thread_count(int requested, int hw, bool fused_cpu_path) {
+    if (requested > 0) return requested;
+    hw = std::max(1, hw);
+    if (!fused_cpu_path) return std::min(hw, kLegacyCpuThreadCap);
+    return std::max(1, hw - hw / 8);
 }
 
 // scheduler-based alloc + compute (Option A), used by stages
@@ -668,6 +776,13 @@ inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
 // docs/supertonic-sched-graph-reuse-investigation.md.
 void supertonic_sched_alloc(const supertonic_model & model, ggml_cgraph * graph);
 void supertonic_sched_compute(const supertonic_model & model, ggml_cgraph * graph);
+
+// Graph size the [backend, CPU-last] scheduler bundle is created with
+// (sched_fallback_ensure in supertonic_sched_alloc).  ONE definition shared
+// with the memory-fit vocoder pricer (fit_price_graph in
+// supertonic_fit_measure_vocoder): the sched hash size shifts the scheduler's
+// own allocation, so the priced scheduler must be the runtime's.
+constexpr size_t kSupertonicSchedGraphSize = 8192;
 
 // Dispatch gate shared by every dual-path stage: supports_op walk over the
 // graph + the TTS_CPP_FORCE_SCHED escape hatch (safe: every dual-path site
@@ -753,6 +868,24 @@ bool supertonic_duration_trace_ggml(const supertonic_model & model,
                                     bool include_ggml_trace = true,
                                     std::vector<float> * sentence_proj_out = nullptr);
 
+// Hybrid path: one convnext graph, then the attention encoder and projection on the host.
+bool supertonic_duration_forward_hybrid_ggml(const supertonic_model & model,
+                                             const int64_t * text_ids,
+                                             int text_len,
+                                             const float * style_dp,
+                                             float & duration_out,
+                                             std::string * error = nullptr,
+                                             std::vector<float> * sentence_proj_out = nullptr);
+
+// Whole sentence encoder in one graph compute (the default off the CPU backend).
+bool supertonic_duration_forward_one_graph_ggml(const supertonic_model & model,
+                                                const int64_t * text_ids,
+                                                int text_len,
+                                                const float * style_dp,
+                                                float & duration_out,
+                                                std::string * error = nullptr,
+                                                std::vector<float> * sentence_proj_out = nullptr);
+
 bool supertonic_text_encoder_forward_cpu(const supertonic_model & model,
                                          const int64_t * text_ids,
                                          int text_len,
@@ -766,6 +899,51 @@ bool supertonic_text_encoder_forward_ggml(const supertonic_model & model,
                                           const float * style_ttl,
                                           std::vector<float> & text_emb_out,
                                           std::string * error = nullptr);
+
+// Per-island path: one graph per stage with host residual adds and layer norms.
+bool supertonic_text_encoder_forward_islands_ggml(const supertonic_model & model,
+                                                  const int64_t * text_ids,
+                                                  int text_len,
+                                                  const float * style_ttl,
+                                                  std::vector<float> & text_emb_out,
+                                                  std::string * error = nullptr);
+
+// Whole encoder in one graph compute (the default off the CPU backend).
+bool supertonic_text_encoder_forward_one_graph_ggml(const supertonic_model & model,
+                                                    const int64_t * text_ids,
+                                                    int text_len,
+                                                    const float * style_ttl,
+                                                    std::vector<float> & text_emb_out,
+                                                    std::string * error = nullptr);
+
+inline std::vector<int32_t> text_ids_as_i32(const ggml_tensor * emb_table, const int64_t * text_ids, int L) {
+    const int64_t vocab_size = emb_table->ne[1];
+    std::vector<int32_t> ids((size_t) L);
+    for (int t = 0; t < L; ++t) {
+        if (text_ids[t] < 0 || text_ids[t] >= vocab_size) throw std::runtime_error("text id out of range");
+        ids[(size_t) t] = (int32_t) text_ids[t];
+    }
+    return ids;
+}
+
+// [L, L] band holding `scale` inside the relative-position window and zero elsewhere.
+std::vector<float> make_rel_band(int L, float scale);
+
+// Relative-position self-attention of x [L, C] with H heads under weight prefix `p`;
+// rel_band carries the softmax scale so the relative-key term matches the scalar reference.
+ggml_tensor * relpos_attention_graph_ggml(ggml_context * ctx,
+                                          const supertonic_model & m,
+                                          const std::string & p,
+                                          ggml_tensor * x,
+                                          ggml_tensor * rel_band,
+                                          int L,
+                                          int C,
+                                          int H);
+
+// Weight names of one speech-prompted attention layer, resolved once per cache build.
+struct speech_prompted_sources {
+    std::string q_w, q_b, v_w, v_b, out_w, out_b, tanh_k;
+};
 
 // round 12 #6 — text-encoder speech-prompted-attention
 // GPU bridge.

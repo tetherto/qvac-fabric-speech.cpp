@@ -328,6 +328,64 @@ bool parler_dec_step(const parler_model & model,
     return read_logits(gf, model, logits_out);
 }
 
+// ---- fit-graph twins (memory-fit preflight; built, never run) --------------
+// Mirror the graph-build halves of parler_dec_prefill / parler_dec_step above
+// exactly -- same inputs, same shapes, same builders -- so the size-only
+// pricing of these graphs is the allocation the real dispatch performs.
+
+ggml_cgraph * parler_build_prefill_fit_graph(const parler_model & model, int prompt_tokens) {
+    const parler_hparams & hp = model.hparams;
+    const int P = prompt_tokens;
+    const int N = P + 1;
+
+    ggml_context * ctx = nullptr;
+    ggml_cgraph * gf = new_parler_graph(&ctx);
+
+    ggml_tensor * pids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, std::max(P, 1));
+    ggml_set_name(pids, "prompt_ids"); ggml_set_input(pids);
+    ggml_tensor * fids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, hp.n_codebooks);
+    ggml_set_name(fids, "frame_ids"); ggml_set_input(fids);
+    ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
+    ggml_set_name(pos, "positions"); ggml_set_input(pos);
+    ggml_tensor * mask = ggml_new_tensor_2d(ctx, model.use_fa ? GGML_TYPE_F16 : GGML_TYPE_F32, N, N);
+    ggml_set_name(mask, "kq_mask"); ggml_set_input(mask);
+
+    ggml_tensor * fe = build_frame_embed(ctx, model, fids);
+    ggml_tensor * inp;
+    if (P > 0) {
+        ggml_tensor * pe = ggml_get_rows(ctx, model.embed_prompts, pids);
+        inp = ggml_concat(ctx, pe, fe, 1);
+    } else {
+        inp = fe;
+    }
+    inp = ggml_add(ctx, inp, ggml_get_rows(ctx, model.embed_positions, pos));
+
+    ggml_tensor * hidden = build_dec_core(ctx, gf, model, inp, /*n_past=*/0, N, mask);
+    build_dec_heads(ctx, gf, model, hidden, N);
+    ggml_free(ctx);
+    return gf;
+}
+
+ggml_cgraph * parler_build_step_fit_graph(const parler_model & model, int n_past) {
+    const parler_hparams & hp = model.hparams;
+
+    ggml_context * ctx = nullptr;
+    ggml_cgraph * gf = new_parler_graph(&ctx);
+
+    ggml_tensor * fids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, hp.n_codebooks);
+    ggml_set_name(fids, "frame_ids"); ggml_set_input(fids);
+    ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    ggml_set_name(pos, "positions"); ggml_set_input(pos);
+
+    ggml_tensor * inp = build_frame_embed(ctx, model, fids);
+    inp = ggml_add(ctx, inp, ggml_get_rows(ctx, model.embed_positions, pos));
+
+    ggml_tensor * hidden = build_dec_core(ctx, gf, model, inp, n_past, 1, /*mask=*/nullptr);
+    build_dec_heads(ctx, gf, model, hidden, 1);
+    ggml_free(ctx);
+    return gf;
+}
+
 } // namespace detail
 } // namespace parler
 } // namespace tts_cpp

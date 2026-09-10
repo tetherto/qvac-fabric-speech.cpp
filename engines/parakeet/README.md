@@ -175,10 +175,19 @@ Adreno 6xx OpenCL is skipped because it produces incorrect output. Set
 encoder and CTC/TDT/EOU computation, but the Sortformer diarization head is
 routed to CPU because that head is incorrect on Mali Vulkan.
 
-TDT and EOU predictor/joint decoding uses ggml graphs on Metal, Vulkan, and
-CUDA. CPU and OpenCL use the scalar decoder path; OpenCL lacks the graph
-operation support required by this decoder path. The EOU encoder can still run
-on OpenCL while its decoder runs scalar.
+TDT predictor/joint decoding uses ggml graphs on every backend, including
+ggml-cpu, where the quantised joint matmuls run about ten times faster than the
+former host f32 gemv loop. OpenCL keeps the host scalar decoder because it lacks
+the graph operation support this path needs, and `PARAKEET_TDT_HOST_DECODE=1`
+forces it elsewhere for parity testing. EOU decoding uses graphs on Metal,
+Vulkan and CUDA and the scalar path on CPU and OpenCL.
+
+Nemotron 3.5 ASR streaming is supported on OpenCL (Adreno 700+). The encoder
+runs on the GPU and the cache-aware streaming operating points (80, 160, 320,
+560, 1120 ms) are honoured. The transducer decode runs host-side on OpenCL,
+same as TDT and EOU, because ggml-opencl drops the in-place `ggml_cpy` writes
+that carry the persistent LSTM state. Adreno 6xx remains blocked by default;
+opt in with `PARAKEET_ALLOW_ADRENO_6XX=1` (unvalidated).
 
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
@@ -191,12 +200,18 @@ ops keeps one graph per step. Either path produces the same token sequence as
 the sequential loop; the `test-tdt-unroll-parity` and `test-tdt-lstm-parity`
 harnesses guard that. The encoder applies the same rule to the conformer's
 depthwise convolution (`GGML_OP_CONV_2D_DW` in place where the backend
-reports it, `im2col` and matmul elsewhere; the subsampler switches only on a
-GPU that passed the probe, CPU keeps its previous lowering) and to the gated
+reports it, `im2col` and matmul elsewhere; the subsampler switches on a GPU
+that passed the probe and on ggml-cpu, Mali and OpenCL keep the im2col
+lowering) and to the gated
 GLU (`a * sigmoid(b)` as one op where the backend reports it). Fused attention
 is a build option (`PARAKEET_FLASH_ATTN`) that CUDA, Metal and Vulkan take, and
 only after the backend accepts the exact node the encoder builds; CPU and
-OpenCL keep the unfused graph in every build. The mel front-end runs on up
+OpenCL keep the unfused graph in every build. A cached encoder graph computes
+the 24 per-layer positional projections once per graph size (up to 256 MiB of
+projections per graph) and the attention blocks read them from that buffer on
+every forward; `PARAKEET_POS_PROJ_CACHE=0` recomputes them in-graph instead,
+and `test-pos-proj-cache-parity` checks the encoder output is byte-identical
+either way. The mel front-end runs on up
 to eight host threads with output byte-equal to the single-thread result.
 
 The CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0 transcripts,
@@ -371,8 +386,10 @@ Keep the quantization in explicit filenames:
 
 Use f16 for numerical parity against NeMo references and q8_0 for normal runtime
 fixtures. Small tensors or dimensions unsuitable for block quantization remain
-f16. Hybrid IndicConformer exports are CTC-only and include per-language token
-ranges.
+f16. Hybrid RNNT+CTC checkpoints export their CTC branch by default; pass
+`--head rnnt` to export the Transducer branch instead. RNN-T conversion rejects
+checkpoints whose joint output is not exactly vocabulary plus blank, preventing
+a duration-bearing TDT head from being mislabeled as plain RNN-T.
 
 Recorded CTC 0.6B quantization results on an M4 Air CPU:
 
@@ -396,6 +413,10 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --out engines/parakeet/models/indic-conformer-600m-multilingual.q8_0.gguf \
   --quant q8_0
 ```
+
+To select the same checkpoint's RNN-T branch, add `--head rnnt` and use a
+distinct output filename. The auxiliary `ctc_decoder.*` tensors are then
+ignored.
 
 ## Public C++ API
 
@@ -491,7 +512,11 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
 Useful groups include `--threads`, `--n-gpu-layers`, `--backends-dir`,
 `--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
-and `--dump-mel`. Run `parakeet --help` for the complete list.
+and `--dump-mel`. Run `parakeet --help` for the complete list. `--bench`
+covers the transcription models only: the diarization path (a Sortformer GGUF
+at `--model`) and the attributed path (`--diarization-model`) return before
+the bench loop, ignoring the `--bench*` flags — time the invocation externally
+to benchmark those.
 
 ```bash
 build-parakeet/parakeet \
@@ -560,12 +585,26 @@ resident (`run_encoder`'s 3-slot LRU), and all of them are counted.
 Sortformer diarization does not window — its device projection grows with
 the full input (`O(T^2)` head attention).
 
+Nemotron is fully modelled, and both of its exceptional properties are
+priced: its device projection also grows with the audio (the locale-prompt
+projection graph runs over the **full** stitched encoder output, not per
+window), and its native cache-aware streaming is projected explicitly — the
+result covers one offline transcribe **plus** one live streaming session
+(step graph, per-chunk pre-encode graph, per-layer channel/time caches and
+the other host-resident session state). `--nemotron-chunk-ms` selects the
+streaming operating point to project (one of the GGUF's allowed values,
+80/160/320/560/1120 on the shipped checkpoint); the default projects the
+largest operating point, which bounds every other.
+
 The projection is exact where it can be: `test-fit-params` asserts the
-projected weight, encoder-compute, and Sortformer-head bytes equal what a
-real load/encode/diarize allocates, byte for byte. The projection covers the
-offline paths; streaming sessions build smaller per-chunk graphs but rotate
-through the same graph cache with session-dependent keys, so treat the
-offline projection as a guide, not a proven bound, for streaming.
+projected weight, encoder-compute, Sortformer-head, and Nemotron
+prompt/step/pre-encode bytes equal what a real load/encode/diarize/stream
+allocates, byte for byte. For the legacy families (CTC/RNN-T/TDT/EOU) the
+projection covers the offline paths; their streaming sessions build smaller
+per-chunk graphs but rotate through the same graph cache with
+session-dependent keys, so treat the offline projection as a guide, not a
+proven bound, for streaming. Nemotron streaming is a modelled part of the
+projection, not a guide.
 
 ## Tests and NeMo parity
 
@@ -589,6 +628,12 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
 python engines/parakeet/scripts/dump-ctc-reference.py \
   --wav engines/parakeet/test/samples/jfk.wav
 
+# Hybrid checkpoint: select its RNN-T branch in both conversion and NeMo.
+python engines/parakeet/scripts/dump-rnnt-reference.py \
+  --nemo-model engines/parakeet/models/stt_ka_fastconformer_hybrid_large_pc.nemo \
+  --wav engines/parakeet/test/samples/rnnt-ka-16k.wav \
+  --out engines/parakeet/artifacts/rnnt-ref
+
 cmake -S engines/parakeet -B build-parakeet -DCMAKE_BUILD_TYPE=Release
 cmake --build build-parakeet -j
 ctest --test-dir build-parakeet -N
@@ -605,6 +650,10 @@ GPU-bound and timing-bound labels:
 ```bash
 ctest --test-dir build-parakeet -LE 'gpu|perf' --output-on-failure
 ```
+
+`test-rnnt-decoder-parity` is enabled when the hybrid RNN-T GGUF, its WAV, and
+the NeMo `token_ids.npy` dump are available. It requires bit-exact token IDs
+between the reference and the current shared RNN-T/TDT decoder.
 
 Model-free logic tests (`-L unit`) cover the CTC language mask, mel FFT
 parity and per-feature CMVN, RNN-T graph construction, long-form window
@@ -641,6 +690,25 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 12 August 2026, runner `qvac-ubuntu2204-x64-gpu`, benchmarking the published
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
+
+### speech-cpp CI (2026-09-07)
+
+Fresh CPU-baseline snapshot from `speech-benchmark-desktop.yml` on the
+hosted-Linux and self-hosted macOS runners (5 timed runs + 1 warmup, `jfk.wav`
+fixture, ~11 s).
+
+| Model | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|---:|---:|---:|
+| Parakeet CTC 0.6b q8_0 | linux | ggml-cpu | 2111 | 0.192 | 858 |
+| Parakeet CTC 0.6b q8_0 | macos | ggml-cpu | 184 | 0.0170 | 914 |
+| Whisper base | linux | (CPU) | 1906 | 0.173 | 298 |
+| Whisper base | macos | Metal | 584 | 0.0530 | 360 |
+| Whisper small | linux | (CPU) | 6122 | 0.557 | 797 |
+| Whisper small | macos | Metal | 564 | 0.0510 | 878 |
+| Whisper tiny | linux | (CPU) | 1035 | 0.0940 | 182 |
+| Whisper tiny | macos | Metal | 565 | 0.0510 | 240 |
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
 ### TDT decode on CUDA and Metal
 

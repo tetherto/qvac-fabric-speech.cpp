@@ -153,6 +153,8 @@ int main() {
                "--window-frames non-integer exits Error");
         expect(run_cli({"--model", "x.gguf", "--context-frames", "x"}) == err,
                "--context-frames garbage exits Error");
+        expect(run_cli({"--model", "x.gguf", "--nemotron-chunk-ms", "80ms"}) == err,
+               "--nemotron-chunk-ms garbage exits Error");
     }
 
     if (g_failures == 0) {

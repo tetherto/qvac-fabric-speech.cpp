@@ -599,9 +599,9 @@ void sortformer_cache_reset(SortformerSpeakerCache & cache, int D) {
 
 int sortformer_measure_head(const ParakeetCtcModel & model, int T_enc,
                             size_t & out_active_bytes,
-                            size_t & out_cpu_fallback_bytes) {
-    out_active_bytes       = 0;
-    out_cpu_fallback_bytes = 0;
+                            size_t & out_host_input_bytes) {
+    out_active_bytes     = 0;
+    out_host_input_bytes = 0;
     const auto & enc   = model.encoder_cfg;
     const int tf_d     = enc.sortformer_tf_d_model;
     const int n_heads  = enc.sortformer_tf_n_heads;
@@ -629,36 +629,52 @@ int sortformer_measure_head(const ParakeetCtcModel & model, int T_enc,
     ggml_cgraph * cg = ggml_new_graph_custom(ctx, graph_slots, false);
     ggml_build_forward_expand(cg, x_out);
 
-    // Price with the SAME allocator the real path uses (sf_exec_graph): the
-    // shared scheduler on the normal path -- ggml_backend_sched_reserve_size
-    // runs the real graph split, so per-op CPU fallback lands in the CPU
-    // entry (out_cpu_fallback_bytes; host RAM, not the active device) -- and
-    // a plain gallocr on the force-CPU (Mali-Vulkan) path, where everything
-    // is host RAM and the caller routes it there via model_sortformer_on_cpu.
+    // Price with a gallocr on the head backend's default buffer type. The
+    // real normal path allocates through the shared scheduler
+    // (sf_exec_graph), but the scheduler's own size-only reserve
+    // (ggml_backend_sched_reserve_size) cannot run on a metadata-only model:
+    // its externally-marked weights carry no backend buffer for the
+    // scheduler's leaf resolution (GGML_ASSERT(buffer_id >= 0) inside the
+    // reserve), and explicit ggml_backend_sched_set_tensor_backend pins are
+    // wiped by the reset at the head of reserve_size. So this used to abort
+    // fit_params on every Sortformer GGUF; the gallocr prices the same
+    // single-split graph without touching the scheduler.
+    //
+    // Exactness: on CPU-only runs the scheduler's reservation IS this
+    // gallocr layout, byte for byte. On GPU runs the scheduler keeps the
+    // graph-input original (x_in) in a CPU-side buffer (sized explicitly
+    // into out_host_input_bytes; host RAM) and copies it into the device
+    // split as a reusable node, which lets its split allocator come in at
+    // most one device-side x_in slot BELOW this measure -- a bounded
+    // overcount in the strict direction. test-fit-params asserts exactly
+    // that: real == projected on CPU, and real <= projected <= real +
+    // aligned x_in bytes on GPU, so a backend that split the head across
+    // backends (per-op fallback the measure cannot see) would fail the gate
+    // loudly rather than misproject silently. The force-CPU (Mali-Vulkan)
+    // path prices the same way because its real path already uses a plain
+    // gallocr; the caller routes everything to host RAM via
+    // model_sortformer_on_cpu.
     int rc = 0;
-    if (model_sortformer_on_cpu(model)) {
-        ggml_gallocr_t pricer =
-            ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (pricer) {
-            ggml_gallocr_reserve_n_size(pricer, cg, nullptr, nullptr, &out_active_bytes);
-            ggml_gallocr_free(pricer);
-        } else {
-            rc = -2;
-        }
+    ggml_gallocr_t pricer =
+        ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (pricer) {
+        ggml_gallocr_reserve_n_size(pricer, cg, nullptr, nullptr, &out_active_bytes);
+        ggml_gallocr_free(pricer);
     } else {
+        rc = -2;
+    }
+    if (rc == 0 && !model_sortformer_on_cpu(model)) {
+        // Scheduler backend order is [active, CPU-last]; a CPU-only run has
+        // one backend and no CPU-side input buffer.
         ggml_backend_sched_t sched = model_sched(model);
-        if (sched) {
-            const int n_backends = ggml_backend_sched_get_n_backends(sched);
-            std::vector<size_t> sizes((size_t) std::max(n_backends, 1), 0);
-            ggml_backend_sched_reserve_size(sched, cg, sizes.data());
-            // Scheduler backend order is [active, CPU-last]; index 0 is the
-            // active backend's buffer, the rest is CPU per-op fallback.
-            out_active_bytes = sizes[0];
-            for (int i = 1; i < n_backends; ++i) {
-                out_cpu_fallback_bytes += sizes[(size_t) i];
-            }
-        } else {
-            rc = -2;
+        const int n_backends = sched ? ggml_backend_sched_get_n_backends(sched) : 0;
+        if (n_backends > 1 && x_in) {
+            ggml_backend_buffer_type_t cpu_buft =
+                ggml_backend_get_default_buffer_type(
+                    ggml_backend_sched_get_backend(sched, n_backends - 1));
+            const size_t align = ggml_backend_buft_get_alignment(cpu_buft);
+            out_host_input_bytes =
+                GGML_PAD(ggml_backend_buft_get_alloc_size(cpu_buft, x_in), align);
         }
     }
     ggml_free(ctx);

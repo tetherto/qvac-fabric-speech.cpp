@@ -10,6 +10,8 @@
 
 #include "backend_selection.h"
 #include "backend_util.h"
+#include "cosyvoice_fit_internal.h"
+#include "fit_price.h"
 #include "gguf_stream.h"
 #include "ggml-alloc.h"
 #include "gguf.h"
@@ -157,15 +159,36 @@ static bool cosy_dispatch_compute(model_ctx & m, ggml_cgraph * gf, bool use_sche
 // whose mapped pointer is under-aligned falls back to an allocated copy.
 static constexpr uintptr_t kCosyvoiceTensorAlignment = 32;
 
-model_ctx cosyvoice_load_gguf(const std::string & path, ggml_backend_t backend) {
+// Mark every unallocated tensor in `ctx` externally allocated (dummy non-null
+// data, the same trick ggml's own measure paths use) so graph pricing via
+// ggml_gallocr / ggml_backend_sched excludes it from the measured compute
+// buffers instead of counting it as a graph-owned leaf.  The context must
+// never have tensor data read or written after this.
+static void cosy_mark_externally_allocated(ggml_context * ctx) {
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t;
+         t = ggml_get_next_tensor(ctx, t)) {
+        if (!t->data && !t->view_src) {
+            t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+        }
+    }
+}
+
+// Shared body of cosyvoice_load_gguf and cosyvoice_load_gguf_metadata_only.
+// When `measure` is non-null the load is metadata-only: the buffers the real
+// path allocates are sized instead, and no tensor data leaves the disk.
+static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend_t backend,
+                                          cosyvoice_fit_load_measure * measure) {
     // Heap-allocated, matching chatterbox's model_ctx: a stack model_ctx corrupts
     // its own std::map during load on the win32 MSVC-lib + clang-addon link.
     auto mp = std::make_unique<model_ctx>();
     model_ctx & m = *mp;
 
     // Map the GGUF so CPU/host weights can be backed in place; fall back to a
-    // resident copy when mapping fails.
-    const bool have_map = tts_cpp::cosyvoice::mapped_file_open(m.mapped, path, "cosyvoice");
+    // resident copy when mapping fails.  Measure mode bypasses the mmap: the
+    // projection prices the allocate-and-stream fallback, which bounds the
+    // fully-touched mapping from above (the strict direction).
+    const bool have_map = !measure &&
+        tts_cpp::cosyvoice::mapped_file_open(m.mapped, path, "cosyvoice");
 
     ggml_context * tmp_ctx = nullptr;
     // Shapes only; bytes come from the mapping or the bounds-checked stream
@@ -251,22 +274,32 @@ model_ctx cosyvoice_load_gguf(const std::string & path, ggml_backend_t backend) 
         }
         return false;
     };
-    if (!mapping || has_unmapped(m.ctx_w)) {
+    if (measure) {
+        measure->device_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+            m.ctx_w, ggml_backend_get_default_buffer_type(m.backend));
+        cosy_mark_externally_allocated(m.ctx_w);
+    } else if (!mapping || has_unmapped(m.ctx_w)) {
         m.buffer_w = ggml_backend_alloc_ctx_tensors(m.ctx_w, m.backend);
     }
-    if (m.ctx_h && (!mapping || has_unmapped(m.ctx_h))) {
+    if (m.ctx_h && (measure || !mapping || has_unmapped(m.ctx_h))) {
         ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
         if (!cpu_dev) {
             gguf_free(g); ggml_free(tmp_ctx);
             tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: no CPU device for host-resident weights");
         }
-        m.buffer_h = ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_h, ggml_backend_dev_buffer_type(cpu_dev));
+        if (measure) {
+            measure->host_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+                m.ctx_h, ggml_backend_dev_buffer_type(cpu_dev));
+            cosy_mark_externally_allocated(m.ctx_h);
+        } else {
+            m.buffer_h = ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_h, ggml_backend_dev_buffer_type(cpu_dev));
+        }
     }
 
     // Stream the unmapped tensors with the bounds-checked reader (a truncated
     // GGUF fails cleanly here instead of reading past the mapping).
-    {
+    if (!measure) {
         ::tts_cpp::detail::gguf_stream_reader rd(g, path);
         if (!rd.ok()) {
             gguf_free(g); ggml_free(tmp_ctx);
@@ -306,6 +339,17 @@ model_ctx cosyvoice_load_gguf(const std::string & path, ggml_backend_t backend) 
     gguf_free(g);
     ggml_free(tmp_ctx);
     return std::move(m);
+}
+
+model_ctx cosyvoice_load_gguf(const std::string & path, ggml_backend_t backend) {
+    return cosyvoice_load_gguf_impl(path, backend, /*measure=*/nullptr);
+}
+
+model_ctx cosyvoice_load_gguf_metadata_only(const std::string & path,
+                                            ggml_backend_t backend,
+                                            cosyvoice_fit_load_measure & out) {
+    out = cosyvoice_fit_load_measure{};
+    return cosyvoice_load_gguf_impl(path, backend, &out);
 }
 
 void cosyvoice_free(model_ctx & m) {
@@ -369,6 +413,19 @@ qwen_hp cosyvoice_qwen_hp(const model_ctx & m) {
     hp.inter    = (int)cosyvoice_meta_i(m, "cosyvoice3.llm.inter",    hp.inter);
     hp.theta    = cosyvoice_meta_f(m, "cosyvoice3.llm.rope_theta", hp.theta);
     hp.eps      = cosyvoice_meta_f(m, "cosyvoice3.llm.rms_eps",    hp.eps);
+    return hp;
+}
+
+dit_hp cosyvoice_dit_hp(const model_ctx & m) {
+    dit_hp hp;  // struct defaults are the per-field fallback (real GGUFs
+                // predate these keys, so their graph shape is unchanged)
+    hp.depth       = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.depth",       hp.depth);
+    hp.dim         = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.dim",         hp.dim);
+    hp.heads       = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.heads",       hp.heads);
+    hp.dim_head    = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.dim_head",    hp.dim_head);
+    hp.ff_inner    = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.ff_inner",    hp.ff_inner);
+    hp.conv_k      = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.conv_k",      hp.conv_k);
+    hp.conv_groups = (int)cosyvoice_meta_i(m, "cosyvoice3.flow.conv_groups", hp.conv_groups);
     return hp;
 }
 
@@ -545,16 +602,19 @@ struct qwen_kvcache {
 // at absolute position cache.P.  Only K/V for the Lq new tokens are computed;
 // the past K/V come from the cache (concatenated in), so a decode step is O(L)
 // not O(L^2).  Updates the cache in place; returns the LAST-position logits [VS].
-static std::vector<float> qwen_step_kv(model_ctx & m, const qwen_hp & hp,
-        const float * x_new, int Lq, int D, int VS,
-        qwen_kvcache & cache, ggml_gallocr_t al) {
+// Graph-build half of qwen_step_kv, shared with the memory-fit measure
+// (cosyvoice_fit_measure_llm) so the priced graph is the executed graph by
+// construction.  Inputs are the named tensors "x" / "pos" / "mask"; the
+// last-position logits output is named "logits".  Reads cache.P for the
+// attention window and emits the in-graph K/V appends into the cache tensors.
+static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m,
+                                           const qwen_hp & hp, int Lq, int D,
+                                           const qwen_kvcache & cache) {
     const int HD = hp.head_dim, NH = hp.n_head, NKV = hp.n_kv, G_ = NH / NKV;
     const float scale = 1.0f / std::sqrt((float)HD);
     const int P = cache.P, Lk = P + Lq;
 
     const size_t nmax = cosy_lm_nodes(hp);
-    ggml_init_params gp = cosy_arena(nmax);
-    ggml_context * c = ggml_init(gp);
     ggml_cgraph * gf = ggml_new_graph_custom(c, nmax, false);
 
     ggml_tensor * x = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, Lq); ggml_set_name(x,"x"); ggml_set_input(x);
@@ -611,9 +671,25 @@ static std::vector<float> qwen_step_kv(model_ctx & m, const qwen_hp & hp,
     }
     xx = rmsnorm(c, xx, G(m, "lm/norm/weight"), hp.eps);
     ggml_tensor * logits = mul_mat_f32acc(c, G(m, "lm/llm_decoder/weight"), xx); // [VS, Lq]
+    ggml_set_name(logits, "logits");
     ggml_set_output(logits);
     ggml_build_forward_expand(gf, logits);
     for (int i = 0; i < hp.depth; ++i) { ggml_build_forward_expand(gf, cpy_k[i]); ggml_build_forward_expand(gf, cpy_v[i]); }
+    return gf;
+}
+
+static std::vector<float> qwen_step_kv(model_ctx & m, const qwen_hp & hp,
+        const float * x_new, int Lq, int D, int VS,
+        qwen_kvcache & cache, ggml_gallocr_t al) {
+    const int P = cache.P, Lk = P + Lq;
+    const size_t nmax = cosy_lm_nodes(hp);
+    ggml_init_params gp = cosy_arena(nmax);
+    ggml_context * c = ggml_init(gp);
+    ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, Lq, D, cache);
+    ggml_tensor * x      = ggml_graph_get_tensor(gf, "x");
+    ggml_tensor * pos    = ggml_graph_get_tensor(gf, "pos");
+    ggml_tensor * mask   = ggml_graph_get_tensor(gf, "mask");
+    ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
 
     // `al` is owned by the caller and reused across the whole decode: creating
     // and destroying an allocator per token means a backend buffer alloc/free
@@ -852,15 +928,11 @@ std::vector<float> sinus_time_emb(const std::vector<float> & t, int dim) {
 // Flow front-end (DiT graph A): upsampled token features mu and the affine-
 // projected speaker vector.  tokids = prompt++speech token ids; on return
 // mu_host is [MEL,TM] channel-major-flattened (mel-fastest) and spks_host[MEL].
-static void build_flow_frontend(model_ctx & m, const std::vector<int32_t> & tokids,
-                                const std::vector<float> & embedding,
-                                int T_tok, int TM, int SPK,
-                                std::vector<float> & mu_host, std::vector<float> & spks_host) {
+// Graph-build half of build_flow_frontend, shared with the memory-fit measure
+// (cosyvoice_fit_measure_flow).  Inputs "ids" / "emb"; outputs "mu" / "spks".
+static ggml_cgraph * build_flow_frontend_graph(ggml_context * c, const model_ctx & m,
+                                               int T_tok, int TM, int SPK) {
     const int MEL = 80;
-    mu_host.assign((size_t)MEL * TM, 0.f);
-    spks_host.assign(MEL, 0.f);
-    ggml_init_params gp = cosy_arena(kCosyFlowFrontendNodes);
-    ggml_context * c = ggml_init(gp);
     ggml_cgraph * gf = ggml_new_graph_custom(c, kCosyFlowFrontendNodes, false);
 
     ggml_tensor * ids = ggml_new_tensor_1d(c, GGML_TYPE_I32, T_tok); ggml_set_name(ids, "ids"); ggml_set_input(ids);
@@ -891,6 +963,23 @@ static void build_flow_frontend(model_ctx & m, const std::vector<int32_t> & toki
 
     ggml_build_forward_expand(gf, mu);
     ggml_build_forward_expand(gf, sp);
+    return gf;
+}
+
+static void build_flow_frontend(model_ctx & m, const std::vector<int32_t> & tokids,
+                                const std::vector<float> & embedding,
+                                int T_tok, int TM, int SPK,
+                                std::vector<float> & mu_host, std::vector<float> & spks_host) {
+    const int MEL = 80;
+    mu_host.assign((size_t)MEL * TM, 0.f);
+    spks_host.assign(MEL, 0.f);
+    ggml_init_params gp = cosy_arena(kCosyFlowFrontendNodes);
+    ggml_context * c = ggml_init(gp);
+    ggml_cgraph * gf = build_flow_frontend_graph(c, m, T_tok, TM, SPK);
+    ggml_tensor * ids   = ggml_graph_get_tensor(gf, "ids");
+    ggml_tensor * emb1d = ggml_graph_get_tensor(gf, "emb");
+    ggml_tensor * mu    = ggml_graph_get_tensor(gf, "mu");
+    ggml_tensor * sp    = ggml_graph_get_tensor(gf, "spks");
     ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     bool use_sched = false;
     if (!al || !cosy_dispatch_prepare(m, gf, al, kCosyFlowFrontendNodes, use_sched, "cosyvoice_flow_frontend")) {
@@ -1011,7 +1100,7 @@ std::vector<float> cosyvoice_flow_run(model_ctx & m,
                                       const std::vector<float> & prompt_feat, int mel_len1,
                                       const std::vector<float> & embedding, int & out_mel_len,
                                       cosyvoice_timings * tmg) {
-    dit_hp hp;
+    dit_hp hp = cosyvoice_dit_hp(m);
     const int MEL = 80;
     int T_ptok = (int)prompt_token.size(), T_stok = (int)speech_tokens.size();
     int T_tok = T_ptok + T_stok;
@@ -1196,9 +1285,9 @@ static std::vector<float> sinegen2_source(const std::vector<float> & f0_wav,
     return source;
 }
 
-std::vector<float> cosyvoice_hift_f0(model_ctx & m, const std::vector<float> & mel, int T_mel) {
-    ggml_init_params gp = cosy_arena(kCosyHiftF0Nodes);
-    ggml_context * ctx = ggml_init(gp);
+// Graph-build half of cosyvoice_hift_f0, shared with the memory-fit measure.
+// Input "mel_in"; output "out".
+static ggml_cgraph * build_hift_f0_graph(ggml_context * ctx, const model_ctx & m, int T_mel) {
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, kCosyHiftF0Nodes, false);
     ggml_tensor * mel_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_mel, 80);
     ggml_set_name(mel_in, "mel_in"); ggml_set_input(mel_in);
@@ -1225,6 +1314,14 @@ std::vector<float> cosyvoice_hift_f0(model_ctx & m, const std::vector<float> & m
     y = ggml_reshape_1d(ctx, y, T_mel);
     ggml_set_name(y, "out"); ggml_set_output(y);
     ggml_build_forward_expand(gf, y);
+    return gf;
+}
+
+std::vector<float> cosyvoice_hift_f0(model_ctx & m, const std::vector<float> & mel, int T_mel) {
+    ggml_init_params gp = cosy_arena(kCosyHiftF0Nodes);
+    ggml_context * ctx = ggml_init(gp);
+    ggml_cgraph * gf = build_hift_f0_graph(ctx, m, T_mel);
+    ggml_tensor * y = ggml_graph_get_tensor(gf, "out");
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     bool use_sched = false;
     if (!allocr || !cosy_dispatch_prepare(m, gf, allocr, kCosyHiftF0Nodes, use_sched, "cosyvoice_hift_f0")) {
@@ -1243,9 +1340,20 @@ std::vector<float> cosyvoice_hift_f0(model_ctx & m, const std::vector<float> & m
     return f0;
 }
 
-static std::vector<float> run_hift_decode(model_ctx & m,
-                                          const std::vector<float> & mel, int T_mel,
-                                          const std::vector<float> & s_stft, int T_stft) {
+// Host-side 1/(alpha + eps) payloads for the snake activations; the graph
+// carries them as named inputs so the decode graph itself stays data-free.
+struct cosy_inv_entry { std::string gn; std::vector<float> data; };
+
+// Graph-build half of run_hift_decode, shared with the memory-fit measure.
+// Inputs "mel_in" / "s_stft_in" / "istft_k" / "w_sum" plus one "inv_*" input
+// per snake activation; output "wav".  When `measure` is true the inv-alpha
+// payloads are NOT read off the backend (a metadata-only model has no data);
+// shapes alone drive the allocation, so the priced graph is unchanged.
+static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx & m,
+                                             int T_mel, int T_stft, bool measure,
+                                             std::vector<cosy_inv_entry> * inv_alphas_out,
+                                             std::vector<float> * istft_kernel_out,
+                                             std::vector<float> * w_sum_out) {
     const int MEL = 80;
     const int NFFT2 = 18;
     const int BASE_CH = 512;
@@ -1260,21 +1368,18 @@ static std::vector<float> run_hift_decode(model_ctx & m,
     std::vector<int> src_rb_ksizes = {7, 7, 11};
     std::vector<std::vector<int>> src_rb_dilations = {{1,3,5},{1,3,5},{1,3,5}};
 
-    ggml_init_params gp = cosy_arena(kCosyHiftDecodeNodes);
-    ggml_context * ctx = ggml_init(gp);
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, kCosyHiftDecodeNodes, false);
 
     ggml_tensor * mel_in    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_mel, MEL);    ggml_set_name(mel_in, "mel_in"); ggml_set_input(mel_in);
     ggml_tensor * s_stft_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_stft, NFFT2); ggml_set_name(s_stft_in, "s_stft_in"); ggml_set_input(s_stft_in);
 
-    struct inv_entry { std::string gn; std::vector<float> data; };
-    std::vector<inv_entry> inv_alphas;
     auto mk_inv = [&](const std::string & name_pref, int C) {
         std::string gn = "inv_" + name_pref;
-        std::vector<float> inv = invert_alpha_cpu(m, name_pref);
+        std::vector<float> inv;
+        if (!measure) inv = invert_alpha_cpu(m, name_pref);
         ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
         ggml_set_name(t, gn.c_str()); ggml_set_input(t);
-        inv_alphas.push_back({gn, std::move(inv)});
+        if (inv_alphas_out) inv_alphas_out->push_back({gn, std::move(inv)});
         return t;
     };
     auto load_rb = [&](const std::string & prefix, int C) {
@@ -1392,6 +1497,21 @@ static std::vector<float> run_hift_decode(model_ctx & m,
     y_trim = ggml_clamp(ctx, y_trim, -0.99f, 0.99f);
     ggml_set_name(y_trim, "wav"); ggml_set_output(y_trim);
     ggml_build_forward_expand(gf, y_trim);
+    if (istft_kernel_out) *istft_kernel_out = std::move(istft_kernel);
+    if (w_sum_out)        *w_sum_out        = std::move(w_sum);
+    return gf;
+}
+
+static std::vector<float> run_hift_decode(model_ctx & m,
+                                          const std::vector<float> & mel, int T_mel,
+                                          const std::vector<float> & s_stft, int T_stft) {
+    ggml_init_params gp = cosy_arena(kCosyHiftDecodeNodes);
+    ggml_context * ctx = ggml_init(gp);
+    std::vector<cosy_inv_entry> inv_alphas;
+    std::vector<float> istft_kernel, w_sum;
+    ggml_cgraph * gf = build_hift_decode_graph(ctx, m, T_mel, T_stft, /*measure=*/false,
+                                               &inv_alphas, &istft_kernel, &w_sum);
+    ggml_tensor * y_trim = ggml_graph_get_tensor(gf, "wav");
 
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     // The iSTFT is a CONV_TRANSPOSE_1D, which ggml-opencl does not implement, so
@@ -1420,15 +1540,13 @@ static std::vector<float> run_hift_decode(model_ctx & m,
     return wav;
 }
 
-static std::vector<float> run_stft(model_ctx & m, const std::vector<float> & src) {
+// Graph-build half of run_stft, shared with the memory-fit measure.
+// Inputs "s" / "k"; output "spec".
+static ggml_cgraph * build_stft_graph(ggml_context * ctx, const model_ctx & m, int T_src) {
     const int n_fft = 16;
     const int hop = 4;
     const int F = n_fft / 2 + 1;
-    int T_src = (int)src.size();
-    auto window = build_hann_window(n_fft, true);
-    auto kernel = build_stft_kernel(n_fft, window);
-    ggml_init_params gp = cosy_arena(kCosyStftNodes);
-    ggml_context * ctx = ggml_init(gp);
+    (void) m;
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, kCosyStftNodes, false);
     ggml_tensor * s = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_src, 1);
     ggml_set_name(s, "s"); ggml_set_input(s);
@@ -1438,6 +1556,18 @@ static std::vector<float> run_stft(model_ctx & m, const std::vector<float> & src
     ggml_tensor * spec = cosyvoice_conv1d_f32(ctx, k, s_padded, hop, 0, 1);
     ggml_set_name(spec, "spec"); ggml_set_output(spec);
     ggml_build_forward_expand(gf, spec);
+    return gf;
+}
+
+static std::vector<float> run_stft(model_ctx & m, const std::vector<float> & src) {
+    const int n_fft = 16;
+    int T_src = (int)src.size();
+    auto window = build_hann_window(n_fft, true);
+    auto kernel = build_stft_kernel(n_fft, window);
+    ggml_init_params gp = cosy_arena(kCosyStftNodes);
+    ggml_context * ctx = ggml_init(gp);
+    ggml_cgraph * gf = build_stft_graph(ctx, m, T_src);
+    ggml_tensor * spec = ggml_graph_get_tensor(gf, "spec");
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     bool use_sched = false;
     if (!allocr || !cosy_dispatch_prepare(m, gf, allocr, kCosyStftNodes, use_sched, "cosyvoice_stft")) {
@@ -1491,4 +1621,262 @@ std::vector<float> cosyvoice_hift_synth(model_ctx & m,
     auto wav = run_hift_decode(m, mel, T_mel, s_stft, T_stft);
     if (tmg) tmg->hift_decode_ms += cosy_ms_since(t_dec, m.backend);
     return wav;
+}
+
+// ===========================================================================
+// Memory-fit measurement (src/cosyvoice_fit_internal.h)
+// ===========================================================================
+// Implemented here so the priced graphs come from the exact builders the
+// runtime dispatches (build_qwen_step_graph / build_flow_frontend_graph /
+// build_dit / build_hift_f0_graph / build_stft_graph /
+// build_hift_decode_graph).
+
+namespace {
+
+// Price one freshly built graph through the same dual-path dispatch
+// cosy_dispatch_prepare allocates with (2 * nmax mirrors its sched hash size).
+bool cosy_fit_price(model_ctx & m, ggml_cgraph * gf, size_t nmax,
+                    cosyvoice_fit_price & acc_max, std::string * error,
+                    const char * what) {
+    ::tts_cpp::detail::fit_graph_price price;
+    if (!gf || !::tts_cpp::detail::fit_price_graph(m.backend, gf, 2 * nmax, price)) {
+        if (error) *error = std::string("cosyvoice fit: pricing failed for ") + what;
+        return false;
+    }
+    acc_max.device_bytes = std::max<uint64_t>(acc_max.device_bytes, price.device_bytes);
+    acc_max.host_bytes   = std::max<uint64_t>(acc_max.host_bytes, price.host_bytes);
+    return true;
+}
+
+// Metadata-only twin of qwen_kvcache::init: same tensor set, sized instead of
+// allocated, tensors marked externally allocated so the step graphs can build
+// their cache views over them.  cache.buf stays null; free with cache.free().
+uint64_t cosy_fit_kv_init_measure(qwen_kvcache & cache, model_ctx & m, const qwen_hp & hp,
+                                  int max_tokens) {
+    cache.backend = m.backend; cache.max_P = max_tokens; cache.P = 0;
+    const int HD = hp.head_dim, NKV = hp.n_kv, depth = hp.depth;
+    ggml_init_params p = { ggml_tensor_overhead() * (size_t)(2 * depth) + 64, nullptr, /*no_alloc=*/true };
+    cache.ctx = ggml_init(p);
+    cache.k.assign(depth, nullptr); cache.v.assign(depth, nullptr);
+    for (int i = 0; i < depth; ++i) {
+        cache.k[i] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F32, HD, NKV, max_tokens);
+        cache.v[i] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F32, HD, NKV, max_tokens);
+    }
+    const uint64_t bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+        cache.ctx, ggml_backend_get_default_buffer_type(m.backend));
+    cosy_mark_externally_allocated(cache.ctx);
+    return bytes;
+}
+
+}  // namespace
+
+bool cosyvoice_fit_measure_llm(model_ctx & m, const qwen_hp & hp, int L0, int max_steps,
+                               uint64_t & kv_bytes, cosyvoice_fit_price & arena,
+                               std::string * error) {
+    kv_bytes = 0;
+    arena = cosyvoice_fit_price{};
+    const int D = hp.hidden;
+    const size_t nmax = cosy_lm_nodes(hp);
+    // The cache the runtime allocates up front: L0 prefill positions plus up
+    // to max_steps decode positions (cosyvoice_llm_generate).
+    qwen_kvcache cache;
+    kv_bytes = cosy_fit_kv_init_measure(cache, m, hp, L0 + max_steps + 1);
+    bool ok = true;
+    {   // prefill graph: Lq = L0 at cache position 0
+        cache.P = 0;
+        ggml_context * c = ggml_init(cosy_arena(nmax));
+        ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, L0, D, cache);
+        ok = cosy_fit_price(m, gf, nmax, arena, error, "LM prefill");
+        ggml_free(c);
+    }
+    if (ok) {  // deepest decode step: Lq = 1 at the last cache position
+        cache.P = L0 + max_steps - 1;
+        ggml_context * c = ggml_init(cosy_arena(nmax));
+        ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, 1, D, cache);
+        ok = cosy_fit_price(m, gf, nmax, arena, error, "LM decode step");
+        ggml_free(c);
+    }
+    cache.free();
+    return ok;
+}
+
+bool cosyvoice_fit_measure_flow(model_ctx & m, int T_tok, int TM, int SPK,
+                                cosyvoice_fit_price & arena, std::string * error) {
+    arena = cosyvoice_fit_price{};
+    {   // front-end graph (its allocator is freed before the DiT's exists)
+        ggml_context * c = ggml_init(cosy_arena(kCosyFlowFrontendNodes));
+        ggml_cgraph * gf = build_flow_frontend_graph(c, m, T_tok, TM, SPK);
+        const bool ok = cosy_fit_price(m, gf, kCosyFlowFrontendNodes, arena, error,
+                                       "flow front-end");
+        ggml_free(c);
+        if (!ok) return false;
+    }
+    {   // DiT estimator at N = TM, CFG batch B = 2 (as run_euler_steps builds it)
+        const dit_hp hp = cosyvoice_dit_hp(m);
+        const int MEL = 80, B = 2, N = TM;
+        const size_t nmax = cosy_dit_nodes(hp);
+        ggml_context * c = ggml_init(cosy_arena(nmax));
+        ggml_cgraph * gf = ggml_new_graph_custom(c, nmax, false);
+        ggml_tensor * x    = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(x);
+        ggml_tensor * mu   = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(mu);
+        ggml_tensor * cnd  = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(cnd);
+        ggml_tensor * spks = ggml_new_tensor_2d(c, GGML_TYPE_F32, MEL, B);    ggml_set_input(spks);
+        ggml_tensor * tsin = ggml_new_tensor_2d(c, GGML_TYPE_F32, 256, B);    ggml_set_input(tsin);
+        ggml_tensor * pos  = ggml_new_tensor_1d(c, GGML_TYPE_I32, N);         ggml_set_input(pos);
+        ggml_tensor * out  = build_dit(c, m, hp, x, mu, cnd, spks, tsin, pos, N, B);
+        ggml_build_forward_expand(gf, out);
+        const bool ok = cosy_fit_price(m, gf, nmax, arena, error, "DiT estimator");
+        ggml_free(c);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool cosyvoice_fit_measure_hift(model_ctx & m, int T_mel,
+                                cosyvoice_fit_price & arena, std::string * error) {
+    arena = cosyvoice_fit_price{};
+    const int T_src  = T_mel * 480;      // prod(upsample_rates) * hop_len
+    const int T_stft = T_src / 4 + 1;    // hop 4, reflect-padded by n_fft/2
+    {
+        ggml_context * c = ggml_init(cosy_arena(kCosyHiftF0Nodes));
+        ggml_cgraph * gf = build_hift_f0_graph(c, m, T_mel);
+        const bool ok = cosy_fit_price(m, gf, kCosyHiftF0Nodes, arena, error, "HiFT f0");
+        ggml_free(c);
+        if (!ok) return false;
+    }
+    {
+        ggml_context * c = ggml_init(cosy_arena(kCosyStftNodes));
+        ggml_cgraph * gf = build_stft_graph(c, m, T_src);
+        const bool ok = cosy_fit_price(m, gf, kCosyStftNodes, arena, error, "HiFT STFT");
+        ggml_free(c);
+        if (!ok) return false;
+    }
+    {
+        ggml_context * c = ggml_init(cosy_arena(kCosyHiftDecodeNodes));
+        ggml_cgraph * gf = build_hift_decode_graph(c, m, T_mel, T_stft, /*measure=*/true,
+                                                   nullptr, nullptr, nullptr);
+        const bool ok = cosy_fit_price(m, gf, kCosyHiftDecodeNodes, arena, error,
+                                       "HiFT decode");
+        ggml_free(c);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// ---- real-allocation parity probes (test support) ---------------------------
+
+bool cosyvoice_fit_llm_parity_probe(model_ctx & m, const qwen_hp & hp, int L0, int n_steps,
+                                    uint64_t & kv_bytes, uint64_t & arena_bytes,
+                                    std::string * error) {
+    kv_bytes = arena_bytes = 0;
+    const int D  = hp.hidden;
+    const int VS = (int)T(m, "lm/llm_decoder/weight")->ne[1];
+    try {
+        qwen_kvcache cache;
+        cache.init(m, hp, L0 + n_steps + 1);
+        if (!cache.buf) {
+            if (error) *error = "parity probe: KV allocation failed";
+            cache.free();
+            return false;
+        }
+        kv_bytes = ggml_backend_buffer_get_size(cache.buf);
+        ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        std::vector<float> x0((size_t)L0 * D, 0.01f);
+        std::vector<float> logits = qwen_step_kv(m, hp, x0.data(), L0, D, VS, cache, al);
+        std::vector<float> x1((size_t)D, 0.01f);
+        for (int s = 0; s < n_steps; ++s) {
+            logits = qwen_step_kv(m, hp, x1.data(), 1, D, VS, cache, al);
+        }
+        arena_bytes = ggml_gallocr_get_buffer_size(al, 0);
+        ggml_gallocr_free(al);
+        cache.free();
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+bool cosyvoice_fit_flow_parity_probe(model_ctx & m, int T_tok, int TM, int SPK,
+                                     uint64_t & frontend_bytes, uint64_t & dit_bytes,
+                                     std::string * error) {
+    frontend_bytes = dit_bytes = 0;
+    {
+        ggml_context * c = ggml_init(cosy_arena(kCosyFlowFrontendNodes));
+        ggml_cgraph * gf = build_flow_frontend_graph(c, m, T_tok, TM, SPK);
+        ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        bool use_sched = false;
+        const bool ok = al && cosy_dispatch_prepare(m, gf, al, kCosyFlowFrontendNodes,
+                                                    use_sched, "fit_flow_probe");
+        if (ok && !use_sched) frontend_bytes = ggml_gallocr_get_buffer_size(al, 0);
+        if (al) ggml_gallocr_free(al);
+        ggml_free(c);
+        if (!ok) {
+            if (error) *error = "parity probe: flow front-end dispatch failed";
+            return false;
+        }
+    }
+    {
+        const dit_hp hp = cosyvoice_dit_hp(m);
+        const int MEL = 80, B = 2, N = TM;
+        const size_t nmax = cosy_dit_nodes(hp);
+        ggml_context * c = ggml_init(cosy_arena(nmax));
+        ggml_cgraph * gf = ggml_new_graph_custom(c, nmax, false);
+        ggml_tensor * x    = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(x);
+        ggml_tensor * mu   = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(mu);
+        ggml_tensor * cnd  = ggml_new_tensor_3d(c, GGML_TYPE_F32, MEL, N, B); ggml_set_input(cnd);
+        ggml_tensor * spks = ggml_new_tensor_2d(c, GGML_TYPE_F32, MEL, B);    ggml_set_input(spks);
+        ggml_tensor * tsin = ggml_new_tensor_2d(c, GGML_TYPE_F32, 256, B);    ggml_set_input(tsin);
+        ggml_tensor * pos  = ggml_new_tensor_1d(c, GGML_TYPE_I32, N);         ggml_set_input(pos);
+        ggml_tensor * out  = build_dit(c, m, hp, x, mu, cnd, spks, tsin, pos, N, B);
+        ggml_build_forward_expand(gf, out);
+        ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        bool use_sched = false;
+        const bool ok = al && cosy_dispatch_prepare(m, gf, al, nmax, use_sched, "fit_dit_probe");
+        if (ok && !use_sched) dit_bytes = ggml_gallocr_get_buffer_size(al, 0);
+        if (al) ggml_gallocr_free(al);
+        ggml_free(c);
+        if (!ok) {
+            if (error) *error = "parity probe: DiT dispatch failed";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool cosyvoice_fit_hift_parity_probe(model_ctx & m, int T_mel,
+                                     uint64_t & f0_bytes, uint64_t & stft_bytes,
+                                     uint64_t & decode_bytes, std::string * error) {
+    f0_bytes = stft_bytes = decode_bytes = 0;
+    const int T_src  = T_mel * 480;
+    const int T_stft = T_src / 4 + 1;
+    struct probe { ggml_cgraph * gf; size_t nmax; uint64_t * out; const char * what; };
+    ggml_context * c_f0  = ggml_init(cosy_arena(kCosyHiftF0Nodes));
+    ggml_context * c_st  = ggml_init(cosy_arena(kCosyStftNodes));
+    ggml_context * c_dec = ggml_init(cosy_arena(kCosyHiftDecodeNodes));
+    ggml_cgraph * g_f0  = build_hift_f0_graph(c_f0, m, T_mel);
+    ggml_cgraph * g_st  = build_stft_graph(c_st, m, T_src);
+    ggml_cgraph * g_dec = build_hift_decode_graph(c_dec, m, T_mel, T_stft, /*measure=*/false,
+                                                  nullptr, nullptr, nullptr);
+    const probe probes[3] = {
+        { g_f0,  kCosyHiftF0Nodes,     &f0_bytes,     "HiFT f0"     },
+        { g_st,  kCosyStftNodes,       &stft_bytes,   "HiFT STFT"   },
+        { g_dec, kCosyHiftDecodeNodes, &decode_bytes, "HiFT decode" },
+    };
+    bool ok = true;
+    for (const probe & p : probes) {
+        ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+        bool use_sched = false;
+        ok = al && cosy_dispatch_prepare(m, p.gf, al, p.nmax, use_sched, p.what);
+        if (ok && !use_sched) *p.out = ggml_gallocr_get_buffer_size(al, 0);
+        if (al) ggml_gallocr_free(al);
+        if (!ok) {
+            if (error) *error = std::string("parity probe: dispatch failed for ") + p.what;
+            break;
+        }
+    }
+    ggml_free(c_f0);
+    ggml_free(c_st);
+    ggml_free(c_dec);
+    return ok;
 }

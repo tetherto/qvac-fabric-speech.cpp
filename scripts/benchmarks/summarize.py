@@ -91,6 +91,21 @@ def fmt_speedup(v: Any) -> str:
         return "—"
 
 
+def fmt_wer(v: Any) -> str:
+    """Format WER as a percentage rounded to two decimals.
+
+    Blank ("—") when the family didn't declare a correctness block or the
+    scoring step was skipped — so a reader can distinguish "no correctness
+    signal" from "correctness = 0.00%". A perfect run reads "0.00%".
+    """
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v) * 100.0:.2f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def fmt_coreml_verified(v: Any) -> str:
     if v is True:
         return "yes"
@@ -104,15 +119,16 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
     header = (
         "| Family | Model | Runner | OS | Decoder | Encoder | Baseline encoder | Core ML verified "
         "| Encoder ms | Baseline encoder ms | Encoder speedup | End-to-end ms "
-        "| Baseline end-to-end ms | E2E speedup | RTF | Peak RSS MiB | Runs | Status | Notes |\n"
-        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
+        "| Min | Max | Baseline end-to-end ms | E2E speedup | RTF | WER "
+        "| Peak RSS MiB | Runs | Status | Notes |\n"
+        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
     rows = []
     for r in results:
         rows.append(
             "| {family} | {model} | {runner} | {os} | {backend} | {encoder_backend} | {baseline_encoder_backend} "
             "| {coreml_verified} | {encoder_ms} | {baseline_encoder_ms} | {encoder_speedup} "
-            "| {median} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {rss} "
+            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {wer} | {rss} "
             "| {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
@@ -126,9 +142,12 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 baseline_encoder_ms=fmt_ms(r.get("baseline_encoder_ms_median")),
                 encoder_speedup=fmt_speedup(r.get("encoder_speedup")),
                 median=fmt_ms(r.get("wall_ms_median")),
+                min=fmt_ms(r.get("wall_ms_min")),
+                max=fmt_ms(r.get("wall_ms_max")),
                 baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
                 inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
+                wer=fmt_wer(r.get("wer_median")),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -136,7 +155,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
             )
         )
     if not rows:
-        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | |")
+        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | | | | |")
     return header + "\n".join(rows) + "\n"
 
 
@@ -151,11 +170,19 @@ def render_legend() -> str:
         "- **Median RTF** — real-time factor; wall / audio-seconds. `< 1.0` means "
         "faster than real-time. Blank when the family's output length isn't fixed "
         "(text-driven TTS, chatterbox, audio8).\n"
+        "- **WER** — Word Error Rate of the bench transcript against the family's "
+        "`correctness.reference` file, English-normalized (case-folded, punctuation "
+        "stripped). `0.00%` is a healthy build; a non-trivial WER means either the "
+        "model regressed or the reference drifted with a checkpoint bump. Blank when "
+        "the family didn't declare a `correctness` block (all non-ASR families today) "
+        "or the scoring step was skipped — see the row's notes.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
-        "- **Backend** — extracted from the engine's `using <NAME> backend` stderr "
-        "line. `unknown` means the log line was absent (usually a build-failed or "
-        "CPU-only path that didn't emit it).\n"
+        "- **Backend** — from the bench binary's JSON when it reports one, else the "
+        "engine's `using <NAME> backend` / `backend: <NAME>` log lines, else ggml's "
+        "own GPU compute-init logs; a green run with no GPU-engagement evidence is "
+        "reported as `CPU`. `unknown` appears only on failed runs, whose logs may be "
+        "truncated mid-init.\n"
         "- **Core ML comparison** — the Parakeet Darwin row runs TDT twice on the "
         "same Apple Silicon runner. `Core ML verified=yes` means every measured "
         "encoder invocation used the sidecar; the baseline is forced through ggml "

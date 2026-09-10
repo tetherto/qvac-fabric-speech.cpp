@@ -15,7 +15,7 @@ on:
       model_families:
         description: >-
           Comma-separated family names, or "all". Families:
-          whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, chatterbox, supertonic, parler,
+          whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
           cosyvoice, audio8, lavasr, acestep, minimax.
         required: false
         default: "all"
@@ -61,7 +61,7 @@ env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
   GGML_BRANCH: speech
   AWS_REGION: eu-central-1
-  ALL_FAMILIES: "whisper,parakeet,sortformer,chatterbox,supertonic,parler,cosyvoice,audio8,lavasr,acestep,minimax"
+  ALL_FAMILIES: "whisper,parakeet,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,lavasr,acestep,minimax"
 
 jobs:
   # ---------- 1. Expand inputs into a matrix ------------------------------
@@ -78,6 +78,14 @@ jobs:
       runs_per_bench: ${{ steps.expand.outputs.runs_per_bench }}
       expected_count: ${{ steps.expand.outputs.expected_count }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Fail the whole dispatch before any runner minutes are spent when the
+      # bench driver or the family spec regressed — the suite runs the driver
+      # against stub binaries, so it needs neither models nor engines.
+      - name: Bench driver self-check
+        run: scripts/benchmarks/test-run-family.sh
+
       - id: expand
         env:
           IN_FAMILIES: ${{ inputs.model_families }}
@@ -111,7 +119,7 @@ jobs:
 
           valid_family() {
             case "$1" in
-              whisper|parakeet|sortformer|chatterbox|supertonic|parler|cosyvoice|audio8|lavasr|acestep|minimax) return 0 ;;
+              whisper|parakeet|sortformer|vad|chatterbox|supertonic|parler|cosyvoice|audio8|lavasr|acestep|minimax) return 0 ;;
               *) return 1 ;;
             esac
           }

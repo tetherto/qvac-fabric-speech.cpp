@@ -44,6 +44,12 @@ void print_usage(const char * argv0) {
         "  --margin-mib MIB        free-memory headroom to require (default 256)\n"
         "  --window-frames N       EngineOptions::long_form_window_frames (default 0 = auto)\n"
         "  --context-frames N      EngineOptions::long_form_context_frames (default 0 = auto)\n"
+        "  --nemotron-chunk-ms N   Nemotron only: streaming operating point\n"
+        "                          (StreamingOptions::chunk_ms) whose live session the\n"
+        "                          projection must also fit; must be one of the GGUF's\n"
+        "                          allowed values (80/160/320/560/1120 on the shipped\n"
+        "                          checkpoint). Default 0 projects the largest allowed\n"
+        "                          operating point. Ignored for other model types\n"
         "  --backends-dir DIR      directory scanned for dynamically-loaded ggml backends\n"
         "  --json                  emit the projection as JSON on stdout\n"
         "  --verbose               loader diagnostics on stderr\n"
@@ -120,6 +126,11 @@ extern "C" int parakeet_fit_cli_main(int argc, char ** argv) {
         } else if (a == "--context-frames" && i + 1 < argc) {
             if (!parse_i32(argv[++i], opts.long_form_context_frames)) {
                 std::fprintf(stderr, "--context-frames: '%s' is not an integer\n", argv[i]);
+                return (int) parakeet::FitStatus::Error;
+            }
+        } else if (a == "--nemotron-chunk-ms" && i + 1 < argc) {
+            if (!parse_i32(argv[++i], opts.nemotron_chunk_ms)) {
+                std::fprintf(stderr, "--nemotron-chunk-ms: '%s' is not an integer\n", argv[i]);
                 return (int) parakeet::FitStatus::Error;
             }
         } else if (a == "--backends-dir" && i + 1 < argc) {
