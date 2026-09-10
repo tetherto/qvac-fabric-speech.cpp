@@ -76,6 +76,12 @@ def parse_reference_json(text: str) -> list[tuple[float, float]]:
 # Pin the exact format via a regex rather than a positional split so a future
 # upstream change (an added prefix, a different separator) fails loudly at
 # parse time rather than silently mis-scoring.
+#
+# UNITS: the numbers printed by this format are CENTISECONDS (see
+# whisper.cpp's `samples_to_cs()` at src/whisper.cpp:4758 and the debug print
+# at 7115 which explicitly `/100.0`s the same field before displaying it as
+# seconds). The example itself doesn't divide, so "start = 29.00" means
+# 0.29 s. The parser below converts to seconds by dividing by 100.
 _WHISPER_VAD_SEG_RE = re.compile(
     r"^Speech segment\s+\d+\s*:\s*start\s*=\s*([0-9.]+)\s*,\s*end\s*=\s*([0-9.]+)\s*$"
 )
@@ -132,7 +138,9 @@ def parse_hypothesis(text: str) -> list[tuple[float, float]]:
                 print(f"compute-f1.py: skipping unrecognized hypothesis line {lineno}: {raw!r}",
                       file=sys.stderr)
             continue
-        s, e = float(m.group(1)), float(m.group(2))
+        # Values are centiseconds — see _WHISPER_VAD_SEG_RE comment.
+        s = float(m.group(1)) / 100.0
+        e = float(m.group(2)) / 100.0
         if e > s:
             segments.append((s, e))
     return segments
@@ -306,10 +314,13 @@ def _self_test() -> int:
 
     # Parser dual-shape parity: whisper-vad text output and equivalent JSON
     # array must produce identical F1 scores against the same reference.
+    # whisper-vad text values are CENTISECONDS (see _WHISPER_VAD_SEG_RE),
+    # so "start = 200.00, end = 600.00" is 2.0-6.0 s — the same range the
+    # JSON hypothesis names directly in seconds.
     hyp_text = (
         "\n"
         "Detected 1 speech segments:\n"
-        "Speech segment 0: start = 2.00, end = 6.00\n"
+        "Speech segment 0: start = 200.00, end = 600.00\n"
         "\n"
     )
     hyp_json = '[{"start": 2.0, "end": 6.0}]'
@@ -320,16 +331,36 @@ def _self_test() -> int:
 
     # Robustness against non-recognized stdout chatter (banner/backend logs
     # from a future upstream change). Would fail loudly if the parser aborted
-    # on the first stray line.
+    # on the first stray line. Segment values in centiseconds as above.
     mixed = (
         "whisper_vad: loading model...\n"
         "Detected 1 speech segments:\n"
-        "Speech segment 0: start = 2.00, end = 6.00\n"
+        "Speech segment 0: start = 200.00, end = 600.00\n"
         "info: total time = 42ms\n"
     )
     f_mixed = compute_f1(parse_hypothesis(mixed), ref, collar_ms=0)["f1"]
     if f_mixed != 1.0:
         failed.append(f"mixed-stdout robustness: f1={f_mixed} (expected 1.0)")
+
+    # Regression guard for the centiseconds unit bug: the previous parser
+    # treated "start = 29.00" as 29 s (past the end of an 11 s clip), giving
+    # F1 = 0.0 on the real silero-on-jfk verification dispatch. Pin that the
+    # whisper-vad text ranges from a realistic silero-on-jfk run land inside
+    # the audio window and score a reasonable non-zero F1 against a
+    # single-segment reference covering the same span. Would fail loudly if
+    # the /100 conversion is ever accidentally removed.
+    ref_jfk = [(0.30, 10.90)]
+    silero_jfk = (
+        "\nDetected 5 speech segments:\n"
+        "Speech segment 0: start = 29.00, end = 221.00\n"
+        "Speech segment 1: start = 330.00, end = 377.00\n"
+        "Speech segment 2: start = 400.00, end = 435.00\n"
+        "Speech segment 3: start = 538.00, end = 765.00\n"
+        "Speech segment 4: start = 816.00, end = 1059.00\n\n"
+    )
+    got = compute_f1(parse_hypothesis(silero_jfk), ref_jfk, collar_ms=100)
+    if not (0.7 < got["f1"] < 0.9):
+        failed.append(f"centiseconds unit fix: silero-on-jfk F1={got['f1']} (expected ~0.75-0.85)")
 
     if failed:
         for f in failed:

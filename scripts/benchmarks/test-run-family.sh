@@ -476,11 +476,14 @@ STUB
 # "Detected N speech segments:" header, "Speech segment N: start=X, end=Y"
 # per detected range, and a trailing blank line. compute-f1.py's parser
 # skips the header and blanks and pulls (start,end) from the segment lines.
+# UNITS: the example prints values in CENTISECONDS (see the compute-f1.py
+# _WHISPER_VAD_SEG_RE comment) — the parser divides by 100. So a stub that
+# wants to emit a 2.0-6.0 s segment writes "start = 200.00, end = 600.00".
 cat > "$BUILD/bin/tw-vadtext-perfect" <<'STUB'
 #!/usr/bin/env bash
 printf '\n'
 printf 'Detected 1 speech segments:\n'
-printf 'Speech segment 0: start = 2.00, end = 6.00\n'
+printf 'Speech segment 0: start = 200.00, end = 600.00\n'
 printf '\n'
 STUB
 
@@ -488,7 +491,7 @@ cat > "$BUILD/bin/tw-vadtext-partial" <<'STUB'
 #!/usr/bin/env bash
 printf '\n'
 printf 'Detected 1 speech segments:\n'
-printf 'Speech segment 0: start = 2.00, end = 4.00\n'
+printf 'Speech segment 0: start = 200.00, end = 400.00\n'
 printf '\n'
 STUB
 
@@ -509,7 +512,7 @@ cat > "$BUILD/bin/tw-vadtext-slop" <<'STUB'
 #!/usr/bin/env bash
 printf '\n'
 printf 'Detected 1 speech segments:\n'
-printf 'Speech segment 0: start = 2.10, end = 6.10\n'
+printf 'Speech segment 0: start = 210.00, end = 610.00\n'
 printf '\n'
 STUB
 
