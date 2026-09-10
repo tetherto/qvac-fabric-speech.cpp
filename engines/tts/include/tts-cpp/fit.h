@@ -23,7 +23,7 @@
 //              against a machine the fitter cannot see is worse than none.
 //
 // Per-engine entry points live in tts-cpp/audio8/fit.h and
-// tts-cpp/chatterbox/fit.h.
+// tts-cpp/chatterbox/fit.h, tts-cpp/supertonic/fit.h, and tts-cpp/pocket/fit.h.
 
 #include "tts-cpp/export.h"
 

@@ -4,12 +4,17 @@ Native C++17/ggml speech synthesis, voice cloning, and post-synthesis
 enhancement for the QVAC speech stack. There is no Python, PyTorch, or ONNX
 Runtime dependency after models have been converted to GGUF.
 
-This package exposes five public synthesis engine APIs covering six synthesis
-families and eight model lines: Chatterbox Turbo, Chatterbox Multilingual,
-Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, and Audio8. LavaSR is a
+This package exposes six public synthesis engine APIs covering seven synthesis
+families and nine model lines: Chatterbox Turbo, Chatterbox Multilingual,
+Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, Audio8, and Pocket TTS. LavaSR is a
 speech-enhancement pipeline, not a TTS synthesizer. The API count follows the
 installed public headers under `include/tts-cpp/`; the two Chatterbox families
 share one engine API, while the Supertonic generations share another.
+
+Pocket TTS has a native CPU engine, streaming addon/public SDK support, and
+metadata-only memory preflight. Package rollout and broader platform validation
+remain in progress. See the
+[implementation status and validation guide](docs/pocket-tts.md).
 
 This directory is the in-tree `engines/tts` package in
 [`qvac-fabric-speech.cpp`](../../README.md). It consumes the system
@@ -31,7 +36,7 @@ the separate bundled-ggml development path.
 - [Fixtures and static validation](#fixtures-and-static-validation)
 - Engine details: [Chatterbox](#chatterbox), [Parler](#parler-tts),
   [Supertonic](#supertonic-gguf), [CosyVoice3](#cosyvoice3), and
-  [Audio8](#audio8)
+  [Audio8](#audio8), and [Pocket TTS](docs/pocket-tts.md)
 - [LavaSR enhancement](#lavasr-enhancement)
 - [Troubleshooting](#troubleshooting)
 
@@ -52,6 +57,7 @@ engine, not every backend ggml can compile.
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes | yes | yes | yes |
+| Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
@@ -162,6 +168,7 @@ a Cangjie5 TSV.
 | Parler | `<tts-cpp/parler/engine.h>` | incremental callback via `stream_chunk_frames` | `parler-cli` and `tts-cli` batch only; neither exposes streaming |
 | CosyVoice3 | `<tts-cpp/cosyvoice/engine.h>` | callback is post-hoc chunking after full generation | `cosyvoice-cli` |
 | Audio8 | `<tts-cpp/audio8/engine.h>` | no | `audio8-cli` |
+| Pocket TTS | `<tts-cpp/pocket/engine.h>` | incremental FlowLM/Mimi PCM callbacks | `pocket-cli` batch WAV and memory preflight |
 | LavaSR | `<tts-cpp/lavasr/{denoiser,enhancer}.h>` | block-oriented enhancement APIs | `lavasr-bench` |
 
 `tts-cli` is intentionally a limited metadata dispatcher: it handles
@@ -1348,7 +1355,7 @@ override with `-D<flag>=...` at configure time):
 |------|---------|---------|
 | `TTS_CPP_BUILD_LIBRARY` | `ON` | Build the `tts-cpp` library target itself (linkage controlled by `TTS_CPP_BUILD_SHARED`, not `BUILD_SHARED_LIBS` — see below) |
 | `TTS_CPP_BUILD_SHARED` | `OFF` | Build `tts-cpp` as `SHARED` instead of `STATIC`. Decoupled from `BUILD_SHARED_LIBS` because ggml's own CMake declares its own `option(BUILD_SHARED_LIBS)` defaulting to `ON` on Windows non-MinGW; using a project-namespaced option keeps the two independent. The supertonic test/bench harnesses link against `tts-cpp` directly and use detail-namespaced symbols outside the `TTS_CPP_API` public surface, so `SHARED` builds hide them and disable those targets — leave OFF for development, flip ON only for downstream packaging where the test harnesses aren't built |
-| `TTS_CPP_BUILD_EXECUTABLES` | `ON` standalone / `OFF` subdir | `tts-cli`, `mel2wav`, `cosyvoice-hift`, `cosyvoice-flow`, `cosyvoice-llm`, `cosyvoice-cli`, `cosyvoice-bench`, `supertonic-cli`, `parler-cli`, `parler-bench`, `lavasr-bench`, and `audio8-cli` |
+| `TTS_CPP_BUILD_EXECUTABLES` | `ON` standalone / `OFF` subdir | `tts-cli`, `mel2wav`, `cosyvoice-hift`, `cosyvoice-flow`, `cosyvoice-llm`, `cosyvoice-cli`, `cosyvoice-bench`, `supertonic-cli`, `parler-cli`, `parler-bench`, `lavasr-bench`, `audio8-cli`, and `pocket-cli` |
 | `TTS_CPP_BUILD_TESTS` | `ON` standalone / `OFF` subdir | `test-*` parity / unit harnesses, registered with CTest (label-filterable via `ctest -L unit` / `ctest -L fixture` / `ctest -L gpu`) |
 | `TTS_CPP_INSTALL` | `ON` | Generate `install` rules + the `tts-cpp` CMake package config so consumers can `find_package(tts-cpp CONFIG REQUIRED)` |
 | `TTS_CPP_USE_SYSTEM_GGML` | `ON` | Use `find_package(ggml CONFIG REQUIRED)` against `ggml-speech`. `OFF` uses `add_subdirectory(ggml)` and requires an `engines/tts/ggml` checkout of `qvac-ext-ggml@speech`, staged by `scripts/setup-ggml.sh`; no patch overlay — the speech branch is patched at the commit level |
@@ -1384,6 +1391,7 @@ a green `ctest` run on the harnesses whose fixtures it does have.
 | `build/parler-cli` / `parler-bench` | Parler end-to-end synthesis and benchmark |
 | `build/lavasr-bench` | LavaSR denoiser/enhancer benchmark and by-ear harness |
 | `build/audio8-cli` | Audio8 text-to-speech and zero-shot voice cloning |
+| `build/pocket-cli` | Pocket text-to-speech and metadata-only memory preflight |
 
 `supertonic-bench` is built only by `TTS_CPP_BUILD_TESTS`; it is not in the
 executable gate. The tests also produce the following representative
