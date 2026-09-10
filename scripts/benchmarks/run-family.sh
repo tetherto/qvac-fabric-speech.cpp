@@ -539,7 +539,7 @@ parse_backend_from_logs() {
   echo ""
 }
 
-# ---- correctness scoring (WER / DER) ---------------------------------------
+# ---- correctness scoring (WER / DER / F1) ----------------------------------
 # When a family in families.json carries a `correctness` block, score the
 # hypothesis against the checked-in reference and echo "score|kind|reference"
 # (or empty when scoring is skipped). Callers route the score into WER_MEDIAN

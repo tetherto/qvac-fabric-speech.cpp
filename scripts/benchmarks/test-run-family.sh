@@ -341,6 +341,12 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 200},
     notes: "boundary-slop hyp (2.1-6.1 vs ref 2.0-6.0) + 200 ms tolerance; the slop falls inside the collar so F1 1.0. Proves tolerance_ms>0 is threaded from families.json through to compute-f1.py."
   },
+  "f1-tw-silero-shape": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadtext-silero-shape", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 0},
+    notes: "multi-segment centiseconds hyp mimicking a realistic silero jfk output — three phrase-level segments with inter-phrase pauses. Exercises the whisper-vad text parser end-to-end at the driver level. Expected F1 = 6/7 ≈ 0.857. A pre-centiseconds-fix parser would score 0.0 here, so this cell would catch the units bug at driver level, not just self-test level."
+  },
   "f1-nat-warns": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
@@ -513,6 +519,24 @@ cat > "$BUILD/bin/tw-vadtext-slop" <<'STUB'
 printf '\n'
 printf 'Detected 1 speech segments:\n'
 printf 'Speech segment 0: start = 210.00, end = 610.00\n'
+printf '\n'
+STUB
+
+# Realistic silero-shape stub: multiple phrase-level segments in
+# centiseconds, mimicking what silero actually emits for a continuous
+# speech clip like jfk.wav. Values in cs: 3 segments totaling 3.0 s of
+# speech across the 2.0-6.0 s ref window with two ~0.5 s pauses. Exercises
+# the full pipeline (multi-line whisper-vad parse -> /100 conversion ->
+# frame masking -> F1) on a shape closer to production than any of the
+# 1-segment cells. Expected F1 = 2*P*R/(P+R) with P=1.0 (all hyp inside
+# ref) and R = 300/400 = 0.75, so F1 = 6/7 = 0.8571...
+cat > "$BUILD/bin/tw-vadtext-silero-shape" <<'STUB'
+#!/usr/bin/env bash
+printf '\n'
+printf 'Detected 3 speech segments:\n'
+printf 'Speech segment 0: start = 200.00, end = 300.00\n'
+printf 'Speech segment 1: start = 350.00, end = 450.00\n'
+printf 'Speech segment 2: start = 500.00, end = 600.00\n'
 printf '\n'
 STUB
 
@@ -905,6 +929,22 @@ jq -e '.status == "ok" and .f1_median == 1.0 and .correctness_kind == "f1"' \
   "$OUT/f1-tw-collar.json" > /dev/null \
   || fail "f1-tw-collar: $(cat "$OUT/f1-tw-collar.json")"
 ok "correctness (F1, time-wrapped): 200 ms tolerance hides boundary slop => F1 1.0 (tolerance_ms plumbed through)"
+
+# Realistic multi-segment shape: the compute-f1.py self-test locks the
+# centiseconds fix at the module level via the silero-on-jfk replay, but no
+# driver cell exercises the same shape end-to-end. This one does: 3 hyp
+# segments (in centiseconds) covering 300 out of 400 ref-speech frames with
+# ~50 frame gaps. Precision = 1.0 (all hyp inside ref), recall = 300/400 =
+# 0.75, F1 = 6/7 ≈ 0.8571. Under the pre-centiseconds-fix parser every
+# hypothesis segment would be interpreted as being in seconds (200-300 s
+# etc.) and land past the end of the audio window — a pre-fix run of this
+# cell would report F1 = 0.0 and fail loudly.
+run_driver f1-tw-silero-shape "$OUT/f1-tw-silero-shape.json" "$OUT/f1-tw-silero-shape.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .correctness_kind == "f1"
+       and (.f1_median > 0.855 and .f1_median < 0.858)' \
+  "$OUT/f1-tw-silero-shape.json" > /dev/null \
+  || fail "f1-tw-silero-shape: $(cat "$OUT/f1-tw-silero-shape.json")"
+ok "correctness (F1, time-wrapped): realistic multi-segment silero-shape hyp scores F1 6/7 (centiseconds fix pinned end-to-end)"
 
 # Native families have no VAD schema in --json-out, so a native spec that
 # declares kind='f1' must be skipped with a diagnostic — guards against a

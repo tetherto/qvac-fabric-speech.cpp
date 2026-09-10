@@ -244,6 +244,16 @@ def compute_f1(
         precision = 1.0     # no hyp claims to be wrong about
         recall    = 0.0
         f1        = 0.0
+    elif (tp + fp + fn) == 0:
+        # Both sides declared segments but the collar excluded every scorable
+        # frame (e.g., a short reference segment entirely inside its own
+        # boundary tolerance). Treat as agreement rather than 0.0 — the
+        # both-empty branch above already establishes that "nothing to
+        # disagree about" scores 1.0. Not exercisable at the shipped families
+        # spec (10.6 s ref, 100 ms collar), but the alternative — silently
+        # returning 0.0 for a perfect-but-uncounted hyp — would mislead any
+        # future family that ships a shorter reference or a wider tolerance.
+        precision = recall = f1 = 1.0
     else:
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -361,6 +371,20 @@ def _self_test() -> int:
     got = compute_f1(parse_hypothesis(silero_jfk), ref_jfk, collar_ms=100)
     if not (0.7 < got["f1"] < 0.9):
         failed.append(f"centiseconds unit fix: silero-on-jfk F1={got['f1']} (expected ~0.75-0.85)")
+
+    # No-scorable-frames edge case: a 50 ms ref segment with a 100 ms collar
+    # excludes every ref frame. A hyp that matches exactly should score 1.0
+    # (agreement, nothing to disagree about) — the pre-fix behavior collapsed
+    # this to 0.0 via a div-by-zero fallback, misleading any future family
+    # with short refs or wide tolerance. Verified: without the fix, tp=fp=fn=0
+    # would land in the previous `else` branch and return 0.0.
+    tiny = [(2.00, 2.05)]
+    perfect = compute_f1([(2.00, 2.05)], tiny, collar_ms=100)
+    if perfect["f1"] != 1.0:
+        failed.append(
+            f"no-scorable-frames edge case: matching hyp on collar-eaten ref "
+            f"F1={perfect['f1']} (expected 1.0)"
+        )
 
     if failed:
         for f in failed:
