@@ -30,6 +30,7 @@ using parakeet::WindowTrim;
 using parakeet::append_committed_frames;
 using parakeet::compute_window_trim;
 using parakeet::plan_long_form_windows;
+using parakeet::resolve_coreml_fixed_shape_plan;
 using parakeet::resolve_long_form_window_frames;
 
 namespace {
@@ -70,6 +71,10 @@ void check_plan(int n, int center, int ctx) {
         expect(w.window_start + w.window_len >= w.center_end,
                wtag + ": window ends before centre");
         expect(w.window_len <= center + 2 * ctx, wtag + ": window length exceeds bound");
+        if (n >= center + 2 * ctx) {
+            expect(w.window_len == center + 2 * ctx,
+                   wtag + ": boundary window did not reuse its full context budget");
+        }
         expect(w.is_final == (i + 1 == ws.size()), wtag + ": is_final mismatch");
         if (i + 1 < ws.size()) {
             expect(w.center_end == ws[i + 1].center_start,
@@ -113,6 +118,57 @@ void check_window_resolution() {
            "resolve: explicit request above pos_emb is capped to it");
     expect(resolve_long_form_window_frames(1000, 100, kAuto, kMin) == 100,
            "resolve: pos_emb ceiling wins even when it is below the floor");
+}
+
+void check_coreml_fixed_shape_resolution() {
+    using parakeet::LongFormPlan;
+
+    expect(!resolve_coreml_fixed_shape_plan(0, 0, 8, 5000).enabled,
+           "coreml resolve: unknown/flexible capacity stays disabled");
+    expect(!resolve_coreml_fixed_shape_plan(1501, 0, 8, 1501).enabled,
+           "coreml resolve: exact-capacity input stays single-pass");
+    expect(!resolve_coreml_fixed_shape_plan(1501, 0, 8, 1000).enabled,
+           "coreml resolve: shorter input stays single-pass");
+    expect(!resolve_coreml_fixed_shape_plan(7, 0, 8, 100).enabled,
+           "coreml resolve: capacity below one encoder frame is unusable");
+
+    const LongFormPlan automatic =
+        resolve_coreml_fixed_shape_plan(1501, 0, 8, 1502);
+    expect(automatic.enabled, "coreml resolve: oversized input enables windowing");
+    expect(automatic.sub == 8, "coreml resolve: preserves subsampling factor");
+    expect(automatic.window_frames == 187,
+           "coreml resolve: floors capacity to whole encoder frames");
+    expect(automatic.context_frames == 46,
+           "coreml resolve: clamps automatic context to window/4");
+    expect(automatic.center_frames == 95,
+           "coreml resolve: centre excludes both context regions");
+    expect((long long) automatic.window_frames * automatic.sub <= 1501,
+           "coreml resolve: mel window never exceeds sidecar capacity");
+
+    const LongFormPlan no_context =
+        resolve_coreml_fixed_shape_plan(1501, -1, 8, 5000);
+    expect(no_context.enabled && no_context.context_frames == 0 &&
+               no_context.center_frames == no_context.window_frames,
+           "coreml resolve: negative context disables overlap");
+
+    const LongFormPlan clamped_context =
+        resolve_coreml_fixed_shape_plan(1501, 1000, 8, 5000);
+    expect(clamped_context.context_frames == 46,
+           "coreml resolve: explicit context is clamped to window/4");
+
+    const LongFormPlan fallback_sub =
+        resolve_coreml_fixed_shape_plan(1501, 0, 0, 5000);
+    expect(fallback_sub.sub == 8,
+           "coreml resolve: invalid subsampling uses the default factor");
+
+    const int center_mel = automatic.center_frames * automatic.sub;
+    const int context_mel = automatic.context_frames * automatic.sub;
+    const std::vector<LongFormWindow> windows =
+        plan_long_form_windows(10000, center_mel, context_mel);
+    for (const LongFormWindow & window : windows) {
+        expect(window.window_len <= 1501,
+               "coreml resolve: planned mel window exceeded fixed capacity");
+    }
 }
 
 // Drive the real trim + append over a synthetic encoder output and assert the
@@ -205,6 +261,7 @@ int main() {
 
     // Window-size resolution: pos_emb_max_len is a hard ceiling over the floor.
     check_window_resolution();
+    check_coreml_fixed_shape_resolution();
 
     // Trim + append seam stitching (multiples of sub so subsampling is exact).
     check_stitch(2048, 256, 64, 8);   // several equal windows

@@ -16,6 +16,11 @@
 #     "backend":        "CUDA" | "Metal" | "Vulkan" | "OpenCL" | "CPU" | "unknown"
 #                       ("unknown" only on failed runs — a green run with no
 #                        GPU-engagement evidence is reported as "CPU"),
+#     "encoder_backend":"coreml-all" | "ggml-metal" | ... | "unknown",
+#     "encoder_coreml_all_runs": true | false | null,
+#     "encoder_ms_median": 32.1,       # native engines that report it
+#     "baseline_encoder_ms_median": 121.3, # Darwin Core ML comparisons
+#     "encoder_speedup": 3.78,         # baseline / Core ML
 #     "wall_ms_median": 1234.5,
 #     "wall_ms_min":    1210.0,
 #     "wall_ms_max":    1301.2,
@@ -115,15 +120,20 @@ if [[ -z "$BENCH_KIND" ]]; then
   echo "family '$FAMILY' not found in families.json" >&2; exit 1
 fi
 
-# Config sanity: a `correctness` block is only meaningful for native-mode
-# families whose bench binary writes .transcript into --json-out. Warn loudly
-# but don't fail — the field is optional and the perf path still works.
+# Config sanity: correctness is honored for both bench kinds — native families
+# feed compute-wer.py their .transcript field from --json-out; time-wrapped
+# families feed the last run's captured stdout. Anything else (TTS-style
+# families with no transcript at all, or a hypothetical third bench kind)
+# is flagged but not fatal — the perf portion still works.
 if jq -e --arg family "$FAMILY" '.[$family].correctness // empty' \
      "$FAMILIES_JSON" > /dev/null 2>&1; then
-  if [[ "$BENCH_KIND" != "native" ]]; then
-    echo "warning: family '$FAMILY' declares correctness but bench_kind='$BENCH_KIND'" >&2
-    echo "  correctness scoring is native-mode only; block will be ignored." >&2
-  fi
+  case "$BENCH_KIND" in
+    native|time-wrapped) : ;;
+    *)
+      echo "warning: family '$FAMILY' declares correctness but bench_kind='$BENCH_KIND'" >&2
+      echo "  correctness scoring requires a hypothesis source; block will be ignored." >&2
+      ;;
+  esac
 fi
 
 MODEL_DIR="$MODELS_ROOT/$FAMILY"
@@ -131,6 +141,16 @@ mkdir -p "$MODEL_DIR"
 
 # ---- output-JSON emitter (used from every exit path) ------------------------
 BACKEND="unknown"     # populated from JSON or stderr scrape on a successful run
+ENCODER_BACKEND="unknown"
+ENCODER_COREML_ALL_RUNS="null"
+ENCODER_MS_MEDIAN="null"
+BASELINE_BACKEND=""
+BASELINE_ENCODER_BACKEND=""
+BASELINE_ENCODER_MS_MEDIAN="null"
+BASELINE_INFERENCE_MS_MEDIAN="null"
+BASELINE_RTF_MEDIAN="null"
+ENCODER_SPEEDUP="null"
+INFERENCE_SPEEDUP="null"
 PEAK_RSS_MIB="null"   # tracked across runs; max seen
 RTF_MEDIAN="null"     # from bench JSON (native) or computed (time-wrapped w/ audio_duration_seconds)
 # Correctness fields — populated only when the family carries a `correctness`
@@ -150,6 +170,16 @@ emit_json() {
     --arg  runner "$RUNNER_LABEL" \
     --arg  os     "$uname_s" \
     --arg  backend "$BACKEND" \
+    --arg  encoder_backend "$ENCODER_BACKEND" \
+    --argjson encoder_coreml_all_runs "$ENCODER_COREML_ALL_RUNS" \
+    --argjson encoder_ms_median "$ENCODER_MS_MEDIAN" \
+    --arg  baseline_backend "$BASELINE_BACKEND" \
+    --arg  baseline_encoder_backend "$BASELINE_ENCODER_BACKEND" \
+    --argjson baseline_encoder_ms_median "$BASELINE_ENCODER_MS_MEDIAN" \
+    --argjson baseline_inference_ms_median "$BASELINE_INFERENCE_MS_MEDIAN" \
+    --argjson baseline_rtf_median "$BASELINE_RTF_MEDIAN" \
+    --argjson encoder_speedup "$ENCODER_SPEEDUP" \
+    --argjson inference_speedup "$INFERENCE_SPEEDUP" \
     --argjson wall_median "$median" \
     --argjson wall_min    "$wmin" \
     --argjson wall_max    "$wmax" \
@@ -162,6 +192,15 @@ emit_json() {
     --arg  status "$status" \
     --arg  notes  "$NOTES$extra" \
     '{family:$family, model:$model, runner:$runner, os:$os, backend:$backend,
+      encoder_backend:$encoder_backend,
+      encoder_coreml_all_runs:$encoder_coreml_all_runs,
+      encoder_ms_median:$encoder_ms_median,
+      baseline_backend:(if $baseline_backend == "" then null else $baseline_backend end),
+      baseline_encoder_backend:(if $baseline_encoder_backend == "" then null else $baseline_encoder_backend end),
+      baseline_encoder_ms_median:$baseline_encoder_ms_median,
+      baseline_inference_ms_median:$baseline_inference_ms_median,
+      baseline_rtf_median:$baseline_rtf_median,
+      encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
       wer_median:$wer_median, correctness_kind:$correctness_kind,
@@ -283,7 +322,7 @@ s3_cp_retry() {
 fetch_from_s3() {
   local bucket="${MODEL_S3_BUCKET:-}"
   if [[ -z "$bucket" ]]; then
-    echo "MODEL_S3_BUCKET not set — skipping fetch (assuming local models present)" >&2
+    echo "MODEL_S3_BUCKET not set — skipping remote fetch (assuming local models present)" >&2
     return 0
   fi
 
@@ -318,6 +357,7 @@ fetch_from_s3() {
     # `run-failed` for what's actually a `fetch-failed`.
     s3_cp_retry "$s3url" "$dest" || return $?
   done
+
   return 0
 }
 
@@ -353,6 +393,37 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 JSON_OUT="$tmp_dir/native.json"
 
+# The Core ML bundle is derived from the exact F16 model under test. A restored
+# Actions cache makes this a no-op on subsequent runs; the first run exports and
+# compiles locally on the Apple Silicon benchmark host.
+if [[ "$(uname -s)" == "Darwin" ]] &&
+   [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
+  coreml_sidecar="$MODEL_DIR/parakeet-tdt-0.6b-v3-encoder.mlmodelc"
+  if [[ ! -d "$coreml_sidecar" ]]; then
+    coreml_python="${PARAKEET_COREML_PYTHON:-python3}"
+    if [[ ! -x "$coreml_python" ]] && ! command -v "$coreml_python" >/dev/null 2>&1; then
+      emit_json "run-failed" null null null " (Core ML exporter Python not found: $coreml_python)"
+      exit 0
+    fi
+    coreml_package="$tmp_dir/parakeet-tdt-0.6b-v3-encoder.mlpackage"
+    echo "generating Core ML encoder sidecar from the benchmark GGUF" >&2
+    if ! "$coreml_python" engines/parakeet/scripts/export-encoder-coreml.py \
+        --gguf "$MODEL_DIR/parakeet-tdt-0.6b-v3.f16.gguf" \
+        --n-mel-frames 1501 \
+        --palettize-bits 6 \
+        --palettize-group-size 16 \
+        --out "$coreml_package" \
+        --compile-dir "$MODEL_DIR"; then
+      emit_json "run-failed" null null null " (Core ML sidecar generation failed)"
+      exit 0
+    fi
+  fi
+  if [[ ! -d "$coreml_sidecar" ]]; then
+    emit_json "run-failed" null null null " (Core ML exporter did not produce $coreml_sidecar)"
+    exit 0
+  fi
+fi
+
 # ---- build the argv array from the JSON-array `args` field -----------------
 # families.json stores `args` as a JSON array so multi-word values (e.g.
 # "benchmark run") stay a single argv token — a plain space-separated string
@@ -372,10 +443,14 @@ expand_placeholder() {
 }
 
 BENCH_ARGS=()
-_line=""
-while IFS= read -r _line; do
-  BENCH_ARGS+=("$(expand_placeholder "$_line")")
-done < <(jq -r --arg family "$FAMILY" '.[$family].args[]?' "$FAMILIES_JSON")
+build_bench_args() {
+  BENCH_ARGS=()
+  local line=""
+  while IFS= read -r line; do
+    BENCH_ARGS+=("$(expand_placeholder "$line")")
+  done < <(jq -r --arg family "$FAMILY" '.[$family].args[]?' "$FAMILIES_JSON")
+}
+build_bench_args
 
 BINARY="$BUILD_DIR/$BINARY_REL"
 if ! [[ -x "$BINARY" ]]; then
@@ -461,17 +536,23 @@ parse_backend_from_logs() {
 
 # ---- correctness scoring (WER) ---------------------------------------------
 # When a family in families.json carries a `correctness` block, score the
-# native-bench transcript against the checked-in reference and echo
+# hypothesis transcript against the checked-in reference and echo
 # "wer|kind|reference" (or empty when scoring is skipped). Callers set the
 # emitter's WER_MEDIAN / CORRECTNESS_* vars from the returned values.
 #
+# Two hypothesis sources, one per bench kind:
+#   mode="bench-json" <path>  — native families whose --json-out carries
+#                               .transcript (parakeet).
+#   mode="text-file"  <path>  — time-wrapped families whose CLI prints its
+#                               transcript on stdout (whisper -nt).
+#
 # All error paths are non-fatal: a missing reference file, missing transcript
-# in the bench JSON, or compute-wer.py failure logs to stderr and returns
-# empty so the perf portion of the run still succeeds — a green benchmark
-# with correctness=null tells the reader "perf is fine, correctness didn't
-# run" instead of dragging the whole cell to run-failed.
+# in the bench JSON, missing stdout capture, or compute-wer.py failure logs
+# to stderr and returns empty so the perf portion of the run still succeeds
+# — a green benchmark with correctness=null tells the reader "perf is fine,
+# correctness didn't run" instead of dragging the whole cell to run-failed.
 score_correctness() {
-  local bench_json="$1"
+  local mode="$1" src_path="$2"
   local spec_kind spec_ref spec_norm
   spec_kind="$(jq -r --arg family "$FAMILY" \
     '.[$family].correctness.kind // ""'       "$FAMILIES_JSON")"
@@ -500,24 +581,42 @@ score_correctness() {
     return 0
   fi
 
-  # Distinguish "field absent" from "field present but empty string" — an
-  # empty transcript is a catastrophic model regression (parakeet emitted
-  # nothing) and MUST score as WER 1.0, not be silently skipped. `// empty`
-  # would flatten both to "" and hide the collapse. Test presence + string
-  # type with `-e`, then pull the value (which may legitimately be "").
-  local hyp
-  if ! jq -e 'has("transcript") and (.transcript | type == "string")' \
-         "$bench_json" > /dev/null 2>&1; then
-    echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
-    return 0
-  fi
-  hyp="$(jq -r '.transcript' "$bench_json" 2>/dev/null || true)"
+  # Build the --hypothesis-* args for compute-wer.py. Both modes preserve the
+  # "present-but-empty transcript => WER 1.0" invariant: bench-json checks
+  # field presence separately from truthiness so `.transcript=""` reaches
+  # compute-wer.py rather than being conflated with field-absent; text-file
+  # passes even an empty stdout capture through, which compute-wer.py scores
+  # as a full miss when the reference is non-empty.
+  local -a hyp_args=()
+  case "$mode" in
+    bench-json)
+      local hyp
+      if ! jq -e 'has("transcript") and (.transcript | type == "string")' \
+             "$src_path" > /dev/null 2>&1; then
+        echo "$FAMILY: bench JSON has no .transcript field — correctness skipped" >&2
+        return 0
+      fi
+      hyp="$(jq -r '.transcript' "$src_path" 2>/dev/null || true)"
+      hyp_args=(--hypothesis-text "$hyp")
+      ;;
+    text-file)
+      if ! [[ -f "$src_path" ]]; then
+        echo "$FAMILY: hypothesis stdout capture missing: $src_path — correctness skipped" >&2
+        return 0
+      fi
+      hyp_args=(--hypothesis-file "$src_path")
+      ;;
+    *)
+      echo "$FAMILY: internal error: unknown score_correctness mode '$mode'" >&2
+      return 0
+      ;;
+  esac
 
   local wer_out wer
   # Prefer the caller-python interpreter that ran the workflow's other Python
   # steps (python3). No venv assumed — compute-wer.py imports only stdlib.
   if ! wer_out="$(python3 "$(dirname "$0")/compute-wer.py" \
-       --hypothesis-text "$hyp" \
+       "${hyp_args[@]}" \
        --reference       "$ref_path" \
        --normalizer      "$spec_norm" 2>&1)"; then
     echo "$FAMILY: compute-wer.py failed: $wer_out" >&2
@@ -561,7 +660,7 @@ run_native() {
   # success or failure paths.
   : > "$stderr_log"
 
-  if wrap_time "$BINARY" "${BENCH_ARGS[@]}" \
+  if wrap_time "$BINARY" ${BENCH_ARGS[@]+"${BENCH_ARGS[@]}"} \
       > "$stderr_log.stdout" 2>> "$stderr_log"; then
     :
   else
@@ -612,7 +711,7 @@ run_one_time_wrapped() {
   : > "$rss_log"
   local start_ns end_ns
   start_ns="$(now_ns)"
-  if ! wrap_time "$BINARY" "${BENCH_ARGS[@]}" > "$stderr_log.stdout" 2> "$rss_log"; then
+  if ! wrap_time "$BINARY" ${BENCH_ARGS[@]+"${BENCH_ARGS[@]}"} > "$stderr_log.stdout" 2> "$rss_log"; then
     cat "$rss_log" >> "$stderr_log"
     tail -20 "$stderr_log" >&2
     return 1
@@ -625,6 +724,98 @@ run_one_time_wrapped() {
 # ---- run --------------------------------------------------------------------
 case "$BENCH_KIND" in
   native)
+    coreml_compare="$(spec_field coreml_compare_on_darwin)"
+    if [[ "$(uname -s)" == "Darwin" && "$coreml_compare" == "true" ]]; then
+      coreml_json="$tmp_dir/native-coreml.json"
+      coreml_stderr="$tmp_dir/coreml.err"
+      JSON_OUT="$coreml_json"
+      build_bench_args
+      BENCH_ARGS+=("--require-coreml")
+      if ! run_native "$coreml_json" "$coreml_stderr" >/dev/null; then
+        tail -40 "$coreml_stderr" >&2 || true
+        BACKEND="$(parse_backend_from_logs "$coreml_stderr" "$coreml_stderr.stdout")"
+        BACKEND="${BACKEND:-unknown}"
+        emit_json "run-failed" null null null " (required Core ML benchmark failed; verify the sidecar and runner compatibility)"
+        exit 0
+      fi
+
+      if [[ "$(jq -r '.encoder_coreml_all_runs // false' "$coreml_json")" != "true" ]] ||
+         [[ "$(jq -r '.encoder_backend // ""' "$coreml_json")" != coreml-* ]]; then
+        emit_json "run-failed" null null null " (benchmark completed without Core ML on every encoder invocation)"
+        exit 0
+      fi
+
+      baseline_json="$tmp_dir/native-metal.json"
+      baseline_stderr="$tmp_dir/metal.err"
+      JSON_OUT="$baseline_json"
+      build_bench_args
+      if ! PARAKEET_COREML_DISABLE=1 run_native "$baseline_json" "$baseline_stderr" >/dev/null; then
+        tail -40 "$baseline_stderr" >&2 || true
+        BACKEND="$(jq -r '.backend // "unknown"' "$coreml_json")"
+        ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$coreml_json")"
+        ENCODER_COREML_ALL_RUNS="true"
+        emit_json "run-failed" null null null " (forced-ggml baseline benchmark failed)"
+        exit 0
+      fi
+
+      if [[ "$(jq -r '.encoder_coreml_all_runs // false' "$baseline_json")" == "true" ]]; then
+        emit_json "run-failed" null null null " (PARAKEET_COREML_DISABLE was ignored by the baseline run)"
+        exit 0
+      fi
+      if [[ "$(jq -r '.transcript // ""' "$coreml_json")" != "$(jq -r '.transcript // ""' "$baseline_json")" ]]; then
+        emit_json "run-failed" null null null " (Core ML and forced-ggml transcripts differ)"
+        exit 0
+      fi
+
+      BACKEND="$(jq -r '.backend // "unknown"' "$coreml_json")"
+      ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$coreml_json")"
+      ENCODER_COREML_ALL_RUNS="true"
+      ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$coreml_json")"
+      BASELINE_BACKEND="$(jq -r '.backend // "unknown"' "$baseline_json")"
+      BASELINE_ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$baseline_json")"
+      BASELINE_ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$baseline_json")"
+      BASELINE_INFERENCE_MS_MEDIAN="$(jq -r '.inference_ms.median // null' "$baseline_json")"
+      BASELINE_RTF_MEDIAN="$(jq -r '.rtf_median // null' "$baseline_json")"
+      coreml_inference="$(jq -r '.inference_ms.median // null' "$coreml_json")"
+      RTF_MEDIAN="$(jq -r '.rtf_median // null' "$coreml_json")"
+
+      if [[ "$ENCODER_MS_MEDIAN" != "null" && "$BASELINE_ENCODER_MS_MEDIAN" != "null" ]]; then
+        ENCODER_SPEEDUP="$(jq -n --argjson base "$BASELINE_ENCODER_MS_MEDIAN" --argjson active "$ENCODER_MS_MEDIAN" 'if $active > 0 then $base / $active else null end')"
+      fi
+      if [[ "$coreml_inference" != "null" && "$BASELINE_INFERENCE_MS_MEDIAN" != "null" ]]; then
+        INFERENCE_SPEEDUP="$(jq -n --argjson base "$BASELINE_INFERENCE_MS_MEDIAN" --argjson active "$coreml_inference" 'if $active > 0 then $base / $active else null end')"
+      fi
+
+      coreml_rss="$(parse_rss_from_time_stderr "$coreml_stderr")"
+      baseline_rss="$(parse_rss_from_time_stderr "$baseline_stderr")"
+      if [[ -n "$coreml_rss" && -n "$baseline_rss" ]]; then
+        PEAK_RSS_MIB="$(awk -v a="$coreml_rss" -v b="$baseline_rss" 'BEGIN { print (a > b ? a : b) }')"
+      elif [[ -n "$coreml_rss" ]]; then
+        PEAK_RSS_MIB="$coreml_rss"
+      elif [[ -n "$baseline_rss" ]]; then
+        PEAK_RSS_MIB="$baseline_rss"
+      fi
+
+      artifact_dir="$(dirname "$OUT")"
+      mkdir -p "$artifact_dir"
+      cp "$coreml_json" "$artifact_dir/parakeet-tdt-coreml-native.json"
+      cp "$baseline_json" "$artifact_dir/parakeet-tdt-metal-native.json"
+
+      corr_out=""
+      corr_out="$(score_correctness "$coreml_json" || true)"
+      if [[ -n "$corr_out" ]]; then
+        IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
+        [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
+        [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
+        [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s' "$c_ref" | jq -R .)"
+      fi
+
+      coreml_min="$(jq -r '.inference_ms.min // null' "$coreml_json")"
+      coreml_max="$(jq -r '.inference_ms.max // null' "$coreml_json")"
+      emit_json "ok" "$coreml_inference" "$coreml_min" "$coreml_max"
+      exit 0
+    fi
+
     stderr_log="$tmp_dir/stderr.log"
     parsed=""
     if ! parsed="$(run_native "$JSON_OUT" "$stderr_log")"; then
@@ -648,6 +839,9 @@ case "$BENCH_KIND" in
       BACKEND="$(parse_backend_from_logs "$stderr_log" "$stderr_log.stdout")"
       BACKEND="${BACKEND:-CPU}"
     fi
+    ENCODER_BACKEND="$(jq -r '.encoder_backend // "unknown"' "$JSON_OUT")"
+    ENCODER_COREML_ALL_RUNS="$(jq -r '.encoder_coreml_all_runs // null' "$JSON_OUT")"
+    ENCODER_MS_MEDIAN="$(jq -r '.encoder_ms.median // null' "$JSON_OUT")"
     rss="$(parse_rss_from_time_stderr "$stderr_log")"
     [[ -n "$rss" ]] && PEAK_RSS_MIB="$rss"
 
@@ -655,7 +849,7 @@ case "$BENCH_KIND" in
     # block. Runs after perf is captured so a scoring failure never
     # downgrades a green perf run.
     corr_out=""
-    corr_out="$(score_correctness "$JSON_OUT" || true)"
+    corr_out="$(score_correctness bench-json "$JSON_OUT" || true)"
     if [[ -n "$corr_out" ]]; then
       IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
       [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
@@ -667,7 +861,7 @@ case "$BENCH_KIND" in
     ;;
 
   time-wrapped)
-    for i in $(seq 1 "$WARMUP"); do
+    for ((i = 1; i <= WARMUP; i++)); do
       echo "warmup $i/$WARMUP" >&2
       wu_stderr="$tmp_dir/warmup-$i.err"
       wu_rss="$tmp_dir/warmup-$i.rss"
@@ -683,7 +877,7 @@ case "$BENCH_KIND" in
     combined_stdout="$tmp_dir/combined.out"
     : > "$combined_stderr"
     : > "$combined_stdout"
-    for i in $(seq 1 "$RUNS"); do
+    for ((i = 1; i <= RUNS; i++)); do
       echo "run $i/$RUNS" >&2
       r_stderr="$tmp_dir/run-$i.err"
       r_rss="$tmp_dir/run-$i.rss"
@@ -720,6 +914,20 @@ case "$BENCH_KIND" in
     # Compute RTF only when families.json declared audio_duration_seconds.
     if [[ "$AUDIO_DURATION_S" != "null" && -n "$AUDIO_DURATION_S" ]]; then
       RTF_MEDIAN="$(awk -v m="$med" -v s="$AUDIO_DURATION_S" 'BEGIN { printf "%.3f", m / (s * 1000.0) }')"
+    fi
+
+    # Correctness scoring — no-op unless the family declares a correctness
+    # block. The hypothesis is the last successful run's captured stdout
+    # ($r_stderr.stdout from the final loop iteration, still on disk in
+    # $tmp_dir). Runs after perf is captured so a scoring failure never
+    # downgrades a green perf run.
+    corr_out=""
+    corr_out="$(score_correctness text-file "$r_stderr.stdout" || true)"
+    if [[ -n "$corr_out" ]]; then
+      IFS='|' read -r c_wer c_kind c_ref <<< "$corr_out"
+      [[ -n "$c_wer"  ]] && WER_MEDIAN="$c_wer"
+      [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
+      [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
     fi
 
     emit_json "ok" "$med" "$mn" "$mx"

@@ -1458,8 +1458,16 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder disabled via PARAKEET_COREML_DISABLE; using ggml\n");
         return;
     }
-    if (model.model_type == ParakeetModelType::CTC ||
-        model.model_type == ParakeetModelType::NEMOTRON) {
+    // Version one intentionally supports only the validated offline TDT
+    // contract. RNNT, Nemotron, CTC, EOU, and Sortformer remain on ggml until
+    // each family has its own export contract and parity coverage.
+    if (model.model_type != ParakeetModelType::TDT) {
+        if (verbose) {
+            PARAKEET_LOG_INFO(
+                "parakeet: Core ML encoder is currently TDT-only; "
+                "using ggml for model type %s\n",
+                model_type_name(model.model_type));
+        }
         return;
     }
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
@@ -2119,6 +2127,21 @@ bool model_encoder_on_coreml(const ParakeetCtcModel & m) {
     (void) m;
     return false;
 #endif
+}
+
+int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->ctx_coreml) {
+        const int64_t frames =
+            parakeet_coreml_fixed_mel_frames(m.impl->ctx_coreml, m.mel_cfg.n_mels);
+        if (frames > 0 && frames <= std::numeric_limits<int>::max()) {
+            return (int) frames;
+        }
+    }
+#else
+    (void) m;
+#endif
+    return 0;
 }
 
 std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
@@ -3499,11 +3522,12 @@ static bool encoder_is_offline(const EncoderConfig & enc) {
 
 static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool all_valid,
-                                      bool capture_intermediates) {
+                                      bool capture_intermediates,
+                                      bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (!all_valid)            return false;  // partial / streaming windows -> ggml (time masks not replicated)
+    if (model.model_type != ParakeetModelType::TDT) return false;
+    if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
-    if (model.model_type == ParakeetModelType::CTC) return false;  // CTC logits come from the ggml head
     return encoder_is_offline(model.encoder_cfg);
 }
 
@@ -3529,6 +3553,7 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
                                            T, d_model, out.encoder_out.data());
     if (rc != 0) return rc;
 
+    out.used_coreml = true;
     out.subsampling_out.clear();
     out.block_0_post_ff1.clear();
     out.block_0_post_attn.clear();
@@ -3707,7 +3732,11 @@ int run_encoder(ParakeetCtcModel   & model,
                 int                  n_mels,
                 EncoderOutputs     & out,
                 int                  max_layers,
-                bool                 capture_intermediates) {
+                bool                 capture_intermediates,
+                bool                 allow_coreml_padded) {
+    // Set pessimistically on every invocation. Only a successful Core ML
+    // prediction may change this to true.
+    out.used_coreml = false;
     if (!model.impl || !model.impl->backend_active) return -1;
 
     ggml_backend_t backend = model.impl->backend_active;
@@ -3734,10 +3763,11 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Neural Engine sidecar: run the offline FastConformer encoder
-    // on Core ML and hand encoder_out back to the ggml TDT/EOU/Sortformer decoders. On
-    // any failure fall through to the ggml encoder below (silent, presence-driven).
-    if (should_use_coreml_encoder(model, all_valid, capture_intermediates)) {
+    // Apple Core ML sidecar: run the validated offline TDT FastConformer
+    // encoder and hand encoder_out back to the ggml TDT decoder. On any failure
+    // fall through to the ggml encoder below.
+    if (should_use_coreml_encoder(model, all_valid, capture_intermediates,
+                                  allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
         if (rc == 0) return 0;
         PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);
