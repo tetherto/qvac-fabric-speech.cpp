@@ -545,3 +545,53 @@ peak 0.57874, and no clipped samples. Automated transcription recovers
 “Hello, we can generate speech with fabric.” This is a fresh current-main
 runtime sample; the prior iOS worklet results above refer to the earlier
 Fabric checkpoint until that port is rebuilt for mobile.
+
+
+## Final registry build and release review
+
+The native implementation is available in draft PR #240. Registry draft PR
+`tetherto/qvac-registry-vcpkg#364` selects speech-cpp 2026-09-10#1 from source
+`470e678f7c5ae8496bb5c11bd04229698379175e` with a verified archive checksum.
+The Fabric addon pins registry baseline and reference
+`7a70a0c301c155beb85e985c542f8b0ccd090e10`. Normal vcpkg-backed addon builds,
+without development library overrides, succeed for macOS and iOS Simulator.
+
+The current pinned macOS addon passes its real-model integration test and the
+public Node SDK passes all four transport tests. The current iOS Simulator
+worklet passes 58 assertions using Bare Kit 0.14.5 / Bare 1.29.4 on iOS 18.6.
+Both produce valid 2.64-second PCM16 WAVs at 24 kHz. The mobile packager handles
+pnpm's physical dependency paths and uses the actual linked addon framework.
+Adversarial review found no remaining concrete issue in that harness.
+
+A final CLI consumer linked against the exact pinned registry libraries gives
+different performance from the manual development build reported earlier.
+The final measurements supersede the earlier approximately 2x slowdown:
+
+| Prompt | Upstream seconds | Pinned Fabric seconds | Fabric RTF |
+| --- | ---: | ---: | ---: |
+| Short | 0.941 | 0.984 | 0.178 |
+| Numbers | 1.231 | 1.424 | 0.191 |
+| Punctuation | 1.181 | 1.236 | 0.184 |
+| Accented names | 1.230 | 1.379 | 0.187 |
+| Long | 6.160 | 6.554 | 0.180 |
+
+These are medians of three measured runs following one warmup, Apple M2 CPU,
+one thread per worker and two workers. Fabric is about 5.2–5.6x faster than
+real time; generation time is 5–16% above upstream. First audio is 74–116 ms
+versus upstream 53–69 ms. Registry build flags differ from the manual build;
+this comparison does not isolate which flag or compiler caused the change.
+During the matrix, model loading took 0.23–0.31 s. An earlier first process
+launch measured 9.61 s, so these warm-cache numbers are not a cold-start claim.
+Public SDK startup and transport latency are additional.
+
+All ten final recordings are finite, non-silent and unclipped. Automated ASR
+results remain consistent with the earlier corpus: short and punctuation have
+zero word errors, both long recordings share one assistance/assistants error,
+and nonzero-temperature accented-name output differs in a contraction. The
+zero-temperature follow-up above remains the controlled numerical comparison.
+
+Native CI builds pass on macOS, iOS and Android. Linux and Windows compile,
+but their suite fails the unchanged `test-supertonic-fit-params` CPU-refusal
+expectation; Pocket tests are not the reported failures. Full Fabric inference
+compilation still has the unrelated errors noted above. These are review/CI
+limitations; no default-branch merge or package publication is claimed.
