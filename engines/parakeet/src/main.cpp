@@ -153,7 +153,7 @@ void print_usage(const char * argv0) {
         "  --bench-warmup N     warmup runs NOT counted in stats (default 2)\n"
         "  --bench-json PATH    in --bench mode, also write the stats as JSON to PATH\n"
         "  --require-coreml     require every benchmark encoder invocation to use\n"
-        "                       the TDT Core ML sidecar; fail instead of accepting\n"
+        "                       a supported TDT/EOU Core ML sidecar; fail instead of accepting\n"
         "                       a missing sidecar or per-invocation ggml fallback\n"
         "  --profile            per-sub-stage encoder profiling: runs the encoder\n"
         "                       with n_layers = {0, 1, N/2, N} (N from the GGUF) and\n"
@@ -523,15 +523,16 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             PARAKEET_LOG_ERROR("error: --require-coreml is valid only with --bench\n");
             return 3;
         }
-        if (model.model_type != ParakeetModelType::TDT) {
+        if (model.model_type != ParakeetModelType::TDT &&
+            model.model_type != ParakeetModelType::EOU) {
             PARAKEET_LOG_ERROR(
-                "error: --require-coreml currently supports only TDT models; loaded %s\n",
+                "error: --require-coreml supports TDT and EOU models; loaded %s\n",
                 model_type_name(model.model_type));
             return 3;
         }
         if (!model_encoder_on_coreml(model)) {
             PARAKEET_LOG_ERROR(
-                "error: --require-coreml requested, but no TDT Core ML sidecar loaded; "
+                "error: --require-coreml requested, but no compatible Core ML sidecar loaded; "
                 "build with PARAKEET_COREML=ON and place <model>-encoder.mlmodelc beside "
                 "the GGUF\n");
             return 3;
@@ -767,7 +768,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
 
         if (extra.require_coreml && !times.encoder_coreml) {
             PARAKEET_LOG_ERROR(
-                "error: TDT Core ML encoder fell back to %s during benchmark\n",
+                "error: Core ML encoder fell back to %s during benchmark\n",
                 model_active_backend_name(model).c_str());
             return 31;
         }

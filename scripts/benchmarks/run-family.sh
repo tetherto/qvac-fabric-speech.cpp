@@ -398,18 +398,25 @@ JSON_OUT="$tmp_dir/native.json"
 # compiles locally on the Apple Silicon benchmark host.
 if [[ "$(uname -s)" == "Darwin" ]] &&
    [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
-  coreml_sidecar="$MODEL_DIR/parakeet-tdt-0.6b-v3-encoder.mlmodelc"
+  coreml_basename="$(spec_field coreml_model_basename)"
+  coreml_frames="$(spec_field coreml_export_mel_frames)"
+  if [[ -z "$coreml_basename" || "$coreml_basename" == "null" ||
+        -z "$coreml_frames" || "$coreml_frames" == "null" ]]; then
+    emit_json "run-failed" null null null " (Core ML benchmark metadata is incomplete)"
+    exit 0
+  fi
+  coreml_sidecar="$MODEL_DIR/${coreml_basename}-encoder.mlmodelc"
   if [[ ! -d "$coreml_sidecar" ]]; then
     coreml_python="${PARAKEET_COREML_PYTHON:-python3}"
     if [[ ! -x "$coreml_python" ]] && ! command -v "$coreml_python" >/dev/null 2>&1; then
       emit_json "run-failed" null null null " (Core ML exporter Python not found: $coreml_python)"
       exit 0
     fi
-    coreml_package="$tmp_dir/parakeet-tdt-0.6b-v3-encoder.mlpackage"
+    coreml_package="$tmp_dir/${coreml_basename}-encoder.mlpackage"
     echo "generating Core ML encoder sidecar from the benchmark GGUF" >&2
     if ! "$coreml_python" engines/parakeet/scripts/export-encoder-coreml.py \
-        --gguf "$MODEL_DIR/parakeet-tdt-0.6b-v3.f16.gguf" \
-        --n-mel-frames 1501 \
+        --gguf "$MODEL_DIR/${coreml_basename}.f16.gguf" \
+        --n-mel-frames "$coreml_frames" \
         --palettize-bits 6 \
         --palettize-group-size 16 \
         --out "$coreml_package" \
@@ -798,8 +805,8 @@ case "$BENCH_KIND" in
 
       artifact_dir="$(dirname "$OUT")"
       mkdir -p "$artifact_dir"
-      cp "$coreml_json" "$artifact_dir/parakeet-tdt-coreml-native.json"
-      cp "$baseline_json" "$artifact_dir/parakeet-tdt-metal-native.json"
+      cp "$coreml_json" "$artifact_dir/${FAMILY}-coreml-native.json"
+      cp "$baseline_json" "$artifact_dir/${FAMILY}-metal-native.json"
 
       corr_out=""
       corr_out="$(score_correctness "$coreml_json" || true)"

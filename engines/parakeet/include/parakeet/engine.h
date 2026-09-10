@@ -296,14 +296,14 @@ public:
 
     // Reports whether an Apple Core ML encoder sidecar loaded for this model.
     // Returns "coreml" when loaded; otherwise identical to backend_name().
-    // The documented and validated deployment is an offline TDT encoder. The
-    // TDT decoder always runs on the ggml backend reported by backend_name().
+    // Validated deployments are offline TDT and exact-fixed-shape EOU encoders.
+    // Their decoders always run on the ggml backend reported by backend_name().
     std::string encoder_backend() const;
 
     // True when an Apple Core ML encoder sidecar loaded. This is a load-status
     // query, not a guarantee that every call shape uses Core ML: unsupported
-    // or streaming shapes fall back to ggml. The supported deployment is an
-    // offline TDT encoder. Always false on non-Apple builds and when the
+    // or streaming shapes fall back to ggml. Supported deployments are TDT and
+    // EOU encoders. Always false on non-Apple builds and when the
     // sidecar is absent or failed to initialise.
     bool encoder_on_coreml() const;
 

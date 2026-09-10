@@ -256,10 +256,9 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 ## Core ML encoder sidecar
 
-`PARAKEET_COREML=ON` is Apple-only. It enables an optional offline TDT
-FastConformer encoder sidecar. This first implementation intentionally leaves
-CTC, RNNT/Nemotron, EOU, and Sortformer on ggml. Mel preprocessing and TDT
-decoding remain in the normal pipeline.
+`PARAKEET_COREML=ON` is Apple-only. It enables optional TDT and EOU
+FastConformer encoder sidecars. Mel preprocessing and the TDT/EOU decoders
+remain in the normal ggml pipeline.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
 is not currently compatible with its TorchScript scalar conversion, and the
@@ -293,6 +292,36 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --compile-dir engines/parakeet/models
 ```
 
+For EOU, first download and convert the checkpoint, verify the F16 round trip,
+then compile the exact-shape sidecar from that GGUF:
+
+```bash
+engines/parakeet/scripts/download-all-models.sh eou
+
+python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --hf-repo nvidia/parakeet_realtime_eou_120m-v1 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf \
+  --quant f16
+
+python engines/parakeet/scripts/verify-gguf-roundtrip.py \
+  --nemo engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --gguf engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf
+
+python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --hf-repo nvidia/parakeet_realtime_eou_120m-v1 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1.q8_0.gguf \
+  --quant q8_0
+
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
 Benchmark fixed lengths and inspect ANE/GPU/CPU placement:
 
 ```bash
@@ -300,18 +329,27 @@ python engines/parakeet/scripts/bench-encoder-coreml.py \
   --gguf engines/parakeet/models/parakeet-tdt-0.6b-v3.f16.gguf \
   --mel-frames 1501 \
   --palettize-bits 6 --palettize-group-size 16
+
+python engines/parakeet/scripts/bench-encoder-coreml.py \
+  --gguf engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf \
+  --mel-frames 1101 \
+  --palettize-bits 6 --palettize-group-size 16
 ```
 
-The default export uses Float16 input, output, weights, and intermediates. It is
-fixed-shape: shorter inputs are zero-padded to the exported mel-frame capacity,
-while longer offline inputs are automatically divided into overlapping windows
-that each fit that capacity. The example uses this addon's 15-second shape (1501
+The default export uses Float16 input, output, weights, and intermediates. TDT
+shorter inputs are zero-padded to the exported mel-frame capacity, while longer
+offline inputs are automatically divided into overlapping windows that fit that
+capacity. EOU uses exact-shape routing because padding future frames can change
+token and end-of-turn decisions: only an invocation matching the compiled mel
+shape uses Core ML, and all other batch or streaming windows use ggml. The TDT
+example uses this addon's 15-second shape (1501
 mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional 6-bit
 grouped-channel LUT weights. Grouped palettization requires coremltools 8+ and
 macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS 16
-compatible Float16 model. `--flexible` exports a RangeDim model, but it is a
+compatible Float16 model. `--flexible` exports a TDT RangeDim model, but it is a
 correctness/experimentation path: measured flexible graphs place no operations
-on ANE and can be substantially slower than ggml Metal.
+on ANE and can be substantially slower than ggml Metal. Flexible EOU export is
+rejected.
 
 At runtime the sidecar lets Core ML use all compute units and reuses its input,
 feature-provider, and fixed-shape output-backing objects across predictions. The
@@ -327,7 +365,7 @@ force ggml, including for parity or benchmarking. Setting
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
 
-For an unambiguous TDT benchmark, configure the exact build directory with
+For an unambiguous TDT or EOU benchmark, configure the exact build directory with
 Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
 
 ```bash
@@ -347,7 +385,7 @@ cmake --build build-parakeet-coreml --target parakeet-cli -j
 ```
 
 The JSON may still contain `"backend": "ggml-metal"` because the TDT decoder
-continues to use Metal. Confirm encoder execution using `encoder_backend` and
+or EOU decoder continues to use Metal. Confirm encoder execution using `encoder_backend` and
 `encoder_coreml_all_runs`. A `coreml-all` encoder label means Core ML may place
 operations across ANE, GPU, and CPU; it does not mean ANE-only execution.
 

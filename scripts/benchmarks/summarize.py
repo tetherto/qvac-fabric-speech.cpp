@@ -183,7 +183,7 @@ def render_legend() -> str:
         "own GPU compute-init logs; a green run with no GPU-engagement evidence is "
         "reported as `CPU`. `unknown` appears only on failed runs, whose logs may be "
         "truncated mid-init.\n"
-        "- **Core ML comparison** — the Parakeet Darwin row runs TDT twice on the "
+        "- **Core ML comparison** — Core-ML-enabled Parakeet Darwin rows run twice on the "
         "same Apple Silicon runner. `Core ML verified=yes` means every measured "
         "encoder invocation used the sidecar; the baseline is forced through ggml "
         "with `PARAKEET_COREML_DISABLE=1`. Speedup is baseline divided by Core ML.\n"

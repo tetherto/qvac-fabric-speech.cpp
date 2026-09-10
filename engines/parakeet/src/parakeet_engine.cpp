@@ -141,11 +141,16 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    const LongFormPlan coreml = resolve_coreml_fixed_shape_plan(
-        model_coreml_fixed_mel_frames(model),
-        opts.long_form_context_frames,
-        model.encoder_cfg.subsampling_factor,
-        n_mel_frames);
+    // Padding to a fixed capacity is validated only for the full-context TDT
+    // graph. EOU uses exact-shape Core ML routing, so loading an EOU sidecar
+    // must not alter the existing long-form window plan.
+    const LongFormPlan coreml = model.model_type == ParakeetModelType::TDT
+        ? resolve_coreml_fixed_shape_plan(
+              model_coreml_fixed_mel_frames(model),
+              opts.long_form_context_frames,
+              model.encoder_cfg.subsampling_factor,
+              n_mel_frames)
+        : LongFormPlan{};
 
     // Respect a smaller user/model long-form limit, but force fixed-shape
     // windowing when that is the only way the complete input fits the sidecar.

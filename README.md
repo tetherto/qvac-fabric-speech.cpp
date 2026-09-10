@@ -106,7 +106,7 @@ engine-specific guides qualify model-level validation.
 
 | Model | Engine | Task | Params | Quantization | Backends | Notes |
 |---|---|---|---|---|---|---|
-| `nvidia/parakeet_realtime_eou_120m-v1` | parakeet | low-latency ASR + end-of-turn | 120 M | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | decoder graphs on Metal/Vulkan/CUDA, scalar on CPU/OpenCL; `is_eou_boundary` |
+| `nvidia/parakeet_realtime_eou_120m-v1` | parakeet | low-latency ASR + end-of-turn | 120 M | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape encoder | decoder graphs on Metal/Vulkan/CUDA, scalar on CPU/OpenCL; `is_eou_boundary` |
 | `nvidia/diar_sortformer_4spk-v1` | parakeet | diarization, up to 4 speakers | 123 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + sliding-history live |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | streaming-trained encoder |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | Audio-Online Speaker Cache, stable slots across gaps |
@@ -191,7 +191,7 @@ tests link an object library so they still see hidden internals. Consumers keep
 | `SPEECH_BUILD_TESTS` | `OFF` | build the engine test harnesses |
 | `SPEECH_BUILD_WHISPER_TESTS` | `OFF` | also build whisper's tests (committed weightless stubs cover tiny..large pipeline smokes; only `test-vad-full` needs a downloaded model) |
 
-GPU backends come from the ggml build: `-DGGML_VULKAN=ON`, `-DGGML_OPENCL=ON`, `-DGGML_CUDA=ON`; Metal is on by default on Apple. Core ML is gated per engine and defaults to off on both, so add `-DWHISPER_COREML=ON -DPARAKEET_COREML=ON` on Apple for the Whisper encoder and Parakeet offline TDT encoder sidecars. For tests, configure with `-DSPEECH_BUILD_TESTS=ON`, then run the non-GPU suite with `ctest --test-dir build -LE 'gpu|perf'`. A Metal build also exposes `test-minimax-metal-ops`, the model-free AudioGen CPU/Metal parity regression; it skips unless the Metal device supports `MUL_MAT` (simdgroup reduction, `MTLGPUFamilyApple7`+), which rules out the virtualized GPUs on hosted macOS runners.
+GPU backends come from the ggml build: `-DGGML_VULKAN=ON`, `-DGGML_OPENCL=ON`, `-DGGML_CUDA=ON`; Metal is on by default on Apple. Core ML is gated per engine and defaults to off on both, so add `-DWHISPER_COREML=ON -DPARAKEET_COREML=ON` on Apple for the Whisper encoder and Parakeet TDT/EOU encoder sidecars. EOU sidecars accelerate exact compiled mel shapes only. For tests, configure with `-DSPEECH_BUILD_TESTS=ON`, then run the non-GPU suite with `ctest --test-dir build -LE 'gpu|perf'`. A Metal build also exposes `test-minimax-metal-ops`, the model-free AudioGen CPU/Metal parity regression; it skips unless the Metal device supports `MUL_MAT` (simdgroup reduction, `MTLGPUFamilyApple7`+), which rules out the virtualized GPUs on hosted macOS runners.
 
 Each engine also configures standalone (`cmake -S engines/parakeet`, and so on), which is what the CI lanes use.
 
@@ -241,6 +241,37 @@ Models are converted from NeMo checkpoints with `download-all-models.sh` and
 `convert-nemo-to-gguf.py`. The downloader covers every supported checkpoint,
 including the AI4Bharat IndicConformer hybrid; see
 [engines/parakeet/README.md](engines/parakeet/README.md).
+
+The EOU-only artifact path downloads the 120M checkpoint, creates and verifies
+an F16 GGUF, creates the Q8_0 runtime GGUF, and compiles the fixed 1101-frame
+Core ML sidecar on macOS/Xcode:
+
+```sh
+engines/parakeet/scripts/download-all-models.sh eou
+python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --hf-repo nvidia/parakeet_realtime_eou_120m-v1 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf --quant f16
+python engines/parakeet/scripts/verify-gguf-roundtrip.py \
+  --nemo engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --gguf engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf
+python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt engines/parakeet/models/parakeet_realtime_eou_120m-v1.nemo \
+  --hf-repo nvidia/parakeet_realtime_eou_120m-v1 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1.q8_0.gguf --quant q8_0
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/parakeet_realtime_eou_120m-v1.f16.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/parakeet_realtime_eou_120m-v1-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+EOU Core ML is correctness-first: only calls with exactly the sidecar's fixed
+mel-frame shape are accelerated. Startup, tail, custom-sized, and other
+streaming windows fall back to ggml. Use `PARAKEET_COREML_DISABLE=1` for a
+forced-ggml comparison, or run the `parakeet-eou` desktop benchmark family for
+required-Core-ML versus Metal timing and normalized JFK WER.
 
 Hybrid RNNT+CTC checkpoints export CTC by default. Pass `--head rnnt` to export
 their Transducer branch; conversion validates that the joint output is exactly
