@@ -590,8 +590,16 @@ zero word errors, both long recordings share one assistance/assistants error,
 and nonzero-temperature accented-name output differs in a contraction. The
 zero-temperature follow-up above remains the controlled numerical comparison.
 
-Native CI builds pass on macOS, iOS and Android. Linux and Windows compile,
-but their suite fails the unchanged `test-supertonic-fit-params` CPU-refusal
-expectation; Pocket tests are not the reported failures. Full Fabric inference
-compilation still has the unrelated errors noted above. These are review/CI
-limitations; no default-branch merge or package publication is claimed.
+The initial native CI builds passed on macOS, iOS and Android. Linux and
+Windows compiled but failed an existing `test-supertonic-fit-params`
+CPU-refusal expectation. Supertonic's earlier `808c732f` dispatch change lets
+CPU builds without Accelerate/CBLAS use the fused graph path; the test still
+expected every CPU request to be refused before graph measurement. The
+incomplete synthetic model correctly returns `measurement-failed` on that
+path. The test now checks the precise reason for each dispatch configuration,
+still requiring Error (never FITS) for the incomplete model. The failure was
+reproduced locally with Accelerate disabled; the corrected test passes both
+with and without Accelerate. This changes test expectations and documentation,
+not synthesis or fit-dispatch behavior. Full Fabric inference compilation
+still has the unrelated errors noted above. No default-branch merge or package
+publication is claimed.

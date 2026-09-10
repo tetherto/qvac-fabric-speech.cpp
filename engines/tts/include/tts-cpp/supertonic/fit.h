@@ -39,13 +39,13 @@
 //
 // COVERAGE / REFUSALS (honest partial coverage; a wrong FITS is never
 // emitted):
-//   * Only the non-CPU one-graph dispatch paths are modelled.  When the
-//     resolved backend is the CPU (n_gpu_layers <= 0, no validated GPU
-//     present) or a one-graph path is env-disabled
+//   * The fused one-graph dispatch paths are modelled: GPU backends and CPU
+//     builds without Accelerate/CBLAS pointwise kernels. When the resolved
+//     CPU backend uses those pointwise kernels, or a one-graph path is env-disabled
 //     (SUPERTONIC_DISABLE_LOOP_GRAPH / SUPERTONIC_DISABLE_ONE_GRAPH /
 //     SUPERTONIC_DISABLE_TEXT_ONE_GRAPH /
 //     SUPERTONIC_DISABLE_DURATION_ONE_GRAPH), fit_params returns
-//     Error / "compute-path-not-supported": the CPU dispatch runs per-island
+//     Error / "compute-path-not-supported": the pointwise path runs per-island
 //     multi-cache sets this projection does not model yet (follow-up under
 //     QVAC-24283).
 //   * The projection covers the batch path; streaming runs the same stages
