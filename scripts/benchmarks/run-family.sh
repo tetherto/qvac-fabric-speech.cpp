@@ -884,8 +884,13 @@ case "$BENCH_KIND" in
       cp "$coreml_json" "$artifact_dir/parakeet-tdt-coreml-native.json"
       cp "$baseline_json" "$artifact_dir/parakeet-tdt-metal-native.json"
 
+      # $coreml_json is the parakeet-cli --json-out from the CoreML-forced
+      # run — a bench-JSON with the .transcript field. Pass the mode
+      # positional explicitly; the pre-refactor single-arg call landed
+      # $coreml_json in $mode, hit score_correctness's unknown-mode
+      # branch, and silently skipped WER on every CoreML-native dispatch.
       corr_out=""
-      corr_out="$(score_correctness "$coreml_json" || true)"
+      corr_out="$(score_correctness bench-json "$coreml_json" || true)"
       if [[ -n "$corr_out" ]]; then
         IFS='|' read -r c_score c_kind c_ref <<< "$corr_out"
         case "$c_kind" in

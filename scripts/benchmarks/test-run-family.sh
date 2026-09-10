@@ -335,6 +335,12 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "f1", reference: "/does/not/exist.json", tolerance_ms: 0},
     notes: "missing reference: correctness skipped, perf still ok"
   },
+  "f1-tw-collar": {
+    bench_kind: "time-wrapped", binary: "bin/tw-vadtext-slop", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "f1", reference: $ref_f1, tolerance_ms: 200},
+    notes: "boundary-slop hyp (2.1-6.1 vs ref 2.0-6.0) + 200 ms tolerance; the slop falls inside the collar so F1 1.0. Proves tolerance_ms>0 is threaded from families.json through to compute-f1.py."
+  },
   "f1-nat-warns": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
@@ -492,6 +498,19 @@ STUB
 cat > "$BUILD/bin/tw-vadjson-perfect" <<'STUB'
 #!/usr/bin/env bash
 printf '[{"start": 2.0, "end": 6.0}]\n'
+STUB
+
+# Boundary-slop hyp for the F1 collar plumbing test: 100 ms late at both
+# start and end. Without collar: precision = recall = 390/400 = 0.975
+# (10 FP + 10 FN). With a 200 ms collar (±20 frames around each ref
+# boundary), both slop regions fall entirely inside the excluded frames,
+# so F1 goes back to 1.0. The f1-tw-collar cell asserts the collar case.
+cat > "$BUILD/bin/tw-vadtext-slop" <<'STUB'
+#!/usr/bin/env bash
+printf '\n'
+printf 'Detected 1 speech segments:\n'
+printf 'Speech segment 0: start = 2.10, end = 6.10\n'
+printf '\n'
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -872,6 +891,17 @@ grep -q 'reference file not found' "$OUT/f1-tw-badref.err" \
 [[ ! -f "$OUT/f1-tw-badref.hypothesis.txt" ]] \
   || fail "f1-tw-badref: hypothesis sibling should NOT exist when correctness was skipped"
 ok "correctness (F1, time-wrapped): missing reference => f1_median=null + diagnostic + no hypothesis sibling (perf still ok)"
+
+# Non-zero tolerance plumbing: proves families.json's correctness.tolerance_ms
+# reaches compute-f1.py's --collar-ms. The 100 ms boundary slop scores
+# ~0.975 F1 without a collar (compute-f1.py self-test pins that value);
+# a 200 ms collar hides both slop regions, so F1 lands at 1.0 here.
+# Mirrors the der-tw-collar plumbing test.
+run_driver f1-tw-collar "$OUT/f1-tw-collar.json" "$OUT/f1-tw-collar.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .f1_median == 1.0 and .correctness_kind == "f1"' \
+  "$OUT/f1-tw-collar.json" > /dev/null \
+  || fail "f1-tw-collar: $(cat "$OUT/f1-tw-collar.json")"
+ok "correctness (F1, time-wrapped): 200 ms tolerance hides boundary slop => F1 1.0 (tolerance_ms plumbed through)"
 
 # Native families have no VAD schema in --json-out, so a native spec that
 # declares kind='f1' must be skipped with a diagnostic — guards against a
