@@ -74,8 +74,8 @@ struct FitOptions {
     // so a projection normally passes n_gpu_layers > 0.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
-    // "f32" (default) | "f16" | "q8_0" -- EngineOptions::precision.
-    std::string precision = "f32";
+    // Mirrors the default Engine allocation policy by construction.
+    std::string precision = "auto";
     // EngineOptions::f16_weights tri-state (-1 auto / 0 off / 1 on).
     int         f16_weights = -1;
     std::string backends_dir;

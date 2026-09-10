@@ -1,6 +1,8 @@
 #include "coreml/parakeet_coreml_shape.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace parakeet {
 namespace {
@@ -33,6 +35,27 @@ CoremlTrailingMatch coreml_match_trailing_dims(const std::vector<int64_t> & dims
     if (outer == cols && inner == rows) {
         return {true, true};
     }
+    return {false, false};
+}
+
+CoremlTrailingMatch coreml_match_trailing_capacity(
+        const std::vector<int64_t> & dims,
+        int64_t required_rows,
+        int64_t cols) {
+    const std::size_t n = dims.size();
+    if (n < 2 || required_rows <= 0 || cols <= 0) {
+        return {false, false};
+    }
+
+    const int64_t outer = dims[n - 2];
+    const int64_t inner = dims[n - 1];
+    if (inner == cols && outer >= required_rows) {
+        return {true, false};
+    }
+    if (outer == cols && inner >= required_rows) {
+        return {true, true};
+    }
+
     return {false, false};
 }
 

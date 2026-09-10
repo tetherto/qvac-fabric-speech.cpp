@@ -27,7 +27,8 @@ Example:
 
   python scripts/export-encoder-coreml.py \
       --gguf   models/parakeet-tdt-0.6b-v3.f16.gguf \
-      --wav    test/samples/jfk.wav \
+      --n-mel-frames 1501 \
+      --palettize-bits 6 --palettize-group-size 16 \
       --out    models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
       --compile-dir models
 
@@ -323,8 +324,28 @@ def report_compute_placement(mlmodelc_path):
               "force Core ML onto CPU; export a fixed single length for ANE acceleration.")
 
 
+def palettize_encoder(mlmodel, bits, group_size):
+    """Apply the grouped-channel LUT layout used by ANE-focused speech models.
+
+    Grouped-channel palettization requires the macOS 15 / iOS 18 model format;
+    the caller selects that deployment target before conversion.
+    """
+    import coremltools.optimize as cto
+
+    op_config = cto.coreml.OpPalettizerConfig(
+        mode="kmeans",
+        nbits=bits,
+        granularity="per_grouped_channel",
+        group_size=group_size,
+    )
+    config = cto.coreml.OptimizationConfig(global_config=op_config)
+    print(f"[export] palettizing weights: {bits}-bit grouped-channel LUTs, "
+          f"group_size={group_size}")
+    return cto.coreml.palettize_weights(mlmodel, config)
+
+
 def convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
-                  precision, out_dtype):
+                  precision, io_dtype, deployment_target):
     model = EncoderModule(ref, weights, meta).eval()
     with torch.inference_mode():
         reference_out = model(example)
@@ -333,16 +354,16 @@ def convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
     traced = torch.jit.trace(model, example, check_trace=False)
     return ct.convert(
         traced,
-        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=np.float32)],
-        outputs=[ct.TensorType(name="encoder_out", dtype=out_dtype)],
+        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=io_dtype)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
         compute_units=ct.ComputeUnit.ALL,
         compute_precision=precision,
-        minimum_deployment_target=ct.target.macOS13,
+        minimum_deployment_target=deployment_target,
     )
 
 
 def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
-                     min_frames, max_frames, precision, out_dtype):
+                     min_frames, max_frames, precision, io_dtype, deployment_target):
     min_frames = min_frames if min_frames is not None else 1
     max_frames = max(max_frames if max_frames is not None else n_mel_frames, n_mel_frames)
     pos_emb_max_len = int(meta.get("parakeet.encoder.pos_emb_max_len", 5000))
@@ -389,11 +410,11 @@ def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
             name="mel",
             shape=ct.Shape(shape=(n_mels, ct.RangeDim(
                 lower_bound=min_frames, upper_bound=max_frames, default=n_mel_frames))),
-            dtype=np.float32)],
-        outputs=[ct.TensorType(name="encoder_out", dtype=out_dtype)],
+            dtype=io_dtype)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
         compute_units=ct.ComputeUnit.ALL,
         compute_precision=precision,
-        minimum_deployment_target=ct.target.macOS13,
+        minimum_deployment_target=deployment_target,
     )
 
 
@@ -408,6 +429,11 @@ def main():
     group.add_argument("--wav", type=Path, help="size the encoder to this wav's mel length")
     group.add_argument("--n-mel-frames", type=int, help="fixed mel length to trace")
     ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    ap.add_argument("--palettize-bits", type=int, choices=[4, 6, 8], default=None,
+                    help="optionally compress fixed-export weights into grouped-channel LUTs; "
+                         "6 matches the ANE-oriented Voz layout and requires macOS 15 / iOS 18")
+    ap.add_argument("--palettize-group-size", type=int, default=16,
+                    help="channels sharing each LUT with --palettize-bits (default: 16)")
     ap.add_argument("--compile-dir", type=Path, default=None,
                     help="if set, compile the .mlpackage to a .mlmodelc here via coremlc")
     ap.add_argument("--flexible", action="store_true",
@@ -421,6 +447,10 @@ def main():
                     help="[--flexible] maximum mel length the RangeDim accepts; set to your "
                          "longest expected utterance (default: the traced length)")
     args = ap.parse_args()
+    if args.flexible and args.palettize_bits is not None:
+        ap.error("--palettize-bits requires a fixed-shape export (omit --flexible)")
+    if args.palettize_group_size <= 0:
+        ap.error("--palettize-group-size must be greater than zero")
 
     ref = load_reference_encoder(args.scripts)
     weights, meta = ref.load_gguf(args.gguf)
@@ -433,16 +463,20 @@ def main():
         n_mel_frames = mel_frames_for_wav(args.wav, resolve_hop_length(meta))
 
     precision = ct.precision.FLOAT16 if args.precision == "fp16" else ct.precision.FLOAT32
-    out_dtype = np.float16 if args.precision == "fp16" else np.float32
+    io_dtype = np.float16 if args.precision == "fp16" else np.float32
+    deployment_target = ct.target.macOS15 if args.palettize_bits is not None else ct.target.macOS13
     example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
 
     if args.flexible:
         mlmodel = convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames,
                                    d_model, args.min_frames, args.max_frames,
-                                   precision, out_dtype)
+                                   precision, io_dtype, deployment_target)
     else:
         mlmodel = convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames,
-                                d_model, precision, out_dtype)
+                                d_model, precision, io_dtype, deployment_target)
+    if args.palettize_bits is not None:
+        mlmodel = palettize_encoder(mlmodel, args.palettize_bits,
+                                    args.palettize_group_size)
     mlmodel.save(str(args.out))
     print(f"[export] saved {args.out}")
 

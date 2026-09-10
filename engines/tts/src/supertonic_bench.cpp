@@ -55,7 +55,7 @@ void usage(const char * argv0) {
         "          [--runs 5] [--warmup 1] [--threads N] [--n-gpu-layers N]\n"
         "          [--vulkan-device N] (-1 = auto-pick adapter with most free VRAM)\n"
         "          [--f16-attn 0|1] [--f16-weights 0|1]\n"
-        "          [--precision f32|f16|q8_0]   (default: f32)\n"
+        "          [--precision auto|f32|f16|q8_0]   (default: auto)\n"
         "          [--kv-attn-type auto|f32|f16|bf16|q8_0]\n"
         "                            (multi-dtype K/V flash-attn dispatch; generalises\n"
         "                            --f16-attn.  default auto: falls back to --f16-attn.\n"
@@ -83,10 +83,11 @@ void usage(const char * argv0) {
 
 tts_cpp::supertonic::detail::supertonic_precision parse_bench_precision(const std::string & s) {
     using P = tts_cpp::supertonic::detail::supertonic_precision;
+    if (s == "auto" || s == "AUTO" || s == "Auto") return P::Auto;
     if (s == "f32" || s == "F32") return P::F32;
     if (s == "f16" || s == "F16") return P::F16;
     if (s == "q8_0" || s == "Q8_0" || s == "q8") return P::Q8_0;
-    throw std::runtime_error("unknown --precision value: " + s + " (expected f32|f16|q8_0)");
+    throw std::runtime_error("unknown --precision value: " + s + " (expected auto|f32|f16|q8_0)");
 }
 
 const char * precision_to_string(tts_cpp::supertonic::detail::supertonic_precision p) {
@@ -95,8 +96,9 @@ const char * precision_to_string(tts_cpp::supertonic::detail::supertonic_precisi
         case P::F32:  return "f32";
         case P::F16:  return "f16";
         case P::Q8_0: return "q8_0";
+        case P::Auto: return "auto";
     }
-    return "f32";
+    return "auto";
 }
 
 double percentile(std::vector<double> v, double p) {
@@ -172,7 +174,7 @@ int main(int argc, char ** argv) {
     // Phase 2A — F16 load-time materialization of the hot matmul /
     // pwconv weights.  -1 auto / 0 / 1 force.
     int f16_weights = -1;
-    supertonic_precision precision = supertonic_precision::F32;
+    supertonic_precision precision = supertonic_precision::Auto;
     // Vulkan adapter index. Default 0 (the historical
     // hard-coded value in `init_supertonic_backend`).  Range-checked
     // at GGUF load against `ggml_backend_vk_get_device_count()`; an

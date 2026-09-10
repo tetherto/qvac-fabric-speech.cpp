@@ -3,7 +3,7 @@
 // Mirrors the whisper.cpp `whisper_coreml_*` C shim: an opaque context wraps a
 // compiled `.mlmodelc` encoder that runs on the Apple Neural Engine, and the
 // caller hands log-mel features in / reads encoder hidden states out. The rest
-// of the pipeline (mel preprocessing, TDT/CTC decode, tokenizer) stays on ggml.
+// of the validated pipeline (mel preprocessing, TDT decode, tokenizer) stays on ggml.
 //
 // This header is Apple-only; it is compiled and referenced solely when the
 // PARAKEET_USE_COREML build definition is set. All entry points return failure
@@ -12,13 +12,12 @@
 //
 // Export contract (what the mobius `.mlmodelc` must expose so the wrapper binds):
 //   - Exactly one MLMultiArray input  = log-mel features, dims {n_mels, n_mel_frames}
-//     (either order; the wrapper adapts). This is the offline FastConformer encoder
+//     (either order; Float16 or Float32; the wrapper adapts). This is the offline FastConformer encoder
 //     input, i.e. everything from the subsampling stack through the last Conformer
 //     block; it must NOT include the TDT joint projection. The mel time axis may be
-//     fixed (accelerates only that exact length; other lengths fall back to ggml) or
-//     flexible (RangeDim / enumerated shapes): the wrapper allocates the input at the
-//     caller's length in the model's declared orientation and lets Core ML reject an
-//     unsupported length.
+//     fixed or flexible. For a fixed shape, an input no longer than the declared
+//     capacity is zero-padded to that capacity. Longer inputs must be divided into
+//     windows by the caller. Flexible inputs are allocated at the requested length.
 //   - Exactly one MLMultiArray output = encoder hidden states, dims {n_enc_frames,
 //     d_model} (either order; Float32 or Float16). n_enc_frames is n_mel_frames put
 //     through the three stride-2 subsampling convs (matching run_encoder's sizing).
@@ -43,6 +42,13 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 
+// Return the fixed mel-frame capacity of the model input for `n_mels`.
+// Returns 0 for flexible, enumerated-multi-shape, or unrecognised inputs.
+// The value describes model capacity, not the current utterance length.
+int64_t parakeet_coreml_fixed_mel_frames(
+        const struct parakeet_coreml_context * ctx,
+        int64_t n_mels);
+
 // Run the encoder on the Apple Neural Engine.
 //
 //   mel           log-mel features, row-major (n_mel_frames, n_mels),
@@ -65,9 +71,8 @@ int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,
                            int64_t       d_model,
                            float       * encoder_out);
 
-// Human-readable compute label for stats/logging, e.g. "coreml". The concrete
-// unit (ANE / GPU / CPU) is chosen by Core ML at runtime and is not knowable
-// up front, so this reports the backend family rather than the physical unit.
+// Human-readable requested-compute label for stats/logging, e.g. "coreml-ane".
+// Core ML may still fall back to CPU for individual unsupported operations.
 const char * parakeet_coreml_backend_label(const struct parakeet_coreml_context * ctx);
 
 #if defined(__cplusplus)

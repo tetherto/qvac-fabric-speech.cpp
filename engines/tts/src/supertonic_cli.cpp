@@ -43,7 +43,7 @@ void usage(const char * argv0) {
         "          [--f16-weights 0|1] (load-time F16 materialization for the\n"
         "                            audit-identified hot matmul / pwconv weights;\n"
         "                            defaults to auto: on for GPU, off for CPU)\n"
-        "          [--precision f32|f16|q8_0]   (default: f32)\n"
+        "          [--precision auto|f32|f16|q8_0]   (default: auto)\n"
         "          [--f16-weights-deny PATTERN1,PATTERN2,...] (substring patterns,\n"
         "                            comma-separated; matching tensors stay F32 even\n"
         "                            when --f16-weights is on.  Default empty.)\n"
@@ -78,10 +78,11 @@ void usage(const char * argv0) {
 }
 
 tts_cpp::supertonic::Precision parse_precision(const std::string & s) {
+    if (s == "auto" || s == "AUTO" || s == "Auto") return tts_cpp::supertonic::Precision::Auto;
     if (s == "f32" || s == "F32") return tts_cpp::supertonic::Precision::F32;
     if (s == "f16" || s == "F16") return tts_cpp::supertonic::Precision::F16;
     if (s == "q8_0" || s == "Q8_0" || s == "q8") return tts_cpp::supertonic::Precision::Q8_0;
-    throw std::runtime_error("unknown --precision value: " + s + " (expected f32|f16|q8_0)");
+    throw std::runtime_error("unknown --precision value: " + s + " (expected auto|f32|f16|q8_0)");
 }
 
 // Emit `pcm` as raw signed-16-bit little-endian samples on stdout.  Used
