@@ -447,15 +447,14 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
 ggml_tensor * layer_norm_ggml(ggml_context * ctx,
                               ggml_tensor * x,
                               ggml_tensor * g,
-                              ggml_tensor * b,
-                              bool allow_fused) {
+                              ggml_tensor * b) {
     // Fused-op fast path on non-CPU backends (Metal/Vulkan/CUDA/OpenCL):
     // GGML_OP_SUPERTONIC_LAYER_NORM_CHANNEL collapses the
     // permute + cont + ggml_norm + mul + add + permute + cont chain into
     // a single dispatch.  Override with SUPERTONIC_DISABLE_FUSED_LAYER_NORM=1.
     static const bool disable_fused_layer_norm =
         std::getenv("SUPERTONIC_DISABLE_FUSED_LAYER_NORM") != nullptr;
-    if (allow_fused && !supertonic_use_cpu_custom_ops() && supertonic_use_fused_supertonic_ops() && !disable_fused_layer_norm &&
+    if (!supertonic_use_cpu_custom_ops() && supertonic_use_fused_layer_norm() && !disable_fused_layer_norm &&
         x->type == GGML_TYPE_F32 && g->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         g->ne[0] == x->ne[1] && b->ne[0] == x->ne[1] &&
@@ -842,8 +841,7 @@ ggml_tensor * vector_convnext_ggml(ggml_context * ctx,
         dilation);
     y = layer_norm_ggml(ctx, y,
         require_source_tensor(model, p + ".norm.norm.weight"),
-        require_source_tensor(model, p + ".norm.norm.bias"),
-        !model.backend_is_vk);
+        require_source_tensor(model, p + ".norm.norm.bias"));
     y = conv1d_f32(ctx, require_source_tensor(model, p + ".pwconv1.weight"), y, 1, 0, 1);
     y = bias_gelu_ggml(ctx, y, require_source_tensor(model, p + ".pwconv1.bias"));
     y = conv1d_f32(ctx, require_source_tensor(model, p + ".pwconv2.weight"), y, 1, 0, 1);
@@ -868,6 +866,7 @@ ggml_tensor * vector_convnext_ggml(ggml_context * ctx,
 // path is faster than the equivalent ggml_mul_mat dispatch on Apple
 // CPUs.  Caller's `vector_convnext_ggml_ct` already roundtrips on CPU.
 ggml_tensor * pointwise_matmul_ct(ggml_context * ctx,
+                                  const supertonic_model & model,
                                   ggml_tensor * x_ct,   // [IC, T, 1, 1]
                                   ggml_tensor * w,      // [1, IC, OC, 1]  (Conv1d K=1)
                                   ggml_tensor * b) {
@@ -876,7 +875,12 @@ ggml_tensor * pointwise_matmul_ct(ggml_context * ctx,
     GGML_ASSERT(ggml_is_contiguous(w));
     ggml_tensor * w_2d = ggml_reshape_2d(ctx, w, w->ne[1], w->ne[2]);
     ggml_tensor * x_2d = ggml_reshape_2d(ctx, x_ct, x_ct->ne[0], x_ct->ne[1]);
-    ggml_tensor * y = st_mul_mat(ctx, w_2d, x_2d);  // [OC, T]
+    // Weight-first keeps the result in [C, T] with no transpose, but only
+    // some Vulkan drivers accumulate it identically to the F32 reference;
+    // the rest multiply activation-first and pay one transpose dispatch.
+    ggml_tensor * y = model.ct_matmul_activation_first
+        ? ggml_cont(ctx, ggml_transpose(ctx, st_mul_mat(ctx, x_2d, w_2d)))
+        : st_mul_mat(ctx, w_2d, x_2d);  // [OC, T]
     if (b) y = ggml_add(ctx, y, repeat_like(ctx, b, y));
     return y;
 }
@@ -938,20 +942,33 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
     ggml_tensor * y = seg_len > 0
         ? ggml_supertonic_depthwise_1d_ct_segmented(ctx, x_ct, dw_w, dw_b, dilation, seg_len)
         : ggml_supertonic_depthwise_1d_ct(ctx, x_ct, dw_w, dw_b, dilation);
-    // layer_norm_channel_ct: [C, T] -> [C, T]
-    y = ggml_supertonic_layer_norm_channel_ct(ctx, y,
-        flatten_1d(require_source_tensor(model, p + ".norm.norm.weight")),
-        flatten_1d(require_source_tensor(model, p + ".norm.norm.bias")),
-        1e-6f);
+    // layer_norm over the channel dim.  In [C, T] the channels are already
+    // the inner-most axis, so the stock decomposition needs no permute:
+    // ggml_norm reduces over ne[0] and the affine broadcasts along T.
+    // Vulkan takes that decomposition because its fused channel-norm
+    // kernel does not reproduce the stock reduction closely enough for
+    // waveform parity.
+    if (model.backend_is_vk) {
+        y = ggml_norm(ctx, y, 1e-6f);
+        y = ggml_mul(ctx, y, ggml_reshape_2d(ctx,
+            flatten_1d(require_source_tensor(model, p + ".norm.norm.weight")), y->ne[0], 1));
+        y = ggml_add(ctx, y, ggml_reshape_2d(ctx,
+            flatten_1d(require_source_tensor(model, p + ".norm.norm.bias")), y->ne[0], 1));
+    } else {
+        y = ggml_supertonic_layer_norm_channel_ct(ctx, y,
+            flatten_1d(require_source_tensor(model, p + ".norm.norm.weight")),
+            flatten_1d(require_source_tensor(model, p + ".norm.norm.bias")),
+            1e-6f);
+    }
     // pw1 matmul: [IC=C, T] -> [OC, T]
-    y = pointwise_matmul_ct(ctx, y,
+    y = pointwise_matmul_ct(ctx, model, y,
         require_source_tensor(model, p + ".pwconv1.weight"),
         nullptr);
     // bias_gelu_ct: [OC, T] -> [OC, T]
     y = ggml_supertonic_bias_gelu_ct(ctx, y,
         flatten_1d(require_source_tensor(model, p + ".pwconv1.bias")));
     // pw2 matmul: [IC=OC, T] -> [C, T]   (restores channel count)
-    y = pointwise_matmul_ct(ctx, y,
+    y = pointwise_matmul_ct(ctx, model, y,
         require_source_tensor(model, p + ".pwconv2.weight"),
         nullptr);
     // pw2_residual_ct: x[C, T] + bias[C] (×) gamma[C] + residual[C, T] -> [C, T]
@@ -2138,8 +2155,7 @@ void build_res_style_qkv_cache(vector_res_style_qkv_cache & cache,
     }
     ggml_tensor * norm = layer_norm_ggml(cache.ctx, res,
         require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.weight"),
-        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"),
-        !model.backend_is_vk);
+        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"));
     ggml_set_name(norm, norm_name.c_str());
     if (trace_outputs) {
         ggml_set_output(norm);
@@ -2390,8 +2406,7 @@ inline void build_style_residual_cache(vector_style_residual_graph_cache & cache
     }
     ggml_tensor * norm = layer_norm_ggml(cache.ctx, res,
         require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.weight"),
-        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"),
-        !model.backend_is_vk);
+        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"));
     ggml_set_name(norm, "sr_norm"); ggml_set_output(norm);
     ggml_build_forward_expand(cache.gf, norm);
 
@@ -4744,7 +4759,14 @@ ggml_tensor * flatten_channel_param(ggml_context * ctx, ggml_tensor * t) {
     return ggml_reshape_1d(ctx, t, n);
 }
 
-ggml_tensor * layer_norm_ct_ggml(ggml_context * ctx, ggml_tensor * x_ct, ggml_tensor * g, ggml_tensor * b) {
+ggml_tensor * layer_norm_ct_ggml(ggml_context * ctx, const supertonic_model & model,
+                                 ggml_tensor * x_ct, ggml_tensor * g, ggml_tensor * b) {
+    if (model.backend_is_vk) {
+        // See vector_convnext_ggml_ct: Vulkan keeps the stock reduction.
+        ggml_tensor * y = ggml_norm(ctx, x_ct, kLayerNormEps);
+        y = ggml_mul(ctx, y, ggml_reshape_2d(ctx, flatten_channel_param(ctx, g), y->ne[0], 1));
+        return ggml_add(ctx, y, ggml_reshape_2d(ctx, flatten_channel_param(ctx, b), y->ne[0], 1));
+    }
     return ggml_supertonic_layer_norm_channel_ct(ctx, x_ct,
         flatten_channel_param(ctx, g), flatten_channel_param(ctx, b), kLayerNormEps);
 }
@@ -4804,7 +4826,7 @@ ggml_tensor * attention_block_ct_ggml(ggml_context * ctx, const supertonic_model
     ggml_tensor * out = dense_matmul_ct_ggml(ctx, model, attn,
         require_source_tensor(model, matmul_name(out_w_name)),
         require_source_tensor(model, attn_prefix + "out_fc.linear.bias"));
-    return layer_norm_ct_ggml(ctx, ggml_add(ctx, residual_ct, out),
+    return layer_norm_ct_ggml(ctx, model, ggml_add(ctx, residual_ct, out),
         require_source_tensor(model, block + ".norm.norm.weight"),
         require_source_tensor(model, block + ".norm.norm.bias"));
 }
@@ -4867,7 +4889,7 @@ ggml_tensor * step_tail_ct_ggml(ggml_context * ctx, const supertonic_model & mod
                                 int total_steps, int seg_len) {
     ggml_tensor * tail = convnext_chain_ct_ggml(ctx, model,
         "vector_estimator:tts.ttl.vector_field.last_convnext", x_ct, kTailDilations, seg_len);
-    ggml_tensor * velocity = pointwise_matmul_ct(ctx, tail,
+    ggml_tensor * velocity = pointwise_matmul_ct(ctx, model, tail,
         require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_out.net.weight"), nullptr);
     ggml_tensor * scaled = ggml_scale(ctx, ggml_mul(ctx, velocity, mask_row), 1.0f / (float) total_steps);
     return ggml_add(ctx, noise_ct, scaled);
@@ -4890,7 +4912,7 @@ ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertoni
                            : inputs.io_ct ? inputs.noise_in : to_channel_time(ctx, inputs.noise_in);
     ggml_tensor * mask_row = ggml_reshape_2d(ctx, inputs.mask_in, 1, T);
 
-    ggml_tensor * cur = pointwise_matmul_ct(ctx, x_ct,
+    ggml_tensor * cur = pointwise_matmul_ct(ctx, model, x_ct,
         require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.proj_in.net.weight"), nullptr);
     cur = ggml_mul(ctx, cur, mask_row);
     cur = group_prep_ct_ggml(ctx, model, inputs, 0, cur, L);
@@ -4905,7 +4927,7 @@ ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertoni
 static bool use_ct_vector_step(const supertonic_model & model, bool use_cpu_custom) {
     const bool disabled = std::getenv("SUPERTONIC_DISABLE_CT_STEP") != nullptr ||
                           std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
-    return !disabled && !use_cpu_custom && !model.backend_is_vk &&
+    return !disabled && !use_cpu_custom &&
            !model_prefers_cpu_kernels(model) && supertonic_use_fused_supertonic_ops();
 }
 
@@ -4939,13 +4961,10 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
 
     // ===== PHASE 1: Group 0 prologue — ConvNeXt × 4 on main_blocks.0 + time_add (1) + ConvNeXt (2) =====
     int dils[4] = {1, 2, 4, 8};
-    // Keep Vulkan on the baseline [T, C] execution order. Advertising the
-    // fused op family would otherwise select the channel-major path and
-    // change reductions enough to violate waveform parity.
+    // The channel-major chain follows the same gate as `use_ct_vector_step`.
     static const bool disable_ct_convnext =
         std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
-    const bool use_ct_convnext =
-        !disable_ct_convnext && !model.backend_is_vk && !use_cpu_custom;
+    const bool use_ct_convnext = !disable_ct_convnext && !use_cpu_custom;
     if (use_ct_convnext) {
         ggml_tensor * cur_ct = ggml_cont(gctx, ggml_permute(gctx, cur, 1, 0, 2, 3));
         for (int j = 0; j < 4; ++j) {
@@ -5011,8 +5030,7 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(attn_block) + ".norm.norm.weight"),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(attn_block) + ".norm.norm.bias"),
-            !model.backend_is_vk);
+                                         std::to_string(attn_block) + ".norm.norm.bias"));
 
         ggml_tensor * post = vector_convnext_ggml(gctx, model,
             "vector_estimator:tts.ttl.vector_field.main_blocks." +
@@ -5044,8 +5062,7 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(style_block) + ".norm.norm.weight"),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(style_block) + ".norm.norm.bias"),
-            !model.backend_is_vk);
+                                         std::to_string(style_block) + ".norm.norm.bias"));
         (void)x;
         return style_normed;
     };
@@ -5460,7 +5477,11 @@ static void build_vector_loop_one_graph_cache(vector_loop_one_graph_cache & cach
             cache.text_len = text_len;
             cache.total_steps = total_steps;
             const bool io_ct = use_ct_vector_step(model, supertonic_use_cpu_custom_ops());
-            cache.batch = (io_ct && model.hparams.cfg_enabled()) ? 2 : 1;
+            // Concatenating the conditional and unconditional sequences along
+            // T changes tile selection and depthwise segmentation enough to
+            // move the Vulkan waveform off the F32 reference, so Vulkan runs
+            // the two branches as separate sequences.
+            cache.batch = (io_ct && model.hparams.cfg_enabled() && !model.backend_is_vk) ? 2 : 1;
             const int T = L * cache.batch;
 
             // ~5x the per-step node budget.  Each per-step build registered ~1056

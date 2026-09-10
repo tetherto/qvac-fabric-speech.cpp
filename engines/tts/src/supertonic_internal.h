@@ -415,6 +415,11 @@ struct supertonic_model {
     // ARM Mali/Valhall Vulkan miscomputes a GEMM mul_mat whose output dim < ~48; set via
     // device-identity (not supports_op: driver claims support). st_mul_mat pads to 64; harmless elsewhere.
     bool mulmat_needs_pad = false;
+    // Vulkan drivers other than NVIDIA reorder a weight-first GEMM's
+    // reduction, which moves the channel-major step's waveform off the F32
+    // reference.  When true the step multiplies activation-first and
+    // transposes the result back into [C, T].
+    bool ct_matmul_activation_first = false;
     // When true, the per-step vector-estimator attention graphs materialise
     // K/V into contiguous F16 before calling ggml_flash_attn_ext so OpenCL
     // (and other backends carrying the mixed-precision kernel) dispatch
@@ -1305,6 +1310,11 @@ bool supertonic_use_f16_attn();
 // pure-GGML decomposition.  Defaults to `false` (pure-GGML) when no scope
 // is active, so a helper called outside a scope never emits a backend-
 // unsupported fused op.
+// Thread-local mirror of "this backend's fused channel layer-norm reproduces
+// the stock NORM + MUL + ADD chain".  False on Vulkan, whose kernel shifts a
+// knife-edge tail alignment in the q8 short case; the graph builders then
+// emit the stock decomposition.  Defaults to false outside any scope.
+bool supertonic_use_fused_layer_norm();
 bool supertonic_use_fused_supertonic_ops();
 
 // Thread-local mirror of `supertonic_model::mulmat_needs_pad`, set by the dispatch scope.
@@ -1670,6 +1680,8 @@ struct supertonic_op_dispatch_scope {
     bool prev_use_fused_supertonic_ops;
     // saved `mulmat_needs_pad` flag for RAII teardown.
     bool prev_mulmat_needs_pad;
+    // saved fused-layer-norm flag for RAII teardown.
+    bool prev_use_fused_layer_norm;
     // round 4 — saved K/V dispatch dtype for RAII
     // teardown.  Restored on scope destruction so a follow-on
     // engine on the same thread sees the default value, not the

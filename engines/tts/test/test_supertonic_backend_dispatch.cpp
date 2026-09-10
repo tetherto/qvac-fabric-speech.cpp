@@ -287,7 +287,7 @@ void test_packed_q8_0_weight_is_not_expanded() {
         ggml_type expected;
     };
     const storage_case cases[] = {
-        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, false, true,  GGML_TYPE_Q8_0 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, false, true,  GGML_TYPE_F16 },
         { weight.c_str(), GGML_TYPE_F16,  supertonic_precision::Auto, false, true,  GGML_TYPE_F16 },
         { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, false, false, GGML_TYPE_F32 },
         { weight.c_str(), GGML_TYPE_F16,  supertonic_precision::Auto, false, false, GGML_TYPE_F32 },

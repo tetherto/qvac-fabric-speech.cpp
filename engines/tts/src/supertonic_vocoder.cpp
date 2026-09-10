@@ -384,7 +384,7 @@ ggml_tensor * layer_norm_channel_ggml(ggml_context * ctx,
                                       float eps = 1e-6f) {
     static const bool disable_fused_layer_norm =
         std::getenv("SUPERTONIC_DISABLE_FUSED_LAYER_NORM") != nullptr;
-    if (!disable_fused_layer_norm && supertonic_use_fused_supertonic_ops() &&
+    if (!disable_fused_layer_norm && supertonic_use_fused_layer_norm() &&
         x->type == GGML_TYPE_F32 && gamma->type == GGML_TYPE_F32 && beta->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         gamma->ne[0] == x->ne[1] && beta->ne[0] == x->ne[1] &&
@@ -515,8 +515,18 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
 
     ggml_tensor * y_ct = ggml_supertonic_depthwise_1d_causal_ct(ctx, x_ct,
         w.dw_w, flatten_1d(w.dw_b), dilations[idx]);
-    y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
-        flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
+    if (supertonic_use_fused_layer_norm()) {
+        y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
+            flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
+    } else {
+        // Channels are already inner-most, so the stock reduction needs no
+        // permute; matches `layer_norm_channel_ggml`'s decomposition.
+        y_ct = ggml_norm(ctx, y_ct, 1e-6f);
+        y_ct = ggml_mul(ctx, y_ct,
+            ggml_reshape_2d(ctx, flatten_1d(w.norm_g), y_ct->ne[0], 1));
+        y_ct = ggml_add(ctx, y_ct,
+            ggml_reshape_2d(ctx, flatten_1d(w.norm_b), y_ct->ne[0], 1));
+    }
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw1_w, /*bias=*/nullptr);
     y_ct = ggml_supertonic_bias_gelu_ct(ctx, y_ct, flatten_1d(w.pw1_b));
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw2_w, flatten_1d(w.pw2_b));

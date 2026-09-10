@@ -104,8 +104,9 @@ ggml_tensor * get_tensor_or_null(const supertonic_model & model, const std::stri
 }
 
 // Compute the storage type for a model tensor given the source type and
-// requested policy. Auto remains F32 here; the loader separately applies the
-// validated Vulkan F16 hot-weight roster. Packed Q8_0 is explicit-only.
+// requested policy. Auto narrows quantized matmul weights to F16 on Vulkan
+// and leaves everything else at F32; packed Q8_0 storage stays explicit-only
+// because its matmul output diverges too far from the F32 waveform.
 } // namespace
 
 // Predicate: is `tensor_name` a true matmul weight that lands in a
@@ -153,7 +154,7 @@ ggml_type target_supertonic_storage_type(const std::string & name,
             return !backend_is_cpu && backend_is_vk &&
                    (src_type == GGML_TYPE_Q8_0 || src_type == GGML_TYPE_F16) &&
                    is_supertonic_matmul_weight_name(name)
-                ? src_type : GGML_TYPE_F32;
+                ? GGML_TYPE_F16 : GGML_TYPE_F32;
     }
     return GGML_TYPE_F32;
 }
@@ -1468,6 +1469,9 @@ thread_local bool g_supertonic_use_fused_supertonic_ops = false;
 // Small-output-dim mul_mat-miscompute flag. Defaults to false so a builder outside
 // any dispatch scope emits a plain ggml_mul_mat; only the broken backend flips it on.
 thread_local bool g_supertonic_mulmat_needs_pad = false;
+// Fused channel layer-norm parity flag; false outside any dispatch scope so a
+// stray builder emits the stock chain.
+thread_local bool g_supertonic_use_fused_layer_norm = false;
 // round 4 — current K/V flash-attn dispatch dtype.
 // Defaults to f32 so a graph builder called outside any
 // `supertonic_op_dispatch_scope` doesn't accidentally take the
@@ -1494,6 +1498,10 @@ bool supertonic_use_fused_supertonic_ops() {
 bool supertonic_mulmat_needs_pad() {
     return g_supertonic_mulmat_needs_pad;
 }
+
+bool supertonic_use_fused_layer_norm() {
+    return g_supertonic_use_fused_layer_norm;
+}
 kv_attn_dtype supertonic_kv_attn_type() {
     return g_supertonic_kv_attn_type;
 }
@@ -1504,6 +1512,7 @@ supertonic_op_dispatch_scope::supertonic_op_dispatch_scope(const supertonic_mode
       prev_use_native_leaky_relu(g_supertonic_use_native_leaky_relu),
       prev_use_fused_supertonic_ops(g_supertonic_use_fused_supertonic_ops),
       prev_mulmat_needs_pad(g_supertonic_mulmat_needs_pad),
+      prev_use_fused_layer_norm(g_supertonic_use_fused_layer_norm),
       prev_kv_attn_type(g_supertonic_kv_attn_type) {
     // The CPU custom-op fast paths (CBLAS sgemm, fused depthwise/layernorm,
     // tail update) read their weight args as raw F32, so they cannot consume
@@ -1521,6 +1530,8 @@ supertonic_op_dispatch_scope::supertonic_op_dispatch_scope(const supertonic_mode
     g_supertonic_use_native_leaky_relu    = model.use_native_leaky_relu;
     g_supertonic_use_fused_supertonic_ops = model.backend_supports_fused_supertonic_ops;
     g_supertonic_mulmat_needs_pad         = model.mulmat_needs_pad;
+    g_supertonic_use_fused_layer_norm     = model.backend_supports_fused_supertonic_ops &&
+                                            !model.backend_is_vk;
     g_supertonic_kv_attn_type             = model.kv_attn_type;
 }
 
@@ -1530,6 +1541,7 @@ supertonic_op_dispatch_scope::~supertonic_op_dispatch_scope() {
     g_supertonic_use_native_leaky_relu    = prev_use_native_leaky_relu;
     g_supertonic_use_fused_supertonic_ops = prev_use_fused_supertonic_ops;
     g_supertonic_mulmat_needs_pad         = prev_mulmat_needs_pad;
+    g_supertonic_use_fused_layer_norm     = prev_use_fused_layer_norm;
     g_supertonic_kv_attn_type             = prev_kv_attn_type;
 }
 
@@ -2010,6 +2022,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
         // st_mul_mat pads those dims to 64 here. Device-identity gate (DL-safe, no
         // compute) since an at-load compute probe hung the driver. False elsewhere.
         model.mulmat_needs_pad = ::tts_cpp::detail::backend_is_arm_mali_vulkan(model.backend);
+        model.ct_matmul_activation_first =
+            model.backend_is_vk && !::tts_cpp::detail::backend_is_nvidia_vulkan(model.backend);
         if (verbose) {
             fprintf(stderr, "supertonic: backend_is_cpu=%s backend_is_vk=%s use_native_leaky_relu=%s fused_supertonic_ops=%s mulmat_needs_pad=%s\n",
                     model.backend_is_cpu ? "true" : "false",
@@ -2213,12 +2227,13 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 decision_name, src->type, precision,
                 resolved_backend_is_cpu, resolved_backend_is_vk);
 
-            // Auto is authoritative: preserve source Q8_0/F16 only through
-            // precision_dst_type. The historical curated F16 roster remains
-            // available to explicit precision modes.
+            // Vulkan Auto also keeps the validated curated F16 hot roster,
+            // except where the precision policy deliberately retains a
+            // packed Q8_0 matmul weight.
             const bool allow_f16_roster =
-                precision != supertonic_precision::Auto;
+                precision != supertonic_precision::Auto || resolved_backend_is_vk;
             bool f16_materialise = false;
+
             if (allow_f16_roster &&
                 precision_dst_type != GGML_TYPE_Q8_0 &&
                 model.use_f16_weights &&
@@ -2244,8 +2259,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 // 2-D [IC,OC] so it could be block-quantized.  Re-expand to
                 // [1, IC, OC] (= [1, src->ne[0], src->ne[1]]); the dequantized
                 // upload below is byte-identical to the original 3-D tensor.
-                // dst_type is F32 here (pwconv names aren't matmul-weight
-                // names, so the storage selector always dequantizes them).
+                // dst_type is F32 unless this pointwise weight was narrowed
+                // to F16 for the weight-first matmul.
                 const int64_t ne3[3] = { 1, src->ne[0], src->ne[1] };
                 dst = ggml_new_tensor(model.ctx_w, dst_type, 3, ne3);
             } else {

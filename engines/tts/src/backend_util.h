@@ -105,6 +105,19 @@ inline bool backend_is_arm_mali_vulkan(ggml_backend_t b) {
     return desc_or_name_is_arm_mali(ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
 }
 
+// True iff `b` is ggml-vulkan on an NVIDIA GPU.  NVIDIA's matmul accumulates
+// the same way for either operand order, so the channel-major Supertonic step
+// can keep the weight as src0 there; other Vulkan drivers (measured on RADV)
+// reorder the reduction and need the activation-first form to stay on the F32
+// reference.  DL-safe: device name only, no compute.
+inline bool backend_is_nvidia_vulkan(ggml_backend_t b) {
+    if (!backend_is_vulkan(b)) return false;
+    ggml_backend_dev_t dev = ggml_backend_get_device(b);
+    if (!dev) return false;
+    return str_contains_ci(ggml_backend_dev_name(dev), "nvidia") ||
+           str_contains_ci(ggml_backend_dev_description(dev), "nvidia");
+}
+
 inline void backend_set_n_threads(ggml_backend_t b, int n_threads) {
     if (!b || n_threads <= 0) return;
     ggml_backend_dev_t dev = ggml_backend_get_device(b);

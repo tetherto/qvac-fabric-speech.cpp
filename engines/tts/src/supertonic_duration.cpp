@@ -170,7 +170,7 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
 ggml_tensor * layer_norm_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor * g, ggml_tensor * b) {
     static const bool disable_fused_layer_norm =
         std::getenv("SUPERTONIC_DISABLE_FUSED_LAYER_NORM") != nullptr;
-    if (!disable_fused_layer_norm && supertonic_use_fused_supertonic_ops() &&
+    if (!disable_fused_layer_norm && supertonic_use_fused_layer_norm() &&
         x->type == GGML_TYPE_F32 && g->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         g->ne[0] == x->ne[1] && b->ne[0] == x->ne[1] &&
