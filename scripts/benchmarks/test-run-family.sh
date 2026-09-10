@@ -259,6 +259,12 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
     notes: "hyp uses {start,duration} instead of {start,end}; must parse identically"
   },
+  "der-tw-mixed-stdout": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-mixed", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "hyp interleaves non-JSON banner/verbose lines with JSONL segments — parser must skip the noise and score to the same DER 0.0 as the pure-JSONL case"
+  },
   "der-nat-warns": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
@@ -372,6 +378,21 @@ cat > "$BUILD/bin/tw-jsonl-duration" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"speaker":0,"start":0.000,"duration":4.000}'
 printf '%s\n' '{"speaker":1,"start":4.000,"duration":4.000}'
+STUB
+
+# Mixed-stdout hyp: real parakeet-cli --verbose leaks non-JSON banner /
+# summary lines to stdout alongside the JSONL segments. compute-der.py
+# must skip the noise and score the JSONL portion — a single stray print
+# from a future --verbose change (or a new backend init log) would
+# otherwise null DER on every dispatch. Segments are identical to
+# tw-jsonl-perfect, so the expected DER is 0.0.
+cat > "$BUILD/bin/tw-jsonl-mixed" <<'STUB'
+#!/usr/bin/env bash
+echo "parakeet: using Metal backend"
+echo "load=42.1ms audio=8.00s samples=128000@16000Hz"
+printf '%s\n' '{"speaker":0,"start":0.000,"end":4.000}'
+printf '%s\n' '{"speaker":1,"start":4.000,"end":8.000}'
+echo "[diarize] total=123.4ms RTF=0.015 segments=2"
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -664,6 +685,21 @@ jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
   "$OUT/der-tw-duration-shape.json" > /dev/null \
   || fail "der-tw-duration-shape: $(cat "$OUT/der-tw-duration-shape.json")"
 ok "correctness (DER, time-wrapped): {start,duration}-shape JSONL parses identically to {start,end}"
+
+# Mixed-stdout robustness: parakeet-cli --verbose could leak non-JSON banner
+# and summary lines to stdout alongside the JSONL segments. compute-der.py
+# must skip those and score just the JSONL portion — otherwise a single
+# upstream --verbose change (or a new backend init log) would silently null
+# DER on every dispatch. This test would fail loudly under the pre-review
+# `raise ValueError` behavior, which aborted the whole score on the first
+# non-JSON line.
+run_driver der-tw-mixed-stdout "$OUT/der-tw-mixed-stdout.json" "$OUT/der-tw-mixed-stdout.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-mixed-stdout.json" > /dev/null \
+  || fail "der-tw-mixed-stdout: $(cat "$OUT/der-tw-mixed-stdout.json")"
+grep -q 'skipping non-JSON hypothesis line' "$OUT/der-tw-mixed-stdout.err" \
+  || fail "der-tw-mixed-stdout: expected 'skipping non-JSON' diagnostic on stderr"
+ok "correctness (DER, time-wrapped): non-JSON stdout chatter (--verbose banners) is skipped and JSONL portion still scores correctly"
 
 # Native-mode families have no diarize schema in --json-out today, so a
 # native family declaring correctness.kind='der' must be skipped with a

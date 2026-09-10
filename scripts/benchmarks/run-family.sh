@@ -628,14 +628,22 @@ score_correctness() {
           return 0
           ;;
       esac
+      # Route stderr through a temp file so per-line diagnostics from
+      # compute-*.py (e.g. skipped non-JSON hypothesis lines) flow to the
+      # workflow log for debuggability WITHOUT contaminating stdout, which
+      # jq needs to parse cleanly as the tool's JSON result. Merging with
+      # `2>&1` would break jq the moment compute-*.py prints a warning.
+      local script_err
+      script_err="$tmp_dir/${spec_kind}-score.err"
       script_name="compute-wer.py"
       if ! script_out="$(python3 "$(dirname "$0")/compute-wer.py" \
            "${hyp_args[@]}" \
            --reference   "$ref_path" \
-           --normalizer  "$spec_norm" 2>&1)"; then
-        echo "$FAMILY: compute-wer.py failed: $script_out" >&2
+           --normalizer  "$spec_norm" 2> "$script_err")"; then
+        echo "$FAMILY: compute-wer.py failed: $(cat "$script_err" 2>/dev/null)" >&2
         return 0
       fi
+      cat "$script_err" >&2 2>/dev/null || true
       score="$(echo "$script_out" | jq -r '.wer // empty' 2>/dev/null || true)"
       ;;
 
@@ -651,14 +659,18 @@ score_correctness() {
         echo "$FAMILY: hypothesis stdout capture missing: $src_path — correctness skipped" >&2
         return 0
       fi
+      # See the WER branch above for the stderr-vs-stdout separation rationale.
+      local script_err
+      script_err="$tmp_dir/${spec_kind}-score.err"
       script_name="compute-der.py"
       if ! script_out="$(python3 "$(dirname "$0")/compute-der.py" \
            --hypothesis-jsonl "$src_path" \
            --reference        "$ref_path" \
-           --collar-ms        "$spec_collar" 2>&1)"; then
-        echo "$FAMILY: compute-der.py failed: $script_out" >&2
+           --collar-ms        "$spec_collar" 2> "$script_err")"; then
+        echo "$FAMILY: compute-der.py failed: $(cat "$script_err" 2>/dev/null)" >&2
         return 0
       fi
+      cat "$script_err" >&2 2>/dev/null || true
       score="$(echo "$script_out" | jq -r '.der // empty' 2>/dev/null || true)"
       ;;
   esac

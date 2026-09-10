@@ -88,9 +88,14 @@ def parse_rttm(text: str) -> list[tuple[float, float, str]]:
 def parse_hypothesis_jsonl(text: str) -> list[tuple[float, float, str]]:
     """Return [(start_s, duration_s, speaker_id), ...] from JSONL hypothesis.
 
-    Each non-blank line is a JSON object with `speaker`, `start`, and
-    either `end` or `duration`. Blank stdout (a diarizer that emitted
-    nothing) yields the empty list, which downstream scores as pure miss.
+    Each non-blank line SHOULD be a JSON object with `speaker`, `start`, and
+    either `end` or `duration`. Non-JSON lines (banners, backend-init logs,
+    stray --verbose output from the CLI) are skipped with a stderr diagnostic
+    rather than aborting the whole score — parakeet-cli --verbose currently
+    only prints to stderr on the diarize path, but relying on that invariant
+    would turn any future upstream leak into a silent null DER, defeating
+    the whole "correctness scoring catches regressions" purpose. Blank
+    stdout still yields the empty list (scored as pure miss downstream).
     """
     segments: list[tuple[float, float, str]] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
@@ -99,19 +104,28 @@ def parse_hypothesis_jsonl(text: str) -> list[tuple[float, float, str]]:
             continue
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"hypothesis line {lineno}: not JSON: {raw!r}") from e
+        except json.JSONDecodeError:
+            print(f"compute-der.py: skipping non-JSON hypothesis line {lineno}: {raw!r}",
+                  file=sys.stderr)
+            continue
         if not isinstance(obj, dict):
-            raise ValueError(f"hypothesis line {lineno}: expected object, got {type(obj).__name__}")
+            print(f"compute-der.py: skipping non-object hypothesis line {lineno}: "
+                  f"expected object, got {type(obj).__name__}",
+                  file=sys.stderr)
+            continue
         if "speaker" not in obj or "start" not in obj:
-            raise ValueError(f"hypothesis line {lineno}: missing speaker/start: {raw!r}")
+            print(f"compute-der.py: skipping hypothesis line {lineno}, missing speaker/start: {raw!r}",
+                  file=sys.stderr)
+            continue
         start = float(obj["start"])
         if "duration" in obj:
             dur = float(obj["duration"])
         elif "end" in obj:
             dur = float(obj["end"]) - start
         else:
-            raise ValueError(f"hypothesis line {lineno}: missing end/duration: {raw!r}")
+            print(f"compute-der.py: skipping hypothesis line {lineno}, missing end/duration: {raw!r}",
+                  file=sys.stderr)
+            continue
         speaker = str(obj["speaker"])
         if dur > 0:
             segments.append((start, dur, speaker))
@@ -190,20 +204,17 @@ def _score_with_mapping(
         h = hyp_frames[i]
         mapped_h = {hyp_to_ref[x] for x in h if x in hyp_to_ref}
         ref_speech += len(r)
-        for rs in r:
-            if rs in mapped_h:
-                pass  # correct
-            elif mapped_h:
-                conf += 1
-            else:
-                miss += 1
-        # Extra hypothesis speakers on a frame count as false alarms.
-        for _ in range(max(0, len(mapped_h) - len(r))):
-            fa += 1
-        # And a hyp-only frame (no ref speech) is pure FA.
-        if not r and mapped_h:
-            # already counted above (max(0, len(mapped_h) - 0) == len(mapped_h))
-            pass
+        # md-eval per-frame split: correct = |r ∩ mapped_h|; unmatched ref
+        # speakers split as miss = max(0, |r| - |mapped_h|) and the rest
+        # are confusion. Total DER is invariant to this split (miss+conf =
+        # unmatched-ref-count either way), but the miss/confusion fields
+        # are consumed for regression diagnosis, so match the standard
+        # rather than putting everything into confusion.
+        correct = sum(1 for rs in r if rs in mapped_h)
+        unmatched = len(r) - correct
+        miss += max(0, len(r) - len(mapped_h))
+        conf += unmatched - max(0, len(r) - len(mapped_h))
+        fa   += max(0, len(mapped_h) - len(r))
     return miss, fa, conf, ref_speech
 
 
@@ -375,6 +386,37 @@ def _self_test() -> int:
     d_dur = compute_der(parse_hypothesis_jsonl(hyp_dur), ref_ab)["der"]
     if d_end != d_dur or d_end != 0.0:
         failed.append(f"duration vs end shape: end={d_end}, duration={d_dur} (both should be 0.0)")
+
+    # Robustness against non-JSON stdout chatter (e.g. --verbose banner lines
+    # leaking to stdout instead of stderr from parakeet-cli). Mixed input must
+    # score the JSONL portion correctly and ignore the noise — otherwise a
+    # single upstream stray-print would silently null every DER dispatch.
+    mixed = (
+        "parakeet: using Metal backend\n"                        # non-JSON banner
+        "load=42.1ms audio=8.00s samples=128000@16000Hz\n"       # non-JSON verbose line
+        '{"speaker":0,"start":0.000,"end":4.000}\n'
+        '{"speaker":1,"start":4.000,"end":8.000}\n'
+        "\n"                                                     # blank
+        "[diarize] total=123.4ms RTF=0.015 segments=2\n"         # non-JSON trailer
+    )
+    d_mixed = compute_der(parse_hypothesis_jsonl(mixed), ref_ab)["der"]
+    if d_mixed != 0.0:
+        failed.append(f"mixed stdout robustness: der={d_mixed} (expected 0.0 — non-JSON lines must be skipped)")
+
+    # md-eval miss/confusion split: with ref speakers > hyp speakers on a
+    # frame, unmatched ref speakers split as miss=max(0,N_ref-N_sys),
+    # confusion=residual. Ref 4 s of {A,B} overlap, hyp 4 s of speaker 0
+    # (maps to A). N_ref=2, N_sys=1, N_correct=1 => miss=1, conf=0 per frame.
+    # 400 frames of that = miss=400, conf=0, ref_speech=800 (per-speaker
+    # counting). DER = 400/800 = 0.5; miss = 0.5; confusion = 0.0. Under the
+    # old code the split was miss=0, conf=0.5 — same DER, wrong breakdown.
+    overlap_ref = [(0.0, 4.0, "A"), (0.0, 4.0, "B")]
+    got = compute_der([(0.0, 4.0, "0")], overlap_ref, collar_ms=0)
+    if abs(got["der"] - 0.5) > 1e-6 or abs(got["miss"] - 0.5) > 1e-6 or abs(got["confusion"]) > 1e-6:
+        failed.append(
+            f"md-eval split (ref>hyp): der={got['der']} miss={got['miss']} conf={got['confusion']} "
+            f"(expected der=0.5 miss=0.5 conf=0.0)"
+        )
 
     # RTTM parser sanity: the shipped abcba.rttm should round-trip to 5
     # segments across 3 speakers.
