@@ -15,7 +15,7 @@
 //     builders hardcode the real channel plans, so stage-arena parity still
 //     needs a fixture; this mode pins weight-sizing parity (buffer_w +
 //     the GPU pre-transpose extra buffer, byte for byte vs a real load) and
-//     the refusal paths (CPU pointwise-path refusal, invalid arguments,
+//     the refusal paths (resolved-/requested-CPU refusal, invalid arguments,
 //     unreadable model, oversized workload, and Error -- never a guessed
 //     FITS -- when a stage measure cannot run).
 //
@@ -30,13 +30,13 @@
 //      estimator loop graph / vocoder) == the real reservation of the same
 //      graphs (the parity probes), byte for byte on the direct path;
 //   3. fit_params end-to-end: quadratic growth with text_tokens (the relpos
-//      masks), growth with audio_seconds, the CPU pointwise-path refusal
+//      masks), growth with audio_seconds, the resolved-CPU refusal
 //      (compute-path-not-supported -- never a guessed FITS), near-INT_MAX
 //      rejection, and Error (never Success) on unreadable models.
 //
-// The vector-estimator gates require the fused graph path: a GPU or a CPU
-// build without Accelerate/CBLAS pointwise kernels. The CPU pointwise
-// multi-cache path is refused by design, so those builds check the refusal.
+// The vector-estimator gates require a non-CPU backend (the CPU multi-cache
+// path is refused by design); on a GPU-less host those gates degrade to
+// checking the refusal itself.
 //
 // Exit 0 on success; non-zero with a FAIL line per broken invariant.
 
@@ -252,8 +252,8 @@ void run_synthetic_gates() {
     fopts.audio_seconds   = 4.0f;
     {
         // The synthetic has no stage graph tensors, so a full projection can
-        // never complete: Error always, FITS never. On the CPU pointwise
-        // path the refusal fires first; on a fused path the stage measure fails.
+        // never complete: Error always, FITS never.  On a CPU-resolved host
+        // the refusal fires first; on a GPU host the stage measure fails.
         const tts_cpp::FitResult fr = tts_cpp::supertonic::fit_params(fopts);
         expect(fr.status == tts_cpp::FitStatus::Error,
                "synthetic partial model was not Error (" + fr.reason + ")");
@@ -262,18 +262,13 @@ void run_synthetic_gates() {
                "synthetic partial model: unexpected reason (" + fr.reason + ")");
     }
     {
-        // CPU is not synonymous with the unmodelled pointwise path. Without
-        // Accelerate/CBLAS the fused graph path reaches the missing stage
-        // tensors, so it must fail measurement rather than refuse dispatch.
+        // Explicit CPU request: refused, never guessed.
         tts_cpp::supertonic::FitOptions cpu = fopts;
         cpu.n_gpu_layers = 0;
         const tts_cpp::FitResult fr = tts_cpp::supertonic::fit_params(cpu);
-        const std::string expected_reason = cpu_pointwise_accel_compiled()
-            ? "compute-path-not-supported" : "measurement-failed";
-        expect(fr.device_is_cpu, "synthetic explicit CPU request selected a non-CPU device");
         expect(fr.status == tts_cpp::FitStatus::Error &&
-                   !fr.fits && fr.reason == expected_reason,
-               "synthetic CPU request: expected " + expected_reason + ", got " + fr.reason);
+                   fr.reason == "compute-path-not-supported",
+               "synthetic CPU request was not refused (" + fr.reason + ")");
     }
     {
         tts_cpp::supertonic::FitOptions huge = fopts;
@@ -319,7 +314,7 @@ void run_gates(const std::string & path, int n_gpu_layers) {
         free_supertonic_model(mm);
         return;
     }
-    const bool cpu_pointwise_path = model_prefers_cpu_kernels(real);
+    const bool on_cpu = model_prefers_cpu_kernels(real);
 
     // 1. Weight parity, byte for byte, per buffer.
     expect(real.buffer_w != nullptr, "real load produced no weight buffer");
@@ -360,7 +355,7 @@ void run_gates(const std::string & path, int n_gpu_layers) {
             expect_eq(meas, probe, "duration cache parity");
         }
     }
-    if (!cpu_pointwise_path) {
+    if (!on_cpu) {
         uint64_t meas = 0, probe = 0;
         if (!supertonic_fit_measure_vector(mm, latent_len, L, steps, meas, &error)) {
             fail("vector estimator measure failed: " + error);
@@ -380,7 +375,7 @@ void run_gates(const std::string & path, int n_gpu_layers) {
     // must strictly exceed the same shapes priced with CFG off.  Pins the
     // CFG multiplier's presence and sign directly on the metadata model,
     // independent of which other fixture lanes are registered.
-    if (!cpu_pointwise_path && mm.hparams.cfg_enabled()) {
+    if (!on_cpu && mm.hparams.cfg_enabled()) {
         uint64_t cfg_bytes = 0, nocfg_bytes = 0;
         if (!supertonic_fit_measure_vector(mm, latent_len, L, steps, cfg_bytes, &error)) {
             fail("CFG vector measure failed: " + error);
@@ -421,11 +416,11 @@ void run_gates(const std::string & path, int n_gpu_layers) {
     fopts.audio_seconds   = 4.0f;
 
     const tts_cpp::FitResult fit = tts_cpp::supertonic::fit_params(fopts);
-    if (cpu_pointwise_path) {
-        // The CPU pointwise multi-cache path is not modelled yet.
+    if (on_cpu) {
+        // The CPU compute path is refused by design -- never a guessed FITS.
         expect(fit.status == tts_cpp::FitStatus::Error &&
                    fit.reason == "compute-path-not-supported",
-               "CPU pointwise projection was not refused (" + fit.reason + ")");
+               "resolved-CPU projection was not refused (" + fit.reason + ")");
     } else {
         expect(fit.status != tts_cpp::FitStatus::Error,
                "fit_params returned Error (" + fit.reason + ") for a readable model");
@@ -450,24 +445,14 @@ void run_gates(const std::string & path, int n_gpu_layers) {
                "projection did not grow with audio_seconds");
     }
 
-    // An explicit CPU request must follow the same dispatch contract even
-    // when the fixture gates above ran on a GPU.
+    // The explicit CPU request must refuse, never guess.
     {
         tts_cpp::supertonic::FitOptions cpu = fopts;
         cpu.n_gpu_layers = 0;
         const tts_cpp::FitResult fr = tts_cpp::supertonic::fit_params(cpu);
-        expect(fr.device_is_cpu, "explicit CPU request selected a non-CPU device");
-        if (cpu_pointwise_accel_compiled()) {
-            expect(fr.status == tts_cpp::FitStatus::Error &&
-                       !fr.fits && fr.reason == "compute-path-not-supported",
-                   "CPU pointwise request was not refused (" + fr.reason + ")");
-        } else {
-            expect(fr.status != tts_cpp::FitStatus::Error,
-                   "fused CPU projection failed for a readable model (" + fr.reason + ")");
-            expect(fr.device.weights_bytes > 0 && fr.device.lm_compute_bytes > 0 &&
-                       fr.device.codec_compute_bytes > 0 && fr.host_bytes > 0,
-                   "fused CPU projection omitted memory allocations");
-        }
+        expect(fr.status == tts_cpp::FitStatus::Error &&
+                   fr.reason == "compute-path-not-supported",
+               "CPU request was not refused (" + fr.reason + ")");
     }
 
     // Strict workload / argument rejection.

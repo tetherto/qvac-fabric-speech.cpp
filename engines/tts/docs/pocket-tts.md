@@ -590,16 +590,12 @@ zero word errors, both long recordings share one assistance/assistants error,
 and nonzero-temperature accented-name output differs in a contraction. The
 zero-temperature follow-up above remains the controlled numerical comparison.
 
-The initial native CI builds passed on macOS, iOS and Android. Linux and
-Windows compiled but failed an existing `test-supertonic-fit-params`
-CPU-refusal expectation. Supertonic's earlier `808c732f` dispatch change lets
-CPU builds without Accelerate/CBLAS use the fused graph path; the test still
-expected every CPU request to be refused before graph measurement. The
-incomplete synthetic model correctly returns `measurement-failed` on that
-path. The test now checks the precise reason for each dispatch configuration,
-still requiring Error (never FITS) for the incomplete model. The failure was
-reproduced locally with Accelerate disabled; the corrected test passes both
-with and without Accelerate. This changes test expectations and documentation,
-not synthesis or fit-dispatch behavior. Full Fabric inference compilation
-still has the unrelated errors noted above. No default-branch merge or package
-publication is claimed.
+Native CI builds pass on macOS, iOS and Android. Linux and Windows have an
+existing Supertonic fit-test regression introduced by
+[PR #229](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/229).
+The independent fix is tracked in
+[PR #242](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/242),
+which updates the test's CPU dispatch expectations and fit documentation.
+The Pocket change contains no Supertonic test or runtime modifications.
+Full Fabric inference compilation still has the unrelated errors noted above.
+No default-branch merge or package publication is claimed.

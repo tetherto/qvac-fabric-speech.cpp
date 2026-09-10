@@ -6,8 +6,8 @@
 // capability probes, per-tensor storage-type decisions, pre-baked audit
 // tensors and the GPU pre-transpose roster) and the real per-stage graph
 // builders through ggml's size-only APIs (supertonic_fit_measure_* in the
-// stage TUs). Fused GPU/CPU graph paths are modelled; the CPU pointwise
-// multi-cache path is refused rather than understated (see fit.h).
+// stage TUs).  Only the non-CPU dispatch path is modelled; a resolved-CPU
+// backend is refused rather than understated (see fit.h).
 
 #include "tts-cpp/supertonic/fit.h"
 
@@ -144,8 +144,8 @@ FitResult fit_params(const FitOptions & opts) {
     const int latent_len = (int) latent_u;
     const int T_wav      = latent_len * chunk;
 
-    // Only the fused graph path is modelled: the CPU pointwise vector-estimator
-    // multi-cache set is a documented follow-up. Refusing (Error) beats a
+    // Only the non-CPU dispatch path is modelled: the CPU vector-estimator
+    // multi-cache set is a documented follow-up.  Refusing (Error) beats a
     // wrong FITS.
     if (det::model_prefers_cpu_kernels(m.model)) {
         r.reason = "compute-path-not-supported";
