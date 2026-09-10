@@ -257,31 +257,53 @@ void test_packed_q8_0_weight_is_not_expanded() {
 
     const ggml_type dst = target_supertonic_storage_type(
         weight, GGML_TYPE_Q8_0, supertonic_precision::Q8_0,
-        /*backend_is_cpu=*/false);
+        /*backend_is_cpu=*/false, /*backend_is_vk=*/false);
     CHECK(dst == GGML_TYPE_Q8_0);
 
-    // No conversion helper runs, so the staging decision is the one reached.
     CHECK(needs_supertonic_tensor_conversion(GGML_TYPE_Q8_0, dst) == false);
-    // The source alone still looks expandable: that is what made the bug.
     CHECK(should_expand_supertonic_tensor(GGML_TYPE_Q8_0) == true);
-    // ...but nothing may be staged for a destination that stays packed.
     CHECK(should_stage_f32_expansion(GGML_TYPE_Q8_0, dst) == false);
 
-    // The f32 destination still expands, so the guard did not disable the path.
     const ggml_type dst_f32 = target_supertonic_storage_type(
         weight, GGML_TYPE_Q8_0, supertonic_precision::F32,
-        /*backend_is_cpu=*/false);
+        /*backend_is_cpu=*/false, /*backend_is_vk=*/true);
     CHECK(dst_f32 == GGML_TYPE_F32);
     CHECK(should_stage_f32_expansion(GGML_TYPE_Q8_0, dst_f32) == true);
     CHECK(should_stage_f32_expansion(GGML_TYPE_F16,  GGML_TYPE_F32) == true);
     CHECK(should_stage_f32_expansion(GGML_TYPE_F32,  GGML_TYPE_F32) == false);
     CHECK(should_stage_f32_expansion(GGML_TYPE_F16,  GGML_TYPE_F16) == false);
 
-    // A non-matmul tensor is never kept packed, whatever the precision asks for.
     const ggml_type dst_other = target_supertonic_storage_type(
         "vocoder:conv1d_kernel", GGML_TYPE_Q8_0, supertonic_precision::Q8_0,
-        /*backend_is_cpu=*/false);
+        /*backend_is_cpu=*/false, /*backend_is_vk=*/true);
     CHECK(dst_other == GGML_TYPE_F32);
+
+    struct storage_case {
+        const char * name;
+        ggml_type source;
+        supertonic_precision precision;
+        bool cpu;
+        bool vulkan;
+        ggml_type expected;
+    };
+    const storage_case cases[] = {
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, false, true,  GGML_TYPE_Q8_0 },
+        { weight.c_str(), GGML_TYPE_F16,  supertonic_precision::Auto, false, true,  GGML_TYPE_F16 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, false, false, GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_F16,  supertonic_precision::Auto, false, false, GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Auto, true,  true,  GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_Q4_0, supertonic_precision::Auto, false, true,  GGML_TYPE_F32 },
+        { "vocoder:conv1d_kernel", GGML_TYPE_Q8_0, supertonic_precision::Auto, false, true, GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_F32,  supertonic_precision::Auto, false, true,  GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::F16, false, false, GGML_TYPE_F16 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::F16, true,  true,  GGML_TYPE_F32 },
+        { weight.c_str(), GGML_TYPE_Q8_0, supertonic_precision::Q8_0, false, false, GGML_TYPE_Q8_0 },
+        { weight.c_str(), GGML_TYPE_F16,  supertonic_precision::Q8_0, false, true,  GGML_TYPE_F32 },
+    };
+    for (const storage_case & c : cases) {
+        CHECK(target_supertonic_storage_type(
+            c.name, c.source, c.precision, c.cpu, c.vulkan) == c.expected);
+    }
 }
 
 } // namespace

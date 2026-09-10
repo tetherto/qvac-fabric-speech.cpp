@@ -447,14 +447,15 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
 ggml_tensor * layer_norm_ggml(ggml_context * ctx,
                               ggml_tensor * x,
                               ggml_tensor * g,
-                              ggml_tensor * b) {
+                              ggml_tensor * b,
+                              bool allow_fused) {
     // Fused-op fast path on non-CPU backends (Metal/Vulkan/CUDA/OpenCL):
     // GGML_OP_SUPERTONIC_LAYER_NORM_CHANNEL collapses the
     // permute + cont + ggml_norm + mul + add + permute + cont chain into
     // a single dispatch.  Override with SUPERTONIC_DISABLE_FUSED_LAYER_NORM=1.
     static const bool disable_fused_layer_norm =
         std::getenv("SUPERTONIC_DISABLE_FUSED_LAYER_NORM") != nullptr;
-    if (!supertonic_use_cpu_custom_ops() && supertonic_use_fused_supertonic_ops() && !disable_fused_layer_norm &&
+    if (allow_fused && !supertonic_use_cpu_custom_ops() && supertonic_use_fused_supertonic_ops() && !disable_fused_layer_norm &&
         x->type == GGML_TYPE_F32 && g->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         g->ne[0] == x->ne[1] && b->ne[0] == x->ne[1] &&
@@ -761,6 +762,14 @@ ggml_tensor * pw2_residual_ggml(ggml_context * ctx,
                                 ggml_tensor * x,
                                 ggml_tensor * b,
                                 ggml_tensor * gamma) {
+    ggml_tensor * fused_b = b;
+    ggml_tensor * fused_gamma = gamma;
+    if (fused_b->ne[0] != x->ne[1] && ggml_nelements(fused_b) == x->ne[1]) {
+        fused_b = ggml_reshape_1d(ctx, fused_b, x->ne[1]);
+    }
+    if (fused_gamma->ne[0] != x->ne[1] && ggml_nelements(fused_gamma) == x->ne[1]) {
+        fused_gamma = ggml_reshape_1d(ctx, fused_gamma, x->ne[1]);
+    }
     const bool use_cpu_custom = supertonic_use_cpu_custom_ops();
     // Fused-op fast path (any backend that registers
     // GGML_OP_SUPERTONIC_PW2_RESIDUAL — Metal does via the local ggml port
@@ -773,13 +782,13 @@ ggml_tensor * pw2_residual_ggml(ggml_context * ctx,
         std::getenv("SUPERTONIC_DISABLE_FUSED_PW2_RESIDUAL") != nullptr;
     if (!use_cpu_custom && supertonic_use_fused_supertonic_ops() && !disable_fused_pw2_residual &&
         residual->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32 &&
-        b->type == GGML_TYPE_F32 && gamma->type == GGML_TYPE_F32 &&
+        fused_b->type == GGML_TYPE_F32 && fused_gamma->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         residual->ne[0] == x->ne[0] && residual->ne[1] == x->ne[1] &&
-        b->ne[0] == x->ne[1] && gamma->ne[0] == x->ne[1] &&
+        fused_b->ne[0] == x->ne[1] && fused_gamma->ne[0] == x->ne[1] &&
         ggml_is_contiguous(residual) && ggml_is_contiguous(x) &&
-        ggml_is_contiguous(b) && ggml_is_contiguous(gamma)) {
-        return ggml_supertonic_pw2_residual(ctx, residual, x, b, gamma);
+        ggml_is_contiguous(fused_b) && ggml_is_contiguous(fused_gamma)) {
+        return ggml_supertonic_pw2_residual(ctx, x, fused_b, fused_gamma, residual);
     }
     // CPU-only fused (bias + gamma + residual); falls back to the
     // 3-step add/mul/add chain on GPU.
@@ -833,7 +842,8 @@ ggml_tensor * vector_convnext_ggml(ggml_context * ctx,
         dilation);
     y = layer_norm_ggml(ctx, y,
         require_source_tensor(model, p + ".norm.norm.weight"),
-        require_source_tensor(model, p + ".norm.norm.bias"));
+        require_source_tensor(model, p + ".norm.norm.bias"),
+        !model.backend_is_vk);
     y = conv1d_f32(ctx, require_source_tensor(model, p + ".pwconv1.weight"), y, 1, 0, 1);
     y = bias_gelu_ggml(ctx, y, require_source_tensor(model, p + ".pwconv1.bias"));
     y = conv1d_f32(ctx, require_source_tensor(model, p + ".pwconv2.weight"), y, 1, 0, 1);
@@ -2128,7 +2138,8 @@ void build_res_style_qkv_cache(vector_res_style_qkv_cache & cache,
     }
     ggml_tensor * norm = layer_norm_ggml(cache.ctx, res,
         require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.weight"),
-        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"));
+        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"),
+        !model.backend_is_vk);
     ggml_set_name(norm, norm_name.c_str());
     if (trace_outputs) {
         ggml_set_output(norm);
@@ -2379,7 +2390,8 @@ inline void build_style_residual_cache(vector_style_residual_graph_cache & cache
     }
     ggml_tensor * norm = layer_norm_ggml(cache.ctx, res,
         require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.weight"),
-        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"));
+        require_source_tensor(model, vector_main_block(norm_block) + ".norm.norm.bias"),
+        !model.backend_is_vk);
     ggml_set_name(norm, "sr_norm"); ggml_set_output(norm);
     ggml_build_forward_expand(cache.gf, norm);
 
@@ -4893,8 +4905,8 @@ ggml_tensor * append_vector_step_subgraph_ct(ggml_context * ctx, const supertoni
 static bool use_ct_vector_step(const supertonic_model & model, bool use_cpu_custom) {
     const bool disabled = std::getenv("SUPERTONIC_DISABLE_CT_STEP") != nullptr ||
                           std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
-    return !disabled && !use_cpu_custom && !model_prefers_cpu_kernels(model) &&
-           supertonic_use_fused_supertonic_ops();
+    return !disabled && !use_cpu_custom && !model.backend_is_vk &&
+           !model_prefers_cpu_kernels(model) && supertonic_use_fused_supertonic_ops();
 }
 
 ggml_tensor * append_supertonic_vector_step_subgraph(
@@ -4927,16 +4939,13 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
 
     // ===== PHASE 1: Group 0 prologue — ConvNeXt × 4 on main_blocks.0 + time_add (1) + ConvNeXt (2) =====
     int dils[4] = {1, 2, 4, 8};
-    // Phase B2 full: permute to [C, T] once before the 4-block chain, run
-    // the chain in [C, T] (which lets each block's two pointwise convs
-    // become a direct ggml_mul_mat with no im2col), permute back to
-    // [T, C] for the downstream time-add.  Saves 2 im2col dispatches per
-    // block × 4 blocks × 5 steps − 2 permutes per chain × 5 steps =
-    // 30 dispatches eliminated per synth.  Override:
-    // SUPERTONIC_DISABLE_CT_CONVNEXT=1.
+    // Keep Vulkan on the baseline [T, C] execution order. Advertising the
+    // fused op family would otherwise select the channel-major path and
+    // change reductions enough to violate waveform parity.
     static const bool disable_ct_convnext =
         std::getenv("SUPERTONIC_DISABLE_CT_CONVNEXT") != nullptr;
-    const bool use_ct_convnext = !disable_ct_convnext && !use_cpu_custom;
+    const bool use_ct_convnext =
+        !disable_ct_convnext && !model.backend_is_vk && !use_cpu_custom;
     if (use_ct_convnext) {
         ggml_tensor * cur_ct = ggml_cont(gctx, ggml_permute(gctx, cur, 1, 0, 2, 3));
         for (int j = 0; j < 4; ++j) {
@@ -5002,7 +5011,8 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(attn_block) + ".norm.norm.weight"),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(attn_block) + ".norm.norm.bias"));
+                                         std::to_string(attn_block) + ".norm.norm.bias"),
+            !model.backend_is_vk);
 
         ggml_tensor * post = vector_convnext_ggml(gctx, model,
             "vector_estimator:tts.ttl.vector_field.main_blocks." +
@@ -5034,7 +5044,8 @@ ggml_tensor * append_supertonic_vector_step_subgraph(
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
                                          std::to_string(style_block) + ".norm.norm.weight"),
             require_source_tensor(model, "vector_estimator:tts.ttl.vector_field.main_blocks." +
-                                         std::to_string(style_block) + ".norm.norm.bias"));
+                                         std::to_string(style_block) + ".norm.norm.bias"),
+            !model.backend_is_vk);
         (void)x;
         return style_normed;
     };

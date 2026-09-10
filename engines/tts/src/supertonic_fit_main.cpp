@@ -38,7 +38,7 @@ void print_usage(const char * argv0) {
         "  --audio-seconds S     workload: projected utterance length (default 10;\n"
         "                        the runtime derives it from the duration model)\n"
         "  --steps N             CFM steps (default 0 = the GGUF's default_steps)\n"
-        "  --precision P         f32 | f16 | q8_0, as EngineOptions::precision\n"
+        "  --precision P         auto | f32 | f16 | q8_0, as EngineOptions::precision\n"
         "  --f16-weights N       -1 auto / 0 off / 1 on, as EngineOptions::f16_weights\n"
         "  --n-gpu-layers N      request the validated GPU backend when > 0\n"
         "                        (default 0 = CPU, which this projection refuses)\n"
@@ -107,11 +107,11 @@ extern "C" int supertonic_fit_cli_main(int argc, char ** argv) {
             }
         } else if (a == "--precision" && i + 1 < argc) {
             opts.precision = argv[++i];
-            if (opts.precision != "f32" && opts.precision != "f16" &&
-                opts.precision != "q8_0") {
-                std::fprintf(stderr, "--precision: '%s' is not f32|f16|q8_0\n",
+            if (opts.precision != "auto" && opts.precision != "f32" &&
+                opts.precision != "f16" && opts.precision != "q8_0") {
+                std::fprintf(stderr, "--precision: '%s' is not auto|f32|f16|q8_0\n",
                              opts.precision.c_str());
-                return (int) tts_cpp::FitStatus::Error;
+                return 2;
             }
         } else if (a == "--f16-weights" && i + 1 < argc) {
             if (!parse_i32(argv[++i], opts.f16_weights) ||

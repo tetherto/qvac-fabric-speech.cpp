@@ -572,14 +572,13 @@ struct supertonic_model {
 // See Phase 2A in `aiDocs/PLAN_SUPERTONIC_OPENCL.md` for the
 // roster + auto-policy rationale.
 //
-// `precision` (separate concern): selects the storage type for
-// matmul weights at GGUF load time.  Mirrors the public
-// `tts_cpp::supertonic::Precision` enum.  F32 is the historical
-// default; Q8_0 / F16 trigger asymmetric loads on Metal.
+// `precision` (separate concern): selects model weight storage at load time.
+// Mirrors the public `tts_cpp::supertonic::Precision` values.
 enum class supertonic_precision {
     F32 = 0,
     F16 = 1,
     Q8_0 = 2,
+    Auto = 3,
 };
 
 // `vulkan_device`:
@@ -604,7 +603,7 @@ bool load_supertonic_gguf(const std::string & path,
                           int n_gpu_layers = 0,
                           bool verbose = false,
                           int f16_weights = -1,
-                          supertonic_precision precision = supertonic_precision::F32,
+                          supertonic_precision precision = supertonic_precision::Auto,
                           int vulkan_device = 0,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
@@ -615,7 +614,8 @@ void supertonic_set_n_threads(supertonic_model & model, int n_threads);
 ggml_type target_supertonic_storage_type(const std::string & name,
                                          enum ggml_type src_type,
                                          supertonic_precision precision,
-                                         bool backend_is_cpu);
+                                         bool backend_is_cpu,
+                                         bool backend_is_vk);
 bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
                                         enum ggml_type dst_type);
 bool should_expand_supertonic_tensor(enum ggml_type type);
@@ -1310,7 +1310,6 @@ bool supertonic_use_fused_supertonic_ops();
 // Thread-local mirror of `supertonic_model::mulmat_needs_pad`, set by the dispatch scope.
 // Defaults to false outside any scope, so st_mul_mat emits a plain ggml_mul_mat.
 bool supertonic_mulmat_needs_pad();
-
 // Drop-in for ggml_mul_mat: when mulmat_needs_pad, zero-pad a GEMM output dim < 64 up to 64,
 // then slice back the [M,N] block (exact). No-op on healthy backends, mat-vec, or non-F32 operands.
 inline ggml_tensor * st_mul_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {

@@ -219,7 +219,7 @@ void run_synthetic_gates() {
         supertonic_fit_load_measure fm;
         if (!load_supertonic_gguf_metadata_only(path, mm, /*n_gpu_layers=*/99,
                                                 /*f16_weights=*/-1,
-                                                supertonic_precision::F32,
+                                                supertonic_precision::Auto,
                                                 /*vulkan_device=*/0, {}, fm)) {
             fail("synthetic: load_supertonic_gguf_metadata_only failed");
             return;

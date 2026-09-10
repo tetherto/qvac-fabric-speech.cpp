@@ -200,11 +200,12 @@ struct Engine::Impl {
 
         // Map the public Precision enum onto the internal one (separate
         // declaration so the engine header doesn't pull in internal.h).
-        supertonic_precision internal_precision = supertonic_precision::F32;
+        supertonic_precision internal_precision = supertonic_precision::Auto;
         switch (opts.precision) {
             case Precision::F32:  internal_precision = supertonic_precision::F32;  break;
             case Precision::F16:  internal_precision = supertonic_precision::F16;  break;
             case Precision::Q8_0: internal_precision = supertonic_precision::Q8_0; break;
+            case Precision::Auto: internal_precision = supertonic_precision::Auto; break;
         }
         // round 7 — apply Vulkan env-var overrides
         // BEFORE `load_supertonic_gguf` (which calls
