@@ -240,6 +240,18 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "der", reference: "/does/not/exist.rttm", collar_ms: 0},
     notes: "missing RTTM: correctness skipped, perf still ok"
   },
+  "der-tw-collar": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-slop", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 250},
+    notes: "boundary-slop hyp + 250 ms collar; the slop falls inside the collar so DER 0.0. Proves collar_ms>0 is threaded from families.json through to compute-der.py."
+  },
+  "der-tw-duration-shape": {
+    bench_kind: "time-wrapped", binary: "bin/tw-jsonl-duration", cmake_target: "x",
+    args: [], audio_duration_seconds: 8.0,
+    correctness: {kind: "der", reference: $ref_der, collar_ms: 0},
+    notes: "hyp uses {start,duration} instead of {start,end}; must parse identically"
+  },
   "der-nat-warns": {
     bench_kind: "native", binary: "bin/nat-ok", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 8.0,
@@ -333,6 +345,26 @@ STUB
 cat > "$BUILD/bin/tw-jsonl-confused" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' '{"speaker":0,"start":0.000,"end":8.000}'
+STUB
+
+# Boundary-slop hyp: speaker change 100 ms before the true 4.0 s boundary.
+# Without a collar this scores 10 confusion frames / 800 = DER 0.0125; a
+# 250 ms collar around the boundary hides the slop so DER goes to 0.0.
+# The der-tw-collar cell exercises the collar_ms>0 branch of the driver.
+cat > "$BUILD/bin/tw-jsonl-slop" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"end":3.900}'
+printf '%s\n' '{"speaker":1,"start":3.900,"end":8.000}'
+STUB
+
+# Duration-shape hyp: same content as tw-jsonl-perfect but with `duration`
+# instead of `end` — parse_hypothesis_jsonl accepts both, and this pins
+# that a future parakeet-cli switch between the two shapes doesn't silently
+# break DER.
+cat > "$BUILD/bin/tw-jsonl-duration" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"speaker":0,"start":0.000,"duration":4.000}'
+printf '%s\n' '{"speaker":1,"start":4.000,"duration":4.000}'
 STUB
 
 # Parakeet-shape JSON emitters for correctness tests. The driver expands
@@ -577,6 +609,29 @@ jq -e '.status == "ok" and .der_median == null and .correctness_kind == null' \
 grep -q 'reference file not found' "$OUT/der-tw-badref.err" \
   || fail "der-tw-badref: missing-RTTM diagnosis not surfaced"
 ok "correctness (DER, time-wrapped): missing RTTM => der_median=null + diagnostic (perf still ok)"
+
+# Non-zero collar plumbing: proves families.json's correctness.collar_ms
+# reaches compute-der.py's --collar-ms. The 100 ms boundary slop scores
+# non-zero without a collar (compute-der.py self-test pins that at 0.0125);
+# a 250 ms collar hides it entirely, so DER=0.0 here. If the driver ever
+# stripped collar_ms and compute-der.py's default (250) also gave 0.0 this
+# would still pass, so pair this with the compute-der.py self-test's
+# "boundary slop, no collar" case which pins the DER-without-collar value.
+run_driver der-tw-collar "$OUT/der-tw-collar.json" "$OUT/der-tw-collar.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-collar.json" > /dev/null \
+  || fail "der-tw-collar: $(cat "$OUT/der-tw-collar.json")"
+ok "correctness (DER, time-wrapped): 250 ms collar hides boundary slop => DER 0.0 (collar_ms plumbed through)"
+
+# Duration-shape hypothesis: parakeet-cli today emits {speaker,start,end}
+# but the JSONL contract accepts either end or duration. Pin that a future
+# CLI switch between the two shapes doesn't silently regress DER — same
+# hyp content in the two shapes must score identically (DER 0.0 here).
+run_driver der-tw-duration-shape "$OUT/der-tw-duration-shape.json" "$OUT/der-tw-duration-shape.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .der_median == 0.0 and .correctness_kind == "der"' \
+  "$OUT/der-tw-duration-shape.json" > /dev/null \
+  || fail "der-tw-duration-shape: $(cat "$OUT/der-tw-duration-shape.json")"
+ok "correctness (DER, time-wrapped): {start,duration}-shape JSONL parses identically to {start,end}"
 
 # Native-mode families have no diarize schema in --json-out today, so a
 # native family declaring correctness.kind='der' must be skipped with a

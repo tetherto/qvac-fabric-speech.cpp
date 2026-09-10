@@ -151,10 +151,15 @@ def _collar_mask(
     """True for frames excluded by the collar around ref-segment boundaries.
 
     Standard DER practice: don't penalize the diarizer for boundary-timing
-    slop within +/- collar_ms of any reference start or end.
+    slop within +/- collar_ms of any reference start or end. collar_ms=0
+    disables exclusion entirely — no `max(1, ...)` here, otherwise a
+    zero-collar request silently strips a 1-frame ring around every
+    boundary, biasing DER by a symmetric-but-nonzero amount.
     """
+    if collar_ms <= 0:
+        return [False] * n_frames
     excluded = [False] * n_frames
-    half = max(1, int(round(collar_ms / FRAME_MS)))
+    half = int(round(collar_ms / FRAME_MS))
     for start, dur, _ in ref_segments:
         for edge_s in (start, start + dur):
             center = int(round(edge_s * 1000 / FRAME_MS))
@@ -332,6 +337,27 @@ def _self_test() -> int:
         ("all-fa (empty ref)", [],     jsonl([(0.0, 4.0, "0")]),                   0, 1.0),
         ("both empty",         [],     jsonl([]),                                  0, 0.0),
         ("full confusion",     ref_ab, jsonl([(0.0, 8.0, "0")]),                   0, 0.5),
+        # Boundary-slop case: hyp puts the speaker-change 100 ms before the
+        # true 4.0 s boundary. With collar_ms=0, frames [390-400] score as
+        # speaker confusion (hyp says B but ref is still A) = 10 / 800 =
+        # 0.0125. A 200 ms collar excludes the ±20 frame ring around the
+        # 4.0 s boundary — the confused frames all fall inside that ring,
+        # so DER goes back to 0.0. Guards the collar-off vs collar-on delta,
+        # and would fail loudly if _collar_mask reverted to the max(1, ...)
+        # bug that always excluded a 1-frame ring around every boundary.
+        ("boundary slop, no collar", ref_ab,
+            jsonl([(0.0, 3.9, "0"), (3.9, 4.1, "1")]), 0,   0.0125),
+        ("boundary slop, collar 200", ref_ab,
+            jsonl([(0.0, 3.9, "0"), (3.9, 4.1, "1")]), 200, 0.0),
+        # Extra-hyp-speaker path (n_hyp > n_ref). Sortformer is a 4-speaker
+        # model; if it emits a spurious 4th speaker over a stretch that
+        # already has a ref speaker, that stretch scores as an FA on top of
+        # the correct match. Ref = 4 s A; hyp = 4 s of speaker 0 + 2 s of
+        # speaker 1 overlapping = 200 confusion-free FA frames / 400 ref
+        # frames = DER 0.5.
+        ("extra hyp speaker (FA sentinel)",
+            [(0.0, 4.0, "A")],
+            jsonl([(0.0, 4.0, "0"), (0.0, 2.0, "1")]), 0, 0.5),
     ]
 
     failed: list[str] = []
@@ -339,6 +365,16 @@ def _self_test() -> int:
         got = compute_der(hyp, ref, collar_ms=collar_ms)
         if abs(got["der"] - want) > 1e-6:
             failed.append(f"{label}: der {got['der']} != {want}")
+
+    # Duration-shape hypothesis parsing: parakeet-cli today emits `end`, but
+    # the JSONL contract accepts either — pin that both shapes score identically
+    # so a future CLI switch to `duration` doesn't silently break DER.
+    hyp_end = '{"speaker":0,"start":0.000,"end":4.000}\n{"speaker":1,"start":4.000,"end":8.000}\n'
+    hyp_dur = '{"speaker":0,"start":0.000,"duration":4.000}\n{"speaker":1,"start":4.000,"duration":4.000}\n'
+    d_end = compute_der(parse_hypothesis_jsonl(hyp_end), ref_ab)["der"]
+    d_dur = compute_der(parse_hypothesis_jsonl(hyp_dur), ref_ab)["der"]
+    if d_end != d_dur or d_end != 0.0:
+        failed.append(f"duration vs end shape: end={d_end}, duration={d_dur} (both should be 0.0)")
 
     # RTTM parser sanity: the shipped abcba.rttm should round-trip to 5
     # segments across 3 speakers.
