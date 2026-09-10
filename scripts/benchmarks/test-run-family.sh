@@ -560,7 +560,14 @@ jq -e '.status == "ok" and .wer_median == 0.0 and .correctness_kind == "wer"
        and (.correctness_reference | test("ref-perfect\\.txt$"))' \
   "$OUT/wer-tw-perfect.json" > /dev/null \
   || fail "wer-tw-perfect: $(cat "$OUT/wer-tw-perfect.json")"
-ok "correctness (time-wrapped): captured stdout matching the reference scores WER 0.0"
+# Raw-hypothesis artifact: stashed next to result.json as .hypothesis.txt so
+# a reviewer of a workflow run can see the actual transcript that scored,
+# not just the aggregate WER. .txt for WER (whisper-cli plain text).
+[[ -f "$OUT/wer-tw-perfect.hypothesis.txt" ]] \
+  || fail "wer-tw-perfect: hypothesis sibling not created next to result.json"
+grep -q 'the quick brown fox' "$OUT/wer-tw-perfect.hypothesis.txt" \
+  || fail "wer-tw-perfect: hypothesis sibling did not capture the stub's stdout"
+ok "correctness (time-wrapped): captured stdout matching the reference scores WER 0.0 + hypothesis stashed as .hypothesis.txt"
 
 # Time-wrapped variant of the catastrophic-miss regression guard from PR #230.
 # A binary that exits 0 with an empty stdout capture must score 1.0, not
@@ -585,7 +592,20 @@ jq -e '.status == "ok" and .der_median == 0.0 and .wer_median == null and .corre
        and (.correctness_reference | test("ref-der\\.rttm$"))' \
   "$OUT/der-tw-perfect.json" > /dev/null \
   || fail "der-tw-perfect: $(cat "$OUT/der-tw-perfect.json")"
-ok "correctness (DER, time-wrapped): matching JSONL segments score DER 0.0 (perm search maps 0/1 to A/B)"
+# Raw-hypothesis artifact: stashed next to result.json as .hypothesis.jsonl.
+# For DER debugging, the per-segment JSONL is what a reviewer needs to see
+# which speaker labels came out wrong or which boundaries slipped past the
+# collar — none of that is recoverable from der_median alone.
+[[ -f "$OUT/der-tw-perfect.hypothesis.jsonl" ]] \
+  || fail "der-tw-perfect: hypothesis sibling not created next to result.json"
+jq -e '.speaker == 0 and .start == 0.0 and .end == 4.0' \
+  "$OUT/der-tw-perfect.hypothesis.jsonl" > /dev/null 2>&1 || {
+  # File may have multiple JSONL lines; parse the first one explicitly.
+  first_line="$(head -1 "$OUT/der-tw-perfect.hypothesis.jsonl")"
+  echo "$first_line" | jq -e '.speaker == 0 and .start == 0.0 and .end == 4.0' > /dev/null \
+    || fail "der-tw-perfect.hypothesis.jsonl first line unexpected: $first_line"
+}
+ok "correctness (DER, time-wrapped): matching JSONL segments score DER 0.0 + hypothesis stashed as .hypothesis.jsonl"
 
 run_driver der-tw-nonzero "$OUT/der-tw-nonzero.json" "$OUT/der-tw-nonzero.err" BENCH_FAMILIES_JSON="$SPEC"
 jq -e '.status == "ok" and .der_median == 0.5 and .correctness_kind == "der"' \
@@ -608,7 +628,12 @@ jq -e '.status == "ok" and .der_median == null and .correctness_kind == null' \
   || fail "der-tw-badref: $(cat "$OUT/der-tw-badref.json")"
 grep -q 'reference file not found' "$OUT/der-tw-badref.err" \
   || fail "der-tw-badref: missing-RTTM diagnosis not surfaced"
-ok "correctness (DER, time-wrapped): missing RTTM => der_median=null + diagnostic (perf still ok)"
+# When correctness is skipped no hypothesis sibling should be left behind —
+# otherwise a reader sees a stale hypothesis file next to a null der_median
+# and wonders why the scorer didn't run.
+[[ ! -f "$OUT/der-tw-badref.hypothesis.jsonl" ]] \
+  || fail "der-tw-badref: hypothesis sibling should NOT exist when correctness was skipped"
+ok "correctness (DER, time-wrapped): missing RTTM => der_median=null + diagnostic + no hypothesis sibling (perf still ok)"
 
 # Non-zero collar plumbing: proves families.json's correctness.collar_ms
 # reaches compute-der.py's --collar-ms. The 100 ms boundary slop scores

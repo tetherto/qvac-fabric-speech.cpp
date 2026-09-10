@@ -976,6 +976,24 @@ case "$BENCH_KIND" in
       esac
       [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
       [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
+
+      # Preserve the raw hypothesis alongside result.json so a workflow
+      # reviewer can inspect the actual per-segment output that produced
+      # a given DER / WER number, not just the aggregate. $tmp_dir gets
+      # trap-cleaned at script exit, so the copy has to happen here
+      # (before emit_json returns). Extension mirrors the source shape:
+      # .jsonl for parakeet-cli --emit jsonl (DER), .txt for whisper-cli
+      # -nt plain text (WER). The workflow's upload-artifact step picks
+      # up artifacts/*, so the sibling rides along with result.json.
+      case "$c_kind" in
+        der) hyp_ext="jsonl" ;;
+        wer) hyp_ext="txt"   ;;
+        *)   hyp_ext=""      ;;
+      esac
+      if [[ -n "$hyp_ext" && -f "$r_stderr.stdout" ]]; then
+        cp "$r_stderr.stdout" "${OUT%.json}.hypothesis.$hyp_ext" 2>/dev/null || \
+          echo "warning: could not stash hypothesis artifact next to $OUT" >&2
+      fi
     fi
 
     emit_json "ok" "$med" "$mn" "$mx"
