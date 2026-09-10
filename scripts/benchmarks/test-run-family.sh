@@ -53,7 +53,14 @@ jq -e '[.sortformer.args[] | select(endswith("/abcba.wav"))] | length == 1' "$RE
   || fail "sortformer --wav must be abcba.wav (multi-speaker fixture — jfk.wav gives trivial DER)"
 jq -e '.sortformer.audio_duration_seconds == 160.6' "$REAL_SPEC" > /dev/null \
   || fail "sortformer RTF divides by the abcba.wav duration (~160.6 s)"
-ok "sortformer benches the diarize path time-wrapped on abcba.wav"
+# parakeet-cli defaults to n_gpu_layers=0, i.e. CPU-only. Whisper's macOS row
+# engages Metal automatically; sortformer needs the flag explicitly. Cosyvoice/
+# supertonic/parler already pass it — keeping sortformer in sync so the macos
+# row reports Metal, not CPU. On hosted linux (no GPU compiled into ggml) the
+# flag is a documented no-op — falls back to CPU.
+jq -e '.sortformer.args | index("--n-gpu-layers") != null' "$REAL_SPEC" > /dev/null \
+  || fail "sortformer must request GPU offload with --n-gpu-layers (else macOS runner idles on CPU when Metal is available)"
+ok "sortformer benches the diarize path time-wrapped on abcba.wav with GPU offload requested"
 
 # sortformer DER: correctness block must declare kind='der' with the checked-in
 # RTTM that matches the abcba.wav audio, and --emit jsonl must be in argv so

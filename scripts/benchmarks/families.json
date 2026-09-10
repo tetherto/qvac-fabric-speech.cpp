@@ -79,9 +79,10 @@
     ],
     "args": [
       "--verbose",
-      "--model", "${MODEL_DIR}/sortformer-4spk-v1.q8_0.gguf",
-      "--wav",   "${AUDIO_DIR}/abcba.wav",
-      "--emit",  "jsonl"
+      "--model",         "${MODEL_DIR}/sortformer-4spk-v1.q8_0.gguf",
+      "--wav",           "${AUDIO_DIR}/abcba.wav",
+      "--emit",          "jsonl",
+      "--n-gpu-layers",  "999"
     ],
     "audio_duration_seconds":  160.6,
     "correctness": {
@@ -89,7 +90,7 @@
       "reference":  "engines/parakeet/test/samples/abcba.rttm",
       "collar_ms":  250
     },
-    "notes": "Pure batch diarization: a Sortformer GGUF at --model takes parakeet-cli's diarize path (sortformer-4spk-v1 is the batch checkpoint; diar_streaming_sortformer_4spk-v2.1 belongs to the streaming API). The CLI's --bench mode covers transcription models only — the diarize and attributed paths return before the bench loop and emit no --bench-json — so the family is time-wrapped; wall includes model load like every time-wrapped row. Audio switched from jfk.wav (11 s, single speaker — trivial DER) to abcba.wav (~160.6 s, 3 speakers A-B-C-B-A) so DER actually stress-tests diarization; RTF divides by the abcba.wav duration. --emit jsonl makes parakeet-cli print one {speaker,start,end} JSON object per segment on stdout, which run-family.sh feeds to compute-der.py as the hypothesis. Correctness: DER against the checked-in abcba.rttm with a 250 ms collar; healthy sortformer scores single-digit percent."
+    "notes": "Pure batch diarization: a Sortformer GGUF at --model takes parakeet-cli's diarize path (sortformer-4spk-v1 is the batch checkpoint; diar_streaming_sortformer_4spk-v2.1 belongs to the streaming API). The CLI's --bench mode covers transcription models only — the diarize and attributed paths return before the bench loop and emit no --bench-json — so the family is time-wrapped; wall includes model load like every time-wrapped row. Audio switched from jfk.wav (11 s, single speaker — trivial DER) to abcba.wav (~160.6 s, 3 speakers A-B-C-B-A) so DER actually stress-tests diarization; RTF divides by the abcba.wav duration. --emit jsonl makes parakeet-cli print one {speaker,start,end} JSON object per segment on stdout, which run-family.sh feeds to compute-der.py as the hypothesis. --n-gpu-layers 999 asks parakeet-cli to offload the encoder to a GPU when one is registered — parakeet-cli defaults to 0 (CPU-only) unlike whisper-cli which defaults to on, so the flag is needed for the macOS Metal path; on hosted Linux without a GPU-compiled ggml it falls back to CPU as a no-op. Correctness: DER against the checked-in abcba.rttm with a 250 ms collar; healthy sortformer scores single-digit percent."
   },
 
   "vad": {
