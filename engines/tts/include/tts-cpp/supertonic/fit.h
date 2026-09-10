@@ -69,9 +69,9 @@ struct FitOptions {
     // Required; same role as EngineOptions::model_gguf_path.
     std::string model_gguf_path;
 
-    // Same semantics as the EngineOptions fields of the same name.  The
-    // resolved backend must be a validated GPU (see the refusal note above),
-    // so a projection normally passes n_gpu_layers > 0.
+    // Same semantics as the EngineOptions fields of the same name. The
+    // resolved dispatch must use the fused graph path (see coverage above):
+    // a validated GPU, or CPU without Accelerate/CBLAS pointwise kernels.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
     // Mirrors the default Engine allocation policy by construction.
