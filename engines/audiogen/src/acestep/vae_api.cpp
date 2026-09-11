@@ -10,7 +10,6 @@
 #include "coreml/vae-decoder.h"
 #include "vae_coreml_path.h"
 #include "vae_coreml_windows.h"
-#include "vae_layout.h"
 #endif
 
 #include "ggml-backend.h"
@@ -59,7 +58,7 @@ static acestep_coreml_vae_context * load_coreml_sidecar(const std::string & gguf
 
 static void copy_window_core(const VaeCoremlWindow & w, const std::vector<float> & pcm_win,
                              std::vector<float> & pcm_out) {
-    const size_t samples_per_frame = (size_t) VAE_UPSAMPLE * VAE_PCM_CHANNELS;
+    const size_t samples_per_frame = (size_t) VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS;
     const size_t core_off = (size_t) (w.core_a - w.win_a) * samples_per_frame;
     const size_t core_len = (size_t) (w.core_b - w.core_a) * samples_per_frame;
     const size_t dst      = (size_t) w.core_a * samples_per_frame;
@@ -73,8 +72,8 @@ static CoremlDecodeStatus coreml_decode(acestep_coreml_vae_context * ctx, const 
         vae_coreml_plan_windows(T_latent, window_frames, vae_coreml_window_overlap(window_frames));
     if (plan.empty()) return CoremlDecodeStatus::unavailable;
 
-    pcm_out.assign((size_t) T_latent * VAE_UPSAMPLE * VAE_PCM_CHANNELS, 0.0f);
-    std::vector<float> pcm_win((size_t) window_frames * VAE_UPSAMPLE * VAE_PCM_CHANNELS);
+    pcm_out.assign((size_t) T_latent * VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS, 0.0f);
+    std::vector<float> pcm_win((size_t) window_frames * VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS);
     const int n_windows = (int) plan.size();
     for (int i = 0; i < n_windows; ++i) {
         const VaeCoremlWindow & w = plan[i];

@@ -7,7 +7,7 @@
 
 #include "vae-decoder.h"
 
-#include "vae_layout.h"
+#include "vae_encode_windows.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -19,7 +19,7 @@ namespace {
 
 using tts_cpp::acestep::VAE_LATENT_CHANNELS;
 using tts_cpp::acestep::VAE_PCM_CHANNELS;
-using tts_cpp::acestep::VAE_UPSAMPLE;
+using tts_cpp::acestep::VAE_ENCODER_UPSAMPLE;
 
 float decode_float16(uint16_t h) {
     __fp16 v;
@@ -111,7 +111,7 @@ int64_t validate_model_interface(MLModel * model, NSString ** in_name, NSString 
     if (in_dims.size() < 2 || in_dims.back() <= 0) return 0;
     const int64_t frames = in_dims.back();
     if (!shape_is(in_dims, VAE_LATENT_CHANNELS, frames)) return 0;
-    if (!shape_is(out_dims, VAE_PCM_CHANNELS, frames * VAE_UPSAMPLE)) return 0;
+    if (!shape_is(out_dims, VAE_PCM_CHANNELS, frames * VAE_ENCODER_UPSAMPLE)) return 0;
     return frames;
 }
 
@@ -275,7 +275,7 @@ int acestep_coreml_vae_decode(struct acestep_coreml_vae_context * ctx,
         NSString * out_name = [NSString stringWithUTF8String:ctx->output_name.c_str()];
         MLMultiArray * out_arr = [result featureValueForName:out_name].multiArrayValue;
         if (out_arr == nil) return 3;
-        copy_pcm_array(out_arr, pcm, ctx->window_frames * VAE_UPSAMPLE);
+        copy_pcm_array(out_arr, pcm, ctx->window_frames * VAE_ENCODER_UPSAMPLE);
         return 0;
     }
 }
