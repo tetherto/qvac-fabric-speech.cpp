@@ -14,7 +14,7 @@
       "models_by_size":          "Only for the whisper family. Object keyed by size ('tiny' / 'base' / 'small'). Each value is either a {name, sha256?} object (source='huggingface') or a list of S3 keys (source='s3'). sha256 is optional; when set the download is verified against it via sha256sum/shasum.",
       "args":                    "Command-line arguments as a JSON array (one element per argv token, so multi-word values stay a single token). Placeholders expanded by run-family.sh per-element: ${MODEL_DIR}, ${MODELS_ROOT}, ${AUDIO_DIR}, ${MODEL_PATH}, and for bench_kind=native also ${RUNS}, ${WARMUP}, ${JSON_OUT}. Native families put the runs/warmup/json-out flags in `args` because their spellings differ (--json-out vs --bench-json, --runs vs --bench-runs).",
       "audio_duration_seconds":  "Length of the reference input audio (for ASR) or requested output audio (for TTS/music). Used to compute wall-based RTF when the bench binary does not report one. Null when the wall-clock isn't a fair RTF proxy (e.g. TTS with variable-length output).",
-      "correctness":             "Optional. When present, run-family.sh computes an accuracy metric against a reference and merges it into result.json as wer_median (kind='wer'), der_median (kind='der'), or f1_median (kind='f1'). Object shape by kind: {kind:'wer', reference:'<repo-relative transcript path>', normalizer:'english'|'none'} for ASR; {kind:'der', reference:'<repo-relative RTTM path>', collar_ms:N} for diarization (collar_ms default 250); {kind:'f1', reference:'<repo-relative JSON-array path>', tolerance_ms:N} for VAD (frame-based precision/recall/F1, tolerance_ms default 100). Hypothesis source depends on bench_kind: native families supply it via `.transcript` in --json-out (parakeet WER); time-wrapped families supply it via the CLI's captured stdout (whisper -nt for WER; parakeet-cli --emit jsonl for sortformer DER; whisper-vad-speech-segments --no-prints for VAD F1). TTS families need a different metric (no transcript). Absent block == correctness step skipped.",
+      "correctness":             "Optional. When present, run-family.sh computes an accuracy metric against a reference and merges it into result.json as wer_median (kind='wer'), der_median (kind='der'), or f1_median (kind='f1'). Object shape by kind: {kind:'wer', reference:'<repo-relative transcript path>', normalizer:'english'|'none'} for ASR; {kind:'der', reference:'<repo-relative RTTM path>', collar_ms:N} for diarization (collar_ms default 250); {kind:'f1', reference:'<repo-relative JSON-array path>', tolerance_ms:N} for VAD (frame-based precision/recall/F1, tolerance_ms default 100). Hypothesis source depends on bench_kind: native families supply it via `.transcript` in --json-out (parakeet WER); time-wrapped families supply it via the CLI's captured stdout (whisper -nt for WER; parakeet-cli --emit jsonl for sortformer DER; whisper-vad-speech-segments --no-prints for VAD F1). TTS families need a different metric (no transcript). Audio metrics use {kind:audio, metrics:[sisdr,stoi], reference:<clean WAV>, degradation:{snr_db,seed}?}; output is audio_quality with per-metric status/value/unit. Single kinds sisdr/stoi are also supported. Audio args use ${AUDIO_INPUT} and ${AUDIO_OUT}. Absent block == correctness step skipped.",
       "notes":                   "Free text; surfaced in the summary table's 'notes' column."
     }
   },
@@ -202,42 +202,79 @@
   },
 
   "audio8": {
-    "cmake_target": "audio8-cli",
-    "bench_kind":   "time-wrapped",
-    "binary":       "engines/tts/audio8-cli",
-    "s3_prefix":    "audio-8",
+    "cmake_target": "audio8-codec-bench",
+    "bench_kind": "time-wrapped",
+    "binary": "engines/tts/audio8-codec-bench",
+    "s3_prefix": "audio-8",
     "models": [
-      "2026-08-12/audio8-lm-q8_0.gguf",
       "2026-08-12/audio8-codec-encoder-q8_0.gguf",
       "2026-08-12/audio8-codec-decoder-q8_0.gguf"
     ],
     "args": [
-      "--verbose",
-      "--lm",             "${MODEL_DIR}/audio8-lm-q8_0.gguf",
-      "--codec-decoder",  "${MODEL_DIR}/audio8-codec-decoder-q8_0.gguf",
-      "--text",           "benchmark run",
-      "--out",            "/dev/null"
+      "--codec-encoder",
+      "${MODEL_DIR}/audio8-codec-encoder-q8_0.gguf",
+      "--codec-decoder",
+      "${MODEL_DIR}/audio8-codec-decoder-q8_0.gguf",
+      "--in",
+      "${AUDIO_INPUT}",
+      "--out",
+      "${AUDIO_OUT}",
+      "--threads",
+      "4",
+      "--n-gpu-layers",
+      "999"
     ],
-    "audio_duration_seconds":  null,
-    "notes": "audio8-cli has no --bench flag; wall-clock via time. Runs on CPU (no --n-gpu-layers in args) and prints no backend marker of its own — the driver's GPU-evidence scrape / CPU default labels the Backend column. RTF omitted (text-driven variable output)."
+    "audio_duration_seconds": 11.0,
+    "notes": "Audio8 codec encode/decode reconstruction of JFK speech, without the text LM. This replaces the former TTS workload and resets its performance baseline. GPU requested with CPU fallback. SI-SDR in dB and STOI compare reconstructed speech with the clean input.",
+    "correctness": {
+      "kind": "audio",
+      "metrics": [
+        "sisdr",
+        "stoi"
+      ],
+      "reference": "engines/parakeet/test/samples/jfk.wav"
+    }
   },
 
   "lavasr": {
     "cmake_target": "lavasr-bench",
-    "bench_kind":   "time-wrapped",
-    "binary":       "engines/tts/lavasr-bench",
-    "s3_prefix":    "lavasr",
+    "bench_kind": "time-wrapped",
+    "binary": "engines/tts/lavasr-bench",
+    "s3_prefix": "lavasr",
     "models": [
       "2026-07-03/lavasr-denoiser-f16.gguf",
       "2026-06-26/lavasr-enhancer-f16.gguf"
     ],
     "args": [
-      "--denoiser", "${MODEL_DIR}/lavasr-denoiser-f16.gguf",
-      "--enhancer", "${MODEL_DIR}/lavasr-enhancer-f16.gguf",
-      "--seconds",  "6"
+      "--denoiser",
+      "${MODEL_DIR}/lavasr-denoiser-f16.gguf",
+      "--enhancer",
+      "${MODEL_DIR}/lavasr-enhancer-f16.gguf",
+      "--in",
+      "${AUDIO_INPUT}",
+      "--out-enhanced",
+      "${AUDIO_OUT}",
+      "--runs",
+      "1",
+      "--warmup",
+      "0",
+      "--n-gpu-layers",
+      "999"
     ],
-    "audio_duration_seconds":  6.0,
-    "notes": "lavasr-bench emits stdout tables but has no --json-out; time-wrapped. No q8_0 in registry — f16 weights only."
+    "audio_duration_seconds": 11.0,
+    "notes": "LavaSR denoise/enhance of JFK speech with deterministic 10 dB additive noise (seed 42). Replaces the synthetic six-second tone and resets performance baseline; driver controls repeats. Enhancer GPU requested; denoiser retains scalar CPU default. Audio scores compare enhanced output against clean JFK.",
+    "correctness": {
+      "kind": "audio",
+      "metrics": [
+        "sisdr",
+        "stoi"
+      ],
+      "reference": "engines/parakeet/test/samples/jfk.wav",
+      "degradation": {
+        "snr_db": 10,
+        "seed": 42
+      }
+    }
   },
 
   "acestep": {
