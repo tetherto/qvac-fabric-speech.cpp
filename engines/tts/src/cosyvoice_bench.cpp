@@ -12,6 +12,7 @@
 //       cross-leg check can assert equal work instead of trusting the operator.
 
 #include "tts-cpp/cosyvoice/engine.h"
+#include "bench_wav.h"
 
 #include <algorithm>
 #include <charconv>
@@ -83,24 +84,6 @@ void write_json_stage(std::ofstream & os, const Stage & s, bool comma) {
        << ", \"p95_ms\": " << percentile(s.ms, 0.95)
        << ", \"max_ms\": " << maxv(s.ms)
        << "}" << (comma ? "," : "") << "\n";
-}
-
-void write_wav(const std::string & path, const std::vector<float> & wav, int sr) {
-    FILE * f = std::fopen(path.c_str(), "wb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path.c_str()); return; }
-    uint32_t num_samples = (uint32_t) wav.size();
-    uint32_t byte_rate = sr * 2, data_size = num_samples * 2, chunk_size = 36 + data_size;
-    uint32_t fcs = 16, sr32 = (uint32_t) sr; uint16_t af = 1, nc = 1, ba = 2, bps = 16;
-    std::fwrite("RIFF", 1, 4, f); std::fwrite(&chunk_size, 4, 1, f); std::fwrite("WAVE", 1, 4, f);
-    std::fwrite("fmt ", 1, 4, f); std::fwrite(&fcs, 4, 1, f); std::fwrite(&af, 2, 1, f); std::fwrite(&nc, 2, 1, f);
-    std::fwrite(&sr32, 4, 1, f); std::fwrite(&byte_rate, 4, 1, f); std::fwrite(&ba, 2, 1, f); std::fwrite(&bps, 2, 1, f);
-    std::fwrite("data", 1, 4, f); std::fwrite(&data_size, 4, 1, f);
-    for (float x : wav) {
-        float c = std::max(-1.0f, std::min(1.0f, x));
-        int16_t v = (int16_t) std::lrintf(c * 32767.0f);
-        std::fwrite(&v, 2, 1, f);
-    }
-    std::fclose(f);
 }
 
 bool read_tokens(const std::string & path, std::vector<int> & out) {
@@ -183,6 +166,10 @@ int main(int argc, char ** argv) {
         else if (a == "--backends-dir" && i + 1 < argc) backends_dir = argv[++i];
         else if (a == "--opencl-cache-dir" && i + 1 < argc) opencl_cache_dir = argv[++i];
         else { usage(argv[0]); return 1; }
+    }
+    if (runs <= 0 || warmup < 0 || warmup > std::numeric_limits<int>::max() - runs) {
+        fprintf(stderr, "--runs must be positive and --warmup nonnegative (without overflow)\n");
+        return 2;
     }
     if (model_dir.empty()) { usage(argv[0]); return 1; }
 
@@ -274,7 +261,13 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "cosyvoice-bench: cannot write --tokens-out %s\n", tokens_out.c_str());
         }
     }
-    if (!wav_out.empty()) write_wav(wav_out, last.pcm, last.sample_rate);
+    if (!wav_out.empty()) {
+        std::string wav_error;
+        if (!bench_write_wav(wav_out, last.pcm, last.sample_rate, wav_error)) {
+            fprintf(stderr, "%s\n", wav_error.c_str());
+            return 1;
+        }
+    }
 
     if (!json_out.empty()) {
         std::ofstream os(json_out);
