@@ -566,9 +566,11 @@ ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 // True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
 // instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+bool        model_bypass_encoder_on_coreml(const ParakeetCtcModel & m);
 // Fixed mel-frame capacity advertised by the active Core ML sidecar, or 0 when
 // Core ML is unavailable, disabled, flexible-shape, or has an unknown layout.
 int         model_coreml_fixed_mel_frames(const ParakeetCtcModel & m);
+int         model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m);
 // Encoder compute-backend label for stats/logging: the Core ML label (e.g. "coreml")
 // when the sidecar is active, otherwise the ggml active-backend name.
 std::string model_encoder_backend_name(const ParakeetCtcModel & m);

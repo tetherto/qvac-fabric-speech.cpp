@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Export a Parakeet TDT or EOU FastConformer encoder from GGUF to Core ML
-package for the Apple Neural Engine sidecar consumed by the parakeet.cpp Engine
+"""Export a Parakeet TDT, EOU, or Sortformer v2.1 FastConformer encoder
+from GGUF to a Core ML package consumed by the parakeet.cpp Engine
 (the encoder I/O contract lives in src/coreml/parakeet-encoder.h).
 
 The exported graph reuses the pure-PyTorch reference encoder in
 ref-encoder-from-gguf.py so it matches the ggml encoder numerically.
 
-Two input-shape modes:
+Three input-shape modes:
   - Fixed (default): torch.jit.trace at a single mel length (from a sample wav
-    or an explicit count). The sidecar then accelerates only utterances whose
-    mel length equals that count; every other length falls back to ggml.
+    or an explicit count). TDT and Sortformer treat that length as a capacity
+    and may pad shorter batch inputs; EOU requires the exact exported length.
+  - Sortformer AOSC (--bypass-pre-encode): trace only the Conformer block stack
+    at a fixed encoder-frame capacity. The runtime pads shorter cache/FIFO/chunk
+    slabs, supplies an attention-validity mask, and crops the output.
   - Flexible (--flexible): export a Core ML RangeDim time axis via torch.export
     so one encoder serves any mel length in [--min-frames, --max-frames] (others
     fall back to ggml). CORRECTNESS-ONLY, NOT FOR ACCELERATION: measured on Apple
@@ -38,6 +41,24 @@ Example:
       --wav test/samples/jfk.wav \
       --palettize-bits 6 --palettize-group-size 16 \
       --out models/parakeet_realtime_eou_120m-v1-encoder.mlpackage \
+      --compile-dir models
+
+  # Sortformer v2.1 batch path: mel -> FastConformer output.
+  python scripts/export-encoder-coreml.py \
+      --gguf models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+      --wav test/samples/diarization-sample-16k.wav \
+      --palettize-bits 6 --palettize-group-size 16 \
+      --out models/diar_streaming_sortformer_4spk-v2.1-encoder.mlpackage \
+      --compile-dir models
+
+  # Sortformer v2.1 AOSC path: cached pre-encode embeddings -> encoder output.
+  # 410 covers the default 188-row speaker cache, 188-row FIFO, and the
+  # subsampled 80 ms + 2000 ms + 560 ms context/chunk window.
+  python scripts/export-encoder-coreml.py \
+      --gguf models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+      --bypass-pre-encode --n-encoder-frames 410 \
+      --palettize-bits 6 --palettize-group-size 16 \
+      --out models/diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlpackage \
       --compile-dir models
 
   # variable-length (best-effort; validate on device):
@@ -91,10 +112,33 @@ def model_type(meta):
     return str(meta.get("parakeet.model.type", "ctc"))
 
 
-def validate_export_contract(meta, flexible=False):
+def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
     kind = model_type(meta)
-    if kind not in ("tdt", "eou"):
-        raise ValueError(f"Core ML encoder export supports TDT and EOU, got {kind!r}")
+    if kind not in ("tdt", "eou", "sortformer"):
+        raise ValueError(
+            "Core ML encoder export supports TDT, EOU, and "
+            f"Sortformer v2.1, got {kind!r}")
+    if bypass_pre_encode and kind != "sortformer":
+        raise ValueError("--bypass-pre-encode is supported only for Sortformer v2.1")
+    if kind == "sortformer":
+        variant = str(meta.get("parakeet.model_variant", ""))
+        if variant != "sortformer-streaming-v2.1-aosc":
+            raise ValueError(
+                "Sortformer Core ML export requires "
+                "parakeet.model_variant='sortformer-streaming-v2.1-aosc', "
+                f"got {variant!r}")
+        if flexible:
+            raise ValueError("Sortformer Core ML export requires a fixed shape; omit --flexible")
+        if bool(meta.get("parakeet.encoder.causal_downsampling", False)):
+            raise ValueError("Sortformer Core ML export requires non-causal downsampling")
+        if str(meta.get("parakeet.encoder.conv_context_size", "default")) == "causal":
+            raise ValueError("Sortformer Core ML export requires non-causal convolution")
+        if str(meta.get("parakeet.encoder.att_context_style", "regular")) != "regular":
+            raise ValueError("Sortformer Core ML export requires regular full-context attention")
+        left = int(meta.get("parakeet.encoder.att_context_size_left", -1))
+        right = int(meta.get("parakeet.encoder.att_context_size_right", -1))
+        if left >= 0 or right >= 0:
+            raise ValueError("Sortformer Core ML export requires unbounded attention context")
     if kind == "eou":
         if flexible:
             raise ValueError("EOU Core ML export requires a fixed shape; omit --flexible")
@@ -171,11 +215,16 @@ def rel_pos_mha_fixed(ref, x, pos_emb, weights, prefix, n_heads, att_mask=None):
     return F.linear(ctx, weights[f"{prefix}.out.weight"], weights[f"{prefix}.out.bias"])
 
 
-def conformer_conv(ref, x, weights, prefix, causal=False, layer_norm=False):
+def conformer_conv(ref, x, weights, prefix, causal=False, layer_norm=False,
+                   sequence_mask=None):
     x = x.transpose(1, 2)
     x = F.conv1d(x, weights[f"{prefix}.pw1.weight"].squeeze(-1).unsqueeze(-1),
                  weights[f"{prefix}.pw1.bias"])
     x = F.glu(x, dim=1)
+    if sequence_mask is not None:
+        # Keep appended capacity rows identical to the implicit zero padding at
+        # the boundary of the unpadded ggml depthwise convolution.
+        x = x * sequence_mask.transpose(1, 2)
     depthwise = weights[f"{prefix}.dw.weight"]
     groups = int(depthwise.shape[0])
     kernel = int(depthwise.shape[-1])
@@ -200,40 +249,47 @@ def conformer_conv(ref, x, weights, prefix, causal=False, layer_norm=False):
 
 
 def conformer_block(ref, x, pos_emb, weights, index, n_heads,
-                    att_mask=None, causal_conv=False, conv_layer_norm=False):
+                    att_mask=None, causal_conv=False, conv_layer_norm=False,
+                    sequence_mask=None):
     p = f"encoder.blk.{index}"
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff1.weight"], weights[f"{p}.norm_ff1.bias"]),
         weights, f"{p}.ff1")
+    if sequence_mask is not None:
+        x = x * sequence_mask
     x = x + rel_pos_mha_fixed(ref,
         ref.layer_norm(x, weights[f"{p}.norm_attn.weight"], weights[f"{p}.norm_attn.bias"]),
         pos_emb, weights, f"{p}.attn", n_heads, att_mask)
+    if sequence_mask is not None:
+        x = x * sequence_mask
     x = x + conformer_conv(ref,
         ref.layer_norm(x, weights[f"{p}.norm_conv.weight"], weights[f"{p}.norm_conv.bias"]),
-        weights, f"{p}.conv", causal_conv, conv_layer_norm)
+        weights, f"{p}.conv", causal_conv, conv_layer_norm, sequence_mask)
+    if sequence_mask is not None:
+        x = x * sequence_mask
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff2.weight"], weights[f"{p}.norm_ff2.bias"]),
         weights, f"{p}.ff2")
-    return ref.layer_norm(x, weights[f"{p}.norm_out.weight"], weights[f"{p}.norm_out.bias"])
+    x = ref.layer_norm(x, weights[f"{p}.norm_out.weight"], weights[f"{p}.norm_out.bias"])
+    return x if sequence_mask is None else x * sequence_mask
 
 
-def encoder_forward(ref, mel, weights, meta):
+def conformer_stack_forward(ref, x, weights, meta, attention_mask=None,
+                            sequence_mask=None):
     d_model = meta["parakeet.encoder.d_model"]
     n_layers = meta["parakeet.encoder.n_layers"]
     n_heads = meta["parakeet.encoder.n_heads"]
     kind = model_type(meta)
-    if kind == "eou":
-        x = causal_subsampling(mel, weights)
-    else:
-        x, _ = ref.subsampling(mel, weights)
     if meta.get("parakeet.encoder.xscaling", True):
         x = x * math.sqrt(d_model)
+    if sequence_mask is not None:
+        x = x * sequence_mask
     length = x.size(1)
     pe = ref.sinusoidal_rel_pe(
         max(length, meta.get("parakeet.encoder.pos_emb_max_len", 5000)), d_model, dtype=x.dtype)
     center = pe.size(1) // 2 + 1
     pos_emb = pe[:, center - length: center + length - 1]
-    att_mask = None
+    att_mask = attention_mask
     causal_conv = False
     conv_layer_norm = False
     if kind == "eou":
@@ -246,8 +302,16 @@ def encoder_forward(ref, mel, weights, meta):
         conv_layer_norm = True
     for index in range(n_layers):
         x = conformer_block(ref, x, pos_emb, weights, index, n_heads,
-                            att_mask, causal_conv, conv_layer_norm)
+                            att_mask, causal_conv, conv_layer_norm, sequence_mask)
     return x
+
+
+def encoder_forward(ref, mel, weights, meta):
+    if model_type(meta) == "eou":
+        x = causal_subsampling(mel, weights)
+    else:
+        x, _ = ref.subsampling(mel, weights)
+    return conformer_stack_forward(ref, x, weights, meta)
 
 
 def subsampling_shape_generic(mel, weights):
@@ -397,6 +461,34 @@ class EncoderModule(torch.nn.Module):
         return encoder_forward(self.ref, mel, weights, self.meta)[0]
 
 
+class BypassEncoderModule(torch.nn.Module):
+    """FastConformer blocks with subsampling/pre-encode intentionally omitted."""
+
+    def __init__(self, ref, weights, meta):
+        super().__init__()
+        self.ref = ref
+        self.meta = meta
+        self._keys = list(weights.keys())
+        self._buffers_by_key = {}
+        for i, key in enumerate(self._keys):
+            name = f"w_{i}"
+            self.register_buffer(name, weights[key].contiguous().float())
+            self._buffers_by_key[key] = name
+
+    def forward(self, pre_encode, valid_mask):
+        weights = BiasTolerantWeights(
+            (key, getattr(self, self._buffers_by_key[key])) for key in self._keys)
+        # Core ML boundary: (d_model, time) -> PyTorch (1, time, d_model).
+        x = pre_encode.transpose(0, 1).unsqueeze(0)
+        # Mask only the key axis. Padded query rows are discarded by the caller;
+        # excluding padded keys keeps every real query identical to the unpadded graph.
+        sequence_mask = valid_mask.reshape(1, -1, 1)
+        attention_mask = (1.0 - valid_mask).reshape(1, 1, 1, -1) * -1.0e4
+        return conformer_stack_forward(
+            self.ref, x, weights, self.meta, attention_mask=attention_mask,
+            sequence_mask=sequence_mask)[0]
+
+
 def compile_mlmodelc(mlpackage_path, compile_dir):
     subprocess.run(
         ["xcrun", "coremlc", "compile", str(mlpackage_path), str(compile_dir)],
@@ -485,6 +577,28 @@ def convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
     )
 
 
+def convert_bypass_fixed(ref, weights, meta, example, d_model, n_encoder_frames,
+                         precision, io_dtype, deployment_target):
+    model = BypassEncoderModule(ref, weights, meta).eval()
+    valid_mask = torch.ones(n_encoder_frames, dtype=torch.float32)
+    with torch.inference_mode():
+        reference_out = model(example, valid_mask)
+    print(f"[export] fixed bypass-pre-encode d_model={d_model} "
+          f"encoder_frames={n_encoder_frames} output_frames={reference_out.shape[0]}")
+    traced = torch.jit.trace(model, (example, valid_mask), check_trace=False)
+    return ct.convert(
+        traced,
+        inputs=[ct.TensorType(name="pre_encode", shape=(d_model, n_encoder_frames),
+                              dtype=io_dtype),
+                ct.TensorType(name="valid_mask", shape=(n_encoder_frames,),
+                              dtype=io_dtype)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
+        compute_units=ct.ComputeUnit.ALL,
+        compute_precision=precision,
+        minimum_deployment_target=deployment_target,
+    )
+
+
 def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
                      min_frames, max_frames, precision, io_dtype, deployment_target):
     min_frames = min_frames if min_frames is not None else 1
@@ -551,6 +665,12 @@ def main():
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--wav", type=Path, help="size the encoder to this wav's mel length")
     group.add_argument("--n-mel-frames", type=int, help="fixed mel length to trace")
+    group.add_argument("--n-encoder-frames", type=int,
+                       help="fixed capacity for --bypass-pre-encode (410 covers "
+                            "the default v2.1 AOSC geometry)")
+    ap.add_argument("--bypass-pre-encode", action="store_true",
+                    help="export the Sortformer v2.1 conformer stack without subsampling; "
+                         "input is a fixed (d_model, n_encoder_frames) embedding slab")
     ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     ap.add_argument("--palettize-bits", type=int, choices=[4, 6, 8], default=None,
                     help="optionally compress fixed-export weights into grouped-channel LUTs; "
@@ -570,6 +690,12 @@ def main():
                     help="[--flexible] maximum mel length the RangeDim accepts; set to your "
                          "longest expected utterance (default: the traced length)")
     args = ap.parse_args()
+    if args.bypass_pre_encode != (args.n_encoder_frames is not None):
+        ap.error("--bypass-pre-encode and --n-encoder-frames must be used together")
+    if args.bypass_pre_encode and args.flexible:
+        ap.error("--bypass-pre-encode does not support --flexible")
+    if args.n_encoder_frames is not None and args.n_encoder_frames <= 0:
+        ap.error("--n-encoder-frames must be greater than zero")
     if args.flexible and args.palettize_bits is not None:
         ap.error("--palettize-bits requires a fixed-shape export (omit --flexible)")
     if args.palettize_group_size <= 0:
@@ -578,13 +704,16 @@ def main():
     ref = load_reference_encoder(args.scripts)
     weights, meta = ref.load_gguf(args.gguf)
     try:
-        kind = validate_export_contract(meta, flexible=args.flexible)
+        kind = validate_export_contract(meta, flexible=args.flexible,
+                                        bypass_pre_encode=args.bypass_pre_encode)
     except ValueError as exc:
         ap.error(str(exc))
 
-    d_model = meta["parakeet.encoder.d_model"]
+    d_model = int(meta["parakeet.encoder.d_model"])
     n_mels = int(weights["preproc.mel_filterbank"].shape[0])
-    if args.n_mel_frames is not None:
+    if args.bypass_pre_encode:
+        n_mel_frames = None
+    elif args.n_mel_frames is not None:
         n_mel_frames = args.n_mel_frames
     else:
         n_mel_frames = mel_frames_for_wav(args.wav, resolve_hop_length(meta))
@@ -592,14 +721,19 @@ def main():
     precision = ct.precision.FLOAT16 if args.precision == "fp16" else ct.precision.FLOAT32
     io_dtype = np.float16 if args.precision == "fp16" else np.float32
     deployment_target = ct.target.macOS15 if args.palettize_bits is not None else ct.target.macOS13
-    example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
-
-    print(f"[export] model_type={kind}")
-    if args.flexible:
+    print(f"[export] model_type={kind} bypass_pre_encode={args.bypass_pre_encode}")
+    if args.bypass_pre_encode:
+        example = torch.zeros(d_model, args.n_encoder_frames, dtype=torch.float32)
+        mlmodel = convert_bypass_fixed(ref, weights, meta, example, d_model,
+                                       args.n_encoder_frames, precision, io_dtype,
+                                       deployment_target)
+    elif args.flexible:
+        example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
         mlmodel = convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames,
                                    d_model, args.min_frames, args.max_frames,
                                    precision, io_dtype, deployment_target)
     else:
+        example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
         mlmodel = convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames,
                                 d_model, precision, io_dtype, deployment_target)
     if args.palettize_bits is not None:

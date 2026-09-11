@@ -1,4 +1,4 @@
-// Core ML TDT/EOU FastConformer encoder sidecar for parakeet-cpp.
+// Core ML TDT/EOU/Sortformer FastConformer encoder sidecars for parakeet-cpp.
 //
 // Derived from the whisper.cpp Core ML wrapper pattern (src/coreml/whisper-encoder.mm),
 // generalised to load an arbitrary compiled encoder via the generic MLModel API so it
@@ -214,6 +214,27 @@ bool fill_input_array(
     return true;
 }
 
+bool fill_valid_mask(MLMultiArray * arr, int64_t valid_frames, int64_t capacity) {
+    if (arr == nil || valid_frames <= 0 || capacity < valid_frames ||
+        (int64_t) arr.count != capacity) {
+        return false;
+    }
+
+    if (arr.dataType == MLMultiArrayDataTypeFloat32) {
+        float * dst = (float *) arr.dataPointer;
+        std::fill(dst, dst + capacity, 0.0f);
+        std::fill(dst, dst + valid_frames, 1.0f);
+        return true;
+    }
+    if (arr.dataType == MLMultiArrayDataTypeFloat16) {
+        uint16_t * dst = (uint16_t *) arr.dataPointer;
+        std::fill(dst, dst + capacity, uint16_t{0});
+        std::fill(dst, dst + valid_frames, encode_float16(1.0f));
+        return true;
+    }
+    return false;
+}
+
 bool read_scalar(const void * base, MLMultiArrayDataType dt, int64_t off, float * out) {
     switch (dt) {
         case MLMultiArrayDataTypeFloat32: *out = ((const float *)    base)[off];                 return true;
@@ -268,10 +289,12 @@ bool copy_output_array(MLMultiArray * arr, float * dst, int64_t n_enc_frames, in
 struct parakeet_coreml_context {
     const void * model              = nullptr;  // CFBridgingRetain'd MLModel *
     const void * input_array        = nullptr;  // retained MLMultiArray *
+    const void * valid_mask_array   = nullptr;  // retained MLMultiArray * (AOSC)
     const void * input_provider     = nullptr;  // retained MLDictionaryFeatureProvider *
     const void * output_array       = nullptr;  // retained MLMultiArray * (when shape is fixed)
     const void * prediction_options = nullptr;  // retained MLPredictionOptions *
     std::string  input_name;
+    std::string  valid_mask_name;
     std::string  output_name;
     std::string  label;
     std::vector<int64_t> declared_input_dims;
@@ -307,10 +330,12 @@ void release_cached_io(parakeet_coreml_context * ctx) {
     if (ctx->prediction_options != nullptr) CFRelease(ctx->prediction_options);
     if (ctx->output_array       != nullptr) CFRelease(ctx->output_array);
     if (ctx->input_provider     != nullptr) CFRelease(ctx->input_provider);
+    if (ctx->valid_mask_array   != nullptr) CFRelease(ctx->valid_mask_array);
     if (ctx->input_array        != nullptr) CFRelease(ctx->input_array);
     ctx->prediction_options = nullptr;
     ctx->output_array       = nullptr;
     ctx->input_provider     = nullptr;
+    ctx->valid_mask_array   = nullptr;
     ctx->input_array        = nullptr;
     ctx->cached_mel_frames  = 0;
     ctx->cached_mels        = 0;
@@ -373,6 +398,64 @@ bool prepare_cached_io(parakeet_coreml_context * ctx, MLModel * model,
     return true;
 }
 
+bool prepare_cached_bypass_io(parakeet_coreml_context * ctx, MLModel * model,
+                              NSString * in_name, NSString * mask_name,
+                              NSString * out_name, int64_t capacity,
+                              int64_t d_model) {
+    if (ctx->input_array != nullptr && ctx->valid_mask_array != nullptr &&
+        ctx->cached_mel_frames == capacity && ctx->cached_mels == d_model &&
+        ctx->cached_d_model == d_model) {
+        return true;
+    }
+
+    release_cached_io(ctx);
+    MLMultiArrayConstraint * in_constraint =
+        model.modelDescription.inputDescriptionsByName[in_name].multiArrayConstraint;
+    MLMultiArrayConstraint * mask_constraint =
+        model.modelDescription.inputDescriptionsByName[mask_name].multiArrayConstraint;
+    MLMultiArrayConstraint * out_constraint =
+        model.modelDescription.outputDescriptionsByName[out_name].multiArrayConstraint;
+    if (in_constraint == nil || mask_constraint == nil || out_constraint == nil) return false;
+
+    bool transpose = true;
+    NSArray<NSNumber *> * in_shape =
+        resolve_input_shape(in_constraint.shape, capacity, d_model, &transpose);
+    NSError * err = nil;
+    MLMultiArray * in_arr = build_array(in_shape, in_constraint.dataType, &err);
+    if (in_arr == nil || err != nil) return false;
+    MLMultiArray * mask_arr = build_array(
+        mask_constraint.shape, mask_constraint.dataType, &err);
+    if (mask_arr == nil || err != nil || (int64_t) mask_arr.count != capacity) return false;
+
+    MLDictionaryFeatureProvider * provider =
+        [[MLDictionaryFeatureProvider alloc]
+            initWithDictionary:@{ in_name : in_arr, mask_name : mask_arr }
+            error:&err];
+    if (provider == nil || err != nil) return false;
+
+    MLPredictionOptions * options = [[MLPredictionOptions alloc] init];
+    MLMultiArray * out_arr = nil;
+    const parakeet::CoremlTrailingMatch out_match =
+        parakeet::coreml_match_trailing_capacity(
+            dims_of(out_constraint.shape), capacity, d_model);
+    if (out_match.matched) {
+        out_arr = build_array(out_constraint.shape, out_constraint.dataType, &err);
+        if (out_arr == nil || err != nil) return false;
+        options.outputBackings = @{ out_name : out_arr };
+    }
+
+    ctx->input_array        = CFBridgingRetain(in_arr);
+    ctx->valid_mask_array   = CFBridgingRetain(mask_arr);
+    ctx->input_provider     = CFBridgingRetain(provider);
+    ctx->prediction_options = CFBridgingRetain(options);
+    if (out_arr != nil) ctx->output_array = CFBridgingRetain(out_arr);
+    ctx->cached_mel_frames = capacity;
+    ctx->cached_mels       = d_model;
+    ctx->cached_d_model    = d_model;
+    ctx->input_transpose   = transpose;
+    return true;
+}
+
 MLComputeUnits requested_compute_units(std::string * label) {
     const char * env = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
     if (env != nullptr && std::strcmp(env, "all") == 0) {
@@ -420,7 +503,16 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
                                                     error:&err];
         if (model == nil || err != nil) return nullptr;
 
-        NSString * in_name  = sole_multiarray_feature(model.modelDescription.inputDescriptionsByName);
+        NSDictionary<NSString *, MLFeatureDescription *> * input_descs =
+            model.modelDescription.inputDescriptionsByName;
+        NSString * in_name = sole_multiarray_feature(input_descs);
+        NSString * valid_mask_name = nil;
+        if (in_name == nil && input_descs.count == 2 &&
+            input_descs[@"pre_encode"].type == MLFeatureTypeMultiArray &&
+            input_descs[@"valid_mask"].type == MLFeatureTypeMultiArray) {
+            in_name = @"pre_encode";
+            valid_mask_name = @"valid_mask";
+        }
         NSString * out_name = sole_multiarray_feature(model.modelDescription.outputDescriptionsByName);
         if (in_name == nil || out_name == nil) return nullptr;
 
@@ -430,6 +522,7 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
         auto * ctx = new parakeet_coreml_context();
         ctx->model       = CFBridgingRetain(model);
         ctx->input_name  = in_name.UTF8String;
+        if (valid_mask_name != nil) ctx->valid_mask_name = valid_mask_name.UTF8String;
         ctx->output_name = out_name.UTF8String;
         ctx->label       = std::move(label);
         ctx->declared_input_dims = dims_of(input_constraint.shape);
@@ -459,6 +552,7 @@ int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,
                            int64_t       d_model,
                            float       * encoder_out) {
     if (ctx == nullptr || ctx->model == nullptr || mel == nullptr || encoder_out == nullptr) return 1;
+    if (!ctx->valid_mask_name.empty()) return 1;
     if (n_mel_frames <= 0 || n_mels <= 0 || n_enc_frames <= 0 || d_model <= 0) return 1;
 
     @autoreleasepool {
@@ -482,6 +576,50 @@ int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,
         MLMultiArray * out_arr = [result featureValueForName:out_name].multiArrayValue;
         if (out_arr == nil) return 6;
         if (!copy_output_array(out_arr, encoder_out, n_enc_frames, d_model)) return 7;
+        return 0;
+    }
+}
+
+int parakeet_coreml_encode_embeddings(
+        struct parakeet_coreml_context * ctx,
+        int64_t n_encoder_frames,
+        int64_t d_model,
+        const float * pre_encode,
+        float * encoder_out) {
+    if (ctx == nullptr || ctx->model == nullptr || pre_encode == nullptr ||
+        encoder_out == nullptr || ctx->valid_mask_name.empty()) return 1;
+    if (n_encoder_frames <= 0 || d_model <= 0) return 1;
+
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        MLModel * model = (__bridge MLModel *) ctx->model;
+        NSString * in_name = [NSString stringWithUTF8String:ctx->input_name.c_str()];
+        NSString * mask_name = [NSString stringWithUTF8String:ctx->valid_mask_name.c_str()];
+        NSString * out_name = [NSString stringWithUTF8String:ctx->output_name.c_str()];
+
+        const int64_t capacity = fixed_mel_frames_for(ctx, d_model);
+        if (capacity <= 0 || n_encoder_frames > capacity) return 2;
+
+        if (!prepare_cached_bypass_io(ctx, model, in_name, mask_name, out_name,
+                                      capacity, d_model)) return 2;
+        MLMultiArray * in_arr = (__bridge MLMultiArray *) ctx->input_array;
+        MLMultiArray * mask_arr = (__bridge MLMultiArray *) ctx->valid_mask_array;
+        if (!fill_input_array(in_arr, ctx->input_transpose, pre_encode, n_encoder_frames,
+                              capacity, d_model)) return 3;
+        if (!fill_valid_mask(mask_arr, n_encoder_frames, capacity)) return 3;
+
+        NSError * err = nil;
+        MLDictionaryFeatureProvider * provider =
+            (__bridge MLDictionaryFeatureProvider *) ctx->input_provider;
+        MLPredictionOptions * options =
+            (__bridge MLPredictionOptions *) ctx->prediction_options;
+        id<MLFeatureProvider> result =
+            [model predictionFromFeatures:provider options:options error:&err];
+        if (result == nil || err != nil) return 5;
+
+        MLMultiArray * out_arr = [result featureValueForName:out_name].multiArrayValue;
+        if (out_arr == nil) return 6;
+        if (!copy_output_array(out_arr, encoder_out, n_encoder_frames, d_model)) return 7;
         return 0;
     }
 }

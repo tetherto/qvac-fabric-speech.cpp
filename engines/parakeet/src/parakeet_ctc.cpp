@@ -208,11 +208,15 @@ struct ParakeetCtcModel::Impl {
     // then routes the full-utterance offline FastConformer forward through Core ML
     // instead of the ggml graph. Null keeps the ggml encoder (the universal path).
     parakeet_coreml_context * ctx_coreml = nullptr;
+    // Optional fixed-capacity Sortformer v2.1 AOSC block-stack sidecar. Its
+    // input is post-subsampling [speaker cache | FIFO | chunk] embeddings.
+    parakeet_coreml_context * ctx_coreml_bypass = nullptr;
 #endif
 
     ~Impl() {
 #ifdef PARAKEET_USE_COREML
         if (ctx_coreml) parakeet_coreml_free(ctx_coreml);
+        if (ctx_coreml_bypass) parakeet_coreml_free(ctx_coreml_bypass);
 #endif
         for (auto & g : encoder_graphs) {
             if (g) g->free_();
@@ -1458,29 +1462,51 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder disabled via PARAKEET_COREML_DISABLE; using ggml\n");
         return;
     }
-    // Core ML sidecars currently have validated contracts for offline TDT and
-    // fixed-shape causal/chunked EOU encoders. Other families stay on ggml.
+    const bool supported_sortformer =
+        model.model_type == ParakeetModelType::SORTFORMER &&
+        model.model_variant == "sortformer-streaming-v2.1-aosc";
     if (model.model_type != ParakeetModelType::TDT &&
-        model.model_type != ParakeetModelType::EOU) {
+        model.model_type != ParakeetModelType::EOU &&
+        !supported_sortformer) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder supports TDT and EOU; "
-                "using ggml for model type %s\n",
-                model_type_name(model.model_type));
+                "parakeet: Core ML encoder supports TDT, EOU, and Sortformer v2.1; "
+                "using ggml for model type %s variant '%s'\n",
+                model_type_name(model.model_type), model.model_variant.c_str());
         }
         return;
     }
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
-    if (!path_is_directory(path)) {
-        if (verbose) PARAKEET_LOG_INFO("parakeet: no Core ML encoder at '%s'; using ggml encoder\n", path.c_str());
-        return;
+    if (path_is_directory(path)) {
+        model.impl->ctx_coreml = parakeet_coreml_init(path.c_str());
+        if (model.impl->ctx_coreml == nullptr) {
+            PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'; falling back to ggml encoder\n", path.c_str());
+        } else {
+            PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s'\n", path.c_str());
+        }
+    } else if (verbose) {
+        PARAKEET_LOG_INFO("parakeet: no Core ML encoder at '%s'; using ggml encoder\n", path.c_str());
     }
-    model.impl->ctx_coreml = parakeet_coreml_init(path.c_str());
-    if (model.impl->ctx_coreml == nullptr) {
-        PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'; falling back to ggml encoder\n", path.c_str());
-        return;
+
+    if (supported_sortformer) {
+        const std::string bypass_path = coreml_bypass_encoder_sidecar_path(gguf_path);
+        if (path_is_directory(bypass_path)) {
+            model.impl->ctx_coreml_bypass = parakeet_coreml_init(bypass_path.c_str());
+            if (model.impl->ctx_coreml_bypass == nullptr) {
+                PARAKEET_LOG_WARN(
+                    "parakeet: failed to load Core ML bypass encoder at '%s'; "
+                    "falling back to ggml for AOSC\n", bypass_path.c_str());
+            } else {
+                PARAKEET_LOG_INFO(
+                    "parakeet: Core ML bypass encoder loaded from '%s'\n",
+                    bypass_path.c_str());
+            }
+        } else if (verbose) {
+            PARAKEET_LOG_INFO(
+                "parakeet: no Core ML bypass encoder at '%s'; using ggml for AOSC\n",
+                bypass_path.c_str());
+        }
     }
-    PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s'\n", path.c_str());
 }
 #endif  // PARAKEET_USE_COREML
 
@@ -2129,6 +2155,15 @@ bool model_encoder_on_coreml(const ParakeetCtcModel & m) {
 #endif
 }
 
+bool model_bypass_encoder_on_coreml(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    return m.impl && m.impl->ctx_coreml_bypass != nullptr;
+#else
+    (void) m;
+    return false;
+#endif
+}
+
 int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->ctx_coreml) {
@@ -2137,6 +2172,18 @@ int model_coreml_fixed_mel_frames(const ParakeetCtcModel & m) {
         if (frames > 0 && frames <= std::numeric_limits<int>::max()) {
             return (int) frames;
         }
+    }
+#else
+    (void) m;
+#endif
+    return 0;
+}
+
+int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
+#ifdef PARAKEET_USE_COREML
+    if (m.impl && m.impl->ctx_coreml_bypass) {
+        return (int) parakeet_coreml_fixed_mel_frames(
+            m.impl->ctx_coreml_bypass, m.encoder_cfg.d_model);
     }
 #else
     (void) m;
@@ -3509,7 +3556,7 @@ static int coreml_encoder_out_frames(const EncoderConfig & enc, int n_mel_frames
     return next(next(next(n_mel_frames)));
 }
 
-// TDT sidecars use the offline, full-context FastConformer contract.
+// TDT and Sortformer v2.1 batch sidecars use the full-context contract.
 static bool encoder_is_offline(const EncoderConfig & enc) {
     return enc.att_context_left  < 0
         && enc.att_context_right < 0
@@ -3525,11 +3572,16 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
     if (model.model_type != ParakeetModelType::TDT &&
-        model.model_type != ParakeetModelType::EOU) return false;
+        model.model_type != ParakeetModelType::EOU &&
+        model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
     if (model.model_type == ParakeetModelType::TDT) {
         return encoder_is_offline(model.encoder_cfg);
+    }
+    if (model.model_type == ParakeetModelType::SORTFORMER) {
+        return model.model_variant == "sortformer-streaming-v2.1-aosc" &&
+               encoder_is_offline(model.encoder_cfg);
     }
 
     // The EOU graph bakes its causal/chunked attention geometry and shape into
@@ -3779,9 +3831,8 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run the validated TDT/EOU FastConformer encoder
-    // and hand encoder_out back to the ggml decoder. On any failure, fall
-    // through to the ggml encoder below.
+    // Apple Core ML sidecar: run a validated TDT/EOU/Sortformer FastConformer
+    // encoder and hand encoder_out back to the ggml decoder or diarization head.
     if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
@@ -3928,6 +3979,7 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                                   int                d_model_in,
                                   EncoderOutputs   & out,
                                   int                max_layers) {
+    out.used_coreml = false;
     if (!model.impl || !model.impl->backend_active) return -1;
     if (!pre_encode_in || n_pre_encode_frames <= 0) return -1;
 
@@ -3940,6 +3992,44 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
             d_model_in, d_model);
         return -1;
     }
+
+#ifdef PARAKEET_USE_COREML
+    // The AOSC sidecar has a fixed capacity. Shorter cache/FIFO/chunk slabs are
+    // zero-padded and accompanied by an attention-validity mask inside the
+    // Core ML wrapper; oversized/custom geometries keep the ggml path.
+    if (model.impl->ctx_coreml_bypass != nullptr &&
+        model.model_type == ParakeetModelType::SORTFORMER &&
+        model.model_variant == "sortformer-streaming-v2.1-aosc" &&
+        max_layers < 0) {
+        const int fixed_frames = (int) parakeet_coreml_fixed_mel_frames(
+            model.impl->ctx_coreml_bypass, d_model);
+        if (fixed_frames > 0 && n_pre_encode_frames <= fixed_frames) {
+            out.n_enc_frames = n_pre_encode_frames;
+            out.d_model = d_model;
+            out.vocab_size = model.vocab_size;
+            out.encoder_out.resize((size_t) n_pre_encode_frames * d_model);
+            const int rc = parakeet_coreml_encode_embeddings(
+                model.impl->ctx_coreml_bypass,
+                n_pre_encode_frames, d_model, pre_encode_in,
+                out.encoder_out.data());
+            if (rc == 0) {
+                out.used_coreml = true;
+                out.subsampling_out.clear();
+                out.block_0_post_ff1.clear();
+                out.block_0_post_attn.clear();
+                out.block_0_post_conv.clear();
+                out.block_0_post_ff2.clear();
+                out.block_0_out.clear();
+                out.block_last_out.clear();
+                out.logits.clear();
+                return 0;
+            }
+            PARAKEET_LOG_WARN(
+                "parakeet: Core ML bypass encoder failed (rc=%d); "
+                "falling back to ggml encoder\n", rc);
+        }
+    }
+#endif
 
     auto & cache = model.impl->encoder_graphs;
     const int layers_key = (max_layers >= 0) ? max_layers : -1;
