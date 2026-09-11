@@ -598,6 +598,15 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     target_include_directories(audio8-cli PRIVATE src)
     tts_cpp_apply_ccache(audio8-cli)
 
+    # Codec-only reconstruction accesses internal codec symbols, which are
+    # intentionally hidden in shared-library builds (as with codec unit tests).
+    if (NOT TTS_CPP_BUILD_SHARED)
+        add_executable(audio8-codec-bench src/audio8_codec_bench.cpp)
+        target_link_libraries(audio8-codec-bench PRIVATE tts-cpp ggml)
+        target_include_directories(audio8-codec-bench PRIVATE src)
+        tts_cpp_apply_ccache(audio8-codec-bench)
+    endif()
+
     # Memory-fit preflight CLIs: project a model set against the free device
     # memory without loading weights.  See src/audio8/fit_main.cpp and
     # src/chatterbox_fit_main.cpp.
@@ -1361,6 +1370,11 @@ if (TTS_CPP_BUILD_TESTS)
     # The CLI's own surface: the flags the bench scripts and the on-device
     # harness pass, and the code dump two runs get compared on.  No model, so it
     # runs everywhere.
+    add_executable(test-audio8-codec-bench-cli test/audio8/test_codec_bench_cli.cpp)
+    target_include_directories(test-audio8-codec-bench-cli PRIVATE src)
+    tts_cpp_apply_ccache(test-audio8-codec-bench-cli)
+    tts_cpp_register_test(test-audio8-codec-bench-cli LABEL "unit")
+
     add_executable(test-audio8-cli test/audio8/test_cli.cpp src/audio8/cli.cpp)
     target_include_directories(test-audio8-cli PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-cli)

@@ -122,6 +122,25 @@ def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any, tts: Any = None) -> 
         return "—"
 
 
+def fmt_audio_quality(metrics: Any) -> str:
+    if not isinstance(metrics, dict) or not metrics:
+        return "—"
+    cells = []
+    for kind in ("sisdr", "stoi"):
+        metric = metrics.get(kind)
+        if not isinstance(metric, dict):
+            continue
+        label = {"sisdr": "SI-SDR", "stoi": "STOI"}[kind]
+        value = metric.get("value")
+        if metric.get("status") != "ok" or value is None:
+            cells.append(f"{label} — ({metric.get('status', 'unavailable')})")
+            continue
+        value = float(value)
+        display = f"{value:.2f} dB" if kind == "sisdr" else f"{value * 100:.2f}%"
+        cells.append(f"{label} {display}")
+    return "; ".join(cells) or "—"
+
+
 def fmt_coreml_verified(v: Any) -> str:
     if v is True:
         return "yes"
@@ -163,7 +182,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
                 inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
-                correctness=fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility")),
+                correctness=(fmt_audio_quality(r.get("audio_quality")) if r.get("correctness_kind") == "audio" else fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility"))),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -201,6 +220,9 @@ def render_legend() -> str:
         "`F1` close to 100%; worse numbers mean the model regressed or the reference "
         "drifted. Blank when the family didn't declare a `correctness` block or the scoring "
         "step was skipped — see the row's notes.\n"
+        "- **Audio quality** — SI-SDR is in dB; STOI is a percentage. "
+        "Higher is better. Scores use the final timed output, not a median. "
+        "Unavailable metrics are labeled; details and reference/output WAVs are in artifacts.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "
