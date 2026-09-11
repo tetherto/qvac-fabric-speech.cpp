@@ -79,6 +79,25 @@ std::vector<float> decode_once(const std::string & gguf, const std::vector<float
     return vae->decode(latent, T_LATENT);
 }
 
+// A callback returning false must cancel and yield an empty result, never
+// fall back to the ggml decode.
+bool check_coreml_cancellation(const std::string & gguf, const std::vector<float> & latent) {
+    tts_cpp::acestep::VaeOptions opts;
+    opts.with_encoder = false;
+    auto vae = tts_cpp::acestep::Vae::load(gguf, opts);
+    int calls = 0;
+    const std::vector<float> pcm = vae->decode(latent, T_LATENT, [&calls](int, int) {
+        ++calls;
+        return false;
+    });
+    if (!pcm.empty() || calls != 1) {
+        std::fprintf(stderr, "[coreml-parity] FAIL: cancellation returned %zu samples after %d callbacks\n",
+                     pcm.size(), calls);
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -114,7 +133,9 @@ int main() {
     const double cos = cosine(pcm_ggml, pcm_coreml);
     std::fprintf(stderr, "[coreml-parity] T_latent=%d samples=%zu cosine=%.7f (min %.4f)\n",
                  T_LATENT, pcm_ggml.size(), cos, MIN_COSINE);
-    return cos >= MIN_COSINE ? 0 : 1;
+    if (cos < MIN_COSINE) return 1;
+
+    return check_coreml_cancellation(gguf, latent) ? 0 : 1;
 }
 
 #endif  // AUDIOGEN_USE_COREML

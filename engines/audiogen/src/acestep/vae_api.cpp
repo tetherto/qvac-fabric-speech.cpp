@@ -10,6 +10,7 @@
 #include "coreml/vae-decoder.h"
 #include "vae_coreml_path.h"
 #include "vae_coreml_windows.h"
+#include "vae_layout.h"
 #endif
 
 #include "ggml-backend.h"
@@ -38,6 +39,8 @@ struct Vae::Impl {
 };
 
 #ifdef AUDIOGEN_USE_COREML
+enum class CoremlDecodeStatus { done, unavailable, cancelled };
+
 static acestep_coreml_vae_context * load_coreml_sidecar(const std::string & gguf_path, bool verbose) {
     if (std::getenv("ACESTEP_COREML_DISABLE")) return nullptr;
     const std::string path = coreml_vae_sidecar_path(gguf_path);
@@ -54,31 +57,38 @@ static acestep_coreml_vae_context * load_coreml_sidecar(const std::string & gguf
     return ctx;
 }
 
-// Decode via the Core ML sidecar in fixed-size overlapped windows. Returns
-// T_audio frames, or -1 when the sidecar cannot serve this latent (too short
-// for one window, or a prediction failure) and the ggml path must run instead.
-static int coreml_decode(acestep_coreml_vae_context * ctx, const float * latent, int T_latent,
-                         std::vector<float> & pcm_out, const Vae::ProgressCb & on_progress) {
-    constexpr int UPSAMPLE = 1920;
+static void copy_window_core(const VaeCoremlWindow & w, const std::vector<float> & pcm_win,
+                             std::vector<float> & pcm_out) {
+    const size_t samples_per_frame = (size_t) VAE_UPSAMPLE * VAE_PCM_CHANNELS;
+    const size_t core_off = (size_t) (w.core_a - w.win_a) * samples_per_frame;
+    const size_t core_len = (size_t) (w.core_b - w.core_a) * samples_per_frame;
+    const size_t dst      = (size_t) w.core_a * samples_per_frame;
+    std::copy(pcm_win.begin() + core_off, pcm_win.begin() + core_off + core_len, pcm_out.begin() + dst);
+}
+
+static CoremlDecodeStatus coreml_decode(acestep_coreml_vae_context * ctx, const float * latent, int T_latent,
+                                        std::vector<float> & pcm_out, const Vae::ProgressCb & on_progress) {
     const int window_frames = (int) acestep_coreml_vae_window_frames(ctx);
     const std::vector<VaeCoremlWindow> plan =
         vae_coreml_plan_windows(T_latent, window_frames, vae_coreml_window_overlap(window_frames));
-    if (plan.empty()) return -1;
+    if (plan.empty()) return CoremlDecodeStatus::unavailable;
 
-    pcm_out.assign((size_t) T_latent * UPSAMPLE * 2, 0.0f);
-    std::vector<float> pcm_win((size_t) window_frames * UPSAMPLE * 2);
+    pcm_out.assign((size_t) T_latent * VAE_UPSAMPLE * VAE_PCM_CHANNELS, 0.0f);
+    std::vector<float> pcm_win((size_t) window_frames * VAE_UPSAMPLE * VAE_PCM_CHANNELS);
     const int n_windows = (int) plan.size();
     for (int i = 0; i < n_windows; ++i) {
         const VaeCoremlWindow & w = plan[i];
-        if (acestep_coreml_vae_decode(ctx, latent + (size_t) w.win_a * 64, pcm_win.data()) != 0) return -1;
-
-        const size_t core_off = (size_t) (w.core_a - w.win_a) * UPSAMPLE * 2;
-        const size_t core_len = (size_t) (w.core_b - w.core_a) * UPSAMPLE * 2;
-        const size_t dst      = (size_t) w.core_a * UPSAMPLE * 2;
-        std::copy(pcm_win.begin() + core_off, pcm_win.begin() + core_off + core_len, pcm_out.begin() + dst);
-        if (on_progress && !on_progress(i + 1, n_windows)) return -1;
+        if (acestep_coreml_vae_decode(ctx, latent + (size_t) w.win_a * VAE_LATENT_CHANNELS, pcm_win.data()) != 0) {
+            pcm_out.clear();
+            return CoremlDecodeStatus::unavailable;
+        }
+        copy_window_core(w, pcm_win, pcm_out);
+        if (on_progress && !on_progress(i + 1, n_windows)) {
+            pcm_out.clear();
+            return CoremlDecodeStatus::cancelled;
+        }
     }
-    return T_latent * UPSAMPLE;
+    return CoremlDecodeStatus::done;
 }
 #endif
 
@@ -124,10 +134,14 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
     if (T_latent <= 0 || (int) latent.size() < T_latent * 64) return {};
 #ifdef AUDIOGEN_USE_COREML
     if (impl_->coreml) {
-        const int T_coreml = coreml_decode(impl_->coreml, latent.data(), T_latent, pcm, on_progress);
-        if (T_coreml >= 0) return pcm;
-        if (std::getenv("AUDIOGEN_VERBOSE"))
-            fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d; using ggml\n", T_latent);
+        switch (coreml_decode(impl_->coreml, latent.data(), T_latent, pcm, on_progress)) {
+            case CoremlDecodeStatus::done:      return pcm;
+            case CoremlDecodeStatus::cancelled: return {};
+            case CoremlDecodeStatus::unavailable:
+                if (std::getenv("AUDIOGEN_VERBOSE"))
+                    fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d; using ggml\n", T_latent);
+                break;
+        }
     }
 #endif
     int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, on_progress);

@@ -132,9 +132,9 @@ jobs:
           cmake --install ggml-src/build
 
       # AUDIOGEN_COREML on macOS: the Apple lane builds the Core ML VAE decoder
-      # sidecar wrapper so the flag cannot rot. The parity test still self-skips
-      # (77) without a staged model + compiled vae-decoder.mlmodelc; those stay
-      # local-device artifacts.
+      # sidecar wrapper and runs the parity test against a staged VAE + exported
+      # sidecar (see the "Core ML VAE sidecar" steps below), so the feature is
+      # functionally covered on every PR, not just compiled.
       - name: Configure
         run: |
           cmake -S engines/audiogen -B build \
@@ -177,6 +177,44 @@ jobs:
             echo "::error::Metal device lacks simdgroup reduction, so MUL_MAT is unsupported — this runner was expected to expose an Apple7+ GPU"
             exit 1
           fi
+
+      # The VAE GGUF is byte-identical to the QVAC registry artifact
+      # (sha256-verified) and the sidecar is exported from it by the in-tree
+      # script, so the parity test exercises exporter output, Core ML
+      # execution, runtime dispatch, and PCM stitching end to end. Cache key
+      # carries the model hash and the export script hash.
+      - name: Cache Core ML VAE fixture
+        if: runner.os == 'macOS'
+        id: coreml-fixture-cache
+        uses: actions/cache@v4
+        with:
+          path: coreml-fixture
+          key: acestep-vae-coreml-${{ runner.os }}-${{ runner.arch }}-0599862a-${{ hashFiles('engines/audiogen/scripts/export-vae-coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Build Core ML VAE fixture
+        if: runner.os == 'macOS' && steps.coreml-fixture-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p coreml-fixture
+          curl -sSfL --retry 3 -o coreml-fixture/vae-BF16.gguf \
+            https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/resolve/9b3707625776cc4cf775e9b12ab82f9fe48335ff/vae-BF16.gguf
+          echo "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8  coreml-fixture/vae-BF16.gguf" | shasum -a 256 -c -
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-coreml
+          .venv-coreml/bin/python -m pip install --upgrade pip
+          .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-coreml/bin/python engines/audiogen/scripts/export-vae-coreml.py \
+            --gguf coreml-fixture/vae-BF16.gguf --t-latent 128 \
+            --out coreml-fixture/vae-decoder.mlpackage --compile-dir coreml-fixture
+          rm -rf coreml-fixture/vae-decoder.mlpackage
+
+      # Runs the binary directly: a skip (exit 77) fails the step, so a green
+      # lane proves the parity assertions ran against the staged sidecar.
+      - name: Test (Core ML VAE sidecar)
+        if: runner.os == 'macOS'
+        env:
+          AUDIOGEN_TEST_MODELS_DIR: ${{ github.workspace }}/coreml-fixture
+        run: ./build/test-vae-coreml-parity
 
   # No opt-in GPU job here: audiogen's only gpu-labeled test is the Metal
   # parity check (SKIP_RETURN_CODE 77 without Metal), which the build-test
