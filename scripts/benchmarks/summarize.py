@@ -120,18 +120,17 @@ def fmt_audio_quality(metrics: Any) -> str:
     if not isinstance(metrics, dict) or not metrics:
         return "—"
     cells = []
-    for kind in ("sisdr", "stoi", "pesq"):
+    for kind in ("sisdr", "stoi"):
         metric = metrics.get(kind)
         if not isinstance(metric, dict):
             continue
-        label = {"sisdr": "SI-SDR", "stoi": "STOI", "pesq": "PESQ"}[kind]
+        label = {"sisdr": "SI-SDR", "stoi": "STOI"}[kind]
         value = metric.get("value")
         if metric.get("status") != "ok" or value is None:
             cells.append(f"{label} — ({metric.get('status', 'unavailable')})")
             continue
         value = float(value)
-        display = f"{value:.2f} dB" if kind == "sisdr" else (
-            f"{value * 100:.2f}%" if kind == "stoi" else f"{value:.2f}")
+        display = f"{value:.2f} dB" if kind == "sisdr" else f"{value * 100:.2f}%"
         cells.append(f"{label} {display}")
     return "; ".join(cells) or "—"
 
@@ -212,10 +211,9 @@ def render_legend() -> str:
         "`F1` close to 100%; worse numbers mean the model regressed or the reference "
         "drifted. Blank when the family didn't declare a `correctness` block or the scoring "
         "step was skipped — see the row's notes.\n"
-        "- **Audio quality** — SI-SDR is in dB; STOI is a percentage; PESQ is a raw score. "
-        "Higher is better. Scores use the final timed output, not a median. Disabled or "
-        "unavailable metrics are labeled; details and reference/output WAVs are in artifacts. "
-        "PESQ is disabled pending legal sign-off.\n"
+        "- **Audio quality** — SI-SDR is in dB; STOI is a percentage. "
+        "Higher is better. Scores use the final timed output, not a median. "
+        "Unavailable metrics are labeled; details and reference/output WAVs are in artifacts.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "

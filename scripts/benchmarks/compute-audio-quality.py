@@ -67,21 +67,16 @@ def resample(samples, rate, target_rate):
     return resample_poly(samples, target_rate // factor, rate // factor).tolist()
 
 
-def perceptual(reference, hypothesis, rate, name):
+def compute_stoi(reference, hypothesis, rate):
     import warnings
     import numpy as np
-    if name == 'stoi':
-        from pystoi import stoi
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', RuntimeWarning)
-            return float(stoi(np.asarray(reference), np.asarray(hypothesis), rate, extended=False))
-    from pesq import pesq
-    reference = resample(reference, rate, 16000)
-    hypothesis = resample(hypothesis, rate, 16000)
-    return float(pesq(16000, np.asarray(reference), np.asarray(hypothesis), 'wb'))
+    from pystoi import stoi
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        return float(stoi(np.asarray(reference), np.asarray(hypothesis), rate, extended=False))
 
 
-def score(reference_path, hypothesis_path, metrics, enable_pesq=False):
+def score(reference_path, hypothesis_path, metrics):
     result = {'reference': str(reference_path), 'hypothesis': str(hypothesis_path),
               'preprocessing': {'zero_mean_sisdr': True, 'alignment': 'none'}, 'metrics': {}}
     try:
@@ -105,15 +100,12 @@ def score(reference_path, hypothesis_path, metrics, enable_pesq=False):
     except Exception as exc:
         input_error = exc
     for name in metrics:
-        metric = {'value': None, 'unit': 'dB' if name == 'sisdr' else 'MOS-LQO' if name == 'pesq' else 'score'}
+        metric = {'value': None, 'unit': 'dB' if name == 'sisdr' else 'score'}
         result['metrics'][name] = metric
-        if name == 'pesq' and not enable_pesq:
-            metric.update(status='disabled', reason='PESQ requires explicit --enable-pesq; CI enablement requires legal signoff')
-            continue
         try:
             if input_error is not None:
                 raise input_error
-            value = sisdr(reference, hypothesis) if name == 'sisdr' else perceptual(reference, hypothesis, rate, name)
+            value = sisdr(reference, hypothesis) if name == 'sisdr' else compute_stoi(reference, hypothesis, rate)
             if not math.isfinite(value):
                 raise ValueError('metric returned a nonfinite value')
             metric.update(value=value, status='ok')
@@ -130,12 +122,11 @@ def main():
     parser.add_argument('--hypothesis-file', required=True)
     parser.add_argument('--metrics', default='sisdr,stoi')
     parser.add_argument('--json-out')
-    parser.add_argument('--enable-pesq', action='store_true', help='explicitly opt into installed PESQ; CI requires legal signoff')
     args = parser.parse_args()
     metrics = list(dict.fromkeys(args.metrics.split(',')))
-    if not metrics or any(x not in ('sisdr', 'stoi', 'pesq') for x in metrics):
-        parser.error('--metrics must be a comma-separated subset of sisdr,stoi,pesq')
-    result = score(args.reference, args.hypothesis_file, metrics, args.enable_pesq)
+    if not metrics or any(x not in ('sisdr', 'stoi') for x in metrics):
+        parser.error('--metrics must be a comma-separated subset of sisdr,stoi')
+    result = score(args.reference, args.hypothesis_file, metrics)
     encoded = json.dumps(result, indent=2, allow_nan=False) + '\n'
     if args.json_out:
         Path(args.json_out).write_text(encoded, encoding='utf-8')

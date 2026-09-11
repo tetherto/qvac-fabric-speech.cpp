@@ -62,12 +62,11 @@ class AudioQualityTests(unittest.TestCase):
             noisy = prepare.noisy_pair(samples, 10, 42)[1]
             prepare.write_wav(hyp, noisy, 16000)
             subprocess.run([sys.executable, str(ROOT/'compute-audio-quality.py'), '--reference', str(ref),
-                            '--hypothesis-file', str(hyp), '--metrics', 'sisdr,pesq', '--json-out', str(out)],
+                            '--hypothesis-file', str(hyp), '--metrics', 'sisdr', '--json-out', str(out)],
                            check=True, capture_output=True)
             result = json.loads(out.read_text())
             self.assertEqual(result['metrics']['sisdr']['status'], 'ok')
-            self.assertEqual(result['metrics']['pesq']['status'], 'disabled')
-            with patch.object(quality, 'perceptual', side_effect=ImportError('pystoi')):
+            with patch.object(quality, 'compute_stoi', side_effect=ImportError('pystoi')):
                 missing = quality.score(ref, hyp, ['sisdr','stoi'])
             self.assertEqual(missing['metrics']['sisdr']['status'], 'ok')
             self.assertEqual(missing['metrics']['stoi']['status'], 'unavailable')
@@ -115,34 +114,12 @@ class AudioQualityTests(unittest.TestCase):
                 quality.read_wav(path)
 
     @unittest.skipUnless(importlib.util.find_spec('numpy'), 'NumPy unavailable')
-    def test_optional_adapters(self):
+    def test_stoi_warning_is_not_a_score(self):
         with tempfile.TemporaryDirectory() as directory:
             ref, hyp = Path(directory)/'ref.wav', Path(directory)/'hyp.wav'
             samples = [.1*math.sin(i/13) for i in range(8000)]
             prepare.write_wav(ref, samples, 8000)
             prepare.write_wav(hyp, prepare.noisy_pair(samples, 10, 42)[1], 8000)
-            import builtins
-            real_import = builtins.__import__
-            def forbid_pesq(name, *args, **kwargs):
-                if name == 'pesq':
-                    self.fail('disabled PESQ was imported')
-                return real_import(name, *args, **kwargs)
-            with patch('builtins.__import__', side_effect=forbid_pesq):
-                self.assertEqual(quality.score(ref,hyp,['pesq'])['metrics']['pesq']['status'], 'disabled')
-            calls = []
-            def fake_pesq(rate, reference, hypothesis, mode):
-                calls.append((rate,len(reference),len(hypothesis),mode))
-                return 3.2
-            with patch.dict(sys.modules, {'pesq': types.SimpleNamespace(pesq=fake_pesq)}):
-                result = quality.score(ref,hyp,['pesq'], enable_pesq=True)
-            self.assertEqual(calls, [(16000,16000,16000,'wb')])
-            self.assertEqual(result['metrics']['pesq']['value'], 3.2)
-            def broken(*args):
-                raise ValueError('no utterances')
-            with patch.dict(sys.modules, {'pesq': types.SimpleNamespace(pesq=broken)}):
-                metric = quality.score(ref,hyp,['pesq'], enable_pesq=True)['metrics']['pesq']
-            self.assertEqual(metric['status'], 'error')
-            self.assertIn('no utterances', metric['reason'])
             def short_stoi(*args, **kwargs):
                 warnings.warn('not enough frames', RuntimeWarning)
                 return 1e-5
@@ -171,12 +148,12 @@ class AudioQualityTests(unittest.TestCase):
         # A varying envelope produces nonconstant band envelopes used by STOI.
         ref = [.2*(.6+.4*math.sin(i/800))*math.sin(i/8) + .05*math.sin(i/3.1) for i in range(32000)]
         noisy = prepare.noisy_pair(ref, -5, 42)[1]
-        perfect = quality.perceptual(ref, ref, 16000, 'stoi')
-        degraded = quality.perceptual(ref, noisy, 16000, 'stoi')
+        perfect = quality.compute_stoi(ref, ref, 16000)
+        degraded = quality.compute_stoi(ref, noisy, 16000)
         self.assertAlmostEqual(perfect, 1, places=5)
         self.assertLess(degraded, perfect)
         with self.assertRaises(RuntimeWarning):
-            quality.perceptual(ref[:1000], ref[:1000], 16000, 'stoi')
+            quality.compute_stoi(ref[:1000], ref[:1000], 16000)
 
 
 if __name__ == '__main__':

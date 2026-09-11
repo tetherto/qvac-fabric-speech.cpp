@@ -165,7 +165,7 @@ AUDIO_QUALITY="null"
 CORRECTNESS_REF="null"     # repo-relative path to the reference file or null
 # Audio artifacts belong to this invocation, including when a later run fails.
 case "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")" in
-  audio|sisdr|stoi|pesq)
+  audio|sisdr|stoi)
     for suffix in reference.wav input.wav hypothesis.wav audio-quality.json input-preparation.json; do
       rm -f -- "${OUT%.json}.$suffix"
     done
@@ -414,7 +414,7 @@ AUDIO_REFERENCE=""
 AUDIO_KIND="$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")"
 AUDIO_PYTHON="${AUDIO_QUALITY_PYTHON:-python3}"
 case "$AUDIO_KIND" in
-  audio|sisdr|stoi|pesq)
+  audio|sisdr|stoi)
     AUDIO_REFERENCE="$(jq -r --arg f "$FAMILY" '.[$f].correctness.reference // ""' "$FAMILIES_JSON")"
     if [[ "$AUDIO_REFERENCE" != /* ]]; then
       AUDIO_REFERENCE="$(cd "$(dirname "$0")/../.." && pwd)/$AUDIO_REFERENCE"
@@ -615,7 +615,7 @@ score_correctness() {
   if [[ -z "$spec_kind" ]]; then return 0; fi
 
   case "$spec_kind" in
-    audio|sisdr|stoi|pesq) return 0 ;;
+    audio|sisdr|stoi) return 0 ;;
     wer|der|f1) : ;;
     *)
       echo "$FAMILY: unsupported correctness.kind '$spec_kind' (known: wer, der, f1)" >&2
@@ -847,7 +847,7 @@ run_one_time_wrapped() {
 }
 
 score_audio_correctness() {
-  case "$AUDIO_KIND" in audio|sisdr|stoi|pesq) ;; *) return 0 ;; esac
+  case "$AUDIO_KIND" in audio|sisdr|stoi) ;; *) return 0 ;; esac
   local hypothesis="$1" metrics report
   report="${OUT%.json}.audio-quality.json"
   metrics="$(jq -r --arg f "$FAMILY" '.[$f].correctness | if .kind == "audio" then (.metrics | join(",")) else .kind end' "$FAMILIES_JSON")"
