@@ -1,0 +1,5 @@
+# Optional benchmark metrics only. SI-SDR works without these packages.
+numpy==1.26.4
+scipy==1.11.4
+pystoi==0.4.1
+# PESQ intentionally excluded: task QVAC-24843 requires legal signoff before CI use.

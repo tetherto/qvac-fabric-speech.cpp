@@ -84,7 +84,10 @@ jobs:
       # bench driver or the family spec regressed — the suite runs the driver
       # against stub binaries, so it needs neither models nor engines.
       - name: Bench driver self-check
-        run: scripts/benchmarks/test-run-family.sh
+        run: |
+          scripts/benchmarks/test-run-family.sh
+          python3 -B scripts/benchmarks/test_audio_quality.py
+          python3 -B scripts/benchmarks/test-audio-quality-driver.py
 
       - id: expand
         env:
@@ -457,6 +460,21 @@ jobs:
       # when spawning through /bin/bash, so a `DYLD_LIBRARY_PATH:` env here
       # would silently be a no-op. The macOS binaries resolve libggml via
       # RPATH baked in at link time.
+      - name: Select audio quality Python
+        if: matrix.family == 'audio8' || matrix.family == 'lavasr'
+        continue-on-error: true
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare audio quality Python
+        continue-on-error: true
+        if: matrix.family == 'audio8' || matrix.family == 'lavasr'
+        run: |
+          python3 -m venv .venv-audio-quality
+          echo "AUDIO_QUALITY_PYTHON=$PWD/.venv-audio-quality/bin/python" >> "$GITHUB_ENV"
+          .venv-audio-quality/bin/python -m pip install -r scripts/benchmarks/requirements-audio-quality.txt
+
       - name: Run bench
         env:
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}

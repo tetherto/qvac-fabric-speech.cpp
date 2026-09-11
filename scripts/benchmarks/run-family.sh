@@ -161,7 +161,16 @@ WER_MEDIAN="null"          # numeric WER in [0,1] or null (kind='wer' only)
 DER_MEDIAN="null"          # numeric DER in [0,1] or null (kind='der' only)
 F1_MEDIAN="null"           # numeric F1  in [0,1] or null (kind='f1'  only)
 CORRECTNESS_KIND="null"    # "wer" | "der" | "f1" | null
+AUDIO_QUALITY="null"
 CORRECTNESS_REF="null"     # repo-relative path to the reference file or null
+# Audio artifacts belong to this invocation, including when a later run fails.
+case "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")" in
+  audio|sisdr|stoi|pesq)
+    for suffix in reference.wav input.wav hypothesis.wav audio-quality.json input-preparation.json; do
+      rm -f -- "${OUT%.json}.$suffix"
+    done
+    ;;
+esac
 
 emit_json() {
   local status="$1" median="${2:-null}" wmin="${3:-null}" wmax="${4:-null}" extra="${5:-}"
@@ -191,6 +200,7 @@ emit_json() {
     --argjson wer_median  "$WER_MEDIAN" \
     --argjson der_median  "$DER_MEDIAN" \
     --argjson f1_median   "$F1_MEDIAN" \
+    --argjson audio_quality "$AUDIO_QUALITY" \
     --argjson correctness_kind "$CORRECTNESS_KIND" \
     --argjson correctness_reference "$CORRECTNESS_REF" \
     --arg  status "$status" \
@@ -208,6 +218,7 @@ emit_json() {
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
       wer_median:$wer_median, der_median:$der_median, f1_median:$f1_median,
+      audio_quality:$audio_quality,
       correctness_kind:$correctness_kind,
       correctness_reference:$correctness_reference,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
@@ -397,6 +408,32 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 JSON_OUT="$tmp_dir/native.json"
+AUDIO_OUT="$tmp_dir/unused.wav"
+AUDIO_INPUT=""
+AUDIO_REFERENCE=""
+AUDIO_KIND="$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")"
+AUDIO_PYTHON="${AUDIO_QUALITY_PYTHON:-python3}"
+case "$AUDIO_KIND" in
+  audio|sisdr|stoi|pesq)
+    AUDIO_REFERENCE="$(jq -r --arg f "$FAMILY" '.[$f].correctness.reference // ""' "$FAMILIES_JSON")"
+    if [[ "$AUDIO_REFERENCE" != /* ]]; then
+      AUDIO_REFERENCE="$(cd "$(dirname "$0")/../.." && pwd)/$AUDIO_REFERENCE"
+    fi
+    AUDIO_INPUT="$AUDIO_REFERENCE"
+    if jq -e --arg f "$FAMILY" '.[$f].correctness.degradation != null' "$FAMILIES_JSON" >/dev/null; then
+      AUDIO_INPUT="$tmp_dir/degraded.wav"
+      snr="$(jq -r --arg f "$FAMILY" '.[$f].correctness.degradation.snr_db' "$FAMILIES_JSON")"
+      seed="$(jq -r --arg f "$FAMILY" '.[$f].correctness.degradation.seed' "$FAMILIES_JSON")"
+      if ! "$AUDIO_PYTHON" "$(dirname "$0")/prepare-audio-quality.py" \
+          --reference "$AUDIO_REFERENCE" --reference-output "$tmp_dir/reference.wav" --output "$AUDIO_INPUT" --snr-db "$snr" --seed "$seed" \
+          > "${OUT%.json}.input-preparation.json"; then
+        emit_json "run-failed" null null null " (audio input preparation failed)"
+        exit 0
+      fi
+      AUDIO_REFERENCE="$tmp_dir/reference.wav"
+    fi
+    ;;
+esac
 
 # The Core ML bundle is derived from the exact F16 model under test. A restored
 # Actions cache makes this a no-op on subsequent runs; the first run exports and
@@ -440,6 +477,8 @@ expand_placeholder() {
   s="${s//\$\{MODEL_DIR\}/$MODEL_DIR}"
   s="${s//\$\{MODELS_ROOT\}/$MODELS_ROOT}"
   s="${s//\$\{AUDIO_DIR\}/$AUDIO_DIR}"
+  s="${s//\$\{AUDIO_INPUT\}/$AUDIO_INPUT}"
+  s="${s//\$\{AUDIO_OUT\}/$AUDIO_OUT}"
   s="${s//\$\{MODEL_PATH\}/${MODEL_PATH:-}}"
   s="${s//\$\{RUNS\}/$RUNS}"
   s="${s//\$\{WARMUP\}/$WARMUP}"
@@ -576,6 +615,7 @@ score_correctness() {
   if [[ -z "$spec_kind" ]]; then return 0; fi
 
   case "$spec_kind" in
+    audio|sisdr|stoi|pesq) return 0 ;;
     wer|der|f1) : ;;
     *)
       echo "$FAMILY: unsupported correctness.kind '$spec_kind' (known: wer, der, f1)" >&2
@@ -792,6 +832,8 @@ run_one_time_wrapped() {
   # append its stderr.
   : > "$stderr_log"
   : > "$rss_log"
+  AUDIO_OUT="$stderr_log.wav"
+  build_bench_args
   local start_ns end_ns
   start_ns="$(now_ns)"
   if ! wrap_time "$BINARY" ${BENCH_ARGS[@]+"${BENCH_ARGS[@]}"} > "$stderr_log.stdout" 2> "$rss_log"; then
@@ -802,6 +844,35 @@ run_one_time_wrapped() {
   end_ns="$(now_ns)"
   cat "$rss_log" >> "$stderr_log"
   awk -v s="$start_ns" -v e="$end_ns" 'BEGIN { printf "%.1f", (e - s) / 1000000.0 }'
+}
+
+score_audio_correctness() {
+  case "$AUDIO_KIND" in audio|sisdr|stoi|pesq) ;; *) return 0 ;; esac
+  local hypothesis="$1" metrics report
+  report="${OUT%.json}.audio-quality.json"
+  metrics="$(jq -r --arg f "$FAMILY" '.[$f].correctness | if .kind == "audio" then (.metrics | join(",")) else .kind end' "$FAMILIES_JSON")"
+  CORRECTNESS_KIND='"audio"'
+  CORRECTNESS_REF="$(jq --arg f "$FAMILY" '.[$f].correctness.reference' "$FAMILIES_JSON")"
+  if "$AUDIO_PYTHON" "$(dirname "$0")/compute-audio-quality.py" \
+      --reference "$AUDIO_REFERENCE" --hypothesis-file "$hypothesis" \
+      --metrics "$metrics" --json-out "$report" > "$tmp_dir/audio-score.stdout"; then
+    if jq -e '.metrics | type == "object"' "$report" >/dev/null 2>&1; then
+      AUDIO_QUALITY="$(jq -c '.metrics' "$report")"
+    fi
+  else
+    echo "$FAMILY: audio quality scorer failed; performance results retained" >&2
+  fi
+  local source suffix
+  for suffix in reference input hypothesis; do
+    case "$suffix" in
+      reference) source="$AUDIO_REFERENCE" ;;
+      input) source="$AUDIO_INPUT" ;;
+      hypothesis) source="$hypothesis" ;;
+    esac
+    if [[ -f "$source" ]]; then
+      cp "$source" "${OUT%.json}.$suffix.wav" || echo "warning: cannot preserve $suffix WAV" >&2
+    fi
+  done
 }
 
 # ---- run --------------------------------------------------------------------
@@ -1051,6 +1122,7 @@ case "$BENCH_KIND" in
       fi
     fi
 
+    score_audio_correctness "$r_stderr.wav"
     emit_json "ok" "$med" "$mn" "$mx"
     ;;
 
