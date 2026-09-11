@@ -8,6 +8,7 @@ from pathlib import Path
 def install_gguf_stub():
     gguf = types.ModuleType("gguf")
     gguf.GGMLQuantizationType = types.SimpleNamespace(
+        BF16=0,
         Q8_0=1,
         Q5_0=2,
         Q4_0=3,
@@ -18,6 +19,7 @@ def install_gguf_stub():
         MOSTLY_Q8_0=3,
         MOSTLY_Q5_0=4,
         MOSTLY_Q4_0=5,
+        MOSTLY_BF16=6,
     )
     sys.modules["gguf"] = gguf
 
