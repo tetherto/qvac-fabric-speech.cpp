@@ -7,13 +7,13 @@ The optional `correctness` declaration supports multiple metrics:
 ```json
 {
   "kind": "audio",
-  "metrics": ["sisdr", "stoi"],
+  "metrics": ["sisdr", "stoi", "pesq"],
   "reference": "engines/parakeet/test/samples/jfk.wav",
   "degradation": {"snr_db": 10, "seed": 42}
 }
 ```
 
-Omit `degradation` for codec reconstruction. Single kinds `sisdr` and `stoi` are also accepted. CLI arguments use `${AUDIO_INPUT}` for the prepared input and `${AUDIO_OUT}` for a unique output path for each warmup and timed run. The final timed output is scored after performance capture. Scores are not medians, and they do not gate the performance status.
+Omit `degradation` for codec reconstruction. Single kinds `sisdr`, `stoi`, and `pesq` are also accepted. CLI arguments use `${AUDIO_INPUT}` for the prepared input and `${AUDIO_OUT}` for a unique output path for each warmup and timed run. The final timed output is scored after performance capture. Scores are not medians, and they do not gate the performance status.
 
 Install the benchmark-only dependencies in a virtual environment:
 
@@ -23,9 +23,9 @@ python3 -m venv .venv-audio-quality
 export AUDIO_QUALITY_PYTHON="$PWD/.venv-audio-quality/bin/python"
 ```
 
-SI-SDR uses the standard library for matching sample rates. STOI and resampling use pinned NumPy/SciPy/pystoi.
+SI-SDR uses the standard library for matching sample rates. STOI and resampling use pinned NumPy/SciPy/pystoi. PESQ is not included in these requirements and is disabled in the driver. The task requires legal sign-off before PESQ can be installed or enabled in CI. Its standalone adapter requires an explicitly installed dependency and `--enable-pesq`; adding that flag is not a substitute for legal approval.
 
-SI-SDR uses zero-mean projection and is reported in dB. STOI uses standard (not extended) STOI and is displayed as a percentage. Higher values are better for both. Establish baselines from measured outputs rather than assuming codec or enhancement quality is perfect.
+SI-SDR uses zero-mean projection and is reported in dB. STOI uses standard (not extended) STOI and is displayed as a percentage. PESQ, when explicitly enabled outside the driver, uses 16 kHz wideband and reports the raw score. Higher values are better for all three. Establish baselines from measured outputs rather than assuming codec or enhancement quality is perfect.
 
 The scorer accepts mono integer PCM WAV. Different rates are converted to 16 kHz with polyphase resampling, and resulting sample counts must match. It does not search for the best lag or silently crop signals. Audio8 removes only its known trailing codec padding and preserves input duration. Noise preparation scales the clean/degraded pair together if needed to avoid clipping; its metadata records the scale. Empty/missing/silent audio and undefined or infinite scores produce explicit per-metric statuses and JSON null, never a fabricated finite score.
 

@@ -169,7 +169,7 @@ else:
                 self.assertTrue((self.root / "result.audio-quality.json").exists())
 
     def test_single_metric_kind_is_accepted(self):
-        for kind in ("sisdr", "stoi"):
+        for kind in ("sisdr", "stoi", "pesq"):
             with self.subTest(kind=kind):
                 result = self.run_driver(kind=kind)
                 self.assertEqual(result["correctness_kind"], "audio")
@@ -178,11 +178,11 @@ else:
                     self.assertEqual(result["audio_quality"][kind]["status"], "ok")
 
     def test_optional_metric_failures_do_not_hide_sisdr(self):
-        result = self.run_driver(metrics=["sisdr", "stoi"],
+        result = self.run_driver(metrics=["sisdr", "stoi", "pesq"],
                                  without_optional_dependencies=True)
-        self.assertEqual(set(result["audio_quality"]), {"sisdr", "stoi"})
+        self.assertEqual(set(result["audio_quality"]), {"sisdr", "stoi", "pesq"})
         self.assertEqual(result["audio_quality"]["sisdr"]["status"], "ok")
-        for name, status in (("stoi", "unavailable"),):
+        for name, status in (("stoi", "unavailable"), ("pesq", "disabled")):
             metric = result["audio_quality"][name]
             self.assertEqual(metric["status"], status)
             self.assertIsNone(metric["value"])
@@ -222,9 +222,11 @@ class AudioSummaryTests(unittest.TestCase):
         rendered = summary.fmt_audio_quality({
             "sisdr": {"status": "ok", "value": -2.5, "unit": "dB"},
             "stoi": {"status": "ok", "value": 0.8125, "unit": "ratio"},
+            "pesq": {"status": "ok", "value": 3.125, "unit": "MOS-LQO"},
         })
         self.assertIn("SI-SDR -2.50 dB", rendered)
         self.assertIn("STOI 81.25%", rendered)
+        self.assertRegex(rendered, r"PESQ 3\.1[23](?:;|$)")
         unavailable = summary.fmt_audio_quality({
             "stoi": {"status": "unavailable", "value": None, "reason": "dependency missing"}})
         self.assertIn("unavailable", unavailable)
