@@ -14,9 +14,10 @@
 // Usage:
 //   ./build/supertonic-bench --model models/supertonic2.gguf \
 //       --text "..." [--voice M1] [--language en] [--steps 5] [--speed 1.05] \
-//       [--seed 42] [--noise-npy noise.npy] [--runs 5] [--warmup 1] [--json-out result.json]
+//       [--seed 42] [--noise-npy noise.npy] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out result.json]
 
 #include "backend_selection.h"
+#include "bench_wav.h"
 #include "supertonic_internal.h"
 #include "npy.h"
 // Vulkan adapter description in the bench backend annotator is now
@@ -77,7 +78,7 @@ void usage(const char * argv0) {
         "                               default off for accurate per-stage attribution on Vulkan)\n"
         "          [--bench-per-step]  (time each denoise step individually so the first-step\n"
         "                               cold-pipeline cost is distinguished from steady-state)\n"
-        "          [--json-out FILE]\n",
+        "          [--wav-out FILE] [--json-out FILE]\n",
         argv0);
 }
 
@@ -161,7 +162,7 @@ int main(int argc, char ** argv) {
     std::string model_path, text;
     std::string voice = "M1", language = "en";
     std::string noise_npy;
-    std::string json_out;
+    std::string json_out, wav_out;
     int steps = 5;
     float speed = 1.05f;
     int seed = 42;
@@ -285,9 +286,14 @@ int main(int argc, char ** argv) {
         else if (a == "--no-bench-sync") bench_sync = false;
         else if (a == "--bench-sync")    bench_sync = true;  // explicit on; default
         else if (a == "--bench-per-step") bench_per_step = true;
+        else if (a == "--wav-out") wav_out = next("--wav-out");
         else if (a == "--json-out") json_out = next("--json-out");
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+    if (runs <= 0 || warmup < 0 || warmup > std::numeric_limits<int>::max() - runs) {
+        fprintf(stderr, "--runs must be positive and --warmup nonnegative (without overflow)\n");
+        return 2;
     }
     if (model_path.empty() || text.empty()) { usage(argv[0]); return 2; }
 
@@ -455,6 +461,8 @@ int main(int argc, char ** argv) {
                 prewarm_text.c_str(), prewarm_ms);
     }
 
+    // Retain only the final measured synthesis; WAV conversion and I/O are untimed.
+    std::vector<float> last_pcm;
     int total_runs = runs + warmup;
     for (int r = 0; r < total_runs; ++r) {
         bool record = r >= warmup;
@@ -556,10 +564,20 @@ int main(int argc, char ** argv) {
             rtfs.push_back((tot_ms / 1000.0) / audio_s);
             last_audio_s = audio_s;
         }
+        if (!wav_out.empty() && record && r + 1 == total_runs) last_pcm.swap(wav);
         fprintf(stderr, "[run %d/%d] %s total=%.1fms audio=%.2fs RTF=%.3f%s\n",
                 r + 1, total_runs, record ? "" : "(warmup) ",
                 tot_ms, audio_s, (tot_ms / 1000.0) / audio_s,
                 record ? "" : " [discarded]");
+    }
+
+    if (!wav_out.empty()) {
+        std::string wav_error;
+        if (!bench_write_wav(wav_out, last_pcm, model.hparams.sample_rate, wav_error)) {
+            fprintf(stderr, "%s\n", wav_error.c_str());
+            free_supertonic_model(model);
+            return 1;
+        }
     }
 
     printf("\nSupertonic 2 C++ benchmark\n");

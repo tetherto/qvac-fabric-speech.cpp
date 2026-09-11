@@ -16,7 +16,7 @@ on:
         description: >-
           Comma-separated family names, or "all". Families:
           whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
-          cosyvoice, audio8, lavasr, acestep, minimax.
+          cosyvoice, audio8, audio8-tts, lavasr, acestep, minimax.
         required: false
         default: "all"
         type: string
@@ -61,7 +61,7 @@ env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
   GGML_BRANCH: speech
   AWS_REGION: eu-central-1
-  ALL_FAMILIES: "whisper,parakeet,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,lavasr,acestep,minimax"
+  ALL_FAMILIES: "whisper,parakeet,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,audio8-tts,lavasr,acestep,minimax"
 
 jobs:
   # ---------- 1. Expand inputs into a matrix ------------------------------
@@ -84,7 +84,10 @@ jobs:
       # bench driver or the family spec regressed — the suite runs the driver
       # against stub binaries, so it needs neither models nor engines.
       - name: Bench driver self-check
-        run: scripts/benchmarks/test-run-family.sh
+        run: |
+          scripts/benchmarks/test-run-family.sh
+          python3 -B scripts/benchmarks/test_tts_intelligibility.py
+          python3 -B scripts/benchmarks/test-tts-intelligibility-driver.py
 
       - id: expand
         env:
@@ -119,7 +122,7 @@ jobs:
 
           valid_family() {
             case "$1" in
-              whisper|parakeet|sortformer|vad|chatterbox|supertonic|parler|cosyvoice|audio8|lavasr|acestep|minimax) return 0 ;;
+              whisper|parakeet|sortformer|vad|chatterbox|supertonic|parler|cosyvoice|audio8|audio8-tts|lavasr|acestep|minimax) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -435,6 +438,19 @@ jobs:
             -DSPEECH_BUILD_EXECUTABLES=ON \
             -DPARAKEET_COREML="$PARAKEET_COREML_FLAG" \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+
+      - name: Cache reference ASR model
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/reference-asr
+          key: tts-reference-asr-${{ hashFiles('scripts/benchmarks/families.json') }}
+
+      - name: Build reference ASR
+        continue-on-error: true
+        run: |
+          if [[ "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' scripts/benchmarks/families.json)" == "tts_intelligibility" ]]; then
+            cmake --build build --target whisper-cli -j4
+          fi
 
       - name: Build bench target
         id: build

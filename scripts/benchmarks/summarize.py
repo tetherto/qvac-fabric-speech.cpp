@@ -91,7 +91,7 @@ def fmt_speedup(v: Any) -> str:
         return "—"
 
 
-def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any) -> str:
+def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any, tts: Any = None) -> str:
     """Kind-prefixed correctness cell.
 
     Only one score is populated per row (the family declared exactly one
@@ -100,6 +100,12 @@ def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any) -> str:
     Blank when the family didn't declare a `correctness` block or the
     scoring step was skipped — distinct from a scored 0.00% run.
     """
+    if kind == "tts_intelligibility":
+        if not isinstance(tts, dict) or tts.get("status") != "ok":
+            status = tts.get("status", "unavailable") if isinstance(tts, dict) else "unavailable"
+            return f"TTS WER {status}"
+        value = tts.get("wer")
+        return f"TTS WER {float(value) * 100:.2f}%" if isinstance(value, (float, int)) else "TTS WER unavailable"
     if kind == "wer":
         v = wer
     elif kind == "der":
@@ -157,7 +163,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
                 inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
-                correctness=fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median")),
+                correctness=fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility")),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -180,6 +186,9 @@ def render_legend() -> str:
         "- **Median RTF** — real-time factor; wall / audio-seconds. `< 1.0` means "
         "faster than real-time. Blank when the family's output length isn't fixed "
         "(text-driven TTS, chatterbox, audio8).\n"
+        "- **TTS WER** — WER of pinned Whisper Tiny CPU transcription against the synthesis prompt; lower is better. "
+        "Scored once on the final measured output, not a median. Includes reference-ASR errors; no quality pass threshold. "
+        "ASR time is excluded from synthesis timing. Missing/failed scoring is explicitly labeled.\n"
         "- **Correctness** — accuracy metric declared by the family's `correctness.kind`. "
         "Kind-prefixed. `WER 0.00%` is Word Error Rate of the bench transcript against a "
         "reference text, English-normalized (case-folded, punctuation stripped) — used by "
