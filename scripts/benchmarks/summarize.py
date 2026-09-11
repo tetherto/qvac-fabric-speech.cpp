@@ -91,17 +91,27 @@ def fmt_speedup(v: Any) -> str:
         return "—"
 
 
-def fmt_wer(v: Any) -> str:
-    """Format WER as a percentage rounded to two decimals.
+def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any) -> str:
+    """Kind-prefixed correctness cell.
 
-    Blank ("—") when the family didn't declare a correctness block or the
-    scoring step was skipped — so a reader can distinguish "no correctness
-    signal" from "correctness = 0.00%". A perfect run reads "0.00%".
+    Only one score is populated per row (the family declared exactly one
+    `correctness.kind`). Renders as "WER 0.00%" / "DER 8.2%" / "F1 98.70%"
+    / "—" so a reader sees at a glance which metric the row is scored on.
+    Blank when the family didn't declare a `correctness` block or the
+    scoring step was skipped — distinct from a scored 0.00% run.
     """
+    if kind == "wer":
+        v = wer
+    elif kind == "der":
+        v = der
+    elif kind == "f1":
+        v = f1
+    else:
+        return "—"
     if v is None:
         return "—"
     try:
-        return f"{float(v) * 100.0:.2f}%"
+        return f"{kind.upper()} {float(v) * 100.0:.2f}%"
     except (TypeError, ValueError):
         return "—"
 
@@ -119,7 +129,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
     header = (
         "| Family | Model | Runner | OS | Decoder | Encoder | Baseline encoder | Core ML verified "
         "| Encoder ms | Baseline encoder ms | Encoder speedup | End-to-end ms "
-        "| Min | Max | Baseline end-to-end ms | E2E speedup | RTF | WER "
+        "| Min | Max | Baseline end-to-end ms | E2E speedup | RTF | Correctness "
         "| Peak RSS MiB | Runs | Status | Notes |\n"
         "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
@@ -128,7 +138,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
         rows.append(
             "| {family} | {model} | {runner} | {os} | {backend} | {encoder_backend} | {baseline_encoder_backend} "
             "| {coreml_verified} | {encoder_ms} | {baseline_encoder_ms} | {encoder_speedup} "
-            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {wer} | {rss} "
+            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {correctness} | {rss} "
             "| {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
@@ -147,7 +157,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
                 inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
-                wer=fmt_wer(r.get("wer_median")),
+                correctness=fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median")),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -170,12 +180,18 @@ def render_legend() -> str:
         "- **Median RTF** — real-time factor; wall / audio-seconds. `< 1.0` means "
         "faster than real-time. Blank when the family's output length isn't fixed "
         "(text-driven TTS, chatterbox, audio8).\n"
-        "- **WER** — Word Error Rate of the bench transcript against the family's "
-        "`correctness.reference` file, English-normalized (case-folded, punctuation "
-        "stripped). `0.00%` is a healthy build; a non-trivial WER means either the "
-        "model regressed or the reference drifted with a checkpoint bump. Blank when "
-        "the family didn't declare a `correctness` block (all non-ASR families today) "
-        "or the scoring step was skipped — see the row's notes.\n"
+        "- **Correctness** — accuracy metric declared by the family's `correctness.kind`. "
+        "Kind-prefixed. `WER 0.00%` is Word Error Rate of the bench transcript against a "
+        "reference text, English-normalized (case-folded, punctuation stripped) — used by "
+        "ASR families (parakeet, whisper). `DER 8.2%` is Diarization Error Rate — miss + "
+        "false-alarm + speaker-confusion time over reference-speech time, with a 250 ms "
+        "collar around segment boundaries — used by diarization families (sortformer). "
+        "`F1 98.70%` is frame-based Precision/Recall/F1 of predicted speech vs a reference "
+        "of speech-segment ranges, with a 100 ms boundary-tolerance collar — used by voice-"
+        "activity detection (vad). Healthy build: `WER 0.00%` / low single-digit `DER` / "
+        "`F1` close to 100%; worse numbers mean the model regressed or the reference "
+        "drifted. Blank when the family didn't declare a `correctness` block or the scoring "
+        "step was skipped — see the row's notes.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "

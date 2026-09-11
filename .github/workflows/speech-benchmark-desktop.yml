@@ -500,7 +500,12 @@ jobs:
             --out "artifacts/result.json"
 
       # Include the whisper size in the artifact name so the fan-out cells
-      # don't clobber each other's uploads.
+      # don't clobber each other's uploads. Uploads the whole `artifacts/`
+      # directory (not just result.json) so run-family.sh's optional
+      # `result.hypothesis.<ext>` sibling — the raw per-segment output the
+      # correctness scorer consumed — rides along for post-hoc DER/WER
+      # debugging. The summarize job only reads result.json, so siblings
+      # are transparent to the aggregate.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
