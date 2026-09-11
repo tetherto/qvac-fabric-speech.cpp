@@ -15,13 +15,15 @@ The optional `correctness` declaration supports multiple metrics:
 
 Omit `degradation` for codec reconstruction. Single kinds `sisdr` and `stoi` are also accepted. CLI arguments use `${AUDIO_INPUT}` for the prepared input and `${AUDIO_OUT}` for a unique output path for each warmup and timed run. The final timed output is scored after performance capture. Scores are not medians, and they do not gate the performance status.
 
-Install the benchmark-only dependencies in a virtual environment:
+Install the benchmark-only dependencies in a Python 3.11 or 3.12 virtual environment on Linux x86_64 or macOS arm64:
 
 ```sh
 python3 -m venv .venv-audio-quality
 .venv-audio-quality/bin/python -m pip install -r scripts/benchmarks/requirements-audio-quality.txt
 export AUDIO_QUALITY_PYTHON="$PWD/.venv-audio-quality/bin/python"
 ```
+
+Dependencies are pinned to official PyPI wheel SHA-256 hashes; pip rejects source distributions and unlisted artifacts. This prevents source-build execution but does not remove capabilities present inside the installed libraries.
 
 SI-SDR uses the standard library for matching sample rates. STOI and resampling use pinned NumPy/SciPy/pystoi.
 
@@ -40,3 +42,15 @@ python3 -B scripts/benchmarks/test-audio-quality-driver.py
 ```
 
 The desktop workflow runs model-free checks and installs audio dependencies only for affected benchmark cells. Real verification dispatches should select `audio8,lavasr` on `linux,macos` and inspect backend attribution, valid nonempty WAVs, and populated SI-SDR/STOI results. A green performance cell alone is insufficient.
+
+## Dependency capability review
+
+Socket reports shell-access and dynamic-code-execution capabilities in SciPy 1.11.4. These alerts are not CVE findings. The benchmark and pystoi both use `scipy.signal.resample_poly`; removing only the direct requirement would leave SciPy as a transitive dependency.
+
+Examples reviewed in the official wheel:
+
+- `scipy/stats/_generate_pyx.py` launches code-generation scripts with `subprocess.run` during source generation.
+- `scipy/_lib/_bunch.py` uses `exec` to generate result-container classes from field names checked by `_validate_names`.
+- `scipy/signal/_signaltools.py` uses `eval`/`exec` in `hilbert2`, which this benchmark does not call.
+
+The requirements file permits only hash-verified wheels for the supported benchmark platforms, preventing source-build installation. This does not remove runtime capabilities inside SciPy and does not prove every package path safe. Retaining the dependency with these capability alerts requires security triage; no Socket suppression is included in this change.
