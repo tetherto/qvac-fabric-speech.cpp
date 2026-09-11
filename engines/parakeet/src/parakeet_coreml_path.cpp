@@ -32,7 +32,7 @@ std::size_t basename_separator(const std::string & path, std::size_t slash) {
 
 }  // namespace
 
-std::string coreml_encoder_sidecar_path(const std::string & gguf_path) {
+static std::string coreml_sidecar_base(const std::string & gguf_path) {
     std::string path  = gguf_path;
     const std::size_t slash = path.find_last_of("/\\");
 
@@ -46,7 +46,15 @@ std::string coreml_encoder_sidecar_path(const std::string & gguf_path) {
         path.erase(sep);
     }
 
-    return path + "-encoder.mlmodelc";
+    return path;
+}
+
+std::string coreml_encoder_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder.mlmodelc";
+}
+
+std::string coreml_bypass_encoder_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder-bypass-pre-encode.mlmodelc";
 }
 
 }  // namespace parakeet

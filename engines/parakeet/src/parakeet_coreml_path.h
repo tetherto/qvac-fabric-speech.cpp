@@ -16,4 +16,8 @@ namespace parakeet {
 // unit-tested without Apple frameworks or a model.
 std::string coreml_encoder_sidecar_path(const std::string & gguf_path);
 
+// Sortformer v2.1 AOSC sidecar: the subsampling output/cache concatenation is
+// supplied directly, so this bundle contains only the FastConformer block stack.
+std::string coreml_bypass_encoder_sidecar_path(const std::string & gguf_path);
+
 }  // namespace parakeet

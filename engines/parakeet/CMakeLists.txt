@@ -578,6 +578,9 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_sf_f16_gguf   "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.f16.gguf")
     set(_qvp_sfs_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.q8_0.gguf")
     set(_qvp_sfsv21_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1.q8_0.gguf")
+    set(_qvp_sfsv21_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1.f16.gguf")
+    set(_qvp_sfsv21_coreml "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-encoder.mlmodelc")
+    set(_qvp_sfsv21_coreml_bypass "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlmodelc")
     set(_qvp_indic_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.q8_0.gguf")
     set(_qvp_indic_q4_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.q4_0.gguf")
     set(_qvp_indic_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.f16.gguf")
@@ -1101,6 +1104,35 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-encoder-coreml-parity
         ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
+    parakeet_register_test(test-encoder-coreml-parity-sortformer-v2.1
+        LABEL    "fixture"
+        EXE      test-encoder-coreml-parity
+        ARGS     "--model" "${_qvp_sfsv21_f16_gguf}" "--wav" "${_qvp_diar_wav}"
+        REQUIRES "${_qvp_sfsv21_f16_gguf}" "${_qvp_diar_wav}" "${_qvp_sfsv21_coreml}")
+
+    add_executable(test-encoder-coreml-bypass-parity
+        test/test_encoder_coreml_bypass_parity.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_coreml_path.cpp
+        src/coreml/parakeet_coreml_shape.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-encoder-coreml-bypass-parity PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-encoder-coreml-bypass-parity PRIVATE include src ggml/include)
+    parakeet_apply_backend_defs(test-encoder-coreml-bypass-parity)
+    if (PARAKEET_COREML)
+        target_sources(test-encoder-coreml-bypass-parity PRIVATE src/coreml/parakeet-encoder.mm)
+        set_source_files_properties(src/coreml/parakeet-encoder.mm
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_compile_definitions(test-encoder-coreml-bypass-parity PRIVATE PARAKEET_USE_COREML)
+        target_link_libraries(test-encoder-coreml-bypass-parity PRIVATE
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+    endif()
+    parakeet_register_test(test-encoder-coreml-bypass-parity
+        LABEL    "fixture"
+        ARGS     "${_qvp_sfsv21_f16_gguf}"
+        REQUIRES "${_qvp_sfsv21_f16_gguf}" "${_qvp_sfsv21_coreml_bypass}")
 
     # Portable unit test for the Core ML sidecar path derivation
     # (coreml_encoder_sidecar_path). Pure string logic -- no ggml, model, or
