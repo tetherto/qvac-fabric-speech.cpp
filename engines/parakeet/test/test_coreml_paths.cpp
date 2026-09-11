@@ -28,6 +28,7 @@ void expect(const std::string & gguf, const std::string & expected) {
 
 int main() {
     expect("models/parakeet-tdt-0.6b-v3.f16.gguf",  "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
+    expect("models/parakeet-tdt-0.6b-v3.bf16.gguf", "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
     expect("models/parakeet-tdt-0.6b-v3.q8_0.gguf", "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
     expect("parakeet-ctc-0.6b.q8_0.gguf",           "parakeet-ctc-0.6b-encoder.mlmodelc");
     expect("/opt/models/parakeet-tdt-0.6b-v3.gguf", "/opt/models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");

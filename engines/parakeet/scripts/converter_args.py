@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-QUANT_CHOICES = ["f32", "f16", "q8_0", "q5_0", "q4_0"]
+QUANT_CHOICES = ["f32", "f16", "bf16", "q8_0", "q5_0", "q4_0"]
 HEAD_CHOICES = ["auto", "ctc", "rnnt", "tdt", "eou", "sortformer"]
 DEFAULT_MODEL_STEM = "parakeet-ctc-0.6b"
 
@@ -39,7 +39,8 @@ def parse_args(
             "Weight dtype for 2D projection matrices. Biases / norms / BN "
             "stay at f32. q8_0 default (~2x smaller than f16, bit-equal "
             "transcripts on clean speech across CTC/TDT/EOU/Sortformer); "
-            "pass --quant f16 for the bit-equal floating-point baseline."
+            "pass --quant f16 for the bit-equal floating-point baseline, or "
+            "--quant bf16 for bfloat16 projection weights."
         ),
     )
     parser.add_argument(

@@ -101,6 +101,7 @@ src/parakeet_sortformer.h for the consumer structs):
 """
 
 import io
+import math
 import os
 import sys
 import tarfile
@@ -127,8 +128,11 @@ NEMOTRON_DEFAULT_ATT_CONTEXT_RIGHT = 3
 NEMOTRON_NUM_PROMPTS = 128
 NEMOTRON_PROMPT_INPUT = 1152
 NEMOTRON_PROMPT_HIDDEN = 2048
+EOU_REPO = "nvidia/parakeet_realtime_eou_120m-v1"
+EOU_LICENSE = "NVIDIA Open Model License"
 
 QUANT_MAP = {
+    "bf16": gguf.GGMLQuantizationType.BF16,
     "q8_0": gguf.GGMLQuantizationType.Q8_0,
     "q5_0": gguf.GGMLQuantizationType.Q5_0,
     "q4_0": gguf.GGMLQuantizationType.Q4_0,
@@ -137,6 +141,7 @@ QUANT_MAP = {
 FILE_TYPE_MAP = {
     "f32":  gguf.LlamaFileType.ALL_F32,
     "f16":  gguf.LlamaFileType.MOSTLY_F16,
+    "bf16": gguf.LlamaFileType.MOSTLY_BF16,
     "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0,
     "q5_0": gguf.LlamaFileType.MOSTLY_Q5_0,
     "q4_0": gguf.LlamaFileType.MOSTLY_Q4_0,
@@ -529,6 +534,118 @@ def resolve_attention_context(enc: dict, default_right=None):
     return -1, -1
 
 
+def eou_required_tensor_names(cfg: dict) -> list[str]:
+    names = [
+        "preprocessor.featurizer.fb",
+        "preprocessor.featurizer.window",
+        "encoder.pre_encode.conv.0.weight",
+        "encoder.pre_encode.conv.2.weight",
+        "encoder.pre_encode.conv.3.weight",
+        "encoder.pre_encode.conv.5.weight",
+        "encoder.pre_encode.conv.6.weight",
+        "encoder.pre_encode.out.weight",
+        "decoder.prediction.embed.weight",
+        "joint.enc.weight", "joint.enc.bias",
+        "joint.pred.weight", "joint.pred.bias",
+        "joint.joint_net.2.weight", "joint.joint_net.2.bias",
+    ]
+    for layer in range(int(cfg.get("encoder", {}).get("n_layers", 0))):
+        prefix = f"encoder.layers.{layer}"
+        names.extend([
+            f"{prefix}.norm_feed_forward1.weight",
+            f"{prefix}.norm_feed_forward1.bias",
+            f"{prefix}.feed_forward1.linear1.weight",
+            f"{prefix}.feed_forward1.linear2.weight",
+            f"{prefix}.norm_self_att.weight",
+            f"{prefix}.norm_self_att.bias",
+            f"{prefix}.self_attn.linear_q.weight",
+            f"{prefix}.self_attn.linear_k.weight",
+            f"{prefix}.self_attn.linear_v.weight",
+            f"{prefix}.self_attn.linear_out.weight",
+            f"{prefix}.self_attn.linear_pos.weight",
+            f"{prefix}.self_attn.pos_bias_u",
+            f"{prefix}.self_attn.pos_bias_v",
+            f"{prefix}.norm_conv.weight",
+            f"{prefix}.norm_conv.bias",
+            f"{prefix}.conv.pointwise_conv1.weight",
+            f"{prefix}.conv.depthwise_conv.weight",
+            f"{prefix}.conv.batch_norm.weight",
+            f"{prefix}.conv.batch_norm.bias",
+            f"{prefix}.conv.pointwise_conv2.weight",
+            f"{prefix}.norm_feed_forward2.weight",
+            f"{prefix}.norm_feed_forward2.bias",
+            f"{prefix}.feed_forward2.linear1.weight",
+            f"{prefix}.feed_forward2.linear2.weight",
+            f"{prefix}.norm_out.weight",
+            f"{prefix}.norm_out.bias",
+        ])
+    for layer in range(int(cfg.get("decoder", {}).get("prednet", {}).get(
+            "pred_rnn_layers", 0))):
+        prefix = f"decoder.prediction.dec_rnn.lstm"
+        names.extend([
+            f"{prefix}.weight_ih_l{layer}",
+            f"{prefix}.weight_hh_l{layer}",
+            f"{prefix}.bias_ih_l{layer}",
+            f"{prefix}.bias_hh_l{layer}",
+        ])
+    return names
+
+
+def validate_eou_contract(cfg: dict, sd=None):
+    errors = []
+    expected = (
+        (("encoder", "d_model"), 512),
+        (("encoder", "n_layers"), 17),
+        (("encoder", "n_heads"), 8),
+        (("encoder", "subsampling_factor"), 8),
+        (("encoder", "causal_downsampling"), True),
+        (("encoder", "conv_context_size"), "causal"),
+        (("encoder", "conv_norm_type"), "layer_norm"),
+        (("encoder", "att_context_style"), "chunked_limited"),
+        (("decoder", "vocab_size"), 1026),
+        (("decoder", "prednet", "pred_hidden"), 640),
+        (("decoder", "prednet", "pred_rnn_layers"), 1),
+        (("joint", "num_classes"), 1026),
+        (("joint", "jointnet", "joint_hidden"), 640),
+    )
+    for path, value in expected:
+        validate_config_value(errors, cfg, path, value)
+    if resolve_attention_context(cfg.get("encoder", {})) != (70, 1):
+        errors.append("encoder.att_context_size must resolve to [70, 1]")
+    labels = cfg.get("labels") or cfg.get("decoder", {}).get("vocabulary") or []
+    label_set = {str(label) for label in labels}
+    for token in ("<EOU>", "<EOB>"):
+        if token not in label_set:
+            errors.append(f"vocabulary is missing {token}")
+    if labels:
+        positions = {str(label): index for index, label in enumerate(labels)}
+        if positions.get("<EOU>") != 1024:
+            errors.append("<EOU> must have token id 1024")
+        if positions.get("<EOB>") != 1025:
+            errors.append("<EOB> must have token id 1025")
+    if sd is not None:
+        missing = [name for name in eou_required_tensor_names(cfg) if name not in sd]
+        if missing:
+            preview = ", ".join(missing[:8])
+            suffix = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+            errors.append(f"missing required tensors: {preview}{suffix}")
+    if errors:
+        raise ValueError(
+            "incompatible EOU checkpoint:\n  - " + "\n  - ".join(errors))
+
+
+def write_eou_provenance(writer):
+    writer.add_description(
+        "NVIDIA Parakeet Realtime EOU 120M "
+        f"({EOU_LICENSE})"
+    )
+    writer.add_string("general.license", EOU_LICENSE)
+    writer.add_string(
+        "general.source.url",
+        f"https://huggingface.co/{EOU_REPO}",
+    )
+
+
 def nemotron_prompt_entries(cfg: dict):
     prompt_dictionary = cfg["model_defaults"]["prompt_dictionary"]
     aliases = [str(alias) for alias in prompt_dictionary]
@@ -564,6 +681,18 @@ def detect_model_type(cfg: dict, head: str = "auto") -> str:
             return "eou"
         return "rnnt"
     return "ctc"
+
+
+def subsampling_freq_bins(feat_in: int, sub_factor: int,
+                          causal_downsampling: bool) -> int:
+    """Return the frequency width after the stride-2 subsampling stack."""
+    if sub_factor <= 0 or sub_factor & (sub_factor - 1):
+        raise ValueError("subsampling_factor must be a positive power of two")
+    bins = int(feat_in)
+    for _ in range(int(math.log2(sub_factor))):
+        # NeMo CausalConv2D pads (2, 1), producing floor(L / 2) + 1.
+        bins = bins // 2 + 1 if causal_downsampling else (bins + 2 - 3) // 2 + 1
+    return bins
 
 
 def rnnt_max_symbols(cfg: dict) -> int:
@@ -776,6 +905,8 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     model_type = detect_model_type(cfg, head)
     if model_type == "rnnt":
         validate_rnnt_contract(cfg, sd)
+    if model_type == "eou":
+        validate_eou_contract(cfg, sd)
     if model_type == "nemotron":
         validate_nemotron_contract(cfg, sd)
 
@@ -797,9 +928,9 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     use_bias      = bool(enc.get("use_bias", True))
 
     feat_in       = int(enc["feat_in"])
-    sub_freq_bins = feat_in
-    for _ in range(int(np.log2(sub_factor))):
-        sub_freq_bins = (sub_freq_bins + 2 * 1 - 3) // 2 + 1
+    causal_downsample = bool(enc.get("causal_downsampling", False))
+    sub_freq_bins = subsampling_freq_bins(
+        feat_in, sub_factor, causal_downsample)
 
     sample_rate   = int(pre["sample_rate"])
     n_fft         = int(pre["n_fft"])
@@ -830,6 +961,8 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
             "nemotron-3.5-asr-streaming-0.6b",
         )
         writer.add_string("parakeet.model_variant", NEMOTRON_VARIANT)
+    elif model_type == "eou":
+        write_eou_provenance(writer)
     else:
         writer.add_description(
             f"NVIDIA Parakeet-{model_type.upper()} "
@@ -842,7 +975,6 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     conv_norm_type   = str(enc.get("conv_norm_type", "batch_norm"))
     conv_context_str = str(enc.get("conv_context_size", "default"))
     conv_context_style = str(enc.get("conv_context_style", "regular"))
-    causal_downsample = bool(enc.get("causal_downsampling", False))
     att_style        = str(enc.get("att_context_style", "regular"))
     att_ctx_left, att_ctx_right = resolve_attention_context(
         enc,
@@ -873,10 +1005,10 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     writer.add_string("parakeet.encoder.att_context_style",           att_style)
     writer.add_int32 ("parakeet.encoder.att_context_size_left",       att_ctx_left)
     writer.add_int32 ("parakeet.encoder.att_context_size_right",      att_ctx_right)
-    if model_type in ("rnnt", "nemotron"):
+    if model_type in ("rnnt", "eou", "nemotron"):
         writer.add_bool(
             "parakeet.encoder.streaming.enabled",
-            model_type == "nemotron",
+            model_type in ("eou", "nemotron"),
         )
 
     normalize_str = str(pre.get("normalize", "per_feature"))
@@ -975,25 +1107,40 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         arr = as_np(t, np.float32)
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = arr.squeeze(-1)
-        if qtype is None or arr.shape[-1] % 32 != 0:
+        block_quant = quant in {"q8_0", "q5_0", "q4_0"}
+        if qtype is None or (block_quant and arr.shape[-1] % 32 != 0):
             writer.add_tensor(name, arr.astype(fallback_dtype, copy=False))
             return
         packed = gguf.quants.quantize(arr, qtype)
         writer.add_tensor(name, packed, raw_dtype=qtype)
 
+    def add_conv(name: str, t: torch.Tensor):
+        # ggml-metal supports BF16 matrix multiplication on recent Apple GPUs,
+        # but its convolution IM2COL path does not accept BF16 kernels, and the
+        # subsampler's pointwise lowering casts activations to its kernel type.
+        # A MOSTLY_BF16 file therefore keeps all subsampling plus depthwise
+        # kernels in F16; encoder/decoder projection matrices remain BF16.
+        if quant != "bf16":
+            add_2d(name, t)
+            return
+        arr = as_np(t, np.float32)
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr.squeeze(-1)
+        writer.add_tensor(name, arr.astype(np.float16, copy=False))
+
     def try_bias(name: str, key: str):
         if key in sd:
             add_f32(name, sd[key])
 
-    add_2d ("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
+    add_conv("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
     try_bias("encoder.subsampling.conv0.bias",    "encoder.pre_encode.conv.0.bias")
-    add_2d ("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
+    add_conv("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
     try_bias("encoder.subsampling.conv1_dw.bias",   "encoder.pre_encode.conv.2.bias")
-    add_2d ("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
+    add_conv("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
     try_bias("encoder.subsampling.conv1_pw.bias",   "encoder.pre_encode.conv.3.bias")
-    add_2d ("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
+    add_conv("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
     try_bias("encoder.subsampling.conv2_dw.bias",   "encoder.pre_encode.conv.5.bias")
-    add_2d ("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
+    add_conv("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
     try_bias("encoder.subsampling.conv2_pw.bias",   "encoder.pre_encode.conv.6.bias")
     add_2d ("encoder.subsampling.out.weight",      sd["encoder.pre_encode.out.weight"])
     try_bias("encoder.subsampling.out.bias",        "encoder.pre_encode.out.bias")
@@ -1037,7 +1184,7 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         add_f32(f"{p}.norm_conv.bias",    sd[f"{k}.norm_conv.bias"])
         add_2d (f"{p}.conv.pw1.weight",   sd[f"{k}.conv.pointwise_conv1.weight"])
         try_bias(f"{p}.conv.pw1.bias",    f"{k}.conv.pointwise_conv1.bias")
-        add_2d (f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
+        add_conv(f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
         try_bias(f"{p}.conv.dw.bias",     f"{k}.conv.depthwise_conv.bias")
 
         if conv_norm_type == "layer_norm":

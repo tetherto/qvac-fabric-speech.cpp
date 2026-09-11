@@ -9,6 +9,8 @@ STUB_DIR="$WORK_DIR/bin"
 DOWNLOAD_LOG="$WORK_DIR/downloads.log"
 EXPECTED_URL="https://objectstore.e2enetworks.net/indicconformer/models/indicconformer_stt_multi_hybrid_rnnt_600m.nemo"
 EXPECTED_MODEL="$WORK_DIR/models/indicconformer_stt_multi_hybrid_rnnt_600m.nemo"
+EOU_URL="https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1/resolve/main/parakeet_realtime_eou_120m-v1.nemo"
+EOU_MODEL="$WORK_DIR/models/parakeet_realtime_eou_120m-v1.nemo"
 
 cleanup() {
   rm -rf "$WORK_DIR"
@@ -58,9 +60,20 @@ assert_download() {
   test -f "$EXPECTED_MODEL"
 }
 
+assert_eou_only_download() {
+  : > "$DOWNLOAD_LOG"
+  rm -rf "$WORK_DIR/models"
+  PATH="$STUB_DIR:$PATH" DOWNLOAD_LOG="$DOWNLOAD_LOG" \
+    bash "$WORK_DIR/scripts/download-all-models.sh" eou > /dev/null
+  grep -Fxq "$EOU_URL" "$DOWNLOAD_LOG"
+  test -f "$EOU_MODEL"
+  test "$(wc -l < "$DOWNLOAD_LOG" | tr -d ' ')" = "1"
+}
+
 trap cleanup EXIT
 create_curl_stub
 prepare_script
 PATH="$STUB_DIR:$PATH" DOWNLOAD_LOG="$DOWNLOAD_LOG" \
   bash "$WORK_DIR/scripts/download-all-models.sh" > /dev/null
 assert_download
+assert_eou_only_download

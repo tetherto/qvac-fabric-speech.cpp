@@ -111,6 +111,13 @@ jq -e '.whisper.args | index("-nt") != null' "$REAL_SPEC" > /dev/null \
   || fail "whisper must invoke whisper-cli with -nt so its stdout carries only the decoded transcript (the time-wrapped correctness hypothesis)"
 ok "whisper declares a WER correctness block reusing parakeet's JFK reference and keeps -nt on"
 
+jq -e '."parakeet-eou".coreml_compare_on_darwin == true and
+       ."parakeet-eou".coreml_model_basename == "parakeet_realtime_eou_120m-v1" and
+       ."parakeet-eou".coreml_export_mel_frames == 1101 and
+       ."parakeet-eou".correctness.kind == "wer"' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-eou must declare its exact-shape Core ML and WER benchmark contract"
+ok "parakeet-eou declares the fixed 1101-frame Core ML comparison"
+
 # compute-wer.py: shipped self-test must pass. Catches accidental regressions
 # in the normalizer / DP without needing a real bench run.
 python3 "$HERE/compute-wer.py" --self-test > /dev/null \

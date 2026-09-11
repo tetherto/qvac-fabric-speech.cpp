@@ -3,7 +3,7 @@
 // Mirrors the whisper.cpp `whisper_coreml_*` C shim: an opaque context wraps a
 // compiled `.mlmodelc` encoder that runs on the Apple Neural Engine, and the
 // caller hands log-mel features in / reads encoder hidden states out. The rest
-// of the validated pipeline (mel preprocessing, TDT decode, tokenizer) stays on ggml.
+// of the validated pipeline (mel preprocessing, TDT/EOU decode, tokenizer) stays on ggml.
 //
 // This header is Apple-only; it is compiled and referenced solely when the
 // PARAKEET_USE_COREML build definition is set. All entry points return failure
@@ -14,15 +14,16 @@
 //   - Exactly one MLMultiArray input  = log-mel features, dims {n_mels, n_mel_frames}
 //     (either order; Float16 or Float32; the wrapper adapts). This is the offline FastConformer encoder
 //     input, i.e. everything from the subsampling stack through the last Conformer
-//     block; it must NOT include the TDT joint projection. The mel time axis may be
+//     block; it must NOT include a decoder joint projection. The mel time axis may be
 //     fixed or flexible. For a fixed shape, an input no longer than the declared
 //     capacity is zero-padded to that capacity. Longer inputs must be divided into
 //     windows by the caller. Flexible inputs are allocated at the requested length.
 //   - Exactly one MLMultiArray output = encoder hidden states, dims {n_enc_frames,
 //     d_model} (either order; Float32 or Float16). n_enc_frames is n_mel_frames put
 //     through the three stride-2 subsampling convs (matching run_encoder's sizing).
-//   - The model is the full-context (non-causal, non-chunked) encoder; streaming /
-//     cache-aware configurations are served by ggml, not this sidecar.
+//   - TDT exports are full-context and may pad shorter inputs. EOU exports bake
+//     causal subsampling/convolution and chunk-limited attention into one exact
+//     fixed shape; the caller rejects nonmatching EOU shapes before this wrapper.
 
 #pragma once
 

@@ -8,6 +8,8 @@
       "source":                  "Where to fetch models from. 's3' (default) uses aws s3 cp against s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/<s3_prefix>/<key>. 'huggingface' uses curl against https://huggingface.co/<hf_repo>/resolve/<hf_ref>/<name> — vanilla whisper GGMLs (ggml-tiny.bin etc.) live on HuggingFace, not S3.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
       "coreml_compare_on_darwin":"Run the native benchmark twice on Darwin: required Core ML first, then the same command with PARAKEET_COREML_DISABLE=1 as the ggml baseline.",
+      "coreml_model_basename":  "Parakeet GGUF basename without the quantization suffix; used to derive the F16 GGUF and compiled sidecar names.",
+      "coreml_export_mel_frames":"Fixed mel-frame shape passed to the Core ML exporter.",
       "models":                  "List of files to fetch. Only the trailing filename lands in models/<family>/ — intermediate directory segments (dates etc.) are dropped locally. For source='s3' an entry is an S3 key string or a {s3, as} object (fetched as `as`). For source='huggingface' families other than whisper, an entry is a {name, sha256?} object resolved against hf_repo@hf_ref.",
       "hf_repo":                 "HuggingFace repo id (e.g. 'ggerganov/whisper.cpp'). Required when source='huggingface'.",
       "hf_ref":                  "HuggingFace ref (commit SHA) pinned so the download can't silently drift with upstream re-uploads. Required when source='huggingface'.",
@@ -50,6 +52,8 @@
       "2026-05-11/parakeet-tdt-0.6b-v3.f16.gguf"
     ],
     "coreml_compare_on_darwin": true,
+    "coreml_model_basename": "parakeet-tdt-0.6b-v3",
+    "coreml_export_mel_frames": 1501,
     "args": [
       "--verbose",
       "--model",       "${MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf",
@@ -67,6 +71,36 @@
       "normalizer": "english"
     },
     "notes": "TDT benchmark. On Darwin the driver requires the Core ML encoder for one run, repeats the same benchmark with PARAKEET_COREML_DISABLE=1, and reports encoder/end-to-end speedups. The TDT decoder remains on ggml Metal. jfk.wav is a ~11 s fixture; RTF < 1 means faster than real-time. Correctness: WER of the benchmark transcript against the checked-in reference; a non-trivial WER means either the model regressed or the reference drifted with a checkpoint bump."
+  },
+
+  "parakeet-eou": {
+    "cmake_target": "parakeet-cli",
+    "bench_kind":   "native",
+    "binary":       "engines/parakeet/parakeet",
+    "s3_prefix":    "parakeet",
+    "models": [
+      "2026-05-11/parakeet_realtime_eou_120m-v1.f16.gguf"
+    ],
+    "coreml_compare_on_darwin": true,
+    "coreml_model_basename": "parakeet_realtime_eou_120m-v1",
+    "coreml_export_mel_frames": 1101,
+    "args": [
+      "--verbose",
+      "--model",       "${MODEL_DIR}/parakeet_realtime_eou_120m-v1.f16.gguf",
+      "--wav",         "${AUDIO_DIR}/jfk.wav",
+      "--n-gpu-layers", "999",
+      "--bench",
+      "--bench-runs",    "${RUNS}",
+      "--bench-warmup",  "${WARMUP}",
+      "--bench-json",    "${JSON_OUT}"
+    ],
+    "audio_duration_seconds": 11.0,
+    "correctness": {
+      "kind":       "wer",
+      "reference":  "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt",
+      "normalizer": "english"
+    },
+    "notes": "EOU benchmark. On Darwin the 1101-frame fixed sidecar must run every measured encoder invocation; the same F16 GGUF then runs with Core ML disabled as the Metal baseline. The EOU decoder remains on ggml Metal. Correctness compares normalized JFK WER and requires the Core ML and Metal transcripts to match."
   },
 
   "sortformer": {

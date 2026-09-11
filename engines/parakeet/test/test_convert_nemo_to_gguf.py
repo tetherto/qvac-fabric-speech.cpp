@@ -8,6 +8,7 @@ from pathlib import Path
 def install_gguf_stub():
     gguf = types.ModuleType("gguf")
     gguf.GGMLQuantizationType = types.SimpleNamespace(
+        BF16=0,
         Q8_0=1,
         Q5_0=2,
         Q4_0=3,
@@ -18,6 +19,7 @@ def install_gguf_stub():
         MOSTLY_Q8_0=3,
         MOSTLY_Q5_0=4,
         MOSTLY_Q4_0=5,
+        MOSTLY_BF16=6,
     )
     sys.modules["gguf"] = gguf
 
@@ -113,6 +115,9 @@ class RecordingWriter:
 
     def add_string(self, name, value):
         self.values[name] = value
+
+    def add_description(self, value):
+        self.values["general.description"] = value
 
 
 class FakeTensor:
@@ -220,6 +225,27 @@ def nemotron_state_dict():
     }
 
 
+def eou_config():
+    config = unified_config()
+    config["encoder"] = {
+        "d_model": 512,
+        "n_layers": 17,
+        "n_heads": 8,
+        "subsampling_factor": 8,
+        "causal_downsampling": True,
+        "conv_context_size": "causal",
+        "conv_norm_type": "layer_norm",
+        "att_context_style": "chunked_limited",
+        "att_context_size": [70, 1],
+    }
+    config["decoder"]["vocab_size"] = 1026
+    config["decoder"]["prednet"]["pred_rnn_layers"] = 1
+    config["joint"]["num_classes"] = 1026
+    config["labels"] = [f"token-{index}" for index in range(1024)] + [
+        "<EOU>", "<EOB>"]
+    return config
+
+
 class ConverterRnntTests(unittest.TestCase):
     def test_detects_standard_rnnt(self):
         self.assertEqual(CONVERTER.detect_model_type(unified_config()), "rnnt")
@@ -233,6 +259,58 @@ class ConverterRnntTests(unittest.TestCase):
         config = unified_config()
         config["labels"] = ["<unk>", "<EOU>"]
         self.assertEqual(CONVERTER.detect_model_type(config), "eou")
+
+    def test_eou_causal_subsampling_frequency_geometry(self):
+        self.assertEqual([
+            CONVERTER.subsampling_freq_bins(128, factor, True)
+            for factor in (1, 2, 4, 8)
+        ], [128, 65, 33, 17])
+        self.assertEqual(
+            CONVERTER.subsampling_freq_bins(128, 8, False), 16)
+
+    def test_rejects_non_power_of_two_subsampling(self):
+        with self.assertRaisesRegex(ValueError, "positive power of two"):
+            CONVERTER.subsampling_freq_bins(128, 6, True)
+
+    def test_eou_license_contract(self):
+        writer = RecordingWriter()
+        CONVERTER.write_eou_provenance(writer)
+        self.assertEqual(writer.values["general.license"],
+                         "NVIDIA Open Model License")
+        self.assertEqual(
+            writer.values["general.source.url"],
+            "https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1")
+        self.assertIn("NVIDIA Open Model License",
+                      writer.values["general.description"])
+
+    def test_validates_eou_checkpoint_contract(self):
+        CONVERTER.validate_eou_contract(eou_config())
+
+    def test_eou_required_tensor_set_covers_encoder_and_decoder(self):
+        required = CONVERTER.eou_required_tensor_names(eou_config())
+        self.assertIn("encoder.pre_encode.conv.0.weight", required)
+        self.assertIn("encoder.layers.16.conv.batch_norm.weight", required)
+        self.assertIn("decoder.prediction.dec_rnn.lstm.weight_ih_l0", required)
+        self.assertIn("joint.joint_net.2.weight", required)
+
+        state_dict = {name: object() for name in required}
+        CONVERTER.validate_eou_contract(eou_config(), state_dict)
+        del state_dict["encoder.layers.16.conv.batch_norm.weight"]
+        with self.assertRaisesRegex(ValueError, "missing required tensors"):
+            CONVERTER.validate_eou_contract(eou_config(), state_dict)
+
+    def test_rejects_wrong_eou_attention_context(self):
+        config = eou_config()
+        config["encoder"]["att_context_size"] = [64, 1]
+        with self.assertRaisesRegex(ValueError, r"\[70, 1\]"):
+            CONVERTER.validate_eou_contract(config)
+
+    def test_rejects_wrong_eou_token_ids(self):
+        config = eou_config()
+        config["labels"][1023], config["labels"][1024] = (
+            config["labels"][1024], config["labels"][1023])
+        with self.assertRaisesRegex(ValueError, "token id 1024"):
+            CONVERTER.validate_eou_contract(config)
 
     def test_can_select_hybrid_rnnt_branch(self):
         config = unified_config()
@@ -415,11 +493,15 @@ class ConverterNemotronTests(unittest.TestCase):
         )
 
     def test_supports_float_and_block_quantized_output_routes(self):
-        for quant in ("f16", "q8_0", "q4_0"):
+        for quant in ("f16", "bf16", "q8_0", "q4_0"):
             with self.subTest(quant=quant):
                 self.assertIn(quant, CONVERTER.FILE_TYPE_MAP)
         self.assertIn("q8_0", CONVERTER.QUANT_MAP)
         self.assertIn("q4_0", CONVERTER.QUANT_MAP)
+        self.assertEqual(
+            CONVERTER.QUANT_MAP["bf16"],
+            CONVERTER.gguf.GGMLQuantizationType.BF16,
+        )
 
 
 if __name__ == "__main__":

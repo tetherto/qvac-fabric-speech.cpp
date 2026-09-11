@@ -49,10 +49,11 @@ struct LongFormWindow {
 //      windows[i+1].center_start; windows.back().center_end == n_units);
 //   - each window fully contains its committed centre
 //     (window_start <= center_start && window_start + window_len >= center_end);
-//   - window_len <= center_units + 2 * ctx_units, so peak encoder memory is
-//     bounded regardless of total input length.
+//   - normally window_len <= center_units + 2 * ctx_units; callers supplying
+//     `exact_window_units` instead get that fixed bound for sidecar routing.
 inline std::vector<LongFormWindow>
-plan_long_form_windows(int n_units, int center_units, int ctx_units) {
+plan_long_form_windows(int n_units, int center_units, int ctx_units,
+                       int exact_window_units = 0) {
     std::vector<LongFormWindow> windows;
     if (n_units <= 0 || center_units <= 0) {
         return windows;
@@ -80,8 +81,9 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units) {
         // boundary frames more useful context, this keeps fixed-shape Core ML
         // windows near their exported capacity instead of adding a large block
         // of synthetic zero padding to the first and final predictions.
-        const long long requested_len_ll =
-            (long long) center_units + 2LL * ctx_units;
+        const long long requested_len_ll = exact_window_units > 0
+            ? (long long) exact_window_units
+            : (long long) center_units + 2LL * ctx_units;
         const int target_len = requested_len_ll < n_units
                              ? (int) requested_len_ll : n_units;
         int missing = target_len - (window_end - window_start);
@@ -156,6 +158,8 @@ struct LongFormPlan {
     int  context_frames = 0;  // encoder frames of shared context each side
     int  center_frames  = 0;  // committed encoder frames per window
     int  sub            = 0;  // subsampling factor (mel frames per encoder frame)
+    int  exact_mel_frames = 0; // >0: every window has this fixed sidecar shape
+    bool causal_downsampling = false; // use causal subsampling seam geometry
 };
 
 // Resolve the window required by a fixed-shape Core ML encoder. The sidecar's
@@ -198,6 +202,25 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     plan.context_frames = context_frames;
     plan.center_frames  = center_frames;
     plan.sub            = sub;
+    return plan;
+}
+
+// EOU sidecars are fixed causal graphs and may only consume their exact mel
+// shape. For an oversized input, retain that shape in the plan so every window
+// is filled entirely with real mel frames (including a backward-shifted final
+// window). Inputs at or below the fixed shape stay on the single-pass route:
+// exact-size calls can use Core ML directly and shorter calls fall back to ggml.
+inline LongFormPlan resolve_coreml_exact_shape_plan(int fixed_mel_frames,
+                                                    int requested_context_frames,
+                                                    int subsampling_factor,
+                                                    long long n_mel_frames) {
+    LongFormPlan plan = resolve_coreml_fixed_shape_plan(
+        fixed_mel_frames, requested_context_frames,
+        subsampling_factor, n_mel_frames);
+    if (plan.enabled) {
+        plan.exact_mel_frames = fixed_mel_frames;
+        plan.causal_downsampling = true;
+    }
     return plan;
 }
 
@@ -278,6 +301,45 @@ inline WindowTrim compute_window_trim(const LongFormWindow & w,
     t.left_drop  = (w.center_start - w.window_start) / div;
     t.center_cnt = w.is_final ? (t_enc_frames - t.left_drop)
                               : (w.center_end - w.center_start) / div;
+    if (t.left_drop < 0) t.left_drop = 0;
+    if (t.left_drop > t_enc_frames) t.left_drop = t_enc_frames;
+    if (t.center_cnt < 0) t.center_cnt = 0;
+    if (t.center_cnt > t_enc_frames - t.left_drop) {
+        t.center_cnt = t_enc_frames - t.left_drop;
+    }
+    return t;
+}
+
+// Number of encoder frames emitted by repeated causal stride-2 subsampling
+// convolutions. EOU uses three stages (sub=8), each with len -> len/2 + 1.
+// Prefix length zero is defined as zero so differences telescope exactly over
+// gap-free committed mel ranges.
+inline int causal_subsampled_frames(int n_mel_frames, int sub) {
+    if (n_mel_frames <= 0) return 0;
+    int frames = n_mel_frames;
+    int remaining = sub > 0 ? sub : 1;
+    while (remaining > 1 && remaining % 2 == 0) {
+        frames = frames / 2 + 1;
+        remaining /= 2;
+    }
+    // EOU currently has a power-of-two factor. Keep an unsurprising fallback
+    // for malformed metadata rather than applying a partial recurrence.
+    if (remaining != 1) {
+        return (n_mel_frames + sub - 1) / sub;
+    }
+    return frames;
+}
+
+// Causal subsampling emits boundary frames in addition to the simple mel/sub
+// quotient. Compute each committed count from global mel prefixes so all window
+// counts telescope to the exact full-input output geometry.
+inline WindowTrim compute_causal_window_trim(const LongFormWindow & w,
+                                             int t_enc_frames, int sub) {
+    WindowTrim t;
+    t.left_drop = causal_subsampled_frames(w.center_start, sub)
+                - causal_subsampled_frames(w.window_start, sub);
+    t.center_cnt = causal_subsampled_frames(w.center_end, sub)
+                 - causal_subsampled_frames(w.center_start, sub);
     if (t.left_drop < 0) t.left_drop = 0;
     if (t.left_drop > t_enc_frames) t.left_drop = t_enc_frames;
     if (t.center_cnt < 0) t.center_cnt = 0;

@@ -15,7 +15,7 @@ on:
       model_families:
         description: >-
           Comma-separated family names, or "all". Families:
-          whisper, parakeet (TDT; Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
+          whisper, parakeet (TDT), parakeet-eou (both Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
           cosyvoice, audio8, lavasr, acestep, minimax.
         required: false
         default: "all"
@@ -61,7 +61,7 @@ env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
   GGML_BRANCH: speech
   AWS_REGION: eu-central-1
-  ALL_FAMILIES: "whisper,parakeet,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,lavasr,acestep,minimax"
+  ALL_FAMILIES: "whisper,parakeet,parakeet-eou,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,lavasr,acestep,minimax"
 
 jobs:
   # ---------- 1. Expand inputs into a matrix ------------------------------
@@ -119,7 +119,7 @@ jobs:
 
           valid_family() {
             case "$1" in
-              whisper|parakeet|sortformer|vad|chatterbox|supertonic|parler|cosyvoice|audio8|lavasr|acestep|minimax) return 0 ;;
+              whisper|parakeet|parakeet-eou|sortformer|vad|chatterbox|supertonic|parler|cosyvoice|audio8|lavasr|acestep|minimax) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -302,8 +302,16 @@ jobs:
           path: bench-models/parakeet/parakeet-tdt-0.6b-v3-encoder.mlmodelc
           key: parakeet-tdt-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/convert-nemo-to-gguf.py', 'engines/parakeet/scripts/converter_args.py', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
+      - name: Cache generated Parakeet EOU Core ML sidecar
+        if: runner.os == 'macOS' && matrix.family == 'parakeet-eou'
+        id: parakeet-eou-coreml-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet-eou/parakeet_realtime_eou_120m-v1-encoder.mlmodelc
+          key: parakeet-eou-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
       - name: Install Core ML exporter dependencies
-        if: runner.os == 'macOS' && matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')
+        if: runner.os == 'macOS' && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true'))
         run: |
           set -euo pipefail
           coreml_python="$(command -v python3.11 || true)"
@@ -427,7 +435,7 @@ jobs:
 
       - name: Configure umbrella build
         env:
-          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && matrix.family == 'parakeet' && 'ON' || 'OFF' }}
+          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && (matrix.family == 'parakeet' || matrix.family == 'parakeet-eou') && 'ON' || 'OFF' }}
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -470,7 +478,7 @@ jobs:
           if [[ -n "$WHISPER_SIZE" ]]; then
             extra_args+=(--whisper-size "$WHISPER_SIZE")
           fi
-          if [[ "$FAMILY" == "parakeet" && "$RUNNER_OS" == "macOS" ]]; then
+          if [[ ("$FAMILY" == "parakeet" || "$FAMILY" == "parakeet-eou") && "$RUNNER_OS" == "macOS" ]]; then
             warmup_runs=3
           fi
           # run-family.sh handles all failure paths (missing binary, fetch

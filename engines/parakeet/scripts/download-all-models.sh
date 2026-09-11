@@ -12,7 +12,8 @@
 #
 # Usage:
 #     ./scripts/download-all-models.sh             # everything
-#     ./scripts/download-all-models.sh tdt         # only the TDT v3 pair
+#     ./scripts/download-all-models.sh tdt         # only the TDT pair
+#     ./scripts/download-all-models.sh eou         # only EOU 120M
 
 set -euo pipefail
 
@@ -24,7 +25,8 @@ mkdir -p "$NEMO_DIR"
 case "${1:-all}" in
   all) ;;
   tdt) ;;  # filtered below
-  *) echo "usage: $0 [all|tdt]" >&2; exit 2 ;;
+  eou) ;;  # filtered below
+  *) echo "usage: $0 [all|tdt|eou]" >&2; exit 2 ;;
 esac
 
 bytes_human() {
@@ -53,20 +55,19 @@ fetch() {
 
 hr() { printf '%.0s=' {1..70}; echo; }
 
-# The TDT block always runs (both `all` and the `tdt` filter need it).
-# (When the filter is `tdt`, only the TDT-related blocks fire; the
-# CTC / EOU / Sortformer blocks below are gated off.)
-hr
-echo "== nemo: parakeet-tdt-0.6b-v3 (multilingual, 25 langs, +PnC, ~2.4 GiB)"
-fetch "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo" \
-      "$NEMO_DIR/parakeet-tdt-0.6b-v3.nemo"
+if [[ "${1:-all}" != "eou" ]]; then
+  hr
+  echo "== nemo: parakeet-tdt-0.6b-v3 (multilingual, 25 langs, +PnC, ~2.4 GiB)"
+  fetch "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo" \
+        "$NEMO_DIR/parakeet-tdt-0.6b-v3.nemo"
 
-hr
-echo "== nemo: parakeet-tdt-1.1b (English-only, best WER, 42 layers, ~4.3 GiB)"
-fetch "https://huggingface.co/nvidia/parakeet-tdt-1.1b/resolve/main/parakeet-tdt-1.1b.nemo" \
-      "$NEMO_DIR/parakeet-tdt-1.1b.nemo"
+  hr
+  echo "== nemo: parakeet-tdt-1.1b (English-only, best WER, 42 layers, ~4.3 GiB)"
+  fetch "https://huggingface.co/nvidia/parakeet-tdt-1.1b/resolve/main/parakeet-tdt-1.1b.nemo" \
+        "$NEMO_DIR/parakeet-tdt-1.1b.nemo"
+fi
 
-if [[ "${1:-all}" != "tdt" ]]; then
+if [[ "${1:-all}" == "all" ]]; then
   hr
   echo "== nemo: parakeet-unified-en-0.6b (English RNN-T, ~2.4 GiB)"
   fetch "https://huggingface.co/nvidia/parakeet-unified-en-0.6b/resolve/main/parakeet-unified-en-0.6b.nemo" \
@@ -99,13 +100,6 @@ if [[ "${1:-all}" != "tdt" ]]; then
         "$NEMO_DIR/parakeet-tdt_ctc-110m.nemo"
 
   hr
-  echo "== nemo: parakeet_realtime_eou_120m-v1 (EOU streaming, FastConformer-RNNT 120M, ~440 MiB)"
-  echo "         (cache-aware streaming with att_context_size=[70,1] + <EOU>"
-  echo "          end-of-utterance token; English only.)"
-  fetch "https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1/resolve/main/parakeet_realtime_eou_120m-v1.nemo" \
-        "$NEMO_DIR/parakeet_realtime_eou_120m-v1.nemo"
-
-  hr
   echo "== nemo: diar_sortformer_4spk-v1 (4-speaker diarization, offline, ~490 MiB)"
   fetch "https://huggingface.co/nvidia/diar_sortformer_4spk-v1/resolve/main/diar_sortformer_4spk-v1.nemo" \
         "$NEMO_DIR/diar_sortformer_4spk-v1.nemo"
@@ -119,6 +113,15 @@ if [[ "${1:-all}" != "tdt" ]]; then
   echo "== nemo: diar_streaming_sortformer_4spk-v2.1 (4-speaker, streaming + AOSC fine-tune, ~470 MiB)"
   fetch "https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1/resolve/main/diar_streaming_sortformer_4spk-v2.1.nemo" \
         "$NEMO_DIR/diar_streaming_sortformer_4spk-v2.1.nemo"
+fi
+
+if [[ "${1:-all}" != "tdt" ]]; then
+  hr
+  echo "== nemo: parakeet_realtime_eou_120m-v1 (EOU streaming, FastConformer-RNNT 120M, ~440 MiB)"
+  echo "         (cache-aware streaming with att_context_size=[70,1] + <EOU>"
+  echo "          end-of-utterance token; English only.)"
+  fetch "https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1/resolve/main/parakeet_realtime_eou_120m-v1.nemo" \
+        "$NEMO_DIR/parakeet_realtime_eou_120m-v1.nemo"
 fi
 
 hr
