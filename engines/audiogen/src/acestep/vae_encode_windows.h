@@ -6,6 +6,7 @@
 namespace tts_cpp::acestep {
 
 inline constexpr int VAE_LATENT_CHANNELS       = 64;
+inline constexpr int VAE_PCM_CHANNELS          = 2;
 inline constexpr int VAE_ENCODER_UPSAMPLE      = 1920;
 inline constexpr int VAE_LATENT_CHUNK_FRAMES   = 1024;
 inline constexpr int VAE_LATENT_OVERLAP_FRAMES = 64;
