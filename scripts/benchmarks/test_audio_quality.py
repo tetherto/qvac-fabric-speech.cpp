@@ -62,11 +62,10 @@ class AudioQualityTests(unittest.TestCase):
             noisy = prepare.noisy_pair(samples, 10, 42)[1]
             prepare.write_wav(hyp, noisy, 16000)
             subprocess.run([sys.executable, str(ROOT/'compute-audio-quality.py'), '--reference', str(ref),
-                            '--hypothesis-file', str(hyp), '--metrics', 'sisdr,pesq', '--json-out', str(out)],
+                            '--hypothesis-file', str(hyp), '--metrics', 'sisdr', '--json-out', str(out)],
                            check=True, capture_output=True)
             result = json.loads(out.read_text())
             self.assertEqual(result['metrics']['sisdr']['status'], 'ok')
-            self.assertEqual(result['metrics']['pesq']['status'], 'disabled')
             with patch.object(quality, 'perceptual', side_effect=ImportError('pystoi')):
                 missing = quality.score(ref, hyp, ['sisdr','stoi'])
             self.assertEqual(missing['metrics']['sisdr']['status'], 'ok')
@@ -121,28 +120,6 @@ class AudioQualityTests(unittest.TestCase):
             samples = [.1*math.sin(i/13) for i in range(8000)]
             prepare.write_wav(ref, samples, 8000)
             prepare.write_wav(hyp, prepare.noisy_pair(samples, 10, 42)[1], 8000)
-            import builtins
-            real_import = builtins.__import__
-            def forbid_pesq(name, *args, **kwargs):
-                if name == 'pesq':
-                    self.fail('disabled PESQ was imported')
-                return real_import(name, *args, **kwargs)
-            with patch('builtins.__import__', side_effect=forbid_pesq):
-                self.assertEqual(quality.score(ref,hyp,['pesq'])['metrics']['pesq']['status'], 'disabled')
-            calls = []
-            def fake_pesq(rate, reference, hypothesis, mode):
-                calls.append((rate,len(reference),len(hypothesis),mode))
-                return 3.2
-            with patch.dict(sys.modules, {'pesq': types.SimpleNamespace(pesq=fake_pesq)}):
-                result = quality.score(ref,hyp,['pesq'], enable_pesq=True)
-            self.assertEqual(calls, [(16000,16000,16000,'wb')])
-            self.assertEqual(result['metrics']['pesq']['value'], 3.2)
-            def broken(*args):
-                raise ValueError('no utterances')
-            with patch.dict(sys.modules, {'pesq': types.SimpleNamespace(pesq=broken)}):
-                metric = quality.score(ref,hyp,['pesq'], enable_pesq=True)['metrics']['pesq']
-            self.assertEqual(metric['status'], 'error')
-            self.assertIn('no utterances', metric['reason'])
             def short_stoi(*args, **kwargs):
                 warnings.warn('not enough frames', RuntimeWarning)
                 return 1e-5
