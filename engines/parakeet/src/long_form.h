@@ -217,10 +217,32 @@ inline LongFormPlan resolve_coreml_exact_shape_plan(int fixed_mel_frames,
     LongFormPlan plan = resolve_coreml_fixed_shape_plan(
         fixed_mel_frames, requested_context_frames,
         subsampling_factor, n_mel_frames);
-    if (plan.enabled) {
-        plan.exact_mel_frames = fixed_mel_frames;
-        plan.causal_downsampling = true;
+    if (!plan.enabled) {
+        return plan;
     }
+
+    // EOU attention is restarted for every sidecar invocation and operates in
+    // two-frame chunks. Window origins must therefore preserve both the causal
+    // subsampling phase and the attention-chunk phase. The final exact window
+    // is necessarily anchored at n_mel_frames - fixed_mel_frames; if that
+    // origin cannot be aligned, use the normal ggml plan instead.
+    constexpr int attention_chunk_frames = 2;
+    const int alignment_mel = plan.sub * attention_chunk_frames;
+    if (alignment_mel <= 0 ||
+        (n_mel_frames - fixed_mel_frames) % alignment_mel != 0) {
+        return LongFormPlan{};
+    }
+
+    // Keep every interior origin aligned as well. exact_mel_frames lets the
+    // planner distribute any remaining capacity asymmetrically.
+    plan.context_frames -= plan.context_frames % attention_chunk_frames;
+    plan.center_frames  -= plan.center_frames % attention_chunk_frames;
+    if (plan.center_frames <= 0) {
+        return LongFormPlan{};
+    }
+
+    plan.exact_mel_frames = fixed_mel_frames;
+    plan.causal_downsampling = true;
     return plan;
 }
 
@@ -331,13 +353,16 @@ inline int causal_subsampled_frames(int n_mel_frames, int sub) {
 }
 
 // Causal subsampling emits boundary frames in addition to the simple mel/sub
-// quotient. Compute each committed count from global mel prefixes so all window
-// counts telescope to the exact full-input output geometry.
+// quotient. The retained range is expressed in global encoder-frame indices;
+// translate its start to a window-local index using the aligned window origin.
+// Subtracting two causal prefix lengths is incorrect because each prefix
+// includes its own padding-generated boundary frame.
 inline WindowTrim compute_causal_window_trim(const LongFormWindow & w,
                                              int t_enc_frames, int sub) {
+    const int div = sub > 0 ? sub : 1;
     WindowTrim t;
     t.left_drop = causal_subsampled_frames(w.center_start, sub)
-                - causal_subsampled_frames(w.window_start, sub);
+                - w.window_start / div;
     t.center_cnt = causal_subsampled_frames(w.center_end, sub)
                  - causal_subsampled_frames(w.center_start, sub);
     if (t.left_drop < 0) t.left_drop = 0;

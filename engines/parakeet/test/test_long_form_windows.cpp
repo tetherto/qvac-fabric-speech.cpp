@@ -22,6 +22,7 @@
 #include "long_form.h"
 
 #include <cstdio>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -182,17 +183,24 @@ void check_coreml_eou_exact_shape_resolution() {
     expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 1101).enabled,
            "eou coreml resolve: exact input remains single-pass");
 
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 1102).enabled,
+           "eou coreml resolve: unaligned final exact window falls back");
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 5000).enabled,
+           "eou coreml resolve: attention/subsampling phase mismatch falls back");
+
     const LongFormPlan plan =
-        resolve_coreml_exact_shape_plan(1101, 0, 8, 1102);
+        resolve_coreml_exact_shape_plan(1101, 0, 8, 1117);
     expect(plan.enabled, "eou coreml resolve: oversized input enables windowing");
     expect(plan.exact_mel_frames == 1101,
            "eou coreml resolve: preserves exact sidecar mel shape");
     expect(plan.causal_downsampling,
            "eou coreml resolve: selects causal seam geometry");
+    expect(plan.center_frames % 2 == 0 && plan.context_frames % 2 == 0,
+           "eou coreml resolve: centre and context preserve attention chunks");
 
     const int center_mel = plan.center_frames * plan.sub;
     const int context_mel = plan.context_frames * plan.sub;
-    for (int n_mel : {1102, 5000, 152704}) {
+    for (int n_mel : {1117, 5005, 152701}) {
         const std::vector<LongFormWindow> windows = plan_long_form_windows(
             n_mel, center_mel, context_mel, plan.exact_mel_frames);
         expect(windows.size() > 1,
@@ -201,6 +209,8 @@ void check_coreml_eou_exact_shape_resolution() {
         for (const LongFormWindow & window : windows) {
             expect(window.window_len == 1101,
                    "eou exact windows: every window must match the sidecar");
+            expect(window.window_start % 16 == 0,
+                   "eou exact windows: window origin must preserve both phases");
             const WindowTrim trim = compute_causal_window_trim(
                 window, causal_subsampled_frames(window.window_len, 8), 8);
             expect(trim.left_drop >= 0 && trim.center_cnt >= 0 &&
@@ -218,6 +228,64 @@ void check_coreml_eou_exact_shape_resolution() {
            "eou causal geometry: 1101 mel frames must produce 139 frames");
     expect(causal_subsampled_frames(152704, 8) == 19089,
            "eou causal geometry: full benchmark frame count mismatch");
+}
+
+// Apply a three-stage causal stride-2 sampler to a ramp. Each stage emits one
+// left-padding boundary value, matching the len -> len/2 + 1 geometry. Away
+// from that boundary, output frame j samples input frame 8*j - 7, which makes
+// a duplicated or skipped seam directly visible in the stitched values.
+std::vector<float> causal_stride2(const std::vector<float> & input) {
+    std::vector<float> output(input.size() / 2 + 1, -1.0f);
+    for (size_t i = 1; i < output.size(); ++i) {
+        output[i] = input[2 * i - 1];
+    }
+    return output;
+}
+
+std::vector<float> causal_subsample_ramp(const std::vector<float> & input) {
+    return causal_stride2(causal_stride2(causal_stride2(input)));
+}
+
+void check_causal_stitch_values() {
+    constexpr int fixed_mel = 1101;
+    constexpr int sub = 8;
+    constexpr int n_mel = 5005;  // final origin 3904 is divisible by 16
+    const parakeet::LongFormPlan plan =
+        resolve_coreml_exact_shape_plan(fixed_mel, 0, sub, n_mel);
+    expect(plan.enabled, "eou causal stitch: aligned input must use exact windows");
+    if (!plan.enabled) return;
+
+    std::vector<float> ramp((size_t) n_mel);
+    std::iota(ramp.begin(), ramp.end(), 0.0f);
+    const std::vector<float> expected = causal_subsample_ramp(ramp);
+    std::vector<float> stitched;
+
+    const std::vector<LongFormWindow> windows = plan_long_form_windows(
+        n_mel, plan.center_frames * sub, plan.context_frames * sub,
+        plan.exact_mel_frames);
+    for (const LongFormWindow & window : windows) {
+        const auto first = ramp.begin() + window.window_start;
+        const std::vector<float> window_input(first, first + window.window_len);
+        const std::vector<float> window_output = causal_subsample_ramp(window_input);
+        const WindowTrim trim = compute_causal_window_trim(
+            window, (int) window_output.size(), sub);
+        expect(append_committed_frames(stitched, window_output,
+                                       trim.left_drop, trim.center_cnt, 1),
+               "eou causal stitch: valid trim escaped window output");
+    }
+
+    expect(stitched.size() == expected.size(),
+           "eou causal stitch: stitched frame count mismatch");
+    const size_t compared = stitched.size() < expected.size()
+                          ? stitched.size() : expected.size();
+    for (size_t i = 0; i < compared; ++i) {
+        if (stitched[i] != expected[i]) {
+            fail("eou causal stitch: frame " + std::to_string(i) + " = " +
+                 std::to_string((long long) stitched[i]) + ", expected " +
+                 std::to_string((long long) expected[i]));
+            break;
+        }
+    }
 }
 
 // Drive the real trim + append over a synthetic encoder output and assert the
@@ -312,6 +380,7 @@ int main() {
     check_window_resolution();
     check_coreml_fixed_shape_resolution();
     check_coreml_eou_exact_shape_resolution();
+    check_causal_stitch_values();
 
     // Trim + append seam stitching (multiples of sub so subsampling is exact).
     check_stitch(2048, 256, 64, 8);   // several equal windows
