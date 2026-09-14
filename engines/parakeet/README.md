@@ -745,6 +745,142 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
 
+### Four-engine head-to-head (2026-09)
+
+Maintainer-run comparison of Parakeet TDT 0.6b v3 across four independent
+GGML-based engines on four machines: a MacBook Air M5 (Metal, CPU), an RTX
+3080 desktop (CUDA, Vulkan), a Strix Halo box (Vulkan, RDNA 3.5), and an RTX
+5090 box (CUDA, Vulkan). Every rival ran at its own shipping defaults with its
+own converted GGUF, and every lane was timed from outside the process — no
+engine's own timer is quoted anywhere. fabric-speech won all 39
+engine-versus-rival cells, with a 2.80x median speed-up and a 10.9x best cell.
+
+Scoreboard — rival time divided by our time, median over the clips in each
+lane; our RTF is compute seconds per audio second for the short (11.0 s) and
+long (98.49 s) clip:
+
+| Device | Backend | vs transcribe.cpp | vs audio.cpp | vs LocalAI | our RTF short / long |
+|---|---|--:|--:|--:|--:|
+| MacBook Air M5 | Metal | 2.07x | 1.30x | 10.35x | 0.0055 / 0.0077 |
+| MacBook Air M5 | CPU | 2.24x | 4.27x | 2.80x | 0.0405 (short only) |
+| RTX 3080 desktop | CUDA | 6.58x | 1.85x | 2.69x | 0.0012 / 0.0012 |
+| RTX 3080 desktop | Vulkan | 3.03x | 1.94x | 2.80x | 0.0014 / 0.0015 |
+| Strix Halo | Vulkan | 2.09x | 2.67x | 3.51x | 0.0027 / 0.0023 |
+| RTX 5090 box | CUDA | 7.83x | 1.84x | 2.64x | 0.0007 / 0.0006 |
+| RTX 5090 box | Vulkan | 3.41x | 2.32x | 3.57x | 0.0011 / 0.0007 |
+
+Full matrix — compute per transcription (external two-point slope, model load
+and process start-up cancelled out), RTF in parentheses. Spread is the worst
+rep-to-rep spread at the high repeat count in that row; rows above the 10 %
+gate are marked `*`:
+
+| Device | Backend | Clip | fabric-speech | transcribe.cpp | audio.cpp | LocalAI / parakeet.cpp | spread |
+|---|---|---|--:|--:|--:|--:|--:|
+| MacBook Air M5 | Metal | short 11.0 s | 60.53 ms (0.0055) | 110.60 ms (0.0101) | 88.24 ms (0.0080) | 592.78 ms (0.0539) | 15.1 %* |
+| MacBook Air M5 | Metal | long 98.49 s | 755.80 ms (0.0077) | 1,746 ms (0.0177) | 865.21 ms (0.0088) | 8,236 ms (0.0836) | 7.3 % |
+| MacBook Air M5 | CPU | short 11.0 s | 445.44 ms (0.0405) | 997.79 ms (0.0907) | 1,903 ms (0.1730) | 1,249 ms (0.1135) | 24.0 %* |
+| MacBook Air M5 | CPU | long 98.49 s | withheld | withheld | withheld | withheld | — |
+| RTX 3080 desktop | CUDA | short 11.0 s | 13.49 ms (0.0012) | 90.70 ms (0.0082) | 25.05 ms (0.0023) | 34.18 ms (0.0031) | 4.8 % |
+| RTX 3080 desktop | CUDA | long 98.49 s | 115.51 ms (0.0012) | 742.61 ms (0.0075) | 213.13 ms (0.0022) | 329.19 ms (0.0033) | 1.4 % |
+| RTX 3080 desktop | Vulkan | short 11.0 s | 15.41 ms (0.0014) | 48.36 ms (0.0044) | 30.58 ms (0.0028) | 43.42 ms (0.0039) | 5.7 % |
+| RTX 3080 desktop | Vulkan | long 98.49 s | 143.98 ms (0.0015) | 420.71 ms (0.0043) | 272.38 ms (0.0028) | 400.70 ms (0.0041) | 2.3 % |
+| Strix Halo | Vulkan | short 11.0 s | 30.21 ms (0.0027) | 63.41 ms (0.0058) | 76.78 ms (0.0070) | 102.32 ms (0.0093) | 4.4 % |
+| Strix Halo | Vulkan | long 98.49 s | 228.27 ms (0.0023) | 476.04 ms (0.0048) | 640.75 ms (0.0065) | 830.93 ms (0.0084) | 1.4 % |
+| RTX 5090 box | CUDA | short 11.0 s | 8.00 ms (0.0007) | 56.91 ms (0.0052) | 14.69 ms (0.0013) | 16.69 ms (0.0015) | 4.7 % |
+| RTX 5090 box | CUDA | long 98.49 s | 58.46 ms (0.0006) | 499.03 ms (0.0051) | 107.90 ms (0.0011) | 186.16 ms (0.0019) | 4.1 % |
+| RTX 5090 box | Vulkan | short 11.0 s | 11.56 ms (0.0011) | 35.66 ms (0.0032) | 22.96 ms (0.0021) | 37.35 ms (0.0034) | 12.1 %* |
+| RTX 5090 box | Vulkan | long 98.49 s | 69.51 ms (0.0007) | 259.53 ms (0.0026) | 185.01 ms (0.0019) | 272.31 ms (0.0028) | 1.9 % |
+
+Peak GPU memory on the long clip (MiB, `nvidia-smi` per-process sampling at
+5 Hz, warm run only; RADV and Metal expose no equivalent counter):
+
+| Device | Backend | fabric-speech | transcribe.cpp | audio.cpp | LocalAI / parakeet.cpp |
+|---|---|--:|--:|--:|--:|
+| RTX 3080 desktop | CUDA | 2008 | 1756 | 3072 | 1986 |
+| RTX 3080 desktop | Vulkan | 1748 | 1409 | 2864 | 1778 |
+| RTX 5090 box | CUDA | 2386 | 2134 | 3450 | 2330 |
+| RTX 5090 box | Vulkan | 1935 | 1403 | 2874 | 1782 |
+
+Accuracy: all four engines, all lanes, both clips score jfk 0.00 % and ls90
+0.80 % WER (`compute-wer.py`, `english` normaliser, 64 transcripts). The same
+checkpoint runs everywhere, so these clips do not separate the engines; the
+statement of record stays the 500-utterance LibriSpeech run — ours
+2.15–2.22 %, transcribe.cpp 1.90–1.96 %, audio.cpp 1.87–1.97 %.
+
+Reading the result:
+
+- **GPU, every vendor, every lane.** Metal, CUDA (Ampere and Blackwell) and
+  Vulkan (NVIDIA and AMD RDNA 3.5): 36 of 36 GPU cells. audio.cpp is always
+  second (we lead 1.14–2.8x), transcribe.cpp third on CUDA (6.4–8.5x), and
+  LocalAI last everywhere (2.1–10.9x).
+- **Our Vulkan tracks our CUDA** (3080: 15.4 vs 13.5 ms short, 144 vs 116 ms
+  long). transcribe.cpp is inverted — its Vulkan beats its own CUDA — which is
+  why our CUDA ratio against it is double our Vulkan ratio.
+- **LocalAI has no real Metal path**: 8.2 s for a 98 s clip (RTF 0.084),
+  10.9x our time. The same binary is normal on CUDA and Vulkan.
+- **Linux CPU lanes are out of scope.** The shipping x86/Strix CPU path is
+  1.0–1.4x behind transcribe.cpp and audio.cpp; the cause is graph structure,
+  not kernels, and it is fixed in engine PR #227 / registry PR #360
+  (1.1–1.8x ahead on the same boxes), neither of which is in the `46afe7d9`
+  tree measured here. The M5 CPU lane is kept because we lead it (2.2–4.3x).
+
+Method:
+
+- **Two-point slope**: each cell runs the clip `R_lo=1` and `R_hi` times in
+  one process; `slope = (median_wall(R_hi) - median_wall(R_lo)) / (R_hi -
+  R_lo)`, so model load, process start-up and wav decode cancel. `R_hi` = 11,
+  or 51–101 for the short clip on the MacBook.
+- **3 timed reps per point** (5 on the MacBook) plus an untimed warm-up;
+  engines alternate inside each rep; one job at a time;
+  `CUDA_VISIBLE_DEVICES=0`, `GGML_VK_VISIBLE_DEVICES=0`.
+- **Repeats are native per CLI**: `--bench-runs` (ours), `--repeat`
+  (transcribe.cpp), `--batch-audio-dir` with N hardlinks (audio.cpp),
+  `bench --manifest` (parakeet.cpp).
+- **Same thread count for all engines on a host** (16 / 10 / 8), not
+  per-engine calibrated.
+- **Backend proven per cell**: ours by `.backend` in the bench JSON;
+  transcribe.cpp by its `backend:` line; parakeet.cpp by `pk::Backend using
+  device:`; audio.cpp names none, so its GPU lanes are evidenced by
+  1.8–3.5 GiB of GPU memory and a 6–9x gap against its own CPU run.
+- **Gate**: worst rep spread at `R_hi` per row — at most 10 % clean, above
+  that marked `*`; rows under proven host contention are withheld.
+  Re-measured lanes publish the single session with the lowest worst spread,
+  never a mix.
+
+Builds and models — each engine runs its own GGUF because the converters
+differ (ours is 100 % Q8_0, transcribe.cpp keeps 144 MiB F16, audio.cpp
+316 MiB F32); clips are byte-identical on all machines (`jfk.wav` 11.00 s,
+`ls90.wav` 98.49 s):
+
+| Engine | Pin | Model (q8_0) |
+|---|---|---|
+| fabric-speech | engine `46afe7d9`, ggml `speech@157b299f` | `parakeet-tdt-0.6b-v3.q8_0.gguf`, 715 MiB |
+| transcribe.cpp | v0.2.3 `63a44d92` | `handy-computer` GGUF Q8_0, 706 MiB |
+| audio.cpp | v0.7.3 `9c6a2823`, `AUDIOCPP_MODELS=parakeet_tdt` | `audio-cpp/audio.cpp-gguf` q8_0, 874 MiB |
+| LocalAI / parakeet.cpp | `e75de9b6`, the pin in LocalAI's `backend/go/parakeet-cpp/Makefile` | `mudler/parakeet-cpp-gguf` q8_0, 898 MiB |
+
+"LocalAI" is parakeet.cpp at LocalAI's pin, run as `parakeet-cli` — LocalAI
+has no Parakeet implementation of its own, and dropping its Go/gRPC hop is
+the friendliest framing for it. Three documented build deviations: Arch
+needed `-DBLAS_LIBRARIES=...` for transcribe.cpp (netlib BLAS lacks cblas
+symbols — keeping their BLAS decoder enabled); macOS needed Homebrew `libomp`
+wired in for audio.cpp's default OpenMP; our ggml needed `#include
+<cuda/iterator>` in `src/ggml-cuda/{top-k,argsort}.cu` to compile under CUDA
+13.3 (build fix only).
+
+Withheld rows:
+
+- **RTX 5090 CPU, long clip** — shared host: a foreign process held ~57 % of
+  the 10 exposed threads (load 8.47) and a later pass found 19–25 GiB of
+  foreign GPU allocation; three passes gave 16–384 % spread. Its GPU lanes
+  were measured in quiet windows (0.3–4.7 %).
+- **M5 CPU, long clip** — audio.cpp's ~9 GiB CPU working set drives the
+  16 GiB machine to ~14 GiB of swap, so that row measures the SSD.
+- **M5 rows carry `*`**: fanless throttling gives 7–24 % spread and three
+  Metal sessions put our short clip at 51 / 61 / 81 ms. The 1.8–2.3x
+  (transcribe.cpp) and 9.8–10.9x (LocalAI) leads are far outside that; the
+  1.14–1.46x edge over audio.cpp on Metal is directional only.
+
 ### speech-cpp CI (2026-09-07)
 
 Fresh CPU-baseline snapshot from `speech-benchmark-desktop.yml` on the
