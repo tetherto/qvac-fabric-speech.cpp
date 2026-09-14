@@ -209,6 +209,11 @@ struct EngineResult {
     std::string text;
     std::vector<int32_t> token_ids;
 
+    // True only when every encoder invocation used Core ML successfully for
+    // this transcription. Unlike Engine::encoder_on_coreml(), this reports
+    // actual per-call routing rather than sidecar availability.
+    bool encoder_used_coreml = false;
+
     double preprocess_ms = 0.0;
     double encoder_ms    = 0.0;
     double decode_ms     = 0.0;

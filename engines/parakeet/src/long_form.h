@@ -158,8 +158,6 @@ struct LongFormPlan {
     int  context_frames = 0;  // encoder frames of shared context each side
     int  center_frames  = 0;  // committed encoder frames per window
     int  sub            = 0;  // subsampling factor (mel frames per encoder frame)
-    int  exact_mel_frames = 0; // >0: every window has this fixed sidecar shape
-    bool causal_downsampling = false; // use causal subsampling seam geometry
 };
 
 // Resolve the window required by a fixed-shape Core ML encoder. The sidecar's
@@ -205,45 +203,20 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     return plan;
 }
 
-// EOU sidecars are fixed causal graphs and may only consume their exact mel
-// shape. For an oversized input, retain that shape in the plan so every window
-// is filled entirely with real mel frames (including a backward-shifted final
-// window). Inputs at or below the fixed shape stay on the single-pass route:
-// exact-size calls can use Core ML directly and shorter calls fall back to ggml.
+// EOU sidecars are fixed causal/chunked graphs. Restarting one on overlapping
+// windows must preserve the complete attention history required by every kept
+// frame, not just subsampling and chunk alignment. The current 1101-mel-frame
+// sidecar cannot provide that history, so oversized EOU inputs deliberately use
+// the normal ggml plan until long-form Core ML parity is validated.
 inline LongFormPlan resolve_coreml_exact_shape_plan(int fixed_mel_frames,
                                                     int requested_context_frames,
                                                     int subsampling_factor,
                                                     long long n_mel_frames) {
-    LongFormPlan plan = resolve_coreml_fixed_shape_plan(
-        fixed_mel_frames, requested_context_frames,
-        subsampling_factor, n_mel_frames);
-    if (!plan.enabled) {
-        return plan;
-    }
-
-    // EOU attention is restarted for every sidecar invocation and operates in
-    // two-frame chunks. Window origins must therefore preserve both the causal
-    // subsampling phase and the attention-chunk phase. The final exact window
-    // is necessarily anchored at n_mel_frames - fixed_mel_frames; if that
-    // origin cannot be aligned, use the normal ggml plan instead.
-    constexpr int attention_chunk_frames = 2;
-    const int alignment_mel = plan.sub * attention_chunk_frames;
-    if (alignment_mel <= 0 ||
-        (n_mel_frames - fixed_mel_frames) % alignment_mel != 0) {
-        return LongFormPlan{};
-    }
-
-    // Keep every interior origin aligned as well. exact_mel_frames lets the
-    // planner distribute any remaining capacity asymmetrically.
-    plan.context_frames -= plan.context_frames % attention_chunk_frames;
-    plan.center_frames  -= plan.center_frames % attention_chunk_frames;
-    if (plan.center_frames <= 0) {
-        return LongFormPlan{};
-    }
-
-    plan.exact_mel_frames = fixed_mel_frames;
-    plan.causal_downsampling = true;
-    return plan;
+    (void) fixed_mel_frames;
+    (void) requested_context_frames;
+    (void) subsampling_factor;
+    (void) n_mel_frames;
+    return LongFormPlan{};
 }
 
 // Pure core of the engine's long-form resolution: decide the effective window
@@ -323,48 +296,6 @@ inline WindowTrim compute_window_trim(const LongFormWindow & w,
     t.left_drop  = (w.center_start - w.window_start) / div;
     t.center_cnt = w.is_final ? (t_enc_frames - t.left_drop)
                               : (w.center_end - w.center_start) / div;
-    if (t.left_drop < 0) t.left_drop = 0;
-    if (t.left_drop > t_enc_frames) t.left_drop = t_enc_frames;
-    if (t.center_cnt < 0) t.center_cnt = 0;
-    if (t.center_cnt > t_enc_frames - t.left_drop) {
-        t.center_cnt = t_enc_frames - t.left_drop;
-    }
-    return t;
-}
-
-// Number of encoder frames emitted by repeated causal stride-2 subsampling
-// convolutions. EOU uses three stages (sub=8), each with len -> len/2 + 1.
-// Prefix length zero is defined as zero so differences telescope exactly over
-// gap-free committed mel ranges.
-inline int causal_subsampled_frames(int n_mel_frames, int sub) {
-    if (n_mel_frames <= 0) return 0;
-    int frames = n_mel_frames;
-    int remaining = sub > 0 ? sub : 1;
-    while (remaining > 1 && remaining % 2 == 0) {
-        frames = frames / 2 + 1;
-        remaining /= 2;
-    }
-    // EOU currently has a power-of-two factor. Keep an unsurprising fallback
-    // for malformed metadata rather than applying a partial recurrence.
-    if (remaining != 1) {
-        return (n_mel_frames + sub - 1) / sub;
-    }
-    return frames;
-}
-
-// Causal subsampling emits boundary frames in addition to the simple mel/sub
-// quotient. The retained range is expressed in global encoder-frame indices;
-// translate its start to a window-local index using the aligned window origin.
-// Subtracting two causal prefix lengths is incorrect because each prefix
-// includes its own padding-generated boundary frame.
-inline WindowTrim compute_causal_window_trim(const LongFormWindow & w,
-                                             int t_enc_frames, int sub) {
-    const int div = sub > 0 ? sub : 1;
-    WindowTrim t;
-    t.left_drop = causal_subsampled_frames(w.center_start, sub)
-                - w.window_start / div;
-    t.center_cnt = causal_subsampled_frames(w.center_end, sub)
-                 - causal_subsampled_frames(w.center_start, sub);
     if (t.left_drop < 0) t.left_drop = 0;
     if (t.left_drop > t_enc_frames) t.left_drop = t_enc_frames;
     if (t.center_cnt < 0) t.center_cnt = 0;

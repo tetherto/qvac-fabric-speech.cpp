@@ -96,8 +96,10 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
                  << event.timestamp_s << ',' << event.chunk_index << ','
                  << event.eot_confidence;
         }
-        const std::string payload = std::string("coreml=") +
+        const std::string payload = std::string("coreml_available=") +
                                     (engine.encoder_on_coreml() ? "1" : "0") +
+                                    "\ncoreml_used=" +
+                                    (result.encoder_used_coreml ? "1" : "0") +
                                     "\n" + body.str();
         for (size_t off = 0; off < payload.size();) {
             const ssize_t n = write(fds[1], payload.data() + off, payload.size() - off);
@@ -120,44 +122,61 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
     return out;
 }
 
-bool parse_child(const std::string & raw, bool & on_coreml, std::string & body) {
-    const std::string prefix = "coreml=";
+bool parse_child(const std::string & raw, bool & coreml_available,
+                 bool & coreml_used, std::string & body) {
+    const std::string prefix = "coreml_available=";
     if (raw.rfind(prefix, 0) != 0) {
         return false;
     }
-    const size_t nl = raw.find('\n');
-    if (nl == std::string::npos) {
+    const size_t first_nl = raw.find('\n');
+    const std::string used_prefix = "coreml_used=";
+    if (first_nl == std::string::npos ||
+        raw.compare(first_nl + 1, used_prefix.size(), used_prefix) != 0) {
         return false;
     }
-    on_coreml = raw.substr(prefix.size(), nl - prefix.size()) == "1";
-    body = raw.substr(nl + 1);
+    const size_t second_nl = raw.find('\n', first_nl + 1);
+    if (second_nl == std::string::npos) {
+        return false;
+    }
+    coreml_available = raw.substr(prefix.size(), first_nl - prefix.size()) == "1";
+    const size_t used_start = first_nl + 1 + used_prefix.size();
+    coreml_used = raw.substr(used_start, second_nl - used_start) == "1";
+    body = raw.substr(second_nl + 1);
     return true;
 }
 
 bool compare_mode(const std::string & gguf, const std::string & wav, bool streaming) {
     const char * mode = streaming ? "streaming" : "batch";
-    bool coreml_on = false;
+    bool coreml_available = false;
+    bool coreml_used = false;
     std::string coreml_body;
     if (!parse_child(transcribe_in_child(gguf, wav, /*disable=*/false, streaming),
-                     coreml_on, coreml_body)) {
+                     coreml_available, coreml_used, coreml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from Core ML %s child\n", mode);
         return false;
     }
-    if (!coreml_on) {
+    if (!coreml_available) {
         std::fprintf(stderr,
             "[transcribe-coreml-parity] SKIP: Core ML encoder not active "
             "(non-Apple build, PARAKEET_COREML off, or no sidecar).\n");
         return true;
     }
+    if (!coreml_used) {
+        std::fprintf(stderr,
+            "[transcribe-coreml-parity] FAIL: Core ML sidecar was available but "
+            "the %s transcription fell back to ggml\n", mode);
+        return false;
+    }
 
-    bool ggml_on = true;
+    bool ggml_available = true;
+    bool ggml_used = true;
     std::string ggml_body;
     if (!parse_child(transcribe_in_child(gguf, wav, /*disable=*/true, streaming),
-                     ggml_on, ggml_body)) {
+                     ggml_available, ggml_used, ggml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from ggml %s child\n", mode);
         return false;
     }
-    if (ggml_on) {
+    if (ggml_available || ggml_used) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: PARAKEET_COREML_DISABLE ignored\n");
         return false;
     }
