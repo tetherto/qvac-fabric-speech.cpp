@@ -49,10 +49,11 @@ struct LongFormWindow {
 //      windows[i+1].center_start; windows.back().center_end == n_units);
 //   - each window fully contains its committed centre
 //     (window_start <= center_start && window_start + window_len >= center_end);
-//   - window_len <= center_units + 2 * ctx_units, so peak encoder memory is
-//     bounded regardless of total input length.
+//   - normally window_len <= center_units + 2 * ctx_units; callers supplying
+//     `exact_window_units` instead get that fixed bound for sidecar routing.
 inline std::vector<LongFormWindow>
-plan_long_form_windows(int n_units, int center_units, int ctx_units) {
+plan_long_form_windows(int n_units, int center_units, int ctx_units,
+                       int exact_window_units = 0) {
     std::vector<LongFormWindow> windows;
     if (n_units <= 0 || center_units <= 0) {
         return windows;
@@ -80,8 +81,9 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units) {
         // boundary frames more useful context, this keeps fixed-shape Core ML
         // windows near their exported capacity instead of adding a large block
         // of synthetic zero padding to the first and final predictions.
-        const long long requested_len_ll =
-            (long long) center_units + 2LL * ctx_units;
+        const long long requested_len_ll = exact_window_units > 0
+            ? (long long) exact_window_units
+            : (long long) center_units + 2LL * ctx_units;
         const int target_len = requested_len_ll < n_units
                              ? (int) requested_len_ll : n_units;
         int missing = target_len - (window_end - window_start);
@@ -199,6 +201,22 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     plan.center_frames  = center_frames;
     plan.sub            = sub;
     return plan;
+}
+
+// EOU sidecars are fixed causal/chunked graphs. Restarting one on overlapping
+// windows must preserve the complete attention history required by every kept
+// frame, not just subsampling and chunk alignment. The current 1101-mel-frame
+// sidecar cannot provide that history, so oversized EOU inputs deliberately use
+// the normal ggml plan until long-form Core ML parity is validated.
+inline LongFormPlan resolve_coreml_exact_shape_plan(int fixed_mel_frames,
+                                                    int requested_context_frames,
+                                                    int subsampling_factor,
+                                                    long long n_mel_frames) {
+    (void) fixed_mel_frames;
+    (void) requested_context_frames;
+    (void) subsampling_factor;
+    (void) n_mel_frames;
+    return LongFormPlan{};
 }
 
 // Pure core of the engine's long-form resolution: decide the effective window

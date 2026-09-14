@@ -6,7 +6,9 @@
 namespace parakeet {
 namespace {
 
-constexpr std::array<const char *, 5> kQuantTags = {"f32", "f16", "q8_0", "q5_0", "q4_0"};
+constexpr std::array<const char *, 6> kQuantTags = {
+    "f32", "f16", "bf16", "q8_0", "q5_0", "q4_0",
+};
 
 bool is_quant_tag(const std::string & token) {
     for (const char * tag : kQuantTags) {

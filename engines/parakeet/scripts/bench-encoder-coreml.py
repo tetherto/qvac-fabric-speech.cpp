@@ -76,6 +76,13 @@ def op_placement(mlmodelc_path):
     return counts
 
 
+def require_ane_placement(placement):
+    ane = placement.get("MLNeuralEngineComputeDevice", 0)
+    if ane <= 0:
+        raise RuntimeError(
+            "Core ML graph has no operations assigned to the Apple Neural Engine")
+
+
 def predict_latency_ms(mlmodel, mel, iters):
     start = time.perf_counter()
     for _ in range(iters):
@@ -100,6 +107,7 @@ def measure_length(export, ref, model, n_mels, n_mel_frames, iters, work_dir,
     mean_cos, min_cos = per_frame_cosine(reference_out, coreml_out)
     latency = predict_latency_ms(mlmodel, coreml_mel, iters)
     placement = op_placement(compiled)
+    require_ane_placement(placement)
     return {
         "enc_frames": reference_out.shape[0],
         "mean_cos": mean_cos,
@@ -127,6 +135,7 @@ def main():
     export = load_export_module(args.scripts)
     weights, meta = export.load_reference_encoder(args.scripts).load_gguf(args.gguf)
     ref = export.load_reference_encoder(args.scripts)
+    export.validate_export_contract(meta, flexible=False)
     n_mels = int(weights["preproc.mel_filterbank"].shape[0])
     model = export.EncoderModule(ref, weights, meta).eval()
 

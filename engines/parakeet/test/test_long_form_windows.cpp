@@ -30,6 +30,7 @@ using parakeet::WindowTrim;
 using parakeet::append_committed_frames;
 using parakeet::compute_window_trim;
 using parakeet::plan_long_form_windows;
+using parakeet::resolve_coreml_exact_shape_plan;
 using parakeet::resolve_coreml_fixed_shape_plan;
 using parakeet::resolve_long_form_window_frames;
 
@@ -171,6 +172,17 @@ void check_coreml_fixed_shape_resolution() {
     }
 }
 
+void check_coreml_eou_exact_shape_resolution() {
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 1100).enabled,
+           "eou coreml resolve: shorter input stays single-pass");
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 1101).enabled,
+           "eou coreml resolve: exact input remains single-pass");
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 1102).enabled,
+           "eou coreml resolve: oversized input falls back to ggml");
+    expect(!resolve_coreml_exact_shape_plan(1101, 0, 8, 5000).enabled,
+           "eou coreml resolve: long input preserves attention via ggml fallback");
+}
+
 // Drive the real trim + append over a synthetic encoder output and assert the
 // stitched frames are exactly [0, 1, ... T_total-1] -- i.e. no frame is dropped
 // or duplicated at any seam. Each window's synthetic encoder frame carries its
@@ -262,6 +274,7 @@ int main() {
     // Window-size resolution: pos_emb_max_len is a hard ceiling over the floor.
     check_window_resolution();
     check_coreml_fixed_shape_resolution();
+    check_coreml_eou_exact_shape_resolution();
 
     // Trim + append seam stitching (multiples of sub so subsampling is exact).
     check_stitch(2048, 256, 64, 8);   // several equal windows

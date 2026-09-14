@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the CLI benchmark's TDT Core ML fail-fast/reporting contract."""
+"""Exercise the CLI benchmark's TDT/EOU Core ML fail-fast/reporting contract."""
 
 import argparse
 import json
