@@ -715,6 +715,13 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
     endfunction()
 
+    add_executable(test-bench-wav test/test_bench_wav.cpp)
+    target_include_directories(test-bench-wav PRIVATE src)
+    tts_cpp_apply_ccache(test-bench-wav)
+    tts_cpp_register_test(test-bench-wav LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/bench wav test.wav")
+
+
     # Stable shorthands for the fixtures referenced by the registrations
     # below.  Resolved at configure time; missing files turn into
     # DISABLED tests via tts_cpp_register_test(REQUIRES ...).
