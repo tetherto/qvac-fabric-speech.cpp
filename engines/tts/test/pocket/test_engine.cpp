@@ -1,4 +1,5 @@
 #include "tts-cpp/pocket/engine.h"
+#include "test_workload.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -19,19 +20,41 @@ static void compare(const std::vector<float> & a, const std::vector<float> & b) 
     }
     if (error > 0.0001) throw std::runtime_error("stream/batch/reuse differ");
 }
+static void check_eos_tail(EngineOptions opts) {
+    // Force EOS on the first frame. A 100-frame tail used to outlive the
+    // token-only budget for this short prompt and throw after streaming PCM.
+    opts.eos_threshold = -1e30f;
+    opts.frames_after_eos = 100;
+    opts.context = context_with_tail(opts, "Hi.");
+    Engine engine(opts);
+    size_t samples = 0;
+    const auto result = engine.synthesize_stream("Hi.", [&](const float *, size_t n, int) {
+        samples += n; return true;
+    });
+    if (result.cancelled || result.generated_frames != opts.frames_after_eos || samples != size_t(opts.frames_after_eos)*tts_cpp::pocket::detail::Mimi::frame_samples())
+        throw std::runtime_error("explicit EOS tail did not complete");
+    --opts.context;
+    Engine too_small(opts);
+    int callbacks = 0;
+    rejects("context without full EOS tail", [&] {
+        too_small.synthesize_stream("Hi.", [&](const float *, size_t, int) { ++callbacks; return true; });
+    });
+    if (callbacks) throw std::runtime_error("context rejected after delivering PCM");
+}
 int main(int argc, char ** argv) {
     if (argc != 3) { std::fprintf(stderr, "usage: test-pocket-engine model-directory flow-lm.gguf\n"); return 2; }
     try {
         const std::string dir = argv[1];
         EngineOptions opts; opts.flow_lm_path = argv[2]; opts.mimi_path = dir+"/mimi.gguf";
         opts.frontend_path = dir+"/frontend.json"; opts.voice_path = dir+"/voice.gguf";
+        check_eos_tail(opts);
         Engine engine(opts);
         const std::string text = "Hello! We can generate speech with Fabric.";
         const auto batch = engine.synthesize(text);
         if (batch.cancelled || batch.sample_rate != 24000 || batch.generated_frames <= 0 || batch.first_audio_ms <= 0) throw std::runtime_error("invalid synthesis result");
         std::vector<float> streamed; int callbacks = 0;
         const auto stream = engine.synthesize_stream(text, [&](const float * p, size_t n, int rate) {
-            if (rate != 24000 || !n || n > 16*1920) throw std::runtime_error("invalid callback chunk");
+            if (rate != 24000 || !n || n > size_t(tts_cpp::pocket::detail::Mimi::max_decode_frames())*tts_cpp::pocket::detail::Mimi::frame_samples()) throw std::runtime_error("invalid callback chunk");
             streamed.insert(streamed.end(), p, p+n);
             if (++callbacks == 1) {
                 rejects("reentrant synthesis", [&] { engine.synthesize("Nested request."); });

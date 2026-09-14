@@ -78,6 +78,19 @@ and is not equivalent to PyTorch's seed. A voice-cloning-capable checkpoint can
 use `--reference-audio` instead of the prepared voice; the public checkpoint
 tested here explicitly rejects that path because its encoder is disabled.
 
+`frames_after_eos` (CLI: `--frames-after-eos`) accepts an explicit 0–100-frame
+tail, or -1 for the checkpoint/text default. Synthesis and memory preflight
+reserve this tail in addition to the text-duration estimate. All chunks must
+fit the context before any PCM is emitted; detecting EOS near the estimate's
+end still permits the complete tail. If EOS never arrives within the original
+text estimate, generation fails rather than spending the reserved tail.
+
+Review regression coverage includes first/last-frame EOS with tails 0, 1, 3,
+5 and 100; missing EOS; real streaming with a 100-frame tail; exact context
+boundaries and rejection before the first callback; and memory pricing of
+default and explicit tails. The nine Pocket CTests pass with the local model
+and upstream FlowLM/Mimi fixtures, including F16 storage parity.
+
 `scripts/convert-pocket-flow-lm-to-gguf.py` takes a local Kyutai checkpoint and
 its YAML configuration. It selects `flow_lm.*` tensors from the safetensors
 bundle, leaving Mimi out. BF16 source weights expand to F32. Unknown/missing

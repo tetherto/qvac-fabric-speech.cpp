@@ -11,8 +11,8 @@
 namespace tts_cpp::pocket::detail {
 namespace {
 [[noreturn]] void fail(const std::string & s) { throw std::runtime_error("pocket Mimi: " + s); }
-constexpr int dim = 512, latent = 32, heads = 8, hd = 64, layers = 2, window = 250;
-constexpr int rate = 24000, hop = 1920, up = 16;
+constexpr int dim = 512, latent = Mimi::latent_dim(), heads = 8, hd = 64, layers = 2, window = 250;
+constexpr int rate = Mimi::sample_rate(), hop = Mimi::frame_samples(), up = 16;
 constexpr int ratios[] = {6, 5, 4};
 }
 
@@ -80,7 +80,7 @@ struct Mimi::Impl {
         const auto & s = cfg.at("seanet"), & t = cfg.at("transformer"), & q = cfg.at("quantizer");
         // Version 1 describes the released English codec. Explicit validation
         // prevents silently interpreting a future codec with different padding.
-        if (cfg.at("sample_rate") != rate || cfg.at("frame_rate") != 12.5 || cfg.at("channels") != 1 ||
+        if (cfg.at("sample_rate") != rate || cfg.at("frame_rate") != double(rate)/hop || cfg.at("channels") != 1 ||
             cfg.at("inner_dim") != latent || cfg.at("outer_dim") != dim ||
             s.at("dimension") != dim || s.at("channels") != 1 || s.at("n_filters") != 64 ||
             s.at("n_residual_layers") != 1 || s.at("ratios") != std::vector<int>({6,5,4}) ||
@@ -312,11 +312,11 @@ Mimi::Mimi(const std::string & path, int threads) : impl_(new Impl) { impl_->loa
 MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder) {
     MemoryMeasure out;
     Impl model; model.load(path, threads, &out);
-    // The engine decodes at most sixteen latents at once; include a full
+    // Price the maximum supported decode batch; include a full
     // retained attention window, plus the distinct empty-history shape.
     for (int past : {0, window-1}) {
         model.positions[0] = past;
-        model.run(std::vector<float>(16 * latent), false);
+        model.run(std::vector<float>(Mimi::max_decode_frames() * latent), false);
         if (include_encoder) {
             model.positions[1] = past;
             model.run(std::vector<float>(hop), true);
@@ -327,12 +327,9 @@ MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_
 }
 Mimi::~Mimi() = default;
 void Mimi::reset_decoder() { impl_->reset(false); }
-int Mimi::sample_rate() const { return rate; }
-int Mimi::frame_samples() const { return hop; }
-int Mimi::latent_dim() const { return latent; }
 const std::string & Mimi::source_hash() const { return impl_->hash; }
 std::vector<float> Mimi::decode(const std::vector<float> & input) {
-    if (input.empty() || input.size()%latent || input.size() > latent*16) fail("decode expects 1..16 latent frames");
+    if (input.empty() || input.size()%latent || input.size() > latent*Mimi::max_decode_frames()) fail("decode expects 1.." + std::to_string(Mimi::max_decode_frames()) + " latent frames");
     require_finite(input, "codec latents");
     return impl_->run(input, false);
 }

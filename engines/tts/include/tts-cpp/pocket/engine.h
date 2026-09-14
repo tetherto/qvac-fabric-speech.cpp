@@ -21,7 +21,8 @@ struct EngineOptions {
     float temperature = 0.3f;
     float noise_clamp = 0;  // 0 disables truncated-normal sampling
     float eos_threshold = -4;
-    int frames_after_eos = -1;  // checkpoint/text-dependent default
+    int frames_after_eos = -1;  // -1: checkpoint/text default; 0..100: explicit tail
+    // Context validation reserves the complete EOS tail before emitting PCM.
     uint32_t seed = 1234;
 };
 struct SynthesisResult {

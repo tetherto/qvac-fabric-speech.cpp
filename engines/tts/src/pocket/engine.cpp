@@ -3,6 +3,7 @@
 #include "pocket/flow_lm.h"
 #include "pocket/mimi.h"
 #include "pocket/frontend.h"
+#include "pocket/generation.h"
 #include "pocket/reference_audio.h"
 #include "voice_features.h"
 #include <atomic>
@@ -77,11 +78,112 @@ struct Engine::Impl {
         else {
             auto pcm = reference->read_mono();
             const int rate = reference->sample_rate();
-            if (rate != 24000) pcm = ::resample_sinc(pcm, rate, 24000);
+            if (rate != mimi->sample_rate()) pcm = ::resample_sinc(pcm, rate, mimi->sample_rate());
             lm->prefill(lm->voice_embeddings(mimi->encode(pcm))); voice = lm->capture_voice();
         }
     }
 
+    struct Chunk {
+        std::vector<int> tokens;
+        detail::FrameBudget budget;
+    };
+    struct Queue {
+        std::mutex mutex;
+        std::deque<std::vector<float>> frames;
+        bool done = false, stop = false;
+        std::exception_ptr error;
+    };
+    std::vector<Chunk> prepare_chunks(const std::string & text) const {
+        std::vector<Chunk> prepared;
+        for (const auto & chunk : frontend->split(text, opts.max_tokens)) {
+            auto tokens = frontend->encode(chunk.text);
+            const int tail = opts.frames_after_eos >= 0 ? opts.frames_after_eos : chunk.tail_frames;
+            const auto budget = detail::frame_budget(tokens.size(), tail);
+            if (voice.frames+tokens.size()+budget.max_frames() > size_t(opts.context))
+                fail("text chunk exceeds the context; add sentence punctuation or increase context");
+            prepared.push_back({std::move(tokens), budget});
+        }
+        if (prepared.empty()) fail("no text chunks");
+        return prepared;
+    }
+    bool enqueue(Queue & queue, std::vector<float> latent) {
+        std::unique_lock<std::mutex> lock(queue.mutex);
+        changed.wait(lock, [&] { return queue.frames.size() < size_t(mimi->max_decode_frames()) || queue.stop || cancelled.load(); });
+        if (queue.stop || cancelled.load()) return false;
+        queue.frames.push_back(std::move(latent));
+        changed.notify_all();
+        return true;
+    }
+    void generate_frames(const Chunk & chunk, Noise & noise, Queue & queue) {
+        lm->prefill(lm->text_embeddings(chunk.tokens));
+        std::vector<float> previous;
+        detail::FrameProgress progress(chunk.budget);
+        while (progress.has_next()) {
+            if (cancelled.load()) return;
+            { std::lock_guard<std::mutex> lock(queue.mutex); if (queue.stop) return; }
+            const auto condition = lm->advance(previous);
+            previous = lm->sample(condition.hidden, noise.sample(lm->config().latent_dim, opts.temperature, opts.noise_clamp), opts.steps);
+            if (progress.finish_frame(condition.eos_logit > opts.eos_threshold)) return;
+            if (!enqueue(queue, lm->denormalize(previous))) return;
+        }
+        if (!cancelled.load()) fail("generation reached its estimated limit without completing EOS");
+    }
+    void produce(const Chunk & chunk, Noise & noise, Queue & queue) noexcept {
+        try { generate_frames(chunk, noise, queue); }
+        catch (...) {
+            std::lock_guard<std::mutex> lock(queue.mutex); queue.error = std::current_exception();
+        }
+        { std::lock_guard<std::mutex> lock(queue.mutex); queue.done = true; }
+        changed.notify_all();
+    }
+    std::vector<float> dequeue(Queue & queue) {
+        std::unique_lock<std::mutex> lock(queue.mutex);
+        changed.wait(lock, [&] { return !queue.frames.empty() || queue.done || cancelled.load(); });
+        if (queue.error) std::rethrow_exception(queue.error);
+        if (cancelled.load()) return {};
+        std::vector<float> latents;
+        const size_t batch_size = size_t(mimi->max_decode_frames())*mimi->latent_dim();
+        while (!queue.frames.empty() && latents.size() < batch_size) {
+            auto & frame = queue.frames.front();
+            latents.insert(latents.end(), frame.begin(), frame.end());
+            queue.frames.pop_front();
+        }
+        changed.notify_all();
+        return latents;
+    }
+    using Emit = std::function<void(const std::vector<float> &)>;
+    void drain(Queue & queue, OutputResampler & resampler, SynthesisResult & result, const Emit & emit) {
+        while (!cancelled.load()) {
+            auto latents = dequeue(queue);
+            if (latents.empty()) break;
+            auto pcm = mimi->decode(latents);
+            if (cancelled.load()) break;
+            result.generated_frames += latents.size()/mimi->latent_dim();
+            emit(resampler.process(pcm));
+        }
+    }
+    void stop_producer(Queue & queue, std::thread & producer) {
+        { std::lock_guard<std::mutex> lock(queue.mutex); queue.stop = true; }
+        changed.notify_all();
+        if (producer.joinable()) producer.join();
+    }
+    void generate_chunk(const Chunk & chunk, Noise & noise, OutputResampler & resampler,
+                        SynthesisResult & result, const Emit & emit) {
+        lm->restore_voice(voice); mimi->reset_decoder();
+        Queue queue;
+        std::thread producer([&] { produce(chunk, noise, queue); });
+        try { drain(queue, resampler, result, emit); }
+        catch (...) { stop_producer(queue, producer); throw; }
+        stop_producer(queue, producer);
+        if (queue.error && !cancelled.load()) std::rethrow_exception(queue.error);
+    }
+    void generate_chunks(const std::vector<Chunk> & chunks, Noise & noise, OutputResampler & resampler,
+                         SynthesisResult & result, const Emit & emit) {
+        for (const auto & chunk : chunks) {
+            if (cancelled.load()) break;
+            generate_chunk(chunk, noise, resampler, result, emit);
+        }
+    }
     SynthesisResult generate(const std::string & text, const AudioCallback & callback) {
         bool idle = false;
         if (!operating.compare_exchange_strong(idle, true)) fail("concurrent or reentrant synthesis on one engine is unsupported");
@@ -89,16 +191,10 @@ struct Engine::Impl {
         cancelled.store(false);
         if (!callback) fail("stream callback is empty");
         const auto begin = Clock::now();
-        const auto chunks = frontend->split(text, opts.max_tokens);
-        if (chunks.empty()) fail("no text chunks");
-        // Validate all chunks before delivering any PCM.
-        for (const auto & chunk : chunks) {
-            const auto tokens = frontend->encode(chunk.text);
-            const int max_frames = std::ceil((tokens.size()/3.0+2)*12.5);
-            if (voice.frames+tokens.size()+max_frames > size_t(opts.context)) fail("text chunk exceeds the context; add sentence punctuation or increase context");
-        }
+        // Validate every chunk, including its EOS tail, before delivering PCM.
+        const auto chunks = prepare_chunks(text);
         SynthesisResult result; result.sample_rate = opts.output_sample_rate;
-        Noise noise(opts.seed); OutputResampler resampler(24000, opts.output_sample_rate);
+        Noise noise(opts.seed); OutputResampler resampler(mimi->sample_rate(), opts.output_sample_rate);
         bool delivered = false;
         const auto emit = [&](const std::vector<float> & pcm) {
             if (pcm.empty() || cancelled.load()) return;
@@ -107,68 +203,7 @@ struct Engine::Impl {
                 cancelled.store(true); changed.notify_all();
             }
         };
-        for (const auto & chunk : chunks) {
-            if (cancelled.load()) break;
-            lm->restore_voice(voice); mimi->reset_decoder();
-            const auto tokens = frontend->encode(chunk.text);
-            const int max_frames = std::ceil((tokens.size()/3.0+2)*12.5);
-            const int tail = opts.frames_after_eos >= 0 ? opts.frames_after_eos : chunk.tail_frames;
-            struct Queue {
-                std::mutex mutex;
-                std::deque<std::vector<float>> frames;
-                bool done = false, stop = false;
-                std::exception_ptr error;
-            } queue;
-            std::thread producer([&] {
-                try {
-                    lm->prefill(lm->text_embeddings(tokens));
-                    std::vector<float> previous; int eos = -1; bool ended = false;
-                    for (int frame = 0; frame < max_frames && !cancelled.load(); ++frame) {
-                        { std::lock_guard<std::mutex> g(queue.mutex); if (queue.stop) break; }
-                        const auto condition = lm->advance(previous);
-                        previous = lm->sample(condition.hidden, noise.sample(lm->config().latent_dim, opts.temperature, opts.noise_clamp), opts.steps);
-                        if (condition.eos_logit > opts.eos_threshold && eos < 0) eos = frame;
-                        if (eos >= 0 && frame >= eos+tail) { ended = true; break; }
-                        auto latent = lm->denormalize(previous);
-                        std::unique_lock<std::mutex> g(queue.mutex);
-                        changed.wait(g, [&] { return queue.frames.size() < 16 || queue.stop || cancelled.load(); });
-                        if (queue.stop || cancelled.load()) break;
-                        queue.frames.push_back(std::move(latent)); changed.notify_all();
-                    }
-                    std::lock_guard<std::mutex> g(queue.mutex);
-                    if (!ended && !queue.stop && !cancelled.load()) fail("generation reached its estimated limit without completing EOS");
-                } catch (...) {
-                    std::lock_guard<std::mutex> g(queue.mutex); queue.error = std::current_exception();
-                }
-                { std::lock_guard<std::mutex> g(queue.mutex); queue.done = true; }
-                changed.notify_all();
-            });
-            try {
-                while (!cancelled.load()) {
-                    std::vector<float> latents;
-                    {
-                        std::unique_lock<std::mutex> g(queue.mutex);
-                        changed.wait(g, [&] { return !queue.frames.empty() || queue.done || cancelled.load(); });
-                        if (queue.error) std::rethrow_exception(queue.error);
-                        if (cancelled.load() || (queue.frames.empty() && queue.done)) break;
-                        while (!queue.frames.empty() && latents.size() < size_t(16*lm->config().latent_dim)) {
-                            auto & frame = queue.frames.front(); latents.insert(latents.end(), frame.begin(), frame.end()); queue.frames.pop_front();
-                        }
-                        changed.notify_all();
-                    }
-                    auto pcm = mimi->decode(latents);
-                    if (cancelled.load()) break;
-                    result.generated_frames += latents.size()/lm->config().latent_dim;
-                    emit(resampler.process(pcm));
-                }
-                { std::lock_guard<std::mutex> g(queue.mutex); queue.stop = true; }
-                changed.notify_all(); producer.join();
-                if (queue.error && !cancelled.load()) std::rethrow_exception(queue.error);
-            } catch (...) {
-                { std::lock_guard<std::mutex> g(queue.mutex); queue.stop = true; }
-                changed.notify_all(); if (producer.joinable()) producer.join(); throw;
-            }
-        }
+        generate_chunks(chunks, noise, resampler, result, emit);
         if (!cancelled.load()) emit(resampler.finish());
         result.cancelled = cancelled.load(); result.generation_ms = milliseconds(begin); return result;
     }

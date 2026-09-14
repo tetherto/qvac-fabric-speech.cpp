@@ -65,24 +65,24 @@ inline void price_persistent(ggml_backend_t backend, ggml_context * metadata,
     mark_external(weights); mark_external(state);
 }
 
-struct PocketGraph {
+template<int Nodes>
+struct SizedPocketGraph {
     ggml_context * ctx = nullptr;
     ggml_cgraph * graph = nullptr;
     ggml_gallocr_t allocator = nullptr;
     std::vector<ggml_tensor *> updates;
-    explicit PocketGraph(ggml_backend_t backend) {
-        constexpr int nodes = 32768;
+    explicit SizedPocketGraph(ggml_backend_t backend) {
         ctx = ggml_init({metadata_bytes(), nullptr, true});
         if (!ctx) throw std::runtime_error("pocket: graph context allocation failed");
-        graph = ggml_new_graph_custom(ctx, nodes, false);
+        graph = ggml_new_graph_custom(ctx, Nodes, false);
         allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
         if (!allocator) { ggml_free(ctx); ctx = nullptr; throw std::runtime_error("pocket: graph allocator failed"); }
     }
-    ~PocketGraph() { if (allocator) ggml_gallocr_free(allocator); if (ctx) ggml_free(ctx); }
-    PocketGraph(const PocketGraph &) = delete;
-    PocketGraph & operator=(const PocketGraph &) = delete;
+    ~SizedPocketGraph() { if (allocator) ggml_gallocr_free(allocator); if (ctx) ggml_free(ctx); }
+    SizedPocketGraph(const SizedPocketGraph &) = delete;
+    SizedPocketGraph & operator=(const SizedPocketGraph &) = delete;
     static size_t metadata_bytes() {
-        return 32768 * ggml_tensor_overhead() + ggml_graph_overhead_custom(32768, false);
+        return Nodes * ggml_tensor_overhead() + ggml_graph_overhead_custom(Nodes, false);
     }
     uint64_t prepare(ggml_tensor * output, bool size_only = false, int threads = 1) {
         ggml_set_output(output);
@@ -104,6 +104,10 @@ struct PocketGraph {
     }
 };
 
+// Keep each model's existing arena budget, sharing allocation and execution.
+using PocketGraph = SizedPocketGraph<32768>;
+using PocketFlowGraph = SizedPocketGraph<16384>;
+
 inline ggml_tensor * pocket_mm(ggml_context * c, ggml_tensor * w, ggml_tensor * x) {
     auto * result = ggml_mul_mat(c, w, x);
     ggml_mul_mat_set_prec(result, GGML_PREC_F32);
@@ -111,14 +115,28 @@ inline ggml_tensor * pocket_mm(ggml_context * c, ggml_tensor * w, ggml_tensor * 
 }
 
 inline ggml_tensor * pocket_gelu(ggml_context * c, ggml_tensor * x) {
+    // Avoid ggml_gelu's CPU FP16 lookup: preserve PyTorch approximate="tanh"
+    // arithmetic in F32 for both FlowLM and Mimi.
     auto * cubic = ggml_mul(c, ggml_sqr(c, x), x);
     auto * inner = ggml_scale(c, ggml_add(c, x, ggml_scale(c, cubic, 0.044715f)), 0.7978845608028654f);
     return ggml_mul(c, ggml_scale(c, x, 0.5f), ggml_scale_bias(c, ggml_tanh(c, inner), 1, 1));
 }
 
-inline std::vector<float> pocket_read(ggml_tensor * t) {
-    std::vector<float> result(static_cast<size_t>(ggml_nelements(t)));
-    ggml_backend_tensor_get(t, result.data(), 0, result.size() * sizeof(float));
+inline std::vector<float> pocket_read(ggml_tensor * t, size_t offset = 0, size_t count = 0) {
+    const auto elements = static_cast<size_t>(ggml_nelements(t));
+    if (offset > elements) throw std::runtime_error("pocket: tensor read offset exceeds size");
+    if (!count) count = elements - offset;
+    if (count > elements - offset) throw std::runtime_error("pocket: tensor read exceeds size");
+    std::vector<float> result(count);
+    if (t->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(t, result.data(), offset * sizeof(float), count * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> half(count);
+        ggml_backend_tensor_get(t, half.data(), offset * sizeof(ggml_fp16_t), count * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(half.data(), result.data(), static_cast<int64_t>(count));
+    } else {
+        throw std::runtime_error("pocket: unsupported tensor read type");
+    }
     return result;
 }
 } // namespace tts_cpp::pocket::detail

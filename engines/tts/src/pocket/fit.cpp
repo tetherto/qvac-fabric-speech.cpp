@@ -2,6 +2,7 @@
 #include "pocket/flow_lm.h"
 #include "pocket/mimi.h"
 #include "pocket/frontend.h"
+#include "pocket/generation.h"
 #include "fit_util.h"
 #include "backend_selection.h"
 #include "pocket/reference_audio.h"
@@ -96,8 +97,9 @@ FitResult fit_params(const FitOptions & o) {
         std::vector<std::pair<size_t, int>> shapes;
         for (const auto & chunk : chunks) {
             const auto tokens = frontend.encode(chunk.text).size();
-            const int count = int(std::ceil((tokens/3.0+2)*12.5));
-            if (tokens + count >= size_t(e.context)) {
+            const int tail = e.frames_after_eos >= 0 ? e.frames_after_eos : chunk.tail_frames;
+            const int count = detail::frame_budget(tokens, tail).max_frames();
+            if (tokens + count > size_t(e.context)) {
                 r.reason = "workload-too-large"; r.report = "Text chunk exceeds the context capacity"; return r;
             }
             prefill = std::max(prefill, int(tokens));
@@ -112,8 +114,8 @@ FitResult fit_params(const FitOptions & o) {
             const auto file_bytes = audio.file_bytes();
             const auto rate = audio.sample_rate();
             const auto audio_frames = audio.frames();
-            const auto samples = uint64_t(std::ceil(double(audio_frames)*24000/rate));
-            voice_frames = int((samples+1919)/1920) + int(flow.config.bos_before_voice);
+            const auto samples = uint64_t(std::ceil(double(audio_frames)*detail::Mimi::sample_rate()/rate));
+            voice_frames = int((samples+detail::Mimi::frame_samples()-1)/detail::Mimi::frame_samples()) + int(flow.config.bos_before_voice);
             reference_host = sat_add(sat_mul(file_bytes, 8), sat_mul(30ull*192000+samples, 8));
             if (voice_frames > prefill && voice_frames < e.context)
                 flow = detail::FlowLM::measure(e.flow_lm_path, e.context, voice_frames, e.n_threads);
@@ -125,7 +127,7 @@ FitResult fit_params(const FitOptions & o) {
         }
         const auto codec = detail::Mimi::measure(e.mimi_path, e.n_threads, reference);
         if (flow.source_hash != frontend.source_hash() || flow.source_hash != codec.source_hash ||
-            flow.config.vocab_size != frontend.vocab_size() || flow.config.latent_dim != 32)
+            flow.config.vocab_size != frontend.vocab_size() || flow.config.latent_dim != detail::Mimi::latent_dim())
             throw std::invalid_argument("Pocket artifacts do not belong to the same checkpoint");
         r.device.weights_bytes = sat_add(flow.weights, codec.weights);
         r.device.state_bytes = sat_add(flow.state, codec.state);
@@ -142,8 +144,8 @@ FitResult fit_params(const FitOptions & o) {
         runtime_host = sat_add(runtime_host, sat_mul(uint64_t(prefill)*flow.config.dim, 16));
         runtime_host = sat_add(runtime_host, sat_mul(o.text.size()+1, 64));
         runtime_host = sat_add(runtime_host, 2*mib); // codec mask, latent queue, chunk copies
-        const auto native_samples = sat_mul(frames, 1920);
-        const auto output_samples = uint64_t(std::ceil(double(native_samples)*e.output_sample_rate/24000));
+        const auto native_samples = sat_mul(frames, detail::Mimi::frame_samples());
+        const auto output_samples = uint64_t(std::ceil(double(native_samples)*e.output_sample_rate/detail::Mimi::sample_rate()));
         // Batch-vector growth (old+new arenas), output chunks, and the sinc
         // resampler's retained input. At 24 kHz the latter is an overestimate.
         runtime_host = sat_add(runtime_host, sat_add(sat_mul(native_samples, 12), sat_mul(output_samples, 16)));

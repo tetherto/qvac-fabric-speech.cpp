@@ -1191,6 +1191,9 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-backend-selection LABEL "unit")
 
     # ---- Pocket numerical core (fixtures from dump-pocket-flow-reference.py) ----
+    add_executable(test-pocket-generation test/pocket/test_generation.cpp)
+    target_include_directories(test-pocket-generation PRIVATE src)
+    tts_cpp_register_test(test-pocket-generation LABEL "unit")
     add_executable(test-pocket-reference-audio test/pocket/test_reference_audio.cpp src/pocket/reference_audio.cpp)
     target_include_directories(test-pocket-reference-audio PRIVATE src)
     tts_cpp_register_test(test-pocket-reference-audio LABEL "unit")
@@ -1202,14 +1205,16 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json"
         REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json")
     if (TARGET tts-cpp)
-        add_executable(test-pocket-fit test/pocket/test_fit.cpp)
+        add_executable(test-pocket-fit test/pocket/test_fit.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-fit PRIVATE src)
         target_link_libraries(test-pocket-fit PRIVATE tts-cpp ggml)
         tts_cpp_register_test(test-pocket-fit LABEL "fixture"
             ARGS "${TTS_CPP_POCKET_MODEL_DIR}"
             REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
                      "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
-        add_executable(test-pocket-engine test/pocket/test_engine.cpp)
-        target_link_libraries(test-pocket-engine PRIVATE tts-cpp)
+        add_executable(test-pocket-engine test/pocket/test_engine.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-engine PRIVATE src)
+        target_link_libraries(test-pocket-engine PRIVATE tts-cpp ggml)
         tts_cpp_register_test(test-pocket-engine LABEL "fixture"
             ARGS "${TTS_CPP_POCKET_MODEL_DIR}" "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf"
             REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"

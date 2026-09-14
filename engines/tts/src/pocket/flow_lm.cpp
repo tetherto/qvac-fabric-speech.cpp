@@ -23,70 +23,10 @@ void finite(const std::vector<float> & values) {
         fail("input contains non-finite values");
 }
 
-struct Graph {
-    ggml_context * ctx = nullptr;
-    ggml_cgraph * graph = nullptr;
-    ggml_gallocr_t allocator = nullptr;
-    explicit Graph(ggml_backend_t backend) {
-        constexpr int nodes = 16384;
-        ctx = ggml_init({metadata_bytes(), nullptr, true});
-        if (!ctx) fail("cannot create graph context");
-        graph = ggml_new_graph_custom(ctx, nodes, false);
-        allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!allocator) { ggml_free(ctx); ctx = nullptr; fail("cannot create graph allocator"); }
-    }
-    ~Graph() { if (allocator) ggml_gallocr_free(allocator); if (ctx) ggml_free(ctx); }
-    Graph(const Graph &) = delete;
-    Graph & operator=(const Graph &) = delete;
-    static size_t metadata_bytes() {
-        return 16384 * ggml_tensor_overhead() + ggml_graph_overhead_custom(16384, false);
-    }
-    uint64_t allocate(ggml_tensor * output, bool size_only = false, int threads = 1) {
-        ggml_set_output(output);
-        ggml_build_forward_expand(graph, output);
-        if (size_only) return price_cpu_graph(allocator, graph, threads);
-        if (!ggml_gallocr_alloc_graph(allocator, graph)) fail("graph allocation failed");
-        return 0;
-    }
-    std::vector<float> run(ggml_backend_t backend, ggml_tensor * output) {
-        if (ggml_backend_graph_compute(backend, graph) != GGML_STATUS_SUCCESS) fail("graph execution failed");
-        std::vector<float> result(static_cast<size_t>(ggml_nelements(output)));
-        ggml_backend_tensor_get(output, result.data(), 0, result.size() * sizeof(float));
-        finite(result);
-        return result;
-    }
-};
-
-ggml_tensor * mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
-    auto * result = ggml_mul_mat(ctx, w, x);
-    ggml_mul_mat_set_prec(result, GGML_PREC_F32);
-    return result;
-}
-
-ggml_tensor * gelu_tanh(ggml_context * c, ggml_tensor * x) {
-    // ggml_gelu uses an FP16 lookup table on CPU. Spell out PyTorch's
-    // approximate="tanh" formula to keep the F32 reference path in F32.
-    auto * cubic = ggml_mul(c, ggml_sqr(c, x), x);
-    auto * inner = ggml_scale(c, ggml_add(c, x, ggml_scale(c, cubic, 0.044715f)), 0.7978845608028654f);
-    return ggml_mul(c, ggml_scale(c, x, 0.5f), ggml_scale_bias(c, ggml_tanh(c, inner), 1, 1));
-}
-
 void upload(ggml_tensor * tensor, const std::vector<float> & values) {
     ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(float));
 }
 
-std::vector<float> read_vector(ggml_tensor * t, size_t offset = 0, size_t count = 0) {
-    if (!count) count = static_cast<size_t>(ggml_nelements(t));
-    std::vector<float> values(count);
-    if (t->type == GGML_TYPE_F32) {
-        ggml_backend_tensor_get(t, values.data(), offset * sizeof(float), count * sizeof(float));
-    } else {
-        std::vector<ggml_fp16_t> half(count);
-        ggml_backend_tensor_get(t, half.data(), offset * sizeof(ggml_fp16_t), count * sizeof(ggml_fp16_t));
-        ggml_fp16_to_fp32_row(half.data(), values.data(), static_cast<int64_t>(count));
-    }
-    return values;
-}
 } // namespace
 
 struct FlowLM::Impl {
@@ -227,7 +167,7 @@ struct FlowLM::Impl {
             auto * source = ggml_get_tensor(metadata, ggml_get_name(t));
             load_float_weight(reader, source, t);
         }
-        const auto scales = read_vector(tensor("emb_std"));
+        const auto scales = pocket_read(tensor("emb_std"));
         for (float x : scales) if (!std::isfinite(x) || x <= 0) fail("invalid latent normalization");
         }
         state = ggml_init({static_cast<size_t>(2 * cfg.layers + 8) * ggml_tensor_overhead(), nullptr, true});
@@ -245,13 +185,13 @@ struct FlowLM::Impl {
     }
 
     ggml_tensor * linear(ggml_context * c, const std::string & p, ggml_tensor * x, bool bias = true) const {
-        x = mm(c, tensor(p + ".weight"), x);
+        x = pocket_mm(c, tensor(p + ".weight"), x);
         return bias ? ggml_add(c, x, tensor(p + ".bias")) : x;
     }
-    ggml_tensor * voice_projection(Graph & g, ggml_tensor * input) const {
-        return mm(g.ctx, tensor("speaker_proj_weight"), input);
+    ggml_tensor * voice_projection(PocketFlowGraph & g, ggml_tensor * input) const {
+        return pocket_mm(g.ctx, tensor("speaker_proj_weight"), input);
     }
-    ggml_tensor * audio_projection(Graph & g, ggml_tensor * input) const {
+    ggml_tensor * audio_projection(PocketFlowGraph & g, ggml_tensor * input) const {
         return linear(g.ctx, "input_linear", input, false);
     }
     ggml_tensor * norm(ggml_context * c, const std::string & p, ggml_tensor * x, float eps) const {
@@ -269,7 +209,7 @@ struct FlowLM::Impl {
         if (!count) fail("empty graph workload");
         if (count > static_cast<size_t>(capacity - past)) fail("KV context capacity exceeded");
         const int n = static_cast<int>(count), hd = cfg.dim / cfg.heads, total = past + n;
-        Graph g(backend); auto * c = g.ctx;
+        PocketFlowGraph g(backend); auto * c = g.ctx;
         auto * in = ggml_new_tensor_2d(c, GGML_TYPE_F32, cfg.dim, n); ggml_set_input(in);
         auto * positions = ggml_new_tensor_1d(c, GGML_TYPE_I32, n); ggml_set_input(positions);
         auto * x = in;
@@ -288,20 +228,20 @@ struct FlowLM::Impl {
             ggml_build_forward_expand(g.graph, ggml_cpy(c, v, cache_view(c, values[i], past, n)));
             auto * all_k = ggml_permute(c, cache_view(c, keys[i], 0, total), 0, 2, 1, 3);
             auto * all_v = ggml_cont(c, ggml_permute(c, cache_view(c, values[i], 0, total), 1, 2, 0, 3));
-            auto * scores = mm(c, all_k, ggml_permute(c, q, 0, 2, 1, 3));
+            auto * scores = pocket_mm(c, all_k, ggml_permute(c, q, 0, 2, 1, 3));
             auto * probabilities = ggml_soft_max(c, ggml_diag_mask_inf(c,
                                       ggml_scale(c, scores, 1.0f / std::sqrt(static_cast<float>(hd))), past));
-            auto * merged = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, mm(c, all_v, probabilities), 0, 2, 1, 3)), cfg.dim, n);
+            auto * merged = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, pocket_mm(c, all_v, probabilities), 0, 2, 1, 3)), cfg.dim, n);
             x = ggml_add(c, x, linear(c, p + ".self_attn.out_proj", merged, false));
             auto * ff = linear(c, p + ".linear1", norm(c, p + ".norm2", x, 1e-5f), false);
-            x = ggml_add(c, x, linear(c, p + ".linear2", gelu_tanh(c, ff), false));
+            x = ggml_add(c, x, linear(c, p + ".linear2", pocket_gelu(c, ff), false));
         }
         auto * output = norm(c, "out_norm", x, 1e-5f);
         if (measure) {
-            measure->compute = std::max(measure->compute, g.allocate(output, true, n_threads));
+            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads));
             return {};
         }
-        g.allocate(output);
+        g.prepare(output);
         upload(in, input);
         std::vector<int32_t> pos(n);
         for (int i = 0; i < n; ++i) pos[i] = past + i;
@@ -309,7 +249,7 @@ struct FlowLM::Impl {
         // Failed computations may have written cache rows. Discard the prefix
         // rather than treating a partially written cache as valid.
         try {
-            auto result = g.run(backend, output);
+            auto result = g.compute(backend, output);
             past = total;
             return result;
         } catch (...) { past = 0; throw; }
@@ -319,7 +259,7 @@ struct FlowLM::Impl {
         if (condition.size() != static_cast<size_t>(cfg.dim) || noise.size() != static_cast<size_t>(cfg.latent_dim) ||
             steps < 1 || steps > 64) fail("invalid flow inputs or steps (expected 1..64)");
         finite(condition); finite(noise);
-        Graph g(backend); auto * c = g.ctx;
+        PocketFlowGraph g(backend); auto * c = g.ctx;
         auto * hidden = ggml_new_tensor_2d(c, GGML_TYPE_F32, cfg.dim, 1); ggml_set_input(hidden);
         auto * latent = ggml_new_tensor_2d(c, GGML_TYPE_F32, cfg.latent_dim, 1); ggml_set_input(latent);
         ggml_tensor * times[2]; ggml_tensor * embedded[2];
@@ -353,13 +293,13 @@ struct FlowLM::Impl {
         auto * modulation = linear(c, "flow_net.final_layer.adaLN_modulation.1", activated_y);
         auto * output = linear(c, "flow_net.final_layer.linear", modulate(ggml_norm(c, x, 1e-6f), modulation));
         if (measure) {
-            measure->compute = std::max(measure->compute, g.allocate(output, true, n_threads));
+            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads));
             return {};
         }
-        g.allocate(output);
+        g.prepare(output);
         std::vector<float> current = noise;
-        const auto freq0 = read_vector(tensor("flow_net.time_embed.0.freqs"));
-        const auto freq1 = read_vector(tensor("flow_net.time_embed.1.freqs"));
+        const auto freq0 = pocket_read(tensor("flow_net.time_embed.0.freqs"));
+        const auto freq1 = pocket_read(tensor("flow_net.time_embed.1.freqs"));
         for (int step = 0; step < steps; ++step) {
             // Graph arenas may reuse input buffers after their last consumer.
             // Restore every input, even the unchanged conditioning vector.
@@ -375,7 +315,7 @@ struct FlowLM::Impl {
                 }
                 upload(times[i], embedding);
             }
-            const auto velocity = g.run(backend, output);
+            const auto velocity = g.compute(backend, output);
             for (size_t i = 0; i < current.size(); ++i) current[i] += velocity[i] / float(steps);
         }
         finite(current);
@@ -398,16 +338,16 @@ FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_fr
     model.past = context - 1;
     model.backbone({}, 1);
     // advance() keeps its projection arena alive while backbone() runs.
-    Graph projection(model.backend);
+    PocketFlowGraph projection(model.backend);
     auto * input = ggml_new_tensor_2d(projection.ctx, GGML_TYPE_F32, model.cfg.latent_dim, 1);
     ggml_set_input(input);
-    out.compute += projection.allocate(model.audio_projection(projection, input), true, threads);
+    out.compute += projection.prepare(model.audio_projection(projection, input), true, threads);
     model.flow(std::vector<float>(model.cfg.dim), std::vector<float>(model.cfg.latent_dim), 1);
-    Graph voice_projection(model.backend);
+    PocketFlowGraph voice_projection(model.backend);
     auto * voice_input = ggml_new_tensor_2d(voice_projection.ctx, GGML_TYPE_F32, model.cfg.latent_dim, 375);
     ggml_set_input(voice_input);
-    out.compute = std::max(out.compute, voice_projection.allocate(model.voice_projection(voice_projection, voice_input), true, threads));
-    out.graph_metadata = 2 * Graph::metadata_bytes();
+    out.compute = std::max(out.compute, voice_projection.prepare(model.voice_projection(voice_projection, voice_input), true, threads));
+    out.graph_metadata = 2 * PocketFlowGraph::metadata_bytes();
     return out;
 }
 FlowLM::~FlowLM() = default;
@@ -421,7 +361,7 @@ std::vector<float> FlowLM::text_embeddings(const std::vector<int> & ids) const {
     if (ids.size() > static_cast<size_t>(impl_->capacity)) fail("text exceeds context capacity");
     for (int id : ids) {
         if (id < 0 || id >= config().vocab_size) fail("invalid text token id");
-        const auto row = read_vector(impl_->tensor("conditioner.embed.weight"),
+        const auto row = pocket_read(impl_->tensor("conditioner.embed.weight"),
                                       static_cast<size_t>(id) * config().dim, config().dim);
         result.insert(result.end(), row.begin(), row.end());
     }
@@ -432,16 +372,16 @@ FrameCondition FlowLM::advance(const std::vector<float> & latent) {
     if (position() >= impl_->capacity) fail("KV context capacity exceeded");
     if (!latent.empty() && latent.size() != static_cast<size_t>(config().latent_dim)) fail("invalid latent dimensions");
     finite(latent);
-    Graph g(impl_->backend);
+    PocketFlowGraph g(impl_->backend);
     auto * input = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, config().latent_dim, 1); ggml_set_input(input);
     auto * output = impl_->audio_projection(g, input);
-    g.allocate(output);
-    upload(input, latent.empty() ? read_vector(impl_->tensor("bos_emb")) : latent);
+    g.prepare(output);
+    upload(input, latent.empty() ? pocket_read(impl_->tensor("bos_emb")) : latent);
     FrameCondition result;
-    result.hidden = impl_->backbone(g.run(impl_->backend, output));
+    result.hidden = impl_->backbone(g.compute(impl_->backend, output));
     // A small dot product avoids constructing a second graph for one logit.
-    const auto w = read_vector(impl_->tensor("out_eos.weight"));
-    result.eos_logit = read_vector(impl_->tensor("out_eos.bias"))[0];
+    const auto w = pocket_read(impl_->tensor("out_eos.weight"));
+    result.eos_logit = pocket_read(impl_->tensor("out_eos.bias"))[0];
     for (size_t i = 0; i < w.size(); ++i) result.eos_logit += w[i] * result.hidden[i];
     if (!std::isfinite(result.eos_logit)) { reset(); fail("non-finite EOS logit"); }
     return result;
@@ -454,7 +394,7 @@ std::vector<float> FlowLM::denormalize(const std::vector<float> & latent) const 
     if (latent.size() != static_cast<size_t>(config().latent_dim)) fail("invalid latent dimensions");
     finite(latent);
     auto result = latent;
-    const auto mean = read_vector(impl_->tensor("emb_mean")), std = read_vector(impl_->tensor("emb_std"));
+    const auto mean = pocket_read(impl_->tensor("emb_mean")), std = pocket_read(impl_->tensor("emb_std"));
     for (size_t i = 0; i < result.size(); ++i) result[i] = result[i] * std[i] + mean[i];
     finite(result);
     return result;
@@ -509,8 +449,8 @@ VoiceState FlowLM::capture_voice() const {
     if (position() < 1) fail("cannot capture an empty voice prefix");
     VoiceState result; result.source_hash = source_hash(); result.frames = position();
     for (int i = 0; i < config().layers; ++i) {
-        result.keys.push_back(read_vector(impl_->keys[i], 0, result.frames*config().dim));
-        result.values.push_back(read_vector(impl_->values[i], 0, result.frames*config().dim));
+        result.keys.push_back(pocket_read(impl_->keys[i], 0, result.frames*config().dim));
+        result.values.push_back(pocket_read(impl_->values[i], 0, result.frames*config().dim));
     }
     return result;
 }
@@ -528,12 +468,12 @@ void FlowLM::restore_voice(const VoiceState & voice) {
 std::vector<float> FlowLM::voice_embeddings(const std::vector<float> & latents) const {
     if (latents.empty() || latents.size()%config().latent_dim || latents.size()/config().latent_dim > 375) fail("invalid voice latents");
     finite(latents);
-    Graph g(impl_->backend);
+    PocketFlowGraph g(impl_->backend);
     auto * x = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, config().latent_dim, latents.size()/config().latent_dim);
     ggml_set_input(x); auto * output = impl_->voice_projection(g, x);
-    g.allocate(output); upload(x, latents); auto result = g.run(impl_->backend, output);
+    g.prepare(output); upload(x, latents); auto result = g.compute(impl_->backend, output);
     if (config().bos_before_voice) {
-        auto bos = read_vector(impl_->tensor("bos_before_voice")); result.insert(result.begin(), bos.begin(), bos.end());
+        auto bos = pocket_read(impl_->tensor("bos_before_voice")); result.insert(result.begin(), bos.begin(), bos.end());
     }
     return result;
 }

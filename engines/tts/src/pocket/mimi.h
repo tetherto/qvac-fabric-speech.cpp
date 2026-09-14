@@ -19,9 +19,11 @@ public:
     // A whole mono reference at the native sample rate; zero-padded to the
     // next frame. Each call starts an independent encoding session.
     std::vector<float> encode(const std::vector<float> & pcm);
-    int sample_rate() const;
-    int frame_samples() const;
-    int latent_dim() const;
+    // Version 1 codec geometry, shared by decoding and metadata-only fit.
+    static constexpr int sample_rate() { return 24000; }
+    static constexpr int frame_samples() { return 1920; }
+    static constexpr int latent_dim() { return 32; }
+    static constexpr int max_decode_frames() { return 16; }
     const std::string & source_hash() const;
 private:
     struct Impl;

@@ -1,4 +1,5 @@
 #include "tts-cpp/pocket/fit.h"
+#include "test_workload.h"
 #include "gguf.h"
 #include "ggml.h"
 #include <chrono>
@@ -38,6 +39,23 @@ void reference_wav(const fs::path & path, bool hostile) {
     put(1, 2); put(1, 2); put(24000, 4); put(48000, 4); put(2, 2); put(16, 2);
     f << "data"; put(4800, 4); for (int i = 0; i < 2400; ++i) put(0, 2);
 }
+void check_tail_budget(pocket::FitOptions opts) {
+    opts.text = "Hi.";
+    const auto normal = pocket::fit_params(opts);
+    opts.engine.frames_after_eos = 100;
+    const auto long_tail = pocket::fit_params(opts);
+    check(normal.status != FitStatus::Error && long_tail.status != FitStatus::Error, "tail fit failed");
+    check(long_tail.host_bytes > normal.host_bytes, "EOS tail not included in host memory estimate");
+    opts.engine.context = context_with_tail(opts.engine, opts.text);
+    check(pocket::fit_params(opts).status != FitStatus::Error, "exact context boundary rejected");
+    --opts.engine.context;
+    check(pocket::fit_params(opts).reason == "workload-too-large", "context omitted EOS tail");
+    opts.engine.frames_after_eos = -1;
+    opts.engine.context = context_with_tail(opts.engine, opts.text);
+    check(pocket::fit_params(opts).status != FitStatus::Error, "default-tail context boundary rejected");
+    --opts.engine.context;
+    check(pocket::fit_params(opts).reason == "workload-too-large", "context omitted default EOS tail");
+}
 int main(int argc, char ** argv) {
     try {
         check(argc == 2, "expected Pocket bundle directory");
@@ -49,7 +67,7 @@ int main(int argc, char ** argv) {
             opts.engine.frontend_path = (dir/"frontend.json").string();
             opts.engine.voice_path = (dir/"voice.gguf").string();
         };
-        set_paths(bundle); opts.text = "Hello! This is a Pocket memory preflight.";
+        set_paths(bundle); check_tail_budget(opts); opts.text = "Hello! This is a Pocket memory preflight.";
         const auto result = pocket::fit_params(opts);
         check(result.status != FitStatus::Error, result.report.c_str());
         check(result.device.weights_bytes > 100*1024*1024, "expanded weights not priced");
