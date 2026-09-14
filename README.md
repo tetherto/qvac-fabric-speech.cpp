@@ -73,6 +73,7 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-
 | Indic Parler-TTS | tts | 21 Indic | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | Indic prompt BPE tokenizer |
 | Fun-CosyVoice3-0.5B | tts | model-advertised multilingual text | 24 kHz | `f32` | CPU, Metal, Vulkan, OpenCL, CUDA | Qwen2.5 LM + DiT flow + CausalHiFT; zero-shot/cross-lingual cloning from a reference WAV (native speech_tokenizer_v3 + CAM++); Metal, desktop Vulkan, desktop CUDA, and OpenCL are the validated GPU paths |
 | Audio8-TTS-Preview-0.6B | tts | multilingual | 44.1 kHz | `f32`, `f16`, `q8_0`; LM also `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | DualAR + DAC codec, zero-shot cloning from reference audio and transcript |
+| Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
@@ -100,7 +101,7 @@ The ACE-Step Core ML sidecar is exported by
 `engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
 Engine operating point, optionally weight-palettized (`--palettize 8` halves
 the sidecar at unchanged speed and quality gate); see the
-[audiogen README](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) for
+[audiogen backends guide](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) for
 the measured constraints and benchmark tooling.
 
 ## Performance
