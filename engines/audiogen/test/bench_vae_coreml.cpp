@@ -37,10 +37,11 @@ int main() {
 
 namespace {
 
-constexpr int    LATENT_CHANNELS  = 64;
-constexpr int    BENCH_T_LATENTS[] = {750, 1500};  // 30 s and 60 s at 5 Hz
-constexpr int    BENCH_REPS       = 3;
-constexpr double MIN_COSINE       = 0.999;
+constexpr int    LATENT_CHANNELS = 64;
+constexpr int    LATENT_RATE_HZ  = 25;  // 48000 Hz audio / 1920x upsample
+constexpr int    BENCH_AUDIO_SECONDS[] = {30, 60};
+constexpr int    BENCH_REPS      = 3;
+constexpr double MIN_COSINE      = 0.999;
 
 bool path_exists(const std::string & path) {
     struct stat st{};
@@ -101,29 +102,44 @@ double time_decode(const tts_cpp::acestep::Vae & vae, const std::vector<float> &
 }
 
 struct BenchRow {
+    int    audio_seconds;
     int    T_latent;
     double ggml_ms;
     double coreml_ms;
     double cos;
 };
 
-bool bench_one(const std::string & gguf, int T_latent, BenchRow * row) {
+bool bench_one(const std::string & gguf, int audio_seconds, BenchRow * row, bool * gpu_missing) {
+    const int T_latent = audio_seconds * LATENT_RATE_HZ;
     const std::vector<float> latent = make_latent(T_latent);
 
     setenv("ACESTEP_COREML_DISABLE", "1", 1);
     const auto vae_ggml = load_vae(gguf);
     unsetenv("ACESTEP_COREML_DISABLE");
+    // The reference must actually be a GPU decode: n_gpu_layers only requests
+    // one, and a CPU fallback here would publish an inflated speedup.
+    const std::string ggml_backend = vae_ggml->backend_name();
+    if (ggml_backend == "CPU") {
+        *gpu_missing = true;
+        return false;
+    }
     std::vector<float> pcm_ggml;
     const double ggml_ms = time_decode(*vae_ggml, latent, T_latent, &pcm_ggml);
 
+    // Strict: a sidecar init or predict failure fails the run instead of
+    // timing the ggml fallback and reporting it as Core ML.
+    setenv("ACESTEP_COREML_STRICT", "1", 1);
     const auto vae_coreml = load_vae(gguf);
     std::vector<float> warmup = vae_coreml->decode(latent, T_latent);
     if (warmup.empty()) {
-        std::fprintf(stderr, "[bench-vae-coreml] FAIL: warm-up decode empty at T=%d\n", T_latent);
+        unsetenv("ACESTEP_COREML_STRICT");
+        std::fprintf(stderr, "[bench-vae-coreml] FAIL: strict Core ML warm-up decode empty at T=%d\n",
+                     T_latent);
         return false;
     }
     std::vector<float> pcm_coreml;
     const double coreml_ms = time_decode(*vae_coreml, latent, T_latent, &pcm_coreml);
+    unsetenv("ACESTEP_COREML_STRICT");
 
     if (ggml_ms < 0.0 || coreml_ms < 0.0 || pcm_ggml.size() != pcm_coreml.size()) {
         std::fprintf(stderr, "[bench-vae-coreml] FAIL: decode sizes ggml=%zu coreml=%zu at T=%d\n",
@@ -131,10 +147,10 @@ bool bench_one(const std::string & gguf, int T_latent, BenchRow * row) {
         return false;
     }
 
-    *row = {T_latent, ggml_ms, coreml_ms, cosine(pcm_ggml, pcm_coreml)};
+    *row = {audio_seconds, T_latent, ggml_ms, coreml_ms, cosine(pcm_ggml, pcm_coreml)};
     std::fprintf(stderr,
-                 "[bench-vae-coreml] T=%d ggml=%.0f ms coreml=%.0f ms (median of %d) cosine=%.7f\n",
-                 T_latent, ggml_ms, coreml_ms, BENCH_REPS, row->cos);
+                 "[bench-vae-coreml] T=%d ggml(%s)=%.0f ms coreml=%.0f ms (median of %d) cosine=%.7f\n",
+                 T_latent, ggml_backend.c_str(), ggml_ms, coreml_ms, BENCH_REPS, row->cos);
     return row->cos >= MIN_COSINE;
 }
 
@@ -143,8 +159,8 @@ void print_markdown(const std::vector<BenchRow> & rows) {
     std::printf("| T_latent | audio | ggml GPU | Core ML | speedup | cosine |\n");
     std::printf("|---|---|---|---|---|---|\n");
     for (const BenchRow & r : rows) {
-        std::printf("| %d | %.0f s | %.0f ms | %.0f ms | %.2fx | %.5f |\n",
-                    r.T_latent, r.T_latent / 25.0, r.ggml_ms, r.coreml_ms,
+        std::printf("| %d | %d s | %.0f ms | %.0f ms | %.2fx | %.5f |\n",
+                    r.T_latent, r.audio_seconds, r.ggml_ms, r.coreml_ms,
                     r.ggml_ms / r.coreml_ms, r.cos);
     }
 }
@@ -169,9 +185,17 @@ int main() {
     }
 
     std::vector<BenchRow> rows;
-    for (int T_latent : BENCH_T_LATENTS) {
+    for (int audio_seconds : BENCH_AUDIO_SECONDS) {
         BenchRow row{};
-        if (!bench_one(gguf, T_latent, &row)) return 1;
+        bool gpu_missing = false;
+        if (!bench_one(gguf, audio_seconds, &row, &gpu_missing)) {
+            if (gpu_missing) {
+                std::fprintf(stderr, "[bench-vae-coreml] no GPU ggml backend resolved; "
+                                     "the reference would be CPU, skipping\n");
+                return SKIP_EXIT_CODE;
+            }
+            return 1;
+        }
         rows.push_back(row);
     }
 

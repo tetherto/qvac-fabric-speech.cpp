@@ -191,7 +191,7 @@ jobs:
           path: |
             coreml-fixture
             coreml-fixture-p8
-          key: acestep-vae-coreml-${{ runner.os }}-${{ runner.arch }}-0599862a-${{ hashFiles('engines/audiogen/scripts/export-vae-coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          key: acestep-vae-coreml-${{ runner.os }}-${{ runner.arch }}-0599862a-${{ hashFiles('engines/audiogen/scripts/export-vae-coreml.py', 'engines/audiogen/test/test_export_vae_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       # Two sidecars from one GGUF: the default float16 export and an 8-bit
       # palettized one, so the palettization path is parity-gated in CI. The
@@ -208,6 +208,7 @@ jobs:
           "$coreml_python" -m venv .venv-coreml
           .venv-coreml/bin/python -m pip install --upgrade pip
           .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-coreml/bin/python engines/audiogen/test/test_export_vae_coreml.py
           .venv-coreml/bin/python engines/audiogen/scripts/export-vae-coreml.py \
             --gguf coreml-fixture/vae-BF16.gguf \
             --out coreml-fixture/vae-decoder.mlpackage --compile-dir coreml-fixture

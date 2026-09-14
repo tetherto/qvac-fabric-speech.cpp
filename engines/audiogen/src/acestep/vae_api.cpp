@@ -40,6 +40,11 @@ struct Vae::Impl {
 #ifdef AUDIOGEN_USE_COREML
 enum class CoremlDecodeStatus { done, unavailable, cancelled };
 
+// ACESTEP_COREML_STRICT turns the silent ggml fallback into a decode failure,
+// so a parity or benchmark run cannot accidentally measure ggml and report it
+// as Core ML. A production decode never sets it.
+static bool coreml_strict() { return std::getenv("ACESTEP_COREML_STRICT") != nullptr; }
+
 static acestep_coreml_vae_context * load_coreml_sidecar(const std::string & gguf_path, bool verbose) {
     if (std::getenv("ACESTEP_COREML_DISABLE")) return nullptr;
     const std::string path = coreml_vae_sidecar_path(gguf_path);
@@ -137,10 +142,19 @@ std::vector<float> Vae::decode(const std::vector<float> & latent, int T_latent,
             case CoremlDecodeStatus::done:      return pcm;
             case CoremlDecodeStatus::cancelled: return {};
             case CoremlDecodeStatus::unavailable:
+                if (coreml_strict()) {
+                    fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d and "
+                                    "ACESTEP_COREML_STRICT is set; failing instead of ggml fallback\n", T_latent);
+                    return {};
+                }
                 if (std::getenv("AUDIOGEN_VERBOSE"))
                     fprintf(stderr, "[acestep-vae] Core ML decode unavailable for T_latent=%d; using ggml\n", T_latent);
                 break;
         }
+    } else if (coreml_strict()) {
+        fprintf(stderr, "[acestep-vae] no Core ML sidecar loaded and ACESTEP_COREML_STRICT is set; "
+                        "failing instead of ggml fallback\n");
+        return {};
     }
 #endif
     int T_audio = vae_model_decode(impl_->model, latent.data(), T_latent, pcm, on_progress);

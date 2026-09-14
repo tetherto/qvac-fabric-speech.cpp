@@ -443,7 +443,10 @@ reference at fp16 rounding error. `test-vae-coreml-parity` gates the sidecar
 against the ggml decode at cosine 0.999 (measured 0.99999).
 
 Set `ACESTEP_COREML_DISABLE=1` to force the ggml decode, including for parity
-or benchmarking. `ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane`
+or benchmarking. `ACESTEP_COREML_STRICT=1` turns the silent ggml fallback into
+a decode failure, so a test cannot measure ggml and attribute it to Core ML —
+the parity test and benchmark set it for their Core ML legs.
+`ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane`
 overrides the default all-units placement for comparisons — on an M5 both
 non-default choices are large regressions (`cpu_and_ane` pushes the
 ANE-declined upsample stages onto the CPU).
