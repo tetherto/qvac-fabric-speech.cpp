@@ -1084,9 +1084,8 @@ byte of weights.
 
 Roughly a second of audio per second of CPU on eight cores of a desktop x86-64,
 q8_0 weights: 16 s of speech in 19 s wall, 5.5 s of cloned speech in 10 s
-including enrolment. For a measured comparison against audio.cpp's Audio8
-port, see
-[the head-to-head in Performance](#audio8-head-to-head-vs-audiocpp-2026-09-rtx-5090-box).
+including enrolment. For measured multi-machine numbers, see
+[the Audio8 benchmark in Performance](#audio8-multi-machine-benchmark-2026-09).
 
 **The codec is chunked, in both directions.**  Its convolution stacks, not the
 LM, are what made memory grow with utterance length — a 24 s decode used to
@@ -1884,113 +1883,68 @@ Metal (`MTL0`).
 
 Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
-### Supertonic 3 head-to-head vs audio.cpp (2026-09)
+### Supertonic 3 multi-machine benchmark (2026-09)
 
-Maintainer-run comparison against [audio.cpp](https://github.com/0xShug0/audio.cpp)
-(v0.7.3 `9c6a2823`), the other GGML engine that ships Supertonic 3, on four
-machines. Matched **f16** weights on both sides — audio.cpp's "q8_0" package
-holds no quantised tensor, so f16 is the only precision-matched pair. One
-synthesis per process (neither CLI has a repeat flag), so the number a user
-feels is the **end-to-end process wall**, model load included, timed from
-outside the process. Two text lengths: ~9.6 s and ~26.5 s of speech.
+Maintainer-run measurement on four machines. `supertonic-cli` performs one
+synthesis per process (it has no repeat flag), so the number a user feels is
+the **end-to-end process wall**, model load included, timed from outside the
+process. Two text lengths, ~9.6 s and ~26.5 s of speech; f16 weights
+(`supertonic3-f16.gguf`, 197 MiB); engine `46afe7d9`, ggml
+`speech@157b299f`. Load is the two-point intercept at zero audio,
+`wall_short - slope * audio_short`.
 
-| Device | Backend | ours: wall short / long | theirs: wall short / long | ours RTF (long) | theirs RTF (long) | speed-up | ours load | theirs load |
-|---|---|--:|--:|--:|--:|--:|--:|--:|
-| MacBook Air M5 | Metal | 0.66 / 0.65 s | 3.68 / 4.70 s | 0.025 | 0.166 | **7.19x** | 0.66 s | 3.15 s |
-| MacBook Air M5 | CPU | 1.72 / 2.66 s | 5.23 / 8.73 s | 0.101 | 0.310 | **3.28x** | 1.18 s | 3.42 s |
-| RTX 3080 desktop | CUDA | 0.71 / 0.74 s | 1.94 / 2.09 s | 0.028 | 0.074 | **2.80x** | 0.69 s | 1.86 s |
-| RTX 3080 desktop | Vulkan | 0.61 / 0.62 s | 1.87 / 1.87 s | 0.024 | 0.066 | **3.00x** | 0.61 s | 1.86 s |
-| Strix Halo | Vulkan | 0.61 / 0.65 s | 1.46 / 1.68 s | 0.025 | 0.059 | **2.58x** | 0.59 s | 1.34 s |
-| RTX 5090 box | CUDA | 0.79 / 0.82 s | 2.02 / 2.02 s | 0.031 | 0.071 | **2.45x** | 0.77 s | 2.02 s |
-| RTX 5090 box | Vulkan | 0.72 / 0.74 s | 1.80 / 1.88 s | 0.028 | 0.067 | **2.55x** | 0.70 s | 1.75 s |
+| Device | Backend | wall short / long | RTF (long) | load |
+|---|---|--:|--:|--:|
+| MacBook Air M5 | Metal | 0.66 / 0.65 s | 0.025 | 0.66 s |
+| MacBook Air M5 | CPU | 1.72 / 2.66 s | 0.101 | 1.18 s |
+| RTX 3080 desktop | CUDA | 0.71 / 0.74 s | 0.028 | 0.69 s |
+| RTX 3080 desktop | Vulkan | 0.61 / 0.62 s | 0.024 | 0.61 s |
+| Strix Halo | Vulkan | 0.61 / 0.65 s | 0.025 | 0.59 s |
+| RTX 5090 box | CUDA | 0.79 / 0.82 s | 0.031 | 0.77 s |
+| RTX 5090 box | Vulkan | 0.72 / 0.74 s | 0.028 | 0.70 s |
 
-We win every lane, 2.5x–7.2x end to end, and start up 2.3–4.8x faster
-(0.59–1.18 s vs 1.34–3.42 s), which is most of the gap on the short text. Our
-Metal lane is the extreme case: 0.65 s total for 26.5 s of speech (RTF 0.025)
-against 4.70 s (RTF 0.166).
+On the GPU lanes synthesis is cheap enough that 17 s of extra speech costs
+less than the run-to-run noise on a 0.6 s process, so the compute-only slope
+over text length — `(wall_long - wall_short) / (audio_long - audio_short)` —
+is above the noise floor only on the M5 CPU (0.0561 s per audio-second), the
+RTX 3080 CUDA (0.0022), Strix Halo Vulkan (0.0022), and the RTX 5090 (CUDA
+0.0020, Vulkan 0.0014); start-up dominates the wall everywhere else. One
+caveat: `supertonic-cli` caps one batch synthesis at ~28.5 s of audio, which
+sets the long text point (3x the short text, not 8x).
 
-Compute-only slope over text length —
-`(wall_long - wall_short) / (audio_long - audio_short)` — where it is above
-the noise floor:
+### Audio8 multi-machine benchmark (2026-09)
 
-| Device | Backend | ours s/audio-s | theirs s/audio-s |
-|---|---|--:|--:|
-| MacBook Air M5 | Metal | below noise floor | 0.0547 |
-| MacBook Air M5 | CPU | 0.0561 | 0.1884 |
-| RTX 3080 desktop | CUDA | 0.0022 | 0.0078 |
-| RTX 3080 desktop | Vulkan | below noise floor | below noise floor |
-| Strix Halo | Vulkan | 0.0022 | 0.0119 |
-| RTX 5090 box | CUDA | 0.0020 | below noise floor |
-| RTX 5090 box | Vulkan | 0.0014 | 0.0048 |
-
-On the GPU lanes our synthesis is so cheap that 17 s of extra speech costs
-less than the run-to-run noise on a 0.6 s process, so the wall table above is
-the honest comparison.
-
-Caveats: our `supertonic-cli` caps one batch synthesis at ~28.5 s of audio,
-which sets the long text point (3x the short text, not 8x). Linux CPU lanes
-were measured but are out of scope like the ASR CPU lanes — for the record we
-lead on Strix CPU (3.7x) and the 5090 CPU (2.7x) and trail on the 3080 CPU
-(1.6x theirs). Models: ours `supertonic3-f16.gguf` 197 MiB, theirs
-`Supertonic-3-GGUF/supertonic-3-f16.gguf` 298 MiB, both Supertone
-Supertonic 3. Our build: engine `46afe7d9`, ggml `speech@157b299f`.
-
-### Audio8 head-to-head vs audio.cpp (2026-09, RTX 5090 box)
-
-audio.cpp v0.7.x added a native Audio8 TTS port (community family
-`audio8_tts`), so the same protocol as the Supertonic 3 comparison applies:
-one synthesis per process, end-to-end process wall timed from outside the
-process, model load included, each engine at its shipping defaults with its
-own q8_0 GGUF. Unlike the Supertonic case, both q8_0 packages are genuine
-quantisations (682 MiB of Q8_0 tensors in theirs, 479 MiB in ours, the rest
-f16/f32 carve-outs by role on both sides), so q8_0 is the precision-matched
-pair here. One machine so far: Ryzen 9 9950X3D (16 cores) + RTX 5090, CUDA
-13.3, driver 595.91. Two texts, 160 and 491 characters; Audio8 is
-autoregressive, so each engine renders its own duration for the same words —
-the long text becomes 23.8 s of audio for us and 24.3–29.2 s for audio.cpp —
-which makes the wall columns the same-input comparison and RTF
-(wall / that engine's own audio) the duration-fair one. Speed-up is theirs
-divided by ours on the long-text wall; values below 1 are audio.cpp wins.
-
-| Backend | ours: wall short / long | theirs: wall short / long | ours RTF (long) | theirs RTF (long) | speed-up | ours load | theirs load |
-|---|--:|--:|--:|--:|--:|--:|--:|
-| CUDA | 2.12 / 4.82 s | 2.17 / 4.02 s | 0.203 | 0.166 | 0.83x | 0.48 s | 1.18 s |
-| Vulkan | 2.22 / 5.12 s | 2.22 / 4.52 s | 0.215 | 0.156 | 0.88x | 0.37 s | 1.04 s |
-| CPU | 8.53 / 19.96 s | 11.14 / 32.80 s | 0.840 | 1.125 | **1.64x** | 0.46 s | 1.10 s |
-
-The result is split, and the split is worth stating plainly. audio.cpp's
-generation is faster on this GPU: its compute-only slope is 0.117–0.120 s per
-audio-second against our 0.183–0.200, so it wins the long text end to end
-(1.20x on CUDA, 1.13x on Vulkan) despite reading a third more weight bytes
-(one 1363 MiB file vs our 1001 MiB across two). We load 2.4–2.8x faster
-(0.37–0.48 s vs 1.04–1.18 s), which ties the short text on both GPU lanes,
-and we hold a 1.9–3.0x lower peak GPU footprint on the long text (1.6/2.1 GiB
-Vulkan/CUDA vs their 4.6/4.0 GiB). On CPU we win outright: 1.64x end to end
-and the only faster-than-real-time RTF of the lane (0.84 vs 1.12). One default also
-differs: audio.cpp splits text into 200-character chunks (three chunks for
-the long text, shorter AR contexts per chunk), while our engine synthesizes
-the whole text in one autoregressive pass.
-
-Method: 1 untimed warm-up plus 5 timed runs per cell, engines alternated,
-3 s cooldown, seed 42, 16 threads on both sides, `CUDA_VISIBLE_DEVICES=0`,
-`GGML_VK_VISIBLE_DEVICES=0`, one job at a time on an otherwise idle desktop.
-Worst rep-to-rep spread in any cell: 4.5 % (gate 10 %). All 60 timed runs
-succeeded; every cell's five WAVs are byte-identical (fixed seed), non-silent
-(peak amplitude 0.33–0.91), and both engines print their device (`on CUDA0` /
-`on Vulkan0` ours, `ggml_cuda_init` / `ggml_vulkan` device lines theirs).
+Maintainer-run measurement on three machines. `audio8-cli` performs one
+synthesis per process, so the number is the **end-to-end process wall**, model
+load included, timed from outside the process. Two text lengths, ~9.6 s and
+~24 s of speech; q8_0 weights (`audio8-lm-q8_0.gguf` 800 MiB +
+`audio8-codec-decoder-q8_0.gguf` 201 MiB); engine `0f9fc817`, ggml
+`speech@157b299f`, seed 42, 16 threads on the Linux boxes and 10 on the Mac.
 Load is the two-point intercept at zero audio,
-`wall_short - slope * audio_short`; GPU peak is the `nvidia-smi` total-memory
-delta sampled at 5 Hz.
+`wall_short - slope * audio_short`.
 
-Builds and models: ours engine `0f9fc817`, ggml `speech@157b299f`,
-`audio8-lm-q8_0.gguf` 800 MiB + `audio8-codec-decoder-q8_0.gguf` 201 MiB;
-audio.cpp v0.7.4 `5ba81ac5` built per its own docs
-(`-DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=audio8_tts`, Release, one
-backend per build), model
-`js-byte/Audio8-TTS-Preview-0.6b-GGUF/audio8-tts-preview-0.6b-q8_0.gguf`
-1363 MiB (single file, codec encoder included). One documented build
-deviation: both engines' ggml Vulkan sources need the Khronos SPIRV-Headers
-include path on this host.
+| Device | Backend | wall short / long | RTF (long) | load |
+|---|---|--:|--:|--:|
+| RTX 5090 box | CUDA | 2.12 / 4.82 s | 0.203 | 0.48 s |
+| RTX 5090 box | Vulkan | 2.22 / 5.12 s | 0.215 | 0.37 s |
+| RTX 5090 box | CPU | 8.53 / 19.96 s | 0.840 | 0.46 s |
+| Strix Halo | Vulkan | 3.87 / 9.58 s | 0.403 | 0.24 s |
+| Strix Halo | CPU | 7.93 / 18.40 s | 0.774 | 0.53 s |
+| Mac mini M4 | Metal | 6.76 / 15.43 s | 0.649 | 0.92 s |
+| Mac mini M4 | CPU | 10.82 / 26.97 s | 1.134 | ~0 s |
+
+Audio8 is autoregressive, so unlike Supertonic its compute-only slope over
+text length is well above the noise floor on every lane
+(`(wall_long - wall_short) / (audio_long - audio_short)`): 0.183 s per
+audio-second on the RTX 5090 CUDA, 0.200 on its Vulkan, 0.393 on Strix Halo
+Vulkan, 0.610 on Mac Metal, and 0.75–1.14 on the CPU lanes. Every GPU lane
+runs faster than real time; the Mac mini M4 CPU lane is the only one that does
+not (RTF 1.13). Method: 1 untimed warm-up plus 5 timed runs per cell, engines
+alternated, 3 s cooldown, worst rep-to-rep spread in any cell 3.2 % (10 %
+gate), outputs deterministic per cell and non-silent (peak amplitude
+0.47–0.89), device confirmed in every run log (`on CUDA0` / `on Vulkan0` /
+`on MTL0`). One build note: the ggml Vulkan build needs the Khronos
+SPIRV-Headers include path on hosts without a system copy.
 
 ### Mac Studio M3 Ultra (96 GB unified memory)
 

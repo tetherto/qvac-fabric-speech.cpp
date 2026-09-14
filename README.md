@@ -380,20 +380,20 @@ has a reproducible
 for CPU, Metal, Vulkan, and CUDA; `music-cli` also reports per-stage wall clock
 on stderr.
 
-### Head-to-head vs other GGML engines (2026-09)
+### Multi-machine benchmarks (2026-09)
 
-Maintainer-run comparisons on four machines — MacBook Air M5 (Metal, CPU), an
-RTX 3080 desktop (CUDA, Vulkan), a Strix Halo box (Vulkan), and an RTX 5090
-box (CUDA, Vulkan). Every rival ran at its own shipping defaults with its own
-converted weights, and every lane was timed from outside the process. The
-engine READMEs carry the full matrices, method, and build pins.
+Maintainer-run measurements across up to four machines — a MacBook Air M5 and
+Mac mini M4 (Metal, CPU), an RTX 3080 desktop (CUDA, Vulkan), a Strix Halo box
+(Vulkan, CPU), and an RTX 5090 box (CUDA, Vulkan, CPU) — every lane timed from
+outside the process. The engine READMEs carry the full tables, method, and
+build pins.
 
-| Task | Model | Rivals | Result |
-|---|---|---|---|
-| ASR | Parakeet TDT 0.6b v3 | transcribe.cpp, audio.cpp, LocalAI / parakeet.cpp | 39/39 cells won, median speed-up 2.80x, best 10.9x — [full matrix](engines/parakeet/README.md#four-engine-head-to-head-2026-09) |
-| TTS | Supertonic 3 | audio.cpp | 7/7 lanes won, 2.45–7.19x end to end — [full table](engines/tts/README.md#supertonic-3-head-to-head-vs-audiocpp-2026-09) |
-| TTS | Audio8 0.6b | audio.cpp | split (RTX 5090 box only): we win CPU 1.64x, load 2.4–2.8x faster and use 1.9–3.0x less GPU memory; audio.cpp wins GPU generation 1.13–1.20x — [full table](engines/tts/README.md#audio8-head-to-head-vs-audiocpp-2026-09-rtx-5090-box) |
-| Music | ACE-Step 1.5 | acestep.cpp | 6/6 lanes and 60/60 prompt cells won, 1.11–2.07x — [full table](engines/audiogen/README.md#ace-step-15-head-to-head-vs-acestepcpp-2026-09) |
+| Task | Model | Highlights |
+|---|---|---|
+| ASR | Parakeet TDT 0.6b v3 | RTF 0.0006–0.0055 on the GPU lanes; 0.00 % / 0.80 % WER on the jfk / ls90 clips — [full table](engines/parakeet/README.md#multi-machine-benchmark-2026-09) |
+| TTS | Supertonic 3 | end-to-end wall 0.61–0.82 s on every GPU lane (RTF 0.024–0.031) — [full table](engines/tts/README.md#supertonic-3-multi-machine-benchmark-2026-09) |
+| TTS | Audio8 0.6b | GPU RTF 0.20–0.40, faster than real time on every GPU lane — [full table](engines/tts/README.md#audio8-multi-machine-benchmark-2026-09) |
+| Music | ACE-Step 1.5 | generation 1,338–2,330 ms on the GPU lanes (RTF 0.14–0.25) — [full table](engines/audiogen/README.md#ace-step-15-multi-machine-benchmark-2026-09) |
 
 ### ASR, end-of-utterance, diarization
 

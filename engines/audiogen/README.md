@@ -853,41 +853,31 @@ For a reproducible engine-to-engine measurement against upstream
 `acestep.cpp` (`ace-lm` + `ace-synth`, no addon), see
 [`benchmarks/comparison/README.md`](benchmarks/comparison/README.md).
 
-### ACE-Step 1.5 head-to-head vs acestep.cpp (2026-09)
+### ACE-Step 1.5 multi-machine benchmark (2026-09)
 
-Measured with the repo's own comparison harness
+Measured with the repo's own benchmark harness
 ([`benchmarks/comparison`](benchmarks/comparison/README.md),
 `node run-comparison.js --backend ...`): 10 fixed prompts, 1 warm-up + 3
-timed runs each, engines alternated, 5 s cooldown, `failOnGpuFallback: true`,
-both engines loading the **same four GGUFs** (identical SHA-256 on every
-host): `Qwen3-Embedding-0.6B-Q8_0`, `acestep-5Hz-lm-0.6B-Q8_0`,
-`acestep-v15-turbo-Q8_0`, `vae-BF16`.
+timed runs each, 5 s cooldown, `failOnGpuFallback: true`. Build: engine
+`46afe7d9`, ggml `speech@157b299f`; GGUFs `Qwen3-Embedding-0.6B-Q8_0`,
+`acestep-5Hz-lm-0.6B-Q8_0`, `acestep-v15-turbo-Q8_0`, `vae-BF16`, identical
+SHA-256 on every host. `gen` is generation compute, `e2e` adds the lazy
+stage loads inside `generate()`.
 
-| Device | Backend | ours gen | theirs gen | speed-up | ours RTF | theirs RTF | ours e2e | theirs e2e | prompt wins |
-|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| MacBook Air M5 | Metal | 9,016 ms | 9,993 ms | **1.11x** | 0.957 | 1.080 | 9,682 ms | 9,993 ms | 10/10 |
-| RTX 3080 desktop | CUDA | 1,796 ms | 2,602 ms | **1.45x** | 0.198 | 0.283 | 2,146 ms | 2,602 ms | 10/10 |
-| RTX 3080 desktop | Vulkan | 1,580 ms | 2,722 ms | **1.72x** | 0.164 | 0.292 | 1,912 ms | 2,722 ms | 10/10 |
-| Strix Halo | Vulkan | 2,330 ms | 4,815 ms | **2.07x** | 0.253 | 0.507 | 2,570 ms | 4,815 ms | 10/10 |
-| RTX 5090 box | CUDA | 1,338 ms | 2,562 ms | **1.91x** | 0.139 | 0.278 | 1,772 ms | 2,562 ms | 10/10 |
-| RTX 5090 box | Vulkan | 1,435 ms | 2,762 ms | **1.92x** | 0.157 | 0.283 | 1,864 ms | 2,762 ms | 10/10 |
+| Device | Backend | gen | e2e | RTF |
+|---|---|--:|--:|--:|
+| MacBook Air M5 | Metal | 9,016 ms | 9,682 ms | 0.957 |
+| RTX 3080 desktop | CUDA | 1,796 ms | 2,146 ms | 0.198 |
+| RTX 3080 desktop | Vulkan | 1,580 ms | 1,912 ms | 0.164 |
+| Strix Halo | Vulkan | 2,330 ms | 2,570 ms | 0.253 |
+| RTX 5090 box | CUDA | 1,338 ms | 1,772 ms | 0.139 |
+| RTX 5090 box | Vulkan | 1,435 ms | 1,864 ms | 0.157 |
 
-We win every lane and every one of the 60 prompt cells. Our Vulkan beats our
-own CUDA on the 3080 (1,580 vs 1,796 ms) — that is the ACE-Step LM running on
-the GPU for every Vulkan device except Mali (PR #234). The widest margin is
-Strix Vulkan at 2.07x. Output QC from the harness: 0 failures and 0 silent
-renders in 360 rounds, 10/10 unique WAV hashes per engine per lane, max
-duration error 1.2 s against the requested song length.
-
-Builds: ours engine `46afe7d9` + ggml `speech@157b299f`; acestep.cpp
-`daf7644d` (upstream HEAD at measurement time) with
-`-DCMAKE_BUILD_TYPE=Release` forced — its shipped `build*.sh` leaves the
-build type unset, which would have produced an unoptimised rival binary.
-
-This supersedes the verdict recorded in
-[`benchmarks/comparison/reports/linux-nvidia-rtx5090/cuda.md`](benchmarks/comparison/reports/linux-nvidia-rtx5090/cuda.md)
-(2026-08-24), where acestep.cpp led on CUDA (2,826 vs our 3,715 ms): the
-result flipped against a newer upstream than that report used.
+Vulkan beats CUDA on the 3080 (1,580 vs 1,796 ms) — that is the ACE-Step LM
+running on the GPU for every Vulkan device except Mali (PR #234). Output QC
+from the harness: no failures and no silent renders in 180 rounds, 10/10
+unique WAV hashes per lane, and duration error at most 1.2 s against the
+requested song length.
 
 ### speech-cpp CI (2026-09-07, CPU + macOS)
 
