@@ -69,7 +69,7 @@ static CoremlDecodeStatus coreml_decode(acestep_coreml_vae_context * ctx, const 
                                         std::vector<float> & pcm_out, const Vae::ProgressCb & on_progress) {
     const int window_frames = (int) acestep_coreml_vae_window_frames(ctx);
     const std::vector<VaeCoremlWindow> plan =
-        vae_coreml_plan_windows(T_latent, window_frames, vae_coreml_window_overlap(window_frames));
+        vae_coreml_plan_windows(T_latent, window_frames, VAE_COREML_OVERLAP);
     if (plan.empty()) return CoremlDecodeStatus::unavailable;
 
     pcm_out.assign((size_t) T_latent * VAE_ENCODER_UPSAMPLE * VAE_PCM_CHANNELS, 0.0f);

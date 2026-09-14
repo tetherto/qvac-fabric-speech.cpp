@@ -408,7 +408,7 @@ python3.11 -m venv .venv-coreml
 . .venv-coreml/bin/activate
 python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
 python engines/audiogen/scripts/export-vae-coreml.py \
-  --gguf models/vae-BF16.gguf --t-latent 352 \
+  --gguf models/vae-BF16.gguf \
   --out models/vae-decoder.mlpackage --compile-dir models
 ```
 
@@ -417,10 +417,23 @@ The compiled sidecar must sit next to the VAE GGUF as
 `vae-decoder.mlmodelc`). The export is fixed-shape; the engine decodes in
 fixed overlapped windows of exactly the exported latent length (the last
 window end-aligned), keeping the same trimmed-core stitching as the ggml
-chunked decode. A latent shorter than one window falls back to ggml. 352
-frames matches the ggml chunker's 256-frame core plus its 48-frame context on
-each side; smaller exports scale the context down, no lower than 8 frames
-(the decoder's latent receptive field is about 6).
+chunked decode. A latent shorter than one window falls back to ggml.
+
+The default 64-frame window is the Neural Engine sweet spot, not a memory
+compromise: the ANE caps the decoder's output width near 131072 samples
+(68 x 1920 still fits, 72 x 1920 splits ops onto the GPU), a 68-frame window
+runs over 2x slower per frame than the 64-aligned one, and a window of 128 or
+more fails ANE compilation outright, leaving a Core ML GPU model an order of
+magnitude slower than ggml Metal. Windows overlap by a fixed 8 frames:
+stitching is bit-exact against a full decode down to a 12-frame overlap (the
+decoder's receptive field) and at 8 the boundary error stays below the
+sidecar's own fp16 conversion error. `--palettize {4,6,8}` additionally
+compresses the weights to a k-means LUT for smaller sidecars; the parity test
+is the quality gate for such exports (measured on the ACE-Step VAE: 8-bit
+passes at cosine 0.9997 and halves the sidecar to 81 MB at unchanged speed,
+6-bit fails the 0.999 gate). The very first load of a new sidecar pays a
+one-time on-device ANE compilation (tens of seconds); the OS caches the
+result for subsequent loads.
 
 The export replaces the two `ConvTranspose1d(kernel 8, stride 4)` upsample
 stages with an exact phase-convolution + depth-to-space form: the native
@@ -431,7 +444,19 @@ against the ggml decode at cosine 0.999 (measured 0.99999).
 
 Set `ACESTEP_COREML_DISABLE=1` to force the ggml decode, including for parity
 or benchmarking. `ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane`
-overrides the default all-units placement for comparisons.
+overrides the default all-units placement for comparisons — on an M5 both
+non-default choices are large regressions (`cpu_and_ane` pushes the
+ANE-declined upsample stages onto the CPU).
+
+`bench-vae-coreml` times the ggml GPU decode against the sidecar on the same
+deterministic 30 s and 60 s latents (median of 3 after a warm-up that absorbs
+the one-time ANE compile) and prints a markdown table; it fails below the
+0.999 parity gate, so its numbers are correctness-checked. The audiogen CI
+macOS lane runs it for the float16 and the 8-bit palettized sidecar and
+appends both tables to the job summary. Measured on an M5 (macOS 26): 1.24x
+over ggml Metal at 30 s, 1.32x at 60 s. In a full `music-cli` generation the
+VAE stage drops from 2.6 s (Metal) to 2.2 s at 30 s and from 5.0 s to 4.0 s
+at 60 s, and the decode leaves the GPU entirely.
 
 ## Build
 

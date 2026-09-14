@@ -310,6 +310,17 @@ if (AUDIOGEN_BUILD_TESTS)
     audiogen_register_test(test-vae-coreml-parity LABEL "integration")
     set_property(TEST test-vae-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
+    # Core ML VAE decode benchmark (ggml GPU vs sidecar, markdown to stdout).
+    # Not a ctest: CI runs it directly and appends its table to the job
+    # summary; it still fails on parity below 0.999, so a wrong-but-fast
+    # sidecar cannot report a win. Same self-skip (77) contract as the
+    # parity test.
+    add_executable(bench-vae-coreml test/bench_vae_coreml.cpp)
+    audiogen_link_in_tree_binary(bench-vae-coreml)
+    if (AUDIOGEN_COREML)
+        target_compile_definitions(bench-vae-coreml PRIVATE AUDIOGEN_USE_COREML)
+    endif()
+
     # Memory-fit preflight. test-acestep-fit-cli is model-free (strict parsers,
     # saturating arithmetic, JSON escaping, CLI exit codes). test-acestep-fit-params
     # asserts the metadata-only projection matches real allocations

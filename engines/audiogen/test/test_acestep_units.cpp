@@ -648,16 +648,13 @@ void test_coreml_plan_windows() {
     using tts_cpp::acestep::vae_coreml_plan_windows;
     using tts_cpp::acestep::VaeCoremlWindow;
 
-    using tts_cpp::acestep::vae_coreml_window_overlap;
-    CHECK(vae_coreml_window_overlap(352) == 48);   // production window keeps the ggml overlap
-    CHECK(vae_coreml_window_overlap(64) == 28);    // small sidecars scale down
-    CHECK(vae_coreml_window_overlap(24) == 8);     // never below the floor
-    CHECK(vae_coreml_window_overlap(1024) == 48);  // never above the ggml overlap
+    using tts_cpp::acestep::VAE_COREML_OVERLAP;
+    CHECK(VAE_COREML_OVERLAP == 8);   // measured bound, see vae_coreml_windows.h
 
     CHECK(vae_coreml_plan_windows(300, 352, 48).empty());   // shorter than one window
     CHECK(vae_coreml_plan_windows(352, 96, 48).empty());    // no core left after overlap
 
-    const std::vector<VaeCoremlWindow> tiny = vae_coreml_plan_windows(740, 64, vae_coreml_window_overlap(64));
+    const std::vector<VaeCoremlWindow> tiny = vae_coreml_plan_windows(740, 64, VAE_COREML_OVERLAP);
     CHECK(!tiny.empty());
     CHECK(tiny.front().core_a == 0 && tiny.back().core_b == 740);
 
