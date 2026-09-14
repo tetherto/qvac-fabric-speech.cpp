@@ -160,7 +160,7 @@ The ACE-Step Core ML sidecar is exported by
 `engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
 Engine operating point, optionally weight-palettized (`--palettize 8` halves
 the sidecar at unchanged speed and quality gate); see the
-[audiogen README](engines/audiogen/README.md#core-ml-vae-decoder-sidecar) for
+[audiogen README](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) for
 the measured constraints and benchmark tooling.
 
 ## Build
@@ -345,7 +345,7 @@ package with `SPEECH_BUILD_TTS=ON`.
 
 `--emotion` and `--pace` work the same way on every engine that supports them;
 each CLI lists its own supported values via `--list-emotions` / `--list-paces`.
-See [Voice conditioning](engines/tts/README.md#voice-conditioning-cross-engine).
+See [Voice conditioning](engines/tts/docs/voice-conditioning.md#voice-conditioning-cross-engine).
 
 ```sh
 ./build/engines/tts/parler-cli --model models/parler-indic-q8_0.gguf \
@@ -361,7 +361,7 @@ See [Voice conditioning](engines/tts/README.md#voice-conditioning-cross-engine).
 
 AudioGen uses four GGUF files for six runtime weight sets. The DiT file also
 contains the FSQ detokenizer and condition encoder; see the
-[AudioGen model setup](engines/audiogen/README.md#model-setup) for the
+[AudioGen model setup](engines/audiogen/docs/pipeline.md#model-setup) for the
 validated file combinations and the download, conversion, and quantization
 steps that produce them.
 
@@ -492,7 +492,7 @@ The macOS arm64 lane runs on the GitHub-hosted `macos-26` runner, whose virtuali
 
 ### Streaming latency
 
-Chatterbox on Apple M4 Metal, 317 speech tokens (12.7 s of audio), `--stream-first-chunk-tokens 10 --stream-chunk-tokens 25 --stream-cfm-steps 1`. Full table: [engines/tts/README.md](engines/tts/README.md#streaming-mode--low-latency-playback).
+Chatterbox on Apple M4 Metal, 317 speech tokens (12.7 s of audio), `--stream-first-chunk-tokens 10 --stream-chunk-tokens 25 --stream-cfm-steps 1`. Full table: [engines/tts/README.md](engines/tts/docs/performance.md#streaming-mode--low-latency-playback).
 
 | Metric | Value |
 |---|--:|
@@ -535,5 +535,6 @@ Per-engine `NOTICE` files list every third-party dependency and its license.
 | ASR, diarization, end-of-utterance | [engines/parakeet/README.md](engines/parakeet/README.md) |
 | Text-to-speech and enhancement | [engines/tts/README.md](engines/tts/README.md) |
 | Music generation | [engines/audiogen/README.md](engines/audiogen/README.md) |
+| Engine deep dives (build, backends, APIs, CLIs, models, tests) | [engines/parakeet/docs/](engines/parakeet/docs), [engines/tts/docs/](engines/tts/docs), [engines/audiogen/docs/](engines/audiogen/docs) |
 | TTS memory behaviour | [engines/tts/MEMORY.md](engines/tts/MEMORY.md) |
 | Development journals | [engines/parakeet/PROGRESS.md](engines/parakeet/PROGRESS.md), [engines/tts/PROGRESS.md](engines/tts/PROGRESS.md) |
