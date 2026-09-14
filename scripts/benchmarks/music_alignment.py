@@ -235,11 +235,14 @@ def score_loaded_audio(model, processor, waveform, sample_rate, caption, device=
 def provenance(manifest):
     import torch
     packages = ('torch', 'transformers', 'numpy', 'scipy', 'tokenizers', 'huggingface-hub')
+    # platform.platform() probes the processor with an external `uname` on Unix.
+    # These uname fields come from the OS directly, without a subprocess.
+    system = platform.uname()
     return {'model_id': manifest['model_id'], 'revision': manifest['revision'], 'files': manifest['files'],
             'device': 'cpu', 'dtype': 'float32', 'threads': 1,
             'inter_op_threads': torch.get_num_interop_threads(),
             'wave_decoder': {'name': 'scipy.io.wavfile', 'version': importlib.metadata.version('scipy')}, 'python': platform.python_version(),
-            'platform': platform.platform(),
+            'platform': '-'.join((system.system, system.release, system.machine)),
             'dependencies': {name: importlib.metadata.version(name) for name in packages},
             'sampling_rate': SAMPLE_RATE, 'window_samples': WINDOW_SAMPLES,
             'mono': 'arithmetic-mean', 'resampler': 'scipy.signal.resample_poly',

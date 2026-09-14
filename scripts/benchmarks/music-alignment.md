@@ -17,6 +17,8 @@ Linux requires glibc 2.28 or later. The security-updated runtime uses Torch 2.13
 and Transformers 5.17.0; use the recorded dependency versions when comparing
 scores. Rescoring retained ACE-Step audio changed cosine by approximately
 2.81e-7 from the Torch 2.6.0 / Transformers 5.5.4 environment on Linux.
+See the [dependency capability review](music-alignment-security.md) for the
+remaining Socket findings, their dispositions and the limits of runtime tracing.
 
 ```sh
 python3.12 -m venv .venv-music-alignment
