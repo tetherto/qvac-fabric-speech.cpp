@@ -161,7 +161,33 @@ WER_MEDIAN="null"          # numeric WER in [0,1] or null (kind='wer' only)
 DER_MEDIAN="null"          # numeric DER in [0,1] or null (kind='der' only)
 F1_MEDIAN="null"           # numeric F1  in [0,1] or null (kind='f1'  only)
 CORRECTNESS_KIND="null"    # "wer" | "der" | "f1" | null
+AUDIO_QUALITY="null"
 CORRECTNESS_REF="null"     # repo-relative path to the reference file or null
+TTS_INTELLIGIBILITY="null"
+TTS_KIND="$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")"
+TTS_TEXT=""
+TTS_AUDIO_OUT=""
+if [[ "$TTS_KIND" == "tts_intelligibility" ]]; then
+  CORRECTNESS_KIND='"tts_intelligibility"'
+  CORRECTNESS_REF="$(jq --arg f "$FAMILY" '.[$f].correctness.reference' "$FAMILIES_JSON")"
+  TTS_INTELLIGIBILITY='{"status":"unavailable","wer":null,"reason":"synthesis has not completed"}'
+  # Clear only artifacts owned by this result, including early-failure paths.
+  python3 - "$OUT" <<'PY'
+import pathlib, sys
+base = pathlib.Path(sys.argv[1])
+stem = str(base)[:-5] if str(base).endswith('.json') else str(base)
+for suffix in ('.tts.wav', '.tts-reference.txt', '.tts-transcript.txt', '.tts-asr.log', '.tts-intelligibility.json'):
+    pathlib.Path(stem + suffix).unlink(missing_ok=True)
+PY
+fi
+# Audio artifacts belong to this invocation, including when a later run fails.
+case "$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")" in
+  audio|sisdr|stoi)
+    for suffix in reference.wav input.wav hypothesis.wav audio-quality.json input-preparation.json; do
+      rm -f -- "${OUT%.json}.$suffix"
+    done
+    ;;
+esac
 
 emit_json() {
   local status="$1" median="${2:-null}" wmin="${3:-null}" wmax="${4:-null}" extra="${5:-}"
@@ -191,8 +217,10 @@ emit_json() {
     --argjson wer_median  "$WER_MEDIAN" \
     --argjson der_median  "$DER_MEDIAN" \
     --argjson f1_median   "$F1_MEDIAN" \
+    --argjson audio_quality "$AUDIO_QUALITY" \
     --argjson correctness_kind "$CORRECTNESS_KIND" \
     --argjson correctness_reference "$CORRECTNESS_REF" \
+    --argjson tts_intelligibility "$TTS_INTELLIGIBILITY" \
     --arg  status "$status" \
     --arg  notes  "$NOTES$extra" \
     '{family:$family, model:$model, runner:$runner, os:$os, backend:$backend,
@@ -208,8 +236,10 @@ emit_json() {
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
       wer_median:$wer_median, der_median:$der_median, f1_median:$f1_median,
+      audio_quality:$audio_quality,
       correctness_kind:$correctness_kind,
       correctness_reference:$correctness_reference,
+      tts_intelligibility:$tts_intelligibility,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
   echo "wrote $OUT"
   cat "$OUT" >&2
@@ -397,6 +427,48 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 JSON_OUT="$tmp_dir/native.json"
+AUDIO_OUT="$tmp_dir/unused.wav"
+AUDIO_INPUT=""
+AUDIO_REFERENCE=""
+AUDIO_KIND="$(jq -r --arg f "$FAMILY" '.[$f].correctness.kind // ""' "$FAMILIES_JSON")"
+AUDIO_PYTHON="${AUDIO_QUALITY_PYTHON:-python3}"
+case "$AUDIO_KIND" in
+  audio|sisdr|stoi)
+    AUDIO_REFERENCE="$(jq -r --arg f "$FAMILY" '.[$f].correctness.reference // ""' "$FAMILIES_JSON")"
+    if [[ "$AUDIO_REFERENCE" != /* ]]; then
+      AUDIO_REFERENCE="$(cd "$(dirname "$0")/../.." && pwd)/$AUDIO_REFERENCE"
+    fi
+    AUDIO_INPUT="$AUDIO_REFERENCE"
+    if jq -e --arg f "$FAMILY" '.[$f].correctness.degradation != null' "$FAMILIES_JSON" >/dev/null; then
+      AUDIO_INPUT="$tmp_dir/degraded.wav"
+      snr="$(jq -r --arg f "$FAMILY" '.[$f].correctness.degradation.snr_db' "$FAMILIES_JSON")"
+      seed="$(jq -r --arg f "$FAMILY" '.[$f].correctness.degradation.seed' "$FAMILIES_JSON")"
+      if ! "$AUDIO_PYTHON" "$(dirname "$0")/prepare-audio-quality.py" \
+          --reference "$AUDIO_REFERENCE" --reference-output "$tmp_dir/reference.wav" --output "$AUDIO_INPUT" --snr-db "$snr" --seed "$seed" \
+          > "${OUT%.json}.input-preparation.json"; then
+        emit_json "run-failed" null null null " (audio input preparation failed)"
+        exit 0
+      fi
+      AUDIO_REFERENCE="$tmp_dir/reference.wav"
+    fi
+    ;;
+esac
+
+if [[ "$TTS_KIND" == "tts_intelligibility" ]]; then
+  tts_reference="$(jq -r --arg f "$FAMILY" '.[$f].correctness.reference' "$FAMILIES_JSON")"
+  if [[ "$tts_reference" != /* ]]; then
+    tts_reference="$(cd "$(dirname "$0")/../.." && pwd)/$tts_reference"
+  fi
+  if [[ ! -s "$tts_reference" ]]; then
+    emit_json "run-failed" null null null " (TTS prompt fixture missing or empty)"; exit 0
+  fi
+  TTS_TEXT="$(cat "$tts_reference"; printf '.')"
+  TTS_TEXT="${TTS_TEXT%.}"
+  TTS_AUDIO_OUT="$tmp_dir/native.wav"
+  tts_asr_preparation="$(python3 "$(dirname "$0")/prepare-tts-asr.py" \
+    --spec "$FAMILIES_JSON" --family "$FAMILY" --models-root "$MODELS_ROOT" || true)"
+  tts_asr_model="$(printf '%s' "$tts_asr_preparation" | jq -r '.model // ""')"
+fi
 
 # The Core ML bundle is derived from the exact F16 model under test. A restored
 # Actions cache makes this a no-op on subsequent runs; the first run exports and
@@ -437,22 +509,27 @@ fi
 # substitution table.
 expand_placeholder() {
   local s="$1"
+  if [[ "$s" == '${TTS_TEXT}' ]]; then printf '%s' "$TTS_TEXT"; return; fi
   s="${s//\$\{MODEL_DIR\}/$MODEL_DIR}"
   s="${s//\$\{MODELS_ROOT\}/$MODELS_ROOT}"
   s="${s//\$\{AUDIO_DIR\}/$AUDIO_DIR}"
+  s="${s//\$\{AUDIO_INPUT\}/$AUDIO_INPUT}"
+  s="${s//\$\{AUDIO_OUT\}/$AUDIO_OUT}"
   s="${s//\$\{MODEL_PATH\}/${MODEL_PATH:-}}"
   s="${s//\$\{RUNS\}/$RUNS}"
   s="${s//\$\{WARMUP\}/$WARMUP}"
   s="${s//\$\{JSON_OUT\}/$JSON_OUT}"
+  s="${s//\$\{TTS_AUDIO_OUT\}/$TTS_AUDIO_OUT}"
   printf '%s' "$s"
 }
 
 BENCH_ARGS=()
 build_bench_args() {
   BENCH_ARGS=()
-  local line=""
+  local line="" expanded=""
   while IFS= read -r line; do
-    BENCH_ARGS+=("$(expand_placeholder "$line")")
+    expanded="$(expand_placeholder "$line"; printf '.')"
+    BENCH_ARGS+=("${expanded%.}")
   done < <(jq -r --arg family "$FAMILY" '.[$family].args[]?' "$FAMILIES_JSON")
 }
 build_bench_args
@@ -574,8 +651,11 @@ score_correctness() {
 
   # No correctness block — silent no-op (the common case).
   if [[ -z "$spec_kind" ]]; then return 0; fi
+  # The audio-based TTS path runs separately in the parent shell.
+  if [[ "$spec_kind" == "tts_intelligibility" ]]; then return 0; fi
 
   case "$spec_kind" in
+    audio|sisdr|stoi) return 0 ;;
     wer|der|f1) : ;;
     *)
       echo "$FAMILY: unsupported correctness.kind '$spec_kind' (known: wer, der, f1)" >&2
@@ -787,11 +867,16 @@ run_native() {
 # ---- time-wrapped bench: N invocations, we take the median ------------------
 run_one_time_wrapped() {
   local iter="$1" stderr_log="$2" rss_log="$3"
+  if [[ "$TTS_KIND" == "tts_intelligibility" ]]; then
+    TTS_AUDIO_OUT="${stderr_log}.wav"
+  fi
   # stderr_log MUST exist by function-exit — the caller cat's it into the
   # combined log even on failure. Touch first, then let wrap_time's redirect
   # append its stderr.
   : > "$stderr_log"
   : > "$rss_log"
+  AUDIO_OUT="$stderr_log.wav"
+  build_bench_args
   local start_ns end_ns
   start_ns="$(now_ns)"
   if ! wrap_time "$BINARY" ${BENCH_ARGS[@]+"${BENCH_ARGS[@]}"} > "$stderr_log.stdout" 2> "$rss_log"; then
@@ -804,7 +889,64 @@ run_one_time_wrapped() {
   awk -v s="$start_ns" -v e="$end_ns" 'BEGIN { printf "%.1f", (e - s) / 1000000.0 }'
 }
 
+score_audio_correctness() {
+  case "$AUDIO_KIND" in audio|sisdr|stoi) ;; *) return 0 ;; esac
+  local hypothesis="$1" metrics report
+  report="${OUT%.json}.audio-quality.json"
+  metrics="$(jq -r --arg f "$FAMILY" '.[$f].correctness | if .kind == "audio" then (.metrics | join(",")) else .kind end' "$FAMILIES_JSON")"
+  CORRECTNESS_KIND='"audio"'
+  CORRECTNESS_REF="$(jq --arg f "$FAMILY" '.[$f].correctness.reference' "$FAMILIES_JSON")"
+  if "$AUDIO_PYTHON" "$(dirname "$0")/compute-audio-quality.py" \
+      --reference "$AUDIO_REFERENCE" --hypothesis-file "$hypothesis" \
+      --metrics "$metrics" --json-out "$report" > "$tmp_dir/audio-score.stdout"; then
+    if jq -e '.metrics | type == "object"' "$report" >/dev/null 2>&1; then
+      AUDIO_QUALITY="$(jq -c '.metrics' "$report")"
+    fi
+  else
+    echo "$FAMILY: audio quality scorer failed; performance results retained" >&2
+  fi
+  local source suffix
+  for suffix in reference input hypothesis; do
+    case "$suffix" in
+      reference) source="$AUDIO_REFERENCE" ;;
+      input) source="$AUDIO_INPUT" ;;
+      hypothesis) source="$hypothesis" ;;
+    esac
+    if [[ -f "$source" ]]; then
+      cp "$source" "${OUT%.json}.$suffix.wav" || echo "warning: cannot preserve $suffix WAV" >&2
+    fi
+  done
+}
+
 # ---- run --------------------------------------------------------------------
+score_tts_intelligibility() {
+  [[ "$TTS_KIND" == "tts_intelligibility" ]] || return 0
+  local audio="$1" artifact_base="${OUT%.json}"
+  if ! cp "$tts_reference" "$artifact_base.tts-reference.txt" ||
+     { [[ -f "$audio" ]] && ! cp "$audio" "$artifact_base.tts.wav"; }; then
+    TTS_INTELLIGIBILITY='{"status":"error","wer":null,"reason":"could not preserve TTS input/output artifacts"}'
+    printf '%s\n' "$TTS_INTELLIGIBILITY" > "$artifact_base.tts-intelligibility.json" || true
+    return 0
+  fi
+  if [[ -z "$tts_asr_model" ]]; then
+    TTS_INTELLIGIBILITY="$(printf '%s' "$tts_asr_preparation" | jq '. + {wer:null,kind:"tts_intelligibility"}')"
+    printf '%s\n' "$TTS_INTELLIGIBILITY" > "$artifact_base.tts-intelligibility.json"
+    return 0
+  fi
+  python3 "$(dirname "$0")/compute-tts-intelligibility.py" \
+    --audio "$artifact_base.tts.wav" --reference "$artifact_base.tts-reference.txt" \
+    --asr-binary "$BUILD_DIR/bin/whisper-cli" --asr-model "$tts_asr_model" \
+    --json-out "$artifact_base.tts-intelligibility.json" \
+    --transcript-out "$artifact_base.tts-transcript.txt" \
+    --log-out "$artifact_base.tts-asr.log" > "$tmp_dir/tts-score.stdout" || true
+  if [[ -s "$artifact_base.tts-intelligibility.json" ]]; then
+    TTS_INTELLIGIBILITY="$(cat "$artifact_base.tts-intelligibility.json")"
+  else
+    TTS_INTELLIGIBILITY='{"status":"error","wer":null,"reason":"TTS scorer failed without a result"}'
+    printf '%s\n' "$TTS_INTELLIGIBILITY" > "$artifact_base.tts-intelligibility.json"
+  fi
+}
+
 case "$BENCH_KIND" in
   native)
     coreml_compare="$(spec_field coreml_compare_on_darwin)"
@@ -954,6 +1096,7 @@ case "$BENCH_KIND" in
       [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s'  "$c_ref"  | jq -R .)"
     fi
 
+    score_tts_intelligibility "$TTS_AUDIO_OUT"
     emit_json "ok" "$n_med" "$n_min" "$n_max"
     ;;
 
@@ -1051,6 +1194,8 @@ case "$BENCH_KIND" in
       fi
     fi
 
+    score_tts_intelligibility "${r_stderr}.wav"
+    score_audio_correctness "$r_stderr.wav"
     emit_json "ok" "$med" "$mn" "$mx"
     ;;
 

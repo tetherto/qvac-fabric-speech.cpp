@@ -15,7 +15,7 @@
 // Usage:
 //   ./parler-bench --model parler-indic-q8_0.gguf --text "..." \
 //       [--description DESC] [--n-gpu-layers N] [--threads N] \
-//       [--max-frames N] [--seed 42] [--runs 5] [--warmup 1] [--json-out f.json]
+//       [--max-frames N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
 
 #include "internal.h"
 #include "tokenizer.h"
@@ -24,6 +24,7 @@
 #include "delay.h"
 #include "sampler.h"
 #include "backend_selection.h"
+#include "bench_wav.h"
 #include "backend_util.h"
 
 #include <algorithm>
@@ -56,7 +57,7 @@ void usage(const char * argv0) {
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
         "          [--threads N] [--max-frames N] (decoder steps; ~86/s audio)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
-        "          [--runs 5] [--warmup 1] [--json-out FILE]\n",
+        "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
         argv0);
 }
 
@@ -114,7 +115,7 @@ void write_json_stage(std::ofstream & os, const Stage & s, bool comma) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string model_path, text, json_out;
+    std::string model_path, text, json_out, wav_out;
     std::string description =
         "A female speaker with a calm, clear voice, close up, studio quality "
         "with no background noise.";
@@ -142,9 +143,14 @@ int main(int argc, char ** argv) {
         else if (a == "--runs")         runs        = std::stoi(next("--runs"));
         else if (a == "--warmup")       warmup      = std::stoi(next("--warmup"));
         else if (a == "--sampled")      greedy      = false;
+        else if (a == "--wav-out")      wav_out     = next("--wav-out");
         else if (a == "--json-out")     json_out    = next("--json-out");
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+    if (runs <= 0 || warmup < 0 || warmup > std::numeric_limits<int>::max() - runs) {
+        fprintf(stderr, "--runs must be positive and --warmup nonnegative (without overflow)\n");
+        return 2;
     }
     if (model_path.empty() || text.empty()) { usage(argv[0]); return 2; }
 
@@ -208,6 +214,8 @@ int main(int argc, char ** argv) {
     double last_audio_s = 0.0;
     int    last_steps = 0;
 
+    // Retain only the final measured synthesis; WAV conversion and I/O are untimed.
+    std::vector<float> last_pcm;
     const int total_runs = runs + warmup;
     for (int r = 0; r < total_runs; ++r) {
         const bool record = r >= warmup;
@@ -269,9 +277,19 @@ int main(int argc, char ** argv) {
             last_audio_s = audio_s;
             last_steps = steps;
         }
+        if (!wav_out.empty() && record && r + 1 == total_runs) last_pcm.swap(pcm);
         fprintf(stderr, "[run %d/%d]%s total=%.1fms audio=%.2fs steps=%d RTF=%.3f\n",
                 r + 1, total_runs, record ? "" : " (warmup)",
                 tot_ms, audio_s, steps, audio_s > 0 ? (tot_ms / 1000.0) / audio_s : 0.0);
+    }
+
+    if (!wav_out.empty()) {
+        std::string wav_error;
+        if (!bench_write_wav(wav_out, last_pcm, hp.dac_sample_rate, wav_error)) {
+            fprintf(stderr, "%s\n", wav_error.c_str());
+            ggml_gallocr_free(allocr); parler_free_model(model);
+            return 1;
+        }
     }
 
     printf("\nParler-TTS C++ benchmark\n");
