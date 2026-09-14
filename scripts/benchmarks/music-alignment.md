@@ -11,8 +11,12 @@ Use Python 3.12 and a separate environment. The resolved dependency pins were
 validated on Linux with CPU Torch. macOS uses its native PyPI Torch build;
 measure repeatability separately before comparing across scorer platforms.
 The shared lock requires SHA-256-verified wheels for CPython 3.12 on Linux x86_64
-and macOS arm64, including Torch; source builds and unpinned dependency installs
+and macOS 14+ arm64, including Torch; source builds and unpinned dependency installs
 are disabled. The comparison scorer uses this same lock.
+Linux requires glibc 2.28 or later. The security-updated runtime uses Torch 2.13.0
+and Transformers 5.10.0; use the recorded dependency versions when comparing
+scores. Rescoring retained ACE-Step audio changed cosine by approximately
+2.81e-7 from the Torch 2.6.0 / Transformers 5.5.4 environment on Linux.
 
 ```sh
 python3.12 -m venv .venv-music-alignment

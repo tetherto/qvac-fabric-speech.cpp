@@ -1,4 +1,4 @@
-# CPython 3.12: Linux x86_64 CPU and macOS arm64 only.
+# CPython 3.12: Linux x86_64 CPU (glibc 2.28+) and macOS 14+ arm64 only.
 # Lock contains official compatible wheels only; no source distributions or unpinned installs.
 --only-binary=:all:
 --require-hashes
@@ -91,30 +91,30 @@ scipy==1.15.3 \
     --hash=sha256:185cd3d6d05ca4b44a8f1595af87f9c372bb6acf9c808e99aa3e9aa03bd98cf6 \
     --hash=sha256:271e3713e645149ea5ea3e97b57fdab61ce61333f97cfae392c28ba786f9bb49
 
-setuptools==82.0.1 \
-    --hash=sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb
+setuptools==83.0.0 \
+    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3
 
 shellingham==1.5.4 \
     --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686
 
-sympy==1.13.1 \
-    --hash=sha256:db36cdc64bf61b9b24578b6f7bab1ecdd2452cf008f34faa33776680c26d66f8
+sympy==1.13.3 \
+    --hash=sha256:54612cf55a62755ee71824ce692986f23c88ffa77207b30c1368eda4a7060f73
 
 tokenizers==0.22.2 \
     --hash=sha256:1e418a55456beedca4621dbab65a318981467a2b188e982a23e117f115ce5001 \
     --hash=sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67
 
-torch @ https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp312-cp312-linux_x86_64.whl ; sys_platform == "linux" \
-    --hash=sha256:59e78aa0c690f70734e42670036d6b541930b8eabbaa18d94e090abf14cc4d91
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl ; sys_platform == "linux" \
+    --hash=sha256:4ca4a9394b0c771238a4f73590fdbbc4debad85ed0fa63d026ae1b085da7d6e2
 
-torch==2.6.0 ; sys_platform == "darwin" \
-    --hash=sha256:9a610afe216a85a8b9bc9f8365ed561535c93e804c2a317ef7fabcc5deda0989
+torch==2.13.0 ; sys_platform == "darwin" \
+    --hash=sha256:2fe228aba290d14b9f31b049be550dbd469c3fd3013d7a19705b30454da97027
 
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
 
-transformers==5.5.4 \
-    --hash=sha256:0bd6281b82966fe5a7a16f553ea517a9db1dee6284d7cb224dfd88fc0dd1c167
+transformers==5.10.0 \
+    --hash=sha256:eae143e46d8e521da604bc4fdc45af7dd90e96eacbbc27f68d2754150aa5175a
 
 typer==0.27.2 \
     --hash=sha256:b3a5fc4342d5fc8fda8fc3010b1cf117e9249aab7fae800c2eff62fd3842d97d
