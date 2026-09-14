@@ -46,6 +46,13 @@ else()
     set(AUDIOGEN_MINIMAX_DEFAULT ON)
 endif()
 option(AUDIOGEN_BUILD_MINIMAX "audiogen-cpp: build the desktop MiniMax-Music3 engine (CPU default, GPU via EngineOptions::device)" ${AUDIOGEN_MINIMAX_DEFAULT})
+option(AUDIOGEN_COREML "audiogen-cpp: enable the Apple Core ML (Neural Engine) VAE decoder sidecar (Apple-only, additive; ACE-Step decodes on a <vae>-decoder.mlmodelc next to the VAE GGUF when present, else falls back to the ggml decode)." OFF)
+if (AUDIOGEN_COREML)
+    if (NOT APPLE)
+        message(FATAL_ERROR "AUDIOGEN_COREML is Apple-only (requires the CoreML framework); leave it OFF on ${CMAKE_SYSTEM_NAME}.")
+    endif()
+    enable_language(OBJCXX)
+endif()
 if (AUDIOGEN_MOBILE)
     set(AUDIOGEN_BUILD_MINIMAX OFF CACHE BOOL "audiogen-cpp: MiniMax-Music3 is unavailable on mobile" FORCE)
 endif()
@@ -97,6 +104,7 @@ set(AUDIOGEN_LIB_SOURCES
     src/acestep/vae_gguf.cpp
     src/acestep/vae_ggml.cpp
     src/acestep/vae_encode_windows.cpp
+    src/acestep/vae_coreml_path.cpp
     src/acestep/vae_api.cpp
     src/acestep/wav_reader.cpp
     src/acestep/dit_gguf.cpp
@@ -124,6 +132,12 @@ if (AUDIOGEN_BUILD_MINIMAX)
     )
 endif()
 
+if (AUDIOGEN_COREML)
+    list(APPEND AUDIOGEN_LIB_SOURCES src/coreml/vae-decoder.mm)
+    set_source_files_properties(src/coreml/vae-decoder.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
+
 if (AUDIOGEN_BUILD_LIBRARY)
     # Compile once. The installed/exported library follows BUILD_SHARED_LIBS
     # (shared under the umbrella, because whisper caches ON). In-tree CLIs and
@@ -141,6 +155,16 @@ if (AUDIOGEN_BUILD_LIBRARY)
             $<$<BOOL:${AUDIOGEN_BUILD_MINIMAX}>:${CMAKE_CURRENT_SOURCE_DIR}/src/minimax>
     )
     target_link_libraries(audiogen-cpp-objects PUBLIC ggml)
+    if (AUDIOGEN_COREML)
+        find_library(AUDIOGEN_COREML_FRAMEWORK     CoreML     REQUIRED)
+        find_library(AUDIOGEN_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        target_compile_definitions(audiogen-cpp-objects PRIVATE AUDIOGEN_USE_COREML)
+        target_link_libraries(audiogen-cpp-objects PUBLIC
+            ${AUDIOGEN_COREML_FRAMEWORK}
+            ${AUDIOGEN_FOUNDATION_FRAMEWORK}
+        )
+        message(STATUS "audiogen: Core ML VAE decoder sidecar enabled (AUDIOGEN_USE_COREML)")
+    endif()
     set_target_properties(audiogen-cpp-objects PROPERTIES
         POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET     hidden
@@ -160,6 +184,12 @@ if (AUDIOGEN_BUILD_LIBRARY)
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
     target_link_libraries(audiogen-cpp PUBLIC ggml)
+    if (AUDIOGEN_COREML)
+        target_link_libraries(audiogen-cpp PUBLIC
+            ${AUDIOGEN_COREML_FRAMEWORK}
+            ${AUDIOGEN_FOUNDATION_FRAMEWORK}
+        )
+    endif()
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -268,6 +298,17 @@ if (AUDIOGEN_BUILD_TESTS)
     audiogen_link_in_tree_binary(test-acestep-integration)
     audiogen_register_test(test-acestep-integration LABEL "integration")
     set_property(TEST test-acestep-integration PROPERTY SKIP_RETURN_CODE 77)
+
+    # Core ML VAE decoder parity vs the ggml decode. Compiled on every
+    # platform; self-skips (77) without AUDIOGEN_COREML, a staged
+    # AUDIOGEN_TEST_MODELS_DIR, or a compiled vae-decoder.mlmodelc.
+    add_executable(test-vae-coreml-parity test/test_vae_coreml_parity.cpp)
+    audiogen_link_in_tree_binary(test-vae-coreml-parity)
+    if (AUDIOGEN_COREML)
+        target_compile_definitions(test-vae-coreml-parity PRIVATE AUDIOGEN_USE_COREML)
+    endif()
+    audiogen_register_test(test-vae-coreml-parity LABEL "integration")
+    set_property(TEST test-vae-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
     # Memory-fit preflight. test-acestep-fit-cli is model-free (strict parsers,
     # saturating arithmetic, JSON escaping, CLI exit codes). test-acestep-fit-params

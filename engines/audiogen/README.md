@@ -7,7 +7,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | CMake project | `audiogen-cpp` v0.1.0 |
 | Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine` |
 | Output | interleaved stereo PCM, model-defined sample rate, `pcm[t * 2 + ch]` |
-| Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA |
+| Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
 | ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
 | Consumed by | the `@qvac/audiogen-ggml` addon in [QVAC](https://github.com/tetherto/qvac) |
 
@@ -395,6 +395,44 @@ shrinks the core window when needed; short inputs remain a single graph.
 `ACESTEP_VAE_WIN_CORE` can pin the core only for diagnostics. VAE encode is not
 windowed and still allocates one full graph.
 
+## Core ML VAE decoder sidecar
+
+`AUDIOGEN_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for
+the ACE-Step Oobleck VAE decoder — the stage that dominates generation time at
+song lengths on Apple GPUs — running it predominantly on the Neural Engine.
+Every other stage stays on ggml, and the decoder falls back to ggml on any
+sidecar failure. Export it from the VAE GGUF:
+
+```bash
+python3.11 -m venv .venv-coreml
+. .venv-coreml/bin/activate
+python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+python engines/audiogen/scripts/export-vae-coreml.py \
+  --gguf models/vae-BF16.gguf --t-latent 352 \
+  --out models/vae-decoder.mlpackage --compile-dir models
+```
+
+The compiled sidecar must sit next to the VAE GGUF as
+`<basename-minus-quant>-decoder.mlmodelc` (`vae-BF16.gguf` resolves to
+`vae-decoder.mlmodelc`). The export is fixed-shape; the engine decodes in
+fixed overlapped windows of exactly the exported latent length (the last
+window end-aligned), keeping the same trimmed-core stitching as the ggml
+chunked decode. A latent shorter than one window falls back to ggml. 352
+frames matches the ggml chunker's 256-frame core plus its 48-frame context on
+each side; smaller exports scale the context down, no lower than 8 frames
+(the decoder's latent receptive field is about 6).
+
+The export replaces the two `ConvTranspose1d(kernel 8, stride 4)` upsample
+stages with an exact phase-convolution + depth-to-space form: the native
+operation miscomputes on the Apple Neural Engine (measured on an M5, macOS 26:
+output cosine 0.71 vs CPU at any size), while the phase form matches the CPU
+reference at fp16 rounding error. `test-vae-coreml-parity` gates the sidecar
+against the ggml decode at cosine 0.999 (measured 0.99999).
+
+Set `ACESTEP_COREML_DISABLE=1` to force the ggml decode, including for parity
+or benchmarking. `ACESTEP_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane`
+overrides the default all-units placement for comparisons.
+
 ## Build
 
 Standalone from the repository root, against an installed `ggml-speech`:
@@ -427,6 +465,7 @@ directory such as `Release/` beneath the executable directory. See the
 | `AUDIOGEN_BUILD_EXECUTABLES` | `ON` standalone, `OFF` as a subdirectory | CLIs and per-stage smoke harnesses |
 | `AUDIOGEN_BUILD_TESTS` | `ON` standalone, `OFF` as a subdirectory | unit, integration, and backend parity tests |
 | `AUDIOGEN_BUILD_MINIMAX` | `ON` on desktop, unavailable on Android and iOS | MiniMax-Music3 engine; CPU by default, GPU through `EngineOptions::device` |
+| `AUDIOGEN_COREML` | `OFF` | Apple-only Core ML (Neural Engine) VAE decoder sidecar; see [Core ML VAE decoder sidecar](#core-ml-vae-decoder-sidecar) |
 | `AUDIOGEN_INSTALL` | `ON` | generate install rules |
 | `AUDIOGEN_USE_SYSTEM_GGML` | `ON` | `find_package(ggml)`; required, there is no supported vendored ggml in this tree |
 | `AUDIOGEN_CCACHE` | `ON` | use ccache when available |
