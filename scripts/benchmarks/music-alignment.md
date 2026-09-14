@@ -10,12 +10,12 @@ is no quality threshold. The existing performance workload remains the default.
 Use Python 3.12 and a separate environment. The resolved dependency pins were
 validated on Linux with CPU Torch. macOS uses its native PyPI Torch build;
 measure repeatability separately before comparing across scorer platforms.
+The shared lock requires SHA-256-verified wheels for CPython 3.12 on Linux x86_64
+and macOS arm64, including Torch; source builds and unpinned dependency installs
+are disabled. The comparison scorer uses this same lock.
 
 ```sh
 python3.12 -m venv .venv-music-alignment
-# Linux only: install the CPU wheel before the full requirements.
-.venv-music-alignment/bin/python -m pip install 'torch==2.6.0+cpu' \
-  --index-url https://download.pytorch.org/whl/cpu
 .venv-music-alignment/bin/python -m pip install \
   -r scripts/benchmarks/requirements-music-alignment.txt
 .venv-music-alignment/bin/python -m pip check
@@ -77,12 +77,14 @@ for music families and installs/caches its optional dependencies.
 
 ## Scoring policy
 
-`clap-music-v1` uses caption-only text with an explicit tokenizer-length check;
+`clap-music-v2` uses caption-only text with an explicit tokenizer-length check;
 it never silently truncates a caption. Decode PCM, reject empty/nonfinite/all-zero
 audio and all-zero mono cancellation, average channels, and resample with pinned
 SciPy `resample_poly` (Kaiser 5.0, constant padding) to 48 kHz. There is no loudness
 normalization. RMS, peak, clipping fraction, channel energy and source WAV hash
 are diagnostic metadata; quiet music is not assigned an arbitrary failure cutoff.
+SciPy decodes PCM8/16/24/32 and floating-point WAV directly; SoundFile, CFFI and
+pycparser are not required. Unsupported codecs and truncated WAVs fail explicitly.
 
 Partition from sample zero into consecutive ten-second windows. Zero-pad only
 the final short window. Score each full window, retaining its original valid

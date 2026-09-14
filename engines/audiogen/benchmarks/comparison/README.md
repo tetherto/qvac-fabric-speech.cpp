@@ -39,7 +39,7 @@ Install through the host package manager, then review local source before
 building:
 
 - CMake >= 3.20, a C++17 compiler, git, Node.js 20+
-- Python is optional. CLAP scoring needs Python 3.10+ and the pins in
+- Python is optional. CLAP scoring needs Python 3.12 and the pins in
   `quality/requirements.txt`. Fréchet Audio Distance is not run by default
   because this harness does not ship a licensed reference corpus.
 - CUDA builds require the NVIDIA CUDA toolkit. RTX 50-series native (`sm_120`)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,76 @@ import music_alignment as music
 
 
 class MusicAlignmentTests(unittest.TestCase):
+    def test_wav_integer_normalization_and_stereo_shape(self):
+        from scipy.io import wavfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'samples.wav'
+            for dtype, values, expected in (
+                (np.uint8, [0, 128, 255], [-1., 0., 127 / 128]),
+                (np.int16, [-32768, 0, 32767], [-1., 0., 32767 / 32768]),
+                (np.int32, [-2147483648, 0, 2147483647], [-1., 0., 2147483647 / 2147483648]),
+            ):
+                with self.subTest(dtype=dtype):
+                    pcm = np.array([values, values], dtype=dtype).T
+                    wavfile.write(path, 44100, pcm)
+                    audio, rate = music.read_wav(path)
+                    self.assertEqual(rate, 44100)
+                    self.assertEqual(audio.shape, (3, 2))
+                    self.assertEqual(audio.dtype, np.float64)
+                    np.testing.assert_array_equal(audio[:, 0], expected)
+                    np.testing.assert_array_equal(audio[:, 1], expected)
+
+    def test_wav_pcm24_uses_left_aligned_scale(self):
+        # scipy writes int32 as 32-bit PCM; use the standard WAV writer to
+        # exercise an actual packed three-byte PCM payload.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'pcm24.wav'
+            values = [-8388608, -1, 0, 1, 8388607]
+            with wave.open(str(path), 'wb') as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(3)
+                stream.setframerate(48000)
+                stream.writeframes(b''.join(x.to_bytes(3, 'little', signed=True) for x in values))
+            audio, rate = music.read_wav(path)
+            self.assertEqual(audio.shape, (5, 1))
+            np.testing.assert_array_equal(audio[:, 0], np.array(values) / 8388608)
+
+    def test_float_wav_preserves_amplitude_and_invalid_values(self):
+        from scipy.io import wavfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'float.wav'
+            for dtype in (np.float32, np.float64):
+                source = np.array([-.25, .5, 1.5], dtype=dtype)
+                wavfile.write(path, 48000, source)
+                audio, rate = music.read_wav(path)
+                np.testing.assert_array_equal(audio[:, 0], source)
+                self.assertEqual(audio.shape, (3, 1))
+                for invalid in (float('nan'), float('inf')):
+                    wavfile.write(path, 48000, np.array([invalid], dtype=dtype))
+                    audio, rate = music.read_wav(path)
+                    with self.assertRaises(music.AlignmentError):
+                        music.validate_audio(audio, rate)
+
+    def test_wav_rejects_other_containers_corrupt_and_compressed(self):
+        from scipy.io import wavfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'audio.wav'
+            for payload in (b'', b'not a wav', b'fLaC' + b'\0' * 32):
+                path.write_bytes(payload)
+                with self.assertRaises(music.AlignmentError) as error:
+                    music.read_wav(path)
+                self.assertEqual(error.exception.status, 'invalid-audio')
+            wavfile.write(path, 48000, np.ones(8, dtype=np.int16))
+            original = path.read_bytes()
+            path.write_bytes(original[:-4])
+            with self.assertRaises(music.AlignmentError):
+                music.read_wav(path)
+            payload = bytearray(original)
+            payload[20:22] = (7).to_bytes(2, 'little')  # mu-law is unsupported
+            path.write_bytes(payload)
+            with self.assertRaises(music.AlignmentError):
+                music.read_wav(path)
+
     def test_windows_preserve_tail_and_do_not_repeat_short_audio(self):
         windows = list(music.fixed_windows(np.arange(7, dtype=np.float32), 3))
         self.assertEqual([(x[0], x[1]) for x in windows], [(0, 3), (3, 3), (6, 1)])

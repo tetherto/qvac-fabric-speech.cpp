@@ -15,7 +15,7 @@ import re
 import time
 from pathlib import Path
 
-POLICY_VERSION = 'clap-music-v1'
+POLICY_VERSION = 'clap-music-v2'
 SAMPLE_RATE = 48000
 WINDOW_SAMPLES = 480000
 
@@ -97,6 +97,39 @@ def validate_caption(processor, caption):
     if len(tokens) > limit:
         raise AlignmentError('scorer-error', f'caption has {len(tokens)} tokens; maximum is {limit}; truncation forbidden')
     return len(tokens)
+
+
+def read_wav(path):
+    """Decode PCM/IEEE-float WAV only, returning float64 (frames, channels).
+
+    scipy returns 24-bit PCM left-aligned in int32, so scaling by the dtype
+    width also preserves its original [-1, 1) amplitude. Float WAV amplitudes
+    are retained unchanged, including nonfinite values for validity rejection.
+    Other containers and compressed WAV codecs are intentionally unsupported.
+    """
+    import numpy as np
+    import struct
+    import warnings
+    from scipy.io import wavfile
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message='Reached EOF prematurely.*', category=wavfile.WavFileWarning)
+            sample_rate, audio = wavfile.read(path, mmap=False)
+        if audio.dtype.kind == 'u' and audio.dtype.itemsize == 1:
+            audio = (audio.astype(np.float64) - 128.0) / 128.0
+        elif audio.dtype.kind == 'i':
+            audio = audio.astype(np.float64) / float(2 ** (8 * audio.dtype.itemsize - 1))
+        elif audio.dtype.kind == 'f':
+            audio = audio.astype(np.float64)
+        else:
+            raise ValueError(f'unsupported WAV sample type: {audio.dtype}')
+        if audio.ndim == 1:
+            audio = audio[:, None]
+        if audio.ndim != 2 or sample_rate <= 0:
+            raise ValueError('invalid WAV shape or sample rate')
+        return audio, int(sample_rate)
+    except (OSError, ValueError, EOFError, struct.error, wavfile.WavFileWarning) as exc:
+        raise AlignmentError('invalid-audio', f'WAV decode failed: {exc}') from exc
 
 
 def validate_audio(waveform, sample_rate):
@@ -200,13 +233,12 @@ def score_loaded_audio(model, processor, waveform, sample_rate, caption, device=
 
 
 def provenance(manifest):
-    import soundfile
     import torch
-    packages = ('torch', 'transformers', 'numpy', 'scipy', 'soundfile', 'tokenizers', 'huggingface-hub')
+    packages = ('torch', 'transformers', 'numpy', 'scipy', 'tokenizers', 'huggingface-hub')
     return {'model_id': manifest['model_id'], 'revision': manifest['revision'], 'files': manifest['files'],
             'device': 'cpu', 'dtype': 'float32', 'threads': 1,
             'inter_op_threads': torch.get_num_interop_threads(),
-            'libsndfile': soundfile.__libsndfile_version__, 'python': platform.python_version(),
+            'wave_decoder': {'name': 'scipy.io.wavfile', 'version': importlib.metadata.version('scipy')}, 'python': platform.python_version(),
             'platform': platform.platform(),
             'dependencies': {name: importlib.metadata.version(name) for name in packages},
             'sampling_rate': SAMPLE_RATE, 'window_samples': WINDOW_SAMPLES,
@@ -224,10 +256,9 @@ def score_file(wav, caption, model_dir, manifest_path):
     try:
         model, processor, manifest = load_clap_local(model_dir, manifest_path)
         result['provenance'] = provenance(manifest)
-        import soundfile as sf
         try:
             result['wav_sha256'] = sha256_file(wav)
-            audio, rate = sf.read(wav, dtype='float64', always_2d=True)
+            audio, rate = read_wav(wav)
         except (OSError, RuntimeError) as exc:
             raise AlignmentError('invalid-audio', f'WAV decode failed: {exc}') from exc
         result.update(score_loaded_audio(model, processor, audio, rate, caption))

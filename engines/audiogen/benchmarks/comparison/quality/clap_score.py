@@ -12,7 +12,7 @@ from pathlib import Path
 # Keep the comparison harness JSON interface while sharing the frozen
 # preprocessing/scoring policy with desktop music benchmarks.
 sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "scripts" / "benchmarks"))
-from music_alignment import resample_to, score_loaded_audio, POLICY_VERSION
+from music_alignment import read_wav, resample_to, score_loaded_audio, POLICY_VERSION
 from typing import Any
 
 DEFAULT_MODEL = 'laion/larger_clap_music_and_speech'
@@ -32,8 +32,7 @@ def mix_to_mono (waveform: Any) -> Any:
 
 
 def load_mono_wav (path: str) -> tuple[Any, int]:
-    import soundfile as sf
-    waveform, sample_rate = sf.read(path, always_2d=True)
+    waveform, sample_rate = read_wav(path)
     return mix_to_mono(waveform), int(sample_rate)
 
 
@@ -74,8 +73,7 @@ def score_item (model: Any, processor: Any, item: dict[str, Any], device: str,
     if not wav_path or not text:
         return {'id': item_id, 'ok': False, 'score': None, 'error': 'item needs wav and text', 'elapsedMs': 0}
     try:
-        import soundfile as sf
-        waveform, sample_rate = sf.read(wav_path, always_2d=True)
+        waveform, sample_rate = read_wav(wav_path)
         detail = score_loaded_audio(model, processor, waveform, sample_rate, text, device)
         score = detail['score']
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -136,7 +134,7 @@ def main (argv: list[str]) -> None:
     args = parse_args(argv)
     try:
         import numpy  # noqa: F401
-        import soundfile  # noqa: F401
+        from scipy.io import wavfile  # noqa: F401
         import torch  # noqa: F401
         from transformers import ClapModel, ClapProcessor  # noqa: F401
     except ImportError as error:

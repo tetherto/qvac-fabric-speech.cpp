@@ -518,9 +518,6 @@ jobs:
         run: |
           python3 -m venv .venv-music-alignment
           echo "MUSIC_ALIGNMENT_PYTHON=$PWD/.venv-music-alignment/bin/python" >> "$GITHUB_ENV"
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            .venv-music-alignment/bin/python -m pip install torch==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
-          fi
           .venv-music-alignment/bin/python -m pip install -r scripts/benchmarks/requirements-music-alignment.txt
           .venv-music-alignment/bin/python -m pip check
 
