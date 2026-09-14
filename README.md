@@ -156,6 +156,13 @@ the [TTS capability table](engines/tts/README.md#capabilities).
 | ACE-Step v15 base | audiogen | text-to-music, multi-track (lego) stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 50 diffusion steps by default, `--task lego --track <layer>` |
 | MiniMax-Music3 | audiogen | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM+DiT also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal via `EngineOptions::device`) | 25 fps, 30 flow steps, two GGUF files; `test-minimax-metal-ops` checks Metal condition/vocoder parity on an Apple7+ GPU |
 
+The ACE-Step Core ML sidecar is exported by
+`engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
+Engine operating point, optionally weight-palettized (`--palettize 8` halves
+the sidecar at unchanged speed and quality gate); see the
+[audiogen README](engines/audiogen/README.md#core-ml-vae-decoder-sidecar) for
+the measured constraints and benchmark tooling.
+
 ## Build
 
 Prerequisites: CMake >= 3.20, a C++17 compiler, git.

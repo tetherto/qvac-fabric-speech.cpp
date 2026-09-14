@@ -119,10 +119,25 @@ int main() {
 
     const std::vector<float> latent = make_latent();
 
+    // Strict mode with the sidecar disabled must fail the decode instead of
+    // silently producing the ggml audio, or the parity below could compare
+    // ggml against itself and pass vacuously.
     setenv("ACESTEP_COREML_DISABLE", "1", 1);
+    setenv("ACESTEP_COREML_STRICT", "1", 1);
+    if (!decode_once(gguf, latent).empty()) {
+        std::fprintf(stderr, "[coreml-parity] FAIL: strict decode without a sidecar returned audio\n");
+        return 1;
+    }
+    unsetenv("ACESTEP_COREML_STRICT");
+
     const std::vector<float> pcm_ggml = decode_once(gguf, latent);
     unsetenv("ACESTEP_COREML_DISABLE");
+
+    // Strict for the Core ML leg: a sidecar init or predict failure now fails
+    // the run instead of measuring the ggml fallback as Core ML.
+    setenv("ACESTEP_COREML_STRICT", "1", 1);
     const std::vector<float> pcm_coreml = decode_once(gguf, latent);
+    unsetenv("ACESTEP_COREML_STRICT");
 
     if (pcm_ggml.empty() || pcm_coreml.empty() || pcm_ggml.size() != pcm_coreml.size()) {
         std::fprintf(stderr, "[coreml-parity] FAIL: decode sizes ggml=%zu coreml=%zu\n",

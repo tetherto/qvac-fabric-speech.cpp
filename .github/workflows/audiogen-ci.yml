@@ -188,14 +188,19 @@ jobs:
         id: coreml-fixture-cache
         uses: actions/cache@v4
         with:
-          path: coreml-fixture
-          key: acestep-vae-coreml-${{ runner.os }}-${{ runner.arch }}-0599862a-${{ hashFiles('engines/audiogen/scripts/export-vae-coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          path: |
+            coreml-fixture
+            coreml-fixture-p8
+          key: acestep-vae-coreml-${{ runner.os }}-${{ runner.arch }}-0599862a-${{ hashFiles('engines/audiogen/scripts/export-vae-coreml.py', 'engines/audiogen/test/test_export_vae_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
+      # Two sidecars from one GGUF: the default float16 export and an 8-bit
+      # palettized one, so the palettization path is parity-gated in CI. The
+      # p8 directory holds only the sidecar; the test step links the GGUF in.
       - name: Build Core ML VAE fixture
         if: runner.os == 'macOS' && steps.coreml-fixture-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          mkdir -p coreml-fixture
+          mkdir -p coreml-fixture coreml-fixture-p8
           curl -sSfL --retry 3 -o coreml-fixture/vae-BF16.gguf \
             https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/resolve/9b3707625776cc4cf775e9b12ab82f9fe48335ff/vae-BF16.gguf
           echo "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8  coreml-fixture/vae-BF16.gguf" | shasum -a 256 -c -
@@ -203,18 +208,45 @@ jobs:
           "$coreml_python" -m venv .venv-coreml
           .venv-coreml/bin/python -m pip install --upgrade pip
           .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-coreml/bin/python engines/audiogen/test/test_export_vae_coreml.py
           .venv-coreml/bin/python engines/audiogen/scripts/export-vae-coreml.py \
-            --gguf coreml-fixture/vae-BF16.gguf --t-latent 128 \
+            --gguf coreml-fixture/vae-BF16.gguf \
             --out coreml-fixture/vae-decoder.mlpackage --compile-dir coreml-fixture
           rm -rf coreml-fixture/vae-decoder.mlpackage
+          .venv-coreml/bin/python engines/audiogen/scripts/export-vae-coreml.py \
+            --gguf coreml-fixture/vae-BF16.gguf --palettize 8 \
+            --out coreml-fixture-p8/vae-decoder.mlpackage --compile-dir coreml-fixture-p8
+          rm -rf coreml-fixture-p8/vae-decoder.mlpackage
 
-      # Runs the binary directly: a skip (exit 77) fails the step, so a green
-      # lane proves the parity assertions ran against the staged sidecar.
+      # Runs the binaries directly: a skip (exit 77) fails the step, so a
+      # green lane proves the parity assertions ran against both staged
+      # sidecars (float16 and 8-bit palettized).
       - name: Test (Core ML VAE sidecar)
         if: runner.os == 'macOS'
         env:
           AUDIOGEN_TEST_MODELS_DIR: ${{ github.workspace }}/coreml-fixture
         run: ./build/test-vae-coreml-parity
+
+      - name: Test (Core ML VAE sidecar, 8-bit palettized)
+        if: runner.os == 'macOS'
+        env:
+          AUDIOGEN_TEST_MODELS_DIR: ${{ github.workspace }}/coreml-fixture-p8
+        run: |
+          ln -sf "$GITHUB_WORKSPACE/coreml-fixture/vae-BF16.gguf" coreml-fixture-p8/vae-BF16.gguf
+          ./build/test-vae-coreml-parity
+
+      # Decode benchmark, ggml Metal vs the Core ML sidecar on the runner;
+      # the markdown tables land in the job summary. The binary fails on
+      # parity below 0.999, so the numbers are gated, not decorative.
+      - name: Benchmark (Core ML VAE vs Metal)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          AUDIOGEN_TEST_MODELS_DIR="$GITHUB_WORKSPACE/coreml-fixture" \
+            ./build/bench-vae-coreml >> "$GITHUB_STEP_SUMMARY"
+          echo "(float16 sidecar above; 8-bit palettized below)" >> "$GITHUB_STEP_SUMMARY"
+          AUDIOGEN_TEST_MODELS_DIR="$GITHUB_WORKSPACE/coreml-fixture-p8" \
+            ./build/bench-vae-coreml >> "$GITHUB_STEP_SUMMARY"
 
   # No opt-in GPU job here: audiogen's only gpu-labeled test is the Metal
   # parity check (SKIP_RETURN_CODE 77 without Metal), which the build-test
