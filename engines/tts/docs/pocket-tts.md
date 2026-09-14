@@ -89,7 +89,10 @@ Review regression coverage includes first/last-frame EOS with tails 0, 1, 3,
 5 and 100; missing EOS; real streaming with a 100-frame tail; exact context
 boundaries and rejection before the first callback; and memory pricing of
 default and explicit tails. The nine Pocket CTests pass with the local model
-and upstream FlowLM/Mimi fixtures, including F16 storage parity.
+and upstream FlowLM/Mimi fixtures, including F16 storage parity. After updating
+to current `master`, all 124 enabled local CPU CTests pass; 100 tests without
+the required fixtures/backends are disabled. CLI validation also covers argument
+rejection, explicit tails, warmup/multiple runs, WAV/JSON output and memory fit.
 
 `scripts/convert-pocket-flow-lm-to-gguf.py` takes a local Kyutai checkpoint and
 its YAML configuration. It selects `flow_lm.*` tensors from the safetensors
@@ -603,12 +606,9 @@ zero word errors, both long recordings share one assistance/assistants error,
 and nonzero-temperature accented-name output differs in a contraction. The
 zero-temperature follow-up above remains the controlled numerical comparison.
 
-Native CI builds pass on macOS, iOS and Android. Linux and Windows have an
-existing Supertonic fit-test regression introduced by
-[PR #229](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/229).
-The independent fix is tracked in
-[PR #242](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/242),
-which updates the test's CPU dispatch expectations and fit documentation.
-The Pocket change contains no Supertonic test or runtime modifications.
+The earlier Linux/Windows Supertonic fit-test regression from
+[PR #229](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/229) was fixed
+independently in [PR #242](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/242),
+now merged into this branch's base. The Pocket PR contains no Supertonic changes.
 Full Fabric inference compilation still has the unrelated errors noted above.
 No default-branch merge or package publication is claimed.
