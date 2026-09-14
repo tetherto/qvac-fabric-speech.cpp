@@ -3,6 +3,7 @@
 # Do not pipe a remote installer into a shell.
 numpy==2.2.6
 soundfile==0.13.1
+scipy==1.15.3
 torch==2.6.0
 transformers==5.5.4
 safetensors==0.5.3
