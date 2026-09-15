@@ -211,6 +211,14 @@ only**. Override with `ACESTEP_CLAP_TEXT_POLICY=caption+lyrics`.
 `--force` rescores. `--include-warmup` scores warm-up WAVs too.
 `clap.elapsedMs` is scorer time and is not added to generation time.
 
+Saved scores retain the scorer's `clap.policyVersion`. The post-pass reuses only
+finite scores from the current policy (`clap-music-v2`); legacy scores without a
+version and scores from other policies are automatically rescored. `--force`
+also rescans scores already on the current policy. Reports label the policy and
+reject mixed policies across engines or prompts, including legacy/unversioned
+scores mixed with versioned scores. Rescore the saved WAVs before comparing such
+results. A report containing only legacy scores is labeled `legacy/unversioned`.
+
 Copy reviewed JSON/Markdown into `reports/<target>/` and complete the
 `verification-report.md` checklist described in `reports/README.md`. Keep
 large WAVs out of git; record checksums.
