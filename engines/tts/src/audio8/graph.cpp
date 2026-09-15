@@ -31,6 +31,10 @@ ggml_tensor * upper_half(ggml_context * ctx, ggml_tensor * x) {
     return ggml_view_3d(ctx, x, x->ne[0] / 2, x->ne[1], x->ne[2], x->nb[1], x->nb[2], half);
 }
 
+ggml_tensor * swap_halves(ggml_context * ctx, ggml_tensor * x) {
+    return ggml_concat(ctx, upper_half(ctx, x), lower_half(ctx, x), 0);
+}
+
 ggml_tensor * project_heads(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * bias,
                             ggml_tensor * x, int head_dim, int heads) {
     return ggml_reshape_3d(ctx, linear(ctx, weight, x, bias), head_dim, heads,
@@ -98,11 +102,27 @@ ggml_tensor * rotated_query(ggml_context * ctx, const attention_weights & weight
     return ggml_permute(ctx, apply_rope(ctx, query, rope), 0, 2, 1, 3);
 }
 
+// GGML_PREC_F32 buys precision the operands still have. A block-quantised
+// weight has already spent it, and on CUDA the default path -- the integer dot
+// product every CPU build of this tier also takes -- accumulates in f32
+// anyway, so the marker only forces a dequantise-to-f32 round trip through
+// cuBLAS -- 48% of GPU kernel time, a fifth of the decode's wall, since the
+// loop is host-bound rather than GPU-bound. Other backends keep the marker:
+// ggml-vulkan reduces quantised matmuls in f16 under PREC_DEFAULT, which is a
+// genuine loss rather than the same arithmetic spelled differently.
+bool quantised_matmul_is_already_f32(const ggml_tensor * weight) {
+    return ggml_is_quantized(weight->type) && weight->buffer &&
+           ::tts_cpp::detail::reg_name_is_cuda(
+               ::tts_cpp::detail::buft_reg_name(ggml_backend_buffer_get_type(weight->buffer)));
+}
+
 }  // namespace
 
 ggml_tensor * precise_mul_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
     ggml_tensor * out = ggml_mul_mat(ctx, a, b);
-    ggml_mul_mat_set_prec(out, GGML_PREC_F32);
+    if (!quantised_matmul_is_already_f32(a)) {
+        ggml_mul_mat_set_prec(out, GGML_PREC_F32);
+    }
     return out;
 }
 
@@ -197,18 +217,15 @@ bool compute_graph(ggml_backend_t backend, ::tts_cpp::detail::sched_fallback & s
 
 rope_planes rope_window(ggml_context * ctx, ggml_tensor * cos_table,
                         ggml_tensor * sin_table, int first, int count) {
-    return {table_window(ctx, cos_table, first, count),
-            table_window(ctx, sin_table, first, count)};
+    ggml_tensor * cosines = table_window(ctx, cos_table, first, count);
+    ggml_tensor * sines = table_window(ctx, sin_table, first, count);
+    return {ggml_concat(ctx, cosines, cosines, 0),
+            ggml_concat(ctx, ggml_neg(ctx, sines), sines, 0)};
 }
 
 ggml_tensor * apply_rope(ggml_context * ctx, ggml_tensor * x, const rope_planes & rope) {
-    ggml_tensor * lower = lower_half(ctx, x);
-    ggml_tensor * upper = upper_half(ctx, x);
-    ggml_tensor * rotated_lower = ggml_sub(ctx, ggml_mul(ctx, lower, rope.cos),
-                                           ggml_mul(ctx, upper, rope.sin));
-    ggml_tensor * rotated_upper = ggml_add(ctx, ggml_mul(ctx, upper, rope.cos),
-                                           ggml_mul(ctx, lower, rope.sin));
-    return ggml_concat(ctx, rotated_lower, rotated_upper, 0);
+    return ggml_add(ctx, ggml_mul(ctx, x, rope.cos),
+                    ggml_mul(ctx, swap_halves(ctx, x), rope.signed_sin));
 }
 
 ggml_tensor * rms_norm(ggml_context * ctx, ggml_tensor * x, ggml_tensor * weight, float eps) {
@@ -223,8 +240,9 @@ ggml_tensor * linear(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x,
 
 ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
                      ggml_tensor * w3, ggml_tensor * x) {
-    ggml_tensor * gate = ggml_silu(ctx, precise_mul_mat(ctx, w1, x));
-    return precise_mul_mat(ctx, w2, ggml_mul(ctx, gate, precise_mul_mat(ctx, w3, x)));
+    ggml_tensor * gated = ggml_swiglu_split(ctx, precise_mul_mat(ctx, w1, x),
+                                            precise_mul_mat(ctx, w3, x));
+    return precise_mul_mat(ctx, w2, gated);
 }
 
 ggml_tensor * attention(ggml_context * ctx, ggml_cgraph * graph,

@@ -1316,6 +1316,19 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_ref}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_ref}/sem_logits.npy")
 
+    add_executable(test-audio8-quantised-precision
+        test/audio8/test_quantised_precision.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml)
+    target_include_directories(test-audio8-quantised-precision PRIVATE include src)
+    tts_cpp_apply_ccache(test-audio8-quantised-precision)
+    tts_cpp_register_test(test-audio8-quantised-precision
+        LABEL    "fixture"
+        ARGS     "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
+        REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+
     add_executable(test-audio8-codec test/audio8/test_codec.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
         ${_tcb_audio8_core_srcs})
@@ -1403,34 +1416,53 @@ if (TTS_CPP_BUILD_TESTS)
             REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}"
                      "${_tcb_audio8_ref}/wav.npy" "${_tcb_audio8_ref_clone}/wav.npy"
                      "${_tcb_audio8_ref_wav}")
+        # Reads the marker the graph asks for, which is the half of the
+        # quantised route the f32 fixtures cannot see.
+        tts_cpp_register_test(test-audio8-quantised-precision-${suffix}
+            EXE      test-audio8-quantised-precision
+            LABEL    "gpu"
+            ARGS     "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
+            REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
         set_property(TEST test-audio8-lm-${suffix} test-audio8-codec-${suffix}
-                          test-audio8-engine-${suffix} APPEND
+                          test-audio8-engine-${suffix}
+                          test-audio8-quantised-precision-${suffix} APPEND
                      PROPERTY ENVIRONMENT "AUDIO8_TEST_GPU=${suffix}"
                                           "TTS_CPP_GPU_BACKEND=${suffix}")
+    endfunction()
+
+    # The block formats take their own route through every backend -- Vulkan
+    # picks fp32-arithmetic pipelines for them, CUDA drops the f32 marker and
+    # takes the integer-dot path -- and the f32 fixtures above cannot reach
+    # either.  One short greedy utterance per backend pins that the quantised
+    # route still runs there and still reports the backend it ran on.
+    function(tts_cpp_register_audio8_quantised_cli_test backend device_regex)
+        if (NOT TARGET audio8-cli)
+            return()
+        endif()
+        tts_cpp_register_test(test-audio8-cli-${backend}-q8_0
+            EXE        audio8-cli
+            LABEL      "gpu"
+            ARGS       "--lm" "${_tcb_audio8_lm_q8}"
+                       "--codec-decoder" "${_tcb_audio8_decoder_q8}"
+                       "--text" "Audio8 ${backend} q8 regression."
+                       "--greedy" "--max-frames" "2"
+                       "--n-gpu-layers" "${_tcb_audio8_gpu_layers}"
+                       "--out" "${CMAKE_CURRENT_BINARY_DIR}/audio8-${backend}-q8_0.wav"
+            PASS_REGEX "${device_regex}"
+            REQUIRES   "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+        set_property(TEST test-audio8-cli-${backend}-q8_0 APPEND PROPERTY ENVIRONMENT
+                     "TTS_CPP_GPU_BACKEND=${backend}")
     endfunction()
 
     # Audio8 allowlist: Vulkan / Metal / OpenCL / CUDA (audio8/gguf.cpp
     # GpuBackendRequirement::Vulkan | Metal | OpenCL | CUDA).
     if (TTS_CPP_GGML_CUDA)
         tts_cpp_register_audio8_gpu_tests(cuda)
+        tts_cpp_register_audio8_quantised_cli_test(cuda "on CUDA")
     endif()
     if (TTS_CPP_GGML_VULKAN)
         tts_cpp_register_audio8_gpu_tests(vulkan)
-        if (TARGET audio8-cli)
-            tts_cpp_register_test(test-audio8-cli-vulkan-q8_0
-                EXE        audio8-cli
-                LABEL      "gpu"
-                ARGS       "--lm" "${_tcb_audio8_lm_q8}"
-                           "--codec-decoder" "${_tcb_audio8_decoder_q8}"
-                           "--text" "Audio8 Vulkan q8 regression."
-                           "--greedy" "--max-frames" "2"
-                           "--n-gpu-layers" "${_tcb_audio8_gpu_layers}"
-                           "--out" "${CMAKE_CURRENT_BINARY_DIR}/audio8-vulkan-q8_0.wav"
-                PASS_REGEX "on Vulkan"
-                REQUIRES   "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
-            set_property(TEST test-audio8-cli-vulkan-q8_0 APPEND PROPERTY ENVIRONMENT
-                         "TTS_CPP_GPU_BACKEND=vulkan")
-        endif()
+        tts_cpp_register_audio8_quantised_cli_test(vulkan "on Vulkan")
     endif()
     if (TTS_CPP_GGML_METAL)
         tts_cpp_register_audio8_gpu_tests(metal)

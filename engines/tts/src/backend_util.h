@@ -54,6 +54,18 @@ inline bool reg_name_is_cuda(const char * n) {
     return n && std::strcmp(n, "CUDA") == 0;
 }
 
+// Which backend a resident tensor's buffer belongs to. Graph builders see the
+// weight but not the backend that holds it, and the buffer carries the answer.
+inline const char * buft_reg_name(ggml_backend_buffer_type_t buft) {
+    if (!buft) return "";
+    ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    if (!dev) return "";
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    if (!reg) return "";
+    const char * n = ggml_backend_reg_name(reg);
+    return n ? n : "";
+}
+
 inline bool backend_is_metal(ggml_backend_t b) {
     return reg_name_is_metal(backend_reg_name(b));
 }

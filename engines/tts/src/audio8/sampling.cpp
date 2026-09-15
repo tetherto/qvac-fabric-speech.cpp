@@ -15,41 +15,57 @@ constexpr float MIN_TEMPERATURE = 1e-5f;
 constexpr float MIN_UNIFORM = 1e-20f;
 const float REJECTED = -std::numeric_limits<float>::infinity();
 
-std::vector<int> order_by_logit(const std::vector<float> & logits) {
+// Nothing below rank top_k can survive, so only that many candidates are ever
+// ranked. Selecting the leaders instead of sorting the whole vocabulary is what
+// keeps the fast head's nine draws per frame off the critical path.
+size_t leader_count(const sampling_params & params, size_t vocab) {
+    return params.top_k > 0 ? std::min<size_t>(params.top_k, vocab) : vocab;
+}
+
+std::vector<int> rank_leaders(const std::vector<float> & logits, size_t count) {
     std::vector<int> order(logits.size());
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(),
-              [&](int left, int right) { return logits[left] > logits[right]; });
+    const auto by_logit = [&](int left, int right) { return logits[left] > logits[right]; };
+    if (count >= order.size()) {
+        std::sort(order.begin(), order.end(), by_logit);
+        return order;
+    }
+    std::partial_sort(order.begin(), order.begin() + count, order.end(), by_logit);
+    order.resize(count);
     return order;
 }
 
-std::vector<float> softmax_in_rank_order(const std::vector<float> & logits,
-                                         const std::vector<int> & order) {
-    std::vector<float> probabilities(order.size());
-    const float top = logits[order.front()];
-    float total = 0.0f;
-    for (size_t rank = 0; rank < order.size(); ++rank) {
-        probabilities[rank] = std::exp(logits[order[rank]] - top);
-        total += probabilities[rank];
-    }
-    for (float & value : probabilities) value /= total;
-    return probabilities;
+float highest_logit(const std::vector<float> & logits) {
+    return *std::max_element(logits.begin(), logits.end());
 }
 
-// How many of the ranked candidates survive top-k and top-p. A candidate goes
-// when the mass up to and including it passes top_p, so the one that crosses
-// the threshold is dropped; the highest-ranked candidate always stays.
-size_t surviving_rank_count(const std::vector<float> & probabilities,
-                            const sampling_params & params) {
-    const size_t limit = params.top_k > 0
-                             ? std::min<size_t>(params.top_k, probabilities.size())
-                             : probabilities.size();
-    float mass = 0.0f;
-    for (size_t rank = 0; rank < limit; ++rank) {
-        mass += probabilities[rank];
-        if (mass > params.top_p) return std::max<size_t>(rank, 1);
+// The whole vocabulary normalises the masses even though only the leaders are
+// ever read back.
+float softmax_total(const std::vector<float> & logits, float top) {
+    float total = 0.0f;
+    for (float logit : logits) total += std::exp(logit - top);
+    return total;
+}
+
+std::vector<float> leader_masses(const std::vector<float> & logits,
+                                 const std::vector<int> & leaders, float top, float total) {
+    std::vector<float> masses(leaders.size());
+    for (size_t rank = 0; rank < leaders.size(); ++rank) {
+        masses[rank] = std::exp(logits[leaders[rank]] - top) / total;
     }
-    return std::max<size_t>(limit, 1);
+    return masses;
+}
+
+// How many of the ranked candidates survive top-p. A candidate goes when the
+// mass up to and including it passes top_p, so the one that crosses the
+// threshold is dropped; the highest-ranked candidate always stays.
+size_t surviving_rank_count(const std::vector<float> & masses, float top_p) {
+    float mass = 0.0f;
+    for (size_t rank = 0; rank < masses.size(); ++rank) {
+        mass += masses[rank];
+        if (mass > top_p) return std::max<size_t>(rank, 1);
+    }
+    return std::max<size_t>(masses.size(), 1);
 }
 
 // Gumbel-max: the argmax of p / -log(u) is a draw from p. The weights stay
@@ -74,13 +90,16 @@ int draw(const std::vector<float> & scores, std::mt19937 & rng) {
 
 std::vector<float> filter_scores(const std::vector<float> & logits,
                                  const sampling_params & params) {
-    const std::vector<int> order = order_by_logit(logits);
-    const std::vector<float> probabilities = softmax_in_rank_order(logits, order);
-    const size_t kept = surviving_rank_count(probabilities, params);
+    const float top = highest_logit(logits);
+    const std::vector<int> leaders =
+        rank_leaders(logits, leader_count(params, logits.size()));
+    const std::vector<float> masses =
+        leader_masses(logits, leaders, top, softmax_total(logits, top));
+    const size_t kept = surviving_rank_count(masses, params.top_p);
     const float scale = 1.0f / std::max(params.temperature, MIN_TEMPERATURE);
     std::vector<float> scores(logits.size(), REJECTED);
     for (size_t rank = 0; rank < kept; ++rank) {
-        scores[order[rank]] = logits[order[rank]] * scale;
+        scores[leaders[rank]] = logits[leaders[rank]] * scale;
     }
     return scores;
 }

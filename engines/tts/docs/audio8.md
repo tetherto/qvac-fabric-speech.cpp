@@ -293,6 +293,34 @@ transformer: `ggml_soft_max_ext` materialises the full score matrix, so a
 reference much beyond 30 s gets expensive.  References of a few seconds are
 what the model expects anyway.
 
+**Quantised weights take a different route per backend.**  `GGML_PREC_F32`
+asks a matmul to accumulate in f32, which a block-quantised weight has already
+spent: on CUDA the default route is the integer dot product every CPU build of
+this tier also takes, so the marker there buys nothing and costs a
+dequantise-to-f32 round trip through cuBLAS: 48% of GPU kernel time, and a
+fifth of the decode's wall, the loop being host-bound rather than GPU-bound.
+The graphs therefore drop it on CUDA-resident quantised weights and keep it
+everywhere else, because ggml-vulkan reduces quantised matmuls in f16 under
+`PREC_DEFAULT`.  It reaches the codec too: its post-quantiser transformer is
+56 of the q8_0 decoder's tensors.
+
+Measured against the PyTorch fixtures at q8_0, both halves land at the CPU
+q8_0 build's own accuracy, which is what this tier is judged at — the previous
+CUDA route was *more* accurate than CPU, at twice the cost, because it never
+quantised the activations.
+
+| RMS deviation from the f32 reference | CPU q8_0 | CUDA before | CUDA after |
+|---|--:|--:|--:|
+| LM semantic logits | 0.106 | 0.077 | 0.100 |
+| LM fast logits | 0.182 | 0.146 | 0.173 |
+| codec latent | 2.20e-2 | 1.19e-2 | 2.18e-2 |
+| codec waveform | 7.04e-4 | 3.16e-4 | 5.52e-4 |
+
+f32 and f16 weights keep the marker on every backend, so the exact CPU/GPU
+trajectory match at F32 is unaffected.  `test-audio8-quantised-precision` pins
+the scoping per backend, over the LM's built graphs and the codec decoder's
+resident weights.
+
 **Sampling follows the reference's order, which is unusual.**  top-k and top-p
 run on the raw logits and the temperature is applied to what survives, so
 temperature does not affect which candidates are in the running.  Semantic
