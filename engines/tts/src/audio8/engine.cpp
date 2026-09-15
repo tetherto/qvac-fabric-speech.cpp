@@ -489,6 +489,10 @@ BackendDevice Engine::backend_device() const {
                                                                  : BackendDevice::GPU;
 }
 
+bool Engine::codec_on_coreml() const {
+    return pimpl_->decoder.synthesis_on_coreml;
+}
+
 VoicePrompt load_voice_prompt(const std::string & wav_path,
                               const std::string & transcript) {
     VoicePrompt voice;

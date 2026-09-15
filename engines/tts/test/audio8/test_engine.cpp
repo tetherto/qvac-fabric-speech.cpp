@@ -204,6 +204,12 @@ bool check_frames(const char * tag, int got, const nlohmann::json & meta) {
 bool check_backend(const char * tag, const tts_cpp::audio8::Engine & engine) {
     if (!is_gpu_test()) return true;
     const std::string name = engine.backend_name();
+    // This harness pins the ggml synthesis (AUDIO8_COREML_DISABLE in main), so
+    // the sidecar report must say so even when a sidecar sits next to the GGUF.
+    if (engine.codec_on_coreml()) {
+        std::fprintf(stderr, "engine: FAIL codec_on_coreml() is true under AUDIO8_COREML_DISABLE\n");
+        return false;
+    }
     if (engine.backend_device() == tts_cpp::BackendDevice::GPU &&
         audio8_test::instance_is_requested(name)) {
         return true;
