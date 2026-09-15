@@ -327,8 +327,10 @@ struct Engine::Impl {
         timings.codec_latent_ms = timing.latent_ms;
         timings.codec_synth_ms = timing.synthesis_ms;
         if (opts.verbose) {
-            std::fprintf(stderr, "[audio8-timing] codec block %d frames, %.0f MB scratch\n",
-                         timing.block_frames, timing.block_scratch / (1024.0 * 1024.0));
+            std::fprintf(stderr,
+                         "[audio8-timing] codec block %d frames, %.0f MB scratch, synthesis on %s\n",
+                         timing.block_frames, timing.block_scratch / (1024.0 * 1024.0),
+                         timing.synthesis_backend.c_str());
         }
     }
 
@@ -436,6 +438,11 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers, pimpl_->decoder,
                     &error)) {
         throw std::runtime_error(error);
+    }
+    if (opts.verbose) {
+        std::fprintf(stderr, "[audio8] codec synthesis on %s\n",
+                     pimpl_->decoder.synthesis_on_coreml ? "the Core ML sidecar"
+                                                         : ggml_backend_name(pimpl_->decoder.backend));
     }
     if (cloning) {
         if (!load_codec(opts.codec_encoder_gguf_path, opts.n_gpu_layers, pimpl_->encoder,

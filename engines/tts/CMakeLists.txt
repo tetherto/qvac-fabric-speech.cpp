@@ -26,6 +26,21 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecar for the Audio8 codec synthesis stack (Apple-only, additive; synthesis runs on a <codec-decoder>.mlmodelc next to the decoder GGUF when present, else on ggml)." OFF)
+
+# Objective-C and Objective-C++ are enabled up front (before any
+# add_subdirectory(ggml)) for the Core ML sidecar, for the same two reasons
+# engines/parakeet spells out: OBJCXX enabled only after ggml pulls in the
+# Metal toolchain leaves CMAKE_OBJCXX_COMPILE_OBJECT unset under CMake 4.x,
+# and enabling OBJCXX without OBJC makes ggml-metal's .m sources compile as
+# Objective-C++ in the bundled-ggml build.
+if (TTS_CPP_COREML)
+    if (NOT APPLE)
+        message(FATAL_ERROR "TTS_CPP_COREML is Apple-only (requires the CoreML framework); leave it OFF on ${CMAKE_SYSTEM_NAME}.")
+    endif()
+    enable_language(OBJC)
+    enable_language(OBJCXX)
+endif()
 
 # ccache shaves ~30 % off iterative rebuild time on developer machines.
 # Opt-out via -DTTS_CPP_CCACHE=OFF for clean reproducibility runs.
@@ -340,6 +355,9 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_ops.cpp
     src/audio8/codec_decode.cpp
     src/audio8/codec_encode.cpp
+    # The sidecar's naming rule is portable and always compiled; the Core ML
+    # wrapper itself joins under TTS_CPP_COREML below.
+    src/audio8/coreml_path.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
     # Pocket TTS numerical core; Mimi synthesis is not exposed yet.
@@ -409,6 +427,34 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/src
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
+
+    # Apple Core ML sidecar for the Audio8 codec synthesis stack. The
+    # Objective-C++ wrapper is an OBJECT library so its ARC-compiled objects
+    # fold into libtts-cpp (one archive for the static vcpkg build, no extra
+    # install/export target); the frameworks go PUBLIC because a static
+    # consumer has to link them itself. The I/O contract the exported
+    # .mlmodelc must honour is in src/audio8/coreml/codec-synth.h.
+    if (TTS_CPP_COREML)
+        find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        find_library(TTS_CPP_COREML_FRAMEWORK     CoreML     REQUIRED)
+
+        add_library(tts-cpp.coreml OBJECT src/audio8/coreml/codec-synth.mm)
+        tts_cpp_apply_ccache(tts-cpp.coreml)
+        target_include_directories(tts-cpp.coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        set_target_properties(tts-cpp.coreml PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            COMPILE_FLAGS "-fobjc-arc"
+            XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+        )
+
+        target_sources(tts-cpp PRIVATE $<TARGET_OBJECTS:tts-cpp.coreml>)
+        target_compile_definitions(tts-cpp PRIVATE TTS_CPP_USE_COREML)
+        target_link_libraries(tts-cpp PUBLIC
+            ${TTS_CPP_FOUNDATION_FRAMEWORK}
+            ${TTS_CPP_COREML_FRAMEWORK}
+        )
+        message(STATUS "tts-cpp: Core ML Audio8 codec sidecar enabled (TTS_CPP_USE_COREML)")
+    endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -1047,6 +1093,17 @@ if (TTS_CPP_BUILD_TESTS)
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_assemble_cosyvoice3_model.py")
         set_property(TEST test-assemble-cosyvoice3-model PROPERTY LABELS "unit")
+
+        # The Audio8 Core ML exporter's model-free checks (phase-form
+        # transposed convolution, causality of the rebuilt stack, sidecar
+        # naming). Skips without torch under the system interpreter; the TTS
+        # CI macOS lane also runs it with the Core ML export venv, where torch
+        # is installed and the assertions execute.
+        add_test(NAME test-audio8-codec-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_audio8_codec_coreml.py")
+        set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
+        set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1463,6 +1520,44 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-audio8-codec-bench-cli PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-codec-bench-cli)
     tts_cpp_register_test(test-audio8-codec-bench-cli LABEL "unit")
+
+    # The Core ML sidecar's portable half: the sidecar naming rule and the
+    # fixed-window plan the synthesis stack is walked with. Pure arithmetic and
+    # string logic, no model and no Apple frameworks, so it runs on every host.
+    add_executable(test-audio8-coreml-windows test/audio8/test_coreml_windows.cpp
+        src/audio8/coreml_path.cpp)
+    target_include_directories(test-audio8-coreml-windows PRIVATE src)
+    tts_cpp_apply_ccache(test-audio8-coreml-windows)
+    tts_cpp_register_test(test-audio8-coreml-windows LABEL "unit")
+
+    # Core ML codec sidecar parity against the ggml synthesis, through the
+    # production dispatch (AUDIO8_COREML_DISABLE / AUDIO8_COREML_STRICT).
+    # Compiled on every platform; self-skips (77) without TTS_CPP_COREML, a
+    # staged AUDIO8_COREML_TEST_MODELS_DIR, or a compiled sidecar next to the
+    # decoder GGUF there. Not REQUIRES-gated on purpose: CI runs the binary
+    # directly so a skip fails the step instead of passing hollow.
+    add_executable(test-audio8-codec-coreml-parity test/audio8/test_codec_coreml_parity.cpp)
+    target_link_libraries(test-audio8-codec-coreml-parity PRIVATE tts-cpp ggml)
+    target_include_directories(test-audio8-codec-coreml-parity PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-audio8-codec-coreml-parity)
+    tts_cpp_register_test(test-audio8-codec-coreml-parity LABEL "fixture")
+    set_property(TEST test-audio8-codec-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Codec synthesis benchmark, ggml GPU vs the Core ML sidecar (markdown to
+    # stdout). Not a ctest: CI runs it directly and appends the table to the
+    # job summary; it fails on parity below the gate, so a wrong-but-fast
+    # sidecar cannot report a win. Same self-skip (77) contract as the parity
+    # test.
+    add_executable(bench-audio8-codec-coreml test/audio8/bench_codec_coreml.cpp)
+    target_link_libraries(bench-audio8-codec-coreml PRIVATE tts-cpp ggml)
+    target_include_directories(bench-audio8-codec-coreml PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(bench-audio8-codec-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(bench-audio8-codec-coreml)
 
     add_executable(test-audio8-cli test/audio8/test_cli.cpp src/audio8/cli.cpp)
     target_include_directories(test-audio8-cli PRIVATE src)

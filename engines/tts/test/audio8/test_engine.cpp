@@ -307,6 +307,11 @@ bool run_case(const char * tag, const paths & where, const fixture & data, bool 
 }  // namespace
 
 int main(int argc, char ** argv) {
+    // This harness holds the ggml stack to the torch reference at ggml
+    // tolerances; the Core ML sidecar has its own parity gate
+    // (test-audio8-codec-coreml-parity), so a sidecar next to the fixture
+    // GGUF must not take over here.
+    setenv("AUDIO8_COREML_DISABLE", "1", 1);
     if (argc < 7) {
         std::fprintf(stderr,
                      "usage: %s <lm.gguf> <codec-decoder.gguf> <codec-encoder.gguf> "
