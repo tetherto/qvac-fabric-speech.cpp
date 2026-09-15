@@ -186,6 +186,26 @@ bool price(lm_model & lm, scratch & build, ::tts_cpp::detail::fit_graph_price & 
                                               2 * AUDIO8_MAX_NODES, out);
 }
 
+// What a real fast_step leaves allocated: one arena per position it ran.
+uint64_t real_fast_arena_bytes(const lm_model & model) {
+    uint64_t total = 0;
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.allocr) total += ggml_gallocr_get_buffer_size(cached.allocr, 0);
+    }
+    return total;
+}
+
+// And in host RAM, one graph context per position. The projector multiplies
+// scratch_arena_bytes by this count, so the count is what has to be pinned --
+// the size itself comes from the same function the arenas are built with.
+uint64_t retained_fast_contexts(const lm_model & model) {
+    uint64_t kept = 0;
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.ctx) ++kept;
+    }
+    return kept;
+}
+
 void run_synthetic_lm_gates() {
     const tiny_lm p;
     const std::string path = write_tiny_lm_gguf(p);
@@ -245,8 +265,10 @@ void run_synthetic_lm_gates() {
         }
     }
 
-    // 4. Fast arena parity: a real whole-frame fast_step vs the projected
-    //    prime/last maximum.
+    // 4. Fast arena parity: a real whole-frame fast_step vs the projected sum
+    //    over the positions. Each position keeps its own graph and its own
+    //    arena for the life of the model, so what a real frame leaves behind is
+    //    every one of them, not the widest.
     {
         std::vector<int32_t> codes;
         std::vector<float> prime_in((size_t) p.hidden, 0.0f);
@@ -254,21 +276,21 @@ void run_synthetic_lm_gates() {
         if (!fast_step(real, prime_in, p.semantic_begin, 2, pick, codes, &error)) {
             fail("real fast_step failed: " + error);
         } else {
-            ::tts_cpp::detail::fit_graph_price prime, last;
-            {
-                scratch build(AUDIO8_MAX_NODES);
-                build_fast_fit_graph(mm, build, 0, /*prime=*/true);
-                if (!price(mm, build, prime)) fail("pricing the fast prime graph failed");
+            ::tts_cpp::detail::fit_graph_price projected;
+            bool priced_on_device = true;
+            for (int position = 0; position < p.num_codebooks; ++position) {
+                scratch build(AUDIO8_FAST_MAX_NODES);
+                build_fast_fit_graph(mm, build, position, /*prime=*/position == 0);
+                ::tts_cpp::detail::fit_graph_price one;
+                if (!price(mm, build, one)) fail("pricing a fast position graph failed");
+                projected.device_bytes += one.device_bytes;
+                priced_on_device = priced_on_device && one.host_bytes == 0;
             }
-            {
-                scratch build(AUDIO8_MAX_NODES);
-                build_fast_fit_graph(mm, build, p.num_codebooks - 1, /*prime=*/false);
-                if (!price(mm, build, last)) fail("pricing the fast step graph failed");
-            }
-            if (prime.host_bytes == 0 && last.host_bytes == 0) {
-                expect_eq(std::max(prime.device_bytes, last.device_bytes),
-                          ggml_gallocr_get_buffer_size(real.fast_allocr, 0),
+            if (priced_on_device) {
+                expect_eq(projected.device_bytes, real_fast_arena_bytes(real),
                           "LM fast arena parity");
+                expect_eq((uint64_t) p.num_codebooks, retained_fast_contexts(real),
+                          "LM retained fast graph contexts");
             }
         }
     }

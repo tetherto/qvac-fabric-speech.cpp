@@ -245,32 +245,162 @@ ggml_tensor * build_fast_pass_graph(lm_model & model, scratch & build, int posit
                                     model.precise_outputs));
 }
 
-bool fast_pass(lm_model & model, const fast_source & source, int position, int n_threads,
-               std::vector<float> * logits_out, std::string * error) {
-    scratch build(AUDIO8_MAX_NODES);
+// Every fast position attends to the whole frame prefix, so its causal mask is
+// all zeros and depends only on the position. The graph outlives the frame, so
+// the mask is written when it is built rather than before every run.
+void write_fast_mask(ggml_cgraph * graph, int position) {
+    std::vector<float> mask_values(position + 1);
+    fill_causal_mask(mask_values.data(), position + 1, 1, position, /*window=*/0);
+    write_input(graph, "mask", mask_values.data(), mask_values.size() * sizeof(float));
+}
+
+void drop_cached_fast_graph(lm_model::fast_graph & cached) {
+    if (cached.ctx) ggml_free(cached.ctx);
+    if (cached.allocr) ggml_gallocr_free(cached.allocr);
+    cached = lm_model::fast_graph{};
+}
+
+// A frame walks the same ten positions every time, so each position's graph is
+// built once and replayed. Nothing in it depends on the frame: the shapes come
+// from the position, the weights and the fast cache are resident, and the two
+// inputs are written before every run.
+bool build_cached_fast_graph(lm_model & model, int position, bool is_code,
+                             lm_model::fast_graph & cached, std::string * error) {
+    scratch build(AUDIO8_FAST_MAX_NODES);
+    if (!build.ok()) {
+        if (error) *error = "audio8: failed to create the fast graph context";
+        return false;
+    }
+    cached.logits = build_fast_pass_graph(model, build, position, is_code);
+    cached.allocr =
+        ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    if (!cached.allocr) {
+        if (error) *error = "audio8: failed to create the fast graph allocator";
+        return false;
+    }
+    if (!prepare_graph(model.backend, model.sched, model.buffer_w, cached.allocr,
+                       build.graph, "fast", cached.use_sched, error)) {
+        ggml_gallocr_free(cached.allocr);
+        cached.allocr = nullptr;
+        return false;
+    }
+    write_fast_mask(build.graph, position);
+    cached.ctx = build.ctx;
+    cached.graph = build.graph;
+    build.release();
+    return true;
+}
+
+// A cached graph is keyed by position alone, which is only sound because the
+// position decides the input: position 0 always primes from the slow hidden
+// state and every later one always reads a code. Stated rather than assumed,
+// so a caller that broke it gets an error instead of the wrong graph.
+bool source_matches_position(const fast_source & source, int position) {
+    return source.is_code == (position != 0);
+}
+
+bool run_fast_graph(lm_model & model, ggml_cgraph * graph, bool use_sched,
+                    const fast_source & source, ggml_tensor * logits, int n_threads,
+                    std::vector<float> * logits_out, std::string * error) {
+    write_input(graph, "input", source.data, source.bytes);
+    if (!compute_graph(model.backend, model.sched, graph, use_sched, n_threads, "fast",
+                       error)) {
+        return false;
+    }
+    if (logits_out) read_output(logits, *logits_out);
+    return true;
+}
+
+// What fast_pass did before the cache, and still does wherever a graph cannot
+// be replayed.
+bool fast_pass_uncached(lm_model & model, const fast_source & source, int position,
+                        int n_threads, std::vector<float> * logits_out,
+                        std::string * error) {
+    scratch build(AUDIO8_FAST_MAX_NODES);
     if (!build.ok()) {
         if (error) *error = "audio8: failed to create the fast graph context";
         return false;
     }
     ggml_tensor * logits = build_fast_pass_graph(model, build, position, source.is_code);
-    const int keys = position + 1;
-
     bool use_sched = false;
     if (!prepare_graph(model.backend, model.sched, model.buffer_w, model.fast_allocr,
                        build.graph, "fast", use_sched, error)) {
         return false;
     }
-    std::vector<float> mask_values(keys);
-    fill_causal_mask(mask_values.data(), keys, 1, position, /*window=*/0);
-    write_input(build.graph, "mask", mask_values.data(), mask_values.size() * sizeof(float));
-    write_input(build.graph, "input", source.data, source.bytes);
-    if (!compute_graph(model.backend, model.sched, build.graph, use_sched, n_threads,
-                       "fast", error)) {
+    write_fast_mask(build.graph, position);
+    return run_fast_graph(model, build.graph, use_sched, source, logits, n_threads,
+                          logits_out, error);
+}
+
+bool position_accepts_source(const lm_model & model, const fast_source & source,
+                             int position, std::string * error) {
+    if (position < 0 || position >= model.hp.num_codebooks) {
+        if (error) *error = "audio8: fast position outside the codebook range";
         return false;
     }
-
-    if (logits_out) read_output(logits, *logits_out);
+    if (!source_matches_position(source, position)) {
+        if (error) *error = "audio8: fast position and input kind disagree";
+        return false;
+    }
     return true;
+}
+
+// One transition, wherever it is discovered: give back what was built and stay
+// on the per-call path for the rest of the model's life. A backend that needs
+// the scheduler cannot keep a graph at all, because
+// ggml_backend_sched_alloc_graph resets one shared arena and rewrites
+// node->src[] in place.
+void disable_fast_cache(lm_model & model) {
+    for (lm_model::fast_graph & cached : model.fast_graphs) {
+        drop_cached_fast_graph(cached);
+    }
+    model.fast_cache_off = true;
+}
+
+// Builds the position on first use. Returns null once the cache is off, which
+// includes the build that discovers this backend needs the scheduler: that one
+// runs through the per-call path like every one after it.
+//
+// Nothing here reads the force hook. prepare_graph does, which is what lets a
+// test reach the branch below on a backend that supports every node -- reading
+// it here instead would route past the branch and leave it unreachable. The
+// cost is that flipping the hook on after a position was already replayed does
+// not reach the scheduler; set it before the first frame, as the other
+// sched-equivalence harnesses do.
+lm_model::fast_graph * cached_fast_graph(lm_model & model, int position,
+                                         bool is_code, std::string * error) {
+    if (model.fast_graphs.empty()) {
+        model.fast_graphs.resize(static_cast<size_t>(model.hp.num_codebooks));
+    }
+    lm_model::fast_graph & cached = model.fast_graphs[static_cast<size_t>(position)];
+    if (cached.graph) return &cached;
+    if (!build_cached_fast_graph(model, position, is_code, cached, error)) return nullptr;
+    if (cached.use_sched) {
+        disable_fast_cache(model);
+        return nullptr;
+    }
+    return &cached;
+}
+
+bool fast_pass(lm_model & model, const fast_source & source, int position, int n_threads,
+               std::vector<float> * logits_out, std::string * error) {
+    if (!position_accepts_source(model, source, position, error)) return false;
+    if (model.fast_cache_off) {
+        return fast_pass_uncached(model, source, position, n_threads, logits_out, error);
+    }
+    std::string build_error;
+    lm_model::fast_graph * cached =
+        cached_fast_graph(model, position, source.is_code, &build_error);
+    if (!cached) {
+        if (model.fast_cache_off) {
+            return fast_pass_uncached(model, source, position, n_threads, logits_out,
+                                      error);
+        }
+        if (error) *error = build_error;
+        return false;
+    }
+    return run_fast_graph(model, cached->graph, cached->use_sched, source,
+                          cached->logits, n_threads, logits_out, error);
 }
 
 int clamp_to_codebook(const lm_hparams & hp, int semantic) {

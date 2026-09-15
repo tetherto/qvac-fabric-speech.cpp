@@ -634,6 +634,11 @@ bool load_lm_metadata_only(const std::string & path, int n_gpu_layers,
 }
 
 void free_lm(lm_model & model) {
+    for (lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.ctx) ggml_free(cached.ctx);
+        if (cached.allocr) ggml_gallocr_free(cached.allocr);
+    }
+    model.fast_graphs.clear();
     ::tts_cpp::detail::sched_fallback_free(model.sched);
     if (model.slow_allocr) ggml_gallocr_free(model.slow_allocr);
     if (model.fast_allocr) ggml_gallocr_free(model.fast_allocr);

@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace tts_cpp {
 namespace audio8 {
@@ -67,6 +68,60 @@ bool price_lm_graph(detail::lm_model & lm, detail::scratch & build,
     // 2 * AUDIO8_MAX_NODES mirrors prepare_graph's sched_fallback_ensure size.
     return ::tts_cpp::detail::fit_price_graph(lm.backend, build.graph,
                                               2 * AUDIO8_MAX_NODES, out);
+}
+
+bool price_fast_position(detail::lm_model & lm, int position,
+                         ::tts_cpp::detail::fit_graph_price & out) {
+    detail::scratch build(detail::AUDIO8_FAST_MAX_NODES);
+    if (!build.ok()) return false;
+    detail::build_fast_fit_graph(lm, build, position, /*prime=*/position == 0);
+    return price_lm_graph(lm, build, out);
+}
+
+bool any_used_sched(const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
+    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
+        if (one.used_sched) return true;
+    }
+    return false;
+}
+
+::tts_cpp::detail::fit_graph_price summed(
+    const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
+    ::tts_cpp::detail::fit_graph_price total;
+    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
+        total.device_bytes = sat_add(total.device_bytes, one.device_bytes);
+        total.host_bytes = sat_add(total.host_bytes, one.host_bytes);
+    }
+    return total;
+}
+
+::tts_cpp::detail::fit_graph_price widest(
+    const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
+    ::tts_cpp::detail::fit_graph_price peak;
+    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
+        peak.device_bytes = std::max(peak.device_bytes, one.device_bytes);
+        peak.host_bytes = std::max(peak.host_bytes, one.host_bytes);
+    }
+    peak.used_sched = true;
+    return peak;
+}
+
+// Position 0 primes from the slow transformer's hidden state and every later
+// one reads the code before it. Each keeps its own graph and its own arena --
+// unless one of them lands on the scheduler, which cannot hand out memory a
+// graph may keep: the first that does drops what was built and puts every
+// position back on the one shared arena. The projection follows the same fork,
+// so it adds the resident arenas or takes the widest shared one, never both.
+bool price_fast_positions(detail::lm_model & lm, int num_codebooks,
+                          ::tts_cpp::detail::fit_graph_price & total) {
+    std::vector<::tts_cpp::detail::fit_graph_price> priced;
+    for (int position = 0; position < num_codebooks; ++position) {
+        ::tts_cpp::detail::fit_graph_price one;
+        if (!price_fast_position(lm, position, one)) return false;
+        priced.push_back(one);
+    }
+    total = any_used_sched(priced) ? widest(priced) : summed(priced);
+    return true;
 }
 
 }  // namespace
@@ -196,6 +251,7 @@ FitResult fit_params(const FitOptions & opts) {
 
     uint64_t lm_compute = 0;
     uint64_t host_extra = 0;  // CPU-fallback portions of sched-priced graphs
+    bool fast_positions_replayed = false;  // false once one lands on the scheduler
 
     // ── LM graphs: the resident arena set ───────────────────────────────────
     // slow_allocr serves both the prompt prefill and every decode step and
@@ -231,30 +287,17 @@ FitResult fit_params(const FitOptions & opts) {
         host_extra = sat_add(host_extra,
                              std::max(prefill.host_bytes, decode.host_bytes));
 
-        // Fast head: position 0 primes from the slow hidden state, the last
-        // position sees the deepest cache; one arena serves both, so max.
-        ::tts_cpp::detail::fit_graph_price prime, last;
-        {
-            detail::scratch build(AUDIO8_MAX_NODES);
-            if (!build.ok()) { r.reason = "measurement-failed"; return r; }
-            detail::build_fast_fit_graph(m.lm, build, /*position=*/0, /*prime=*/true);
-            if (!price_lm_graph(m.lm, build, prime)) {
-                r.reason = "measurement-failed";
-                return r;
-            }
+        // Fast head: every position keeps its own graph and its own arena for
+        // the life of the model, so they all stay resident and the projection
+        // adds them up.
+        ::tts_cpp::detail::fit_graph_price fast;
+        if (!price_fast_positions(m.lm, hp.num_codebooks, fast)) {
+            r.reason = "measurement-failed";
+            return r;
         }
-        {
-            detail::scratch build(AUDIO8_MAX_NODES);
-            if (!build.ok()) { r.reason = "measurement-failed"; return r; }
-            detail::build_fast_fit_graph(m.lm, build, hp.num_codebooks - 1,
-                                         /*prime=*/false);
-            if (!price_lm_graph(m.lm, build, last)) {
-                r.reason = "measurement-failed";
-                return r;
-            }
-        }
-        lm_compute = sat_add(lm_compute, std::max(prime.device_bytes, last.device_bytes));
-        host_extra = sat_add(host_extra, std::max(prime.host_bytes, last.host_bytes));
+        fast_positions_replayed = !fast.used_sched;
+        lm_compute = sat_add(lm_compute, fast.device_bytes);
+        host_extra = sat_add(host_extra, fast.host_bytes);
 
         // The chained whole-frame graph only runs where the backend can pick
         // codes itself (greedy on a validated GPU); its arena then coexists
@@ -306,6 +349,13 @@ FitResult fit_params(const FitOptions & opts) {
         host = sat_add(host, sat_mul(sat_mul((uint64_t) n_frames, books), 3 * 4));
         // Semantic logits + carried fast input, per step.
         host = sat_add(host, sat_mul((uint64_t) hp.codebook_size + 1 + hp.hidden, f32));
+        // A replayed fast-AR position also keeps its graph's arena -- the
+        // tensor headers and the graph itself -- resident in host RAM. The
+        // scheduler path keeps none, because it cannot replay one.
+        if (fast_positions_replayed) {
+            host = sat_add(host, sat_mul(books, (uint64_t) detail::scratch_arena_bytes(
+                                                    detail::AUDIO8_FAST_MAX_NODES)));
+        }
         // Latent-graph host side: post slab + its window mask.
         host = sat_add(host, sat_mul(sat_mul((uint64_t) codec_frames,
                                              (uint64_t) m.decoder.hp.latent_dim), f32));

@@ -28,6 +28,12 @@ namespace detail {
 
 constexpr int AUDIO8_MAX_NODES = 8192;
 
+// The fast head is four layers over at most num_codebooks positions, so its
+// graphs are two orders of magnitude smaller than the cap above. They are held
+// for the life of the model, one per position, and an arena sized for 8192
+// tensor headers would hold 30 MB of host memory to describe ~135 nodes.
+constexpr int AUDIO8_FAST_MAX_NODES = 512;
+
 // EngineOptions::max_frames == 0 resolves to this, the reference default
 // (~24 s of audio). Shared with the fit projector so the projected workload
 // is the one the engine would run.
@@ -141,10 +147,30 @@ struct lm_model {
     kv_cache slow_kv;
     kv_cache fast_kv;
     // Separate arenas: the two graphs have different shapes, and alternating
-    // them through one allocator would resize it on every call.
+    // them through one allocator would resize it on every call. fast_allocr
+    // serves the per-call path only; a replayed position uses its own.
     ggml_gallocr_t slow_allocr = nullptr;
     ggml_gallocr_t fast_allocr = nullptr;
     ggml_gallocr_t frame_allocr = nullptr;
+
+    // One built graph per fast-AR position, kept for the life of the model.
+    // Every frame replays the same shapes, so rebuilding them per frame costs a
+    // context, a support sweep and an allocation each time, and hands the
+    // backend a graph it cannot recognise as the one it just ran. Each position
+    // owns its allocator: one shared arena would move under the graphs already
+    // built against it the first time a later position reserved something
+    // bigger, and a graph whose tensors moved cannot be replayed either.
+    struct fast_graph {
+        ggml_context * ctx = nullptr;
+        ggml_cgraph * graph = nullptr;
+        ggml_tensor * logits = nullptr;
+        ggml_gallocr_t allocr = nullptr;
+        bool use_sched = false;
+    };
+    std::vector<fast_graph> fast_graphs;
+    // Set when a build lands on the scheduler fallback, which reallocates one
+    // shared arena per graph and so cannot hand out memory a graph may keep.
+    bool fast_cache_off = false;
     // Whether this backend can pick codes itself, decided once at load time.
     bool picks_codes = false;
     bool precise_outputs = false;

@@ -138,7 +138,7 @@ build pins.
 |---|---|---|
 | ASR | Parakeet TDT 0.6b v3 | RTF 0.0006–0.0055 on the GPU lanes; 0.00 % / 0.80 % WER on the jfk / ls90 clips — [full table](engines/parakeet/README.md#multi-machine-benchmark-2026-09) |
 | TTS | Supertonic 3 | end-to-end wall 0.61–0.82 s on every GPU lane (RTF 0.024–0.031) — [full table](engines/tts/README.md#supertonic-3-multi-machine-benchmark-2026-09) |
-| TTS | Audio8 0.6b | GPU RTF 0.20–0.40, faster than real time on every GPU lane — [full table](engines/tts/README.md#audio8-multi-machine-benchmark-2026-09) |
+| TTS | Audio8 0.6b | GPU RTF 0.13–0.65, faster than real time on every GPU lane — [full table](engines/tts/README.md#audio8-multi-machine-benchmark-2026-09) |
 | Music | ACE-Step 1.5 | generation 1,338–2,330 ms on the GPU lanes (RTF 0.14–0.25) — [full table](engines/audiogen/README.md#ace-step-15-multi-machine-benchmark-2026-09) |
 
 ### Brain-computer interface
