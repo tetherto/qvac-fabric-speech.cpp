@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import sys
@@ -141,6 +142,18 @@ def fmt_audio_quality(metrics: Any) -> str:
     return "; ".join(cells) or "—"
 
 
+def fmt_music_alignment(metric: Any) -> str:
+    if not isinstance(metric, dict):
+        return "—"
+    coverage = metric.get("coverage") or {}
+    count = f"{coverage.get('scored', 0)}/{coverage.get('expected', '?')}"
+    value = metric.get("score")
+    status = str(metric.get("status", "unavailable")).replace("|", "\\|")
+    if status in ("ok", "partial") and isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and -1 <= value <= 1:
+        return f"CLAP {value:.4f} ({status}; {count})"
+    return f"CLAP — ({status}; {count})"
+
+
 def fmt_coreml_verified(v: Any) -> str:
     if v is True:
         return "yes"
@@ -182,7 +195,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
                 baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
                 inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
-                correctness=(fmt_audio_quality(r.get("audio_quality")) if r.get("correctness_kind") == "audio" else fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility"))),
+                correctness=(fmt_music_alignment(r.get("music_alignment")) if r.get("music_alignment") is not None else fmt_audio_quality(r.get("audio_quality")) if r.get("correctness_kind") == "audio" else fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility"))),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -223,6 +236,7 @@ def render_legend() -> str:
         "- **Audio quality** — SI-SDR is in dB; STOI is a percentage. "
         "Higher is better. Scores use the final timed output, not a median. "
         "Unavailable metrics are labeled; details and reference/output WAVs are in artifacts.\n"
+        "- **CLAP** — non-gating text/music cosine similarity, higher means stronger prompt alignment; not overall music quality. Equal-weight mean across timed runs with scored/expected coverage; failed scores remain null. Opt-in diagnostic generation writes WAVs within timing and uses a longer workload; compare only matching diagnostic configurations. CLAP preparation/scoring are excluded from generation timing.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
         "- **Backend** — from the bench binary's JSON when it reports one, else the "

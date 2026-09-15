@@ -964,4 +964,12 @@ grep -q "correctness.kind='f1' requires text-file mode" "$OUT/f1-nat-warns.err" 
   || fail "f1-nat-warns: native-F1 config diagnostic not surfaced"
 ok "correctness (F1): native-mode families with kind='f1' are skipped with a diagnostic"
 
+# Music driver, cache and pilot aggregation tests use only the standard library.
+python3 "$HERE/test-music-alignment-driver.py" || fail "music driver regressions"
+ok "music driver output isolation, statuses and provenance"
+python3 "$HERE/test_music_preparation.py" || fail "music model preparation regressions"
+ok "music model cache integrity"
+python3 "$HERE/test_music_pilot.py" || fail "music pilot regressions"
+ok "music paired pilot aggregation and coverage"
+
 echo "all $PASS checks passed"

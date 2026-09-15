@@ -98,12 +98,13 @@ function renderEngineTable (title, engines) {
   const lines = [
     `## ${title}`,
     '',
-    '| Engine | Success | Fail | Median gen ms | Median e2e ms | Median RTF | Peak RSS | Unique WAV hashes | Silent | Median CLAP |',
-    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|'
+    '| Engine | Success | Fail | Median gen ms | Median e2e ms | Median RTF | Peak RSS | Unique WAV hashes | Silent | Median CLAP | CLAP policy |',
+    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|'
   ]
   for (const [name, stats] of Object.entries(engines || {})) {
     const clapMedian = stats.clap && stats.clap.median
-    lines.push(`| ${name} | ${stats.successCount} | ${stats.failureCount} | ${formatNumber(stats.generationMs.median, 1)} | ${formatNumber(stats.e2eMs.median, 1)} | ${formatNumber(stats.rtf.median, 3)} | ${formatBytes(stats.peakRssBytes.median)} | ${stats.uniqueWavHashes} | ${stats.silentCount} | ${formatNumber(clapMedian, 3)} |`)
+    const policy = clapMedian == null ? 'n/a' : (stats.clap.policyVersion || 'legacy/unversioned')
+    lines.push(`| ${name} | ${stats.successCount} | ${stats.failureCount} | ${formatNumber(stats.generationMs.median, 1)} | ${formatNumber(stats.e2eMs.median, 1)} | ${formatNumber(stats.rtf.median, 3)} | ${formatBytes(stats.peakRssBytes.median)} | ${stats.uniqueWavHashes} | ${stats.silentCount} | ${formatNumber(clapMedian, 3)} | ${policy} |`)
   }
   lines.push('')
   return lines

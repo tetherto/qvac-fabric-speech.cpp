@@ -1,5 +1,7 @@
 'use strict'
 
+const { clapPolicyVersion } = require('./clap')
+
 function sortedNumbers (values) {
   return values.filter(value => typeof value === 'number' && !Number.isNaN(value)).sort((a, b) => a - b)
 }
@@ -57,6 +59,8 @@ function uniqueCount (values) {
 }
 
 function aggregateRounds (rounds) {
+  // Validate before grouping so different engines cannot use different policies.
+  clapPolicyVersion(rounds)
   const byEngine = {}
   for (const round of rounds) {
     const key = round.engine
@@ -82,7 +86,10 @@ function aggregateRounds (rounds) {
       clippingRatio: summarise(successful.map(round => round.audio && round.audio.clippingRatio)),
       uniqueWavHashes: uniqueCount(successful.map(round => round.wavSha256)),
       uniqueCodeHashes: uniqueCount(successful.map(round => round.codesSha256)),
-      clap: summarise(successful.map(round => round.clap && round.clap.score)),
+      clap: {
+        ...summarise(successful.map(round => round.clap && round.clap.score).filter(Number.isFinite)),
+        policyVersion: clapPolicyVersion(successful)
+      },
       silentCount: successful.filter(round => round.audio && round.audio.silent).length
     }
   }
@@ -90,6 +97,7 @@ function aggregateRounds (rounds) {
 }
 
 function groupByPrompt (rounds) {
+  clapPolicyVersion(rounds)
   const groups = {}
   for (const round of rounds) {
     const key = round.promptId

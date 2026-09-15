@@ -1,5 +1,8 @@
 'use strict'
 
+// Must match scripts/benchmarks/music_alignment.py (checked by clap.test.js).
+const CLAP_POLICY_VERSION = 'clap-music-v2'
+
 function buildClapText (prompt, textPolicy) {
   if (!prompt || typeof prompt.caption !== 'string') {
     throw new Error('CLAP prompt must include a caption string')
@@ -35,8 +38,20 @@ function shouldScoreRound (record, options) {
   if (!record) return false
   if (timedOnly && record.kind !== 'timed') return false
   if (!record.wavPath) return false
-  if (!options.force && record.clap && typeof record.clap.score === 'number') return false
+  if (!options.force && record.clap && record.clap.ok !== false &&
+      Number.isFinite(record.clap.score) && record.clap.policyVersion === CLAP_POLICY_VERSION) return false
   return true
+}
+
+function clapPolicyVersion (rounds) {
+  const versions = new Set(rounds
+    .filter(round => round.ok && round.clap && Number.isFinite(round.clap.score))
+    .map(round => round.clap.policyVersion || null))
+  if (versions.size > 1) {
+    const labels = [...versions].map(version => version || 'legacy/unversioned')
+    throw new Error(`mixed CLAP policies: ${labels.join(', ')}. Run node score-clap.js --force to rescore saved WAVs before reporting.`)
+  }
+  return versions.size ? [...versions][0] : null
 }
 
 function mergeClapScore (record, scoreItem, meta) {
@@ -48,6 +63,7 @@ function mergeClapScore (record, scoreItem, meta) {
     model: meta.model,
     revision: meta.revision || null,
     samplingRate: meta.samplingRate || null,
+    policyVersion: meta.policyVersion || null,
     device: meta.device,
     textPolicy: meta.textPolicy
   }
@@ -61,7 +77,9 @@ function lookupPrompt (prompts, promptId) {
 }
 
 module.exports = {
+  CLAP_POLICY_VERSION,
   buildClapText,
+  clapPolicyVersion,
   lookupPrompt,
   mergeClapScore,
   parseClapBatchOutput,
