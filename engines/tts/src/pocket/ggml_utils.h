@@ -44,10 +44,17 @@ inline void mark_external(ggml_context * ctx) {
     for (auto * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t))
         t->data = reinterpret_cast<void *>(uintptr_t(0x1000));
 }
-inline uint64_t price_cpu_graph(ggml_gallocr_t allocator, ggml_cgraph * graph, int threads) {
+inline uint64_t price_cpu_graph(ggml_backend_t backend, ggml_gallocr_t allocator, ggml_cgraph * graph, int threads) {
     size_t arena = 0;
     ggml_gallocr_reserve_n_size(allocator, graph, nullptr, nullptr, &arena);
-    const auto plan = ggml_graph_plan(graph, threads, nullptr);
+    // CPU variants can be MODULE libraries: resolve the planner on the same
+    // backend that will execute the graph, without a direct CPU-library import.
+    const auto device = ggml_backend_get_device(backend);
+    const auto reg = ggml_backend_dev_backend_reg(device);
+    const auto plan_graph = reinterpret_cast<decltype(&ggml_graph_plan)>(
+        ggml_backend_reg_get_proc_address(reg, "ggml_graph_plan"));
+    if (!plan_graph) throw std::runtime_error("pocket: CPU backend lacks ggml_graph_plan; update ggml-speech");
+    const auto plan = plan_graph(graph, threads, nullptr);
     return uint64_t(arena) + plan.work_size;
 }
 inline void price_persistent(ggml_backend_t backend, ggml_context * metadata,
@@ -67,11 +74,12 @@ inline void price_persistent(ggml_backend_t backend, ggml_context * metadata,
 
 template<int Nodes>
 struct SizedPocketGraph {
+    ggml_backend_t backend_;
     ggml_context * ctx = nullptr;
     ggml_cgraph * graph = nullptr;
     ggml_gallocr_t allocator = nullptr;
     std::vector<ggml_tensor *> updates;
-    explicit SizedPocketGraph(ggml_backend_t backend) {
+    explicit SizedPocketGraph(ggml_backend_t backend) : backend_(backend) {
         ctx = ggml_init({metadata_bytes(), nullptr, true});
         if (!ctx) throw std::runtime_error("pocket: graph context allocation failed");
         graph = ggml_new_graph_custom(ctx, Nodes, false);
@@ -90,7 +98,7 @@ struct SizedPocketGraph {
         // The old convolution / transformer histories must remain intact until
         // every consumer has run. Delay cache writes until after the output.
         for (auto * update : updates) ggml_build_forward_expand(graph, update);
-        if (size_only) return price_cpu_graph(allocator, graph, threads);
+        if (size_only) return price_cpu_graph(backend_, allocator, graph, threads);
         if (!ggml_gallocr_alloc_graph(allocator, graph)) throw std::runtime_error("pocket: graph allocation failed");
         return 0;
     }

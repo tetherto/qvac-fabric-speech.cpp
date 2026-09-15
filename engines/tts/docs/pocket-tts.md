@@ -133,7 +133,7 @@ full prefixes while the native implementation uses cached decoding.
 /tmp/pocket-venv/bin/python engines/tts/test/pocket/test_converter.py /tmp/pocket-reference
 
 # GGML_PREFIX must contain an installed qvac-ext-ggml speech build compatible
-# with the rest of this checkout. Pocket itself needs no new ggml operations.
+# with the rest of this checkout, including the CPU registry graph-planner export.
 cmake -S engines/tts -B build/pocket -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$GGML_PREFIX" -DTTS_CPP_BUILD_EXECUTABLES=OFF \
   -DTTS_CPP_BUILD_TESTS=ON -DTTS_CPP_POCKET_REFERENCE_DIR=/tmp/pocket-reference
@@ -367,6 +367,11 @@ numpy and scipy. Keep CPU-heavy work idle during the timed comparison.
 `tts-cpp/pocket/fit.h` exposes `pocket::fit_params(FitOptions)`. It tokenizes the
 requested text, validates voice/context capacity, and prices the actual FlowLM
 and Mimi graphs with ggml's size-only allocator and CPU work-buffer planner.
+The planner is resolved through the selected CPU backend's registry, so
+preflight works when CPU variants are dynamically loaded (Linux/Android).
+This requires the `ggml_graph_plan` registry export from
+[qvac-ext-ggml#92](https://github.com/tetherto/qvac-ext-ggml/pull/92);
+older backends report an explicit preflight error instead of omitting scratch memory.
 GGUF tensor payloads are never read, allocated, or executed during preflight.
 The estimate includes expanded F32 weights, state, overlapping worker compute,
 host containers, thread stacks, load staging, and native batch PCM buffers.
