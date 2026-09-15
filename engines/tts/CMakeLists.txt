@@ -1207,6 +1207,10 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-backend-selection LABEL "unit")
 
     # ---- Pocket numerical core (fixtures from dump-pocket-flow-reference.py) ----
+    add_executable(test-pocket-graph-memory test/pocket/test_graph_memory.cpp)
+    target_include_directories(test-pocket-graph-memory PRIVATE src)
+    target_link_libraries(test-pocket-graph-memory PRIVATE ggml)
+    tts_cpp_register_test(test-pocket-graph-memory LABEL "unit")
     add_executable(test-pocket-generation test/pocket/test_generation.cpp)
     target_include_directories(test-pocket-generation PRIVATE src)
     tts_cpp_register_test(test-pocket-generation LABEL "unit")

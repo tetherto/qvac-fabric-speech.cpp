@@ -20,7 +20,7 @@ from GGUF metadata.
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; cache-aware streaming at 80/160/320/560/1120 ms |
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | Sortformer | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Streaming-trained; sliding-history streaming |
-| `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps |
+| `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps; Core ML exact-shape batch/AOSC encoder |
 
 TDT 0.6B-v3 and TDT 1.1B are distinct model contracts: only 0.6B-v3 is
 multilingual and punctuation/capitalization-aware. Encoder topology, including
@@ -44,6 +44,45 @@ or `1120` to select the corresponding trained right-context configuration.
 Both callback streaming and live `StreamSession` input use the native caches;
 the sliding-window `left_context_ms` and `right_lookahead_ms` knobs are ignored
 for Nemotron.
+
+## Sortformer v2.1 Core ML
+
+On Apple platforms, `PARAKEET_COREML=ON` supports two optional fixed-shape
+sidecars for the tagged `sortformer-streaming-v2.1-aosc` variant. The batch
+sidecar accepts mel features and the AOSC sidecar accepts post-subsampling
+embeddings plus a validity mask. Mel preprocessing and the Sortformer
+transformer/speaker head remain on ggml.
+
+Export and compile both sidecars from the F16 GGUF:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+  --wav engines/parakeet/test/samples/diarization-sample-16k.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+  --bypass-pre-encode --n-encoder-frames 410 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directories beside any quantization of the same GGUF as
+`diar_streaming_sortformer_4spk-v2.1-encoder.mlmodelc` and
+`diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlmodelc`.
+Batch routing requires the exact exported mel-frame count because that graph
+has no padding-validity mask; shorter and mismatched inputs use ggml. The AOSC
+sidecar accepts up to its masked encoder-frame capacity (410 for the default
+cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
+or incompatible sidecars and prediction failures fall back to ggml. A bypass
+sidecar that fails prediction is quarantined for the lifetime of the engine so
+subsequent chunks go directly to ggml. See
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for TDT/EOU
+details and runtime controls.
 
 ## Performance
 
