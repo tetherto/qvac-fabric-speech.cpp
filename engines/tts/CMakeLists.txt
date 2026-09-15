@@ -1679,7 +1679,8 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-engine-stream test/parler/test_engine_stream.cpp)
     target_link_libraries(test-parler-engine-stream PRIVATE tts-cpp)
-    target_include_directories(test-parler-engine-stream PRIVATE include)
+    # src for backend_util.h: the CPU leg asks whether tinyBLAS is compiled in.
+    target_include_directories(test-parler-engine-stream PRIVATE include src)
     tts_cpp_apply_ccache(test-parler-engine-stream)
     tts_cpp_register_test(test-parler-engine-stream
         LABEL    "fixture"
