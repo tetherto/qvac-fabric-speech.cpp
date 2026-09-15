@@ -97,6 +97,17 @@ parakeet_ref_repo_rel="$(jq -r '.parakeet.correctness.reference' "$REAL_SPEC")"
   || fail "parakeet correctness.reference file missing: $parakeet_ref_repo_rel"
 ok "parakeet declares a WER correctness block pointing at a real reference file"
 
+jq -e '."parakeet-unified".coreml_compare_on_darwin == true and
+       ."parakeet-unified".coreml_model_basename == "parakeet-unified-en-0.6b" and
+       ."parakeet-unified".coreml_source_gguf == "parakeet-unified-en-0.6b.q8_0.gguf" and
+       ."parakeet-unified".coreml_export_mel_frames == 1501 and
+       ."parakeet-unified".correctness.kind == "wer"' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-unified must declare its fixed-capacity Core ML and WER benchmark contract"
+jq -e '."parakeet-unified".correctness.reference == .parakeet.correctness.reference' \
+  "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-unified and TDT must use the same JFK WER reference"
+ok "parakeet-unified declares the fixed 1501-frame Core ML comparison"
+
 # whisper is the time-wrapped ASR family and must reuse the same JFK reference
 # parakeet does — same jfk.wav audio, so a WER delta between the two rows is a
 # real model-quality delta, not a normalizer or reference drift.
