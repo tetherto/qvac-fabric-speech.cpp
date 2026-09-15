@@ -1458,13 +1458,13 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder disabled via PARAKEET_COREML_DISABLE; using ggml\n");
         return;
     }
-    // Version one intentionally supports only the validated offline TDT
-    // contract. RNNT, Nemotron, CTC, EOU, and Sortformer remain on ggml until
-    // each family has its own export contract and parity coverage.
-    if (model.model_type != ParakeetModelType::TDT) {
+    // Core ML sidecars currently have validated contracts for offline TDT and
+    // fixed-shape causal/chunked EOU encoders. Other families stay on ggml.
+    if (model.model_type != ParakeetModelType::TDT &&
+        model.model_type != ParakeetModelType::EOU) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder is currently TDT-only; "
+                "parakeet: Core ML encoder supports TDT and EOU; "
                 "using ggml for model type %s\n",
                 model_type_name(model.model_type));
         }
@@ -3509,9 +3509,7 @@ static int coreml_encoder_out_frames(const EncoderConfig & enc, int n_mel_frames
     return next(next(next(n_mel_frames)));
 }
 
-// The exported sidecar is the offline, full-context FastConformer. Cache-aware /
-// chunked / causal encoders (EOU streaming) compute different activations, so only
-// the offline configuration is routed through Core ML; everything else stays on ggml.
+// TDT sidecars use the offline, full-context FastConformer contract.
 static bool encoder_is_offline(const EncoderConfig & enc) {
     return enc.att_context_left  < 0
         && enc.att_context_right < 0
@@ -3521,14 +3519,32 @@ static bool encoder_is_offline(const EncoderConfig & enc) {
 }
 
 static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
+                                      int n_mel_frames,
                                       bool all_valid,
                                       bool capture_intermediates,
                                       bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (model.model_type != ParakeetModelType::TDT) return false;
+    if (model.model_type != ParakeetModelType::TDT &&
+        model.model_type != ParakeetModelType::EOU) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
-    return encoder_is_offline(model.encoder_cfg);
+    if (model.model_type == ParakeetModelType::TDT) {
+        return encoder_is_offline(model.encoder_cfg);
+    }
+
+    // The EOU graph bakes its causal/chunked attention geometry and shape into
+    // the compiled program. Never pad a shorter invocation: an extra future
+    // encoder frame can change both token emission and the <EOU> boundary.
+    const EncoderConfig & enc = model.encoder_cfg;
+    const int fixed_frames = model_coreml_fixed_mel_frames(model);
+    return fixed_frames > 0
+        && n_mel_frames == fixed_frames
+        && enc.causal_downsampling
+        && enc.conv_causal
+        && enc.conv_norm_type == ConvNormType::LayerNorm
+        && enc.att_chunked_limited
+        && enc.att_context_left >= 0
+        && enc.att_context_right >= 0;
 }
 
 // Fills out.encoder_out from the Core ML sidecar, honouring run_encoder's contract
@@ -3763,10 +3779,10 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run the validated offline TDT FastConformer
-    // encoder and hand encoder_out back to the ggml TDT decoder. On any failure
-    // fall through to the ggml encoder below.
-    if (should_use_coreml_encoder(model, all_valid, capture_intermediates,
+    // Apple Core ML sidecar: run the validated TDT/EOU FastConformer encoder
+    // and hand encoder_out back to the ggml decoder. On any failure, fall
+    // through to the ggml encoder below.
+    if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
         if (rc == 0) return 0;

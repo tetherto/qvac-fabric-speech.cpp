@@ -13,6 +13,7 @@
 #include "sentencepiece_bpe.h"
 #include "energy_vad.h"
 #include "long_form.h"
+#include "parakeet_log.h"
 #include "sortformer_finalize.h"
 
 #include <algorithm>
@@ -141,11 +142,22 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    const LongFormPlan coreml = resolve_coreml_fixed_shape_plan(
-        model_coreml_fixed_mel_frames(model),
-        opts.long_form_context_frames,
-        model.encoder_cfg.subsampling_factor,
-        n_mel_frames);
+    LongFormPlan coreml;
+    if (model.model_type == ParakeetModelType::TDT) {
+        coreml = resolve_coreml_fixed_shape_plan(
+            model_coreml_fixed_mel_frames(model),
+            opts.long_form_context_frames,
+            model.encoder_cfg.subsampling_factor,
+            n_mel_frames);
+    } else if (model.model_type == ParakeetModelType::EOU) {
+        // Exact-shape EOU calls may use Core ML directly, but oversized inputs
+        // stay on ggml until windowed causal/chunked attention parity is proven.
+        coreml = resolve_coreml_exact_shape_plan(
+            model_coreml_fixed_mel_frames(model),
+            opts.long_form_context_frames,
+            model.encoder_cfg.subsampling_factor,
+            n_mel_frames);
+    }
 
     // Respect a smaller user/model long-form limit, but force fixed-shape
     // windowing when that is the only way the complete input fits the sidecar.
@@ -158,6 +170,8 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
 
 struct WindowedEncoderStats {
     double encoder_ms = 0.0;
+    int coreml_windows = 0;
+    int ggml_windows = 0;
 };
 
 // Bounded-memory replacement for a single full-length run_encoder() call on long
@@ -201,6 +215,11 @@ int run_encoder_windowed(ParakeetCtcModel & model,
             return rc;
         }
         stats.encoder_ms += ms_since(t_enc);
+        if (win_out.used_coreml) {
+            ++stats.coreml_windows;
+        } else {
+            ++stats.ggml_windows;
+        }
 
         if (out.d_model == 0) {
             out.d_model    = win_out.d_model;
@@ -224,6 +243,12 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         }
         out.n_enc_frames += trim.center_cnt;
     }
+
+    out.used_coreml = !windows.empty() &&
+                      stats.coreml_windows == (int) windows.size();
+    PARAKEET_LOG_INFO(
+        "parakeet: long-form encoder windows=%zu coreml=%d ggml=%d\n",
+        windows.size(), stats.coreml_windows, stats.ggml_windows);
 
     return 0;
 }
@@ -508,6 +533,7 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
         result.sample_rate    = sample_rate;
         result.mel_frames     = n_mel_frames;
         result.encoder_frames = 0;
+        result.encoder_used_coreml = enc_out.used_coreml;
         return result;
     }
 
@@ -594,6 +620,7 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
     result.sample_rate    = sample_rate;
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = enc_out.n_enc_frames;
+    result.encoder_used_coreml = enc_out.used_coreml;
     return result;
 }
 
@@ -747,6 +774,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
     result.sample_rate    = sample_rate;
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = T_enc;
+    result.encoder_used_coreml = enc_out.used_coreml;
 
     const auto t_dec = clock::now();
 

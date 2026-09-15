@@ -5,9 +5,12 @@ Core ML package for the Apple Neural Engine sidecar.
 The decoder is rebuilt in pure PyTorch from the same GGUF tensors the ggml
 engine loads (weight-norm fused, snake alpha/beta exponentiated), so it matches
 vae_ggml.cpp numerically. The engine decodes long latents in fixed overlapping
-windows (core 256 + 48 context frames each side = 352), so a single fixed-shape
-Core ML graph covers every interior window; edge windows are zero-padded and
-trimmed by the caller.
+windows of the exported length, so a single fixed-shape Core ML graph covers
+every window. 64 latent frames is the Neural Engine sweet spot: the ANE caps
+the output width near 131072 samples (68 * 1920 fits, 72 * 1920 splits the
+graph onto the GPU), non-64-aligned windows run over 2x slower per frame, and
+a window of 128 or more fails ANE compilation outright and falls to a far
+slower Core ML GPU path.
 
 Parity check against an engine dump (music-cli --dump-stages <dir>):
 
@@ -18,7 +21,6 @@ Parity check against an engine dump (music-cli --dump-stages <dir>):
 Export and compile the fixed-shape sidecar:
 
   python scripts/export-vae-coreml.py --gguf models/vae-BF16.gguf \
-      --t-latent 352 \
       --out models/vae-decoder.mlpackage --compile-dir models
 """
 import argparse
@@ -36,7 +38,7 @@ IN_CH = [2048, 1024, 512, 256, 128]
 OUT_CH = [1024, 512, 256, 128, 128]
 DILATIONS = [1, 3, 9]
 WN_EPS = 1e-12
-DEFAULT_T_LATENT = 352
+DEFAULT_T_LATENT = 64
 
 
 class Snake(nn.Module):
@@ -103,7 +105,8 @@ def phase_conv_weight(w, out_ch, stride):
 
 def make_ane_safe(model):
     for block in model.blocks:
-        if block.conv_t1.stride[0] in ANE_BROKEN_DECONV_STRIDES:
+        if isinstance(block.conv_t1, nn.ConvTranspose1d) \
+                and block.conv_t1.stride[0] in ANE_BROKEN_DECONV_STRIDES:
             block.conv_t1 = PhaseUpsample(block.conv_t1)
     return model
 
@@ -219,7 +222,14 @@ def run_parity(model, latent_path, pcm_path):
     return cos
 
 
-def convert_coreml(model, t_latent, out_path, compile_dir, compute_units):
+def palettize(mlmodel, nbits):
+    import coremltools.optimize.coreml as cto
+    op_config = cto.OpPalettizerConfig(mode='kmeans', nbits=nbits)
+    config = cto.OptimizationConfig(global_config=op_config)
+    return cto.palettize_weights(mlmodel, config)
+
+
+def convert_coreml(model, t_latent, out_path, compile_dir, compute_units, palettize_nbits):
     import coremltools as ct
     example = torch.zeros(1, LATENT_CHANNELS, t_latent)
     traced = torch.jit.trace(make_ane_safe(model), example)
@@ -232,6 +242,9 @@ def convert_coreml(model, t_latent, out_path, compile_dir, compute_units):
         compute_units=getattr(ct.ComputeUnit, compute_units),
         convert_to='mlprogram',
     )
+    if palettize_nbits:
+        mlmodel = palettize(mlmodel, palettize_nbits)
+        print(f'[export] palettized weights to {palettize_nbits}-bit LUT')
     mlmodel.save(str(out_path))
     print(f'[export] saved {out_path} (T_latent={t_latent}, T_audio={t_latent * UPSAMPLE})')
     if compile_dir:
@@ -270,6 +283,8 @@ def parse_args():
     p.add_argument('--compile-dir')
     p.add_argument('--compute-units', default='ALL',
                    choices=['ALL', 'CPU_AND_NE', 'CPU_AND_GPU', 'CPU_ONLY'])
+    p.add_argument('--palettize', type=int, default=0, choices=[0, 4, 6, 8],
+                   help='k-means weight LUT bits (0 = keep float16 weights)')
     p.add_argument('--parity-latent')
     p.add_argument('--parity-pcm')
     return p.parse_args()
@@ -282,7 +297,8 @@ def main():
     if args.parity_latent and args.parity_pcm:
         run_parity(model, args.parity_latent, args.parity_pcm)
     if args.out:
-        convert_coreml(model, args.t_latent, args.out, args.compile_dir, args.compute_units)
+        convert_coreml(model, args.t_latent, args.out, args.compile_dir, args.compute_units,
+                       args.palettize)
 
 
 if __name__ == '__main__':

@@ -200,7 +200,7 @@ jobs:
             cmake_flags: -DTTS_CPP_BUILD_TESTS=OFF
           - engine: audiogen
             src: engines/audiogen
-            cmake_flags: -DAUDIOGEN_BUILD_TESTS=OFF -DAUDIOGEN_BUILD_EXECUTABLES=OFF
+            cmake_flags: -DAUDIOGEN_BUILD_TESTS=OFF -DAUDIOGEN_BUILD_EXECUTABLES=OFF -DAUDIOGEN_COREML=ON
     runs-on: ${{ needs.runner_names.outputs.macos_14 }}
     timeout-minutes: 60
     steps:

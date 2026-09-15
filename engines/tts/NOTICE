@@ -21,6 +21,15 @@ MIT
     MIT-licensed. The native implementation covers T3, S3Gen, HiFT, voice
     encoders, tokenizers, and voice-feature preprocessing.
 
+MIT reference code; CC-BY-4.0 model weights
+
+  Kyutai Pocket TTS
+    Code: https://github.com/kyutai-labs/pocket-tts
+    Models: https://huggingface.co/kyutai/pocket-tts
+    The FlowLM and Mimi implementations and validation scripts follow the upstream
+    reference at 0c2db3bdea7c991c568989cc11b503f14483fabc. The reference is an
+    optional Python test dependency. No Pocket model weights are distributed.
+
 MIT sample code; BigScience OpenRAIL-M model weights
 
   Supertone Supertonic 1, 2, and 3
