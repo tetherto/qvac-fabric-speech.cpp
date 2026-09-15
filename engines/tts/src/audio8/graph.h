@@ -28,6 +28,10 @@ struct scratch {
     scratch & operator=(const scratch &) = delete;
 
     bool ok() const { return ctx && graph; }
+
+    // Hands the arena to a caller that will outlive this scope; the caller then
+    // owns the context and frees it with ggml_free.
+    void release() { ctx = nullptr; graph = nullptr; }
 };
 
 ggml_tensor * input_i32(ggml_context * ctx, const char * name, int count);

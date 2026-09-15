@@ -69,6 +69,23 @@ bool price_lm_graph(detail::lm_model & lm, detail::scratch & build,
                                               2 * AUDIO8_MAX_NODES, out);
 }
 
+// One priced graph per fast-AR position, summed: position 0 primes from the
+// slow transformer's hidden state and every later one reads the code before
+// it, and each keeps its own arena.
+bool price_fast_positions(detail::lm_model & lm, int num_codebooks,
+                          ::tts_cpp::detail::fit_graph_price & total) {
+    for (int position = 0; position < num_codebooks; ++position) {
+        detail::scratch build(detail::AUDIO8_FAST_MAX_NODES);
+        if (!build.ok()) return false;
+        detail::build_fast_fit_graph(lm, build, position, /*prime=*/position == 0);
+        ::tts_cpp::detail::fit_graph_price price;
+        if (!price_lm_graph(lm, build, price)) return false;
+        total.device_bytes = sat_add(total.device_bytes, price.device_bytes);
+        total.host_bytes = sat_add(total.host_bytes, price.host_bytes);
+    }
+    return true;
+}
+
 }  // namespace
 
 FitResult fit_params(const FitOptions & opts) {
@@ -231,30 +248,16 @@ FitResult fit_params(const FitOptions & opts) {
         host_extra = sat_add(host_extra,
                              std::max(prefill.host_bytes, decode.host_bytes));
 
-        // Fast head: position 0 primes from the slow hidden state, the last
-        // position sees the deepest cache; one arena serves both, so max.
-        ::tts_cpp::detail::fit_graph_price prime, last;
-        {
-            detail::scratch build(AUDIO8_MAX_NODES);
-            if (!build.ok()) { r.reason = "measurement-failed"; return r; }
-            detail::build_fast_fit_graph(m.lm, build, /*position=*/0, /*prime=*/true);
-            if (!price_lm_graph(m.lm, build, prime)) {
-                r.reason = "measurement-failed";
-                return r;
-            }
+        // Fast head: every position keeps its own graph and its own arena for
+        // the life of the model, so they all stay resident and the projection
+        // adds them up.
+        ::tts_cpp::detail::fit_graph_price fast;
+        if (!price_fast_positions(m.lm, hp.num_codebooks, fast)) {
+            r.reason = "measurement-failed";
+            return r;
         }
-        {
-            detail::scratch build(AUDIO8_MAX_NODES);
-            if (!build.ok()) { r.reason = "measurement-failed"; return r; }
-            detail::build_fast_fit_graph(m.lm, build, hp.num_codebooks - 1,
-                                         /*prime=*/false);
-            if (!price_lm_graph(m.lm, build, last)) {
-                r.reason = "measurement-failed";
-                return r;
-            }
-        }
-        lm_compute = sat_add(lm_compute, std::max(prime.device_bytes, last.device_bytes));
-        host_extra = sat_add(host_extra, std::max(prime.host_bytes, last.host_bytes));
+        lm_compute = sat_add(lm_compute, fast.device_bytes);
+        host_extra = sat_add(host_extra, fast.host_bytes);
 
         // The chained whole-frame graph only runs where the backend can pick
         // codes itself (greedy on a validated GPU); its arena then coexists

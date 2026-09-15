@@ -1316,6 +1316,20 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_ref}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_ref}/sem_logits.npy")
 
+    # The fast-AR graph cache against the dual-path dispatch: the scheduler
+    # must bypass it and must not leave it poisoned for the direct path after.
+    add_executable(test-audio8-fast-cache-sched
+        test/audio8/test_fast_cache_sched.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/sampling.cpp ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-fast-cache-sched PRIVATE ggml)
+    target_include_directories(test-audio8-fast-cache-sched PRIVATE include src test)
+    tts_cpp_apply_ccache(test-audio8-fast-cache-sched)
+    tts_cpp_register_test(test-audio8-fast-cache-sched
+        LABEL    "fixture"
+        ARGS     "${_tcb_audio8_lm}"
+        REQUIRES "${_tcb_audio8_lm}")
+
     add_executable(test-audio8-quantised-precision
         test/audio8/test_quantised_precision.cpp
         src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
@@ -1423,9 +1437,15 @@ if (TTS_CPP_BUILD_TESTS)
             LABEL    "gpu"
             ARGS     "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
             REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+        tts_cpp_register_test(test-audio8-fast-cache-sched-${suffix}
+            EXE      test-audio8-fast-cache-sched
+            LABEL    "gpu"
+            ARGS     "${_tcb_audio8_lm}"
+            REQUIRES "${_tcb_audio8_lm}")
         set_property(TEST test-audio8-lm-${suffix} test-audio8-codec-${suffix}
                           test-audio8-engine-${suffix}
-                          test-audio8-quantised-precision-${suffix} APPEND
+                          test-audio8-quantised-precision-${suffix}
+                          test-audio8-fast-cache-sched-${suffix} APPEND
                      PROPERTY ENVIRONMENT "AUDIO8_TEST_GPU=${suffix}"
                                           "TTS_CPP_GPU_BACKEND=${suffix}")
     endfunction()
