@@ -8,8 +8,8 @@ ref-encoder-from-gguf.py so it matches the ggml encoder numerically.
 
 Three input-shape modes:
   - Fixed (default): torch.jit.trace at a single mel length (from a sample wav
-    or an explicit count). TDT and Sortformer treat that length as a capacity
-    and may pad shorter batch inputs; EOU requires the exact exported length.
+    or an explicit count). TDT treats that length as a capacity. EOU and
+    Sortformer batch routing require the exact exported length.
   - Sortformer AOSC (--bypass-pre-encode): trace only the Conformer block stack
     at a fixed encoder-frame capacity. The runtime pads shorter cache/FIFO/chunk
     slabs, supplies an attention-validity mask, and crops the output.
@@ -461,6 +461,13 @@ class EncoderModule(torch.nn.Module):
         return encoder_forward(self.ref, mel, weights, self.meta)[0]
 
 
+def prepare_bypass_encoder_inputs(pre_encode, valid_mask):
+    encoder_input = pre_encode.transpose(0, 1).unsqueeze(0)
+    sequence_mask = valid_mask.reshape(1, -1, 1)
+    attention_mask = (1.0 - valid_mask).reshape(1, 1, 1, -1) * -1.0e4
+    return encoder_input, sequence_mask, attention_mask
+
+
 class BypassEncoderModule(torch.nn.Module):
     """FastConformer blocks with subsampling/pre-encode intentionally omitted."""
 
@@ -478,12 +485,8 @@ class BypassEncoderModule(torch.nn.Module):
     def forward(self, pre_encode, valid_mask):
         weights = BiasTolerantWeights(
             (key, getattr(self, self._buffers_by_key[key])) for key in self._keys)
-        # Core ML boundary: (d_model, time) -> PyTorch (1, time, d_model).
-        x = pre_encode.transpose(0, 1).unsqueeze(0)
-        # Mask only the key axis. Padded query rows are discarded by the caller;
-        # excluding padded keys keeps every real query identical to the unpadded graph.
-        sequence_mask = valid_mask.reshape(1, -1, 1)
-        attention_mask = (1.0 - valid_mask).reshape(1, 1, 1, -1) * -1.0e4
+        x, sequence_mask, attention_mask = prepare_bypass_encoder_inputs(
+            pre_encode, valid_mask)
         return conformer_stack_forward(
             self.ref, x, weights, self.meta, attention_mask=attention_mask,
             sequence_mask=sequence_mask)[0]

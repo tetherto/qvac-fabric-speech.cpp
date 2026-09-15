@@ -950,7 +950,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
                              impl.model.mel_cfg.n_mels, enc_out,
                              /*max_layers=*/-1,
                              /*capture_intermediates=*/false,
-                             /*allow_coreml_padded=*/true); rc != 0) {
+                             /*allow_coreml_padded=*/false); rc != 0) {
         throw std::runtime_error("diarize: run_encoder failed (rc=" +
                                  std::to_string(rc) + ")");
     }

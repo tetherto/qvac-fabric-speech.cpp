@@ -1104,12 +1104,6 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-encoder-coreml-parity
         ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
-    parakeet_register_test(test-encoder-coreml-parity-sortformer-v2.1
-        LABEL    "fixture"
-        EXE      test-encoder-coreml-parity
-        ARGS     "--model" "${_qvp_sfsv21_f16_gguf}" "--wav" "${_qvp_diar_wav}"
-        REQUIRES "${_qvp_sfsv21_f16_gguf}" "${_qvp_diar_wav}" "${_qvp_sfsv21_coreml}")
-
     add_executable(test-encoder-coreml-bypass-parity
         test/test_encoder_coreml_bypass_parity.cpp
         src/parakeet_ctc.cpp
@@ -1185,6 +1179,16 @@ if (PARAKEET_BUILD_TESTS)
             EXE      test-transcribe-coreml-parity
             ARGS     "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
+
+        add_executable(test-diarize-coreml-short-parity
+            test/test_diarize_coreml_short_parity.cpp)
+        target_link_libraries(test-diarize-coreml-short-parity PRIVATE qvac-parakeet)
+        target_include_directories(test-diarize-coreml-short-parity PRIVATE include)
+        parakeet_apply_ccache(test-diarize-coreml-short-parity)
+        parakeet_register_test(test-diarize-coreml-short-parity
+            LABEL    "fixture"
+            ARGS     "${_qvp_sfsv21_f16_gguf}"
+            REQUIRES "${_qvp_sfsv21_f16_gguf}" "${_qvp_sfsv21_coreml}")
     endif()
 
     # CLI-level Core ML gate: --require-coreml must prove every measured encoder

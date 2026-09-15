@@ -3580,7 +3580,10 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         return encoder_is_offline(model.encoder_cfg);
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
+        const int fixed_frames = model_coreml_fixed_mel_frames(model);
         return model.model_variant == "sortformer-streaming-v2.1-aosc" &&
+               fixed_frames > 0 &&
+               n_mel_frames == fixed_frames &&
                encoder_is_offline(model.encoder_cfg);
     }
 
@@ -4026,7 +4029,9 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
             }
             PARAKEET_LOG_WARN(
                 "parakeet: Core ML bypass encoder failed (rc=%d); "
-                "falling back to ggml encoder\n", rc);
+                "quarantining sidecar and falling back to ggml encoder\n", rc);
+            parakeet_coreml_free(model.impl->ctx_coreml_bypass);
+            model.impl->ctx_coreml_bypass = nullptr;
         }
     }
 #endif

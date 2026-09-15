@@ -22,7 +22,8 @@
 //   - Exactly one MLMultiArray output = encoder hidden states, dims {n_enc_frames,
 //     d_model} (either order; Float32 or Float16). n_enc_frames is n_mel_frames put
 //     through the three stride-2 subsampling convs (matching run_encoder's sizing).
-//   - TDT and Sortformer batch exports are full-context and may pad shorter inputs. EOU exports bake
+//   - TDT exports are full-context and may pad shorter inputs. Sortformer batch
+//     and EOU exports require their exact fixed shape. EOU additionally bakes
 //     causal subsampling/convolution and chunk-limited attention into one exact
 //     fixed shape; the caller rejects nonmatching EOU shapes before this wrapper.
 //   - Sortformer v2.1 AOSC uses a second fixed-capacity sidecar with

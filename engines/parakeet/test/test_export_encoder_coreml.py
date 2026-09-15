@@ -107,9 +107,28 @@ class ExportContractTests(unittest.TestCase):
             EXPORTER.validate_export_contract(meta)
 
     @unittest.skipIf(torch is None, "torch is not installed")
+    def test_prepare_bypass_encoder_inputs_builds_masks(self):
+        pre_encode = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+        valid_mask = torch.tensor([1.0, 1.0, 0.0], dtype=torch.float32)
+        encoder_input, sequence_mask, attention_mask = (
+            EXPORTER.prepare_bypass_encoder_inputs(pre_encode, valid_mask))
+
+        self.assertEqual(tuple(encoder_input.shape), (1, 3, 4))
+        torch.testing.assert_close(encoder_input[0], pre_encode.transpose(0, 1))
+        self.assertEqual(tuple(sequence_mask.shape), (1, 3, 1))
+        torch.testing.assert_close(sequence_mask[0, :, 0], valid_mask)
+        torch.testing.assert_close(
+            attention_mask[0, 0, 0], torch.tensor([0.0, 0.0, -1.0e4]))
+
+    @unittest.skipIf(torch is None, "torch is not installed")
     def test_bypass_module_preserves_time_and_feature_orientation(self):
+        class Ref:
+            @staticmethod
+            def sinusoidal_rel_pe(max_len, d_model, dtype):
+                return torch.zeros(1, 2 * max_len - 1, d_model, dtype=dtype)
+
         module = EXPORTER.BypassEncoderModule(
-            ref=types.SimpleNamespace(), weights={}, meta=sortformer_v2_1_meta()).eval()
+            ref=Ref(), weights={}, meta=sortformer_v2_1_meta()).eval()
         pre_encode = torch.arange(12, dtype=torch.float32).reshape(4, 3)
         output = module(pre_encode, torch.ones(3, dtype=torch.float32))
         self.assertEqual(tuple(output.shape), (3, 4))
