@@ -104,9 +104,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 ## Core ML encoder sidecar
 
-`PARAKEET_COREML=ON` is Apple-only. It enables optional TDT and EOU
-FastConformer encoder sidecars. Mel preprocessing and the TDT/EOU decoders
-remain in the normal ggml pipeline.
+`PARAKEET_COREML=ON` is Apple-only. It enables optional TDT, EOU, and tagged
+Sortformer v2.1 FastConformer encoder sidecars. Mel preprocessing, TDT/EOU
+decoders, and the Sortformer transformer/speaker head remain in the normal
+ggml pipeline.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
 is not currently compatible with its TorchScript scalar conversion, and the
@@ -128,6 +129,11 @@ The compiled sidecar must sit next to the GGUF and use this name:
 For example, both `parakeet-tdt-0.6b-v3.f16.gguf` and
 `parakeet-tdt-0.6b-v3.q8_0.gguf` resolve to
 `parakeet-tdt-0.6b-v3-encoder.mlmodelc`.
+Sortformer v2.1 may also load
+`diar_streaming_sortformer_4spk-v2.1-encoder.mlmodelc` for exact-shape batch
+inference and
+`diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlmodelc` for
+masked AOSC inference.
 
 Export and compile a fixed-shape sidecar:
 
@@ -169,6 +175,24 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --out engines/parakeet/models/parakeet_realtime_eou_120m-v1-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
+For Sortformer v2.1, export the batch and AOSC block-stack sidecars separately:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+  --wav engines/parakeet/test/samples/diarization-sample-16k.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+  --bypass-pre-encode --n-encoder-frames 410 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
 
 Benchmark fixed lengths and inspect ANE/GPU/CPU placement:
 
@@ -201,6 +225,13 @@ correctness/experimentation path: measured flexible graphs place no operations
 on ANE and can be substantially slower than ggml Metal. Flexible EOU export is
 rejected.
 
+Sortformer batch routing requires the exact exported mel-frame count because
+its graph has no validity-mask input; shorter and mismatched batch inputs stay
+on ggml. The AOSC bypass sidecar masks padded keys and accepts encoder slabs up
+to its exported capacity (410 frames for the default cache/FIFO/chunk geometry);
+larger or custom geometries stay on ggml. Flexible Sortformer exports are
+rejected.
+
 At runtime the sidecar lets Core ML use all compute units and reuses its input,
 feature-provider, and fixed-shape output-backing objects across predictions. The
 graph is predominantly Neural Engine-backed, but a small number of operations
@@ -209,13 +240,15 @@ the CPU and reduce the speedup. Set `PARAKEET_COREML_COMPUTE_UNITS=cpu_and_gpu`,
 `cpu_only`, or `cpu_and_ane` to override the default for placement comparisons.
 
 A missing sidecar, load failure, incompatible shape, or runtime prediction
-failure falls back to the ggml encoder. Set `PARAKEET_COREML_DISABLE=1` to
+failure falls back to the ggml encoder. A failed AOSC bypass prediction also
+quarantines that sidecar for the lifetime of the engine, so later chunks go
+directly to ggml. Set `PARAKEET_COREML_DISABLE=1` to
 force ggml, including for parity or benchmarking. Setting
 `EngineOptions::long_form_window_frames` below zero disables automatic
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
 
-For an unambiguous TDT or EOU benchmark, configure the exact build directory with
+For an unambiguous TDT, EOU, or Sortformer benchmark, configure the exact build directory with
 Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
 
 ```bash

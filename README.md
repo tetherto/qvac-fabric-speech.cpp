@@ -49,7 +49,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet_realtime_eou_120m-v1` | parakeet | low-latency ASR + end-of-turn | 120 M | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape encoder | decoder graphs on Metal/Vulkan/CUDA, scalar on CPU/OpenCL; `is_eou_boundary` |
 | `nvidia/diar_sortformer_4spk-v1` | parakeet | diarization, up to 4 speakers | 123 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + sliding-history live |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | streaming-trained encoder |
-| `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | Audio-Online Speaker Cache, stable slots across gaps |
+| `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape batch/AOSC encoder | Audio-Online Speaker Cache, stable slots across gaps; speaker head stays on ggml |
 
 Parakeet's CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0
 transcripts, Sortformer and streaming output byte-equal to the previous build,
@@ -58,6 +58,18 @@ hardware decoder parity CI. CUDA in these rows denotes hardware-validated
 availability, not CI coverage.
 
 Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-model` for an attributed "who said what" transcript. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
+
+Sortformer v2.1 can offload either an exact-shape batch encoder or the masked
+AOSC block stack to Apple Core ML; the speaker head remains on ggml. Export the
+batch sidecar with
+`python engines/parakeet/scripts/export-encoder-coreml.py --gguf <v2.1.f16.gguf> --wav <fixed-shape.wav> --out <v2.1-encoder.mlpackage> --compile-dir <model-dir>`.
+For AOSC, replace `--wav` with
+`--bypass-pre-encode --n-encoder-frames 410` and use an
+`-encoder-bypass-pre-encode.mlpackage` output. The compiled directories must
+end in `-encoder.mlmodelc` and `-encoder-bypass-pre-encode.mlmodelc`,
+respectively. Batch inputs must match the exported mel-frame count; AOSC inputs
+may be shorter than its masked capacity. Missing sidecars, incompatible shapes,
+and prediction failures fall back to ggml.
 
 ### Text-to-speech and voice cloning
 
