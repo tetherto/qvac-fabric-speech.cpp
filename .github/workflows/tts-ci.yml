@@ -33,9 +33,27 @@ on:
 permissions:
   contents: read
 
+# Dedupe per PR and per branch: a re-push or re-dispatch supersedes the
+# in-flight run. The guard below previously excluded every event but
+# pull_request, so a push or a re-dispatch stacked a second run instead of
+# replacing the first.
+#
+# Two things are exempt and keyed per run instead, so they can never be
+# superseded:
+#
+#   run_gpu dispatch - the opt-in `gpu` job below only runs under a
+#     workflow_dispatch with run_gpu, takes ~90 minutes on a self-hosted
+#     runner, and is SKIPPED by whatever run would replace it. Since that
+#     dispatch is made on a branch rather than master, keying on the ref alone
+#     left it cancellable — a second dispatch would kill it and the
+#     replacement would not re-run `gpu`, silently losing the result.
+#   master - so a merged commit always gets a CI verdict.
+#
+# github.event.inputs.* is a string even for a `type: boolean` input, hence
+# the explicit == 'true'.
 concurrency:
-  group: tts-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: tts-ci-${{ ((github.event.inputs.run_gpu == 'true' || github.ref == 'refs/heads/master') && github.run_id) || github.ref }}
+  cancel-in-progress: true
 
 env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git

@@ -42,10 +42,16 @@ inline bool backend_name_is_cuda(const char * name) {
     return name && std::strcmp(name, "CUDA") == 0;
 }
 
-// Per-device Vulkan LM allowlist: Mesa RADV is validated against the
-// F32-dequantized reference (README "Backends"); other devices stay on CPU.
-inline bool vulkan_device_lm_validated(const char * device_desc) {
-    return device_desc && std::strstr(device_desc, "RADV") != nullptr;
+inline bool device_desc_has_marker(const char * device_desc, const char * marker) {
+    return device_desc && std::strstr(device_desc, marker) != nullptr;
+}
+
+// Per-device Vulkan LM denylist, keyed on the driver family that appears in the
+// device description. Vulkan runs the LM on the GPU everywhere except the
+// devices where it is known to miscompute: on Mali the LM collapses to repeated
+// semantic codes and truncates the song (README "Backends").
+inline bool vulkan_device_lm_blocked(const char * device_desc) {
+    return device_desc_has_marker(device_desc, "Mali");
 }
 
 // Environment escape hatches, read once at create(). Presence is what counts:
@@ -67,14 +73,16 @@ struct StagePlacement {
     bool detok_on_gpu = true;
 };
 
-// Allowlist, then the overrides; an unmeasured backend keeps the CPU placement
-// (README "Backends"). Only consulted when a GPU backend actually initialised.
+// Backend allowlist, then the per-device Vulkan denylist, then the overrides. An
+// unmeasured backend keeps the CPU placement (README "Backends"); Vulkan carries
+// the whole GPU pipeline unless the device is denylisted. Only consulted when a
+// GPU backend actually initialised.
 inline StagePlacement resolve_stage_placement(const char * reg_name, const char * device_desc,
                                               const PlacementOverrides & ov) {
     StagePlacement p;
 
     if (backend_name_is_vulkan(reg_name)) {
-        p.lm_on_gpu = vulkan_device_lm_validated(device_desc);
+        p.lm_on_gpu = !vulkan_device_lm_blocked(device_desc);
     } else if (!backend_name_is_metal(reg_name) && !backend_name_is_opencl(reg_name) &&
                !backend_name_is_cuda(reg_name)) {
         p.lm_on_gpu    = false;

@@ -342,12 +342,25 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_encode.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
+    # Pocket TTS numerical core; Mimi synthesis is not exposed yet.
+    src/pocket/flow_lm.cpp
+    src/pocket/mimi.cpp
+    src/pocket/frontend.cpp
+    src/pocket/engine.cpp
+    src/pocket/fit.cpp
+    src/pocket/reference_audio.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
     src/audio8/fit_main.cpp
     src/chatterbox_fit.cpp
     src/chatterbox_fit_main.cpp
+    src/parler/fit.cpp
+    src/parler/fit_main.cpp
+    src/cosyvoice_fit.cpp
+    src/cosyvoice_fit_main.cpp
+    src/supertonic_fit.cpp
+    src/supertonic_fit_main.cpp
 )
 
 if (TTS_CPP_BUILD_LIBRARY)
@@ -397,6 +410,8 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
     target_link_libraries(tts-cpp PUBLIC ggml)
+    find_package(Threads REQUIRED)
+    target_link_libraries(tts-cpp PRIVATE Threads::Threads)
 
     # ------------------------------------------------------------------
     # Optional native preprocessors for the MTL non-Latin tier:
@@ -511,6 +526,10 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     endif()
 
     add_executable(tts-cli src/cli_main.cpp)
+    add_executable(pocket-cli src/pocket/cli.cpp)
+    target_link_libraries(pocket-cli PRIVATE tts-cpp)
+    target_include_directories(pocket-cli PRIVATE src)
+    tts_cpp_apply_ccache(pocket-cli)
     target_link_libraries(tts-cli PRIVATE tts-cpp)
     tts_cpp_apply_ccache(tts-cli)
 
@@ -592,6 +611,15 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     target_include_directories(audio8-cli PRIVATE src)
     tts_cpp_apply_ccache(audio8-cli)
 
+    # Codec-only reconstruction accesses internal codec symbols, which are
+    # intentionally hidden in shared-library builds (as with codec unit tests).
+    if (NOT TTS_CPP_BUILD_SHARED)
+        add_executable(audio8-codec-bench src/audio8_codec_bench.cpp)
+        target_link_libraries(audio8-codec-bench PRIVATE tts-cpp ggml)
+        target_include_directories(audio8-codec-bench PRIVATE src)
+        tts_cpp_apply_ccache(audio8-codec-bench)
+    endif()
+
     # Memory-fit preflight CLIs: project a model set against the free device
     # memory without loading weights.  See src/audio8/fit_main.cpp and
     # src/chatterbox_fit_main.cpp.
@@ -602,6 +630,18 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     add_executable(chatterbox-fit-params src/chatterbox_fit_params.cpp)
     target_link_libraries(chatterbox-fit-params PRIVATE tts-cpp)
     tts_cpp_apply_ccache(chatterbox-fit-params)
+
+    add_executable(parler-fit-params src/parler_fit_params.cpp)
+    target_link_libraries(parler-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(parler-fit-params)
+
+    add_executable(cosyvoice-fit-params src/cosyvoice_fit_params.cpp)
+    target_link_libraries(cosyvoice-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(cosyvoice-fit-params)
+
+    add_executable(supertonic-fit-params src/supertonic_fit_params.cpp)
+    target_link_libraries(supertonic-fit-params PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(supertonic-fit-params)
 endif()
 
 if (TTS_CPP_BUILD_TESTS)
@@ -688,6 +728,13 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
     endfunction()
 
+    add_executable(test-bench-wav test/test_bench_wav.cpp)
+    target_include_directories(test-bench-wav PRIVATE src)
+    tts_cpp_apply_ccache(test-bench-wav)
+    tts_cpp_register_test(test-bench-wav LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/bench wav test.wav")
+
+
     # Stable shorthands for the fixtures referenced by the registrations
     # below.  Resolved at configure time; missing files turn into
     # DISABLED tests via tts_cpp_register_test(REQUIRES ...).
@@ -699,6 +746,7 @@ if (TTS_CPP_BUILD_TESTS)
     set(_tcb_s3gen_mtl_gguf     "${TTS_CPP_TEST_MODEL_DIR}/chatterbox-s3gen-mtl.gguf")
     set(_tcb_super_gguf         "${TTS_CPP_TEST_MODEL_DIR}/supertonic.gguf")
     set(_tcb_super2_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic2.gguf")
+    set(_tcb_super3_gguf        "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
     set(_tcb_super_ref          "${TTS_CPP_TEST_REF_DIR}/supertonic-ref-quick")
     set(_tcb_super_ref_noise    "${_tcb_super_ref}/noise.npy")
     set(_tcb_s3gen_ref          "${TTS_CPP_TEST_REF_DIR}/s3gen-ref")
@@ -1158,6 +1206,82 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-backend-selection)
     tts_cpp_register_test(test-backend-selection LABEL "unit")
 
+    # ---- Pocket numerical core (fixtures from dump-pocket-flow-reference.py) ----
+    add_executable(test-pocket-graph-memory test/pocket/test_graph_memory.cpp)
+    target_include_directories(test-pocket-graph-memory PRIVATE src)
+    target_link_libraries(test-pocket-graph-memory PRIVATE ggml)
+    tts_cpp_register_test(test-pocket-graph-memory LABEL "unit")
+    add_executable(test-pocket-generation test/pocket/test_generation.cpp)
+    target_include_directories(test-pocket-generation PRIVATE src)
+    tts_cpp_register_test(test-pocket-generation LABEL "unit")
+    add_executable(test-pocket-reference-audio test/pocket/test_reference_audio.cpp src/pocket/reference_audio.cpp)
+    target_include_directories(test-pocket-reference-audio PRIVATE src)
+    tts_cpp_register_test(test-pocket-reference-audio LABEL "unit")
+    set(TTS_CPP_POCKET_MODEL_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket"
+        CACHE PATH "Complete Pocket bundle for frontend and engine fixtures")
+    add_executable(test-pocket-frontend test/pocket/test_frontend.cpp src/pocket/frontend.cpp)
+    target_include_directories(test-pocket-frontend PRIVATE src)
+    tts_cpp_register_test(test-pocket-frontend LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json"
+        REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/frontend-corpus.json")
+    if (TARGET tts-cpp)
+        add_executable(test-pocket-fit test/pocket/test_fit.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-fit PRIVATE src)
+        target_link_libraries(test-pocket-fit PRIVATE tts-cpp ggml)
+        tts_cpp_register_test(test-pocket-fit LABEL "fixture"
+            ARGS "${TTS_CPP_POCKET_MODEL_DIR}"
+            REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
+                     "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+        add_executable(test-pocket-engine test/pocket/test_engine.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-engine PRIVATE src)
+        target_link_libraries(test-pocket-engine PRIVATE tts-cpp ggml)
+        tts_cpp_register_test(test-pocket-engine LABEL "fixture"
+            ARGS "${TTS_CPP_POCKET_MODEL_DIR}" "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf"
+            REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
+                     "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+    endif()
+    set(TTS_CPP_POCKET_REFERENCE_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket-reference"
+        CACHE PATH "Pocket FlowLM fixtures from dump-pocket-flow-reference.py")
+    # Exercise the shipped objects (including their optimization flags) for
+    # static builds. Shared builds intentionally hide this internal stage API.
+    set(_pocket_test_sources src/pocket/flow_lm.cpp src/pocket/mimi.cpp src/backend_selection.cpp src/log.cpp)
+    set(_pocket_test_library ggml)
+    if (TARGET tts-cpp AND NOT TTS_CPP_BUILD_SHARED)
+        set(_pocket_test_sources)
+        set(_pocket_test_library tts-cpp)
+    endif()
+    add_executable(test-pocket-load test/pocket/test_load.cpp
+        ${_pocket_test_sources})
+    target_link_libraries(test-pocket-load PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-load PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-load)
+    tts_cpp_register_test(test-pocket-load LABEL "unit")
+    add_executable(test-pocket-flow-lm test/pocket/test_flow_lm.cpp
+        ${_pocket_test_sources})
+    target_link_libraries(test-pocket-flow-lm PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-flow-lm PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-flow-lm)
+    tts_cpp_register_test(test-pocket-flow-lm LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f32.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}" "0.0001"
+        REQUIRES "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f32.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}/provenance.json")
+    tts_cpp_register_test(test-pocket-flow-lm-f16 LABEL "fixture" EXE test-pocket-flow-lm
+        ARGS "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f16.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}" "0.01"
+        REQUIRES "${TTS_CPP_POCKET_REFERENCE_DIR}/flow-lm-f16.gguf" "${TTS_CPP_POCKET_REFERENCE_DIR}/provenance.json")
+
+    add_executable(test-pocket-mimi test/pocket/test_mimi.cpp ${_pocket_test_sources})
+    target_link_libraries(test-pocket-mimi PRIVATE ${_pocket_test_library})
+    target_include_directories(test-pocket-mimi PRIVATE include src)
+    tts_cpp_apply_ccache(test-pocket-mimi)
+    set(TTS_CPP_POCKET_MIMI_REFERENCE_DIR "${TTS_CPP_TEST_MODEL_DIR}/pocket-mimi-reference"
+        CACHE PATH "Pocket Mimi fixtures from dump-pocket-mimi-reference.py")
+    tts_cpp_register_test(test-pocket-mimi LABEL "fixture"
+        ARGS "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/mimi.gguf" "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}"
+        REQUIRES "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/mimi.gguf"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/provenance.json"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/latents.npy"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/pcm.npy"
+                 "${TTS_CPP_POCKET_MIMI_REFERENCE_DIR}/encoded.npy")
+
     # ---- Audio8 tests (fixtures from scripts/dump-audio8-*-reference.py) ----
     set(_tcb_audio8_core_srcs
         src/audio8/gguf.cpp
@@ -1335,6 +1459,11 @@ if (TTS_CPP_BUILD_TESTS)
     # The CLI's own surface: the flags the bench scripts and the on-device
     # harness pass, and the code dump two runs get compared on.  No model, so it
     # runs everywhere.
+    add_executable(test-audio8-codec-bench-cli test/audio8/test_codec_bench_cli.cpp)
+    target_include_directories(test-audio8-codec-bench-cli PRIVATE src)
+    tts_cpp_apply_ccache(test-audio8-codec-bench-cli)
+    tts_cpp_register_test(test-audio8-codec-bench-cli LABEL "unit")
+
     add_executable(test-audio8-cli test/audio8/test_cli.cpp src/audio8/cli.cpp)
     target_include_directories(test-audio8-cli PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-cli)
@@ -2509,6 +2638,79 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}")
 
+    # Parler fit parity.  The no-argument form synthesizes a tiny but complete
+    # parler GGUF on the fly, so the byte-parity gates (weights, KV slab,
+    # cross-K/V, decoder/T5/DAC arenas vs a real load + runs) need no fixture
+    # at all; the fixture form runs the same gates on the real model (plus the
+    # GPU fused-weight stack when n_gpu_layers > 0).
+    add_executable(test-parler-fit-params test/parler/test_fit_params.cpp)
+    target_link_libraries(test-parler-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-parler-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-parler-fit-params)
+    tts_cpp_register_test(test-parler-fit-params LABEL "unit")
+    tts_cpp_register_test(test-parler-fit-params-gpu
+        EXE   test-parler-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-parler-fit-params-fixture
+        EXE      test-parler-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_parler_gguf}"
+        REQUIRES "${_tcb_parler_gguf}")
+
+    # CosyVoice3 fit parity.  The no-argument form synthesizes the model set
+    # on the fly (tiny metadata-driven LM/flow + full-geometry HiFT + voice),
+    # so the byte-parity gates (weights, KV, LM/flow/HiFT arenas vs real
+    # dispatches) need no fixture at all; the fixture form runs the same gates
+    # on the real converted set.
+    add_executable(test-cosyvoice-fit-params test/test_cosyvoice_fit_params.cpp)
+    target_link_libraries(test-cosyvoice-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-cosyvoice-fit-params)
+    tts_cpp_register_test(test-cosyvoice-fit-params LABEL "unit")
+    tts_cpp_register_test(test-cosyvoice-fit-params-gpu
+        EXE   test-cosyvoice-fit-params
+        LABEL "gpu"
+        ARGS  "--synthetic-gpu")
+    tts_cpp_register_test(test-cosyvoice-fit-params-fixture
+        EXE      test-cosyvoice-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf"
+        REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                 "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+
+    # Supertonic fit parity: metadata-only weight/arena projection vs a real
+    # load + real reservations, byte for byte.  The no-argument form
+    # synthesizes a metadata-only supertonic GGUF on the fly (the loader's
+    # exact tensor contract at tiny dims), pinning weight-sizing parity and
+    # the refusal paths with no fixture; the stage-arena parity gates stay
+    # fixture-gated because the vocoder / vector-estimator channel plans are
+    # hardcoded to the real architecture.
+    add_executable(test-supertonic-fit-params test/test_supertonic_fit_params.cpp)
+    target_link_libraries(test-supertonic-fit-params PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-supertonic-fit-params)
+    tts_cpp_register_test(test-supertonic-fit-params LABEL "unit")
+    tts_cpp_register_test(test-supertonic-fit-params-v2
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super2_gguf}" "99"
+        REQUIRES "${_tcb_super2_gguf}")
+    tts_cpp_register_test(test-supertonic-fit-params-v1
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super_gguf}" "99"
+        REQUIRES "${_tcb_super_gguf}")
+    # v3 is the only variant with CFG (cfg_uncond_scale != 0): this lane is
+    # what pins the batch=2 [C, T] CFM loop arena and the unconditional-pass
+    # host slabs -- neither v1 nor v2 reaches that branch.
+    tts_cpp_register_test(test-supertonic-fit-params-v3
+        EXE      test-supertonic-fit-params
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}" "99"
+        REQUIRES "${_tcb_super3_gguf}")
+
     # Chatterbox fit parity: metadata-only projection vs a real T3 load +
     # eval and a real S3Gen synthesis, byte for byte per buffer/arena.
     add_executable(test-chatterbox-fit-params test/test_chatterbox_fit_params.cpp)
@@ -2610,7 +2812,8 @@ if (TTS_CPP_BUILD_TESTS)
     # through the v3 model — the v3-only languages are covered by the
     # model-free test-supertonic-languages unit test — so that both the old
     # and the new languages get exercised end-to-end on Supertonic 3.
-    set(_tcb_super3_gguf "${TTS_CPP_TEST_MODEL_DIR}/supertonic3.gguf")
+    # (_tcb_super3_gguf is set with the other fixture paths near the top of
+    # the fixture block; the fit-parity v3 lane uses it too.)
     set(SUPERTONIC3_REF_LANGS en ko es pt fr
         CACHE STRING "tts-cpp: languages exercised end-to-end against the Supertonic 3 fixture")
 
@@ -2648,8 +2851,10 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_super3_gguf}"
         REQUIRES "${_tcb_super3_gguf}")
-    # gpu: the one-graph CFM loop, its [C, T] step and the batched CFG pass only
-    # exist off the CPU backend, so this arm is the one that exercises them.
+    # gpu: on a build with an Accelerate/CBLAS pointwise path the one-graph CFM
+    # loop, its [C, T] step and the batched CFG pass are off on CPU, so that arm
+    # is the one exercising them there. Without such a path the CPU arm takes
+    # them too.
     tts_cpp_register_test(test-supertonic-graph-rewrites-v3-gpu
         EXE      test-supertonic-graph-rewrites
         LABEL    "gpu"

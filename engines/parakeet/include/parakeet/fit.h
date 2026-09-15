@@ -14,10 +14,17 @@
 // and no graph is executed, so a fit call is cheap (milliseconds + one
 // metadata read) and safe to run before committing to a full Engine load.
 //
-// Scope: the projection covers the offline paths. Streaming sessions build
-// smaller per-chunk graphs but rotate through the same 3-slot graph cache
-// with session-dependent keys, so the offline projection is a good guide but
-// not a proven upper bound for every streaming configuration.
+// Scope: the projection covers the offline paths. Streaming sessions for the
+// legacy families (CTC/RNN-T/TDT/EOU) build smaller per-chunk graphs but
+// rotate through the same 3-slot graph cache with session-dependent keys, so
+// the offline projection is a good guide but not a proven upper bound for
+// every streaming configuration. Nemotron is the exception: its native
+// cache-aware streaming path is modelled explicitly -- the projection covers
+// one offline transcribe (including the full-length locale-prompt projection
+// graph, which scales with audio_seconds because the prompt conditioning runs
+// over the whole stitched encoder output, not per window) PLUS one live
+// streaming session at the FitOptions::nemotron_chunk_ms operating point (its
+// step graph, per-chunk pre-encode graph, and host-resident caches).
 //
 // Status semantics follow the SDK's @qvac/model-fit contract:
 //   Success -- a projection was made and it fits (result.fits == true).
@@ -65,6 +72,9 @@ struct FitOptions {
     // engine slides the encoder over longer inputs), so the device projection
     // saturates once audio_seconds exceeds one window; the host-side buffers
     // (full-input mel, encoder-output slab, ...) keep growing with it.
+    // Exceptions that keep growing on the device too: Sortformer (no
+    // windowing) and Nemotron (its locale-prompt projection graph runs over
+    // the full stitched encoder output).
     float audio_seconds = 300.0f;
 
     // Same semantics as the EngineOptions fields of the same name (0 = auto).
@@ -72,6 +82,18 @@ struct FitOptions {
     // matches.
     int long_form_window_frames  = 0;
     int long_form_context_frames = 0;
+
+    // Nemotron only (ignored for every other model type): the cache-aware
+    // streaming operating point (StreamingOptions::chunk_ms) whose live
+    // session the projection must also accommodate -- the step graph and the
+    // per-layer caches scale with the operating point's right context. Must
+    // be one of the GGUF's parakeet.nemotron.allowed_chunk_ms values
+    // (80/160/320/560/1120 on the shipped checkpoint); anything else is
+    // Error/"invalid-arguments", mirroring Engine::stream_start. 0 (default)
+    // projects the largest allowed operating point -- the biggest resident
+    // set, so the default verdict is safe for any chunk_ms the host later
+    // picks.
+    int nemotron_chunk_ms = 0;
 
     // Free-memory headroom that must remain on the device for the projection
     // to count as fitting.
@@ -91,12 +113,12 @@ struct FitResult {
     FitStatus   status = FitStatus::Error;
     bool        fits   = false;  // status == Success
     // "fits" | "does-not-fit" | "model-unreadable" | "no-backend-device" |
-    // "measurement-failed" | "invalid-arguments" | "workload-too-large" |
-    // "model-type-not-supported" (Nemotron: its prompt-conditioned encoder
-    // is not modelled yet; refusing beats a wrong projection)
+    // "measurement-failed" | "invalid-arguments" | "workload-too-large"
+    // ("model-type-not-supported" is retired: every model type the loader
+    // accepts is now modelled, Nemotron included)
     std::string reason;
 
-    std::string model_type;     // "ctc" | "rnnt" | "tdt" | "eou" | "sortformer"
+    std::string model_type;     // "ctc" | "rnnt" | "tdt" | "eou" | "nemotron" | "sortformer"
     std::string model_variant;  // GGUF parakeet.model_variant, may be empty
 
     // Resolved compute device, after the same runtime tiering and fallbacks a

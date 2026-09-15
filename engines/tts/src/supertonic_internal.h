@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -414,6 +415,11 @@ struct supertonic_model {
     // ARM Mali/Valhall Vulkan miscomputes a GEMM mul_mat whose output dim < ~48; set via
     // device-identity (not supports_op: driver claims support). st_mul_mat pads to 64; harmless elsewhere.
     bool mulmat_needs_pad = false;
+    // Vulkan drivers other than NVIDIA reorder a weight-first GEMM's
+    // reduction, which moves the channel-major step's waveform off the F32
+    // reference.  When true the step multiplies activation-first and
+    // transposes the result back into [C, T].
+    bool ct_matmul_activation_first = false;
     // When true, the per-step vector-estimator attention graphs materialise
     // K/V into contiguous F16 before calling ggml_flash_attn_ext so OpenCL
     // (and other backends carrying the mixed-precision kernel) dispatch
@@ -571,14 +577,13 @@ struct supertonic_model {
 // See Phase 2A in `aiDocs/PLAN_SUPERTONIC_OPENCL.md` for the
 // roster + auto-policy rationale.
 //
-// `precision` (separate concern): selects the storage type for
-// matmul weights at GGUF load time.  Mirrors the public
-// `tts_cpp::supertonic::Precision` enum.  F32 is the historical
-// default; Q8_0 / F16 trigger asymmetric loads on Metal.
+// `precision` (separate concern): selects model weight storage at load time.
+// Mirrors the public `tts_cpp::supertonic::Precision` values.
 enum class supertonic_precision {
     F32 = 0,
     F16 = 1,
     Q8_0 = 2,
+    Auto = 3,
 };
 
 // `vulkan_device`:
@@ -603,12 +608,93 @@ bool load_supertonic_gguf(const std::string & path,
                           int n_gpu_layers = 0,
                           bool verbose = false,
                           int f16_weights = -1,
-                          supertonic_precision precision = supertonic_precision::F32,
+                          supertonic_precision precision = supertonic_precision::Auto,
                           int vulkan_device = 0,
                           const std::vector<std::string> & f16_weights_deny_list = {});
 void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
+
+// Weight-staging decisions taken during load, exposed so the loader's
+// packed-source handling can be regression-tested without a GGUF.
+ggml_type target_supertonic_storage_type(const std::string & name,
+                                         enum ggml_type src_type,
+                                         supertonic_precision precision,
+                                         bool backend_is_cpu,
+                                         bool backend_is_vk);
+bool needs_supertonic_tensor_conversion(enum ggml_type src_type,
+                                        enum ggml_type dst_type);
+bool should_expand_supertonic_tensor(enum ggml_type type);
+bool should_stage_f32_expansion(enum ggml_type src_type, enum ggml_type dst_type);
+bool is_supertonic_matmul_weight_name(const std::string & name);
 void supertonic_graph_compute(const supertonic_model & model, ggml_cgraph * graph);
+
+// ---- memory-fit preflight (include/tts-cpp/supertonic/fit.h) ---------------
+// Sizes of everything one load_supertonic_gguf allocates, filled by
+// load_supertonic_gguf_metadata_only.
+struct supertonic_fit_load_measure {
+    uint64_t weights_bytes        = 0;  // buffer_w (converted dst types + pre-baked F2/F6)
+    uint64_t extra_bytes          = 0;  // buffer_w_extra (GPU pre-transposed matmul weights)
+    // Persistent host caches a real load keeps (unicode indexer, RoPE theta,
+    // layer-norm / tanh_k pre-downloads) plus the scalar-weight cache's
+    // documented ~5 MiB steady state.
+    uint64_t host_bytes           = 0;
+    // Transient host peak of the load itself: gguf_init_from_file's full
+    // tensor-data copy plus the conversion staging maps, alive alongside
+    // buffer_w until the upload loop finishes.  Often the true process peak.
+    uint64_t host_transient_bytes = 0;
+};
+
+// Metadata-only twin of load_supertonic_gguf: same backend policy, capability
+// probes, per-tensor destination-type decisions, pre-baked tensor
+// declarations, alias/pretranspose registration, and the same two buffers --
+// sized via ggml_backend_alloc_ctx_tensors_from_buft_size instead of
+// allocated, with no tensor data read from disk or converted.  All tensors
+// come back marked externally allocated so the stage graph builders below can
+// price their graphs over them.  Free with free_supertonic_model as usual.
+bool load_supertonic_gguf_metadata_only(const std::string & path,
+                                        supertonic_model & model,
+                                        int n_gpu_layers,
+                                        int f16_weights,
+                                        supertonic_precision precision,
+                                        int vulkan_device,
+                                        const std::vector<std::string> & f16_weights_deny_list,
+                                        supertonic_fit_load_measure & out);
+
+// Size-only pricing of the per-stage thread_local graph-cache arenas at the
+// given shapes -- the SAME one-graph builders the runtime dispatches off the
+// CPU backend (text encoder / duration / CFM loop), reserved through ggml's
+// size-only APIs; nothing is allocated and nothing runs.  Every one of these
+// caches stays resident once its stage has run, so a projection SUMS them.
+// GPU (non-CPU-kernel) dispatch paths only: the CPU multi-cache paths and the
+// env-disabled one-graph fallbacks are not modelled -- each measure refuses
+// them with a "not modelled" error (the fitter maps that to
+// compute-path-not-supported; see fit.h).
+bool supertonic_fit_measure_text_encoder(const supertonic_model & m, int L,
+                                         uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_duration(const supertonic_model & m, int L,
+                                     uint64_t & bytes, std::string * error);
+bool supertonic_fit_measure_vector(const supertonic_model & m, int L, int text_len,
+                                   int total_steps, uint64_t & bytes, std::string * error);
+// The vocoder dual-paths through the [backend, CPU-last] scheduler when the
+// backend cannot run some op; its CPU portion lands in host_bytes.
+bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
+                                    uint64_t & device_bytes, uint64_t & host_bytes,
+                                    std::string * error);
+
+// Real-allocation parity probes (test support): the same builders at the same
+// shapes, but reserved + allocated for real; the reported bytes anchor the
+// size-only measures above byte for byte.  Only for tests on REAL models --
+// these allocate the full arena set.  A probe reports 0 for a graph the
+// direct path cannot allocate (scheduler-dispatched); the test skips those.
+bool supertonic_fit_parity_probe_text_encoder(const supertonic_model & m, int L,
+                                              uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_duration(const supertonic_model & m, int L,
+                                          uint64_t & bytes, std::string * error);
+bool supertonic_fit_parity_probe_vector(const supertonic_model & m, int L, int text_len,
+                                        int total_steps, uint64_t & bytes,
+                                        std::string * error);
+bool supertonic_fit_parity_probe_vocoder(const supertonic_model & m, int latent_len,
+                                         uint64_t & bytes, std::string * error);
 
 // Per-TU thread-local cache release helpers — called from
 // `free_supertonic_model` BEFORE `ggml_backend_free`, so the
@@ -637,16 +723,42 @@ void release_text_encoder_thread_local_caches();
 void release_vocoder_thread_local_caches();
 void release_duration_thread_local_caches();
 
-// True when the model's compute backend supports the per-stage CPU fast paths
-// (the `ggml_custom_4d` callbacks in conv1d_f32 / depthwise_same_ggml /
-// layer_norm_ggml etc.).  ggml custom ops are CPU-only by design; on Metal /
-// CUDA / Vulkan the helpers must fall through to their stock-ggml-op paths.
-// Mirrors the `!ggml_backend_is_cpu(backend)` idiom Chatterbox uses to gate
-// its Metal-only batched-CFG path.
+// True when the per-stage CPU fast paths exist AND the model runs on them.
+// Those paths (conv1d_f32, dense_matmul_time, the tail update) are compiled
+// only behind TTS_CPP_USE_ACCELERATE / TTS_CPP_USE_CBLAS, so on a build without
+// a pointwise BLAS they do not exist and preferring them would select plain
+// im2col + mul_mat over the fused and [C, T] graph paths every other backend
+// takes.
+// Defined once in supertonic_gguf.cpp: TTS_CPP_USE_ACCELERATE and
+// TTS_CPP_USE_CBLAS are PRIVATE to the library's own targets, so an inline body
+// here would differ between translation units and violate the ODR.
+bool cpu_pointwise_accel_compiled();
+
 inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
+    if (!cpu_pointwise_accel_compiled()) return false;
     // `ggml_backend_is_cpu` lives in the CPU backend shared library, which is
     // unlinkable under GGML_BACKEND_DL. Route through the registry-based shim.
     return model.backend == nullptr || ::tts_cpp::detail::backend_is_cpu(model.backend);
+}
+
+// The per-island CPU path runs many small graphs and stops scaling almost
+// immediately, so it keeps the conservative cap it was given.
+inline constexpr int kLegacyCpuThreadCap = 4;
+
+// Pure-logic resolver for the default thread count. A positive `requested`
+// always wins. Otherwise only the CPU backend on the fused one-graph path is
+// allowed past the legacy cap: a GPU backend runs a handful of host-side ops
+// and did not ask for more threads.
+//
+// The fused path leaves an eighth of the logical CPUs unsubscribed. Measured on
+// two 16-core / 32-thread Zen boxes across two prompt lengths: full
+// subscription costs 13 to 70 percent against this, and the regression survives
+// an OpenMP barrier, so it is oversubscription rather than ggml's spin barrier.
+inline int resolve_supertonic_thread_count(int requested, int hw, bool fused_cpu_path) {
+    if (requested > 0) return requested;
+    hw = std::max(1, hw);
+    if (!fused_cpu_path) return std::min(hw, kLegacyCpuThreadCap);
+    return std::max(1, hw - hw / 8);
 }
 
 // scheduler-based alloc + compute (Option A), used by stages
@@ -669,6 +781,13 @@ inline bool model_prefers_cpu_kernels(const supertonic_model & model) {
 // docs/supertonic-sched-graph-reuse-investigation.md.
 void supertonic_sched_alloc(const supertonic_model & model, ggml_cgraph * graph);
 void supertonic_sched_compute(const supertonic_model & model, ggml_cgraph * graph);
+
+// Graph size the [backend, CPU-last] scheduler bundle is created with
+// (sched_fallback_ensure in supertonic_sched_alloc).  ONE definition shared
+// with the memory-fit vocoder pricer (fit_price_graph in
+// supertonic_fit_measure_vocoder): the sched hash size shifts the scheduler's
+// own allocation, so the priced scheduler must be the runtime's.
+constexpr size_t kSupertonicSchedGraphSize = 8192;
 
 // Dispatch gate shared by every dual-path stage: supports_op walk over the
 // graph + the TTS_CPP_FORCE_SCHED escape hatch (safe: every dual-path site
@@ -1191,12 +1310,16 @@ bool supertonic_use_f16_attn();
 // pure-GGML decomposition.  Defaults to `false` (pure-GGML) when no scope
 // is active, so a helper called outside a scope never emits a backend-
 // unsupported fused op.
+// Thread-local mirror of "this backend's fused channel layer-norm reproduces
+// the stock NORM + MUL + ADD chain".  False on Vulkan, whose kernel shifts a
+// knife-edge tail alignment in the q8 short case; the graph builders then
+// emit the stock decomposition.  Defaults to false outside any scope.
+bool supertonic_use_fused_layer_norm();
 bool supertonic_use_fused_supertonic_ops();
 
 // Thread-local mirror of `supertonic_model::mulmat_needs_pad`, set by the dispatch scope.
 // Defaults to false outside any scope, so st_mul_mat emits a plain ggml_mul_mat.
 bool supertonic_mulmat_needs_pad();
-
 // Drop-in for ggml_mul_mat: when mulmat_needs_pad, zero-pad a GEMM output dim < 64 up to 64,
 // then slice back the [M,N] block (exact). No-op on healthy backends, mat-vec, or non-F32 operands.
 inline ggml_tensor * st_mul_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b) {
@@ -1557,6 +1680,8 @@ struct supertonic_op_dispatch_scope {
     bool prev_use_fused_supertonic_ops;
     // saved `mulmat_needs_pad` flag for RAII teardown.
     bool prev_mulmat_needs_pad;
+    // saved fused-layer-norm flag for RAII teardown.
+    bool prev_use_fused_layer_norm;
     // round 4 — saved K/V dispatch dtype for RAII
     // teardown.  Restored on scope destruction so a follow-on
     // engine on the same thread sees the default value, not the

@@ -191,6 +191,27 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
                       int n_gpu_layers = 0, std::string * error = nullptr);
 void parler_free_model(parler_model & model);
 
+// Sizes of the load-time buffers, filled by parler_load_gguf_metadata_only.
+struct parler_fit_measure {
+    size_t weights_bytes = 0;  // ctx_w on the resolved backend (alloc+stream path)
+    size_t fused_bytes   = 0;  // GPU-only fused qkv stacks + stacked LM heads
+    size_t kv_bytes      = 0;  // decoder self-KV slab at the resolved kv type
+};
+
+// Metadata-only twin of parler_load_gguf: same backend policy, FA probe, KV
+// type resolution, tensor wiring, fused-weight eligibility, and shape checks,
+// but every buffer the real load allocates is SIZED instead (the size-only
+// twin of ggml_backend_alloc_ctx_tensors) and no tensor data leaves the disk.
+// The CPU mmap-in-place path is intentionally bypassed: the projection prices
+// the allocate-and-stream fallback, which bounds the fully-touched mapping
+// from above (wrong only in the strict direction).  All tensors come back
+// marked externally allocated so graph pricing counts only compute scratch.
+// The model must never have tensor data read or written; free with
+// parler_free_model as usual (no buffers exist in measure mode).
+bool parler_load_gguf_metadata_only(const std::string & path, parler_model & model,
+                                    int n_gpu_layers, parler_fit_measure & measure,
+                                    std::string * error = nullptr);
+
 // Dual-path graph dispatch honoring the sched_dispatch contract (gf must be
 // freshly built per call; set inputs AFTER this returns true, via
 // ggml_backend_tensor_set on named graph tensors).
@@ -207,6 +228,20 @@ bool parler_encode_description(parler_model & model,
                                const std::vector<int32_t> & desc_ids,
                                int n_threads,
                                std::vector<float> * states_out = nullptr);
+
+// (Re)allocate the persistent per-description cross-K/V tensors for a
+// description of T tokens -- the exact block parler_encode_description runs
+// first.  When `measure_bytes` is non-null the buffer is SIZED instead of
+// allocated (added to *measure_bytes) and the tensors come back marked
+// externally allocated so the T5 / decoder fit graphs can be built over them.
+bool parler_alloc_cross(parler_model & model, int T, size_t * measure_bytes = nullptr);
+
+// Fit-graph twin of the T5 encode: builds (but never runs) the same graph
+// parler_encode_description computes, including the cross-K/V writes, so it
+// can be priced size-only.  parler_alloc_cross must have been called for T.
+// The graph lives in a thread_local arena valid until the next parler graph
+// build on this thread.
+ggml_cgraph * parler_build_t5_fit_graph(const parler_model & model, int T);
 
 // ---- parler_decoder.cpp ----
 // Prefill: prompt embeds prepended to the BOS start frame; returns logits for
@@ -225,6 +260,14 @@ bool parler_dec_step(const parler_model & model,
                      ggml_gallocr_t allocr, int n_threads,
                      std::vector<float> & logits_out);
 
+// Fit-graph twins of the decoder graphs: build (but never run) exactly what
+// parler_dec_prefill / parler_dec_step would dispatch, so the fit projector
+// can price them size-only.  The description cross-K/V tensors must exist
+// (parler_alloc_cross).  The graph lives in the decoder's thread_local arena,
+// valid until the next parler graph build on this thread.
+ggml_cgraph * parler_build_prefill_fit_graph(const parler_model & model, int prompt_tokens);
+ggml_cgraph * parler_build_step_fit_graph(const parler_model & model, int n_past);
+
 // ---- parler_dac.cpp ----
 // DAC receptive field in latent frames, derived from the loaded conv geometry.
 // Windows carry this much real context per side; the streaming emitter holds back
@@ -234,6 +277,14 @@ int parler_dac_rf_frames(const parler_model & model);
 // Peak DAC compute-buffer bytes for a decode of n_frames; must not grow once
 // n_frames exceeds one window plus context. Measures without allocating.
 size_t parler_dac_compute_buffer_size(const parler_model & model, int n_frames);
+
+// Fit-graph twin of one DAC decode window: builds (but never runs) the graph
+// a decode of n_frames dispatches, at the same bounded window
+// (min(n_frames, PARLER_DAC_WINDOW_FRAMES + 2*rf)) and the same
+// convt-dispatch (phase-GEMM on GPU).  *ctx_out must be freed with ggml_free
+// after pricing; returns nullptr on failure.
+ggml_cgraph * parler_build_dac_fit_graph(const parler_model & model, int n_frames,
+                                         ggml_context ** ctx_out);
 
 // codes: [n_codebooks, n_frames] row-major, values in [0, codebook_size).
 // Decodes frames [out_begin, out_end) — the default (0, -1) means the whole

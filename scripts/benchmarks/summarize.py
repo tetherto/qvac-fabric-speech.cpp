@@ -12,8 +12,9 @@
 #
 # Column shape mirrors engines/audiogen/benchmarks/comparison/reports/*.md
 # (the closest in-repo precedent for this project's benchmark tables):
-# Family | Model | Runner | OS | Backend | Wall ms (median/min/max) | RTF
-# (median) | Peak RSS MiB | Runs | Status | Notes.
+# The shared columns cover every family. Native engines can additionally report
+# encoder backend/timing; the Parakeet Darwin comparison adds its forced-ggml
+# baseline and baseline/Core ML speedups.
 
 from __future__ import annotations
 
@@ -81,27 +82,107 @@ def fmt_rss(v: Any) -> str:
         return "—"
 
 
+def fmt_speedup(v: Any) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.2f}×"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_correctness(kind: Any, wer: Any, der: Any, f1: Any, tts: Any = None) -> str:
+    """Kind-prefixed correctness cell.
+
+    Only one score is populated per row (the family declared exactly one
+    `correctness.kind`). Renders as "WER 0.00%" / "DER 8.2%" / "F1 98.70%"
+    / "—" so a reader sees at a glance which metric the row is scored on.
+    Blank when the family didn't declare a `correctness` block or the
+    scoring step was skipped — distinct from a scored 0.00% run.
+    """
+    if kind == "tts_intelligibility":
+        if not isinstance(tts, dict) or tts.get("status") != "ok":
+            status = tts.get("status", "unavailable") if isinstance(tts, dict) else "unavailable"
+            return f"TTS WER {status}"
+        value = tts.get("wer")
+        return f"TTS WER {float(value) * 100:.2f}%" if isinstance(value, (float, int)) else "TTS WER unavailable"
+    if kind == "wer":
+        v = wer
+    elif kind == "der":
+        v = der
+    elif kind == "f1":
+        v = f1
+    else:
+        return "—"
+    if v is None:
+        return "—"
+    try:
+        return f"{kind.upper()} {float(v) * 100.0:.2f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_audio_quality(metrics: Any) -> str:
+    if not isinstance(metrics, dict) or not metrics:
+        return "—"
+    cells = []
+    for kind in ("sisdr", "stoi"):
+        metric = metrics.get(kind)
+        if not isinstance(metric, dict):
+            continue
+        label = {"sisdr": "SI-SDR", "stoi": "STOI"}[kind]
+        value = metric.get("value")
+        if metric.get("status") != "ok" or value is None:
+            cells.append(f"{label} — ({metric.get('status', 'unavailable')})")
+            continue
+        value = float(value)
+        display = f"{value:.2f} dB" if kind == "sisdr" else f"{value * 100:.2f}%"
+        cells.append(f"{label} {display}")
+    return "; ".join(cells) or "—"
+
+
+def fmt_coreml_verified(v: Any) -> str:
+    if v is True:
+        return "yes"
+    if v is False:
+        return "no"
+    return "—"
+
+
 def render_markdown(results: list[dict[str, Any]]) -> str:
     """Single fixed-column table. Empty result set still produces a valid table."""
     header = (
-        "| Family | Model | Runner | OS | Backend | Median wall ms | Min | Max "
-        "| Median RTF | Peak RSS MiB | Runs | Status | Notes |\n"
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|\n"
+        "| Family | Model | Runner | OS | Decoder | Encoder | Baseline encoder | Core ML verified "
+        "| Encoder ms | Baseline encoder ms | Encoder speedup | End-to-end ms "
+        "| Min | Max | Baseline end-to-end ms | E2E speedup | RTF | Correctness "
+        "| Peak RSS MiB | Runs | Status | Notes |\n"
+        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
     )
     rows = []
     for r in results:
         rows.append(
-            "| {family} | {model} | {runner} | {os} | {backend} | {median} | {min} | {max} "
-            "| {rtf} | {rss} | {runs} | {status} | {notes} |".format(
+            "| {family} | {model} | {runner} | {os} | {backend} | {encoder_backend} | {baseline_encoder_backend} "
+            "| {coreml_verified} | {encoder_ms} | {baseline_encoder_ms} | {encoder_speedup} "
+            "| {median} | {min} | {max} | {baseline_inference_ms} | {inference_speedup} | {rtf} | {correctness} | {rss} "
+            "| {runs} | {status} | {notes} |".format(
                 family=r.get("family", "?"),
                 model=r.get("model", "?"),
                 runner=r.get("runner", "?"),
                 os=r.get("os", "?"),
                 backend=r.get("backend", "?") or "unknown",
+                encoder_backend=r.get("encoder_backend", "—") or "unknown",
+                baseline_encoder_backend=r.get("baseline_encoder_backend") or "—",
+                coreml_verified=fmt_coreml_verified(r.get("encoder_coreml_all_runs")),
+                encoder_ms=fmt_ms(r.get("encoder_ms_median")),
+                baseline_encoder_ms=fmt_ms(r.get("baseline_encoder_ms_median")),
+                encoder_speedup=fmt_speedup(r.get("encoder_speedup")),
                 median=fmt_ms(r.get("wall_ms_median")),
                 min=fmt_ms(r.get("wall_ms_min")),
                 max=fmt_ms(r.get("wall_ms_max")),
+                baseline_inference_ms=fmt_ms(r.get("baseline_inference_ms_median")),
+                inference_speedup=fmt_speedup(r.get("inference_speedup")),
                 rtf=fmt_rtf(r.get("rtf_median")),
+                correctness=(fmt_audio_quality(r.get("audio_quality")) if r.get("correctness_kind") == "audio" else fmt_correctness(r.get("correctness_kind"), r.get("wer_median"), r.get("der_median"), r.get("f1_median"), r.get("tts_intelligibility"))),
                 rss=fmt_rss(r.get("peak_rss_mib")),
                 runs=r.get("runs", 0),
                 status=r.get("status", "?"),
@@ -109,7 +190,7 @@ def render_markdown(results: list[dict[str, Any]]) -> str:
             )
         )
     if not rows:
-        rows.append("| _no results collected_ | | | | | | | | | | | | |")
+        rows.append("| _no results collected_ | | | | | | | | | | | | | | | | | | | | | |")
     return header + "\n".join(rows) + "\n"
 
 
@@ -124,11 +205,35 @@ def render_legend() -> str:
         "- **Median RTF** — real-time factor; wall / audio-seconds. `< 1.0` means "
         "faster than real-time. Blank when the family's output length isn't fixed "
         "(text-driven TTS, chatterbox, audio8).\n"
+        "- **TTS WER** — WER of pinned Whisper Tiny CPU transcription against the synthesis prompt; lower is better. "
+        "Scored once on the final measured output, not a median. Includes reference-ASR errors; no quality pass threshold. "
+        "ASR time is excluded from synthesis timing. Missing/failed scoring is explicitly labeled.\n"
+        "- **Correctness** — accuracy metric declared by the family's `correctness.kind`. "
+        "Kind-prefixed. `WER 0.00%` is Word Error Rate of the bench transcript against a "
+        "reference text, English-normalized (case-folded, punctuation stripped) — used by "
+        "ASR families (parakeet, whisper). `DER 8.2%` is Diarization Error Rate — miss + "
+        "false-alarm + speaker-confusion time over reference-speech time, with a 250 ms "
+        "collar around segment boundaries — used by diarization families (sortformer). "
+        "`F1 98.70%` is frame-based Precision/Recall/F1 of predicted speech vs a reference "
+        "of speech-segment ranges, with a 100 ms boundary-tolerance collar — used by voice-"
+        "activity detection (vad). Healthy build: `WER 0.00%` / low single-digit `DER` / "
+        "`F1` close to 100%; worse numbers mean the model regressed or the reference "
+        "drifted. Blank when the family didn't declare a `correctness` block or the scoring "
+        "step was skipped — see the row's notes.\n"
+        "- **Audio quality** — SI-SDR is in dB; STOI is a percentage. "
+        "Higher is better. Scores use the final timed output, not a median. "
+        "Unavailable metrics are labeled; details and reference/output WAVs are in artifacts.\n"
         "- **Peak RSS MiB** — maximum resident set size across all timed runs, via "
         "`/usr/bin/time` (GNU `-v` on Linux, BSD `-l` on macOS).\n"
-        "- **Backend** — extracted from the engine's `using <NAME> backend` stderr "
-        "line. `unknown` means the log line was absent (usually a build-failed or "
-        "CPU-only path that didn't emit it).\n"
+        "- **Backend** — from the bench binary's JSON when it reports one, else the "
+        "engine's `using <NAME> backend` / `backend: <NAME>` log lines, else ggml's "
+        "own GPU compute-init logs; a green run with no GPU-engagement evidence is "
+        "reported as `CPU`. `unknown` appears only on failed runs, whose logs may be "
+        "truncated mid-init.\n"
+        "- **Core ML comparison** — Core-ML-enabled Parakeet Darwin rows run twice on the "
+        "same Apple Silicon runner. `Core ML verified=yes` means every measured "
+        "encoder invocation used the sidecar; the baseline is forced through ggml "
+        "with `PARAKEET_COREML_DISABLE=1`. Speedup is baseline divided by Core ML.\n"
         "- **Status** — `ok` / `not-in-registry` (whisper `small`) / `missing-model` "
         "(minimax — no S3 path yet) / `build-failed` / `run-failed` / `fetch-failed` / "
         "`infrastructure-failed` (a pre-bench workflow step — AWS OIDC, ggml build, "

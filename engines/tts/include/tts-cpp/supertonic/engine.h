@@ -54,24 +54,14 @@
 
 namespace tts_cpp::supertonic {
 
-// Compute precision for matmul weights inside the model buffer.  Selects
-// how the GGUF's stored q8_0 weights are loaded into the resident model:
-//   - F32  (default): expand q8_0 to f32 at load time.  CPU path uses
-//          cblas/AMX f32 matmul.  Metal path uses kernel_mul_mat_f32_f32.
-//          Highest accuracy + simplest, but on Metal misses the 4×
-//          weight-bandwidth win of running the native q8_0 matmul kernel.
-//   - F16  (Phase B1): expand q8_0 to f16 at load time, run f16 matmul
-//          with f32 accumulator.  ~2× less activation bandwidth on Metal,
-//          may drift slightly across the 5 CFM steps (parity tolerance
-//          relaxed to ~1e-2 L_inf).
-//   - Q8_0 (Phase A3): keep weights as q8_0 in the model buffer, let
-//          ggml's quantized matmul kernels dispatch directly.  Metal-only
-//          (Phase A3 makes the load logic asymmetric: q8_0 on Metal, f32
-//          on CPU).
+// Resident storage policy for model weights. Auto is the production default:
+// Vulkan retains source Q8_0/F16 storage for the validated vector-estimator
+// matmul roster; other tensors and backends use F32.
 enum class Precision {
-    F32,
-    F16,
-    Q8_0,
+    F32 = 0,
+    F16 = 1,
+    Q8_0 = 2,
+    Auto = 3,
 };
 
 struct EngineOptions {
@@ -138,10 +128,9 @@ struct EngineOptions {
     // Validated at construction to 0 or [8000, 192000] Hz.
     int   output_sample_rate = 0;
 
-    // Compute precision for matmul weights — see Precision enum above.
-    // Default F32 is the current behaviour (load q8_0 GGUF, expand to f32).
-    // F16 / Q8_0 are non-default GPU paths (Metal-validated).
-    Precision precision = Precision::F32;
+    // Resident weight storage policy. Auto retains source Q8_0/F16 storage for
+    // validated vector-estimator matmuls on Vulkan and uses F32 elsewhere.
+    Precision precision = Precision::Auto;
 
     // F16 K/V flash-attention in the vector estimator.  When -1, the
     // engine auto-enables this on GPU backends (non-CPU) and disables
@@ -176,9 +165,9 @@ struct EngineOptions {
     // Halves the GPU read bandwidth into those ops with a small
     // (≤ 2e-3 abs / 5e-3 cosine) numerical drift on the end-to-end
     // synth.  Mirrors chatterbox's CHATTERBOX_F16_CFM gate.
-    // Orthogonal to `precision`: this is a per-op runtime selector for
-    // the OpenCL hot-weight materialisation, while `precision` decides
-    // the storage type of all matmul weights uniformly.
+    // Explicit precision modes may combine this curated materialization with
+    // their storage policy. Precision::Auto is authoritative and ignores this
+    // legacy selector.
     int f16_weights = -1;
 
     // round 6 — extra deny-list for F16 weight

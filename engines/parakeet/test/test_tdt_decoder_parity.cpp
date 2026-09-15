@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -177,6 +178,15 @@ void print_first_diff(const std::vector<int32_t> & a,
                  a.size(), b.size());
 }
 
+// Toggles the host scalar decoder via the env switch parakeet_tdt.cpp reads at prepare time.
+void set_host_decode(bool on) {
+#ifdef _WIN32
+    _putenv_s("PARAKEET_TDT_HOST_DECODE", on ? "1" : "");
+#else
+    if (on) setenv("PARAKEET_TDT_HOST_DECODE", "1", 1); else unsetenv("PARAKEET_TDT_HOST_DECODE");
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -203,12 +213,15 @@ int main(int argc, char ** argv) {
     const bool require_reference =
         argc >= 5 && std::strcmp(argv[4], "--require-reference") == 0;
 
-    // ---- Run the CPU-fallback scalar path (n_gpu_layers=0). ----
-    std::fprintf(stderr, "[tdt-decode-parity] running CPU fallback (n_gpu_layers=0)...\n");
+    // ---- Run the host scalar path (n_gpu_layers=0, PARAKEET_TDT_HOST_DECODE=1). ----
+    std::fprintf(stderr, "[tdt-decode-parity] running host fallback (n_gpu_layers=0)...\n");
     std::vector<int32_t> ids_cpu;
     std::string text_cpu;
-    if (int rc = transcribe_transducer(gguf_path, wav_path, 0, ids_cpu, text_cpu); rc != 0) {
-        return rc;
+    set_host_decode(true);
+    const int rc_cpu = transcribe_transducer(gguf_path, wav_path, 0, ids_cpu, text_cpu);
+    set_host_decode(false);
+    if (rc_cpu != 0) {
+        return rc_cpu;
     }
     std::fprintf(stderr, "[tdt-decode-parity] CPU: tokens=%zu text=%.80s%s\n",
                  ids_cpu.size(), text_cpu.c_str(),
@@ -216,8 +229,7 @@ int main(int argc, char ** argv) {
 
     // ---- Run the ggml-graph path (n_gpu_layers=1). On a Metal-enabled
     //      build this exercises the graph code on the GPU; on a CPU-only
-    //      build n_gpu_layers=1 falls back to CPU and the call still
-    //      validates that no path regressed. ----
+    //      build the graphs run on ggml-cpu, which is the shipping CPU decoder. ----
     std::fprintf(stderr, "[tdt-decode-parity] running graph path (n_gpu_layers=1)...\n");
     std::vector<int32_t> ids_gpu;
     std::string text_gpu;

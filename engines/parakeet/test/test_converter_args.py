@@ -39,7 +39,7 @@ class ConverterArgsTest(unittest.TestCase):
     def test_quant_choices_cover_documented_tiers(self):
         self.assertEqual(
             QUANT_CHOICES,
-            ["f32", "f16", "q8_0", "q5_0", "q4_0"],
+            ["f32", "f16", "bf16", "q8_0", "q5_0", "q4_0"],
         )
 
     def test_unknown_quantization_is_rejected(self):

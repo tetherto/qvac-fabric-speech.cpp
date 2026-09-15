@@ -18,6 +18,7 @@
 #include "parakeet_ctc.h"
 #include "mel_preprocess.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -106,18 +107,80 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Numerical encoder parity must compare identical full fixed-shape inputs.
+    // Production's shorter-input zero padding intentionally changes full-context
+    // attention relative to an unpadded ggml encode and is covered separately by
+    // test-transcribe-coreml-parity. Extend/crop this fixture to the sidecar's
+    // declared capacity, repeating real mel rows rather than adding padding.
+    const int fixed_mel_frames = model_coreml_fixed_mel_frames(model);
+    if (fixed_mel_frames > 0 && fixed_mel_frames != n_mel_frames) {
+        const int original_frames = n_mel_frames;
+        const int n_mels = model.mel_cfg.n_mels;
+        std::vector<float> fixed_mel((size_t) fixed_mel_frames * n_mels);
+        for (int t = 0; t < fixed_mel_frames; ++t) {
+            const int src_t = t % original_frames;
+            std::copy_n(mel.data() + (size_t) src_t * n_mels,
+                        n_mels,
+                        fixed_mel.data() + (size_t) t * n_mels);
+        }
+        mel = std::move(fixed_mel);
+        n_mel_frames = fixed_mel_frames;
+    }
+
     EncoderOutputs out_ggml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
                              out_ggml, /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] ggml run_encoder rc=%d\n", rc);
         return 1;
     }
+    if (out_ggml.used_coreml) {
+        std::fprintf(stderr,
+            "[coreml-parity] FAIL: capture baseline unexpectedly used Core ML\n");
+        return 1;
+    }
 
     EncoderOutputs out_coreml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_coreml, /*max_layers=*/-1, /*capture_intermediates=*/false); rc != 0) {
+                             out_coreml, /*max_layers=*/-1,
+                             /*capture_intermediates=*/false,
+                             /*allow_coreml_padded=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] Core ML run_encoder rc=%d\n", rc);
         return 1;
+    }
+    if (!out_coreml.used_coreml) {
+        std::fprintf(stderr,
+            "[coreml-parity] FAIL: requested Core ML comparison fell back to ggml\n");
+        return 1;
+    }
+
+    if (model.model_type == ParakeetModelType::EOU && fixed_mel_frames > 1) {
+        for (int delta : {-1, 1}) {
+            const int mismatch_frames = fixed_mel_frames + delta;
+            std::vector<float> mismatch(
+                (size_t) mismatch_frames * model.mel_cfg.n_mels);
+            for (int t = 0; t < mismatch_frames; ++t) {
+                const int src_t = std::min(t, fixed_mel_frames - 1);
+                std::copy_n(mel.data() + (size_t) src_t * model.mel_cfg.n_mels,
+                            model.mel_cfg.n_mels,
+                            mismatch.data() + (size_t) t * model.mel_cfg.n_mels);
+            }
+            EncoderOutputs mismatch_out;
+            if (int rc = run_encoder(model, mismatch.data(), mismatch_frames,
+                                     model.mel_cfg.n_mels, mismatch_out,
+                                     /*max_layers=*/-1,
+                                     /*capture_intermediates=*/false,
+                                     /*allow_coreml_padded=*/true); rc != 0) {
+                std::fprintf(stderr,
+                    "[coreml-parity] EOU mismatch-shape run rc=%d\n", rc);
+                return 1;
+            }
+            if (mismatch_out.used_coreml) {
+                std::fprintf(stderr,
+                    "[coreml-parity] FAIL: EOU %d-frame mismatch used Core ML\n",
+                    mismatch_frames);
+                return 1;
+            }
+        }
     }
 
     if (out_ggml.n_enc_frames != out_coreml.n_enc_frames || out_ggml.d_model != out_coreml.d_model) {

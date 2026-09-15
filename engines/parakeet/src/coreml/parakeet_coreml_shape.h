@@ -16,6 +16,15 @@ struct CoremlTrailingMatch {
 CoremlTrailingMatch coreml_match_trailing_dims(const std::vector<int64_t> & dims,
                                                int64_t rows, int64_t cols);
 
+// Match a tensor whose row/time dimension may be larger than `required_rows`.
+// Leading dimensions are ignored, matching coreml_match_trailing_dims.
+// `transpose` is false for [.., capacity_rows, cols] and true for
+// [.., cols, capacity_rows].
+CoremlTrailingMatch coreml_match_trailing_capacity(
+        const std::vector<int64_t> & dims,
+        int64_t required_rows,
+        int64_t cols);
+
 // Concrete Core ML input dims to allocate, plus whether the row-major
 // (n_mel_frames, n_mels) mel must be transposed to features-major on copy.
 struct CoremlInputDims {

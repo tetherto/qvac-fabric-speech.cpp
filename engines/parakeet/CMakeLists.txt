@@ -372,7 +372,7 @@ if (PARAKEET_BUILD_LIBRARY)
     # (src/coreml/parakeet-encoder.mm) into the parakeet library and defines
     # PARAKEET_USE_COREML so run_encoder can route the offline FastConformer
     # forward through a `<model>-encoder.mlmodelc` on the Apple Neural Engine.
-    # Mel preprocessing, TDT/CTC decode and the tokenizer stay on ggml, and any
+    # Mel preprocessing, TDT decode and the tokenizer stay on ggml, and any
     # non-Apple build or missing/incompatible sidecar falls back to the ggml
     # encoder. Modelled on the whisper.cpp WHISPER_COREML pattern; the encoder
     # I/O contract the exported .mlmodelc must honour is documented in
@@ -570,7 +570,9 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_rnnt_hybrid_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/stt_ka_fastconformer_hybrid_large_pc.q8_0.gguf")
     set(_qvp_tdt_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf")
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
+    set(_qvp_tdt_coreml     "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3-encoder.mlmodelc")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
+    set(_qvp_eou_coreml    "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1-encoder.mlmodelc")
     set(_qvp_nemotron_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b.f16.gguf")
     set(_qvp_sf_q8_gguf    "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.q8_0.gguf")
     set(_qvp_sf_f16_gguf   "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.f16.gguf")
@@ -949,6 +951,42 @@ if (PARAKEET_BUILD_TESTS)
             "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
     endif()
 
+    if (GGML_CUDA)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-cuda-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
+
+    if (GGML_VULKAN)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-vulkan-80
+            "${_qvp_nemotron_stream_80_ref}" 0 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-vulkan-160
+            "${_qvp_nemotron_stream_160_ref}" 1 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-vulkan
+            "${_qvp_nemotron_stream_ref}" 3 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-vulkan-560
+            "${_qvp_nemotron_stream_560_ref}" 6 --n-gpu-layers 1)
+        parakeet_register_nemotron_stream_case(
+            test-nemotron-stream-step-vulkan-1120
+            "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
+    endif()
+
     if (GGML_OPENCL)
         parakeet_register_nemotron_stream_case(
             test-nemotron-stream-step-opencl-80
@@ -1058,6 +1096,11 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-encoder-coreml-parity-eou
+        LABEL    "fixture"
+        EXE      test-encoder-coreml-parity
+        ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
 
     # Portable unit test for the Core ML sidecar path derivation
     # (coreml_encoder_sidecar_path). Pure string logic -- no ggml, model, or
@@ -1082,6 +1125,14 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-coreml-shapes)
     parakeet_register_test(test-coreml-shapes LABEL "cpu")
 
+    if (Python3_Interpreter_FOUND)
+        add_test(
+            NAME test-export-encoder-coreml
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_encoder_coreml.py")
+        set_property(TEST test-export-encoder-coreml PROPERTY LABELS "unit")
+    endif()
+
     # End-to-end transcription parity: full Engine::transcribe() with the Core ML
     # encoder vs the ggml encoder (forced via PARAKEET_COREML_DISABLE) must yield
     # identical text. Links libqvac-parakeet for the public Engine API. Skips at runtime
@@ -1097,6 +1148,42 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture"
             ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-transcribe-coreml-parity-eou
+            LABEL    "fixture"
+            EXE      test-transcribe-coreml-parity
+            ARGS     "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
+    endif()
+
+    # CLI-level Core ML gate: --require-coreml must prove every measured encoder
+    # invocation used the TDT sidecar while the decoder remains on ggml.
+    if (PARAKEET_COREML AND Python3_Interpreter_FOUND AND TARGET parakeet-cli)
+        add_test(
+            NAME test-cli-coreml-bench
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_tdt_q8_gguf}"
+                    "--wav" "${_qvp_jfk_wav}")
+        set_property(TEST test-cli-coreml-bench PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_tdt_q8_gguf}" OR
+            NOT EXISTS "${_qvp_jfk_wav}" OR
+            NOT EXISTS "${_qvp_tdt_coreml}")
+            set_property(TEST test-cli-coreml-bench PROPERTY DISABLED TRUE)
+        endif()
+        add_test(
+            NAME test-cli-coreml-bench-eou
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_eou_q8_gguf}"
+                    "--wav" "${_qvp_jfk_wav}")
+        set_property(TEST test-cli-coreml-bench-eou PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_eou_q8_gguf}" OR
+            NOT EXISTS "${_qvp_jfk_wav}" OR
+            NOT EXISTS "${_qvp_eou_coreml}")
+            set_property(TEST test-cli-coreml-bench-eou PROPERTY DISABLED TRUE)
+        endif()
     endif()
 
     # Regression gate for cached-encoder-graph reuse determinism. Compiles the
@@ -1224,6 +1311,31 @@ if (PARAKEET_BUILD_TESTS)
                  "${_qvp_rnnt_hybrid_ref}" "--require-reference"
         REQUIRES "${_qvp_rnnt_hybrid_q8_gguf}" "${_qvp_rnnt_hybrid_wav}"
                  "${_qvp_rnnt_hybrid_ref}/token_ids.npy")
+    # Cached positional projections must not change the encoder output.
+    add_executable(test-pos-proj-cache-parity
+        test/test_pos_proj_cache_parity.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_link_libraries(test-pos-proj-cache-parity PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-pos-proj-cache-parity PRIVATE include src ggml/include)
+    parakeet_apply_backend_defs(test-pos-proj-cache-parity)
+    parakeet_register_test(test-pos-proj-cache-parity
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-pos-proj-cache-parity-gpu
+        LABEL    "gpu"
+        EXE      test-pos-proj-cache-parity
+        ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "1"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)
@@ -1337,6 +1449,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
+        src/parakeet_nemotron.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
@@ -1369,6 +1482,11 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-fit-params
         ARGS     "${_qvp_sf_q8_gguf}"
         REQUIRES "${_qvp_sf_q8_gguf}")
+    parakeet_register_test(test-fit-params-nemotron
+        LABEL    "fixture"
+        EXE      test-fit-params
+        ARGS     "${_qvp_nemotron_f16_gguf}"
+        REQUIRES "${_qvp_nemotron_f16_gguf}")
 
     # Model-free CLI-layer unit tests: strict parsers, saturating arithmetic,
     # JSON escaping, and the parakeet-fit-params exit-code contract.
@@ -1378,6 +1496,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
+        src/parakeet_nemotron.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp

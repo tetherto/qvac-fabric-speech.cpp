@@ -46,6 +46,8 @@
 #include "quantize_policy.h"
 #include "qwen3_block.h"
 #include "stage_placement.h"
+#include "vae_coreml_path.h"
+#include "vae_coreml_windows.h"
 #include "vae_encode_windows.h"
 #include "vae_ggml.h"
 #include "wav_reader.h"
@@ -627,7 +629,57 @@ void test_vae_progress() {
     CHECK(last_emitted == 100);  // the final surfaced value is 100
 }
 
-// 5b. VAE window sizing ------------------------------------------------------
+// 5b. Core ML sidecar path ----------------------------------------------------
+void test_coreml_sidecar_path() {
+    using tts_cpp::acestep::coreml_vae_sidecar_path;
+
+    CHECK(coreml_vae_sidecar_path("models/vae-BF16.gguf") == "models/vae-decoder.mlmodelc");
+    CHECK(coreml_vae_sidecar_path("vae.f16.gguf") == "vae-decoder.mlmodelc");
+    CHECK(coreml_vae_sidecar_path("models/vae.gguf") == "models/vae-decoder.mlmodelc");
+    CHECK(coreml_vae_sidecar_path("C:\\m\\vae-BF16.gguf") == "C:\\m\\vae-decoder.mlmodelc");
+    CHECK(coreml_vae_sidecar_path("my-vae.gguf") == "my-vae-decoder.mlmodelc");
+}
+
+// 5c. Core ML decode windows --------------------------------------------------
+// The sidecar's input shape is fixed, so every planned window must be exactly
+// window_frames long (the last one end-aligned), with the kept cores disjoint
+// and covering the latent exactly.
+void test_coreml_plan_windows() {
+    using tts_cpp::acestep::vae_coreml_plan_windows;
+    using tts_cpp::acestep::VaeCoremlWindow;
+
+    using tts_cpp::acestep::VAE_COREML_OVERLAP;
+    CHECK(VAE_COREML_OVERLAP == 8);   // measured bound, see vae_coreml_windows.h
+
+    CHECK(vae_coreml_plan_windows(300, 352, 48).empty());   // shorter than one window
+    CHECK(vae_coreml_plan_windows(352, 96, 48).empty());    // no core left after overlap
+
+    const std::vector<VaeCoremlWindow> tiny = vae_coreml_plan_windows(740, 64, VAE_COREML_OVERLAP);
+    CHECK(!tiny.empty());
+    CHECK(tiny.front().core_a == 0 && tiny.back().core_b == 740);
+
+    const std::vector<VaeCoremlWindow> single = vae_coreml_plan_windows(352, 352, 48);
+    CHECK(single.size() == 1);
+    CHECK(single[0].win_a == 0 && single[0].core_a == 0 && single[0].core_b == 352);
+
+    for (int T : {353, 740, 1024, 4096}) {
+        const std::vector<VaeCoremlWindow> plan = vae_coreml_plan_windows(T, 352, 48);
+        CHECK(!plan.empty());
+        CHECK(plan.front().core_a == 0);
+        CHECK(plan.back().core_b == T);
+        for (size_t i = 0; i < plan.size(); ++i) {
+            const VaeCoremlWindow & w = plan[i];
+            CHECK(w.win_a >= 0 && w.win_a + 352 <= T);              // window inside the latent
+            CHECK(w.core_a >= w.win_a && w.core_b <= w.win_a + 352);  // core inside the window
+            CHECK(w.core_a < w.core_b);
+            if (i > 0) CHECK(w.core_a == plan[i - 1].core_b);       // disjoint, gapless cores
+            if (w.core_a > 0) CHECK(w.core_a - w.win_a >= 48);      // left context except at 0
+            if (w.core_b < T) CHECK(w.win_a + 352 - w.core_b >= 48);  // right context except at T
+        }
+    }
+}
+
+// 5d. VAE window sizing ------------------------------------------------------
 // The decoder's im2col node grows linearly with the window and cannot be split
 // across allocations, so a backend that caps allocation size caps the window.
 // Adreno 740 reports 1024 MB and the 256+2*48 window needs 1155 MiB, which is
@@ -870,18 +922,20 @@ void test_stage_placement() {
     CHECK(!backend_name_is_cuda(nullptr));
 
     const PlacementOverrides none;
-    const char * const radv_desc = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const radv_desc   = "Radeon 8060S Graphics (RADV GFX1151)";
+    const char * const nvidia_desc = "NVIDIA GeForce RTX 3080";
 
-    // -- device predicate: the Vulkan LM allowlist is per-device --------------
-    using tts_cpp::acestep::vulkan_device_lm_validated;
-    CHECK(vulkan_device_lm_validated(radv_desc));
-    CHECK(vulkan_device_lm_validated("AMD Radeon Graphics (RADV GFX1100)"));
-    CHECK(!vulkan_device_lm_validated("Mali-G715"));
-    CHECK(!vulkan_device_lm_validated("Samsung Xclipse 920"));
-    CHECK(!vulkan_device_lm_validated("NVIDIA GeForce RTX 4090"));
-    CHECK(!vulkan_device_lm_validated("AMD Radeon RX 7900 XTX"));  // proprietary driver
-    CHECK(!vulkan_device_lm_validated(""));
-    CHECK(!vulkan_device_lm_validated(nullptr));
+    // -- device predicate: the Vulkan LM denylist is per-device ---------------
+    using tts_cpp::acestep::vulkan_device_lm_blocked;
+    CHECK(vulkan_device_lm_blocked("Mali-G715"));
+    CHECK(vulkan_device_lm_blocked("Mali-G78"));
+    CHECK(!vulkan_device_lm_blocked(radv_desc));
+    CHECK(!vulkan_device_lm_blocked(nvidia_desc));
+    CHECK(!vulkan_device_lm_blocked("Samsung Xclipse 920"));
+    CHECK(!vulkan_device_lm_blocked("AMD Radeon RX 7900 XTX"));  // proprietary driver
+    CHECK(!vulkan_device_lm_blocked("Intel(R) Arc(tm) A770 Graphics"));
+    CHECK(!vulkan_device_lm_blocked(""));
+    CHECK(!vulkan_device_lm_blocked(nullptr));
 
     // -- allowlist: Metal, OpenCL, and CUDA keep LM + detokenizer on GPU --------
     for (const char * allowed : { "MTL", "Metal", "OpenCL", "CUDA" }) {
@@ -891,20 +945,21 @@ void test_stage_placement() {
         CHECK(p.enc_on_gpu);  // encoders follow the GPU on every backend
     }
 
-    // Vulkan on a Mesa RADV device runs every stage on the GPU (measured on
-    // Strix Halo: ~2x faster LM, closer to the F32 reference than the CPU path).
-    {
-        StagePlacement p = resolve_stage_placement("Vulkan", radv_desc, none);
+    // Vulkan runs every stage on the GPU on any device that is not denylisted.
+    // RADV (Strix Halo) and NVIDIA (RTX 3080) are measured against the
+    // F32-dequantized reference; the rest inherit the GPU placement.
+    for (const char * device : { radv_desc, nvidia_desc, "Samsung Xclipse 920",
+                                 "Intel(R) Arc(tm) A770 Graphics", "" }) {
+        StagePlacement p = resolve_stage_placement("Vulkan", device, none);
         CHECK(p.lm_on_gpu);
         CHECK(p.detok_on_gpu);
         CHECK(p.enc_on_gpu);
     }
 
-    // Vulkan on any other device keeps the LM on the CPU (README "Backends"
-    // records the per-backend rationale).
+    // Mali keeps the LM on the CPU: the GPU LM collapses to repeated semantic
+    // codes and truncates the song there (README "Backends").
     check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Mali-G715");
-    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Samsung Xclipse 920");
-    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "");
+    check_gpu_backend_keeps_lm_on_cpu("Vulkan", "Mali-G78");
 
     // -- fallback: everything else keeps the shipping CPU placement -----------
     // Unmeasured backends must not silently pick up the GPU path. "MTL0" is in
@@ -969,7 +1024,7 @@ void test_stage_placement() {
         ov.detok_cpu     = true;
         StagePlacement p = resolve_stage_placement("Vulkan", "", ov);
         CHECK(!p.detok_on_gpu);
-        CHECK(!p.lm_on_gpu);
+        CHECK(p.lm_on_gpu);  // the detokenizer hatch leaves the LM where it was
     }
 
     // Precedence: CPU wins when both hatches are set for the same stage, on an
@@ -992,7 +1047,7 @@ void test_stage_placement() {
         StagePlacement p = resolve_stage_placement(name, "", ov);
         CHECK(!p.enc_on_gpu);
         CHECK(p.lm_on_gpu == (backend_name_is_metal(name) || backend_name_is_opencl(name) ||
-                              backend_name_is_cuda(name)));
+                              backend_name_is_cuda(name) || backend_name_is_vulkan(name)));
     }
 }
 
@@ -2936,6 +2991,8 @@ int main() {
     test_fsm_forced_token();
     test_sampler_fusion_oracle();
     test_vae_progress();
+    test_coreml_sidecar_path();
+    test_coreml_plan_windows();
     test_vae_window_core();
     test_backend_device_types();
     test_gpu_fallback_reason();

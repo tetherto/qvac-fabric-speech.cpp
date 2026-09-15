@@ -93,6 +93,7 @@ void test_engine_options_defaults() {
     CHECK(o.model_gguf_path.empty());
     CHECK(o.prewarm_text.empty());
     CHECK(o.vulkan_device == 0);
+    CHECK(o.precision == tts_cpp::supertonic::Precision::Auto);
     // follow-up — the default values for f16_attn /
     // f16_weights are -1 (auto: gated on the new probe set).
     // The probes themselves are exercised by

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the offline FastConformer encoder from a parakeet GGUF to a Core ML
+"""Export a Parakeet TDT or EOU FastConformer encoder from GGUF to Core ML
 package for the Apple Neural Engine sidecar consumed by the parakeet.cpp Engine
 (the encoder I/O contract lives in src/coreml/parakeet-encoder.h).
 
@@ -27,8 +27,17 @@ Example:
 
   python scripts/export-encoder-coreml.py \
       --gguf   models/parakeet-tdt-0.6b-v3.f16.gguf \
-      --wav    test/samples/jfk.wav \
+      --n-mel-frames 1501 \
+      --palettize-bits 6 --palettize-group-size 16 \
       --out    models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
+      --compile-dir models
+
+  # EOU fixed shape (the 11-second fixture produces 1101 mel frames):
+  python scripts/export-encoder-coreml.py \
+      --gguf models/parakeet_realtime_eou_120m-v1.f16.gguf \
+      --wav test/samples/jfk.wav \
+      --palettize-bits 6 --palettize-group-size 16 \
+      --out models/parakeet_realtime_eou_120m-v1-encoder.mlpackage \
       --compile-dir models
 
   # variable-length (best-effort; validate on device):
@@ -78,34 +87,130 @@ def mel_frames_for_wav(wav_path, hop_length):
     return 1 + num_samples // hop_length
 
 
-def conformer_conv(x, weights, prefix):
+def model_type(meta):
+    return str(meta.get("parakeet.model.type", "ctc"))
+
+
+def validate_export_contract(meta, flexible=False):
+    kind = model_type(meta)
+    if kind not in ("tdt", "eou"):
+        raise ValueError(f"Core ML encoder export supports TDT and EOU, got {kind!r}")
+    if kind == "eou":
+        if flexible:
+            raise ValueError("EOU Core ML export requires a fixed shape; omit --flexible")
+        expected = {
+            "parakeet.encoder.causal_downsampling": True,
+            "parakeet.encoder.conv_context_size": "causal",
+            "parakeet.encoder.conv_norm_type": "layer_norm",
+            "parakeet.encoder.att_context_style": "chunked_limited",
+        }
+        for key, value in expected.items():
+            if meta.get(key) != value:
+                raise ValueError(f"unsupported EOU encoder metadata: {key}={meta.get(key)!r}, expected {value!r}")
+        if int(meta.get("parakeet.encoder.att_context_size_left", -1)) < 0 or \
+           int(meta.get("parakeet.encoder.att_context_size_right", -1)) < 0:
+            raise ValueError("EOU Core ML export requires finite attention context metadata")
+    return kind
+
+
+def causal_subsampling(mel, weights):
+    x = mel.unsqueeze(0).transpose(1, 2).unsqueeze(1)
+
+    def pad(value):
+        # PyTorch pads the last dimension first: frequency (2,1), then time (2,1).
+        return F.pad(value, (2, 1, 2, 1))
+
+    x = F.conv2d(pad(x), weights["encoder.subsampling.conv0.weight"],
+                 bias=weights["encoder.subsampling.conv0.bias"], stride=2)
+    x = F.relu(x)
+    x = F.conv2d(pad(x), weights["encoder.subsampling.conv1_dw.weight"],
+                 bias=weights["encoder.subsampling.conv1_dw.bias"], stride=2,
+                 groups=x.size(1))
+    x = F.conv2d(x, weights["encoder.subsampling.conv1_pw.weight"],
+                 bias=weights["encoder.subsampling.conv1_pw.bias"])
+    x = F.relu(x)
+    x = F.conv2d(pad(x), weights["encoder.subsampling.conv2_dw.weight"],
+                 bias=weights["encoder.subsampling.conv2_dw.bias"], stride=2,
+                 groups=x.size(1))
+    x = F.conv2d(x, weights["encoder.subsampling.conv2_pw.weight"],
+                 bias=weights["encoder.subsampling.conv2_pw.bias"])
+    x = F.relu(x)
+    x = x.permute(0, 2, 1, 3).flatten(2)
+    return F.linear(x, weights["encoder.subsampling.out.weight"],
+                    weights["encoder.subsampling.out.bias"])
+
+
+def chunked_attention_mask(length, left, right, dtype, device):
+    chunk = right + 1
+    query = torch.arange(length, device=device).unsqueeze(1)
+    key = torch.arange(length, device=device).unsqueeze(0)
+    chunk_start = (query // chunk) * chunk
+    visible = (key >= chunk_start - left) & (key < chunk_start + chunk)
+    zeros = torch.zeros((length, length), dtype=dtype, device=device)
+    blocked = torch.full((length, length), -1.0e30, dtype=dtype, device=device)
+    return torch.where(visible, zeros, blocked).unsqueeze(0).unsqueeze(0)
+
+
+def rel_pos_mha_fixed(ref, x, pos_emb, weights, prefix, n_heads, att_mask=None):
+    d_model = x.size(-1)
+    head_dim = d_model // n_heads
+    batch, length, _ = x.shape
+    q = F.linear(x, weights[f"{prefix}.q.weight"], weights[f"{prefix}.q.bias"]).view(batch, length, n_heads, head_dim)
+    k = F.linear(x, weights[f"{prefix}.k.weight"], weights[f"{prefix}.k.bias"]).view(batch, length, n_heads, head_dim).transpose(1, 2)
+    v = F.linear(x, weights[f"{prefix}.v.weight"], weights[f"{prefix}.v.bias"]).view(batch, length, n_heads, head_dim).transpose(1, 2)
+    p = F.linear(pos_emb, weights[f"{prefix}.pos.weight"]).view(1, -1, n_heads, head_dim).transpose(1, 2)
+    q_u = (q + weights[f"{prefix}.pos_bias_u"]).transpose(1, 2)
+    q_v = (q + weights[f"{prefix}.pos_bias_v"]).transpose(1, 2)
+    matrix_ac = torch.matmul(q_u, k.transpose(-2, -1))
+    matrix_bd = ref.rel_shift(torch.matmul(q_v, p.transpose(-2, -1)))[:, :, :, :length]
+    scores = (matrix_ac + matrix_bd) / math.sqrt(head_dim)
+    if att_mask is not None:
+        scores = scores + att_mask
+    attn = torch.softmax(scores, dim=-1)
+    ctx = torch.matmul(attn, v).transpose(1, 2).reshape(batch, length, d_model)
+    return F.linear(ctx, weights[f"{prefix}.out.weight"], weights[f"{prefix}.out.bias"])
+
+
+def conformer_conv(ref, x, weights, prefix, causal=False, layer_norm=False):
     x = x.transpose(1, 2)
     x = F.conv1d(x, weights[f"{prefix}.pw1.weight"].squeeze(-1).unsqueeze(-1),
                  weights[f"{prefix}.pw1.bias"])
     x = F.glu(x, dim=1)
     depthwise = weights[f"{prefix}.dw.weight"]
     groups = int(depthwise.shape[0])
-    padding = (int(depthwise.shape[-1]) - 1) // 2
+    kernel = int(depthwise.shape[-1])
+    if causal:
+        x = F.pad(x, (kernel - 1, 0))
+        padding = 0
+    else:
+        padding = (kernel - 1) // 2
     x = F.conv1d(x, depthwise, weights[f"{prefix}.dw.bias"], padding=padding, groups=groups)
-    scale = weights[f"{prefix}.bn.scale"].view(1, -1, 1)
-    shift = weights[f"{prefix}.bn.shift"].view(1, -1, 1)
-    x = F.silu(x * scale + shift)
+    if layer_norm:
+        x = ref.layer_norm(x.transpose(1, 2),
+                           weights[f"{prefix}.norm.weight"],
+                           weights[f"{prefix}.norm.bias"]).transpose(1, 2)
+    else:
+        scale = weights[f"{prefix}.bn.scale"].view(1, -1, 1)
+        shift = weights[f"{prefix}.bn.shift"].view(1, -1, 1)
+        x = x * scale + shift
+    x = F.silu(x)
     x = F.conv1d(x, weights[f"{prefix}.pw2.weight"].squeeze(-1).unsqueeze(-1),
                  weights[f"{prefix}.pw2.bias"])
     return x.transpose(1, 2)
 
 
-def conformer_block(ref, x, pos_emb, weights, index, n_heads):
+def conformer_block(ref, x, pos_emb, weights, index, n_heads,
+                    att_mask=None, causal_conv=False, conv_layer_norm=False):
     p = f"encoder.blk.{index}"
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff1.weight"], weights[f"{p}.norm_ff1.bias"]),
         weights, f"{p}.ff1")
-    x = x + ref.rel_pos_mha(
+    x = x + rel_pos_mha_fixed(ref,
         ref.layer_norm(x, weights[f"{p}.norm_attn.weight"], weights[f"{p}.norm_attn.bias"]),
-        pos_emb, weights, f"{p}.attn", n_heads)
-    x = x + conformer_conv(
+        pos_emb, weights, f"{p}.attn", n_heads, att_mask)
+    x = x + conformer_conv(ref,
         ref.layer_norm(x, weights[f"{p}.norm_conv.weight"], weights[f"{p}.norm_conv.bias"]),
-        weights, f"{p}.conv")
+        weights, f"{p}.conv", causal_conv, conv_layer_norm)
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff2.weight"], weights[f"{p}.norm_ff2.bias"]),
         weights, f"{p}.ff2")
@@ -116,7 +221,11 @@ def encoder_forward(ref, mel, weights, meta):
     d_model = meta["parakeet.encoder.d_model"]
     n_layers = meta["parakeet.encoder.n_layers"]
     n_heads = meta["parakeet.encoder.n_heads"]
-    x, _ = ref.subsampling(mel, weights)
+    kind = model_type(meta)
+    if kind == "eou":
+        x = causal_subsampling(mel, weights)
+    else:
+        x, _ = ref.subsampling(mel, weights)
     if meta.get("parakeet.encoder.xscaling", True):
         x = x * math.sqrt(d_model)
     length = x.size(1)
@@ -124,8 +233,20 @@ def encoder_forward(ref, mel, weights, meta):
         max(length, meta.get("parakeet.encoder.pos_emb_max_len", 5000)), d_model, dtype=x.dtype)
     center = pe.size(1) // 2 + 1
     pos_emb = pe[:, center - length: center + length - 1]
+    att_mask = None
+    causal_conv = False
+    conv_layer_norm = False
+    if kind == "eou":
+        att_mask = chunked_attention_mask(
+            length,
+            int(meta["parakeet.encoder.att_context_size_left"]),
+            int(meta["parakeet.encoder.att_context_size_right"]),
+            x.dtype, x.device)
+        causal_conv = True
+        conv_layer_norm = True
     for index in range(n_layers):
-        x = conformer_block(ref, x, pos_emb, weights, index, n_heads)
+        x = conformer_block(ref, x, pos_emb, weights, index, n_heads,
+                            att_mask, causal_conv, conv_layer_norm)
     return x
 
 
@@ -218,7 +339,7 @@ def conformer_block_flex(ref, x, pos_emb, weights, index, n_heads):
     x = x + rel_pos_mha_flex(
         ref.layer_norm(x, weights[f"{p}.norm_attn.weight"], weights[f"{p}.norm_attn.bias"]),
         pos_emb, weights, f"{p}.attn", n_heads)
-    x = x + conformer_conv(
+    x = x + conformer_conv(ref,
         ref.layer_norm(x, weights[f"{p}.norm_conv.weight"], weights[f"{p}.norm_conv.bias"]),
         weights, f"{p}.conv")
     x = x + 0.5 * ref.conformer_ff(
@@ -280,7 +401,10 @@ def compile_mlmodelc(mlpackage_path, compile_dir):
     subprocess.run(
         ["xcrun", "coremlc", "compile", str(mlpackage_path), str(compile_dir)],
         check=True)
-    return Path(compile_dir) / (Path(mlpackage_path).stem + ".mlmodelc")
+    compiled = Path(compile_dir) / (Path(mlpackage_path).stem + ".mlmodelc")
+    if not compiled.is_dir():
+        raise RuntimeError(f"coremlc did not produce expected bundle: {compiled}")
+    return compiled
 
 
 def report_compute_placement(mlmodelc_path):
@@ -323,8 +447,28 @@ def report_compute_placement(mlmodelc_path):
               "force Core ML onto CPU; export a fixed single length for ANE acceleration.")
 
 
+def palettize_encoder(mlmodel, bits, group_size):
+    """Apply the grouped-channel LUT layout used by ANE-focused speech models.
+
+    Grouped-channel palettization requires the macOS 15 / iOS 18 model format;
+    the caller selects that deployment target before conversion.
+    """
+    import coremltools.optimize as cto
+
+    op_config = cto.coreml.OpPalettizerConfig(
+        mode="kmeans",
+        nbits=bits,
+        granularity="per_grouped_channel",
+        group_size=group_size,
+    )
+    config = cto.coreml.OptimizationConfig(global_config=op_config)
+    print(f"[export] palettizing weights: {bits}-bit grouped-channel LUTs, "
+          f"group_size={group_size}")
+    return cto.coreml.palettize_weights(mlmodel, config)
+
+
 def convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
-                  precision, out_dtype):
+                  precision, io_dtype, deployment_target):
     model = EncoderModule(ref, weights, meta).eval()
     with torch.inference_mode():
         reference_out = model(example)
@@ -333,16 +477,16 @@ def convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
     traced = torch.jit.trace(model, example, check_trace=False)
     return ct.convert(
         traced,
-        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=np.float32)],
-        outputs=[ct.TensorType(name="encoder_out", dtype=out_dtype)],
+        inputs=[ct.TensorType(name="mel", shape=(n_mels, n_mel_frames), dtype=io_dtype)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
         compute_units=ct.ComputeUnit.ALL,
         compute_precision=precision,
-        minimum_deployment_target=ct.target.macOS13,
+        minimum_deployment_target=deployment_target,
     )
 
 
 def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
-                     min_frames, max_frames, precision, out_dtype):
+                     min_frames, max_frames, precision, io_dtype, deployment_target):
     min_frames = min_frames if min_frames is not None else 1
     max_frames = max(max_frames if max_frames is not None else n_mel_frames, n_mel_frames)
     pos_emb_max_len = int(meta.get("parakeet.encoder.pos_emb_max_len", 5000))
@@ -389,11 +533,11 @@ def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
             name="mel",
             shape=ct.Shape(shape=(n_mels, ct.RangeDim(
                 lower_bound=min_frames, upper_bound=max_frames, default=n_mel_frames))),
-            dtype=np.float32)],
-        outputs=[ct.TensorType(name="encoder_out", dtype=out_dtype)],
+            dtype=io_dtype)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
         compute_units=ct.ComputeUnit.ALL,
         compute_precision=precision,
-        minimum_deployment_target=ct.target.macOS13,
+        minimum_deployment_target=deployment_target,
     )
 
 
@@ -408,6 +552,11 @@ def main():
     group.add_argument("--wav", type=Path, help="size the encoder to this wav's mel length")
     group.add_argument("--n-mel-frames", type=int, help="fixed mel length to trace")
     ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    ap.add_argument("--palettize-bits", type=int, choices=[4, 6, 8], default=None,
+                    help="optionally compress fixed-export weights into grouped-channel LUTs; "
+                         "6 matches the ANE-oriented Voz layout and requires macOS 15 / iOS 18")
+    ap.add_argument("--palettize-group-size", type=int, default=16,
+                    help="channels sharing each LUT with --palettize-bits (default: 16)")
     ap.add_argument("--compile-dir", type=Path, default=None,
                     help="if set, compile the .mlpackage to a .mlmodelc here via coremlc")
     ap.add_argument("--flexible", action="store_true",
@@ -421,9 +570,17 @@ def main():
                     help="[--flexible] maximum mel length the RangeDim accepts; set to your "
                          "longest expected utterance (default: the traced length)")
     args = ap.parse_args()
+    if args.flexible and args.palettize_bits is not None:
+        ap.error("--palettize-bits requires a fixed-shape export (omit --flexible)")
+    if args.palettize_group_size <= 0:
+        ap.error("--palettize-group-size must be greater than zero")
 
     ref = load_reference_encoder(args.scripts)
     weights, meta = ref.load_gguf(args.gguf)
+    try:
+        kind = validate_export_contract(meta, flexible=args.flexible)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     d_model = meta["parakeet.encoder.d_model"]
     n_mels = int(weights["preproc.mel_filterbank"].shape[0])
@@ -433,16 +590,21 @@ def main():
         n_mel_frames = mel_frames_for_wav(args.wav, resolve_hop_length(meta))
 
     precision = ct.precision.FLOAT16 if args.precision == "fp16" else ct.precision.FLOAT32
-    out_dtype = np.float16 if args.precision == "fp16" else np.float32
+    io_dtype = np.float16 if args.precision == "fp16" else np.float32
+    deployment_target = ct.target.macOS15 if args.palettize_bits is not None else ct.target.macOS13
     example = torch.zeros(n_mels, n_mel_frames, dtype=torch.float32)
 
+    print(f"[export] model_type={kind}")
     if args.flexible:
         mlmodel = convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames,
                                    d_model, args.min_frames, args.max_frames,
-                                   precision, out_dtype)
+                                   precision, io_dtype, deployment_target)
     else:
         mlmodel = convert_fixed(ref, weights, meta, example, n_mels, n_mel_frames,
-                                d_model, precision, out_dtype)
+                                d_model, precision, io_dtype, deployment_target)
+    if args.palettize_bits is not None:
+        mlmodel = palettize_encoder(mlmodel, args.palettize_bits,
+                                    args.palettize_group_size)
     mlmodel.save(str(args.out))
     print(f"[export] saved {args.out}")
 

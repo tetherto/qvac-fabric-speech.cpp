@@ -39,6 +39,23 @@ void expect(const std::string & name,
     }
 }
 
+void expect_capacity(const std::string & name,
+                     const std::vector<int64_t> & dims,
+                     int64_t required_rows, int64_t cols,
+                     bool want_matched, bool want_transpose) {
+    const parakeet::CoremlTrailingMatch got =
+        parakeet::coreml_match_trailing_capacity(dims, required_rows, cols);
+    const bool ok = got.matched == want_matched &&
+                    got.transpose == want_transpose;
+    std::printf("[%s] %-34s -> matched=%d transpose=%d\n",
+                ok ? "ok  " : "FAIL", name.c_str(), got.matched, got.transpose);
+    if (!ok) {
+        std::printf("       expected: matched=%d transpose=%d\n",
+                    want_matched, want_transpose);
+        ++g_failures;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -61,6 +78,16 @@ int main() {
     expect("rank-1 default",           {N_MELS},         900, N_MELS, {1, N_MELS, 900}, true);
     // Neither trailing axis is the feature dim -> default rather than a bad rebuild.
     expect("no feature axis default",  {1, 7, 9},        900, N_MELS, {1, N_MELS, 900}, true);
+
+    // Fixed output backing may have more time rows than the current (unpadded)
+    // utterance needs. Both time-major and features-major layouts are accepted,
+    // but a short time axis, wrong feature width, or rank below two is rejected.
+    expect_capacity("capacity time-major exact", {1, 188, 1024}, 188, 1024, true, false);
+    expect_capacity("capacity time-major padded", {1, 188, 1024}, 100, 1024, true, false);
+    expect_capacity("capacity features-major", {1, 1024, 188}, 100, 1024, true, true);
+    expect_capacity("capacity too short", {1, 99, 1024}, 100, 1024, false, false);
+    expect_capacity("capacity wrong width", {1, 188, 512}, 100, 1024, false, false);
+    expect_capacity("capacity rank one", {1024}, 100, 1024, false, false);
 
     if (g_failures == 0) {
         std::printf("[coreml-shapes] PASS\n");

@@ -106,16 +106,22 @@ struct SortformerSpeakerCache {
 void sortformer_cache_reset(SortformerSpeakerCache & cache, int D);
 
 // Fit projection: size the compute buffers of the diarization head graph at
-// `T_enc` encoder frames, without allocating or executing it, using the SAME
-// allocator the real path uses (the shared scheduler normally, a gallocr on
-// the Mali force-CPU path). `out_active_bytes` is the resolved head backend's
-// buffer (all host RAM on the force-CPU path -- route by
-// model_sortformer_on_cpu); `out_cpu_fallback_bytes` is the scheduler's
-// per-op CPU fallback buffer (host RAM). Requires a
-// load_from_gguf_metadata_only model.
+// `T_enc` encoder frames, without allocating or executing it.
+// `out_active_bytes` is the resolved head backend's buffer, sized with a
+// gallocr on its default buffer type (all host RAM on the force-CPU path --
+// route by model_sortformer_on_cpu); `out_host_input_bytes` is the CPU-side
+// scheduler buffer holding the graph-input original on GPU runs (host RAM;
+// zero on CPU-only and force-CPU runs). The sum equals the shared
+// scheduler's real reservation for a diarize byte for byte on CPU, and on
+// GPU bounds it from above by at most one device-side x_in slot (the
+// scheduler's input copy is a reusable node; a user-settable input leaf is
+// not) -- strict-direction only, asserted by test-fit-params. See the
+// implementation comment for why the scheduler's own size-only reserve
+// cannot run on a metadata-only model. Works on metadata-only and
+// real-loaded models alike.
 int  sortformer_measure_head(const ParakeetCtcModel & model, int T_enc,
                              size_t & out_active_bytes,
-                             size_t & out_cpu_fallback_bytes);
+                             size_t & out_host_input_bytes);
 
 // The diarization head backend is resolved internally via model_sortformer_backend
 // (CPU on Mali-Vulkan, the active backend otherwise) so callers cannot accidentally

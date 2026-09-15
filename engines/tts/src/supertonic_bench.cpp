@@ -14,9 +14,10 @@
 // Usage:
 //   ./build/supertonic-bench --model models/supertonic2.gguf \
 //       --text "..." [--voice M1] [--language en] [--steps 5] [--speed 1.05] \
-//       [--seed 42] [--noise-npy noise.npy] [--runs 5] [--warmup 1] [--json-out result.json]
+//       [--seed 42] [--noise-npy noise.npy] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out result.json]
 
 #include "backend_selection.h"
+#include "bench_wav.h"
 #include "supertonic_internal.h"
 #include "npy.h"
 // Vulkan adapter description in the bench backend annotator is now
@@ -55,7 +56,7 @@ void usage(const char * argv0) {
         "          [--runs 5] [--warmup 1] [--threads N] [--n-gpu-layers N]\n"
         "          [--vulkan-device N] (-1 = auto-pick adapter with most free VRAM)\n"
         "          [--f16-attn 0|1] [--f16-weights 0|1]\n"
-        "          [--precision f32|f16|q8_0]   (default: f32)\n"
+        "          [--precision auto|f32|f16|q8_0]   (default: auto)\n"
         "          [--kv-attn-type auto|f32|f16|bf16|q8_0]\n"
         "                            (multi-dtype K/V flash-attn dispatch; generalises\n"
         "                            --f16-attn.  default auto: falls back to --f16-attn.\n"
@@ -77,16 +78,17 @@ void usage(const char * argv0) {
         "                               default off for accurate per-stage attribution on Vulkan)\n"
         "          [--bench-per-step]  (time each denoise step individually so the first-step\n"
         "                               cold-pipeline cost is distinguished from steady-state)\n"
-        "          [--json-out FILE]\n",
+        "          [--wav-out FILE] [--json-out FILE]\n",
         argv0);
 }
 
 tts_cpp::supertonic::detail::supertonic_precision parse_bench_precision(const std::string & s) {
     using P = tts_cpp::supertonic::detail::supertonic_precision;
+    if (s == "auto" || s == "AUTO" || s == "Auto") return P::Auto;
     if (s == "f32" || s == "F32") return P::F32;
     if (s == "f16" || s == "F16") return P::F16;
     if (s == "q8_0" || s == "Q8_0" || s == "q8") return P::Q8_0;
-    throw std::runtime_error("unknown --precision value: " + s + " (expected f32|f16|q8_0)");
+    throw std::runtime_error("unknown --precision value: " + s + " (expected auto|f32|f16|q8_0)");
 }
 
 const char * precision_to_string(tts_cpp::supertonic::detail::supertonic_precision p) {
@@ -95,8 +97,9 @@ const char * precision_to_string(tts_cpp::supertonic::detail::supertonic_precisi
         case P::F32:  return "f32";
         case P::F16:  return "f16";
         case P::Q8_0: return "q8_0";
+        case P::Auto: return "auto";
     }
-    return "f32";
+    return "auto";
 }
 
 double percentile(std::vector<double> v, double p) {
@@ -159,7 +162,7 @@ int main(int argc, char ** argv) {
     std::string model_path, text;
     std::string voice = "M1", language = "en";
     std::string noise_npy;
-    std::string json_out;
+    std::string json_out, wav_out;
     int steps = 5;
     float speed = 1.05f;
     int seed = 42;
@@ -172,7 +175,7 @@ int main(int argc, char ** argv) {
     // Phase 2A — F16 load-time materialization of the hot matmul /
     // pwconv weights.  -1 auto / 0 / 1 force.
     int f16_weights = -1;
-    supertonic_precision precision = supertonic_precision::F32;
+    supertonic_precision precision = supertonic_precision::Auto;
     // Vulkan adapter index. Default 0 (the historical
     // hard-coded value in `init_supertonic_backend`).  Range-checked
     // at GGUF load against `ggml_backend_vk_get_device_count()`; an
@@ -283,9 +286,14 @@ int main(int argc, char ** argv) {
         else if (a == "--no-bench-sync") bench_sync = false;
         else if (a == "--bench-sync")    bench_sync = true;  // explicit on; default
         else if (a == "--bench-per-step") bench_per_step = true;
+        else if (a == "--wav-out") wav_out = next("--wav-out");
         else if (a == "--json-out") json_out = next("--json-out");
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+    if (runs <= 0 || warmup < 0 || warmup > std::numeric_limits<int>::max() - runs) {
+        fprintf(stderr, "--runs must be positive and --warmup nonnegative (without overflow)\n");
+        return 2;
     }
     if (model_path.empty() || text.empty()) { usage(argv[0]); return 2; }
 
@@ -453,6 +461,8 @@ int main(int argc, char ** argv) {
                 prewarm_text.c_str(), prewarm_ms);
     }
 
+    // Retain only the final measured synthesis; WAV conversion and I/O are untimed.
+    std::vector<float> last_pcm;
     int total_runs = runs + warmup;
     for (int r = 0; r < total_runs; ++r) {
         bool record = r >= warmup;
@@ -554,10 +564,20 @@ int main(int argc, char ** argv) {
             rtfs.push_back((tot_ms / 1000.0) / audio_s);
             last_audio_s = audio_s;
         }
+        if (!wav_out.empty() && record && r + 1 == total_runs) last_pcm.swap(wav);
         fprintf(stderr, "[run %d/%d] %s total=%.1fms audio=%.2fs RTF=%.3f%s\n",
                 r + 1, total_runs, record ? "" : "(warmup) ",
                 tot_ms, audio_s, (tot_ms / 1000.0) / audio_s,
                 record ? "" : " [discarded]");
+    }
+
+    if (!wav_out.empty()) {
+        std::string wav_error;
+        if (!bench_write_wav(wav_out, last_pcm, model.hparams.sample_rate, wav_error)) {
+            fprintf(stderr, "%s\n", wav_error.c_str());
+            free_supertonic_model(model);
+            return 1;
+        }
     }
 
     printf("\nSupertonic 2 C++ benchmark\n");

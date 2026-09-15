@@ -475,15 +475,78 @@ struct DecoderFitMeasure {
     size_t host_bytes           = 0;  // host-dequantised f32 weights (CPU decode path)
 };
 
+// ── Nemotron fit measurement (see include/parakeet/fit.h) ──────────────────
+
+// Measure the compute buffer of the Nemotron locale-prompt projection graph
+// at `n_frames` encoder frames -- the graph run_nemotron_prompt_projection
+// builds and caches (one graph resident at a time, keyed by frame count) --
+// without allocating it. Requires a Nemotron model (metadata-only or real).
+int measure_nemotron_prompt_compute(ParakeetCtcModel & model,
+                                    int                n_frames,
+                                    size_t           & out_bytes);
+
+// Measure the run_subsampling graph at `n_mel_frames` (per-chunk Nemotron
+// streaming builds a fresh subsampling graph through the shared scheduler
+// every step). `out_active_bytes` is the active-backend reservation, sized
+// with a gallocr on its default buffer type -- the subsampling ops run
+// single-split on every active backend, so this matches the scheduler's
+// device buffer. `out_host_input_bytes` is the CPU-side scheduler buffer
+// holding the graph-input originals on GPU runs (the scheduler assigns
+// inputs to the CPU backend and copies them in; zero on CPU-only runs).
+// test-fit-params asserts the sum equals the scheduler's real reservation
+// byte for byte; see the implementation comment for why the scheduler's own
+// size-only reserve cannot run on a metadata-only model.
+int measure_subsampling_compute(ParakeetCtcModel & model,
+                                int                n_mel_frames,
+                                int                n_mels,
+                                size_t           & out_active_bytes,
+                                size_t           & out_host_input_bytes);
+
+// Byte totals for ONE cache-aware Nemotron streaming session at a given
+// right-context operating point (StreamingOptions::chunk_ms resolves to one
+// of parakeet.nemotron.allowed_right_context_frames). Filled by
+// nemotron_measure_stream against a load_from_gguf_metadata_only model.
+struct NemotronStreamFitMeasure {
+    // Steady-state step-graph gallocr buffer on the active backend: encoder
+    // input, per-layer channel/time cache I/O tensors, and the compute
+    // transients, all owned by one allocator for the session's life.
+    size_t device_step_graph_bytes  = 0;
+    // Per-chunk pre-encode (subsampling) graph on the active backend (the
+    // shared scheduler's device reservation; see measure_subsampling_compute).
+    size_t device_subsampling_bytes = 0;
+    // CPU-side scheduler buffer holding the subsampling graph-input originals
+    // on GPU runs (zero on CPU-only runs). Already INCLUDED in host_bytes;
+    // broken out so parity tests can reconstruct the scheduler's full
+    // reservation as device_subsampling_bytes + this.
+    size_t host_subsampling_input_bytes = 0;
+    // Session state living in host RAM: per-layer channel/time caches, the
+    // step graph's position/mask mirrors, mel chunk staging, the per-step
+    // encoder/prompt staging vectors, the RNN-T decode state, and the
+    // scheduler's CPU-side subsampling input buffer.
+    size_t host_bytes               = 0;
+};
+
+// Size everything one live Nemotron stream session keeps resident at the
+// given operating point, without allocating. Returns 0 on success.
+int nemotron_measure_stream(ParakeetCtcModel         & model,
+                            int                        right_context_frames,
+                            NemotronStreamFitMeasure & out);
+
 // Actually-allocated byte counts on a REAL-loaded model, for fit-parity tests
 // and stats. Both return 0 on a metadata-only model.
 //
 // Total bytes of the allocated weight buffers (default buffer + CPU repack
 // extra buffers; excludes the Mali Sortformer CPU head copy).
 size_t model_weights_buffer_bytes(const ParakeetCtcModel & m);
-// Backend buffer held by the most recently built cached encoder graph's
-// allocator (0 when no encoder graph has been built yet).
+// Backend bytes held by the most recently built cached encoder graph: its
+// allocator's buffer plus its positional-projection cache (0 before any build).
 size_t model_encoder_compute_buffer_bytes(const ParakeetCtcModel & m);
+// Backend buffer held by the cached Nemotron prompt-projection graph's
+// allocator (0 until run_nemotron_prompt_projection has built one).
+size_t model_nemotron_prompt_buffer_bytes(const ParakeetCtcModel & m);
+// Backend buffer held by a live Nemotron stream session's step-graph
+// allocator (0 before the first stream step builds it).
+size_t nemotron_stream_graph_buffer_bytes(const NemotronStreamState & state);
 
 void print_model_summary(const ParakeetCtcModel & m);
 const char * model_type_name(ParakeetModelType model_type);
@@ -503,6 +566,9 @@ ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 // True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
 // instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+// Fixed mel-frame capacity advertised by the active Core ML sidecar, or 0 when
+// Core ML is unavailable, disabled, flexible-shape, or has an unknown layout.
+int         model_coreml_fixed_mel_frames(const ParakeetCtcModel & m);
 // Encoder compute-backend label for stats/logging: the Core ML label (e.g. "coreml")
 // when the sidecar is active, otherwise the ggml active-backend name.
 std::string model_encoder_backend_name(const ParakeetCtcModel & m);
@@ -539,6 +605,11 @@ struct EncoderOutputs {
     int n_enc_frames = 0;
     int d_model      = 0;
     int vocab_size   = 0;
+
+    // True only when this invocation completed through the Core ML sidecar.
+    // Loading a sidecar is insufficient: an incompatible shape or prediction
+    // failure can still make run_encoder fall back to ggml.
+    bool used_coreml = false;
 };
 
 // `capture_intermediates`: when true (default, kept for backward compat with
@@ -553,14 +624,17 @@ struct EncoderOutputs {
 // per-call cost on GPU/OpenCL backends and negligible-but-noisy on
 // CPU. The graph topology is unchanged either way -- only the
 // host-copy step is gated, so this is safe regardless of backend
-// scheduling.
+// scheduling. `allow_coreml_padded` is reserved for offline callers that know
+// trailing zero mel frames represent padding, not an in-progress streaming
+// window; it lets a fixed-shape Core ML sidecar consume that padded input.
 int run_encoder(ParakeetCtcModel   & model,
                 const float        * mel,
                 int                  n_mel_frames,
                 int                  n_mels,
                 EncoderOutputs     & out,
                 int                  max_layers = -1,
-                bool                 capture_intermediates = true);
+                bool                 capture_intermediates = true,
+                bool                 allow_coreml_padded = false);
 
 // Apply Nemotron's locale one-hot concatenation and two-layer projection to
 // row-major encoder output shaped (n_frames, d_model).

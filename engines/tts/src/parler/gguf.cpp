@@ -3,6 +3,7 @@
 #include "backend_selection.h"
 #include "backend_util.h"
 #include "gguf_stream.h"
+#include "ggml-alloc.h"
 #include "gguf.h"
 
 #include <algorithm>
@@ -81,10 +82,28 @@ bool parler_probe_fa_f16(ggml_backend_t backend, int head_dim, int n_heads) {
     return ok;
 }
 
+// Mark every unallocated tensor in `ctx` externally allocated (dummy non-null
+// data, the same trick ggml's own measure paths use) so graph pricing via
+// ggml_gallocr / ggml_backend_sched excludes it from the measured compute
+// buffers instead of counting it as a graph-owned leaf. The context must
+// never have tensor data read or written after this.
+void mark_externally_allocated(ggml_context * ctx) {
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t;
+         t = ggml_get_next_tensor(ctx, t)) {
+        if (!t->data && !t->view_src) {
+            t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+        }
+    }
+}
+
 } // namespace
 
-bool parler_load_gguf(const std::string & path, parler_model & model,
-                      int n_gpu_layers, std::string * error) {
+// Shared body of parler_load_gguf and parler_load_gguf_metadata_only.  When
+// `measure` is non-null the load is metadata-only: every buffer the real path
+// allocates is sized instead and no tensor data leaves the disk.
+bool parler_load_gguf_impl(const std::string & path, parler_model & model,
+                           int n_gpu_layers, std::string * error,
+                           parler_fit_measure * measure) {
     ggml_context * ctx_meta = nullptr;
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &ctx_meta };
     gguf_context * g = gguf_init_from_file(path.c_str(), gp);
@@ -251,9 +270,11 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
     // (bounds + 32B-align guarded, alloc+stream fallback) instead of a dirty
     // buffer + stream copy. GPU path unchanged (weights uploaded to a device
     // buffer); ctx_fused is GPU-only.
+    // Measure mode bypasses the mmap: the projection prices the allocate-and-
+    // stream fallback, which bounds the fully-touched mapping from above.
     const bool on_cpu = ::tts_cpp::detail::backend_is_cpu(model.backend);
     bool mapping = false;
-    if (on_cpu && tts_cpp::cosyvoice::mapped_file_open(model.mapped, path, "parler")) {
+    if (on_cpu && !measure && tts_cpp::cosyvoice::mapped_file_open(model.mapped, path, "parler")) {
         model.map_buf = ggml_backend_cpu_buffer_from_ptr(
             (void *) model.mapped.data, model.mapped.size);
         mapping = model.map_buf != nullptr;
@@ -276,13 +297,18 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
     }
 
     // Allocate + stream whatever stayed unmapped (all on GPU; none on a full CPU
-    // map, where buffer_w stays null).
+    // map, where buffer_w stays null).  In measure mode the buffer is sized
+    // instead of allocated and nothing is streamed.
     bool any_unmapped = false;
     for (ggml_tensor * t = ggml_get_first_tensor(model.ctx_w); t;
          t = ggml_get_next_tensor(model.ctx_w, t)) {
         if (t->data == nullptr) { any_unmapped = true; break; }
     }
-    if (any_unmapped) {
+    if (measure) {
+        measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+            model.ctx_w, ggml_backend_get_default_buffer_type(model.backend));
+        mark_externally_allocated(model.ctx_w);
+    } else if (any_unmapped) {
         model.buffer_w = ggml_backend_alloc_ctx_tensors(model.ctx_w, model.backend);
         if (!model.buffer_w) return fail("failed to allocate weight buffer");
 
@@ -424,8 +450,14 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
         model.memory_v = ggml_new_tensor_2d(model.ctx_kv, model.kv_type, hp.dec_d_model, rows);
         ggml_set_name(model.memory_k, "parler_kv_k");
         ggml_set_name(model.memory_v, "parler_kv_v");
-        model.buffer_kv = ggml_backend_alloc_ctx_tensors(model.ctx_kv, model.backend);
-        if (!model.buffer_kv) return fail("failed to allocate KV buffer");
+        if (measure) {
+            measure->kv_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+                model.ctx_kv, ggml_backend_get_default_buffer_type(model.backend));
+            mark_externally_allocated(model.ctx_kv);
+        } else {
+            model.buffer_kv = ggml_backend_alloc_ctx_tensors(model.ctx_kv, model.backend);
+            if (!model.buffer_kv) return fail("failed to allocate KV buffer");
+        }
     }
 
     // ---- GPU: fused weights (fewer N=1 decode dispatches; byte-exact row concat) ----
@@ -461,6 +493,21 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
             }
             ggml_tensor * heads = fuse_heads
                 ? ggml_new_tensor_2d(model.ctx_fused, model.lm_heads[0]->type, d, vocab * nq) : nullptr;
+            if (measure) {
+                // Size the fused stack and wire the pointers so graph builds
+                // take the fused path exactly as a real GPU load would; the
+                // row-concat fill below needs real weight data, so skip it.
+                measure->fused_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+                    model.ctx_fused, ggml_backend_get_default_buffer_type(model.backend));
+                mark_externally_allocated(model.ctx_fused);
+                if (fuse_qkv) {
+                    for (int i = 0; i < nl; ++i) model.dec_layers[i].qkv = qkv[i];
+                }
+                if (fuse_heads) model.lm_head_stacked = heads;
+                gguf_free(g);
+                ggml_free(ctx_meta);
+                return true;
+            }
             model.buffer_fused = ggml_backend_alloc_ctx_tensors(model.ctx_fused, model.backend);
             if (!model.buffer_fused) return fail("failed to allocate fused-weight buffer");
             // Assemble the row concat in host memory and upload it in one whole-tensor
@@ -496,6 +543,18 @@ bool parler_load_gguf(const std::string & path, parler_model & model,
     gguf_free(g);
     ggml_free(ctx_meta);
     return true;
+}
+
+bool parler_load_gguf(const std::string & path, parler_model & model,
+                      int n_gpu_layers, std::string * error) {
+    return parler_load_gguf_impl(path, model, n_gpu_layers, error, /*measure=*/nullptr);
+}
+
+bool parler_load_gguf_metadata_only(const std::string & path, parler_model & model,
+                                    int n_gpu_layers, parler_fit_measure & measure,
+                                    std::string * error) {
+    measure = parler_fit_measure{};
+    return parler_load_gguf_impl(path, model, n_gpu_layers, error, &measure);
 }
 
 void parler_free_model(parler_model & model) {

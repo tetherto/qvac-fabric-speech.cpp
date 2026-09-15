@@ -1,5 +1,6 @@
 #include "supertonic_internal.h"
 
+#include "fit_price.h"
 #include "ggml-alloc.h"
 
 #if defined(TTS_CPP_USE_ACCELERATE)
@@ -49,6 +50,12 @@ f32_tensor read_f32(const supertonic_model & m, const std::string & source_name)
 }
 
 float scalar_f32_tensor(ggml_tensor * tensor) {
+    if (!tensor->buffer) {
+        // Metadata-only (memory-fit) model: there is no data to read.  Scalar
+        // weights only parameterise op VALUES (scales, PReLU slopes), never
+        // graph shapes, so the priced allocation is unchanged.
+        return 0.0f;
+    }
     f32_tensor t = read_f32_tensor(tensor);
     if (t.data.empty()) throw std::runtime_error("empty scalar tensor");
     return t.data[0];
@@ -377,7 +384,7 @@ ggml_tensor * layer_norm_channel_ggml(ggml_context * ctx,
                                       float eps = 1e-6f) {
     static const bool disable_fused_layer_norm =
         std::getenv("SUPERTONIC_DISABLE_FUSED_LAYER_NORM") != nullptr;
-    if (!disable_fused_layer_norm && supertonic_use_fused_supertonic_ops() &&
+    if (!disable_fused_layer_norm && supertonic_use_fused_layer_norm() &&
         x->type == GGML_TYPE_F32 && gamma->type == GGML_TYPE_F32 && beta->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         gamma->ne[0] == x->ne[1] && beta->ne[0] == x->ne[1] &&
@@ -508,8 +515,18 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
 
     ggml_tensor * y_ct = ggml_supertonic_depthwise_1d_causal_ct(ctx, x_ct,
         w.dw_w, flatten_1d(w.dw_b), dilations[idx]);
-    y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
-        flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
+    if (supertonic_use_fused_layer_norm()) {
+        y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
+            flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
+    } else {
+        // Channels are already inner-most, so the stock reduction needs no
+        // permute; matches `layer_norm_channel_ggml`'s decomposition.
+        y_ct = ggml_norm(ctx, y_ct, 1e-6f);
+        y_ct = ggml_mul(ctx, y_ct,
+            ggml_reshape_2d(ctx, flatten_1d(w.norm_g), y_ct->ne[0], 1));
+        y_ct = ggml_add(ctx, y_ct,
+            ggml_reshape_2d(ctx, flatten_1d(w.norm_b), y_ct->ne[0], 1));
+    }
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw1_w, /*bias=*/nullptr);
     y_ct = ggml_supertonic_bias_gelu_ct(ctx, y_ct, flatten_1d(w.pw1_b));
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw2_w, flatten_1d(w.pw2_b));
@@ -1234,6 +1251,65 @@ void release_vocoder_thread_local_caches() {
     // See `release_vector_estimator_thread_local_caches` for the contract.
     for (auto & fn : g_tl_release_thunks) {
         if (fn) fn();
+    }
+}
+
+// ---- memory-fit measure (supertonic_internal.h) -----------------------------
+// Sizes the vocoder graph cache at latent_len, through the exact builder the
+// runtime dispatches, priced with the same dual-path policy the forward
+// applies: the direct gallocr where the backend fully supports the graph,
+// the [backend, CPU-last] scheduler shape otherwise (its CPU portion is
+// charged to host_bytes).  Nothing is allocated and nothing runs.
+bool supertonic_fit_measure_vocoder(const supertonic_model & m, int latent_len,
+                                    uint64_t & device_bytes, uint64_t & host_bytes,
+                                    std::string * error) {
+    device_bytes = host_bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vocoder_graph_cache cache;
+        build_supertonic_vocoder_cache(cache, m, latent_len);
+        ::tts_cpp::detail::fit_graph_price price;
+        const bool ok = ::tts_cpp::detail::fit_price_graph(m.backend, cache.gf,
+                                                           kSupertonicSchedGraphSize, price);
+        free_vocoder_cache(cache);
+        if (!ok) {
+            if (error) *error = "vocoder graph pricing failed";
+            return false;
+        }
+        device_bytes = price.device_bytes;
+        host_bytes   = price.host_bytes;
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+// Real-allocation parity probe (test support): the same builder reserved and
+// allocated through the direct gallocr path; reports 0 when the backend
+// cannot run the graph directly (the scheduler path), which the test skips.
+bool supertonic_fit_parity_probe_vocoder(const supertonic_model & m, int latent_len,
+                                         uint64_t & bytes, std::string * error) {
+    bytes = 0;
+    try {
+        supertonic_op_dispatch_scope dispatch(m);
+        vocoder_graph_cache cache;
+        build_supertonic_vocoder_cache(cache, m, latent_len);
+        if (!::tts_cpp::detail::sched_force_enabled() &&
+            ::tts_cpp::detail::graph_fully_supported(m.backend, cache.gf)) {
+            ggml_gallocr_t al =
+                ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
+            if (al && ggml_gallocr_reserve(al, cache.gf) &&
+                ggml_gallocr_alloc_graph(al, cache.gf)) {
+                bytes = ggml_gallocr_get_buffer_size(al, 0);
+            }
+            if (al) ggml_gallocr_free(al);
+        }
+        free_vocoder_cache(cache);
+        return true;
+    } catch (const std::exception & e) {
+        if (error) *error = e.what();
+        return false;
     }
 }
 

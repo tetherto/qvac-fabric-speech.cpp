@@ -16,6 +16,7 @@
 build/
 build-*/
 build_*/
+ggml-prefix/
 tmp/
 
 # SPM

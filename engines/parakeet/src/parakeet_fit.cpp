@@ -99,15 +99,45 @@ FitResult fit_params(const FitOptions & opts) {
     r.model_variant = model.model_variant;
     r.device_name   = model_active_backend_name(model);
 
-    if (model.model_type == ParakeetModelType::NEMOTRON) {
-        // Nemotron's prompt-conditioned encoder and cache-aware streaming
-        // graphs (parakeet_nemotron.cpp) are not modelled by this projection
-        // yet -- the type landed after the fit slice, and projecting it with
-        // the standard encoder graph would understate the requirement.
-        // Refusing (Error) beats a wrong FITS; Nemotron support is a
-        // follow-up under QVAC-24283.
-        r.reason = "model-type-not-supported";
-        return r;
+    const bool is_nemotron = model.model_type == ParakeetModelType::NEMOTRON;
+
+    // Nemotron: resolve the streaming operating point (chunk_ms -> trained
+    // right-context frames, the same table Engine::stream_start consults) up
+    // front so a bad request fails before any measurement. The default (0)
+    // picks the operating point with the LARGEST right context: its step
+    // graph and caches bound every other operating point, so the default
+    // verdict stays safe whichever chunk_ms the host later streams with.
+    int nemotron_rc_frames = -1;
+    int nemotron_chunk_ms  = 0;
+    if (is_nemotron) {
+        const auto & chunks = model.nemotron_cfg.allowed_chunk_ms;
+        const auto & rcs    = model.nemotron_cfg.allowed_right_context_frames;
+        if (chunks.empty() || chunks.size() != rcs.size()) {
+            // validate_nemotron_model guarantees a well-formed table on any
+            // loadable GGUF; a mismatch here means the model is not usable.
+            r.reason = "model-unreadable";
+            return r;
+        }
+        if (opts.nemotron_chunk_ms == 0) {
+            size_t worst = 0;
+            for (size_t i = 1; i < rcs.size(); ++i) {
+                if (rcs[i] > rcs[worst]) worst = i;
+            }
+            nemotron_rc_frames = rcs[worst];
+            nemotron_chunk_ms  = chunks[worst];
+        } else {
+            for (size_t i = 0; i < chunks.size(); ++i) {
+                if (chunks[i] == opts.nemotron_chunk_ms) {
+                    nemotron_rc_frames = rcs[i];
+                    nemotron_chunk_ms  = chunks[i];
+                    break;
+                }
+            }
+            if (nemotron_rc_frames < 0) {
+                r.reason = "invalid-arguments";  // mirrors Engine::stream_start
+                return r;
+            }
+        }
     }
 
     ggml_backend_t backend = model_active_backend(model);
@@ -226,16 +256,46 @@ FitResult fit_params(const FitOptions & opts) {
         }
     }
 
+    // ── Nemotron: prompt-projection graph + one live streaming session ─────
+    // The locale-prompt projection graph is cached one-at-a-time keyed by
+    // frame count; the offline path builds it at the FULL stitched length
+    // (windowing bounds the encoder graphs, not the prompt conditioning), so
+    // -- unlike every other transcription family -- Nemotron's device
+    // projection keeps growing with audio_seconds. A live stream session
+    // keys the same slot at right_context + 1 frames; the larger of the two
+    // bounds both since only one graph is ever resident.
+    NemotronStreamFitMeasure nsm;
+    uint64_t nemotron_prompt_bytes = 0;
+    if (is_nemotron) {
+        const int stream_enc_frames = nemotron_rc_frames + 1;
+        const int prompt_frames = std::max(total_enc, stream_enc_frames);
+        size_t prompt_bytes = 0;
+        if (measure_nemotron_prompt_compute(model, prompt_frames,
+                                            prompt_bytes) != 0) {
+            r.reason = "measurement-failed";
+            return r;
+        }
+        nemotron_prompt_bytes = prompt_bytes;
+        if (nemotron_measure_stream(model, nemotron_rc_frames, nsm) != 0) {
+            r.reason = "measurement-failed";
+            return r;
+        }
+        enc_compute = sat_add(enc_compute, nemotron_prompt_bytes);
+        enc_compute = sat_add(enc_compute, nsm.device_step_graph_bytes);
+        enc_compute = sat_add(enc_compute, nsm.device_subsampling_bytes);
+    }
+
     // ── Decoder-side buffers, per model type ───────────────────────────────
     DecoderFitMeasure dm;
     uint64_t extra_host = 0;  // decoder-side buffers that live in host RAM
     switch (model.model_type) {
-        case ParakeetModelType::NEMOTRON:
-            break;  // unreachable: rejected as model-type-not-supported above
         case ParakeetModelType::CTC:
             break;  // the CTC head lives inside the encoder graph, already measured
         case ParakeetModelType::RNNT:
         case ParakeetModelType::TDT:
+        case ParakeetModelType::NEMOTRON:  // shares the RNN-T runtime
+                                           // (tdt_prepare_runtime handles the
+                                           // nemotron dims + weights)
             if (tdt_measure_runtime(model, window_enc, dm) != 0) {
                 r.reason = "measurement-failed";
                 return r;
@@ -248,21 +308,21 @@ FitResult fit_params(const FitOptions & opts) {
             }
             break;
         case ParakeetModelType::SORTFORMER: {
-            size_t head_active = 0, head_cpu_fallback = 0;
+            size_t head_active = 0, head_host_input = 0;
             if (sortformer_measure_head(model, window_enc,
-                                        head_active, head_cpu_fallback) != 0) {
+                                        head_active, head_host_input) != 0) {
                 r.reason = "measurement-failed";
                 return r;
             }
             // On Mali-Vulkan the head is force-routed to CPU: its compute
             // buffer is host RAM, like the head weight copies already counted
-            // in lm.sortformer_cpu_bytes. The scheduler's per-op CPU fallback
-            // portion is host RAM on every backend.
+            // in lm.sortformer_cpu_bytes. On GPU runs the scheduler keeps the
+            // head's graph-input original in a CPU-side buffer (host RAM).
             if (model_sortformer_on_cpu(model)) {
-                extra_host = sat_add(extra_host, sat_add(head_active, head_cpu_fallback));
+                extra_host = sat_add(extra_host, sat_add(head_active, head_host_input));
             } else {
                 dm.device_compute_bytes = head_active;
-                extra_host = sat_add(extra_host, head_cpu_fallback);
+                extra_host = sat_add(extra_host, head_host_input);
             }
             break;
         }
@@ -306,6 +366,18 @@ FitResult fit_params(const FitOptions & opts) {
         host = sat_add(host, dm.host_bytes);           // CPU decode path: dequantised f32 weights
         host = sat_add(host, lm.sortformer_cpu_bytes); // Mali-Vulkan CPU head copy (host RAM)
         host = sat_add(host, extra_host);
+        if (is_nemotron) {
+            // Offline prompt conditioning stages the one-hot concat input and
+            // the projected output on the host at the full stitched length
+            // (run_nemotron_prompt_projection).
+            host = sat_add(host, sat_mul(sat_mul((uint64_t) total_enc,
+                       sat_add((uint64_t) model.nemotron_cfg.prompt_input_width,
+                               (uint64_t) model.encoder_cfg.d_model)),
+                       sizeof(float)));
+            // One live streaming session: per-layer caches, graph host
+            // mirrors, chunk staging, decode state, sched CPU fallback.
+            host = sat_add(host, nsm.host_bytes);
+        }
         r.host_bytes = host;
     }
 
@@ -349,6 +421,17 @@ FitResult fit_params(const FitOptions & opts) {
                       "workload: %.1f s audio -> worst window %d mel frames (%d encoder frames)\n",
                       (double) opts.audio_seconds, window_mel, window_enc);
         s += line;
+        if (is_nemotron) {
+            std::snprintf(line, sizeof(line),
+                          "nemotron: prompt projection %s (%d frames); "
+                          "stream %d ms -> step graph %s + pre-encode %s\n",
+                          fmt_mib(nemotron_prompt_bytes).c_str(),
+                          std::max(total_enc, nemotron_rc_frames + 1),
+                          nemotron_chunk_ms,
+                          fmt_mib(nsm.device_step_graph_bytes).c_str(),
+                          fmt_mib(nsm.device_subsampling_bytes).c_str());
+            s += line;
+        }
         s += "device projection:\n";
         std::snprintf(line, sizeof(line), "  weights:         %14s\n",
                       fmt_mib(r.device.weights_bytes).c_str());

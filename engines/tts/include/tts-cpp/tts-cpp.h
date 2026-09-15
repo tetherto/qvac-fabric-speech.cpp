@@ -8,6 +8,7 @@
 //   <tts-cpp/parler/engine.h>
 //   <tts-cpp/cosyvoice/engine.h>
 //   <tts-cpp/audio8/engine.h>
+//   <tts-cpp/pocket/engine.h>
 // Speech enhancement is exposed by <tts-cpp/lavasr/denoiser.h> and
 // <tts-cpp/lavasr/enhancer.h>.
 //

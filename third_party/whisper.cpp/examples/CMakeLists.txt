@@ -107,6 +107,7 @@ else()
     add_subdirectory(server)
     add_subdirectory(quantize)
     add_subdirectory(vad-speech-segments)
+    add_subdirectory(whisper-fit-params) # QVAC patch, see PATCHES.md
     if (WHISPER_BUILD_PARAKEET) # QVAC patch, see PATCHES.md
         add_subdirectory(parakeet-cli)
         add_subdirectory(parakeet-quantize)

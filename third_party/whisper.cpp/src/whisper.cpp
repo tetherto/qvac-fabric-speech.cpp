@@ -573,6 +573,50 @@ static bool whisper_sched_graph_init(struct whisper_sched & allocr, std::vector<
     return true;
 }
 
+// QVAC (see PATCHES.md): size-only twin of whisper_sched_graph_init for the
+// memory-fit preflight. Same scheduler construction and the same real graph
+// build, but the compute buffers are only *sized* (per backend, into `sizes`)
+// via ggml_backend_sched_reserve_size, never allocated. The inter-graph
+// dependencies the comment above refers to (embd_conv / embd_enc / KV tensors
+// produced by an earlier graph or state buffer) are reproduced by marking
+// those tensors externally-allocated (data = (void *) 1) before the dependent
+// graph is measured -- see whisper_fit_params -- so the reserve sees exactly
+// the pre-allocated leafs a real alloc-time measurement sees. The whisper_sched
+// stays alive afterwards because the graph tensors live in its `meta` buffer.
+static bool whisper_sched_graph_measure(struct whisper_sched & allocr, std::vector<ggml_backend_t> backends,
+                                        std::function<struct ggml_cgraph *()> && get_graph,
+                                        std::vector<size_t> & sizes) {
+    auto & sched = allocr.sched;
+    auto & meta  = allocr.meta;
+
+    sched = ggml_backend_sched_new(backends.data(), nullptr, backends.size(), WHISPER_MAX_NODES, false, true);
+
+    meta.resize(ggml_tensor_overhead()*WHISPER_MAX_NODES + ggml_graph_overhead());
+
+    sizes.assign(backends.size(), 0);
+    ggml_backend_sched_reserve_size(sched, get_graph(), sizes.data());
+
+    // backends that share a buffer type (e.g. BLAS and CPU) share ONE galloc
+    // pool, but reserve_size reports that pool once per backend; the real
+    // ggml_backend_sched_get_buffer_size reports duplicates as 0, so mirror
+    // that here (dedup key: the backend's default buffer type, which is what
+    // the scheduler allocates from)
+    for (size_t i = 1; i < backends.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (ggml_backend_get_default_buffer_type(backends[i]) ==
+                ggml_backend_get_default_buffer_type(backends[j])) {
+                sizes[i] = 0;
+                break;
+            }
+        }
+    }
+
+    // no reset: the caller may still query ggml_backend_sched_get_tensor_backend
+    // to place this graph's outputs before the next graph is measured
+
+    return true;
+}
+
 // medium
 // hparams: {
 // 'n_mels': 80,
@@ -989,13 +1033,64 @@ static void read_safe(whisper_model_loader * loader, T & dest) {
     BYTESWAP_VALUE(dest);
 }
 
+// QVAC (see PATCHES.md): plumbing for the memory-fit preflight
+// (whisper_fit_params, implementation at the end of this file). When one of
+// these measure structs is passed to a loader/init function, every allocation
+// the real path makes is *sized* through ggml's size-only APIs instead of
+// performed, weight payloads are seeked past instead of read, and the created
+// tensors are marked externally-allocated: data = (void *) 1 (the same trick
+// ggml's own measure paths use, so ggml_gallocr excludes them from measured
+// compute buffers) plus a ZERO-SIZE dummy buffer of the buffer type the real
+// allocation would have used -- ggml_backend_sched places tensors by
+// tensor->buffer (buffer type support, WEIGHTS usage, host-ness), so the
+// dummy is what makes the measured graph split identically to a real load's.
+// A context/state produced this way must NEVER be used for inference.
+
+// zero-size buffer of `buft` (the trick weight_buft_supported also uses);
+// assigns it to every tensor of `ctx` and marks them externally-allocated.
+// Returns nullptr on failure; the caller owns the buffer.
+static ggml_backend_buffer_t whisper_fit_mark_ctx_tensors(ggml_context * ctx, ggml_backend_buffer_type_t buft) {
+    ggml_backend_buffer_t dummy = ggml_backend_buft_alloc_buffer(buft, 0);
+    if (!dummy) {
+        return nullptr;
+    }
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+        t->buffer = dummy;
+        t->data   = (void *)(uintptr_t) 1;
+    }
+    return dummy;
+}
+struct whisper_fit_load_measure {
+    // seek past one tensor payload without reading it; supplied by the fit
+    // front-end (the sequential whisper_model_loader interface has no seek)
+    bool (*skip)(void * ctx, size_t nbytes) = nullptr;
+    void * skip_ctx = nullptr;
+
+    // sized weight buffers, one entry per model context (buffer type)
+    std::vector<std::pair<ggml_backend_buffer_type_t, size_t>> weight_bufts;
+};
+
+struct whisper_fit_kv_measure {
+    size_t                     bytes = 0;
+    ggml_backend_buffer_type_t buft  = nullptr; // where the real buffer would live
+};
+
+struct whisper_fit_vad_measure {
+    whisper_fit_load_measure   load;             // VAD weight sizing + payload skip
+    size_t                     state_bytes = 0;  // LSTM h/c state buffer
+    ggml_backend_buffer_type_t state_buft  = nullptr;
+    std::vector<size_t>        sched_sizes;      // VAD compute, per scheduler backend
+    size_t                     meta_bytes  = 0;  // scheduler graph-meta host buffer
+};
+
 static bool whisper_kv_cache_init(
              struct whisper_kv_cache & cache,
                       ggml_backend_t   backend,
                            ggml_type   wtype,
                              int64_t   n_text_state,
                              int64_t   n_text_layer,
-                                 int   n_ctx) {
+                                 int   n_ctx,
+             whisper_fit_kv_measure  * fit = nullptr) {
     const int64_t n_mem      = n_text_layer*n_ctx;
     const int64_t n_elements = n_text_state*n_mem;
 
@@ -1033,6 +1128,18 @@ static bool whisper_kv_cache_init(
         WHISPER_LOG_INFO("%s: kv cache tensor %.2f MB exceeds backend max %.2f MB; using CPU buffer\n",
             __func__, per_tensor_bytes / 1e6, backend_max / 1e6);
         buft = ggml_backend_cpu_buffer_type();
+    }
+
+    if (fit) {
+        // QVAC fit: size the buffer the line below would allocate, then mark
+        // the tensors externally-allocated (zero-size dummy of the same buft)
+        // so graph measurement treats them exactly like a real cache
+        // (pre-allocated leafs on the right backend, not graph-owned)
+        fit->bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft);
+        fit->buft  = buft;
+        cache.buffer = whisper_fit_mark_ctx_tensors(ctx, buft);
+        ggml_free(ctx);
+        return cache.buffer != nullptr;
     }
 
     cache.buffer = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
@@ -1518,7 +1625,11 @@ static ggml_backend_buffer_type_t select_weight_buft(const whisper_hparams & hpa
 //
 // see the convert-pt-to-ggml.py script for details
 //
-static bool whisper_model_load(struct whisper_model_loader * loader, whisper_context & wctx) {
+// QVAC (see PATCHES.md): `fit` non-null runs the metadata-only measure mode
+// for whisper_fit_params -- identical parsing, tensor wiring and buffer-type
+// selection, but weight buffers are sized instead of allocated and tensor
+// payloads are seeked past instead of read.
+static bool whisper_model_load(struct whisper_model_loader * loader, whisper_context & wctx, whisper_fit_load_measure * fit = nullptr) {
     WHISPER_LOG_INFO("%s: loading model\n", __func__);
 
     const int64_t t_start_us = ggml_time_us();
@@ -1925,6 +2036,22 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
     for (auto & p : ctx_map) {
         ggml_backend_buffer_type_t buft = p.first;
         ggml_context * ctx = p.second;
+        if (fit) {
+            // QVAC fit: size the buffer this loop would allocate, then mark
+            // every weight tensor (including the fused QKV synthesized above,
+            // which is not in the model file) externally-allocated so graph
+            // measurement excludes the weights from the compute buffers
+            const size_t size_main = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft);
+            fit->weight_bufts.emplace_back(buft, size_main);
+            ggml_backend_buffer_t dummy = whisper_fit_mark_ctx_tensors(ctx, buft);
+            if (dummy) {
+                // owned like a real weight buffer; the usage-marking loop
+                // below tags it WEIGHTS so the scheduler splits identically
+                model.buffers.emplace_back(dummy);
+            }
+            WHISPER_LOG_INFO("%s: %12s total size = %8.2f MB (fit projection)\n", __func__, ggml_backend_buft_name(buft), size_main / 1e6);
+            continue;
+        }
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
         if (buf) {
             model.buffers.emplace_back(buf);
@@ -2004,7 +2131,14 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                 return false;
             }
 
-            if (ggml_backend_buffer_is_host(tensor->buffer)) {
+            if (fit) {
+                // QVAC fit: metadata-only load -- every per-tensor validation
+                // above ran, now seek past the payload instead of reading it
+                if (!fit->skip || !fit->skip(fit->skip_ctx, ggml_nbytes(tensor))) {
+                    WHISPER_LOG_ERROR("%s: failed to seek past tensor '%s' data\n", __func__, name.data());
+                    return false;
+                }
+            } else if (ggml_backend_buffer_is_host(tensor->buffer)) {
                 // for the CPU and Metal backend, we can read directly into the tensor
                 loader->read(loader->context, tensor->data, ggml_nbytes(tensor));
                 BYTESWAP_TENSOR(tensor);
@@ -2043,7 +2177,7 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
 
     // assemble the fused Q+K+V decoder weight from the staged plain bytes: byte-concat the per-projection
     // rows along ne[1] and set once (set_tensor re-applies the destination buffer layout; bit-exact).
-    if (model.n_loaded > 0) {
+    if (model.n_loaded > 0 && !fit) { // QVAC fit: no weight data was read, nothing to assemble
         std::vector<char> qkv_buf;
         for (auto & layer : model.layers_decoder) {
             const size_t nb_w = ggml_nbytes(layer.attn_q_w);
@@ -4824,7 +4958,9 @@ static struct ggml_cgraph * whisper_vad_build_graph(whisper_vad_context & vctx) 
     return gf;
 }
 
-static bool whisper_vad_init_context(whisper_vad_context * vctx) {
+// QVAC (see PATCHES.md): `fit` non-null sizes the VAD state buffer and compute
+// scheduler instead of allocating them (memory-fit preflight, whisper_fit_params)
+static bool whisper_vad_init_context(whisper_vad_context * vctx, whisper_fit_vad_measure * fit = nullptr) {
 
     auto whisper_context_params = whisper_context_default_params();
     // QVAC: honor use_gpu so the compute backends match the weight placement
@@ -4864,6 +5000,33 @@ static bool whisper_vad_init_context(whisper_vad_context * vctx) {
     // LSTM Cell state
     vctx->c_state = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, lstm_hidden_size);
     ggml_set_name(vctx->c_state, "c_state");
+
+    if (fit) {
+        // QVAC fit: size the state buffer and the compute scheduler instead
+        // of allocating them; mark h/c externally-allocated so the graph
+        // measurement treats them as the pre-allocated leafs they really are
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(vctx->backends[0]);
+        fit->state_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft);
+        fit->state_buft  = buft;
+        vctx->buffer = whisper_fit_mark_ctx_tensors(ctx, buft); // owned/freed like the real state buffer
+        ggml_free(ctx);
+        if (!vctx->buffer) {
+            WHISPER_LOG_ERROR("%s: failed to create the fit dummy buffer for the VAD state\n", __func__);
+            return false;
+        }
+
+        bool ok = whisper_sched_graph_measure(vctx->sched, vctx->backends,
+                [&]() {
+                    return whisper_vad_build_graph(*vctx);
+                }, fit->sched_sizes);
+        if (!ok) {
+            WHISPER_LOG_ERROR("%s: failed to measure VAD allocator\n", __func__);
+            return false;
+        }
+        fit->meta_bytes = vctx->sched.meta.size();
+
+        return true;
+    }
 
     vctx->buffer = ggml_backend_alloc_ctx_tensors(ctx, vctx->backends[0]);
     ggml_free(ctx);
@@ -4933,9 +5096,15 @@ struct whisper_vad_context * whisper_vad_init_from_file_with_params(
     return ctx;
 }
 
-struct whisper_vad_context * whisper_vad_init_with_params(
+// QVAC (see PATCHES.md): shared body of whisper_vad_init_with_params and the
+// memory-fit preflight. `fit` non-null runs the metadata-only measure mode:
+// same parsing, tensor wiring and buffer-type selection, but weight/state/
+// compute buffers are sized instead of allocated and tensor payloads are
+// seeked past instead of read.
+static struct whisper_vad_context * whisper_vad_init_with_params_impl(
             struct whisper_model_loader * loader,
-            struct whisper_vad_context_params params) {
+            struct whisper_vad_context_params params,
+            whisper_fit_vad_measure * fit) {
     // Read the VAD model
     {
         uint32_t magic;
@@ -5154,6 +5323,18 @@ struct whisper_vad_context * whisper_vad_init_with_params(
     for (auto & p : ctx_map) {
         ggml_backend_buffer_type_t buft = p.first;
         ggml_context * ctx = p.second;
+        if (fit) {
+            // QVAC fit: size instead of allocate, then mark the weights
+            // externally-allocated (see whisper_fit_load_measure)
+            const size_t size_main = ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buft);
+            fit->load.weight_bufts.emplace_back(buft, size_main);
+            ggml_backend_buffer_t dummy = whisper_fit_mark_ctx_tensors(ctx, buft);
+            if (dummy) {
+                model.buffers.emplace_back(dummy); // owned/freed like a real VAD weight buffer
+            }
+            WHISPER_LOG_INFO("%s: %12s total size = %8.2f MB (fit projection)\n", __func__, ggml_backend_buft_name(buft), size_main / 1e6);
+            continue;
+        }
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
         if (buf) {
             model.buffers.emplace_back(buf);
@@ -5222,7 +5403,13 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                 return nullptr;
             }
 
-            if (ggml_backend_buffer_is_host(tensor->buffer)) {
+            if (fit) {
+                // QVAC fit: metadata-only load -- seek past the payload
+                if (!fit->load.skip || !fit->load.skip(fit->load.skip_ctx, ggml_nbytes(tensor))) {
+                    WHISPER_LOG_ERROR("%s: failed to seek past tensor '%s' data\n", __func__, name.data());
+                    return nullptr;
+                }
+            } else if (ggml_backend_buffer_is_host(tensor->buffer)) {
                 // for the CPU and Metal backend, we can read directly into the tensor
                 loader->read(loader->context, tensor->data, ggml_nbytes(tensor));
                 BYTESWAP_TENSOR(tensor);
@@ -5250,12 +5437,18 @@ struct whisper_vad_context * whisper_vad_init_with_params(
 
     }
 
-    if (!whisper_vad_init_context(vctx)) {
+    if (!whisper_vad_init_context(vctx, fit)) {
         whisper_vad_free(vctx);
         return nullptr;
     }
 
     return vctx;
+}
+
+struct whisper_vad_context * whisper_vad_init_with_params(
+            struct whisper_model_loader * loader,
+            struct whisper_vad_context_params params) {
+    return whisper_vad_init_with_params_impl(loader, params, /*fit=*/nullptr);
 }
 
 void whisper_vad_reset_state(whisper_vad_context * vctx) {
@@ -9206,4 +9399,783 @@ static void whisper_log_callback_default(ggml_log_level level, const char * text
 #endif
     fputs(text, stderr);
     fflush(stderr);
+}
+
+//
+// QVAC (see PATCHES.md): memory-fit preflight
+//
+// Implementation of whisper_fit_params / whisper_fit_actual (include/whisper.h).
+// The projection mirrors the real runtime by construction rather than by
+// formula: it drives the same loader (metadata-only, whisper_model_load with a
+// whisper_fit_load_measure), the same state initialization order as
+// whisper_init_state, and the same graph builders, pricing every allocation
+// through ggml's size-only APIs (ggml_backend_alloc_ctx_tensors_from_buft_size,
+// ggml_backend_sched_reserve_size). Nothing is allocated on the device and no
+// graph executes.
+//
+// whisper_init_state measures and allocates ALL FOUR schedulers (conv, encode,
+// cross, decode) at the model's full n_audio_ctx and keeps them resident for
+// the life of the state -- a smaller runtime audio_ctx never shrinks them --
+// so the projected resident set is init-time-fixed. The one runtime growth is
+// whisper_full's self-attention KV recreation ((n_decoders + 2)x) plus the
+// decode graph rebuilt against the bigger cache; the projection prices both
+// through the n_decoders option.
+
+namespace {
+
+// Saturating arithmetic: a preflight's verdict must only ever be wrong in the
+// strict direction -- overflow surfaces as a larger requirement (DOES-NOT-FIT),
+// never wraps into a false FITS.
+uint64_t whisper_fit_sat_add(uint64_t a, uint64_t b) {
+    const uint64_t s = a + b;
+    return s < a ? UINT64_MAX : s;
+}
+
+uint64_t whisper_fit_sat_mul(uint64_t a, uint64_t b) {
+    if (a == 0 || b == 0) return 0;
+    if (a > UINT64_MAX / b) return UINT64_MAX;
+    return a * b;
+}
+
+// negative inputs collapse to 0; too-large / infinite / NaN saturate to max
+uint64_t whisper_fit_sat_from_double(double d) {
+    if (std::isnan(d)) return UINT64_MAX;
+    if (d <= 0.0) return 0;
+    if (d >= (double) UINT64_MAX) return UINT64_MAX;
+    return (uint64_t) d;
+}
+
+// file front-end for the metadata-only load: the sequential
+// whisper_model_loader interface plus the seek the measure mode needs to
+// skip weight payloads
+struct whisper_fit_file {
+    std::ifstream fin;
+
+    bool open(const char * path) {
+#ifdef _MSC_VER
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+        fin.open(converter.from_bytes(path), std::ios::binary);
+#else
+        fin.open(path, std::ios::binary);
+#endif
+        return (bool) fin;
+    }
+
+    whisper_model_loader loader() {
+        whisper_model_loader l = {};
+        l.context = &fin;
+        l.read = [](void * ctx, void * output, size_t read_size) {
+            std::ifstream * f = (std::ifstream *) ctx;
+            f->read((char *) output, read_size);
+            return read_size;
+        };
+        l.eof = [](void * ctx) {
+            std::ifstream * f = (std::ifstream *) ctx;
+            return f->eof();
+        };
+        l.close = [](void * ctx) {
+            std::ifstream * f = (std::ifstream *) ctx;
+            f->close();
+        };
+        return l;
+    }
+
+    static bool skip(void * ctx, size_t nbytes) {
+        std::ifstream * f = (std::ifstream *) ctx;
+        f->seekg((std::streamoff) nbytes, std::ios::cur);
+        return (bool) *f;
+    }
+};
+
+// true when the device's memory pool IS system RAM: the CPU backend,
+// integrated GPUs, and Apple unified memory (the Metal registry reports
+// "Metal" upstream and "MTL" in the qvac-ext-ggml pin)
+bool whisper_fit_dev_shares_host_memory(ggml_backend_dev_t dev) {
+    const enum ggml_backend_dev_type t = ggml_backend_dev_type(dev);
+    if (t == GGML_BACKEND_DEVICE_TYPE_CPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+        return true;
+    }
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return name && (strcmp(name, "Metal") == 0 || strcmp(name, "MTL") == 0);
+}
+
+// everything the metadata-only state measurement produces; mirrors
+// whisper_init_state's allocation set field by field
+struct whisper_fit_state_measure {
+    whisper_fit_kv_measure kv_self;
+    whisper_fit_kv_measure kv_cross;
+    whisper_fit_kv_measure kv_pad;
+
+    std::vector<size_t> conv_sizes;    // per sched backend
+    std::vector<size_t> encode_sizes;
+    std::vector<size_t> cross_sizes;
+    std::vector<size_t> decode_sizes;
+
+    size_t meta_bytes  = 0;  // the four schedulers' graph-meta host buffers
+    size_t batch_bytes = 0;  // whisper_batch host arrays
+
+    // zero-size dummy buffers standing in for cross-graph outputs
+    // (embd_conv / embd_enc); owned here
+    std::vector<ggml_backend_buffer_t> dummy_buffers;
+
+    ~whisper_fit_state_measure() {
+        for (auto * buf : dummy_buffers) {
+            ggml_backend_buffer_free(buf);
+        }
+    }
+};
+
+// Mark a graph output produced by an already-measured scheduler as
+// externally-allocated on the backend that scheduler assigned it to -- the
+// exact effect a real whisper_sched_graph_init (which allocates) has on the
+// graphs measured after it.
+bool whisper_fit_mark_graph_output(whisper_fit_state_measure & m, whisper_sched & allocr,
+                                   ggml_backend_t fallback, ggml_tensor * t) {
+    if (t == nullptr || t->buffer != nullptr) {
+        return true;
+    }
+    ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(allocr.sched, t);
+    if (backend == nullptr) {
+        backend = fallback;
+    }
+    ggml_backend_buffer_t dummy =
+        ggml_backend_buft_alloc_buffer(ggml_backend_get_default_buffer_type(backend), 0);
+    if (dummy == nullptr) {
+        return false;
+    }
+    m.dummy_buffers.push_back(dummy);
+    t->buffer = dummy;
+    t->data   = (void *)(uintptr_t) 1;
+    return true;
+}
+
+// size-only twin of whisper_init_state: same allocation set, same order, same
+// graph builders -- kv caches and schedulers are sized instead of allocated.
+// `n_decoders` prices whisper_full's worst-case KV recreation (factor n + 2,
+// mirroring the recreation site in whisper_full) and the decode graph built
+// against that bigger cache. Returns the state (caller frees with
+// whisper_free_state) or nullptr on failure.
+whisper_state * whisper_fit_measure_state(whisper_context & ctx, int n_decoders, whisper_fit_state_measure & m) {
+    whisper_state * state = new whisper_state;
+
+    try {
+        state->backends = whisper_backend_init(ctx.params);
+    } catch (const std::exception & e) {
+        WHISPER_LOG_ERROR("%s: exception during backend init: %s\n", __func__, e.what());
+        state->backends.clear();
+    }
+    if (state->backends.empty()) {
+        whisper_free_state(state);
+        return nullptr;
+    }
+
+    // init the batch before anything that can fail so every error path hands
+    // whisper_free_state a valid batch
+    state->batch = whisper_batch_init(ctx.model.hparams.n_text_ctx, WHISPER_MAX_DECODERS);
+    {
+        const int64_t n = ctx.model.hparams.n_text_ctx;
+        m.batch_bytes = (size_t) (n*(sizeof(whisper_token) + sizeof(whisper_pos) + sizeof(int32_t) + sizeof(int8_t))
+                      + (n + 1)*sizeof(whisper_seq_id *)
+                      + n*WHISPER_MAX_DECODERS*sizeof(whisper_seq_id));
+    }
+
+    // worst-case self-attention KV: whisper_full recreates the cache
+    // (n_decoders + 2)x larger the first time it decodes with n > 1 decoders
+    const int factor = n_decoders > 1 ? n_decoders + 2 : 1;
+
+    state->kv_self_n_dec = 1;
+    if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx.itype,
+                ctx.model.hparams.n_text_state,
+                ctx.model.hparams.n_text_layer,
+                GGML_PAD(ctx.model.hparams.n_text_ctx, 256)*factor, &m.kv_self)) {
+        whisper_free_state(state);
+        return nullptr;
+    }
+
+    if (!whisper_kv_cache_init(state->kv_cross, state->backends[0], ctx.itype,
+                ctx.model.hparams.n_text_state,
+                ctx.model.hparams.n_text_layer,
+                GGML_PAD(ctx.model.hparams.n_audio_ctx, 256), &m.kv_cross)) {
+        whisper_free_state(state);
+        return nullptr;
+    }
+
+    if (!whisper_kv_cache_init(state->kv_pad, state->backends[0], ctx.itype,
+                ctx.model.hparams.n_audio_state,
+                1,
+                GGML_PAD(ctx.model.hparams.n_audio_ctx, 256), &m.kv_pad)) {
+        whisper_free_state(state);
+        return nullptr;
+    }
+
+    // dtw_token_timestamps is not modelled (fit options never enable it), so
+    // no aheads masks -- matching whisper_init_state with dtw off
+
+    // the four schedulers, in whisper_init_state's order; each mark step
+    // reproduces "the previous graph's outputs are already allocated when the
+    // next graph is measured", which is exactly why whisper_sched_graph_init
+    // must allocate instead of reserve on the real path
+    bool ok = whisper_sched_graph_measure(state->sched_conv, state->backends,
+            [&]() {
+                return whisper_build_graph_conv(ctx, *state);
+            }, m.conv_sizes);
+    if (ok) {
+        ok = whisper_fit_mark_graph_output(m, state->sched_conv, state->backends[0], state->embd_conv) &&
+             // external-encoder path of the conv graph
+             whisper_fit_mark_graph_output(m, state->sched_conv, state->backends[0], state->embd_enc);
+    }
+
+    if (ok && !whisper_encode_external(*state)) {
+        ok = whisper_sched_graph_measure(state->sched_encode, state->backends,
+                [&]() {
+                    return whisper_build_graph_encoder(ctx, *state);
+                }, m.encode_sizes);
+        if (ok) {
+            ok = whisper_fit_mark_graph_output(m, state->sched_encode, state->backends[0], state->embd_enc);
+        }
+    }
+
+    if (ok) {
+        ok = whisper_sched_graph_measure(state->sched_cross, state->backends,
+                [&]() {
+                    return whisper_build_graph_cross(ctx, *state);
+                }, m.cross_sizes);
+    }
+
+    if (ok) {
+        ok = whisper_sched_graph_measure(state->sched_decode, state->backends,
+                [&]() {
+                    const auto & hparams = ctx.model.hparams;
+
+                    // same worst case whisper_init_state measures: a full
+                    // prompt with every row requesting logits
+                    const int n_tokens = hparams.n_text_ctx;
+                    const int n_past   = 0;
+
+                    whisper_batch_prep_legacy(state->batch, nullptr, n_tokens, n_past, 0);
+
+                    for (int i = 0; i < n_tokens; ++i) {
+                        state->batch.logits[i] = 1;
+                    }
+
+                    return whisper_build_graph_decoder(ctx, *state, state->batch, ctx.params.dtw_token_timestamps, true);
+                }, m.decode_sizes);
+    }
+
+    if (!ok) {
+        whisper_free_state(state);
+        return nullptr;
+    }
+
+    m.meta_bytes = state->sched_conv.meta.size() + state->sched_encode.meta.size() +
+                   state->sched_cross.meta.size() + state->sched_decode.meta.size();
+
+    return state;
+}
+
+// The device whose memory pool the verdict is made against: the GPU backend
+// when one is active (whisper_backend_init puts it first), otherwise the CPU
+// device -- never an ACCEL backend like BLAS, which is a host-memory compute
+// helper, not a memory pool of its own.
+ggml_backend_dev_t whisper_fit_main_device(const std::vector<ggml_backend_t> & backends) {
+    for (ggml_backend_t backend : backends) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+        if (dev == nullptr) {
+            continue;
+        }
+        const enum ggml_backend_dev_type t = ggml_backend_dev_type(dev);
+        if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            return dev;
+        }
+    }
+    return ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+}
+
+// split a projected component between the resolved compute device and host
+// RAM, per buffer type / backend -- on GPU runs the CPU-fallback portions
+// (unsupported-op weight buffers, oversized KV caches, CPU splits of a
+// scheduled graph) live in host RAM, not VRAM. When the main device IS the
+// CPU, every host buffer type (plain CPU, repack extras, BLAS) is one pool.
+struct whisper_fit_charge {
+    ggml_backend_dev_t main_dev = nullptr;
+    bool main_pool_is_host = false;
+    uint64_t device = 0;
+    uint64_t host   = 0;
+
+    void add(ggml_backend_buffer_type_t buft, uint64_t bytes) {
+        const bool on_device = buft &&
+            (ggml_backend_buft_get_device(buft) == main_dev ||
+             (main_pool_is_host && ggml_backend_buft_is_host(buft)));
+        if (on_device) {
+            device = whisper_fit_sat_add(device, bytes);
+        } else {
+            host = whisper_fit_sat_add(host, bytes);
+        }
+    }
+
+    void add_sched(const std::vector<ggml_backend_t> & backends, const std::vector<size_t> & sizes) {
+        // a scheduler's buffer for backend i uses that backend's default
+        // buffer type, so classify by it
+        for (size_t i = 0; i < sizes.size() && i < backends.size(); ++i) {
+            add(ggml_backend_get_default_buffer_type(backends[i]), sizes[i]);
+        }
+    }
+};
+
+std::string whisper_fit_fmt_mib(uint64_t bytes) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.1f MiB", (double) bytes / (1024.0*1024.0));
+    return buf;
+}
+
+void whisper_fit_set_str(char * dst, size_t dst_size, const char * src) {
+    snprintf(dst, dst_size, "%s", src ? src : "");
+}
+
+} // namespace
+
+struct whisper_fit_options whisper_fit_default_options(void) {
+    struct whisper_fit_options opts;
+    memset(&opts, 0, sizeof(opts));
+
+    const whisper_context_params cparams = whisper_context_default_params();
+
+    opts.model_path     = nullptr;
+    opts.vad_model_path = nullptr;
+    opts.use_gpu        = cparams.use_gpu;
+    opts.flash_attn     = cparams.flash_attn;
+    opts.gpu_device     = cparams.gpu_device;
+    opts.n_decoders     = 5; // whisper_full_default_params: greedy best_of == beam_size == 5
+    opts.audio_seconds  = 300.0f;
+    opts.margin_bytes   = 256ull*1024*1024;
+    opts.verbose        = false;
+
+    return opts;
+}
+
+int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_fit_result * result) {
+    whisper_fit_result local;
+    if (result == nullptr) {
+        result = &local;
+    }
+    memset(result, 0, sizeof(*result));
+    result->status = WHISPER_FIT_ERROR;
+    result->fits   = false;
+
+    if (opts == nullptr || opts->model_path == nullptr ||
+        !(opts->audio_seconds > 0.0f) || !std::isfinite(opts->audio_seconds) ||
+        opts->n_decoders < 1 || opts->n_decoders > WHISPER_MAX_DECODERS) {
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "invalid-arguments");
+        return (int) result->status;
+    }
+
+    ggml_time_init();
+
+    // an empty device registry is ALWAYS Error, never Success: a projection
+    // made against a machine the fitter cannot see is worse than none
+    if (ggml_backend_dev_count() == 0 ||
+        ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU) == nullptr) {
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "no-backend-device");
+        return (int) result->status;
+    }
+
+    whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu    = opts->use_gpu;
+    cparams.flash_attn = opts->flash_attn;
+    cparams.gpu_device = opts->gpu_device;
+    cparams.dtw_token_timestamps = false; // not modelled by the projection
+
+    // -- metadata-only model load: same parser, same tensor wiring, same
+    //    buffer-type selection; weight payloads are seeked past
+    whisper_fit_file file;
+    if (!file.open(opts->model_path)) {
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "model-unreadable");
+        return (int) result->status;
+    }
+    whisper_model_loader loader = file.loader();
+
+    whisper_fit_load_measure lm;
+    lm.skip     = &whisper_fit_file::skip;
+    lm.skip_ctx = &file.fin;
+
+    // whisper_free (not plain delete): the metadata-only load still creates
+    // the model's ggml contexts, which whisper_free owns
+    std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(new whisper_context, &whisper_free);
+    ctx->params = cparams;
+
+    bool model_loaded = false;
+    try {
+        model_loaded = whisper_model_load(&loader, *ctx, &lm);
+    } catch (const std::exception & e) {
+        WHISPER_LOG_ERROR("%s: exception during metadata-only load: %s\n", __func__, e.what());
+    } catch (...) {
+        WHISPER_LOG_ERROR("%s: unknown exception during metadata-only load\n", __func__);
+    }
+    loader.close(loader.context);
+    if (!model_loaded) {
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "model-unreadable");
+        return (int) result->status;
+    }
+
+    {
+        std::string type_name = "unknown";
+        const auto it = g_model_name.find(ctx->model.type);
+        if (it != g_model_name.end()) {
+            type_name = it->second;
+        }
+        if (ctx->model.type == e_model::MODEL_LARGE && ctx->model.hparams.n_vocab == 51866) {
+            type_name += " v3";
+        }
+        whisper_fit_set_str(result->model_type, sizeof(result->model_type), type_name.c_str());
+    }
+
+    // -- size-only state init (kv caches + the four resident schedulers)
+    whisper_fit_state_measure sm;
+    whisper_state * state = whisper_fit_measure_state(*ctx, opts->n_decoders, sm);
+    if (state == nullptr) {
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "measurement-failed");
+        return (int) result->status;
+    }
+
+    ggml_backend_dev_t main_dev = whisper_fit_main_device(state->backends);
+    if (main_dev == nullptr) {
+        whisper_free_state(state);
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "no-backend-device");
+        return (int) result->status;
+    }
+    const bool main_pool_is_host = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+
+    whisper_fit_set_str(result->device_name, sizeof(result->device_name), ggml_backend_dev_name(main_dev));
+    result->device_is_cpu = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+    result->device_shares_host_memory = whisper_fit_dev_shares_host_memory(main_dev);
+    {
+        size_t free_b = 0, total_b = 0;
+        ggml_backend_dev_memory(main_dev, &free_b, &total_b);
+        result->device_free_bytes  = free_b;
+        result->device_total_bytes = total_b;
+    }
+
+    // -- charge each component to the device or to host RAM
+    whisper_fit_charge weights, kv, compute;
+    weights.main_dev = kv.main_dev = compute.main_dev = main_dev;
+    weights.main_pool_is_host = kv.main_pool_is_host = compute.main_pool_is_host = main_pool_is_host;
+
+    for (const auto & p : lm.weight_bufts) {
+        weights.add(p.first, p.second);
+    }
+    kv.add(sm.kv_self.buft,  sm.kv_self.bytes);
+    kv.add(sm.kv_cross.buft, sm.kv_cross.bytes);
+    kv.add(sm.kv_pad.buft,   sm.kv_pad.bytes);
+
+    compute.add_sched(state->backends, sm.conv_sizes);
+    compute.add_sched(state->backends, sm.encode_sizes);
+    compute.add_sched(state->backends, sm.cross_sizes);
+    compute.add_sched(state->backends, sm.decode_sizes);
+
+    const auto & hparams  = ctx->model.hparams;
+    const int n_vocab     = hparams.n_vocab;
+    const int n_text_ctx  = hparams.n_text_ctx;
+    const bool is_bci     = hparams.is_bci;
+    const int n_mels      = hparams.n_mels;
+    const int n_audio_ctx = hparams.n_audio_ctx;
+
+    // model ggml-context overhead (tensor structs, host RAM)
+    uint64_t ctx_overhead = 0;
+    for (const auto & c : ctx->model.ctxs) {
+        ctx_overhead = whisper_fit_sat_add(ctx_overhead, ggml_get_mem_size(c));
+    }
+    ctx_overhead = whisper_fit_sat_add(ctx_overhead, 3*2*ggml_tensor_overhead()); // kv ctx_bufs
+
+    // vocab maps (host): token bytes + a per-entry estimate for the two
+    // std::map nodes and string headers; an approximation, and a small one
+    // next to the mel/logits terms below
+    uint64_t vocab_bytes = 0;
+    for (const auto & kvp : ctx->vocab.id_to_token) {
+        vocab_bytes = whisper_fit_sat_add(vocab_bytes, 2*(kvp.second.size() + sizeof(std::string) + 48));
+    }
+
+    whisper_free_state(state);
+    state = nullptr;
+
+    // -- optional VAD model, metadata-only, mirroring whisper_full's
+    //    whisper_vad_init_from_file_with_params path
+    whisper_fit_charge vad;
+    vad.main_dev = main_dev;
+    vad.main_pool_is_host = main_pool_is_host;
+    uint64_t vad_meta_bytes = 0;
+    int      vad_n_window   = 0;
+    if (opts->vad_model_path != nullptr) {
+        whisper_fit_file vfile;
+        if (!vfile.open(opts->vad_model_path)) {
+            whisper_fit_set_str(result->reason, sizeof(result->reason), "vad-model-unreadable");
+            return (int) result->status;
+        }
+        whisper_model_loader vloader = vfile.loader();
+
+        whisper_fit_vad_measure vm;
+        vm.load.skip     = &whisper_fit_file::skip;
+        vm.load.skip_ctx = &vfile.fin;
+
+        whisper_vad_context_params vparams = whisper_vad_default_context_params();
+        vparams.use_gpu    = opts->use_gpu;
+        vparams.gpu_device = opts->gpu_device;
+
+        whisper_vad_context * vctx = nullptr;
+        try {
+            vctx = whisper_vad_init_with_params_impl(&vloader, vparams, &vm);
+        } catch (const std::exception & e) {
+            WHISPER_LOG_ERROR("%s: exception during VAD metadata-only load: %s\n", __func__, e.what());
+        }
+        vloader.close(vloader.context);
+        if (vctx == nullptr) {
+            whisper_fit_set_str(result->reason, sizeof(result->reason), "vad-model-unreadable");
+            return (int) result->status;
+        }
+
+        for (const auto & p : vm.load.weight_bufts) {
+            vad.add(p.first, p.second);
+        }
+        vad.add(vm.state_buft, vm.state_bytes);
+        vad.add_sched(vctx->backends, vm.sched_sizes);
+        vad_meta_bytes = vm.meta_bytes;
+        vad_n_window   = vctx->n_window > 0 ? vctx->n_window : 512;
+
+        whisper_vad_free(vctx);
+    }
+
+    // -- host-side extras: everything above that landed in host RAM, plus the
+    //    workload-scaled buffers a real whisper_full run keeps around
+    uint64_t host = 0;
+    host = whisper_fit_sat_add(host, weights.host);
+    host = whisper_fit_sat_add(host, kv.host);
+    host = whisper_fit_sat_add(host, compute.host);
+    host = whisper_fit_sat_add(host, vad.host);
+    const uint64_t host_overflow = host;
+
+    const uint64_t n_samples = whisper_fit_sat_from_double(
+        std::ceil((double) opts->audio_seconds * WHISPER_SAMPLE_RATE));
+    // log_mel_spectrogram: 30 s zero pad + 2 * (N_FFT/2) reflective pad
+    const uint64_t n_samples_padded = whisper_fit_sat_add(n_samples,
+        (uint64_t) 30*WHISPER_SAMPLE_RATE + WHISPER_N_FFT);
+    const uint64_t n_mel_len = (n_samples_padded > WHISPER_N_FFT ? n_samples_padded - WHISPER_N_FFT : 0) / WHISPER_HOP_LENGTH;
+
+    host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples, sizeof(float)));         // caller's samples
+    host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples_padded, sizeof(float)));  // padded copy in log_mel_spectrogram
+    host = whisper_fit_sat_add(host, whisper_fit_sat_mul(whisper_fit_sat_mul(n_mel_len, (uint64_t) n_mels), sizeof(float))); // state->mel
+    host = whisper_fit_sat_add(host, (uint64_t) 2*n_audio_ctx*n_mels*sizeof(float));         // state->inp_mel
+    host = whisper_fit_sat_add(host, (uint64_t) n_vocab*n_text_ctx*sizeof(float));           // state->logits reserve
+    // per-decoder host reserves (probs/logits/logprobs floats, logits_id
+    // pairs, token history), for the worst-case decoder count
+    host = whisper_fit_sat_add(host, whisper_fit_sat_mul((uint64_t) opts->n_decoders,
+            (uint64_t) n_vocab*(3*sizeof(float) + 16) + (uint64_t) n_text_ctx*sizeof(whisper_token)));
+    host = whisper_fit_sat_add(host, (uint64_t) 2*n_vocab*sizeof(float));                    // whisper_full no-speech prob/logprob temporaries
+    host = whisper_fit_sat_add(host, sm.batch_bytes);
+    host = whisper_fit_sat_add(host, sm.meta_bytes);
+    host = whisper_fit_sat_add(host, ctx_overhead);
+    host = whisper_fit_sat_add(host, vocab_bytes);
+    if (is_bci) {
+        host = whisper_fit_sat_add(host, (uint64_t) n_audio_ctx*n_audio_ctx*sizeof(float));  // window mask
+    }
+    if (opts->vad_model_path != nullptr) {
+        host = whisper_fit_sat_add(host, vad_meta_bytes);
+        host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples/(uint64_t) vad_n_window, sizeof(float))); // vad probs
+        host = whisper_fit_sat_add(host, whisper_fit_sat_mul(n_samples, sizeof(float)));     // vad-filtered sample copy
+    }
+    result->host_bytes = host;
+
+    result->device.weights_bytes = weights.device;
+    result->device.kv_bytes      = kv.device;
+    result->device.compute_bytes = compute.device;
+    result->device.vad_bytes     = vad.device;
+    result->device.total_bytes   = whisper_fit_sat_add(
+        whisper_fit_sat_add(weights.device, kv.device),
+        whisper_fit_sat_add(compute.device, vad.device));
+    result->device.host_overflow_bytes = host_overflow;
+
+    // -- verdict: on a unified-memory device the host extras compete with the
+    //    device projection for the same physical RAM
+    uint64_t required = whisper_fit_sat_add(result->device.total_bytes, opts->margin_bytes);
+    if (result->device_shares_host_memory) {
+        required = whisper_fit_sat_add(required, result->host_bytes);
+    }
+    result->fits   = required <= result->device_free_bytes;
+    result->status = result->fits ? WHISPER_FIT_SUCCESS : WHISPER_FIT_FAILURE;
+    whisper_fit_set_str(result->reason, sizeof(result->reason), result->fits ? "fits" : "does-not-fit");
+
+    // -- report
+    {
+        std::string s;
+        char line[256];
+        snprintf(line, sizeof(line), "model:    %s\n", result->model_type);
+        s += line;
+        snprintf(line, sizeof(line), "device:   %s (%s), free %s / total %s\n",
+                 result->device_name, result->device_is_cpu ? "CPU" : "GPU",
+                 whisper_fit_fmt_mib(result->device_free_bytes).c_str(),
+                 whisper_fit_fmt_mib(result->device_total_bytes).c_str());
+        s += line;
+        snprintf(line, sizeof(line), "workload: %.1f s audio, %d decoder%s, flash_attn %s, VAD %s\n",
+                 (double) opts->audio_seconds, opts->n_decoders, opts->n_decoders == 1 ? "" : "s",
+                 opts->flash_attn ? "on" : "off",
+                 opts->vad_model_path ? "on" : "off");
+        s += line;
+        s += "device projection:\n";
+        snprintf(line, sizeof(line), "  weights:  %14s\n", whisper_fit_fmt_mib(result->device.weights_bytes).c_str());
+        s += line;
+        snprintf(line, sizeof(line), "  kv cache: %14s\n", whisper_fit_fmt_mib(result->device.kv_bytes).c_str());
+        s += line;
+        snprintf(line, sizeof(line), "  compute:  %14s (conv + encode + cross + decode, all resident)\n",
+                 whisper_fit_fmt_mib(result->device.compute_bytes).c_str());
+        s += line;
+        if (opts->vad_model_path) {
+            snprintf(line, sizeof(line), "  vad:      %14s\n", whisper_fit_fmt_mib(result->device.vad_bytes).c_str());
+            s += line;
+        }
+        snprintf(line, sizeof(line), "  total:    %14s\n", whisper_fit_fmt_mib(result->device.total_bytes).c_str());
+        s += line;
+        snprintf(line, sizeof(line), "host extras:%13s%s\n", whisper_fit_fmt_mib(result->host_bytes).c_str(),
+                 result->device_shares_host_memory ? " (same RAM pool as the device projection)" : "");
+        s += line;
+        snprintf(line, sizeof(line), "margin:    %14s\n", whisper_fit_fmt_mib(opts->margin_bytes).c_str());
+        s += line;
+        if (result->fits) {
+            snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
+                     whisper_fit_fmt_mib(result->device_free_bytes - required).c_str());
+        } else {
+            snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
+                     whisper_fit_fmt_mib(required - result->device_free_bytes).c_str());
+        }
+        s += line;
+        whisper_fit_set_str(result->report, sizeof(result->report), s.c_str());
+    }
+
+    return (int) result->status;
+}
+
+int whisper_fit_actual(const struct whisper_fit_options * opts, struct whisper_fit_breakdown * out) {
+    if (opts == nullptr || opts->model_path == nullptr || out == nullptr ||
+        opts->n_decoders < 1 || opts->n_decoders > WHISPER_MAX_DECODERS) {
+        return 1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu    = opts->use_gpu;
+    cparams.flash_attn = opts->flash_attn;
+    cparams.gpu_device = opts->gpu_device;
+    cparams.dtw_token_timestamps = false;
+
+    whisper_context * ctx = whisper_init_from_file_with_params_no_state(opts->model_path, cparams);
+    if (ctx == nullptr) {
+        return 1;
+    }
+
+    whisper_state * state = whisper_init_state(ctx);
+    if (state == nullptr) {
+        whisper_free(ctx);
+        return 1;
+    }
+
+    // n_decoders > 1: reproduce whisper_full_with_state's KV recreation (the
+    // same whisper_kv_cache_free + (n+2)x whisper_kv_cache_init call it makes
+    // the first time it decodes with that many decoders) so the measured
+    // kv_bytes are the real worst-case figure the projection prices. The
+    // compute figure stays the post-init measurement: the schedulers grow
+    // lazily on the first decode against the larger cache.
+    if (opts->n_decoders > 1) {
+        whisper_kv_cache_free(state->kv_self);
+
+        // overallocate to workaround KV cache fragmentation issues
+        const int factor = opts->n_decoders + 2;
+
+        if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
+                    ctx->model.hparams.n_text_state,
+                    ctx->model.hparams.n_text_layer,
+                    GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*factor)) {
+            whisper_free_state(state);
+            whisper_free(ctx);
+            return 1;
+        }
+
+        state->kv_self_n_dec = opts->n_decoders;
+    }
+
+    ggml_backend_dev_t main_dev = whisper_fit_main_device(state->backends);
+    if (main_dev == nullptr) {
+        // same guard as whisper_fit_params: with no device to charge against,
+        // a breakdown would silently classify everything as host overflow
+        whisper_free_state(state);
+        whisper_free(ctx);
+        return 1;
+    }
+    const bool main_pool_is_host = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+
+    whisper_fit_charge weights, kv, compute;
+    weights.main_dev = kv.main_dev = compute.main_dev = main_dev;
+    weights.main_pool_is_host = kv.main_pool_is_host = compute.main_pool_is_host = main_pool_is_host;
+
+    for (const auto & buf : ctx->model.buffers) {
+        weights.add(ggml_backend_buffer_get_type(buf), ggml_backend_buffer_get_size(buf));
+    }
+    for (const auto * cache : { &state->kv_self, &state->kv_cross, &state->kv_pad }) {
+        if (cache->buffer) {
+            kv.add(ggml_backend_buffer_get_type(cache->buffer), ggml_backend_buffer_get_size(cache->buffer));
+        }
+    }
+    for (const auto * sched : { &state->sched_conv, &state->sched_encode, &state->sched_cross, &state->sched_decode }) {
+        if (!sched->sched) {
+            continue;
+        }
+        std::vector<size_t> sizes;
+        for (int i = 0; i < ggml_backend_sched_get_n_backends(sched->sched); ++i) {
+            sizes.push_back(ggml_backend_sched_get_buffer_size(sched->sched, ggml_backend_sched_get_backend(sched->sched, i)));
+        }
+        compute.add_sched(state->backends, sizes);
+    }
+
+    whisper_fit_charge vad;
+    vad.main_dev = main_dev;
+    vad.main_pool_is_host = main_pool_is_host;
+    if (opts->vad_model_path != nullptr) {
+        whisper_vad_context_params vparams = whisper_vad_default_context_params();
+        vparams.use_gpu    = opts->use_gpu;
+        vparams.gpu_device = opts->gpu_device;
+
+        whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(opts->vad_model_path, vparams);
+        if (vctx == nullptr) {
+            whisper_free_state(state);
+            whisper_free(ctx);
+            return 1;
+        }
+        for (const auto & buf : vctx->model.buffers) {
+            vad.add(ggml_backend_buffer_get_type(buf), ggml_backend_buffer_get_size(buf));
+        }
+        if (vctx->buffer) {
+            vad.add(ggml_backend_buffer_get_type(vctx->buffer), ggml_backend_buffer_get_size(vctx->buffer));
+        }
+        if (vctx->sched.sched) {
+            std::vector<size_t> sizes;
+            for (int i = 0; i < ggml_backend_sched_get_n_backends(vctx->sched.sched); ++i) {
+                sizes.push_back(ggml_backend_sched_get_buffer_size(vctx->sched.sched, ggml_backend_sched_get_backend(vctx->sched.sched, i)));
+            }
+            vad.add_sched(vctx->backends, sizes);
+        }
+        whisper_vad_free(vctx);
+    }
+
+    out->weights_bytes = weights.device;
+    out->kv_bytes      = kv.device;
+    out->compute_bytes = compute.device;
+    out->vad_bytes     = vad.device;
+    out->total_bytes   = whisper_fit_sat_add(
+        whisper_fit_sat_add(weights.device, kv.device),
+        whisper_fit_sat_add(compute.device, vad.device));
+    out->host_overflow_bytes = whisper_fit_sat_add(
+        whisper_fit_sat_add(weights.host, kv.host),
+        whisper_fit_sat_add(compute.host, vad.host));
+
+    whisper_free_state(state);
+    whisper_free(ctx);
+
+    return 0;
 }

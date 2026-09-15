@@ -135,6 +135,12 @@ struct dit_hp {
     int conv_k = 31, conv_groups = 16;
 };
 
+// Build the DiT hyper-parameters from a loaded flow GGUF's cosyvoice3.flow.*
+// KV, falling back to the struct defaults for any key the GGUF doesn't carry
+// (real converted GGUFs predate these keys, so their graph shape is
+// unchanged).  Mirrors cosyvoice_qwen_hp.
+dit_hp cosyvoice_dit_hp(const model_ctx & m);
+
 // ---- low-level graph builders (exposed for the parity CLIs) ---------------
 // Qwen2 prefill: x [hidden, L] -> logits [6761, L] (also tags "hidden" output).
 ggml_tensor * build_qwen(ggml_context * c, const model_ctx & m, const qwen_hp & hp,

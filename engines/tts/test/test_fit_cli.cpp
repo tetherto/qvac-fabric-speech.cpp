@@ -7,6 +7,9 @@
 #include "fit_util.h"
 #include "tts-cpp/audio8/fit.h"
 #include "tts-cpp/chatterbox/fit.h"
+#include "tts-cpp/cosyvoice/fit.h"
+#include "tts-cpp/parler/fit.h"
+#include "tts-cpp/supertonic/fit.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -167,6 +170,93 @@ void test_chatterbox_cli_contract() {
            "chatterbox unreadable model exits 2");
 }
 
+void test_parler_cli_contract() {
+    expect(run_cli(parler_fit_cli_main, {"parler-fit-params", "--help"}) == 0,
+           "parler --help exits 0");
+    expect(run_cli(parler_fit_cli_main, {"parler-fit-params"}) == 2,
+           "parler missing required flags exits 2");
+    expect(run_cli(parler_fit_cli_main,
+                   {"parler-fit-params", "--model", "a",
+                    "--description-tokens", "0"}) == 2,
+           "parler non-positive --description-tokens exits 2");
+    expect(run_cli(parler_fit_cli_main,
+                   {"parler-fit-params", "--model", "a",
+                    "--prompt-tokens", "12x"}) == 2,
+           "parler junk --prompt-tokens exits 2 (never coerced)");
+    expect(run_cli(parler_fit_cli_main,
+                   {"parler-fit-params", "--model", "a",
+                    "--max-frames", "-3"}) == 2,
+           "parler negative --max-frames exits 2");
+    expect(run_cli(parler_fit_cli_main,
+                   {"parler-fit-params", "--model", "a",
+                    "--margin-mib", "abc"}) == 2,
+           "parler junk --margin-mib exits 2");
+    expect(run_cli(parler_fit_cli_main, {"parler-fit-params", "--not-a-flag"}) == 2,
+           "parler unknown flag exits 2");
+    expect(run_cli(parler_fit_cli_main,
+                   {"parler-fit-params", "--model", "/nonexistent-fit-test.gguf",
+                    "--json"}) == 2,
+           "parler unreadable model exits 2");
+}
+
+void test_cosyvoice_cli_contract() {
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params", "--help"}) == 0,
+           "cosyvoice --help exits 0");
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params"}) == 2,
+           "cosyvoice missing required flags exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c"}) == 2,
+           "cosyvoice missing --voice exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--text-tokens", "0"}) == 2,
+           "cosyvoice non-positive --text-tokens exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--speech-tokens", "1e3"}) == 2,
+           "cosyvoice junk --speech-tokens exits 2 (never coerced)");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "a", "--flow", "b",
+                    "--hift", "c", "--voice", "d", "--margin-mib", "abc"}) == 2,
+           "cosyvoice junk --margin-mib exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main, {"cosyvoice-fit-params", "--not-a-flag"}) == 2,
+           "cosyvoice unknown flag exits 2");
+    expect(run_cli(cosyvoice_fit_cli_main,
+                   {"cosyvoice-fit-params", "--llm", "/nonexistent-fit-1.gguf",
+                    "--flow", "/nonexistent-fit-2.gguf", "--hift", "/nonexistent-fit-3.gguf",
+                    "--voice", "/nonexistent-fit-4.gguf", "--json"}) == 2,
+           "cosyvoice unreadable models exit 2");
+}
+
+void test_supertonic_cli_contract() {
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params", "--help"}) == 0,
+           "supertonic --help exits 0");
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params"}) == 2,
+           "supertonic missing required flags exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--text-tokens", "0"}) == 2,
+           "supertonic non-positive --text-tokens exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--audio-seconds", "-1"}) == 2,
+           "supertonic negative --audio-seconds exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--precision", "int4"}) == 2,
+           "supertonic junk --precision exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--steps", "1x"}) == 2,
+           "supertonic junk --steps exits 2 (never coerced)");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "a", "--margin-mib", "abc"}) == 2,
+           "supertonic junk --margin-mib exits 2");
+    expect(run_cli(supertonic_fit_cli_main, {"supertonic-fit-params", "--not-a-flag"}) == 2,
+           "supertonic unknown flag exits 2");
+    expect(run_cli(supertonic_fit_cli_main,
+                   {"supertonic-fit-params", "--model", "/nonexistent-fit-test.gguf",
+                    "--json"}) == 2,
+           "supertonic unreadable model exits 2");
+}
+
 }  // namespace
 
 int main() {
@@ -175,6 +265,9 @@ int main() {
     test_json_escape();
     test_audio8_cli_contract();
     test_chatterbox_cli_contract();
+    test_parler_cli_contract();
+    test_cosyvoice_cli_contract();
+    test_supertonic_cli_contract();
 
     if (g_failures == 0) {
         std::printf("test-fit-cli: all checks passed\n");

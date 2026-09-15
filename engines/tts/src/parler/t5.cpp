@@ -8,6 +8,8 @@
 
 #include "internal.h"
 
+#include "ggml-alloc.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -151,6 +153,54 @@ t5_graph build_t5_graph(const parler_model & model, int T) {
 
 } // namespace
 
+bool parler_alloc_cross(parler_model & model, int T, size_t * measure_bytes) {
+    const parler_hparams & hp = model.hparams;
+    // (re)allocate the persistent cross-KV tensors for this description length
+    if (model.buffer_cross) { ggml_backend_buffer_free(model.buffer_cross); model.buffer_cross = nullptr; }
+    if (model.ctx_cross)    { ggml_free(model.ctx_cross); model.ctx_cross = nullptr; }
+    model.cross_len = 0; // previous cross-KV is gone; any early return must not leave it usable
+    ggml_init_params ip = { (size_t)(2 * hp.dec_n_layer + 2) * ggml_tensor_overhead(),
+                            nullptr, /*no_alloc=*/ true };
+    model.ctx_cross = ggml_init(ip);
+    if (!model.ctx_cross) return false;
+    model.cross_k.assign(hp.dec_n_layer, nullptr);
+    model.cross_v_t.assign(hp.dec_n_layer, nullptr);
+    // FA path keeps cross-K/V in F16 and stores V non-transposed [dec_d, T] so
+    // both view as [HD, T, H]; manual path keeps F32 K and transposed V^T [T, dec_d].
+    const ggml_type ct = model.use_fa ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    for (int il = 0; il < hp.dec_n_layer; ++il) {
+        model.cross_k[il]   = ggml_new_tensor_2d(model.ctx_cross, ct, hp.dec_d_model, T);
+        model.cross_v_t[il] = model.use_fa
+            ? ggml_new_tensor_2d(model.ctx_cross, ct, hp.dec_d_model, T)
+            : ggml_new_tensor_2d(model.ctx_cross, ct, T, hp.dec_d_model);
+    }
+    if (measure_bytes) {
+        // Size-only twin: mark the tensors externally allocated so the fit
+        // graphs built over them price only true compute scratch.
+        *measure_bytes += ggml_backend_alloc_ctx_tensors_from_buft_size(
+            model.ctx_cross, ggml_backend_get_default_buffer_type(model.backend));
+        for (ggml_tensor * t = ggml_get_first_tensor(model.ctx_cross); t;
+             t = ggml_get_next_tensor(model.ctx_cross, t)) {
+            if (!t->data && !t->view_src) {
+                t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+            }
+        }
+        model.cross_len = T;
+        return true;
+    }
+    model.buffer_cross = ggml_backend_alloc_ctx_tensors(model.ctx_cross, model.backend);
+    if (!model.buffer_cross) {
+        fprintf(stderr, "%s: cross buffer alloc failed\n", __func__);
+        return false;
+    }
+    model.cross_len = T;
+    return true;
+}
+
+ggml_cgraph * parler_build_t5_fit_graph(const parler_model & model, int T) {
+    return build_t5_graph(model, T).gf;
+}
+
 bool parler_encode_description(parler_model & model,
                                const std::vector<int32_t> & desc_ids,
                                int n_threads,
@@ -162,33 +212,7 @@ bool parler_encode_description(parler_model & model,
         return false;
     }
 
-    // (re)allocate the persistent cross-KV tensors for this description length
-    if (model.buffer_cross) { ggml_backend_buffer_free(model.buffer_cross); model.buffer_cross = nullptr; }
-    if (model.ctx_cross)    { ggml_free(model.ctx_cross); model.ctx_cross = nullptr; }
-    model.cross_len = 0; // previous cross-KV is gone; any early return below must not leave it usable
-    {
-        ggml_init_params ip = { (size_t)(2 * hp.dec_n_layer + 2) * ggml_tensor_overhead(),
-                                nullptr, /*no_alloc=*/ true };
-        model.ctx_cross = ggml_init(ip);
-        if (!model.ctx_cross) return false;
-        model.cross_k.assign(hp.dec_n_layer, nullptr);
-        model.cross_v_t.assign(hp.dec_n_layer, nullptr);
-        // FA path keeps cross-K/V in F16 and stores V non-transposed [dec_d, T] so
-        // both view as [HD, T, H]; manual path keeps F32 K and transposed V^T [T, dec_d].
-        const ggml_type ct = model.use_fa ? GGML_TYPE_F16 : GGML_TYPE_F32;
-        for (int il = 0; il < hp.dec_n_layer; ++il) {
-            model.cross_k[il]   = ggml_new_tensor_2d(model.ctx_cross, ct, hp.dec_d_model, T);
-            model.cross_v_t[il] = model.use_fa
-                ? ggml_new_tensor_2d(model.ctx_cross, ct, hp.dec_d_model, T)
-                : ggml_new_tensor_2d(model.ctx_cross, ct, T, hp.dec_d_model);
-        }
-        model.buffer_cross = ggml_backend_alloc_ctx_tensors(model.ctx_cross, model.backend);
-        if (!model.buffer_cross) {
-            fprintf(stderr, "%s: cross buffer alloc failed\n", __func__);
-            return false;
-        }
-        model.cross_len = T;
-    }
+    if (!parler_alloc_cross(model, T)) return false;
 
     t5_graph tg = build_t5_graph(model, T);
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
