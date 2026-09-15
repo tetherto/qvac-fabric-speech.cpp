@@ -17,6 +17,11 @@ namespace tts_cpp {
 namespace audio8 {
 namespace detail {
 
+// Host bytes one scratch arena holds: the tensor headers plus the graph. The
+// projector prices replayed graphs with this, so it cannot drift from what the
+// constructor below actually allocates.
+size_t scratch_arena_bytes(int nodes);
+
 // A graph and the arena its nodes live in, sized for `nodes` tensors.
 struct scratch {
     ggml_context * ctx = nullptr;

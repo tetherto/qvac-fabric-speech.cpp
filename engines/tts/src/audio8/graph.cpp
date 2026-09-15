@@ -11,11 +11,6 @@ namespace {
 
 const size_t FLOAT = sizeof(float);
 
-size_t graph_arena(int nodes) {
-    return static_cast<size_t>(nodes) * ggml_tensor_overhead() +
-           ggml_graph_overhead_custom(nodes, /*grads=*/false);
-}
-
 ggml_tensor * table_window(ggml_context * ctx, ggml_tensor * table, int first, int count) {
     ggml_tensor * rows = ggml_view_2d(ctx, table, table->ne[0], count, table->nb[1],
                                       static_cast<size_t>(first) * table->nb[1]);
@@ -102,14 +97,8 @@ ggml_tensor * rotated_query(ggml_context * ctx, const attention_weights & weight
     return ggml_permute(ctx, apply_rope(ctx, query, rope), 0, 2, 1, 3);
 }
 
-// GGML_PREC_F32 buys precision the operands still have. A block-quantised
-// weight has already spent it, and on CUDA the default path -- the integer dot
-// product every CPU build of this tier also takes -- accumulates in f32
-// anyway, so the marker only forces a dequantise-to-f32 round trip through
-// cuBLAS -- 48% of GPU kernel time, a fifth of the decode's wall, since the
-// loop is host-bound rather than GPU-bound. Other backends keep the marker:
-// ggml-vulkan reduces quantised matmuls in f16 under PREC_DEFAULT, which is a
-// genuine loss rather than the same arithmetic spelled differently.
+// Per-backend route and its accuracy: docs/audio8.md, "Quantised weights take
+// a different route per backend". Pinned by test-audio8-quantised-precision.
 bool quantised_matmul_is_already_f32(const ggml_tensor * weight) {
     return ggml_is_quantized(weight->type) && weight->buffer &&
            ::tts_cpp::detail::reg_name_is_cuda(
@@ -131,8 +120,13 @@ ggml_tensor * multiply_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b,
     return precise ? precise_mul_mat(ctx, a, b) : ggml_mul_mat(ctx, a, b);
 }
 
+size_t scratch_arena_bytes(int nodes) {
+    return static_cast<size_t>(nodes) * ggml_tensor_overhead() +
+           ggml_graph_overhead_custom(nodes, /*grads=*/false);
+}
+
 scratch::scratch(int nodes) {
-    ggml_init_params params = {graph_arena(nodes), nullptr, /*no_alloc=*/true};
+    ggml_init_params params = {scratch_arena_bytes(nodes), nullptr, /*no_alloc=*/true};
     ctx = ggml_init(params);
     if (ctx) graph = ggml_new_graph_custom(ctx, nodes, /*grads=*/false);
 }

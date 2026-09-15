@@ -35,10 +35,6 @@ std::vector<int> rank_leaders(const std::vector<float> & logits, size_t count) {
     return order;
 }
 
-float highest_logit(const std::vector<float> & logits) {
-    return *std::max_element(logits.begin(), logits.end());
-}
-
 // The whole vocabulary normalises the masses even though only the leaders are
 // ever read back.
 float softmax_total(const std::vector<float> & logits, float top) {
@@ -90,9 +86,9 @@ int draw(const std::vector<float> & scores, std::mt19937 & rng) {
 
 std::vector<float> filter_scores(const std::vector<float> & logits,
                                  const sampling_params & params) {
-    const float top = highest_logit(logits);
     const std::vector<int> leaders =
         rank_leaders(logits, leader_count(params, logits.size()));
+    const float top = logits[leaders.front()];
     const std::vector<float> masses =
         leader_masses(logits, leaders, top, softmax_total(logits, top));
     const size_t kept = surviving_rank_count(masses, params.top_p);

@@ -195,6 +195,17 @@ uint64_t real_fast_arena_bytes(const lm_model & model) {
     return total;
 }
 
+// And in host RAM, one graph context per position. The projector multiplies
+// scratch_arena_bytes by this count, so the count is what has to be pinned --
+// the size itself comes from the same function the arenas are built with.
+uint64_t retained_fast_contexts(const lm_model & model) {
+    uint64_t kept = 0;
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.ctx) ++kept;
+    }
+    return kept;
+}
+
 void run_synthetic_lm_gates() {
     const tiny_lm p;
     const std::string path = write_tiny_lm_gguf(p);
@@ -278,6 +289,8 @@ void run_synthetic_lm_gates() {
             if (priced_on_device) {
                 expect_eq(projected.device_bytes, real_fast_arena_bytes(real),
                           "LM fast arena parity");
+                expect_eq((uint64_t) p.num_codebooks, retained_fast_contexts(real),
+                          "LM retained fast graph contexts");
             }
         }
     }

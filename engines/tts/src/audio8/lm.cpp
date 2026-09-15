@@ -345,17 +345,28 @@ bool position_accepts_source(const lm_model & model, const fast_source & source,
     return true;
 }
 
-// Two reasons a position may not be replayed. A backend that needs the
-// scheduler cannot keep a graph at all: ggml_backend_sched_alloc_graph resets
-// one shared arena and rewrites node->src[] in place, so the first build to
-// land there turns the cache off for good. And the force hook has to reach the
-// fast head, or setting it would quietly leave this path on the direct route
-// and hide whatever it was set to catch; it is read every call, so a test can
-// turn the scheduler on mid-run.
-bool fast_cache_available(lm_model & model) {
-    return !model.fast_cache_off && !::tts_cpp::detail::sched_force_enabled();
+// One transition, wherever it is discovered: give back what was built and stay
+// on the per-call path for the rest of the model's life. A backend that needs
+// the scheduler cannot keep a graph at all, because
+// ggml_backend_sched_alloc_graph resets one shared arena and rewrites
+// node->src[] in place.
+void disable_fast_cache(lm_model & model) {
+    for (lm_model::fast_graph & cached : model.fast_graphs) {
+        drop_cached_fast_graph(cached);
+    }
+    model.fast_cache_off = true;
 }
 
+// Builds the position on first use. Returns null once the cache is off, which
+// includes the build that discovers this backend needs the scheduler: that one
+// runs through the per-call path like every one after it.
+//
+// Nothing here reads the force hook. prepare_graph does, which is what lets a
+// test reach the branch below on a backend that supports every node -- reading
+// it here instead would route past the branch and leave it unreachable. The
+// cost is that flipping the hook on after a position was already replayed does
+// not reach the scheduler; set it before the first frame, as the other
+// sched-equivalence harnesses do.
 lm_model::fast_graph * cached_fast_graph(lm_model & model, int position,
                                          bool is_code, std::string * error) {
     if (model.fast_graphs.empty()) {
@@ -365,8 +376,7 @@ lm_model::fast_graph * cached_fast_graph(lm_model & model, int position,
     if (cached.graph) return &cached;
     if (!build_cached_fast_graph(model, position, is_code, cached, error)) return nullptr;
     if (cached.use_sched) {
-        drop_cached_fast_graph(cached);
-        model.fast_cache_off = true;
+        disable_fast_cache(model);
         return nullptr;
     }
     return &cached;
@@ -375,7 +385,7 @@ lm_model::fast_graph * cached_fast_graph(lm_model & model, int position,
 bool fast_pass(lm_model & model, const fast_source & source, int position, int n_threads,
                std::vector<float> * logits_out, std::string * error) {
     if (!position_accepts_source(model, source, position, error)) return false;
-    if (!fast_cache_available(model)) {
+    if (model.fast_cache_off) {
         return fast_pass_uncached(model, source, position, n_threads, logits_out, error);
     }
     std::string build_error;

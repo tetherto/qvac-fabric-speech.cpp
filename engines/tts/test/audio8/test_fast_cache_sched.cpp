@@ -7,20 +7,21 @@
 // cannot be kept, and a kept graph cannot be handed to the scheduler. The same
 // hazard is spelled out for T3 in test_t3_sched_equivalence.cpp.
 //
-// Sequence, same model and same inputs each phase:
-//   A   direct path, which fills the cache
-//   B   TTS_CPP_FORCE_SCHED=1, which must bypass the cache and still run
-//   A'  direct again, which must still match A -- the cache survived B
+// Two runs of the same model, because the branch that matters is only
+// reachable when the scheduler is chosen while caching is still available.
+//
+//   forced first  S   TTS_CPP_FORCE_SCHED=1 before any frame, so the build
+//                     itself goes through prepare_graph, comes back scheduler-
+//                     backed, and takes the drop. Asserted directly: the entry
+//                     is released and caching is off for the model's life.
+//                 S'  a second frame with the hook cleared, which must stay on
+//                     the per-call path and still match.
+//
+//   replayed      R   a second model with the hook clear, whose positions are
+//                     all replayed, and whose logits must match S exactly
 //
 // Logits are compared byte for byte. Bit-exactness is the bar; do not relax it
-// to a tolerance, because both paths run the same graph on the same backend.
-//
-// This is a regression net for the class, not a proof of the guard: on a
-// backend that supports every node, phase B reaches the scheduler only because
-// fast_pass consults the force hook, and a build that ignored the hook would
-// still pass by staying on the direct path. What caught the original defect --
-// one allocator shared by every cached graph, so reserving a larger one dangled
-// the rest -- was test-audio8-{engine,timing,cli-verbose} segfaulting.
+// to a tolerance, because every phase runs the same graph on the same backend.
 
 #include "audio8/internal.h"
 #include "audio8/sampling.h"
@@ -91,6 +92,40 @@ void expect_same(const logit_trace & got, const logit_trace & want, const char *
     fail(std::string(what) + ": fast-AR logits differ");
 }
 
+bool nothing_retained(const lm_model & model) {
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.ctx || cached.graph || cached.allocr) return false;
+    }
+    return true;
+}
+
+// The scheduler is selected inside prepare_graph, so the hook has to be on
+// before the first frame for the build to meet it while caching is still live.
+void check_dropped_on_first_scheduler_build(lm_model & model, logit_trace & forced) {
+    setenv("TTS_CPP_FORCE_SCHED", "1", 1);
+    const bool ok = run_frame(model, forced);
+    unsetenv("TTS_CPP_FORCE_SCHED");
+    if (!ok) return;
+    if (!model.fast_cache_off) {
+        fail("a scheduler-backed build left caching enabled");
+    }
+    if (!nothing_retained(model)) {
+        fail("a scheduler-backed build kept a graph, context or allocator");
+    }
+}
+
+void check_replayed_matches(lm_model & model, const logit_trace & scheduled) {
+    logit_trace replayed, again;
+    unsetenv("TTS_CPP_FORCE_SCHED");
+    if (!run_frame(model, replayed)) return;
+    if (model.fast_cache_off) fail("a supported backend disabled the cache");
+    if (nothing_retained(model)) fail("a replayed frame kept no graph");
+    expect_same(replayed, scheduled, "replayed against scheduler-backed");
+    if (!run_frame(model, again)) return;
+    expect_same(again, replayed, "a second replayed frame");
+    if (replayed.empty()) fail("the frame produced no fast-AR positions");
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -110,21 +145,24 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    logit_trace direct, scheduled, direct_again;
-    unsetenv("TTS_CPP_FORCE_SCHED");
-    const bool ok_a = run_frame(model, direct);
-    setenv("TTS_CPP_FORCE_SCHED", "1", 1);
-    const bool ok_b = run_frame(model, scheduled);
-    unsetenv("TTS_CPP_FORCE_SCHED");
-    const bool ok_c = run_frame(model, direct_again);
-
-    if (ok_a && ok_b) expect_same(scheduled, direct, "forced scheduler");
-    if (ok_a && ok_c) expect_same(direct_again, direct, "direct after scheduler");
-    if (direct.empty()) fail("the frame produced no fast-AR positions");
-
-    std::printf("backend: %s, %zu positions compared\n", ggml_backend_name(model.backend),
-                direct.size());
+    logit_trace forced_first, after_forced_first;
+    check_dropped_on_first_scheduler_build(model, forced_first);
+    if (!forced_first.empty()) {
+        run_frame(model, after_forced_first);
+        expect_same(after_forced_first, forced_first, "per-call path after the drop");
+    }
     free_lm(model);
+
+    lm_model replayed;
+    if (!load_lm(argv[1], requested_layers(), replayed, &error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+    }
+    check_replayed_matches(replayed, forced_first);
+
+    std::printf("backend: %s, %zu positions compared\n",
+                ggml_backend_name(replayed.backend), forced_first.size());
+    free_lm(replayed);
 
     if (failures == 0) {
         std::fprintf(stderr, "audio8 fast cache sched: PASS\n");
