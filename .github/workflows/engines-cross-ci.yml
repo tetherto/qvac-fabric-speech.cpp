@@ -197,7 +197,7 @@ jobs:
             cmake_flags: -DPARAKEET_USE_SYSTEM_GGML=ON -DPARAKEET_BUILD_TESTS=OFF -DPARAKEET_BUILD_EXAMPLES=OFF
           - engine: tts
             src: engines/tts
-            cmake_flags: -DTTS_CPP_BUILD_TESTS=OFF
+            cmake_flags: -DTTS_CPP_BUILD_TESTS=OFF -DTTS_CPP_COREML=ON
           - engine: audiogen
             src: engines/audiogen
             cmake_flags: -DAUDIOGEN_BUILD_TESTS=OFF -DAUDIOGEN_BUILD_EXECUTABLES=OFF -DAUDIOGEN_COREML=ON

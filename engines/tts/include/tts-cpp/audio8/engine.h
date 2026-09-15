@@ -145,6 +145,12 @@ public:
     std::string backend_name() const;
     BackendDevice backend_device() const;
 
+    // Whether the codec's synthesis stack runs on the Apple Core ML sidecar
+    // (a TTS_CPP_COREML build with a compiled model next to the decoder GGUF)
+    // rather than on the ggml backend backend_name() reports. The language
+    // model and the codec's post transformer always run on that backend.
+    bool codec_on_coreml() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pimpl_;

@@ -22,6 +22,11 @@
 
 #include "audio8/tokenizer.h"
 
+// The Core ML synthesis sidecar (src/audio8/coreml/codec-synth.h), opaque here
+// so the model struct compiles on every platform; only TTS_CPP_USE_COREML
+// builds ever hold a non-null one.
+struct audio8_coreml_codec_context;
+
 namespace tts_cpp {
 namespace audio8 {
 namespace detail {
@@ -289,6 +294,19 @@ struct codec_model {
     size_t synthesis_scratch_budget = 0;
     int analysis_block_columns = 128;
 
+    // The Core ML sidecar for the synthesis stack, when the build has
+    // TTS_CPP_COREML, the platform is Apple, and a compiled model sits next
+    // to the decoder GGUF (coreml_codec_sidecar_path). Synthesis then runs in
+    // fixed windows of the exported width (coreml_windows.h) instead of the
+    // budgeted ggml blocks above, which the sidecar ignores; the ggml path
+    // stays as the fallback for anything it cannot serve. Decoder only.
+    audio8_coreml_codec_context * coreml = nullptr;
+    // Whether synthesis is expected to run on the sidecar: the real load sets
+    // it when the sidecar initialised, the metadata-only load when one is
+    // present and not disabled, so the fit projection prices the path the
+    // engine will take (a sidecar leaves the ggml synthesis arena empty).
+    bool synthesis_on_coreml = false;
+
     conv_weights enc_in;
     std::vector<dac_stage> enc_stages;
     ggml_tensor * enc_out_alpha = nullptr;
@@ -444,10 +462,21 @@ struct decode_timing {
     double latent_ms = 0.0;
     double synthesis_ms = 0.0;
     // The block width synthesis settled on and what the allocator priced it at,
-    // which is the only view of a width chosen from a memory budget.
+    // which is the only view of a width chosen from a memory budget. On the
+    // Core ML sidecar the width is the exported window and the scratch zero.
     int block_frames = 0;
     size_t block_scratch = 0;
+    // "ggml", or the sidecar's compute label ("coreml-all", ...) when the
+    // synthesis stack ran on Core ML.
+    std::string synthesis_backend = "ggml";
 };
+
+// Frames of history one synthesis block or Core ML window has to be handed
+// before its own, walked back from a single output sample through the whole
+// synthesis stack. Both the ggml block path and the sidecar's window plan
+// drop exactly this many leading frames of every block that does not start
+// at zero.
+int synthesis_context_frames(const codec_model & model);
 
 // What synthesis_block_frames == 0 resolves the scratch budget to, given a
 // configured budget and what the backend reports for the device. Separate from
