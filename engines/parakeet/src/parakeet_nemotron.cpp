@@ -1,5 +1,6 @@
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
+#include "cached_encoder.h"
 #include "backend_util.h"
 
 #include "ggml-alloc.h"
@@ -41,6 +42,9 @@ int encoder_subsampling_factor(const ParakeetCtcModel & model) {
         ? model.encoder_cfg.subsampling_factor
         : kDefaultSubsamplingFactor;
 }
+}
+
+namespace cached_encoder {
 
 // ggml-opencl mis-handles a handful of non-contiguous view feeds (byte-offset
 // views into a concat, depthwise conv on a view). Force a materialised copy on
@@ -53,6 +57,12 @@ ggml_tensor * ensure_contig_on_opencl(
         ? ggml_cont(ctx, tensor)
         : tensor;
 }
+
+}
+
+namespace {
+
+using namespace cached_encoder;
 
 struct NemotronStepGraph {
     ggml_context * context = nullptr;
@@ -101,6 +111,10 @@ struct NemotronStepGraph {
         clear();
     }
 };
+
+}
+
+namespace cached_encoder {
 
 ggml_tensor * add_bias(
     ggml_context * context,
@@ -328,6 +342,12 @@ ggml_tensor * update_channel_cache(
         static_cast<size_t>(current_frames) * cache->nb[1]);
     return ggml_concat(context, retained, current, 1);
 }
+
+}
+
+namespace {
+
+using namespace cached_encoder;
 
 ggml_tensor * cached_convolution(
     ggml_context * context,
