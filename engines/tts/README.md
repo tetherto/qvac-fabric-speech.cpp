@@ -239,10 +239,12 @@ gate), outputs deterministic per cell and non-silent (peak amplitude
 SPIRV-Headers include path on hosts without a system copy.
 
 The table is the campaign as measured at engine `0f9fc817`. The RTX 5090 GPU
-lanes were re-measured after the decode-loop work (same harness, same protocol,
-same box): **CUDA 1.47 / 2.97 s, RTF 0.129**, slope 0.107 s per audio-second,
-and **Vulkan 1.82 / 4.02 s, RTF 0.169**, slope 0.152. The CPU lane and the
-other machines are unchanged and are not re-stated here.
+lanes were re-measured after the decode-loop work and the fast-AR graph cache
+(same harness, same protocol, same box): **CUDA 1.31 / 2.67 s, RTF 0.116**,
+slope 0.096 s per audio-second, and **Vulkan 1.65 / 3.73 s, RTF 0.157**, slope
+0.144. The intercept of the wall-versus-audio fit — what a caller pays before
+the first second of speech — is 0.45 s on CUDA and 0.32 s on Vulkan. The CPU
+lane and the other machines are unchanged and are not re-stated here.
 
 ## Documentation
 
