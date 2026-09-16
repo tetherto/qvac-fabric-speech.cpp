@@ -20,8 +20,7 @@ jobs:
     name: Authorize self-hosted
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     environment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'fork-ci' || '' }}
     outputs:
       allowed: ${{ steps.auth.outputs.allowed }}
