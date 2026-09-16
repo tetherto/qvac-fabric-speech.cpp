@@ -3694,3 +3694,145 @@ build-vk/parakeet \
 The converter needs python >= 3.10. To reproduce the 19.2 table, re-run
 `build-vk/test-gpu-vs-cpu` under `GGML_VK_DISABLE_COOPMAT=1` and
 `GGML_VK_DISABLE_COOPMAT2=1`.
+
+## Phase 20 — Unified RNN-T cache-aware streaming (QVAC-25107)  _(in progress)_
+
+`nvidia/parakeet-unified-en-0.6b` was trained jointly offline and streaming:
+`att_context_style=chunked_limited_with_rc` with
+`att_chunk_context_size=[[70],[1,2,7,13],[0,1,2,3,4,7,13]]` (left 5.6 s; chunk
+80/160/560/1040 ms; right 0–1040 ms), `conv_context_style=dcc`, non-causal
+`dw_striding` subsampling, BatchNorm convolution module. NeMo main stores
+`conv_context_style` but never reads it at inference, so the depthwise
+convolution is the plain symmetric kernel-9 module. NeMo's own inference for
+this checkpoint is buffered (left context re-encoded per chunk); its
+`setup_streaming_params` treats the `with_rc` style like `regular`, so there
+is no upstream cache-aware reference for a right-context chunk. The
+three-parameter mask (`_create_masks`): frame `i` in chunk `c` attends to
+`[c*chunk - left, (c+1)*chunk - 1 + right]`.
+
+Baseline on the 5.5 min narration (`LastQuestion_long_EN`, Apple M1 Ultra,
+Metal, q8_0), WER against the NeMo 3.0.0 offline transcript:
+
+| Path | Latency setting | WER | Wall |
+|---|---|---:|---:|
+| NeMo full audio, chunked mask [70,7,7] | — | 2.27 % | — |
+| NeMo buffered [70,7,7] (`scripts/dump-unified-reference.py`) | 560 ms + 560 ms | 2.99 % | — |
+| Mode 3 sliding window (full-context encoder) | chunk 1040 / left 5600 / right 1040 | 2.89 % | 15.2 s |
+| Mode 3 sliding window | chunk 560 / left 5600 / right 560 | 3.40 % | 28.0 s |
+| Mode 3 sliding window | chunk 160 / left 5600 / right 400 | 3.30 % | 75.1 s |
+| Cache-aware (20.2) | chunk 1040 / right 1040 | 2.16 % | 14.7 s |
+| Cache-aware (20.2) | chunk 560 / right 560 | 2.68 % | 23.3 s |
+| Cache-aware (20.2) | chunk 160 / right 320 | 2.99 % | 98.2 s |
+| Cache-aware (20.2) | chunk 80 / right 240 | 8.56 % | 195.3 s |
+
+CPU (8 threads, 120 s cut): Mode 3 560/5600/560 43.6 s; cache-aware 560/560
+14.2 s; cache-aware 1040/1040 11.2 s.
+
+Scoring note: `--emit text` prints one line per segment and a segment may start
+mid-word (`sl` / `owly`), so segment texts must be concatenated without a
+separator before normalising; joining them with spaces inflates WER to 14 %
+and 40 % at 560 ms and 160 ms.
+
+On `jfk.wav` every path (NeMo offline, chunked, buffered, our offline, Mode 2,
+Mode 3) yields the same transcript.
+
+### 20.1 — streaming metadata contract (done)
+
+- Converter: an `rnnt` checkpoint with the `chunked_limited_with_rc` style and
+  `att_chunk_context_size` now writes `parakeet.unified.left_context_frames`,
+  `parakeet.unified.cache_time_steps` (`(conv_kernel - 1) / 2`, the symmetric
+  left convolution cache), `parakeet.unified.allowed_chunk_frames`,
+  `parakeet.unified.allowed_right_context_frames` and flips
+  `parakeet.encoder.streaming.enabled` to true.
+- Loader: `UnifiedStreamingConfig` on `ParakeetCtcModel`; GGUFs converted
+  before the keys existed (the registry q8_0 from 2026-08-13) fall back to the
+  published checkpoint contexts, logged at INFO, so no model regeneration is
+  needed to exercise the path. `validate_unified_streaming_model` rejects
+  causal geometry, even kernels, a convolution cache that does not match the
+  kernel, and empty or negative operating points.
+- Reference: `scripts/dump-unified-reference.py` writes the offline,
+  chunked-mask and buffered NeMo transcripts plus per-step mel / encoder /
+  token tensors for one `(left, chunk, right)` context. Needs NeMo >= 3.0
+  (the checkpoint was saved with 2.7.0rc0; 2.6 does not know
+  `att_chunk_context_size`).
+- Tests: `test-unified-loader` (metadata, fallback, validation),
+  `test_convert_nemo_to_gguf.py` (Unified contexts, regular RNN-T unaffected,
+  multiple left contexts rejected), `test_dump_unified_reference.py` (window
+  tiling).
+
+### 20.2 — cache-aware step (done; speed work tracked in 20.3)
+
+`src/parakeet_unified.cpp` (+ `cached_encoder.h`, the attention / feed-forward /
+cache helpers shared with `parakeet_nemotron.cpp`). Per step the encoder sees
+`chunk + right` new frames: the `right` frames are provisional (recomputed as
+part of the next chunk), only the `chunk` frames enter the 70-frame attention
+cache and the 4-frame convolution cache. Differences from the Nemotron step:
+
+- three-parameter `with_rc` mask — committed queries see the whole valid cache
+  plus every current frame; provisional queries drop the oldest `chunk` cache
+  slots per chunk they lie ahead (`first_visible_cache_slot`);
+- symmetric depthwise convolution — 4 cached frames on the left, zero padding
+  on the right (`ggml_pad`), BatchNorm folded scale/shift instead of LayerNorm;
+- non-causal subsampling — 8 mel frames of history in front of the
+  `8 * (chunk + right)` new frames yield `chunk + right + 1` encoder frames;
+  the first one is dropped (exact match against NeMo's `pre_encode`, verified
+  in Python: 8 history frames, offset 1, max diff 0);
+- `xscaling` (`sqrt(d_model)`) applied to the subsampled input;
+- per-feature CMVN over a rolling raw log-mel window of
+  `8 * (left + chunk + right)` frames (NeMo normalises each buffered window);
+  the incremental mel runs with normalisation disabled and the history frames
+  are re-normalised with the current statistics every step;
+- streaming `chunk_ms` and `right_lookahead_ms` snap down to the largest
+  trained value (a request below 80 ms takes the smallest chunk), so existing
+  callers with the 1000 ms default keep working and land on 560 ms;
+  `left_context_ms` is ignored (the cache is the left context);
+- with a right context below 4 frames the committed frames' depthwise
+  convolution is right-truncated by the zero padding, exactly as in NeMo's
+  buffered window; NVIDIA's table shows the same quality cliff at those
+  operating points (8.44 % at 160 ms, 15.63 % at 80 ms), so they stay
+  selectable rather than rejected;
+- the attention mask groups queries by the session's chunk stride, so the
+  final partial step (up to `chunk + right - 1` frames committed at once)
+  keeps the trained window per chunk; the trailing all-zero mel frame the
+  incremental preprocessor emits at finalize is dropped before it can enter
+  the CMVN window.
+
+Parity against `dump-unified-reference.py` (jfk, [70,7,7], q8_0):
+
+| Step | cosine vs NeMo buffered | max abs diff | note |
+|---|---:|---:|---|
+| 0 | 0.99993 | 0.027 | identical inputs, q8 noise only |
+| 1 | 0.99398 | 0.089 | left context cached (final values) vs NeMo re-encoded |
+| 2 | 0.99575 | 0.030 | |
+
+Transcript byte-equal to offline on `jfk.wav` in Mode 2 and Mode 3 at every
+operating point tried (80/0, 160/320, 560/560, 1040/1040). Long-clip WER is in
+the 20.0 table: 2.16 % (1040/1040), 2.68 % (560/560), 2.99 % (160/320) against
+NeMo offline, i.e. at or below NeMo's own buffered path (2.99 %).
+
+Tests: `test-unified-stream-step` (per-step parity + final transcript against
+the NeMo dump, CPU plus one case per GPU backend), `test-unified-streaming`
+(Mode 1 / 2 / 3 byte-equality, lowest-latency point runs, an untrained
+chunk request snaps and stays byte-equal), `test-unified-loader` (metadata,
+fallback, validation, engine-level snapping and feed-after-finalize).
+
+The GGUF stores the Unified chunk list in encoder frames
+(`parakeet.unified.allowed_chunk_frames`) rather than milliseconds like
+`parakeet.nemotron.allowed_chunk_ms`: the frame is the unit the step graph
+works in, and the Unified right-context list is in frames as well, so both
+lists share one unit and `Engine` converts to milliseconds only for messages.
+
+### 20.3 — speed (open)
+
+Per-step profile on the 120 s cut (`PARAKEET_UNIFIED_PROFILE=1`), chunk 560 /
+right 560: Metal 2.2 ms subsampling + 36 ms encoder + 5.7 ms decode; CPU (8
+threads) 5 + 70 + 5 ms. The encoder step is ~32 GFLOP of which the K/V
+projections over the 84 cached+current keys (~8.6) and the relative-position
+projection over `2*84-1` rows (~8.4) are recomputed every step although the
+positions never change. The `sample` profile on CPU is dominated by
+`ggml_graph_compute_thread` / `ggml_barrier`: ~1000 small nodes per step.
+Measured gain over the sliding window at 560 ms: 3.1x on CPU (43.6 s -> 14.2 s
+for 120 s of audio), 1.2x on Metal (28.0 s -> 23.3 s for 5.5 min), where the
+per-node launch cost dominates. Planned: precompute the per-layer position
+projections once per graph geometry, cache K/V instead of the layer input,
+and drop the `ggml_cont` copies around the views.

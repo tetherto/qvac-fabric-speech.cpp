@@ -7,6 +7,7 @@
 
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
+#include "parakeet_unified.h"
 #include "parakeet_eou.h"
 #include "parakeet_sortformer.h"
 #include "mel_preprocess.h"
@@ -70,6 +71,49 @@ std::string format_int_list(const std::vector<int32_t> & values) {
     }
     text += ", and " + std::to_string(values.back());
     return text;
+}
+
+std::vector<int32_t> frames_to_ms(const std::vector<int32_t> & frames, double frame_stride_ms) {
+    std::vector<int32_t> ms;
+    ms.reserve(frames.size());
+    for (int32_t value : frames) {
+        ms.push_back(static_cast<int32_t>(std::lround(value * frame_stride_ms)));
+    }
+    return ms;
+}
+
+int largest_allowed_at_most(const std::vector<int32_t> & allowed, int requested) {
+    int best = -1;
+    for (int32_t value : allowed) {
+        if (value <= requested && value > best) best = value;
+    }
+    return best;
+}
+
+int smallest_allowed(const std::vector<int32_t> & allowed) {
+    return *std::min_element(allowed.begin(), allowed.end());
+}
+
+int resolve_unified_chunk_frames(const ParakeetCtcModel & model, const StreamingOptions & opts) {
+    const double frame_stride_ms = encoder_frame_stride_ms(model);
+    const auto & allowed = model.unified_cfg.allowed_chunk_frames;
+    const int requested = static_cast<int>(opts.chunk_ms / frame_stride_ms);
+    const int snapped = largest_allowed_at_most(allowed, requested);
+    const int resolved = snapped > 0 ? snapped : smallest_allowed(allowed);
+    if (std::lround(resolved * frame_stride_ms) != opts.chunk_ms) {
+        PARAKEET_LOG_INFO("Engine::stream_start: Unified chunk_ms=%d snapped to %ld ms (trained chunks: %s)\n",
+                          opts.chunk_ms, std::lround(resolved * frame_stride_ms),
+                          format_int_list(frames_to_ms(allowed, frame_stride_ms)).c_str());
+    }
+    return resolved;
+}
+
+int resolve_unified_right_context_frames(const ParakeetCtcModel & model, const StreamingOptions & opts) {
+    const double frame_stride_ms = encoder_frame_stride_ms(model);
+    const auto & allowed = model.unified_cfg.allowed_right_context_frames;
+    const int requested = static_cast<int>(opts.right_lookahead_ms / frame_stride_ms);
+    const int snapped = largest_allowed_at_most(allowed, requested);
+    return snapped >= 0 ? snapped : smallest_allowed(allowed);
 }
 
 TdtDecodeOptions transducer_decode_options(const ParakeetCtcModel & model) {
@@ -663,7 +707,8 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
             "transcribe_samples_stream: streaming is for transcription models only; "
             "Sortformer is a diarization model. Use Engine::diarize().");
     }
-    if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
+    if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON ||
+        pimpl_->model.unified_cfg.available) {
         pimpl_->cancel_flag.store(false);
 
         const auto started = std::chrono::steady_clock::now();
@@ -1242,6 +1287,7 @@ struct StreamSession::Impl {
     TdtDecodeState transducer_state;
     EouDecodeState eou_state;
     std::unique_ptr<NemotronStreamState> nemotron_state;
+    std::unique_ptr<UnifiedStreamState> unified_state;
 
     std::string             cumulative_text;
     std::vector<int32_t>    cumulative_token_ids;
@@ -1267,12 +1313,21 @@ struct StreamSession::Impl {
     void flush_remainder();
 
     void drain_nemotron(bool finalize);
+    void drain_unified(bool finalize);
+    void emit_native_segment(int64_t start_frame,
+                             int64_t end_frame,
+                             const std::vector<int32_t> & new_token_ids,
+                             const std::string & text,
+                             double encoder_ms);
 
     void cancel_session() {
         cancelled = true;
 
         if (nemotron_state) {
             cancel_nemotron_stream(*nemotron_state);
+        }
+        if (unified_state) {
+            cancel_unified_stream(*unified_state);
         }
     }
 };
@@ -1335,44 +1390,85 @@ void StreamSession::Impl::drain_nemotron(bool finalize) {
                 "(rc=" + std::to_string(rc) + ")");
         }
 
-        const size_t previous_text_size = cumulative_text.size();
-        cumulative_token_ids.insert(
-            cumulative_token_ids.end(),
-            result.new_token_ids.begin(),
-            result.new_token_ids.end());
-        cumulative_text = result.text;
-
-        if (on_segment) {
-            const double frame_stride_s =
-                encoder_frame_stride_ms(model) / 1000.0;
-
-            StreamingSegment segment;
-            segment.text =
-                cumulative_text.substr(previous_text_size);
-            segment.token_ids = result.new_token_ids;
-            segment.start_s =
-                static_cast<double>(start_encoder_frame) *
-                frame_stride_s;
-            segment.end_s =
-                static_cast<double>(state.emitted_encoder_frames) *
-                frame_stride_s;
-            segment.chunk_index = chunk_index;
-            segment.is_final = true;
-            segment.starts_word = result.new_token_ids.empty()
-                ? true
-                : token_is_word_start(
-                    model.vocab, result.new_token_ids.front());
-            segment.encoder_ms = ms_since(started);
-            segment.decode_ms = 0.0;
-
-            on_segment(segment);
-        }
-
-        ++chunk_index;
+        emit_native_segment(
+            start_encoder_frame,
+            state.emitted_encoder_frames,
+            result.new_token_ids,
+            result.text,
+            ms_since(started));
 
         if (last_chunk) {
             break;
         }
+    }
+}
+
+void StreamSession::Impl::emit_native_segment(int64_t start_frame,
+                                              int64_t end_frame,
+                                              const std::vector<int32_t> & new_token_ids,
+                                              const std::string & text,
+                                              double encoder_ms) {
+    const size_t previous_text_size = cumulative_text.size();
+    cumulative_token_ids.insert(
+        cumulative_token_ids.end(), new_token_ids.begin(), new_token_ids.end());
+    cumulative_text = text;
+    ++chunk_index;
+    if (!on_segment) return;
+
+    const auto & model = engine_impl->model;
+    const double frame_stride_s = encoder_frame_stride_ms(model) / 1000.0;
+    StreamingSegment segment;
+    segment.text = cumulative_text.substr(previous_text_size);
+    segment.token_ids = new_token_ids;
+    segment.start_s = static_cast<double>(start_frame) * frame_stride_s;
+    segment.end_s = static_cast<double>(end_frame) * frame_stride_s;
+    segment.chunk_index = chunk_index - 1;
+    segment.is_final = true;
+    segment.starts_word = new_token_ids.empty()
+        ? true
+        : token_is_word_start(model.vocab, new_token_ids.front());
+    segment.encoder_ms = encoder_ms;
+    segment.decode_ms = 0.0;
+    on_segment(segment);
+}
+
+void StreamSession::Impl::drain_unified(bool finalize) {
+    if (!unified_state) {
+        throw std::runtime_error("StreamSession: Unified stream state is not initialized");
+    }
+    auto & model = engine_impl->model;
+    auto & state = *unified_state;
+    std::vector<float> processed_signal;
+
+    while (!cancelled) {
+        if (engine_impl->cancel_flag.load()) {
+            cancel_session();
+            break;
+        }
+        int n_mel_frames = 0;
+        const int ready = next_unified_processed_signal(
+            state, model.mel_cfg.n_mels, finalize, processed_signal, n_mel_frames);
+        if (ready < 0) {
+            throw std::runtime_error(
+                "StreamSession: preparing Unified chunk failed (rc=" + std::to_string(ready) + ")");
+        }
+        if (ready == 0) break;
+
+        const int64_t start_frame = state.emitted_encoder_frames;
+        const auto started = std::chrono::steady_clock::now();
+        const bool last_chunk = finalize && unified_pending_mel_frames(state) == 0;
+
+        UnifiedStreamStepResult result;
+        const int rc = run_unified_stream_step(
+            model, engine_impl->transducer_rt, processed_signal.data(), n_mel_frames,
+            model.mel_cfg.n_mels, last_chunk, state, result);
+        if (rc != 0) {
+            throw std::runtime_error(
+                "StreamSession: Unified stream step failed (rc=" + std::to_string(rc) + ")");
+        }
+        emit_native_segment(start_frame, state.emitted_encoder_frames,
+                            result.new_token_ids, result.text, ms_since(started));
+        if (last_chunk) break;
     }
 }
 
@@ -1635,6 +1731,18 @@ void StreamSession::feed_pcm_f32(
         return;
     }
 
+    if (pimpl_->unified_state) {
+        const int rc = append_unified_pcm(
+            pimpl_->engine_impl->model, *pimpl_->unified_state, samples, n_samples, false);
+        if (rc != 0) {
+            throw std::runtime_error(
+                "StreamSession::feed_pcm_f32: appending Unified PCM failed "
+                "(rc=" + std::to_string(rc) + ")");
+        }
+        pimpl_->drain_unified(false);
+        return;
+    }
+
     pimpl_->pending.insert(
         pimpl_->pending.end(),
         samples,
@@ -1650,7 +1758,7 @@ void StreamSession::feed_pcm_i16(const int16_t * samples, int n_samples) {
     if (pimpl_->cancelled) return;
     if (!samples || n_samples <= 0) return;
 
-    if (pimpl_->nemotron_state) {
+    if (pimpl_->nemotron_state || pimpl_->unified_state) {
         std::vector<float> converted(
             static_cast<size_t>(n_samples));
 
@@ -1726,6 +1834,31 @@ void StreamSession::finalize() {
         return;
     }
 
+    if (pimpl_->unified_state) {
+        auto & model = pimpl_->engine_impl->model;
+        auto & state = *pimpl_->unified_state;
+        int rc = append_unified_pcm(model, state, nullptr, 0, true);
+        if (rc != 0) {
+            throw std::runtime_error(
+                "StreamSession::finalize: flushing Unified PCM failed "
+                "(rc=" + std::to_string(rc) + ")");
+        }
+        pimpl_->drain_unified(false);
+        pimpl_->drain_unified(true);
+        if (!state.finalized && !pimpl_->cancelled) {
+            UnifiedStreamStepResult result;
+            rc = run_unified_stream_step(
+                model, pimpl_->engine_impl->transducer_rt, nullptr, 0,
+                model.mel_cfg.n_mels, true, state, result);
+            if (rc != 0) {
+                throw std::runtime_error(
+                    "StreamSession::finalize: finalizing Unified state failed "
+                    "(rc=" + std::to_string(rc) + ")");
+            }
+        }
+        return;
+    }
+
     pimpl_->try_emit_chunks();
     pimpl_->flush_remainder();
 }
@@ -1792,6 +1925,18 @@ std::unique_ptr<StreamSession> Engine::stream_start(const StreamingOptions & opt
         if (rc != 0) {
             throw std::runtime_error(
                 "Engine::stream_start: Nemotron stream initialization failed "
+                "(rc=" + std::to_string(rc) + ")");
+        }
+    } else if (pimpl_->model.unified_cfg.available) {
+        impl->unified_state = std::make_unique<UnifiedStreamState>();
+        const int rc = init_unified_stream_state(
+            pimpl_->model,
+            resolve_unified_chunk_frames(pimpl_->model, opts),
+            resolve_unified_right_context_frames(pimpl_->model, opts),
+            *impl->unified_state);
+        if (rc != 0) {
+            throw std::runtime_error(
+                "Engine::stream_start: Unified stream initialization failed "
                 "(rc=" + std::to_string(rc) + ")");
         }
     }
