@@ -1,10 +1,10 @@
 // Engine-level streaming-callback contract test for Parler-TTS.  Pins:
 //   * chunk_index contiguous 0..n-1, is_last exactly once on the last chunk;
 //   * result.pcm == concat(callback chunks);
-//   * streamed pcm == whole-utterance decode -- BIT-IDENTICAL on CPU (the DAC is
-//     local/convolutional so a prefix decode reproduces the interior exactly),
-//     within tolerance on GPU (mul_mat kernel dispatch varies with the sequence
-//     length, so interior samples can differ in the last ULP).
+//   * streamed pcm == whole-utterance decode -- BIT-IDENTICAL on the plain ggml
+//     CPU path (the DAC is local/convolutional so a prefix decode reproduces the
+//     interior exactly), within tolerance on GPU and on a tinyBLAS CPU build
+//     (shape-dependent rounding; cpu_matmul_is_shape_exact).
 //
 // A fixed seed makes the AR codes identical between the streamed and batch
 // runs, so the only difference under test is windowed-vs-whole DAC decode.  Both
@@ -15,6 +15,8 @@
 // Usage: test-parler-engine-stream MODEL.gguf
 
 #include "tts-cpp/parler/engine.h"
+
+#include "backend_util.h"
 
 #include <algorithm>
 #include <cmath>
@@ -90,6 +92,8 @@ static void run_case(const std::string & model, int n_gpu_layers) {
         std::fprintf(stderr, "  max|stream-batch| = %.3g\n", max_abs);
         if (gpu) {
             CHECK(max_abs < 1e-3, "GPU: streamed pcm within tolerance of whole-utterance decode");
+        } else if (!tts_cpp::detail::cpu_matmul_is_shape_exact()) {
+            CHECK(max_abs < 1e-3, "CPU (tinyBLAS): streamed pcm within tolerance of whole-utterance decode");
         } else {
             CHECK(max_abs == 0.0, "CPU: streamed pcm BIT-IDENTICAL to whole-utterance decode");
         }
@@ -102,7 +106,7 @@ int main(int argc, char ** argv) {
         return 2;
     }
     const std::string model = argv[1];
-    run_case(model, 0);    // CPU: bit-identical
+    run_case(model, 0);    // CPU: bit-identical on the plain path, tolerance under tinyBLAS
     run_case(model, 99);   // GPU where present (else CPU fallback): tolerance
 
     if (g_failures == 0) {

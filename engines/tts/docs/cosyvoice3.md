@@ -59,8 +59,23 @@ python3 scripts/convert-campplus-to-gguf.py \
     --out cosyvoice3-campplus-f32.gguf
 ```
 
-The LM converter also accepts `--dtype {f16,q8_0,q4_0}`; flow and HiFT accept
-`f32`/`f16`.
+The LM and flow converters accept `--dtype {f32,f16,q8_0,q4_0}`; HiFT accepts
+`f32`/`f16` (its f0 predictor stays f32 either way). The recommended desktop
+tier is LM `q8_0` + flow `q8_0` + HiFT `f16`. Avoid LM `f16`: the engine reads
+the embedding tables as f32, so a f16 LM is not loadable today — use the
+quantized LM tiers instead.
+In `q8_0`/`q4_0` mode the flow converter quantizes only the 2D matmul
+weights (conv kernels, norms, biases, the token embedding and the baked
+`rand_noise` stay float), and it always writes the per-block attention
+projections pre-fused as one `to_qkv` tensor; the engine also still loads
+older GGUFs with separate `to_q`/`to_k`/`to_v` tensors.
+
+`cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
+the voice-prompt frames as attention conditioning only (the same design
+cosyvoice.cpp uses by default). It cuts DiT time by roughly the prompt's share
+of the mel sequence but deviates from the PyTorch reference, so it is off by
+default; `test-cosyvoice-flow-cut` pins its output against the reference mel
+with a looser bound.
 
 The engine will not construct without a baked default voice (`voice.gguf`): it
 packs the four prompt tensors of one reference utterance, computed on the

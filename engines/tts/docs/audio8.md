@@ -268,6 +268,133 @@ they do — codebook counts and widths, the codec's two halves against each othe
 and both against the language model — from their headers, before it reads a
 byte of weights.
 
+### Core ML codec sidecar
+
+`TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for
+the codec's **synthesis stack** -- the two upsampling stages and the DAC
+decoder, everything from the windowed post transformer's output to the
+waveform. That stack is the single largest stage of a CPU synthesis (5.4 s of
+a 14 s run for 4.5 s of audio on an M2) and about a quarter of a Metal one,
+and it is the part of Audio8 with a fixed, convolutional shape; the
+autoregressive language model, the quantizer banks and the post transformer
+stay on ggml. Export the sidecar from the decoder GGUF:
+
+```bash
+python3.11 -m venv .venv-coreml
+. .venv-coreml/bin/activate
+python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+python engines/tts/scripts/export-audio8-codec-coreml.py \
+  --gguf models/audio8-codec-decoder-q8_0.gguf --compile-dir models
+```
+
+The compiled sidecar must sit next to the decoder GGUF as
+`<basename-minus-quant>.mlmodelc`: `audio8-codec-decoder-q8_0.gguf`,
+`-f16.gguf` and `-f32.gguf` all resolve to `audio8-codec-decoder.mlmodelc`,
+because every tier stores the synthesis stack's kernels at f16 or better and
+the export is the same whichever file it was taken from. The exporter
+rebuilds the stack in PyTorch from the GGUF tensors, so it needs neither the
+checkpoint nor its remote code; `--parity-dir artifacts/audio8-ref` checks
+that rebuild against the reference dumps first (measured: waveform cosine
+1.0000000, max error 1e-6). With the sidecar present `audio8-cli --verbose`
+reports `codec synthesis on the Core ML sidecar` at load and the compute
+label (`coreml-all`) in the timing breakdown.
+
+The export is fixed-shape, `--window` post frames (default 64, 2.97 s,
+131072 samples) in and the matching samples out. The engine walks an
+utterance in windows of exactly that width: every convolution in the stack is
+causal, so a window's output is exact from the first frame whose receptive
+field lies inside it, and the engine drops each window's leading causal
+context (10 frames for this checkpoint, computed by the same walk the ggml
+block path uses) just as the ggml blocks drop theirs. An utterance shorter
+than one window is zero-padded on the right, which changes nothing before the
+padding because nothing in the stack looks forward. `test-audio8-coreml-windows`
+locks that plan without a model; `test-audio8-codec-coreml-parity` gates the
+sidecar against the ggml synthesis at cosine 0.999 on a short (padded) and a
+long (stitched) utterance, and checks that a cancel between windows stops the
+pass; both run on the TTS CI macOS lane, which converts the decoder from the
+upstream checkpoint and exports the sidecar itself.
+
+Two things the exporter does that are worth knowing before reading it. Every
+transposed convolution is emitted in its exact phase form -- a causal `Conv1d`
+over the input followed by a depth-to-space shuffle, which is also how
+`codec_ops.cpp` computes it -- rather than as `ConvTranspose1d`, whose native
+Neural Engine kernel miscomputes at stride 4 (the ACE-Step VAE export hit
+this first). And the Snake activation squares its sine as a product,
+`sin * sin`, never `sin ** 2`: the `pow` the latter lowers to is miscomputed
+on the Neural Engine when its result feeds a convolution (measured on an M2,
+macOS 15.7: the first DAC stage came out at cosine 0.39 against the CPU, with
+the Snake alone and the convolution alone both exact), while the product is
+exact on every compute unit.
+
+Measured on an Apple M2 (macOS 15.7, f32 decoder GGUF, ggml Metal as the
+reference, `bench-audio8-codec-coreml`, median of 3), synthesis stage only,
+parity cosine 0.99999 in every cell:
+
+| window | placement | 10 s (216 frames) | 24 s (517 frames) |
+|---:|---|---:|---:|
+| 64 | `coreml-all` (default) | 1518 -> 1198 ms, **1.27x** | 3683 -> 3023 ms, **1.22x** |
+| 64 | `cpu_and_gpu` | 1466 -> 976 ms, **1.50x** | 3628 -> 2500 ms, **1.45x** |
+| 32 | `coreml-all` | 1.27x | 1.22x |
+| 32 | `cpu_and_gpu` | 1.25x | 1.28x |
+| 128 | `coreml-all` | 0.51x | 0.49x |
+| 128 | `cpu_and_gpu` | 1.53x | 1.51x |
+
+Two placement facts sit behind that table. On this OS the Neural Engine has
+no `sin` kernel, so every Snake activation leaves it: the compute plan puts
+the first twelve sines on the CPU and, from the second DAC stage on, hands
+the whole tail of the graph (17 sines, 18 convolutions) to the GPU, and the
+device handoffs eat most of what the Neural Engine saves on the convolutions
+it does keep. `AUDIO8_COREML_COMPUTE_UNITS=cpu_and_gpu` is therefore the
+faster choice on a macOS 15 host; the default stays all-units because it is
+correct everywhere, because the ACE-Step sidecar measured all-units best on an
+M5 running macOS 26, and because the TTS CI macOS lane (macOS 26) reports the
+default's speedup in its job summary for the current OS. And the 128-frame
+window, which only buys a few percent on the GPU, collapses to half of Metal's
+speed under mixed placement, so 64 is the default: the widest window that is
+robust under either placement, at a causal-context overhead of 10 in 64 frames.
+The very first load of a fresh export pays a one-time on-device compilation
+(tens of seconds), which the OS caches for later loads.
+
+Those are steady-state numbers from a resident engine. A one-shot
+`audio8-cli` run also pays the sidecar's first-prediction warm-up and, for a
+short utterance, the fixed window: a 4.3 s synthesis (92 frames, two 64-frame
+windows for what ggml does in one block) came out at 747 ms on the sidecar
+against 654 ms on Metal under all-units placement, and at 560 ms with
+`cpu_and_gpu`; at 23.8 s (512 frames) the same one-shot run measured 3444 ms
+on Metal, 3241 ms on the sidecar with all units and 2408 ms with
+`cpu_and_gpu`. The engine keeps the sidecar resident across `synthesize()`
+calls, so a host that speaks more than once pays the warm-up once.
+
+Set `AUDIO8_COREML_DISABLE=1` to force the ggml synthesis, including for
+parity or benchmarking. `AUDIO8_COREML_STRICT=1` turns the silent ggml
+fallback into a synthesis failure, so a test cannot measure ggml and attribute
+it to Core ML -- the parity test and benchmark set it for their Core ML legs.
+`AUDIO8_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane` overrides the
+default all-units placement for comparisons. `bench-audio8-codec-coreml`
+times the ggml GPU synthesis against the sidecar on deterministic 10 s and
+24 s code sequences (median of 3 after a warm-up that absorbs the one-time
+on-device compilation of a fresh export) and prints a markdown table; it
+fails below the parity gate, so its numbers are correctness-checked, and the
+TTS CI macOS lane appends its table to the job summary.
+
+Two reports tell a host where the codec ran. `Engine::codec_on_coreml()` is
+the load status: true when a sidecar next to the decoder GGUF initialised (the
+language model and the post transformer still run on `backend_name()`).
+`SynthesisResult::codec_synthesis_backend` is per call: `"ggml"`, or the
+sidecar's compute label (`coreml-all`, `coreml-gpu`, ...) when the synthesis
+stack actually ran there. The two differ whenever a loaded sidecar cannot
+serve a call -- a window that cannot carry the causal context, or a Core ML
+prediction failure -- and the engine falls back to the ggml blocks. Because
+that fallback stays possible, the memory-fit projection (`audio8-fit-params`)
+prices the ggml synthesis arena whether or not a sidecar is present; with a
+working sidecar it over-reports by that arena rather than under-reporting the
+fallback. `test-audio8-codec-coreml-parity` covers all of it: an absent
+sidecar under `AUDIO8_COREML_STRICT`, a sidecar directory that is not a model
+(load status false, ggml synthesis), and a sidecar exported at a window that
+cannot carry the context (`--window 8`; loaded, falls back bit-exactly to the
+ggml decode, fails under `AUDIO8_COREML_STRICT`), each also through the public
+`Engine` with a synthetic language model.
+
 ### Engine notes
 
 Roughly a second of audio per second of CPU on eight cores of a desktop x86-64,

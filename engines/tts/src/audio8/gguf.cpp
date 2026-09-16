@@ -1,5 +1,6 @@
 #include "audio8/internal.h"
 
+#include "audio8/coreml_path.h"
 #include "audio8/graph.h"
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -7,9 +8,16 @@
 #include "gguf.h"
 #include "gguf_stream.h"
 
+#ifdef TTS_CPP_USE_COREML
+#include "audio8/coreml/codec-synth.h"
+#endif
+
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+
+#include <sys/stat.h>
 
 namespace tts_cpp {
 namespace audio8 {
@@ -543,6 +551,38 @@ bool backend_picks_codes(ggml_backend_t backend, const lm_hparams & hp) {
     return ggml_backend_supports_op(backend, ggml_argmax(probe.ctx, logits));
 }
 
+bool coreml_sidecar_enabled() {
+#ifdef TTS_CPP_USE_COREML
+    return std::getenv("AUDIO8_COREML_DISABLE") == nullptr;
+#else
+    return false;
+#endif
+}
+
+bool path_exists(const std::string & path) {
+    struct stat st {};
+    return stat(path.c_str(), &st) == 0;
+}
+
+// The metadata-only load only checks for the sidecar, so a fit preflight stays a preflight.
+void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
+                           bool metadata_only) {
+    model.coreml = nullptr;
+    model.synthesis_on_coreml = false;
+    if (!model.has_decoder || !coreml_sidecar_enabled()) return;
+    const std::string sidecar = coreml_codec_sidecar_path(gguf_path);
+    if (!path_exists(sidecar)) return;
+    if (metadata_only) {
+        model.synthesis_on_coreml = true;
+        return;
+    }
+#ifdef TTS_CPP_USE_COREML
+    model.coreml = audio8_coreml_codec_init(sidecar.c_str(), model.hp.latent_dim,
+                                            model.hp.frame_size);
+    model.synthesis_on_coreml = model.coreml != nullptr;
+#endif
+}
+
 }  // namespace
 
 // Shared body of load_lm and load_lm_metadata_only. When `measure` is
@@ -737,6 +777,7 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_mo
         if (error) *error = "audio8: failed to create the graph allocators";
         return false;
     }
+    attach_coreml_sidecar(path, model, measure != nullptr);
     return true;
 }
 
@@ -753,6 +794,11 @@ bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
 }
 
 void free_codec(codec_model & model) {
+#ifdef TTS_CPP_USE_COREML
+    if (model.coreml) audio8_coreml_codec_free(model.coreml);
+#endif
+    model.coreml = nullptr;
+    model.synthesis_on_coreml = false;
     ::tts_cpp::detail::sched_fallback_free(model.sched);
     if (model.allocr) ggml_gallocr_free(model.allocr);
     if (model.block_allocr) ggml_gallocr_free(model.block_allocr);

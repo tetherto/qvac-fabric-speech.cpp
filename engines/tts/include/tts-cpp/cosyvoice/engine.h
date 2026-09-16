@@ -168,6 +168,12 @@ struct EngineOptions {
     // Off by default: sampling is the better-sounding production path.
     bool greedy      = false;
 
+    // Treat the baked-voice prompt frames as attention conditioning only
+    // inside the flow DiT (queries and feed-forward skip them).  Faster flow,
+    // but the prompt hidden states stop updating per layer, so output
+    // deviates slightly from the PyTorch reference.  Off by default.
+    bool flow_cut_prompt = false;
+
     // Pin the LM speech-token trajectory instead of decoding one.  Sampling is
     // chaotic in the logits, so two backends will not agree on tokens even at
     // the same seed; pinning them is what makes the flow + vocoder stages

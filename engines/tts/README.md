@@ -42,7 +42,7 @@ engine, not every backend ggml can compile.
 | Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes | yes | yes | yes |
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
-| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes | yes | yes | yes |
+| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports load status, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
@@ -105,6 +105,15 @@ reported for information -- with every bar measured on all three backends.
 The same redesign is what fixed test-audio8-codec and test-audio8-lm-vulkan,
 which had been failing on unmodified master since the speech ggml moved past
 their calibration.
+
+CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights, and
+`f16` flow and HiFT weights. The recommended desktop combination is a
+`q8_0` LM, `q8_0` flow, and `f16` HiFT. The optional
+`cosyvoice-cli --flow-cut-prompt` flag reduces flow work: only the first DiT
+block attends to the voice-prompt frames, and subsequent blocks process the
+generated region. It changes reference output and is off by default. See
+[CosyVoice3 conversion and usage](docs/cosyvoice3.md) for details and the
+unsupported LM `f16` caveat.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --
