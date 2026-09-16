@@ -35,19 +35,27 @@ std::vector<int> rank_leaders(const std::vector<float> & logits, size_t count) {
     return order;
 }
 
-// The whole vocabulary normalises the masses even though only the leaders are
-// ever read back.
-float softmax_total(const std::vector<float> & logits, float top) {
+// One exponential per candidate: the whole vector normalises the masses, and
+// the leaders read their own entries back out of it.
+std::vector<float> exponentiated(const std::vector<float> & logits, float top) {
+    std::vector<float> weights(logits.size());
+    for (size_t index = 0; index < logits.size(); ++index) {
+        weights[index] = std::exp(logits[index] - top);
+    }
+    return weights;
+}
+
+float total_of(const std::vector<float> & weights) {
     float total = 0.0f;
-    for (float logit : logits) total += std::exp(logit - top);
+    for (float weight : weights) total += weight;
     return total;
 }
 
-std::vector<float> leader_masses(const std::vector<float> & logits,
-                                 const std::vector<int> & leaders, float top, float total) {
+std::vector<float> leader_masses(const std::vector<float> & weights,
+                                 const std::vector<int> & leaders, float total) {
     std::vector<float> masses(leaders.size());
     for (size_t rank = 0; rank < leaders.size(); ++rank) {
-        masses[rank] = std::exp(logits[leaders[rank]] - top) / total;
+        masses[rank] = weights[leaders[rank]] / total;
     }
     return masses;
 }
@@ -88,9 +96,8 @@ std::vector<float> filter_scores(const std::vector<float> & logits,
                                  const sampling_params & params) {
     const std::vector<int> leaders =
         rank_leaders(logits, leader_count(params, logits.size()));
-    const float top = logits[leaders.front()];
-    const std::vector<float> masses =
-        leader_masses(logits, leaders, top, softmax_total(logits, top));
+    const std::vector<float> weights = exponentiated(logits, logits[leaders.front()]);
+    const std::vector<float> masses = leader_masses(weights, leaders, total_of(weights));
     const size_t kept = surviving_rank_count(masses, params.top_p);
     const float scale = 1.0f / std::max(params.temperature, MIN_TEMPERATURE);
     std::vector<float> scores(logits.size(), REJECTED);

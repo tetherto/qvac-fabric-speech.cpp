@@ -78,49 +78,16 @@ bool price_fast_position(detail::lm_model & lm, int position,
     return price_lm_graph(lm, build, out);
 }
 
-bool any_used_sched(const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
-    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
-        if (one.used_sched) return true;
-    }
-    return false;
-}
-
-::tts_cpp::detail::fit_graph_price summed(
-    const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
-    ::tts_cpp::detail::fit_graph_price total;
-    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
-        total.device_bytes = sat_add(total.device_bytes, one.device_bytes);
-        total.host_bytes = sat_add(total.host_bytes, one.host_bytes);
-    }
-    return total;
-}
-
-::tts_cpp::detail::fit_graph_price widest(
-    const std::vector<::tts_cpp::detail::fit_graph_price> & priced) {
-    ::tts_cpp::detail::fit_graph_price peak;
-    for (const ::tts_cpp::detail::fit_graph_price & one : priced) {
-        peak.device_bytes = std::max(peak.device_bytes, one.device_bytes);
-        peak.host_bytes = std::max(peak.host_bytes, one.host_bytes);
-    }
-    peak.used_sched = true;
-    return peak;
-}
-
 // Position 0 primes from the slow transformer's hidden state and every later
-// one reads the code before it. Each keeps its own graph and its own arena --
-// unless one of them lands on the scheduler, which cannot hand out memory a
-// graph may keep: the first that does drops what was built and puts every
-// position back on the one shared arena. The projection follows the same fork,
-// so it adds the resident arenas or takes the widest shared one, never both.
+// one reads the code before it; how their prices combine lives with
+// fit_price_aggregate, next to the pricing it aggregates.
 bool price_fast_positions(detail::lm_model & lm, int num_codebooks,
-                          ::tts_cpp::detail::fit_graph_price & total) {
-    std::vector<::tts_cpp::detail::fit_graph_price> priced;
+                          ::tts_cpp::detail::fit_price_aggregate & prices) {
     for (int position = 0; position < num_codebooks; ++position) {
         ::tts_cpp::detail::fit_graph_price one;
         if (!price_fast_position(lm, position, one)) return false;
-        priced.push_back(one);
+        prices.add(one);
     }
-    total = any_used_sched(priced) ? widest(priced) : summed(priced);
     return true;
 }
 
@@ -290,12 +257,13 @@ FitResult fit_params(const FitOptions & opts) {
         // Fast head: every position keeps its own graph and its own arena for
         // the life of the model, so they all stay resident and the projection
         // adds them up.
-        ::tts_cpp::detail::fit_graph_price fast;
-        if (!price_fast_positions(m.lm, hp.num_codebooks, fast)) {
+        ::tts_cpp::detail::fit_price_aggregate fast_prices;
+        if (!price_fast_positions(m.lm, hp.num_codebooks, fast_prices)) {
             r.reason = "measurement-failed";
             return r;
         }
-        fast_positions_replayed = !fast.used_sched;
+        fast_positions_replayed = fast_prices.all_replayed();
+        const ::tts_cpp::detail::fit_graph_price fast = fast_prices.total();
         lm_compute = sat_add(lm_compute, fast.device_bytes);
         host_extra = sat_add(host_extra, fast.host_bytes);
 

@@ -321,6 +321,16 @@ trajectory match at F32 is unaffected.  `test-audio8-quantised-precision` pins
 the scoping per backend, over the LM's built graphs and the codec decoder's
 resident weights.
 
+**The fast head's graphs are built once and replayed.**  Every frame walks the
+same positions with the same shapes, and each position's causal mask is all
+zeros -- a fast position attends to the whole frame prefix -- so the mask
+depends only on the position and is written when the graph is built.  A cached
+graph must own its allocator (a shared arena moves under the other graphs the
+first time a bigger one reserves) and must never reach the scheduler fallback,
+which resets one shared arena per graph; a build that lands there drops what
+was built and the per-call path serves the rest of the model's life.
+`test-audio8-fast-cache-sched` pins both transitions.
+
 **Sampling follows the reference's order, which is unusual.**  top-k and top-p
 run on the raw logits and the temperature is applied to what survives, so
 temperature does not affect which candidates are in the running.  Semantic

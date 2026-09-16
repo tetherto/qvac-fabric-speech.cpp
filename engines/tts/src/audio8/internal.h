@@ -28,6 +28,12 @@ namespace detail {
 
 constexpr int AUDIO8_MAX_NODES = 8192;
 
+// Hard ceiling on the codebook count a GGUF may declare. Audio8 ships ten;
+// everything from the prompt rows to the fast KV cache to the per-position
+// graph set scales with this, so an unbounded value from model metadata would
+// size real allocations and real pricing loops.
+constexpr int AUDIO8_MAX_CODEBOOKS = 32;
+
 // The fast head is four layers over at most num_codebooks positions, so its
 // graphs are two orders of magnitude smaller than the cap above. They are held
 // for the life of the model, one per position, and an arena sized for 8192

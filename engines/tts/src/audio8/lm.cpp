@@ -245,9 +245,6 @@ ggml_tensor * build_fast_pass_graph(lm_model & model, scratch & build, int posit
                                     model.precise_outputs));
 }
 
-// Every fast position attends to the whole frame prefix, so its causal mask is
-// all zeros and depends only on the position. The graph outlives the frame, so
-// the mask is written when it is built rather than before every run.
 void write_fast_mask(ggml_cgraph * graph, int position) {
     std::vector<float> mask_values(position + 1);
     fill_causal_mask(mask_values.data(), position + 1, 1, position, /*window=*/0);

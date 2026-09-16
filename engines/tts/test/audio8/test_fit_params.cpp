@@ -317,6 +317,67 @@ void run_synthetic_lm_gates() {
                "wrong-architecture decoder was not Error");
     }
 
+    // 6. A codebook count outside the supported range never reaches the
+    //    per-position pricing loop: the load rejects it first. The metadata
+    //    lies while the tensors stay tiny, which is exactly the malformed-file
+    //    shape the bound exists for.
+    {
+        const std::string absurd_path = path + ".absurd-codebooks";
+        ggml_context * headers = nullptr;
+        gguf_init_params open_params = {/*no_alloc=*/true, &headers};
+        gguf_context * g = gguf_init_from_file(path.c_str(), open_params);
+        expect(g != nullptr, "could not reopen the tiny LM to corrupt it");
+        if (g) {
+            gguf_set_val_u32(g, "audio8.lm.num_codebooks", 1u << 20);
+            gguf_write_to_file(g, absurd_path.c_str(), /*only_meta=*/true);
+            gguf_free(g);
+        }
+        if (headers) ggml_free(headers);
+
+        lm_model rejected;
+        fit_load_measure rejected_load;
+        std::string load_error;
+        expect(!load_lm_metadata_only(absurd_path, 0, rejected, rejected_load, &load_error),
+               "an absurd codebook count loaded anyway");
+        expect(load_error.find("codebooks") != std::string::npos,
+               "the rejection does not name the codebook count: '" + load_error + "'");
+        free_lm(rejected);
+        fs::remove(absurd_path);
+    }
+
+    // 7. How position prices combine, by dispatch path: replayed positions each
+    //    keep an arena and add; once any position is scheduler-backed, the
+    //    direct ones share one growing allocator and the scheduler ones share
+    //    the scheduler's, so the widest of each coexist.
+    {
+        ::tts_cpp::detail::fit_graph_price direct_small{100, 0, false};
+        ::tts_cpp::detail::fit_graph_price direct_large{300, 0, false};
+        ::tts_cpp::detail::fit_graph_price sched_small{50, 10, true};
+        ::tts_cpp::detail::fit_graph_price sched_large{200, 40, true};
+
+        ::tts_cpp::detail::fit_price_aggregate all_direct;
+        all_direct.add(direct_small);
+        all_direct.add(direct_large);
+        expect(all_direct.all_replayed(), "direct-only prices reported a scheduler");
+        expect_eq(400, all_direct.total().device_bytes, "direct-only device sum");
+
+        ::tts_cpp::detail::fit_price_aggregate mixed;
+        mixed.add(direct_small);
+        mixed.add(direct_large);
+        mixed.add(sched_small);
+        mixed.add(sched_large);
+        expect(!mixed.all_replayed(), "a scheduler-backed price went unnoticed");
+        expect_eq(500, mixed.total().device_bytes,
+                  "mixed device total is not widest-direct plus widest-sched");
+        expect_eq(40, mixed.total().host_bytes,
+                  "mixed host total is not the widest scheduler-backed portion");
+
+        ::tts_cpp::detail::fit_price_aggregate sched_only;
+        sched_only.add(sched_small);
+        sched_only.add(sched_large);
+        expect_eq(200, sched_only.total().device_bytes, "sched-only device peak");
+    }
+
     fs::remove(path);
 }
 

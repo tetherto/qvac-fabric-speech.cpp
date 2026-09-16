@@ -19,6 +19,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace tts_cpp::detail {
@@ -27,6 +28,48 @@ struct fit_graph_price {
     uint64_t device_bytes = 0;  // the primary backend's portion
     uint64_t host_bytes   = 0;  // the CPU-fallback portion on sched-path graphs
     bool     used_sched   = false;
+};
+
+// Running aggregate over graphs that are each replayed from their own resident
+// arena until the first of them prices scheduler-backed -- at which point the
+// runtime drops every kept graph and all of them share arenas per call: the
+// direct ones one growing allocator, the scheduler-backed ones the scheduler's.
+// total() follows that fork: the sum of the arenas while all are replayed, the
+// widest direct plus the widest scheduler-backed once any is not.
+struct fit_price_aggregate {
+    fit_graph_price direct_sum;
+    fit_graph_price direct_peak;
+    fit_graph_price sched_peak;
+    bool any_sched = false;
+
+    static uint64_t sat_add_u64(uint64_t a, uint64_t b) {
+        const uint64_t sum = a + b;
+        return sum < a ? UINT64_MAX : sum;
+    }
+
+    void add(const fit_graph_price & one) {
+        if (one.used_sched) {
+            any_sched = true;
+            sched_peak.device_bytes = std::max(sched_peak.device_bytes, one.device_bytes);
+            sched_peak.host_bytes = std::max(sched_peak.host_bytes, one.host_bytes);
+            return;
+        }
+        direct_sum.device_bytes = sat_add_u64(direct_sum.device_bytes, one.device_bytes);
+        direct_sum.host_bytes = sat_add_u64(direct_sum.host_bytes, one.host_bytes);
+        direct_peak.device_bytes = std::max(direct_peak.device_bytes, one.device_bytes);
+        direct_peak.host_bytes = std::max(direct_peak.host_bytes, one.host_bytes);
+    }
+
+    bool all_replayed() const { return !any_sched; }
+
+    fit_graph_price total() const {
+        if (all_replayed()) return direct_sum;
+        fit_graph_price mixed;
+        mixed.device_bytes = sat_add_u64(direct_peak.device_bytes, sched_peak.device_bytes);
+        mixed.host_bytes = sat_add_u64(direct_peak.host_bytes, sched_peak.host_bytes);
+        mixed.used_sched = true;
+        return mixed;
+    }
 };
 
 // Price one freshly built graph. The graph's weight/state leafs must already

@@ -569,6 +569,15 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
         if (error) *error = meta.ok() ? shared.error() : meta.error();
         return false;
     }
+    if (model.hp.num_codebooks < 1 || model.hp.num_codebooks > AUDIO8_MAX_CODEBOOKS) {
+        if (error) {
+            *error = "audio8: the model declares " +
+                     std::to_string(model.hp.num_codebooks) +
+                     " codebooks, outside the supported 1.." +
+                     std::to_string(AUDIO8_MAX_CODEBOOKS);
+        }
+        return false;
+    }
 
     model.backend = init_backend(n_gpu_layers);
     if (!model.backend) {
@@ -633,12 +642,16 @@ bool load_lm_metadata_only(const std::string & path, int n_gpu_layers,
     return load_lm_impl(path, n_gpu_layers, model, error, &measure);
 }
 
-void free_lm(lm_model & model) {
+void free_fast_graphs(lm_model & model) {
     for (lm_model::fast_graph & cached : model.fast_graphs) {
         if (cached.ctx) ggml_free(cached.ctx);
         if (cached.allocr) ggml_gallocr_free(cached.allocr);
     }
     model.fast_graphs.clear();
+}
+
+void free_lm(lm_model & model) {
+    free_fast_graphs(model);
     ::tts_cpp::detail::sched_fallback_free(model.sched);
     if (model.slow_allocr) ggml_gallocr_free(model.slow_allocr);
     if (model.fast_allocr) ggml_gallocr_free(model.fast_allocr);
