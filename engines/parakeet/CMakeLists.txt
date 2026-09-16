@@ -1185,6 +1185,21 @@ if (PARAKEET_BUILD_TESTS)
             EXE      test-transcribe-coreml-parity
             ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
+
+        # Drive Unified RNN-T beyond the 1501-mel-frame sidecar capacity. The
+        # test proves the fixed-capacity long-form plan is selected, every
+        # encoder window stays on Core ML, and its token stream remains close
+        # to the forced-ggml reference.
+        add_executable(test-rnnt-coreml-long-form
+            test/test_rnnt_coreml_long_form.cpp)
+        target_link_libraries(test-rnnt-coreml-long-form PRIVATE qvac-parakeet)
+        target_include_directories(test-rnnt-coreml-long-form PRIVATE include)
+        parakeet_apply_ccache(test-rnnt-coreml-long-form)
+        parakeet_register_test(test-rnnt-coreml-long-form
+            LABEL    "fixture"
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+                     "1501" "16" "0.95"
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity

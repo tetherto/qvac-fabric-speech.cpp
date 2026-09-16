@@ -19,6 +19,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRIVER="$HERE/run-family.sh"
 REAL_SPEC="$HERE/families.json"
+DESKTOP_WORKFLOW="$HERE/../../.github/workflows/speech-benchmark-desktop.yml"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -106,6 +107,12 @@ jq -e '."parakeet-unified".coreml_compare_on_darwin == true and
 jq -e '."parakeet-unified".correctness.reference == .parakeet.correctness.reference' \
   "$REAL_SPEC" > /dev/null \
   || fail "parakeet-unified and TDT must use the same JFK WER reference"
+unified_cache_key="$(awk '
+  /id: parakeet-unified-coreml-cache/ { in_cache = 1 }
+  in_cache && /key:/ { print; exit }
+' "$DESKTOP_WORKFLOW")"
+[[ "$unified_cache_key" == *"scripts/benchmarks/families.json"* ]] \
+  || fail "parakeet-unified Core ML cache key must hash families.json so changing coreml_source_gguf invalidates stale sidecars"
 ok "parakeet-unified declares the fixed 1501-frame Core ML comparison"
 
 # whisper is the time-wrapped ASR family and must reuse the same JFK reference

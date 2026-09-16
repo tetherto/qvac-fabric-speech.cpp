@@ -322,7 +322,10 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: bench-models/parakeet-unified/parakeet-unified-en-0.6b-encoder.mlmodelc
-          key: parakeet-unified-q8-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          # families.json pins coreml_source_gguf (including its dated S3 key).
+          # Hash it so a checkpoint change cannot restore a sidecar compiled
+          # from stale encoder weights.
+          key: parakeet-unified-q8-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/benchmarks/families.json', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Install Core ML exporter dependencies
         if: runner.os == 'macOS' && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-unified' && steps.parakeet-unified-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true'))
