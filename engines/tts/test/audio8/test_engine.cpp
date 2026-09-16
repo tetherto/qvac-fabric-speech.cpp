@@ -17,6 +17,7 @@
 #include "ggml.h"
 #include "gguf.h"
 #include "gpu_arm.h"
+#include "test_env_portable.h"
 #include "json.hpp"
 #include "npy.h"
 

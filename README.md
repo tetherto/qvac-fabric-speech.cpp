@@ -111,7 +111,11 @@ the [TTS capability table](engines/tts/README.md#capabilities).
 
 The Audio8 Core ML sidecar takes the codec's synthesis stack (the stage that
 dominates a CPU synthesis) off ggml; it is exported from the decoder GGUF by
-`engines/tts/scripts/export-audio8-codec-coreml.py`, see the
+`engines/tts/scripts/export-audio8-codec-coreml.py`, hosts read
+`Engine::codec_on_coreml()` (sidecar loaded) and
+`SynthesisResult::codec_synthesis_backend` (where a call's codec synthesis ran;
+the language model always stays on `backend_name()`), and any sidecar failure
+falls back to ggml -- see the
 [Audio8 guide](engines/tts/docs/audio8.md#core-ml-codec-sidecar). The
 ACE-Step Core ML sidecar is exported by
 `engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural

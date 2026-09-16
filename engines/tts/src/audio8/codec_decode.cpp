@@ -353,15 +353,11 @@ bool run_block(codec_model & model, const std::vector<float> & post, const block
 #ifdef TTS_CPP_USE_COREML
 enum class coreml_status { done, unavailable, cancelled };
 
-// AUDIO8_COREML_STRICT turns the silent ggml fallback into a decode failure,
-// so a parity or benchmark run cannot measure ggml and report it as Core ML.
-// A production synthesis never sets it.
+// Test-only: fail instead of falling back to ggml.
 bool coreml_strict() {
     return std::getenv("AUDIO8_COREML_STRICT") != nullptr;
 }
 
-// One fixed-width window through the sidecar: the frames it covers, zero on
-// the right past the end of the utterance, and only the core kept.
 bool run_coreml_window(codec_model & model, const std::vector<float> & post,
                        const coreml_window & span, std::vector<float> & in,
                        std::vector<float> & out, std::vector<float> & pcm_out) {
@@ -380,9 +376,7 @@ bool run_coreml_window(codec_model & model, const std::vector<float> & post,
     return true;
 }
 
-// The sidecar's counterpart of run_synthesis_blocks. A cancel leaves the
-// frames of the completed windows in pcm_out, as the block path leaves its
-// completed blocks; `unavailable` leaves it empty for the ggml fallback.
+// Cancel keeps the completed windows; unavailable leaves pcm_out empty for the fallback.
 coreml_status run_synthesis_coreml(codec_model & model, const std::vector<float> & post,
                                    int n_frames, const cancel_hook & cancel,
                                    std::vector<float> & pcm_out, decode_timing & clock,
@@ -420,8 +414,6 @@ bool run_synthesis_blocks(codec_model & model, const std::vector<float> & post,
                           std::vector<float> & pcm_out, decode_taps * taps,
                           decode_timing & clock, std::string * error) {
 #ifdef TTS_CPP_USE_COREML
-    // The taps are the ggml stack's own stage boundaries, so a caller asking
-    // for them is asking for that stack.
     if (model.coreml && !taps) {
         switch (run_synthesis_coreml(model, post, n_frames, cancel, pcm_out, clock, error)) {
             case coreml_status::done:      return true;
@@ -529,11 +521,6 @@ bool measure_decode_memory(codec_model & model, int n_frames, codec_fit_measure 
         out.device_bytes = sat_add(out.device_bytes, price.device_bytes);
         out.host_bytes   = sat_add(out.host_bytes, price.host_bytes);
     }
-
-    // With a Core ML sidecar the synthesis stack never touches the ggml block
-    // arena, so there is nothing to price for it: the sidecar's own working set
-    // is Core ML's, outside the device memory this projection accounts for.
-    if (model.synthesis_on_coreml) return true;
 
     const int context = synthesis_context(model);
     const block_plan plan = plan_blocks(model, context, n_frames, /*with_taps=*/false);

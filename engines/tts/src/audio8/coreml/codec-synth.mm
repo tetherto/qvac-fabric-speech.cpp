@@ -28,9 +28,6 @@ uint16_t encode_float16(float f) {
     return out;
 }
 
-// AUDIO8_COREML_COMPUTE_UNITS narrows the placement for comparisons; the
-// default lets Core ML use every unit, which is where the Neural Engine path
-// comes from.
 MLComputeUnits requested_compute_units(std::string * label) {
     const char * env = std::getenv("AUDIO8_COREML_COMPUTE_UNITS");
     const std::string requested = env != nullptr ? env : "";
@@ -82,7 +79,6 @@ bool supported_data_type(MLMultiArrayDataType dt) {
     return dt == MLMultiArrayDataTypeFloat32 || dt == MLMultiArrayDataTypeFloat16;
 }
 
-// Leading dimensions must all be 1; the trailing ones are the shape asked for.
 bool shape_is(const std::vector<int64_t> & dims, int64_t channels, int64_t length) {
     if (dims.size() < 2) return false;
     for (std::size_t i = 0; i + 2 < dims.size(); ++i) {
@@ -91,8 +87,6 @@ bool shape_is(const std::vector<int64_t> & dims, int64_t channels, int64_t lengt
     return dims[dims.size() - 2] == channels && dims[dims.size() - 1] == length;
 }
 
-// The window the model was exported at, or 0 when the interface is not the
-// codec synthesis contract.
 int64_t validate_model_interface(MLModel * model, int64_t latent_dim, int64_t frame_size,
                                  NSString ** in_name, NSString ** out_name) {
     *in_name  = sole_multiarray_feature(model.modelDescription.inputDescriptionsByName);
@@ -123,8 +117,6 @@ struct CachedIo {
     MLPredictionOptions         * options  = nil;
 };
 
-// One input array, one output backing, allocated once: every window has the
-// same shape, so nothing is allocated per prediction.
 bool create_cached_io(MLModel * model, NSString * in_name, NSString * out_name, CachedIo * io) {
     MLMultiArrayConstraint * in_constraint =
         model.modelDescription.inputDescriptionsByName[in_name].multiArrayConstraint;
@@ -162,8 +154,6 @@ ArrayView view_of(MLMultiArray * arr) {
             arr.dataType == MLMultiArrayDataTypeFloat32};
 }
 
-// post is channels-inner ([latent_dim, window] in ggml terms); the array is
-// [1, latent_dim, window] with time inner-most.
 void fill_post_array(MLMultiArray * arr, const float * post, int64_t latent_dim, int64_t window) {
     const ArrayView v = view_of(arr);
     for (int64_t c = 0; c < latent_dim; ++c) {

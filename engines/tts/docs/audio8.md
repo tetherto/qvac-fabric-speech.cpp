@@ -375,11 +375,25 @@ times the ggml GPU synthesis against the sidecar on deterministic 10 s and
 24 s code sequences (median of 3 after a warm-up that absorbs the one-time
 on-device compilation of a fresh export) and prints a markdown table; it
 fails below the parity gate, so its numbers are correctness-checked, and the
-TTS CI macOS lane appends its table to the job summary. The memory-fit
-projection (`audio8-fit-params`) follows the sidecar: when one sits next to
-the decoder GGUF the ggml synthesis arena is not priced, because the sidecar
-leaves it empty; a Core ML prediction failure at run time falls back to the
-ggml blocks, whose width is then chosen from the memory free at that moment.
+TTS CI macOS lane appends its table to the job summary.
+
+Two reports tell a host where the codec ran. `Engine::codec_on_coreml()` is
+the load status: true when a sidecar next to the decoder GGUF initialised (the
+language model and the post transformer still run on `backend_name()`).
+`SynthesisResult::codec_synthesis_backend` is per call: `"ggml"`, or the
+sidecar's compute label (`coreml-all`, `coreml-gpu`, ...) when the synthesis
+stack actually ran there. The two differ whenever a loaded sidecar cannot
+serve a call -- a window that cannot carry the causal context, or a Core ML
+prediction failure -- and the engine falls back to the ggml blocks. Because
+that fallback stays possible, the memory-fit projection (`audio8-fit-params`)
+prices the ggml synthesis arena whether or not a sidecar is present; with a
+working sidecar it over-reports by that arena rather than under-reporting the
+fallback. `test-audio8-codec-coreml-parity` covers all of it: an absent
+sidecar under `AUDIO8_COREML_STRICT`, a sidecar directory that is not a model
+(load status false, ggml synthesis), and a sidecar exported at a window that
+cannot carry the context (`--window 8`; loaded, falls back bit-exactly to the
+ggml decode, fails under `AUDIO8_COREML_STRICT`), each also through the public
+`Engine` with a synthetic language model.
 
 ### Engine notes
 

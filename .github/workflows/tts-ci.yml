@@ -195,26 +195,25 @@ jobs:
             exit 1
           fi
 
-      # Core ML Audio8 codec sidecar fixture: the decoder GGUF is converted
-      # from the upstream codec checkpoint by the repo's own converter and the
-      # sidecar exported by the repo's own script, so the parity test covers
-      # converter, exporter, Core ML execution, runtime dispatch and window
-      # stitching end to end. Cache key carries the checkpoint revision and
-      # the script hashes; the f16 decoder is the smallest tier the synthesis
-      # stack is stored at without loss.
+      # Core ML Audio8 codec sidecar fixtures, converted and exported by the
+      # repo's own scripts: the 64-frame sidecar for parity and speed, and an
+      # 8-frame one (window <= causal context) that loads but cannot serve, for
+      # the fallback regression. Cache key: checkpoint revision + script hashes.
       - name: Cache Core ML Audio8 fixture
         if: runner.os == 'macOS'
         id: audio8-coreml-cache
         uses: actions/cache@v4
         with:
-          path: audio8-coreml-fixture
+          path: |
+            audio8-coreml-fixture
+            audio8-coreml-fixture-fallback
           key: audio8-codec-coreml-${{ runner.os }}-${{ runner.arch }}-f07040f3-${{ hashFiles('engines/tts/scripts/export-audio8-codec-coreml.py', 'engines/tts/scripts/convert-audio8-codec-to-gguf.py', 'engines/tts/scripts/audio8_reference.py', 'engines/tts/test/test_export_audio8_codec_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Build Core ML Audio8 fixture
         if: runner.os == 'macOS' && steps.audio8-coreml-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          mkdir -p audio8-coreml-fixture audio8-checkpoint
+          mkdir -p audio8-coreml-fixture audio8-coreml-fixture-fallback audio8-checkpoint
           for f in config.json codec.pth; do
             curl -sSfL --retry 3 -o "audio8-checkpoint/$f" \
               "https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6b/resolve/f07040f3d151f1ba0253bfb92cb2f5dd38b44594/$f"
@@ -231,7 +230,14 @@ jobs:
           .venv-coreml/bin/python engines/tts/scripts/export-audio8-codec-coreml.py \
             --gguf audio8-coreml-fixture/audio8-codec-decoder-f16.gguf \
             --compile-dir audio8-coreml-fixture
-          rm -rf audio8-coreml-fixture/audio8-codec-decoder.mlpackage audio8-checkpoint
+          ln -sf "$GITHUB_WORKSPACE/audio8-coreml-fixture/audio8-codec-decoder-f16.gguf" \
+            audio8-coreml-fixture-fallback/audio8-codec-decoder-f16.gguf
+          .venv-coreml/bin/python engines/tts/scripts/export-audio8-codec-coreml.py \
+            --gguf audio8-coreml-fixture-fallback/audio8-codec-decoder-f16.gguf --window 8 \
+            --out audio8-coreml-fixture-fallback/audio8-codec-decoder.mlpackage \
+            --compile-dir audio8-coreml-fixture-fallback
+          rm -rf audio8-coreml-fixture/audio8-codec-decoder.mlpackage \
+            audio8-coreml-fixture-fallback/audio8-codec-decoder.mlpackage audio8-checkpoint
 
       # Runs the binary directly: a skip (exit 77) fails the step, so a green
       # lane proves the parity assertions ran against the staged sidecar.
@@ -239,7 +245,13 @@ jobs:
         if: runner.os == 'macOS'
         env:
           AUDIO8_COREML_TEST_MODELS_DIR: ${{ github.workspace }}/audio8-coreml-fixture
-        run: ./build/test-audio8-codec-coreml-parity
+          AUDIO8_COREML_FALLBACK_MODELS_DIR: ${{ github.workspace }}/audio8-coreml-fixture-fallback
+        run: |
+          # The fallback fixture links the GGUF by absolute path; a restored
+          # cache keeps the link, so re-point it in case the workspace moved.
+          ln -sf "$GITHUB_WORKSPACE/audio8-coreml-fixture/audio8-codec-decoder-f16.gguf" \
+            audio8-coreml-fixture-fallback/audio8-codec-decoder-f16.gguf
+          ./build/test-audio8-codec-coreml-parity
 
       # Synthesis benchmark, ggml Metal vs the Core ML sidecar on the runner;
       # the markdown table lands in the job summary. The binary fails on

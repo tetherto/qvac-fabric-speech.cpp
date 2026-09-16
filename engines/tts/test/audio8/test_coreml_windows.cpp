@@ -1,14 +1,5 @@
-// The Core ML codec sidecar's portable half: the fixed-window plan the
-// synthesis stack is walked with (coreml_windows.h) and the sidecar naming
-// rule (coreml_path.h). Pure arithmetic and string logic -- no model, no ggml,
-// no Apple frameworks -- so it runs on every platform.
-//
-// The plan's contract, which the ggml block path's bit-exactness rests on
-// too: every window is exactly the exported width and lies inside the
-// utterance (only a single window on an utterance shorter than the width is
-// zero-padded), the kept cores tile [0, n_frames) without gap or overlap, and
-// every core after the first starts at least `context` frames into its
-// window, so the causal convolutions have the history they reach back over.
+// Model-free: the sidecar's window plan (coreml_windows.h) and naming rule
+// (coreml_path.h) on every platform.
 
 #include "audio8/coreml_path.h"
 #include "audio8/coreml_windows.h"

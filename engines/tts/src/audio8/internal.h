@@ -294,17 +294,10 @@ struct codec_model {
     size_t synthesis_scratch_budget = 0;
     int analysis_block_columns = 128;
 
-    // The Core ML sidecar for the synthesis stack, when the build has
-    // TTS_CPP_COREML, the platform is Apple, and a compiled model sits next
-    // to the decoder GGUF (coreml_codec_sidecar_path). Synthesis then runs in
-    // fixed windows of the exported width (coreml_windows.h) instead of the
-    // budgeted ggml blocks above, which the sidecar ignores; the ggml path
-    // stays as the fallback for anything it cannot serve. Decoder only.
+    // Core ML sidecar for the synthesis stack (decoder only; TTS_CPP_COREML
+    // builds, compiled model next to the GGUF). Synthesis runs in windows of
+    // the exported width and falls back to the ggml blocks when it cannot.
     audio8_coreml_codec_context * coreml = nullptr;
-    // Whether synthesis is expected to run on the sidecar: the real load sets
-    // it when the sidecar initialised, the metadata-only load when one is
-    // present and not disabled, so the fit projection prices the path the
-    // engine will take (a sidecar leaves the ggml synthesis arena empty).
     bool synthesis_on_coreml = false;
 
     conv_weights enc_in;
@@ -466,16 +459,10 @@ struct decode_timing {
     // Core ML sidecar the width is the exported window and the scratch zero.
     int block_frames = 0;
     size_t block_scratch = 0;
-    // "ggml", or the sidecar's compute label ("coreml-all", ...) when the
-    // synthesis stack ran on Core ML.
-    std::string synthesis_backend = "ggml";
+    std::string synthesis_backend = "ggml";  // or the sidecar's compute label
 };
 
-// Frames of history one synthesis block or Core ML window has to be handed
-// before its own, walked back from a single output sample through the whole
-// synthesis stack. Both the ggml block path and the sidecar's window plan
-// drop exactly this many leading frames of every block that does not start
-// at zero.
+// Frames of history a synthesis block or Core ML window needs before its own.
 int synthesis_context_frames(const codec_model & model);
 
 // What synthesis_block_frames == 0 resolves the scratch budget to, given a

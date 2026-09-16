@@ -38,7 +38,7 @@ load their model once and reuse it across synthesis calls:
 | `tts_cpp::supertonic` | `Engine::synthesize` | model-rate PCM, usually 44.1 kHz |
 | `tts_cpp::parler` | `Engine::synthesize` | 44.1 kHz PCM conditioned by a description |
 | `tts_cpp::cosyvoice` | `Engine::synthesize` | 24 kHz PCM |
-| `tts_cpp::audio8` | `Engine::synthesize` | 44.1 kHz PCM, optionally cloned from `VoicePrompt` |
+| `tts_cpp::audio8` | `Engine::synthesize` | 44.1 kHz PCM, optionally cloned from `VoicePrompt`; `Engine::codec_on_coreml()` reports whether the Core ML codec sidecar loaded and `SynthesisResult::codec_synthesis_backend` where each call's codec synthesis ran (`"ggml"` or a `coreml-*` label), see the [Audio8 guide](audio8.md#core-ml-codec-sidecar) |
 | `tts_cpp::lavasr` | `Denoiser` / `Enhancer` | enhanced PCM |
 
 The public surface also includes Chatterbox's lower-level

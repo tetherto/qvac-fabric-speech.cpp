@@ -11,6 +11,7 @@
 
 #include "audio8/internal.h"
 #include "gpu_arm.h"
+#include "test_env_portable.h"
 #include "npy.h"
 
 #include <cmath>

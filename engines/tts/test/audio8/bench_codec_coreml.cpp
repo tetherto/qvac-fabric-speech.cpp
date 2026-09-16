@@ -1,15 +1,6 @@
-// Core ML codec sidecar benchmark: times the ggml GPU synthesis and the
-// sidecar synthesis of the same deterministic code sequences and prints a
-// markdown table to stdout (detail lines go to stderr), so a CI step can
-// append the numbers to its job summary. The compared figure is the
-// synthesis stage alone: the quantizer banks and the post transformer run on
-// ggml in both legs. The first sidecar synthesis is a discarded warm-up
-// because a freshly compiled .mlmodelc pays a one-time on-device compilation.
-// The two legs must also agree at the parity gate, so a run that produces
-// fast but wrong audio fails instead of reporting a win.
-//
-// Skips (exit 77) under the same conditions as test-audio8-codec-coreml-parity,
-// and when no GPU ggml backend resolves (the reference would be CPU).
+// ggml GPU synthesis vs the Core ML sidecar on the same code sequences,
+// parity-gated, markdown table to stdout. Skips (77) like the parity test and
+// when no GPU ggml backend resolves.
 
 #include <algorithm>
 #include <chrono>
@@ -36,6 +27,7 @@ int main() {
 
 #include "audio8/coreml_path.h"
 #include "audio8/internal.h"
+#include "test_env_portable.h"
 
 #include <sys/stat.h>
 
@@ -171,9 +163,6 @@ bool bench_one(const std::string & gguf, int audio_seconds, bench_row * row, boo
     const std::vector<int32_t> codes = make_codes(ggml.model.hp, n_frames, 0x2468ace1u);
     if (!time_leg(ggml.model, codes, n_frames, row->ggml)) return false;
 
-    // Strict: a sidecar init or predict failure fails the run instead of
-    // timing the ggml fallback and reporting it as Core ML. The sidecar leg
-    // loads on the same GPU backend so the shared latent stage is identical.
     setenv("AUDIO8_COREML_STRICT", "1", 1);
     owned_codec coreml;
     bool ok = load_codec(gguf, GPU_LAYERS, coreml.model, &error);

@@ -551,10 +551,6 @@ bool backend_picks_codes(ggml_backend_t backend, const lm_hparams & hp) {
     return ggml_backend_supports_op(backend, ggml_argmax(probe.ctx, logits));
 }
 
-// Whether the synthesis stack should look for a Core ML sidecar at all: the
-// build has to carry the wrapper and AUDIO8_COREML_DISABLE must be unset. Both
-// the real load and the metadata-only load ask this, so the fit projection
-// follows the path the engine takes.
 bool coreml_sidecar_enabled() {
 #ifdef TTS_CPP_USE_COREML
     return std::getenv("AUDIO8_COREML_DISABLE") == nullptr;
@@ -568,10 +564,7 @@ bool path_exists(const std::string & path) {
     return stat(path.c_str(), &st) == 0;
 }
 
-// The decoder's Core ML sidecar, when one sits next to the GGUF. The real
-// load initialises it (a fresh export pays a one-time on-device compilation
-// here, which the OS caches); the metadata-only load only looks for it, so a
-// fit preflight stays a preflight.
+// The metadata-only load only checks for the sidecar, so a fit preflight stays a preflight.
 void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
                            bool metadata_only) {
     model.coreml = nullptr;

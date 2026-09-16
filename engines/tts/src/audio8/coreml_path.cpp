@@ -24,7 +24,6 @@ bool is_quant_tag(const std::string & token) {
     return false;
 }
 
-// The last '.' or '-' of the basename, or npos when there is none.
 std::size_t basename_separator(const std::string & path, std::size_t slash) {
     const std::size_t sep = path.find_last_of(".-");
     if (sep == std::string::npos) return std::string::npos;
