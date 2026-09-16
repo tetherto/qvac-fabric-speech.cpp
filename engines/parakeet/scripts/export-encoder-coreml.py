@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a Parakeet Unified RNN-T, TDT, EOU, or Sortformer v2.1
+"""Export a Parakeet Unified RNN-T, TDT, EOU, Nemotron, or Sortformer v2.1
 FastConformer encoder
 from GGUF to a Core ML package consumed by the parakeet.cpp Engine
 (the encoder I/O contract lives in src/coreml/parakeet-encoder.h).
@@ -10,8 +10,8 @@ ref-encoder-from-gguf.py so it matches the ggml encoder numerically.
 Three input-shape modes:
   - Fixed (default): torch.jit.trace at a single mel length (from a sample wav
     or an explicit count). Unified RNN-T and TDT treat that length as a
-    capacity. EOU and Sortformer batch routing require the exact exported
-    length.
+    capacity. EOU, Nemotron, and Sortformer batch routing require the exact
+    exported length.
   - Sortformer AOSC (--bypass-pre-encode): trace only the Conformer block stack
     at a fixed encoder-frame capacity. The runtime pads shorter cache/FIFO/chunk
     slabs, supplies an attention-validity mask, and crops the output.
@@ -124,9 +124,9 @@ def model_type(meta):
 
 def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
     kind = model_type(meta)
-    if kind not in ("rnnt", "tdt", "eou", "sortformer"):
+    if kind not in ("rnnt", "tdt", "eou", "nemotron", "sortformer"):
         raise ValueError(
-            "Core ML encoder export supports Unified RNN-T, TDT, EOU, and "
+            "Core ML encoder export supports Unified RNN-T, TDT, EOU, Nemotron, and "
             f"Sortformer v2.1, got {kind!r}")
     if bypass_pre_encode and kind != "sortformer":
         raise ValueError("--bypass-pre-encode is supported only for Sortformer v2.1")
@@ -181,6 +181,24 @@ def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
         if int(meta.get("parakeet.encoder.att_context_size_left", -1)) < 0 or \
            int(meta.get("parakeet.encoder.att_context_size_right", -1)) < 0:
             raise ValueError("EOU Core ML export requires finite attention context metadata")
+    if kind == "nemotron":
+        if flexible:
+            raise ValueError("Nemotron Core ML export requires a fixed shape; omit --flexible")
+        expected = {
+            "parakeet.encoder.causal_downsampling": True,
+            "parakeet.encoder.conv_context_size": "causal",
+            "parakeet.encoder.conv_norm_type": "layer_norm",
+            "parakeet.encoder.att_context_style": "chunked_limited",
+        }
+        for key, value in expected.items():
+            if meta.get(key) != value:
+                raise ValueError(
+                    f"unsupported Nemotron encoder metadata: {key}={meta.get(key)!r}, "
+                    f"expected {value!r}")
+        if int(meta.get("parakeet.encoder.att_context_size_left", -1)) < 0 or \
+           int(meta.get("parakeet.encoder.att_context_size_right", -1)) < 0:
+            raise ValueError(
+                "Nemotron Core ML export requires finite attention context metadata")
     return kind
 
 
@@ -319,7 +337,7 @@ def conformer_stack_forward(ref, x, weights, meta, attention_mask=None,
     att_mask = attention_mask
     causal_conv = False
     conv_layer_norm = False
-    if kind == "eou":
+    if kind in ("eou", "nemotron"):
         att_mask = chunked_attention_mask(
             length,
             int(meta["parakeet.encoder.att_context_size_left"]),
@@ -334,7 +352,7 @@ def conformer_stack_forward(ref, x, weights, meta, attention_mask=None,
 
 
 def encoder_forward(ref, mel, weights, meta):
-    if model_type(meta) == "eou":
+    if model_type(meta) in ("eou", "nemotron"):
         x = causal_subsampling(mel, weights)
     else:
         x, _ = ref.subsampling(mel, weights)

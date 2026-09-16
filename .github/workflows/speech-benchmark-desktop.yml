@@ -15,7 +15,7 @@ on:
       model_families:
         description: >-
           Comma-separated family names, or "all". Families:
-          whisper, parakeet (TDT), parakeet-unified, parakeet-eou
+          whisper, parakeet (TDT), parakeet-unified, parakeet-eou, parakeet-nemotron
           (Core ML vs Metal on macOS), sortformer, vad, chatterbox, supertonic, parler,
           cosyvoice, audio8, audio8-tts, lavasr, acestep, minimax.
         required: false
@@ -62,7 +62,7 @@ env:
   GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
   GGML_BRANCH: speech
   AWS_REGION: eu-central-1
-  ALL_FAMILIES: "whisper,parakeet,parakeet-unified,parakeet-eou,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,audio8-tts,lavasr,acestep,minimax"
+  ALL_FAMILIES: "whisper,parakeet,parakeet-unified,parakeet-eou,parakeet-nemotron,sortformer,vad,chatterbox,supertonic,parler,cosyvoice,audio8,audio8-tts,lavasr,acestep,minimax"
 
 jobs:
   # ---------- 1. Expand inputs into a matrix ------------------------------
@@ -327,8 +327,16 @@ jobs:
           # from stale encoder weights.
           key: parakeet-unified-q8-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/benchmarks/families.json', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
+      - name: Cache generated Nemotron Core ML sidecar
+        if: runner.os == 'macOS' && matrix.family == 'parakeet-nemotron'
+        id: parakeet-nemotron-coreml-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench-models/parakeet-nemotron/nemotron-3.5-asr-streaming-0.6b-encoder.mlmodelc
+          key: parakeet-nemotron-f16-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/benchmarks/families.json', 'engines/parakeet/scripts/export-encoder-coreml.py', 'engines/parakeet/scripts/ref-encoder-from-gguf.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
       - name: Install Core ML exporter dependencies
-        if: runner.os == 'macOS' && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-unified' && steps.parakeet-unified-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true'))
+        if: runner.os == 'macOS' && ((matrix.family == 'parakeet' && (steps.parakeet-f16-cache.outputs.cache-hit != 'true' || steps.parakeet-coreml-cache.outputs.cache-hit != 'true')) || (matrix.family == 'parakeet-unified' && steps.parakeet-unified-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-eou' && steps.parakeet-eou-coreml-cache.outputs.cache-hit != 'true') || (matrix.family == 'parakeet-nemotron' && steps.parakeet-nemotron-coreml-cache.outputs.cache-hit != 'true'))
         run: |
           set -euo pipefail
           coreml_python="$(command -v python3.11 || true)"
@@ -452,7 +460,7 @@ jobs:
 
       - name: Configure umbrella build
         env:
-          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && (matrix.family == 'parakeet' || matrix.family == 'parakeet-unified' || matrix.family == 'parakeet-eou') && 'ON' || 'OFF' }}
+          PARAKEET_COREML_FLAG: ${{ runner.os == 'macOS' && (matrix.family == 'parakeet' || matrix.family == 'parakeet-unified' || matrix.family == 'parakeet-eou' || matrix.family == 'parakeet-nemotron') && 'ON' || 'OFF' }}
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \

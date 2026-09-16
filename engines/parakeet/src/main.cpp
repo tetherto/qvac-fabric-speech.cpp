@@ -153,7 +153,7 @@ void print_usage(const char * argv0) {
         "  --bench-warmup N     warmup runs NOT counted in stats (default 2)\n"
         "  --bench-json PATH    in --bench mode, also write the stats as JSON to PATH\n"
         "  --require-coreml     require every benchmark encoder invocation to use\n"
-        "                       a supported Unified RNN-T/TDT/EOU Core ML sidecar;\n"
+        "                       a supported Unified RNN-T/TDT/EOU/Nemotron Core ML sidecar;\n"
         "                       fail on a missing sidecar or per-invocation ggml\n"
         "                       fallback\n"
         "  --profile            per-sub-stage encoder profiling: runs the encoder\n"
@@ -526,10 +526,11 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         }
         if (model.model_type != ParakeetModelType::RNNT &&
             model.model_type != ParakeetModelType::TDT &&
-            model.model_type != ParakeetModelType::EOU) {
+            model.model_type != ParakeetModelType::EOU &&
+            model.model_type != ParakeetModelType::NEMOTRON) {
             PARAKEET_LOG_ERROR(
-                "error: --require-coreml supports Unified RNN-T, TDT, and "
-                "EOU models; loaded %s\n",
+                "error: --require-coreml supports Unified RNN-T, TDT, EOU, and "
+                "Nemotron models; loaded %s\n",
                 model_type_name(model.model_type));
             return 3;
         }

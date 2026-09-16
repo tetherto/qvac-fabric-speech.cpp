@@ -136,6 +136,15 @@ jq -e '."parakeet-eou".coreml_compare_on_darwin == true and
   || fail "parakeet-eou must declare its exact-shape Core ML and WER benchmark contract"
 ok "parakeet-eou declares the fixed 1101-frame Core ML comparison"
 
+jq -e '."parakeet-nemotron".coreml_compare_on_darwin == true and
+       ."parakeet-nemotron".coreml_require_transcript_match == false and
+       ."parakeet-nemotron".coreml_model_basename == "nemotron-3.5-asr-streaming-0.6b" and
+       ."parakeet-nemotron".coreml_export_mel_frames == 1101 and
+       ."parakeet-nemotron".correctness.kind == "wer" and
+       (."parakeet-nemotron".args | index("--language") != null)' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-nemotron must declare its exact-shape Core ML, locale, and WER benchmark contract"
+ok "parakeet-nemotron declares the fixed 1101-frame Core ML comparison"
+
 # compute-wer.py: shipped self-test must pass. Catches accidental regressions
 # in the normalizer / DP without needing a real bench run.
 python3 "$HERE/compute-wer.py" --self-test > /dev/null \

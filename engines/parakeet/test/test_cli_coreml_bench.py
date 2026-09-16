@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the CLI benchmark's RNN-T/TDT/EOU Core ML reporting contract."""
+"""Exercise the CLI benchmark's Parakeet Core ML reporting contract."""
 
 import argparse
 import json

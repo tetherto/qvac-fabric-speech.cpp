@@ -1468,10 +1468,11 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
     if (model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
+        model.model_type != ParakeetModelType::NEMOTRON &&
         !supported_sortformer) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder supports Unified RNN-T, TDT, EOU, "
+                "parakeet: Core ML encoder supports Unified RNN-T, TDT, EOU, Nemotron, "
                 "and Sortformer v2.1; "
                 "using ggml for model type %s variant '%s'\n",
                 model_type_name(model.model_type), model.model_variant.c_str());
@@ -3577,6 +3578,7 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
     if (model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
+        model.model_type != ParakeetModelType::NEMOTRON &&
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
@@ -3595,9 +3597,9 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                encoder_is_offline(model.encoder_cfg);
     }
 
-    // The EOU graph bakes its causal/chunked attention geometry and shape into
-    // the compiled program. Never pad a shorter invocation: an extra future
-    // encoder frame can change both token emission and the <EOU> boundary.
+    // EOU and Nemotron graphs bake causal/chunked attention geometry and shape
+    // into the compiled program. Never pad a shorter invocation: added future
+    // encoder frames can change token emission (and the EOU boundary).
     const EncoderConfig & enc = model.encoder_cfg;
     const int fixed_frames = model_coreml_fixed_mel_frames(model);
     return fixed_frames > 0

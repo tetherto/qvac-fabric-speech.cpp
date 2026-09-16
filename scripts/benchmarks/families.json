@@ -8,6 +8,7 @@
       "source":                  "Where to fetch models from. 's3' (default) uses aws s3 cp against s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/<s3_prefix>/<key>. 'huggingface' uses curl against https://huggingface.co/<hf_repo>/resolve/<hf_ref>/<name> — vanilla whisper GGMLs (ggml-tiny.bin etc.) live on HuggingFace, not S3.",
       "s3_prefix":               "Prefix under s3://$MODEL_S3_BUCKET/qvac_models_compiled/ggml/. All entries in `models` are downloaded to models/<family>/<basename> from this prefix — the intermediate directory segments (dates etc.) are dropped in the local layout.",
       "coreml_compare_on_darwin":"Run the native benchmark twice on Darwin: required Core ML first, then the same command with PARAKEET_COREML_DISABLE=1 as the ggml baseline.",
+      "coreml_require_transcript_match": "Optional; defaults to true. Set false when both Core ML and ggml outputs are independently correctness-gated and quantized Core ML output may differ slightly.",
       "coreml_model_basename":  "Parakeet GGUF basename without the quantization suffix; used to derive the compiled sidecar name.",
       "coreml_source_gguf":      "Optional local GGUF filename used for Core ML export. Defaults to <coreml_model_basename>.f16.gguf.",
       "coreml_export_mel_frames":"Fixed mel-frame shape passed to the Core ML exporter.",
@@ -133,6 +134,38 @@
       "normalizer": "english"
     },
     "notes": "EOU benchmark. On Darwin the 1101-frame fixed sidecar must run every measured encoder invocation; the same F16 GGUF then runs with Core ML disabled as the Metal baseline. The EOU decoder remains on ggml Metal. Correctness compares normalized JFK WER and requires the Core ML and Metal transcripts to match."
+  },
+
+  "parakeet-nemotron": {
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": [
+      "2026-05-11/nemotron-3.5-asr-streaming-0.6b.f16.gguf"
+    ],
+    "coreml_compare_on_darwin": true,
+    "coreml_require_transcript_match": false,
+    "coreml_model_basename": "nemotron-3.5-asr-streaming-0.6b",
+    "coreml_export_mel_frames": 1101,
+    "args": [
+      "--verbose",
+      "--model", "${MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b.f16.gguf",
+      "--wav", "${AUDIO_DIR}/jfk.wav",
+      "--language", "en-US",
+      "--n-gpu-layers", "999",
+      "--bench",
+      "--bench-runs", "${RUNS}",
+      "--bench-warmup", "${WARMUP}",
+      "--bench-json", "${JSON_OUT}"
+    ],
+    "audio_duration_seconds": 11.0,
+    "correctness": {
+      "kind": "wer",
+      "reference": "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt",
+      "normalizer": "english"
+    },
+    "notes": "Nemotron offline benchmark at its GGUF-defined chunk-limited attention geometry. On Darwin the fixed Core ML encoder is required, then the same F16 model is rerun with Core ML disabled as the Metal baseline. Locale prompt projection and RNN-T decoding remain on ggml. The 6-bit sidecar may produce a small token-level drift, so each transcript is gated independently by WER instead of requiring byte-for-byte equality."
   },
 
   "sortformer": {

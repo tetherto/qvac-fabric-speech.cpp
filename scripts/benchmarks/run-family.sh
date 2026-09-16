@@ -1003,7 +1003,9 @@ case "$BENCH_KIND" in
         emit_json "run-failed" null null null " (PARAKEET_COREML_DISABLE was ignored by the baseline run)"
         exit 0
       fi
-      if [[ "$(jq -r '.transcript // ""' "$coreml_json")" != "$(jq -r '.transcript // ""' "$baseline_json")" ]]; then
+      require_transcript_match="$(spec_field coreml_require_transcript_match)"
+      if [[ "$require_transcript_match" != "false" ]] &&
+         [[ "$(jq -r '.transcript // ""' "$coreml_json")" != "$(jq -r '.transcript // ""' "$baseline_json")" ]]; then
         emit_json "run-failed" null null null " (Core ML and forced-ggml transcripts differ)"
         exit 0
       fi

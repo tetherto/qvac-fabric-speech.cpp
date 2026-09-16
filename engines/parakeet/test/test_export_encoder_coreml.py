@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model-free checks for the RNN-T/TDT/EOU/Sortformer Core ML exporter helpers."""
+"""Model-free checks for the Parakeet Core ML exporter helpers."""
 
 import importlib.util
 import sys
@@ -71,6 +71,18 @@ def sortformer_v2_1_meta():
     }
 
 
+def nemotron_meta():
+    return {
+        "parakeet.model.type": "nemotron",
+        "parakeet.encoder.causal_downsampling": True,
+        "parakeet.encoder.conv_context_size": "causal",
+        "parakeet.encoder.conv_norm_type": "layer_norm",
+        "parakeet.encoder.att_context_style": "chunked_limited",
+        "parakeet.encoder.att_context_size_left": 56,
+        "parakeet.encoder.att_context_size_right": 3,
+    }
+
+
 class ExportContractTests(unittest.TestCase):
     def test_accepts_offline_rnnt_fixed_and_flexible(self):
         self.assertEqual(
@@ -103,6 +115,18 @@ class ExportContractTests(unittest.TestCase):
         self.assertEqual(EXPORTER.validate_export_contract(eou_meta()), "eou")
         with self.assertRaisesRegex(ValueError, "fixed shape"):
             EXPORTER.validate_export_contract(eou_meta(), flexible=True)
+
+    def test_accepts_fixed_nemotron_and_rejects_flexible(self):
+        self.assertEqual(
+            EXPORTER.validate_export_contract(nemotron_meta()), "nemotron")
+        with self.assertRaisesRegex(ValueError, "fixed shape"):
+            EXPORTER.validate_export_contract(nemotron_meta(), flexible=True)
+
+    def test_rejects_incompatible_nemotron_metadata(self):
+        meta = nemotron_meta()
+        meta["parakeet.encoder.conv_norm_type"] = "batch_norm"
+        with self.assertRaisesRegex(ValueError, "conv_norm_type"):
+            EXPORTER.validate_export_contract(meta)
 
     def test_accepts_sortformer_v2_1_full_and_bypass_exports(self):
         meta = sortformer_v2_1_meta()

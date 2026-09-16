@@ -575,6 +575,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
     set(_qvp_eou_coreml    "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1-encoder.mlmodelc")
     set(_qvp_nemotron_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b.f16.gguf")
+    set(_qvp_nemotron_coreml "${PARAKEET_TEST_MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b-encoder.mlmodelc")
     set(_qvp_sf_q8_gguf    "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.q8_0.gguf")
     set(_qvp_sf_f16_gguf   "${PARAKEET_TEST_MODEL_DIR}/diar_sortformer_4spk-v1.f16.gguf")
     set(_qvp_sfs_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/diar_streaming_sortformer_4spk-v2.q8_0.gguf")
@@ -1110,6 +1111,11 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-encoder-coreml-parity
         ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
+    parakeet_register_test(test-encoder-coreml-parity-nemotron
+        LABEL    "fixture;coreml"
+        EXE      test-encoder-coreml-parity
+        ARGS     --model "${_qvp_nemotron_f16_gguf}" --wav "${_qvp_jfk_wav}" --min-cos 0.995
+        REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
     add_executable(test-encoder-coreml-bypass-parity
         test/test_encoder_coreml_bypass_parity.cpp
         src/parakeet_ctc.cpp
@@ -1258,6 +1264,19 @@ if (PARAKEET_BUILD_TESTS)
             NOT EXISTS "${_qvp_jfk_wav}" OR
             NOT EXISTS "${_qvp_rnnt_coreml}")
             set_property(TEST test-cli-coreml-bench-rnnt PROPERTY DISABLED TRUE)
+        endif()
+        add_test(
+            NAME test-cli-coreml-bench-nemotron
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_nemotron_f16_gguf}"
+                    "--wav" "${_qvp_jfk_wav}")
+        set_property(TEST test-cli-coreml-bench-nemotron PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_nemotron_f16_gguf}" OR
+            NOT EXISTS "${_qvp_jfk_wav}" OR
+            NOT EXISTS "${_qvp_nemotron_coreml}")
+            set_property(TEST test-cli-coreml-bench-nemotron PROPERTY DISABLED TRUE)
         endif()
     endif()
 

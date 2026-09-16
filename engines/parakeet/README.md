@@ -68,6 +68,25 @@ Place the compiled directory beside the GGUF as
 `parakeet-unified-en-0.6b-encoder.mlmodelc`. Missing or incompatible sidecars
 and prediction failures fall back to ggml.
 
+### Nemotron
+
+Nemotron supports a fixed-shape sidecar for offline transcription. Export the
+encoder at the intended mel length using the standard name:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b.f16.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside any quantization of the GGUF using the
+corresponding `.mlmodelc` name. Exact-shape offline encoder invocations use
+Core ML; native cache-aware streaming remains on ggml. Mel subsampling, locale
+prompt projection, and RNN-T decoding also remain on ggml.
+
 ### Sortformer v2.1
 
 On Apple platforms, `PARAKEET_COREML=ON` supports two optional fixed-shape
@@ -104,7 +123,7 @@ cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
 or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
 subsequent chunks go directly to ggml. See
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU/Nemotron
 details and runtime controls.
 
 ## Performance
