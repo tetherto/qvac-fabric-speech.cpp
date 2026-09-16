@@ -3785,7 +3785,17 @@ cache and the 4-frame convolution cache. Differences from the Nemotron step:
 - streaming `chunk_ms` and `right_lookahead_ms` snap down to the largest
   trained value (a request below 80 ms takes the smallest chunk), so existing
   callers with the 1000 ms default keep working and land on 560 ms;
-  `left_context_ms` is ignored (the cache is the left context).
+  `left_context_ms` is ignored (the cache is the left context);
+- with a right context below 4 frames the committed frames' depthwise
+  convolution is right-truncated by the zero padding, exactly as in NeMo's
+  buffered window; NVIDIA's table shows the same quality cliff at those
+  operating points (8.44 % at 160 ms, 15.63 % at 80 ms), so they stay
+  selectable rather than rejected;
+- the attention mask groups queries by the session's chunk stride, so the
+  final partial step (up to `chunk + right - 1` frames committed at once)
+  keeps the trained window per chunk; the trailing all-zero mel frame the
+  incremental preprocessor emits at finalize is dropped before it can enter
+  the CMVN window.
 
 Parity against `dump-unified-reference.py` (jfk, [70,7,7], q8_0):
 
@@ -3801,8 +3811,16 @@ the 20.0 table: 2.16 % (1040/1040), 2.68 % (560/560), 2.99 % (160/320) against
 NeMo offline, i.e. at or below NeMo's own buffered path (2.99 %).
 
 Tests: `test-unified-stream-step` (per-step parity + final transcript against
-the NeMo dump), `test-unified-streaming` (Mode 1 / 2 / 3 byte-equality,
-lowest-latency point runs, unsupported chunk rejected).
+the NeMo dump, CPU plus one case per GPU backend), `test-unified-streaming`
+(Mode 1 / 2 / 3 byte-equality, lowest-latency point runs, an untrained
+chunk request snaps and stays byte-equal), `test-unified-loader` (metadata,
+fallback, validation, engine-level snapping and feed-after-finalize).
+
+The GGUF stores the Unified chunk list in encoder frames
+(`parakeet.unified.allowed_chunk_frames`) rather than milliseconds like
+`parakeet.nemotron.allowed_chunk_ms`: the frame is the unit the step graph
+works in, and the Unified right-context list is in frames as well, so both
+lists share one unit and `Engine` converts to milliseconds only for messages.
 
 ### 20.3 — speed (open)
 

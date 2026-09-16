@@ -615,6 +615,7 @@ if (PARAKEET_BUILD_TESTS)
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-560")
     set(_qvp_nemotron_stream_1120_ref
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-1120")
+    set(_qvp_unified_ref "${PARAKEET_TEST_REF_DIR}/unified-ref-jfk-70-7-7")
 
     add_executable(test-mel
         test/test_mel.cpp
@@ -708,29 +709,43 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
 
-    set(_qvp_unified_ref "${PARAKEET_TEST_REF_DIR}/unified-ref-jfk-70-7-7")
     add_executable(test-unified-stream-step
         test/test_unified_stream_step.cpp
         src/parakeet_ctc.cpp
-        src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
         src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
-        src/parakeet_eou.cpp
-        src/parakeet_sortformer.cpp
         src/mel_preprocess.cpp
-        src/sentencepiece_bpe.cpp
-        src/energy_vad.cpp)
+        src/sentencepiece_bpe.cpp)
     target_link_libraries(test-unified-stream-step PRIVATE ggml parakeet-backend-defs)
     target_include_directories(test-unified-stream-step PRIVATE src include ggml/include)
     parakeet_apply_backend_defs(test-unified-stream-step)
-    parakeet_register_test(test-unified-stream-step
-        LABEL    "fixture"
-        ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_unified_ref}" "${_qvp_jfk_wav}"
-        REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
-                 "${_qvp_unified_ref}/buffered/step-000/encoder_chunk.npy"
-                 "${_qvp_unified_ref}/buffered/transcript.txt")
+
+    function(parakeet_register_unified_stream_case test_name)
+        set(_qvp_unified_stream_label "fixture")
+        if (ARGN)
+            set(_qvp_unified_stream_label "gpu")
+        endif()
+        parakeet_register_test(${test_name}
+            EXE test-unified-stream-step
+            LABEL "${_qvp_unified_stream_label}"
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_unified_ref}" "${_qvp_jfk_wav}" ${ARGN}
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+                     "${_qvp_unified_ref}/buffered/step-000/encoder_chunk.npy"
+                     "${_qvp_unified_ref}/buffered/transcript.txt")
+    endfunction()
+
+    parakeet_register_unified_stream_case(test-unified-stream-step)
+    if (GGML_METAL)
+        parakeet_register_unified_stream_case(test-unified-stream-step-metal --n-gpu-layers 1)
+    endif()
+    if (GGML_CUDA)
+        parakeet_register_unified_stream_case(test-unified-stream-step-cuda --n-gpu-layers 1)
+    endif()
+    if (GGML_VULKAN)
+        parakeet_register_unified_stream_case(test-unified-stream-step-vulkan --n-gpu-layers 1)
+    endif()
 
     add_executable(test-eou-streaming test/test_eou_streaming.cpp)
     target_link_libraries(test-eou-streaming PRIVATE qvac-parakeet)
@@ -892,6 +907,7 @@ if (PARAKEET_BUILD_TESTS)
     target_include_directories(test-unified-loader PRIVATE src include ggml/include)
     parakeet_apply_backend_defs(test-unified-loader)
     parakeet_register_test(test-unified-loader
+        LABEL    "fixture"
         ARGS     "${_qvp_rnnt_q8_gguf}"
         REQUIRES "${_qvp_rnnt_q8_gguf}")
 

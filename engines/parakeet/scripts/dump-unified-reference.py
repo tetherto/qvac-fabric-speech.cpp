@@ -134,6 +134,8 @@ def window_for(start, n_samples, chunk_samples, left_samples, right_samples):
 def dump_buffered(model, audio, out_dir, context, capture_steps):
     out_dir.mkdir(parents=True, exist_ok=True)
     windows = step_windows(audio.shape[0], *context)
+    if not windows:
+        raise ValueError("audio is shorter than one encoder frame; nothing to stream")
     partial = None
     steps = []
     for index, window in enumerate(windows):

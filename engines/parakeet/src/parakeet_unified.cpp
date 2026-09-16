@@ -9,11 +9,7 @@
 #include "ggml.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string>
 
 namespace parakeet {
@@ -66,6 +62,8 @@ struct UnifiedStepGraph {
         positions.clear();
         current_frames = 0;
         committed_frames = 0;
+        channel_frames = 0;
+        convolution_frames = 0;
     }
 
     ~UnifiedStepGraph() {
@@ -92,9 +90,7 @@ ggml_tensor * leading_frames(
     ggml_tensor * frames,
     int width,
     int count) {
-    return ggml_cont(
-        context,
-        ggml_view_2d(context, frames, width, count, frames->nb[1], 0));
+    return ggml_cont(context, ggml_view_2d(context, frames, width, count, frames->nb[1], 0));
 }
 
 ggml_tensor * squeezed_pointwise(
@@ -385,22 +381,9 @@ void expand_cache_outputs(UnifiedStepGraph & output) {
     }
 }
 
-int reserve_step_graph(
-    const ParakeetCtcModel & model,
-    UnifiedStepGraph & output,
-    size_t * measure_bytes) {
+int reserve_step_graph(const ParakeetCtcModel & model, UnifiedStepGraph & output) {
     ggml_backend_buffer_type_t buffer_type =
         ggml_backend_get_default_buffer_type(model.backend_active());
-    if (measure_bytes) {
-        ggml_gallocr_t pricer = ggml_gallocr_new(buffer_type);
-        if (!pricer) {
-            return -2;
-        }
-        *measure_bytes = 0;
-        ggml_gallocr_reserve_n_size(pricer, output.graph, nullptr, nullptr, measure_bytes);
-        ggml_gallocr_free(pricer);
-        return 0;
-    }
     output.allocator = ggml_gallocr_new(buffer_type);
     if (!output.allocator || !ggml_gallocr_reserve(output.allocator, output.graph)) {
         return -2;
@@ -412,8 +395,7 @@ int build_step_graph(
     const ParakeetCtcModel & model,
     int current_frames,
     int committed_frames,
-    UnifiedStepGraph & output,
-    size_t * measure_bytes = nullptr) {
+    UnifiedStepGraph & output) {
     output.clear();
     const EncoderConfig & config = model.encoder_cfg;
     const int channel_frames = channel_cache_frames(model);
@@ -461,13 +443,9 @@ int build_step_graph(
     expand_cache_outputs(output);
     ggml_build_forward_expand(output.graph, output.encoder_output);
 
-    if (int rc = reserve_step_graph(model, output, measure_bytes); rc != 0) {
+    if (int rc = reserve_step_graph(model, output); rc != 0) {
         output.clear();
         return rc;
-    }
-    if (measure_bytes) {
-        output.clear();
-        return 0;
     }
     output.current_frames = current_frames;
     output.committed_frames = committed_frames;
@@ -485,17 +463,17 @@ void open_mask_row(float * row, int first_key, int last_key) {
 
 int first_visible_cache_slot(
     int query,
-    int committed_frames,
+    int chunk_stride,
     int cache_length,
     int channel_frames) {
-    const int chunk_offset = committed_frames > 0 ? (query / committed_frames) * committed_frames : 0;
+    const int chunk_offset = chunk_stride > 0 ? (query / chunk_stride) * chunk_stride : 0;
     return std::max(channel_frames - cache_length, chunk_offset);
 }
 
 void fill_attention_mask(
     int cache_length,
     int current_frames,
-    int committed_frames,
+    int chunk_stride,
     int channel_frames,
     std::vector<float> & mask) {
     const int key_frames = channel_frames + current_frames;
@@ -503,7 +481,7 @@ void fill_attention_mask(
     for (int query = 0; query < current_frames; ++query) {
         float * row = mask.data() + static_cast<size_t>(query) * key_frames;
         const int first_cache = first_visible_cache_slot(
-            query, committed_frames, cache_length, channel_frames);
+            query, chunk_stride, cache_length, channel_frames);
         open_mask_row(row, std::min(first_cache, channel_frames), key_frames);
     }
 }
@@ -520,15 +498,17 @@ struct UnifiedStreamState::Impl {
     RnntDecodeState decoder;
     std::unique_ptr<UnifiedStepGraph> graph;
     IncrementalMelState incremental_mel;
+    MelConfig raw_mel_cfg;
     std::vector<float> raw_history;
     std::vector<float> pending_mel;
     std::vector<float> stats_window;
     std::vector<double> mean;
+    std::vector<double> squares;
     std::vector<float> inv_std;
+    std::string piece_text;
     int mel_width = 0;
     int subsampling_factor = kDefaultSubsamplingFactor;
     int stats_window_frames = 0;
-    int committed_mel_frames = 0;
 };
 
 UnifiedStreamState::UnifiedStreamState() : impl(std::make_unique<Impl>()) {}
@@ -542,36 +522,60 @@ int frames_in(const std::vector<float> & mel, int n_mels) {
     return n_mels > 0 ? static_cast<int>(mel.size() / static_cast<size_t>(n_mels)) : 0;
 }
 
-void accumulate_mean(const std::vector<float> & window, int frames, int n_mels, std::vector<double> & mean) {
-    mean.assign(static_cast<size_t>(n_mels), 0.0);
-    for (int t = 0; t < frames; ++t) {
+struct FrameRange {
+    const float * frames = nullptr;
+    int count = 0;
+};
+
+void add_frames_to_sum(const FrameRange & range, int n_mels, std::vector<double> & sums) {
+    for (int t = 0; t < range.count; ++t) {
         for (int bin = 0; bin < n_mels; ++bin) {
-            mean[bin] += window[static_cast<size_t>(t) * n_mels + bin];
+            sums[bin] += range.frames[static_cast<size_t>(t) * n_mels + bin];
         }
     }
+}
+
+void add_frames_to_squares(
+    const FrameRange & range,
+    int n_mels,
+    const std::vector<double> & mean,
+    std::vector<double> & squares) {
+    for (int t = 0; t < range.count; ++t) {
+        for (int bin = 0; bin < n_mels; ++bin) {
+            const double d = range.frames[static_cast<size_t>(t) * n_mels + bin] - mean[bin];
+            squares[bin] += d * d;
+        }
+    }
+}
+
+void finish_mean(std::vector<double> & mean, int frames) {
     for (double & value : mean) {
         value /= std::max(1, frames);
     }
 }
 
-void accumulate_inv_std(
-    const std::vector<float> & window,
-    int frames,
-    int n_mels,
-    const std::vector<double> & mean,
-    std::vector<float> & inv_std) {
-    std::vector<double> squares(static_cast<size_t>(n_mels), 0.0);
-    for (int t = 0; t < frames; ++t) {
-        for (int bin = 0; bin < n_mels; ++bin) {
-            const double d = window[static_cast<size_t>(t) * n_mels + bin] - mean[bin];
-            squares[bin] += d * d;
-        }
-    }
-    inv_std.assign(static_cast<size_t>(n_mels), 1.0f);
+void finish_inv_std(const std::vector<double> & squares, int frames, std::vector<float> & inv_std) {
     const double denominator = std::max(1, frames - 1);
-    for (int bin = 0; bin < n_mels; ++bin) {
+    inv_std.resize(squares.size());
+    for (size_t bin = 0; bin < squares.size(); ++bin) {
         inv_std[bin] = 1.0f / static_cast<float>(std::sqrt(squares[bin] / denominator) + 1e-5);
     }
+}
+
+void compute_cmvn_statistics(
+    const FrameRange & history,
+    const FrameRange & incoming,
+    int n_mels,
+    UnifiedStreamState::Impl & impl) {
+    const int frames = history.count + incoming.count;
+    impl.mean.assign(static_cast<size_t>(n_mels), 0.0);
+    add_frames_to_sum(history, n_mels, impl.mean);
+    add_frames_to_sum(incoming, n_mels, impl.mean);
+    finish_mean(impl.mean, frames);
+    impl.squares.assign(static_cast<size_t>(n_mels), 0.0);
+    add_frames_to_squares(history, n_mels, impl.mean, impl.squares);
+    add_frames_to_squares(incoming, n_mels, impl.mean, impl.squares);
+    finish_inv_std(impl.squares, frames, impl.inv_std);
 }
 
 void normalize_frames(
@@ -581,10 +585,13 @@ void normalize_frames(
     const std::vector<double> & mean,
     const std::vector<float> & inv_std,
     std::vector<float> & out) {
+    const size_t start = out.size();
+    out.resize(start + static_cast<size_t>(frames) * n_mels);
+    float * destination = out.data() + start;
     for (int t = 0; t < frames; ++t) {
         for (int bin = 0; bin < n_mels; ++bin) {
             const size_t index = static_cast<size_t>(t) * n_mels + bin;
-            out.push_back((raw[index] - static_cast<float>(mean[bin])) * inv_std[bin]);
+            destination[index] = (raw[index] - static_cast<float>(mean[bin])) * inv_std[bin];
         }
     }
 }
@@ -603,13 +610,23 @@ void trim_leading_frames(std::vector<float> & target, int keep_frames, int n_mel
         target.begin() + static_cast<std::ptrdiff_t>(frames - keep_frames) * n_mels);
 }
 
+FrameRange retained_history(const UnifiedStreamState::Impl & impl, int incoming_frames, int n_mels) {
+    const int history_frames = frames_in(impl.stats_window, n_mels);
+    const int keep = std::max(0, std::min(history_frames, impl.stats_window_frames - incoming_frames));
+    const int skip = history_frames - keep;
+    return {impl.stats_window.data() + static_cast<size_t>(skip) * n_mels, keep};
+}
+
 void update_cmvn_statistics(UnifiedStreamState::Impl & impl, const float * incoming, int frames, int n_mels) {
-    std::vector<float> window = impl.stats_window;
-    append_frames(window, incoming, frames, n_mels);
-    trim_leading_frames(window, impl.stats_window_frames, n_mels);
-    const int window_frames = frames_in(window, n_mels);
-    accumulate_mean(window, window_frames, n_mels, impl.mean);
-    accumulate_inv_std(window, window_frames, n_mels, impl.mean, impl.inv_std);
+    compute_cmvn_statistics(retained_history(impl, frames, n_mels), {incoming, frames}, n_mels, impl);
+}
+
+std::string append_transcript_pieces(
+    const BpeVocab & vocab,
+    const std::vector<int32_t> & new_token_ids,
+    UnifiedStreamState::Impl & impl) {
+    append_token_pieces(vocab, new_token_ids, impl.piece_text);
+    return strip_leading_spaces(impl.piece_text);
 }
 
 void append_normalized_history(UnifiedStreamState::Impl & impl, int n_mels, std::vector<float> & processed) {
@@ -628,7 +645,18 @@ void commit_mel_frames(UnifiedStreamState::Impl & impl, int commit_frames, int n
     impl.pending_mel.erase(
         impl.pending_mel.begin(),
         impl.pending_mel.begin() + static_cast<std::ptrdiff_t>(commit_frames) * n_mels);
-    impl.committed_mel_frames = commit_frames;
+}
+
+bool frame_is_all_zero(const float * frame, int n_mels) {
+    return std::all_of(frame, frame + n_mels, [](float value) { return value == 0.0f; });
+}
+
+void drop_trailing_zero_frames(std::vector<float> & mel, int n_mels) {
+    int frames = frames_in(mel, n_mels);
+    while (frames > 0 && frame_is_all_zero(mel.data() + static_cast<size_t>(frames - 1) * n_mels, n_mels)) {
+        --frames;
+    }
+    mel.resize(static_cast<size_t>(frames) * n_mels);
 }
 
 int step_mel_frames(const UnifiedStreamState & state) {
@@ -685,15 +713,16 @@ void download_layer_caches(
 
 void prepare_step_inputs(
     UnifiedStepGraph & graph,
-    const std::vector<float> & encoder_input,
-    int cache_length) {
+    const float * encoder_input,
+    int cache_length,
+    int chunk_stride) {
     ggml_backend_tensor_set(
-        graph.encoder_input, encoder_input.data(), 0, encoder_input.size() * sizeof(float));
+        graph.encoder_input, encoder_input, 0, ggml_nbytes(graph.encoder_input));
     std::vector<float> mask;
     fill_attention_mask(
         cache_length,
         graph.current_frames,
-        graph.committed_frames,
+        chunk_stride,
         graph.channel_frames,
         mask);
     ggml_backend_tensor_set(graph.attention_mask, mask.data(), 0, mask.size() * sizeof(float));
@@ -719,7 +748,7 @@ int ensure_step_graph(
 int run_encoder_step(
     ParakeetCtcModel & model,
     UnifiedStreamState & state,
-    const std::vector<float> & encoder_input,
+    const float * encoder_input,
     int current_frames,
     int committed_frames,
     std::vector<float> & encoder_output) {
@@ -730,7 +759,7 @@ int run_encoder_step(
     if (!ggml_gallocr_alloc_graph(graph.allocator, graph.graph)) {
         return -8;
     }
-    prepare_step_inputs(graph, encoder_input, state.cache_length);
+    prepare_step_inputs(graph, encoder_input, state.cache_length, state.chunk_frames);
     upload_layer_caches(model, graph, state);
     if (ggml_backend_graph_compute(model.backend_active(), graph.graph) != GGML_STATUS_SUCCESS) {
         return -9;
@@ -765,56 +794,6 @@ int decode_committed_frames(
         state.impl->decoder,
         result.new_token_ids,
         result.decoder_steps);
-}
-
-using ProfileClock = std::chrono::steady_clock;
-
-double elapsed_ms(ProfileClock::time_point from, ProfileClock::time_point to) {
-    return std::chrono::duration<double, std::milli>(to - from).count();
-}
-
-double g_profile_pcm_ms = 0.0;
-double g_profile_signal_ms = 0.0;
-
-bool profiling_enabled() {
-    static const bool enabled = std::getenv("PARAKEET_UNIFIED_PROFILE") != nullptr;
-    return enabled;
-}
-
-void log_step_profile(
-    ProfileClock::time_point subsampling_start,
-    ProfileClock::time_point encoder_start,
-    ProfileClock::time_point decode_start,
-    ProfileClock::time_point end) {
-    if (!profiling_enabled()) return;
-    std::fprintf(stderr, "unified-step sub=%.2f enc=%.2f dec=%.2f ms pcm_total=%.1f signal_total=%.1f\n",
-                 elapsed_ms(subsampling_start, encoder_start),
-                 elapsed_ms(encoder_start, decode_start),
-                 elapsed_ms(decode_start, end),
-                 g_profile_pcm_ms,
-                 g_profile_signal_ms);
-}
-
-void write_raw_floats(const std::string & path, const std::vector<float> & values) {
-    FILE * file = std::fopen(path.c_str(), "wb");
-    if (!file) return;
-    std::fwrite(values.data(), sizeof(float), values.size(), file);
-    std::fclose(file);
-}
-
-void dump_step_for_debug(
-    int step_index,
-    const std::vector<float> & encoder_input,
-    const std::vector<float> & encoder_output,
-    const std::vector<float> & encoder_committed,
-    int width) {
-    const char * directory = std::getenv("PARAKEET_DUMP_UNIFIED_STEPS");
-    if (!directory) return;
-    const std::string prefix = std::string(directory) + "/step-" + std::to_string(step_index);
-    write_raw_floats(prefix + "-input.f32", encoder_input);
-    write_raw_floats(prefix + "-output.f32", encoder_output);
-    write_raw_floats(prefix + "-committed.f32", encoder_committed);
-    (void) width;
 }
 
 void advance_state(UnifiedStreamState & state, int committed_frames, int channel_frames, bool finalize) {
@@ -882,6 +861,7 @@ int init_unified_stream_state(
     reset_unified_stream(state);
     state.chunk_frames = chunk_frames;
     state.right_context_frames = right_context_frames;
+    state.impl->raw_mel_cfg = raw_mel_config(model.mel_cfg);
     state.impl->subsampling_factor = encoder_subsampling_factor(model);
     state.impl->stats_window_frames = state.impl->subsampling_factor *
         (channel_cache_frames(model) + chunk_frames + right_context_frames);
@@ -922,18 +902,13 @@ int append_unified_pcm(
     if (!state_accepts_input(state)) {
         return -1;
     }
-    const auto started = ProfileClock::now();
     std::vector<float> mel;
     int mel_frames = 0;
-    struct Accumulate {
-        ProfileClock::time_point from;
-        ~Accumulate() { g_profile_pcm_ms += elapsed_ms(from, ProfileClock::now()); }
-    } accumulate{started};
     if (int rc = append_log_mel(
             samples,
             n_samples,
             finalize,
-            raw_mel_config(model.mel_cfg),
+            state.impl->raw_mel_cfg,
             state.impl->incremental_mel,
             mel,
             mel_frames); rc != 0) {
@@ -960,10 +935,9 @@ int next_unified_processed_signal(
         return -1;
     }
     UnifiedStreamState::Impl & impl = *state.impl;
-    struct Accumulate {
-        ProfileClock::time_point from = ProfileClock::now();
-        ~Accumulate() { g_profile_signal_ms += elapsed_ms(from, ProfileClock::now()); }
-    } accumulate;
+    if (finalize) {
+        drop_trailing_zero_frames(impl.pending_mel, n_mels);
+    }
     const int pending_frames = frames_in(impl.pending_mel, n_mels);
     const int required_frames = step_mel_frames(state);
     if ((!finalize && pending_frames < required_frames) || pending_frames == 0) {
@@ -1011,14 +985,12 @@ int run_unified_stream_step(
         return -5;
     }
 
-    const auto t_subsampling = std::chrono::steady_clock::now();
     std::vector<float> subsampled;
     int subsampled_frames = 0;
     if (int rc = run_subsampling(model, processed_signal, n_mel_frames, n_mels, subsampled, subsampled_frames);
         rc != 0) {
         return rc;
     }
-    const auto t_encoder = std::chrono::steady_clock::now();
     const int current_frames = subsampled_frames - kSubsamplingHistoryFrames;
     if (current_frames <= 0) {
         return -6;
@@ -1030,34 +1002,23 @@ int run_unified_stream_step(
     const int committed_frames = finalize ? current_frames : state.chunk_frames;
 
     const int width = model.encoder_cfg.d_model;
-    const std::vector<float> encoder_input(
-        subsampled.begin() + static_cast<std::ptrdiff_t>(kSubsamplingHistoryFrames) * width,
-        subsampled.end());
+    const float * encoder_input =
+        subsampled.data() + static_cast<std::ptrdiff_t>(kSubsamplingHistoryFrames) * width;
     std::vector<float> encoder_output;
     if (int rc = run_encoder_step(model, state, encoder_input, current_frames, committed_frames, encoder_output);
         rc != 0) {
         return rc;
     }
-    const auto t_decode = std::chrono::steady_clock::now();
     if (int rc = decode_committed_frames(model, runtime, state, encoder_output, committed_frames, result);
         rc != 0) {
         return rc;
     }
-    log_step_profile(t_subsampling, t_encoder, t_decode, std::chrono::steady_clock::now());
-    dump_step_for_debug(state.step_index, encoder_input, encoder_output, result.encoder_committed, width);
     state.token_ids.insert(state.token_ids.end(), result.new_token_ids.begin(), result.new_token_ids.end());
-    result.text = detokenize(model.vocab, state.token_ids);
+    result.text = append_transcript_pieces(model.vocab, result.new_token_ids, *state.impl);
     result.committed_frames = committed_frames;
     result.provisional_frames = current_frames - committed_frames;
     advance_state(state, committed_frames, channel_cache_frames(model), finalize);
     return 0;
-}
-
-size_t unified_stream_graph_buffer_bytes(const UnifiedStreamState & state) {
-    if (!state.impl || !state.impl->graph || !state.impl->graph->allocator) {
-        return 0;
-    }
-    return ggml_gallocr_get_buffer_size(state.impl->graph->allocator, 0);
 }
 
 }

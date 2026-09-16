@@ -112,13 +112,8 @@ int resolve_unified_right_context_frames(const ParakeetCtcModel & model, const S
     const double frame_stride_ms = encoder_frame_stride_ms(model);
     const auto & allowed = model.unified_cfg.allowed_right_context_frames;
     const int requested = static_cast<int>(opts.right_lookahead_ms / frame_stride_ms);
-    const int resolved = largest_allowed_at_most(allowed, requested);
-    if (resolved < 0) {
-        throw std::runtime_error(
-            "Engine::stream_start: unsupported Unified right_lookahead_ms; supported values are " +
-            format_int_list(frames_to_ms(allowed, frame_stride_ms)));
-    }
-    return resolved;
+    const int snapped = largest_allowed_at_most(allowed, requested);
+    return snapped >= 0 ? snapped : smallest_allowed(allowed);
 }
 
 TdtDecodeOptions transducer_decode_options(const ParakeetCtcModel & model) {
@@ -1395,40 +1390,12 @@ void StreamSession::Impl::drain_nemotron(bool finalize) {
                 "(rc=" + std::to_string(rc) + ")");
         }
 
-        const size_t previous_text_size = cumulative_text.size();
-        cumulative_token_ids.insert(
-            cumulative_token_ids.end(),
-            result.new_token_ids.begin(),
-            result.new_token_ids.end());
-        cumulative_text = result.text;
-
-        if (on_segment) {
-            const double frame_stride_s =
-                encoder_frame_stride_ms(model) / 1000.0;
-
-            StreamingSegment segment;
-            segment.text =
-                cumulative_text.substr(previous_text_size);
-            segment.token_ids = result.new_token_ids;
-            segment.start_s =
-                static_cast<double>(start_encoder_frame) *
-                frame_stride_s;
-            segment.end_s =
-                static_cast<double>(state.emitted_encoder_frames) *
-                frame_stride_s;
-            segment.chunk_index = chunk_index;
-            segment.is_final = true;
-            segment.starts_word = result.new_token_ids.empty()
-                ? true
-                : token_is_word_start(
-                    model.vocab, result.new_token_ids.front());
-            segment.encoder_ms = ms_since(started);
-            segment.decode_ms = 0.0;
-
-            on_segment(segment);
-        }
-
-        ++chunk_index;
+        emit_native_segment(
+            start_encoder_frame,
+            state.emitted_encoder_frames,
+            result.new_token_ids,
+            result.text,
+            ms_since(started));
 
         if (last_chunk) {
             break;
@@ -1471,13 +1438,13 @@ void StreamSession::Impl::drain_unified(bool finalize) {
     }
     auto & model = engine_impl->model;
     auto & state = *unified_state;
+    std::vector<float> processed_signal;
 
     while (!cancelled) {
         if (engine_impl->cancel_flag.load()) {
             cancel_session();
             break;
         }
-        std::vector<float> processed_signal;
         int n_mel_frames = 0;
         const int ready = next_unified_processed_signal(
             state, model.mel_cfg.n_mels, finalize, processed_signal, n_mel_frames);
@@ -1878,7 +1845,7 @@ void StreamSession::finalize() {
         }
         pimpl_->drain_unified(false);
         pimpl_->drain_unified(true);
-        if (!state.finalized) {
+        if (!state.finalized && !pimpl_->cancelled) {
             UnifiedStreamStepResult result;
             rc = run_unified_stream_step(
                 model, pimpl_->engine_impl->transducer_rt, nullptr, 0,

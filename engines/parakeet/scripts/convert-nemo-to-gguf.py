@@ -67,6 +67,9 @@ src/parakeet_sortformer.h for the consumer structs):
                            max_symbols_per_step)                     [EOU only]
     parakeet.nemotron.*   (RNNT, prompt, locale, and cache-aware
                            streaming metadata)                       [Nemotron only]
+    parakeet.unified.*    (cache-aware streaming contexts: left context
+                           and convolution cache frames, allowed chunk
+                           and right-context frames)                 [Unified RNN-T only]
     parakeet.sortformer.* (num_spks, fc/tf dims, tf layer count, ...)[Sortformer only]
     tokenizer.ggml.model  = "sentencepiece"                          [CTC, RNN-T, TDT, EOU]
     tokenizer.ggml.sentencepiece_model = <raw tokenizer.model bytes> [CTC, RNN-T, TDT, EOU]

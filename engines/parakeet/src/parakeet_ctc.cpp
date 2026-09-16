@@ -977,14 +977,14 @@ void require_nemotron_shape(
     }
 }
 
-}
-
 bool all_positive(const std::vector<int32_t> & values) {
     return std::all_of(values.begin(), values.end(), [](int32_t v) { return v > 0; });
 }
 
 bool all_non_negative(const std::vector<int32_t> & values) {
     return std::all_of(values.begin(), values.end(), [](int32_t v) { return v >= 0; });
+}
+
 }
 
 void validate_unified_streaming_model(const ParakeetCtcModel & model) {
@@ -2321,12 +2321,16 @@ const char * model_type_name(ParakeetModelType model_type) {
     }
 }
 
+namespace {
+
 std::string join_frames(const std::vector<int32_t> & values) {
     std::string out = "{";
     for (size_t i = 0; i < values.size(); ++i) {
         out += (i ? "," : "") + std::to_string(values[i]);
     }
     return out + "}";
+}
+
 }
 
 void print_model_summary(const ParakeetCtcModel & m) {

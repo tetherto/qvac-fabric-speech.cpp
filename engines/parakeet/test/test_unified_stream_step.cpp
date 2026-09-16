@@ -124,10 +124,16 @@ struct Session {
     parakeet::UnifiedStreamState state;
 };
 
+constexpr int kSkipReturnCode = 3;
+
 int open_session(const std::string & gguf, int n_gpu_layers, Session & session) {
     if (int rc = parakeet::load_from_gguf(gguf, session.model, 0, n_gpu_layers, false); rc != 0) {
         std::fprintf(stderr, "load_from_gguf failed: %d\n", rc);
         return 1;
+    }
+    if (n_gpu_layers > 0 && !parakeet::model_has_gpu_backend(session.model)) {
+        std::fprintf(stderr, "no GPU backend available; skipping\n");
+        return kSkipReturnCode;
     }
     if (parakeet::tdt_prepare_runtime(session.model, session.runtime) != 0) {
         std::fprintf(stderr, "tdt_prepare_runtime failed\n");
@@ -247,13 +253,17 @@ int run(const std::string & gguf, const std::string & reference_dir, const std::
 int main(int argc, char ** argv) {
     if (argc < 4) {
         std::fprintf(stderr, "usage: %s <parakeet-unified.gguf> <unified-ref-dir> <input.wav> [--n-gpu-layers N]\n", argv[0]);
-        return 64;
+        return 2;
     }
     int n_gpu_layers = 0;
     for (int i = 4; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--n-gpu-layers") == 0) n_gpu_layers = std::atoi(argv[i + 1]);
     }
     const int rc = run(argv[1], argv[2], argv[3], n_gpu_layers);
-    std::printf(rc == 0 ? "PASS\n" : "FAIL (%d)\n", rc);
+    if (rc == 0) {
+        std::fprintf(stderr, "Unified stream step tests passed\n");
+    } else {
+        std::fprintf(stderr, "Unified stream step tests failed (%d)\n", rc);
+    }
     return rc;
 }

@@ -1,6 +1,7 @@
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
 #include "cached_encoder.h"
+#include "sentencepiece_bpe.h"
 #include "backend_util.h"
 
 #include "ggml-alloc.h"
@@ -939,46 +940,6 @@ int next_nemotron_processed_signal(
 }
 
 namespace {
-
-void append_token_pieces(
-    const BpeVocab & vocab,
-    const std::vector<int32_t> & token_ids,
-    std::string & pieces) {
-    for (int32_t id : token_ids) {
-        if (id < 0 || id >= static_cast<int32_t>(vocab.pieces.size())) {
-            continue;
-        }
-        if (id == vocab.blank_id ||
-            id == vocab.bos_id ||
-            id == vocab.eos_id ||
-            id == vocab.pad_id) {
-            continue;
-        }
-        const std::string & piece = vocab.pieces[id];
-        for (size_t index = 0; index < piece.size(); ) {
-            const unsigned char c0 =
-                static_cast<unsigned char>(piece[index]);
-            if (c0 == 0xE2 &&
-                index + 2 < piece.size() &&
-                static_cast<unsigned char>(piece[index + 1]) == 0x96 &&
-                static_cast<unsigned char>(piece[index + 2]) == 0x81) {
-                pieces.push_back(' ');
-                index += 3;
-            } else {
-                pieces.push_back(piece[index]);
-                ++index;
-            }
-        }
-    }
-}
-
-std::string strip_leading_spaces(const std::string & text) {
-    size_t start = 0;
-    while (start < text.size() && text[start] == ' ') {
-        ++start;
-    }
-    return text.substr(start);
-}
 
 void upload_layer_caches(
     const ParakeetCtcModel & model,

@@ -120,6 +120,17 @@ int check_lowest_latency_runs(Engine & engine, const std::vector<float> & pcm, c
     return 0;
 }
 
+int check_odd_length_tail(Engine & engine, const std::vector<float> & pcm, const EngineResult & ref) {
+    const std::vector<float> trimmed(pcm.begin(), pcm.end() - 37);
+    const EngineResult offline = engine.transcribe_samples(trimmed.data(), static_cast<int>(trimmed.size()), ref.sample_rate);
+    std::string text;
+    auto session = engine.stream_start(streaming_options(ref.sample_rate, 560, 560),
+        [&](const StreamingSegment & s) { text += s.text; });
+    feed_in_blocks(*session, trimmed, 1024);
+    session->finalize();
+    return report("Mode 3 (odd sample count)", text, offline.text, 560, 560);
+}
+
 int check_untrained_chunk_snaps(Engine & engine, const std::vector<float> & pcm, const EngineResult & ref) {
     std::string text;
     double last_end = 0.0;
@@ -163,6 +174,7 @@ int run(const Opts & opts) {
     failures += check_mode3(engine, pcm, ref, 1040, 1040);
     failures += check_lowest_latency_runs(engine, pcm, ref);
     failures += check_untrained_chunk_snaps(engine, pcm, ref);
+    failures += check_odd_length_tail(engine, pcm, ref);
     return failures == 0 ? 0 : 1;
 }
 

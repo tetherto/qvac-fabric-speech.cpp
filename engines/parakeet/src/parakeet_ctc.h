@@ -213,6 +213,9 @@ struct NemotronLocalePrompt {
     int32_t prompt_id = -1;
 };
 
+// Unified RNN-T cache-aware streaming geometry (parakeet.unified.*, or the
+// published checkpoint defaults when a pre-streaming GGUF only carries the
+// attention style). Frame counts are post-subsampling encoder frames.
 struct UnifiedStreamingConfig {
     bool available = false;
     int left_context_frames = 0;

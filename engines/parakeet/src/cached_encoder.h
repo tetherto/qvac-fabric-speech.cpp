@@ -1,5 +1,10 @@
 #pragma once
 
+// Graph builders shared by the cache-aware streaming encoders (Nemotron and
+// Unified RNN-T): relative-position attention over a channel cache plus the
+// current frames, the feed-forward module, and the channel-cache roll.
+// Tensors are (d_model, frames); the definitions live in parakeet_nemotron.cpp.
+
 #include "parakeet_ctc.h"
 
 #include "ggml.h"
