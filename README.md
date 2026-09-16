@@ -10,7 +10,7 @@ On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/
 | Models | every model loads from GGUF (see [Supported models](#supported-models)) |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android (arm64-v8a), iOS (arm64) |
-| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder sidecar) |
+| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder, codec, and VAE sidecars) |
 | Quantization | `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `q5_0`, `q5_1`, `q4_0`, `q4_k_m` (per model, see tables) |
 | Shared ggml | one `ggml-speech` vcpkg port, built from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 | Language | C++17 |
@@ -84,7 +84,7 @@ and prediction failures fall back to ggml.
 | Parler-TTS large-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice |
 | Indic Parler-TTS | tts | 21 Indic | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | Indic prompt BPE tokenizer |
 | Fun-CosyVoice3-0.5B | tts | model-advertised multilingual text | 24 kHz | `f32` | CPU, Metal, Vulkan, OpenCL, CUDA | Qwen2.5 LM + DiT flow + CausalHiFT; zero-shot/cross-lingual cloning from a reference WAV (native speech_tokenizer_v3 + CAM++); Metal, desktop Vulkan, desktop CUDA, and OpenCL are the validated GPU paths |
-| Audio8-TTS-Preview-0.6B | tts | multilingual | 44.1 kHz | `f32`, `f16`, `q8_0`; LM also `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | DualAR + DAC codec, zero-shot cloning from reference audio and transcript |
+| Audio8-TTS-Preview-0.6B | tts | multilingual | 44.1 kHz | `f32`, `f16`, `q8_0`; LM also `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML codec-synthesis sidecar (`TTS_CPP_COREML`, Apple) | DualAR + DAC codec, zero-shot cloning from reference audio and transcript |
 | Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
@@ -109,7 +109,15 @@ the [TTS capability table](engines/tts/README.md#capabilities).
 | ACE-Step v15 base | audiogen | text-to-music, multi-track (lego) stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 50 diffusion steps by default, `--task lego --track <layer>` |
 | MiniMax-Music3 | audiogen | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM+DiT also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal via `EngineOptions::device`) | 25 fps, 30 flow steps, two GGUF files; `test-minimax-metal-ops` checks Metal condition/vocoder parity on an Apple7+ GPU |
 
-The ACE-Step Core ML sidecar is exported by
+The Audio8 Core ML sidecar takes the codec's synthesis stack (the stage that
+dominates a CPU synthesis) off ggml; it is exported from the decoder GGUF by
+`engines/tts/scripts/export-audio8-codec-coreml.py`, hosts read
+`Engine::codec_on_coreml()` (sidecar loaded) and
+`SynthesisResult::codec_synthesis_backend` (where a call's codec synthesis ran;
+the language model always stays on `backend_name()`), and any sidecar failure
+falls back to ggml -- see the
+[Audio8 guide](engines/tts/docs/audio8.md#core-ml-codec-sidecar). The
+ACE-Step Core ML sidecar is exported by
 `engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
 Engine operating point, optionally weight-palettized (`--palettize 8` halves
 the sidecar at unchanged speed and quality gate); see the
