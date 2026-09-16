@@ -3,11 +3,8 @@
 //   * result.pcm == concat(callback chunks);
 //   * streamed pcm == whole-utterance decode -- BIT-IDENTICAL on the plain ggml
 //     CPU path (the DAC is local/convolutional so a prefix decode reproduces the
-//     interior exactly), within tolerance on GPU (mul_mat kernel dispatch varies
-//     with the sequence length, so interior samples can differ in the last ULP)
-//     and on a CPU with tinyBLAS compiled in (its GEMM declines small-n shapes
-//     and falls back, so shape-dependent rounding reaches the CPU too; see
-//     cpu_matmul_is_shape_exact in backend_util.h).
+//     interior exactly), within tolerance on GPU and on a tinyBLAS CPU build
+//     (shape-dependent rounding; cpu_matmul_is_shape_exact).
 //
 // A fixed seed makes the AR codes identical between the streamed and batch
 // runs, so the only difference under test is windowed-vs-whole DAC decode.  Both

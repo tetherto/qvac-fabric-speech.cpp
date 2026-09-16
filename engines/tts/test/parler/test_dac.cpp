@@ -167,12 +167,9 @@ static std::vector<std::pair<int, int>> dac_window_graphs(int begin, int end, in
 // identical kernels, identical bits. A window whose graph the full decode
 // never built computes the same values through differently shaped GPU
 // kernels, whose reduction order differs, so those ranges are held to a
-// measured tolerance instead. On the plain ggml CPU path every shape reduces
-// in one deterministic order and bit identity always holds; with tinyBLAS
-// compiled in (GGML_LLAMAFILE, on for Linux x64 and Apple silicon in the
-// ggml-speech port) the GEMM declines small-n shapes and falls back, so the
-// CPU is held to the same tolerance as a GPU for those windows
-// (cpu_matmul_is_shape_exact in backend_util.h).
+// measured tolerance instead. The plain ggml CPU path reduces every shape in
+// one deterministic order; a tinyBLAS CPU build does not
+// (cpu_matmul_is_shape_exact), and is held to the GPU tolerance too.
 static bool range_shares_full_decode_graphs(int a, int b, int n_frames, int rf) {
     const auto full   = dac_window_graphs(0, n_frames, n_frames, rf);
     const auto ranged = dac_window_graphs(a, b, n_frames, rf);

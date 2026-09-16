@@ -35,11 +35,7 @@ inline bool backend_is_cpu(ggml_backend_t b) {
     return dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
 }
 
-// Whether a backend registry advertises a compile-time feature, through the
-// registry's optional ggml_backend_get_features entry point (ggml-cpu lists
-// its ISA and library features there: "AVX2", "NEON", "LLAMAFILE", ...).
-// Works under GGML_BACKEND_DL too; a registry without the entry point has no
-// features to report.
+// Registry feature lookup via ggml_backend_get_features ("AVX2", "NEON", "LLAMAFILE", ...).
 inline bool backend_reg_has_feature(ggml_backend_reg_t reg, const char * name) {
     if (!reg || !name) return false;
     auto get_features = (ggml_backend_get_features_t)
@@ -57,19 +53,11 @@ inline bool backend_has_feature(ggml_backend_t b, const char * name) {
     return dev && backend_reg_has_feature(ggml_backend_dev_backend_reg(dev), name);
 }
 
-// The CPU backend's features, for callers that hold no backend handle (the
-// engine-level tests). Requires the CPU registry to be loaded, which any
-// engine construction does.
 inline bool cpu_backend_has_feature(const char * name) {
     return backend_reg_has_feature(ggml_backend_reg_by_name("CPU"), name);
 }
 
-// tinyBLAS (GGML_LLAMAFILE) makes CPU matmul results depend on the operand
-// shapes: its GEMM declines small-n shapes and falls back to the plain path,
-// so the same weights applied to differently shaped windows round differently.
-// Tests that pin CPU bit identity between a windowed and a whole decode have to
-// downgrade to a tolerance where it is compiled in (the ggml-speech port turns
-// it on for Linux x64 and Apple silicon).
+// False with tinyBLAS (GGML_LLAMAFILE), whose GEMM rounding depends on the operand shapes.
 inline bool cpu_matmul_is_shape_exact() {
     return !cpu_backend_has_feature("LLAMAFILE");
 }

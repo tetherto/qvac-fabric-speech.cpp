@@ -72,6 +72,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+          # Same host with tinyBLAS (GGML_LLAMAFILE) compiled into ggml, the
+          # configuration the ggml-speech port ships for Linux x64: exercises
+          # the tinyBLAS-aware CPU tolerance in the Parler parity tests and
+          # asserts the feature detection sees it (test-backend-features).
+          - os: ubuntu-24.04
+            llamafile: ON
           # Self-hosted Apple silicon, not hosted macOS: hosted macos-14
           # exposes an Apple Paravirtual device without simdgroup matmul, so
           # Metal-touching tests abort at kernel encode (QVAC-22775). This is
@@ -80,6 +86,7 @@ jobs:
           # fixture-free TTS Metal kernel parity suite.
           - os: macos-26
     runs-on: ${{ matrix.os == 'macos-26' && needs.runner_names.outputs.macos_arm64_gpu || needs.runner_names.outputs.ubuntu_2404 }}
+    name: build-test (${{ matrix.os }}${{ matrix.llamafile == 'ON' && ', tinyBLAS' || '' }})
     timeout-minutes: 60
     steps:
       # Self-hosted runners are persistent, so a previous run's tree can
@@ -112,14 +119,14 @@ jobs:
           # Linux stays compatible with the portable cache shared with
           # parakeet-ci.yml. macOS carries the Metal backend that
           # test-metal-ops needs (same split as audiogen-ci.yml).
-          key: ggml-install-${{ runner.os == 'macOS' && 'metal' || 'portable' }}-${{ matrix.os }}-${{ steps.ggml.outputs.sha }}
+          key: ggml-install-${{ runner.os == 'macOS' && 'metal' || 'portable' }}${{ matrix.llamafile == 'ON' && '-llamafile' || '' }}-${{ matrix.os }}-${{ steps.ggml.outputs.sha }}
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-tts-${{ matrix.os }}-${{ github.sha }}
-          restore-keys: ccache-tts-${{ matrix.os }}-
+          key: ccache-tts-${{ matrix.os }}${{ matrix.llamafile == 'ON' && '-llamafile' || '' }}-${{ github.sha }}
+          restore-keys: ccache-tts-${{ matrix.os }}${{ matrix.llamafile == 'ON' && '-llamafile' || '' }}-
 
       # Linux builds a portable CPU-only ggml (hosted runner, no GPU).
       # macOS builds with Metal: the self-hosted runner is real Apple
@@ -142,6 +149,7 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
             -DGGML_METAL=${{ runner.os == 'macOS' && 'ON' || 'OFF' }} \
+            -DGGML_LLAMAFILE=${{ matrix.llamafile == 'ON' && 'ON' || 'OFF' }} \
             -DGGML_BUILD_TESTS=OFF \
             -DGGML_BUILD_EXAMPLES=OFF \
             -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"

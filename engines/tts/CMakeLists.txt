@@ -728,6 +728,24 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
     endfunction()
 
+    # Model-free: the CPU registry's feature list and the tinyBLAS detection the
+    # Parler CPU parity tests key on. GGML_LLAMAFILE comes from the ggml package
+    # config (or the bundled build), so the expectation follows the ggml build.
+    add_executable(test-backend-features test/test_backend_features.cpp)
+    target_link_libraries(test-backend-features PRIVATE ggml)
+    target_include_directories(test-backend-features PRIVATE src)
+    tts_cpp_apply_ccache(test-backend-features)
+    tts_cpp_register_test(test-backend-features LABEL "unit")
+    if (DEFINED GGML_LLAMAFILE)
+        if (GGML_LLAMAFILE)
+            set(_tts_expect_llamafile 1)
+        else()
+            set(_tts_expect_llamafile 0)
+        endif()
+        set_property(TEST test-backend-features APPEND PROPERTY ENVIRONMENT
+            "TTS_CPP_EXPECT_LLAMAFILE=${_tts_expect_llamafile}")
+    endif()
+
     add_executable(test-bench-wav test/test_bench_wav.cpp)
     target_include_directories(test-bench-wav PRIVATE src)
     tts_cpp_apply_ccache(test-bench-wav)
@@ -1679,7 +1697,6 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-engine-stream test/parler/test_engine_stream.cpp)
     target_link_libraries(test-parler-engine-stream PRIVATE tts-cpp)
-    # src for backend_util.h: the CPU leg asks whether tinyBLAS is compiled in.
     target_include_directories(test-parler-engine-stream PRIVATE include src)
     tts_cpp_apply_ccache(test-parler-engine-stream)
     tts_cpp_register_test(test-parler-engine-stream
