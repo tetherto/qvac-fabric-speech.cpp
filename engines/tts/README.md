@@ -42,7 +42,7 @@ engine, not every backend ggml can compile.
 | Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes | yes | yes | yes |
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
-| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes | yes | yes | yes |
+| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports load status, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
@@ -105,6 +105,20 @@ reported for information -- with every bar measured on all three backends.
 The same redesign is what fixed test-audio8-codec and test-audio8-lm-vulkan,
 which had been failing on unmodified master since the speech ggml moved past
 their calibration.
+
+CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights,
+`f16`/`bf16` flow weights, and `f16` HiFT weights. The recommended desktop
+GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT; on CPU use a
+`bf16` flow on AVX512-BF16 hosts and `f16` elsewhere (measured on a 16-core
+Zen 5, 16 threads, same pinned 14.8 s utterance: flow+vocoder wall 16.7 s
+with f32 weights on a ggml built without tinyBLAS falls to 8.6 s with the
+f16 tier and 7.7 s with the bf16 tier on a `GGML_LLAMAFILE=ON` build, the
+bundled-ggml default since this change). The optional
+`cosyvoice-cli --flow-cut-prompt` flag reduces flow work: only the first DiT
+block attends to the voice-prompt frames, and subsequent blocks process the
+generated region. It changes reference output and is off by default. See
+[CosyVoice3 conversion and usage](docs/cosyvoice3.md) for details and the
+unsupported LM `f16` caveat.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --
@@ -237,6 +251,14 @@ gate), outputs deterministic per cell and non-silent (peak amplitude
 0.47–0.89), device confirmed in every run log (`on CUDA0` / `on Vulkan0` /
 `on MTL0`). One build note: the ggml Vulkan build needs the Khronos
 SPIRV-Headers include path on hosts without a system copy.
+
+The table is the campaign as measured at engine `0f9fc817`. The RTX 5090 GPU
+lanes were re-measured after the decode-loop work and the fast-AR graph cache
+(same harness, same protocol, same box): **CUDA 1.31 / 2.67 s, RTF 0.116**,
+slope 0.096 s per audio-second, and **Vulkan 1.65 / 3.73 s, RTF 0.157**, slope
+0.144. The intercept of the wall-versus-audio fit — what a caller pays before
+the first second of speech — is 0.45 s on CUDA and 0.32 s on Vulkan. The CPU
+lane and the other machines are unchanged and are not re-stated here.
 
 ## Documentation
 

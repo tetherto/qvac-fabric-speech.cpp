@@ -111,6 +111,12 @@ struct SynthesisResult {
     // f. Two runs that agree here differ only in the codec's arithmetic, which
     // makes this the sharpest way to compare backends or quantisation tiers.
     std::vector<int> codes;
+
+    // Where this synthesis's codec synthesis stack actually ran: "ggml" (on
+    // backend_name()) or the Core ML sidecar's compute label ("coreml-all",
+    // "coreml-gpu", ...). Unlike Engine::codec_on_coreml(), this is per call:
+    // a loaded sidecar that cannot serve a call falls back to ggml here.
+    std::string codec_synthesis_backend = "ggml";
 };
 
 // Persistent engine. Loads the GGUFs once at construction; synthesize() reuses
@@ -144,6 +150,14 @@ public:
     int sample_rate() const;
     std::string backend_name() const;
     BackendDevice backend_device() const;
+
+    // True when an Apple Core ML sidecar for the codec's synthesis stack loaded
+    // (a TTS_CPP_COREML build with a compiled model next to the decoder GGUF).
+    // A load-status query: SynthesisResult::codec_synthesis_backend reports
+    // where each call actually ran, since a loaded sidecar that cannot serve a
+    // call falls back to ggml. The language model and the codec's post
+    // transformer always run on the backend backend_name() reports.
+    bool codec_on_coreml() const;
 
 private:
     struct Impl;

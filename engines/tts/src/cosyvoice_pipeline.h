@@ -145,11 +145,14 @@ dit_hp cosyvoice_dit_hp(const model_ctx & m);
 // Qwen2 prefill: x [hidden, L] -> logits [6761, L] (also tags "hidden" output).
 ggml_tensor * build_qwen(ggml_context * c, const model_ctx & m, const qwen_hp & hp,
                          ggml_tensor * x, ggml_tensor * pos, ggml_tensor * mask, int L);
-// DiT estimator: (x,mu,cond,spks,time_sin,pos) -> dit_out [80, N, B].
+// DiT estimator: (x,mu,cond,spks,time_sin,pos) -> dit_out [80, N - n_cut, B].
+// n_cut > 0 treats the first n_cut positions as attention conditioning only
+// (block 0 attends over the full sequence, later blocks and the output cover
+// just the generated region); 0 (the default) is the full reference path.
 ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp,
                         ggml_tensor * x, ggml_tensor * mu, ggml_tensor * cond,
                         ggml_tensor * spks, ggml_tensor * time_sin, ggml_tensor * pos,
-                        int N, int B);
+                        int N, int B, int n_cut = 0);
 // SinusPositionEmbedding(dim, scale=1000); returns [dim, B] (b outer).
 std::vector<float> sinus_time_emb(const std::vector<float> & t, int dim);
 
@@ -194,12 +197,16 @@ std::vector<int> cosyvoice_llm_generate(model_ctx & m, const qwen_hp & hp,
 // DiT flow: (prompt_token ++ speech_tokens) -> mel.  prompt_feat is the prompt
 // mel [mel_len1][80] row-major (mel-fastest); embedding is the 192-d CAM++
 // speaker vector.  Returns mel [80, out_mel_len] channel-major (mel[ch*T + t]).
+// n_cut > 0 (clamped to mel_len1) turns on the opt-in prompt cut: the prompt
+// frames condition attention only and the Euler solve integrates just the
+// generated region.  0 (the default) is the full reference path.
 std::vector<float> cosyvoice_flow_run(model_ctx & m,
                                       const std::vector<int> & prompt_token,
                                       const std::vector<int> & speech_tokens,
                                       const std::vector<float> & prompt_feat, int mel_len1,
                                       const std::vector<float> & embedding, int & out_mel_len,
-                                      cosyvoice_timings * tmg = nullptr);
+                                      cosyvoice_timings * tmg = nullptr,
+                                      int n_cut = 0);
 
 // HiFT f0 predictor alone: mel [80, mel_len] channel-major -> per-frame f0 [Hz].
 std::vector<float> cosyvoice_hift_f0(model_ctx & m,

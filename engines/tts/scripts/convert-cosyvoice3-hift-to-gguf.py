@@ -74,9 +74,13 @@ def resolve_weight_norm(sd):
     return out
 
 
-def to_numpy(t, dtype):
+def to_numpy(t, dtype, name=""):
     a = t.detach().to("cpu").to(_torch_dtype("f32")).numpy()
     a = np.ascontiguousarray(a)
+    if name.startswith("f0_predictor"):
+        # The f0 graph reads l_linear raw as f32 and its condnet matmul keeps
+        # the weight as src1, so the whole predictor stays f32 (it is tiny).
+        return a.astype(np.float32)
     if dtype == "f16" and a.ndim >= 2 and a.size >= 32:
         return a.astype(np.float16)
     return a.astype(np.float32)
@@ -144,7 +148,7 @@ def main():
 
     n = 0
     for name, tensor in sorted(sd.items()):
-        arr = to_numpy(tensor, args.dtype)
+        arr = to_numpy(tensor, args.dtype, name)
         w.add_tensor(gguf_name(name), arr)
         n += 1
     print(f"writing {n} tensors -> {args.outfile} ({args.dtype})")

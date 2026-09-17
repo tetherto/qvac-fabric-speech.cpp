@@ -22,11 +22,28 @@
 
 #include "audio8/tokenizer.h"
 
+// The Core ML synthesis sidecar (src/audio8/coreml/codec-synth.h), opaque here
+// so the model struct compiles on every platform; only TTS_CPP_USE_COREML
+// builds ever hold a non-null one.
+struct audio8_coreml_codec_context;
+
 namespace tts_cpp {
 namespace audio8 {
 namespace detail {
 
 constexpr int AUDIO8_MAX_NODES = 8192;
+
+// Hard ceiling on the codebook count a GGUF may declare. Audio8 ships ten;
+// everything from the prompt rows to the fast KV cache to the per-position
+// graph set scales with this, so an unbounded value from model metadata would
+// size real allocations and real pricing loops.
+constexpr int AUDIO8_MAX_CODEBOOKS = 32;
+
+// The fast head is four layers over at most num_codebooks positions, so its
+// graphs are two orders of magnitude smaller than the cap above. They are held
+// for the life of the model, one per position, and an arena sized for 8192
+// tensor headers would hold 30 MB of host memory to describe ~135 nodes.
+constexpr int AUDIO8_FAST_MAX_NODES = 512;
 
 // EngineOptions::max_frames == 0 resolves to this, the reference default
 // (~24 s of audio). Shared with the fit projector so the projected workload
@@ -141,10 +158,30 @@ struct lm_model {
     kv_cache slow_kv;
     kv_cache fast_kv;
     // Separate arenas: the two graphs have different shapes, and alternating
-    // them through one allocator would resize it on every call.
+    // them through one allocator would resize it on every call. fast_allocr
+    // serves the per-call path only; a replayed position uses its own.
     ggml_gallocr_t slow_allocr = nullptr;
     ggml_gallocr_t fast_allocr = nullptr;
     ggml_gallocr_t frame_allocr = nullptr;
+
+    // One built graph per fast-AR position, kept for the life of the model.
+    // Every frame replays the same shapes, so rebuilding them per frame costs a
+    // context, a support sweep and an allocation each time, and hands the
+    // backend a graph it cannot recognise as the one it just ran. Each position
+    // owns its allocator: one shared arena would move under the graphs already
+    // built against it the first time a later position reserved something
+    // bigger, and a graph whose tensors moved cannot be replayed either.
+    struct fast_graph {
+        ggml_context * ctx = nullptr;
+        ggml_cgraph * graph = nullptr;
+        ggml_tensor * logits = nullptr;
+        ggml_gallocr_t allocr = nullptr;
+        bool use_sched = false;
+    };
+    std::vector<fast_graph> fast_graphs;
+    // Set when a build lands on the scheduler fallback, which reallocates one
+    // shared arena per graph and so cannot hand out memory a graph may keep.
+    bool fast_cache_off = false;
     // Whether this backend can pick codes itself, decided once at load time.
     bool picks_codes = false;
     bool precise_outputs = false;
@@ -288,6 +325,12 @@ struct codec_model {
     int synthesis_block_frames = 0;
     size_t synthesis_scratch_budget = 0;
     int analysis_block_columns = 128;
+
+    // Core ML sidecar for the synthesis stack (decoder only; TTS_CPP_COREML
+    // builds, compiled model next to the GGUF). Synthesis runs in windows of
+    // the exported width and falls back to the ggml blocks when it cannot.
+    audio8_coreml_codec_context * coreml = nullptr;
+    bool synthesis_on_coreml = false;
 
     conv_weights enc_in;
     std::vector<dac_stage> enc_stages;
@@ -444,10 +487,15 @@ struct decode_timing {
     double latent_ms = 0.0;
     double synthesis_ms = 0.0;
     // The block width synthesis settled on and what the allocator priced it at,
-    // which is the only view of a width chosen from a memory budget.
+    // which is the only view of a width chosen from a memory budget. On the
+    // Core ML sidecar the width is the exported window and the scratch zero.
     int block_frames = 0;
     size_t block_scratch = 0;
+    std::string synthesis_backend = "ggml";  // or the sidecar's compute label
 };
+
+// Frames of history a synthesis block or Core ML window needs before its own.
+int synthesis_context_frames(const codec_model & model);
 
 // What synthesis_block_frames == 0 resolves the scratch budget to, given a
 // configured budget and what the backend reports for the device. Separate from

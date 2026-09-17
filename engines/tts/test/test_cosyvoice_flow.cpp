@@ -61,11 +61,22 @@ static void compute_mel_parity_metrics(const std::vector<float> & a,
     max_abs = mx;
 }
 
+// Cosine between a computed mel and the first n values of the fixture buffer.
+static double ref_cosine(const std::vector<float> & mel, const float * ref, size_t n) {
+    double dot = 0, na = 0, nb = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const double a = mel[i], b = ref[i];
+        dot += a * b; na += a * a; nb += b * b;
+    }
+    return dot / (std::sqrt(na) * std::sqrt(nb));
+}
+
 int main(int argc, char ** argv) {
     std::string gguf, in_dir;
     double min_cosine = 0.99;
     double xb_min_cosine = 0.9995;
     double xb_max_abs = 0.5;
+    double cut_min_cosine = -1;
     bool args_ok = true;
     for (int i = 1; i < argc && args_ok; ++i) {
         std::string a = argv[i];
@@ -74,11 +85,12 @@ int main(int argc, char ** argv) {
         else if (a == "--min-cosine" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], 0.0, 1.0, min_cosine);
         else if (a == "--xb-min-cosine" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], 0.0, 1.0, xb_min_cosine);
         else if (a == "--xb-max-abs" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], 0.0, 1e9, xb_max_abs);
+        else if (a == "--cut-min-cosine" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], 0.0, 1.0, cut_min_cosine);
         else args_ok = false;
     }
     if (!args_ok) {
         fprintf(stderr, "usage: %s --flow-gguf FLOW.gguf --in-dir DIR [--min-cosine 0.99]\n"
-                        "          [--xb-min-cosine 0.9995] [--xb-max-abs 0.5]\n"
+                        "          [--xb-min-cosine 0.9995] [--xb-max-abs 0.5] [--cut-min-cosine X]\n"
                         "cosine thresholds take [0,1]; the abs bound takes a nonnegative value\n", argv[0]);
         return 2;
     }
@@ -144,12 +156,31 @@ int main(int argc, char ** argv) {
     }
     size_t n = std::min(mel.size(), (size_t)MEL * (size_t)ref_a.shape[1]);
     const float * e = npy_as_f32(ref_a);
-    double dot = 0, na = 0, nb = 0;
-    for (size_t i = 0; i < n; ++i) { const double a = mel[i], b = e[i]; dot += a * b; na += a * a; nb += b * b; }
-    double cosine = dot / (std::sqrt(na) * std::sqrt(nb));
+    double cosine = ref_cosine(mel, e, n);
 
     fprintf(stderr, "flow_mel cosine = %.6f  (threshold %.4f, %d frames)\n", cosine, min_cosine, mel_len2);
     if (!(cosine >= min_cosine)) { fprintf(stderr, "FAIL: flow_mel cosine below threshold\n"); return 1; }
+
+    // Optional prompt-cut leg: same inputs through the opt-in n_cut path.  The
+    // cut deviates from the reference by design, so it gets its own looser
+    // threshold; shape must still match exactly.
+    if (cut_min_cosine >= 0) {
+        int mel_len2_cut = 0;
+        std::vector<float> mel_cut = cosyvoice_flow_run(m, ptok, stok, pfeat, mel_len1,
+                                                        emb, mel_len2_cut, nullptr, mel_len1);
+        if (mel_len2_cut != mel_len2 || mel_cut.size() != mel.size()) {
+            fprintf(stderr, "FAIL: cut mel shape differs (%d vs %d frames)\n",
+                    mel_len2_cut, mel_len2);
+            return 1;
+        }
+        double cosine_cut = ref_cosine(mel_cut, e, n);
+        fprintf(stderr, "cut flow_mel cosine = %.6f  (threshold %.4f)\n",
+                cosine_cut, cut_min_cosine);
+        if (!(cosine_cut >= cut_min_cosine)) {
+            fprintf(stderr, "FAIL: cut flow_mel cosine below threshold\n");
+            return 1;
+        }
+    }
     fprintf(stderr, "PASS\n");
     return 0;
 }

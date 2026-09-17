@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Export a Parakeet TDT, EOU, or Sortformer v2.1 FastConformer encoder
+"""Export a Parakeet Unified RNN-T, TDT, EOU, or Sortformer v2.1
+FastConformer encoder
 from GGUF to a Core ML package consumed by the parakeet.cpp Engine
 (the encoder I/O contract lives in src/coreml/parakeet-encoder.h).
 
@@ -8,8 +9,9 @@ ref-encoder-from-gguf.py so it matches the ggml encoder numerically.
 
 Three input-shape modes:
   - Fixed (default): torch.jit.trace at a single mel length (from a sample wav
-    or an explicit count). TDT treats that length as a capacity. EOU and
-    Sortformer batch routing require the exact exported length.
+    or an explicit count). Unified RNN-T and TDT treat that length as a
+    capacity. EOU and Sortformer batch routing require the exact exported
+    length.
   - Sortformer AOSC (--bypass-pre-encode): trace only the Conformer block stack
     at a fixed encoder-frame capacity. The runtime pads shorter cache/FIFO/chunk
     slabs, supplies an attention-validity mask, and crops the output.
@@ -33,6 +35,14 @@ Example:
       --n-mel-frames 1501 \
       --palettize-bits 6 --palettize-group-size 16 \
       --out    models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
+      --compile-dir models
+
+  # Unified RNN-T fixed-capacity encoder:
+  python scripts/export-encoder-coreml.py \
+      --gguf models/parakeet-unified-en-0.6b.q8_0.gguf \
+      --n-mel-frames 1501 \
+      --palettize-bits 6 --palettize-group-size 16 \
+      --out models/parakeet-unified-en-0.6b-encoder.mlpackage \
       --compile-dir models
 
   # EOU fixed shape (the 11-second fixture produces 1101 mel frames):
@@ -114,12 +124,29 @@ def model_type(meta):
 
 def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
     kind = model_type(meta)
-    if kind not in ("tdt", "eou", "sortformer"):
+    if kind not in ("rnnt", "tdt", "eou", "sortformer"):
         raise ValueError(
-            "Core ML encoder export supports TDT, EOU, and "
+            "Core ML encoder export supports Unified RNN-T, TDT, EOU, and "
             f"Sortformer v2.1, got {kind!r}")
     if bypass_pre_encode and kind != "sortformer":
         raise ValueError("--bypass-pre-encode is supported only for Sortformer v2.1")
+    if kind == "rnnt":
+        if bool(meta.get("parakeet.encoder.causal_downsampling", False)):
+            raise ValueError(
+                "Unified RNN-T Core ML export requires non-causal downsampling")
+        if str(meta.get(
+                "parakeet.encoder.conv_context_size", "default")) == "causal":
+            raise ValueError(
+                "Unified RNN-T Core ML export requires non-causal convolution")
+        if str(meta.get(
+                "parakeet.encoder.conv_norm_type", "batch_norm")) != "batch_norm":
+            raise ValueError(
+                "Unified RNN-T Core ML export requires batch-normalized convolution")
+        left = int(meta.get("parakeet.encoder.att_context_size_left", -1))
+        right = int(meta.get("parakeet.encoder.att_context_size_right", -1))
+        if left >= 0 or right >= 0:
+            raise ValueError(
+                "Unified RNN-T Core ML export requires unbounded attention context")
     if kind == "sortformer":
         variant = str(meta.get("parakeet.model_variant", ""))
         if variant != "sortformer-streaming-v2.1-aosc":

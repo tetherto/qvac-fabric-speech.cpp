@@ -317,18 +317,21 @@ struct Engine::Impl {
     }
 
     void run_codec(const std::vector<int32_t> & frames, int n_frames, int n_threads,
-                   std::vector<float> & pcm) {
+                   SynthesisResult & result) {
         decode_timing timing;
         std::string error;
         if (!decode_codes(decoder, as_codebook_rows(frames, n_frames).data(), n_frames,
-                          n_threads, cancel_probe(), pcm, &error, nullptr, &timing)) {
+                          n_threads, cancel_probe(), result.pcm, &error, nullptr, &timing)) {
             throw std::runtime_error(error);
         }
+        result.codec_synthesis_backend = timing.synthesis_backend;
         timings.codec_latent_ms = timing.latent_ms;
         timings.codec_synth_ms = timing.synthesis_ms;
         if (opts.verbose) {
-            std::fprintf(stderr, "[audio8-timing] codec block %d frames, %.0f MB scratch\n",
-                         timing.block_frames, timing.block_scratch / (1024.0 * 1024.0));
+            std::fprintf(stderr,
+                         "[audio8-timing] codec block %d frames, %.0f MB scratch, synthesis on %s\n",
+                         timing.block_frames, timing.block_scratch / (1024.0 * 1024.0),
+                         timing.synthesis_backend.c_str());
         }
     }
 
@@ -367,7 +370,7 @@ struct Engine::Impl {
         SynthesisResult result;
         result.frames = n_frames;
         result.codes.assign(frames.begin(), frames.end());
-        run_codec(frames, n_frames, n_threads, result.pcm);
+        run_codec(frames, n_frames, n_threads, result);
 
         const int native = decoder.hp.sample_rate;
         resample(result.pcm, native);
@@ -437,6 +440,11 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
                     &error)) {
         throw std::runtime_error(error);
     }
+    if (opts.verbose) {
+        std::fprintf(stderr, "[audio8] codec synthesis on %s\n",
+                     pimpl_->decoder.synthesis_on_coreml ? "the Core ML sidecar"
+                                                         : ggml_backend_name(pimpl_->decoder.backend));
+    }
     if (cloning) {
         if (!load_codec(opts.codec_encoder_gguf_path, opts.n_gpu_layers, pimpl_->encoder,
                         &error)) {
@@ -480,6 +488,10 @@ std::string Engine::backend_name() const {
 BackendDevice Engine::backend_device() const {
     return ::tts_cpp::detail::backend_is_cpu(pimpl_->lm.backend) ? BackendDevice::CPU
                                                                  : BackendDevice::GPU;
+}
+
+bool Engine::codec_on_coreml() const {
+    return pimpl_->decoder.synthesis_on_coreml;
 }
 
 VoicePrompt load_voice_prompt(const std::string & wav_path,

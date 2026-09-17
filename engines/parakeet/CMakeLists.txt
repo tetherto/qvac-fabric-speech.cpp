@@ -568,6 +568,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_ctc_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.q8_0.gguf")
     set(_qvp_ctc_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-ctc-0.6b.f16.gguf")
     set(_qvp_rnnt_q8_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf")
+    set(_qvp_rnnt_coreml   "${PARAKEET_TEST_MODEL_DIR}/parakeet-unified-en-0.6b-encoder.mlmodelc")
     set(_qvp_rnnt_hybrid_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/stt_ka_fastconformer_hybrid_large_pc.q8_0.gguf")
     set(_qvp_tdt_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf")
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
@@ -1173,6 +1174,11 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-encoder-coreml-parity-rnnt
+        LABEL    "fixture"
+        EXE      test-encoder-coreml-parity
+        ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
     parakeet_register_test(test-encoder-coreml-parity-eou
         LABEL    "fixture"
         EXE      test-encoder-coreml-parity
@@ -1248,6 +1254,26 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture"
             ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-transcribe-coreml-parity-rnnt
+            LABEL    "fixture"
+            EXE      test-transcribe-coreml-parity
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
+
+        # Drive Unified RNN-T beyond the 1501-mel-frame sidecar capacity. The
+        # test proves the fixed-capacity long-form plan is selected, every
+        # encoder window stays on Core ML, and its token stream remains close
+        # to the forced-ggml reference.
+        add_executable(test-rnnt-coreml-long-form
+            test/test_rnnt_coreml_long_form.cpp)
+        target_link_libraries(test-rnnt-coreml-long-form PRIVATE qvac-parakeet)
+        target_include_directories(test-rnnt-coreml-long-form PRIVATE include)
+        parakeet_apply_ccache(test-rnnt-coreml-long-form)
+        parakeet_register_test(test-rnnt-coreml-long-form
+            LABEL    "fixture"
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+                     "1501" "16" "0.95"
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity
@@ -1266,7 +1292,7 @@ if (PARAKEET_BUILD_TESTS)
     endif()
 
     # CLI-level Core ML gate: --require-coreml must prove every measured encoder
-    # invocation used the TDT sidecar while the decoder remains on ggml.
+    # invocation used the expected ASR sidecar while the decoder remains on ggml.
     if (PARAKEET_COREML AND Python3_Interpreter_FOUND AND TARGET parakeet-cli)
         add_test(
             NAME test-cli-coreml-bench
@@ -1293,6 +1319,19 @@ if (PARAKEET_BUILD_TESTS)
             NOT EXISTS "${_qvp_jfk_wav}" OR
             NOT EXISTS "${_qvp_eou_coreml}")
             set_property(TEST test-cli-coreml-bench-eou PROPERTY DISABLED TRUE)
+        endif()
+        add_test(
+            NAME test-cli-coreml-bench-rnnt
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_rnnt_q8_gguf}"
+                    "--wav" "${_qvp_jfk_wav}")
+        set_property(TEST test-cli-coreml-bench-rnnt PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_rnnt_q8_gguf}" OR
+            NOT EXISTS "${_qvp_jfk_wav}" OR
+            NOT EXISTS "${_qvp_rnnt_coreml}")
+            set_property(TEST test-cli-coreml-bench-rnnt PROPERTY DISABLED TRUE)
         endif()
     endif()
 
