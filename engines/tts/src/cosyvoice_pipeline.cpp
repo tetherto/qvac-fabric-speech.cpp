@@ -83,8 +83,9 @@ static inline size_t cosy_lm_nodes(const qwen_hp & hp) {
     return (size_t)hp.depth * 64 + 256;                    // measured ~48/layer
 }
 static inline size_t cosy_dit_nodes(const dit_hp & hp) {
-    // ~100 nodes/layer, plus conv_pos_embed which emits per (group, batch).
-    return (size_t)hp.depth * 128 + (size_t)hp.conv_groups * 96 + 512;
+    // ~100 nodes/layer (~140 with the CPU blocked-attention tiles), plus
+    // conv_pos_embed which emits per (group, batch).
+    return (size_t)hp.depth * 192 + (size_t)hp.conv_groups * 96 + 512;
 }
 static constexpr size_t kCosyFlowFrontendNodes = 256;
 static constexpr size_t kCosyHiftF0Nodes       = 256;
@@ -493,7 +494,7 @@ static ggml_tensor * conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_tens
             ggml_tensor * wg = ggml_view_3d(c, w, w->ne[0], w->ne[1], cout_g,
                                             w->nb[1], w->nb[2], (size_t)g * cout_g * w->nb[2]);
             wg = ggml_cont(c, wg);
-            ggml_tensor * im = ggml_im2col(c, wg, xg, 1, 0, 0, 0, 1, 0, false, GGML_TYPE_F32);
+            ggml_tensor * im = ggml_im2col(c, wg, xg, 1, 0, 0, 0, 1, 0, false, wg->type == GGML_TYPE_F16 ? GGML_TYPE_F16 : GGML_TYPE_F32);
             ggml_tensor * yg = ggml_mul_mat(c,
                 ggml_reshape_2d(c, im, im->ne[0], im->ne[1]),           // A = im2col [K*cin_g, OW]
                 ggml_reshape_2d(c, wg, wg->ne[0] * wg->ne[1], wg->ne[2]));
@@ -513,7 +514,7 @@ ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tenso
     // ggml-vulkan's IM2COL supports_op requires a contiguous signal; a view
     // reaching it would demote the whole stage to the sched-fallback path.
     if (!ggml_is_contiguous(x)) x = ggml_cont(c, x);
-    ggml_tensor * im = ggml_im2col(c, w, x, stride, 0, padding, 0, dilation, 0, false, GGML_TYPE_F32);
+    ggml_tensor * im = ggml_im2col(c, w, x, stride, 0, padding, 0, dilation, 0, false, w->type == GGML_TYPE_F16 ? GGML_TYPE_F16 : GGML_TYPE_F32);
     ggml_tensor * r = ggml_mul_mat(c,
         ggml_reshape_2d(c, im, im->ne[0], im->ne[2] * im->ne[1]),
         ggml_reshape_2d(c, w, w->ne[0] * w->ne[1], w->ne[2]));
@@ -572,12 +573,14 @@ ggml_tensor * build_qwen(ggml_context * c, const model_ctx & m, const qwen_hp & 
 // new Lq columns in-graph (ggml_cpy into a column-offset view) and reads the
 // past as a view of the first P columns, so a step moves O(Lq) data instead of
 // round-tripping the whole O(P) cache host<->backend every step (which was
-// O(L^2) over a full decode).  Layout per layer: [HD, NKV, max_P] (ne2=time).
+// O(L^2) over a full decode).  Layout per layer: K [HD, NKV, max_P] (ne2=time);
+// V time-transposed [max_P, HD, NKV] (ne0=time) so the value matmul reads
+// contiguous time rows straight from the cache.
 struct qwen_kvcache {
     ggml_backend_t          backend = nullptr;
     ggml_context *          ctx     = nullptr;
     ggml_backend_buffer_t   buf     = nullptr;
-    std::vector<ggml_tensor*> k, v;   // per layer, resident [HD, NKV, max_P]
+    std::vector<ggml_tensor*> k, v;   // per layer, resident; K/V layouts above
     int P = 0, max_P = 0;
     void init(model_ctx & m, const qwen_hp & hp, int max_tokens) {
         backend = m.backend; max_P = max_tokens; P = 0;
@@ -587,7 +590,7 @@ struct qwen_kvcache {
         k.assign(depth, nullptr); v.assign(depth, nullptr);
         for (int i = 0; i < depth; ++i) {
             k[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, HD, NKV, max_P);
-            v[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, HD, NKV, max_P);
+            v[i] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, max_P, HD, NKV);
         }
         buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     }
@@ -600,8 +603,9 @@ struct qwen_kvcache {
 
 // One prefill/decode step with a KV cache.  x_new: [D, Lq], Lq tokens starting
 // at absolute position cache.P.  Only K/V for the Lq new tokens are computed;
-// the past K/V come from the cache (concatenated in), so a decode step is O(L)
-// not O(L^2).  Updates the cache in place; returns the LAST-position logits [VS].
+// attention reads past ++ new as strided views of the resident cache, so a
+// decode step is O(L) not O(L^2).  Updates the cache in place; returns the
+// LAST-position logits [VS].
 // Graph-build half of qwen_step_kv, shared with the memory-fit measure
 // (cosyvoice_fit_measure_llm) so the priced graph is the executed graph by
 // construction.  Inputs are the named tensors "x" / "pos" / "mask"; the
@@ -635,29 +639,28 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
         v = ggml_reshape_3d(c, v, HD, NKV, Lq);
         q = ggml_rope_ext(c, q, pos, nullptr, HD, GGML_ROPE_TYPE_NEOX, 0, hp.theta, 1.0f,0,1,0,0);
         k = ggml_rope_ext(c, k, pos, nullptr, HD, GGML_ROPE_TYPE_NEOX, 0, hp.theta, 1.0f,0,1,0,0);
-        // Past K/V come from the resident cache's first P columns (written by
-        // prior steps); attention runs over past ++ this step's new K/V.
-        ggml_tensor * past_k = (P > 0) ? ggml_view_3d(c, cache.k[i], HD, NKV, P,
-                                             cache.k[i]->nb[1], cache.k[i]->nb[2], 0) : nullptr;
-        ggml_tensor * past_v = (P > 0) ? ggml_view_3d(c, cache.v[i], HD, NKV, P,
-                                             cache.v[i]->nb[1], cache.v[i]->nb[2], 0) : nullptr;
-        ggml_tensor * kc = (P > 0) ? ggml_concat(c, past_k, k, 2) : k;   // [HD,NKV,Lk]
-        ggml_tensor * vc = (P > 0) ? ggml_concat(c, past_v, v, 2) : v;
-        // Append this step's new K/V into the resident cache at columns [P,Lk)
-        // for future steps.  Disjoint from past_k/past_v (which read [0,P)), so
-        // there is no read-after-write hazard within this graph.
+        // Append this step's new K/V into the resident cache at columns [P,Lk),
+        // then attend against strided views of the cache itself: no concat of
+        // past K/V and no cont copies, so a decode step moves O(Lq) not O(Lk)
+        // bytes.  The V cache is stored time-transposed ([max_P, HD, NKV]) so
+        // the value matmul reads contiguous time rows without a transpose copy.
+        // The cpy nodes are expanded into the graph inside this loop, which
+        // places them before the attention nodes that read the cache views.
         ggml_tensor * dst_k = ggml_view_3d(c, cache.k[i], HD, NKV, Lq,
                                   cache.k[i]->nb[1], cache.k[i]->nb[2], (size_t)P * cache.k[i]->nb[2]);
-        ggml_tensor * dst_v = ggml_view_3d(c, cache.v[i], HD, NKV, Lq,
-                                  cache.v[i]->nb[1], cache.v[i]->nb[2], (size_t)P * cache.v[i]->nb[2]);
+        ggml_tensor * dst_v = ggml_view_2d(c, cache.v[i], Lq, (int64_t)HD * NKV,
+                                  cache.v[i]->nb[1], (size_t)P * cache.v[i]->nb[0]);
         cpy_k[i] = ggml_cpy(c, k, dst_k);
-        cpy_v[i] = ggml_cpy(c, v, dst_v);
+        cpy_v[i] = ggml_cpy(c, ggml_transpose(c, ggml_reshape_2d(c, v, (int64_t)HD * NKV, Lq)), dst_v);
+        ggml_build_forward_expand(gf, cpy_k[i]);
+        ggml_build_forward_expand(gf, cpy_v[i]);
         ggml_tensor * qh = ggml_reshape_4d(c, ggml_cont(c, ggml_permute(c, q, 0,2,1,3)), HD, Lq, G_, NKV);
-        ggml_tensor * kh = ggml_reshape_4d(c, ggml_cont(c, ggml_permute(c, kc, 0,2,1,3)), HD, Lk, 1, NKV);
-        ggml_tensor * vh = ggml_reshape_4d(c, ggml_cont(c, ggml_permute(c, vc, 0,2,1,3)), HD, Lk, 1, NKV);
+        ggml_tensor * kh = ggml_view_4d(c, cache.k[i], HD, Lk, 1, NKV,
+                                  cache.k[i]->nb[2], cache.k[i]->nb[1], cache.k[i]->nb[1], 0);
         ggml_tensor * sc = mul_mat_f32acc(c, kh, qh);        // [Lk, Lq, G, NKV]
         sc = ggml_soft_max_ext(c, sc, mask, scale, 0.0f);
-        ggml_tensor * vt = ggml_cont(c, ggml_permute(c, vh, 1,0,2,3)); // [Lk, HD, 1, NKV]
+        ggml_tensor * vt = ggml_view_4d(c, cache.v[i], Lk, HD, 1, NKV,
+                                  cache.v[i]->nb[1], cache.v[i]->nb[2], cache.v[i]->nb[2], 0);
         ggml_tensor * o = mul_mat_f32acc(c, vt, sc);         // [HD, Lq, G, NKV]
         o = ggml_cont(c, ggml_permute(c, o, 0,3,1,2));       // [HD, G, NKV, Lq]
         o = ggml_reshape_2d(c, o, static_cast<int64_t>(HD) * NH, Lq);
@@ -674,7 +677,6 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
     ggml_set_name(logits, "logits");
     ggml_set_output(logits);
     ggml_build_forward_expand(gf, logits);
-    for (int i = 0; i < hp.depth; ++i) { ggml_build_forward_expand(gf, cpy_k[i]); ggml_build_forward_expand(gf, cpy_v[i]); }
     return gf;
 }
 
@@ -821,10 +823,32 @@ std::vector<int> cosyvoice_llm_generate(model_ctx & m, const qwen_hp & hp,
 static const char * P = "flow/";
 static std::string bp(int i, const std::string & s) { return std::string(P) + "blk/" + std::to_string(i) + "/" + s; }
 
+// Probe: build a representative DiT attention node (f32 Q/K/V, f32
+// accumulation, no mask) and ask the backend whether it runs natively.
+static bool cosy_dit_fa_supported(ggml_backend_t backend, int head_dim, int heads) {
+    if (!backend) return false;
+    ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, /*no_alloc=*/true };
+    ggml_context * c = ggml_init(ip);
+    if (!c) return false;
+    ggml_tensor * q = ggml_new_tensor_4d(c, GGML_TYPE_F32, head_dim, 16, heads, 2);
+    ggml_tensor * k = ggml_new_tensor_4d(c, GGML_TYPE_F32, head_dim, 16, heads, 2);
+    ggml_tensor * v = ggml_new_tensor_4d(c, GGML_TYPE_F32, head_dim, 16, heads, 2);
+    ggml_tensor * op = ggml_flash_attn_ext(c, q, k, v, nullptr, 1.0f, 0.0f, 0.0f);
+    if (op) ggml_flash_attn_ext_set_prec(op, GGML_PREC_F32);
+    const bool ok = op && ggml_backend_supports_op(backend, op);
+    ggml_free(c);
+    return ok;
+}
+
 ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp,
                         ggml_tensor * x, ggml_tensor * mu, ggml_tensor * cond,
                         ggml_tensor * spks, ggml_tensor * time_sin, ggml_tensor * pos,
-                        int N, int B) {
+                        int N, int B, int n_cut) {
+    // Flash attention measured faster than the naive score/softmax/value
+    // chain on both the CPU backend and the desktop GPUs; the probe keeps
+    // backends without a native FLASH_ATTN_EXT on the naive path they are
+    // tuned for instead of demoting the stage to a scheduler fallback.
+    const bool use_fa = cosy_dit_fa_supported(m.backend, hp.dim_head, hp.heads);
     ggml_tensor * t = linear(c, T(m, std::string(P) + "time_embed/time_mlp/0/weight"),
                                 T(m, std::string(P) + "time_embed/time_mlp/0/bias"), time_sin);
     t = silu(c, t);
@@ -860,44 +884,80 @@ ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp
         ggml_tensor * shift_msa = chunk(0), * scale_msa = chunk(1), * gate_msa = chunk(2);
         ggml_tensor * shift_mlp = chunk(3), * scale_mlp = chunk(4), * gate_mlp = chunk(5);
 
+        // n_cut > 0 treats the first n_cut (voice-prompt) positions as
+        // conditioning only: block 0 attends over the full sequence but emits
+        // just the generated region, and every later block runs on that
+        // shorter sequence.  The prompt influences the output only through
+        // block 0's attention, which deviates from the PyTorch reference, so
+        // it is opt-in.  NL is this block's input length (N at block 0, the
+        // generated length afterwards); pos_l keeps absolute RoPE positions
+        // for the trimmed rows.
+        const int NL = (int)h->ne[1];
+        const int NQ = (i == 0) ? NL - n_cut : NL;
+        ggml_tensor * pos_l = (NL == N) ? pos
+            : ggml_view_1d(c, pos, NL, (size_t)(N - NL) * pos->nb[0]);
+
         ggml_tensor * norm = adaln_modulate(c, ln_noaffine(c, h), scale_msa, shift_msa);
 
-        ggml_tensor * q = linear(c, T(m, bp(i, "attn/to_q/weight")), T(m, bp(i, "attn/to_q/bias")), norm);
-        ggml_tensor * k = linear(c, T(m, bp(i, "attn/to_k/weight")), T(m, bp(i, "attn/to_k/bias")), norm);
-        ggml_tensor * v = linear(c, T(m, bp(i, "attn/to_v/weight")), T(m, bp(i, "attn/to_v/bias")), norm);
+        ggml_tensor * q, * k, * v;
+        if (m.tensors.count(bp(i, "attn/to_qkv/weight"))) {
+            ggml_tensor * qkv = linear(c, T(m, bp(i, "attn/to_qkv/weight")),
+                                          T(m, bp(i, "attn/to_qkv/bias")), norm);
+            q = ggml_view_3d(c, qkv, hp.dim, NL, B, qkv->nb[1], qkv->nb[2], 0);
+            k = ggml_view_3d(c, qkv, hp.dim, NL, B, qkv->nb[1], qkv->nb[2], (size_t)hp.dim * qkv->nb[0]);
+            v = ggml_cont(c, ggml_view_3d(c, qkv, hp.dim, NL, B, qkv->nb[1], qkv->nb[2], (size_t)2 * hp.dim * qkv->nb[0]));
+        } else {
+            q = linear(c, T(m, bp(i, "attn/to_q/weight")), T(m, bp(i, "attn/to_q/bias")), norm);
+            k = linear(c, T(m, bp(i, "attn/to_k/weight")), T(m, bp(i, "attn/to_k/bias")), norm);
+            v = linear(c, T(m, bp(i, "attn/to_v/weight")), T(m, bp(i, "attn/to_v/bias")), norm);
+        }
         auto rope_head0 = [&](ggml_tensor * z) {
-            ggml_tensor * h0 = ggml_cont(c, ggml_view_3d(c, z, hp.dim_head, N, B, z->nb[1], z->nb[2], 0));
-            h0 = ggml_reshape_4d(c, h0, hp.dim_head, 1, N, B);
-            h0 = ggml_rope_ext(c, h0, pos, nullptr, hp.dim_head, GGML_ROPE_TYPE_NORMAL, 0,
+            ggml_tensor * h0 = ggml_cont(c, ggml_view_3d(c, z, hp.dim_head, NL, B, z->nb[1], z->nb[2], 0));
+            h0 = ggml_reshape_4d(c, h0, hp.dim_head, 1, NL, B);
+            h0 = ggml_rope_ext(c, h0, pos_l, nullptr, hp.dim_head, GGML_ROPE_TYPE_NORMAL, 0,
                                10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-            h0 = ggml_reshape_3d(c, h0, hp.dim_head, N, B);
-            ggml_tensor * rest = ggml_cont(c, ggml_view_3d(c, z, hp.dim - hp.dim_head, N, B,
+            h0 = ggml_reshape_3d(c, h0, hp.dim_head, NL, B);
+            ggml_tensor * rest = ggml_cont(c, ggml_view_3d(c, z, hp.dim - hp.dim_head, NL, B,
                                           z->nb[1], z->nb[2], (size_t)hp.dim_head * z->nb[0]));
             return ggml_concat(c, h0, rest, 0);
         };
         q = rope_head0(q);
         k = rope_head0(k);
-        q = ggml_reshape_4d(c, q, hp.dim_head, hp.heads, N, B);
-        k = ggml_reshape_4d(c, k, hp.dim_head, hp.heads, N, B);
-        v = ggml_reshape_4d(c, v, hp.dim_head, hp.heads, N, B);
+        if (NQ < NL) {
+            q = ggml_cont(c, ggml_view_3d(c, q, hp.dim, NQ, B, q->nb[1], q->nb[2], (size_t)n_cut * q->nb[1]));
+        }
+        q = ggml_reshape_4d(c, q, hp.dim_head, hp.heads, NQ, B);
+        k = ggml_reshape_4d(c, k, hp.dim_head, hp.heads, NL, B);
+        v = ggml_reshape_4d(c, v, hp.dim_head, hp.heads, NL, B);
         q = ggml_cont(c, ggml_permute(c, q, 0, 2, 1, 3));
         k = ggml_cont(c, ggml_permute(c, k, 0, 2, 1, 3));
         v = ggml_cont(c, ggml_permute(c, v, 0, 2, 1, 3));
-        ggml_tensor * scores = ggml_mul_mat(c, k, q);
-        scores = ggml_soft_max_ext(c, scores, nullptr, attn_scale, 0.0f);
-        ggml_tensor * vt = ggml_cont(c, ggml_permute(c, v, 1, 0, 2, 3));
-        ggml_tensor * o = ggml_mul_mat(c, vt, scores);
-        o = ggml_cont(c, ggml_permute(c, o, 0, 2, 1, 3));
-        o = ggml_reshape_3d(c, o, hp.dim, N, B);
+        ggml_tensor * o = nullptr;
+        if (use_fa) {
+            o = ggml_flash_attn_ext(c, q, k, v, nullptr, attn_scale, 0.0f, 0.0f);
+            ggml_flash_attn_ext_set_prec(o, GGML_PREC_F32);
+        } else {
+            ggml_tensor * scores = ggml_mul_mat(c, k, q);
+            scores = ggml_soft_max_ext(c, scores, nullptr, attn_scale, 0.0f);
+            ggml_tensor * vt = ggml_cont(c, ggml_permute(c, v, 1, 0, 2, 3));
+            o = ggml_mul_mat(c, vt, scores);
+            o = ggml_cont(c, ggml_permute(c, o, 0, 2, 1, 3));
+        }
+        o = ggml_reshape_3d(c, o, hp.dim, NQ, B);
         o = linear(c, T(m, bp(i, "attn/to_out/0/weight")), T(m, bp(i, "attn/to_out/0/bias")), o);
 
-        h = ggml_add(c, h, ggml_mul(c, o, ggml_reshape_3d(c, gate_msa, hp.dim, 1, B)));
+        ggml_tensor * hg = h;
+        if (NQ < NL) {
+            hg = ggml_cont(c, ggml_view_3d(c, h, hp.dim, NQ, B, h->nb[1], h->nb[2], (size_t)n_cut * h->nb[1]));
+        }
+        hg = ggml_add(c, hg, ggml_mul(c, o, ggml_reshape_3d(c, gate_msa, hp.dim, 1, B)));
 
-        ggml_tensor * fn = adaln_modulate(c, ln_noaffine(c, h), scale_mlp, shift_mlp);
+        ggml_tensor * fn = adaln_modulate(c, ln_noaffine(c, hg), scale_mlp, shift_mlp);
         ggml_tensor * ff = linear(c, T(m, bp(i, "ff/ff/0/0/weight")), T(m, bp(i, "ff/ff/0/0/bias")), fn);
         ff = ggml_gelu(c, ff);
         ff = linear(c, T(m, bp(i, "ff/ff/2/weight")), T(m, bp(i, "ff/ff/2/bias")), ff);
-        h = ggml_add(c, h, ggml_mul(c, ff, ggml_reshape_3d(c, gate_mlp, hp.dim, 1, B)));
+        hg = ggml_add(c, hg, ggml_mul(c, ff, ggml_reshape_3d(c, gate_mlp, hp.dim, 1, B)));
+        h = hg;
     }
 
     ggml_tensor * embf = linear(c, T(m, std::string(P) + "norm_out/linear/weight"),
@@ -1005,7 +1065,7 @@ static void run_euler_steps(model_ctx & m, const dit_hp & hp,
                             const std::vector<float> & mu_host,
                             const std::vector<float> & cond_host,
                             const std::vector<float> & spks_host, int TM,
-                            std::vector<float> & x_host) {
+                            std::vector<float> & x_host, int n_cut) {
     const int MEL = 80;
     int B = 2, N = TM;
     const size_t nmax = cosy_dit_nodes(hp);
@@ -1028,7 +1088,7 @@ static void run_euler_steps(model_ctx & m, const dit_hp & hp,
         spks = ggml_new_tensor_2d(c, GGML_TYPE_F32, MEL, B);    ggml_set_name(spks, "spks"); ggml_set_input(spks);
         tsin = ggml_new_tensor_2d(c, GGML_TYPE_F32, 256, B);    ggml_set_name(tsin, "tsin"); ggml_set_input(tsin);
         pos  = ggml_new_tensor_1d(c, GGML_TYPE_I32, N);         ggml_set_name(pos, "pos");   ggml_set_input(pos);
-        out  = build_dit(c, m, hp, x, mu, cnd, spks, tsin, pos, N, B);
+        out  = build_dit(c, m, hp, x, mu, cnd, spks, tsin, pos, N, B, n_cut);
         ggml_build_forward_expand(gf, out);
     };
     build();
@@ -1048,7 +1108,8 @@ static void run_euler_steps(model_ctx & m, const dit_hp & hp,
     std::vector<float> tspan(11);
     for (int i = 0; i <= 10; ++i) { float u = (float)i / 10.0f; tspan[i] = 1.0f - std::cos(u * 0.5f * (float)M_PI); }
     const float cfg = 0.7f;
-    std::vector<float> dphi((size_t)MEL * N * B);
+    const int NG = N - n_cut;
+    std::vector<float> dphi((size_t)MEL * NG * B);
     std::vector<float> xin((size_t)MEL * N * B);
     for (int step = 0; step < 10; ++step) {
         if (use_sched && step > 0) {
@@ -1075,10 +1136,10 @@ static void run_euler_steps(model_ctx & m, const dit_hp & hp,
             throw std::runtime_error("cosyvoice: DiT compute failed");
         }
         ggml_backend_tensor_get(out, dphi.data(), 0, dphi.size() * 4);
-        for (size_t i = 0; i < (size_t)MEL * N; ++i) {
-            float dc = dphi[i], du = dphi[i + (size_t)MEL * N];
+        for (size_t i = 0; i < (size_t)MEL * NG; ++i) {
+            float dc = dphi[i], du = dphi[i + (size_t)MEL * NG];
             float d = (1.0f + cfg) * dc - cfg * du;
-            x_host[i] += dt * d;
+            x_host[(size_t)MEL * n_cut + i] += dt * d;
         }
     }
     ggml_gallocr_free(al); ggml_free(c);
@@ -1099,7 +1160,7 @@ std::vector<float> cosyvoice_flow_run(model_ctx & m,
                                       const std::vector<int> & speech_tokens,
                                       const std::vector<float> & prompt_feat, int mel_len1,
                                       const std::vector<float> & embedding, int & out_mel_len,
-                                      cosyvoice_timings * tmg) {
+                                      cosyvoice_timings * tmg, int n_cut) {
     dit_hp hp = cosyvoice_dit_hp(m);
     const int MEL = 80;
     int T_ptok = (int)prompt_token.size(), T_stok = (int)speech_tokens.size();
@@ -1142,7 +1203,8 @@ std::vector<float> cosyvoice_flow_run(model_ctx & m,
 
     // DiT graph B: 10 Euler steps (integrates x_host in place).
     auto t_dit = cosy_clk::now();
-    run_euler_steps(m, hp, mu_host, cond_host, spks_host, TM, x_host);
+    if (n_cut > 0) n_cut = std::min(n_cut, mel_len1);
+    run_euler_steps(m, hp, mu_host, cond_host, spks_host, TM, x_host, n_cut);
     if (tmg) tmg->dit_euler_ms += cosy_ms_since(t_dit, m.backend);
 
     // trim prompt part -> [80, mel_len2] channel-major
@@ -1660,7 +1722,7 @@ uint64_t cosy_fit_kv_init_measure(qwen_kvcache & cache, model_ctx & m, const qwe
     cache.k.assign(depth, nullptr); cache.v.assign(depth, nullptr);
     for (int i = 0; i < depth; ++i) {
         cache.k[i] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F32, HD, NKV, max_tokens);
-        cache.v[i] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F32, HD, NKV, max_tokens);
+        cache.v[i] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F32, max_tokens, HD, NKV);
     }
     const uint64_t bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
         cache.ctx, ggml_backend_get_default_buffer_type(m.backend));

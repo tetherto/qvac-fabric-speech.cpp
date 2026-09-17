@@ -28,6 +28,9 @@
 
 #include "tts-cpp/audio8/fit.h"
 
+#include "test_env_portable.h"
+#include "tiny_lm.h"
+
 #include "audio8/graph.h"
 #include "audio8/internal.h"
 #include "fit_price.h"
@@ -67,117 +70,6 @@ void expect_eq(uint64_t projected, uint64_t real, const std::string & what) {
     }
 }
 
-// ── Tiny synthetic audio8-lm GGUF ───────────────────────────────────────────
-// The smallest hparam set the loader, the graph builders, and the RoPE tables
-// accept: every dimension real models scale up, none of the structure changed.
-
-struct tiny_lm {
-    int hidden = 32, depth = 2, n_head = 4, n_kv = 2, head_dim = 8, inter = 48;
-    int vocab = 96;
-    int fast_depth = 1, fast_n_head = 4, fast_n_kv = 2, fast_head_dim = 8, fast_inter = 48;
-    int num_codebooks = 4, codebook_size = 24;
-    int semantic_begin = 8, semantic_end = 31, eos = 32, pad = 0;
-    int max_seq_len = 48, ras_window = 6;
-};
-
-void add_f32(gguf_context * g, ggml_context * ctx, const char * name,
-             std::initializer_list<int64_t> ne) {
-    ggml_tensor * t = ggml_new_tensor(ctx, GGML_TYPE_F32, (int) ne.size(),
-                                      std::vector<int64_t>(ne).data());
-    ggml_set_name(t, name);
-    float * d = (float *) t->data;
-    for (int64_t i = 0; i < ggml_nelements(t); ++i) d[i] = 0.01f;
-    gguf_add_tensor(g, t);
-}
-
-std::string write_tiny_lm_gguf(const tiny_lm & p) {
-    const std::string path =
-        (fs::temp_directory_path() / "test-audio8-fit-tiny-lm.gguf").string();
-    gguf_context * g = gguf_init_empty();
-    gguf_set_val_str(g, "general.architecture", "audio8-lm");
-    auto u32 = [&](const char * k, int v) {
-        gguf_set_val_u32(g, (std::string("audio8.lm.") + k).c_str(), (uint32_t) v);
-    };
-    auto f32 = [&](const char * k, float v) {
-        gguf_set_val_f32(g, (std::string("audio8.lm.") + k).c_str(), v);
-    };
-    auto b = [&](const char * k, bool v) {
-        gguf_set_val_bool(g, (std::string("audio8.lm.") + k).c_str(), v);
-    };
-    u32("depth", p.depth);            u32("hidden", p.hidden);
-    u32("n_head", p.n_head);          u32("n_kv", p.n_kv);
-    u32("head_dim", p.head_dim);      u32("inter", p.inter);
-    u32("vocab", p.vocab);
-    u32("fast_depth", p.fast_depth);  u32("fast_hidden", p.hidden);
-    u32("fast_n_head", p.fast_n_head); u32("fast_n_kv", p.fast_n_kv);
-    u32("fast_head_dim", p.fast_head_dim); u32("fast_inter", p.fast_inter);
-    u32("num_codebooks", p.num_codebooks); u32("codebook_size", p.codebook_size);
-    u32("semantic_begin", p.semantic_begin); u32("semantic_end", p.semantic_end);
-    u32("eos", p.eos);                u32("pad", p.pad);
-    u32("max_seq_len", p.max_seq_len); u32("ras_window", p.ras_window);
-    f32("rope_theta", 10000.0f);      f32("rms_eps", 1e-5f);
-    f32("ras_top_p", 0.9f);           f32("ras_temperature", 0.7f);
-    b("norm_fast_input", true);       b("qkv_bias", true);
-    b("fast_qkv_bias", false);
-
-    const char * toks[] = {"<pad>", "a", "b", "c"};
-    gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 4);
-    const char * merges[] = {"a b"};
-    gguf_set_arr_str(g, "tokenizer.ggml.merges", merges, 1);
-    const int32_t added[] = {0};
-    gguf_set_arr_data(g, "tokenizer.ggml.added_token_ids", GGUF_TYPE_INT32, added, 1);
-
-    ggml_init_params ip = { 16u * 1024 * 1024, nullptr, /*no_alloc=*/false };
-    ggml_context * ctx = ggml_init(ip);
-
-    add_f32(g, ctx, "lm/tok_emb",      {p.hidden, p.vocab});
-    add_f32(g, ctx, "lm/codebook_emb", {p.hidden, (int64_t) p.num_codebooks * p.codebook_size});
-    add_f32(g, ctx, "lm/norm",         {p.hidden});
-    add_f32(g, ctx, "lm/sem_head",     {p.hidden, p.codebook_size + 1});
-    add_f32(g, ctx, "lm/rope_cos",     {p.head_dim / 2, p.max_seq_len});
-    add_f32(g, ctx, "lm/rope_sin",     {p.head_dim / 2, p.max_seq_len});
-    for (int i = 0; i < p.depth; ++i) {
-        const std::string pre = "lm/blk/" + std::to_string(i) + "/";
-        add_f32(g, ctx, (pre + "wq").c_str(),        {p.hidden, p.n_head * p.head_dim});
-        add_f32(g, ctx, (pre + "wk").c_str(),        {p.hidden, p.n_kv * p.head_dim});
-        add_f32(g, ctx, (pre + "wv").c_str(),        {p.hidden, p.n_kv * p.head_dim});
-        add_f32(g, ctx, (pre + "wo").c_str(),        {p.n_head * p.head_dim, p.hidden});
-        add_f32(g, ctx, (pre + "wq_b").c_str(),      {p.n_head * p.head_dim});
-        add_f32(g, ctx, (pre + "wk_b").c_str(),      {p.n_kv * p.head_dim});
-        add_f32(g, ctx, (pre + "wv_b").c_str(),      {p.n_kv * p.head_dim});
-        add_f32(g, ctx, (pre + "attn_norm").c_str(), {p.hidden});
-        add_f32(g, ctx, (pre + "w1").c_str(),        {p.hidden, p.inter});
-        add_f32(g, ctx, (pre + "w2").c_str(),        {p.inter, p.hidden});
-        add_f32(g, ctx, (pre + "w3").c_str(),        {p.hidden, p.inter});
-        add_f32(g, ctx, (pre + "ffn_norm").c_str(),  {p.hidden});
-    }
-    add_f32(g, ctx, "fast/emb",      {p.hidden, p.codebook_size});
-    add_f32(g, ctx, "fast/norm",     {p.hidden});
-    add_f32(g, ctx, "fast/out",      {p.hidden, p.codebook_size});
-    add_f32(g, ctx, "fast/rope_cos", {p.fast_head_dim / 2, p.num_codebooks});
-    add_f32(g, ctx, "fast/rope_sin", {p.fast_head_dim / 2, p.num_codebooks});
-    for (int i = 0; i < p.fast_depth; ++i) {
-        const std::string pre = "fast/blk/" + std::to_string(i) + "/";
-        add_f32(g, ctx, (pre + "wq").c_str(),        {p.hidden, p.fast_n_head * p.fast_head_dim});
-        add_f32(g, ctx, (pre + "wk").c_str(),        {p.hidden, p.fast_n_kv * p.fast_head_dim});
-        add_f32(g, ctx, (pre + "wv").c_str(),        {p.hidden, p.fast_n_kv * p.fast_head_dim});
-        add_f32(g, ctx, (pre + "wo").c_str(),        {p.fast_n_head * p.fast_head_dim, p.hidden});
-        add_f32(g, ctx, (pre + "attn_norm").c_str(), {p.hidden});
-        add_f32(g, ctx, (pre + "w1").c_str(),        {p.hidden, p.fast_inter});
-        add_f32(g, ctx, (pre + "w2").c_str(),        {p.fast_inter, p.hidden});
-        add_f32(g, ctx, (pre + "w3").c_str(),        {p.hidden, p.fast_inter});
-        add_f32(g, ctx, (pre + "ffn_norm").c_str(),  {p.hidden});
-    }
-
-    if (!gguf_write_to_file(g, path.c_str(), /*only_meta=*/false)) {
-        std::fprintf(stderr, "FATAL: cannot write %s\n", path.c_str());
-        std::exit(2);
-    }
-    ggml_free(ctx);
-    gguf_free(g);
-    return path;
-}
-
 // Price a freshly built LM graph the way the projector does (fit_price.h
 // mirrors prepare_graph's dispatch).
 bool price(lm_model & lm, scratch & build, ::tts_cpp::detail::fit_graph_price & out) {
@@ -186,9 +78,30 @@ bool price(lm_model & lm, scratch & build, ::tts_cpp::detail::fit_graph_price & 
                                               2 * AUDIO8_MAX_NODES, out);
 }
 
+// What a real fast_step leaves allocated: one arena per position it ran.
+uint64_t real_fast_arena_bytes(const lm_model & model) {
+    uint64_t total = 0;
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.allocr) total += ggml_gallocr_get_buffer_size(cached.allocr, 0);
+    }
+    return total;
+}
+
+// And in host RAM, one graph context per position. The projector multiplies
+// scratch_arena_bytes by this count, so the count is what has to be pinned --
+// the size itself comes from the same function the arenas are built with.
+uint64_t retained_fast_contexts(const lm_model & model) {
+    uint64_t kept = 0;
+    for (const lm_model::fast_graph & cached : model.fast_graphs) {
+        if (cached.ctx) ++kept;
+    }
+    return kept;
+}
+
 void run_synthetic_lm_gates() {
-    const tiny_lm p;
-    const std::string path = write_tiny_lm_gguf(p);
+    const audio8_test::tiny_lm p;
+    const std::string path = audio8_test::write_tiny_lm_gguf(
+        p, (fs::temp_directory_path() / "test-audio8-fit-tiny-lm.gguf").string());
 
     // Metadata-only vs real load on the same (CPU) backend.
     lm_model mm, real;
@@ -245,8 +158,10 @@ void run_synthetic_lm_gates() {
         }
     }
 
-    // 4. Fast arena parity: a real whole-frame fast_step vs the projected
-    //    prime/last maximum.
+    // 4. Fast arena parity: a real whole-frame fast_step vs the projected sum
+    //    over the positions. Each position keeps its own graph and its own
+    //    arena for the life of the model, so what a real frame leaves behind is
+    //    every one of them, not the widest.
     {
         std::vector<int32_t> codes;
         std::vector<float> prime_in((size_t) p.hidden, 0.0f);
@@ -254,21 +169,21 @@ void run_synthetic_lm_gates() {
         if (!fast_step(real, prime_in, p.semantic_begin, 2, pick, codes, &error)) {
             fail("real fast_step failed: " + error);
         } else {
-            ::tts_cpp::detail::fit_graph_price prime, last;
-            {
-                scratch build(AUDIO8_MAX_NODES);
-                build_fast_fit_graph(mm, build, 0, /*prime=*/true);
-                if (!price(mm, build, prime)) fail("pricing the fast prime graph failed");
+            ::tts_cpp::detail::fit_graph_price projected;
+            bool priced_on_device = true;
+            for (int position = 0; position < p.num_codebooks; ++position) {
+                scratch build(AUDIO8_FAST_MAX_NODES);
+                build_fast_fit_graph(mm, build, position, /*prime=*/position == 0);
+                ::tts_cpp::detail::fit_graph_price one;
+                if (!price(mm, build, one)) fail("pricing a fast position graph failed");
+                projected.device_bytes += one.device_bytes;
+                priced_on_device = priced_on_device && one.host_bytes == 0;
             }
-            {
-                scratch build(AUDIO8_MAX_NODES);
-                build_fast_fit_graph(mm, build, p.num_codebooks - 1, /*prime=*/false);
-                if (!price(mm, build, last)) fail("pricing the fast step graph failed");
-            }
-            if (prime.host_bytes == 0 && last.host_bytes == 0) {
-                expect_eq(std::max(prime.device_bytes, last.device_bytes),
-                          ggml_gallocr_get_buffer_size(real.fast_allocr, 0),
+            if (priced_on_device) {
+                expect_eq(projected.device_bytes, real_fast_arena_bytes(real),
                           "LM fast arena parity");
+                expect_eq((uint64_t) p.num_codebooks, retained_fast_contexts(real),
+                          "LM retained fast graph contexts");
             }
         }
     }
@@ -293,6 +208,67 @@ void run_synthetic_lm_gates() {
         fr = tts_cpp::audio8::fit_params(wrong);
         expect(fr.status == tts_cpp::FitStatus::Error,
                "wrong-architecture decoder was not Error");
+    }
+
+    // 6. A codebook count outside the supported range never reaches the
+    //    per-position pricing loop: the load rejects it first. The metadata
+    //    lies while the tensors stay tiny, which is exactly the malformed-file
+    //    shape the bound exists for.
+    {
+        const std::string absurd_path = path + ".absurd-codebooks";
+        ggml_context * headers = nullptr;
+        gguf_init_params open_params = {/*no_alloc=*/true, &headers};
+        gguf_context * g = gguf_init_from_file(path.c_str(), open_params);
+        expect(g != nullptr, "could not reopen the tiny LM to corrupt it");
+        if (g) {
+            gguf_set_val_u32(g, "audio8.lm.num_codebooks", 1u << 20);
+            gguf_write_to_file(g, absurd_path.c_str(), /*only_meta=*/true);
+            gguf_free(g);
+        }
+        if (headers) ggml_free(headers);
+
+        lm_model rejected;
+        fit_load_measure rejected_load;
+        std::string load_error;
+        expect(!load_lm_metadata_only(absurd_path, 0, rejected, rejected_load, &load_error),
+               "an absurd codebook count loaded anyway");
+        expect(load_error.find("codebooks") != std::string::npos,
+               "the rejection does not name the codebook count: '" + load_error + "'");
+        free_lm(rejected);
+        fs::remove(absurd_path);
+    }
+
+    // 7. How position prices combine, by dispatch path: replayed positions each
+    //    keep an arena and add; once any position is scheduler-backed, the
+    //    direct ones share one growing allocator and the scheduler ones share
+    //    the scheduler's, so the widest of each coexist.
+    {
+        ::tts_cpp::detail::fit_graph_price direct_small{100, 0, false};
+        ::tts_cpp::detail::fit_graph_price direct_large{300, 0, false};
+        ::tts_cpp::detail::fit_graph_price sched_small{50, 10, true};
+        ::tts_cpp::detail::fit_graph_price sched_large{200, 40, true};
+
+        ::tts_cpp::detail::fit_price_aggregate all_direct;
+        all_direct.add(direct_small);
+        all_direct.add(direct_large);
+        expect(all_direct.all_replayed(), "direct-only prices reported a scheduler");
+        expect_eq(400, all_direct.total().device_bytes, "direct-only device sum");
+
+        ::tts_cpp::detail::fit_price_aggregate mixed;
+        mixed.add(direct_small);
+        mixed.add(direct_large);
+        mixed.add(sched_small);
+        mixed.add(sched_large);
+        expect(!mixed.all_replayed(), "a scheduler-backed price went unnoticed");
+        expect_eq(500, mixed.total().device_bytes,
+                  "mixed device total is not widest-direct plus widest-sched");
+        expect_eq(40, mixed.total().host_bytes,
+                  "mixed host total is not the widest scheduler-backed portion");
+
+        ::tts_cpp::detail::fit_price_aggregate sched_only;
+        sched_only.add(sched_small);
+        sched_only.add(sched_large);
+        expect_eq(200, sched_only.total().device_bytes, "sched-only device peak");
     }
 
     fs::remove(path);
@@ -389,6 +365,9 @@ void run_fixture_gates(const std::string & lm_path, const std::string & dec_path
 }  // namespace
 
 int main(int argc, char ** argv) {
+    // The arena gates compare against a real ggml decode, which a staged Core
+    // ML sidecar would replace.
+    setenv("AUDIO8_COREML_DISABLE", "1", 1);
     if (argc >= 3) {
         run_fixture_gates(argv[1], argv[2], argc > 3 ? argv[3] : "",
                           argc > 4 ? std::atoi(argv[4]) : 0);

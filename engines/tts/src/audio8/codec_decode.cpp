@@ -19,8 +19,15 @@
 #include "fit_price.h"
 #include "fit_util.h"
 
+#ifdef TTS_CPP_USE_COREML
+#include "audio8/coreml/codec-synth.h"
+#include "audio8/coreml_windows.h"
+#endif
+
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace tts_cpp {
@@ -113,9 +120,13 @@ int upsample_factor(const codec_model & model) {
     return factor;
 }
 
-// The frames of history one block has to be handed before its own, walked back
-// from a single output sample through the whole synthesis stack.
 int synthesis_context(const codec_model & model) {
+    return synthesis_context_frames(model);
+}
+
+}  // namespace
+
+int synthesis_context_frames(const codec_model & model) {
     int span = span_through_conv(1, conv_taps(model.dec_out), 1, 1);
     for (size_t index = model.dec_stages.size(); index-- > 0;) {
         const dac_stage & stage = model.dec_stages[index];
@@ -130,6 +141,8 @@ int synthesis_context(const codec_model & model) {
     }
     return span - 1;
 }
+
+namespace {
 
 latent_graph build_latents(ggml_context * ctx, const codec_model & model, int n_frames) {
     ggml_tensor * codes = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_frames,
@@ -337,10 +350,96 @@ bool run_block(codec_model & model, const std::vector<float> & post, const block
     return true;
 }
 
+#ifdef TTS_CPP_USE_COREML
+enum class coreml_status { done, unavailable, cancelled };
+
+// Test-only: fail instead of falling back to ggml.
+bool coreml_strict() {
+    return std::getenv("AUDIO8_COREML_STRICT") != nullptr;
+}
+
+bool run_coreml_window(codec_model & model, const std::vector<float> & post,
+                       const coreml_window & span, std::vector<float> & in,
+                       std::vector<float> & out, std::vector<float> & pcm_out) {
+    const codec_hparams & hp = model.hp;
+    const size_t latent = static_cast<size_t>(hp.latent_dim);
+    const size_t frame = static_cast<size_t>(hp.frame_size);
+    std::fill(in.begin(), in.end(), 0.0f);
+    std::copy(post.begin() + static_cast<size_t>(span.begin) * latent,
+              post.begin() + static_cast<size_t>(span.begin + span.filled) * latent,
+              in.begin());
+    if (audio8_coreml_codec_synthesize(model.coreml, in.data(), out.data()) != 0) return false;
+    const size_t skip = static_cast<size_t>(span.core_begin - span.begin) * frame;
+    const size_t keep = static_cast<size_t>(span.core_end - span.core_begin) * frame;
+    std::copy(out.begin() + skip, out.begin() + skip + keep,
+              pcm_out.begin() + static_cast<size_t>(span.core_begin) * frame);
+    return true;
+}
+
+// Cancel keeps the completed windows; unavailable leaves pcm_out empty for the fallback.
+coreml_status run_synthesis_coreml(codec_model & model, const std::vector<float> & post,
+                                   int n_frames, const cancel_hook & cancel,
+                                   std::vector<float> & pcm_out, decode_timing & clock,
+                                   std::string * error) {
+    const codec_hparams & hp = model.hp;
+    const int window = static_cast<int>(audio8_coreml_codec_window_frames(model.coreml));
+    const std::vector<coreml_window> plan =
+        plan_coreml_windows(n_frames, window, synthesis_context_frames(model));
+    if (plan.empty()) return coreml_status::unavailable;
+
+    pcm_out.assign(static_cast<size_t>(n_frames) * hp.frame_size, 0.0f);
+    std::vector<float> in(static_cast<size_t>(window) * hp.latent_dim);
+    std::vector<float> out(static_cast<size_t>(window) * hp.frame_size);
+    int completed = 0;
+    for (const coreml_window & span : plan) {
+        if (cancelled(cancel, error)) {
+            pcm_out.resize(static_cast<size_t>(completed) * hp.frame_size);
+            return coreml_status::cancelled;
+        }
+        if (!run_coreml_window(model, post, span, in, out, pcm_out)) {
+            pcm_out.clear();
+            return coreml_status::unavailable;
+        }
+        completed = span.core_end;
+    }
+    clock.block_frames = window;
+    clock.block_scratch = 0;
+    clock.synthesis_backend = audio8_coreml_codec_backend_label(model.coreml);
+    return coreml_status::done;
+}
+#endif
+
 bool run_synthesis_blocks(codec_model & model, const std::vector<float> & post,
                           int n_frames, int n_threads, const cancel_hook & cancel,
                           std::vector<float> & pcm_out, decode_taps * taps,
                           decode_timing & clock, std::string * error) {
+#ifdef TTS_CPP_USE_COREML
+    if (model.coreml && !taps) {
+        switch (run_synthesis_coreml(model, post, n_frames, cancel, pcm_out, clock, error)) {
+            case coreml_status::done:      return true;
+            case coreml_status::cancelled: return false;
+            case coreml_status::unavailable:
+                if (coreml_strict()) {
+                    if (error) {
+                        *error = "audio8: Core ML synthesis unavailable for " +
+                                 std::to_string(n_frames) +
+                                 " frames and AUDIO8_COREML_STRICT is set; failing instead "
+                                 "of the ggml fallback";
+                    }
+                    return false;
+                }
+                std::fprintf(stderr, "[audio8] Core ML synthesis unavailable for %d frames; "
+                                     "using ggml\n", n_frames);
+                break;
+        }
+    } else if (coreml_strict() && !taps) {
+        if (error) {
+            *error = "audio8: no Core ML sidecar loaded and AUDIO8_COREML_STRICT is set; "
+                     "failing instead of the ggml fallback";
+        }
+        return false;
+    }
+#endif
     pcm_out.reserve(static_cast<size_t>(n_frames) * model.hp.frame_size);
     if (taps) taps->latent.clear();
     const int context = synthesis_context(model);
@@ -348,6 +447,7 @@ bool run_synthesis_blocks(codec_model & model, const std::vector<float> & post,
     const int block_frames = plan.frames;
     clock.block_frames = plan.frames;
     clock.block_scratch = plan.scratch;
+    clock.synthesis_backend = "ggml";
     for (int first = 0; first < n_frames; first += block_frames) {
         if (cancelled(cancel, error)) return false;
         if (!run_block(model, post, block_at(first, n_frames, context, block_frames),
