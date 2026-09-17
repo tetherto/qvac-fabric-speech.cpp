@@ -65,6 +65,11 @@ jobs:
       contents: read
     uses: ./.github/workflows/reusable-runner-names.yml
 
+  authorize:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-authorize-self-hosted.yml
+
   build-test:
     needs: runner_names
     strategy:
@@ -185,16 +190,78 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: ctest --test-dir build -LE 'gpu|perf' --output-on-failure --timeout 600
 
-      # test-metal-ops exits 0 with a "nothing to validate" marker when no
-      # Metal device is registered, so a bare green tick would not prove the
-      # kernel parity assertions ran. On this lane they must: the runner is
-      # real Apple silicon. The marker is treated as a failure, exactly like
-      # audiogen-ci.yml's enforced MiniMax Metal step. --no-tests=error
-      # closes the other vacuous-pass path: the test registers only when the
-      # installed ggml exports a Metal backend, and a zero-match ctest run
-      # exits 0 by default.
+  # Self-hosted Apple silicon, not hosted macOS: hosted macos-14 exposes an
+  # Apple Paravirtual device without simdgroup matmul, so Metal-touching tests
+  # abort at kernel encode (QVAC-22775). Job-level `if` cannot see `matrix.os`,
+  # so this lane is a separate job gated on fork-ci.
+  build-test-macos:
+    needs: [runner_names, authorize]
+    if: needs.authorize.outputs.allowed == 'true'
+    runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
+    timeout-minutes: 60
+    steps:
+      - name: Manual Workspace Cleanup
+        run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+        shell: bash
+        working-directory: .
+
+      - uses: actions/checkout@v4
+
+      - name: Install ccache
+        run: echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
+
+      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+        id: ggml
+        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ggml install
+        id: ggml-cache
+        uses: actions/cache@v4
+        with:
+          path: ggml-install
+          key: ggml-install-metal-macos-26-${{ steps.ggml.outputs.sha }}
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-tts-macos-26-${{ github.sha }}
+          restore-keys: ccache-tts-macos-26-
+
+      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+        if: steps.ggml-cache.outputs.cache-hit != 'true'
+        run: |
+          git init -q ggml-src
+          git -C ggml-src remote add origin "$GGML_REPO"
+          git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
+          git -C ggml-src checkout -q FETCH_HEAD
+          cmake -S ggml-src -B ggml-src/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_METAL=ON \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
+          cmake --build ggml-src/build -j4
+          cmake --install ggml-src/build
+
+      - name: Configure
+        run: |
+          cmake -S engines/tts -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTTS_CPP_BUILD_TESTS=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Test (non-GPU)
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: ctest --test-dir build -LE 'gpu|perf' --output-on-failure --timeout 600
+
       - name: Test (Metal kernel parity)
-        if: runner.os == 'macOS'
         run: |
           set -o pipefail
           ctest --test-dir build -R '^test-metal-ops$' --no-tests=error -V --timeout 600 2>&1 | tee metal-test.log
