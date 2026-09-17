@@ -36,6 +36,12 @@ cmake --build build --target tts-cli
 `SPEECH_BUILD_EXECUTABLES` controls all engine CLIs and defaults to `ON`;
 `SPEECH_BUILD_TESTS` controls TTS test harnesses and defaults to `OFF`.
 
+When building the `ggml-speech` install yourself, configure the ggml build
+with `-DGGML_LLAMAFILE=ON`: standalone ggml defaults it OFF, and without
+tinyBLAS every CPU matmul takes the generic vec_dot path (measured 1.8x
+slower on the CosyVoice3 DiT). The bundled-ggml path
+(`TTS_CPP_USE_SYSTEM_GGML=OFF`) already defaults it ON.
+
 ### Direct in-tree build
 
 From the repository root:
