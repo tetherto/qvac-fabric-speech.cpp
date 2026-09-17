@@ -376,6 +376,15 @@ bool run_coreml_window(codec_model & model, const std::vector<float> & post,
     return true;
 }
 
+// A sidecar that failed once is retired: the plan and the model are fixed, so
+// the failure would repeat on every call, each time ahead of a full ggml pass.
+void retire_coreml_sidecar(codec_model & model, const char * why) {
+    std::fprintf(stderr, "[audio8] retiring the Core ML sidecar (%s); synthesis stays on ggml\n", why);
+    audio8_coreml_codec_free(model.coreml);
+    model.coreml = nullptr;
+    model.synthesis_on_coreml = false;
+}
+
 // Cancel keeps the completed windows; unavailable leaves pcm_out empty for the fallback.
 coreml_status run_synthesis_coreml(codec_model & model, const std::vector<float> & post,
                                    int n_frames, const cancel_hook & cancel,
@@ -385,7 +394,10 @@ coreml_status run_synthesis_coreml(codec_model & model, const std::vector<float>
     const int window = static_cast<int>(audio8_coreml_codec_window_frames(model.coreml));
     const std::vector<coreml_window> plan =
         plan_coreml_windows(n_frames, window, synthesis_context_frames(model));
-    if (plan.empty()) return coreml_status::unavailable;
+    if (plan.empty()) {
+        retire_coreml_sidecar(model, "its window cannot carry the causal context");
+        return coreml_status::unavailable;
+    }
 
     pcm_out.assign(static_cast<size_t>(n_frames) * hp.frame_size, 0.0f);
     std::vector<float> in(static_cast<size_t>(window) * hp.latent_dim);
@@ -398,6 +410,7 @@ coreml_status run_synthesis_coreml(codec_model & model, const std::vector<float>
         }
         if (!run_coreml_window(model, post, span, in, out, pcm_out)) {
             pcm_out.clear();
+            retire_coreml_sidecar(model, "prediction failed");
             return coreml_status::unavailable;
         }
         completed = span.core_end;
