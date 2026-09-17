@@ -135,6 +135,16 @@ reproducible
 [engine comparison harness](engines/audiogen/benchmarks/comparison/README.md)
 for CPU, Metal, Vulkan, and CUDA.
 
+The [desktop benchmark workflow](.github/workflows/speech-benchmark-desktop.yml)
+accepts `music_alignment=true` (default `false`) to score caption adherence with
+CLAP for AudioGen's ACE-Step (`acestep`) and MiniMax-Music3 (`minimax`) families.
+Its per-family artifacts retain generated WAVs, generation/scorer logs,
+binary/model hashes, scorer provenance, scores, and scored/expected coverage.
+These are non-gating diagnostics with no quality pass threshold; unavailable
+scores remain null without discarding generation performance. See the
+[music alignment guide](scripts/benchmarks/music-alignment.md) for setup,
+artifact layout, and the distinct diagnostic timing baseline.
+
 ### Multi-machine benchmarks (2026-09)
 
 Maintainer-run measurements across up to four machines — a MacBook Air M5 and

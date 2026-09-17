@@ -25,10 +25,6 @@ struct BpeVocab {
 std::string detokenize(const BpeVocab & vocab,
                        const std::vector<int32_t> & token_ids);
 
-// Incremental form used by the cache-aware streaming sessions: appends the
-// pieces of `token_ids` (word-boundary markers become spaces, specials are
-// skipped) to `pieces` without stripping, so a session can grow one string
-// across steps and strip the leading space once when it reports.
 void append_token_pieces(const BpeVocab & vocab,
                          const std::vector<int32_t> & token_ids,
                          std::string & pieces);

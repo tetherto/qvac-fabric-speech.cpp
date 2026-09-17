@@ -510,6 +510,7 @@ struct UnifiedStreamState::Impl {
     int subsampling_factor = kDefaultSubsamplingFactor;
     int stats_window_frames = 0;
     int history_window_frames = 0;
+    int pending_offset_frames = 0;
 };
 
 UnifiedStreamState::UnifiedStreamState() : impl(std::make_unique<Impl>()) {}
@@ -601,6 +602,28 @@ void append_frames(std::vector<float> & target, const float * frames, int count,
     target.insert(target.end(), frames, frames + static_cast<size_t>(count) * n_mels);
 }
 
+const float * pending_frames_data(const UnifiedStreamState::Impl & impl, int n_mels) {
+    return impl.pending_mel.data() + static_cast<size_t>(impl.pending_offset_frames) * n_mels;
+}
+
+int pending_frame_count(const UnifiedStreamState::Impl & impl, int n_mels) {
+    return frames_in(impl.pending_mel, n_mels) - impl.pending_offset_frames;
+}
+
+void compact_pending_frames(UnifiedStreamState::Impl & impl, int n_mels) {
+    impl.pending_mel.erase(
+        impl.pending_mel.begin(),
+        impl.pending_mel.begin() + static_cast<std::ptrdiff_t>(impl.pending_offset_frames) * n_mels);
+    impl.pending_offset_frames = 0;
+}
+
+void release_pending_frames(UnifiedStreamState::Impl & impl, int count, int n_mels) {
+    impl.pending_offset_frames += count;
+    if (impl.pending_offset_frames * 2 >= frames_in(impl.pending_mel, n_mels)) {
+        compact_pending_frames(impl, n_mels);
+    }
+}
+
 void trim_leading_frames(std::vector<float> & target, int keep_frames, int n_mels) {
     const int frames = frames_in(target, n_mels);
     if (frames <= keep_frames) {
@@ -639,14 +662,12 @@ void append_normalized_history(UnifiedStreamState::Impl & impl, int n_mels, std:
 }
 
 void commit_mel_frames(UnifiedStreamState::Impl & impl, int commit_frames, int n_mels) {
-    const float * committed = impl.pending_mel.data();
+    const float * committed = pending_frames_data(impl, n_mels);
     append_frames(impl.stats_window, committed, commit_frames, n_mels);
     trim_leading_frames(impl.stats_window, impl.stats_window_frames, n_mels);
     append_frames(impl.raw_history, committed, commit_frames, n_mels);
     trim_leading_frames(impl.raw_history, kPreEncodeHistoryMelFrames, n_mels);
-    impl.pending_mel.erase(
-        impl.pending_mel.begin(),
-        impl.pending_mel.begin() + static_cast<std::ptrdiff_t>(commit_frames) * n_mels);
+    release_pending_frames(impl, commit_frames, n_mels);
 }
 
 bool frame_is_all_zero(const float * frame, int n_mels) {
@@ -846,7 +867,7 @@ int unified_pending_mel_frames(const UnifiedStreamState & state) {
     if (!state.impl || state.impl->mel_width <= 0) {
         return 0;
     }
-    return frames_in(state.impl->pending_mel, state.impl->mel_width);
+    return pending_frame_count(*state.impl, state.impl->mel_width);
 }
 
 int init_unified_stream_state(
@@ -939,9 +960,10 @@ int next_unified_processed_signal(
     }
     UnifiedStreamState::Impl & impl = *state.impl;
     if (finalize) {
+        compact_pending_frames(impl, n_mels);
         drop_trailing_zero_frames(impl.pending_mel, n_mels);
     }
-    const int pending_frames = frames_in(impl.pending_mel, n_mels);
+    const int pending_frames = pending_frame_count(impl, n_mels);
     const int required_frames = step_mel_frames(state);
     if ((!finalize && pending_frames < required_frames) || pending_frames == 0) {
         return 0;
@@ -950,9 +972,9 @@ int next_unified_processed_signal(
     const bool last_step = finalize && pending_frames <= required_frames;
     const int commit_frames = last_step ? consumed_frames : std::min(chunk_mel_frames(state), consumed_frames);
 
-    update_cmvn_statistics(impl, impl.pending_mel.data(), consumed_frames, n_mels);
+    update_cmvn_statistics(impl, pending_frames_data(impl, n_mels), consumed_frames, n_mels);
     append_normalized_history(impl, n_mels, processed_signal);
-    normalize_frames(impl.pending_mel.data(), consumed_frames, n_mels, impl.mean, impl.inv_std, processed_signal);
+    normalize_frames(pending_frames_data(impl, n_mels), consumed_frames, n_mels, impl.mean, impl.inv_std, processed_signal);
     n_frames = frames_in(processed_signal, n_mels);
     commit_mel_frames(impl, commit_frames, n_mels);
     return 1;
