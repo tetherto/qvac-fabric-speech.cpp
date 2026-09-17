@@ -84,7 +84,7 @@ and prediction failures fall back to ggml.
 | Parler-TTS mini-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice, no cloning |
 | Parler-TTS large-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice |
 | Indic Parler-TTS | tts | 21 Indic | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | Indic prompt BPE tokenizer |
-| Fun-CosyVoice3-0.5B | tts | model-advertised multilingual text | 24 kHz | `f32`; LM and flow also `q8_0`, `q4_0`; flow and HiFT also `f16` | CPU, Metal, Vulkan, OpenCL, CUDA | Qwen2.5 LM + DiT flow + CausalHiFT; zero-shot/cross-lingual cloning from a reference WAV (native speech_tokenizer_v3 + CAM++); Metal, desktop Vulkan, desktop CUDA, and OpenCL are the validated GPU paths |
+| Fun-CosyVoice3-0.5B | tts | model-advertised multilingual text | 24 kHz | `f32`; LM and flow also `q8_0`, `q4_0`; flow and HiFT also `f16`; flow also `bf16` | CPU, Metal, Vulkan, OpenCL, CUDA | Qwen2.5 LM + DiT flow + CausalHiFT; zero-shot/cross-lingual cloning from a reference WAV (native speech_tokenizer_v3 + CAM++); Metal, desktop Vulkan, desktop CUDA, and OpenCL are the validated GPU paths |
 | Audio8-TTS-Preview-0.6B | tts | multilingual | 44.1 kHz | `f32`, `f16`, `q8_0`; LM also `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML codec-synthesis sidecar (`TTS_CPP_COREML`, Apple) | DualAR + DAC codec, zero-shot cloning from reference audio and transcript |
 | Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 

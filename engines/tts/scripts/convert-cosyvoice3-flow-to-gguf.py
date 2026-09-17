@@ -16,8 +16,11 @@ into one to_qkv tensor, and the architecture hparams recorded as metadata so
 the C++ graph cannot silently disagree with the weights.  In q8_0/q4_0 mode
 only the 2-D matmul weights quantize; conv kernels, norms, biases, the token
 embedding and the baked rand_noise stay float (the C++ reads rand_noise raw
-as f32).  f16 mode keeps 1-D tensors (biases, norms) f32: the engine adds
-biases to f32 activations and the CPU backend has no F32+F16 add.
+as f32).  bf16 mode stores those same 2-D matmul weights as bf16 (the fastest
+CPU tier on AVX512-BF16 hardware) and everything else like f16 mode, so the
+conv path keeps its kernel-typed f16 im2col.  f16 mode keeps 1-D tensors
+(biases, norms) f32: the engine adds biases to f32 activations and the CPU
+backend has no F32+F16 add.
 
     python3 convert-cosyvoice3-flow-to-gguf.py --flow flow.pt \\
         --config cosyvoice3.yaml --outfile cosyvoice3-flow-f32.gguf --dtype f32
@@ -70,6 +73,14 @@ def add_weight(w, name, t, dtype):
             w.add_tensor(name, q, raw_dtype=qt)
         else:
             w.add_tensor(name, a)
+        return
+    if dtype == "bf16":
+        a = to_numpy(t, "f32")
+        if should_quant(a):
+            qt = gguf.GGMLQuantizationType.BF16
+            w.add_tensor(name, gguf.quants.quantize(a, qt), raw_dtype=qt)
+        else:
+            w.add_tensor(name, to_numpy(t, "f16"))
         return
     w.add_tensor(name, to_numpy(t, dtype))
 
@@ -128,7 +139,7 @@ def main():
     ap.add_argument("--flow", required=True, help="path to flow.pt")
     ap.add_argument("--config", default=None, help="cosyvoice3.yaml (embedded as metadata)")
     ap.add_argument("--outfile", required=True)
-    ap.add_argument("--dtype", choices=["f32", "f16", "q8_0", "q4_0"], default="f32")
+    ap.add_argument("--dtype", choices=["f32", "f16", "bf16", "q8_0", "q4_0"], default="f32")
     args = ap.parse_args()
 
     sd = load_state_dict(args.flow)

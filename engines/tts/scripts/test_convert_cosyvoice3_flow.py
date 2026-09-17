@@ -123,6 +123,15 @@ class ConvertFlowTest(unittest.TestCase):
         self.assertIn("F32", self.type_name(types, "flow/input_embedding/weight"))
         self.assertIn("F32", self.type_name(types, "flow/input_embed/conv_pos_embed/conv1/0/weight"))
 
+    def test_bf16(self):
+        types = self.convert("bf16")
+        self.check_rand_noise_f32(types)
+        self.assertIn("BF16", self.type_name(types, "flow/blk/0/attn/to_qkv/weight"))
+        self.assertIn("BF16", self.type_name(types, "flow/blk/0/ff/ff/0/0/weight"))
+        self.assertIn("F32", self.type_name(types, "flow/blk/0/attn/to_qkv/bias"))
+        self.assertIn("F16", self.type_name(types, "flow/input_embed/conv_pos_embed/conv1/0/weight"))
+        self.assertIn("F16", self.type_name(types, "flow/input_embedding/weight"))
+
     def test_f16(self):
         types = self.convert("f16")
         self.check_rand_noise_f32(types)
