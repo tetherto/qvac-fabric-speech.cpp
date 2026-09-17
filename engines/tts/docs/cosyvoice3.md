@@ -78,7 +78,13 @@ older GGUFs with separate `to_q`/`to_k`/`to_v` tensors. `bf16` mode stores
 those same 2D matmul weights as bf16 and the conv kernels as f16, keeping
 the kernel-typed f16 im2col path. Every reduced-precision tier is gated
 against the f32 reference by `test-cosyvoice-{flow,hift}-tier-*`, which
-needs only the two GGUFs staged (no PyTorch fixture).
+needs only the two GGUFs staged (no PyTorch fixture). Measured deviations
+on the gate's synthetic inputs (mel cosine / max abs): flow `f16`
+0.99996 / 0.25, `bf16` 0.99967 / 0.99, `q8_0` 0.99983 / 0.66, `q4_0`
+0.98659 / 4.84 — prefer `q8_0` over `q4_0` where the flow size allows.
+The HiFT leg (`f16` waveform cosine 0.999966, max abs 0.0012) pins f0 so
+the gate measures weight precision rather than sine-phase noise. The
+thresholds registered in CMakeLists.txt carry margin over these values.
 
 `cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
 the voice-prompt frames as attention conditioning only (the same design
