@@ -509,6 +509,7 @@ struct UnifiedStreamState::Impl {
     int mel_width = 0;
     int subsampling_factor = kDefaultSubsamplingFactor;
     int stats_window_frames = 0;
+    int history_window_frames = 0;
 };
 
 UnifiedStreamState::UnifiedStreamState() : impl(std::make_unique<Impl>()) {}
@@ -612,7 +613,8 @@ void trim_leading_frames(std::vector<float> & target, int keep_frames, int n_mel
 
 FrameRange retained_history(const UnifiedStreamState::Impl & impl, int incoming_frames, int n_mels) {
     const int history_frames = frames_in(impl.stats_window, n_mels);
-    const int keep = std::max(0, std::min(history_frames, impl.stats_window_frames - incoming_frames));
+    const int room = std::min(impl.stats_window_frames - incoming_frames, impl.history_window_frames);
+    const int keep = std::max(0, std::min(history_frames, room));
     const int skip = history_frames - keep;
     return {impl.stats_window.data() + static_cast<size_t>(skip) * n_mels, keep};
 }
@@ -863,8 +865,9 @@ int init_unified_stream_state(
     state.right_context_frames = right_context_frames;
     state.impl->raw_mel_cfg = raw_mel_config(model.mel_cfg);
     state.impl->subsampling_factor = encoder_subsampling_factor(model);
-    state.impl->stats_window_frames = state.impl->subsampling_factor *
-        (channel_cache_frames(model) + chunk_frames + right_context_frames);
+    state.impl->history_window_frames = state.impl->subsampling_factor * channel_cache_frames(model);
+    state.impl->stats_window_frames = state.impl->history_window_frames +
+        state.impl->subsampling_factor * (chunk_frames + right_context_frames);
     state.cache_channel.assign(
         static_cast<size_t>(model.encoder_cfg.n_layers) * channel_cache_frames(model) * model.encoder_cfg.d_model,
         0.0f);

@@ -3,6 +3,7 @@
 #include "parakeet/streaming.h"
 
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -111,6 +112,42 @@ int check_rejects_offline_attention_style(const parakeet::ParakeetCtcModel & mod
     return 0;
 }
 
+int check_rejects_oversized_left_context(const parakeet::ParakeetCtcModel & model) {
+    parakeet::ParakeetCtcModel malformed = model;
+    malformed.unified_cfg.left_context_frames = std::numeric_limits<int>::max();
+    if (!rejects(malformed)) {
+        std::fprintf(stderr, "oversized left context was accepted\n");
+        return 13;
+    }
+    return 0;
+}
+
+int check_rejects_oversized_operating_points(const parakeet::ParakeetCtcModel & model) {
+    parakeet::ParakeetCtcModel malformed = model;
+    malformed.unified_cfg.allowed_chunk_frames = {std::numeric_limits<int32_t>::max()};
+    if (!rejects(malformed)) {
+        std::fprintf(stderr, "oversized chunk size was accepted\n");
+        return 14;
+    }
+    malformed = model;
+    malformed.unified_cfg.allowed_right_context_frames = {std::numeric_limits<int32_t>::max()};
+    if (!rejects(malformed)) {
+        std::fprintf(stderr, "oversized right context was accepted\n");
+        return 15;
+    }
+    return 0;
+}
+
+int check_rejects_too_many_operating_points(const parakeet::ParakeetCtcModel & model) {
+    parakeet::ParakeetCtcModel malformed = model;
+    malformed.unified_cfg.allowed_chunk_frames.assign(1024, 7);
+    if (!rejects(malformed)) {
+        std::fprintf(stderr, "unbounded operating point list was accepted\n");
+        return 16;
+    }
+    return 0;
+}
+
 parakeet::StreamingOptions streaming_options(int chunk_ms, int right_lookahead_ms) {
     parakeet::StreamingOptions options;
     options.chunk_ms = chunk_ms;
@@ -163,6 +200,9 @@ int run_checks(const std::string & path) {
     if (int rc = check_rejects_empty_operating_points(model); rc != 0) return rc;
     if (int rc = check_rejects_negative_right_context(model); rc != 0) return rc;
     if (int rc = check_rejects_offline_attention_style(model); rc != 0) return rc;
+    if (int rc = check_rejects_oversized_left_context(model); rc != 0) return rc;
+    if (int rc = check_rejects_oversized_operating_points(model); rc != 0) return rc;
+    if (int rc = check_rejects_too_many_operating_points(model); rc != 0) return rc;
     return check_engine_stream_creation(path);
 }
 

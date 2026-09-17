@@ -977,12 +977,27 @@ void require_nemotron_shape(
     }
 }
 
+constexpr int UNIFIED_MAX_LEFT_CONTEXT_FRAMES = 4096;
+constexpr int UNIFIED_MAX_CHUNK_FRAMES = 4096;
+constexpr int UNIFIED_MAX_RIGHT_CONTEXT_FRAMES = 4096;
+constexpr int UNIFIED_MAX_CACHE_TIME_STEPS = 4096;
+constexpr size_t UNIFIED_MAX_OPERATING_POINTS = 64;
+
+bool in_range(int32_t value, int32_t low, int32_t high) {
+    return value >= low && value <= high;
+}
+
+bool all_in_range(const std::vector<int32_t> & values, int32_t low, int32_t high) {
+    return std::all_of(values.begin(), values.end(),
+                       [low, high](int32_t v) { return in_range(v, low, high); });
+}
+
 bool all_positive(const std::vector<int32_t> & values) {
-    return std::all_of(values.begin(), values.end(), [](int32_t v) { return v > 0; });
+    return all_in_range(values, 1, UNIFIED_MAX_CHUNK_FRAMES);
 }
 
 bool all_non_negative(const std::vector<int32_t> & values) {
-    return std::all_of(values.begin(), values.end(), [](int32_t v) { return v >= 0; });
+    return all_in_range(values, 0, UNIFIED_MAX_RIGHT_CONTEXT_FRAMES);
 }
 
 }
@@ -1001,13 +1016,16 @@ void validate_unified_streaming_model(const ParakeetCtcModel & model) {
         throw std::runtime_error(
             "gguf: incompatible Unified FastConformer geometry");
     }
-    if (cfg.left_context_frames <= 0 ||
+    if (!in_range(cfg.left_context_frames, 1, UNIFIED_MAX_LEFT_CONTEXT_FRAMES) ||
+        !in_range(cfg.cache_time_steps, 0, UNIFIED_MAX_CACHE_TIME_STEPS) ||
         cfg.cache_time_steps != symmetric_convolution_cache_frames(encoder)) {
         throw std::runtime_error(
             "gguf: incompatible Unified streaming cache geometry");
     }
     if (cfg.allowed_chunk_frames.empty() ||
         cfg.allowed_right_context_frames.empty() ||
+        cfg.allowed_chunk_frames.size() > UNIFIED_MAX_OPERATING_POINTS ||
+        cfg.allowed_right_context_frames.size() > UNIFIED_MAX_OPERATING_POINTS ||
         !all_positive(cfg.allowed_chunk_frames) ||
         !all_non_negative(cfg.allowed_right_context_frames)) {
         throw std::runtime_error(

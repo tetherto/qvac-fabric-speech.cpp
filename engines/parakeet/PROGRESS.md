@@ -3695,7 +3695,7 @@ The converter needs python >= 3.10. To reproduce the 19.2 table, re-run
 `build-vk/test-gpu-vs-cpu` under `GGML_VK_DISABLE_COOPMAT=1` and
 `GGML_VK_DISABLE_COOPMAT2=1`.
 
-## Phase 20 — Unified RNN-T cache-aware streaming (QVAC-25107)  _(in progress)_
+## Phase 20 — Unified RNN-T cache-aware streaming  _(in progress)_
 
 `nvidia/parakeet-unified-en-0.6b` was trained jointly offline and streaming:
 `att_context_style=chunked_limited_with_rc` with

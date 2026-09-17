@@ -1,0 +1,456 @@
+[  0%] Building CXX object CMakeFiles/test-sortformer-finalize.dir/test/test_sortformer_finalize.cpp.o
+[  1%] Building CXX object CMakeFiles/test-sortformer-segments.dir/test/test_sortformer_segments.cpp.o
+[  1%] Building CXX object CMakeFiles/test-energy-vad.dir/src/energy_vad.cpp.o
+[  1%] Building CXX object CMakeFiles/test-long-form-windows.dir/test/test_long_form_windows.cpp.o
+[  1%] Building CXX object CMakeFiles/test-energy-vad.dir/test/test_energy_vad.cpp.o
+[  1%] Building CXX object CMakeFiles/test-sentencepiece-bpe.dir/test/test_sentencepiece_bpe.cpp.o
+[  1%] Building CXX object CMakeFiles/test-coreml-shapes.dir/test/test_coreml_shapes.cpp.o
+[  2%] Building CXX object CMakeFiles/test-coreml-paths.dir/test/test_coreml_paths.cpp.o
+[  2%] Building C object ggml/src/CMakeFiles/ggml-base.dir/ggml.c.o
+[  3%] Building CXX object CMakeFiles/test-sentencepiece-bpe.dir/src/sentencepiece_bpe.cpp.o
+[  4%] Building CXX object CMakeFiles/test-coreml-shapes.dir/src/coreml/parakeet_coreml_shape.cpp.o
+[  5%] Building CXX object CMakeFiles/test-coreml-paths.dir/src/parakeet_coreml_path.cpp.o
+[  5%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/ggml.cpp.o
+[  6%] Building C object ggml/src/CMakeFiles/ggml-base.dir/ggml-alloc.c.o
+[  6%] Linking CXX executable test-energy-vad
+[  6%] Linking CXX executable test-sortformer-finalize
+[  6%] Linking CXX executable test-sentencepiece-bpe
+[  6%] Built target test-energy-vad
+[  6%] Linking CXX executable test-sortformer-segments
+[  6%] Built target test-sortformer-finalize
+[  6%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/ggml-backend.cpp.o
+[  7%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/ggml-backend-meta.cpp.o
+[  7%] Built target test-sentencepiece-bpe
+[  8%] Linking CXX executable test-long-form-windows
+[  8%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/ggml-opt.cpp.o
+[  8%] Built target test-sortformer-segments
+[  8%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/ggml-threading.cpp.o
+[  8%] Linking CXX executable test-coreml-paths
+[  8%] Built target test-long-form-windows
+[  9%] Building C object ggml/src/CMakeFiles/ggml-base.dir/ggml-quants.c.o
+[  9%] Linking CXX executable test-coreml-shapes
+[  9%] Built target test-coreml-paths
+[  9%] Building CXX object ggml/src/CMakeFiles/ggml-base.dir/gguf.cpp.o
+[  9%] Built target test-coreml-shapes
+[  9%] Linking CXX shared library libspeech-ggml-base.dylib
+[  9%] Built target ggml-base
+[  9%] Generate assembly for embedded Metal library
+Embedding Metal library
+[  9%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.cpp.o
+[  9%] Building C object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.c.o
+[  9%] Building CXX object ggml/src/ggml-blas/CMakeFiles/ggml-blas.dir/ggml-blas.cpp.o
+[  9%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/repack.cpp.o
+[  9%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/traits.cpp.o
+[ 11%] Building C object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/quants.c.o
+[ 11%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/mmq.cpp.o
+[ 11%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/hbm.cpp.o
+[ 11%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/amx.cpp.o
+[ 11%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/binary-ops.cpp.o
+[ 11%] Building CXX object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal.cpp.o
+[ 12%] Building C object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal-device.m.o
+[ 12%] Building CXX object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal-device.cpp.o
+[ 12%] Building CXX object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal-common.cpp.o
+[ 12%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/unary-ops.cpp.o
+[ 12%] Building C object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal-context.m.o
+[ 13%] Building CXX object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/ggml-metal-ops.cpp.o
+/Volumes/FreddyHD/Work/Tether/repos/qvac-ext-lib-whisper.cpp/engines/parakeet/ggml/src/ggml-metal/ggml-metal-device.m:807:63: warning: 'location' is deprecated: first deprecated in macOS 27.0 - Not applicable on Apple Silicon [-Wdeprecated-declarations]
+  807 |             dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
+      |                                                               ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:530:40: note: property 'location' is declared deprecated here
+  530 | @property (readonly) MTLDeviceLocation location API_DEPRECATED("Not applicable on Apple Silicon", macos(10.15, 27.0)) API_UNAVAILABLE(ios);
+      |                                        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:530:40: note: 'location' has been explicitly marked deprecated here
+/Volumes/FreddyHD/Work/Tether/repos/qvac-ext-lib-whisper.cpp/engines/parakeet/ggml/src/ggml-metal/ggml-metal-device.m:807:76: warning: 'MTLDeviceLocationExternal' is deprecated: first deprecated in macOS 27.0 - Not applicable on Apple Silicon [-Wdeprecated-declarations]
+  807 |             dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
+      |                                                                            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:263:29: note: 'MTLDeviceLocation' has been explicitly marked deprecated here
+  263 | typedef NS_ENUM(NSUInteger, MTLDeviceLocation)
+      |                             ^
+/Volumes/FreddyHD/Work/Tether/repos/qvac-ext-lib-whisper.cpp/engines/parakeet/ggml/src/ggml-metal/ggml-metal-device.m:865:30: warning: 'MTLGPUFamilyCommon1' is deprecated: first deprecated in macOS 27.0 [-Wdeprecated-declarations]
+  865 |                 for (int i = MTLGPUFamilyCommon1 + 5; i >= MTLGPUFamilyCommon1; --i) {
+      |                              ^~~~~~~~~~~~~~~~~~~
+      |                              MTLGPUFamilyApple1
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:248:5: note: 'MTLGPUFamilyCommon1' has been explicitly marked deprecated here
+  248 |     MTLGPUFamilyCommon1 API_DEPRECATED_WITH_REPLACEMENT("MTLGPUFamilyApple1", macos(10.15, 27.0), ios(13.0, 27.0)) = 3001,
+      |     ^
+/Volumes/FreddyHD/Work/Tether/repos/qvac-ext-lib-whisper.cpp/engines/parakeet/ggml/src/ggml-metal/ggml-metal-device.m:865:60: warning: 'MTLGPUFamilyCommon1' is deprecated: first deprecated in macOS 27.0 [-Wdeprecated-declarations]
+  865 |                 for (int i = MTLGPUFamilyCommon1 + 5; i >= MTLGPUFamilyCommon1; --i) {
+      |                                                            ^~~~~~~~~~~~~~~~~~~
+      |                                                            MTLGPUFamilyApple1
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:248:5: note: 'MTLGPUFamilyCommon1' has been explicitly marked deprecated here
+  248 |     MTLGPUFamilyCommon1 API_DEPRECATED_WITH_REPLACEMENT("MTLGPUFamilyApple1", macos(10.15, 27.0), ios(13.0, 27.0)) = 3001,
+      |     ^
+/Volumes/FreddyHD/Work/Tether/repos/qvac-ext-lib-whisper.cpp/engines/parakeet/ggml/src/ggml-metal/ggml-metal-device.m:867:106: warning: 'MTLGPUFamilyCommon1' is deprecated: first deprecated in macOS 27.0 [-Wdeprecated-declarations]
+  867 |                         GGML_LOG_INFO("%s: GPU family: MTLGPUFamilyCommon%d (%d)\n", __func__, i - (int) MTLGPUFamilyCommon1 + 1, i);
+      |                                                                                                          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h:248:5: note: 'MTLGPUFamilyCommon1' has been explicitly marked deprecated here
+  248 |     MTLGPUFamilyCommon1 API_DEPRECATED_WITH_REPLACEMENT("MTLGPUFamilyApple1", macos(10.15, 27.0), ios(13.0, 27.0)) = 3001,
+      |     ^
+5 warnings generated.
+[ 13%] Building ASM object ggml/src/ggml-metal/CMakeFiles/ggml-metal.dir/autogenerated/ggml-metal-embed.s.o
+[ 14%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/vec.cpp.o
+[ 14%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ops.cpp.o
+[ 14%] Building C object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/arm/quants.c.o
+[ 14%] Building CXX object ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/arm/repack.cpp.o
+[ 15%] Linking CXX shared library libspeech-ggml-blas.dylib
+[ 15%] Built target ggml-blas
+[ 15%] Linking CXX shared library libspeech-ggml-metal.dylib
+[ 15%] Built target ggml-metal
+[ 16%] Linking CXX shared library libspeech-ggml-cpu.dylib
+[ 16%] Built target ggml-cpu
+[ 16%] Building CXX object ggml/src/CMakeFiles/ggml.dir/ggml-backend-reg.cpp.o
+[ 16%] Building CXX object ggml/src/CMakeFiles/ggml.dir/ggml-backend-dl.cpp.o
+[ 16%] Linking CXX shared library libspeech-ggml.dylib
+[ 16%] Built target ggml
+[ 16%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_ctc.cpp.o
+[ 16%] Building CXX object CMakeFiles/test-ctc.dir/test/test_ctc.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-mel-bands.dir/test/test_mel_bands.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-mel.dir/test/test_mel.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-encoder.dir/test/test_encoder.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-mel-threads.dir/test/test_mel_threads.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-rnnt.dir/test/test_rnnt.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-parakeet-backend-selection.dir/test/test_backend_selection.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-mel-fft-parity.dir/test/test_mel_fft_parity.cpp.o
+[ 18%] Building CXX object CMakeFiles/test-ctc-language-mask.dir/test/test_ctc_language_mask.cpp.o
+[ 19%] Linking CXX executable test-parakeet-backend-selection
+[ 19%] Built target test-parakeet-backend-selection
+[ 19%] Building CXX object CMakeFiles/test-ctc.dir/src/parakeet_ctc.cpp.o
+[ 20%] Building CXX object CMakeFiles/test-mel-threads.dir/src/mel_preprocess.cpp.o
+[ 20%] Building CXX object CMakeFiles/test-mel-bands.dir/src/mel_preprocess.cpp.o
+[ 20%] Building CXX object CMakeFiles/test-ctc-language-mask.dir/src/parakeet_ctc.cpp.o
+[ 21%] Building CXX object CMakeFiles/test-mel-fft-parity.dir/src/mel_preprocess.cpp.o
+[ 21%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_ctc.cpp.o
+[ 21%] Building CXX object CMakeFiles/test-mel.dir/src/mel_preprocess.cpp.o
+[ 22%] Building CXX object CMakeFiles/test-nemotron-loader.dir/test/test_nemotron_loader.cpp.o
+[ 22%] Building CXX object CMakeFiles/test-encoder.dir/src/parakeet_ctc.cpp.o
+[ 22%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_ctc.cpp.o
+[ 22%] Building CXX object CMakeFiles/test-mel-threads.dir/src/parakeet_log.cpp.o
+[ 23%] Building CXX object CMakeFiles/test-mel-bands.dir/src/parakeet_log.cpp.o
+[ 23%] Building CXX object CMakeFiles/test-mel-fft-parity.dir/src/parakeet_log.cpp.o
+[ 23%] Building CXX object CMakeFiles/test-mel.dir/src/parakeet_ctc.cpp.o
+[ 23%] Linking CXX executable test-mel-threads
+[ 23%] Linking CXX executable test-mel-bands
+[ 23%] Built target test-mel-threads
+[ 24%] Building CXX object CMakeFiles/test-ctc.dir/src/parakeet_log.cpp.o
+[ 24%] Built target test-mel-bands
+[ 24%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_engine.cpp.o
+[ 24%] Linking CXX executable test-mel-fft-parity
+[ 24%] Built target test-mel-fft-parity
+[ 25%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_coreml_path.cpp.o
+[ 25%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/coreml/parakeet_coreml_shape.cpp.o
+[ 26%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_nemotron.cpp.o
+[ 26%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_engine.cpp.o
+[ 26%] Building CXX object CMakeFiles/test-ctc.dir/src/mel_preprocess.cpp.o
+[ 26%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_nemotron.cpp.o
+[ 27%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_engine.cpp.o
+[ 27%] Building CXX object CMakeFiles/test-ctc-language-mask.dir/src/parakeet_log.cpp.o
+[ 27%] Building CXX object CMakeFiles/test-encoder.dir/src/parakeet_log.cpp.o
+[ 27%] Building CXX object CMakeFiles/test-mel.dir/src/parakeet_log.cpp.o
+[ 28%] Building CXX object CMakeFiles/test-ctc-language-mask.dir/src/mel_preprocess.cpp.o
+[ 28%] Building CXX object CMakeFiles/test-encoder.dir/src/mel_preprocess.cpp.o
+[ 28%] Building CXX object CMakeFiles/test-ctc.dir/src/sentencepiece_bpe.cpp.o
+[ 28%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_nemotron.cpp.o
+[ 29%] Building CXX object CMakeFiles/test-encoder.dir/src/sentencepiece_bpe.cpp.o
+[ 29%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_log.cpp.o
+[ 30%] Building CXX object CMakeFiles/test-mel.dir/src/sentencepiece_bpe.cpp.o
+[ 30%] Building CXX object CMakeFiles/test-ctc-language-mask.dir/src/sentencepiece_bpe.cpp.o
+[ 31%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_tdt.cpp.o
+[ 31%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_tdt.cpp.o
+[ 31%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_log.cpp.o
+[ 32%] Linking CXX executable test-ctc
+[ 32%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_eou.cpp.o
+[ 32%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_eou.cpp.o
+[ 32%] Built target test-ctc
+[ 33%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_tdt.cpp.o
+[ 33%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_sortformer.cpp.o
+[ 33%] Linking CXX executable test-mel
+[ 33%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_eou.cpp.o
+[ 33%] Built target test-mel
+[ 33%] Building CXX object CMakeFiles/test-nemotron.dir/test/test_nemotron.cpp.o
+[ 33%] Linking CXX executable test-ctc-language-mask
+[ 33%] Built target test-ctc-language-mask
+[ 34%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/parakeet_sortformer.cpp.o
+[ 34%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_log.cpp.o
+[ 35%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_ctc.cpp.o
+[ 35%] Linking CXX executable test-encoder
+[ 35%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/mel_preprocess.cpp.o
+[ 35%] Built target test-encoder
+[ 35%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/test/test_nemotron_stream_step.cpp.o
+[ 35%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_engine.cpp.o
+[ 36%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/mel_preprocess.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-rnnt.dir/src/parakeet_sortformer.cpp.o
+[ 36%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/sentencepiece_bpe.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/sentencepiece_bpe.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-rnnt.dir/src/mel_preprocess.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-nemotron-loader.dir/src/energy_vad.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/parakeet_ctc.cpp.o
+[ 36%] Building CXX object CMakeFiles/test-encoder-capture-parity.dir/test/test_encoder_capture_parity.cpp.o
+[ 37%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/parakeet_nemotron.cpp.o
+[ 37%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_nemotron.cpp.o
+[ 37%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/test/test_encoder_coreml_parity.cpp.o
+[ 37%] Building CXX object CMakeFiles/test-encoder-capture-parity.dir/src/parakeet_ctc.cpp.o
+[ 38%] Linking CXX executable test-nemotron-loader
+[ 38%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/parakeet_ctc.cpp.o
+[ 39%] Building CXX object CMakeFiles/test-rnnt.dir/src/sentencepiece_bpe.cpp.o
+[ 40%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_log.cpp.o
+[ 40%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_tdt.cpp.o
+[ 40%] Built target test-nemotron-loader
+[ 40%] Building CXX object CMakeFiles/test-rnnt.dir/src/energy_vad.cpp.o
+[ 40%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/energy_vad.cpp.o
+[ 40%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/parakeet_log.cpp.o
+[ 41%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/parakeet_fit.cpp.o
+[ 41%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_eou.cpp.o
+[ 41%] Linking CXX executable test-rnnt
+[ 42%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/parakeet_coreml_path.cpp.o
+[ 42%] Built target test-rnnt
+[ 42%] Building CXX object CMakeFiles/test-nemotron.dir/src/parakeet_sortformer.cpp.o
+[ 42%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/main.cpp.o
+[ 42%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/test/test_encoder_coreml_bypass_parity.cpp.o
+[ 42%] Building CXX object CMakeFiles/qvac-parakeet.dir/src/fit_main.cpp.o
+[ 43%] Building CXX object CMakeFiles/test-nemotron.dir/src/mel_preprocess.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-encoder-capture-parity.dir/src/parakeet_log.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/parakeet_ctc.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-nemotron.dir/src/sentencepiece_bpe.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/parakeet_tdt.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-nemotron.dir/src/energy_vad.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/parakeet_coreml_path.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-sched-encoder-determinism.dir/test/test_sched_encoder_determinism.cpp.o
+[ 44%] Building CXX object CMakeFiles/test-encoder-capture-parity.dir/src/mel_preprocess.cpp.o
+[ 44%] Linking CXX shared library libqvac-parakeet.dylib
+[ 44%] Built target qvac-parakeet
+[ 44%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/coreml/parakeet_coreml_shape.cpp.o
+[ 45%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/coreml/parakeet_coreml_shape.cpp.o
+[ 45%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/mel_preprocess.cpp.o
+[ 45%] Building CXX object CMakeFiles/test-sched-encoder-determinism.dir/src/parakeet_ctc.cpp.o
+[ 45%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/parakeet_log.cpp.o
+[ 46%] Building CXX object CMakeFiles/test-nemotron-stream-step.dir/src/sentencepiece_bpe.cpp.o
+[ 46%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/test/test_sched_diarize_lifecycle.cpp.o
+[ 46%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/parakeet_log.cpp.o
+[ 46%] Linking CXX executable test-nemotron
+[ 46%] Building CXX object CMakeFiles/test-encoder-capture-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 46%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/mel_preprocess.cpp.o
+[ 46%] Built target test-nemotron
+[ 47%] Building CXX object CMakeFiles/test-subsampling-tail.dir/test/test_subsampling_tail.cpp.o
+[ 48%] Building CXX object CMakeFiles/test-encoder-coreml-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 49%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_ctc.cpp.o
+[ 49%] Building CXX object CMakeFiles/test-sched-encoder-determinism.dir/src/parakeet_log.cpp.o
+[ 49%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/mel_preprocess.cpp.o
+[ 50%] Building CXX object CMakeFiles/test-sched-encoder-determinism.dir/src/mel_preprocess.cpp.o
+[ 51%] Linking CXX executable test-encoder-capture-parity
+[ 51%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/test/test_tdt_encoder_parity.cpp.o
+[ 51%] Built target test-encoder-capture-parity
+[ 51%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_ctc.cpp.o
+[ 51%] Building CXX object CMakeFiles/test-encoder-coreml-bypass-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 51%] Linking CXX executable test-nemotron-stream-step
+[ 51%] Built target test-nemotron-stream-step
+[ 51%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/test/test_tdt_decoder_parity.cpp.o
+[ 51%] Building CXX object CMakeFiles/test-sched-encoder-determinism.dir/src/sentencepiece_bpe.cpp.o
+[ 52%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_ctc.cpp.o
+[ 52%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_engine.cpp.o
+[ 52%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_ctc.cpp.o
+[ 52%] Linking CXX executable test-encoder-coreml-parity
+[ 53%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_engine.cpp.o
+[ 53%] Built target test-encoder-coreml-parity
+[ 53%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/test/test_pos_proj_cache_parity.cpp.o
+[ 54%] Linking CXX executable test-encoder-coreml-bypass-parity
+[ 54%] Built target test-encoder-coreml-bypass-parity
+[ 54%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_nemotron.cpp.o
+[ 54%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_nemotron.cpp.o
+[ 54%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_ctc.cpp.o
+[ 54%] Linking CXX executable test-sched-encoder-determinism
+[ 54%] Built target test-sched-encoder-determinism
+[ 54%] Building CXX object CMakeFiles/test-lstm-input-concat.dir/test/test_lstm_input_concat.cpp.o
+[ 54%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_engine.cpp.o
+[ 54%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_engine.cpp.o
+[ 55%] Building CXX object CMakeFiles/test-attn-path.dir/test/test_attn_path.cpp.o
+[ 56%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_log.cpp.o
+[ 56%] Linking CXX executable test-lstm-input-concat
+[ 56%] Built target test-lstm-input-concat
+[ 56%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_log.cpp.o
+[ 56%] Building CXX object CMakeFiles/test-conv-channels-view.dir/test/test_conv_channels_view.cpp.o
+[ 56%] Linking CXX executable test-conv-channels-view
+[ 56%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_tdt.cpp.o
+[ 56%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_ctc.cpp.o
+[ 56%] Built target test-conv-channels-view
+[ 57%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_nemotron.cpp.o
+[ 57%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_engine.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_nemotron.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_log.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_eou.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_nemotron.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_tdt.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_tdt.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/parakeet_sortformer.cpp.o
+[ 58%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_log.cpp.o
+[ 59%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_eou.cpp.o
+[ 59%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_tdt.cpp.o
+[ 59%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_log.cpp.o
+[ 60%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_tdt.cpp.o
+[ 61%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_eou.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/mel_preprocess.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_eou.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_engine.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/sentencepiece_bpe.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_eou.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/parakeet_sortformer.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_nemotron.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-sched-diarize-lifecycle.dir/src/energy_vad.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/parakeet_sortformer.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/parakeet_sortformer.cpp.o
+[ 62%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/mel_preprocess.cpp.o
+[ 63%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/parakeet_sortformer.cpp.o
+[ 64%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/test/test_tdt_lstm_parity.cpp.o
+[ 64%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/mel_preprocess.cpp.o
+[ 65%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_log.cpp.o
+[ 66%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 66%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_tdt.cpp.o
+[ 67%] Linking CXX executable test-sched-diarize-lifecycle
+[ 67%] Built target test-sched-diarize-lifecycle
+[ 67%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_ctc.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/mel_preprocess.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/test/test_tdt_unroll_parity.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-fit-params.dir/test/test_fit_params.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-tdt-decoder-parity.dir/src/energy_vad.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_eou.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/mel_preprocess.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-fit-cli.dir/test/test_fit_cli.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_ctc.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_ctc.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_engine.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 68%] Building CXX object CMakeFiles/test-fit-cli.dir/src/fit_main.cpp.o
+[ 69%] Building CXX object CMakeFiles/test-attn-path.dir/src/parakeet_sortformer.cpp.o
+[ 69%] Linking CXX executable test-tdt-decoder-parity
+[ 70%] Building CXX object CMakeFiles/test-pos-proj-cache-parity.dir/src/energy_vad.cpp.o
+[ 70%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_ctc.cpp.o
+[ 70%] Built target test-tdt-decoder-parity
+[ 70%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/sentencepiece_bpe.cpp.o
+[ 70%] Linking CXX executable test-pos-proj-cache-parity
+[ 70%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 70%] Built target test-pos-proj-cache-parity
+[ 70%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_nemotron.cpp.o
+[ 70%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_engine.cpp.o
+[ 70%] Building CXX object CMakeFiles/test-subsampling-tail.dir/src/energy_vad.cpp.o
+[ 70%] Building CXX object CMakeFiles/test-attn-path.dir/src/mel_preprocess.cpp.o
+[ 70%] Building CXX object CMakeFiles/test-tdt-encoder-parity.dir/src/energy_vad.cpp.o
+[ 71%] Linking CXX executable test-subsampling-tail
+[ 71%] Built target test-subsampling-tail
+[ 72%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_fit.cpp.o
+[ 72%] Linking CXX executable test-tdt-encoder-parity
+[ 72%] Built target test-tdt-encoder-parity
+[ 72%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/test/test_eou_decoder_parity.cpp.o
+[ 73%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_fit.cpp.o
+[ 73%] Building CXX object CMakeFiles/test-sortformer-parity.dir/test/test_sortformer_parity.cpp.o
+[ 74%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_log.cpp.o
+[ 74%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_tdt.cpp.o
+[ 74%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_ctc.cpp.o
+[ 74%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_log.cpp.o
+[ 74%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_eou.cpp.o
+[ 75%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_ctc.cpp.o
+[ 75%] Building CXX object CMakeFiles/test-attn-path.dir/src/sentencepiece_bpe.cpp.o
+[ 76%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_nemotron.cpp.o
+[ 76%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_engine.cpp.o
+[ 76%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_log.cpp.o
+[ 76%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_nemotron.cpp.o
+[ 76%] Building CXX object CMakeFiles/test-attn-path.dir/src/energy_vad.cpp.o
+[ 77%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_engine.cpp.o
+[ 77%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_tdt.cpp.o
+[ 78%] Linking CXX executable test-attn-path
+[ 79%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/parakeet_sortformer.cpp.o
+[ 79%] Built target test-attn-path
+[ 80%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_eou.cpp.o
+[ 80%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_nemotron.cpp.o
+[ 80%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_log.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_tdt.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_nemotron.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_log.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/mel_preprocess.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/parakeet_sortformer.cpp.o
+[ 81%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/mel_preprocess.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_tdt.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_tdt.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_eou.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_eou.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_nemotron.cpp.o
+[ 82%] Building CXX object CMakeFiles/test-decoder-determinism.dir/test/test_decoder_determinism.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_eou.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_log.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-fit-params.dir/src/parakeet_sortformer.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-fit-cli.dir/src/parakeet_sortformer.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/parakeet_sortformer.cpp.o
+[ 83%] Building CXX object CMakeFiles/test-long-form.dir/test/test_long_form.cpp.o
+[ 84%] Building CXX object CMakeFiles/test-tdt-unroll-parity.dir/src/energy_vad.cpp.o
+[ 85%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_tdt.cpp.o
+[ 85%] Building CXX object CMakeFiles/test-tdt-lstm-parity.dir/src/energy_vad.cpp.o
+[ 86%] Linking CXX executable test-decoder-determinism
+[ 86%] Building CXX object CMakeFiles/test-fit-cli.dir/src/mel_preprocess.cpp.o
+[ 86%] Built target test-decoder-determinism
+[ 86%] Linking CXX executable test-tdt-unroll-parity
+[ 86%] Building CXX object CMakeFiles/test-fit-params.dir/src/mel_preprocess.cpp.o
+[ 86%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_eou.cpp.o
+[ 86%] Built target test-tdt-unroll-parity
+[ 87%] Linking CXX executable test-tdt-lstm-parity
+[ 87%] Building CXX object CMakeFiles/test-gpu-vs-cpu.dir/test/test_gpu_vs_cpu.cpp.o
+[ 87%] Built target test-tdt-lstm-parity
+[ 87%] Building CXX object CMakeFiles/live-mic.dir/examples/live-mic.cpp.o
+[ 87%] Linking CXX executable test-long-form
+[ 87%] Built target test-long-form
+[ 87%] Building CXX object CMakeFiles/test-gpu-vs-cpu.dir/src/parakeet_ctc.cpp.o
+[ 87%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/parakeet_sortformer.cpp.o
+[ 87%] Building CXX object CMakeFiles/live-mic-attributed.dir/examples/live-mic-attributed.cpp.o
+[ 87%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/mel_preprocess.cpp.o
+[ 88%] Building CXX object CMakeFiles/test-fit-cli.dir/src/sentencepiece_bpe.cpp.o
+[ 89%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/mel_preprocess.cpp.o
+[ 90%] Building CXX object CMakeFiles/live-mic.dir/examples/miniaudio_impl.cpp.o
+[ 90%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 91%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/sentencepiece_bpe.cpp.o
+[ 92%] Building CXX object CMakeFiles/live-mic-attributed.dir/examples/miniaudio_impl.cpp.o
+[ 92%] Building CXX object CMakeFiles/test-sortformer-parity.dir/src/energy_vad.cpp.o
+[ 93%] Building CXX object CMakeFiles/test-gpu-vs-cpu.dir/src/parakeet_log.cpp.o
+[ 93%] Building CXX object CMakeFiles/test-eou-decoder-parity.dir/src/energy_vad.cpp.o
+[ 93%] Linking CXX executable test-fit-cli
+[ 94%] Building CXX object CMakeFiles/test-fit-params.dir/src/sentencepiece_bpe.cpp.o
+[ 94%] Building CXX object CMakeFiles/test-gpu-vs-cpu.dir/src/mel_preprocess.cpp.o
+[ 94%] Built target test-fit-cli
+[ 94%] Building CXX object CMakeFiles/test-gpu-vs-cpu.dir/src/sentencepiece_bpe.cpp.o
+[ 94%] Building CXX object CMakeFiles/parakeet-cli.dir/src/cli_main.cpp.o
+[ 94%] Linking CXX executable parakeet
+[ 94%] Built target parakeet-cli
+[ 95%] Building CXX object CMakeFiles/parakeet-fit-params.dir/src/fit_cli_main.cpp.o
+[ 95%] Building CXX object CMakeFiles/test-parakeet-streaming.dir/test/test_streaming.cpp.o
+[ 95%] Linking CXX executable parakeet-fit-params
+[ 95%] Built target parakeet-fit-params
+[ 95%] Linking CXX executable test-fit-params
+[ 95%] Building CXX object CMakeFiles/test-eou-streaming.dir/test/test_eou_streaming.cpp.o
+[ 95%] Built target test-fit-params
+[ 95%] Building CXX object CMakeFiles/test-sortformer-streaming.dir/test/test_sortformer_streaming.cpp.o
+[ 95%] Building CXX object CMakeFiles/test-sortformer-aosc-speakers.dir/test/test_sortformer_aosc_speakers.cpp.o
+[ 95%] Linking CXX executable test-eou-decoder-parity
+[ 95%] Built target test-eou-decoder-parity
+[ 95%] Building CXX object CMakeFiles/test-perf-regression.dir/test/test_perf_regression.cpp.o
+[ 95%] Linking CXX executable test-sortformer-parity
+[ 95%] Built target test-sortformer-parity
+[ 95%] Building CXX object CMakeFiles/test-transcribe-coreml-parity.dir/test/test_transcribe_coreml_parity.cpp.o
+[ 95%] Linking CXX executable test-parakeet-streaming
+[ 95%] Built target test-parakeet-streaming
+[ 96%] Building CXX object CMakeFiles/test-diarize-coreml-short-parity.dir/test/test_diarize_coreml_short_parity.cpp.o
+[ 96%] Linking CXX executable test-eou-streaming
+[ 96%] Built target test-eou-streaming
+[ 97%] Linking CXX executable test-perf-regression
+[ 97%] Linking CXX executable test-sortformer-streaming
+[ 97%] Built target test-perf-regression
+[ 97%] Built target test-sortformer-streaming
+[ 98%] Linking CXX executable test-sortformer-aosc-speakers
+[ 99%] Linking CXX executable test-transcribe-coreml-parity
+[ 99%] Linking CXX executable test-diarize-coreml-short-parity
+[ 99%] Built target test-sortformer-aosc-speakers
+[ 99%] Built target test-transcribe-coreml-parity
+[ 99%] Built target test-diarize-coreml-short-parity
+[100%] Linking CXX executable test-gpu-vs-cpu
+[100%] Built target test-gpu-vs-cpu
+[100%] Linking CXX executable live-mic
+[100%] Built target live-mic
+[100%] Linking CXX executable live-mic-attributed
+[100%] Built target live-mic-attributed

@@ -1,14 +1,5 @@
 #pragma once
 
-// Cache-aware streaming for parakeet-unified-en-0.6b (chunked-limited
-// attention with right context). Session lifecycle:
-//   init_unified_stream_state -> append_unified_pcm / append_unified_mel_frames
-//   -> next_unified_processed_signal (1 = a chunk is ready, 0 = need more mel,
-//      < 0 = error) -> run_unified_stream_step, repeated; finalize with
-//      finalize=true on the last append / signal / step.
-// Each step encodes chunk + right-context frames; only the chunk frames are
-// decoded and enter the per-layer attention and convolution caches.
-
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
 
