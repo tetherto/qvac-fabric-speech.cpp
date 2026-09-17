@@ -108,7 +108,10 @@ their calibration.
 
 CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights,
 `f16`/`bf16` flow weights, and `f16` HiFT weights. The recommended desktop
-GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT; on CPU use a
+GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT — except on
+Metal, where the `f16` flow measured slightly ahead of `q8_0` (the GEMMs
+there are compute-bound, not weight-bandwidth-bound), so Apple targets
+prefer `q8_0` LM + `f16` flow + `f16` HiFT; on CPU use a
 `bf16` flow on AVX512-BF16 hosts and `f16` elsewhere (measured on a 16-core
 Zen 5, 16 threads, same pinned 14.8 s utterance: flow+vocoder wall 16.7 s
 with f32 weights on a ggml built without tinyBLAS falls to 8.6 s with the
@@ -119,6 +122,24 @@ block attends to the voice-prompt frames, and subsequent blocks process the
 generated region. It changes reference output and is off by default. See
 [CosyVoice3 conversion and usage](docs/cosyvoice3.md) for details and the
 unsupported LM `f16` caveat.
+
+CosyVoice3 on Metal takes graph paths the profiler singled out on Apple
+GPUs, all gated by the cross-backend and per-backend harnesses: the LM's
+single-token decode runs one flash-attention node per layer instead of the
+masked matmul/softmax chain (with the all-zeros causal mask elided — the
+greedy trajectory stays bit-identical to the CPU's, measured over 1680
+consecutive steps), newer LM GGUFs feed it one fused `qkv_proj` matvec, the
+DiT's flash attention takes f16 K/V operands, its grouped `conv_pos_embed`
+collapses from 64 dispatches per Euler step to one batched im2col + matmul,
+and the vocoder's snake activations run as single fused `GGML_OP_SNAKE`
+kernels on every backend. Measured on the same medium utterance (LM `q8_0`,
+543 speech tokens, 21.7 s audio): M3 Ultra end-to-end 5.00 s -> 3.96 s (RTF
+0.234 -> 0.182, 5.5x real time) with LM decode 4.9 -> 3.5 ms/token, DiT
+1435 -> 1332 ms and HiFT decode 185 -> 159 ms on the pinned-trajectory f16
+leg; M4 end-to-end RTF 0.598 -> 0.544 with LM decode 7.1 -> 5.9 ms/token and
+HiFT decode 838 -> 686 ms. The remaining DiT time is machine-rate GEMM and
+flash attention (13+ TFLOPS measured per op), which is why the f16 tier, not
+`q8_0`, is the Metal recommendation.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --

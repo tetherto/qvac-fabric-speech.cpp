@@ -1152,6 +1152,10 @@ if (TTS_CPP_BUILD_TESTS)
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_flow.py")
         set_property(TEST test-convert-cosyvoice3-flow PROPERTY LABELS "unit")
+        add_test(NAME test-convert-cosyvoice3-llm
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
+        set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
         # Skips without torch; the TTS CI macOS lane runs it in the export venv.
         add_test(NAME test-audio8-codec-coreml-exporter
@@ -1277,6 +1281,38 @@ if (TTS_CPP_BUILD_TESTS)
                 EXE   test-cosyvoice-conv1d
                 LABEL "gpu")
             set_property(TEST test-cosyvoice-conv1d-${_tcb_cosy_arm} APPEND PROPERTY ENVIRONMENT
+                         "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
+        endforeach()
+    endif()
+
+    # Cross-backend stage parity on deterministic synthetic inputs (no PyTorch
+    # fixtures, only the stage GGUFs): exact greedy LM trajectory, flow mel
+    # cosine + max-abs, pinned-f0 HiFT waveform cosine — CPU vs the selected
+    # GPU.  Pins the backend-specific graph paths (Metal flash-attention LM
+    # decode, DiT f16-K/V flash attention, batched grouped conv, fused snake).
+    add_executable(test-cosyvoice-xb test/test_cosyvoice_xb.cpp)
+    target_link_libraries(test-cosyvoice-xb PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-xb PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-xb)
+    if (TTS_CPP_COSYVOICE_GPU)
+        tts_cpp_register_test(test-cosyvoice-xb
+            LABEL    "gpu"
+            ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                     "--flow-gguf" "${_tcb_cosy_flow_gguf}"
+                     "--hift-gguf" "${_tcb_cosy_hift_gguf}"
+            REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                     "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+        set_property(TEST test-cosyvoice-xb APPEND PROPERTY ENVIRONMENT "COSYVOICE_TEST_GPU=1")
+        foreach(_tcb_cosy_arm IN LISTS _tcb_cosy_arms)
+            tts_cpp_register_test(test-cosyvoice-xb-${_tcb_cosy_arm}
+                EXE      test-cosyvoice-xb
+                LABEL    "gpu"
+                ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                         "--flow-gguf" "${_tcb_cosy_flow_gguf}"
+                         "--hift-gguf" "${_tcb_cosy_hift_gguf}"
+                REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                         "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+            set_property(TEST test-cosyvoice-xb-${_tcb_cosy_arm} APPEND PROPERTY ENVIRONMENT
                          "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
         endforeach()
     endif()

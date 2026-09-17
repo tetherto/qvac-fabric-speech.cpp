@@ -62,14 +62,19 @@ python3 scripts/convert-campplus-to-gguf.py \
 The LM converter accepts `--dtype {f32,f16,q8_0,q4_0}`, the flow converter
 `--dtype {f32,f16,bf16,q8_0,q4_0}`, and HiFT `f32`/`f16` (its f0 predictor
 stays f32 either way). The recommended desktop GPU tier is LM `q8_0` + flow
-`q8_0` + HiFT `f16`; on CPU the float flow tiers beat `q8_0` once ggml is
+`q8_0` + HiFT `f16`, except on Metal, where flow `f16` wins: the DiT there
+is compute-bound at the GPU's f16 GEMM rate, so `q8_0` saves no time and
+costs a little accuracy (M3 Ultra, pinned trajectory: flow+HiFT f16 1.71 s
+vs q8_0 1.83 s). On CPU the float flow tiers beat `q8_0` once ggml is
 built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml default): flow
 `bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon), flow `f16`
 elsewhere, both with HiFT `f16`. The CPU LM decode is weight-bandwidth
 bound, so LM `q4_0` roughly halves it against `q8_0` (measured 7.5 ->
-4.1 ms/token) where its output quality is acceptable. Avoid LM `f16`: the engine reads
-the embedding tables as f32, so a f16 LM is not loadable today — use the
-quantized LM tiers instead.
+4.1 ms/token) where its output quality is acceptable. A quantized HiFT tier
+would gain nothing: like the flow's `q8_0`, quantization applies only to 2-D
+matmul weights, and the vocoder is convolutions end to end. Avoid LM `f16`:
+the engine reads the embedding tables as f32, so a f16 LM is not loadable
+today — use the quantized LM tiers instead.
 In `q8_0`/`q4_0` mode the flow converter quantizes only the 2D matmul
 weights (conv kernels, norms, biases, the token embedding and the baked
 `rand_noise` stay float), and it always writes the per-block attention
@@ -85,6 +90,12 @@ on the gate's synthetic inputs (mel cosine / max abs): flow `f16`
 The HiFT leg (`f16` waveform cosine 0.999966, max abs 0.0012) pins f0 so
 the gate measures weight precision rather than sine-phase noise. The
 thresholds registered in CMakeLists.txt carry margin over these values.
+
+The LM converter applies the same attention fusion to each layer
+(`qkv_proj`, rows q ++ k ++ v): one matvec feeds all three heads per decode
+step. Row-wise quantization makes the fused tensor bit-identical to the
+separate ones, and the engine still loads older GGUFs with separate
+`q/k/v_proj` tensors.
 
 `cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
 the voice-prompt frames as attention conditioning only (the same design

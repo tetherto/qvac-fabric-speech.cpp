@@ -220,6 +220,15 @@ std::vector<float> cosyvoice_hift_f0(model_ctx & m,
 ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tensor * x,
                                    int stride, int padding, int dilation);
 
+// Grouped conv1d over time: x [Nlen, Cin, B] (ne0=time), weight
+// [K, Cin/groups, Cout].  The per-group form emits one im2col + matmul per
+// (group, batch) — the shape Adreno's im2col fusion requires; the batched
+// form folds (group, batch) into one im2col and one batched matmul and is
+// selected where per-dispatch launch overhead dominates (Metal).  Both are
+// exposed for test-cosyvoice-conv1d, which pins their equivalence.
+ggml_tensor * cosyvoice_conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
+ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
+
 // CausalHiFT vocoder: mel [80, mel_len] channel-major (mel[ch*T + t]) -> 24 kHz
 // float PCM.  Runs f0_predictor + SineGen2 excitation + STFT + decode.
 // f0_override (parity tests) skips the predictor: SineGen2 integrates f0 into
