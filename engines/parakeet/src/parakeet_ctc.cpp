@@ -1465,12 +1465,14 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
     const bool supported_sortformer =
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc";
-    if (model.model_type != ParakeetModelType::TDT &&
+    if (model.model_type != ParakeetModelType::RNNT &&
+        model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         !supported_sortformer) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder supports TDT, EOU, and Sortformer v2.1; "
+                "parakeet: Core ML encoder supports Unified RNN-T, TDT, EOU, "
+                "and Sortformer v2.1; "
                 "using ggml for model type %s variant '%s'\n",
                 model_type_name(model.model_type), model.model_variant.c_str());
         }
@@ -3556,7 +3558,8 @@ static int coreml_encoder_out_frames(const EncoderConfig & enc, int n_mel_frames
     return next(next(next(n_mel_frames)));
 }
 
-// TDT and Sortformer v2.1 batch sidecars use the full-context contract.
+// Unified RNN-T, TDT, and Sortformer v2.1 batch sidecars use the
+// full-context contract.
 static bool encoder_is_offline(const EncoderConfig & enc) {
     return enc.att_context_left  < 0
         && enc.att_context_right < 0
@@ -3571,11 +3574,16 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool capture_intermediates,
                                       bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (model.model_type != ParakeetModelType::TDT &&
+    if (model.model_type != ParakeetModelType::RNNT &&
+        model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    if (model.model_type == ParakeetModelType::RNNT) {
+        return encoder_is_offline(model.encoder_cfg) &&
+               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
+    }
     if (model.model_type == ParakeetModelType::TDT) {
         return encoder_is_offline(model.encoder_cfg);
     }
@@ -3834,8 +3842,9 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run a validated TDT/EOU/Sortformer FastConformer
-    // encoder and hand encoder_out back to the ggml decoder or diarization head.
+    // Apple Core ML sidecar: run a validated Unified RNN-T, TDT, EOU, or
+    // Sortformer FastConformer encoder and hand encoder_out back to the ggml
+    // decoder or diarization head.
     if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);

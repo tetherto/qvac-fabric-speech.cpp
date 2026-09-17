@@ -59,8 +59,39 @@ python3 scripts/convert-campplus-to-gguf.py \
     --out cosyvoice3-campplus-f32.gguf
 ```
 
-The LM converter also accepts `--dtype {f16,q8_0,q4_0}`; flow and HiFT accept
-`f32`/`f16`.
+The LM converter accepts `--dtype {f32,f16,q8_0,q4_0}`, the flow converter
+`--dtype {f32,f16,bf16,q8_0,q4_0}`, and HiFT `f32`/`f16` (its f0 predictor
+stays f32 either way). The recommended desktop GPU tier is LM `q8_0` + flow
+`q8_0` + HiFT `f16`; on CPU the float flow tiers beat `q8_0` once ggml is
+built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml default): flow
+`bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon), flow `f16`
+elsewhere, both with HiFT `f16`. The CPU LM decode is weight-bandwidth
+bound, so LM `q4_0` roughly halves it against `q8_0` (measured 7.5 ->
+4.1 ms/token) where its output quality is acceptable. Avoid LM `f16`: the engine reads
+the embedding tables as f32, so a f16 LM is not loadable today — use the
+quantized LM tiers instead.
+In `q8_0`/`q4_0` mode the flow converter quantizes only the 2D matmul
+weights (conv kernels, norms, biases, the token embedding and the baked
+`rand_noise` stay float), and it always writes the per-block attention
+projections pre-fused as one `to_qkv` tensor; the engine also still loads
+older GGUFs with separate `to_q`/`to_k`/`to_v` tensors. `bf16` mode stores
+those same 2D matmul weights as bf16 and the conv kernels as f16, keeping
+the kernel-typed f16 im2col path. Every reduced-precision tier is gated
+against the f32 reference by `test-cosyvoice-{flow,hift}-tier-*`, which
+needs only the two GGUFs staged (no PyTorch fixture). Measured deviations
+on the gate's synthetic inputs (mel cosine / max abs): flow `f16`
+0.99996 / 0.25, `bf16` 0.99967 / 0.99, `q8_0` 0.99983 / 0.66, `q4_0`
+0.98659 / 4.84 — prefer `q8_0` over `q4_0` where the flow size allows.
+The HiFT leg (`f16` waveform cosine 0.999966, max abs 0.0012) pins f0 so
+the gate measures weight precision rather than sine-phase noise. The
+thresholds registered in CMakeLists.txt carry margin over these values.
+
+`cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
+the voice-prompt frames as attention conditioning only (the same design
+cosyvoice.cpp uses by default). It cuts DiT time by roughly the prompt's share
+of the mel sequence but deviates from the PyTorch reference, so it is off by
+default; `test-cosyvoice-flow-cut` pins its output against the reference mel
+with a looser bound.
 
 The engine will not construct without a baked default voice (`voice.gguf`): it
 packs the four prompt tensors of one reference utterance, computed on the

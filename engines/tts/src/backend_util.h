@@ -35,6 +35,33 @@ inline bool backend_is_cpu(ggml_backend_t b) {
     return dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
 }
 
+// Registry feature lookup via ggml_backend_get_features ("AVX2", "NEON", "LLAMAFILE", ...).
+inline bool backend_reg_has_feature(ggml_backend_reg_t reg, const char * name) {
+    if (!reg || !name) return false;
+    auto get_features = (ggml_backend_get_features_t)
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_get_features");
+    if (!get_features) return false;
+    for (const ggml_backend_feature * f = get_features(reg); f && f->name; ++f) {
+        if (std::strcmp(f->name, name) == 0) return true;
+    }
+    return false;
+}
+
+inline bool backend_has_feature(ggml_backend_t b, const char * name) {
+    if (!b) return false;
+    ggml_backend_dev_t dev = ggml_backend_get_device(b);
+    return dev && backend_reg_has_feature(ggml_backend_dev_backend_reg(dev), name);
+}
+
+inline bool cpu_backend_has_feature(const char * name) {
+    return backend_reg_has_feature(ggml_backend_reg_by_name("CPU"), name);
+}
+
+// False with tinyBLAS (GGML_LLAMAFILE), whose GEMM rounding depends on the operand shapes.
+inline bool cpu_matmul_is_shape_exact() {
+    return !cpu_backend_has_feature("LLAMAFILE");
+}
+
 // The name-level predicates exist because device selection knows a registry name
 // before it has a backend handle to ask, and both readings have to agree.
 inline bool reg_name_is_metal(const char * n) {
@@ -52,6 +79,18 @@ inline bool reg_name_is_opencl(const char * n) {
 
 inline bool reg_name_is_cuda(const char * n) {
     return n && std::strcmp(n, "CUDA") == 0;
+}
+
+// Which backend a resident tensor's buffer belongs to. Graph builders see the
+// weight but not the backend that holds it, and the buffer carries the answer.
+inline const char * buft_reg_name(ggml_backend_buffer_type_t buft) {
+    if (!buft) return "";
+    ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    if (!dev) return "";
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    if (!reg) return "";
+    const char * n = ggml_backend_reg_name(reg);
+    return n ? n : "";
 }
 
 inline bool backend_is_metal(ggml_backend_t b) {

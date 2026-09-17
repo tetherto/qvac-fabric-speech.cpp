@@ -1,9 +1,4 @@
-# Optional CLAP post-pass. Review this file, then:
-#   python3 -m pip install -r quality/requirements.txt
-# Do not pipe a remote installer into a shell.
-numpy==2.2.6
-soundfile==0.13.1
-torch==2.6.0
-transformers==5.5.4
-safetensors==0.5.3
-huggingface_hub==1.28.0
+# Shared, patched CLAP environment: Python 3.12, Linux x86_64 or macOS arm64.
+# Wheel-only hashes prevent source-build fallback; comparison and desktop scoring
+# use the same resolved versions.
+-r ../../../../../scripts/benchmarks/requirements-music-alignment.txt

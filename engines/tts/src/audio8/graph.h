@@ -17,6 +17,11 @@ namespace tts_cpp {
 namespace audio8 {
 namespace detail {
 
+// Host bytes one scratch arena holds: the tensor headers plus the graph. The
+// projector prices replayed graphs with this, so it cannot drift from what the
+// constructor below actually allocates.
+size_t scratch_arena_bytes(int nodes);
+
 // A graph and the arena its nodes live in, sized for `nodes` tensors.
 struct scratch {
     ggml_context * ctx = nullptr;
@@ -28,6 +33,10 @@ struct scratch {
     scratch & operator=(const scratch &) = delete;
 
     bool ok() const { return ctx && graph; }
+
+    // Hands the arena to a caller that will outlive this scope; the caller then
+    // owns the context and frees it with ggml_free.
+    void release() { ctx = nullptr; graph = nullptr; }
 };
 
 ggml_tensor * input_i32(ggml_context * ctx, const char * name, int count);
@@ -53,15 +62,19 @@ bool compute_graph(ggml_backend_t backend, ::tts_cpp::detail::sched_fallback & s
 
 struct rope_planes {
     ggml_tensor * cos = nullptr;
-    ggml_tensor * sin = nullptr;
+    ggml_tensor * signed_sin = nullptr;
 };
 
-// One row per position of the baked tables, as [head_dim/2, 1, count] so it
-// broadcasts across heads.
+// One row per position of the baked tables, each widened to [head_dim, 1,
+// count] so it broadcasts across heads and both halves of a head read the same
+// plane: the cosine row twice, the sine row negated then plain. Widening costs
+// three nodes per graph and saves five in every attention block.
 rope_planes rope_window(ggml_context * ctx, ggml_tensor * cos_table,
                         ggml_tensor * sin_table, int first, int count);
 
-// x is [head_dim, n_head, count].
+// x is [head_dim, n_head, count], rotated as x * cos + swap(x) * signed_sin,
+// where swap exchanges the halves of each head. Negating the lower sines is
+// exact, so this is the arithmetic the per-half spelling did.
 ggml_tensor * apply_rope(ggml_context * ctx, ggml_tensor * x, const rope_planes & rope);
 
 ggml_tensor * precise_mul_mat(ggml_context * ctx, ggml_tensor * a, ggml_tensor * b);
@@ -73,7 +86,8 @@ ggml_tensor * rms_norm(ggml_context * ctx, ggml_tensor * x, ggml_tensor * weight
 ggml_tensor * linear(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x,
                      ggml_tensor * bias);
 
-// SwiGLU: w2(silu(w1(x)) * w3(x)).
+// SwiGLU: w2(silu(w1(x)) * w3(x)), as the single gated node so the two
+// projections and the gate reach the backend as one fusable run.
 ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
                      ggml_tensor * w3, ggml_tensor * x);
 

@@ -5,6 +5,7 @@ const { spawnSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const {
+  CLAP_POLICY_VERSION,
   buildClapText,
   lookupPrompt,
   mergeClapScore,
@@ -115,6 +116,9 @@ function runClapBatch (config, items) {
 }
 
 function applyScores (pending, batch, textPolicy) {
+  if (batch.policyVersion !== CLAP_POLICY_VERSION) {
+    throw new Error(`incompatible CLAP scorer policy: ${batch.policyVersion || 'missing'}; expected ${CLAP_POLICY_VERSION}`)
+  }
   const byId = new Map()
   for (const score of batch.scores) {
     byId.set(score.id, score)
@@ -123,6 +127,7 @@ function applyScores (pending, batch, textPolicy) {
     model: batch.model,
     revision: batch.revision,
     samplingRate: batch.samplingRate,
+    policyVersion: batch.policyVersion,
     device: batch.device,
     textPolicy
   }
@@ -197,9 +202,13 @@ function main () {
   console.log(`Wrote ${written.markdownPath}`)
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(`error: ${error.message}`)
-  process.exitCode = 1
+if (require.main === module) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`error: ${error.message}`)
+    process.exitCode = 1
+  }
 }
+
+module.exports = { applyScores, collectPendingRounds, persistRounds, replaceScoredRounds }

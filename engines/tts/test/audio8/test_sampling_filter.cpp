@@ -161,6 +161,25 @@ void test_single_candidate_survives_any_filter() {
     CHECK(scores[0] == logits[0] * (1.0f / 0.5f), "and still temperature-scaled");
 }
 
+// Ranking stops at top_k, but the masses it is measured against do not: the
+// tail the ranking never visits still normalises the nucleus. A leaders-only
+// normaliser would inflate every mass and close the nucleus early.
+std::vector<float> three_leaders_over_a_flat_tail() {
+    std::vector<float> logits = { std::log(8.0f), std::log(4.0f), std::log(2.0f) };
+    logits.resize(103, 0.0f);
+    return logits;
+}
+
+void test_the_tail_normalises_the_nucleus() {
+    const std::vector<float> logits = three_leaders_over_a_flat_tail();
+    // Masses over the whole 114 of exp-weight: 0.070, 0.035, 0.018 -- the three
+    // leaders together hold 0.123, far short of top-p, so top-k is what stops it.
+    CHECK(kept_count(filter_scores(logits, with(3, 0.9f, NO_TEMPERATURE))) == 3,
+          "the tail's mass keeps the nucleus open across every ranked leader");
+    CHECK(kept_count(filter_scores(logits, with(2, 0.9f, NO_TEMPERATURE))) == 2,
+          "top-k still caps how many leaders are ranked");
+}
+
 void test_a_filter_with_one_survivor_pins_the_draw() {
     const std::vector<float> logits = { 1.0f, 5.0f, 3.0f, 4.0f, 2.0f };
     std::mt19937 rng(7);
@@ -188,6 +207,7 @@ int main() {
     test_temperature_does_not_move_the_nucleus();
     test_zero_temperature_clamps_to_the_minimum();
     test_single_candidate_survives_any_filter();
+    test_the_tail_normalises_the_nucleus();
     test_a_filter_with_one_survivor_pins_the_draw();
 
     if (failures == 0) {

@@ -40,6 +40,10 @@ int main() {
     expect("models/parakeet-tdt-0.6b-v3.f16.gguf",  "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
     expect("models/parakeet-tdt-0.6b-v3.bf16.gguf", "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
     expect("models/parakeet-tdt-0.6b-v3.q8_0.gguf", "models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
+    expect("models/parakeet-unified-en-0.6b.q8_0.gguf",
+           "models/parakeet-unified-en-0.6b-encoder.mlmodelc");
+    expect("models/parakeet-unified-en-0.6b.f16.gguf",
+           "models/parakeet-unified-en-0.6b-encoder.mlmodelc");
     expect("parakeet-ctc-0.6b.q8_0.gguf",           "parakeet-ctc-0.6b-encoder.mlmodelc");
     expect("/opt/models/parakeet-tdt-0.6b-v3.gguf", "/opt/models/parakeet-tdt-0.6b-v3-encoder.mlmodelc");
     expect("model-q8_0.gguf",                       "model-encoder.mlmodelc");

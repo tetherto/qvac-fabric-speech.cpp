@@ -74,6 +74,7 @@ int main(int argc, char ** argv) {
     VoiceControls controls;
     int seed = 42, n_gpu_layers = 0, n_threads = 0, vulkan_device = 0;
     bool greedy = false;
+    bool flow_cut_prompt = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--model-dir" && i + 1 < argc) model_dir = argv[++i];
@@ -102,6 +103,7 @@ int main(int argc, char ** argv) {
         else if (a == "--backends-dir" && i + 1 < argc) backends_dir = argv[++i];
         else if (a == "--opencl-cache-dir" && i + 1 < argc) opencl_cache_dir = argv[++i];
         else if (a == "--greedy") greedy = true;
+        else if (a == "--flow-cut-prompt") flow_cut_prompt = true;
         else {
             fprintf(stderr,
                 "usage: %s --model-dir DIR [--text ...] [--voice-gguf voice.gguf]\n"
@@ -109,7 +111,8 @@ int main(int argc, char ** argv) {
                 "          [--s3tok-gguf S3TOK.gguf] [--campplus-gguf CAMPPLUS.gguf]\n"
                 "          [--emotion NAME] [--pace slow|moderate|fast] [--instruct \"...\"]\n"
                 "          [--list-emotions] [--list-paces]\n"
-                "          [--out out.wav] [--seed N] [--greedy] [--n-gpu-layers N] [--threads N]\n"
+                "          [--out out.wav] [--seed N] [--greedy] [--flow-cut-prompt]\n"
+                "          [--n-gpu-layers N] [--threads N]\n"
                 "          [--vulkan-device N] [--backends-dir DIR] [--opencl-cache-dir DIR]\n"
                 "\n"
                 "Voice cloning: --reference-audio with --prompt-text (the reference's verbatim\n"
@@ -128,6 +131,7 @@ int main(int argc, char ** argv) {
     opts.model_dir = model_dir;
     opts.seed = seed;
     opts.greedy = greedy;
+    opts.flow_cut_prompt = flow_cut_prompt;
     opts.n_gpu_layers = n_gpu_layers;
     opts.vulkan_device = vulkan_device;
     opts.n_threads = n_threads;
@@ -148,6 +152,14 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "  %zu samples  %.2fs  %d Hz (backend %s%s)\n",
                 res.pcm.size(), res.duration_s, res.sample_rate, engine.backend_name().c_str(),
                 engine.gpu_unsupported() ? ", GPU present but declined" : "");
+        const auto & t = res.timings;
+        fprintf(stderr,
+                "  timings ms: lm_prefill %.0f lm_decode %.0f flow_frontend %.0f "
+                "dit_euler %.0f hift_f0 %.0f hift_source %.0f hift_stft %.0f "
+                "hift_decode %.0f total %.0f (decode_steps %d tokens %d)\n",
+                t.lm_prefill_ms, t.lm_decode_ms, t.flow_frontend_ms, t.dit_euler_ms,
+                t.hift_f0_ms, t.hift_source_ms, t.hift_stft_ms, t.hift_decode_ms,
+                t.total_ms, t.n_decode_steps, t.n_speech_tokens);
         write_wav(out, res.pcm, res.sample_rate);
     } catch (const std::exception & e) {
         fprintf(stderr, "cosyvoice-cli: error: %s\n", e.what());

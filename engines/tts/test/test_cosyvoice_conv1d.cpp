@@ -40,10 +40,17 @@ bool close_enough(float a, float b) {
     return std::fabs(a - b) <= 1e-4f + 1e-4f * std::fabs(b);
 }
 
+// The f16 leg loses kernel precision to the half round-trip, so it gets a
+// correspondingly looser bound.
+bool close_enough_f16(float a, float b) {
+    return std::fabs(a - b) <= 5e-3f + 5e-3f * std::fabs(b);
+}
+
 // Builds conv over either a contiguous copy of the signal or a strided
 // permute view of it, runs on `backend`, and reports whether the graph was
 // fully supported there (i.e. needed no sched fallback).
-std::vector<float> run_conv(ggml_backend_t backend, bool use_view, bool & fully_supported) {
+std::vector<float> run_conv(ggml_backend_t backend, bool use_view, bool & fully_supported,
+                            ggml_type wtype = GGML_TYPE_F32) {
     static const size_t buf_size = 4 * 1024 * 1024;
     std::vector<uint8_t> buf(buf_size);
     ggml_init_params p = { buf_size, buf.data(), /*no_alloc=*/true };
@@ -54,7 +61,7 @@ std::vector<float> run_conv(ggml_backend_t backend, bool use_view, bool & fully_
     // conv layout [Len, Cin, 1] WITHOUT making it contiguous.
     ggml_tensor * xt = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kCin, kLen);
     ggml_set_name(xt, "xt"); ggml_set_input(xt);
-    ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kKernel, kCin, kCout);
+    ggml_tensor * w = ggml_new_tensor_3d(ctx, wtype, kKernel, kCin, kCout);
     ggml_set_name(w, "w"); ggml_set_input(w);
 
     ggml_tensor * x = ggml_permute(ctx, xt, 1, 0, 2, 3);          // [Len, Cin, 1] strided view
@@ -71,7 +78,13 @@ std::vector<float> run_conv(ggml_backend_t backend, bool use_view, bool & fully_
     const auto sig = make_signal();
     const auto wts = make_weights();
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "xt"), sig.data(), 0, sig.size() * sizeof(float));
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "w"),  wts.data(), 0, wts.size() * sizeof(float));
+    if (wtype == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> wts16(wts.size());
+        ggml_fp32_to_fp16_row(wts.data(), wts16.data(), (int64_t)wts.size());
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "w"), wts16.data(), 0, wts16.size() * sizeof(ggml_fp16_t));
+    } else {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "w"), wts.data(), 0, wts.size() * sizeof(float));
+    }
     ggml_backend_graph_compute(backend, gf);
     ggml_tensor * out = ggml_graph_get_tensor(gf, "y");
     std::vector<float> res(ggml_nelements(out));
@@ -109,6 +122,30 @@ int main() {
     if (cpu_view != ref_cont) {
         fprintf(stderr, "FAIL: CPU view leg differs from pre-contiguous leg\n");
         return 1;
+    }
+
+    // f16 kernel leg: the graph must stay fully CPU-supported (the im2col dst
+    // follows the kernel type, so the matmul sees an f16/f16 pair the CPU
+    // accepts) and the result must track the f32 reference.
+    bool f16_supported = false;
+    const auto cpu_f16 = run_conv(cpu, /*use_view=*/false, f16_supported, GGML_TYPE_F16);
+    if (!f16_supported) {
+        fprintf(stderr, "FAIL: f16-kernel conv graph not fully supported on the CPU backend\n");
+        ggml_backend_free(cpu);
+        return 1;
+    }
+    if (cpu_f16.size() != ref_cont.size()) {
+        fprintf(stderr, "FAIL: f16 leg size mismatch\n");
+        ggml_backend_free(cpu);
+        return 1;
+    }
+    for (size_t i = 0; i < ref_cont.size(); ++i) {
+        if (!close_enough_f16(cpu_f16[i], ref_cont[i])) {
+            fprintf(stderr, "FAIL: f16 leg mismatch @ %zu: got=%.6g ref=%.6g\n",
+                    i, cpu_f16[i], ref_cont[i]);
+            ggml_backend_free(cpu);
+            return 1;
+        }
     }
 
     if (std::getenv("COSYVOICE_TEST_GPU")) {

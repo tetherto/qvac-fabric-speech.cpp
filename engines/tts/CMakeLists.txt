@@ -26,6 +26,16 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecar for the Audio8 codec synthesis stack (Apple-only, additive; synthesis runs on a <codec-decoder>.mlmodelc next to the decoder GGUF when present, else on ggml)." OFF)
+
+# OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
+if (TTS_CPP_COREML)
+    if (NOT APPLE)
+        message(FATAL_ERROR "TTS_CPP_COREML is Apple-only (requires the CoreML framework); leave it OFF on ${CMAKE_SYSTEM_NAME}.")
+    endif()
+    enable_language(OBJC)
+    enable_language(OBJCXX)
+endif()
 
 # ccache shaves ~30 % off iterative rebuild time on developer machines.
 # Opt-out via -DTTS_CPP_CCACHE=OFF for clean reproducibility runs.
@@ -177,6 +187,10 @@ if (NOT TARGET ggml)
                 "scripts/setup-ggml.sh to stage it, or pass "
                 "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the QVAC "
                 "speech-stack `ggml-speech` vcpkg port.")
+        endif()
+        # tinyBLAS rationale and measurements: docs/build.md.
+        if (NOT DEFINED GGML_LLAMAFILE_DEFAULT)
+            set(GGML_LLAMAFILE_DEFAULT ON)
         endif()
         add_subdirectory(ggml)
     endif()
@@ -340,6 +354,7 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_ops.cpp
     src/audio8/codec_decode.cpp
     src/audio8/codec_encode.cpp
+    src/audio8/coreml_path.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
     # Pocket TTS numerical core; Mimi synthesis is not exposed yet.
@@ -409,6 +424,30 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/src
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
+
+    # Audio8 Core ML sidecar: ARC objects fold into libtts-cpp; frameworks are
+    # PUBLIC for static consumers.
+    if (TTS_CPP_COREML)
+        find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        find_library(TTS_CPP_COREML_FRAMEWORK     CoreML     REQUIRED)
+
+        add_library(tts-cpp.coreml OBJECT src/audio8/coreml/codec-synth.mm)
+        tts_cpp_apply_ccache(tts-cpp.coreml)
+        target_include_directories(tts-cpp.coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        set_target_properties(tts-cpp.coreml PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            COMPILE_FLAGS "-fobjc-arc"
+            XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+        )
+
+        target_sources(tts-cpp PRIVATE $<TARGET_OBJECTS:tts-cpp.coreml>)
+        target_compile_definitions(tts-cpp PRIVATE TTS_CPP_USE_COREML)
+        target_link_libraries(tts-cpp PUBLIC
+            ${TTS_CPP_FOUNDATION_FRAMEWORK}
+            ${TTS_CPP_COREML_FRAMEWORK}
+        )
+        message(STATUS "tts-cpp: Core ML Audio8 codec sidecar enabled (TTS_CPP_USE_COREML)")
+    endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -728,6 +767,24 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
     endfunction()
 
+    # Model-free: the CPU registry's feature list and the tinyBLAS detection the
+    # Parler CPU parity tests key on. GGML_LLAMAFILE comes from the ggml package
+    # config (or the bundled build), so the expectation follows the ggml build.
+    add_executable(test-backend-features test/test_backend_features.cpp)
+    target_link_libraries(test-backend-features PRIVATE ggml)
+    target_include_directories(test-backend-features PRIVATE src)
+    tts_cpp_apply_ccache(test-backend-features)
+    tts_cpp_register_test(test-backend-features LABEL "unit")
+    if (DEFINED GGML_LLAMAFILE)
+        if (GGML_LLAMAFILE)
+            set(_tts_expect_llamafile 1)
+        else()
+            set(_tts_expect_llamafile 0)
+        endif()
+        set_property(TEST test-backend-features APPEND PROPERTY ENVIRONMENT
+            "TTS_CPP_EXPECT_LLAMAFILE=${_tts_expect_llamafile}")
+    endif()
+
     add_executable(test-bench-wav test/test_bench_wav.cpp)
     target_include_directories(test-bench-wav PRIVATE src)
     tts_cpp_apply_ccache(test-bench-wav)
@@ -789,6 +846,15 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-cosyvoice-flow
         LABEL    "fixture"
         ARGS     "--flow-gguf" "${_tcb_cosy_flow_gguf}" "--in-dir" "${_tcb_cosy_ref}"
+        REQUIRES "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_ref}/flow_mel.npy")
+
+    # The opt-in prompt-cut path deviates from the reference by design, so it
+    # gets its own leg with a looser reference bound.
+    tts_cpp_register_test(test-cosyvoice-flow-cut
+        EXE      test-cosyvoice-flow
+        LABEL    "fixture"
+        ARGS     "--flow-gguf" "${_tcb_cosy_flow_gguf}" "--in-dir" "${_tcb_cosy_ref}"
+                 "--cut-min-cosine" "0.95"
         REQUIRES "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_ref}/flow_mel.npy")
 
     # Same binaries on the GPU backend — the per-stage reference legs behind
@@ -897,6 +963,41 @@ if (TTS_CPP_BUILD_TESTS)
                          "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
         endforeach()
     endif()
+
+    # ---- flow / HiFT weight-tier parity ------------------------------------
+    # Thresholds are the measured tier deviations with margin: docs/cosyvoice3.md.
+    add_executable(test-cosyvoice-tier test/test_cosyvoice_tier.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-tier PRIVATE ggml)
+    target_include_directories(test-cosyvoice-tier PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-tier)
+    set(_tcb_cosy_flow_tier_gates
+        "f16|0.998|2.0"
+        "bf16|0.998|2.0"
+        "q8_0|0.998|2.0"
+        "q4_0|0.98|8.0")
+    foreach(_tcb_cosy_tier_gate IN LISTS _tcb_cosy_flow_tier_gates)
+        string(REPLACE "|" ";" _tcb_cosy_tier_gate "${_tcb_cosy_tier_gate}")
+        list(GET _tcb_cosy_tier_gate 0 _tcb_cosy_tier)
+        list(GET _tcb_cosy_tier_gate 1 _tcb_cosy_tier_min_cosine)
+        list(GET _tcb_cosy_tier_gate 2 _tcb_cosy_tier_max_abs)
+        set(_tcb_cosy_flow_tier_gguf "${TTS_CPP_TEST_MODEL_DIR}/cosyvoice3-flow-${_tcb_cosy_tier}.gguf")
+        tts_cpp_register_test(test-cosyvoice-flow-tier-${_tcb_cosy_tier}
+            EXE      test-cosyvoice-tier
+            LABEL    "fixture"
+            ARGS     "--stage" "flow" "--ref-gguf" "${_tcb_cosy_flow_gguf}"
+                     "--tier-gguf" "${_tcb_cosy_flow_tier_gguf}"
+                     "--min-cosine" "${_tcb_cosy_tier_min_cosine}"
+                     "--max-abs" "${_tcb_cosy_tier_max_abs}"
+            REQUIRES "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_flow_tier_gguf}")
+    endforeach()
+    set(_tcb_cosy_hift_f16_gguf "${TTS_CPP_TEST_MODEL_DIR}/cosyvoice3-hift-f16.gguf")
+    tts_cpp_register_test(test-cosyvoice-hift-tier-f16
+        EXE      test-cosyvoice-tier
+        LABEL    "fixture"
+        ARGS     "--stage" "hift" "--ref-gguf" "${_tcb_cosy_hift_gguf}"
+                 "--tier-gguf" "${_tcb_cosy_hift_f16_gguf}"
+                 "--min-cosine" "0.999" "--max-abs" "0.01"
+        REQUIRES "${_tcb_cosy_hift_gguf}" "${_tcb_cosy_hift_f16_gguf}")
 
     # ---- speech_tokenizer_v3 (CosyVoice3 zero-shot cloning front-end) -----
     # Fixtures come from scripts/dump-s3tokenizer-v3-reference.py; the GGUFs
@@ -1047,6 +1148,17 @@ if (TTS_CPP_BUILD_TESTS)
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_assemble_cosyvoice3_model.py")
         set_property(TEST test-assemble-cosyvoice3-model PROPERTY LABELS "unit")
+        add_test(NAME test-convert-cosyvoice3-flow
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_flow.py")
+        set_property(TEST test-convert-cosyvoice3-flow PROPERTY LABELS "unit")
+
+        # Skips without torch; the TTS CI macOS lane runs it in the export venv.
+        add_test(NAME test-audio8-codec-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_audio8_codec_coreml.py")
+        set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
+        set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1320,11 +1432,38 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_audio8_lm}" "${_tcb_audio8_ref}"
         REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_ref}/sem_logits.npy")
 
+    # The fast-AR graph cache against the dual-path dispatch: the scheduler
+    # must bypass it and must not leave it poisoned for the direct path after.
+    add_executable(test-audio8-fast-cache-sched
+        test/audio8/test_fast_cache_sched.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/sampling.cpp ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-fast-cache-sched PRIVATE ggml)
+    target_include_directories(test-audio8-fast-cache-sched PRIVATE include src test)
+    tts_cpp_apply_ccache(test-audio8-fast-cache-sched)
+    tts_cpp_register_test(test-audio8-fast-cache-sched
+        LABEL    "fixture"
+        ARGS     "${_tcb_audio8_lm}"
+        REQUIRES "${_tcb_audio8_lm}")
+
+    add_executable(test-audio8-quantised-precision
+        test/audio8/test_quantised_precision.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml)
+    target_include_directories(test-audio8-quantised-precision PRIVATE include src)
+    tts_cpp_apply_ccache(test-audio8-quantised-precision)
+    tts_cpp_register_test(test-audio8-quantised-precision
+        LABEL    "fixture"
+        ARGS     "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
+        REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+
     add_executable(test-audio8-codec test/audio8/test_codec.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
         ${_tcb_audio8_core_srcs})
     target_link_libraries(test-audio8-codec PRIVATE ggml)
-    target_include_directories(test-audio8-codec PRIVATE include src)
+    target_include_directories(test-audio8-codec PRIVATE include src test)
     tts_cpp_apply_ccache(test-audio8-codec)
     tts_cpp_register_test(test-audio8-codec
         LABEL    "fixture"
@@ -1368,7 +1507,7 @@ if (TTS_CPP_BUILD_TESTS)
     # path, so it links the whole library rather than the stage sources.
     add_executable(test-audio8-engine test/audio8/test_engine.cpp)
     target_link_libraries(test-audio8-engine PRIVATE tts-cpp ggml)
-    target_include_directories(test-audio8-engine PRIVATE include src)
+    target_include_directories(test-audio8-engine PRIVATE include src test)
     tts_cpp_apply_ccache(test-audio8-engine)
     tts_cpp_register_test(test-audio8-engine
         LABEL    "fixture"
@@ -1407,34 +1546,59 @@ if (TTS_CPP_BUILD_TESTS)
             REQUIRES "${_tcb_audio8_lm}" "${_tcb_audio8_decoder}" "${_tcb_audio8_encoder}"
                      "${_tcb_audio8_ref}/wav.npy" "${_tcb_audio8_ref_clone}/wav.npy"
                      "${_tcb_audio8_ref_wav}")
+        # Reads the marker the graph asks for, which is the half of the
+        # quantised route the f32 fixtures cannot see.
+        tts_cpp_register_test(test-audio8-quantised-precision-${suffix}
+            EXE      test-audio8-quantised-precision
+            LABEL    "gpu"
+            ARGS     "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
+            REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+        tts_cpp_register_test(test-audio8-fast-cache-sched-${suffix}
+            EXE      test-audio8-fast-cache-sched
+            LABEL    "gpu"
+            ARGS     "${_tcb_audio8_lm}"
+            REQUIRES "${_tcb_audio8_lm}")
         set_property(TEST test-audio8-lm-${suffix} test-audio8-codec-${suffix}
-                          test-audio8-engine-${suffix} APPEND
+                          test-audio8-engine-${suffix}
+                          test-audio8-quantised-precision-${suffix}
+                          test-audio8-fast-cache-sched-${suffix} APPEND
                      PROPERTY ENVIRONMENT "AUDIO8_TEST_GPU=${suffix}"
                                           "TTS_CPP_GPU_BACKEND=${suffix}")
+    endfunction()
+
+    # The block formats take their own route through every backend -- Vulkan
+    # picks fp32-arithmetic pipelines for them, CUDA drops the f32 marker and
+    # takes the integer-dot path -- and the f32 fixtures above cannot reach
+    # either.  One short greedy utterance per backend pins that the quantised
+    # route still runs there and still reports the backend it ran on.
+    function(tts_cpp_register_audio8_quantised_cli_test backend device_regex)
+        if (NOT TARGET audio8-cli)
+            return()
+        endif()
+        tts_cpp_register_test(test-audio8-cli-${backend}-q8_0
+            EXE        audio8-cli
+            LABEL      "gpu"
+            ARGS       "--lm" "${_tcb_audio8_lm_q8}"
+                       "--codec-decoder" "${_tcb_audio8_decoder_q8}"
+                       "--text" "Audio8 ${backend} q8 regression."
+                       "--greedy" "--max-frames" "2"
+                       "--n-gpu-layers" "${_tcb_audio8_gpu_layers}"
+                       "--out" "${CMAKE_CURRENT_BINARY_DIR}/audio8-${backend}-q8_0.wav"
+            PASS_REGEX "${device_regex}"
+            REQUIRES   "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+        set_property(TEST test-audio8-cli-${backend}-q8_0 APPEND PROPERTY ENVIRONMENT
+                     "TTS_CPP_GPU_BACKEND=${backend}")
     endfunction()
 
     # Audio8 allowlist: Vulkan / Metal / OpenCL / CUDA (audio8/gguf.cpp
     # GpuBackendRequirement::Vulkan | Metal | OpenCL | CUDA).
     if (TTS_CPP_GGML_CUDA)
         tts_cpp_register_audio8_gpu_tests(cuda)
+        tts_cpp_register_audio8_quantised_cli_test(cuda "on CUDA")
     endif()
     if (TTS_CPP_GGML_VULKAN)
         tts_cpp_register_audio8_gpu_tests(vulkan)
-        if (TARGET audio8-cli)
-            tts_cpp_register_test(test-audio8-cli-vulkan-q8_0
-                EXE        audio8-cli
-                LABEL      "gpu"
-                ARGS       "--lm" "${_tcb_audio8_lm_q8}"
-                           "--codec-decoder" "${_tcb_audio8_decoder_q8}"
-                           "--text" "Audio8 Vulkan q8 regression."
-                           "--greedy" "--max-frames" "2"
-                           "--n-gpu-layers" "${_tcb_audio8_gpu_layers}"
-                           "--out" "${CMAKE_CURRENT_BINARY_DIR}/audio8-vulkan-q8_0.wav"
-                PASS_REGEX "on Vulkan"
-                REQUIRES   "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
-            set_property(TEST test-audio8-cli-vulkan-q8_0 APPEND PROPERTY ENVIRONMENT
-                         "TTS_CPP_GPU_BACKEND=vulkan")
-        endif()
+        tts_cpp_register_audio8_quantised_cli_test(vulkan "on Vulkan")
     endif()
     if (TTS_CPP_GGML_METAL)
         tts_cpp_register_audio8_gpu_tests(metal)
@@ -1463,6 +1627,34 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-audio8-codec-bench-cli PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-codec-bench-cli)
     tts_cpp_register_test(test-audio8-codec-bench-cli LABEL "unit")
+
+    # Model-free on every host: sidecar naming rule and window plan.
+    add_executable(test-audio8-coreml-windows test/audio8/test_coreml_windows.cpp
+        src/audio8/coreml_path.cpp)
+    target_include_directories(test-audio8-coreml-windows PRIVATE src)
+    tts_cpp_apply_ccache(test-audio8-coreml-windows)
+    tts_cpp_register_test(test-audio8-coreml-windows LABEL "unit")
+
+    # Self-skips (77) without TTS_CPP_COREML or a staged
+    # AUDIO8_COREML_TEST_MODELS_DIR; CI runs the binary directly so a skip fails.
+    add_executable(test-audio8-codec-coreml-parity test/audio8/test_codec_coreml_parity.cpp)
+    target_link_libraries(test-audio8-codec-coreml-parity PRIVATE tts-cpp ggml)
+    target_include_directories(test-audio8-codec-coreml-parity PRIVATE include src test)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-audio8-codec-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-audio8-codec-coreml-parity)
+    tts_cpp_register_test(test-audio8-codec-coreml-parity LABEL "fixture")
+    set_property(TEST test-audio8-codec-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Not a ctest: CI appends its parity-gated markdown table to the job summary.
+    add_executable(bench-audio8-codec-coreml test/audio8/bench_codec_coreml.cpp)
+    target_link_libraries(bench-audio8-codec-coreml PRIVATE tts-cpp ggml)
+    target_include_directories(bench-audio8-codec-coreml PRIVATE include src test)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(bench-audio8-codec-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(bench-audio8-codec-coreml)
 
     add_executable(test-audio8-cli test/audio8/test_cli.cpp src/audio8/cli.cpp)
     target_include_directories(test-audio8-cli PRIVATE src)
@@ -1679,7 +1871,7 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-engine-stream test/parler/test_engine_stream.cpp)
     target_link_libraries(test-parler-engine-stream PRIVATE tts-cpp)
-    target_include_directories(test-parler-engine-stream PRIVATE include)
+    target_include_directories(test-parler-engine-stream PRIVATE include src)
     tts_cpp_apply_ccache(test-parler-engine-stream)
     tts_cpp_register_test(test-parler-engine-stream
         LABEL    "fixture"
@@ -2629,7 +2821,7 @@ if (TTS_CPP_BUILD_TESTS)
     # the fixture form adds the full-pipeline + codec-arena gates.
     add_executable(test-audio8-fit-params test/audio8/test_fit_params.cpp)
     target_link_libraries(test-audio8-fit-params PRIVATE tts-cpp ggml)
-    target_include_directories(test-audio8-fit-params PRIVATE ggml/include src include)
+    target_include_directories(test-audio8-fit-params PRIVATE ggml/include src include test)
     tts_cpp_apply_ccache(test-audio8-fit-params)
     tts_cpp_register_test(test-audio8-fit-params LABEL "unit")
     tts_cpp_register_test(test-audio8-fit-params-fixture
