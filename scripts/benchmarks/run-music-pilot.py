@@ -7,6 +7,7 @@ Checkpoint identity names the original checkpoint, shared by quantized variants.
 """
 import argparse
 import hashlib
+from itertools import product
 import json
 import math
 import os
@@ -92,7 +93,7 @@ def score_control(wav, caption, destination, args):
         return {'status': 'timeout', 'score': None, 'reason': 'control scorer timeout'}
 
 
-def main():
+def parse_inputs():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--family', choices=['acestep', 'minimax'], required=True)
     parser.add_argument('--configuration', type=Path, required=True)
@@ -125,90 +126,146 @@ def main():
         parser.error('configuration backend must be cpu or gpu; requested device is applied through MUSIC_DEVICE')
     if args.out_dir.exists():
         parser.error('--out-dir must be new to prevent overwriting retained evidence')
-    args.out_dir.mkdir(parents=True)
-    output = args.out_dir.resolve()
-    settings = manifest['generation'][args.family]
+    return args, manifest, config
+
+
+def record_configuration(config, settings):
     config['generation_settings'] = settings
     config['source_commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=HERE, text=True).strip()
     config['source_diff_sha256'] = hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'], cwd=HERE)).hexdigest()
     config['source_dirty'] = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=HERE, text=True).strip())
     config['source_pinned'] = not config['source_dirty']
     config['benchmark_source_hashes'] = {str(p.relative_to(HERE)): digest(p) for p in sorted(HERE.rglob('*')) if p.is_file() and p.suffix in ('.py', '.sh', '.json', '.txt')}
+
+
+def prepare_pilot(args, manifest, config):
+    args.out_dir.mkdir(parents=True)
+    output = args.out_dir.resolve()
+    record_configuration(config, manifest['generation'][args.family])
     pilot = {'schema_version': 1, 'manifest': manifest, 'manifest_sha256': digest(args.manifest),
              'family': args.family, 'configuration': config, 'records': [], 'controls': [],
              'listening_review': 'pending human observations',
              'validity_controls': 'see model-free scorer tests; empirical corruption controls not run'}
     write(output / 'manifest.json', manifest)
     write(output / 'configuration.json', config)
+    return pilot
+
+
+def build_environment(args, config):
     env = os.environ.copy()
-    env.update(MUSIC_ALIGNMENT='1', MUSIC_DEVICE=device, MUSIC_ALIGNMENT_MODEL=str(args.scorer_model_dir.resolve()),
+    env.update(MUSIC_ALIGNMENT='1', MUSIC_DEVICE=str(config['backend']).lower(), MUSIC_ALIGNMENT_MODEL=str(args.scorer_model_dir.resolve()),
                MUSIC_ALIGNMENT_MANIFEST=str(args.scorer_manifest.resolve()),
                MUSIC_ALIGNMENT_TIMEOUT=str(args.scorer_timeout))
     if args.model_dir:
         env['MUSIC_ALIGNMENT_MODEL_DIR'] = str(args.model_dir.resolve())
-    categories = set()
-    repeated = False
-    attempted = 0
-    for prompt in manifest['prompts']:
-        for seed in manifest['seeds']:
-            row = {'prompt_id': prompt['id'], 'seed': seed, 'status': 'not-run', 'score': None,
-                   'reason': 'outside explicitly limited cohort' if args.limit is not None else 'not attempted'}
-            pilot['records'].append(row)
-            if args.limit is not None and attempted >= args.limit:
-                continue
-            attempted += 1
-            run_dir = output / f"{prompt['id']}-{seed}"
-            run_dir.mkdir()
-            result_path = run_dir / 'result.json'
-            env.update(MUSIC_CAPTION=prompt['caption'], MUSIC_LYRICS=prompt['lyrics'], MUSIC_SEED=str(seed),
-                       MUSIC_DURATION=str(settings.get('duration_seconds') or 20), MUSIC_MAX_FRAMES=str(settings.get('max_frames') or 300))
-            command = ['bash', str(HERE / 'run-family.sh'), '--family', args.family, '--runs', '1', '--warmup', '0',
-                       '--build-dir', str(args.build_dir.resolve()), '--models-root', str(args.models_root.resolve()), '--out', str(result_path)]
-            started = time.monotonic()
-            try:
-                with (run_dir / 'driver.log').open('w') as log:
-                    run_bounded(command, cwd=HERE.parent.parent, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                timeout=args.generation_timeout)
-                result = extract_score(result_path) if result_path.exists() else {
-                    'status': 'run-failed', 'notes': 'generation driver did not write result.json; see driver.log'}
-                scored_runs = result.get('music_alignment', {}).get('runs', [])
-                score = normalize_score(scored_runs[0] if scored_runs else result.get('music_alignment', {}))
-                row.update(status=score.get('status', result.get('status', 'run-failed')),
-                           score=score.get('score'), reason=score.get('reason') or result.get('notes'),
-                           scorer_provenance=({'policy_version': score.get('policy_version'), **score['provenance']} if score.get('provenance') else None), result=str(result_path.relative_to(output)))
-                row['performance_result'] = result
-                artifact_dir = score.get('artifact_dir')
-                generation_file = Path(artifact_dir) / 'generation.json' if artifact_dir else None
-                row['generation'] = json.loads(generation_file.read_text()) if generation_file and generation_file.is_file() else None
-                row['score_artifact'] = score
-            except subprocess.TimeoutExpired:
-                row.update(status='timeout', reason='generation driver timeout')
-            row['elapsed_seconds'] = time.monotonic() - started
-            wav_paths = sorted(run_dir.glob('result.music.*/run-*/audio.wav'))
-            if row['status'] == 'ok' and wav_paths:
-                wav = wav_paths[0]
-                if args.controls and prompt['category'] not in categories and prompt['subset'] == 'primary':
-                    categories.add(prompt['category'])
-                    mismatch = next(p for p in manifest['prompts'] if p['subset'] == 'primary' and p['category'] != prompt['category'])
-                    pilot['controls'].append({'prompt_id': prompt['id'], 'seed': seed, 'category': prompt['category'], 'matched': row['score_artifact'], 'wav_sha256': digest(wav),
-                        'repeat': score_control(wav, prompt['caption'], run_dir / 'repeat-score.json', args),
-                        'mismatch_prompt_id': mismatch['id'],
-                        'mismatch': score_control(wav, mismatch['caption'], run_dir / 'mismatch-score.json', args)})
-                if args.repeat_generation and not repeated:
-                    repeated = True
-                    repeat_path = run_dir / 'repeat-result.json'
-                    repeat_command = command[:-1] + [str(repeat_path)]
-                    try:
-                        with (run_dir / 'repeat-driver.log').open('w') as log:
-                            run_bounded(repeat_command, cwd=HERE.parent.parent, env=env, stdout=log,
-                                        stderr=subprocess.STDOUT, timeout=args.generation_timeout)
-                        pilot['controls'].append({'kind': 'repeat-generation', 'prompt_id': prompt['id'],
-                                                  'seed': seed, 'result': extract_score(repeat_path)})
-                    except subprocess.TimeoutExpired:
-                        pilot['controls'].append({'kind': 'repeat-generation', 'status': 'timeout', 'prompt_id': prompt['id'], 'seed': seed})
-            write(output / 'pilot.json', pilot)
+    return env
+
+
+def build_record_environment(env, prompt, seed, settings):
+    env = env.copy()
+    env.update(MUSIC_CAPTION=prompt['caption'], MUSIC_LYRICS=prompt['lyrics'], MUSIC_SEED=str(seed),
+               MUSIC_DURATION=str(settings.get('duration_seconds') or 20),
+               MUSIC_MAX_FRAMES=str(settings.get('max_frames') or 300))
+    return env
+
+
+def generation_command(args, result_path):
+    return ['bash', str(HERE / 'run-family.sh'), '--family', args.family, '--runs', '1', '--warmup', '0',
+            '--build-dir', str(args.build_dir.resolve()), '--models-root', str(args.models_root.resolve()),
+            '--out', str(result_path)]
+
+
+def read_generation_result(row, result_path, output):
+    result = extract_score(result_path) if result_path.exists() else {
+        'status': 'run-failed', 'notes': 'generation driver did not write result.json; see driver.log'}
+    scored_runs = result.get('music_alignment', {}).get('runs', [])
+    score = normalize_score(scored_runs[0] if scored_runs else result.get('music_alignment', {}))
+    row.update(status=score.get('status', result.get('status', 'run-failed')),
+               score=score.get('score'), reason=score.get('reason') or result.get('notes'),
+               scorer_provenance=({'policy_version': score.get('policy_version'), **score['provenance']}
+                                  if score.get('provenance') else None),
+               result=str(result_path.relative_to(output)))
+    row['performance_result'] = result
+    artifact_dir = score.get('artifact_dir')
+    generation_file = Path(artifact_dir) / 'generation.json' if artifact_dir else None
+    row['generation'] = json.loads(generation_file.read_text()) if generation_file and generation_file.is_file() else None
+    row['score_artifact'] = score
+
+
+def run_record(row, run_dir, args, env):
+    run_dir.mkdir()
+    result_path = run_dir / 'result.json'
+    started = time.monotonic()
+    try:
+        with (run_dir / 'driver.log').open('w') as log:
+            run_bounded(generation_command(args, result_path), cwd=HERE.parent.parent, env=env,
+                        stdout=log, stderr=subprocess.STDOUT, timeout=args.generation_timeout)
+        read_generation_result(row, result_path, run_dir.parent)
+    except subprocess.TimeoutExpired:
+        row.update(status='timeout', reason='generation driver timeout')
+    row['elapsed_seconds'] = time.monotonic() - started
+
+
+def run_caption_controls(prompt, row, wav, run_dir, args, manifest):
+    mismatch = next(p for p in manifest['prompts']
+                    if p['subset'] == 'primary' and p['category'] != prompt['category'])
+    return {'prompt_id': prompt['id'], 'seed': row['seed'], 'category': prompt['category'],
+            'matched': row['score_artifact'], 'wav_sha256': digest(wav),
+            'repeat': score_control(wav, prompt['caption'], run_dir / 'repeat-score.json', args),
+            'mismatch_prompt_id': mismatch['id'],
+            'mismatch': score_control(wav, mismatch['caption'], run_dir / 'mismatch-score.json', args)}
+
+
+def repeat_generation(row, run_dir, args, env):
+    control = {'kind': 'repeat-generation', 'prompt_id': row['prompt_id'], 'seed': row['seed']}
+    repeat_path = run_dir / 'repeat-result.json'
+    try:
+        with (run_dir / 'repeat-driver.log').open('w') as log:
+            run_bounded(generation_command(args, repeat_path), cwd=HERE.parent.parent, env=env,
+                        stdout=log, stderr=subprocess.STDOUT, timeout=args.generation_timeout)
+        control['result'] = extract_score(repeat_path)
+    except subprocess.TimeoutExpired:
+        control['status'] = 'timeout'
+    return control
+
+
+def run_controls(prompt, row, run_dir, args, env, pilot, state):
+    wav_paths = sorted(run_dir.glob('result.music.*/run-*/audio.wav'))
+    if row['status'] != 'ok' or not wav_paths:
+        return
+    if args.controls and prompt['category'] not in state['categories'] and prompt['subset'] == 'primary':
+        state['categories'].add(prompt['category'])
+        pilot['controls'].append(run_caption_controls(prompt, row, wav_paths[0], run_dir, args, pilot['manifest']))
+    if args.repeat_generation and not state['repeated']:
+        state['repeated'] = True
+        pilot['controls'].append(repeat_generation(row, run_dir, args, env))
+
+
+def run_cohort(args, pilot, env):
+    output = args.out_dir.resolve()
+    manifest = pilot['manifest']
+    settings = pilot['configuration']['generation_settings']
+    control_state = {'categories': set(), 'repeated': False}
+    for index, (prompt, seed) in enumerate(product(manifest['prompts'], manifest['seeds'])):
+        row = {'prompt_id': prompt['id'], 'seed': seed, 'status': 'not-run', 'score': None,
+               'reason': 'outside explicitly limited cohort' if args.limit is not None else 'not attempted'}
+        pilot['records'].append(row)
+        if args.limit is not None and index >= args.limit:
+            continue
+        run_dir = output / f"{prompt['id']}-{seed}"
+        record_env = build_record_environment(env, prompt, seed, settings)
+        run_record(row, run_dir, args, record_env)
+        run_controls(prompt, row, run_dir, args, record_env, pilot, control_state)
+        write(output / 'pilot.json', pilot)
     write(output / 'pilot.json', pilot)
-    print(output / 'pilot.json')
+
+
+def main():
+    args, manifest, config = parse_inputs()
+    pilot = prepare_pilot(args, manifest, config)
+    env = build_environment(args, config)
+    run_cohort(args, pilot, env)
+    print(args.out_dir.resolve() / 'pilot.json')
 
 
 if __name__ == '__main__':

@@ -58,9 +58,12 @@ function uniqueCount (values) {
   return new Set(values.filter(Boolean)).size
 }
 
-function aggregateRounds (rounds) {
-  // Validate before grouping so different engines cannot use different policies.
+function validateCompatibleClapPolicies (rounds) {
   clapPolicyVersion(rounds)
+}
+
+function aggregateRounds (rounds) {
+  validateCompatibleClapPolicies(rounds)
   const byEngine = {}
   for (const round of rounds) {
     const key = round.engine
@@ -97,7 +100,7 @@ function aggregateRounds (rounds) {
 }
 
 function groupByPrompt (rounds) {
-  clapPolicyVersion(rounds)
+  validateCompatibleClapPolicies(rounds)
   const groups = {}
   for (const round of rounds) {
     const key = round.promptId

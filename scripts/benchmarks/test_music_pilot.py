@@ -4,6 +4,8 @@ import importlib.util
 import unittest
 import json
 import tempfile
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -129,6 +131,79 @@ class PilotTests(unittest.TestCase):
         for value in (True, float('nan'), float('inf'), 1.1, None, '0.2'):
             self.assertEqual(runner.normalize_score({'status': 'ok', 'score': value})['status'], 'scorer-error')
         self.assertIsNone(runner.normalize_score({'status': 'timeout', 'score': .2})['score'])
+
+    def test_record_failure_retains_null_score_and_skips_controls(self):
+        for failure in ('missing-result', 'timeout'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                args = SimpleNamespace(family='acestep', build_dir=root / 'build', models_root=root / 'models',
+                                       generation_timeout=1, controls=True, repeat_generation=True)
+                row = {'prompt_id': 'p1', 'seed': 1, 'status': 'not-run', 'score': None}
+                effect = subprocess.TimeoutExpired('driver', 1) if failure == 'timeout' else None
+                with patch.object(runner, 'run_bounded', side_effect=effect):
+                    runner.run_record(row, root / 'p1-1', args, {})
+                self.assertEqual(row['status'], 'timeout' if failure == 'timeout' else 'run-failed')
+                self.assertIsNone(row['score'])
+                self.assertGreaterEqual(row['elapsed_seconds'], 0)
+                pilot = {'controls': []}
+                state = {'categories': set(), 'repeated': False}
+                runner.run_controls({}, row, root / 'p1-1', args, {}, pilot, state)
+                self.assertEqual(pilot['controls'], [])
+                self.assertEqual(state, {'categories': set(), 'repeated': False})
+
+    def test_cohort_controls_once_per_primary_category_and_repeat_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(family='minimax', build_dir=root / 'build', models_root=root / 'models',
+                                   out_dir=root, generation_timeout=1, limit=7, controls=True, repeat_generation=True)
+            prompts = [{'id': identifier, 'category': category, 'subset': subset,
+                        'caption': identifier, 'lyrics': ''}
+                       for identifier, category, subset in [('p1', 'a', 'primary'), ('p2', 'a', 'primary'),
+                                                             ('p3', 'b', 'primary'), ('s1', 'c', 'stress')]]
+            pilot = {'manifest': {'prompts': prompts, 'seeds': [1, 2]},
+                     'configuration': {'generation_settings': {'max_frames': 123}}, 'records': [], 'controls': []}
+            env = {'MUSIC_DEVICE': 'cpu'}
+            generated = []
+
+            def fake_run(command, **kwargs):
+                destination = Path(command[-1])
+                generated.append((kwargs['env'].copy(), destination.name))
+                self.assertEqual(kwargs['env']['MUSIC_MAX_FRAMES'], '123')
+                self.assertEqual(kwargs['env']['MUSIC_CAPTION'], destination.parent.name.rsplit('-', 1)[0])
+                self.assertEqual(kwargs['env']['MUSIC_SEED'], destination.parent.name.rsplit('-', 1)[1])
+                if len(generated) > 2:
+                    saved = json.loads((root / 'pilot.json').read_text())
+                    self.assertTrue(all(row['status'] == 'ok' for row in saved['records']))
+                artifacts = destination.with_suffix('.music.test') / 'run-1'
+                artifacts.mkdir(parents=True)
+                (artifacts / 'audio.wav').write_bytes(b'retained audio')
+                runner.write(destination, {'status': 'ok', 'music_alignment': {
+                    'runs': [{'status': 'ok', 'score': .5}]}})
+                return 0
+
+            with patch.object(runner, 'run_bounded', side_effect=fake_run), \
+                    patch.object(runner, 'score_control', return_value={'status': 'ok', 'score': .4}) as score:
+                runner.run_cohort(args, pilot, env)
+            self.assertEqual(score.call_count, 4)
+            self.assertEqual(len(generated), 8)
+            self.assertEqual(generated[0][0], generated[1][0])
+            self.assertEqual(generated[1][1], 'repeat-result.json')
+            self.assertEqual(env, {'MUSIC_DEVICE': 'cpu'})
+            self.assertEqual([control.get('category') for control in pilot['controls']], ['a', None, 'b'])
+            saved = json.loads((root / 'pilot.json').read_text())
+            self.assertEqual(saved, pilot)
+            self.assertEqual(len(saved['records']), 8)
+            self.assertEqual(saved['records'][-1]['status'], 'not-run')
+
+    def test_repeat_generation_timeout_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(family='acestep', build_dir=root / 'build', models_root=root / 'models',
+                                   generation_timeout=1)
+            with patch.object(runner, 'run_bounded', side_effect=subprocess.TimeoutExpired('driver', 1)):
+                control = runner.repeat_generation({'prompt_id': 'p1', 'seed': 1}, root, args, {})
+            self.assertEqual(control, {'kind': 'repeat-generation', 'prompt_id': 'p1', 'seed': 1,
+                                       'status': 'timeout'})
 
     def test_manifest_size(self):
         import json

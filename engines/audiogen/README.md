@@ -20,7 +20,22 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 
 ## Performance
 
-There is no CI benchmark lane for this engine yet. `music-cli` always enables
+The [desktop benchmark workflow](../../.github/workflows/speech-benchmark-desktop.yml)
+supports ACE-Step (`acestep`) and MiniMax-Music3 (`minimax`). Set its opt-in
+`music_alignment` input to `true` (default `false`) to retain generated WAVs and
+score caption adherence with CLAP. The per-family `bench-<family>-<runner>`
+artifacts retain generation/scorer logs, binary/model hashes, scorer provenance,
+per-run scores, and scored/expected coverage alongside performance results for
+14 days. Scores are non-gating diagnostics with no quality pass threshold;
+missing models or scoring failures produce null scores and explicit coverage,
+without discarding successful generation performance. MiniMax requires
+provisioned generator models; unavailable models remain an unavailable result.
+See the [music alignment guide](../../scripts/benchmarks/music-alignment.md)
+for setup, artifacts, and pilot controls. The diagnostic workload is longer than
+the default performance workload, so their timings use different baselines;
+CLAP scoring is excluded from generation timing.
+
+`music-cli` always enables
 verbose engine output and prints per-stage wall clock to stderr (`[music-cli]`,
 `[acestep-timing]`). Direct library use prints `[acestep-timing]` only when
 `EngineOptions::verbose` is enabled; it defaults to `false`.
