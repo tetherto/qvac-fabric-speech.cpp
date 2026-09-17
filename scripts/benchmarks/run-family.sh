@@ -517,16 +517,25 @@ if [[ "$TTS_KIND" == "tts_intelligibility" ]]; then
   tts_asr_model="$(printf '%s' "$tts_asr_preparation" | jq -r '.model // ""')"
 fi
 
-# The Core ML bundle is derived from the exact F16 model under test. A restored
+# The Core ML bundle is derived from the family's configured source GGUF. A restored
 # Actions cache makes this a no-op on subsequent runs; the first run exports and
 # compiles locally on the Apple Silicon benchmark host.
 if [[ "$(uname -s)" == "Darwin" ]] &&
    [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
   coreml_basename="$(spec_field coreml_model_basename)"
+  coreml_source_gguf="$(spec_field coreml_source_gguf)"
   coreml_frames="$(spec_field coreml_export_mel_frames)"
   if [[ -z "$coreml_basename" || "$coreml_basename" == "null" ||
         -z "$coreml_frames" || "$coreml_frames" == "null" ]]; then
     emit_json "run-failed" null null null " (Core ML benchmark metadata is incomplete)"
+    exit 0
+  fi
+  if [[ -z "$coreml_source_gguf" || "$coreml_source_gguf" == "null" ]]; then
+    coreml_source_gguf="${coreml_basename}.f16.gguf"
+  fi
+  if [[ ! -f "$MODEL_DIR/$coreml_source_gguf" ]]; then
+    emit_json "run-failed" null null null \
+      " (Core ML source GGUF is missing: $MODEL_DIR/$coreml_source_gguf)"
     exit 0
   fi
   coreml_sidecar="$MODEL_DIR/${coreml_basename}-encoder.mlmodelc"
@@ -539,7 +548,7 @@ if [[ "$(uname -s)" == "Darwin" ]] &&
     coreml_package="$tmp_dir/${coreml_basename}-encoder.mlpackage"
     echo "generating Core ML encoder sidecar from the benchmark GGUF" >&2
     if ! "$coreml_python" engines/parakeet/scripts/export-encoder-coreml.py \
-        --gguf "$MODEL_DIR/${coreml_basename}.f16.gguf" \
+        --gguf "$MODEL_DIR/$coreml_source_gguf" \
         --n-mel-frames "$coreml_frames" \
         --palettize-bits 6 \
         --palettize-group-size 16 \

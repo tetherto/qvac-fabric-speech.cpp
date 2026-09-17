@@ -1,4 +1,5 @@
-// Core ML TDT/EOU/Sortformer FastConformer encoder sidecars for parakeet-cpp.
+// Core ML Unified RNN-T/TDT/EOU/Sortformer FastConformer encoder sidecars for
+// parakeet-cpp.
 //
 // Derived from the whisper.cpp Core ML wrapper pattern (src/coreml/whisper-encoder.mm),
 // generalised to load an arbitrary compiled encoder via the generic MLModel API so it

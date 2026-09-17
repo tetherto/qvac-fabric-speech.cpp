@@ -364,7 +364,8 @@ struct Engine::Impl {
             flow_m.n_threads = opts.n_threads;
             mel = cosyvoice_flow_run(
                 flow_m, voice_prompt_token, speech_tokens,
-                voice_prompt_feat, voice_mel_len1, voice_embedding, mel_len, tmg);
+                voice_prompt_feat, voice_mel_len1, voice_embedding, mel_len, tmg,
+                opts.flow_cut_prompt ? voice_mel_len1 : 0);
         }
 
         // Stage 3 — CausalHiFT vocoder: mel -> 24 kHz PCM.

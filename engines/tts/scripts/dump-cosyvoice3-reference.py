@@ -162,6 +162,10 @@ def main():
     CV = _import_cosyvoice(args.model_class)
     print(f"loading {CV.__name__} from {args.model_dir}")
     cosyvoice = build_model(CV, args.model_dir)
+    # The 2512 checkpoint ships the LM in bf16 and the CPU path no longer
+    # upcasts it (Float-vs-BFloat16 matmul error); force f32 like the
+    # llm-reference dump does so the fixtures stay full-precision.
+    cosyvoice.model.llm.float()
 
     instruct = resolve_instruction(args)
     is_cv3 = CV.__name__ == "CosyVoice3"

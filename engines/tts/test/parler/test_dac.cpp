@@ -167,8 +167,9 @@ static std::vector<std::pair<int, int>> dac_window_graphs(int begin, int end, in
 // identical kernels, identical bits. A window whose graph the full decode
 // never built computes the same values through differently shaped GPU
 // kernels, whose reduction order differs, so those ranges are held to a
-// measured tolerance instead. On the CPU every shape reduces in one
-// deterministic order and bit identity always holds.
+// measured tolerance instead. The plain ggml CPU path reduces every shape in
+// one deterministic order; a tinyBLAS CPU build does not
+// (cpu_matmul_is_shape_exact), and is held to the GPU tolerance too.
 static bool range_shares_full_decode_graphs(int a, int b, int n_frames, int rf) {
     const auto full   = dac_window_graphs(0, n_frames, n_frames, rf);
     const auto ranged = dac_window_graphs(a, b, n_frames, rf);
@@ -234,6 +235,12 @@ static bool test_range_equivalence(const parler_model & model, const std::string
     const int W = PARLER_DAC_WINDOW_FRAMES;
     const int R = parler_dac_rf_frames(model);
     const bool cpu_backend = ::tts_cpp::detail::backend_is_cpu(model.backend);
+    const bool cpu_exact   = cpu_backend && !::tts_cpp::detail::backend_has_feature(model.backend, "LLAMAFILE");
+    if (cpu_backend && !cpu_exact) {
+        fprintf(stderr, "range-equivalence: CPU backend carries tinyBLAS (LLAMAFILE); "
+                        "windows the full decode never built are held to %.0e instead of bit identity\n",
+                RANGE_TOLERANCE);
+    }
     const std::vector<std::pair<int, int>> ranges = {
         {0, n_frames},                                          // whole sequence
         {0, 1},                                                 // first frame only
@@ -261,7 +268,7 @@ static bool test_range_equivalence(const parler_model & model, const std::string
             ok = false;
             continue;
         }
-        const bool bit_identical = cpu_backend || range_shares_full_decode_graphs(a, b, n_frames, R);
+        const bool bit_identical = cpu_exact || range_shares_full_decode_graphs(a, b, n_frames, R);
         const char * bar = bit_identical ? "bit-identical" : "2e-3";
         compare_stats wav_stats;
         if (want != 0 &&

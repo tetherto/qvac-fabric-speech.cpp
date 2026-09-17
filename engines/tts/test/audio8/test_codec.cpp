@@ -11,6 +11,7 @@
 
 #include "audio8/internal.h"
 #include "gpu_arm.h"
+#include "test_env_portable.h"
 #include "npy.h"
 
 #include <cmath>
@@ -458,6 +459,12 @@ bool run_encode(codec_model & model, const fixture & data, int n_threads) {
 }  // namespace
 
 int main(int argc, char ** argv) {
+    // This harness holds the ggml stack to the torch reference and exercises
+    // its block machinery (pinned widths, budgets, cancellation between
+    // blocks); the Core ML sidecar has its own parity gate
+    // (test-audio8-codec-coreml-parity), so a sidecar next to the fixture
+    // GGUF must not take over here.
+    setenv("AUDIO8_COREML_DISABLE", "1", 1);
     if (argc < 4) {
         std::fprintf(stderr,
                      "usage: %s <codec-decoder.gguf> <codec-encoder.gguf> <ref-dir> "

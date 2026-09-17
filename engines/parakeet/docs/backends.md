@@ -104,10 +104,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 ## Core ML encoder sidecar
 
-`PARAKEET_COREML=ON` is Apple-only. It enables optional TDT, EOU, and tagged
-Sortformer v2.1 FastConformer encoder sidecars. Mel preprocessing, TDT/EOU
-decoders, and the Sortformer transformer/speaker head remain in the normal
-ggml pipeline.
+`PARAKEET_COREML=ON` is Apple-only. It enables optional Unified RNN-T, TDT,
+EOU, and tagged Sortformer v2.1 FastConformer encoder sidecars. Mel
+preprocessing, the RNN-T/TDT/EOU decoders, and the Sortformer
+transformer/speaker head remain in the normal ggml pipeline.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
 is not currently compatible with its TorchScript scalar conversion, and the
@@ -143,6 +143,17 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --n-mel-frames 1501 \
   --palettize-bits 6 --palettize-group-size 16 \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Unified RNN-T uses the same fixed-capacity contract:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/parakeet-unified-en-0.6b.q8_0.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/parakeet-unified-en-0.6b-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
 
@@ -208,20 +219,20 @@ python engines/parakeet/scripts/bench-encoder-coreml.py \
   --palettize-bits 6 --palettize-group-size 16
 ```
 
-The default export uses Float16 input, output, weights, and intermediates. TDT
-shorter inputs are zero-padded to the exported mel-frame capacity, while longer
-offline inputs are automatically divided into overlapping windows that fit that
-capacity. EOU uses exact-shape routing because padding future frames can change
-token and end-of-turn decisions. Longer offline inputs are divided into
-overlapping windows that each exactly match the compiled shape, with the final
-window shifted backward so it contains only real mel frames. Shorter inputs and
+The default export uses Float16 input, output, weights, and intermediates.
+Unified RNN-T and TDT shorter inputs are zero-padded to the exported mel-frame
+capacity, while longer offline inputs are automatically divided into overlapping
+windows that fit that capacity. EOU uses exact-shape routing because padding
+future frames can change token and end-of-turn decisions. Longer offline inputs
+are divided into overlapping windows that each exactly match the compiled shape,
+with the final window shifted backward so it contains only real mel frames. Shorter inputs and
 mismatching streaming windows use ggml; EOU never pads them. The TDT example
 uses this addon's 15-second shape (1501
 mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional 6-bit
 grouped-channel LUT weights. Grouped palettization requires coremltools 8+ and
 macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS 16
-compatible Float16 model. `--flexible` exports a TDT RangeDim model, but it is a
-correctness/experimentation path: measured flexible graphs place no operations
+compatible Float16 model. `--flexible` exports a Unified RNN-T or TDT RangeDim
+model, but it is a correctness/experimentation path: measured flexible graphs place no operations
 on ANE and can be substantially slower than ggml Metal. Flexible EOU export is
 rejected.
 
@@ -248,7 +259,8 @@ force ggml, including for parity or benchmarking. Setting
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
 
-For an unambiguous TDT, EOU, or Sortformer benchmark, configure the exact build directory with
+For an unambiguous Unified RNN-T, TDT, EOU, or Sortformer benchmark, configure
+the exact build directory with
 Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
 
 ```bash

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model-free checks for the TDT/EOU/Sortformer Core ML exporter helpers."""
+"""Model-free checks for the RNN-T/TDT/EOU/Sortformer Core ML exporter helpers."""
 
 import importlib.util
 import sys
@@ -40,6 +40,20 @@ def eou_meta():
     }
 
 
+def rnnt_meta():
+    return {
+        "parakeet.model.type": "rnnt",
+        "parakeet.encoder.causal_downsampling": False,
+        "parakeet.encoder.conv_context_size": "default",
+        "parakeet.encoder.conv_norm_type": "batch_norm",
+        # Unified preserves its dynamic-chunk training style in metadata, but
+        # the runtime executes the unbounded offline inference contract.
+        "parakeet.encoder.att_context_style": "chunked_limited_with_rc",
+        "parakeet.encoder.att_context_size_left": -1,
+        "parakeet.encoder.att_context_size_right": -1,
+    }
+
+
 def sortformer_v2_1_meta():
     return {
         "parakeet.model.type": "sortformer",
@@ -58,6 +72,33 @@ def sortformer_v2_1_meta():
 
 
 class ExportContractTests(unittest.TestCase):
+    def test_accepts_offline_rnnt_fixed_and_flexible(self):
+        self.assertEqual(
+            EXPORTER.validate_export_contract(rnnt_meta()), "rnnt")
+        self.assertEqual(
+            EXPORTER.validate_export_contract(rnnt_meta(), flexible=True),
+            "rnnt")
+
+    def test_rejects_incompatible_rnnt_metadata(self):
+        invalid_cases = (
+            ("parakeet.encoder.causal_downsampling", True,
+             "non-causal downsampling"),
+            ("parakeet.encoder.conv_context_size", "causal",
+             "non-causal convolution"),
+            ("parakeet.encoder.conv_norm_type", "layer_norm",
+             "batch-normalized convolution"),
+            ("parakeet.encoder.att_context_size_left", 70,
+             "unbounded attention context"),
+            ("parakeet.encoder.att_context_size_right", 1,
+             "unbounded attention context"),
+        )
+        for key, value, message in invalid_cases:
+            with self.subTest(key=key, value=value):
+                meta = rnnt_meta()
+                meta[key] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    EXPORTER.validate_export_contract(meta)
+
     def test_accepts_fixed_eou_and_rejects_flexible(self):
         self.assertEqual(EXPORTER.validate_export_contract(eou_meta()), "eou")
         with self.assertRaisesRegex(ValueError, "fixed shape"):
@@ -83,8 +124,11 @@ class ExportContractTests(unittest.TestCase):
                     EXPORTER.validate_export_contract(meta)
 
     def test_rejects_non_sortformer_bypass_export(self):
-        with self.assertRaisesRegex(ValueError, "only for Sortformer"):
-            EXPORTER.validate_export_contract(eou_meta(), bypass_pre_encode=True)
+        for meta in (rnnt_meta(), eou_meta()):
+            with self.subTest(model_type=meta["parakeet.model.type"]):
+                with self.assertRaisesRegex(ValueError, "only for Sortformer"):
+                    EXPORTER.validate_export_contract(
+                        meta, bypass_pre_encode=True)
 
     def test_rejects_incompatible_sortformer_encoder_metadata(self):
         invalid_cases = (

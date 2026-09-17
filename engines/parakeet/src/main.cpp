@@ -153,8 +153,9 @@ void print_usage(const char * argv0) {
         "  --bench-warmup N     warmup runs NOT counted in stats (default 2)\n"
         "  --bench-json PATH    in --bench mode, also write the stats as JSON to PATH\n"
         "  --require-coreml     require every benchmark encoder invocation to use\n"
-        "                       a supported TDT/EOU Core ML sidecar; fail instead of accepting\n"
-        "                       a missing sidecar or per-invocation ggml fallback\n"
+        "                       a supported Unified RNN-T/TDT/EOU Core ML sidecar;\n"
+        "                       fail on a missing sidecar or per-invocation ggml\n"
+        "                       fallback\n"
         "  --profile            per-sub-stage encoder profiling: runs the encoder\n"
         "                       with n_layers = {0, 1, N/2, N} (N from the GGUF) and\n"
         "                       attributes time to subsampling / CTC-head / per-block.\n"
@@ -523,10 +524,12 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             PARAKEET_LOG_ERROR("error: --require-coreml is valid only with --bench\n");
             return 3;
         }
-        if (model.model_type != ParakeetModelType::TDT &&
+        if (model.model_type != ParakeetModelType::RNNT &&
+            model.model_type != ParakeetModelType::TDT &&
             model.model_type != ParakeetModelType::EOU) {
             PARAKEET_LOG_ERROR(
-                "error: --require-coreml supports TDT and EOU models; loaded %s\n",
+                "error: --require-coreml supports Unified RNN-T, TDT, and "
+                "EOU models; loaded %s\n",
                 model_type_name(model.model_type));
             return 3;
         }

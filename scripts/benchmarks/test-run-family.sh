@@ -19,6 +19,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRIVER="$HERE/run-family.sh"
 REAL_SPEC="$HERE/families.json"
+DESKTOP_WORKFLOW="$HERE/../../.github/workflows/speech-benchmark-desktop.yml"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -96,6 +97,23 @@ parakeet_ref_repo_rel="$(jq -r '.parakeet.correctness.reference' "$REAL_SPEC")"
 [[ -f "$HERE/../../$parakeet_ref_repo_rel" ]] \
   || fail "parakeet correctness.reference file missing: $parakeet_ref_repo_rel"
 ok "parakeet declares a WER correctness block pointing at a real reference file"
+
+jq -e '."parakeet-unified".coreml_compare_on_darwin == true and
+       ."parakeet-unified".coreml_model_basename == "parakeet-unified-en-0.6b" and
+       ."parakeet-unified".coreml_source_gguf == "parakeet-unified-en-0.6b.q8_0.gguf" and
+       ."parakeet-unified".coreml_export_mel_frames == 1501 and
+       ."parakeet-unified".correctness.kind == "wer"' "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-unified must declare its fixed-capacity Core ML and WER benchmark contract"
+jq -e '."parakeet-unified".correctness.reference == .parakeet.correctness.reference' \
+  "$REAL_SPEC" > /dev/null \
+  || fail "parakeet-unified and TDT must use the same JFK WER reference"
+unified_cache_key="$(awk '
+  /id: parakeet-unified-coreml-cache/ { in_cache = 1 }
+  in_cache && /key:/ { print; exit }
+' "$DESKTOP_WORKFLOW")"
+[[ "$unified_cache_key" == *"scripts/benchmarks/families.json"* ]] \
+  || fail "parakeet-unified Core ML cache key must hash families.json so changing coreml_source_gguf invalidates stale sidecars"
+ok "parakeet-unified declares the fixed 1501-frame Core ML comparison"
 
 # whisper is the time-wrapped ASR family and must reuse the same JFK reference
 # parakeet does — same jfk.wav audio, so a WER delta between the two rows is a
