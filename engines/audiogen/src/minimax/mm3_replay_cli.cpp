@@ -65,7 +65,8 @@ CliOptions parse_options(int argc, char ** argv) {
     options.acoustic_path = arg_value(argc, argv, "--acoustic", "");
     options.noise_paths   = collect_noise_paths(argc, argv);
     options.seed          = (uint64_t) atoll(arg_value(argc, argv, "--seed", "42"));
-    options.steps         = atoi(arg_value(argc, argv, "--steps", "30"));
+    const std::string default_steps = std::to_string(tts_cpp::minimax::detail::kDefaultFlowSteps);
+    options.steps         = atoi(arg_value(argc, argv, "--steps", default_steps.c_str()));
     options.max_frames    = atoll(arg_value(argc, argv, "--max-frames", "300"));
     options.threads       = atoi(arg_value(argc, argv, "--threads", "0"));
     options.dump_iters    = atoll(arg_value(argc, argv, "--dump-iters", "0"));

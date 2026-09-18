@@ -16,7 +16,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | Model | Task | Output | Quantization | Backends |
 |---|---|---|---|---|
 | ACE-Step v15 (base and turbo DiT variants) | text-to-music, multi-track (lego) stems, editing, LRC timestamps | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar |
-| MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM+DiT also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
+| MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
 
 ## Performance
 

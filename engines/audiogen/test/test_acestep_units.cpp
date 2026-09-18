@@ -2410,10 +2410,14 @@ void test_quantize_policy_mm3() {
     CHECK(quant_pick_type("output.weight", 2, "acestep-lm", *q4km, 24) == GGML_TYPE_Q4_K);
 
     // Synth policy: condition encoder and vocoder never quantize; the RVQ depth
-    // decoder is pinned at Q8_0 for every variant (fast integer matvec path).
-    CHECK(quant_pick_type("depth.proj.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_Q8_0);
-    CHECK(quant_pick_type("depth.blk.0.attn_v.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_Q8_0);
+    // decoder follows the requested variant like the DiT, keeping its positional
+    // embedding raw and its get_rows code table at Q8_0 (CUDA get_rows has no
+    // k-quant path).
+    CHECK(quant_pick_type("depth.proj.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_Q4_K);
+    CHECK(quant_pick_type("depth.blk.0.attn_v.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_Q4_K);
     CHECK(quant_pick_type("depth.audio_embd.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_Q8_0);
+    CHECK(quant_pick_type("depth.audio_embd.weight", 2, "mm3", *find_quant_variant("Q8_0"), 0) ==
+          GGML_TYPE_Q8_0);
     CHECK(quant_pick_type("depth.blk.0.input_norm.weight", 1, "mm3", *q4km, 0) == GGML_TYPE_COUNT);
     CHECK(quant_pick_type("depth.pos_embd.weight", 2, "mm3", *q4km, 0) == GGML_TYPE_COUNT);
     CHECK(quant_pick_type("cond.proj.weight", 3, "mm3", *q4km, 0) == GGML_TYPE_COUNT);
@@ -2625,12 +2629,12 @@ void test_quantize_gguf_roundtrip_mm3() {
         }
 
         ggml_tensor * q_depth = ggml_get_tensor(out_meta, "depth.blk.0.attn_v.weight");
-        CHECK(q_depth && q_depth->type == GGML_TYPE_Q8_0);
+        CHECK(q_depth && q_depth->type == GGML_TYPE_Q4_K);
         if (q_depth) {
             std::vector<float> f32(depth_row.size());
             ggml_fp16_to_fp32_row(depth_bytes.data(), f32.data(), (int64_t) f32.size());
-            std::vector<uint8_t> expected(ggml_row_size(GGML_TYPE_Q8_0, 256) * 2);
-            ggml_quantize_chunk(GGML_TYPE_Q8_0, f32.data(), expected.data(), 0, 2, 256, nullptr);
+            std::vector<uint8_t> expected(ggml_row_size(GGML_TYPE_Q4_K, 256) * 2);
+            ggml_quantize_chunk(GGML_TYPE_Q4_K, f32.data(), expected.data(), 0, 2, 256, nullptr);
             CHECK(std::memcmp(q_depth->data, expected.data(), expected.size()) == 0);
         }
 
