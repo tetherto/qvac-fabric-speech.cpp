@@ -39,7 +39,7 @@ Install through the host package manager, then review local source before
 building:
 
 - CMake >= 3.20, a C++17 compiler, git, Node.js 20+
-- Python is optional. CLAP scoring needs Python 3.10+ and the pins in
+- Python is optional. CLAP scoring needs Python 3.12 and the pins in
   `quality/requirements.txt`. Fréchet Audio Distance is not run by default
   because this harness does not ship a licensed reference corpus.
 - CUDA builds require the NVIDIA CUDA toolkit. RTX 50-series native (`sm_120`)
@@ -210,6 +210,14 @@ cache (data, not a shell installer). Default text is the manifest **caption
 only**. Override with `ACESTEP_CLAP_TEXT_POLICY=caption+lyrics`.
 `--force` rescores. `--include-warmup` scores warm-up WAVs too.
 `clap.elapsedMs` is scorer time and is not added to generation time.
+
+Saved scores retain the scorer's `clap.policyVersion`. The post-pass reuses only
+finite scores from the current policy (`clap-music-v2`); legacy scores without a
+version and scores from other policies are automatically rescored. `--force`
+also rescans scores already on the current policy. Reports label the policy and
+reject mixed policies across engines or prompts, including legacy/unversioned
+scores mixed with versioned scores. Rescore the saved WAVs before comparing such
+results. A report containing only legacy scores is labeled `legacy/unversioned`.
 
 Copy reviewed JSON/Markdown into `reports/<target>/` and complete the
 `verification-report.md` checklist described in `reports/README.md`. Keep

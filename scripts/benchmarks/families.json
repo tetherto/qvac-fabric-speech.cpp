@@ -521,7 +521,28 @@
       "--out",      "/dev/null"
     ],
     "audio_duration_seconds":  4.0,
-    "notes": "~5 GB combined; hosted-linux runners may skip if the per-runner disk budget is exceeded. --dur 4 gives a deterministic RTF baseline."
+    "notes": "~5 GB combined; hosted-linux runners may skip if the per-runner disk budget is exceeded. --dur 4 gives a deterministic RTF baseline.",
+    "music_alignment": {
+      "caption": "An instrumental jazz trio with acoustic piano, upright bass and brushed drums.",
+      "seed": 42,
+      "duration_seconds": 20,
+      "max_frames": 300,
+      "lyrics": "[Instrumental]",
+      "args": [
+        "--models",
+        "${MODEL_DIR}",
+        "--caption",
+        "${MUSIC_CAPTION}",
+        "--lyrics",
+        "${MUSIC_LYRICS}",
+        "--seed",
+        "${MUSIC_SEED}",
+        "--dur",
+        "${MUSIC_DURATION}",
+        "--out",
+        "${MUSIC_AUDIO_OUT}"
+      ]
+    }
   },
 
   "minimax": {
@@ -532,6 +553,29 @@
     "models": [],
     "args":         [],
     "audio_duration_seconds":  null,
-    "notes": "MODEL_MISSING: no S3 registry path yet. Row emitted, execution skipped. Follow-up: upload MiniMax-Music3 GGUFs."
+    "notes": "MODEL_MISSING: no S3 registry path yet. Row emitted, execution skipped. Follow-up: upload MiniMax-Music3 GGUFs.",
+    "music_alignment": {
+      "caption": "An instrumental jazz trio with acoustic piano, upright bass and brushed drums.",
+      "seed": 42,
+      "duration_seconds": 20,
+      "max_frames": 300,
+      "lyrics": "[Instrumental]",
+      "args": [
+        "--models",
+        "${MODEL_DIR}",
+        "--caption",
+        "${MUSIC_CAPTION}",
+        "--lyrics",
+        "${MUSIC_LYRICS}",
+        "--seed",
+        "${MUSIC_SEED}",
+        "--mode",
+        "full",
+        "--max-frames",
+        "${MUSIC_MAX_FRAMES}",
+        "--out",
+        "${MUSIC_OUTPUT_DIR}"
+      ]
+    }
   }
 }

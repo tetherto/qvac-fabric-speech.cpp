@@ -106,9 +106,14 @@ The same redesign is what fixed test-audio8-codec and test-audio8-lm-vulkan,
 which had been failing on unmodified master since the speech ggml moved past
 their calibration.
 
-CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights, and
-`f16` flow and HiFT weights. The recommended desktop combination is a
-`q8_0` LM, `q8_0` flow, and `f16` HiFT. The optional
+CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights,
+`f16`/`bf16` flow weights, and `f16` HiFT weights. The recommended desktop
+GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT; on CPU use a
+`bf16` flow on AVX512-BF16 hosts and `f16` elsewhere (measured on a 16-core
+Zen 5, 16 threads, same pinned 14.8 s utterance: flow+vocoder wall 16.7 s
+with f32 weights on a ggml built without tinyBLAS falls to 8.6 s with the
+f16 tier and 7.7 s with the bf16 tier on a `GGML_LLAMAFILE=ON` build, the
+bundled-ggml default since this change). The optional
 `cosyvoice-cli --flow-cut-prompt` flag reduces flow work: only the first DiT
 block attends to the voice-prompt frames, and subsequent blocks process the
 generated region. It changes reference output and is off by default. See

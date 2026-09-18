@@ -188,6 +188,10 @@ if (NOT TARGET ggml)
                 "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the QVAC "
                 "speech-stack `ggml-speech` vcpkg port.")
         endif()
+        # tinyBLAS rationale and measurements: docs/build.md.
+        if (NOT DEFINED GGML_LLAMAFILE_DEFAULT)
+            set(GGML_LLAMAFILE_DEFAULT ON)
+        endif()
         add_subdirectory(ggml)
     endif()
 endif()
@@ -959,6 +963,41 @@ if (TTS_CPP_BUILD_TESTS)
                          "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
         endforeach()
     endif()
+
+    # ---- flow / HiFT weight-tier parity ------------------------------------
+    # Thresholds are the measured tier deviations with margin: docs/cosyvoice3.md.
+    add_executable(test-cosyvoice-tier test/test_cosyvoice_tier.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-tier PRIVATE ggml)
+    target_include_directories(test-cosyvoice-tier PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-tier)
+    set(_tcb_cosy_flow_tier_gates
+        "f16|0.998|2.0"
+        "bf16|0.998|2.0"
+        "q8_0|0.998|2.0"
+        "q4_0|0.98|8.0")
+    foreach(_tcb_cosy_tier_gate IN LISTS _tcb_cosy_flow_tier_gates)
+        string(REPLACE "|" ";" _tcb_cosy_tier_gate "${_tcb_cosy_tier_gate}")
+        list(GET _tcb_cosy_tier_gate 0 _tcb_cosy_tier)
+        list(GET _tcb_cosy_tier_gate 1 _tcb_cosy_tier_min_cosine)
+        list(GET _tcb_cosy_tier_gate 2 _tcb_cosy_tier_max_abs)
+        set(_tcb_cosy_flow_tier_gguf "${TTS_CPP_TEST_MODEL_DIR}/cosyvoice3-flow-${_tcb_cosy_tier}.gguf")
+        tts_cpp_register_test(test-cosyvoice-flow-tier-${_tcb_cosy_tier}
+            EXE      test-cosyvoice-tier
+            LABEL    "fixture"
+            ARGS     "--stage" "flow" "--ref-gguf" "${_tcb_cosy_flow_gguf}"
+                     "--tier-gguf" "${_tcb_cosy_flow_tier_gguf}"
+                     "--min-cosine" "${_tcb_cosy_tier_min_cosine}"
+                     "--max-abs" "${_tcb_cosy_tier_max_abs}"
+            REQUIRES "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_flow_tier_gguf}")
+    endforeach()
+    set(_tcb_cosy_hift_f16_gguf "${TTS_CPP_TEST_MODEL_DIR}/cosyvoice3-hift-f16.gguf")
+    tts_cpp_register_test(test-cosyvoice-hift-tier-f16
+        EXE      test-cosyvoice-tier
+        LABEL    "fixture"
+        ARGS     "--stage" "hift" "--ref-gguf" "${_tcb_cosy_hift_gguf}"
+                 "--tier-gguf" "${_tcb_cosy_hift_f16_gguf}"
+                 "--min-cosine" "0.999" "--max-abs" "0.01"
+        REQUIRES "${_tcb_cosy_hift_gguf}" "${_tcb_cosy_hift_f16_gguf}")
 
     # ---- speech_tokenizer_v3 (CosyVoice3 zero-shot cloning front-end) -----
     # Fixtures come from scripts/dump-s3tokenizer-v3-reference.py; the GGUFs
