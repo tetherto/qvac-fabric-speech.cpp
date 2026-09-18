@@ -64,6 +64,13 @@ class ConverterTests(unittest.TestCase):
                 converter.backup_output_path(str(final), transaction_id, index)
             ).exists())
 
+    def test_flow_defaults(self):
+        # Written to the synth GGUF as mm3.flow.*. The engine takes the CFG
+        # scale from there but uses its own kDefaultFlowSteps for the step
+        # count, so the two constants are kept equal by hand.
+        self.assertEqual(converter.DIT_STEPS, 20)
+        self.assertEqual(converter.DIT_CFG_SCALE, 1.7)
+
     def test_tokenizer(self):
         with self.assertRaises(SystemExit):
             converter.require_tokenizer(None)

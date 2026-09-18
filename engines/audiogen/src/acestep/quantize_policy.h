@@ -97,14 +97,17 @@ inline bool quant_is_untied_output(const char * name, const char * arch) {
     return std::strcmp(arch, "qwen3") == 0 && std::strcmp(name, "output.weight") == 0;
 }
 
+// The acoustic code table is read with get_rows, and CUDA's get_rows accepts
+// Q8_0 but no k-quant: a k-quant table would silently fall back to a host copy
+// of the whole table on every depth step.
+inline bool quant_is_mm3_row_table(const char * name, const char * arch) {
+    return std::strcmp(arch, "mm3") == 0 && std::strcmp(name, "depth.audio_embd.weight") == 0;
+}
+
 inline bool quant_is_mm3_protected_component(const char * name) {
     return std::strncmp(name, "cond.", 5) == 0 || std::strncmp(name, "voc.", 4) == 0 ||
            std::strcmp(name, "dit.time_fourier.weight") == 0 ||
            std::strcmp(name, "depth.pos_embd.weight") == 0;
-}
-
-inline bool quant_is_mm3_depth(const char * name, const char * arch) {
-    return std::strcmp(arch, "mm3") == 0 && std::strncmp(name, "depth.", 6) == 0;
 }
 
 inline bool quant_should_quantize(const char * name, int n_dims, const char * arch) {
@@ -155,7 +158,7 @@ inline enum ggml_type quant_pick_type(const char *         name,
         return GGML_TYPE_COUNT;
     }
 
-    if (quant_is_mm3_depth(name, arch)) {
+    if (quant_is_mm3_row_table(name, arch)) {
         return GGML_TYPE_Q8_0;
     }
 

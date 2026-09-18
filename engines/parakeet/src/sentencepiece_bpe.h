@@ -25,6 +25,12 @@ struct BpeVocab {
 std::string detokenize(const BpeVocab & vocab,
                        const std::vector<int32_t> & token_ids);
 
+void append_token_pieces(const BpeVocab & vocab,
+                         const std::vector<int32_t> & token_ids,
+                         std::string & pieces);
+
+std::string strip_leading_spaces(const std::string & text);
+
 // True when the token's piece (in `vocab.pieces`) begins with the
 // SentencePiece word-boundary marker `▁` (U+2581, encoded as the 3-byte
 // sequence 0xE2 0x96 0x81 in UTF-8). Used by the streaming sessions to

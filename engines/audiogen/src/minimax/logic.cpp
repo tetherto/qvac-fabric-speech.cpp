@@ -42,11 +42,12 @@ void fill_noise_pairs(uint64_t & state, std::vector<float> & output) {
     }
 }
 
-int64_t sum_crop_lengths(const std::vector<int64_t> & latent_lengths, int64_t upsample) {
+int64_t sum_crop_lengths(const std::vector<int64_t> & latent_lengths, int64_t upsample,
+                         const FlowWindowGeometry & geometry) {
     int64_t total = 0;
     for (size_t index = 0; index < latent_lengths.size(); ++index) {
         total += crop_span(latent_lengths[index], static_cast<int64_t>(index),
-                           static_cast<int64_t>(latent_lengths.size()), upsample)
+                           static_cast<int64_t>(latent_lengths.size()), upsample, geometry)
                      .length;
     }
     return total;
@@ -127,7 +128,8 @@ void validate_rates(const ModelCompatibility & model, std::vector<std::string> &
 
 void validate_windows(const ModelCompatibility & model, std::vector<std::string> & errors) {
     add_error(model.window_frames == kWindowFrames, "DiT window frames must be 200", errors);
-    add_error(model.hop_frames == kHopFrames, "DiT hop frames must be 100", errors);
+    add_error(model.hop_frames > 0 && model.hop_frames <= model.window_frames,
+              "DiT hop frames must be positive and at most the window", errors);
     if (!has_positive_condition_rate(model) || model.window_frames <= 0 || model.hop_frames <= 0) {
         return;
     }
@@ -135,7 +137,8 @@ void validate_windows(const ModelCompatibility & model, std::vector<std::string>
               "DiT window latents do not match the condition rate", errors);
     add_error(model.hop_latents == condition_latent_length(model.condition_rate, model.hop_frames),
               "DiT hop latents do not match the condition rate", errors);
-    add_error(model.hop_latents == kCarryLatents, "DiT hop latents must be 344", errors);
+    add_error(model.window_latents - model.hop_latents >= 4,
+              "DiT window and hop must leave a shared region of at least 4 latents", errors);
 }
 
 std::string lowercase(std::string value) {
@@ -342,20 +345,26 @@ std::vector<int64_t> window_starts(int64_t frames, int64_t window_frames, int64_
         starts.push_back(0);
         return starts;
     }
-    for (int64_t start = 0; start < frames - hop_frames; start += hop_frames) {
+    // Keep adding windows until one reaches the end. Stopping at
+    // `frames - hop_frames` only covers the tail while a window spans exactly
+    // two hops, and silently drops it for any wider hop.
+    for (int64_t start = 0;; start += hop_frames) {
         starts.push_back(start);
+        if (start + window_frames >= frames) {
+            break;
+        }
     }
     return starts;
 }
 
-CropSpan crop_span(int64_t latent_length, int64_t window_index, int64_t window_count, int64_t upsample) {
+CropSpan crop_span(int64_t latent_length, int64_t window_index, int64_t window_count, int64_t upsample,
+                   const FlowWindowGeometry & geometry) {
     if (latent_length < 0 || window_index < 0 || window_count <= 0 || window_index >= window_count ||
-        upsample <= 0) {
+        upsample <= 0 || geometry.crop_left < 0 || geometry.crop_right < 0) {
         throw std::invalid_argument("crop values are invalid");
     }
-    const int64_t left = window_index == 0 ? 0 : static_cast<int64_t>(kCropLeftLatents) * upsample;
-    const int64_t right =
-        window_index == window_count - 1 ? 0 : static_cast<int64_t>(kCropRightLatents) * upsample;
+    const int64_t left = window_index == 0 ? 0 : geometry.crop_left * upsample;
+    const int64_t right = window_index == window_count - 1 ? 0 : geometry.crop_right * upsample;
     const int64_t available = latent_length * upsample - left - right;
     return {left, available > 0 ? available : 0};
 }
@@ -417,11 +426,12 @@ bool copy_planar_window(const std::vector<float> & source, int64_t channels,
     return true;
 }
 
-int64_t stitched_sample_count(const std::vector<int64_t> & latent_lengths, int64_t upsample) {
+int64_t stitched_sample_count(const std::vector<int64_t> & latent_lengths, int64_t upsample,
+                              const FlowWindowGeometry & geometry) {
     if (latent_lengths.empty()) {
         return 0;
     }
-    return sum_crop_lengths(latent_lengths, upsample);
+    return sum_crop_lengths(latent_lengths, upsample, geometry);
 }
 
 std::string vocoder_upsample_error(const std::vector<int32_t> & rates, uint32_t total_upsample) {
@@ -644,6 +654,50 @@ int64_t resolve_ar_frame_cap(int64_t requested_frames, int64_t checkpoint_frames
         return 0;
     }
     return frames;
+}
+
+// mm3.flow.steps is written by our own converter from a fixed constant, so it
+// carries no per-checkpoint information and only records what the engine
+// recommended when the file was built. The engine's current recommendation is
+// used instead, so a measured change reaches files converted earlier; the
+// metadata value is validated but not consulted.
+int resolve_flow_steps(int requested_steps) {
+    return requested_steps > 0 ? requested_steps : kDefaultFlowSteps;
+}
+
+// The shared region is rounded down to a multiple of four so the quarter split
+// is exact. Between that and latent_length's truncation per window, each seam
+// can land up to three latents from the exact position in either direction;
+// the stitcher concatenates the kept spans as they are and the output length
+// moves by that much. At the shipped hop the slip is one latent.
+FlowWindowGeometry flow_window_geometry(int64_t window_latents, int64_t hop_latents) {
+    if (hop_latents <= 0 || window_latents <= hop_latents) {
+        throw std::invalid_argument("window latents must exceed a positive hop");
+    }
+    const int64_t shared = (window_latents - hop_latents) / 4 * 4;
+    if (shared <= 0) {
+        throw std::invalid_argument("window and hop leave no shared region");
+    }
+    FlowWindowGeometry geometry;
+    geometry.carry_span = shared;
+    geometry.overlap    = shared / 2;
+    geometry.crop_left  = shared / 4;
+    geometry.crop_right = shared - geometry.crop_left;
+    return geometry;
+}
+
+// The depth decoder's sequence grows by exactly one code per step, so step cb
+// attends over positions 0..cb. The first step is the exception: it seeds both
+// the projected LM hidden and the semantic code, so it writes two positions.
+DepthStepLayout depth_step_layout(int codebook) {
+    if (codebook < 1) {
+        throw std::invalid_argument("depth codebook index must be positive");
+    }
+    DepthStepLayout layout;
+    layout.window = (int64_t) codebook + 1;
+    layout.tokens = codebook == 1 ? 2 : 1;
+    layout.first  = layout.window - layout.tokens;
+    return layout;
 }
 
 std::vector<std::string> validate_model_compatibility(const ModelCompatibility & model) {

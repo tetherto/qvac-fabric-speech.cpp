@@ -77,9 +77,18 @@ byte-identical, and `q4_k_m` generates faster than `q8_0` (Strix Vulkan
 remains unmeasured for MiniMax and takes the same all-on-GPU placement, so
 measure it the same way before shipping it.
 
-The frame rate, maximum frame count, flow defaults, and output sample rate come
-from GGUF metadata. Current converted files specify 25 frames per second, at
-most 9000 frames, 30 flow steps, CFG 1.7, and 44100 Hz output.
+The frame rate, maximum frame count, CFG scale, and output sample rate come from
+GGUF metadata. Current converted files specify 25 frames per second, at most
+9000 frames, CFG 1.7, and 44100 Hz output. The flow step count is the one
+default the engine does not take from the file: `mm3.flow.steps` is validated
+but the engine uses its own recommendation of 20 unless `inference_steps` is set
+on the request, because the metadata value is a fixed converter constant rather
+than a property of the checkpoint.
+
+Files converted before 2026-09-17 carry `mm3.flow.steps = 30`; they run at 20
+steps like everything else. On an AMD Strix Halo (Radeon 8060S, RADV) the flow
+stage is exactly linear in the step count — 612 ms per step at L=689, flat from
+8 steps to 30 — so 20 steps cuts a 10 s track from 57.0 s to 47.2 s end to end.
 
 Download the Comfy-Org single-file safetensors checkpoint (the converter's
 preferred source; requires the Hugging Face CLI,
@@ -107,14 +116,25 @@ ACE-Step engine):
                                           models/minimax/mm3-synth-q4_k_m.gguf Q4_K_M
 ```
 
-This quantizes the LM and, within the synth file, the flow DiT to the chosen
-k-quant while the RVQ depth decoder is held at `q8_0` (its per-frame matvec
-graphs need the integer fast path; F16 weights are several times slower on
-scalar-fp16 Vulkan devices), except `depth.pos_embd.weight`, which the depth
-graph views raw and which stays F32. The condition encoder and vocoder keep their
-converted (F16/F32) precision. Quantize from the `f16` pair, not `q8_0` —
+This quantizes the LM and, within the synth file, both the flow DiT and the RVQ
+depth decoder to the chosen k-quant, with two exceptions inside the depth
+decoder: `depth.pos_embd.weight`, which the depth graph views raw and which
+stays F32, and `depth.audio_embd.weight`, which is read with `get_rows` and is
+held at `q8_0` because CUDA's `get_rows` has no k-quant path (a k-quant table
+would silently fall back to a host copy on every depth step). The condition
+encoder and vocoder keep their converted (F16/F32) precision. Quantize from the `f16` pair, not `q8_0` —
 `acestep-quantize` only requantizes BF16/F16/F32 source tensors, so an
 already-`q8_0` tensor passes through untouched.
+
+The depth decoder used to be held at `q8_0` whatever variant was requested, on the
+grounds that its per-frame matvec graphs want the integer fast path. Since the
+depth decoder gained a K/V cache every one of those matvecs runs with a single
+new token, and at that width `q4_K` measured faster than `q8_0` on an AMD Strix
+Halo under RADV (65 µs against 107 µs for the 4096×4096 projections) with a
+teacher-forced correlation of 0.9998 against the `q8_0` render. That device
+reports no integer dot-product support, so the integer fast path was not part of
+the comparison; on a device that has it, `q8_0` may still be the faster choice
+for the depth decoder and is one `--quant q8_0` conversion away.
 
 `mm3-replay` (built with `AUDIOGEN_BUILD_EXECUTABLES`) is the MiniMax CLI and
 parity harness:

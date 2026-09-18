@@ -1,6 +1,7 @@
 #include "minimax/logic.h"
 #include "minimax/backend.h"
 #include "minimax/bpe.h"
+#include "minimax/mm3-depth-graph.h"
 #include "minimax/mm3-flash-attn.h"
 #include "minimax/mm3-flow-runtime.h"
 #include "minimax/mm3-replay-io.h"
@@ -327,9 +328,214 @@ void test_noise() {
     CHECK(throws_invalid_argument([&] { fill_noise(42, -1, first, 8); }));
 }
 
+void test_depth_step_layout() {
+    using tts_cpp::minimax::detail::depth_step_layout;
+    // The seeding step writes the projected LM hidden and the semantic code;
+    // every later step appends exactly one acoustic code.
+    CHECK(depth_step_layout(1).window == 2);
+    CHECK(depth_step_layout(1).tokens == 2);
+    CHECK(depth_step_layout(1).first == 0);
+    CHECK(depth_step_layout(2).window == 3);
+    CHECK(depth_step_layout(2).tokens == 1);
+    CHECK(depth_step_layout(2).first == 2);
+    CHECK(depth_step_layout(7).window == 8);
+    CHECK(depth_step_layout(7).tokens == 1);
+    CHECK(depth_step_layout(7).first == 7);
+    CHECK(throws_invalid_argument([] { depth_step_layout(0); }));
+
+    // Each step may only read positions earlier steps of the same frame wrote,
+    // so the steps must cover 0..NC exactly once with no gap: a gap would leave
+    // a step attending over a position held from the previous frame.
+    for (int codebooks = 1; codebooks < 16; codebooks++) {
+        int64_t next = 0;
+        for (int cb = 1; cb <= codebooks; cb++) {
+            const auto layout = depth_step_layout(cb);
+            CHECK(layout.first == next);
+            CHECK(layout.window == layout.first + layout.tokens);
+            next += layout.tokens;
+        }
+        CHECK(next == (int64_t) codebooks + 1);
+    }
+}
+
+// The cached block must reproduce, position by position, what one full-prefix
+// pass over the same tokens produces: seed two positions, append one, append
+// one, and every output plus the cache contents must match the single pass.
+// A wrong row index, window, mask or a stale position would all show here.
+void test_depth_kv_cache_matches_full_prefix() {
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+
+    const int64_t H  = 8;
+    const int64_t D  = 4;
+    const int64_t Nh = 2;
+    const int64_t FF = 16;
+    const int64_t S  = 4;
+    const int64_t B  = 2;
+
+    MM3DepthConfig config;
+    config.block_count         = 1;
+    config.embedding_length    = static_cast<uint32_t>(H);
+    config.feed_forward_length = static_cast<uint32_t>(FF);
+    config.head_count          = static_cast<uint32_t>(Nh);
+    config.head_dim            = static_cast<uint32_t>(D);
+    config.rms_eps             = 1e-6f;
+
+    ggml_init_params weight_params = { ggml_tensor_overhead() * 40, nullptr, true };
+    ggml_context *   wctx          = ggml_init(weight_params);
+    CHECK(wctx != nullptr);
+    auto matrix = [&](int64_t in, int64_t out) { return ggml_new_tensor_2d(wctx, GGML_TYPE_F32, in, out); };
+    auto vec    = [&](int64_t n) { return ggml_new_tensor_1d(wctx, GGML_TYPE_F32, n); };
+    auto cache  = [&]() { return ggml_new_tensor_4d(wctx, GGML_TYPE_F32, D, S, Nh, B); };
+
+    MM3DepthLayer layer;
+    layer.attn_norm   = vec(H);
+    layer.attn_q      = matrix(H, H);
+    layer.attn_k      = matrix(H, H);
+    layer.attn_v      = matrix(H, H);
+    layer.attn_output = matrix(H, H);
+    layer.ffn_norm    = vec(H);
+    layer.ffn_gate    = matrix(H, FF);
+    layer.ffn_up      = matrix(H, FF);
+    layer.ffn_down    = matrix(FF, H);
+
+    ggml_tensor * k_full = cache();
+    ggml_tensor * v_full = cache();
+    ggml_tensor * k_inc  = cache();
+    ggml_tensor * v_inc  = cache();
+
+    ggml_tensor * h_full  = ggml_new_tensor_3d(wctx, GGML_TYPE_F32, H, S, B);
+    ggml_tensor * h_seed  = ggml_new_tensor_3d(wctx, GGML_TYPE_F32, H, 2, B);
+    ggml_tensor * h_step2 = ggml_new_tensor_3d(wctx, GGML_TYPE_F32, H, 1, B);
+    ggml_tensor * h_step3 = ggml_new_tensor_3d(wctx, GGML_TYPE_F32, H, 1, B);
+
+    ggml_tensor * rows_full  = ggml_new_tensor_1d(wctx, GGML_TYPE_I64, S);
+    ggml_tensor * rows_seed  = ggml_new_tensor_1d(wctx, GGML_TYPE_I64, 2);
+    ggml_tensor * rows_step2 = ggml_new_tensor_1d(wctx, GGML_TYPE_I64, 1);
+    ggml_tensor * rows_step3 = ggml_new_tensor_1d(wctx, GGML_TYPE_I64, 1);
+
+    ggml_tensor * mask_full = ggml_new_tensor_2d(wctx, GGML_TYPE_F32, S, S);
+    ggml_tensor * mask_seed = ggml_new_tensor_2d(wctx, GGML_TYPE_F32, 2, 2);
+
+    ggml_backend_buffer_t wbuf = ggml_backend_alloc_ctx_tensors(wctx, cpu);
+    CHECK(wbuf != nullptr);
+
+    std::mt19937 random(2026);
+    std::uniform_real_distribution<float> weight(-0.5f, 0.5f);
+    auto fill = [&](ggml_tensor * t, float base) {
+        std::vector<float> values(static_cast<size_t>(ggml_nelements(t)));
+        for (float & value : values) value = base + weight(random);
+        ggml_backend_tensor_set(t, values.data(), 0, values.size() * sizeof(float));
+        return values;
+    };
+    for (ggml_tensor * t : { layer.attn_q, layer.attn_k, layer.attn_v, layer.attn_output,
+                             layer.ffn_gate, layer.ffn_up, layer.ffn_down }) {
+        fill(t, 0.0f);
+    }
+    fill(layer.attn_norm, 1.0f);
+    fill(layer.ffn_norm, 1.0f);
+    const std::vector<float> input = fill(h_full, 0.0f);
+
+    auto slice = [&](ggml_tensor * dst, int64_t first, int64_t count) {
+        std::vector<float> values(static_cast<size_t>(H * count * B));
+        for (int64_t b = 0; b < B; b++) {
+            for (int64_t s = 0; s < count; s++) {
+                std::copy_n(input.begin() + (b * S + first + s) * H, H, values.begin() + (b * count + s) * H);
+            }
+        }
+        ggml_backend_tensor_set(dst, values.data(), 0, values.size() * sizeof(float));
+    };
+    slice(h_seed, 0, 2);
+    slice(h_step2, 2, 1);
+    slice(h_step3, 3, 1);
+
+    auto rows = [&](ggml_tensor * dst, std::vector<int64_t> values) {
+        ggml_backend_tensor_set(dst, values.data(), 0, values.size() * sizeof(int64_t));
+    };
+    rows(rows_full, { 0, 1, 2, 3 });
+    rows(rows_seed, { 0, 1 });
+    rows(rows_step2, { 2 });
+    rows(rows_step3, { 3 });
+
+    auto causal = [&](ggml_tensor * dst, int64_t n) {
+        std::vector<float> values(static_cast<size_t>(n * n));
+        for (int64_t q = 0; q < n; q++) {
+            for (int64_t k = 0; k < n; k++) values[static_cast<size_t>(k + q * n)] = k <= q ? 0.0f : -INFINITY;
+        }
+        ggml_backend_tensor_set(dst, values.data(), 0, values.size() * sizeof(float));
+    };
+    causal(mask_full, S);
+    causal(mask_seed, 2);
+
+    auto run = [&](ggml_tensor * h, ggml_tensor * mask, ggml_tensor * kc, ggml_tensor * vc, ggml_tensor * r,
+                   int64_t window) {
+        constexpr size_t MAX_NODES = 128;
+        ggml_init_params graph_params = {
+            ggml_tensor_overhead() * MAX_NODES + ggml_graph_overhead_custom(MAX_NODES, false), nullptr, true
+        };
+        ggml_context * gctx = ggml_init(graph_params);
+        ggml_cgraph *  gf   = ggml_new_graph_custom(gctx, MAX_NODES, false);
+        ggml_tensor *  y    = mm3_depth_block(gctx, gf, config, layer, h, mask, kc, vc, r, window);
+        ggml_build_forward_expand(gf, y);
+        ggml_gallocr_t allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(cpu));
+        CHECK(ggml_gallocr_alloc_graph(allocator, gf));
+        CHECK(ggml_backend_graph_compute(cpu, gf) == GGML_STATUS_SUCCESS);
+        std::vector<float> out(static_cast<size_t>(ggml_nelements(y)));
+        ggml_backend_tensor_get(y, out.data(), 0, ggml_nbytes(y));
+        ggml_gallocr_free(allocator);
+        ggml_free(gctx);
+        return out;
+    };
+    const std::vector<float> full  = run(h_full, mask_full, k_full, v_full, rows_full, S);
+    const std::vector<float> seed  = run(h_seed, mask_seed, k_inc, v_inc, rows_seed, 2);
+    const std::vector<float> step2 = run(h_step2, nullptr, k_inc, v_inc, rows_step2, 3);
+    const std::vector<float> step3 = run(h_step3, nullptr, k_inc, v_inc, rows_step3, 4);
+
+    auto same = [](float a, float b) { return std::fabs(a - b) <= 1e-5f * (1.0f + std::fabs(a)); };
+    auto position = [&](const std::vector<float> & out, int64_t count, int64_t s, int64_t b, int64_t i) {
+        return out[static_cast<size_t>((b * count + s) * H + i)];
+    };
+    for (int64_t b = 0; b < B; b++) {
+        for (int64_t i = 0; i < H; i++) {
+            CHECK(same(position(full, S, 0, b, i), position(seed, 2, 0, b, i)));
+            CHECK(same(position(full, S, 1, b, i), position(seed, 2, 1, b, i)));
+            CHECK(same(position(full, S, 2, b, i), position(step2, 1, 0, b, i)));
+            CHECK(same(position(full, S, 3, b, i), position(step3, 1, 0, b, i)));
+        }
+    }
+
+    auto dump = [&](ggml_tensor * t) {
+        std::vector<float> values(static_cast<size_t>(ggml_nelements(t)));
+        ggml_backend_tensor_get(t, values.data(), 0, ggml_nbytes(t));
+        return values;
+    };
+    auto same_cache = [&](ggml_tensor * a, ggml_tensor * b) {
+        const std::vector<float> lhs = dump(a);
+        const std::vector<float> rhs = dump(b);
+        if (lhs.size() != rhs.size()) return false;
+        for (size_t i = 0; i < lhs.size(); i++) {
+            if (!same(lhs[i], rhs[i])) return false;
+        }
+        return true;
+    };
+    CHECK(same_cache(k_full, k_inc));
+    CHECK(same_cache(v_full, v_inc));
+
+    ggml_backend_buffer_free(wbuf);
+    ggml_free(wctx);
+    ggml_backend_free(cpu);
+}
+
 void test_flow_schedule() {
     using tts_cpp::minimax::detail::flow_schedule;
-    CHECK(tts_cpp::minimax::detail::kDefaultFlowSteps == 30);
+    using tts_cpp::minimax::detail::resolve_flow_steps;
+    CHECK(tts_cpp::minimax::detail::kDefaultFlowSteps == 20);
+    // An explicit request always wins; otherwise the engine's own recommendation.
+    CHECK(resolve_flow_steps(8) == 8);
+    CHECK(resolve_flow_steps(0) == 20);
+    CHECK(resolve_flow_steps(-3) == 20);
+    CHECK(resolve_flow_steps(50) == 50);
     CHECK(close(tts_cpp::minimax::detail::kDefaultCfgScale, 1.7f));
     std::vector<float> sigmas;
     std::vector<float> timesteps;
@@ -521,18 +727,70 @@ void test_condition_length() {
 
 void test_window_arithmetic() {
     using namespace tts_cpp::minimax::detail;
-    CHECK(window_starts(200, kWindowFrames, kHopFrames) == std::vector<int64_t>({0}));
-    CHECK(window_starts(300, kWindowFrames, kHopFrames) == std::vector<int64_t>({0, 100}));
-    CHECK(window_starts(301, kWindowFrames, kHopFrames) == std::vector<int64_t>({0, 100, 200}));
-    const CropSpan first = crop_span(689, 0, 2, 512);
-    const CropSpan second = crop_span(689, 1, 2, 512);
+    CHECK(window_starts(200, kWindowFrames, 100) == std::vector<int64_t>({0}));
+    CHECK(window_starts(300, kWindowFrames, 100) == std::vector<int64_t>({0, 100}));
+    CHECK(window_starts(301, kWindowFrames, 100) == std::vector<int64_t>({0, 100, 200}));
+    // Every window layout must cover the last frame, whatever the hop. The old
+    // `frames - hop` bound only did so when a window spanned exactly two hops.
+    for (int64_t hop = 20; hop <= kWindowFrames; hop += 10) {
+        for (int64_t frames = 1; frames <= 1200; frames += 7) {
+            const std::vector<int64_t> starts = window_starts(frames, kWindowFrames, hop);
+            CHECK(!starts.empty());
+            CHECK(starts.front() == 0);
+            CHECK(starts.back() + kWindowFrames >= frames);
+            CHECK(starts.size() == 1 || starts.back() < frames);
+        }
+    }
+    const FlowWindowGeometry hop100 = flow_window_geometry(689, 344);
+    const CropSpan first = crop_span(689, 0, 2, 512, hop100);
+    const CropSpan second = crop_span(689, 1, 2, 512, hop100);
     CHECK(first.left == 0);
     CHECK(first.length == 431 * 512);
     CHECK(second.left == 86 * 512);
     CHECK(second.length == 603 * 512);
-    CHECK(stitched_sample_count({689, 689}, 512) == 529408);
-    CHECK(kCarryLatents == kCropLeftLatents + kCropRightLatents);
-    CHECK(kCarryLatents == 2 * kBlendLatents);
+    CHECK(stitched_sample_count({689, 689}, 512, hop100) == 529408);
+    // The hop-100 geometry must reproduce the values that were hardcoded before
+    // it was derived, and the defining relationships must hold for any hop.
+    CHECK(hop100.carry_span == 344);
+    CHECK(hop100.overlap == 172);
+    CHECK(hop100.crop_left == 86);
+    CHECK(hop100.crop_right == 258);
+    for (int64_t hop_latents = 4; hop_latents <= 685; hop_latents += 1) {
+        const FlowWindowGeometry geometry = flow_window_geometry(689, hop_latents);
+        const int64_t shared = 689 - hop_latents;
+        CHECK(geometry.carry_span <= shared && geometry.carry_span > shared - 4);
+        CHECK(geometry.crop_left + geometry.crop_right == geometry.carry_span);
+        CHECK(geometry.carry_span == 2 * geometry.overlap);
+        CHECK(geometry.crop_left * 3 == geometry.crop_right);
+    }
+    CHECK(throws_invalid_argument([] { flow_window_geometry(689, 0); }));
+    CHECK(throws_invalid_argument([] { flow_window_geometry(689, 689); }));
+    CHECK(throws_invalid_argument([] { flow_window_geometry(689, 687); }));
+
+    // The kept spans must tile the output exactly: if they do not, generation is
+    // silently truncated rather than failing. Checked across the frame counts a
+    // caller can ask for, at the shipped hop.
+    const ConditionRate rate;
+    for (int64_t hop = 50; hop <= 190; hop += 10) {
+        const int64_t hop_latents = condition_latent_length(rate, hop);
+        const int64_t window_latents = condition_latent_length(rate, kWindowFrames);
+        const FlowWindowGeometry geometry = flow_window_geometry(window_latents, hop_latents);
+        for (int64_t frames = 1; frames <= 2000; frames += 3) {
+            const std::vector<int64_t> starts = window_starts(frames, kWindowFrames, hop);
+            std::vector<int64_t> latent_lengths;
+            for (size_t index = 0; index < starts.size(); ++index) {
+                const int64_t length = std::min(starts[index] + kWindowFrames, frames) - starts[index];
+                latent_lengths.push_back(condition_latent_length(rate, length));
+            }
+            // Rounding the shared region down to a multiple of four, and
+            // latent_length's own truncation per window, can move each seam by
+            // up to three latents in either direction; a single window is exact.
+            const int64_t stitched = stitched_sample_count(latent_lengths, 1, geometry);
+            const int64_t expected = condition_latent_length(rate, frames);
+            const int64_t seams = (int64_t) starts.size() - 1;
+            CHECK(std::llabs(stitched - expected) <= 3 * seams);
+        }
+    }
 }
 
 void test_overlap_blend_and_pin() {
@@ -1313,6 +1571,8 @@ int main() {
     test_unconditional_mask();
     test_noise();
     test_flow_schedule();
+    test_depth_step_layout();
+    test_depth_kv_cache_matches_full_prefix();
     test_production_dit_readback_preserves_velocity();
     test_depth_step_fused_readback_matches_source_tensors();
     test_production_cfg_euler_step();

@@ -251,6 +251,7 @@ set(PARAKEET_LIB_SOURCES
     src/coreml/parakeet_coreml_shape.cpp
     src/parakeet_engine.cpp
     src/parakeet_nemotron.cpp
+    src/parakeet_unified.cpp
     src/parakeet_tdt.cpp
     src/parakeet_eou.cpp
     src/parakeet_sortformer.cpp
@@ -615,6 +616,7 @@ if (PARAKEET_BUILD_TESTS)
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-560")
     set(_qvp_nemotron_stream_1120_ref
         "${PARAKEET_TEST_REF_DIR}/nemotron-ref-en-us-1120")
+    set(_qvp_unified_ref "${PARAKEET_TEST_REF_DIR}/unified-ref-jfk-70-7-7")
 
     add_executable(test-mel
         test/test_mel.cpp
@@ -698,6 +700,53 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-parakeet-streaming
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+
+    add_executable(test-unified-streaming test/test_unified_streaming.cpp)
+    target_link_libraries(test-unified-streaming PRIVATE qvac-parakeet)
+    target_include_directories(test-unified-streaming PRIVATE include src ggml/include)
+    parakeet_apply_ccache(test-unified-streaming)
+    parakeet_register_test(test-unified-streaming
+        LABEL    "fixture"
+        ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+
+    add_executable(test-unified-stream-step
+        test/test_unified_stream_step.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-unified-stream-step PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-unified-stream-step PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-unified-stream-step)
+
+    function(parakeet_register_unified_stream_case test_name)
+        set(_qvp_unified_stream_label "fixture")
+        if (ARGN)
+            set(_qvp_unified_stream_label "gpu")
+        endif()
+        parakeet_register_test(${test_name}
+            EXE test-unified-stream-step
+            LABEL "${_qvp_unified_stream_label}"
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_unified_ref}" "${_qvp_jfk_wav}" ${ARGN}
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+                     "${_qvp_unified_ref}/buffered/step-000/encoder_chunk.npy"
+                     "${_qvp_unified_ref}/buffered/transcript.txt")
+    endfunction()
+
+    parakeet_register_unified_stream_case(test-unified-stream-step)
+    if (GGML_METAL)
+        parakeet_register_unified_stream_case(test-unified-stream-step-metal --n-gpu-layers 1)
+    endif()
+    if (GGML_CUDA)
+        parakeet_register_unified_stream_case(test-unified-stream-step-cuda --n-gpu-layers 1)
+    endif()
+    if (GGML_VULKAN)
+        parakeet_register_unified_stream_case(test-unified-stream-step-vulkan --n-gpu-layers 1)
+    endif()
 
     add_executable(test-eou-streaming test/test_eou_streaming.cpp)
     target_link_libraries(test-eou-streaming PRIVATE qvac-parakeet)
@@ -829,6 +878,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -841,11 +891,33 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_backend_defs(test-rnnt)
     parakeet_register_test(test-rnnt LABEL "unit")
 
+    add_executable(test-unified-loader
+        test/test_unified_loader.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_link_libraries(test-unified-loader PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-unified-loader PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-unified-loader)
+    parakeet_register_test(test-unified-loader
+        LABEL    "fixture"
+        ARGS     "${_qvp_rnnt_q8_gguf}"
+        REQUIRES "${_qvp_rnnt_q8_gguf}")
+
     add_executable(test-nemotron-loader
         test/test_nemotron_loader.cpp
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -866,6 +938,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -903,6 +976,7 @@ if (PARAKEET_BUILD_TESTS)
         test/test_nemotron_stream_step.cpp
         src/parakeet_ctc.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/mel_preprocess.cpp
@@ -1293,6 +1367,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1320,6 +1395,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1345,6 +1421,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1365,6 +1442,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1392,6 +1470,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1425,6 +1504,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1461,6 +1541,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1483,6 +1564,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1525,6 +1607,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
@@ -1572,6 +1655,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
@@ -1587,6 +1671,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
@@ -1617,6 +1702,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
         src/parakeet_log.cpp
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
