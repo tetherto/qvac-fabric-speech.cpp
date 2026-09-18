@@ -130,6 +130,13 @@ ggml library identities; every
 warm-cache run verifies the final pair and license. `--offline` forbids downloads;
 `--verify-only` forbids both downloads and conversion.
 
+The workflow installs converter dependencies and builds the quantizer before
+restoring the model cache. It obtains the cache key through `--cache-key-only`,
+which computes the exact preparation identity without accessing models or
+running resource checks. Python patch releases, native build metadata and linked
+library changes therefore select a new workflow cache entry that can be saved
+after preparation, instead of repeatedly restoring an incompatible bundle.
+
 Transfer the entire final bundle to a smaller host, preserving all four files.
 Verify it against the same benchmark source revision without installing converter
 dependencies or requiring a matching local quantizer:

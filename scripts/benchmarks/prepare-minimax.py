@@ -256,7 +256,8 @@ def cache_lock(root: Path):
 
 def prepare(spec: dict, root: Path, quant: str = 'q8_0', *, offline: bool = False,
             verify_only: bool = False, quantizer: Path | None = None,
-            prepared_dir: Path | None = None, quantizer_libraries: list[Path] | None = None) -> dict:
+            prepared_dir: Path | None = None, quantizer_libraries: list[Path] | None = None,
+            cache_key_only: bool = False) -> dict:
     stage = 'manifest'
     try:
         validate(spec)
@@ -304,6 +305,13 @@ def prepare(spec: dict, root: Path, quant: str = 'q8_0', *, offline: bool = Fals
         libraries = library_identity(quantizer_libraries or []) if quantizer else {}
         identity = cache_identity(spec, quant, dependency_identity(), quantizer, libraries, build['quantizer_build'])
         key = json_digest(identity)
+        if cache_key_only:
+            # The workflow resolves this after dependency installation/native
+            # build and before cache restore, using exactly the preparation key.
+            # No model cache access, resource check, download or conversion.
+            return {'status': 'ok', 'stage': 'identity', 'reason': None,
+                    'cache_key': key, 'quant': quant, 'model_dir': None,
+                    'provenance': None, 'cached': False}
         # Resolve user-selected root, then reject symlinks within this owned cache.
         root = root.resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -393,8 +401,11 @@ def main() -> int:
     parser.add_argument('--quantizer-library', action='append', type=Path, default=[],
                         help='each ggml shared library used by the quantizer (repeat for all libraries)')
     parser.add_argument('--offline', action='store_true')
-    parser.add_argument('--verify-only', action='store_true')
-    parser.add_argument('--prepared-dir', type=Path,
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--verify-only', action='store_true')
+    mode.add_argument('--cache-key-only', action='store_true',
+                      help='emit the exact preparation cache key without accessing models')
+    mode.add_argument('--prepared-dir', type=Path,
                         help='verify a prepared pair from another builder; never download or convert')
     args = parser.parse_args()
     try:
@@ -404,7 +415,8 @@ def main() -> int:
             raise PreparationError('manifest', str(error)) from error
         result = prepare(spec, args.models_root, args.quant, offline=args.offline,
                          verify_only=args.verify_only, quantizer=args.quantizer,
-                         prepared_dir=args.prepared_dir, quantizer_libraries=args.quantizer_library)
+                         prepared_dir=args.prepared_dir, quantizer_libraries=args.quantizer_library,
+                         cache_key_only=args.cache_key_only)
     except PreparationError as error:
         result = {'status': 'preparation-failed', 'stage': error.stage, 'reason': str(error),
                   'model_dir': None, 'cache_key': None, 'provenance': None,

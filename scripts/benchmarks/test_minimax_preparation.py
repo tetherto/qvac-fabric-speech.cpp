@@ -107,6 +107,53 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(module.PreparationError):
             self.prepare(quant='f16', verify_only=True)
 
+    def test_cache_key_only_has_no_model_preparation_side_effects(self):
+        root = self.root / 'not-created'
+        with (mock.patch.object(module, 'cache_lock', side_effect=AssertionError('cache access')),
+              mock.patch.object(module, 'preflight', side_effect=AssertionError('resource check')),
+              mock.patch.object(module, 'download', side_effect=AssertionError('download')),
+              mock.patch.object(module.subprocess, 'run', side_effect=AssertionError('conversion'))):
+            result = module.prepare(self.manifest, root, cache_key_only=True)
+        self.assertEqual(result['stage'], 'identity')
+        self.assertRegex(result['cache_key'], r'^[0-9a-f]{64}$')
+        self.assertIsNone(result['model_dir'])
+        self.assertFalse(root.exists())
+
+    def test_exported_key_tracks_python_and_native_build_and_reuses_new_bundle(self):
+        binary = self.root / 'quantizer'
+        binary.write_bytes(b'fake quantizer')
+        binary.chmod(0o755)
+        keys = set()
+        for python, cache_hash in [('3.12.0', 'a' * 64), ('3.12.1', 'a' * 64), ('3.12.1', 'b' * 64)]:
+            with self.subTest(python=python, cache_hash=cache_hash):
+                self.dependencies['python'] = python
+                build = {'source_checkout': None, 'quantizer_build': {'sha256': cache_hash}}
+                with mock.patch.object(module, 'build_metadata', return_value=build):
+                    exported = self.prepare(quant='q4_k_m', quantizer=binary, cache_key_only=True)
+                    # Each environment change must miss the old *workflow* key,
+                    # permitting actions/cache to save the newly prepared bundle.
+                    self.assertNotIn(exported['cache_key'], keys)
+                    keys.add(exported['cache_key'])
+                    prepared = self.prepare(quant='q4_k_m', quantizer=binary)
+                    self.assertFalse(prepared['cached'])
+                    self.assertEqual(exported['cache_key'], prepared['cache_key'])
+                    with (mock.patch.object(module, 'download', side_effect=AssertionError('download')),
+                          mock.patch.object(module.subprocess, 'run', side_effect=AssertionError('conversion'))):
+                        next_key = self.prepare(quant='q4_k_m', quantizer=binary, cache_key_only=True)
+                        reused = self.prepare(quant='q4_k_m', quantizer=binary, offline=True)
+                    self.assertEqual(next_key['cache_key'], exported['cache_key'])
+                    self.assertTrue(reused['cached'])
+
+    def test_cache_key_cli_emits_same_identity_json(self):
+        manifest = self.root / 'manifest.json'
+        manifest.write_text(json.dumps(self.manifest))
+        output = io.StringIO()
+        with (mock.patch.object(module.sys, 'argv', ['prepare-minimax.py', '--models-root', str(self.root),
+                                                    '--manifest', str(manifest), '--cache-key-only']),
+              mock.patch.object(module.sys, 'stdout', output)):
+            self.assertEqual(module.main(), 0)
+        self.assertEqual(json.loads(output.getvalue())['cache_key'], self.prepare()['cache_key'])
+
     def test_bad_download_cannot_publish_source_or_model(self):
         for content in (b'bad', b'x' * 200):
             with self.subTest(content=content), mock.patch.object(module.urllib.request, 'urlopen', return_value=io.BytesIO(content)):
