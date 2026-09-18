@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecar for the Audio8 codec synthesis stack (Apple-only, additive; synthesis runs on a <codec-decoder>.mlmodelc next to the decoder GGUF when present, else on ggml)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack and the Supertonic vocoder (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -306,6 +306,8 @@ set(TTS_CPP_LIB_SOURCES
     src/supertonic_pace.cpp
     src/supertonic_voice_json.cpp
     src/supertonic_chunker.cpp
+    src/supertonic_coreml_path.cpp
+    src/coreml_sidecar_path.cpp
     # CosyVoice3 (Fun-CosyVoice3-0.5B / 1.5B) — native CPU pipeline.
     # cosyvoice_pipeline.cpp is the shared graph core (LM / DiT flow / HiFT),
     # also used by the cosyvoice-{llm,flow,hift} parity CLIs below.
@@ -425,13 +427,15 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
 
-    # Audio8 Core ML sidecar: ARC objects fold into libtts-cpp; frameworks are
-    # PUBLIC for static consumers.
+    # Core ML sidecars (Audio8 codec + Supertonic vocoder): ARC objects fold
+    # into libtts-cpp; frameworks are PUBLIC for static consumers.
     if (TTS_CPP_COREML)
         find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
         find_library(TTS_CPP_COREML_FRAMEWORK     CoreML     REQUIRED)
 
-        add_library(tts-cpp.coreml OBJECT src/audio8/coreml/codec-synth.mm)
+        add_library(tts-cpp.coreml OBJECT
+            src/audio8/coreml/codec-synth.mm
+            src/supertonic_coreml_vocoder.mm)
         tts_cpp_apply_ccache(tts-cpp.coreml)
         target_include_directories(tts-cpp.coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         set_target_properties(tts-cpp.coreml PROPERTIES
@@ -446,7 +450,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML Audio8 codec sidecar enabled (TTS_CPP_USE_COREML)")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1181,6 +1185,17 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_audio8_codec_coreml.py")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+        # The GGUF helper tests (aliases, quantized counter, stem rule) need
+        # only numpy; the Vocoder rebuild tests additionally need torch and
+        # run in the Core ML export venv (the tts-ci macOS fixture step). A
+        # numpy-less interpreter reports Skipped, never a vacuous pass.
+        add_test(NAME test-supertonic-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_coreml.py")
+        set_property(TEST test-supertonic-coreml-exporter PROPERTY LABELS "unit")
+        set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1686,10 +1701,31 @@ if (TTS_CPP_BUILD_TESTS)
 
     # Model-free on every host: sidecar naming rule and window plan.
     add_executable(test-audio8-coreml-windows test/audio8/test_coreml_windows.cpp
-        src/audio8/coreml_path.cpp)
+        src/audio8/coreml_path.cpp src/coreml_sidecar_path.cpp)
     target_include_directories(test-audio8-coreml-windows PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-coreml-windows)
     tts_cpp_register_test(test-audio8-coreml-windows LABEL "unit")
+
+    # Model-free on every host: the Supertonic vocoder sidecar's naming rule.
+    add_executable(test-supertonic-coreml-path test/test_supertonic_coreml_path.cpp
+        src/supertonic_coreml_path.cpp src/coreml_sidecar_path.cpp)
+    target_include_directories(test-supertonic-coreml-path PRIVATE src)
+    tts_cpp_apply_ccache(test-supertonic-coreml-path)
+    tts_cpp_register_test(test-supertonic-coreml-path LABEL "unit")
+
+    # Self-skips (77) without TTS_CPP_COREML or a staged
+    # SUPERTONIC_COREML_TEST_MODELS_DIR holding a Supertonic GGUF with a
+    # compiled `<model>-vocoder.mlmodelc` next to it; the tts-ci macOS lane
+    # stages the fixture and runs the binary directly so a skip fails.
+    add_executable(test-supertonic-coreml-parity test/test_supertonic_coreml_parity.cpp)
+    target_link_libraries(test-supertonic-coreml-parity PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-parity PRIVATE include src test)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-parity)
+    tts_cpp_register_test(test-supertonic-coreml-parity LABEL "fixture")
+    set_property(TEST test-supertonic-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
     # Self-skips (77) without TTS_CPP_COREML or a staged
     # AUDIO8_COREML_TEST_MODELS_DIR; CI runs the binary directly so a skip fails.

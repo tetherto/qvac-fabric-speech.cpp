@@ -17,6 +17,11 @@
 #include "backend_util.h"
 #include "sched_dispatch.h"
 
+// The Core ML vocoder sidecar (supertonic_coreml_vocoder.h), opaque here so
+// the model struct compiles on every platform; only TTS_CPP_USE_COREML
+// builds ever hold a non-null one.
+struct supertonic_coreml_vocoder_context;
+
 namespace tts_cpp::supertonic::detail {
 
 // round 4 — multi-dtype K/V flash-attention dispatch.
@@ -566,6 +571,14 @@ struct supertonic_model {
     // `mutable` because the cache populates lazily on const-method
     // paths; thread-unsafe by design (one engine per thread).
     mutable std::unordered_map<std::string, std::vector<float>> scalar_weight_cache;
+
+    // Core ML vocoder sidecar (supertonic_coreml_vocoder.h), opaque so the
+    // struct compiles on every platform; only TTS_CPP_USE_COREML builds ever
+    // hold a non-null context.  `vocoder_on_coreml` is the load-status
+    // report: on a metadata-only load it means "a sidecar exists next to the
+    // GGUF", on a real load it means the sidecar initialised.
+    ::supertonic_coreml_vocoder_context * coreml_vocoder = nullptr;
+    bool vocoder_on_coreml = false;
 };
 
 // `f16_weights`:
@@ -831,11 +844,20 @@ bool supertonic_vocoder_forward_cpu(const supertonic_model & model,
                                     std::vector<float> & wav_out,
                                     std::string * error = nullptr);
 
+// `backend_used` (optional) reports which path produced the waveform: the
+// sidecar's compute-unit label (e.g. "coreml-all") or "ggml".
 bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                                      const float * latent,
                                      int latent_len,
                                      std::vector<float> & wav_out,
-                                     std::string * error = nullptr);
+                                     std::string * error = nullptr,
+                                     std::string * backend_used = nullptr);
+
+// Latent frames of causal left context a Core ML vocoder window must carry so
+// every kept output frame matches the full-utterance ggml graph: the vocoder
+// stack's receptive field (embed + dilated ConvNeXt depthwise chain + head
+// convs), converted from post-unpack frames to latent frames (rounded up).
+int supertonic_coreml_vocoder_context_frames(const supertonic_model & model);
 
 bool supertonic_vocoder_trace_scalar(const supertonic_model & model,
                                      const float * latent,
