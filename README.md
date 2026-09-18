@@ -94,6 +94,12 @@ backend for a test arm or comparison and rejects a value that selects no usable
 device. The per-model validation each backend column rests on is documented in
 the [TTS capability table](engines/tts/README.md#capabilities).
 
+CosyVoice3's weight tiers are platform-dependent: `q8_0` LM + `q8_0` flow +
+`f16` HiFT on desktop GPUs, but an `f16` flow on Metal, where the DiT GEMMs
+are compute-bound rather than weight-bandwidth-bound, and a `bf16` flow on
+AVX512-BF16 CPUs with `f16` elsewhere. See the
+[CosyVoice3 guide](engines/tts/docs/cosyvoice3.md).
+
 ### Speech enhancement
 
 | Model | Engine | Task | Rate | Quantization | Backends | Notes |

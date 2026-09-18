@@ -103,7 +103,27 @@ The LM converter applies the same attention fusion to each layer
 (`qkv_proj`, rows q ++ k ++ v): one matvec feeds all three heads per decode
 step. Row-wise quantization makes the fused tensor bit-identical to the
 separate ones, and the engine still loads older GGUFs with separate
-`q/k/v_proj` tensors.
+`q/k/v_proj` tensors. The engine rejects a fused tensor whose row count
+disagrees with the GGUF's own `n_head` / `n_kv` / `head_dim` metadata: the
+Q/K/V slices carry a custom token stride, so a short fused tensor would read
+past the projection output during multi-token prefill rather than fail
+loudly. Because the layout is chosen per GGUF, `test-cosyvoice-xb` reports
+which one the pinned LM carries, so a pass states whether it covered the
+fused matvec or the fallback.
+
+### Metal graph paths
+
+On Metal the engine takes graph shapes chosen from a per-op GPU profile, all
+gated by `test-cosyvoice-xb` and the per-backend harnesses: one
+`FLASH_ATTN_EXT` per layer for single-token LM decode (with the all-zeros
+causal mask elided, which is bitwise identical on every backend), f16 K/V
+operands for the DiT's flash attention, and the DiT's grouped
+`conv_pos_embed` emitted as one batched im2col plus one batched matmul — that
+last one takes the layer pair from roughly 64 dispatches per Euler step to 6.
+The per-group form stays for backends whose im2col fusion needs an unbatched
+2-D signal (Adreno). The vocoder's snake activations emit the fused
+`GGML_OP_SNAKE` every backend implements, which is also worth 1.09x on the
+CPU vocoder decode.
 
 `cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
 the voice-prompt frames as attention conditioning only (the same design

@@ -1298,6 +1298,7 @@ if (TTS_CPP_BUILD_TESTS)
         tts_cpp_register_test(test-cosyvoice-xb
             LABEL    "gpu"
             ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                     "--llm-gguf" "${_tcb_cosy_llm_gguf}"
                      "--flow-gguf" "${_tcb_cosy_flow_gguf}"
                      "--hift-gguf" "${_tcb_cosy_hift_gguf}"
             REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
@@ -1308,6 +1309,7 @@ if (TTS_CPP_BUILD_TESTS)
                 EXE      test-cosyvoice-xb
                 LABEL    "gpu"
                 ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                         "--llm-gguf" "${_tcb_cosy_llm_gguf}"
                          "--flow-gguf" "${_tcb_cosy_flow_gguf}"
                          "--hift-gguf" "${_tcb_cosy_hift_gguf}"
                 REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"

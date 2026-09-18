@@ -505,14 +505,14 @@ ggml_tensor * cosyvoice_conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_t
     return out;
 }
 
-// Same grouped conv1d as conv1d_grouped, emitted as ONE im2col and ONE batched
-// matmul with (group, batch) folded into the matmul batch dims, instead of a
-// dispatch per (group, batch) plus a concat tree.  Arithmetically identical:
-// each output element is the same dot product over the same group slice.  Used
-// where per-dispatch launch overhead dominates the tiny per-group GEMMs
-// (measured on Metal: the conv_pos_embed pair went from ~64 dispatches per
-// Euler step to 6); the per-group form stays for backends whose im2col
-// fusion requires an unbatched 2-D signal (see cosyvoice_conv1d_grouped).
+// Same grouped conv1d as cosyvoice_conv1d_grouped, emitted as ONE im2col and
+// ONE batched matmul with (group, batch) folded into the matmul batch dims,
+// instead of a dispatch per (group, batch) plus a concat tree.  Arithmetically
+// identical: each output element is the same dot product over the same group
+// slice.  Selected where per-dispatch launch overhead dominates the tiny
+// per-group GEMMs; the per-group form stays for backends whose im2col fusion
+// requires an unbatched 2-D signal (see cosyvoice_conv1d_grouped).  Dispatch
+// counts and the backend split are in docs/cosyvoice3.md.
 ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups) {
     const int64_t Nlen = x->ne[0], Cin = x->ne[1], B = x->ne[2];
     const int64_t K = w->ne[0], Cout = w->ne[2];
@@ -554,6 +554,30 @@ static ggml_tensor * rmsnorm(ggml_context * c, ggml_tensor * x, ggml_tensor * w,
 // ===========================================================================
 static std::string lb(int i, const std::string & s) { return "lm/blk/" + std::to_string(i) + "/" + s; }
 
+// Rows a fused qkv_proj must emit for the hyper-parameters in force: q for
+// every head, then k and v for every KV head.
+static int64_t qwen_fused_qkv_rows(const qwen_hp & hp) {
+    return (int64_t)(hp.n_head + 2 * hp.n_kv) * hp.head_dim;
+}
+
+// The hyper-parameters come from the GGUF's KV block, the tensors from its
+// tensor block, and nothing cross-checks them.  The Q/K/V views below carry a
+// custom token stride, so a fused tensor shorter than the heads imply would
+// place the V view past the matmul output -- diagnosed here rather than left
+// to read whatever follows it.
+static void qwen_require_fused_qkv_shape(const model_ctx & m, const qwen_hp & hp, int i) {
+    const int64_t want   = qwen_fused_qkv_rows(hp);
+    const int64_t w_rows = G(m, lb(i, "qkv_proj/weight"))->ne[1];   // [hidden, rows]
+    const int64_t b_rows = G(m, lb(i, "qkv_proj/bias"))->ne[0];     // [rows]
+    if (w_rows == want && b_rows == want) return;
+    throw std::runtime_error(
+        "cosyvoice: " + lb(i, "qkv_proj") + " holds " + std::to_string(w_rows) +
+        " weight rows and " + std::to_string(b_rows) + " bias rows, but n_head=" +
+        std::to_string(hp.n_head) + " n_kv=" + std::to_string(hp.n_kv) +
+        " head_dim=" + std::to_string(hp.head_dim) + " require " + std::to_string(want) +
+        " of each (fused qkv_proj must hold q ++ k ++ v)");
+}
+
 // Layer i's attention projections as [HD, NH|NKV, Lq].  Newer LM GGUFs carry
 // the projections pre-fused as one qkv_proj tensor (rows q ++ k ++ v, the
 // same fusion the flow converter applies to to_qkv): one matvec feeds all
@@ -565,6 +589,7 @@ static void qwen_qkv(ggml_context * c, const model_ctx & m, const qwen_hp & hp, 
                      ggml_tensor ** q, ggml_tensor ** k, ggml_tensor ** v) {
     const int HD = hp.head_dim, NH = hp.n_head, NKV = hp.n_kv;
     if (m.tensors.count(lb(i, "qkv_proj/weight"))) {
+        qwen_require_fused_qkv_shape(m, hp, i);
         ggml_tensor * qkv = ggml_add(c, mul_mat_f32acc(c, G(m, lb(i, "qkv_proj/weight")), h),
                                         G(m, lb(i, "qkv_proj/bias")));
         const size_t es = qkv->nb[0];
