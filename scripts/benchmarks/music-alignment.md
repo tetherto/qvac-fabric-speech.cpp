@@ -113,7 +113,7 @@ python3.12 -m venv .venv-minimax
 quantizer_libraries=()
 while IFS= read -r library; do
   quantizer_libraries+=(--quantizer-library "$library")
-done < <(find "$PWD/ggml-install/lib" -maxdepth 1 -name 'libggml*' \( -name '*.so*' -o -name '*.dylib' \))
+done < <(find "$PWD/ggml-install/lib" -maxdepth 1 \( -name 'libggml*' -o -name 'libqvac-speech-ggml*' \) \( -name '*.so*' -o -name '*.dylib' \))
 .venv-minimax/bin/python scripts/benchmarks/prepare-minimax.py \
   --models-root "$PWD/bench-models" --quant q4_k_m \
   --quantizer "$PWD/build/engines/audiogen/acestep-quantize" \
