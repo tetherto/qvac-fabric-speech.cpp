@@ -91,13 +91,43 @@ older GGUFs with separate `to_q`/`to_k`/`to_v` tensors. `bf16` mode stores
 those same 2D matmul weights as bf16 and the conv kernels as f16, keeping
 the kernel-typed f16 im2col path. Every reduced-precision tier is gated
 against the f32 reference by `test-cosyvoice-{flow,hift}-tier-*`, which
-needs only the two GGUFs staged (no PyTorch fixture). Measured deviations
-on the gate's synthetic inputs (mel cosine / max abs): flow `f16`
-0.99996 / 0.25, `bf16` 0.99967 / 0.99, `q8_0` 0.99983 / 0.66, `q4_0`
-0.98659 / 4.84 — prefer `q8_0` over `q4_0` where the flow size allows.
-The HiFT leg (`f16` waveform cosine 0.999966, max abs 0.0012) pins f0 so
-the gate measures weight precision rather than sine-phase noise. The
-thresholds registered in CMakeLists.txt carry margin over these values.
+needs only the two GGUFs staged (no PyTorch fixture). It drives the stage
+with deliberately synthetic, off-distribution inputs (random-normal mel
+around log-mel statistics), which is what keeps it fixture-free but also
+amplifies the deviation — so what it measures is as much the host CPU
+backend's matmul rounding as it is the tier GGUF, and the same GGUF
+measures differently on the x86 and ARM CPU paths. Both are measured, and
+the bounds registered in CMakeLists.txt are per-arch:
+
+| flow tier | x86-64 cosine / max abs | arm64 cosine / max abs |
+|---|---|---|
+| `f16`  | 0.999961 / 0.246 | 0.999855 / 0.697 |
+| `bf16` | 0.999671 / 0.989 | 0.998686 / 2.990 (not gated, see below) |
+| `q8_0` | 0.999829 / 0.658 | 0.999018 / 2.384 |
+| `q4_0` | 0.986591 / 4.845 | 0.971658 / 4.125 |
+
+(x86-64: Ryzen 9 9950X3D; arm64: Apple M3 Ultra, macOS 15.7, the CPU backend
+of a Metal build. `GGML_LLAMAFILE` does not move these numbers on either
+arch.) Prefer `q8_0` over `q4_0` where the flow size allows. The cosine is
+the tier-integrity signal — a mis-loaded or mis-dequantized tensor collapses
+it far past either column — and the absolute deviation is the host-dependent
+half, which is why the arm64 column gates `q8_0` at max abs 4.0 against the
+x86 column's 2.0. An x86-measured bound applied to ARM is what made
+`test-cosyvoice-flow-tier-q8_0` (2.38 against a 2.0 bound) and
+`-q4_0` (cosine 0.9717 against a 0.98 threshold) fail on Apple silicon.
+
+The `bf16` flow tier is gated on x86-64 only. Neither tinyBLAS nor
+`ggml_vec_dot_bf16` carries an ARM path — both dispatch bf16 on AVX512-BF16,
+AVX512F, AVX2, POWER MMA and RISC-V only — so on arm64 its matmuls fall back
+to a scalar per-element loop and the gate takes 207 s against the `f16`
+tier's 26 s on the M3 Ultra. The tier guidance above already recommends
+`f16` over `bf16` off AVX512-BF16 hosts, so that time would buy coverage of
+a path no ARM build ships.
+
+The HiFT leg pins f0 so the gate measures weight precision rather than
+sine-phase noise; its `f16` waveform deviation is 0.999966 / 0.0012 on
+x86-64 and 0.999427 / 0.0065 on arm64, both inside the single
+0.999 / 0.01 gate it carries on every host.
 
 The LM converter applies the same attention fusion to each layer
 (`qkv_proj`, rows q ++ k ++ v): one matvec feeds all three heads per decode

@@ -970,11 +970,29 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-cosyvoice-tier PRIVATE ggml)
     target_include_directories(test-cosyvoice-tier PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-tier)
-    set(_tcb_cosy_flow_tier_gates
-        "f16|0.998|2.0"
-        "bf16|0.998|2.0"
-        "q8_0|0.998|2.0"
-        "q4_0|0.98|8.0")
+    # The flow gates are per-arch because both metrics measure the host CPU
+    # backend's matmul rounding as much as they measure the tier GGUF: the
+    # harness drives the DiT with deliberately synthetic off-distribution
+    # inputs, so the x86 and ARM quantized paths land on measurably different
+    # deviations from the same weights. A broken tier instead collapses the
+    # cosine, far past either column.
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        # No bf16 row: neither tinyBLAS nor ggml_vec_dot_bf16 carries an ARM
+        # path, so a bf16 tier runs its matmuls as a scalar per-element loop --
+        # 207 s against the f16 tier's 26 s on an M3 Ultra. The tier guidance in
+        # docs/cosyvoice3.md already recommends f16 over bf16 off AVX512-BF16
+        # hosts, so that time would gate a path no ARM build ships.
+        set(_tcb_cosy_flow_tier_gates
+            "f16|0.998|2.0"
+            "q8_0|0.997|4.0"
+            "q4_0|0.96|8.0")
+    else()
+        set(_tcb_cosy_flow_tier_gates
+            "f16|0.998|2.0"
+            "bf16|0.998|2.0"
+            "q8_0|0.998|2.0"
+            "q4_0|0.98|8.0")
+    endif()
     foreach(_tcb_cosy_tier_gate IN LISTS _tcb_cosy_flow_tier_gates)
         string(REPLACE "|" ";" _tcb_cosy_tier_gate "${_tcb_cosy_tier_gate}")
         list(GET _tcb_cosy_tier_gate 0 _tcb_cosy_tier)

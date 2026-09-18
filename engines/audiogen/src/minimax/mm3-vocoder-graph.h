@@ -5,6 +5,7 @@
 #include "backend.h"
 #include "ggml.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -381,6 +382,7 @@ static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L,
     if (g->graph && g->graph_L == L) {
         return true;
     }
+    const auto rebuild_started = std::chrono::steady_clock::now();
     mm3_vocoder_free_graph(g);
 
     const size_t ctx_bytes =
@@ -430,9 +432,13 @@ static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L,
     g->graph_L = L;
 
     const size_t compute_bytes = ggml_backend_sched_get_buffer_size(g->sched, g->backend);
-    fprintf(stderr, "[MM3-Voc] Graph: L=%lld -> %lld samples, %d nodes, %d splits, compute buffer %.0f MB\n",
+    const double rebuild_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rebuild_started).count();
+    fprintf(stderr,
+            "[MM3-Voc] Graph: L=%lld -> %lld samples, %d nodes, %d splits, compute buffer %.0f MB, "
+            "built in %.0f ms\n",
             (long long) L, (long long) g->output->ne[0], ggml_graph_n_nodes(g->graph),
-            ggml_backend_sched_get_n_splits(g->sched), (double) compute_bytes / (1024.0 * 1024.0));
+            ggml_backend_sched_get_n_splits(g->sched), (double) compute_bytes / (1024.0 * 1024.0), rebuild_ms);
     return true;
 }
 

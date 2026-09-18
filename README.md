@@ -38,7 +38,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet-ctc-0.6b` | parakeet | English | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
 | `nvidia/parakeet-ctc-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
 | `ai4bharat/indic-conformer-600m-multilingual` | parakeet | 22 Indic | 600 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan | CTC export by default; `--head rnnt` exports the Transducer branch; CTC requires `--language` / `EngineOptions::language` |
-| `nvidia/parakeet-unified-en-0.6b` | parakeet | English | 600 M | `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | RNN-T decode; offline + buffered streaming + long-form |
+| `nvidia/parakeet-unified-en-0.6b` | parakeet | English | 600 M | `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | RNN-T decode; offline + long-form + cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA | cache-aware streaming at 80/160/320/560/1120 ms; empty language selects `auto` |
@@ -114,7 +114,7 @@ AVX512-BF16 CPUs with `f16` elsewhere. See the
 | ACE-Step v15 turbo | audiogen | text-to-music | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0`, `q4_k_m` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 8 diffusion steps by default |
 | ACE-Step v15 sft | audiogen | text-to-music | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 50 diffusion steps by default |
 | ACE-Step v15 base | audiogen | text-to-music, multi-track (lego) stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 50 diffusion steps by default, `--task lego --track <layer>` |
-| MiniMax-Music3 | audiogen | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM+DiT also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal via `EngineOptions::device`) | 25 fps, 30 flow steps, two GGUF files; `test-minimax-metal-ops` checks Metal condition/vocoder parity on an Apple7+ GPU |
+| MiniMax-Music3 | audiogen | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal via `EngineOptions::device`) | 25 fps, 20 flow steps, two GGUF files; `test-minimax-metal-ops` checks Metal condition/vocoder parity on an Apple7+ GPU |
 
 The Audio8 Core ML sidecar takes the codec's synthesis stack (the stage that
 dominates a CPU synthesis) off ggml; it is exported from the decoder GGUF by

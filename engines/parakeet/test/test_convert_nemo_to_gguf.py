@@ -369,6 +369,57 @@ class ConverterRnntTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("tdt.") for name in names))
 
 
+def unified_streaming_config():
+    config = unified_config()
+    config["encoder"] = {
+        "att_context_style": "chunked_limited_with_rc",
+        "att_context_size": [-1, -1],
+        "att_chunk_context_size": [[70], [13, 1, 2, 7], [0, 1, 2, 3, 4, 7, 13]],
+        "conv_kernel_size": 9,
+        "conv_context_style": "dcc",
+        "causal_downsampling": False,
+    }
+    return config
+
+
+class ConverterUnifiedStreamingTests(unittest.TestCase):
+    def test_writes_unified_streaming_contexts(self):
+        writer = RecordingWriter()
+
+        written = CONVERTER.write_unified_streaming_metadata(
+            writer, unified_streaming_config())
+
+        self.assertTrue(written)
+        self.assertEqual(
+            writer.values["parakeet.unified.left_context_frames"], 70)
+        self.assertEqual(
+            writer.values["parakeet.unified.cache_time_steps"], 4)
+        self.assertEqual(
+            writer.values["parakeet.unified.allowed_chunk_frames"],
+            [1, 2, 7, 13])
+        self.assertEqual(
+            writer.values["parakeet.unified.allowed_right_context_frames"],
+            [0, 1, 2, 3, 4, 7, 13])
+
+    def test_regular_rnnt_writes_no_streaming_contexts(self):
+        writer = RecordingWriter()
+        config = unified_config()
+        config["encoder"] = {"att_context_style": "regular", "conv_kernel_size": 9}
+
+        written = CONVERTER.write_unified_streaming_metadata(writer, config)
+
+        self.assertFalse(written)
+        self.assertFalse(
+            any(name.startswith("parakeet.unified.") for name in writer.values))
+
+    def test_rejects_multiple_left_contexts(self):
+        config = unified_streaming_config()
+        config["encoder"]["att_chunk_context_size"] = [[70, 35], [7], [7]]
+
+        with self.assertRaises(ValueError):
+            CONVERTER.unified_streaming_contexts(config["encoder"])
+
+
 class ConverterNemotronTests(unittest.TestCase):
     def test_detects_prompt_conditioned_nemotron_narrowly(self):
         self.assertEqual(

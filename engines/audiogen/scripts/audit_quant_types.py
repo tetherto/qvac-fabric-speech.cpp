@@ -10,8 +10,9 @@ quantizer's block-size alignment fallback.
 The default deny-list covers the MM3 synth tensors that stay unquantized, as
 the converter names them: the condition encoder, the vocoder, the DiT timestep
 Fourier basis, and the depth decoder's positional embedding, which the depth
-graph views raw. The rest of the depth decoder is pinned at Q8_0, not held at
-source precision, so it is deliberately absent from the list.
+graph views raw. The rest of the depth decoder is quantized, so it is
+deliberately absent from the list: its weights follow the requested variant like
+the DiT, and its acoustic code table is held at Q8_0 for CUDA's get_rows.
 
 usage: audit_quant_types.py in.gguf [deny_substr,deny_substr,...]
 Exit 0 and prints a per-type byte summary plus a deny-list violation list

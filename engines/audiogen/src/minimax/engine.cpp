@@ -251,10 +251,8 @@ GenerateResult Engine::generate(const GenerateParams & params, const ProgressFn 
 
     const int model_max_frames = static_cast<int>(impl_->model.lm_cfg.max_audio_frames);
     const int64_t max_frames = detail::validate_frames(params.max_frames, model_max_frames);
-    const int steps = params.inference_steps > 0
-                          ? params.inference_steps
-                          : static_cast<int>(impl_->model.synth_cfg.flow.steps);
-    if (steps <= 0 || steps > 1000) {
+    const int steps = detail::resolve_flow_steps(params.inference_steps);
+    if (steps > 1000) {
         throw std::invalid_argument("inference steps must be in 1..1000");
     }
     const float cfg_scale =
