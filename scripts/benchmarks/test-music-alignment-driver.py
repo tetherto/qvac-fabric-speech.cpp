@@ -33,6 +33,8 @@ count=len(log.read_text().splitlines()) if log.exists() else 0
 with log.open('a') as f: f.write(json.dumps(args)+'\\n')
 print('generation stdout '+str(count))
 print('generation stderr '+str(count), file=sys.stderr)
+if os.environ.get('MUSIC_TEST_BACKEND'):
+ print('[MM3] Using GPU backend '+os.environ['MUSIC_TEST_BACKEND']+' (device0); CPU handles unsupported ops', file=sys.stderr)
 if os.environ.get('MUSIC_TEST_FAIL')=='1' and count==1: sys.exit(7)
 out=pathlib.Path(args[args.index('--out')+1])
 if '--mode' in args:
@@ -103,6 +105,45 @@ else: out.write_text('{"status":"ok","score":0.25,"provenance":{"test":true}}')
         self.assertEqual(r['status'],'ok')
         self.assertEqual(r['music_alignment']['score'],0.25)
         self.assertIsNone(r['rtf_median'])
+        generation=Path(r['music_alignment']['runs'][0]['artifact_dir'])/'generation.json'
+        self.assertIsNone(json.loads(generation.read_text())['duration_seconds'])
+
+    def test_prepared_minimax_bundle(self):
+        report=self.root/'preparation.json'
+        report.write_text(json.dumps({'status':'ok','stage':'ready',
+                                     'model_dir':str(self.models),'quant':'f16'}))
+        r=self.run_driver('minimax',MINIMAX_PREPARATION_REPORT=str(report))
+        self.assertEqual(r['status'],'ok')
+        self.assertEqual(r['model'],'minimax: f16')
+        self.assertEqual(r['model_preparation']['model_dir'],str(self.models))
+
+    def test_preparation_failure_preserves_stage_and_reason(self):
+        report=self.root/'preparation.json'
+        report.write_text(json.dumps({'status':'preparation-failed','stage':'resources',
+                                     'reason':'Insufficient memory for conversion','model_dir':None}))
+        r=self.run_driver('minimax',MINIMAX_PREPARATION_REPORT=str(report))
+        self.assertEqual(r['status'],'preparation-failed')
+        self.assertEqual(r['model_preparation']['stage'],'resources')
+        self.assertEqual(r['music_alignment']['stage'],'preparation')
+        self.assertIn('Insufficient memory',r['music_alignment']['reason'])
+        self.assertIsNone(r['music_alignment']['score'])
+        self.assertFalse(self.log.exists())
+
+    def test_invalid_preparation_report_does_not_use_stale_local_pair(self):
+        report=self.root/'preparation.json'
+        report.write_text('{truncated')
+        r=self.run_driver('minimax',MINIMAX_PREPARATION_REPORT=str(report))
+        self.assertEqual(r['status'],'preparation-failed')
+        self.assertFalse(self.log.exists())
+
+    def test_minimax_native_gpu_log_attribution(self):
+        for backend in ('CUDA','MTL0','Vulkan0'):
+            with self.subTest(backend=backend):
+                self.log.unlink(missing_ok=True)
+                r=self.run_driver('minimax',MUSIC_DEVICE='gpu',MUSIC_TEST_BACKEND=backend)
+                self.assertEqual(r['backend'],backend)
+                d=Path(r['music_alignment']['runs'][0]['artifact_dir'])
+                self.assertEqual(json.loads((d/'generation.json').read_text())['observed_backend'],backend)
 
     def test_missing_last_wav_is_partial(self):
         r=self.run_driver(MUSIC_TEST_MISSING='1')

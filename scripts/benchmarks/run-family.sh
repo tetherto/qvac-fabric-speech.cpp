@@ -143,6 +143,7 @@ mkdir -p "$MODEL_DIR"
 # has a separate timing baseline from the default performance dispatch.
 MUSIC_ENABLED=0
 MUSIC_RESULT=null
+MODEL_PREPARATION=null
 MUSIC_OUTPUT_DIR=""
 MUSIC_AUDIO_OUT=""
 if [[ "${MUSIC_ALIGNMENT:-0}" == "1" ]] && jq -e --arg f "$FAMILY" '.[$f].music_alignment' "$FAMILIES_JSON" >/dev/null; then
@@ -218,7 +219,7 @@ esac
 emit_json() {
   local status="$1" median="${2:-null}" wmin="${3:-null}" wmax="${4:-null}" extra="${5:-}"
   local uname_s; uname_s="$(uname -s)"
-  if [[ "$MUSIC_ENABLED" == 1 && "$status" != "ok" ]]; then
+  if [[ "$MUSIC_ENABLED" == 1 && "$status" != "ok" && "$status" != "preparation-failed" ]]; then
     MUSIC_RESULT="$(printf '%s' "$MUSIC_RESULT" | jq --arg status "$status" '.reason = ("generation unavailable: " + $status) | .stage = "generation" | .status = (if $status == "missing-model" then "model-missing" else "unavailable" end)')"
   fi
   jq -n \
@@ -251,6 +252,7 @@ emit_json() {
     --argjson correctness_reference "$CORRECTNESS_REF" \
     --argjson tts_intelligibility "$TTS_INTELLIGIBILITY" \
     --argjson music_alignment "$MUSIC_RESULT" \
+    --argjson model_preparation "$MODEL_PREPARATION" \
     --arg  status "$status" \
     --arg  notes  "$NOTES$extra" \
     '{family:$family, model:$model, runner:$runner, os:$os, backend:$backend,
@@ -270,6 +272,7 @@ emit_json() {
       correctness_kind:$correctness_kind,
       correctness_reference:$correctness_reference,
       tts_intelligibility:$tts_intelligibility, music_alignment:$music_alignment,
+      model_preparation:$model_preparation,
       runs:$runs, status:$status, notes:$notes}' > "$OUT"
   echo "wrote $OUT"
   cat "$OUT" >&2
@@ -444,11 +447,34 @@ if [[ "$FAMILY" == "whisper" ]]; then
 fi
 
 fetch_status=0
+if [[ "$FAMILY" == "minimax" && "$MUSIC_ENABLED" != 1 ]]; then
+  emit_json "missing-model" null null null " (MiniMax performance-only invocation is not configured; use MUSIC_ALIGNMENT=1 with a prepared GGUF pair)"; exit 0
+fi
+if [[ "$MUSIC_ENABLED" == 1 && "$FAMILY" == "minimax" && -n "${MINIMAX_PREPARATION_REPORT:-}" ]]; then
+  if ! jq -e 'type == "object" and (.status == "ok" or .status == "preparation-failed")' "$MINIMAX_PREPARATION_REPORT" >/dev/null 2>&1; then
+    MODEL_PREPARATION='{"status":"preparation-failed","stage":"report","reason":"MiniMax preparation did not produce a valid report"}'
+  else
+    MODEL_PREPARATION="$(cat "$MINIMAX_PREPARATION_REPORT")"
+  fi
+  if [[ "$(printf '%s' "$MODEL_PREPARATION" | jq -r '.status')" == "ok" ]]; then
+    prepared_dir="$(printf '%s' "$MODEL_PREPARATION" | jq -r '.model_dir // ""')"
+    if [[ -n "$prepared_dir" && -d "$prepared_dir" ]]; then
+      MUSIC_ALIGNMENT_MODEL_DIR="$prepared_dir"
+      MODEL_LABEL="minimax: $(printf '%s' "$MODEL_PREPARATION" | jq -r '.quant // "unknown"')"
+    else
+      MODEL_PREPARATION='{"status":"preparation-failed","stage":"report","reason":"Prepared MiniMax model directory is missing"}'
+    fi
+  fi
+  if [[ "$(printf '%s' "$MODEL_PREPARATION" | jq -r '.status')" != "ok" ]]; then
+    MUSIC_RESULT="$(printf '%s' "$MUSIC_RESULT" | jq --arg reason "$(printf '%s' "$MODEL_PREPARATION" | jq -r '.reason')" '.stage = "preparation" | .reason = $reason | .status = "unavailable"')"
+    emit_json "preparation-failed" null null null " (MiniMax preparation failed; see model_preparation)"; exit 0
+  fi
+fi
 if [[ "$MUSIC_ENABLED" == 1 && -n "${MUSIC_ALIGNMENT_MODEL_DIR:-}" ]]; then
   MODEL_DIR="$MUSIC_ALIGNMENT_MODEL_DIR"
   if ! python3 "$(dirname "$0")/validate-music-models.py" "$MODEL_DIR" "$FAMILY"; then fetch_status=65; fi
 elif [[ "$MUSIC_ENABLED" == 1 && "$FAMILY" == "minimax" ]]; then
-  # No registry entry exists; accept only provisioned, matching local stages.
+  # S3 is optional; accept a provisioned, matching local GGUF pair.
   if ! python3 "$(dirname "$0")/validate-music-models.py" "$MODEL_DIR" "$FAMILY"; then fetch_status=65; fi
 else
   fetch_models || fetch_status=$?
@@ -456,7 +482,7 @@ fi
 if   [[ $fetch_status -eq 66 ]]; then
   emit_json "not-in-registry" null null null " (whisper $WHISPER_SIZE size not in the model registry)"; exit 0
 elif [[ $fetch_status -eq 65 ]]; then
-  emit_json "missing-model"   null null null " (no S3 path in the registry — follow-up ticket)"; exit 0
+  emit_json "missing-model" null null null " (no usable model files provisioned; MiniMax music diagnostics accept a local matching GGUF pair)"; exit 0
 elif [[ $fetch_status -ne 0 ]]; then
   emit_json "fetch-failed"    null null null " (model fetch failed with status $fetch_status)"; exit 0
 fi
@@ -679,6 +705,11 @@ parse_rss_from_time_stderr() {
 # logs may be truncated mid-init.
 parse_backend_from_logs() {
   local hit f
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    hit="$(grep -oE 'Using GPU backend [A-Za-z0-9_]+' "$f" 2>/dev/null | head -1 | awk '{print $4}' || true)"
+    if [[ -n "$hit" ]]; then echo "$hit"; return; fi
+  done
   for f in "$@"; do
     [[ -f "$f" ]] || continue
     hit="$(grep -oE 'using [A-Za-z0-9_]+ backend' "$f" 2>/dev/null | head -1 | awk '{print $2}' || true)"
@@ -978,7 +1009,7 @@ run_one_time_wrapped() {
   if [[ "$MUSIC_ENABLED" == 1 ]]; then
     jq -n --arg caption "$MUSIC_CAPTION" --arg lyrics "$MUSIC_LYRICS" --arg seed "$MUSIC_SEED" \
       --arg family "$FAMILY" --arg duration "$MUSIC_DURATION" --arg frames "$MUSIC_MAX_FRAMES" \
-      --slurpfile provenance "$MUSIC_ARTIFACTS/generation-provenance.json" --arg model_dir "$MODEL_DIR" --args '{provenance:$provenance[0],caption:$caption,lyrics:$lyrics,seed:$seed,family:$family,duration_seconds:$duration,max_frames:$frames,model_dir:$model_dir,argv:$ARGS.positional}' \
+      --slurpfile provenance "$MUSIC_ARTIFACTS/generation-provenance.json" --arg model_dir "$MODEL_DIR" --args '{provenance:$provenance[0],caption:$caption,lyrics:$lyrics,seed:$seed,family:$family,duration_seconds:(if $family == "minimax" then null else $duration end),max_frames:$frames,model_dir:$model_dir,argv:$ARGS.positional}' \
       -- "$BINARY" "${BENCH_ARGS[@]}" > "$MUSIC_OUTPUT_DIR/generation.json"
   fi
   local start_ns end_ns

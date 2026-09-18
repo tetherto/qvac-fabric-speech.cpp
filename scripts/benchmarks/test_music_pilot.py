@@ -126,6 +126,17 @@ class PilotTests(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertIn('benchmark_source_hashes', pilot['configuration'])
             self.assertIsNotNone(pilot['controls'][0]['mismatch_prompt_id'])
+            repeated = pilot['controls'][1]
+            self.assertEqual(repeated['status'], 'ok')
+            self.assertTrue(repeated['wav_bytes_equal'])
+            self.assertEqual(repeated['original_wav_sha256'], repeated['repeat_wav_sha256'])
+            self.assertEqual(repeated['score_delta'], 0)
+            self.assertEqual(repeated['score_comparison_status'], 'ok')
+            self.assertEqual(repeated['original_result'], pilot['records'][0]['performance_result'])
+            self.assertEqual(repeated['result'], json.loads((root / 'out/p01-17/repeat-result.json').read_text()))
+            reported = summary.summarize(pilot)['controls'][1]
+            self.assertEqual(reported['score_delta'], 0)
+            self.assertTrue(reported['wav_bytes_equal'])
 
     def test_invalid_driver_score_rejected(self):
         for value in (True, float('nan'), float('inf'), 1.1, None, '0.2'):
@@ -202,8 +213,71 @@ class PilotTests(unittest.TestCase):
                                    generation_timeout=1)
             with patch.object(runner, 'run_bounded', side_effect=subprocess.TimeoutExpired('driver', 1)):
                 control = runner.repeat_generation({'prompt_id': 'p1', 'seed': 1}, root, args, {})
-            self.assertEqual(control, {'kind': 'repeat-generation', 'prompt_id': 'p1', 'seed': 1,
-                                       'status': 'timeout'})
+            self.assertEqual(control['status'], 'timeout')
+            self.assertEqual(control['prompt_id'], 'p1')
+            self.assertIsNone(control['wav_bytes_equal'])
+            self.assertIsNone(control['score_delta'])
+            self.assertEqual(control['score_comparison_status'], 'unavailable')
+            self.assertEqual(control['result']['status'], 'scorer-error')
+
+    def test_repeat_generation_evidence_and_failed_controls(self):
+        cases = ('different-wav', 'different-policy', 'different-provenance', 'missing-policy',
+                 'invalid-score', 'missing-wav', 'missing-result', 'failed-driver', 'nonzero-exit')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                args = SimpleNamespace(family='minimax', build_dir=root / 'build', models_root=root / 'models',
+                                       generation_timeout=1)
+                original = root / 'result.music.test/run-1/audio.wav'
+                original.parent.mkdir(parents=True)
+                original.write_bytes(b'original WAV')
+                score = {'status': 'ok', 'score': .25, 'policy_version': 'v1', 'provenance': {'revision': 'v1'}}
+                row = {'prompt_id': 'p1', 'seed': 1, 'score_artifact': score,
+                       'performance_result': {'status': 'ok', 'music_alignment': {'runs': [score]}}}
+
+                def fake_run(command, **kwargs):
+                    destination = Path(command[-1])
+                    repeated = copy.deepcopy(score)
+                    repeated['score'] = .5
+                    if case == 'different-policy':
+                        repeated['policy_version'] = 'v2'
+                    elif case == 'different-provenance':
+                        repeated['provenance']['revision'] = 'v2'
+                    elif case == 'missing-policy':
+                        repeated.pop('policy_version')
+                    elif case == 'invalid-score':
+                        repeated['score'] = 'invalid'
+                    if case != 'missing-wav':
+                        wav = destination.with_suffix('.music.test') / 'run-1/audio.wav'
+                        wav.parent.mkdir(parents=True)
+                        wav.write_bytes(b'changed WAV' if case == 'different-wav' else original.read_bytes())
+                    if case != 'missing-result':
+                        result = {'status': 'ok', 'music_alignment': {'runs': [repeated]}}
+                        if case == 'failed-driver':
+                            result = {'status': 'missing-model', 'notes': 'model unavailable'}
+                        runner.write(destination, result)
+                    return 1 if case == 'nonzero-exit' else 0
+
+                with patch.object(runner, 'run_bounded', side_effect=fake_run):
+                    control = runner.repeat_generation(row, root, args, {})
+                self.assertEqual(control['original_wav_sha256'], runner.digest(original))
+                self.assertEqual(control['original_result'], row['performance_result'])
+                self.assertEqual(control['original_score'], score)
+                if case == 'different-wav':
+                    self.assertFalse(control['wav_bytes_equal'])
+                    self.assertEqual(control['score_delta'], .25)
+                    self.assertEqual(control['score_comparison_status'], 'ok')
+                else:
+                    self.assertIsNone(control['score_delta'])
+                if case in ('different-policy', 'different-provenance', 'missing-policy'):
+                    self.assertEqual(control['score_comparison_status'], 'incompatible-policy')
+                expected_status = {'invalid-score': 'scorer-error', 'missing-wav': 'missing-audio',
+                                   'missing-result': 'missing-result', 'failed-driver': 'missing-model',
+                                   'nonzero-exit': 'run-failed'}.get(case, 'ok')
+                self.assertEqual(control['status'], expected_status)
+                if case == 'missing-wav':
+                    self.assertIsNone(control['repeat_wav_sha256'])
+                    self.assertIsNone(control['wav_bytes_equal'])
 
     def test_manifest_size(self):
         import json

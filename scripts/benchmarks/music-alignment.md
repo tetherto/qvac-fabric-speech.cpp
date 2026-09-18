@@ -52,8 +52,9 @@ MUSIC_ALIGNMENT=1 MUSIC_ALIGNMENT_MODEL_DIR=/path/to/acestep-models \
 
 For MiniMax use `--family minimax` and a directory containing its matching LM and
 synthesis GGUFs. The CLI runs `--mode full` with caption and lyrics; replayed tokens
-are not a prompt-to-music pilot. No MiniMax registry path is invented by this
-change. Unprovisioned models remain an explicit unavailable result.
+are not a prompt-to-music pilot. S3 registration is optional: prepare the models
+from the pinned Hugging Face checkpoint as described below. Unprovisioned models
+remain an explicit unavailable result.
 
 `MUSIC_DEVICE=cpu|gpu` selects the requested generation device (default CPU).
 CLAP itself runs CPU float32, one thread, irrespective of the generator device.
@@ -80,6 +81,103 @@ generation; CLAP preparation, loading and scoring are excluded. Diagnostic and
 default RTF/wall times have different baselines and must not be compared as a
 speedup. Workflow dispatch input `music_alignment=true` enables this path only
 for music families and installs/caches its optional dependencies.
+
+## MiniMax model preparation
+
+MiniMax inference uses GGUF files, while the source download uses safetensors.
+`minimax-model.json` pins the Comfy-Org checkpoint revision, source file sizes and
+SHA-256 hashes. The tokenizer is embedded in the LM checkpoint. The separate
+upstream MiniMax-Music3 Community License is pinned and retained as `LICENSE`;
+it must accompany a prepared model bundle.
+
+Prepare on a large-memory Linux or macOS machine. The current native converter
+retains the LM in float32 plus writer buffers. The conservative cold-conversion
+guard requires **64 GiB available RAM on Linux** (including cgroup limits), or
+64 GiB physical RAM on macOS, and **50 GiB free conversion workspace plus missing
+source downloads** (about 22 GiB). Close other large applications on macOS. These
+are provisioning budgets, not measured minima or inference requirements. The
+guard runs before downloading weights. A smaller inference host can use an
+already-prepared bundle without conversion.
+
+The workflow uses `q4_k_m` to reduce inference memory. The existing engine docs
+estimate this pair at about 7.6 GB, before runtime buffers. Preparation converts
+to f16 first, then quantizes both stages with the native `acestep-quantize` tool;
+it never requantizes an already-q8 pair to q4. Build `mm3-replay` and
+`acestep-quantize` against the normal speech ggml installation first.
+
+```sh
+python3.12 -m venv .venv-minimax
+.venv-minimax/bin/python -m pip install -r scripts/benchmarks/requirements-minimax.txt
+.venv-minimax/bin/python -m pip check
+# Include the shared ggml implementation used by the quantizer in its identity.
+quantizer_libraries=()
+while IFS= read -r library; do
+  quantizer_libraries+=(--quantizer-library "$library")
+done < <(find "$PWD/ggml-install/lib" -maxdepth 1 -name 'libggml*' \( -name '*.so*' -o -name '*.dylib' \))
+.venv-minimax/bin/python scripts/benchmarks/prepare-minimax.py \
+  --models-root "$PWD/bench-models" --quant q4_k_m \
+  --quantizer "$PWD/build/engines/audiogen/acestep-quantize" \
+  "${quantizer_libraries[@]}" \
+  > minimax-preparation.json
+```
+
+Use `--quant f16` or `--quant q8_0` without `--quantizer` for those tiers. Source
+artifacts live under `minimax-sources/`; the final pair, `LICENSE` and
+`provenance.json` live under `minimax/<cache-key>/`. Downloads use temporary files
+and are checked before publication. The cache identity includes source manifest,
+converter/preparer content, locked dependencies, quantizer binary and linked
+ggml library identities; every
+warm-cache run verifies the final pair and license. `--offline` forbids downloads;
+`--verify-only` forbids both downloads and conversion.
+
+Transfer the entire final bundle to a smaller host, preserving all four files.
+Verify it against the same benchmark source revision without installing converter
+dependencies or requiring a matching local quantizer:
+
+```sh
+python3 scripts/benchmarks/prepare-minimax.py --models-root bench-models \
+  --quant q4_k_m --prepared-dir /path/to/prepared-bundle \
+  > minimax-preparation.json
+MUSIC_ALIGNMENT=1 MINIMAX_PREPARATION_REPORT="$PWD/minimax-preparation.json" \
+  scripts/benchmarks/run-family.sh --family minimax --runs 1 --warmup 0 \
+  --build-dir build --models-root "$PWD/bench-models" \
+  --out artifacts/minimax/result.json
+```
+
+The report names the verified directory and quantization. Preparation failures
+produce `preparation-failed` with the failing stage and reason; they never run
+generation against a stale directory. Manually provisioned legacy GGUF pairs can
+still be supplied through `MUSIC_ALIGNMENT_MODEL_DIR`, but lack the preparer's
+source/conversion evidence unless that metadata is also present.
+
+Desktop dispatch with `model_families=minimax,music_alignment=true` attempts
+pinned preparation and caches the final q4 bundle. The optional
+`minimax_model_dir` input points to an already-prepared bundle on the selected
+runner. That directory must survive self-hosted workspace cleanup, so keep it
+outside `GITHUB_WORKSPACE`. The input is shared by the dispatch's selected
+runners; use separate dispatches for different local directory paths. MiniMax
+does not require AWS credentials. Linux requests CPU generation, macOS requests
+GPU generation; logs determine the actual backend. Scoring stays on CPU.
+
+To bootstrap an ephemeral hosted Linux runner, first dispatch macOS at the same
+source revision with `publish_minimax_models=true`. After successful preparation,
+that run publishes `minimax-models-q4_k_m-macos` with the pair, provenance and
+license (seven-day retention). Dispatch Linux with `minimax_artifact_run_id` set
+to that run ID and leave `minimax_model_dir` empty. The workflow downloads the
+bundle using read-only Actions access and verifies it before inference. Imported
+bundles retain their original builder provenance; the local generator binary and
+backend are recorded separately. Publication is opt-in because the artifact is
+several GB. Expired, missing or incompatible artifacts produce explicit
+preparation failures.
+
+Standard hosted Linux runners may not have sufficient RAM/disk for cold
+conversion; a preparation refusal is a visible missing validation lane, not a
+successful benchmark. No downloaded model or measured MiniMax CLAP result is
+included with this implementation. Real generation, warm-cache resource
+measurements, repeat/mismatch controls and listening observations must be attached
+from adequately provisioned hosts. The existing pilot supports a clearly labelled
+partial run with `--limit`, `--controls` and `--repeat-generation`; full-corpus and
+human-listening calibration remain separate reported coverage.
 
 ## Scoring policy
 
