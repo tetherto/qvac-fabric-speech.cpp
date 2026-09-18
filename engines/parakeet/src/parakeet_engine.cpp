@@ -13,6 +13,7 @@
 #include "sentencepiece_bpe.h"
 #include "energy_vad.h"
 #include "long_form.h"
+#include "long_form_encoder.h"
 #include "parakeet_log.h"
 #include "sortformer_finalize.h"
 
@@ -117,6 +118,8 @@ int decode_transducer(const ParakeetCtcModel & model,
         options, result);
 }
 
+}  // namespace
+
 // ── Long-form offline encoder windowing ───────────────────────────────────
 // See EngineOptions::long_form_window_frames and src/long_form.h. The window
 // policy itself (constants + LongFormPlan + the pure resolver) lives in
@@ -150,6 +153,20 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
             opts.long_form_context_frames,
             model.encoder_cfg.subsampling_factor,
             n_mel_frames);
+    } else if (model.model_type == ParakeetModelType::NEMOTRON) {
+        // Nemotron's exact-shape sidecar cannot use the TDT/Unified padded
+        // capacity path. When Core ML is disabled, retain the shipped 11-second
+        // benchmark geometry so the Metal baseline uses the same bounded
+        // window plan instead of the generic multi-GB attention window.
+        constexpr int kNemotronDefaultWindowMelFrames = 1101;
+        const int fixed_mel_frames = model_coreml_fixed_mel_frames(model);
+        coreml = resolve_nemotron_long_form_plan(
+            fixed_mel_frames > 0 ? fixed_mel_frames
+                                 : kNemotronDefaultWindowMelFrames,
+            model.encoder_cfg.att_context_left,
+            model.encoder_cfg.att_context_right,
+            model.encoder_cfg.subsampling_factor,
+            n_mel_frames);
     } else if (model.model_type == ParakeetModelType::EOU) {
         // Exact-shape EOU calls may use Core ML directly, but oversized inputs
         // stay on ggml until windowed causal/chunked attention parity is proven.
@@ -169,12 +186,6 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
     return normal;
 }
 
-struct WindowedEncoderStats {
-    double encoder_ms = 0.0;
-    int coreml_windows = 0;
-    int ggml_windows = 0;
-};
-
 // Bounded-memory replacement for a single full-length run_encoder() call on long
 // inputs. The caller computes the mel once (so per-feature CMVN statistics are
 // global, matching the single-pass path); this slides the encoder over that mel
@@ -192,10 +203,13 @@ int run_encoder_windowed(ParakeetCtcModel & model,
                          WindowedEncoderStats & stats) {
     using clock = std::chrono::steady_clock;
 
-    const int center_mel = plan.center_frames  * plan.sub;
-    const int ctx_mel    = plan.context_frames * plan.sub;
+    const int center_mel = plan.center_frames * plan.sub;
+    const int left_ctx_mel = plan.left_context_frames * plan.sub;
+    const int right_ctx_mel = plan.right_context_frames * plan.sub;
     const std::vector<LongFormWindow> windows =
-        plan_long_form_windows(n_mel_frames, center_mel, ctx_mel);
+        plan_long_form_windows_asymmetric(
+            n_mel_frames, center_mel, left_ctx_mel, right_ctx_mel,
+            plan.exact_mel_frames);
 
     out = EncoderOutputs{};
 
@@ -252,8 +266,6 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         windows.size(), stats.coreml_windows, stats.ggml_windows);
 
     return 0;
-}
-
 }
 
 struct Engine::Impl {
@@ -561,14 +573,15 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
         options.max_symbols_per_step =
             pimpl_->model.nemotron_cfg.max_symbols_per_step;
         RnntDecodeResult result;
-        if (int rc = rnnt_greedy_decode(
-                pimpl_->model,
-                pimpl_->transducer_rt,
-                decoder_input,
-                enc_out.n_enc_frames,
-                enc_out.d_model,
-                options,
-                result); rc != 0) {
+        const int rc = lf.enabled
+            ? rnnt_greedy_decode_chunked(
+                pimpl_->model, pimpl_->transducer_rt, decoder_input,
+                enc_out.n_enc_frames, enc_out.d_model,
+                std::max(1, lf.center_frames), options, result)
+            : rnnt_greedy_decode(
+                pimpl_->model, pimpl_->transducer_rt, decoder_input,
+                enc_out.n_enc_frames, enc_out.d_model, options, result);
+        if (rc != 0) {
             throw std::runtime_error(
                 "parakeet::Engine::transcribe_samples: Nemotron RNNT decode "
                 "failed (rc=" + std::to_string(rc) + ")");

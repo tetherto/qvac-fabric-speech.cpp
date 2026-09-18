@@ -147,7 +147,9 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
 ```
 
 Nemotron supports an exact-shape offline encoder. Export it using `--wav` or
-`--n-mel-frames`; native cache-aware streaming remains on ggml.
+`--n-mel-frames`. Longer offline inputs are split into exact-shape windows with
+the trained asymmetric attention context, bounding both Core ML and fallback
+Metal memory. Native cache-aware streaming remains on ggml.
 
 Unified RNN-T uses the same fixed-capacity contract:
 
@@ -241,8 +243,10 @@ rejected.
 
 Nemotron routing requires the exact exported mel-frame count because its
 causal, chunk-limited attention geometry is baked into the compiled program.
-Native cache-aware streaming stays on ggml. Flexible Nemotron exports are
-rejected.
+The long-form planner shifts boundary windows rather than zero-padding them,
+so every invocation retains the exact sidecar shape and committed centres cover
+the input without gaps or duplication. Native cache-aware streaming stays on
+ggml. Flexible Nemotron exports are rejected.
 
 Sortformer batch routing requires the exact exported mel-frame count because
 its graph has no validity-mask input; shorter and mismatched batch inputs stay

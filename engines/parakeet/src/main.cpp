@@ -11,10 +11,12 @@
 #include "parakeet_tdt.h"
 #include "parakeet_eou.h"
 #include "mel_preprocess.h"
+#include "long_form_encoder.h"
 
 #include "ggml-backend.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -760,13 +762,26 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.dump_mel_path.clear();
         }
 
-        const auto t2 = clock::now();
         EncoderOutputs enc_out;
-        if (int rc = run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
-                                 /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false,
-                                 /*allow_coreml_padded=*/true); rc != 0) return rc;
-        times.enc_ms = ms_since(t2);
+        EngineOptions long_form_opts;
+        const LongFormPlan long_form =
+            resolve_long_form_plan(model, long_form_opts, n_frames);
+        if (long_form.enabled) {
+            std::atomic<bool> cancel_flag{false};
+            WindowedEncoderStats stats;
+            if (int rc = run_encoder_windowed(
+                    model, mel.data(), n_frames, model.mel_cfg.n_mels,
+                    long_form, cancel_flag, enc_out, stats); rc != 0) return rc;
+            times.enc_ms = stats.encoder_ms;
+        } else {
+            const auto t2 = clock::now();
+            if (int rc = run_encoder(
+                    model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
+                    /*max_layers=*/-1,
+                    /*capture_intermediates=*/false,
+                    /*allow_coreml_padded=*/true); rc != 0) return rc;
+            times.enc_ms = ms_since(t2);
+        }
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
 
@@ -880,7 +895,13 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model.encoder_cfg.rnnt_max_symbols_per_step;
             }
             TdtDecodeResult  dres;
-            const int rc = model.model_type != ParakeetModelType::TDT
+            const int rc = model.model_type == ParakeetModelType::NEMOTRON &&
+                           long_form.enabled
+                ? rnnt_greedy_decode_chunked(
+                    model, rt, decoder_input,
+                    enc_out.n_enc_frames, enc_out.d_model,
+                    std::max(1, long_form.center_frames), dopts, dres)
+                : model.model_type != ParakeetModelType::TDT
                 ? rnnt_greedy_decode(
                     model, rt, decoder_input,
                     enc_out.n_enc_frames, enc_out.d_model, dopts, dres)

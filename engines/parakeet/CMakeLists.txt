@@ -1206,6 +1206,12 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
                      "1501" "16" "0.95"
             REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
+        parakeet_register_test(test-nemotron-coreml-long-form
+            LABEL    "fixture;coreml"
+            EXE      test-rnnt-coreml-long-form
+            ARGS     "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}"
+                     "1101" "16" "0.90"
+            REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity
