@@ -213,6 +213,14 @@ struct NemotronLocalePrompt {
     int32_t prompt_id = -1;
 };
 
+struct UnifiedStreamingConfig {
+    bool available = false;
+    int left_context_frames = 0;
+    int cache_time_steps = 0;
+    std::vector<int32_t> allowed_chunk_frames;
+    std::vector<int32_t> allowed_right_context_frames;
+};
+
 struct NemotronConfig {
     int pred_hidden = 0;
     int pred_rnn_layers = 0;
@@ -395,6 +403,7 @@ struct ParakeetCtcModel {
 
     NemotronConfig nemotron_cfg;
     NemotronWeights nemotron;
+    UnifiedStreamingConfig unified_cfg;
 
     ggml_tensor * mel_filterbank = nullptr;
     ggml_tensor * window         = nullptr;
@@ -552,6 +561,7 @@ void print_model_summary(const ParakeetCtcModel & m);
 const char * model_type_name(ParakeetModelType model_type);
 
 void validate_nemotron_model(const ParakeetCtcModel & model);
+void validate_unified_streaming_model(const ParakeetCtcModel & model);
 int32_t resolve_nemotron_prompt_id(
     const ParakeetCtcModel & model,
     const std::string & language);
