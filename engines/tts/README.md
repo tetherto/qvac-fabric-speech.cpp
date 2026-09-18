@@ -132,14 +132,22 @@ consecutive steps), newer LM GGUFs feed it one fused `qkv_proj` matvec, the
 DiT's flash attention takes f16 K/V operands, its grouped `conv_pos_embed`
 collapses from 64 dispatches per Euler step to one batched im2col + matmul,
 and the vocoder's snake activations run as single fused `GGML_OP_SNAKE`
-kernels on every backend. Measured on the same medium utterance (LM `q8_0`,
-543 speech tokens, 21.7 s audio): M3 Ultra end-to-end 5.00 s -> 3.96 s (RTF
-0.234 -> 0.182, 5.5x real time) with LM decode 4.9 -> 3.5 ms/token, DiT
-1435 -> 1332 ms and HiFT decode 185 -> 159 ms on the pinned-trajectory f16
-leg; M4 end-to-end RTF 0.598 -> 0.544 with LM decode 7.1 -> 5.9 ms/token and
-HiFT decode 838 -> 686 ms. The remaining DiT time is machine-rate GEMM and
-flash attention (13+ TFLOPS measured per op), which is why the f16 tier, not
-`q8_0`, is the Metal recommendation.
+kernels on every backend. Measured against the previous revision on an M3
+Ultra with `--greedy`, so both legs decode the identical 550-token trajectory
+(22.0 s audio) and every stage is directly comparable, f16 flow + f16 HiFT
+throughout: end-to-end RTF 0.214 -> 0.179 (4710 -> 3934 ms, 1.20x, 5.6x real
+time), of which LM decode 4.89 -> 3.73 ms/token (1.31x, the flash-attention
+step plus the fused `qkv_proj` GGUF), DiT 1463 -> 1359 ms (1.08x) and HiFT
+decode 190 -> 163 ms (1.17x). On an M4 the same change moves end-to-end RTF
+0.598 -> 0.544 and HiFT decode 838 -> 686 ms (sampled legs, so the
+trajectories differ slightly). The remaining DiT time is machine-rate GEMM
+and flash attention (13+ TFLOPS measured per op), which is why the f16 tier,
+not `q8_0`, is the Metal recommendation: measured on the same machine with
+the HiFT tier held at f16, flow f32 -> f16 moves the DiT 1426 -> 1351 ms
+while f16 -> `q8_0` moves it back to 1403 ms. The f16 HiFT tier is worth
+1.13-1.14x on the vocoder decode there — less than the fused snake above it,
+because Metal's `mul_mm` already stages f32 operands as half, so a narrower
+weight dtype saves bandwidth rather than arithmetic.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --

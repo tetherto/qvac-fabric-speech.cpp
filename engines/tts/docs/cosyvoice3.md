@@ -62,17 +62,25 @@ python3 scripts/convert-campplus-to-gguf.py \
 The LM converter accepts `--dtype {f32,f16,q8_0,q4_0}`, the flow converter
 `--dtype {f32,f16,bf16,q8_0,q4_0}`, and HiFT `f32`/`f16` (its f0 predictor
 stays f32 either way). The recommended desktop GPU tier is LM `q8_0` + flow
-`q8_0` + HiFT `f16`, except on Metal, where flow `f16` wins: the DiT there
-is compute-bound at the GPU's f16 GEMM rate, so `q8_0` saves no time and
-costs a little accuracy (M3 Ultra, pinned trajectory: flow+HiFT f16 1.71 s
-vs q8_0 1.83 s). On CPU the float flow tiers beat `q8_0` once ggml is
-built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml default): flow
-`bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon), flow `f16`
-elsewhere, both with HiFT `f16`. The CPU LM decode is weight-bandwidth
-bound, so LM `q4_0` roughly halves it against `q8_0` (measured 7.5 ->
-4.1 ms/token) where its output quality is acceptable. A quantized HiFT tier
-would gain nothing: like the flow's `q8_0`, quantization applies only to 2-D
-matmul weights, and the vocoder is convolutions end to end. Avoid LM `f16`:
+`q8_0` + HiFT `f16`, except on Metal, where flow `f16` is preferred: the DiT
+there is compute-bound at the GPU's f16 GEMM rate, so `q8_0` buys no wall
+time and costs a little accuracy. Measured on an M3 Ultra against one pinned
+543-token trajectory with HiFT held at `f16`, `f16` leads on the DiT
+(dit_euler 1351 vs 1403 ms) and the two tie on the flow+vocoder wall
+(1734 vs 1728 ms), so the recommendation rests on the DiT margin and the
+accuracy, not on an end-to-end gap. On CPU the float flow tiers beat `q8_0`
+once ggml is built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml
+default): flow `bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon),
+flow `f16` elsewhere, both with HiFT `f16`. On Apple-silicon CPU flow `f16`
+is worth 1.57x on the DiT (23848 -> 15186 ms, 20 threads, same pinned
+trajectory). The CPU LM decode is weight-bandwidth bound, so LM `q4_0`
+roughly halves it against `q8_0` (measured 7.5 -> 4.1 ms/token) where its
+output quality is acceptable. A quantized HiFT tier would gain nothing: like
+the flow's `q8_0`, quantization applies only to 2-D matmul weights, and the
+vocoder is convolutions end to end. The `f16` HiFT tier does help, but
+modestly and only off the critical path people expect: 1.13-1.14x on the
+vocoder decode on Metal, less than the fused snake activations above it,
+because `mul_mm` already stages f32 operands as half there. Avoid LM `f16`:
 the engine reads the embedding tables as f32, so a f16 LM is not loadable
 today — use the quantized LM tiers instead.
 In `q8_0`/`q4_0` mode the flow converter quantizes only the 2D matmul
