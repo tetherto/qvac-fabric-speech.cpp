@@ -153,7 +153,7 @@ def build_metadata(quantizer: Path | None) -> dict:
 def library_identity(paths: list[Path]) -> dict:
     result = {}
     for path in sorted({path.resolve() for path in paths}):
-        if not path.is_file() or not path.name.startswith('libggml'):
+        if not path.is_file() or not path.name.startswith(('libggml', 'libqvac-speech-ggml')):
             raise ValueError(f'expected a ggml shared library: {path}')
         if path.name in result:
             raise ValueError(f'duplicate ggml library name: {path.name}')

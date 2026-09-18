@@ -279,6 +279,28 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(module.PreparationError, 'quantizer-library'):
             self.prepare(quant='q4_k_m', quantizer=binary, quantizer_libraries=[])
 
+    def test_namespaced_ggml_libraries_are_hashed_and_invalidate_cache(self):
+        binary = self.root / 'quantizer'
+        binary.write_bytes(b'fake quantizer')
+        binary.chmod(0o755)
+        for filename in ('libqvac-speech-ggml-base.0.10.2.dylib',
+                         'libqvac-speech-ggml-base.so.0.10.2'):
+            with self.subTest(filename=filename):
+                library = self.root / filename
+                library.write_bytes(b'quantization implementation')
+                arguments = dict(quant='q4_k_m', quantizer=binary,
+                                 quantizer_libraries=[library])
+                identity = self.prepare(**arguments, cache_key_only=True)
+                result = self.prepare(**arguments)
+                self.assertEqual(identity['cache_key'], result['cache_key'])
+                record = json.loads(Path(result['provenance']).read_text())
+                self.assertEqual(record['identity']['quantizer_libraries'][filename]['sha256'],
+                                 hashlib.sha256(library.read_bytes()).hexdigest())
+                self.assertTrue(self.prepare(**arguments, offline=True)['cached'])
+                library.write_bytes(b'updated quantization implementation')
+                changed = self.prepare(**arguments, cache_key_only=True)
+                self.assertNotEqual(identity['cache_key'], changed['cache_key'])
+
     def test_unverified_native_candidates_are_rejected_in_root_and_mm3(self):
         result = self.prepare(quant='f16')
         target = Path(result['model_dir'])
