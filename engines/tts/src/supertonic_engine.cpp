@@ -315,16 +315,19 @@ struct Engine::Impl {
             resolve_voice_source();
 
             // follow-up — opt-in first-synth pre-warm.
-            // Skipped on CPU (no shader-compile cost to amortise)
-            // and on empty `prewarm_text` (the caller didn't ask).
-            // On Vulkan / OpenCL this runs one throwaway synth to
-            // force every per-stage graph cache to populate and
-            // every shader pipeline to compile, so the first
-            // operator-visible `synthesize()` call hits steady-
-            // state latency instead of paying the ~hundreds-of-ms
-            // cold-start hit chatterbox PROGRESS.md measured on
-            // Adreno + RADV.
-            if (!opts.prewarm_text.empty() && !model.backend_is_cpu) {
+            // Skipped on empty `prewarm_text` (the caller didn't ask)
+            // and on CPU without a Core ML vocoder sidecar (nothing
+            // to amortise).  On Vulkan / OpenCL this runs one
+            // throwaway synth to force every per-stage graph cache
+            // to populate and every shader pipeline to compile, so
+            // the first operator-visible `synthesize()` call hits
+            // steady-state latency instead of paying the
+            // ~hundreds-of-ms cold-start hit chatterbox PROGRESS.md
+            // measured on Adreno + RADV.  With a sidecar attached
+            // the same throwaway synth also absorbs Core ML's
+            // first-prediction device specialization, so a CPU
+            // backend warms too.
+            if (!opts.prewarm_text.empty() && wants_warm_up()) {
                 synthesize(opts.prewarm_text);  // discard result
             }
         } catch (...) {
@@ -567,7 +570,7 @@ struct Engine::Impl {
 
         SynthesisResult result;
         result.duration_s  = duration_s;
-        result.vocoder_backend = std::move(vocoder_backend);
+        result.last_vocoder_backend = std::move(vocoder_backend);
         result.pcm.assign(wav_full.begin(),
                           wav_full.begin() + std::min((size_t) wav_len, wav_full.size()));
 
@@ -731,7 +734,7 @@ struct Engine::Impl {
 
             full.pcm.insert(full.pcm.end(), emit.begin(), emit.end());
             full.duration_s += chunk_res.duration_s;
-            full.vocoder_backend = std::move(chunk_res.vocoder_backend);
+            full.last_vocoder_backend = std::move(chunk_res.last_vocoder_backend);
         }
 
         return full;
@@ -739,6 +742,10 @@ struct Engine::Impl {
 
     bool vocoder_on_coreml() const {
         return model.vocoder_on_coreml;
+    }
+
+    bool wants_warm_up() const {
+        return !model.backend_is_cpu || model.vocoder_on_coreml;
     }
 
     std::string backend_name() const {
@@ -793,15 +800,15 @@ void Engine::cancel() {
 
 // follow-up — explicit first-synth pre-warm.
 // Forwards to the in-place `synthesize` and discards the PCM,
-// gated on the same `backend_is_cpu` short-circuit the auto-
+// gated on the same `wants_warm_up()` short-circuit the auto-
 // invoked path at the end of `Impl::Impl` uses.  See the
 // declaration in `tts-cpp/supertonic/engine.h` for the full
 // rationale; the implementation here intentionally keeps the
-// no-op CPU fast path so callers don't have to branch on
-// `backend_device()` themselves.
+// no-op fast path (CPU with no Core ML vocoder sidecar) so
+// callers don't have to branch on `backend_device()` themselves.
 void Engine::warm_up(const std::string & text) {
     if (text.empty()) return;
-    if (pimpl_->model.backend_is_cpu) return;
+    if (!pimpl_->wants_warm_up()) return;
     pimpl_->synthesize(text);  // discard result
 }
 

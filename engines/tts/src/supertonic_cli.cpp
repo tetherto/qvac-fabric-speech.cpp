@@ -260,8 +260,8 @@ int main(int argc, char ** argv) {
             write_wav(out, result.pcm, result.sample_rate);
             fprintf(stderr, "wrote %s (%.2fs @ %d Hz, %zu samples)\n",
                     out.c_str(), result.duration_s, result.sample_rate, result.pcm.size());
-            if (result.vocoder_backend != "ggml") {
-                fprintf(stderr, "vocoder backend: %s\n", result.vocoder_backend.c_str());
+            if (result.last_vocoder_backend != "ggml") {
+                fprintf(stderr, "vocoder backend: %s\n", result.last_vocoder_backend.c_str());
             }
             return 0;
         }

@@ -2984,7 +2984,7 @@ Design notes:
 - Fail-soft everywhere: any sidecar failure falls back to the ggml vocoder;
   `SUPERTONIC_COREML_DISABLE` / `SUPERTONIC_COREML_COMPUTE_UNITS` /
   `SUPERTONIC_COREML_STRICT` mirror the Audio8 knobs. The per-call path is
-  reported on `SynthesisResult::vocoder_backend` and in the bench JSON.
+  reported on `SynthesisResult::last_vocoder_backend` and in the bench JSON.
 
 Measured (supertonic2 f32, M1, 5 steps, 4 threads, GPU, 5 runs / 2 warmups):
 

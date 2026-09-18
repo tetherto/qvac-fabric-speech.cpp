@@ -190,7 +190,7 @@ bundle nor its runtime; `--parity-dir <ref>` checks that rebuild against
 `final_latent.npy` / `wav_full.npy` from `dump-supertonic-reference.py`
 first. With the sidecar present the engine reports it on
 `Engine::vocoder_on_coreml()` at load and per call on
-`SynthesisResult::vocoder_backend`; `supertonic-bench` prints and emits the
+`SynthesisResult::last_vocoder_backend`; `supertonic-bench` prints and emits the
 same label as `vocoder_backend`.
 
 The export is fixed-shape, `--window` latent frames (default 64, 4.46 s,
@@ -217,7 +217,8 @@ prediction error -- falls back to the ggml vocoder for that call.
 gates the sidecar against the ggml vocoder at cosine 0.999 on a padded, an
 exact-window, and a stitched multi-window latent, checks the
 `SUPERTONIC_COREML_DISABLE` fallback, the strict refusal without a sidecar,
-the invalid-sidecar fallback, and runs one public `Engine` synthesis end to
+the invalid-sidecar fallback, that a CPU-backed engine's pre-warm reaches the
+sidecar, and runs one public `Engine` synthesis end to
 end; `test-supertonic-coreml-exporter` unit-tests the PyTorch rebuild
 (causality, unpack layout, squeezed pointwise re-expansion, receptive field,
 stem rule) without a checkpoint.

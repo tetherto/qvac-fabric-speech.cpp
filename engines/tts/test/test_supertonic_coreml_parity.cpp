@@ -31,6 +31,7 @@ int main() {
 #include "tts-cpp/supertonic/engine.h"
 
 #include <filesystem>
+#include <fstream>
 
 using namespace tts_cpp::supertonic::detail;
 namespace fs = std::filesystem;
@@ -153,12 +154,47 @@ void check_engine_report(const std::string & gguf) {
         Engine engine(opts);
         expect(engine.vocoder_on_coreml(), "engine: vocoder_on_coreml() is false");
         SynthesisResult result = engine.synthesize("Core ML parity check.");
-        expect(result.vocoder_backend.rfind("coreml", 0) == 0,
-               "engine: SynthesisResult::vocoder_backend is " + result.vocoder_backend);
+        expect(result.last_vocoder_backend.rfind("coreml", 0) == 0,
+               "engine: SynthesisResult::last_vocoder_backend is " + result.last_vocoder_backend);
         expect(!result.pcm.empty(), "engine: empty PCM");
     } catch (const std::exception & e) {
         fail(std::string("engine synthesis: ") + e.what());
     }
+}
+
+// A CPU-backed engine (n_gpu_layers = 0) with a sidecar attached must warm it:
+// the ctor pre-warm's vocoder pass shows up as a "vocoder,coreml" profile row
+// before any operator-visible synthesize().
+void check_cpu_warm_up_reaches_sidecar(const std::string & gguf) {
+    using tts_cpp::supertonic::Engine;
+    using tts_cpp::supertonic::EngineOptions;
+    std::error_code ec;
+    const fs::path csv = fs::temp_directory_path(ec) / "supertonic-coreml-warmup.csv";
+    fs::remove(csv, ec);
+    supertonic_profile_csv_set_path(csv.string().c_str());
+    try {
+        EngineOptions opts;
+        opts.model_gguf_path = gguf;
+        opts.n_threads = N_THREADS;
+        opts.prewarm_text = "Warm up the vocoder sidecar.";
+        Engine engine(opts);
+        expect(engine.vocoder_on_coreml(), "warm-up: sidecar not attached");
+    } catch (const std::exception & e) {
+        fail(std::string("warm-up engine: ") + e.what());
+    }
+    supertonic_profile_csv_set_path(nullptr);
+    std::ifstream rows(csv);
+    std::string line;
+    bool warmed = false;
+    while (std::getline(rows, line)) {
+        if (line.rfind("vocoder,coreml,", 0) == 0) {
+            warmed = true;
+            break;
+        }
+    }
+    expect(warmed, "warm-up: the ctor pre-warm left the Core ML vocoder cold "
+                   "(no vocoder,coreml profile row)");
+    fs::remove(csv, ec);
 }
 
 void check_disabled_fallback(const std::string & gguf, int latent_len) {
@@ -273,6 +309,7 @@ int main() {
     check_disabled_fallback(gguf, std::max(1, window / 2));
     check_invalid_sidecar(gguf, std::max(1, window / 2));
     check_engine_report(gguf);
+    check_cpu_warm_up_reaches_sidecar(gguf);
 
     if (g_failures == 0) {
         std::printf("test_supertonic_coreml_parity: OK\n");
