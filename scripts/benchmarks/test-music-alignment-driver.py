@@ -136,6 +136,38 @@ else: out.write_text('{"status":"ok","score":0.25,"provenance":{"test":true}}')
         self.assertEqual(r['status'],'preparation-failed')
         self.assertFalse(self.log.exists())
 
+    def test_successful_preparation_report_requires_existing_model_directory(self):
+        missing = self.root / 'disappeared-models'
+        missing.mkdir()
+        missing.rmdir()
+        for fields in ({}, {'model_dir': None}, {'model_dir': str(missing)}):
+            with self.subTest(fields=fields):
+                report = self.root / 'preparation.json'
+                report.write_text(json.dumps({'status': 'ok', 'quant': 'f16', **fields}))
+                result = self.run_driver('minimax', MINIMAX_PREPARATION_REPORT=str(report))
+                self.assertEqual(result['status'], 'preparation-failed')
+                self.assertEqual(result['model_preparation']['stage'], 'report')
+                self.assertEqual(result['model_preparation']['reason'], 'Prepared MiniMax model directory is missing')
+                self.assertEqual(result['music_alignment']['reason'], result['model_preparation']['reason'])
+                self.assertIsNone(result['music_alignment']['score'])
+                self.assertFalse(self.log.exists())
+
+    def test_pilot_fingerprints_reject_model_changes_before_generation(self):
+        cache = self.root / 'model-fingerprints.json'
+        first = self.run_driver('minimax', MUSIC_MODEL_FINGERPRINT_CACHE=str(cache))
+        self.assertEqual(first['status'], 'ok')
+        self.assertTrue(cache.is_file())
+        original_cache = cache.read_bytes()
+        self.log.unlink()
+        second = self.run_driver('minimax', MUSIC_MODEL_FINGERPRINT_CACHE=str(cache))
+        self.assertEqual(second['status'], 'ok')
+        self.assertEqual(cache.read_bytes(), original_cache)
+        self.log.unlink()
+        (self.models / 'mm3-lm-f16.gguf').write_bytes(b'GGUFchanged-model-payload')
+        changed = self.run_driver('minimax', MUSIC_MODEL_FINGERPRINT_CACHE=str(cache))
+        self.assertEqual(changed['status'], 'run-failed')
+        self.assertFalse(self.log.exists())
+
     def test_minimax_native_gpu_log_attribution(self):
         for backend in ('CUDA','MTL0','Vulkan0'):
             with self.subTest(backend=backend):

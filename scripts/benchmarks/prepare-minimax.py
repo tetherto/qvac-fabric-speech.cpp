@@ -23,6 +23,11 @@ REPO = HERE.parent.parent
 CONVERTER = REPO / 'engines/audiogen/scripts/convert-minimax-music3-to-gguf.py'
 DEFAULT_MANIFEST = HERE / 'minimax-model.json'
 CHUNK = 8 * 1024 * 1024
+DOWNLOAD_TIMEOUT_SECONDS = 120
+MODEL_ROLES = ('lm', 'synth')
+SOURCE_ROLES = ('lm', 'dit', 'vocoder')
+IMPORTED_IDENTITY_FIELDS = ('manifest', 'quant', 'converter_sha256', 'preparer_sha256',
+                            'requirements_sha256')
 
 
 class PreparationError(RuntimeError):
@@ -92,9 +97,11 @@ def matches(path: Path, item: dict) -> bool:
     return path.is_file() and path.stat().st_size == item['size'] and digest(path) == item['sha256']
 
 
-def download(item: dict, spec: dict, target: Path, offline: bool, opener=None) -> None:
+def download(item: dict, spec: dict, target: Path, offline: bool, opener=None,
+             verified: bool | None = None) -> None:
     destination = safe_path(target, item['path'])
-    if matches(destination, item):
+    source_verified = matches(destination, item) if verified is None else verified
+    if source_verified:
         return
     if offline:
         raise PreparationError('download', f'offline source missing or corrupt: {item["path"]}')
@@ -107,7 +114,7 @@ def download(item: dict, spec: dict, target: Path, offline: bool, opener=None) -
         temporary = Path(stream.name)
     try:
         value, size = hashlib.sha256(), 0
-        with opener(url, timeout=120) as response, temporary.open('wb') as stream:
+        with opener(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response, temporary.open('wb') as stream:
             for chunk in iter(lambda: response.read(CHUNK), b''):
                 size += len(chunk)
                 if size > item['size']:
@@ -175,7 +182,6 @@ def memory_bytes() -> int:
     if sys.platform == 'linux':
         info = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
         available = int(info['MemAvailable'].strip().split()[0]) * 1024
-        # Respect common cgroup v2/v1 limits instead of checking host RAM alone.
         for limit_file, used_file in [('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
                                       ('/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes')]:
             try:
@@ -186,7 +192,6 @@ def memory_bytes() -> int:
                 pass
         return available
     if sys.platform == 'darwin':
-        # Physical RAM is a capacity check on macOS; close other heavy workloads.
         return int(subprocess.check_output(['sysctl', '-n', 'hw.memsize'], text=True))
     raise ValueError('resource preflight supports Linux and macOS')
 
@@ -254,142 +259,203 @@ def cache_lock(root: Path):
         yield
 
 
-def prepare(spec: dict, root: Path, quant: str = 'q8_0', *, offline: bool = False,
-            verify_only: bool = False, quantizer: Path | None = None,
-            prepared_dir: Path | None = None, quantizer_libraries: list[Path] | None = None,
-            cache_key_only: bool = False) -> dict:
-    stage = 'manifest'
+@contextlib.contextmanager
+def preparation_stage(name: str):
     try:
-        validate(spec)
-        if quant not in ('f16', 'q8_0', 'q4_k_m'):
-            raise ValueError('unsupported quantization')
-        if prepared_dir is not None:
-            stage = 'cache'
-            target = prepared_dir.resolve()
-            record = json.loads(safe_path(target, 'provenance.json').read_text())
-            identity = record['identity']
-            expected = cache_identity(spec, quant, {}, None)
-            # A low-memory inference runner may consume another platform's
-            # converted pair, retaining that builder's software provenance.
-            for name in ('manifest', 'quant', 'converter_sha256', 'preparer_sha256',
-                         'requirements_sha256'):
-                if identity.get(name) != expected[name]:
-                    raise ValueError(f'prepared pair has incompatible {name}')
-            dependencies = identity.get('dependencies', {})
-            if dependencies.get('versions') != locked_versions():
-                raise ValueError('prepared pair has incompatible converter dependency versions')
-            support = dependencies.get('gguf_sources')
-            if (not isinstance(support, dict) or not support or
-                    any(not re.fullmatch(r'[0-9a-f]{64}', value) for value in support.values())):
-                raise ValueError('prepared pair lacks GGUF support source hashes')
-            quantizer_hash = identity.get('quantizer_sha256')
-            if quant == 'q4_k_m' and not re.fullmatch(r'[0-9a-f]{64}', quantizer_hash or ''):
-                raise ValueError('prepared q4 pair lacks quantizer provenance')
-            libraries = identity.get('quantizer_libraries')
-            if quant == 'q4_k_m' and (not isinstance(libraries, dict) or not libraries or any(
-                    not isinstance(item, dict) or not re.fullmatch(r'[0-9a-f]{64}', item.get('sha256', ''))
-                    or type(item.get('size')) is not int or item['size'] <= 0 for item in libraries.values())):
-                raise ValueError('prepared q4 pair lacks ggml library provenance')
-            if not verify_pair(target, identity):
-                raise ValueError('prepared GGUF pair missing, incomplete, corrupt or incompatible')
-            return {'status': 'ok', 'stage': 'verified', 'reason': None, 'cached': True,
-                    'model_dir': str(target), 'cache_key': record['cache_key'], 'quant': quant,
-                    'provenance': str(target / 'provenance.json')}
-        if quant == 'q4_k_m' and (quantizer is None or not quantizer.is_file() or not os.access(quantizer, os.X_OK)):
-            raise ValueError('q4_k_m requires --quantizer pointing to an executable acestep-quantize')
-        if quant == 'q4_k_m' and not quantizer_libraries:
-            raise ValueError('q4_k_m requires --quantizer-library for every ggml shared library used by acestep-quantize')
-        quantizer = quantizer.resolve() if quant == 'q4_k_m' else None
-        stage = 'dependencies'
-        build = build_metadata(quantizer)
-        libraries = library_identity(quantizer_libraries or []) if quantizer else {}
-        identity = cache_identity(spec, quant, dependency_identity(), quantizer, libraries, build['quantizer_build'])
-        key = json_digest(identity)
-        if cache_key_only:
-            # The workflow resolves this after dependency installation/native
-            # build and before cache restore, using exactly the preparation key.
-            # No model cache access, resource check, download or conversion.
-            return {'status': 'ok', 'stage': 'identity', 'reason': None,
-                    'cache_key': key, 'quant': quant, 'model_dir': None,
-                    'provenance': None, 'cached': False}
-        # Resolve user-selected root, then reject symlinks within this owned cache.
+        yield
+    except PreparationError:
+        raise
+    except Exception as error:
+        raise PreparationError(name, str(error)) from error
+
+
+def verified_result(target: Path, key: str, quant: str, cached: bool) -> dict:
+    return {'status': 'ok', 'stage': 'verified', 'reason': None, 'cached': cached,
+            'model_dir': str(target), 'cache_key': key, 'quant': quant,
+            'provenance': str(target / 'provenance.json')}
+
+
+def validate_imported_dependencies(identity: dict) -> None:
+    dependencies = identity.get('dependencies', {})
+    if dependencies.get('versions') != locked_versions():
+        raise ValueError('prepared pair has incompatible converter dependency versions')
+    support = dependencies.get('gguf_sources')
+    if (not isinstance(support, dict) or not support or
+            any(not re.fullmatch(r'[0-9a-f]{64}', value) for value in support.values())):
+        raise ValueError('prepared pair lacks GGUF support source hashes')
+
+
+def validate_imported_quantizer(identity: dict) -> None:
+    if not re.fullmatch(r'[0-9a-f]{64}', identity.get('quantizer_sha256') or ''):
+        raise ValueError('prepared q4 pair lacks quantizer provenance')
+    libraries = identity.get('quantizer_libraries')
+    if not isinstance(libraries, dict) or not libraries:
+        raise ValueError('prepared q4 pair lacks ggml library provenance')
+    for item in libraries.values():
+        if (not isinstance(item, dict) or not re.fullmatch(r'[0-9a-f]{64}', item.get('sha256', ''))
+                or type(item.get('size')) is not int or item['size'] <= 0):
+            raise ValueError('prepared q4 pair lacks ggml library provenance')
+
+
+def verify_imported_pair(spec: dict, quant: str, target: Path) -> dict:
+    with preparation_stage('cache'):
+        target = target.resolve()
+        record = json.loads(safe_path(target, 'provenance.json').read_text())
+        identity = record['identity']
+        expected = cache_identity(spec, quant, {}, None)
+        for name in IMPORTED_IDENTITY_FIELDS:
+            if identity.get(name) != expected[name]:
+                raise ValueError(f'prepared pair has incompatible {name}')
+        validate_imported_dependencies(identity)
+        if quant == 'q4_k_m':
+            validate_imported_quantizer(identity)
+        if not verify_pair(target, identity):
+            raise ValueError('prepared GGUF pair missing, incomplete, corrupt or incompatible')
+        return verified_result(target, record['cache_key'], quant, True)
+
+
+def select_quantizer(quant: str, quantizer: Path | None, libraries: list[Path]) -> Path | None:
+    if quant != 'q4_k_m':
+        return None
+    if quantizer is None or not quantizer.is_file() or not os.access(quantizer, os.X_OK):
+        raise ValueError('q4_k_m requires --quantizer pointing to an executable acestep-quantize')
+    if not libraries:
+        raise ValueError('q4_k_m requires --quantizer-library for every ggml shared library used by acestep-quantize')
+    return quantizer.resolve()
+
+
+def prepare_sources(spec: dict, root: Path, source: Path, offline: bool) -> None:
+    with preparation_stage('preflight'):
+        verified = {item['path']: matches(safe_path(source, item['path']), item)
+                    for item in spec['files']}
+        missing = sum(item['size'] for item in spec['files'] if not verified[item['path']])
+        if offline and missing:
+            raise PreparationError('download', 'offline source cache missing or corrupt')
+        preflight(spec, root, missing)
+        source.mkdir(parents=True, exist_ok=True)
+    with preparation_stage('download'):
+        download_sources(spec, source, offline, verified)
+
+
+def download_sources(spec: dict, source: Path, offline: bool, verified: dict) -> None:
+    for item in spec['files']:
+        print(f'[prepare-minimax] verifying source {item["path"]}', file=sys.stderr, flush=True)
+        download(item, spec, source, offline, verified=verified[item['path']])
+
+
+def convert_sources(spec: dict, source: Path, staging: Path, quant: str) -> list[str]:
+    conversion_quant = 'f16' if quant == 'q4_k_m' else quant
+    command = [sys.executable, str(CONVERTER), '--out', str(staging), '--quant', conversion_quant]
+    for item in spec['files']:
+        if item['role'] in SOURCE_ROLES:
+            command.extend(['--src', str(source / item['path'])])
+    subprocess.run(command, check=True, stdout=sys.stderr, stderr=sys.stderr)
+    return command
+
+
+def quantize_pair(staging: Path, quant: str, quantizer: Path) -> list[list[str]]:
+    commands = []
+    for role in MODEL_ROLES:
+        original = staging / f'mm3-{role}-f16.gguf'
+        command = [str(quantizer), str(original), str(staging / f'mm3-{role}-{quant}.gguf'), 'Q4_K_M']
+        subprocess.run(command, check=True, stdout=sys.stderr, stderr=sys.stderr)
+        original.unlink()
+        commands.append(command)
+    return commands
+
+
+def verify_outputs(staging: Path, quant: str) -> dict:
+    outputs = {}
+    for role in MODEL_ROLES:
+        name = f'mm3-{role}-{quant}.gguf'
+        path = staging / name
+        with path.open('rb') as stream:
+            if stream.read(4) != b'GGUF' or path.stat().st_size <= 24:
+                raise ValueError(f'converter did not produce a GGUF: {name}')
+        outputs[name] = {'sha256': digest(path), 'size': path.stat().st_size}
+    return outputs
+
+
+def write_preparation_record(spec: dict, source: Path, staging: Path, identity: dict,
+                             build: dict, commands: list[list[str]], outputs: dict) -> None:
+    license_item = next(item for item in spec['files'] if item['role'] == 'license')
+    shutil.copyfile(source / license_item['path'], staging / 'LICENSE')
+    record = {'schema_version': 1, 'cache_key': json_digest(identity), 'identity': identity,
+              'outputs': outputs, 'source_dir': str(source),
+              'conversion_command': commands[0], 'commands': commands,
+              'source_checkout': build['source_checkout'], 'license': spec['license']}
+    (staging / 'provenance.json').write_text(json.dumps(record, indent=2) + '\n')
+
+
+def publish_pair_provenance_last(staging: Path, target: Path, outputs: dict) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    safe_path(target, 'provenance.json').unlink(missing_ok=True)
+    for name in (*outputs, 'LICENSE', 'provenance.json'):
+        (staging / name).replace(safe_path(target, name))
+
+
+def build_pair(spec: dict, source: Path, target: Path, identity: dict, build: dict,
+               quantizer: Path | None) -> None:
+    quant = identity['quant']
+    with preparation_stage('conversion'):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=target.parent, prefix=f'.{target.name}-')
+    with temporary as directory:
+        staging = Path(directory)
+        with preparation_stage('conversion'):
+            commands = [convert_sources(spec, source, staging, quant)]
+        if quantizer:
+            with preparation_stage('quantization'):
+                commands.extend(quantize_pair(staging, quant, quantizer))
+        with preparation_stage('output-verification'):
+            outputs = verify_outputs(staging, quant)
+            write_preparation_record(spec, source, staging, identity, build, commands, outputs)
+        with preparation_stage('publication'):
+            publish_pair_provenance_last(staging, target, outputs)
+
+
+def prepare_cached_pair(spec: dict, root: Path, identity: dict, build: dict,
+                        quantizer: Path | None, offline: bool, verify_only: bool) -> dict:
+    key, quant = json_digest(identity), identity['quant']
+    with preparation_stage('cache'):
         root = root.resolve()
         root.mkdir(parents=True, exist_ok=True)
         target = safe_path(root, f'minimax/{key}')
         source = safe_path(root, f'minimax-sources/{json_digest(spec)}')
-        stage = 'cache'
         with cache_lock(root):
             extras = extra_model_candidates(target, quant)
             if extras:
                 raise PreparationError('cache', f'unverified MiniMax candidates in model cache: {extras}')
-            cached = verify_pair(target, identity)
-            if cached:
-                return {'status': 'ok', 'stage': 'verified', 'reason': None, 'cached': True,
-                        'model_dir': str(target), 'cache_key': key, 'quant': quant,
-                        'provenance': str(target / 'provenance.json')}
+            if verify_pair(target, identity):
+                return verified_result(target, key, quant, True)
             if verify_only:
                 raise PreparationError('cache', 'verified GGUF pair missing, incomplete, corrupt or incompatible')
-            stage = 'preflight'
-            missing = sum(item['size'] for item in spec['files']
-                          if not matches(safe_path(source, item['path']), item))
-            if offline and missing:
-                raise PreparationError('download', 'offline source cache missing or corrupt')
-            preflight(spec, root, missing)
-            source.mkdir(parents=True, exist_ok=True)
-            stage = 'download'
-            for item in spec['files']:
-                print(f'[prepare-minimax] verifying source {item["path"]}', file=sys.stderr, flush=True)
-                download(item, spec, source, offline)
-            stage = 'conversion'
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(dir=target.parent, prefix=f'.{key}-') as temporary:
-                staging = Path(temporary)
-                conversion_quant = 'f16' if quant == 'q4_k_m' else quant
-                command = [sys.executable, str(CONVERTER), '--out', str(staging), '--quant', conversion_quant]
-                # Explicit files prevent unpinned files in a shared source cache entering conversion.
-                for item in spec['files']:
-                    if item['role'] in ('lm', 'dit', 'vocoder'):
-                        command.extend(['--src', str(source / item['path'])])
-                commands = [command]
-                subprocess.run(command, check=True, stdout=sys.stderr, stderr=sys.stderr)
-                if quantizer:
-                    stage = 'quantization'
-                    for role in ('lm', 'synth'):
-                        original = staging / f'mm3-{role}-f16.gguf'
-                        quantization_command = [str(quantizer), str(original), str(staging / f'mm3-{role}-{quant}.gguf'), 'Q4_K_M']
-                        commands.append(quantization_command)
-                        subprocess.run(quantization_command, check=True, stdout=sys.stderr, stderr=sys.stderr)
-                        original.unlink()
-                stage = 'output-verification'
-                outputs = {}
-                for role in ('lm', 'synth'):
-                    name = f'mm3-{role}-{quant}.gguf'
-                    path = staging / name
-                    with path.open('rb') as stream:
-                        if stream.read(4) != b'GGUF' or path.stat().st_size <= 24:
-                            raise ValueError(f'converter did not produce a GGUF: {name}')
-                    outputs[name] = {'sha256': digest(path), 'size': path.stat().st_size}
-                license_item = next(item for item in spec['files'] if item['role'] == 'license')
-                shutil.copyfile(source / license_item['path'], staging / 'LICENSE')
-                record = {'schema_version': 1, 'cache_key': key, 'identity': identity,
-                          'outputs': outputs, 'source_dir': str(source),
-                          'conversion_command': command, 'commands': commands,
-                          'source_checkout': build['source_checkout'], 'license': spec['license']}
-                (staging / 'provenance.json').write_text(json.dumps(record, indent=2) + '\n')
-                # The lock excludes readers in this preparer. Invalidate metadata before
-                # replacement; provenance is always published after both complete GGUFs.
-                stage = 'publication'
-                target.mkdir(parents=True, exist_ok=True)
-                safe_path(target, 'provenance.json').unlink(missing_ok=True)
-                for name in (*outputs, 'LICENSE', 'provenance.json'):
-                    (staging / name).replace(safe_path(target, name))
-            return {'status': 'ok', 'stage': 'verified', 'reason': None, 'cached': False,
-                    'model_dir': str(target), 'cache_key': key, 'quant': quant,
-                    'provenance': str(target / 'provenance.json')}
-    except PreparationError:
-        raise
-    except Exception as error:
-        raise PreparationError(stage, str(error)) from error
+            prepare_sources(spec, root, source, offline)
+            build_pair(spec, source, target, identity, build, quantizer)
+        return verified_result(target, key, quant, False)
+
+
+def prepare(spec: dict, root: Path, quant: str = 'q8_0', *, offline: bool = False,
+            verify_only: bool = False, quantizer: Path | None = None,
+            prepared_dir: Path | None = None, quantizer_libraries: list[Path] | None = None,
+            cache_key_only: bool = False) -> dict:
+    with preparation_stage('manifest'):
+        validate(spec)
+        if quant not in ('f16', 'q8_0', 'q4_k_m'):
+            raise ValueError('unsupported quantization')
+    if prepared_dir is not None:
+        return verify_imported_pair(spec, quant, prepared_dir)
+    with preparation_stage('manifest'):
+        quantizer = select_quantizer(quant, quantizer, quantizer_libraries or [])
+    with preparation_stage('dependencies'):
+        build = build_metadata(quantizer)
+        libraries = library_identity(quantizer_libraries or []) if quantizer else {}
+        identity = cache_identity(spec, quant, dependency_identity(), quantizer, libraries, build['quantizer_build'])
+    if cache_key_only:
+        return {'status': 'ok', 'stage': 'identity', 'reason': None,
+                'cache_key': json_digest(identity), 'quant': quant, 'model_dir': None,
+                'provenance': None, 'cached': False}
+    return prepare_cached_pair(spec, root, identity, build, quantizer, offline, verify_only)
 
 
 def main() -> int:

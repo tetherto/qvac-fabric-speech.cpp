@@ -7,6 +7,7 @@ Checkpoint identity names the original checkpoint, shared by quantized variants.
 """
 import argparse
 import hashlib
+import importlib.util
 from itertools import product
 import json
 import math
@@ -155,10 +156,32 @@ def build_environment(args, config):
     env = os.environ.copy()
     env.update(MUSIC_ALIGNMENT='1', MUSIC_DEVICE=str(config['backend']).lower(), MUSIC_ALIGNMENT_MODEL=str(args.scorer_model_dir.resolve()),
                MUSIC_ALIGNMENT_MANIFEST=str(args.scorer_manifest.resolve()),
-               MUSIC_ALIGNMENT_TIMEOUT=str(args.scorer_timeout))
+               MUSIC_ALIGNMENT_TIMEOUT=str(args.scorer_timeout),
+               MUSIC_MODEL_FINGERPRINT_CACHE=str(args.out_dir.resolve() / 'model-fingerprints.json'))
     if args.model_dir:
         env['MUSIC_ALIGNMENT_MODEL_DIR'] = str(args.model_dir.resolve())
     return env
+
+
+def load_benchmark_module(name):
+    spec = importlib.util.spec_from_file_location(name, HERE / (name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def initialize_model_fingerprints(args, env):
+    root = Path(env.get('MUSIC_ALIGNMENT_MODEL_DIR') or args.models_root / args.family)
+    report = env.get('MINIMAX_PREPARATION_REPORT') if args.family == 'minimax' else None
+    if report:
+        preparation = extract_score(Path(report))
+        if not isinstance(preparation, dict) or preparation.get('status') != 'ok' or not preparation.get('model_dir'):
+            return
+        root = Path(preparation['model_dir'])
+    validator = load_benchmark_module('validate-music-models')
+    if validator.validate(root, args.family):
+        generation = load_benchmark_module('music-generation-provenance')
+        generation.model_identities(root, Path(env['MUSIC_MODEL_FINGERPRINT_CACHE']))
 
 
 def build_record_environment(env, prompt, seed, settings):
@@ -311,6 +334,7 @@ def main():
     args, manifest, config = parse_inputs()
     pilot = prepare_pilot(args, manifest, config)
     env = build_environment(args, config)
+    initialize_model_fingerprints(args, env)
     run_cohort(args, pilot, env)
     print(args.out_dir.resolve() / 'pilot.json')
 

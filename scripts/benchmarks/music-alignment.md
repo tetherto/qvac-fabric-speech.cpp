@@ -130,6 +130,9 @@ ggml library identities; every
 warm-cache run verifies the final pair and license. `--offline` forbids downloads;
 `--verify-only` forbids both downloads and conversion.
 
+On a rebuild, cached source checksums are computed once under the preparation
+lock and reused by the download stage.
+
 The workflow installs converter dependencies and builds the quantizer before
 restoring the model cache. It obtains the cache key through `--cache-key-only`,
 which computes the exact preparation identity without accessing models or
@@ -185,6 +188,17 @@ measurements, repeat/mismatch controls and listening observations must be attach
 from adequately provisioned hosts. The existing pilot supports a clearly labelled
 partial run with `--limit`, `--controls` and `--repeat-generation`; full-corpus and
 human-listening calibration remain separate reported coverage.
+
+The pilot fingerprints provisioned generator models once at startup, before any
+generation timeout, and retains `model-fingerprints.json` in its output directory.
+If models must first be downloaded by the driver, the first invocation creates
+that fingerprint file. Subsequent records and repeat-generation controls reuse
+the hashes after checking the model directory, file list, sizes, timestamps,
+and file identities. A metadata change rejects reuse and requires a new pilot;
+these checks do not rehash the contents. Keep model files unchanged for the
+pilot's duration. Standalone `run-family.sh` invocations
+continue hashing their models once per invocation, including manually provisioned
+pairs without preparation metadata.
 
 ## Scoring policy
 

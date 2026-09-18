@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 def identity(path):
@@ -49,16 +50,53 @@ def source_identity():
         return None
 
 
-def provenance(root, binary, device):
-    paths = sorted(path for directory in (root, root / 'mm3') if directory.is_dir()
-                   for path in directory.iterdir()
-                   if path.is_file() and path.suffix.lower() == '.gguf')
+def model_paths(root):
+    return sorted(path for directory in (root, root / 'mm3') if directory.is_dir()
+                  for path in directory.iterdir()
+                  if path.is_file() and path.suffix.lower() == '.gguf')
+
+
+def file_snapshot(path):
+    stat = path.stat()
+    return {'path': str(path.resolve()), 'bytes': stat.st_size, 'device': stat.st_dev,
+            'inode': stat.st_ino, 'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns}
+
+
+def write_fingerprint_cache(path, record):
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(record, stream, allow_nan=False)
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def model_identities(root, cache_path=None):
+    paths = model_paths(root)
+    if cache_path is None:
+        return [identity(path) for path in paths]
+    snapshot = {'root': str(root.resolve()), 'files': [file_snapshot(path) for path in paths]}
+    if cache_path.exists():
+        cached = json.loads(cache_path.read_text())
+        if cached['snapshot'] != snapshot:
+            raise ValueError('model files changed during the pilot; start a new pilot')
+        return cached['model_files']
+    identities = [identity(path) for path in paths]
+    if snapshot['files'] != [file_snapshot(path) for path in model_paths(root)]:
+        raise ValueError('model files changed while fingerprinting')
+    write_fingerprint_cache(cache_path, {'snapshot': snapshot, 'model_files': identities})
+    return identities
+
+
+def provenance(root, binary, device, cache_path=None):
     preparation_file = root / 'provenance.json'
     preparation = None
     if preparation_file.is_file():
         preparation = {**identity(preparation_file),
                        'metadata': json.loads(preparation_file.read_text())}
-    return {'binary': identity(binary), 'model_files': [identity(path) for path in paths],
+    return {'binary': identity(binary), 'model_files': model_identities(root, cache_path),
             'requested_device': device, 'preparation': preparation,
             'build_cache': build_identity(binary), 'source_checkout': source_identity(),
             'environment': {name: os.environ.get(name) for name in (
@@ -67,5 +105,7 @@ def provenance(root, binary, device):
 
 
 if __name__ == '__main__':
-    print(json.dumps(provenance(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]),
+    cache = os.environ.get('MUSIC_MODEL_FINGERPRINT_CACHE')
+    print(json.dumps(provenance(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3],
+                                Path(cache) if cache else None),
                      allow_nan=False))

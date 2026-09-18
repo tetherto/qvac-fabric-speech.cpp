@@ -151,6 +151,16 @@ scores remain null without discarding generation performance. See the
 [music alignment guide](scripts/benchmarks/music-alignment.md) for setup,
 artifact layout, and the distinct diagnostic timing baseline.
 
+MiniMax diagnostics can provision a pinned Hugging Face checkpoint without S3.
+Dispatch with `model_families=minimax` and `music_alignment=true` on a conversion
+host with at least 64 GiB RAM; hosted Linux can import a verified macOS bundle
+using `minimax_artifact_run_id`. For local runs, use
+[`prepare-minimax.py`](scripts/benchmarks/prepare-minimax.py) to create or verify a
+bundle, then run `run-family.sh --family minimax` with `MUSIC_ALIGNMENT=1` and
+`MINIMAX_PREPARATION_REPORT` pointing to its JSON report. The
+[preparation guide](scripts/benchmarks/music-alignment.md#minimax-model-preparation)
+lists the dependency, disk, quantizer, and bundle-transfer requirements.
+
 ### Multi-machine benchmarks (2026-09)
 
 Maintainer-run measurements across up to four machines — a MacBook Air M5 and

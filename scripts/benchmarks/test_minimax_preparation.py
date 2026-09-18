@@ -107,6 +107,48 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(module.PreparationError):
             self.prepare(quant='f16', verify_only=True)
 
+    def test_rebuild_hashes_cached_sources_once(self):
+        result = self.prepare()
+        record = json.loads(Path(result['provenance']).read_text())
+        source = Path(record['source_dir'])
+        source_paths = {source / item['path'] for item in self.manifest['files']}
+        Path(result['provenance']).unlink()
+        with mock.patch.object(module, 'digest', wraps=module.digest) as digest:
+            rebuilt = self.prepare(offline=True)
+        self.assertFalse(rebuilt['cached'])
+        for path in source_paths:
+            self.assertEqual(sum(call.args[0] == path for call in digest.call_args_list), 1, path)
+
+    def test_download_uses_configurable_timeout(self):
+        opener = mock.Mock(side_effect=self.open_url)
+        with mock.patch.object(module, 'DOWNLOAD_TIMEOUT_SECONDS', 7):
+            module.download(self.manifest['files'][0], self.manifest, self.root, False, opener=opener)
+        self.assertEqual(opener.call_args.kwargs['timeout'], 7)
+
+    def test_quantization_failure_keeps_stage_and_does_not_publish(self):
+        binary = self.root / 'quantizer'
+        binary.write_bytes(b'fake quantizer')
+        binary.chmod(0o755)
+        def fail_quantization(command, **kwargs):
+            if '--out' not in command:
+                raise subprocess.CalledProcessError(2, command)
+            return self.convert(command, **kwargs)
+        with mock.patch.object(module.subprocess, 'run', side_effect=fail_quantization):
+            with self.assertRaises(module.PreparationError) as error:
+                self.prepare(quant='q4_k_m', quantizer=binary)
+        self.assertEqual(error.exception.stage, 'quantization')
+        self.assertEqual(list(self.root.rglob('provenance.json')), [])
+        self.assertEqual(list(self.root.rglob('*.gguf')), [])
+
+    def test_output_and_publication_errors_keep_stage(self):
+        for action, stage in [('verify_outputs', 'output-verification'),
+                              ('publish_pair_provenance_last', 'publication')]:
+            with self.subTest(stage=stage), mock.patch.object(module, action, side_effect=OSError('test failure')):
+                with self.assertRaises(module.PreparationError) as error:
+                    self.prepare()
+                self.assertEqual(error.exception.stage, stage)
+                self.assertEqual(list(self.root.rglob('provenance.json')), [])
+
     def test_cache_key_only_has_no_model_preparation_side_effects(self):
         root = self.root / 'not-created'
         with (mock.patch.object(module, 'cache_lock', side_effect=AssertionError('cache access')),

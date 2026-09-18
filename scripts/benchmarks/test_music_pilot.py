@@ -92,6 +92,10 @@ class PilotTests(unittest.TestCase):
             config = root / 'config.json'
             config.write_text(json.dumps({'name': 'candidate', 'checkpoint_identity': 'source-v1',
                                           'backend': 'GPU', 'build_options': 'test'}))
+            models = root / 'models'
+            models.mkdir()
+            for name in ('text-embedding.gguf', 'vae.gguf', 'acestep-lm.gguf', 'dit.gguf'):
+                (models / name).write_bytes(b'GGUFfixture')
             calls = []
             def fake_run(command, **kwargs):
                 calls.append((command, kwargs))
@@ -101,6 +105,9 @@ class PilotTests(unittest.TestCase):
                     self.assertEqual(env['MUSIC_DURATION'], '20')
                     self.assertEqual(env['MUSIC_SEED'], '17')
                     self.assertIn('acoustic guitar', env['MUSIC_CAPTION'])
+                    fingerprints = Path(env['MUSIC_MODEL_FINGERPRINT_CACHE'])
+                    self.assertEqual(fingerprints, root / 'out/model-fingerprints.json')
+                    self.assertEqual(len(json.loads(fingerprints.read_text())['model_files']), 4)
                     destination = Path(command[-1])
                     artifacts = destination.with_suffix('.music.test') / 'run-1'
                     artifacts.mkdir(parents=True)
@@ -137,6 +144,23 @@ class PilotTests(unittest.TestCase):
             reported = summary.summarize(pilot)['controls'][1]
             self.assertEqual(reported['score_delta'], 0)
             self.assertTrue(reported['wav_bytes_equal'])
+
+    def test_startup_fingerprints_use_preparation_report_model_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            models = root / 'prepared'
+            models.mkdir()
+            for role in ('lm', 'synth'):
+                (models / f'mm3-{role}-f16.gguf').write_bytes(b'GGUFfixture')
+            report = root / 'preparation.json'
+            report.write_text(json.dumps({'status': 'ok', 'model_dir': str(models)}))
+            cache = root / 'fingerprints.json'
+            args = SimpleNamespace(family='minimax', models_root=root / 'models')
+            env = {'MINIMAX_PREPARATION_REPORT': str(report),
+                   'MUSIC_ALIGNMENT_MODEL_DIR': str(root / 'ignored'),
+                   'MUSIC_MODEL_FINGERPRINT_CACHE': str(cache)}
+            runner.initialize_model_fingerprints(args, env)
+            self.assertEqual(json.loads(cache.read_text())['snapshot']['root'], str(models))
 
     def test_invalid_driver_score_rejected(self):
         for value in (True, float('nan'), float('inf'), 1.1, None, '0.2'):

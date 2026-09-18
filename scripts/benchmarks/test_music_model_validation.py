@@ -2,6 +2,7 @@
 """Model-free checks for native MiniMax directory resolution and provenance."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -113,6 +114,62 @@ class MusicModelValidationTests(unittest.TestCase):
         result = generation.provenance(self.root, binary, 'cpu')
         self.assertIsNone(result['preparation'])
         self.assertIsNone(result['build_cache'])
+
+    def test_pilot_hashes_models_once_and_retains_current_binary_provenance(self):
+        model = self.model('mm3-lm-f16.gguf')
+        binary = self.model('mm3-replay', b'binary')
+        cache = self.root / 'fingerprints.json'
+        with patch.object(generation, 'identity', wraps=generation.identity) as identify:
+            initial = generation.model_identities(self.root, cache)
+            for _ in range(3):
+                result = generation.provenance(self.root, binary, 'cpu', cache)
+                self.assertEqual(result['model_files'], initial)
+        self.assertEqual(sum(call.args[0] == model for call in identify.call_args_list), 1)
+        self.assertEqual(sum(call.args[0] == binary for call in identify.call_args_list), 3)
+
+    def test_standalone_provenance_still_hashes_manual_models(self):
+        model = self.model('mm3-lm-f16.gguf')
+        binary = self.model('mm3-replay', b'binary')
+        with patch.object(generation, 'identity', wraps=generation.identity) as identify:
+            generation.provenance(self.root, binary, 'cpu')
+            generation.provenance(self.root, binary, 'cpu')
+        self.assertEqual(sum(call.args[0] == model for call in identify.call_args_list), 2)
+
+    def test_pilot_rejects_changed_replaced_added_or_removed_models(self):
+        for change in ('contents', 'replacement', 'added', 'removed'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                model = root / 'mm3-lm-f16.gguf'
+                model.write_bytes(b'GGUFfixture')
+                stat = model.stat()
+                cache = root / 'fingerprints.json'
+                generation.model_identities(root, cache)
+                if change == 'contents':
+                    model.write_bytes(b'GGUFchanged')
+                    os.utime(model, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+                elif change == 'replacement':
+                    replacement = root / 'replacement'
+                    replacement.write_bytes(model.read_bytes())
+                    replacement.replace(model)
+                elif change == 'added':
+                    (root / 'mm3-synth-f16.gguf').write_bytes(b'GGUFfixture')
+                else:
+                    model.unlink()
+                with self.assertRaisesRegex(ValueError, 'model files changed'):
+                    generation.model_identities(root, cache)
+
+    def test_model_change_during_hashing_does_not_publish_fingerprints(self):
+        model = self.model('mm3-lm-f16.gguf')
+        cache = self.root / 'fingerprints.json'
+        real_identity = generation.identity
+        def change_after_hash(path):
+            result = real_identity(path)
+            path.write_bytes(b'GGUFchanged-size')
+            return result
+        with patch.object(generation, 'identity', side_effect=change_after_hash):
+            with self.assertRaisesRegex(ValueError, 'while fingerprinting'):
+                generation.model_identities(self.root, cache)
+        self.assertFalse(cache.exists())
 
 
 if __name__ == '__main__':
