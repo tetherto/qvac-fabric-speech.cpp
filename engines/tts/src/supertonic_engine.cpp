@@ -559,12 +559,15 @@ struct Engine::Impl {
         }
 
         std::vector<float> wav_full;
-        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav_full, &error)) {
+        std::string vocoder_backend;
+        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav_full, &error,
+                                             &vocoder_backend)) {
             throw std::runtime_error("Supertonic Engine: vocoder failed: " + error);
         }
 
         SynthesisResult result;
         result.duration_s  = duration_s;
+        result.vocoder_backend = std::move(vocoder_backend);
         result.pcm.assign(wav_full.begin(),
                           wav_full.begin() + std::min((size_t) wav_len, wav_full.size()));
 
@@ -728,9 +731,14 @@ struct Engine::Impl {
 
             full.pcm.insert(full.pcm.end(), emit.begin(), emit.end());
             full.duration_s += chunk_res.duration_s;
+            full.vocoder_backend = std::move(chunk_res.vocoder_backend);
         }
 
         return full;
+    }
+
+    bool vocoder_on_coreml() const {
+        return model.vocoder_on_coreml;
     }
 
     std::string backend_name() const {
@@ -817,6 +825,10 @@ BackendDevice Engine::backend_device() const {
 
 bool Engine::gpu_unsupported() const {
     return pimpl_ && pimpl_->model.gpu_unsupported;
+}
+
+bool Engine::vocoder_on_coreml() const {
+    return pimpl_ && pimpl_->vocoder_on_coreml();
 }
 
 // Convenience one-shot wrapper.  Pays the full GGUF load + free per

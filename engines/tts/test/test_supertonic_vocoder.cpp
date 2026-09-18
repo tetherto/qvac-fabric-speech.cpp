@@ -4,10 +4,17 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 using namespace tts_cpp::supertonic::detail;
 
 int main(int argc, char ** argv) {
+    // This harness gates ggml behavior; a Core ML vocoder sidecar staged next
+    // to the GGUF must not reroute it (mirrors the Audio8 harnesses).
+#ifndef _WIN32
+    setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
+#endif
+
     if (argc < 3) {
         fprintf(stderr, "usage: %s MODEL.gguf REF_DIR\n", argv[0]);
         return 2;

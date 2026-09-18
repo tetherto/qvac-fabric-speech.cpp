@@ -154,3 +154,103 @@ python scripts/bench-supertonic-onnx.py \
   --steps 5 --speed 1.05 --threads 1 --runs 5 --warmup 1 \
   --json-out artifacts/supertonic-onnx-bench.json
 ```
+
+## Core ML vocoder sidecar
+
+`TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for
+the **vocoder** -- the latent unpack and denormalize, the embed convolution,
+the ten causal ConvNeXt blocks, the pre-baked BatchNorm affine, and the head.
+The vocoder is the second-largest stage of a synthesis (about a fifth of a
+Metal run, more than a quarter of a CPU one) and the one Supertonic stage with
+a fixed convolutional topology and a single variable dimension; the duration
+predictor, text encoder, and vector estimator stay on ggml. The earlier
+ONNX-Runtime CoreML-EP measurement (see PROGRESS_SUPERTONIC.md) ran the whole
+pipeline through shape-generic graphs and lost to ggml everywhere; the sidecar
+is a fixed-shape, float16 `jit.trace` export of the vocoder alone, which is
+the form Core ML places on the Neural Engine. Export it from the model GGUF:
+
+```bash
+python3.11 -m venv .venv-coreml
+. .venv-coreml/bin/activate
+python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+python engines/tts/scripts/export-supertonic-coreml.py \
+  --gguf models/supertonic2.gguf --compile-dir models
+```
+
+The compiled sidecar must sit next to the model GGUF as
+`<basename-minus-quant>-vocoder.mlmodelc`: `supertonic2.gguf`,
+`supertonic2-f16.gguf` and `supertonic2-q8_0.gguf` all resolve to
+`supertonic2-vocoder.mlmodelc`, so one sidecar serves every tier. Export from
+the f32 or f16 tier: a block-quantized source bakes its dequantized vocoder
+weights under the same shared name (the exporter warns when that happens). The
+exporter rebuilds the vocoder in PyTorch from the GGUF tensors -- replicate
+(edge) left padding on every causal convolution, exactly like
+`causal_replicate_pad_1d` in the ggml graph -- so it needs neither the ONNX
+bundle nor its runtime; `--parity-dir <ref>` checks that rebuild against
+`final_latent.npy` / `wav_full.npy` from `dump-supertonic-reference.py`
+first. With the sidecar present the engine reports it on
+`Engine::vocoder_on_coreml()` at load and per call on
+`SynthesisResult::vocoder_backend`; `supertonic-bench` prints and emits the
+same label as `vocoder_backend`.
+
+The export is fixed-shape, `--window` latent frames (default 64, 4.46 s,
+196608 samples) in and the matching samples out. The engine walks an
+utterance in windows of exactly that width: every convolution in the vocoder
+is causal, so a window's output is exact from the first frame whose receptive
+field lies inside it, and the engine drops each window's leading causal
+context (20 latent frames for this checkpoint, computed by
+`supertonic_coreml_vocoder_context_frames` from the same kernel shapes the
+ggml graph uses) just as a mid-utterance ggml frame ignores everything beyond
+its receptive field. An utterance shorter than one window is zero-padded on
+the right, which changes nothing before the padding because nothing in the
+stack looks forward.
+
+Runtime controls, mirroring the Audio8 sidecar: `SUPERTONIC_COREML_DISABLE=1`
+skips the sidecar at load; `SUPERTONIC_COREML_COMPUTE_UNITS` in `cpu_only` /
+`cpu_and_gpu` / `cpu_and_ane` narrows the requested placement (default: all);
+`SUPERTONIC_COREML_STRICT=1` (test-only) fails instead of falling back to the
+ggml graph. Any sidecar failure -- missing, malformed, wrong shape, or a
+prediction error -- falls back to the ggml vocoder for that call.
+
+`test-supertonic-coreml-path` locks the naming rule without a model;
+`test-supertonic-coreml-parity` (staged via `SUPERTONIC_COREML_TEST_MODELS_DIR`)
+gates the sidecar against the ggml vocoder at cosine 0.999 on a padded, an
+exact-window, and a stitched multi-window latent, checks the
+`SUPERTONIC_COREML_DISABLE` fallback, the strict refusal without a sidecar,
+the invalid-sidecar fallback, and runs one public `Engine` synthesis end to
+end; `test-supertonic-coreml-exporter` unit-tests the PyTorch rebuild
+(causality, unpack layout, squeezed pointwise re-expansion, receptive field,
+stem rule) without a checkpoint.
+
+Measured with `supertonic-bench` (`supertonic2.gguf` f32, voice `M1`, 5 steps,
+4 threads, `--n-gpu-layers 999`, 5 runs after 2 warmups, ggml Metal as the
+reference for every stage but the vocoder; parity cosine >= 0.99995 in every
+cell), vocoder stage median and end-to-end total:
+
+| Machine | Utterance | ggml Metal vocoder | Core ML vocoder (`coreml-all`) | total | real-time |
+|---|---|---:|---:|---:|---:|
+| Apple M4 (mini) | 3.2 s | 6.6 ms | **2.3 ms (2.9x)** | 30.0 -> 26.0 ms | 107x -> 123x |
+| Apple M4 (mini) | 17.9 s | 31.4 ms | **13.2 ms (2.4x)** | 88.3 -> 70.1 ms | 203x -> 255x |
+| Apple M3 Ultra | 3.2 s | 3.0 ms | 4.5 ms (0.7x) | 29.3 -> 32.2 ms | 109x -> 100x |
+| Apple M3 Ultra | 17.9 s | 8.9 ms | 14.0 ms (0.6x) | 41.4 -> 47.0 ms | 433x -> 381x |
+
+The compute-plan places 164 of the 165 exported ops on the Neural Engine, so
+the sidecar's speed is the ANE's: it beats Metal on consumer-class GPUs (the
+M4's 10 cores) and loses to workstation-class ones (the M3 Ultra), while
+freeing the GPU for the vector estimator either way. Ship the sidecar only
+where it wins -- it is presence-driven, so the decision is per-deployment, not
+per-build.
+
+Window sizing: sidecar compute scales with total padded frames, so the cost
+of a window width is its padding overhead -- the 20-frame causal context
+repaid per interior window plus the zero-padded tail of the last window. At
+the 257-frame (17.9 s) benchmark length windows 64, 128, and 192 all pad to
+the same 384 frames and measure within noise, which says nothing general: at
+64 the steady-state overhead is 20/44 (+45%) per interior window, at 128 it
+is 20/108 (+19%), at 192 it is 20/172 (+12%). 64 stays the default because
+typical utterances and every streamed chunk fit one or two windows, where the
+last-window tail dominates and a small window wastes the least; re-tune
+`--window` (and re-measure) for workloads dominated by long batch utterances.
+On the streaming path each chunk vocodes independently, so a short first
+chunk still pays one full window (~2.5 ms on M4) -- a second, smaller
+exported window is the natural follow-up if first-chunk latency matters.

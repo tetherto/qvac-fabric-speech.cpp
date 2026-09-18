@@ -380,6 +380,11 @@ struct SynthesisResult {
     std::vector<float> pcm;
     int   sample_rate = 44100;
     float duration_s  = 0.0f;
+    // Which path produced the vocoder stage's waveform: "ggml", or the Core
+    // ML sidecar's compute-unit label (e.g. "coreml-all") when a
+    // `<model>-vocoder.mlmodelc` sidecar next to the GGUF served the call.
+    // On the streaming path this reports the final chunk's vocoder.
+    std::string vocoder_backend = "ggml";
 };
 
 // Persistent engine.  Loads the GGUF once at construction; subsequent
@@ -462,6 +467,13 @@ public:
     // True when a GPU device was present but unusable (outside the validated
     // allowlist), so we fell back to CPU. Always false when backend_device() == GPU.
     bool gpu_unsupported() const;
+
+    // True when a Core ML vocoder sidecar (`<model>-vocoder.mlmodelc` next
+    // to the GGUF) loaded at construction.  Load status only — a call can
+    // still fall back to the ggml vocoder graph; the per-call truth is
+    // SynthesisResult::vocoder_backend.  Always false when the build is not
+    // compiled with TTS_CPP_COREML or SUPERTONIC_COREML_DISABLE is set.
+    bool vocoder_on_coreml() const;
 
 private:
     struct Impl;

@@ -1,7 +1,12 @@
 #include "supertonic_internal.h"
 
+#include "coreml_windows.h"
 #include "fit_price.h"
 #include "ggml-alloc.h"
+
+#ifdef TTS_CPP_USE_COREML
+#include "supertonic_coreml_vocoder.h"
+#endif
 
 #if defined(TTS_CPP_USE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
@@ -20,6 +25,9 @@
 
 namespace tts_cpp::supertonic::detail {
 namespace {
+
+// Per-block depthwise dilations of the 10-block vocoder ConvNeXt chain.
+constexpr int kVocoderDilations[10] = {1, 2, 4, 1, 2, 4, 1, 1, 1, 1};
 
 // See `release_vocoder_thread_local_caches` below.  Mirrors the
 // registry in supertonic_vector_estimator.cpp / supertonic_text_encoder.cpp.
@@ -402,9 +410,8 @@ ggml_tensor * convnext_block_ggml(ggml_context * ctx,
                                   const supertonic_vocoder_convnext_weights & w,
                                   ggml_tensor * x,
                                   int idx) {
-    static const int dilations[10] = {1, 2, 4, 1, 2, 4, 1, 1, 1, 1};
     const bool use_cpu_custom = supertonic_use_cpu_custom_ops();
-    ggml_tensor * dw = depthwise_conv1d_causal_ggml(ctx, x, w.dw_w, w.dw_b, dilations[idx]);
+    ggml_tensor * dw = depthwise_conv1d_causal_ggml(ctx, x, w.dw_w, w.dw_b, kVocoderDilations[idx]);
     if (use_cpu_custom) {
         // Audit follow-up #6 (F7) — fused LN + pw1 + gelu + pw2 + γ +
         // residual.  The fused helper keeps the layer-norm output in
@@ -504,7 +511,6 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
                                      const supertonic_vocoder_convnext_weights & w,
                                      ggml_tensor * x_ct,
                                      int idx) {
-    static const int dilations[10] = {1, 2, 4, 1, 2, 4, 1, 1, 1, 1};
     ggml_tensor * residual = x_ct;
 
     auto flatten_1d = [&](ggml_tensor * t) -> ggml_tensor * {
@@ -514,7 +520,7 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
     };
 
     ggml_tensor * y_ct = ggml_supertonic_depthwise_1d_causal_ct(ctx, x_ct,
-        w.dw_w, flatten_1d(w.dw_b), dilations[idx]);
+        w.dw_w, flatten_1d(w.dw_b), kVocoderDilations[idx]);
     if (supertonic_use_fused_layer_norm()) {
         y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
             flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
@@ -862,8 +868,7 @@ void convnext_block(const supertonic_model & m, int idx,
     std::vector<float> residual = x;
     std::vector<float> y;
     const int K = (int) dw_w.ne[0];
-    static const int dilations[10] = {1, 2, 4, 1, 2, 4, 1, 1, 1, 1};
-    depthwise_conv1d_causal(x, L, C, dw_w, dw_b, K, dilations[idx], y);
+    depthwise_conv1d_causal(x, L, C, dw_w, dw_b, K, kVocoderDilations[idx], y);
     layer_norm_channel(y, L, C, ln_g, ln_b);
 
     std::vector<float> z;
@@ -957,11 +962,98 @@ bool supertonic_vocoder_forward_cpu(const supertonic_model & model,
     }
 }
 
+int supertonic_coreml_vocoder_context_frames(const supertonic_model & model) {
+    const supertonic_vocoder_weights & v = model.vocoder;
+    if (!v.embed_w || !v.head1_w || !v.head2_w) return 0;
+    int64_t receptive = v.embed_w->ne[0] - 1;
+    for (int i = 0; i < 10; ++i) {
+        ggml_tensor * dw = v.convnext[(size_t) i].dw_w;
+        if (!dw) return 0;
+        receptive += (dw->ne[0] - 1) * kVocoderDilations[i];
+    }
+    receptive += (v.head1_w->ne[0] - 1) + (v.head2_w->ne[0] - 1);
+    const int factor = model.hparams.ttl_chunk_compress_factor;
+    if (factor <= 0) return 0;
+    return (int) ((receptive + factor - 1) / factor);
+}
+
+#ifdef TTS_CPP_USE_COREML
+namespace {
+
+// Test-only: fail instead of falling back to ggml.
+bool coreml_vocoder_strict() {
+    return std::getenv("SUPERTONIC_COREML_STRICT") != nullptr;
+}
+
+// Leaves wav_out empty on failure so the caller falls back to the ggml graph.
+// The sidecar gathers each window straight from the channel-major host latent
+// and decodes only the kept slice straight into wav_out (no staging buffers).
+bool run_vocoder_coreml(const supertonic_model & model, const float * latent,
+                        int latent_len, std::vector<float> & wav_out) {
+    wav_out.clear();
+    const int window = (int) supertonic_coreml_vocoder_window_frames(model.coreml_vocoder);
+    const int context = supertonic_coreml_vocoder_context_frames(model);
+    if (context <= 0) return false;
+    const std::vector<::tts_cpp::detail::coreml_window> plan =
+        ::tts_cpp::detail::plan_coreml_windows(latent_len, window, context);
+    if (plan.empty()) return false;
+
+    const size_t samples_per_frame =
+        (size_t) model.hparams.base_chunk_size * model.hparams.ttl_chunk_compress_factor;
+    wav_out.resize((size_t) latent_len * samples_per_frame);
+    for (const ::tts_cpp::detail::coreml_window & span : plan) {
+        if (supertonic_coreml_vocoder_synthesize(
+                model.coreml_vocoder, latent, latent_len, span.begin, span.filled,
+                span.core_begin - span.begin, span.core_end - span.core_begin,
+                wav_out.data() + (size_t) span.core_begin * samples_per_frame) != 0) {
+            wav_out.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+#endif
+
 bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                                      const float * latent,
                                      int latent_len,
                                      std::vector<float> & wav_out,
-                                     std::string * error) {
+                                     std::string * error,
+                                     std::string * backend_used) {
+    if (backend_used) *backend_used = "ggml";
+#ifdef TTS_CPP_USE_COREML
+    if (model.coreml_vocoder && latent_len > 0) {
+        auto profile_coreml = std::chrono::steady_clock::now();
+        if (run_vocoder_coreml(model, latent, latent_len, wav_out)) {
+            profile_vocoder_checkpoint("coreml", profile_coreml);
+            if (backend_used) {
+                *backend_used = supertonic_coreml_vocoder_backend_label(model.coreml_vocoder);
+            }
+            if (error) error->clear();
+            return true;
+        }
+        if (coreml_vocoder_strict()) {
+            if (error) {
+                *error = "supertonic: Core ML vocoder unavailable for " +
+                         std::to_string(latent_len) +
+                         " latent frames and SUPERTONIC_COREML_STRICT is set; failing "
+                         "instead of the ggml fallback";
+            }
+            return false;
+        }
+        std::fprintf(stderr,
+                     "supertonic: Core ML vocoder failed for %d latent frames; "
+                     "falling back to the ggml graph\n", latent_len);
+    } else if (coreml_vocoder_strict()) {
+        if (error) {
+            *error = "supertonic: no Core ML vocoder sidecar loaded and "
+                     "SUPERTONIC_COREML_STRICT is set";
+        }
+        return false;
+    }
+#endif
     // Sets thread_local CPU-custom-op + F16-attn flags for the duration
     // of this call so the graph-build helpers below pick the backend-
     // appropriate dispatch path; RAII teardown handles exceptions.
