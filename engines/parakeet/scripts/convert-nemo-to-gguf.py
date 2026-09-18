@@ -67,6 +67,9 @@ src/parakeet_sortformer.h for the consumer structs):
                            max_symbols_per_step)                     [EOU only]
     parakeet.nemotron.*   (RNNT, prompt, locale, and cache-aware
                            streaming metadata)                       [Nemotron only]
+    parakeet.unified.*    (cache-aware streaming contexts: left context
+                           and convolution cache frames, allowed chunk
+                           and right-context frames)                 [Unified RNN-T only]
     parakeet.sortformer.* (num_spks, fc/tf dims, tf layer count, ...)[Sortformer only]
     tokenizer.ggml.model  = "sentencepiece"                          [CTC, RNN-T, TDT, EOU]
     tokenizer.ggml.sentencepiece_model = <raw tokenizer.model bytes> [CTC, RNN-T, TDT, EOU]
@@ -128,6 +131,7 @@ NEMOTRON_DEFAULT_ATT_CONTEXT_RIGHT = 3
 NEMOTRON_NUM_PROMPTS = 128
 NEMOTRON_PROMPT_INPUT = 1152
 NEMOTRON_PROMPT_HIDDEN = 2048
+UNIFIED_ATT_CONTEXT_STYLE = "chunked_limited_with_rc"
 EOU_REPO = "nvidia/parakeet_realtime_eou_120m-v1"
 EOU_LICENSE = "NVIDIA Open Model License"
 
@@ -758,6 +762,33 @@ def write_transducer_metadata(writer, cfg: dict, model_type: str):
     writer.add_array(f"{prefix}.durations", durations)
 
 
+def unified_streaming_contexts(enc: dict):
+    if str(enc.get("att_context_style", "regular")) != UNIFIED_ATT_CONTEXT_STYLE:
+        return None
+    raw = enc.get("att_chunk_context_size")
+    if not raw or len(raw) != 3:
+        return None
+    left, chunks, rights = (sorted(int(value) for value in group) for group in raw)
+    if len(left) != 1:
+        raise ValueError(
+            "encoder.att_chunk_context_size left context must hold exactly one value"
+        )
+    return left[0], chunks, rights
+
+
+def write_unified_streaming_metadata(writer, cfg: dict) -> bool:
+    contexts = unified_streaming_contexts(cfg["encoder"])
+    if contexts is None:
+        return False
+    left, chunks, rights = contexts
+    conv_kernel = int(cfg["encoder"]["conv_kernel_size"])
+    writer.add_uint32("parakeet.unified.left_context_frames", left)
+    writer.add_uint32("parakeet.unified.cache_time_steps", (conv_kernel - 1) // 2)
+    writer.add_array("parakeet.unified.allowed_chunk_frames", chunks)
+    writer.add_array("parakeet.unified.allowed_right_context_frames", rights)
+    return True
+
+
 def write_nemotron_metadata(writer, cfg: dict):
     write_transducer_metadata(writer, cfg, "nemotron")
     aliases, prompt_ids = nemotron_prompt_entries(cfg)
@@ -1006,9 +1037,10 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     writer.add_int32 ("parakeet.encoder.att_context_size_left",       att_ctx_left)
     writer.add_int32 ("parakeet.encoder.att_context_size_right",      att_ctx_right)
     if model_type in ("rnnt", "eou", "nemotron"):
+        unified_streaming = model_type == "rnnt" and write_unified_streaming_metadata(writer, cfg)
         writer.add_bool(
             "parakeet.encoder.streaming.enabled",
-            model_type in ("eou", "nemotron"),
+            model_type in ("eou", "nemotron") or unified_streaming,
         )
 
     normalize_str = str(pre.get("normalize", "per_feature"))

@@ -62,14 +62,27 @@ python3 scripts/convert-campplus-to-gguf.py \
 The LM converter accepts `--dtype {f32,f16,q8_0,q4_0}`, the flow converter
 `--dtype {f32,f16,bf16,q8_0,q4_0}`, and HiFT `f32`/`f16` (its f0 predictor
 stays f32 either way). The recommended desktop GPU tier is LM `q8_0` + flow
-`q8_0` + HiFT `f16`; on CPU the float flow tiers beat `q8_0` once ggml is
-built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml default): flow
-`bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon), flow `f16`
-elsewhere, both with HiFT `f16`. The CPU LM decode is weight-bandwidth
-bound, so LM `q4_0` roughly halves it against `q8_0` (measured 7.5 ->
-4.1 ms/token) where its output quality is acceptable. Avoid LM `f16`: the engine reads
-the embedding tables as f32, so a f16 LM is not loadable today — use the
-quantized LM tiers instead.
+`q8_0` + HiFT `f16`, except on Metal, where flow `f16` is preferred: the DiT
+there is compute-bound at the GPU's f16 GEMM rate, so `q8_0` buys no wall
+time and costs a little accuracy. Measured on an M3 Ultra against one pinned
+543-token trajectory with HiFT held at `f16`, `f16` leads on the DiT
+(dit_euler 1351 vs 1403 ms) and the two tie on the flow+vocoder wall
+(1734 vs 1728 ms), so the recommendation rests on the DiT margin and the
+accuracy, not on an end-to-end gap. On CPU the float flow tiers beat `q8_0`
+once ggml is built with tinyBLAS (`GGML_LLAMAFILE=ON`, the bundled-ggml
+default): flow `bf16` is fastest on AVX512-BF16 hosts (Zen 4/5, recent Xeon),
+flow `f16` elsewhere, both with HiFT `f16`. On Apple-silicon CPU flow `f16`
+is worth 1.57x on the DiT (23848 -> 15186 ms, 20 threads, same pinned
+trajectory). The CPU LM decode is weight-bandwidth bound, so LM `q4_0`
+roughly halves it against `q8_0` (measured 7.5 -> 4.1 ms/token) where its
+output quality is acceptable. A quantized HiFT tier would gain nothing: like
+the flow's `q8_0`, quantization applies only to 2-D matmul weights, and the
+vocoder is convolutions end to end. The `f16` HiFT tier does help, but
+modestly and only off the critical path people expect: 1.13-1.14x on the
+vocoder decode on Metal, less than the fused snake activations above it,
+because `mul_mm` already stages f32 operands as half there. Avoid LM `f16`:
+the engine reads the embedding tables as f32, so a f16 LM is not loadable
+today — use the quantized LM tiers instead.
 In `q8_0`/`q4_0` mode the flow converter quantizes only the 2D matmul
 weights (conv kernels, norms, biases, the token embedding and the baked
 `rand_noise` stay float), and it always writes the per-block attention
@@ -78,13 +91,69 @@ older GGUFs with separate `to_q`/`to_k`/`to_v` tensors. `bf16` mode stores
 those same 2D matmul weights as bf16 and the conv kernels as f16, keeping
 the kernel-typed f16 im2col path. Every reduced-precision tier is gated
 against the f32 reference by `test-cosyvoice-{flow,hift}-tier-*`, which
-needs only the two GGUFs staged (no PyTorch fixture). Measured deviations
-on the gate's synthetic inputs (mel cosine / max abs): flow `f16`
-0.99996 / 0.25, `bf16` 0.99967 / 0.99, `q8_0` 0.99983 / 0.66, `q4_0`
-0.98659 / 4.84 — prefer `q8_0` over `q4_0` where the flow size allows.
-The HiFT leg (`f16` waveform cosine 0.999966, max abs 0.0012) pins f0 so
-the gate measures weight precision rather than sine-phase noise. The
-thresholds registered in CMakeLists.txt carry margin over these values.
+needs only the two GGUFs staged (no PyTorch fixture). It drives the stage
+with deliberately synthetic, off-distribution inputs (random-normal mel
+around log-mel statistics), which is what keeps it fixture-free but also
+amplifies the deviation — so what it measures is as much the host CPU
+backend's matmul rounding as it is the tier GGUF, and the same GGUF
+measures differently on the x86 and ARM CPU paths. Both are measured, and
+the bounds registered in CMakeLists.txt are per-arch:
+
+| flow tier | x86-64 cosine / max abs | arm64 cosine / max abs |
+|---|---|---|
+| `f16`  | 0.999961 / 0.246 | 0.999855 / 0.697 |
+| `bf16` | 0.999671 / 0.989 | 0.998686 / 2.990 (not gated, see below) |
+| `q8_0` | 0.999829 / 0.658 | 0.999018 / 2.384 |
+| `q4_0` | 0.986591 / 4.845 | 0.971658 / 4.125 |
+
+(x86-64: Ryzen 9 9950X3D; arm64: Apple M3 Ultra, macOS 15.7, the CPU backend
+of a Metal build. `GGML_LLAMAFILE` does not move these numbers on either
+arch.) Prefer `q8_0` over `q4_0` where the flow size allows. The cosine is
+the tier-integrity signal — a mis-loaded or mis-dequantized tensor collapses
+it far past either column — and the absolute deviation is the host-dependent
+half, which is why the arm64 column gates `q8_0` at max abs 4.0 against the
+x86 column's 2.0. An x86-measured bound applied to ARM is what made
+`test-cosyvoice-flow-tier-q8_0` (2.38 against a 2.0 bound) and
+`-q4_0` (cosine 0.9717 against a 0.98 threshold) fail on Apple silicon.
+
+The `bf16` flow tier is gated on x86-64 only. Neither tinyBLAS nor
+`ggml_vec_dot_bf16` carries an ARM path — both dispatch bf16 on AVX512-BF16,
+AVX512F, AVX2, POWER MMA and RISC-V only — so on arm64 its matmuls fall back
+to a scalar per-element loop and the gate takes 207 s against the `f16`
+tier's 26 s on the M3 Ultra. The tier guidance above already recommends
+`f16` over `bf16` off AVX512-BF16 hosts, so that time would buy coverage of
+a path no ARM build ships.
+
+The HiFT leg pins f0 so the gate measures weight precision rather than
+sine-phase noise; its `f16` waveform deviation is 0.999966 / 0.0012 on
+x86-64 and 0.999427 / 0.0065 on arm64, both inside the single
+0.999 / 0.01 gate it carries on every host.
+
+The LM converter applies the same attention fusion to each layer
+(`qkv_proj`, rows q ++ k ++ v): one matvec feeds all three heads per decode
+step. Row-wise quantization makes the fused tensor bit-identical to the
+separate ones, and the engine still loads older GGUFs with separate
+`q/k/v_proj` tensors. The engine rejects a fused tensor whose row count
+disagrees with the GGUF's own `n_head` / `n_kv` / `head_dim` metadata: the
+Q/K/V slices carry a custom token stride, so a short fused tensor would read
+past the projection output during multi-token prefill rather than fail
+loudly. Because the layout is chosen per GGUF, `test-cosyvoice-xb` reports
+which one the pinned LM carries, so a pass states whether it covered the
+fused matvec or the fallback.
+
+### Metal graph paths
+
+On Metal the engine takes graph shapes chosen from a per-op GPU profile, all
+gated by `test-cosyvoice-xb` and the per-backend harnesses: one
+`FLASH_ATTN_EXT` per layer for single-token LM decode (with the all-zeros
+causal mask elided, which is bitwise identical on every backend), f16 K/V
+operands for the DiT's flash attention, and the DiT's grouped
+`conv_pos_embed` emitted as one batched im2col plus one batched matmul — that
+last one takes the layer pair from roughly 64 dispatches per Euler step to 6.
+The per-group form stays for backends whose im2col fusion needs an unbatched
+2-D signal (Adreno). The vocoder's snake activations emit the fused
+`GGML_OP_SNAKE` every backend implements, which is also worth 1.09x on the
+CPU vocoder decode.
 
 `cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
 the voice-prompt frames as attention conditioning only (the same design

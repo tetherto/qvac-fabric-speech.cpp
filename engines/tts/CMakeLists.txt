@@ -970,11 +970,29 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-cosyvoice-tier PRIVATE ggml)
     target_include_directories(test-cosyvoice-tier PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-tier)
-    set(_tcb_cosy_flow_tier_gates
-        "f16|0.998|2.0"
-        "bf16|0.998|2.0"
-        "q8_0|0.998|2.0"
-        "q4_0|0.98|8.0")
+    # The flow gates are per-arch because both metrics measure the host CPU
+    # backend's matmul rounding as much as they measure the tier GGUF: the
+    # harness drives the DiT with deliberately synthetic off-distribution
+    # inputs, so the x86 and ARM quantized paths land on measurably different
+    # deviations from the same weights. A broken tier instead collapses the
+    # cosine, far past either column.
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        # No bf16 row: neither tinyBLAS nor ggml_vec_dot_bf16 carries an ARM
+        # path, so a bf16 tier runs its matmuls as a scalar per-element loop --
+        # 207 s against the f16 tier's 26 s on an M3 Ultra. The tier guidance in
+        # docs/cosyvoice3.md already recommends f16 over bf16 off AVX512-BF16
+        # hosts, so that time would gate a path no ARM build ships.
+        set(_tcb_cosy_flow_tier_gates
+            "f16|0.998|2.0"
+            "q8_0|0.997|4.0"
+            "q4_0|0.96|8.0")
+    else()
+        set(_tcb_cosy_flow_tier_gates
+            "f16|0.998|2.0"
+            "bf16|0.998|2.0"
+            "q8_0|0.998|2.0"
+            "q4_0|0.98|8.0")
+    endif()
     foreach(_tcb_cosy_tier_gate IN LISTS _tcb_cosy_flow_tier_gates)
         string(REPLACE "|" ";" _tcb_cosy_tier_gate "${_tcb_cosy_tier_gate}")
         list(GET _tcb_cosy_tier_gate 0 _tcb_cosy_tier)
@@ -1152,6 +1170,10 @@ if (TTS_CPP_BUILD_TESTS)
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_flow.py")
         set_property(TEST test-convert-cosyvoice3-flow PROPERTY LABELS "unit")
+        add_test(NAME test-convert-cosyvoice3-llm
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
+        set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
         # Skips without torch; the TTS CI macOS lane runs it in the export venv.
         add_test(NAME test-audio8-codec-coreml-exporter
@@ -1277,6 +1299,40 @@ if (TTS_CPP_BUILD_TESTS)
                 EXE   test-cosyvoice-conv1d
                 LABEL "gpu")
             set_property(TEST test-cosyvoice-conv1d-${_tcb_cosy_arm} APPEND PROPERTY ENVIRONMENT
+                         "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
+        endforeach()
+    endif()
+
+    # Cross-backend stage parity on deterministic synthetic inputs (no PyTorch
+    # fixtures, only the stage GGUFs): exact greedy LM trajectory, flow mel
+    # cosine + max-abs, pinned-f0 HiFT waveform cosine — CPU vs the selected
+    # GPU.  Pins the backend-specific graph paths (Metal flash-attention LM
+    # decode, DiT f16-K/V flash attention, batched grouped conv, fused snake).
+    add_executable(test-cosyvoice-xb test/test_cosyvoice_xb.cpp)
+    target_link_libraries(test-cosyvoice-xb PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-xb PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-xb)
+    if (TTS_CPP_COSYVOICE_GPU)
+        tts_cpp_register_test(test-cosyvoice-xb
+            LABEL    "gpu"
+            ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                     "--llm-gguf" "${_tcb_cosy_llm_gguf}"
+                     "--flow-gguf" "${_tcb_cosy_flow_gguf}"
+                     "--hift-gguf" "${_tcb_cosy_hift_gguf}"
+            REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                     "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+        set_property(TEST test-cosyvoice-xb APPEND PROPERTY ENVIRONMENT "COSYVOICE_TEST_GPU=1")
+        foreach(_tcb_cosy_arm IN LISTS _tcb_cosy_arms)
+            tts_cpp_register_test(test-cosyvoice-xb-${_tcb_cosy_arm}
+                EXE      test-cosyvoice-xb
+                LABEL    "gpu"
+                ARGS     "--model-dir" "${TTS_CPP_TEST_MODEL_DIR}"
+                         "--llm-gguf" "${_tcb_cosy_llm_gguf}"
+                         "--flow-gguf" "${_tcb_cosy_flow_gguf}"
+                         "--hift-gguf" "${_tcb_cosy_hift_gguf}"
+                REQUIRES "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}"
+                         "${TTS_CPP_TEST_MODEL_DIR}/voice.gguf")
+            set_property(TEST test-cosyvoice-xb-${_tcb_cosy_arm} APPEND PROPERTY ENVIRONMENT
                          "COSYVOICE_TEST_GPU=1" "TTS_CPP_GPU_BACKEND=${_tcb_cosy_arm}")
         endforeach()
     endif()

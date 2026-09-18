@@ -30,6 +30,22 @@ def load_state_dict(path):
     return {k: v for k, v in obj.items() if hasattr(v, "detach")}
 
 
+# Concatenate each layer's q/k/v projections into one qkv_proj (rows q ++ k ++
+# v), mirroring the flow converter's fused to_qkv.  One matvec instead of
+# three per layer per decode step.  Row-wise q8_0/q4_0 quantization is
+# per-row, so the fused tensor quantizes to the exact bytes the separate
+# tensors would -- the logits are bit-identical either way.  The engine still
+# loads older GGUFs with separate q/k/v_proj tensors.
+def fuse_qkv(sd, depth):
+    import torch
+    for i in range(depth):
+        p = f"llm.model.model.layers.{i}.self_attn."
+        for kind in ("weight", "bias"):
+            parts = [sd.pop(f"{p}{n}_proj.{kind}") for n in ("q", "k", "v")]
+            sd[f"{p}qkv_proj.{kind}"] = torch.cat(parts, dim=0)
+    return sd
+
+
 def to_f32(t):
     import torch
     return np.ascontiguousarray(t.detach().to(torch.float32).cpu().numpy())
@@ -78,6 +94,7 @@ def main():
     n_kv = kv_dim // head_dim
     print(f"Qwen2: depth={depth} hidden={hidden} n_head={n_head} n_kv={n_kv} "
           f"head_dim={head_dim} inter={inter}")
+    sd = fuse_qkv(sd, depth)
 
     w = gguf.GGUFWriter(args.outfile, "cosyvoice3-llm")
     for k, v in dict(depth=depth, hidden=hidden, n_head=n_head, n_kv=n_kv,

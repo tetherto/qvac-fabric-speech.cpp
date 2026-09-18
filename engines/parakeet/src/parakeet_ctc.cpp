@@ -852,6 +852,55 @@ void load_nemotron_metadata(
     }
 }
 
+constexpr int kUnifiedDefaultLeftContextFrames = 70;
+const std::vector<int32_t> kUnifiedDefaultChunkFrames = {1, 2, 7, 13};
+const std::vector<int32_t> kUnifiedDefaultRightContextFrames = {0, 1, 2, 3, 4, 7, 13};
+
+int symmetric_convolution_cache_frames(const EncoderConfig & encoder) {
+    return (encoder.conv_kernel - 1) / 2;
+}
+
+bool has_unified_streaming_keys(const gguf_context * g) {
+    return find_key(g, "parakeet.unified.left_context_frames") >= 0;
+}
+
+void load_unified_streaming_keys(const gguf_context * g, UnifiedStreamingConfig & cfg) {
+    cfg.left_context_frames = require_u32(g, "parakeet.unified.left_context_frames");
+    cfg.cache_time_steps = require_u32(g, "parakeet.unified.cache_time_steps");
+    cfg.allowed_chunk_frames = require_i32_array(g, "parakeet.unified.allowed_chunk_frames");
+    cfg.allowed_right_context_frames =
+        require_i32_array(g, "parakeet.unified.allowed_right_context_frames");
+    cfg.available = true;
+}
+
+void apply_unified_streaming_defaults(const EncoderConfig & encoder, UnifiedStreamingConfig & cfg) {
+    cfg.left_context_frames = kUnifiedDefaultLeftContextFrames;
+    cfg.cache_time_steps = symmetric_convolution_cache_frames(encoder);
+    cfg.allowed_chunk_frames = kUnifiedDefaultChunkFrames;
+    cfg.allowed_right_context_frames = kUnifiedDefaultRightContextFrames;
+    cfg.available = true;
+    PARAKEET_LOG_INFO("gguf: no parakeet.unified.* metadata; using the published "
+                      "parakeet-unified-en-0.6b streaming contexts\n");
+}
+
+bool is_unified_streaming_candidate(const ParakeetCtcModel & model) {
+    return model.model_type == ParakeetModelType::RNNT &&
+           model.encoder_cfg.att_dynamic_chunking;
+}
+
+void load_unified_streaming_metadata(const gguf_context * g, ParakeetCtcModel & model) {
+    if (!is_unified_streaming_candidate(model)) {
+        return;
+    }
+    if (has_unified_streaming_keys(g)) {
+        load_unified_streaming_keys(g, model.unified_cfg);
+    } else {
+        apply_unified_streaming_defaults(model.encoder_cfg, model.unified_cfg);
+    }
+    model.supports_streaming = true;
+    validate_unified_streaming_model(model);
+}
+
 ggml_tensor * require_tensor(ggml_context * ctx, const std::string & name) {
     ggml_tensor * t = ggml_get_tensor(ctx, name.c_str());
     if (!t) throw std::runtime_error("gguf: missing required tensor '" + name + "'");
@@ -928,6 +977,64 @@ void require_nemotron_shape(
     }
 }
 
+constexpr int UNIFIED_MAX_LEFT_CONTEXT_FRAMES = 4096;
+constexpr int UNIFIED_MAX_CHUNK_FRAMES = 4096;
+constexpr int UNIFIED_MAX_RIGHT_CONTEXT_FRAMES = 4096;
+constexpr int UNIFIED_MAX_CACHE_TIME_STEPS = 4096;
+constexpr size_t UNIFIED_MAX_OPERATING_POINTS = 64;
+
+bool in_range(int32_t value, int32_t low, int32_t high) {
+    return value >= low && value <= high;
+}
+
+bool all_in_range(const std::vector<int32_t> & values, int32_t low, int32_t high) {
+    return std::all_of(values.begin(), values.end(),
+                       [low, high](int32_t v) { return in_range(v, low, high); });
+}
+
+bool all_positive(const std::vector<int32_t> & values) {
+    return all_in_range(values, 1, UNIFIED_MAX_CHUNK_FRAMES);
+}
+
+bool all_non_negative(const std::vector<int32_t> & values) {
+    return all_in_range(values, 0, UNIFIED_MAX_RIGHT_CONTEXT_FRAMES);
+}
+
+}
+
+void validate_unified_streaming_model(const ParakeetCtcModel & model) {
+    const EncoderConfig & encoder = model.encoder_cfg;
+    const UnifiedStreamingConfig & cfg = model.unified_cfg;
+    if (model.model_type != ParakeetModelType::RNNT || !cfg.available) {
+        throw std::runtime_error(
+            "validate_unified_streaming_model called without unified streaming metadata");
+    }
+    if (!encoder.att_dynamic_chunking ||
+        encoder.causal_downsampling ||
+        encoder.conv_causal ||
+        encoder.conv_kernel % 2 == 0) {
+        throw std::runtime_error(
+            "gguf: incompatible Unified FastConformer geometry");
+    }
+    if (!in_range(cfg.left_context_frames, 1, UNIFIED_MAX_LEFT_CONTEXT_FRAMES) ||
+        !in_range(cfg.cache_time_steps, 0, UNIFIED_MAX_CACHE_TIME_STEPS) ||
+        cfg.cache_time_steps != symmetric_convolution_cache_frames(encoder)) {
+        throw std::runtime_error(
+            "gguf: incompatible Unified streaming cache geometry");
+    }
+    if (cfg.allowed_chunk_frames.empty() ||
+        cfg.allowed_right_context_frames.empty() ||
+        cfg.allowed_chunk_frames.size() > UNIFIED_MAX_OPERATING_POINTS ||
+        cfg.allowed_right_context_frames.size() > UNIFIED_MAX_OPERATING_POINTS ||
+        !all_positive(cfg.allowed_chunk_frames) ||
+        !all_non_negative(cfg.allowed_right_context_frames)) {
+        throw std::runtime_error(
+            "gguf: invalid Unified streaming operating points");
+    }
+    if (!model.supports_streaming) {
+        throw std::runtime_error(
+            "gguf: Unified streaming metadata present but streaming is disabled");
+    }
 }
 
 void validate_nemotron_model(const ParakeetCtcModel & model) {
@@ -1747,6 +1854,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     if (out_model.model_type == ParakeetModelType::NEMOTRON) {
         load_nemotron_metadata(g, out_model);
     }
+    load_unified_streaming_metadata(g, out_model);
 
     if (out_model.model_type == ParakeetModelType::RNNT) {
         out_model.encoder_cfg.rnnt_pred_hidden =
@@ -2234,6 +2342,18 @@ const char * model_type_name(ParakeetModelType model_type) {
     }
 }
 
+namespace {
+
+std::string join_frames(const std::vector<int32_t> & values) {
+    std::string out = "{";
+    for (size_t i = 0; i < values.size(); ++i) {
+        out += (i ? "," : "") + std::to_string(values[i]);
+    }
+    return out + "}";
+}
+
+}
+
 void print_model_summary(const ParakeetCtcModel & m) {
     const char * mt = model_type_name(m.model_type);
     PARAKEET_LOG_INFO("parakeet-%s loaded:\n", mt);
@@ -2258,6 +2378,13 @@ void print_model_summary(const ParakeetCtcModel & m) {
                           m.encoder_cfg.conv_dynamic_chunking
                               ? "dcc"
                               : (m.encoder_cfg.conv_causal ? "causal" : "default"));
+    }
+    if (m.unified_cfg.available) {
+        PARAKEET_LOG_INFO("  unified streaming: left=%d frames conv_cache=%d chunks=%s right=%s\n",
+                          m.unified_cfg.left_context_frames,
+                          m.unified_cfg.cache_time_steps,
+                          join_frames(m.unified_cfg.allowed_chunk_frames).c_str(),
+                          join_frames(m.unified_cfg.allowed_right_context_frames).c_str());
     }
     PARAKEET_LOG_INFO("  preproc: sr=%d n_fft=%d win=%d hop=%d n_mels=%d preemph=%.2f log_guard=%.2e\n",
                       m.mel_cfg.sample_rate, m.mel_cfg.n_fft, m.mel_cfg.win_length,
