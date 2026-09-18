@@ -381,8 +381,9 @@ struct SynthesisResult {
     std::vector<float> pcm;
     int   sample_rate = 44100;
     float duration_s  = 0.0f;
-    // "ggml", or the Core ML sidecar's compute-unit label (e.g. "coreml-all").
-    std::string last_vocoder_backend = "ggml";
+    // "ggml", the Core ML sidecar's compute-unit label (e.g. "coreml-all"),
+    // or "mixed" when streamed chunks used different vocoder paths.
+    std::string vocoder_synthesis_backend = "ggml";
 };
 
 // Persistent engine.  Loads the GGUF once at construction; subsequent
@@ -470,7 +471,7 @@ public:
     // True when a Core ML vocoder sidecar (`<model>-vocoder.mlmodelc` next
     // to the GGUF) loaded at construction.  Load status only — a call can
     // still fall back to the ggml vocoder graph; the per-call truth is
-    // SynthesisResult::last_vocoder_backend.  Always false when the build is not
+    // SynthesisResult::vocoder_synthesis_backend.  Always false when the build is not
     // compiled with TTS_CPP_COREML or SUPERTONIC_COREML_DISABLE is set.
     bool vocoder_on_coreml() const;
 

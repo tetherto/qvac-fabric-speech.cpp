@@ -1,35 +1,68 @@
 #!/usr/bin/env python3
-"""Model-free unit tests for scripts/export-supertonic-coreml.py.
+"""Model-free unit tests for scripts/export-supertonic-coreml.py and its
+torch-free helper module scripts/supertonic_coreml_gguf.py.
 
-A tiny vocoder is built from random tensors in the GGUF's own source names
-and ONNX row-major layouts, so the checks need no checkpoint: the latent
-unpack must equal supertonic_vocoder.cpp's reshape-permute chain; the whole
-stack must be causal, which is what lets the engine drop each window's
-leading context and zero-pad the last window on the right; the receptive
-field must bound the context a window drop needs; and the sidecar stem rule
-must match supertonic_coreml_path.cpp. Requires torch; skips without it,
-mirroring the converter tests.
+The GGUF-side paths — tensor-name resolution (alias arrays, legacy pre-v3
+fallbacks), vocoder tensor collection with the block-quantized counter, and
+the sidecar stem rule — always run; they need only numpy (plus gguf for the
+Q8_0 round-trip). The Vocoder rebuild tests need torch: a tiny vocoder is
+built from random tensors in the GGUF's own source names and ONNX row-major
+layouts, so the checks need no checkpoint — the latent unpack must equal
+supertonic_vocoder.cpp's reshape-permute chain; the whole stack must be
+causal, which is what lets the engine drop each window's leading context and
+zero-pad the last window on the right; and the receptive field must bound the
+context a window drop needs.
 """
 import importlib.util
 import pathlib
+import sys
 import unittest
 
 try:
     import numpy as np
+    HAVE_NUMPY = True
+except ImportError:
+    HAVE_NUMPY = False
+
+try:
     import torch
     import torch.nn.functional as F
     HAVE_TORCH = True
 except ImportError:
     HAVE_TORCH = False
 
-SCRIPT = pathlib.Path(__file__).resolve().parent.parent / 'scripts' / 'export-supertonic-coreml.py'
+SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / 'scripts'
 
 
-def load_exporter():
-    spec = importlib.util.spec_from_file_location('export_supertonic_coreml', SCRIPT)
+def load_module(name, filename):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_helpers():
+    return load_module('supertonic_coreml_gguf', 'supertonic_coreml_gguf.py')
+
+
+def load_exporter():
+    return load_module('export_supertonic_coreml', 'export-supertonic-coreml.py')
+
+
+class FakeTensorType:
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeTensor:
+    """A GGUFReader tensor stand-in: flat data plus the reader's numpy-style
+    reversed shape."""
+
+    def __init__(self, name, array, type_name='F32'):
+        self.name = name
+        self.data = np.ascontiguousarray(array).reshape(-1)
+        self.shape = tuple(reversed(array.shape))
+        self.tensor_type = FakeTensorType(type_name)
 
 
 LATENT_DIM = 4
@@ -85,6 +118,85 @@ def tiny_hparams():
         'ttl_chunk_compress_factor': FACTOR,
         'sample_rate': 44100,
     }
+
+
+@unittest.skipUnless(HAVE_NUMPY, 'numpy not installed')
+class ResolveTensorNamesTest(unittest.TestCase):
+    def setUp(self):
+        self.helpers = load_helpers()
+
+    def test_alias_arrays_resolve(self):
+        resolved = self.helpers.resolve_tensor_names(
+            ['vocoder:onnx::Conv_1440', 'vocoder:tts.ae.latent_mean'],
+            ['supertonic/vocoder/t0001', 'supertonic/vocoder/t0002'],
+            [self.helpers.EMBED_W],
+            ['vocoder:onnx::Conv_1440'])
+        self.assertEqual(resolved[self.helpers.EMBED_W], 'supertonic/vocoder/t0001')
+
+    def test_legacy_gguf_without_alias_arrays(self):
+        # Pre-v3 converters ship no alias arrays; the legacy roster must map
+        # the canonical embed/prelu names onto the onnx:: storage names.
+        resolved = self.helpers.resolve_tensor_names(
+            ['vocoder:onnx::Conv_1440', 'vocoder:onnx::Conv_1441', 'vocoder:onnx::PRelu_1505'],
+            ['t1', 't2', 't3'])
+        self.assertEqual(resolved[self.helpers.EMBED_W], 't1')
+        self.assertEqual(resolved[self.helpers.EMBED_B], 't2')
+        self.assertEqual(resolved[self.helpers.HEAD_PRELU], 't3')
+
+    def test_alias_arrays_win_over_legacy(self):
+        resolved = self.helpers.resolve_tensor_names(
+            [self.helpers.EMBED_W, 'vocoder:onnx::Conv_1440'],
+            ['canonical', 'legacy'])
+        self.assertEqual(resolved[self.helpers.EMBED_W], 'canonical')
+
+
+@unittest.skipUnless(HAVE_NUMPY, 'numpy not installed')
+class CollectVocoderTensorsTest(unittest.TestCase):
+    def setUp(self):
+        self.helpers = load_helpers()
+
+    def test_collects_reshapes_and_skips_integers(self):
+        arr = np.arange(6, dtype=np.float32).reshape(2, 3)
+        by_name = {
+            't1': FakeTensor('t1', arr),
+            't2': FakeTensor('t2', np.zeros(3, dtype=np.int32), 'I32'),
+            't3': FakeTensor('t3', arr),
+        }
+        resolved = {'vocoder:a': 't1', 'vocoder:b': 't2', 'text_encoder:c': 't3'}
+        tensors, quantized = self.helpers.collect_vocoder_tensors(resolved, by_name, 'x.gguf')
+        self.assertEqual(quantized, 0)
+        self.assertEqual(sorted(tensors), ['vocoder:a'])
+        self.assertTrue(np.array_equal(tensors['vocoder:a'], arr))
+
+    def test_missing_tensor_raises(self):
+        with self.assertRaises(ValueError):
+            self.helpers.collect_vocoder_tensors({'vocoder:a': 'gone'}, {}, 'x.gguf')
+
+    def test_quantized_counter_and_dequant(self):
+        try:
+            from gguf.constants import GGMLQuantizationType
+            from gguf.quants import quantize
+        except ImportError:
+            self.skipTest('gguf not installed')
+        arr = (np.random.default_rng(7).standard_normal((2, 64)) * 0.5).astype(np.float32)
+        q = FakeTensor('tq', arr)
+        q.data = quantize(arr, GGMLQuantizationType.Q8_0).reshape(-1)
+        q.tensor_type = GGMLQuantizationType.Q8_0
+        by_name = {'tq': q, 'tf': FakeTensor('tf', arr)}
+        resolved = {'vocoder:q': 'tq', 'vocoder:f': 'tf'}
+        tensors, quantized = self.helpers.collect_vocoder_tensors(resolved, by_name, 'x.gguf')
+        self.assertEqual(quantized, 1)
+        self.assertTrue(np.allclose(tensors['vocoder:q'], arr, atol=0.01))
+
+
+@unittest.skipUnless(HAVE_NUMPY, 'numpy not installed')
+class SidecarStemTest(unittest.TestCase):
+    def test_matches_coreml_path_rule(self):
+        stem = load_helpers().sidecar_stem
+        self.assertEqual(stem('models/supertonic2.gguf'), 'supertonic2-vocoder')
+        self.assertEqual(stem('models/supertonic2-q8_0.gguf'), 'supertonic2-vocoder')
+        self.assertEqual(stem('supertonic3.F16.gguf'), 'supertonic3-vocoder')
+        self.assertEqual(stem('supertonic-multilingual.gguf'), 'supertonic-multilingual-vocoder')
 
 
 @unittest.skipUnless(HAVE_TORCH, 'torch not installed')
@@ -165,15 +277,11 @@ class VocoderTest(unittest.TestCase):
         self.assertEqual(self.exporter.receptive_field_frames(self.model, tiny_hparams()), want)
 
 
-@unittest.skipUnless(HAVE_TORCH, 'torch not installed')
-class SidecarStemTest(unittest.TestCase):
-    def test_matches_coreml_path_rule(self):
-        stem = load_exporter().sidecar_stem
-        self.assertEqual(stem('models/supertonic2.gguf'), 'supertonic2-vocoder')
-        self.assertEqual(stem('models/supertonic2-q8_0.gguf'), 'supertonic2-vocoder')
-        self.assertEqual(stem('supertonic3.F16.gguf'), 'supertonic3-vocoder')
-        self.assertEqual(stem('supertonic-multilingual.gguf'), 'supertonic-multilingual-vocoder')
-
-
 if __name__ == '__main__':
+    if not HAVE_NUMPY:
+        print('SKIP: numpy is not installed; no assertions ran')
+        sys.exit(0)
+    if not HAVE_TORCH:
+        print('NOTE: torch is not installed; the Vocoder rebuild tests are skipped, '
+              'the GGUF helper tests still run')
     unittest.main()

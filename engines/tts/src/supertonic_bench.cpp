@@ -743,8 +743,9 @@ int main(int argc, char ** argv) {
         // when comparing JSON across machines / configs.
         os << "  \"bench_sync\": " << (bench_sync ? "true" : "false") << ",\n";
         // Which path served the vocoder stage: "ggml", or the Core ML
-        // sidecar's compute-unit label (e.g. "coreml-all").
-        os << "  \"vocoder_backend\": \"" << json_escape(vocoder_backend) << "\",\n";
+        // sidecar's compute-unit label (e.g. "coreml-all").  Named after
+        // SynthesisResult::vocoder_synthesis_backend.
+        os << "  \"vocoder_synthesis_backend\": \"" << json_escape(vocoder_backend) << "\",\n";
         // round 7 — Vulkan env-var overrides surfaced
         // verbatim so the JSON consumer can attribute drift to
         // a specific override (or its absence).  Always emitted

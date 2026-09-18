@@ -41,19 +41,24 @@ VOCODER_DILATIONS = (1, 2, 4, 1, 2, 4, 1, 1, 1, 1)
 CONVNEXT_NORM_EPS = 1e-6
 BATCHNORM_EPS = 1e-5
 DEFAULT_WINDOW = 64
-QUANT_TAGS = ('f32', 'f16', 'bf16', 'q8_0', 'q5_0', 'q4_0')
 
-EMBED_W = 'vocoder:node:/decoder/embed/net/Conv#1'
-EMBED_B = 'vocoder:node:/decoder/embed/net/Conv#2'
-HEAD_PRELU = 'vocoder:node:/decoder/head/act/PRelu#1'
 
-# Pre-v3 converters shipped no alias arrays; mirror the runtime's
-# kLegacyV2Aliases roster (supertonic_gguf.cpp) for the vocoder names.
-LEGACY_V2_ALIASES = (
-    (EMBED_W, 'vocoder:onnx::Conv_1440'),
-    (EMBED_B, 'vocoder:onnx::Conv_1441'),
-    (HEAD_PRELU, 'vocoder:onnx::PRelu_1505'),
-)
+def load_gguf_helpers():
+    import importlib.util
+
+    module_path = Path(__file__).resolve().parent / 'supertonic_coreml_gguf.py'
+    spec = importlib.util.spec_from_file_location('supertonic_coreml_gguf', module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+gguf_helpers = load_gguf_helpers()
+EMBED_W = gguf_helpers.EMBED_W
+EMBED_B = gguf_helpers.EMBED_B
+HEAD_PRELU = gguf_helpers.HEAD_PRELU
+read_gguf = gguf_helpers.read_gguf
+sidecar_stem = gguf_helpers.sidecar_stem
 
 
 def constant(array):
@@ -187,67 +192,6 @@ class Vocoder(nn.Module):
         return wav
 
 
-def read_gguf(path):
-    from gguf import GGUFReader
-    from gguf.quants import dequantize
-
-    reader = GGUFReader(str(path))
-    by_name = {t.name: t for t in reader.tensors}
-
-    def field(name):
-        return reader.fields['supertonic.' + name].contents()
-
-    sources = [str(s) for s in field('source_names')]
-    names = [str(s) for s in field('tensor_names')]
-    resolved = dict(zip(sources, names))
-    if 'supertonic.source_aliases' in reader.fields:
-        aliases = [str(s) for s in field('source_aliases')]
-        targets = [str(s) for s in field('source_alias_targets')]
-        for alias, target in zip(aliases, targets):
-            if target in resolved:
-                resolved[alias] = resolved[target]
-    for canonical, legacy in LEGACY_V2_ALIASES:
-        if canonical not in resolved and legacy in resolved:
-            resolved[canonical] = resolved[legacy]
-
-    def dequantized(t):
-        if t.tensor_type.name in ('F32', 'F16'):
-            data = np.asarray(t.data).astype(np.float32)
-        elif t.tensor_type.name == 'BF16':
-            raw = np.asarray(t.data).view(np.uint16).reshape(-1)
-            data = (raw.astype(np.uint32) << 16).view(np.float32)
-        else:
-            data = dequantize(np.asarray(t.data), t.tensor_type).astype(np.float32)
-        shape = [int(d) for d in reversed(t.shape)]
-        return data.reshape(shape)
-
-    tensors = {}
-    quantized = 0
-    for source, name in resolved.items():
-        if not source.startswith('vocoder:'):
-            continue
-        t = by_name.get(name)
-        if t is None:
-            raise ValueError(f'{path}: metadata names {name} for {source} but the tensor is missing')
-        if t.tensor_type.name.startswith('I'):
-            continue
-        if t.tensor_type.name not in ('F32', 'F16', 'BF16'):
-            quantized += 1
-        tensors[source] = dequantized(t)
-    if quantized:
-        print(f'[load] WARNING: {quantized} vocoder tensors in {path} are block-quantized; '
-              'the sidecar bakes their dequantized values under the shared per-model name -- '
-              'export from the f32 or f16 tier for tier-independent numerics')
-
-    hp = {
-        'latent_channels': int(field('latent_channels')),
-        'base_chunk_size': int(field('base_chunk_size')),
-        'ttl_chunk_compress_factor': int(field('ttl_chunk_compress_factor')),
-        'sample_rate': int(field('sample_rate')),
-    }
-    return tensors, hp
-
-
 def load_vocoder(gguf_path):
     tensors, hp = read_gguf(gguf_path)
     return Vocoder(tensors, hp).eval(), hp
@@ -262,17 +206,6 @@ def receptive_field_frames(model, hp):
     receptive += model.head1.left + model.head2.left
     factor = hp['ttl_chunk_compress_factor']
     return (receptive + factor - 1) // factor
-
-
-def sidecar_stem(gguf_path):
-    """coreml_vocoder_sidecar_path's rule: drop the extension and a trailing
-    quantisation tag, so every tier of the model shares one sidecar."""
-    stem = Path(gguf_path).stem
-    for sep in ('-', '.'):
-        head, _, tag = stem.rpartition(sep)
-        if head and tag.lower() in QUANT_TAGS:
-            return head + '-vocoder'
-    return stem + '-vocoder'
 
 
 def compare(tag, got, want):

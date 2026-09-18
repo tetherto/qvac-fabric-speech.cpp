@@ -1164,12 +1164,16 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-        # Skips without torch; run it in the Core ML export venv for real coverage.
+        # The GGUF helper tests (aliases, quantized counter, stem rule) need
+        # only numpy; the Vocoder rebuild tests additionally need torch and
+        # run in the Core ML export venv (the tts-ci macOS fixture step). A
+        # numpy-less interpreter reports Skipped, never a vacuous pass.
         add_test(NAME test-supertonic-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_coreml.py")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1655,7 +1659,8 @@ if (TTS_CPP_BUILD_TESTS)
 
     # Self-skips (77) without TTS_CPP_COREML or a staged
     # SUPERTONIC_COREML_TEST_MODELS_DIR holding a Supertonic GGUF with a
-    # compiled `<model>-vocoder.mlmodelc` next to it.
+    # compiled `<model>-vocoder.mlmodelc` next to it; the tts-ci macOS lane
+    # stages the fixture and runs the binary directly so a skip fails.
     add_executable(test-supertonic-coreml-parity test/test_supertonic_coreml_parity.cpp)
     target_link_libraries(test-supertonic-coreml-parity PRIVATE tts-cpp ggml)
     target_include_directories(test-supertonic-coreml-parity PRIVATE include src test)

@@ -190,8 +190,9 @@ bundle nor its runtime; `--parity-dir <ref>` checks that rebuild against
 `final_latent.npy` / `wav_full.npy` from `dump-supertonic-reference.py`
 first. With the sidecar present the engine reports it on
 `Engine::vocoder_on_coreml()` at load and per call on
-`SynthesisResult::last_vocoder_backend`; `supertonic-bench` prints and emits the
-same label as `vocoder_backend`.
+`SynthesisResult::vocoder_synthesis_backend` ("mixed" when streamed chunks
+used different vocoder paths); `supertonic-bench` prints and emits the same
+label as `vocoder_synthesis_backend`.
 
 The export is fixed-shape, `--window` latent frames (default 64, 4.46 s,
 196608 samples) in and the matching samples out. The engine walks an

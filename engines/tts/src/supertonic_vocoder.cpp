@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -966,7 +967,7 @@ int supertonic_coreml_vocoder_context_frames(const supertonic_model & model) {
     const supertonic_vocoder_weights & v = model.vocoder;
     if (!v.embed_w || !v.head1_w || !v.head2_w) return 0;
     int64_t receptive = v.embed_w->ne[0] - 1;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < (int) std::size(kVocoderDilations); ++i) {
         ggml_tensor * dw = v.convnext[(size_t) i].dw_w;
         if (!dw) return 0;
         receptive += (dw->ne[0] - 1) * kVocoderDilations[i];
@@ -1024,9 +1025,9 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
                                      std::string * backend_used) {
     if (backend_used) *backend_used = "ggml";
 #ifdef TTS_CPP_USE_COREML
-    if (model.coreml_vocoder && latent_len > 0) {
+    if (model.coreml_vocoder) {
         auto profile_coreml = std::chrono::steady_clock::now();
-        if (run_vocoder_coreml(model, latent, latent_len, wav_out)) {
+        if (latent_len > 0 && run_vocoder_coreml(model, latent, latent_len, wav_out)) {
             profile_vocoder_checkpoint("coreml", profile_coreml);
             if (backend_used) {
                 *backend_used = supertonic_coreml_vocoder_backend_label(model.coreml_vocoder);
@@ -1043,9 +1044,11 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
             }
             return false;
         }
-        std::fprintf(stderr,
-                     "supertonic: Core ML vocoder failed for %d latent frames; "
-                     "falling back to the ggml graph\n", latent_len);
+        if (latent_len > 0) {
+            std::fprintf(stderr,
+                         "supertonic: Core ML vocoder failed for %d latent frames; "
+                         "falling back to the ggml graph\n", latent_len);
+        }
     } else if (coreml_vocoder_strict()) {
         if (error) {
             *error = "supertonic: no Core ML vocoder sidecar loaded and "

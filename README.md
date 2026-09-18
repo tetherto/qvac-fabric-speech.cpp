@@ -121,7 +121,7 @@ falls back to ggml -- see the
 Supertonic Core ML sidecar takes the vocoder off ggml the same way: exported
 from the model GGUF by `engines/tts/scripts/export-supertonic-coreml.py`,
 reported on `Engine::vocoder_on_coreml()` (sidecar loaded) and
-`SynthesisResult::last_vocoder_backend` (where a call's vocoder ran), with any
+`SynthesisResult::vocoder_synthesis_backend` (where a call's vocoder ran), with any
 failure falling back to ggml -- see the
 [Supertonic guide](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar). The
 ACE-Step Core ML sidecar is exported by

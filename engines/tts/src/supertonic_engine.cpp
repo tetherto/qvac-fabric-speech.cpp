@@ -570,7 +570,7 @@ struct Engine::Impl {
 
         SynthesisResult result;
         result.duration_s  = duration_s;
-        result.last_vocoder_backend = std::move(vocoder_backend);
+        result.vocoder_synthesis_backend = std::move(vocoder_backend);
         result.pcm.assign(wav_full.begin(),
                           wav_full.begin() + std::min((size_t) wav_len, wav_full.size()));
 
@@ -734,7 +734,12 @@ struct Engine::Impl {
 
             full.pcm.insert(full.pcm.end(), emit.begin(), emit.end());
             full.duration_s += chunk_res.duration_s;
-            full.last_vocoder_backend = std::move(chunk_res.last_vocoder_backend);
+            if (k == 0) {
+                full.vocoder_synthesis_backend =
+                    std::move(chunk_res.vocoder_synthesis_backend);
+            } else if (full.vocoder_synthesis_backend != chunk_res.vocoder_synthesis_backend) {
+                full.vocoder_synthesis_backend = "mixed";
+            }
         }
 
         return full;

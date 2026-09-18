@@ -154,9 +154,25 @@ void check_engine_report(const std::string & gguf) {
         Engine engine(opts);
         expect(engine.vocoder_on_coreml(), "engine: vocoder_on_coreml() is false");
         SynthesisResult result = engine.synthesize("Core ML parity check.");
-        expect(result.last_vocoder_backend.rfind("coreml", 0) == 0,
-               "engine: SynthesisResult::last_vocoder_backend is " + result.last_vocoder_backend);
+        expect(result.vocoder_synthesis_backend.rfind("coreml", 0) == 0,
+               "engine: SynthesisResult::vocoder_synthesis_backend is " + result.vocoder_synthesis_backend);
         expect(!result.pcm.empty(), "engine: empty PCM");
+
+        // Streaming with every chunk on the sidecar keeps the sidecar label
+        // rather than degrading to "mixed".
+        EngineOptions stream_opts = opts;
+        stream_opts.stream_chunk_tokens = 40;
+        Engine stream_engine(stream_opts);
+        int chunks = 0;
+        SynthesisResult streamed = stream_engine.synthesize(
+            "The quick brown fox jumps over the lazy dog. The curious cat watches "
+            "from the warm windowsill. A lone bell rings across the quiet valley.",
+            [&](const float *, std::size_t, int, bool) { ++chunks; });
+        expect(chunks >= 2, "engine: streaming produced " + std::to_string(chunks) +
+                            " chunk(s); the multi-chunk label path never ran");
+        expect(streamed.vocoder_synthesis_backend.rfind("coreml", 0) == 0,
+               "engine: streamed vocoder_synthesis_backend is " +
+               streamed.vocoder_synthesis_backend);
     } catch (const std::exception & e) {
         fail(std::string("engine synthesis: ") + e.what());
     }
