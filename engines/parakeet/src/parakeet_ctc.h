@@ -8,6 +8,7 @@
 #include "mel_preprocess.h"
 #include "sentencepiece_bpe.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -254,6 +255,7 @@ struct NemotronWeights {
 };
 
 struct TdtRuntimeWeights;
+struct ParakeetCtcModel;
 
 struct NemotronStreamStepResult {
     std::vector<float> encoder_raw;
@@ -262,6 +264,8 @@ struct NemotronStreamStepResult {
     std::string text;
     int encoder_frames = 0;
     int decoder_steps = 0;
+    double encoder_ms = 0.0;
+    double decoder_ms = 0.0;
 };
 
 struct NemotronStreamState {
@@ -288,6 +292,25 @@ struct NemotronStreamState {
     NemotronStreamState(const NemotronStreamState &) = delete;
     NemotronStreamState & operator=(const NemotronStreamState &) = delete;
 };
+
+struct NemotronOfflineResult {
+    std::string text;
+    std::vector<int32_t> token_ids;
+    int encoder_frames = 0;
+    double encoder_ms = 0.0;
+    double decoder_ms = 0.0;
+};
+
+int run_nemotron_cache_aware_offline(
+        ParakeetCtcModel & model,
+        TdtRuntimeWeights & runtime,
+        const float * mel,
+        int n_mel_frames,
+        int n_mels,
+        const std::string & language,
+        int right_context_frames,
+        std::atomic<bool> & cancel_flag,
+        NemotronOfflineResult & result);
 
 enum class ParakeetModelType {
     CTC,
