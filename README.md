@@ -41,7 +41,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet-unified-en-0.6b` | parakeet | English | 600 M | `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | RNN-T decode; offline + long-form + cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
-| `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA | cache-aware streaming at 80/160/320/560/1120 ms; empty language selects `auto` |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape offline encoder | Core ML is limited to inputs fitting the exported shape; longer offline inputs and streaming use the cache-aware ggml path at 80/160/320/560/1120 ms; empty language selects `auto` |
 
 ### End-of-utterance and diarization
 

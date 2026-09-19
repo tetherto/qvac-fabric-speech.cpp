@@ -102,7 +102,17 @@ if ! [[ "$(/bin/date +%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
 fi
 
 spec_field() {
-  jq -r --arg family "$FAMILY" --arg field "$1" '.[$family][$field] // ""' "$FAMILIES_JSON"
+  jq -r --arg family "$FAMILY" --arg field "$1" \
+    'if .[$family][$field] == null then "" else .[$family][$field] end' \
+    "$FAMILIES_JSON"
+}
+
+benchmark_platform() {
+  if [[ -n "${BENCH_TEST_PLATFORM:-}" ]]; then
+    printf '%s\n' "$BENCH_TEST_PLATFORM"
+  else
+    uname -s
+  fi
 }
 spec_field_raw() {
   # For fields that may be null (audio_duration_seconds) — return jq's raw
@@ -175,6 +185,7 @@ BASELINE_ENCODER_BACKEND=""
 BASELINE_ENCODER_MS_MEDIAN="null"
 BASELINE_INFERENCE_MS_MEDIAN="null"
 BASELINE_RTF_MEDIAN="null"
+BASELINE_WER_MEDIAN="null"
 ENCODER_SPEEDUP="null"
 INFERENCE_SPEEDUP="null"
 PEAK_RSS_MIB="null"   # tracked across runs; max seen
@@ -235,6 +246,7 @@ emit_json() {
     --argjson baseline_encoder_ms_median "$BASELINE_ENCODER_MS_MEDIAN" \
     --argjson baseline_inference_ms_median "$BASELINE_INFERENCE_MS_MEDIAN" \
     --argjson baseline_rtf_median "$BASELINE_RTF_MEDIAN" \
+    --argjson baseline_wer_median "$BASELINE_WER_MEDIAN" \
     --argjson encoder_speedup "$ENCODER_SPEEDUP" \
     --argjson inference_speedup "$INFERENCE_SPEEDUP" \
     --argjson wall_median "$median" \
@@ -262,6 +274,7 @@ emit_json() {
       baseline_encoder_ms_median:$baseline_encoder_ms_median,
       baseline_inference_ms_median:$baseline_inference_ms_median,
       baseline_rtf_median:$baseline_rtf_median,
+      baseline_wer_median:$baseline_wer_median,
       encoder_speedup:$encoder_speedup, inference_speedup:$inference_speedup,
       wall_ms_median:$wall_median, wall_ms_min:$wall_min, wall_ms_max:$wall_max,
       rtf_median:$rtf_median, peak_rss_mib:$peak_rss,
@@ -520,7 +533,7 @@ fi
 # The Core ML bundle is derived from the family's configured source GGUF. A restored
 # Actions cache makes this a no-op on subsequent runs; the first run exports and
 # compiles locally on the Apple Silicon benchmark host.
-if [[ "$(uname -s)" == "Darwin" ]] &&
+if [[ "$(benchmark_platform)" == "Darwin" ]] &&
    [[ "$(spec_field coreml_compare_on_darwin)" == "true" ]]; then
   coreml_basename="$(spec_field coreml_model_basename)"
   coreml_source_gguf="$(spec_field coreml_source_gguf)"
@@ -1062,7 +1075,7 @@ score_tts_intelligibility() {
 case "$BENCH_KIND" in
   native)
     coreml_compare="$(spec_field coreml_compare_on_darwin)"
-    if [[ "$(uname -s)" == "Darwin" && "$coreml_compare" == "true" ]]; then
+    if [[ "$(benchmark_platform)" == "Darwin" && "$coreml_compare" == "true" ]]; then
       coreml_json="$tmp_dir/native-coreml.json"
       coreml_stderr="$tmp_dir/coreml.err"
       JSON_OUT="$coreml_json"
@@ -1140,22 +1153,43 @@ case "$BENCH_KIND" in
       cp "$coreml_json" "$artifact_dir/${FAMILY}-coreml-native.json"
       cp "$baseline_json" "$artifact_dir/${FAMILY}-metal-native.json"
 
-      # $coreml_json is the parakeet-cli --json-out from the CoreML-forced
-      # run — a bench-JSON with the .transcript field. Pass the mode
-      # positional explicitly; the pre-refactor single-arg call landed
-      # $coreml_json in $mode, hit score_correctness's unknown-mode
-      # branch, and silently skipped WER on every CoreML-native dispatch.
-      corr_out=""
-      corr_out="$(score_correctness bench-json "$coreml_json" || true)"
-      if [[ -n "$corr_out" ]]; then
-        IFS='|' read -r c_score c_kind c_ref <<< "$corr_out"
-        case "$c_kind" in
-          wer) [[ -n "$c_score" ]] && WER_MEDIAN="$c_score" ;;
-          der) [[ -n "$c_score" ]] && DER_MEDIAN="$c_score" ;;
-          f1)  [[ -n "$c_score" ]] && F1_MEDIAN="$c_score"  ;;
-        esac
-        [[ -n "$c_kind" ]] && CORRECTNESS_KIND="$(printf '%s' "$c_kind" | jq -R .)"
-        [[ -n "$c_ref"  ]] && CORRECTNESS_REF="$(printf '%s' "$c_ref" | jq -R .)"
+      coreml_corr="$(score_correctness bench-json "$coreml_json" || true)"
+      baseline_corr="$(score_correctness bench-json "$baseline_json" || true)"
+      if [[ -z "$coreml_corr" || -z "$baseline_corr" ]]; then
+        emit_json "run-failed" null null null " (Core ML and baseline correctness must both be scoreable)"
+        exit 0
+      fi
+
+      IFS='|' read -r coreml_score coreml_kind coreml_ref <<< "$coreml_corr"
+      IFS='|' read -r baseline_score baseline_kind baseline_ref <<< "$baseline_corr"
+      if [[ "$coreml_kind" != "$baseline_kind" || "$coreml_ref" != "$baseline_ref" ]]; then
+        emit_json "run-failed" null null null " (Core ML and baseline correctness metadata differ)"
+        exit 0
+      fi
+
+      case "$coreml_kind" in
+        wer)
+          WER_MEDIAN="$coreml_score"
+          BASELINE_WER_MEDIAN="$baseline_score"
+          max_wer="$(jq -r --arg family "$FAMILY" '.[$family].correctness.max_wer // empty' "$FAMILIES_JSON")"
+          if [[ "$require_transcript_match" == "false" && -z "$max_wer" ]]; then
+            emit_json "run-failed" null null null " (transcript matching is disabled without correctness.max_wer)"
+            exit 0
+          fi
+          if [[ -n "$max_wer" ]] && ! awk -v active="$coreml_score" -v baseline="$baseline_score" -v limit="$max_wer" \
+              'BEGIN { exit ! (active <= limit && baseline <= limit) }'; then
+            emit_json "run-failed" null null null " (Core ML or baseline WER exceeds correctness.max_wer=$max_wer)"
+            exit 0
+          fi
+          ;;
+        der) DER_MEDIAN="$coreml_score" ;;
+        f1)  F1_MEDIAN="$coreml_score" ;;
+      esac
+      if [[ -n "$coreml_kind" ]]; then
+        CORRECTNESS_KIND="$(printf '%s' "$coreml_kind" | jq -R .)"
+      fi
+      if [[ -n "$coreml_ref" ]]; then
+        CORRECTNESS_REF="$(printf '%s' "$coreml_ref" | jq -R .)"
       fi
 
       coreml_min="$(jq -r '.inference_ms.min // null' "$coreml_json")"

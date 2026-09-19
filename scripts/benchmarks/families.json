@@ -163,7 +163,8 @@
     "correctness": {
       "kind": "wer",
       "reference": "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt",
-      "normalizer": "english"
+      "normalizer": "english",
+      "max_wer": 0.1
     },
     "notes": "Nemotron offline benchmark at its GGUF-defined chunk-limited attention geometry. On Darwin the fixed Core ML encoder is required, then the same F16 model is rerun with Core ML disabled as the Metal baseline. Locale prompt projection and RNN-T decoding remain on ggml. The 6-bit sidecar may produce a small token-level drift, so each transcript is gated independently by WER instead of requiring byte-for-byte equality."
   },

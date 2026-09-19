@@ -89,10 +89,10 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
 
 Place the compiled directory beside any quantization of the GGUF using the
 corresponding `.mlmodelc` name. Exact-shape offline encoder invocations use
-Core ML. Longer offline inputs are tiled into overlapping exact-shape windows
-using the trained 56-frame left and 3-frame right attention context; native
-cache-aware streaming remains on ggml. Mel subsampling, locale prompt
-projection, and RNN-T decoding also remain on ggml.
+Core ML. Longer offline inputs use the native cache-aware ggml path because an
+independent exact-shape window cannot preserve the encoder's full-depth
+receptive field. Native streaming, mel subsampling, locale prompt projection,
+and RNN-T decoding also remain on ggml.
 
 ### Sortformer v2.1
 

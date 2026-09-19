@@ -197,20 +197,6 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
             opts.long_form_context_frames,
             model.encoder_cfg.subsampling_factor,
             n_mel_frames);
-    } else if (model.model_type == ParakeetModelType::NEMOTRON) {
-        // Nemotron's exact-shape sidecar cannot use the TDT/Unified padded
-        // capacity path. When Core ML is disabled, retain the shipped 11-second
-        // benchmark geometry so the Metal baseline uses the same bounded
-        // window plan instead of the generic multi-GB attention window.
-        constexpr int kNemotronDefaultWindowMelFrames = 1101;
-        const int fixed_mel_frames = model_coreml_fixed_mel_frames(model);
-        coreml = resolve_nemotron_long_form_plan(
-            fixed_mel_frames > 0 ? fixed_mel_frames
-                                 : kNemotronDefaultWindowMelFrames,
-            model.encoder_cfg.att_context_left,
-            model.encoder_cfg.att_context_right,
-            model.encoder_cfg.subsampling_factor,
-            n_mel_frames);
     } else if (model.model_type == ParakeetModelType::EOU) {
         // Exact-shape EOU calls may use Core ML directly, but oversized inputs
         // stay on ggml until windowed causal/chunked attention parity is proven.
@@ -553,6 +539,57 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
     EncoderOutputs enc_out;
     const LongFormPlan lf =
         resolve_long_form_plan(pimpl_->model, pimpl_->opts, n_mel_frames);
+
+    const int exact_mel_frames = model_coreml_fixed_mel_frames(pimpl_->model);
+    const bool cache_aware_nemotron =
+        pimpl_->model.model_type == ParakeetModelType::NEMOTRON &&
+        should_use_nemotron_cache_aware_offline(
+                exact_mel_frames,
+                pimpl_->opts.long_form_window_frames,
+                lf.enabled,
+                n_mel_frames);
+
+    if (cache_aware_nemotron) {
+        const auto & right_contexts =
+            pimpl_->model.nemotron_cfg.allowed_right_context_frames;
+
+        if (right_contexts.empty()) {
+            throw std::runtime_error(
+                    "Nemotron has no cache-aware operating point");
+        }
+
+        NemotronOfflineResult offline;
+        const int rc = run_nemotron_cache_aware_offline(
+                pimpl_->model,
+                pimpl_->transducer_rt,
+                mel.data(),
+                n_mel_frames,
+                pimpl_->model.mel_cfg.n_mels,
+                pimpl_->opts.language,
+                right_contexts.back(),
+                pimpl_->cancel_flag,
+                offline);
+        if (rc != 0) {
+            throw std::runtime_error(
+                    "Nemotron cache-aware offline transcription failed (rc=" +
+                    std::to_string(rc) + ")");
+        }
+
+        EngineResult result;
+        result.text = std::move(offline.text);
+        result.token_ids = std::move(offline.token_ids);
+        result.preprocess_ms = preprocess_ms;
+        result.encoder_ms = offline.encoder_ms;
+        result.decode_ms = offline.decoder_ms;
+        result.total_ms = ms_since(t_total);
+        result.audio_samples = n_samples;
+        result.sample_rate = sample_rate;
+        result.mel_frames = n_mel_frames;
+        result.encoder_frames = offline.encoder_frames;
+        result.encoder_used_coreml = false;
+        return result;
+    }
+
     if (lf.enabled) {
         // Long input: window the encoder over the (global-CMVN) mel so the
         // O(T_enc^2) attention never allocates the full-length score tensor.

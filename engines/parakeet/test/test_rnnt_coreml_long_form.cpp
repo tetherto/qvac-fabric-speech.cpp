@@ -28,6 +28,7 @@ struct ChildResult {
     bool coreml_available = false;
     bool coreml_used = false;
     int mel_frames = 0;
+    int encoder_frames = 0;
     std::vector<int32_t> tokens;
 };
 
@@ -46,7 +47,8 @@ std::vector<float> tile_to_seconds(const std::vector<float> & source,
 }
 
 std::string run_child(const std::string & gguf, const std::string & wav,
-                      int target_seconds, bool disable_coreml) {
+                      int target_seconds, bool disable_coreml,
+                      bool disable_windowing) {
     int fds[2];
     if (pipe(fds) != 0) return {};
 
@@ -73,6 +75,9 @@ std::string run_child(const std::string & gguf, const std::string & wav,
             parakeet::EngineOptions opts;
             opts.model_gguf_path = gguf;
             opts.n_gpu_layers = 999;
+            if (disable_windowing) {
+                opts.long_form_window_frames = -1;
+            }
             parakeet::Engine engine(opts);
             const parakeet::EngineResult result = engine.transcribe_samples(
                 samples.data(), static_cast<int>(samples.size()), sample_rate);
@@ -81,6 +86,7 @@ std::string run_child(const std::string & gguf, const std::string & wav,
             payload << "coreml_available=" << (engine.encoder_on_coreml() ? 1 : 0)
                     << "\ncoreml_used=" << (result.encoder_used_coreml ? 1 : 0)
                     << "\nmel_frames=" << result.mel_frames
+                    << "\nencoder_frames=" << result.encoder_frames
                     << "\ntokens=";
             for (size_t i = 0; i < result.token_ids.size(); ++i) {
                 if (i > 0) payload << ',';
@@ -133,6 +139,8 @@ ChildResult parse_result(const std::string & raw) {
         !parse_bool_line(line, "coreml_used", result.coreml_used)) return result;
     if (!std::getline(input, line) || line.rfind("mel_frames=", 0) != 0) return result;
     result.mel_frames = std::atoi(line.c_str() + 11);
+    if (!std::getline(input, line) || line.rfind("encoder_frames=", 0) != 0) return result;
+    result.encoder_frames = std::atoi(line.c_str() + 15);
     if (!std::getline(input, line) || line.rfind("tokens=", 0) != 0) return result;
 
     std::istringstream tokens(line.substr(7));
@@ -173,10 +181,11 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr, "[rnnt-coreml-long-form] SKIP: Core ML is Apple-only.\n");
     return 0;
 #else
-    if (argc != 6) {
+    if (argc != 7) {
         std::fprintf(stderr,
             "usage: %s <rnnt.gguf> <wav> <fixed-mel-frames> "
-            "<target-seconds> <min-token-similarity>\n", argv[0]);
+            "<target-seconds> <min-token-similarity> "
+            "<windowed-coreml|cache-aware>\n", argv[0]);
         return 2;
     }
     const std::string gguf = argv[1];
@@ -184,9 +193,17 @@ int main(int argc, char ** argv) {
     const int fixed_mel_frames = std::atoi(argv[3]);
     const int target_seconds = std::atoi(argv[4]);
     const double minimum_similarity = std::atof(argv[5]);
+    const std::string mode = argv[6];
+    const bool cache_aware = mode == "cache-aware";
+    if (!cache_aware && mode != "windowed-coreml") {
+        std::fprintf(stderr, "invalid long-form test mode: %s\n", mode.c_str());
+        return 2;
+    }
 
     const ChildResult coreml = parse_result(
-        run_child(gguf, wav, target_seconds, /*disable_coreml=*/false));
+        run_child(gguf, wav, target_seconds,
+                  /*disable_coreml=*/false,
+                  /*disable_windowing=*/false));
     if (!coreml.parsed) {
         std::fprintf(stderr, "[rnnt-coreml-long-form] FAIL: Core ML child failed\n");
         return 1;
@@ -202,14 +219,21 @@ int main(int argc, char ** argv) {
             coreml.mel_frames, fixed_mel_frames);
         return 1;
     }
-    if (!coreml.coreml_used) {
+    if (!cache_aware && !coreml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: an over-capacity encoder window fell back to ggml\n");
         return 1;
     }
+    if (cache_aware && coreml.coreml_used) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: oversized Nemotron input used independent Core ML windows\n");
+        return 1;
+    }
 
     const ChildResult ggml = parse_result(
-        run_child(gguf, wav, target_seconds, /*disable_coreml=*/true));
+        run_child(gguf, wav, target_seconds,
+                  /*disable_coreml=*/true,
+                  /*disable_windowing=*/cache_aware));
     if (!ggml.parsed || ggml.coreml_available || ggml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: forced-ggml reference routing is invalid\n");
@@ -218,6 +242,13 @@ int main(int argc, char ** argv) {
     if (coreml.tokens.empty() || ggml.tokens.empty()) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: transcription returned no tokens\n");
+        return 1;
+    }
+    if (cache_aware && coreml.encoder_frames != ggml.encoder_frames) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: cache-aware encoder frames %d "
+            "do not match unwindowed reference %d\n",
+            coreml.encoder_frames, ggml.encoder_frames);
         return 1;
     }
 

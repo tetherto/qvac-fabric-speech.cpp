@@ -1,5 +1,6 @@
 // CLI executable: flags, WAV/model paths, transcribe/diarize/streaming modes.
 
+#include "long_form.h"
 #include "parakeet/cli.h"
 #include "parakeet/engine.h"
 #include "parakeet/streaming.h"
@@ -766,6 +767,67 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EngineOptions long_form_opts;
         const LongFormPlan long_form =
             resolve_long_form_plan(model, long_form_opts, n_frames);
+
+        static TdtRuntimeWeights rt;
+        static bool rt_ready = false;
+
+        const int exact_mel_frames = model_coreml_fixed_mel_frames(model);
+        const bool cache_aware_nemotron =
+            model.model_type == ParakeetModelType::NEMOTRON &&
+            should_use_nemotron_cache_aware_offline(
+                    exact_mel_frames,
+                    long_form_opts.long_form_window_frames,
+                    long_form.enabled,
+                    n_frames);
+
+        if (cache_aware_nemotron) {
+            const auto & right_contexts =
+                model.nemotron_cfg.allowed_right_context_frames;
+            if (right_contexts.empty()) {
+                return 2;
+            }
+
+            if (!rt_ready) {
+                if (tdt_prepare_runtime(model, rt) != 0) {
+                    return 20;
+                }
+                rt_ready = true;
+            }
+
+            std::atomic<bool> cancel_flag{false};
+            NemotronOfflineResult offline;
+            const int rc = run_nemotron_cache_aware_offline(
+                model,
+                rt,
+                mel.data(),
+                n_frames,
+                model.mel_cfg.n_mels,
+                opts.language,
+                right_contexts.back(),
+                cancel_flag,
+                offline);
+
+            if (rc != 0) {
+                return rc;
+            }
+
+            text_out = std::move(offline.text);
+            ids_out = std::move(offline.token_ids);
+            n_frames_out = n_frames;
+
+            times.enc_ms = offline.encoder_ms;
+            times.dec_ms = offline.decoder_ms;
+            times.inference_ms = times.mel_ms + times.enc_ms + times.dec_ms;
+            times.tokens = static_cast<int>(ids_out.size());
+            times.encoder_frames = offline.encoder_frames;
+            times.encoder_coreml = false;
+
+            if (extra.require_coreml) {
+                return 31;
+            }
+            return 0;
+        }
+
         if (long_form.enabled) {
             std::atomic<bool> cancel_flag{false};
             WindowedEncoderStats stats;
@@ -880,8 +942,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         if (model.model_type == ParakeetModelType::RNNT ||
             model.model_type == ParakeetModelType::NEMOTRON ||
             model.model_type == ParakeetModelType::TDT) {
-            static TdtRuntimeWeights rt;
-            static bool rt_ready = false;
             if (!rt_ready) {
                 if (tdt_prepare_runtime(model, rt) != 0) return 20;
                 rt_ready = true;

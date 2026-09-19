@@ -33,8 +33,8 @@ using parakeet::plan_long_form_windows;
 using parakeet::plan_long_form_windows_asymmetric;
 using parakeet::resolve_coreml_exact_shape_plan;
 using parakeet::resolve_coreml_fixed_shape_plan;
-using parakeet::resolve_nemotron_long_form_plan;
 using parakeet::resolve_long_form_window_frames;
+using parakeet::should_use_nemotron_cache_aware_offline;
 
 namespace {
 
@@ -185,48 +185,19 @@ void check_coreml_eou_exact_shape_resolution() {
            "eou coreml resolve: long input preserves attention via ggml fallback");
 }
 
-void check_nemotron_exact_shape_resolution() {
-    using parakeet::LongFormPlan;
-
-    expect(!resolve_nemotron_long_form_plan(0, 56, 3, 8, 5000).enabled,
-           "nemotron resolve: missing exact shape stays disabled");
-    expect(!resolve_nemotron_long_form_plan(1101, 56, 3, 8, 1101).enabled,
-           "nemotron resolve: exact input remains single-pass");
-    expect(!resolve_nemotron_long_form_plan(1101, 56, 3, 8, 1000).enabled,
-           "nemotron resolve: shorter input remains single-pass");
-
-    const LongFormPlan plan =
-        resolve_nemotron_long_form_plan(1101, 56, 3, 8, 10000);
-    expect(plan.enabled, "nemotron resolve: oversized input enables windowing");
-    expect(plan.exact_mel_frames == 1101,
-           "nemotron resolve: exact mel shape is preserved");
-    expect(plan.left_context_frames == 56 && plan.right_context_frames == 3,
-           "nemotron resolve: trained asymmetric attention context is preserved");
-    expect(plan.center_frames == 78,
-           "nemotron resolve: centre uses the aligned residual capacity");
-
-    const int center_mel = plan.center_frames * plan.sub;
-    const std::vector<LongFormWindow> windows =
-        plan_long_form_windows_asymmetric(
-            10000, center_mel,
-            plan.left_context_frames * plan.sub,
-            plan.right_context_frames * plan.sub,
-            plan.exact_mel_frames);
-    expect(windows.size() > 1,
-           "nemotron resolve: long input should produce multiple windows");
-    long long covered = 0;
-    for (size_t index = 0; index < windows.size(); ++index) {
-        const LongFormWindow & window = windows[index];
-        expect(window.window_len == 1101,
-               "nemotron resolve: every long-form window must match the sidecar");
-        if (index > 0) {
-            expect(windows[index - 1].center_end == window.center_start,
-                   "nemotron resolve: committed centres must be contiguous");
-        }
-        covered += window.center_end - window.center_start;
-    }
-    expect(covered == 10000,
-           "nemotron resolve: committed centres must cover the full input");
+void check_nemotron_cache_aware_resolution() {
+    expect(!should_use_nemotron_cache_aware_offline(1101, 0, false, 1101),
+           "nemotron resolve: exact-shape input remains on offline Core ML");
+    expect(should_use_nemotron_cache_aware_offline(1101, 0, false, 1102),
+           "nemotron resolve: oversized Core ML input uses cache-aware execution");
+    expect(should_use_nemotron_cache_aware_offline(1101, 0, false, 10000),
+           "nemotron resolve: non-aligned long input avoids exact-shape windows");
+    expect(!should_use_nemotron_cache_aware_offline(0, 0, false, 10000),
+           "nemotron resolve: fitting ggml input remains unwindowed");
+    expect(should_use_nemotron_cache_aware_offline(0, 0, true, 40000),
+           "nemotron resolve: generic long-form input uses cache-aware execution");
+    expect(!should_use_nemotron_cache_aware_offline(1101, -1, true, 10000),
+           "nemotron resolve: negative window option permits an unwindowed reference");
 }
 
 // Drive the real trim + append over a synthetic encoder output and assert the
@@ -321,7 +292,7 @@ int main() {
     check_window_resolution();
     check_coreml_fixed_shape_resolution();
     check_coreml_eou_exact_shape_resolution();
-    check_nemotron_exact_shape_resolution();
+    check_nemotron_cache_aware_resolution();
 
     // Trim + append seam stitching (multiples of sub so subsampling is exact).
     check_stitch(2048, 256, 64, 8);   // several equal windows

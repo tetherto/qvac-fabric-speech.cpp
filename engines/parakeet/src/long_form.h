@@ -215,46 +215,17 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     return plan;
 }
 
-// Nemotron uses a causal, chunk-limited encoder and an exact-shape Core ML
-// sidecar. Keep the trained left/right attention geometry at every seam and
-// commit the largest subsampling-aligned centre that leaves those contexts
-// inside the exact mel capacity. The few capacity frames left after alignment
-// are filled from available boundary context by the window planner.
-inline LongFormPlan resolve_nemotron_long_form_plan(
+inline bool should_use_nemotron_cache_aware_offline(
         int exact_mel_frames,
-        int attention_left_frames,
-        int attention_right_frames,
-        int subsampling_factor,
+        int requested_window_frames,
+        bool generic_windowing_required,
         long long n_mel_frames) {
-    LongFormPlan plan;
-    if (exact_mel_frames <= 0 || n_mel_frames <= exact_mel_frames) {
-        return plan;
+    if (requested_window_frames < 0) {
+        return false;
     }
 
-    const int sub = subsampling_factor > 0 ? subsampling_factor : 8;
-    const int left = attention_left_frames > 0 ? attention_left_frames : 0;
-    const int right = attention_right_frames > 0 ? attention_right_frames : 0;
-    const long long context_mel = (long long) (left + right) * sub;
-    if (context_mel >= exact_mel_frames) {
-        return plan;
-    }
-
-    const int available_center_mel =
-        exact_mel_frames - static_cast<int>(context_mel);
-    const int center_frames = available_center_mel / sub;
-    if (center_frames <= 0) {
-        return plan;
-    }
-
-    plan.enabled = true;
-    plan.window_frames = exact_mel_frames / sub;
-    plan.context_frames = left;
-    plan.center_frames = center_frames;
-    plan.sub = sub;
-    plan.left_context_frames = left;
-    plan.right_context_frames = right;
-    plan.exact_mel_frames = exact_mel_frames;
-    return plan;
+    return generic_windowing_required ||
+           (exact_mel_frames > 0 && n_mel_frames > exact_mel_frames);
 }
 
 // EOU sidecars are fixed causal/chunked graphs. Restarting one on overlapping

@@ -141,6 +141,7 @@ jq -e '."parakeet-nemotron".coreml_compare_on_darwin == true and
        ."parakeet-nemotron".coreml_model_basename == "nemotron-3.5-asr-streaming-0.6b" and
        ."parakeet-nemotron".coreml_export_mel_frames == 1101 and
        ."parakeet-nemotron".correctness.kind == "wer" and
+       ."parakeet-nemotron".correctness.max_wer == 0.1 and
        (."parakeet-nemotron".args | index("--language") != null)' "$REAL_SPEC" > /dev/null \
   || fail "parakeet-nemotron must declare its exact-shape Core ML, locale, and WER benchmark contract"
 ok "parakeet-nemotron declares the fixed 1101-frame Core ML comparison"
@@ -248,6 +249,16 @@ jq -n --arg sha "$hello_sha" \
   "nat-nojson": {
     bench_kind: "native", binary: "bin/nat-nojson", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: null, notes: "n"
+  },
+  "coreml-baseline-empty": {
+    bench_kind: "native", binary: "bin/nat-coreml-baseline-empty", cmake_target: "x",
+    models: ["stub.f16.gguf"], args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
+    coreml_compare_on_darwin: true,
+    coreml_require_transcript_match: false,
+    coreml_model_basename: "stub",
+    coreml_export_mel_frames: 1101,
+    correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english", max_wer: 0.1},
+    notes: "forced-ggml baseline emits an empty transcript and must reject the comparison"
   },
   "wer-perfect": {
     bench_kind: "native", binary: "bin/nat-transcript-perfect", cmake_target: "x",
@@ -432,6 +443,19 @@ cat > "$BUILD/bin/nat-nojson" <<'STUB'
 #!/usr/bin/env bash
 echo "[0.00-2.00] speaker_0"
 exit 0
+STUB
+
+cat > "$BUILD/bin/nat-coreml-baseline-empty" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${PARAKEET_COREML_DISABLE:-0}" == "1" ]]; then
+  cat > "$1" <<'EOJ'
+{"backend":"MTL0","encoder_backend":"MTL0","encoder_coreml_all_runs":false,"encoder_ms":{"median":20},"inference_ms":{"median":40,"min":39,"max":41},"rtf_median":0.004,"transcript":""}
+EOJ
+else
+  cat > "$1" <<'EOJ'
+{"backend":"MTL0","encoder_backend":"coreml-all","encoder_coreml_all_runs":true,"encoder_ms":{"median":10},"inference_ms":{"median":30,"min":29,"max":31},"rtf_median":0.003,"transcript":"the quick brown fox"}
+EOJ
+fi
 STUB
 
 cat > "$BUILD/bin/tw-marker" <<'STUB'
@@ -654,6 +678,20 @@ grep -q 'did not emit the --json-out file' "$OUT/nat-nojson.err" \
 grep -q 'speaker_0' "$OUT/nat-nojson.err" \
   || fail "nat-nojson: child stdout not dumped to the step log"
 ok "silent no-JSON native bench reports run-failed with dumped child output"
+
+mkdir -p "$MODELS/coreml-baseline-empty/stub-encoder.mlmodelc"
+printf 'stub' > "$MODELS/coreml-baseline-empty/stub.f16.gguf"
+run_driver coreml-baseline-empty \
+  "$OUT/coreml-baseline-empty.json" "$OUT/coreml-baseline-empty.err" \
+  BENCH_FAMILIES_JSON="$SPEC" BENCH_TEST_PLATFORM=Darwin
+jq -e '.status == "run-failed" and .wer_median == 0.0 and
+       .baseline_wer_median == 1.0' \
+  "$OUT/coreml-baseline-empty.json" > /dev/null \
+  || fail "coreml-baseline-empty: $(cat "$OUT/coreml-baseline-empty.json")"
+grep -q 'baseline WER exceeds correctness.max_wer' \
+  "$OUT/coreml-baseline-empty.json" \
+  || fail "coreml-baseline-empty: missing baseline WER rejection reason"
+ok "Core ML comparison rejects an empty forced-ggml baseline when transcript matching is disabled"
 
 # time-wrapped, explicit `backend:` marker on stdout (supertonic/lavasr shape).
 run_driver tw-marker "$OUT/tw-marker.json" "$OUT/tw-marker.err" BENCH_FAMILIES_JSON="$SPEC"
