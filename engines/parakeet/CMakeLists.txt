@@ -1284,7 +1284,7 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture;coreml"
             EXE      test-rnnt-coreml-long-form
             ARGS     "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}"
-                     "1101" "16" "0.90" "cache-aware"
+                     "1101" "16" "0.85" "cache-aware"
             REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"

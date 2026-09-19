@@ -1240,6 +1240,9 @@ int run_nemotron_cache_aware_offline(
         result.encoder_ms += step.encoder_ms;
         result.decoder_ms += step.decoder_ms;
         result.text = std::move(step.text);
+        if (final_chunk) {
+            break;
+        }
     }
 
     if (cancel_flag.load()) {
