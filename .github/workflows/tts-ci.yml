@@ -83,10 +83,9 @@ jobs:
           # asserts the feature detection sees it (test-backend-features).
           - os: ubuntu-24.04
             llamafile: ON
-    # Hosted only. The self-hosted Apple silicon lane lives in `build-test-macos`
-    # below, which carries the fork-ci gate — a job-level `if` cannot see
-    # `matrix.os`, so a `macos-26` row here could not be gated and would put an
-    # unapproved fork PR straight onto the fleet.
+    # Hosted only. The self-hosted lane is `build-test-macos`, which carries the
+    # fork-ci gate; a job-level `if` cannot see `matrix.os`, so a row here could
+    # not be gated.
     runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
     name: build-test (${{ matrix.os }}${{ matrix.llamafile == 'ON' && ', tinyBLAS' || '' }})
     timeout-minutes: 60
