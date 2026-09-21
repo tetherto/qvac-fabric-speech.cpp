@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <random>
+#include <unordered_set>
 #include <vector>
 
 namespace tts_cpp::moss::detail {
@@ -23,6 +24,8 @@ std::vector<int32_t> apply_delay_pattern(const std::vector<int32_t> & codes, int
 std::vector<int32_t> apply_de_delay_pattern(const std::vector<int32_t> & delayed, int delayed_frames,
                                             int n_vq, int pad_code);
 
+void apply_repetition_penalty(std::vector<float> & logits, const std::unordered_set<int32_t> & seen,
+                              float penalty);
 void apply_repetition_penalty(std::vector<float> & logits, const std::vector<int32_t> & history,
                               float penalty);
 int32_t sample_row(std::vector<float> logits, float top_p, int top_k, bool do_sample,
@@ -56,6 +59,15 @@ private:
                             std::mt19937 & rng) const;
     std::vector<int32_t> next_audio_codes(const DelayLogits & logits, const SamplingConfig & sampling,
                                           std::mt19937 & rng) const;
+    int32_t sample_audio_channel(const DelayLogits & logits, int channel,
+                                 const std::unordered_set<int32_t> & seen,
+                                 const SamplingConfig & sampling, std::mt19937 & rng) const;
+    std::vector<int> sampled_rest_channels() const;
+    void sample_rest_channels(std::vector<int32_t> & codes, const std::vector<int> & rest,
+                              const DelayLogits & logits, const SamplingConfig & sampling,
+                              std::mt19937 & rng) const;
+    std::unordered_set<int32_t> merged_channel_seen(const std::vector<int> & channels) const;
+    void record_row(const DelayRow & row);
     void advance_counters(int32_t text_token);
 
     DelayConfig config_;
@@ -68,6 +80,7 @@ private:
     int64_t time_step_ = 0;
     std::vector<int32_t> text_history_;
     std::vector<int32_t> audio_history_;
+    std::vector<std::unordered_set<int32_t>> channel_seen_;
 };
 
 } // namespace tts_cpp::moss::detail

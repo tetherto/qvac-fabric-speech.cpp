@@ -82,7 +82,7 @@ int32_t sample_top_k(std::vector<float> & logits, float top_p, int top_k, std::m
         subset[i] = logits[indices[i]];
     }
     std::vector<float> probs = softmax(subset);
-    if (top_p > 0.0f && top_p < 1.0f) {
+    if (top_p < 1.0f) {
         std::vector<size_t> order(probs.size());
         std::iota(order.begin(), order.end(), 0);
         mask_beyond_top_p(probs, order, top_p);
@@ -96,7 +96,7 @@ int32_t sample_top_k(std::vector<float> & logits, float top_p, int top_k, std::m
 
 int32_t sample_top_p(std::vector<float> & logits, float top_p, std::mt19937 & rng) {
     std::vector<float> probs = softmax(logits);
-    if (top_p > 0.0f && top_p < 1.0f) {
+    if (top_p < 1.0f) {
         std::vector<size_t> order(probs.size());
         std::iota(order.begin(), order.end(), 0);
         mask_beyond_top_p(probs, order, top_p);
@@ -146,12 +146,11 @@ std::vector<int32_t> apply_de_delay_pattern(const std::vector<int32_t> & delayed
     return codes;
 }
 
-void apply_repetition_penalty(std::vector<float> & logits, const std::vector<int32_t> & history,
+void apply_repetition_penalty(std::vector<float> & logits, const std::unordered_set<int32_t> & seen,
                               float penalty) {
-    if (penalty == 1.0f || history.empty()) {
+    if (penalty == 1.0f || seen.empty()) {
         return;
     }
-    std::unordered_set<int32_t> seen(history.begin(), history.end());
     for (int32_t token : seen) {
         if (token < 0 || (size_t) token >= logits.size()) {
             continue;
@@ -159,6 +158,12 @@ void apply_repetition_penalty(std::vector<float> & logits, const std::vector<int
         float & logit = logits[(size_t) token];
         logit = logit > 0.0f ? logit / penalty : logit * penalty;
     }
+}
+
+void apply_repetition_penalty(std::vector<float> & logits, const std::vector<int32_t> & history,
+                              float penalty) {
+    apply_repetition_penalty(logits,
+            std::unordered_set<int32_t>(history.begin(), history.end()), penalty);
 }
 
 int32_t sample_row(std::vector<float> logits, float top_p, int top_k, bool do_sample,
@@ -208,9 +213,9 @@ DelayState::DelayState(const DelayConfig & config, const std::vector<DelayRow> &
     }
     text_history_.reserve(prompt_rows.size());
     audio_history_.reserve(prompt_rows.size() * (size_t) config_.n_vq);
+    channel_seen_.resize((size_t) config_.n_vq);
     for (const DelayRow & row : prompt_rows) {
-        text_history_.push_back(row.text);
-        audio_history_.insert(audio_history_.end(), row.audio.begin(), row.audio.end());
+        record_row(row);
     }
     const int32_t last = text_history_.back();
     if (last == config_.audio_start_token_id || last == config_.audio_assistant_gen_slot_token_id) {
@@ -268,25 +273,70 @@ int32_t DelayState::next_text_token(const DelayLogits & logits, const SamplingCo
             sampling.text_temperature > 0.0f, rng);
 }
 
+int32_t DelayState::sample_audio_channel(const DelayLogits & logits, int channel,
+                                         const std::unordered_set<int32_t> & seen,
+                                         const SamplingConfig & sampling, std::mt19937 & rng) const {
+    std::vector<float> row = logits.audio[(size_t) channel];
+    scale_by_temperature(row, sampling.audio_temperature);
+    if (config_.audio_pad_code >= 0 && (size_t) config_.audio_pad_code < row.size()) {
+        row[(size_t) config_.audio_pad_code] = MASKED;
+    }
+    apply_repetition_penalty(row, seen, sampling.audio_repetition_penalty);
+    return sample_row(std::move(row), sampling.audio_top_p, sampling.audio_top_k,
+            sampling.audio_temperature > 0.0f, rng);
+}
+
+std::vector<int> DelayState::sampled_rest_channels() const {
+    std::vector<int> channels;
+    for (int channel = 1; channel < config_.n_vq; ++channel) {
+        if (channel_is_sampled(channel)) {
+            channels.push_back(channel);
+        }
+    }
+    return channels;
+}
+
+std::unordered_set<int32_t> DelayState::merged_channel_seen(const std::vector<int> & channels) const {
+    std::unordered_set<int32_t> seen;
+    for (int channel : channels) {
+        seen.insert(channel_seen_[(size_t) channel].begin(),
+                channel_seen_[(size_t) channel].end());
+    }
+    return seen;
+}
+
+// The reference scopes the repetition-penalty history per sampling call:
+// channel 0 is penalized only against its own history, and the remaining
+// sampled channels share the combined history of exactly those channels.
 std::vector<int32_t> DelayState::next_audio_codes(const DelayLogits & logits,
                                                   const SamplingConfig & sampling,
                                                   std::mt19937 & rng) const {
     std::vector<int32_t> codes((size_t) config_.n_vq, config_.audio_pad_code);
-    const bool do_sample = sampling.audio_temperature > 0.0f;
-    for (int channel = 0; channel < config_.n_vq; ++channel) {
-        if (!channel_is_sampled(channel)) {
-            continue;
-        }
-        std::vector<float> row = logits.audio[(size_t) channel];
-        scale_by_temperature(row, sampling.audio_temperature);
-        if (config_.audio_pad_code >= 0 && (size_t) config_.audio_pad_code < row.size()) {
-            row[(size_t) config_.audio_pad_code] = MASKED;
-        }
-        apply_repetition_penalty(row, audio_history_, sampling.audio_repetition_penalty);
-        codes[(size_t) channel] = sample_row(std::move(row), sampling.audio_top_p,
-                sampling.audio_top_k, do_sample, rng);
+    if (channel_is_sampled(0)) {
+        codes[0] = sample_audio_channel(logits, 0, channel_seen_[0], sampling, rng);
+    }
+    const std::vector<int> rest = sampled_rest_channels();
+    if (!rest.empty()) {
+        sample_rest_channels(codes, rest, logits, sampling, rng);
     }
     return codes;
+}
+
+void DelayState::sample_rest_channels(std::vector<int32_t> & codes, const std::vector<int> & rest,
+                                      const DelayLogits & logits, const SamplingConfig & sampling,
+                                      std::mt19937 & rng) const {
+    const std::unordered_set<int32_t> seen = merged_channel_seen(rest);
+    for (int channel : rest) {
+        codes[(size_t) channel] = sample_audio_channel(logits, channel, seen, sampling, rng);
+    }
+}
+
+void DelayState::record_row(const DelayRow & row) {
+    text_history_.push_back(row.text);
+    audio_history_.insert(audio_history_.end(), row.audio.begin(), row.audio.end());
+    for (size_t channel = 0; channel < row.audio.size(); ++channel) {
+        channel_seen_[channel].insert(row.audio[channel]);
+    }
 }
 
 void DelayState::advance_counters(int32_t text_token) {
@@ -331,8 +381,7 @@ DelayRow DelayState::step(const DelayLogits & logits, const SamplingConfig & sam
         is_audio_ = false;
     }
     advance_counters(row.text);
-    text_history_.push_back(row.text);
-    audio_history_.insert(audio_history_.end(), row.audio.begin(), row.audio.end());
+    record_row(row);
     return row;
 }
 

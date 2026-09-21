@@ -7,11 +7,6 @@
 
 namespace tts_cpp::moss::detail {
 
-struct CodecMemory {
-    size_t weights = 0;
-    size_t compute = 0;
-};
-
 // One instance owns either the encoder or the decoder GGUF of the MOSS audio
 // codec (RVQ + patched transformer stack). Graphs are built per call because
 // the frame count varies with the clip; calls must be serialized by the
@@ -24,8 +19,6 @@ public:
     ~Codec();
     Codec(const Codec &) = delete;
     Codec & operator=(const Codec &) = delete;
-
-    static CodecMemory measure(const std::string & path, int n_threads, int64_t max_frames);
 
     bool is_encoder() const;
     int sample_rate() const;

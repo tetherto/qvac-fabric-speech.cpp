@@ -93,7 +93,8 @@ void test_delay_round_trip() {
 
 void test_repetition_penalty() {
     std::vector<float> logits = {2.0f, -2.0f, 1.0f};
-    apply_repetition_penalty(logits, {0, 1, 1}, 2.0f);
+    const std::vector<int32_t> history = {0, 1, 1};
+    apply_repetition_penalty(logits, history, 2.0f);
     check(logits[0] == 1.0f, "positive logit divided");
     check(logits[1] == -4.0f, "negative logit multiplied");
     check(logits[2] == 1.0f, "unseen logit untouched");
@@ -115,6 +116,49 @@ void test_sampling_determinism() {
 void test_argmax_path() {
     std::mt19937 rng(1);
     check(sample_row({0.5f, 3.0f, 1.0f}, 1.0f, 50, false, rng) == 1, "argmax when not sampling");
+}
+
+void test_top_p_zero_is_greedy() {
+    std::mt19937 rng_a(1);
+    std::mt19937 rng_b(999);
+    const std::vector<float> logits = {0.1f, 5.0f, 0.2f, 4.9f, 0.3f};
+    check(sample_row(logits, 0.0f, 3, true, rng_a) == 1, "top_p 0 keeps only the best token");
+    check(sample_row(logits, 0.0f, 3, true, rng_b) == 1, "top_p 0 is seed independent");
+}
+
+std::vector<DelayRow> penalty_prompt(const DelayConfig & config) {
+    std::vector<DelayRow> rows(4);
+    rows[0].text = 42;
+    rows[0].audio = {5, 7, 7};
+    rows[1].text = config.audio_start_token_id;
+    rows[1].audio.assign((size_t) config.n_vq, config.audio_pad_code);
+    rows[2].text = config.audio_assistant_gen_slot_token_id;
+    rows[2].audio.assign((size_t) config.n_vq, config.audio_pad_code);
+    rows[3].text = config.audio_assistant_gen_slot_token_id;
+    rows[3].audio.assign((size_t) config.n_vq, config.audio_pad_code);
+    return rows;
+}
+
+DelayLogits penalty_logits(const DelayConfig & config) {
+    DelayLogits logits = uniform_logits(config);
+    logits.text[(size_t) config.audio_assistant_gen_slot_token_id] = 50.0f;
+    for (auto & channel : logits.audio) {
+        channel[5] = 10.0f;
+        channel[7] = 9.9f;
+    }
+    return logits;
+}
+
+void test_repetition_penalty_scoping() {
+    const DelayConfig config = test_config();
+    SamplingConfig sampling = greedy_sampling();
+    sampling.audio_repetition_penalty = 2.0f;
+    std::mt19937 rng(1);
+    DelayState state(config, penalty_prompt(config), PAD_TOKEN, IM_END_TOKEN);
+    const DelayRow row = state.step(penalty_logits(config), sampling, rng);
+    check(row.audio[0] == 7, "channel 0 is penalized only by its own history");
+    check(row.audio[1] == 5, "rest channels are not penalized by channel 0 codes");
+    check(row.audio[2] == 5, "rest channels share the rest-scoped history");
 }
 
 void test_state_machine_drain() {
@@ -252,6 +296,8 @@ int main() {
     test_repetition_penalty();
     test_sampling_determinism();
     test_argmax_path();
+    test_top_p_zero_is_greedy();
+    test_repetition_penalty_scoping();
     test_state_machine_drain();
     test_early_stop_masks();
     test_segment_extraction();

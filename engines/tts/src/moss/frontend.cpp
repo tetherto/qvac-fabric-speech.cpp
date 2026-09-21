@@ -133,6 +133,11 @@ struct Frontend::Impl {
         tokens.pad      = lookup(PAD_TOKEN);
         tokens.im_start = lookup(IM_START_TOKEN);
         tokens.im_end   = lookup(IM_END_TOKEN);
+        const int32_t text_vocab = model.config().text_vocab;
+        if (tokens.pad >= text_vocab || tokens.im_start >= text_vocab ||
+            tokens.im_end >= text_vocab) {
+            fail("special tokens fall outside the model's text vocabulary");
+        }
     }
 
     int32_t lookup(const std::string & token) const {

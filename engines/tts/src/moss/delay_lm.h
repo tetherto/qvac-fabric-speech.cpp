@@ -39,12 +39,6 @@ struct DelayLogits {
     std::vector<std::vector<float>> audio;
 };
 
-struct DelayMemory {
-    size_t weights = 0;
-    size_t kv_cache = 0;
-    size_t compute = 0;
-};
-
 // The MOSS Delay backbone: a Qwen3-style decoder whose input embedding is the
 // text-token embedding plus one embedding per audio codebook channel, and
 // whose output is one text head plus one head per channel. One instance owns
@@ -57,8 +51,6 @@ public:
     ~DelayLM();
     DelayLM(const DelayLM &) = delete;
     DelayLM & operator=(const DelayLM &) = delete;
-
-    static DelayMemory measure(const std::string & path, int n_threads, int n_ctx, int prefill_rows);
 
     const DelayConfig & config() const;
     const char * backend_name() const;

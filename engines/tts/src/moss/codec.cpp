@@ -120,8 +120,6 @@ struct Codec::Impl {
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
     ::tts_cpp::detail::sched_fallback sched;
-    bool measuring = false;
-    CodecMemory memory;
 
     std::string arch;
     bool encoder = false;
@@ -206,6 +204,20 @@ struct Codec::Impl {
         quantizer.num_quantizers = (int) meta_u32(arch + ".quantizer.num_quantizers");
         quantizer.codebook_size  = (int) meta_u32(arch + ".quantizer.codebook_size");
         quantizer.codebook_dim   = (int) meta_u32(arch + ".quantizer.codebook_dim");
+        if (quantizer.num_quantizers <= 0 || quantizer.codebook_size <= 0) {
+            fail("invalid quantizer geometry");
+        }
+    }
+
+    void validate_codebooks() {
+        for (int iq = 0; iq < quantizer.num_quantizers; ++iq) {
+            const ggml_tensor * codebook =
+                    require_tensor(quantizer_tensor_name(iq, "codebook.weight"));
+            if (codebook->ne[1] < (int64_t) quantizer.codebook_size) {
+                fail("codebook " + std::to_string(iq) +
+                     " holds fewer rows than the declared codebook_size");
+            }
+        }
     }
 
     std::string block_tensor_name(int block, int layer, const char * suffix) const {
@@ -299,14 +311,6 @@ struct Codec::Impl {
         }
     }
 
-    size_t sum_weight_bytes() const {
-        size_t total = 0;
-        for (auto * t = ggml_get_first_tensor(metadata); t; t = ggml_get_next_tensor(metadata, t)) {
-            total += ggml_nbytes(t);
-        }
-        return total;
-    }
-
     void init_backend(bool use_gpu) {
         ::tts_cpp::detail::ensure_backends_loaded();
         if (use_gpu) {
@@ -320,8 +324,7 @@ struct Codec::Impl {
         }
     }
 
-    void load(const std::string & path, bool use_gpu, int threads, bool measure_only) {
-        measuring = measure_only;
+    void load(const std::string & path, bool use_gpu, int threads) {
         n_threads = threads;
         if (threads < 1 || threads > 1024) {
             fail("threads must be 1..1024");
@@ -343,18 +346,15 @@ struct Codec::Impl {
             downsample = meta_u32(arch + ".downsample_rate");
         }
         read_quantizer_meta();
-        init_backend(!measure_only && use_gpu);
+        init_backend(use_gpu);
         duplicate_metadata_tensors();
         read_modules();
+        validate_codebooks();
         if (!encoder) {
             downsample = decoder_upsample_factor();
         }
         if (downsample <= 0) {
             fail("invalid frame geometry");
-        }
-        if (measure_only) {
-            memory.weights = sum_weight_bytes();
-            return;
         }
         upload_weights(path);
     }
@@ -651,42 +651,13 @@ struct Codec::Impl {
         }
     }
 
-    size_t measure_graph(ggml_tensor * output) {
-        ggml_set_output(output);
-        ggml_cgraph * graph = ggml_new_graph_custom(graph_ctx, GRAPH_NODES, false);
-        ggml_build_forward_expand(graph, output);
-        if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {})) {
-            fail("scheduler initialization failed");
-        }
-        if (!ggml_backend_sched_reserve(sched.sched, graph)) {
-            fail("graph reservation failed");
-        }
-        size_t total = 0;
-        for (int i = 0; i < ggml_backend_sched_get_n_backends(sched.sched); ++i) {
-            total += ggml_backend_sched_get_buffer_size(sched.sched, ggml_backend_sched_get_backend(sched.sched, i));
-        }
-        return total;
-    }
 };
 
 Codec::Codec(const std::string & path, bool use_gpu, int n_threads) : impl_(new Impl) {
-    impl_->load(path, use_gpu, n_threads, false);
+    impl_->load(path, use_gpu, n_threads);
 }
 
 Codec::~Codec() = default;
-
-CodecMemory Codec::measure(const std::string & path, int n_threads, int64_t max_frames) {
-    Impl model;
-    model.load(path, false, n_threads, true);
-    model.begin_graph();
-    ggml_tensor * output = model.encoder
-        ? model.build_encode(std::vector<float>((size_t) (max_frames * model.downsample), 0.0f),
-                             max_frames * model.downsample)
-        : model.build_decode(std::vector<int32_t>((size_t) (max_frames * model.quantizer.num_quantizers), 0),
-                             max_frames);
-    model.memory.compute = model.measure_graph(output);
-    return model.memory;
-}
 
 bool Codec::is_encoder() const { return impl_->encoder; }
 int Codec::sample_rate() const { return impl_->rate; }

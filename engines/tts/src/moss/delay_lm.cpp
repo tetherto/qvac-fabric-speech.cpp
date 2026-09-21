@@ -61,8 +61,6 @@ struct DelayLM::Impl {
     ggml_backend_buffer_t weight_buffer = nullptr;
     ggml_backend_buffer_t state_buffer = nullptr;
     ::tts_cpp::detail::sched_fallback sched;
-    bool measuring = false;
-    DelayMemory memory;
 
     DelayConfig config;
     int n_threads = 1;
@@ -219,6 +217,25 @@ struct DelayLM::Impl {
         }
     }
 
+    void require_text_token_id(int id, const char * name) const {
+        if (id < 0 || id >= config.text_vocab || (int64_t) id >= tok_embd->ne[1]) {
+            fail(std::string(name) + " is outside the text vocabulary");
+        }
+    }
+
+    void validate_token_ids() const {
+        require_text_token_id(config.audio_start_token_id, "audio_start_token_id");
+        require_text_token_id(config.audio_end_token_id, "audio_end_token_id");
+        require_text_token_id(config.audio_user_slot_token_id, "audio_user_slot_token_id");
+        require_text_token_id(config.audio_assistant_gen_slot_token_id,
+                "audio_assistant_gen_slot_token_id");
+        require_text_token_id(config.audio_assistant_delay_slot_token_id,
+                "audio_assistant_delay_slot_token_id");
+        if (config.audio_pad_code < 0 || config.audio_pad_code >= config.audio_vocab) {
+            fail("audio_pad_code is outside the audio vocabulary");
+        }
+    }
+
     void allocate_cache() {
         state = ggml_init({(size_t) (2 * config.n_layers + 8) * ggml_tensor_overhead(), nullptr, true});
         if (!state) {
@@ -230,10 +247,6 @@ struct DelayLM::Impl {
         for (int il = 0; il < config.n_layers; ++il) {
             cache_k[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim, n_ctx);
             cache_v[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim, n_ctx);
-        }
-        if (measuring) {
-            memory.kv_cache = (size_t) config.n_layers * 2 * kv_dim * n_ctx * sizeof(uint16_t);
-            return;
         }
         state_buffer = ggml_backend_alloc_ctx_tensors(state, backend);
         if (!state_buffer) {
@@ -273,14 +286,6 @@ struct DelayLM::Impl {
         }
     }
 
-    size_t sum_weight_bytes() const {
-        size_t total = 0;
-        for (auto * t = ggml_get_first_tensor(metadata); t; t = ggml_get_next_tensor(metadata, t)) {
-            total += ggml_nbytes(t);
-        }
-        return total;
-    }
-
     void init_backend(bool use_gpu) {
         ::tts_cpp::detail::ensure_backends_loaded();
         if (use_gpu) {
@@ -294,8 +299,7 @@ struct DelayLM::Impl {
         }
     }
 
-    void load(const std::string & path, bool use_gpu, int threads, int context, bool measure_only) {
-        measuring = measure_only;
+    void load(const std::string & path, bool use_gpu, int threads, int context) {
         n_threads = threads;
         n_ctx = context;
         if (threads < 1 || threads > 1024) {
@@ -312,14 +316,11 @@ struct DelayLM::Impl {
             fail("unsupported architecture");
         }
         read_config();
-        init_backend(!measure_only && use_gpu);
+        init_backend(use_gpu);
         duplicate_metadata_tensors();
         map_tensors();
+        validate_token_ids();
         allocate_cache();
-        if (measure_only) {
-            memory.weights = sum_weight_bytes();
-            return;
-        }
         upload_weights(path);
     }
 
@@ -512,19 +513,6 @@ struct DelayLM::Impl {
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer, state_buffer})) {
             fail("scheduler initialization failed");
         }
-        if (measuring) {
-            if (!ggml_backend_sched_reserve(sched.sched, graph)) {
-                fail("graph reservation failed");
-            }
-            size_t total_bytes = 0;
-            for (int i = 0; i < ggml_backend_sched_get_n_backends(sched.sched); ++i) {
-                total_bytes += ggml_backend_sched_get_buffer_size(sched.sched,
-                        ggml_backend_sched_get_backend(sched.sched, i));
-            }
-            memory.compute = std::max(memory.compute, total_bytes);
-            pos += (int) n_tokens;
-            return {};
-        }
         if (!::tts_cpp::detail::sched_fallback_alloc(sched, graph)) {
             fail("graph allocation failed");
         }
@@ -549,22 +537,10 @@ struct DelayLM::Impl {
 };
 
 DelayLM::DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx) : impl_(new Impl) {
-    impl_->load(path, use_gpu, n_threads, n_ctx, false);
+    impl_->load(path, use_gpu, n_threads, n_ctx);
 }
 
 DelayLM::~DelayLM() = default;
-
-DelayMemory DelayLM::measure(const std::string & path, int n_threads, int n_ctx, int prefill_rows) {
-    Impl model;
-    model.load(path, false, n_threads, n_ctx, true);
-    std::vector<DelayRow> rows((size_t) prefill_rows);
-    for (DelayRow & row : rows) {
-        row.audio.assign((size_t) model.config.n_vq, model.config.audio_pad_code);
-    }
-    model.forward(rows);
-    model.forward({rows[0]});
-    return model.memory;
-}
 
 const DelayConfig & DelayLM::config() const { return impl_->config; }
 const char * DelayLM::backend_name() const { return ggml_backend_name(impl_->backend); }

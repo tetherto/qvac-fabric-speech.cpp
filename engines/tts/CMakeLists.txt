@@ -366,6 +366,7 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/engine.cpp
     src/pocket/fit.cpp
     src/pocket/reference_audio.cpp
+    # MOSS Delay engine (MOSS-TTS-v1.5 / MOSS-TTSD backbone + RVQ codec).
     src/moss/codec.cpp
     src/moss/delay_lm.cpp
     src/moss/generation.cpp
@@ -579,12 +580,13 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     target_include_directories(pocket-cli PRIVATE src)
     tts_cpp_apply_ccache(pocket-cli)
 
+    target_link_libraries(tts-cli PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(tts-cli)
+
     add_executable(moss-cli src/moss/cli.cpp)
     target_link_libraries(moss-cli PRIVATE tts-cpp)
     target_include_directories(moss-cli PRIVATE src)
     tts_cpp_apply_ccache(moss-cli)
-    target_link_libraries(tts-cli PRIVATE tts-cpp)
-    tts_cpp_apply_ccache(tts-cli)
 
     add_executable(mel2wav src/mel2wav.cpp)
     target_link_libraries(mel2wav PRIVATE ggml)
@@ -1393,7 +1395,7 @@ if (TTS_CPP_BUILD_TESTS)
                  "--ref" "${_tcb_cosy_ref}/tokenizer_ref.txt"
         REQUIRES "${_tcb_cosy_vocab}" "${_tcb_cosy_merges}" "${_tcb_cosy_ref}/tokenizer_ref.txt")
 
-    add_executable(test-moss-generation test/test_moss_generation.cpp)
+    add_executable(test-moss-generation test/moss/test_generation.cpp)
     target_link_libraries(test-moss-generation PRIVATE tts-cpp)
     target_include_directories(test-moss-generation PRIVATE src)
     tts_cpp_apply_ccache(test-moss-generation)
