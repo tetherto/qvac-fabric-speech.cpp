@@ -1276,6 +1276,16 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-backend-requirement)
     tts_cpp_register_test(test-backend-requirement LABEL "unit")
 
+    # Serial-vs-parallel equality of the SineGen2 source excitation
+    # (cosyvoice_sinegen2_source): every multi-threaded run must be
+    # byte-identical to the 1-thread reference for the same f0 pattern and
+    # seed. Host-side code only; synthetic inputs, no fixtures.
+    add_executable(test-cosyvoice-sinegen test/test_cosyvoice_sinegen.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-sinegen PRIVATE ggml)
+    target_include_directories(test-cosyvoice-sinegen PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-sinegen)
+    tts_cpp_register_test(test-cosyvoice-sinegen LABEL "unit")
+
     # Non-contiguous-input guard in cosyvoice_conv1d_f32: a strided view must
     # match the pre-contiguous reference bit-for-bit on CPU, and (gpu variant)
     # the built graph must stay fully supported on the selected GPU backend

@@ -147,7 +147,11 @@ the HiFT tier held at f16, flow f32 -> f16 moves the DiT 1426 -> 1351 ms
 while f16 -> `q8_0` moves it back to 1403 ms. The f16 HiFT tier is worth
 1.13-1.14x on the vocoder decode there — less than the fused snake above it,
 because Metal's `mul_mm` already stages f32 operands as half, so a narrower
-weight dtype saves bandwidth rather than arithmetic.
+weight dtype saves bandwidth rather than arithmetic. The vocoder's host-side
+SineGen2 source excitation is threaded over harmonics and the mix arithmetic
+on the engine's `n_threads` (the RNG pass stays sequential, so the output is
+byte-identical at any thread count): 59.7 -> 34.7 ms on the M3 Ultra and
+49.0 -> 34.7 ms on the M4, same pinned trajectories.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --
