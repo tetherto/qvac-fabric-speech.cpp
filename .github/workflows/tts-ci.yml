@@ -271,6 +271,70 @@ jobs:
           AUDIO8_COREML_TEST_MODELS_DIR="$GITHUB_WORKSPACE/audio8-coreml-fixture" \
             ./build/bench-audio8-codec-coreml >> "$GITHUB_STEP_SUMMARY"
 
+      # Core ML Supertonic vocoder fixture, converted and exported by the
+      # repo's own scripts: the f16 GGUF plus the compiled 64-frame sidecar,
+      # and the exporter's causal-context value (context.txt) for the
+      # cross-check against the C++ computation. Cache key: script hashes
+      # (the upstream Supertone/supertonic-2 bundle is unpinned; a model
+      # revision change reuses the cache until a script changes).
+      - name: Cache Core ML Supertonic fixture
+        if: runner.os == 'macOS'
+        id: supertonic-coreml-cache
+        uses: actions/cache@v4
+        with:
+          path: supertonic-coreml-fixture
+          key: supertonic-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_export_supertonic_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Build Core ML Supertonic fixture
+        if: runner.os == 'macOS' && steps.supertonic-coreml-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p supertonic-coreml-fixture
+          if [ ! -x .venv-coreml/bin/python ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-coreml
+            .venv-coreml/bin/python -m pip install --upgrade pip
+            .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          fi
+          # onnx 1.17 is the last release without the ml_dtypes dependency,
+          # whose current releases force numpy >= 2 and break coremltools'
+          # TorchScript conversion; the constraints file pins the rest of the
+          # stack, and the assert fails fast if a future resolution moves it.
+          .venv-coreml/bin/python -m pip install \
+            -c engines/parakeet/scripts/requirements-coreml.txt \
+            "onnx==1.17.0" huggingface_hub
+          .venv-coreml/bin/python -c 'import numpy; assert numpy.__version__ == "1.26.4", numpy.__version__'
+          .venv-coreml/bin/python engines/tts/test/test_export_supertonic_coreml.py
+          .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
+            --arch supertonic2 --ftype f16 \
+            --out supertonic-coreml-fixture/supertonic2-f16.gguf
+          .venv-coreml/bin/python engines/tts/scripts/export-supertonic-coreml.py \
+            --gguf supertonic-coreml-fixture/supertonic2-f16.gguf \
+            --compile-dir supertonic-coreml-fixture | tee supertonic-export.log
+          grep -oE 'context=[0-9]+' supertonic-export.log | head -1 | cut -d= -f2 \
+            > supertonic-coreml-fixture/context.txt
+          rm -rf supertonic-coreml-fixture/supertonic2-vocoder.mlpackage supertonic-export.log
+
+      # Runs the binary directly: a skip (exit 77) fails the step, so a green
+      # lane proves the parity, fallback, strict, and warm-up assertions ran
+      # against the staged sidecar. The context check pins the C++
+      # receptive-field computation (supertonic_coreml_vocoder_context_frames)
+      # to the exporter's (receptive_field_frames): a drift between the two
+      # would corrupt audio at window seams.
+      - name: Test (Core ML Supertonic vocoder sidecar)
+        if: runner.os == 'macOS'
+        env:
+          SUPERTONIC_COREML_TEST_MODELS_DIR: ${{ github.workspace }}/supertonic-coreml-fixture
+        run: |
+          set -o pipefail
+          ./build/test-supertonic-coreml-parity 2>&1 | tee supertonic-parity.log
+          exporter_context="$(cat supertonic-coreml-fixture/context.txt)"
+          runtime_context="$(grep -oE 'context=[0-9]+' supertonic-parity.log | head -1 | cut -d= -f2)"
+          if [ "$exporter_context" != "$runtime_context" ]; then
+            echo "::error::causal-context mismatch: exporter computed $exporter_context latent frames, the runtime computed $runtime_context"
+            exit 1
+          fi
+
   # GPU lane stub: opt-in until self-hosted GPU runners exist. Trial outcome
   # (QVAC-22775): hosted macos-14 exposes Metal but its Apple Paravirtual
   # device has no simdgroup matmul — kernel encode aborts with "unsupported

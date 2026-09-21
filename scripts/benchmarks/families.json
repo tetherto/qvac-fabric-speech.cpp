@@ -554,7 +554,7 @@
     "models": [],
     "args":         [],
     "audio_duration_seconds":  null,
-    "notes": "MODEL_MISSING: no S3 registry path yet. Row emitted, execution skipped. Follow-up: upload MiniMax-Music3 GGUFs.",
+    "notes": "MiniMax performance-only invocation is not configured. Opt-in music alignment uses a locally provisioned matching GGUF pair; pinned Hugging Face preparation does not require S3.",
     "music_alignment": {
       "caption": "An instrumental jazz trio with acoustic piano, upright bass and brushed drums.",
       "seed": 42,
