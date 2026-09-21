@@ -1,4 +1,4 @@
-// Core ML Unified RNN-T/TDT/EOU/Sortformer FastConformer encoder sidecars for
+// Core ML Unified RNN-T/TDT/EOU/Nemotron/Sortformer FastConformer encoder sidecars for
 // parakeet-cpp.
 //
 // Derived from the whisper.cpp Core ML wrapper pattern (src/coreml/whisper-encoder.mm),

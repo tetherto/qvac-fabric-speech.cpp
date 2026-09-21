@@ -12,14 +12,31 @@ namespace tts_cpp::minimax::detail {
 
 constexpr int kDefaultFrameRate = 25;
 constexpr int kDefaultMaxFrames = 9000;
-constexpr int kDefaultFlowSteps = 30;
+constexpr int kDefaultFlowSteps = 20;
 constexpr float kDefaultCfgScale = 1.7f;
 constexpr int kWindowFrames = 200;
-constexpr int kHopFrames = 100;
-constexpr int kCarryLatents = 344;
-constexpr int kBlendLatents = 172;
-constexpr int kCropLeftLatents = 86;
-constexpr int kCropRightLatents = 258;
+
+// How a window's latents are carried into, blended with and cropped against its
+// neighbours. Everything follows the region two consecutive windows share,
+// window_latents - hop_latents: the previous window's latents over that whole
+// region are carried, the next window blends against the first half of it
+// while sampling, and the seam sits a quarter of the way in, in the middle of
+// the blend. Derived from the GGUF's own window and hop so the four values
+// cannot drift from the file.
+struct FlowWindowGeometry {
+    int64_t carry_span = 0;
+    int64_t overlap    = 0;
+    int64_t crop_left  = 0;
+    int64_t crop_right = 0;
+};
+
+// Where one RVQ depth-decoder step sits in the frame's K/V cache: how many
+// positions it may attend over, how many it appends, and the first it appends.
+struct DepthStepLayout {
+    int64_t window = 0;
+    int64_t tokens = 0;
+    int64_t first  = 0;
+};
 
 struct ConditionRate {
     int input_sampling_rate = 24000;
@@ -116,7 +133,8 @@ void pin_latent_overlap(float * latents, const float * previous, int64_t channel
                         int64_t latent_length, int64_t overlap, int64_t previous_stride);
 int64_t condition_latent_length(const ConditionRate & rate, int64_t frames);
 std::vector<int64_t> window_starts(int64_t frames, int64_t window_frames, int64_t hop_frames);
-CropSpan crop_span(int64_t latent_length, int64_t window_index, int64_t window_count, int64_t upsample);
+CropSpan crop_span(int64_t latent_length, int64_t window_index, int64_t window_count, int64_t upsample,
+                   const FlowWindowGeometry & geometry);
 CarryRange carry_range(int64_t latent_length, int64_t carry_span, int64_t overlap);
 bool copy_carry_layout(const std::vector<float> & latents, const std::vector<float> & condition,
                        int64_t channels, int64_t condition_dimension, int64_t latent_length,
@@ -126,7 +144,8 @@ bool copy_planar_window(const std::vector<float> & source, int64_t channels,
                         int64_t source_length, int64_t source_offset,
                         int64_t destination_length, int64_t destination_offset,
                         int64_t copy_length, std::vector<float> & destination);
-int64_t stitched_sample_count(const std::vector<int64_t> & latent_lengths, int64_t upsample);
+int64_t stitched_sample_count(const std::vector<int64_t> & latent_lengths, int64_t upsample,
+                              const FlowWindowGeometry & geometry);
 std::string vocoder_upsample_error(const std::vector<int32_t> & rates, uint32_t total_upsample);
 std::vector<std::string> validate_synthesis_contract(const SynthesisContract & contract);
 std::string vocoder_output_shape_error(int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3,
@@ -151,6 +170,9 @@ void build_acoustic_rows(const int32_t * codes, int64_t codebooks, int64_t acous
                          std::vector<int32_t> & rows);
 int64_t resolve_ar_frame_cap(int64_t requested_frames, int64_t checkpoint_frames,
                              bool forced, int64_t forced_length, std::string & error);
+int resolve_flow_steps(int requested_steps);
+FlowWindowGeometry flow_window_geometry(int64_t window_latents, int64_t hop_latents);
+DepthStepLayout depth_step_layout(int codebook);
 std::vector<std::string> validate_model_compatibility(const ModelCompatibility & model);
 ModelPair resolve_model_pair(const std::string & model_dir, const std::string & explicit_lm,
                              const std::string & explicit_synth);

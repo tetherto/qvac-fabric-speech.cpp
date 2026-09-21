@@ -16,7 +16,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | Model | Task | Output | Quantization | Backends |
 |---|---|---|---|---|
 | ACE-Step v15 (base and turbo DiT variants) | text-to-music, multi-track (lego) stems, editing, LRC timestamps | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar |
-| MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM+DiT also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
+| MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
 
 ## Performance
 
@@ -34,6 +34,27 @@ See the [music alignment guide](../../scripts/benchmarks/music-alignment.md)
 for setup, artifacts, and pilot controls. The diagnostic workload is longer than
 the default performance workload, so their timings use different baselines;
 CLAP scoring is excluded from generation timing.
+
+For MiniMax, the benchmark preparer downloads pinned Hugging Face sources and
+builds a verified GGUF pair independently of S3. Install the separate
+`scripts/benchmarks/requirements-minimax.txt` environment and build
+`acestep-quantize` alongside `mm3-replay`. Run `scripts/benchmarks/prepare-minimax.py`
+with `--quant q4_k_m`, the quantizer, and its ggml libraries; retain its JSON report.
+Cold conversion requires 64 GiB available RAM on Linux or physical RAM on macOS,
+plus 50 GiB workspace and missing source downloads. Smaller inference hosts can
+verify a transferred bundle with `--prepared-dir` instead.
+
+From the repository root, invoke the prepared bundle with:
+
+```sh
+MUSIC_ALIGNMENT=1 MINIMAX_PREPARATION_REPORT="$PWD/minimax-preparation.json" \
+  scripts/benchmarks/run-family.sh --family minimax --runs 1 --warmup 0 \
+  --build-dir build --models-root "$PWD/bench-models" --out artifacts/minimax.json
+```
+
+See the [complete preparation commands](../../scripts/benchmarks/music-alignment.md#minimax-model-preparation)
+for library discovery, dependency installation, and the desktop workflow's
+`minimax_model_dir`, `publish_minimax_models`, and `minimax_artifact_run_id` inputs.
 
 `music-cli` always enables
 verbose engine output and prints per-stage wall clock to stderr (`[music-cli]`,

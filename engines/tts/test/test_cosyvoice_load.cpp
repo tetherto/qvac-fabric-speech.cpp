@@ -112,6 +112,88 @@ static std::string write_truncated(const std::string & src) {
     return path;
 }
 
+// A one-layer Qwen LM whose fused qkv_proj holds `qkv_rows` rows.  The graph
+// builder derives the expected row count from the GGUF's own n_head / n_kv /
+// head_dim metadata, so writing fewer rows than those imply is exactly the
+// GGUF/metadata disagreement the fused path has to refuse.
+namespace fused_qkv {
+
+constexpr int64_t kHidden  = 32;
+constexpr int64_t kNHead   = 4;
+constexpr int64_t kNKv     = 2;
+constexpr int64_t kHeadDim = 8;
+constexpr int64_t kInter   = 16;
+constexpr int64_t kVocab   = 8;
+constexpr int64_t kRows    = (kNHead + 2 * kNKv) * kHeadDim;
+
+std::string write_lm(int64_t qkv_rows, const char * tag) {
+    const std::string path = test_tmpdir() + "/test-cosyvoice-load-qkv-" + tag + ".gguf";
+    struct t_spec { std::string name; int64_t ne0, ne1; };
+    const std::vector<t_spec> specs = {
+        { "lm/blk/0/in_ln/weight",     kHidden,   1 },
+        { "lm/blk/0/qkv_proj/weight",  kHidden,   qkv_rows },
+        { "lm/blk/0/qkv_proj/bias",    qkv_rows,  1 },
+        { "lm/blk/0/o_proj/weight",    kHidden,   kHidden },
+        { "lm/blk/0/post_ln/weight",   kHidden,   1 },
+        { "lm/blk/0/gate/weight",      kHidden,   kInter },
+        { "lm/blk/0/up/weight",        kHidden,   kInter },
+        { "lm/blk/0/down/weight",      kInter,    kHidden },
+        { "lm/norm/weight",            kHidden,   1 },
+        { "lm/llm_decoder/weight",     kHidden,   kVocab },
+    };
+
+    size_t total = 0;
+    for (const auto & s : specs) total += ggml_row_size(GGML_TYPE_F32, s.ne0) * (size_t) s.ne1;
+    ggml_init_params p = { total + (specs.size() + 1) * ggml_tensor_overhead(), nullptr, false };
+    ggml_context * ctx = ggml_init(p);
+
+    gguf_context * g = gguf_init_empty();
+    gguf_set_val_str(g, "general.architecture", "cosyvoice3");
+    gguf_set_val_u32(g, "cosyvoice3.llm.depth",    1);
+    gguf_set_val_u32(g, "cosyvoice3.llm.hidden",   (uint32_t) kHidden);
+    gguf_set_val_u32(g, "cosyvoice3.llm.n_head",   (uint32_t) kNHead);
+    gguf_set_val_u32(g, "cosyvoice3.llm.n_kv",     (uint32_t) kNKv);
+    gguf_set_val_u32(g, "cosyvoice3.llm.head_dim", (uint32_t) kHeadDim);
+    gguf_set_val_u32(g, "cosyvoice3.llm.inter",    (uint32_t) kInter);
+
+    for (const auto & s : specs) {
+        ggml_tensor * t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, s.ne0, s.ne1);
+        ggml_set_name(t, s.name.c_str());
+        memset(t->data, 0, ggml_nbytes(t));
+        gguf_add_tensor(g, t);
+    }
+    if (!gguf_write_to_file(g, path.c_str(), /*only_meta=*/ false)) {
+        fprintf(stderr, "FATAL: cannot write %s\n", path.c_str());
+        exit(1);
+    }
+    gguf_free(g);
+    ggml_free(ctx);
+    return path;
+}
+
+// Builds one LM graph over `n_tokens` positions; reports whether it threw.
+bool build_rejects(const std::string & path, int n_tokens) {
+    bool threw = false;
+    model_ctx m = cosyvoice_load_gguf(path);
+    const qwen_hp hp = cosyvoice_qwen_hp(m);
+    std::vector<uint8_t> buf(4u * 1024 * 1024);
+    ggml_init_params p = { buf.size(), buf.data(), /*no_alloc=*/true };
+    ggml_context * c = ggml_init(p);
+    try {
+        ggml_tensor * x    = ggml_new_tensor_2d(c, GGML_TYPE_F32, kHidden, n_tokens);
+        ggml_tensor * pos  = ggml_new_tensor_1d(c, GGML_TYPE_I32, n_tokens);
+        ggml_tensor * mask = ggml_new_tensor_2d(c, GGML_TYPE_F32, n_tokens, n_tokens);
+        build_qwen(c, m, hp, x, pos, mask, n_tokens);
+    } catch (const std::exception &) {
+        threw = true;
+    }
+    ggml_free(c);
+    cosyvoice_free(m);
+    return threw;
+}
+
+} // namespace fused_qkv
+
 int main() {
     const std::string path = write_fixture();
     check_roundtrip(path);
@@ -126,8 +208,23 @@ int main() {
     }
     CHECK(threw, "loading a truncated GGUF must throw, not read past the mapping");
 
+    // A fused qkv_proj shorter than n_head/n_kv/head_dim imply must be refused
+    // rather than sliced: the Q/K/V views carry a custom token stride, so the
+    // contiguous-size check inside ggml_view_3d passes for a multi-token
+    // prefill while the V view runs past the projection output.
+    const std::string qkv_short = fused_qkv::write_lm(fused_qkv::kRows - fused_qkv::kHeadDim, "short");
+    const std::string qkv_ok    = fused_qkv::write_lm(fused_qkv::kRows, "ok");
+    for (const int n_tokens : { 1, 8 }) {
+        CHECK(fused_qkv::build_rejects(qkv_short, n_tokens),
+              "a short fused qkv_proj must be rejected at %d token(s)", n_tokens);
+        CHECK(!fused_qkv::build_rejects(qkv_ok, n_tokens),
+              "a correctly sized fused qkv_proj must build at %d token(s)", n_tokens);
+    }
+
     remove(path.c_str());
     remove(trunc.c_str());
+    remove(qkv_short.c_str());
+    remove(qkv_ok.c_str());
 
     if (g_failures) {
         fprintf(stderr, "test-cosyvoice-load: %d FAILURE(S)\n", g_failures);

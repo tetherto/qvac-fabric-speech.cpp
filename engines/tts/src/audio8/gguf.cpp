@@ -1,6 +1,7 @@
 #include "audio8/internal.h"
 
 #include "audio8/coreml_path.h"
+#include "coreml_sidecar_path.h"
 #include "audio8/graph.h"
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -16,8 +17,6 @@
 #include <cstring>
 #include <memory>
 #include <string>
-
-#include <sys/stat.h>
 
 namespace tts_cpp {
 namespace audio8 {
@@ -559,11 +558,6 @@ bool coreml_sidecar_enabled() {
 #endif
 }
 
-bool path_exists(const std::string & path) {
-    struct stat st {};
-    return stat(path.c_str(), &st) == 0;
-}
-
 // The metadata-only load only checks for the sidecar, so a fit preflight stays a preflight.
 void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
                            bool metadata_only) {
@@ -571,7 +565,7 @@ void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
     model.synthesis_on_coreml = false;
     if (!model.has_decoder || !coreml_sidecar_enabled()) return;
     const std::string sidecar = coreml_codec_sidecar_path(gguf_path);
-    if (!path_exists(sidecar)) return;
+    if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
     if (metadata_only) {
         model.synthesis_on_coreml = true;
         return;

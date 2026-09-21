@@ -4,6 +4,12 @@
 #include "backend_util.h"
 #include "ggml-cpu.h"
 #include "gguf.h"
+#include "coreml_sidecar_path.h"
+#include "supertonic_coreml_path.h"
+
+#ifdef TTS_CPP_USE_COREML
+#include "supertonic_coreml_vocoder.h"
+#endif
 
 // The per-backend `#include "ggml-{cuda,metal,vulkan,opencl}.h"`
 // blocks gated on `GGML_USE_<X>` that used to live here are gone:
@@ -1871,6 +1877,53 @@ bool supertonic_use_sched(const supertonic_model & model, const ggml_cgraph * gr
            !::tts_cpp::detail::graph_fully_supported(model.backend, graph);
 }
 
+static bool coreml_vocoder_sidecar_enabled() {
+#ifdef TTS_CPP_USE_COREML
+    return std::getenv("SUPERTONIC_COREML_DISABLE") == nullptr;
+#else
+    return false;
+#endif
+}
+
+// The metadata-only load only checks for the sidecar, so a fit preflight
+// stays a preflight (no MLModel is compiled or loaded).  The sidecar's own
+// resident footprint (the MLModel plus two cached window-sized MLMultiArrays)
+// is deliberately not priced into the fit measure, matching the Audio8
+// sidecar's preflight.
+static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
+                                          supertonic_model & model,
+                                          bool metadata_only,
+                                          bool verbose) {
+    model.coreml_vocoder = nullptr;
+    model.vocoder_on_coreml = false;
+    if (!coreml_vocoder_sidecar_enabled()) return;
+    const std::string sidecar = coreml_vocoder_sidecar_path(gguf_path);
+    if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
+    if (metadata_only) {
+        model.vocoder_on_coreml = true;
+        return;
+    }
+#ifdef TTS_CPP_USE_COREML
+    const int64_t samples_per_frame =
+        (int64_t) model.hparams.base_chunk_size * model.hparams.ttl_chunk_compress_factor;
+    model.coreml_vocoder = supertonic_coreml_vocoder_init(
+        sidecar.c_str(), model.hparams.latent_channels, samples_per_frame);
+    model.vocoder_on_coreml = model.coreml_vocoder != nullptr;
+    if (!model.coreml_vocoder) {
+        fprintf(stderr,
+                "supertonic: Core ML vocoder sidecar %s failed to load; "
+                "the vocoder stays on ggml\n", sidecar.c_str());
+    } else if (verbose) {
+        fprintf(stderr, "supertonic: Core ML vocoder sidecar loaded from %s (%s, window %lld)\n",
+                sidecar.c_str(),
+                supertonic_coreml_vocoder_backend_label(model.coreml_vocoder),
+                (long long) supertonic_coreml_vocoder_window_frames(model.coreml_vocoder));
+    }
+#else
+    (void) verbose;
+#endif
+}
+
 static void bind_vocoder_weights(supertonic_model & model) {
     auto & v = model.vocoder;
     v.normalizer_scale = require_source_tensor(model, "vocoder:tts.ttl.normalizer.scale");
@@ -2510,6 +2563,7 @@ static bool load_supertonic_gguf_impl(const std::string & path,
         }
 
         bind_vocoder_weights(model);
+        attach_coreml_vocoder_sidecar(path, model, /*metadata_only=*/measure != nullptr, verbose);
 
         // Audit finding F1 — cache the vector-estimator RoPE θ
         // tensor on the host once at load time.  All four group
@@ -2892,6 +2946,11 @@ bool load_supertonic_gguf_metadata_only(const std::string & path,
 }
 
 void free_supertonic_model(supertonic_model & model) {
+#ifdef TTS_CPP_USE_COREML
+    supertonic_coreml_vocoder_free(model.coreml_vocoder);
+#endif
+    model.coreml_vocoder = nullptr;
+    model.vocoder_on_coreml = false;
     // Drive every per-stage thread_local graph cache populated on this
     // thread through its normal `free_<type>_cache` path WHILE the
     // backend is still alive — that way the gallocr inside each

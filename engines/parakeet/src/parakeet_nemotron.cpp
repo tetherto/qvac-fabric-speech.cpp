@@ -1,5 +1,7 @@
 #include "parakeet_ctc.h"
 #include "parakeet_tdt.h"
+#include "cached_encoder.h"
+#include "sentencepiece_bpe.h"
 #include "backend_util.h"
 
 #include "ggml-alloc.h"
@@ -7,6 +9,8 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -41,6 +45,9 @@ int encoder_subsampling_factor(const ParakeetCtcModel & model) {
         ? model.encoder_cfg.subsampling_factor
         : kDefaultSubsamplingFactor;
 }
+}
+
+namespace cached_encoder {
 
 // ggml-opencl mis-handles a handful of non-contiguous view feeds (byte-offset
 // views into a concat, depthwise conv on a view). Force a materialised copy on
@@ -53,6 +60,12 @@ ggml_tensor * ensure_contig_on_opencl(
         ? ggml_cont(ctx, tensor)
         : tensor;
 }
+
+}
+
+namespace {
+
+using namespace cached_encoder;
 
 struct NemotronStepGraph {
     ggml_context * context = nullptr;
@@ -101,6 +114,10 @@ struct NemotronStepGraph {
         clear();
     }
 };
+
+}
+
+namespace cached_encoder {
 
 ggml_tensor * add_bias(
     ggml_context * context,
@@ -328,6 +345,12 @@ ggml_tensor * update_channel_cache(
         static_cast<size_t>(current_frames) * cache->nb[1]);
     return ggml_concat(context, retained, current, 1);
 }
+
+}
+
+namespace {
+
+using namespace cached_encoder;
 
 ggml_tensor * cached_convolution(
     ggml_context * context,
@@ -920,46 +943,6 @@ int next_nemotron_processed_signal(
 
 namespace {
 
-void append_token_pieces(
-    const BpeVocab & vocab,
-    const std::vector<int32_t> & token_ids,
-    std::string & pieces) {
-    for (int32_t id : token_ids) {
-        if (id < 0 || id >= static_cast<int32_t>(vocab.pieces.size())) {
-            continue;
-        }
-        if (id == vocab.blank_id ||
-            id == vocab.bos_id ||
-            id == vocab.eos_id ||
-            id == vocab.pad_id) {
-            continue;
-        }
-        const std::string & piece = vocab.pieces[id];
-        for (size_t index = 0; index < piece.size(); ) {
-            const unsigned char c0 =
-                static_cast<unsigned char>(piece[index]);
-            if (c0 == 0xE2 &&
-                index + 2 < piece.size() &&
-                static_cast<unsigned char>(piece[index + 1]) == 0x96 &&
-                static_cast<unsigned char>(piece[index + 2]) == 0x81) {
-                pieces.push_back(' ');
-                index += 3;
-            } else {
-                pieces.push_back(piece[index]);
-                ++index;
-            }
-        }
-    }
-}
-
-std::string strip_leading_spaces(const std::string & text) {
-    size_t start = 0;
-    while (start < text.size() && text[start] == ' ') {
-        ++start;
-    }
-    return text.substr(start);
-}
-
 void upload_layer_caches(
     const ParakeetCtcModel & model,
     const NemotronStepGraph & graph,
@@ -1075,6 +1058,8 @@ int run_nemotron_stream_step(
         return -5;
     }
 
+    const auto encoder_started = std::chrono::steady_clock::now();
+
     std::vector<float> subsampled;
     int subsampled_frames = 0;
     if (int rc = run_subsampling(
@@ -1156,6 +1141,11 @@ int run_nemotron_stream_step(
         return rc;
     }
 
+    result.encoder_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - encoder_started).count();
+
+    const auto decoder_started = std::chrono::steady_clock::now();
+
     RnntDecodeOptions options;
     options.max_symbols_per_step =
         model.nemotron_cfg.max_symbols_per_step;
@@ -1171,6 +1161,9 @@ int run_nemotron_stream_step(
             result.decoder_steps); rc != 0) {
         return rc;
     }
+    result.decoder_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - decoder_started).count();
+
     state.token_ids.insert(
         state.token_ids.end(),
         result.new_token_ids.begin(),
@@ -1189,6 +1182,88 @@ int run_nemotron_stream_step(
     if (finalize) {
         state.finalized = true;
     }
+    return 0;
+}
+
+int run_nemotron_cache_aware_offline(
+        ParakeetCtcModel & model,
+        TdtRuntimeWeights & runtime,
+        const float * mel,
+        int n_mel_frames,
+        int n_mels,
+        const std::string & language,
+        int right_context_frames,
+        std::atomic<bool> & cancel_flag,
+        NemotronOfflineResult & result) {
+    result = NemotronOfflineResult();
+
+    NemotronStreamState state;
+
+    if (int rc = init_nemotron_stream_state(
+                model, language, right_context_frames, state); rc != 0) {
+        return rc;
+    }
+
+    if (int rc = append_nemotron_mel_frames(
+            state, mel, n_mel_frames, n_mels); rc != 0) {
+        return rc;
+    }
+
+    while (!cancel_flag.load()) {
+        std::vector<float> processed_signal;
+        int processed_frames = 0;
+        const int ready = next_nemotron_processed_signal(
+                state, n_mels, true, processed_signal, processed_frames);
+
+        if (ready < 0) {
+            return ready;
+        }
+
+        if (ready == 0) {
+            break;
+        }
+
+        const bool final_chunk = nemotron_pending_mel_frames(state) == 0;
+        NemotronStreamStepResult step;
+        if (int rc = run_nemotron_stream_step(
+                    model,
+                    runtime,
+                    processed_signal.data(),
+                    processed_frames,
+                    n_mels,
+                    final_chunk,
+                    state,
+                    step); rc != 0) {
+            return rc;
+        }
+
+        result.encoder_ms += step.encoder_ms;
+        result.decoder_ms += step.decoder_ms;
+        result.text = std::move(step.text);
+        if (final_chunk) {
+            break;
+        }
+    }
+
+    if (cancel_flag.load()) {
+        cancel_nemotron_stream(state);
+    } else if (!state.finalized) {
+        NemotronStreamStepResult final_step;
+        if (int rc = run_nemotron_stream_step(
+                    model,
+                    runtime,
+                    nullptr,
+                    0,
+                    n_mels,
+                    true,
+                    state,
+                    final_step); rc != 0) {
+            return rc;
+        }
+    }
+
+    result.token_ids = state.token_ids;
+    result.encoder_frames = static_cast<int>(state.emitted_encoder_frames);
     return 0;
 }
 

@@ -386,6 +386,7 @@ int main(int argc, char ** argv) {
     std::snprintf(st_ve_label, sizeof(st_ve_label), "vector_estimator (%d step)", steps);
     Stage st_ve {st_ve_label, {}};
     Stage st_voc{"vocoder", {}};
+    std::string vocoder_backend = "ggml";
     Stage st_tot{"total", {}};
     // round 7 — per-denoise-step breakdown. Populated
     // only when `--bench-per-step` is on; otherwise stays empty
@@ -545,7 +546,8 @@ int main(int argc, char ** argv) {
         auto t4 = clk::now();
 
         std::vector<float> wav;
-        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error)) {
+        if (!supertonic_vocoder_forward_ggml(model, latent.data(), latent_len, wav, &error,
+                                             &vocoder_backend)) {
             fprintf(stderr, "vocoder failed: %s\n", error.c_str());
             free_supertonic_model(model); return 1;
         }
@@ -648,6 +650,7 @@ int main(int argc, char ** argv) {
         if (prewarm_ms > 0.0) {
             printf("  prewarm: %.1fms (cold-start, discarded)\n", prewarm_ms);
         }
+        printf("  vocoder backend: %s\n", vocoder_backend.c_str());
     }
     printf("  audio per run: %.3fs @ %d Hz\n", last_audio_s, model.hparams.sample_rate);
     printf("  runs: %d (warmup discarded: %d)\n", runs, warmup);
@@ -739,6 +742,10 @@ int main(int argc, char ** argv) {
         // include a `ggml_backend_synchronize` boundary; useful
         // when comparing JSON across machines / configs.
         os << "  \"bench_sync\": " << (bench_sync ? "true" : "false") << ",\n";
+        // Which path served the vocoder stage: "ggml", or the Core ML
+        // sidecar's compute-unit label (e.g. "coreml-all").  Named after
+        // SynthesisResult::vocoder_synthesis_backend.
+        os << "  \"vocoder_synthesis_backend\": \"" << json_escape(vocoder_backend) << "\",\n";
         // round 7 — Vulkan env-var overrides surfaced
         // verbatim so the JSON consumer can attribute drift to
         // a specific override (or its absence).  Always emitted

@@ -31,7 +31,7 @@ struct GenerateParams {
     std::string lyrics;
     int64_t max_frames = 300;
     int64_t seed = -1;
-    int inference_steps = 0;
+    int inference_steps = 0;  // 0 = engine default
     float cfg_scale = 0.0f;
 };
 

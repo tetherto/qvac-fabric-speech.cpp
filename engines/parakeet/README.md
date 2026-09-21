@@ -13,7 +13,7 @@ from GGUF metadata.
 | `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English |
 | `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English |
 | `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; requires `--language` or `EngineOptions::language` |
-| `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 × 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder; optional Core ML sidecar |
+| `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 x 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder with an optional Core ML sidecar; cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization |
 | `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization |
 | `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token |
@@ -27,14 +27,19 @@ multilingual and punctuation/capitalization-aware. Encoder topology, including
 causal subsampling, convolution normalization, and chunked-limited attention,
 comes from GGUF metadata.
 
-Unified RNN-T uses standard greedy transducer decoding. Its encoder was trained
-with dynamic chunked convolution and attention, but this implementation runs it
-offline in full-context mode. Mode 2 and `StreamSession` use buffered window
-re-encoding; native NeMo cache-aware encoder state is not implemented.
-With `PARAKEET_COREML=ON`, both batch transcription and these buffered streaming
-paths route eligible encoder windows through the fixed-capacity Core ML sidecar.
-This does not add native cache-aware streaming: every buffered window remains an
-independent full-context encode.
+Unified RNN-T uses standard greedy transducer decoding. Offline inference runs
+the encoder in full-context mode, and with `PARAKEET_COREML=ON` eligible batch
+windows route through the fixed-capacity Core ML sidecar. Mode 2 and
+`StreamSession` use the native cache-aware encoder, which builds its own ggml
+graph and never uses the fixed-shape sidecar: `StreamingOptions::chunk_ms`
+selects the chunk and `right_lookahead_ms` the right context, both snapped down
+to the nearest trained value (chunks 80, 160, 560, 1040 ms; right context 0, 80,
+160, 240, 320, 560, 1040 ms; the default 1000 ms chunk runs as 560 ms); the
+encoder keeps a 5.6 s attention cache plus a 4-frame convolution cache per layer
+and only encodes `chunk + right context` new frames per step. The
+`left_context_ms` knob is ignored. GGUFs converted before the
+`parakeet.unified.*` metadata existed fall back to the published checkpoint
+contexts.
 
 Nemotron offline inference uses the GGUF's default 320 ms operating point
 (`att_context_size=[56,3]`). `EngineOptions::language` accepts the locale aliases
@@ -67,6 +72,27 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
 Place the compiled directory beside the GGUF as
 `parakeet-unified-en-0.6b-encoder.mlmodelc`. Missing or incompatible sidecars
 and prediction failures fall back to ggml.
+
+### Nemotron
+
+Nemotron supports a fixed-shape sidecar for offline transcription. Export the
+encoder at the intended mel length using the standard name:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b.f16.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside any quantization of the GGUF using the
+corresponding `.mlmodelc` name. Exact-shape offline encoder invocations use
+Core ML. Longer offline inputs use the native cache-aware ggml path because an
+independent exact-shape window cannot preserve the encoder's full-depth
+receptive field. Native streaming, mel subsampling, locale prompt projection,
+and RNN-T decoding also remain on ggml.
 
 ### Sortformer v2.1
 
@@ -104,7 +130,7 @@ cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
 or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
 subsequent chunks go directly to ggml. See
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU/Nemotron
 details and runtime controls.
 
 ## Performance

@@ -94,6 +94,60 @@ std::vector<float> run_conv(ggml_backend_t backend, bool use_view, bool & fully_
     return res;
 }
 
+// Grouped conv legs: the per-(group, batch) form and the batched form must
+// produce the same output — each output element is the same dot product over
+// the same group slice, only the dispatch shape differs (test pins the
+// equivalence the DiT's conv_pos_embed relies on when it picks the batched
+// form on Metal).
+constexpr int kGK = 5, kGCin = 32, kGCout = 16, kGGroups = 4, kGLen = 33, kGB = 2;
+
+std::vector<float> make_grouped_signal() {
+    std::vector<float> v((size_t)kGLen * kGCin * kGB);
+    for (size_t i = 0; i < v.size(); ++i) v[i] = std::sin(0.19f * (float)i) - 0.05f * (float)(i % 7);
+    return v;
+}
+std::vector<float> make_grouped_weights() {
+    std::vector<float> v((size_t)kGK * (kGCin / kGGroups) * kGCout);
+    for (size_t i = 0; i < v.size(); ++i) v[i] = std::cos(0.31f * (float)i) + 0.03f * (float)(i % 4);
+    return v;
+}
+
+std::vector<float> run_grouped_conv(ggml_backend_t backend, bool batched, bool & fully_supported) {
+    static const size_t buf_size = 8 * 1024 * 1024;
+    std::vector<uint8_t> buf(buf_size);
+    ggml_init_params p = { buf_size, buf.data(), /*no_alloc=*/true };
+    ggml_context * ctx = ggml_init(p);
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+
+    ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kGLen, kGCin, kGB);
+    ggml_set_name(x, "x"); ggml_set_input(x);
+    ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kGK, kGCin / kGGroups, kGCout);
+    ggml_set_name(w, "w"); ggml_set_input(w);
+
+    ggml_tensor * y = batched
+        ? cosyvoice_conv1d_grouped_batched(ctx, w, x, kGGroups)
+        : cosyvoice_conv1d_grouped(ctx, w, x, kGGroups);
+    ggml_set_name(y, "y"); ggml_set_output(y);
+    ggml_build_forward_expand(gf, y);
+
+    fully_supported = ::tts_cpp::detail::graph_fully_supported(backend, gf);
+
+    auto * allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    ggml_gallocr_reserve(allocr, gf);
+    ggml_gallocr_alloc_graph(allocr, gf);
+    const auto sig = make_grouped_signal();
+    const auto wts = make_grouped_weights();
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "x"), sig.data(), 0, sig.size() * sizeof(float));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "w"), wts.data(), 0, wts.size() * sizeof(float));
+    ggml_backend_graph_compute(backend, gf);
+    ggml_tensor * out = ggml_graph_get_tensor(gf, "y");
+    std::vector<float> res(ggml_nelements(out));
+    ggml_backend_tensor_get(out, res.data(), 0, ggml_nbytes(out));
+    ggml_gallocr_free(allocr);
+    ggml_free(ctx);
+    return res;
+}
+
 int compare(const std::vector<float> & got, const std::vector<float> & ref, const char * what) {
     if (got.size() != ref.size()) {
         fprintf(stderr, "FAIL: %s size mismatch (%zu vs %zu)\n", what, got.size(), ref.size());
@@ -148,6 +202,19 @@ int main() {
         }
     }
 
+    bool grp_supported = false, grp_batched_supported = false;
+    const auto grp_ref     = run_grouped_conv(cpu, /*batched=*/false, grp_supported);
+    const auto grp_batched = run_grouped_conv(cpu, /*batched=*/true, grp_batched_supported);
+    if (!grp_batched_supported) {
+        fprintf(stderr, "FAIL: batched grouped conv graph not fully supported on the CPU backend\n");
+        ggml_backend_free(cpu);
+        return 1;
+    }
+    if (compare(grp_batched, grp_ref, "CPU batched grouped conv vs per-group")) {
+        ggml_backend_free(cpu);
+        return 1;
+    }
+
     if (std::getenv("COSYVOICE_TEST_GPU")) {
         ggml_backend_t gpu = ::tts_cpp::detail::init_gpu_backend(
             99, /*verbose=*/false, "test-cosyvoice", /*vulkan_device=*/0,
@@ -165,8 +232,21 @@ int main() {
             return 1;
         }
         const int rc = compare(gpu_view, ref_cont, "GPU view leg vs CPU");
+        if (rc) { ggml_backend_free(gpu); ggml_backend_free(cpu); return 1; }
+
+        bool gpu_grp_supported = false;
+        const auto gpu_grp_batched = run_grouped_conv(gpu, /*batched=*/true, gpu_grp_supported);
+        if (!gpu_grp_supported) {
+            fprintf(stderr, "FAIL: batched grouped conv graph not fully supported on %s "
+                            "(stage would demote to sched fallback)\n",
+                    ggml_backend_name(gpu));
+            ggml_backend_free(gpu);
+            ggml_backend_free(cpu);
+            return 1;
+        }
+        const int grc = compare(gpu_grp_batched, grp_ref, "GPU batched grouped conv vs CPU per-group");
         ggml_backend_free(gpu);
-        if (rc) { ggml_backend_free(cpu); return 1; }
+        if (grc) { ggml_backend_free(cpu); return 1; }
     }
 
     ggml_backend_free(cpu);

@@ -326,9 +326,10 @@ struct EngineOptions {
     // every subsequent call but can't avoid the first pipeline-compile
     // cost — measured ~hundreds of ms on first synth on Adreno + RADV
     // in chatterbox PROGRESS.md), so the operator-visible first synth
-    // call sees ~steady-state latency.  No effect on CPU (no shader
-    // compilation cost; warm_up returns immediately on
-    // `model.backend_is_cpu`).
+    // call sees ~steady-state latency.  On a CPU backend with a Core ML
+    // vocoder sidecar attached the pre-warm still runs, absorbing Core
+    // ML's first-prediction device specialization; without one, CPU has
+    // no shader-compilation cost and warm_up returns immediately.
     //
     // Pre-warm text should be similar in length to representative
     // production input — the per-stage graph caches are keyed on
@@ -380,6 +381,9 @@ struct SynthesisResult {
     std::vector<float> pcm;
     int   sample_rate = 44100;
     float duration_s  = 0.0f;
+    // "ggml", the Core ML sidecar's compute-unit label (e.g. "coreml-all"),
+    // or "mixed" when streamed chunks used different vocoder paths.
+    std::string vocoder_synthesis_backend = "ggml";
 };
 
 // Persistent engine.  Loads the GGUF once at construction; subsequent
@@ -432,7 +436,8 @@ public:
     // pre-compiled pipelines, so the operator-visible first synth
     // sees steady-state latency.
     //
-    // No-op on CPU backends (no pipeline cache to warm).  Auto-
+    // No-op on CPU backends without a Core ML vocoder sidecar (no
+    // pipeline cache to warm; an attached sidecar still warms).  Auto-
     // invoked by the ctor when `EngineOptions::prewarm_text` is
     // non-empty; callers can also invoke explicitly mid-life when
     // they need to warm a different shape (e.g. switching from a
@@ -462,6 +467,13 @@ public:
     // True when a GPU device was present but unusable (outside the validated
     // allowlist), so we fell back to CPU. Always false when backend_device() == GPU.
     bool gpu_unsupported() const;
+
+    // True when a Core ML vocoder sidecar (`<model>-vocoder.mlmodelc` next
+    // to the GGUF) loaded at construction.  Load status only — a call can
+    // still fall back to the ggml vocoder graph; the per-call truth is
+    // SynthesisResult::vocoder_synthesis_backend.  Always false when the build is not
+    // compiled with TTS_CPP_COREML or SUPERTONIC_COREML_DISABLE is set.
+    bool vocoder_on_coreml() const;
 
 private:
     struct Impl;

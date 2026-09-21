@@ -30,9 +30,11 @@ using parakeet::WindowTrim;
 using parakeet::append_committed_frames;
 using parakeet::compute_window_trim;
 using parakeet::plan_long_form_windows;
+using parakeet::plan_long_form_windows_asymmetric;
 using parakeet::resolve_coreml_exact_shape_plan;
 using parakeet::resolve_coreml_fixed_shape_plan;
 using parakeet::resolve_long_form_window_frames;
+using parakeet::should_use_nemotron_cache_aware_offline;
 
 namespace {
 
@@ -183,6 +185,21 @@ void check_coreml_eou_exact_shape_resolution() {
            "eou coreml resolve: long input preserves attention via ggml fallback");
 }
 
+void check_nemotron_cache_aware_resolution() {
+    expect(!should_use_nemotron_cache_aware_offline(1101, 0, false, 1101),
+           "nemotron resolve: exact-shape input remains on offline Core ML");
+    expect(should_use_nemotron_cache_aware_offline(1101, 0, false, 1102),
+           "nemotron resolve: oversized Core ML input uses cache-aware execution");
+    expect(should_use_nemotron_cache_aware_offline(1101, 0, false, 10000),
+           "nemotron resolve: non-aligned long input avoids exact-shape windows");
+    expect(!should_use_nemotron_cache_aware_offline(0, 0, false, 10000),
+           "nemotron resolve: fitting ggml input remains unwindowed");
+    expect(should_use_nemotron_cache_aware_offline(0, 0, true, 40000),
+           "nemotron resolve: generic long-form input uses cache-aware execution");
+    expect(!should_use_nemotron_cache_aware_offline(1101, -1, true, 10000),
+           "nemotron resolve: negative window option permits an unwindowed reference");
+}
+
 // Drive the real trim + append over a synthetic encoder output and assert the
 // stitched frames are exactly [0, 1, ... T_total-1] -- i.e. no frame is dropped
 // or duplicated at any seam. Each window's synthetic encoder frame carries its
@@ -275,6 +292,7 @@ int main() {
     check_window_resolution();
     check_coreml_fixed_shape_resolution();
     check_coreml_eou_exact_shape_resolution();
+    check_nemotron_cache_aware_resolution();
 
     // Trim + append seam stitching (multiples of sub so subsampling is exact).
     check_stitch(2048, 256, 64, 8);   // several equal windows

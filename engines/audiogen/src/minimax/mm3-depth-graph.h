@@ -29,6 +29,7 @@ struct MM3DepthStep {
     ggml_tensor * in_hidden = nullptr;
     ggml_tensor * in_sem    = nullptr;
     ggml_tensor * in_ac     = nullptr;
+    ggml_tensor * in_rows   = nullptr;
     ggml_tensor * out_fused = nullptr;
 
     ggml_tensor * mask = nullptr;
@@ -45,6 +46,17 @@ struct MM3DepthGraph {
 
     const void * synth_token = nullptr;
     const void * lm_token    = nullptr;
+
+    // One K/V cache per layer, sized for the whole codebook sequence. Every
+    // frame rewrites positions 0..NC in order, so no step ever reads a position
+    // left over from the previous frame. F32 where the LM cache is F16: at
+    // eight positions the whole cache is 2 MB, the attention here is
+    // launch-bound rather than bandwidth-bound, and F16 would add a cast per
+    // layer per step while changing the numerics the old full-prefix path had.
+    ggml_context *             kv_ctx = nullptr;
+    ggml_backend_buffer_t      kv_buf = nullptr;
+    std::vector<ggml_tensor *> kv_k;
+    std::vector<ggml_tensor *> kv_v;
 
     MM3DepthStep step[MM3_DEPTH_MAX_STEPS];
     int          n_steps = 0;
@@ -73,10 +85,24 @@ static void mm3_depth_free_step(MM3DepthStep * s) {
     *s = MM3DepthStep{};
 }
 
+static void mm3_depth_free_kv(MM3DepthGraph * g) {
+    if (g->kv_buf) {
+        ggml_backend_buffer_free(g->kv_buf);
+    }
+    if (g->kv_ctx) {
+        ggml_free(g->kv_ctx);
+    }
+    g->kv_buf = nullptr;
+    g->kv_ctx = nullptr;
+    g->kv_k.clear();
+    g->kv_v.clear();
+}
+
 static void mm3_depth_free(MM3DepthGraph * g) {
     for (int i = 0; i < MM3_DEPTH_MAX_STEPS; i++) {
         mm3_depth_free_step(&g->step[i]);
     }
+    mm3_depth_free_kv(g);
     wctx_free(&g->prep);
     g->n_steps     = 0;
     g->synth_token = nullptr;
@@ -93,12 +119,17 @@ static ggml_tensor * mm3_depth_norm(ggml_context * ctx, ggml_tensor * x, ggml_te
     return ggml_mul(ctx, ggml_rms_norm(ctx, x, eps), w);
 }
 
-static ggml_tensor * mm3_depth_block(ggml_context * ctx, const MM3DepthConfig & c, const MM3DepthLayer & w,
-                                     ggml_tensor * h, ggml_tensor * mask) {
+// Attends the step's new token(s) against the layer's K/V cache. `window` is
+// how many cached positions are live for this step; everything beyond it
+// belongs to a later step and must not be read.
+static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const MM3DepthConfig & c,
+                                     const MM3DepthLayer & w, ggml_tensor * h, ggml_tensor * mask,
+                                     ggml_tensor * kcache, ggml_tensor * vcache, ggml_tensor * rows,
+                                     int64_t window) {
     const int64_t H  = (int64_t) c.embedding_length;
     const int64_t D  = (int64_t) c.head_dim;
     const int64_t Nh = (int64_t) c.head_count;
-    const int64_t S  = h->ne[1];
+    const int64_t T  = h->ne[1];
     const int64_t B  = h->ne[2];
 
     ggml_tensor * n = mm3_depth_norm(ctx, h, w.attn_norm, c.rms_eps);
@@ -107,18 +138,26 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, const MM3DepthConfig & 
     ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);
     ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
 
-    q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, D, Nh, S, B), 0, 2, 1, 3));
-    k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, D, Nh, S, B), 0, 2, 1, 3));
-    v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, D, Nh, S, B), 0, 2, 1, 3));
+    q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, D, Nh, T, B), 0, 2, 1, 3));
+    k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, D, Nh, T, B), 0, 2, 1, 3));
+    v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, D, Nh, T, B), 0, 2, 1, 3));
+
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, k, rows));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, v, rows));
+
+    ggml_tensor * k_win =
+        ggml_view_4d(ctx, kcache, D, window, Nh, B, kcache->nb[1], kcache->nb[2], kcache->nb[3], 0);
+    ggml_tensor * v_win =
+        ggml_view_4d(ctx, vcache, D, window, Nh, B, vcache->nb[1], vcache->nb[2], vcache->nb[3], 0);
 
     const float   scale  = 1.0f / sqrtf((float) D);
-    ggml_tensor * scores = ggml_mul_mat(ctx, k, q);
+    ggml_tensor * scores = ggml_mul_mat(ctx, k_win, q);
     scores               = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
 
-    ggml_tensor * vt   = ggml_cont(ctx, ggml_transpose(ctx, v));
+    ggml_tensor * vt   = ggml_cont(ctx, ggml_transpose(ctx, v_win));
     ggml_tensor * attn = ggml_mul_mat(ctx, vt, scores);
     attn               = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
-    attn               = ggml_reshape_3d(ctx, attn, H, S, B);
+    attn               = ggml_reshape_3d(ctx, attn, H, T, B);
 
     h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
 
@@ -127,6 +166,44 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, const MM3DepthConfig & 
     ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
     ggml_tensor * y    = ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up));
     return ggml_add(ctx, h, y);
+}
+
+static bool mm3_depth_alloc_kv(const MM3Model & m, MM3DepthGraph * g, int n_steps, std::string * err) {
+    const MM3DepthConfig & c   = m.synth_cfg.depth;
+    const int64_t          D   = (int64_t) c.head_dim;
+    const int64_t          Nh  = (int64_t) c.head_count;
+    const int64_t          pos = (int64_t) n_steps + 1;
+    const int              L   = (int) c.block_count;
+
+    ggml_init_params ip = { (size_t) (L * 2) * ggml_tensor_overhead() + 1024, NULL, true };
+    g->kv_ctx           = ggml_init(ip);
+    if (!g->kv_ctx) {
+        if (err) {
+            *err = "ggml_init failed for the depth KV cache context";
+        }
+        return false;
+    }
+    g->kv_k.assign((size_t) L, nullptr);
+    g->kv_v.assign((size_t) L, nullptr);
+    for (int i = 0; i < L; i++) {
+        char nm[64];
+        g->kv_k[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, pos, Nh, 2);
+        snprintf(nm, sizeof(nm), "mm3.depth.kv_k.%d", i);
+        ggml_set_name(g->kv_k[(size_t) i], nm);
+        g->kv_v[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, pos, Nh, 2);
+        snprintf(nm, sizeof(nm), "mm3.depth.kv_v.%d", i);
+        ggml_set_name(g->kv_v[(size_t) i], nm);
+    }
+    g->kv_buf = ggml_backend_alloc_ctx_tensors(g->kv_ctx, g->backend);
+    if (!g->kv_buf) {
+        mm3_depth_free_kv(g);
+        if (err) {
+            *err = "backend buffer allocation failed for the depth KV cache";
+        }
+        return false;
+    }
+    ggml_backend_buffer_clear(g->kv_buf, 0);
+    return true;
 }
 
 static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, std::string * err) {
@@ -156,41 +233,50 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
         return false;
     }
 
-    s->in_hidden = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, H, 1, 2);
-    ggml_set_name(s->in_hidden, "mm3_depth_lm_hidden");
-    ggml_set_input(s->in_hidden);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, MM3_DEPTH_MAX_NODES, false);
 
-    s->in_sem = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-    ggml_set_name(s->in_sem, "mm3_depth_semantic_id");
-    ggml_set_input(s->in_sem);
+    const tts_cpp::minimax::detail::DepthStepLayout layout =
+        tts_cpp::minimax::detail::depth_step_layout(cb);
+    const int64_t T = layout.tokens;
 
-    if (cb > 1) {
-        s->in_ac = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cb - 1);
+    s->in_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, T);
+    ggml_set_name(s->in_rows, "mm3_depth_kv_rows");
+    ggml_set_input(s->in_rows);
+
+    ggml_tensor * seq = nullptr;
+    if (cb == 1) {
+        s->in_hidden = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, H, 1, 2);
+        ggml_set_name(s->in_hidden, "mm3_depth_lm_hidden");
+        ggml_set_input(s->in_hidden);
+
+        s->in_sem = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+        ggml_set_name(s->in_sem, "mm3_depth_semantic_id");
+        ggml_set_input(s->in_sem);
+
+        ggml_tensor * tok0   = ggml_mul_mat(ctx, w.proj, s->in_hidden);
+        ggml_tensor * shared = ggml_mul_mat(ctx, w.proj, ggml_get_rows(ctx, m.lm.token_embd, s->in_sem));
+        shared               = ggml_concat(ctx, shared, shared, 2);
+        seq                  = ggml_concat(ctx, tok0, shared, 1);
+    } else {
+        s->in_ac = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
         ggml_set_name(s->in_ac, "mm3_depth_acoustic_rows");
         ggml_set_input(s->in_ac);
+
+        ggml_tensor * ac = ggml_mul_mat(ctx, w.proj, ggml_get_rows(ctx, w.audio_embd, s->in_ac));
+        seq              = ggml_concat(ctx, ac, ac, 2);
     }
 
-    ggml_tensor * tok0 = ggml_mul_mat(ctx, w.proj, s->in_hidden);
-
-    ggml_tensor * shared = ggml_get_rows(ctx, m.lm.token_embd, s->in_sem);
-    if (cb > 1) {
-        ggml_tensor * ac = ggml_get_rows(ctx, w.audio_embd, s->in_ac);
-        shared           = ggml_concat(ctx, shared, ac, 1);
-    }
-    shared = ggml_mul_mat(ctx, w.proj, shared);
-    shared = ggml_concat(ctx, shared, shared, 2);
-    ggml_tensor * seq = ggml_concat(ctx, tok0, shared, 1);
-
-    ggml_tensor * pos = ggml_view_2d(ctx, w.pos_embd, H, S, w.pos_embd->nb[1], 0);
-    ggml_tensor * h   = ggml_add(ctx, seq, pos);
+    ggml_tensor * pos =
+        ggml_view_2d(ctx, w.pos_embd, H, T, w.pos_embd->nb[1], (size_t) layout.first * w.pos_embd->nb[1]);
+    ggml_tensor * h = ggml_add(ctx, seq, pos);
 
     for (size_t i = 0; i < w.blk.size(); i++) {
-        h = mm3_depth_block(ctx, c, w.blk[i], h, s->mask);
+        h = mm3_depth_block(ctx, gf, c, w.blk[i], h, s->mask, g->kv_k[i], g->kv_v[i], s->in_rows, S);
     }
     h = mm3_depth_norm(ctx, h, w.output_norm, c.rms_eps);
 
     ggml_tensor * last = ggml_cont(
-        ctx, ggml_view_3d(ctx, h, H, 1, 2, h->nb[1], h->nb[2], (size_t) (S - 1) * h->nb[1]));
+        ctx, ggml_view_3d(ctx, h, H, 1, 2, h->nb[1], h->nb[2], (size_t) (T - 1) * h->nb[1]));
 
     ggml_tensor * logits = ggml_mul_mat(ctx, w.head[(size_t) (cb - 1)], last);
     ggml_set_name(last, "mm3_depth_hidden");
@@ -204,7 +290,7 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
     ggml_set_name(s->out_fused, "mm3_depth_fused");
     ggml_set_output(s->out_fused);
 
-    s->graph = ggml_new_graph_custom(ctx, MM3_DEPTH_MAX_NODES, false);
+    s->graph = gf;
     ggml_build_forward_expand(s->graph, s->out_fused);
 
     ggml_backend_sched_reset(s->sched);
@@ -292,27 +378,33 @@ static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string
     g->cpu_backend = bp.cpu_backend;
     g->backend_ref = true;
 
-    wctx_init(&g->prep, NC);
-    for (int cb = 1; cb <= NC; cb++) {
-        const int64_t S = cb + 1;
-        auto          d = std::make_unique<float[]>((size_t) (S * S));
-        for (int64_t q = 0; q < S; q++) {
-            for (int64_t k = 0; k < S; k++) {
-                d[(size_t) (k + q * S)] = k <= q ? 0.0f : -INFINITY;
+    // Only the seeding step writes more than one position, so it is the only
+    // one that needs a mask; every later step has a single query that may
+    // attend to every position in its window.
+    wctx_init(&g->prep, 1);
+    {
+        constexpr int64_t kSeedPositions = 2;
+        auto              d = std::make_unique<float[]>((size_t) (kSeedPositions * kSeedPositions));
+        for (int64_t q = 0; q < kSeedPositions; q++) {
+            for (int64_t k = 0; k < kSeedPositions; k++) {
+                d[(size_t) (k + q * kSeedPositions)] = k <= q ? 0.0f : -INFINITY;
             }
         }
-        ggml_tensor * t = ggml_new_tensor_2d(g->prep.ctx, GGML_TYPE_F32, S, S);
-        char          nm[64];
-        snprintf(nm, sizeof(nm), "mm3.depth.causal_mask.%d", cb);
-        ggml_set_name(t, nm);
-        g->prep.pending.push_back({ t, d.get(), (size_t) (S * S) * sizeof(float), 0 });
+        ggml_tensor * t = ggml_new_tensor_2d(g->prep.ctx, GGML_TYPE_F32, kSeedPositions, kSeedPositions);
+        ggml_set_name(t, "mm3.depth.causal_mask");
+        g->prep.pending.push_back({ t, d.get(), (size_t) (kSeedPositions * kSeedPositions) * sizeof(float), 0 });
         g->prep.staging.push_back(std::move(d));
-        g->step[cb - 1].mask = t;
+        g->step[0].mask = t;
     }
     if (!wctx_alloc(&g->prep, g->backend)) {
         if (err) {
-            *err = "backend buffer allocation failed for the depth causal masks";
+            *err = "backend buffer allocation failed for the depth causal mask";
         }
+        mm3_depth_free(g);
+        return false;
+    }
+
+    if (!mm3_depth_alloc_kv(m, g, NC, err)) {
         mm3_depth_free(g);
         return false;
     }
@@ -333,10 +425,11 @@ static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string
         total += g->step[i].compute_bytes;
     }
     fprintf(stderr,
-            "[MM3-Depth] Prepared: %u blocks, %u heads x %u, %d step graphs (S=2..%d, %d nodes each), "
-            "compute buffers %.1f MB\n",
-            c.block_count, c.head_count, c.head_dim, NC, NC + 1, g->step[NC - 1].n_nodes,
-            (double) total / (1024.0 * 1024.0));
+            "[MM3-Depth] Prepared: %u blocks, %u heads x %u, %d step graphs (%d nodes each), "
+            "compute buffers %.1f MB, KV cache %d positions %.1f MB\n",
+            c.block_count, c.head_count, c.head_dim, NC, g->step[NC - 1].n_nodes,
+            (double) total / (1024.0 * 1024.0), NC + 1,
+            (double) ggml_backend_buffer_get_size(g->kv_buf) / (1024.0 * 1024.0));
     return true;
 }
 
@@ -388,12 +481,26 @@ static bool mm3_depth_decode_frame(const MM3Model & m, const float * lm_hidden_c
     for (int cb = 1; cb <= NC; cb++) {
         MM3DepthStep * s = &g_mm3_depth.step[cb - 1];
 
-        ggml_backend_tensor_set(s->in_hidden, lm_hidden_cond, 0, (size_t) H * sizeof(float));
-        ggml_backend_tensor_set(s->in_hidden, lm_hidden_uncond, (size_t) H * sizeof(float),
-                                (size_t) H * sizeof(float));
-        ggml_backend_tensor_set(s->in_sem, &sem_id, 0, sizeof(int32_t));
+        // Uploaded every frame even though the rows depend only on the step:
+        // in_rows is a graph input, and the graph allocator hands its storage
+        // to later nodes once the set_rows consumers have run, so a value set
+        // once at build time does not survive the first compute on a backend
+        // whose inputs share the compute buffer. The LM uploads its rows the
+        // same way.
+        const auto    layout     = tts_cpp::minimax::detail::depth_step_layout(cb);
+        const int64_t kv_rows[2] = { layout.first, layout.first + 1 };
+        ggml_backend_tensor_set(s->in_rows, kv_rows, 0, (size_t) layout.tokens * sizeof(int64_t));
+
+        if (s->in_hidden) {
+            ggml_backend_tensor_set(s->in_hidden, lm_hidden_cond, 0, (size_t) H * sizeof(float));
+            ggml_backend_tensor_set(s->in_hidden, lm_hidden_uncond, (size_t) H * sizeof(float),
+                                    (size_t) H * sizeof(float));
+        }
+        if (s->in_sem) {
+            ggml_backend_tensor_set(s->in_sem, &sem_id, 0, sizeof(int32_t));
+        }
         if (s->in_ac) {
-            ggml_backend_tensor_set(s->in_ac, ac_rows.data(), 0, (size_t) (cb - 1) * sizeof(int32_t));
+            ggml_backend_tensor_set(s->in_ac, &ac_rows[(size_t) (cb - 2)], 0, sizeof(int32_t));
         }
 
         if (ggml_backend_sched_graph_compute(s->sched, s->graph) != GGML_STATUS_SUCCESS) {

@@ -21,11 +21,6 @@
 #include <utility>
 #include <vector>
 
-#define MM3_OVERLAP_LATENTS    172
-#define MM3_CARRY_SPAN_LATENTS 344
-#define MM3_CROP_LEFT_LATENTS  86
-#define MM3_CROP_RIGHT_LATENTS 258
-
 static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const float * cond, int64_t L, int steps,
                                   float cfg_scale, int64_t overlap, const float * prev_latent, int64_t prev_stride,
                                   std::vector<float> & out_latents, MM3FlowStats * stats,
@@ -370,10 +365,13 @@ static MM3WindowDimensions mm3_window_dimensions(
     window.upsample = dimensions.upsample;
     window.window_frames = dimensions.window_frames;
     window.hop_frames = dimensions.hop_frames;
-    window.carry_span = MM3_CARRY_SPAN_LATENTS;
-    window.overlap = MM3_OVERLAP_LATENTS;
-    window.crop_left = MM3_CROP_LEFT_LATENTS;
-    window.crop_right = MM3_CROP_RIGHT_LATENTS;
+    const auto geometry = tts_cpp::minimax::detail::flow_window_geometry(
+        static_cast<int64_t>(model.synth_cfg.dit.window_latents),
+        static_cast<int64_t>(model.synth_cfg.dit.hop_latents));
+    window.carry_span = geometry.carry_span;
+    window.overlap = geometry.overlap;
+    window.crop_left = geometry.crop_left;
+    window.crop_right = geometry.crop_right;
     window.flow_steps = request.steps;
     return window;
 }

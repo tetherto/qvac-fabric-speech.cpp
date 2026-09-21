@@ -2958,3 +2958,51 @@ python scripts/bench-supertonic-onnx.py \
   --providers CPUExecutionProvider \
   --json-out artifacts/supertonic-thread-matrix/onnx-quick-t4.json
 ```
+
+---
+
+## Core ML vocoder sidecar (2026-09-18)
+
+The vocoder now runs on an optional Apple Core ML sidecar
+(`TTS_CPP_COREML=ON`, shared with the Audio8 codec sidecar), exported by
+`scripts/export-supertonic-coreml.py` as a fixed-shape float16 `jit.trace`
+mlprogram and discovered next to the GGUF as
+`<basename-minus-quant>-vocoder.mlmodelc`. The earlier ONNX-Runtime CoreML-EP
+row in the Metal baseline table above ran shape-generic graphs (0 ops on the
+Neural Engine per the Parakeet bring-up); the fixed-shape export places 164 of
+165 ops on the ANE.
+
+Design notes:
+- The exporter rebuilds the vocoder in PyTorch from the GGUF tensors with
+  replicate (edge) left padding, matching `causal_replicate_pad_1d`; parity
+  against the ONNX reference dumps is cosine 1.00000000, max err 1.5e-06.
+- The engine stitches fixed windows (default 64 latent frames) through the
+  shared `coreml_windows.h` plan, dropping each window's leading causal
+  context (20 latent frames, computed from the kernel shapes by
+  `supertonic_coreml_vocoder_context_frames`). C++ parity vs the ggml graph:
+  cosine >= 0.99995 on padded, exact-window, and stitched lengths.
+- Fail-soft everywhere: any sidecar failure falls back to the ggml vocoder;
+  `SUPERTONIC_COREML_DISABLE` / `SUPERTONIC_COREML_COMPUTE_UNITS` /
+  `SUPERTONIC_COREML_STRICT` mirror the Audio8 knobs. The per-call path is
+  reported on `SynthesisResult::vocoder_synthesis_backend` and in the bench JSON.
+
+Measured (supertonic2 f32, M1, 5 steps, 4 threads, GPU, 5 runs / 2 warmups):
+
+| Machine | Utterance | Metal vocoder | Core ML vocoder | end-to-end |
+|---|---|---:|---:|---:|
+| M4 mini | 3.2 s | 6.6 ms | **2.3 ms (2.9x)** | 30.0 -> 26.0 ms |
+| M4 mini | 17.9 s | 31.4 ms | **13.2 ms (2.4x)** | 88.3 -> 70.1 ms |
+| M3 Ultra | 3.2 s | 3.0 ms | 4.5 ms (0.7x) | 29.3 -> 32.2 ms |
+| M3 Ultra | 17.9 s | 8.9 ms | 14.0 ms (0.6x) | 41.4 -> 47.0 ms |
+
+The ANE beats consumer-class GPUs and loses to workstation-class ones; the
+sidecar is presence-driven so the call is per-deployment. Sidecar compute
+scales with padded frames, so window width trades context-repay overhead
+against last-window tail waste (see docs/supertonic.md); 64 stays the
+default. Open follow-ups: the Metal-vs-Core-ML productization comparison
+(which machines ship the sidecar) is the next ticket; batching the window
+plan through one `predictionsFromBatch:` submit would recover up to ~1 ms of
+per-window dispatch on long utterances; a second, smaller exported window
+would cut the streaming first-chunk floor; the vector estimator stays on ggml
+-- variable text length in its cross-attention plus the per-step loop make a
+fixed-shape export a separate investigation.

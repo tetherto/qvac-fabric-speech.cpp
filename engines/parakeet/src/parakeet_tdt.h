@@ -320,4 +320,15 @@ int rnnt_greedy_decode(const ParakeetCtcModel & model,
                        const RnntDecodeOptions & options,
                        RnntDecodeResult & result);
 
+// Decode a long encoder sequence through bounded encoder-projection windows
+// while preserving one predictor state across every window.
+int rnnt_greedy_decode_chunked(const ParakeetCtcModel & model,
+                               RnntRuntimeWeights & weights,
+                               const float * encoder_out,
+                               int encoder_frames,
+                               int encoder_dim,
+                               int chunk_frames,
+                               const RnntDecodeOptions & options,
+                               RnntDecodeResult & result);
+
 }

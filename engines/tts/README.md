@@ -37,9 +37,9 @@ engine, not every backend ggml can compile.
 |---|---|---|---:|:---:|:---:|:---:|:---:|:---:|
 | Chatterbox Turbo | English | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes |
 | Chatterbox Multilingual | 23 | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes |
-| Supertonic 1 | English | preset or external style tensors/JSON | 44.1 kHz | yes | yes | yes | yes | yes |
-| Supertonic 2 | `en`, `ko`, `es`, `pt`, `fr` | preset or external style tensors/JSON | 44.1 kHz | yes | yes | yes | yes | yes |
-| Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes | yes | yes | yes |
+| Supertonic 1 | English | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ Core ML vocoder sidecar: `Engine::vocoder_on_coreml()` reports load status, `SynthesisResult::vocoder_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
+| Supertonic 2 | `en`, `ko`, `es`, `pt`, `fr` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ Core ML vocoder sidecar: `Engine::vocoder_on_coreml()` reports load status, `SynthesisResult::vocoder_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
+| Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ Core ML vocoder sidecar: `Engine::vocoder_on_coreml()` reports load status, `SynthesisResult::vocoder_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports load status, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
@@ -108,7 +108,10 @@ their calibration.
 
 CosyVoice3 supports `f32` weights, `q8_0`/`q4_0` LM and flow weights,
 `f16`/`bf16` flow weights, and `f16` HiFT weights. The recommended desktop
-GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT; on CPU use a
+GPU combination is a `q8_0` LM, `q8_0` flow, and `f16` HiFT — except on
+Metal, where the `f16` flow measured slightly ahead of `q8_0` (the GEMMs
+there are compute-bound, not weight-bandwidth-bound), so Apple targets
+prefer `q8_0` LM + `f16` flow + `f16` HiFT; on CPU use a
 `bf16` flow on AVX512-BF16 hosts and `f16` elsewhere (measured on a 16-core
 Zen 5, 16 threads, same pinned 14.8 s utterance: flow+vocoder wall 16.7 s
 with f32 weights on a ggml built without tinyBLAS falls to 8.6 s with the
@@ -119,6 +122,32 @@ block attends to the voice-prompt frames, and subsequent blocks process the
 generated region. It changes reference output and is off by default. See
 [CosyVoice3 conversion and usage](docs/cosyvoice3.md) for details and the
 unsupported LM `f16` caveat.
+
+CosyVoice3 on Metal takes graph paths the profiler singled out on Apple
+GPUs, all gated by the cross-backend and per-backend harnesses: the LM's
+single-token decode runs one flash-attention node per layer instead of the
+masked matmul/softmax chain (with the all-zeros causal mask elided — the
+greedy trajectory stays bit-identical to the CPU's, measured over 1680
+consecutive steps), newer LM GGUFs feed it one fused `qkv_proj` matvec, the
+DiT's flash attention takes f16 K/V operands, its grouped `conv_pos_embed`
+collapses from 64 dispatches per Euler step to one batched im2col + matmul,
+and the vocoder's snake activations run as single fused `GGML_OP_SNAKE`
+kernels on every backend. Measured against the previous revision on an M3
+Ultra with `--greedy`, so both legs decode the identical 550-token trajectory
+(22.0 s audio) and every stage is directly comparable, f16 flow + f16 HiFT
+throughout: end-to-end RTF 0.214 -> 0.179 (4710 -> 3934 ms, 1.20x, 5.6x real
+time), of which LM decode 4.89 -> 3.73 ms/token (1.31x, the flash-attention
+step plus the fused `qkv_proj` GGUF), DiT 1463 -> 1359 ms (1.08x) and HiFT
+decode 190 -> 163 ms (1.17x). On an M4 the same change moves end-to-end RTF
+0.598 -> 0.544 and HiFT decode 838 -> 686 ms (sampled legs, so the
+trajectories differ slightly). The remaining DiT time is machine-rate GEMM
+and flash attention (13+ TFLOPS measured per op), which is why the f16 tier,
+not `q8_0`, is the Metal recommendation: measured on the same machine with
+the HiFT tier held at f16, flow f32 -> f16 moves the DiT 1426 -> 1351 ms
+while f16 -> `q8_0` moves it back to 1403 ms. The f16 HiFT tier is worth
+1.13-1.14x on the vocoder decode there — less than the fused snake above it,
+because Metal's `mul_mm` already stages f32 operands as half, so a narrower
+weight dtype saves bandwidth rather than arithmetic.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --
