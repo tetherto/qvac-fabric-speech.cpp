@@ -9,6 +9,8 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -1056,6 +1058,8 @@ int run_nemotron_stream_step(
         return -5;
     }
 
+    const auto encoder_started = std::chrono::steady_clock::now();
+
     std::vector<float> subsampled;
     int subsampled_frames = 0;
     if (int rc = run_subsampling(
@@ -1137,6 +1141,11 @@ int run_nemotron_stream_step(
         return rc;
     }
 
+    result.encoder_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - encoder_started).count();
+
+    const auto decoder_started = std::chrono::steady_clock::now();
+
     RnntDecodeOptions options;
     options.max_symbols_per_step =
         model.nemotron_cfg.max_symbols_per_step;
@@ -1152,6 +1161,9 @@ int run_nemotron_stream_step(
             result.decoder_steps); rc != 0) {
         return rc;
     }
+    result.decoder_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - decoder_started).count();
+
     state.token_ids.insert(
         state.token_ids.end(),
         result.new_token_ids.begin(),
@@ -1170,6 +1182,88 @@ int run_nemotron_stream_step(
     if (finalize) {
         state.finalized = true;
     }
+    return 0;
+}
+
+int run_nemotron_cache_aware_offline(
+        ParakeetCtcModel & model,
+        TdtRuntimeWeights & runtime,
+        const float * mel,
+        int n_mel_frames,
+        int n_mels,
+        const std::string & language,
+        int right_context_frames,
+        std::atomic<bool> & cancel_flag,
+        NemotronOfflineResult & result) {
+    result = NemotronOfflineResult();
+
+    NemotronStreamState state;
+
+    if (int rc = init_nemotron_stream_state(
+                model, language, right_context_frames, state); rc != 0) {
+        return rc;
+    }
+
+    if (int rc = append_nemotron_mel_frames(
+            state, mel, n_mel_frames, n_mels); rc != 0) {
+        return rc;
+    }
+
+    while (!cancel_flag.load()) {
+        std::vector<float> processed_signal;
+        int processed_frames = 0;
+        const int ready = next_nemotron_processed_signal(
+                state, n_mels, true, processed_signal, processed_frames);
+
+        if (ready < 0) {
+            return ready;
+        }
+
+        if (ready == 0) {
+            break;
+        }
+
+        const bool final_chunk = nemotron_pending_mel_frames(state) == 0;
+        NemotronStreamStepResult step;
+        if (int rc = run_nemotron_stream_step(
+                    model,
+                    runtime,
+                    processed_signal.data(),
+                    processed_frames,
+                    n_mels,
+                    final_chunk,
+                    state,
+                    step); rc != 0) {
+            return rc;
+        }
+
+        result.encoder_ms += step.encoder_ms;
+        result.decoder_ms += step.decoder_ms;
+        result.text = std::move(step.text);
+        if (final_chunk) {
+            break;
+        }
+    }
+
+    if (cancel_flag.load()) {
+        cancel_nemotron_stream(state);
+    } else if (!state.finalized) {
+        NemotronStreamStepResult final_step;
+        if (int rc = run_nemotron_stream_step(
+                    model,
+                    runtime,
+                    nullptr,
+                    0,
+                    n_mels,
+                    true,
+                    state,
+                    final_step); rc != 0) {
+            return rc;
+        }
+    }
+
+    result.token_ids = state.token_ids;
+    result.encoder_frames = static_cast<int>(state.emitted_encoder_frames);
     return 0;
 }
 

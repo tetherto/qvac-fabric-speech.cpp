@@ -10,7 +10,7 @@ On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/
 | Models | every model loads from GGUF (see [Supported models](#supported-models)) |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android (arm64-v8a), iOS (arm64) |
-| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder, codec, and VAE sidecars) |
+| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
 | Quantization | `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `q5_0`, `q5_1`, `q4_0`, `q4_k_m` (per model, see tables) |
 | Shared ggml | one `ggml-speech` vcpkg port, built from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 | Language | C++17 |
@@ -41,7 +41,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet-unified-en-0.6b` | parakeet | English | 600 M | `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | RNN-T decode; offline + long-form + cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
-| `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA | cache-aware streaming at 80/160/320/560/1120 ms; empty language selects `auto` |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape offline encoder | Core ML is limited to inputs fitting the exported shape; longer offline inputs and streaming use the cache-aware ggml path at 80/160/320/560/1120 ms; empty language selects `auto` |
 
 ### End-of-utterance and diarization
 
@@ -78,9 +78,9 @@ and prediction failures fall back to ggml.
 |---|---|---|---|---|---|---|
 | Chatterbox Turbo | tts | English | 24 kHz | `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | zero-shot voice cloning, 2-step meanflow CFM, streaming |
 | Chatterbox Multilingual | tts | 23 | 24 kHz | `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | zero-shot voice cloning, CFG, `--cfm-steps` knob, streaming |
-| Supertonic v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | preset voices, streaming |
-| Supertonic v2 | tts | 5 (`en`, `ko`, `es`, `pt`, `fr`) | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | preset voices, streaming |
-| Supertonic v3 | tts | 31 + `na` | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | preset voices, streaming, `na` for unknown source language |
+| Supertonic v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming |
+| Supertonic v2 | tts | 5 (`en`, `ko`, `es`, `pt`, `fr`) | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming |
+| Supertonic v3 | tts | 31 + `na` | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming, `na` for unknown source language |
 | Parler-TTS mini-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice, no cloning |
 | Parler-TTS large-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice |
 | Indic Parler-TTS | tts | 21 Indic | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | Indic prompt BPE tokenizer |
@@ -124,6 +124,12 @@ dominates a CPU synthesis) off ggml; it is exported from the decoder GGUF by
 the language model always stays on `backend_name()`), and any sidecar failure
 falls back to ggml -- see the
 [Audio8 guide](engines/tts/docs/audio8.md#core-ml-codec-sidecar). The
+Supertonic Core ML sidecar takes the vocoder off ggml the same way: exported
+from the model GGUF by `engines/tts/scripts/export-supertonic-coreml.py`,
+reported on `Engine::vocoder_on_coreml()` (sidecar loaded) and
+`SynthesisResult::vocoder_synthesis_backend` (where a call's vocoder ran), with any
+failure falling back to ggml -- see the
+[Supertonic guide](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar). The
 ACE-Step Core ML sidecar is exported by
 `engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
 Engine operating point, optionally weight-palettized (`--palettize 8` halves
@@ -150,6 +156,16 @@ These are non-gating diagnostics with no quality pass threshold; unavailable
 scores remain null without discarding generation performance. See the
 [music alignment guide](scripts/benchmarks/music-alignment.md) for setup,
 artifact layout, and the distinct diagnostic timing baseline.
+
+MiniMax diagnostics can provision a pinned Hugging Face checkpoint without S3.
+Dispatch with `model_families=minimax` and `music_alignment=true` on a conversion
+host with at least 64 GiB RAM; hosted Linux can import a verified macOS bundle
+using `minimax_artifact_run_id`. For local runs, use
+[`prepare-minimax.py`](scripts/benchmarks/prepare-minimax.py) to create or verify a
+bundle, then run `run-family.sh --family minimax` with `MUSIC_ALIGNMENT=1` and
+`MINIMAX_PREPARATION_REPORT` pointing to its JSON report. The
+[preparation guide](scripts/benchmarks/music-alignment.md#minimax-model-preparation)
+lists the dependency, disk, quantizer, and bundle-transfer requirements.
 
 ### Multi-machine benchmarks (2026-09)
 

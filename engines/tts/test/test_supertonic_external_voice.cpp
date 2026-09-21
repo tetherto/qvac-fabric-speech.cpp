@@ -30,6 +30,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 using tts_cpp::supertonic::Engine;
 using tts_cpp::supertonic::EngineOptions;
@@ -243,6 +244,12 @@ int run_parity_test(const char * gguf_path) {
 }  // namespace
 
 int main(int argc, char ** argv) {
+    // This harness gates ggml behavior; a Core ML vocoder sidecar staged next
+    // to the GGUF must not reroute it (mirrors the Audio8 harnesses).
+#ifndef _WIN32
+    setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
+#endif
+
     if (argc >= 2) {
         return run_parity_test(argv[1]);
     }

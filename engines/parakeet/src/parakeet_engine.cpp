@@ -14,6 +14,7 @@
 #include "sentencepiece_bpe.h"
 #include "energy_vad.h"
 #include "long_form.h"
+#include "long_form_encoder.h"
 #include "parakeet_log.h"
 #include "sortformer_finalize.h"
 
@@ -161,6 +162,8 @@ int decode_transducer(const ParakeetCtcModel & model,
         options, result);
 }
 
+}  // namespace
+
 // ── Long-form offline encoder windowing ───────────────────────────────────
 // See EngineOptions::long_form_window_frames and src/long_form.h. The window
 // policy itself (constants + LongFormPlan + the pure resolver) lives in
@@ -213,12 +216,6 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
     return normal;
 }
 
-struct WindowedEncoderStats {
-    double encoder_ms = 0.0;
-    int coreml_windows = 0;
-    int ggml_windows = 0;
-};
-
 // Bounded-memory replacement for a single full-length run_encoder() call on long
 // inputs. The caller computes the mel once (so per-feature CMVN statistics are
 // global, matching the single-pass path); this slides the encoder over that mel
@@ -236,10 +233,13 @@ int run_encoder_windowed(ParakeetCtcModel & model,
                          WindowedEncoderStats & stats) {
     using clock = std::chrono::steady_clock;
 
-    const int center_mel = plan.center_frames  * plan.sub;
-    const int ctx_mel    = plan.context_frames * plan.sub;
+    const int center_mel = plan.center_frames * plan.sub;
+    const int left_ctx_mel = plan.left_context_frames * plan.sub;
+    const int right_ctx_mel = plan.right_context_frames * plan.sub;
     const std::vector<LongFormWindow> windows =
-        plan_long_form_windows(n_mel_frames, center_mel, ctx_mel);
+        plan_long_form_windows_asymmetric(
+            n_mel_frames, center_mel, left_ctx_mel, right_ctx_mel,
+            plan.exact_mel_frames);
 
     out = EncoderOutputs{};
 
@@ -296,8 +296,6 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         windows.size(), stats.coreml_windows, stats.ggml_windows);
 
     return 0;
-}
-
 }
 
 struct Engine::Impl {
@@ -541,6 +539,57 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
     EncoderOutputs enc_out;
     const LongFormPlan lf =
         resolve_long_form_plan(pimpl_->model, pimpl_->opts, n_mel_frames);
+
+    const int exact_mel_frames = model_coreml_fixed_mel_frames(pimpl_->model);
+    const bool cache_aware_nemotron =
+        pimpl_->model.model_type == ParakeetModelType::NEMOTRON &&
+        should_use_nemotron_cache_aware_offline(
+                exact_mel_frames,
+                pimpl_->opts.long_form_window_frames,
+                lf.enabled,
+                n_mel_frames);
+
+    if (cache_aware_nemotron) {
+        const auto & right_contexts =
+            pimpl_->model.nemotron_cfg.allowed_right_context_frames;
+
+        if (right_contexts.empty()) {
+            throw std::runtime_error(
+                    "Nemotron has no cache-aware operating point");
+        }
+
+        NemotronOfflineResult offline;
+        const int rc = run_nemotron_cache_aware_offline(
+                pimpl_->model,
+                pimpl_->transducer_rt,
+                mel.data(),
+                n_mel_frames,
+                pimpl_->model.mel_cfg.n_mels,
+                pimpl_->opts.language,
+                right_contexts.back(),
+                pimpl_->cancel_flag,
+                offline);
+        if (rc != 0) {
+            throw std::runtime_error(
+                    "Nemotron cache-aware offline transcription failed (rc=" +
+                    std::to_string(rc) + ")");
+        }
+
+        EngineResult result;
+        result.text = std::move(offline.text);
+        result.token_ids = std::move(offline.token_ids);
+        result.preprocess_ms = preprocess_ms;
+        result.encoder_ms = offline.encoder_ms;
+        result.decode_ms = offline.decoder_ms;
+        result.total_ms = ms_since(t_total);
+        result.audio_samples = n_samples;
+        result.sample_rate = sample_rate;
+        result.mel_frames = n_mel_frames;
+        result.encoder_frames = offline.encoder_frames;
+        result.encoder_used_coreml = false;
+        return result;
+    }
+
     if (lf.enabled) {
         // Long input: window the encoder over the (global-CMVN) mel so the
         // O(T_enc^2) attention never allocates the full-length score tensor.
@@ -605,14 +654,15 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
         options.max_symbols_per_step =
             pimpl_->model.nemotron_cfg.max_symbols_per_step;
         RnntDecodeResult result;
-        if (int rc = rnnt_greedy_decode(
-                pimpl_->model,
-                pimpl_->transducer_rt,
-                decoder_input,
-                enc_out.n_enc_frames,
-                enc_out.d_model,
-                options,
-                result); rc != 0) {
+        const int rc = lf.enabled
+            ? rnnt_greedy_decode_chunked(
+                pimpl_->model, pimpl_->transducer_rt, decoder_input,
+                enc_out.n_enc_frames, enc_out.d_model,
+                std::max(1, lf.center_frames), options, result)
+            : rnnt_greedy_decode(
+                pimpl_->model, pimpl_->transducer_rt, decoder_input,
+                enc_out.n_enc_frames, enc_out.d_model, options, result);
+        if (rc != 0) {
             throw std::runtime_error(
                 "parakeet::Engine::transcribe_samples: Nemotron RNNT decode "
                 "failed (rc=" + std::to_string(rc) + ")");

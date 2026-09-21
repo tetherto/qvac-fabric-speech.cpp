@@ -1895,4 +1895,60 @@ int rnnt_greedy_decode(const ParakeetCtcModel & model,
         options, result);
 }
 
+static int rnnt_decode_chunks(const ParakeetCtcModel & model,
+                              RnntRuntimeWeights & weights,
+                              const float * encoder_out,
+                              int encoder_frames,
+                              int encoder_dim,
+                              int chunk_frames,
+                              const RnntDecodeOptions & options,
+                              RnntDecodeState & state,
+                              RnntDecodeResult & result) {
+    for (int offset = 0; offset < encoder_frames; offset += chunk_frames) {
+        const int frames = std::min(chunk_frames, encoder_frames - offset);
+        int steps = 0;
+        if (int rc = rnnt_decode_window(
+                model, weights,
+                encoder_out + static_cast<size_t>(offset) * encoder_dim,
+                frames, encoder_dim, options, state,
+                result.token_ids, steps); rc != 0) {
+            return rc;
+        }
+        result.steps += steps;
+    }
+    return 0;
+}
+
+int rnnt_greedy_decode_chunked(const ParakeetCtcModel & model,
+                               RnntRuntimeWeights & weights,
+                               const float * encoder_out,
+                               int encoder_frames,
+                               int encoder_dim,
+                               int chunk_frames,
+                               const RnntDecodeOptions & options,
+                               RnntDecodeResult & result) {
+    if ((model.model_type != ParakeetModelType::RNNT &&
+         model.model_type != ParakeetModelType::NEMOTRON) ||
+        !encoder_out || encoder_frames < 0 || chunk_frames <= 0) {
+        return kWrongTransducerModel;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    RnntDecodeState state;
+    result = RnntDecodeResult{};
+    result.token_ids.reserve(encoder_frames);
+
+    if (int rc = rnnt_decode_chunks(
+            model, weights, encoder_out, encoder_frames, encoder_dim,
+            chunk_frames, options, state, result); rc != 0) {
+        return rc;
+    }
+
+    result.text = detokenize(model.vocab, result.token_ids);
+    result.decode_ms =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count() / 1000.0;
+    return 0;
+}
+
 }

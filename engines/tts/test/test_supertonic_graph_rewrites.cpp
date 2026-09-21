@@ -475,6 +475,12 @@ void test_duration_one_graph_matches_hybrid(const supertonic_model & model) {
 } // namespace
 
 int main(int argc, char ** argv) {
+    // This harness gates ggml behavior; a Core ML vocoder sidecar staged next
+    // to the GGUF must not reroute it (mirrors the Audio8 harnesses).
+#ifndef _WIN32
+    setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
+#endif
+
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s MODEL.gguf [N_GPU_LAYERS]\n", argv[0]);
         return 2;

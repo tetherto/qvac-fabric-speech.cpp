@@ -1,5 +1,6 @@
 // CLI executable: flags, WAV/model paths, transcribe/diarize/streaming modes.
 
+#include "long_form.h"
 #include "parakeet/cli.h"
 #include "parakeet/engine.h"
 #include "parakeet/streaming.h"
@@ -11,10 +12,12 @@
 #include "parakeet_tdt.h"
 #include "parakeet_eou.h"
 #include "mel_preprocess.h"
+#include "long_form_encoder.h"
 
 #include "ggml-backend.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -153,7 +156,7 @@ void print_usage(const char * argv0) {
         "  --bench-warmup N     warmup runs NOT counted in stats (default 2)\n"
         "  --bench-json PATH    in --bench mode, also write the stats as JSON to PATH\n"
         "  --require-coreml     require every benchmark encoder invocation to use\n"
-        "                       a supported Unified RNN-T/TDT/EOU Core ML sidecar;\n"
+        "                       a supported Unified RNN-T/TDT/EOU/Nemotron Core ML sidecar;\n"
         "                       fail on a missing sidecar or per-invocation ggml\n"
         "                       fallback\n"
         "  --profile            per-sub-stage encoder profiling: runs the encoder\n"
@@ -526,10 +529,11 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         }
         if (model.model_type != ParakeetModelType::RNNT &&
             model.model_type != ParakeetModelType::TDT &&
-            model.model_type != ParakeetModelType::EOU) {
+            model.model_type != ParakeetModelType::EOU &&
+            model.model_type != ParakeetModelType::NEMOTRON) {
             PARAKEET_LOG_ERROR(
-                "error: --require-coreml supports Unified RNN-T, TDT, and "
-                "EOU models; loaded %s\n",
+                "error: --require-coreml supports Unified RNN-T, TDT, EOU, and "
+                "Nemotron models; loaded %s\n",
                 model_type_name(model.model_type));
             return 3;
         }
@@ -759,13 +763,87 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.dump_mel_path.clear();
         }
 
-        const auto t2 = clock::now();
         EncoderOutputs enc_out;
-        if (int rc = run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
-                                 /*max_layers=*/-1,
-                                 /*capture_intermediates=*/false,
-                                 /*allow_coreml_padded=*/true); rc != 0) return rc;
-        times.enc_ms = ms_since(t2);
+        EngineOptions long_form_opts;
+        const LongFormPlan long_form =
+            resolve_long_form_plan(model, long_form_opts, n_frames);
+
+        static TdtRuntimeWeights rt;
+        static bool rt_ready = false;
+
+        const int exact_mel_frames = model_coreml_fixed_mel_frames(model);
+        const bool cache_aware_nemotron =
+            model.model_type == ParakeetModelType::NEMOTRON &&
+            should_use_nemotron_cache_aware_offline(
+                    exact_mel_frames,
+                    long_form_opts.long_form_window_frames,
+                    long_form.enabled,
+                    n_frames);
+
+        if (cache_aware_nemotron) {
+            const auto & right_contexts =
+                model.nemotron_cfg.allowed_right_context_frames;
+            if (right_contexts.empty()) {
+                return 2;
+            }
+
+            if (!rt_ready) {
+                if (tdt_prepare_runtime(model, rt) != 0) {
+                    return 20;
+                }
+                rt_ready = true;
+            }
+
+            std::atomic<bool> cancel_flag{false};
+            NemotronOfflineResult offline;
+            const int rc = run_nemotron_cache_aware_offline(
+                model,
+                rt,
+                mel.data(),
+                n_frames,
+                model.mel_cfg.n_mels,
+                opts.language,
+                right_contexts.back(),
+                cancel_flag,
+                offline);
+
+            if (rc != 0) {
+                return rc;
+            }
+
+            text_out = std::move(offline.text);
+            ids_out = std::move(offline.token_ids);
+            n_frames_out = n_frames;
+
+            times.enc_ms = offline.encoder_ms;
+            times.dec_ms = offline.decoder_ms;
+            times.inference_ms = times.mel_ms + times.enc_ms + times.dec_ms;
+            times.tokens = static_cast<int>(ids_out.size());
+            times.encoder_frames = offline.encoder_frames;
+            times.encoder_coreml = false;
+
+            if (extra.require_coreml) {
+                return 31;
+            }
+            return 0;
+        }
+
+        if (long_form.enabled) {
+            std::atomic<bool> cancel_flag{false};
+            WindowedEncoderStats stats;
+            if (int rc = run_encoder_windowed(
+                    model, mel.data(), n_frames, model.mel_cfg.n_mels,
+                    long_form, cancel_flag, enc_out, stats); rc != 0) return rc;
+            times.enc_ms = stats.encoder_ms;
+        } else {
+            const auto t2 = clock::now();
+            if (int rc = run_encoder(
+                    model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
+                    /*max_layers=*/-1,
+                    /*capture_intermediates=*/false,
+                    /*allow_coreml_padded=*/true); rc != 0) return rc;
+            times.enc_ms = ms_since(t2);
+        }
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
 
@@ -864,8 +942,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         if (model.model_type == ParakeetModelType::RNNT ||
             model.model_type == ParakeetModelType::NEMOTRON ||
             model.model_type == ParakeetModelType::TDT) {
-            static TdtRuntimeWeights rt;
-            static bool rt_ready = false;
             if (!rt_ready) {
                 if (tdt_prepare_runtime(model, rt) != 0) return 20;
                 rt_ready = true;
@@ -879,7 +955,13 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model.encoder_cfg.rnnt_max_symbols_per_step;
             }
             TdtDecodeResult  dres;
-            const int rc = model.model_type != ParakeetModelType::TDT
+            const int rc = model.model_type == ParakeetModelType::NEMOTRON &&
+                           long_form.enabled
+                ? rnnt_greedy_decode_chunked(
+                    model, rt, decoder_input,
+                    enc_out.n_enc_frames, enc_out.d_model,
+                    std::max(1, long_form.center_frames), dopts, dres)
+                : model.model_type != ParakeetModelType::TDT
                 ? rnnt_greedy_decode(
                     model, rt, decoder_input,
                     enc_out.n_enc_frames, enc_out.d_model, dopts, dres)

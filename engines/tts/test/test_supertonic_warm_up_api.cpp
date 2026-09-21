@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <string>
 #include <type_traits>
+#include <cstdlib>
 
 namespace {
 
@@ -108,6 +109,12 @@ void test_engine_options_defaults() {
 } // namespace
 
 int main() {
+    // This harness gates ggml behavior; a Core ML vocoder sidecar staged next
+    // to the GGUF must not reroute it (mirrors the Audio8 harnesses).
+#ifndef _WIN32
+    setenv("SUPERTONIC_COREML_DISABLE", "1", 1);
+#endif
+
     test_prewarm_text_default_empty();
     test_warm_up_method_exists();
     test_engine_options_defaults();

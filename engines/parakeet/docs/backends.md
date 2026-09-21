@@ -105,8 +105,8 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ## Core ML encoder sidecar
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional Unified RNN-T, TDT,
-EOU, and tagged Sortformer v2.1 FastConformer encoder sidecars. Mel
-preprocessing, the RNN-T/TDT/EOU decoders, and the Sortformer
+EOU, Nemotron, and tagged Sortformer v2.1 FastConformer encoder sidecars. Mel
+preprocessing, the RNN-T/TDT/EOU/Nemotron decoders, and the Sortformer
 transformer/speaker head remain in the normal ggml pipeline.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
@@ -145,6 +145,11 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
+
+Nemotron supports an exact-shape offline encoder. Export it using `--wav` or
+`--n-mel-frames`. Longer offline inputs are split into exact-shape windows with
+the trained asymmetric attention context, bounding both Core ML and fallback
+Metal memory. Native cache-aware streaming remains on ggml.
 
 Unified RNN-T uses the same fixed-capacity contract:
 
@@ -235,6 +240,13 @@ compatible Float16 model. `--flexible` exports a Unified RNN-T or TDT RangeDim
 model, but it is a correctness/experimentation path: measured flexible graphs place no operations
 on ANE and can be substantially slower than ggml Metal. Flexible EOU export is
 rejected.
+
+Nemotron routing requires the exact exported mel-frame count because its
+causal, chunk-limited attention geometry is baked into the compiled program.
+The long-form planner shifts boundary windows rather than zero-padding them,
+so every invocation retains the exact sidecar shape and committed centres cover
+the input without gaps or duplication. Native cache-aware streaming stays on
+ggml. Flexible Nemotron exports are rejected.
 
 Sortformer batch routing requires the exact exported mel-frame count because
 its graph has no validity-mask input; shorter and mismatched batch inputs stay

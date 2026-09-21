@@ -52,15 +52,15 @@ struct LongFormWindow {
 //   - normally window_len <= center_units + 2 * ctx_units; callers supplying
 //     `exact_window_units` instead get that fixed bound for sidecar routing.
 inline std::vector<LongFormWindow>
-plan_long_form_windows(int n_units, int center_units, int ctx_units,
-                       int exact_window_units = 0) {
+plan_long_form_windows_asymmetric(int n_units, int center_units,
+                                  int left_ctx_units, int right_ctx_units,
+                                  int exact_window_units = 0) {
     std::vector<LongFormWindow> windows;
     if (n_units <= 0 || center_units <= 0) {
         return windows;
     }
-    if (ctx_units < 0) {
-        ctx_units = 0;
-    }
+    if (left_ctx_units < 0) left_ctx_units = 0;
+    if (right_ctx_units < 0) right_ctx_units = 0;
 
     for (int center_start = 0; center_start < n_units; center_start += center_units) {
         int center_end = center_start + center_units;
@@ -68,11 +68,11 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units,
             center_end = n_units;
         }
 
-        int window_start = center_start - ctx_units;
+        int window_start = center_start - left_ctx_units;
         if (window_start < 0) {
             window_start = 0;
         }
-        int window_end = center_end + ctx_units;
+        int window_end = center_end + right_ctx_units;
         if (window_end > n_units) {
             window_end = n_units;
         }
@@ -83,7 +83,7 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units,
         // of synthetic zero padding to the first and final predictions.
         const long long requested_len_ll = exact_window_units > 0
             ? (long long) exact_window_units
-            : (long long) center_units + 2LL * ctx_units;
+            : (long long) center_units + left_ctx_units + right_ctx_units;
         const int target_len = requested_len_ll < n_units
                              ? (int) requested_len_ll : n_units;
         int missing = target_len - (window_end - window_start);
@@ -107,6 +107,13 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units,
         windows.push_back(w);
     }
     return windows;
+}
+
+inline std::vector<LongFormWindow>
+plan_long_form_windows(int n_units, int center_units, int ctx_units,
+                       int exact_window_units = 0) {
+    return plan_long_form_windows_asymmetric(
+        n_units, center_units, ctx_units, ctx_units, exact_window_units);
 }
 
 // Resolve the effective per-window encoder-frame ceiling from the requested
@@ -154,10 +161,13 @@ constexpr int kLongFormMinWindowFrames   = 256;
 
 struct LongFormPlan {
     bool enabled        = false;
-    int  window_frames  = 0;  // encoder frames per window (center + 2 * context)
-    int  context_frames = 0;  // encoder frames of shared context each side
+    int  window_frames  = 0;  // encoder-frame capacity of each window
+    int  context_frames = 0;  // legacy symmetric context (left for asymmetric plans)
     int  center_frames  = 0;  // committed encoder frames per window
     int  sub            = 0;  // subsampling factor (mel frames per encoder frame)
+    int  left_context_frames  = 0;
+    int  right_context_frames = 0;
+    int  exact_mel_frames     = 0;  // non-zero requires every mel window to match
 };
 
 // Resolve the window required by a fixed-shape Core ML encoder. The sidecar's
@@ -199,8 +209,23 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     plan.window_frames  = window_frames;
     plan.context_frames = context_frames;
     plan.center_frames  = center_frames;
+    plan.left_context_frames  = context_frames;
+    plan.right_context_frames = context_frames;
     plan.sub            = sub;
     return plan;
+}
+
+inline bool should_use_nemotron_cache_aware_offline(
+        int exact_mel_frames,
+        int requested_window_frames,
+        bool generic_windowing_required,
+        long long n_mel_frames) {
+    if (requested_window_frames < 0) {
+        return false;
+    }
+
+    return generic_windowing_required ||
+           (exact_mel_frames > 0 && n_mel_frames > exact_mel_frames);
 }
 
 // EOU sidecars are fixed causal/chunked graphs. Restarting one on overlapping
@@ -274,6 +299,8 @@ inline LongFormPlan resolve_long_form_plan_frames(int requested_window_frames,
     plan.window_frames  = window_frames;
     plan.context_frames = context_frames;
     plan.center_frames  = center_frames;
+    plan.left_context_frames  = context_frames;
+    plan.right_context_frames = context_frames;
     return plan;
 }
 
