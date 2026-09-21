@@ -7,6 +7,7 @@ Checkpoint identity names the original checkpoint, shared by quantized variants.
 """
 import argparse
 import hashlib
+import importlib.util
 from itertools import product
 import json
 import math
@@ -155,10 +156,32 @@ def build_environment(args, config):
     env = os.environ.copy()
     env.update(MUSIC_ALIGNMENT='1', MUSIC_DEVICE=str(config['backend']).lower(), MUSIC_ALIGNMENT_MODEL=str(args.scorer_model_dir.resolve()),
                MUSIC_ALIGNMENT_MANIFEST=str(args.scorer_manifest.resolve()),
-               MUSIC_ALIGNMENT_TIMEOUT=str(args.scorer_timeout))
+               MUSIC_ALIGNMENT_TIMEOUT=str(args.scorer_timeout),
+               MUSIC_MODEL_FINGERPRINT_CACHE=str(args.out_dir.resolve() / 'model-fingerprints.json'))
     if args.model_dir:
         env['MUSIC_ALIGNMENT_MODEL_DIR'] = str(args.model_dir.resolve())
     return env
+
+
+def load_benchmark_module(name):
+    spec = importlib.util.spec_from_file_location(name, HERE / (name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def initialize_model_fingerprints(args, env):
+    root = Path(env.get('MUSIC_ALIGNMENT_MODEL_DIR') or args.models_root / args.family)
+    report = env.get('MINIMAX_PREPARATION_REPORT') if args.family == 'minimax' else None
+    if report:
+        preparation = extract_score(Path(report))
+        if not isinstance(preparation, dict) or preparation.get('status') != 'ok' or not preparation.get('model_dir'):
+            return
+        root = Path(preparation['model_dir'])
+    validator = load_benchmark_module('validate-music-models')
+    if validator.validate(root, args.family):
+        generation = load_benchmark_module('music-generation-provenance')
+        generation.model_identities(root, Path(env['MUSIC_MODEL_FINGERPRINT_CACHE']))
 
 
 def build_record_environment(env, prompt, seed, settings):
@@ -217,15 +240,62 @@ def run_caption_controls(prompt, row, wav, run_dir, args, manifest):
 
 
 def repeat_generation(row, run_dir, args, env):
-    control = {'kind': 'repeat-generation', 'prompt_id': row['prompt_id'], 'seed': row['seed']}
+    control = {'kind': 'repeat-generation', 'prompt_id': row['prompt_id'], 'seed': row['seed'],
+               'original_result': row.get('performance_result'),
+               'original_score': normalize_score(row.get('score_artifact')),
+               'original_wav_sha256': None, 'repeat_wav_sha256': None,
+               'wav_bytes_equal': None, 'score_delta': None,
+               'score_comparison_status': 'unavailable'}
     repeat_path = run_dir / 'repeat-result.json'
+    # Hash the original before starting another generation, preserving evidence
+    # even if a faulty driver reuses its output path.
+    original_wavs = sorted(run_dir.glob('result.music.*/run-*/audio.wav'))
+    if len(original_wavs) == 1:
+        control['original_wav_sha256'] = digest(original_wavs[0])
     try:
         with (run_dir / 'repeat-driver.log').open('w') as log:
-            run_bounded(generation_command(args, repeat_path), cwd=HERE.parent.parent, env=env,
-                        stdout=log, stderr=subprocess.STDOUT, timeout=args.generation_timeout)
-        control['result'] = extract_score(repeat_path)
+            returncode = run_bounded(generation_command(args, repeat_path), cwd=HERE.parent.parent, env=env,
+                                     stdout=log, stderr=subprocess.STDOUT, timeout=args.generation_timeout)
+        control.update(status='ok' if returncode == 0 else 'run-failed', returncode=returncode)
     except subprocess.TimeoutExpired:
-        control['status'] = 'timeout'
+        control.update(status='timeout', reason='repeat generation driver timeout')
+    except OSError as error:
+        control.update(status='run-failed', reason=str(error))
+
+    control['result'] = extract_score(repeat_path)
+    result = control['result'] if isinstance(control['result'], dict) else {}
+    alignment = result.get('music_alignment')
+    alignment = alignment if isinstance(alignment, dict) else {}
+    runs = alignment.get('runs')
+    repeated = normalize_score(runs[0] if isinstance(runs, list) and runs else alignment)
+    control['repeat_score'] = repeated
+    if control['status'] == 'ok':
+        if not repeat_path.is_file():
+            control.update(status='missing-result', reason='repeat generation driver did not write result JSON')
+        elif result.get('status') != 'ok':
+            control.update(status=result.get('status') or 'run-failed',
+                           reason=result.get('reason') or result.get('notes') or 'repeat generation failed')
+        elif repeated.get('status') != 'ok':
+            control.update(status=repeated.get('status') or 'scorer-error',
+                           reason=repeated.get('reason') or 'repeat generation was not scored')
+
+    repeat_wavs = sorted(run_dir.glob('repeat-result.music.*/run-*/audio.wav'))
+    if len(repeat_wavs) == 1:
+        control['repeat_wav_sha256'] = digest(repeat_wavs[0])
+    if control['original_wav_sha256'] and control['repeat_wav_sha256']:
+        control['wav_bytes_equal'] = control['original_wav_sha256'] == control['repeat_wav_sha256']
+    elif control['status'] == 'ok':
+        control.update(status='missing-audio', reason='expected one retained original WAV and one repeat WAV')
+
+    original = control['original_score']
+    if control['status'] == 'ok' and original.get('status') == repeated.get('status') == 'ok':
+        same_policy = (original.get('policy_version') and original.get('provenance')
+                       and original['policy_version'] == repeated.get('policy_version')
+                       and original['provenance'] == repeated.get('provenance'))
+        if same_policy:
+            control.update(score_delta=repeated['score'] - original['score'], score_comparison_status='ok')
+        else:
+            control['score_comparison_status'] = 'incompatible-policy'
     return control
 
 
@@ -264,6 +334,7 @@ def main():
     args, manifest, config = parse_inputs()
     pilot = prepare_pilot(args, manifest, config)
     env = build_environment(args, config)
+    initialize_model_fingerprints(args, env)
     run_cohort(args, pilot, env)
     print(args.out_dir.resolve() / 'pilot.json')
 
