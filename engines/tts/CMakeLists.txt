@@ -1713,6 +1713,14 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-coreml-path)
     tts_cpp_register_test(test-supertonic-coreml-path LABEL "unit")
 
+    # Model-free on every host: the weight-width floor that keeps the sidecar
+    # off tiers it would substitute rather than accelerate.
+    add_executable(test-supertonic-coreml-tier test/test_supertonic_coreml_tier.cpp)
+    target_link_libraries(test-supertonic-coreml-tier PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-tier PRIVATE include src)
+    tts_cpp_apply_ccache(test-supertonic-coreml-tier)
+    tts_cpp_register_test(test-supertonic-coreml-tier LABEL "unit")
+
     # Self-skips (77) without TTS_CPP_COREML or a staged
     # SUPERTONIC_COREML_TEST_MODELS_DIR holding a Supertonic GGUF with a
     # compiled `<model>-vocoder.mlmodelc` next to it; the tts-ci macOS lane
