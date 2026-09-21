@@ -296,7 +296,14 @@ jobs:
             .venv-coreml/bin/python -m pip install --upgrade pip
             .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
           fi
-          .venv-coreml/bin/python -m pip install onnx huggingface_hub
+          # onnx 1.17 is the last release without the ml_dtypes dependency,
+          # whose current releases force numpy >= 2 and break coremltools'
+          # TorchScript conversion; the constraints file pins the rest of the
+          # stack, and the assert fails fast if a future resolution moves it.
+          .venv-coreml/bin/python -m pip install \
+            -c engines/parakeet/scripts/requirements-coreml.txt \
+            "onnx==1.17.0" huggingface_hub
+          .venv-coreml/bin/python -c 'import numpy; assert numpy.__version__ == "1.26.4", numpy.__version__'
           .venv-coreml/bin/python engines/tts/test/test_export_supertonic_coreml.py
           .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
             --arch supertonic2 --ftype f16 \
