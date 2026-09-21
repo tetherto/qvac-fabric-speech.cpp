@@ -83,14 +83,11 @@ jobs:
           # asserts the feature detection sees it (test-backend-features).
           - os: ubuntu-24.04
             llamafile: ON
-          # Self-hosted Apple silicon, not hosted macOS: hosted macos-14
-          # exposes an Apple Paravirtual device without simdgroup matmul, so
-          # Metal-touching tests abort at kernel encode (QVAC-22775). This is
-          # the runner audiogen-ci.yml already uses for its enforced Metal
-          # parity step; here it additionally unlocks test-metal-ops, the
-          # fixture-free TTS Metal kernel parity suite.
-          - os: macos-26
-    runs-on: ${{ matrix.os == 'macos-26' && needs.runner_names.outputs.macos_arm64_gpu || needs.runner_names.outputs.ubuntu_2404 }}
+    # Hosted only. The self-hosted Apple silicon lane lives in `build-test-macos`
+    # below, which carries the fork-ci gate — a job-level `if` cannot see
+    # `matrix.os`, so a `macos-26` row here could not be gated and would put an
+    # unapproved fork PR straight onto the fleet.
+    runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
     name: build-test (${{ matrix.os }}${{ matrix.llamafile == 'ON' && ', tinyBLAS' || '' }})
     timeout-minutes: 60
     steps:
