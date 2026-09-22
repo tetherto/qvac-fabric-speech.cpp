@@ -237,7 +237,9 @@ int main(int argc, char ** argv) {
         }
         sync(); auto t1 = clk::now();
 
-        std::vector<float> logits;
+        parler_step_logits logits;
+        parler_sampler_scratch scratch;
+        std::vector<int32_t> frame;
         int n_past = 0;
         if (!parler_dec_prefill(model, prompt_ids, st.input_frame(), allocr, n_thr, logits, n_past)) {
             fprintf(stderr, "parler-bench: prefill failed\n"); parler_free_model(model); return 1;
@@ -246,8 +248,10 @@ int main(int argc, char ** argv) {
 
         int steps = 0;
         while (true) {
-            st.process_logits(logits.data(), hp.dec_vocab);
-            st.append(parler_sample_frame(logits.data(), hp.n_codebooks, hp.dec_vocab, sp, rng));
+            st.process_logits(logits.view, hp.dec_vocab);
+            parler_sample_frame(logits.view, hp.n_codebooks, hp.dec_vocab, sp, rng, scratch,
+                                frame);
+            st.append(frame);
             if (st.finished()) break;
             if (!parler_dec_step(model, st.input_frame(), n_past, allocr, n_thr, logits)) {
                 fprintf(stderr, "parler-bench: dec step failed\n"); parler_free_model(model); return 1;
