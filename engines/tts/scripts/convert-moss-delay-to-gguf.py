@@ -100,16 +100,18 @@ def load_hparams(model_dir: Path) -> dict[str, Any]:
 def map_backbone_tensor_name(name: str) -> str | None:
     if name.startswith("language_model."):
         name = name[len("language_model."):]
+    if name.startswith("model."):
+        name = name[len("model."):]
     if (match := re.fullmatch(r"emb_ext\.(\d+)\.weight", name)) is not None:
         return f"token_embd_audio.{match.group(1)}.weight"
     if (match := re.fullmatch(r"lm_heads\.(\d+)\.weight", name)) is not None:
         head = int(match.group(1))
         return "output.weight" if head == 0 else f"output_audio.{head - 1}.weight"
-    if name == "model.embed_tokens.weight":
+    if name == "embed_tokens.weight":
         return "token_embd.weight"
-    if name == "model.norm.weight":
+    if name == "norm.weight":
         return "output_norm.weight"
-    if (match := re.fullmatch(r"model\.layers\.(\d+)\.(.+)", name)) is not None:
+    if (match := re.fullmatch(r"layers\.(\d+)\.(.+)", name)) is not None:
         mapped = LAYER_RENAMES.get(match.group(2))
         return f"blk.{match.group(1)}.{mapped}" if mapped else None
     if name == "lm_head.weight":
@@ -199,6 +201,11 @@ def main() -> None:
                 continue
             writer.add_tensor(mapped, convert_tensor_dtype(index.load(name), args.outtype))
             emitted.add(mapped)
+        expected = 3 + 2 * int(hparams["n_vq"]) + 11 * int(hparams["num_hidden_layers"])
+        if len(emitted) != expected:
+            raise RuntimeError(
+                f"emitted {len(emitted)} tensors but the architecture needs {expected}; "
+                "the checkpoint uses tensor names this converter does not map")
         writer.write_header_to_file()
         writer.write_kv_data_to_file()
         writer.write_tensors_to_file(progress=True)

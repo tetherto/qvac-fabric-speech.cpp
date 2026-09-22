@@ -367,7 +367,7 @@ struct DelayLM::Impl {
 
     ggml_tensor * rope(ggml_tensor * cur, ggml_tensor * positions) {
         return ggml_rope_ext(graph_ctx, cur, positions, nullptr, config.head_dim,
-                GGML_ROPE_TYPE_NORMAL, config.n_ctx_train, config.rope_base,
+                GGML_ROPE_TYPE_NEOX, config.n_ctx_train, config.rope_base,
                 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     }
 
