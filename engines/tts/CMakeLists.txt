@@ -1407,6 +1407,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-load)
     tts_cpp_register_test(test-moss-load)
 
+    add_executable(test-moss-stream test/moss/test_stream.cpp)
+    target_link_libraries(test-moss-stream PRIVATE tts-cpp)
+    target_include_directories(test-moss-stream PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-stream)
+    tts_cpp_register_test(test-moss-stream)
+
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
     target_include_directories(test-backend-selection PRIVATE src)

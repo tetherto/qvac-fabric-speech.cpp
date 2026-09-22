@@ -7,9 +7,11 @@
 
 #include "dr_wav.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <stdexcept>
@@ -26,6 +28,7 @@ using detail::Frontend;
 using detail::SamplingConfig;
 
 constexpr int CONTEXT_HEADROOM = 8;
+constexpr int BATCH_SINGLE_DECODE_MAX_FRAMES = 750;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss engine: " + message);
@@ -172,7 +175,8 @@ struct Engine::Impl {
     }
 
     void generate_rows(const std::vector<DelayRow> & prompt, DelayState & state,
-                       std::mt19937 & rng, SynthesisResult & result) {
+                       std::mt19937 & rng, SynthesisResult & result,
+                       const std::function<bool()> & after_step) {
         DelayLogits logits = backbone->prefill(prompt);
         for (int step = 0; step < options.max_new_tokens; ++step) {
             if (cancel_requested) {
@@ -181,11 +185,103 @@ struct Engine::Impl {
             }
             const DelayRow row = state.step(logits, sampling, rng);
             result.generated_frames += 1;
+            if (after_step && !after_step()) {
+                result.cancelled = true;
+                return;
+            }
             if (state.stopping()) {
                 return;
             }
             logits = backbone->step(row);
         }
+    }
+
+    struct StreamProgress {
+        std::vector<int32_t> codes;
+        int scanned_frames = 0;
+        int emitted_frames = 0;
+    };
+
+    static bool frame_is_pad(const std::vector<int32_t> & frame, int pad_code) {
+        for (int32_t code : frame) {
+            if (code != pad_code) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void collect_ready_frames(const DelayState & state, int prompt_frames,
+                              StreamProgress & progress) const {
+        const int available = state.available_frames(prompt_frames);
+        for (; progress.scanned_frames < available; ++progress.scanned_frames) {
+            const std::vector<int32_t> frame = state.frame_codes(prompt_frames,
+                    progress.scanned_frames);
+            if (!frame_is_pad(frame, backbone->config().audio_pad_code)) {
+                progress.codes.insert(progress.codes.end(), frame.begin(), frame.end());
+            }
+        }
+    }
+
+    std::vector<float> decode_frame_range(const std::vector<int32_t> & codes, int begin_frame,
+                                          int end_frame, SynthesisResult & result) {
+        const int n_vq = backbone->config().n_vq;
+        const int from = std::max(0, begin_frame - std::max(0, options.stream_overlap_frames));
+        const std::vector<int32_t> slice(codes.begin() + (size_t) from * n_vq,
+                codes.begin() + (size_t) end_frame * n_vq);
+        const auto decode_start = std::chrono::steady_clock::now();
+        std::vector<float> pcm = decoder->decode(slice);
+        result.decode_ms += elapsed_ms(decode_start);
+        const size_t skip = (size_t) (begin_frame - from) * decoder->samples_per_frame();
+        pcm.erase(pcm.begin(), pcm.begin() + (std::ptrdiff_t) std::min(skip, pcm.size()));
+        return pcm;
+    }
+
+    bool emit_ready(StreamProgress & progress, const AudioCallback & callback, bool flush,
+                    const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        const int chunk = std::max(1, options.stream_chunk_frames);
+        while (true) {
+            const int total = (int) (progress.codes.size() / (size_t) backbone->config().n_vq);
+            const int pending = total - progress.emitted_frames;
+            if (pending <= 0 || (pending < chunk && !flush)) {
+                return true;
+            }
+            const int end = flush ? total : progress.emitted_frames + chunk;
+            const std::vector<float> pcm = decode_frame_range(progress.codes,
+                    progress.emitted_frames, end, result);
+            if (result.first_audio_ms == 0) {
+                result.first_audio_ms = elapsed_ms(start);
+            }
+            if (!pcm.empty() && !callback(pcm.data(), pcm.size(), decoder->sample_rate())) {
+                return false;
+            }
+            progress.emitted_frames = end;
+        }
+    }
+
+    void decode_batch(const std::vector<int32_t> & codes, SynthesisResult & result) {
+        const int n_vq = backbone->config().n_vq;
+        const int frames = (int) (codes.size() / (size_t) n_vq);
+        if (frames <= BATCH_SINGLE_DECODE_MAX_FRAMES) {
+            const auto decode_start = std::chrono::steady_clock::now();
+            result.pcm = decoder->decode(codes);
+            result.decode_ms = elapsed_ms(decode_start);
+            return;
+        }
+        for (int begin = 0; begin < frames; begin += BATCH_SINGLE_DECODE_MAX_FRAMES) {
+            const int end = std::min(frames, begin + BATCH_SINGLE_DECODE_MAX_FRAMES);
+            const std::vector<float> pcm = decode_frame_range(codes, begin, end, result);
+            result.pcm.insert(result.pcm.end(), pcm.begin(), pcm.end());
+        }
+    }
+
+    std::vector<DelayRow> build_checked_prompt(const std::string & text) {
+        const std::vector<DelayRow> prompt = frontend->build_prompt(backbone->config(), text,
+                options.language, reference_codes, reference_frames);
+        if ((int) prompt.size() + options.max_new_tokens + CONTEXT_HEADROOM > backbone->context()) {
+            fail("prompt plus max_new_tokens exceeds the context; raise the context option");
+        }
+        return prompt;
     }
 
     SynthesisResult run(const std::string & text) {
@@ -198,20 +294,15 @@ struct Engine::Impl {
         }
         cancel_requested = false;
 
-        const detail::DelayConfig & config = backbone->config();
-        const std::vector<DelayRow> prompt = frontend->build_prompt(config, text,
-                options.language, reference_codes, reference_frames);
-        if ((int) prompt.size() + options.max_new_tokens + CONTEXT_HEADROOM > backbone->context()) {
-            fail("prompt plus max_new_tokens exceeds the context; raise the context option");
-        }
-
+        const std::vector<DelayRow> prompt = build_checked_prompt(text);
         std::mt19937 rng(options.seed);
-        DelayState state(config, prompt, frontend->tokens().pad, frontend->tokens().im_end);
+        DelayState state(backbone->config(), prompt, frontend->tokens().pad,
+                frontend->tokens().im_end);
         SynthesisResult result;
 
         const auto generation_start = std::chrono::steady_clock::now();
         backbone->reset();
-        generate_rows(prompt, state, rng, result);
+        generate_rows(prompt, state, rng, result, nullptr);
         result.generation_ms = elapsed_ms(generation_start);
         if (result.cancelled) {
             return result;
@@ -225,11 +316,51 @@ struct Engine::Impl {
             result.cancelled = true;
             return result;
         }
-        const auto decode_start = std::chrono::steady_clock::now();
-        result.pcm = decoder->decode(codes);
-        result.decode_ms = elapsed_ms(decode_start);
+        decode_batch(codes, result);
         result.sample_rate = decoder->sample_rate();
         result.cancelled = cancel_requested;
+        return result;
+    }
+
+    SynthesisResult run_stream(const std::string & text, const AudioCallback & callback) {
+        std::unique_lock<std::mutex> lock(synthesis_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            fail("synthesis already in progress on this instance");
+        }
+        if (text.empty()) {
+            fail("text must not be empty");
+        }
+        if (!callback) {
+            fail("streaming synthesis needs a callback");
+        }
+        cancel_requested = false;
+
+        const std::vector<DelayRow> prompt = build_checked_prompt(text);
+        const int prompt_frames = (int) prompt.size();
+        std::mt19937 rng(options.seed);
+        DelayState state(backbone->config(), prompt, frontend->tokens().pad,
+                frontend->tokens().im_end);
+        SynthesisResult result;
+        StreamProgress progress;
+
+        const auto start = std::chrono::steady_clock::now();
+        backbone->reset();
+        generate_rows(prompt, state, rng, result, [&]() {
+            collect_ready_frames(state, prompt_frames, progress);
+            return emit_ready(progress, callback, false, start, result);
+        });
+        if (!result.cancelled) {
+            collect_ready_frames(state, prompt_frames, progress);
+            if (!emit_ready(progress, callback, true, start, result)) {
+                result.cancelled = true;
+            }
+        }
+        result.generation_ms = elapsed_ms(start) - result.decode_ms;
+        result.sample_rate = decoder->sample_rate();
+        result.cancelled = result.cancelled || cancel_requested;
+        if (!result.cancelled && progress.emitted_frames == 0) {
+            fail("the model produced no audio frames");
+        }
         return result;
     }
 };
@@ -243,6 +374,10 @@ Engine::~Engine() = default;
 
 SynthesisResult Engine::synthesize(const std::string & text) {
     return impl_->run(text);
+}
+
+SynthesisResult Engine::synthesize_stream(const std::string & text, const AudioCallback & callback) {
+    return impl_->run_stream(text, callback);
 }
 
 void Engine::cancel() noexcept {

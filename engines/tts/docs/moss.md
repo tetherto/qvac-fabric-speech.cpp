@@ -68,6 +68,12 @@ build/moss-cli --backbone moss-tts-delay-f16.gguf \
     --decoder moss-codec-decoder-f16.gguf \
     --text "..." --language en --out out.wav
 
+# streaming: chunks arrive at the terminal as they decode; the WAV is
+# identical to the batch render for the same seed
+build/moss-cli --backbone moss-tts-delay-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --text "..." --language en --stream --out out.wav
+
 # cloning: add the codec encoder and a reference wav (must match the
 # codec sample rate; stereo is downmixed by averaging)
 build/moss-cli --backbone moss-tts-delay-f16.gguf \
@@ -98,6 +104,18 @@ a decoder whose quantizer count does not match the backbone's channel count.
 the reference WAV must already be at the codec sample rate (channels are
 averaged; there is no resampling). Each request reseeds the RNG from the
 options, so equal requests on one instance produce equal audio.
+
+`synthesize_stream(text, callback)` emits PCM chunks while generation runs:
+a frame is complete `n_vq - 1` steps after its row, completed non-pad frames
+accumulate, and every `stream_chunk_frames` of them decode as one codec
+graph carrying `stream_overlap_frames` of already-emitted frames as left
+context (their samples are dropped, only the new frames are delivered). The
+callback runs on the calling thread and returning false cancels the request;
+`SynthesisResult::first_audio_ms` reports the latency to the first chunk and
+`pcm` stays empty. The batch path reuses the same chunked decode once a
+render exceeds 60 seconds of frames, which bounds the codec's attention
+memory on long generations; shorter renders keep the exact single-graph
+decode.
 
 Generation mirrors the reference loop. The prompt packs the fixed
 `<user_inst>` template between `<|im_start|>`/`<|im_end|>` markers and ends
