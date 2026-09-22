@@ -229,14 +229,19 @@ void check_public_load_status(const std::string & lm, const std::string & decode
 }
 
 void check_public_synthesis_backend(const std::string & lm, const std::string & decoder,
-                                    const char * want_prefix, const char * tag) {
+                                    const char * want_prefix, bool want_attached_after,
+                                    const char * tag) {
     try {
         tts_cpp::audio8::Engine engine(engine_options(lm, decoder));
+        expect(engine.codec_on_coreml(), std::string(tag) + ": sidecar not attached at load");
         const tts_cpp::audio8::SynthesisResult result = engine.synthesize("Hello from the parity test.");
         expect(result.codec_synthesis_backend.rfind(want_prefix, 0) == 0,
                std::string(tag) + ": codec_synthesis_backend = '" + result.codec_synthesis_backend +
                    "', expected prefix '" + want_prefix + "'");
-        std::fprintf(stderr, "[coreml-parity] %s: %d frames, codec synthesis on %s (sidecar loaded: %s)\n",
+        expect(engine.codec_on_coreml() == want_attached_after,
+               std::string(tag) + ": codec_on_coreml() after synthesis = " +
+                   (engine.codec_on_coreml() ? "true" : "false"));
+        std::fprintf(stderr, "[coreml-parity] %s: %d frames, codec synthesis on %s (sidecar attached after: %s)\n",
                      tag, result.frames, result.codec_synthesis_backend.c_str(),
                      engine.codec_on_coreml() ? "yes" : "no");
     } catch (const std::exception & e) {
@@ -275,8 +280,8 @@ void check_invalid_sidecar(const std::string & gguf, const std::string & lm) {
 }
 
 // A sidecar that loads but cannot serve any utterance (window <= causal
-// context) must report loaded, fall back to ggml bit-exactly, and fail under
-// STRICT instead of falling back.
+// context): fails under STRICT, otherwise falls back to ggml bit-exactly and is
+// retired, so the next call goes straight to ggml with no sidecar attached.
 void check_unservable_sidecar(const std::string & dir, const std::string & lm) {
     const std::string gguf = find_decoder_gguf(dir);
     if (gguf.empty() || !fs::exists(coreml_codec_sidecar_path(gguf))) {
@@ -293,33 +298,42 @@ void check_unservable_sidecar(const std::string & dir, const std::string & lm) {
                                   ") carries the context (" + std::to_string(context) + "); it would serve");
 
     const std::vector<int32_t> codes = make_codes(codec.model.hp, SHORT_FRAMES, 5u);
-    std::vector<float> pcm_fallback, pcm_ggml;
-    decode_timing t_fallback, t_ggml;
     std::string error;
+    {
+        owned_codec strict_codec;
+        if (!load(gguf, strict_codec)) return;
+        scoped_env strict("AUDIO8_COREML_STRICT", "1");
+        std::vector<float> pcm;
+        decode_timing timing;
+        expect(!decode(strict_codec.model, codes, SHORT_FRAMES, nullptr, pcm, timing, error),
+               "strict decode with an unservable sidecar returned audio");
+        expect(error.find("unavailable") != std::string::npos,
+               "strict failure did not name the unavailable sidecar: " + error);
+    }
+    std::vector<float> pcm_fallback, pcm_ggml, pcm_retired;
+    decode_timing t_fallback, t_ggml, t_retired;
     expect(decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_fallback, t_fallback, error),
            "fallback decode failed: " + error);
     expect(t_fallback.synthesis_backend == "ggml",
            "fallback synthesis ran on " + t_fallback.synthesis_backend);
+    expect(codec.model.coreml == nullptr && !codec.model.synthesis_on_coreml,
+           "the failed sidecar was not retired after the fallback");
+    expect(decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_retired, t_retired, error) &&
+               t_retired.synthesis_backend == "ggml",
+           "decode after retirement did not go straight to ggml: " + error);
     {
         scoped_env disabled("AUDIO8_COREML_DISABLE", "1");
         expect(decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm_ggml, t_ggml, error),
                "reference decode failed: " + error);
     }
-    expect(pcm_fallback == pcm_ggml, "fallback output is not bit-identical to the ggml decode");
-    {
-        scoped_env strict("AUDIO8_COREML_STRICT", "1");
-        std::vector<float> pcm;
-        decode_timing timing;
-        expect(!decode(codec.model, codes, SHORT_FRAMES, nullptr, pcm, timing, error),
-               "strict decode with an unservable sidecar returned audio");
-        expect(error.find("unavailable") != std::string::npos,
-               "strict failure did not name the unavailable sidecar: " + error);
-    }
+    expect(pcm_fallback == pcm_ggml && pcm_retired == pcm_ggml,
+           "fallback outputs are not bit-identical to the ggml decode");
     check_public_load_status(lm, gguf, /*want_loaded=*/true, "unservable sidecar");
     if (const char * real_lm = std::getenv("AUDIO8_COREML_TEST_LM_GGUF"); real_lm && *real_lm) {
-        check_public_synthesis_backend(real_lm, gguf, "ggml", "unservable sidecar, public synthesis");
+        check_public_synthesis_backend(real_lm, gguf, "ggml", /*want_attached_after=*/false,
+                                       "unservable sidecar, public synthesis");
     }
-    std::fprintf(stderr, "[coreml-parity] unservable sidecar (window %d <= context %d): loaded, fell back to ggml\n",
+    std::fprintf(stderr, "[coreml-parity] unservable sidecar (window %d <= context %d): loaded, fell back to ggml, retired\n",
                  window, context);
 }
 
@@ -384,7 +398,8 @@ int main() {
         std::fprintf(stderr, "[coreml-parity] AUDIO8_COREML_FALLBACK_MODELS_DIR not set; unservable-sidecar checks not run\n");
     }
     if (const char * real_lm = std::getenv("AUDIO8_COREML_TEST_LM_GGUF"); real_lm && *real_lm) {
-        check_public_synthesis_backend(real_lm, gguf, "coreml", "sidecar present, public synthesis");
+        check_public_synthesis_backend(real_lm, gguf, "coreml", /*want_attached_after=*/true,
+                                       "sidecar present, public synthesis");
     }
     fs::remove(tiny_lm);
 
