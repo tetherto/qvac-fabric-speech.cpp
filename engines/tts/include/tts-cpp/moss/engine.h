@@ -27,7 +27,7 @@ struct EngineOptions {
     float audio_repetition_penalty = 1.0f;
     uint32_t seed = 1234;
     int stream_chunk_frames = 25;
-    int stream_overlap_frames = 125;
+    int stream_left_context_frames = 0;
 };
 
 struct SynthesisResult {

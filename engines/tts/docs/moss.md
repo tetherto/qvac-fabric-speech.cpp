@@ -108,14 +108,17 @@ options, so equal requests on one instance produce equal audio.
 `synthesize_stream(text, callback)` emits PCM chunks while generation runs:
 a frame is complete `n_vq - 1` steps after its row, completed non-pad frames
 accumulate, and every `stream_chunk_frames` of them decode as one codec
-graph carrying `stream_overlap_frames` of already-emitted frames as left
-context (their samples are dropped, only the new frames are delivered). The
-callback runs on the calling thread and returning false cancels the request;
-`SynthesisResult::first_audio_ms` reports the latency to the first chunk and
-`pcm` stays empty. The batch path reuses the same chunked decode once a
-render exceeds 60 seconds of frames, which bounds the codec's attention
-memory on long generations; shorter renders keep the exact single-graph
-decode.
+graph whose already-emitted samples are dropped. By default each chunk
+re-decodes the whole cumulative prefix, so the streamed audio equals the
+batch render exactly; `stream_left_context_frames > 0` bounds that prefix
+(the chatterbox knob), trading per-chunk cost and memory for boundary
+approximation — measured on real audio, a 125-frame window keeps 0.96
+correlation to the exact render. The callback runs on the calling thread and
+returning false cancels the request; `SynthesisResult::first_audio_ms`
+reports the latency to the first chunk and `pcm` stays empty. The batch path
+switches to chunked decode with a 125-frame window once a render exceeds 60
+seconds of frames, which bounds the codec's attention memory where a single
+graph would not fit; shorter renders keep the exact single-graph decode.
 
 Generation mirrors the reference loop. The prompt packs the fixed
 `<user_inst>` template between `<|im_start|>`/`<|im_end|>` markers and ends

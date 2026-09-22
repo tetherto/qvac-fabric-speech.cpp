@@ -29,6 +29,7 @@ using detail::SamplingConfig;
 
 constexpr int CONTEXT_HEADROOM = 8;
 constexpr int BATCH_SINGLE_DECODE_MAX_FRAMES = 750;
+constexpr int BATCH_CHUNK_LEFT_CONTEXT_FRAMES = 125;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss engine: " + message);
@@ -200,6 +201,7 @@ struct Engine::Impl {
         std::vector<int32_t> codes;
         int scanned_frames = 0;
         int emitted_frames = 0;
+        bool audio_emitted = false;
     };
 
     static bool frame_is_pad(const std::vector<int32_t> & frame, int pad_code) {
@@ -224,9 +226,10 @@ struct Engine::Impl {
     }
 
     std::vector<float> decode_frame_range(const std::vector<int32_t> & codes, int begin_frame,
-                                          int end_frame, SynthesisResult & result) {
+                                          int end_frame, int left_context_frames,
+                                          SynthesisResult & result) {
         const int n_vq = backbone->config().n_vq;
-        const int from = std::max(0, begin_frame - std::max(0, options.stream_overlap_frames));
+        const int from = left_context_frames > 0 ? std::max(0, begin_frame - left_context_frames) : 0;
         const std::vector<int32_t> slice(codes.begin() + (size_t) from * n_vq,
                 codes.begin() + (size_t) end_frame * n_vq);
         const auto decode_start = std::chrono::steady_clock::now();
@@ -248,12 +251,15 @@ struct Engine::Impl {
             }
             const int end = flush ? total : progress.emitted_frames + chunk;
             const std::vector<float> pcm = decode_frame_range(progress.codes,
-                    progress.emitted_frames, end, result);
-            if (result.first_audio_ms == 0) {
-                result.first_audio_ms = elapsed_ms(start);
-            }
-            if (!pcm.empty() && !callback(pcm.data(), pcm.size(), decoder->sample_rate())) {
-                return false;
+                    progress.emitted_frames, end, options.stream_left_context_frames, result);
+            if (!pcm.empty()) {
+                if (!progress.audio_emitted) {
+                    progress.audio_emitted = true;
+                    result.first_audio_ms = elapsed_ms(start);
+                }
+                if (!callback(pcm.data(), pcm.size(), decoder->sample_rate())) {
+                    return false;
+                }
             }
             progress.emitted_frames = end;
         }
@@ -270,7 +276,8 @@ struct Engine::Impl {
         }
         for (int begin = 0; begin < frames; begin += BATCH_SINGLE_DECODE_MAX_FRAMES) {
             const int end = std::min(frames, begin + BATCH_SINGLE_DECODE_MAX_FRAMES);
-            const std::vector<float> pcm = decode_frame_range(codes, begin, end, result);
+            const std::vector<float> pcm = decode_frame_range(codes, begin, end,
+                    BATCH_CHUNK_LEFT_CONTEXT_FRAMES, result);
             result.pcm.insert(result.pcm.end(), pcm.begin(), pcm.end());
         }
     }

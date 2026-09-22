@@ -67,6 +67,24 @@ void test_stream_matches_batch(tts_cpp::moss::Engine & engine) {
     check(max_abs_diff(streamed, batch.pcm) < 1e-4f, "streamed audio matches the batch render");
 }
 
+void test_bounded_left_context_matches_batch(const std::filesystem::path & backbone,
+                                              const std::filesystem::path & decoder) {
+    tts_cpp::moss::EngineOptions options = fixture_options(backbone, decoder);
+    options.stream_left_context_frames = 8;
+    tts_cpp::moss::Engine engine(options);
+    const tts_cpp::moss::SynthesisResult batch = engine.synthesize("hi");
+    std::vector<float> streamed;
+    const tts_cpp::moss::SynthesisResult stream = engine.synthesize_stream("hi",
+            [&](const float * samples, size_t count, int) {
+                streamed.insert(streamed.end(), samples, samples + count);
+                return true;
+            });
+    check(!stream.cancelled, "bounded-context streaming completes");
+    check(streamed.size() == batch.pcm.size(), "bounded-context sample count matches batch");
+    check(max_abs_diff(streamed, batch.pcm) < 1e-4f,
+            "a window covering the fixture context reproduces the batch render");
+}
+
 void test_stream_callback_cancels(tts_cpp::moss::Engine & engine) {
     size_t chunks = 0;
     const tts_cpp::moss::SynthesisResult result = engine.synthesize_stream("hi",
@@ -89,6 +107,7 @@ int main() {
         tts_cpp::moss::Engine engine(fixture_options(backbone, decoder));
         test_stream_matches_batch(engine);
         test_stream_callback_cancels(engine);
+        test_bounded_left_context_matches_batch(backbone, decoder);
     } catch (const std::exception & e) {
         std::fprintf(stderr, "%s\n", e.what());
         rc = 1;
