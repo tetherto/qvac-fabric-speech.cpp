@@ -505,6 +505,8 @@ void run_weightless_description_gates() {
     parler_model real;
     expect(!parler_load_gguf(path, real, /*n_gpu_layers=*/0, &error),
            "a real load accepted a vocab-less GGUF");
+    expect(error.find("tokenizer.ggml.tokens") != std::string::npos,
+           "the real-load rejection does not name the vocabulary: '" + error + "'");
     parler_free_model(real);
 
     tts_cpp::parler::FitOptions fopts;

@@ -178,7 +178,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     // ---- tokenizer payload ----
     // A weightless fit-measure GGUF may omit the vocabulary: a measurement
     // never tokenizes text.
-    if (gguf_find_key(g, "tokenizer.ggml.tokens") >= 0 || !measure) {
+    if (!measure || gguf_find_key(g, "tokenizer.ggml.tokens") >= 0) {
         int64_t id = gguf_find_key(g, "tokenizer.ggml.tokens");
         if (id < 0) return fail("missing tokenizer.ggml.tokens");
         const int n = (int) gguf_get_arr_n(g, id);
@@ -207,7 +207,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     // ---- optional BPE prompt tokenizer (indic-class checkpoints; its vocab
     //      may be stripped from a weightless fit-measure GGUF too) ----
     if (gguf_find_key(g, "parler.prompt_tokenizer.model") >= 0 &&
-        (gguf_find_key(g, "parler.prompt_tokenizer.tokens") >= 0 || !measure)) {
+        (!measure || gguf_find_key(g, "parler.prompt_tokenizer.tokens") >= 0)) {
         int64_t id = gguf_find_key(g, "parler.prompt_tokenizer.tokens");
         if (id < 0) return fail("missing parler.prompt_tokenizer.tokens");
         const int n = (int) gguf_get_arr_n(g, id);

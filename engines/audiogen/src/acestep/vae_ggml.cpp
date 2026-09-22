@@ -688,35 +688,42 @@ int vae_model_decode_window_frames(VaeModel * m) {
 // its externally-marked weights carry no backend buffer, so the scheduler's
 // leaf resolution leaves them unassigned and the reserve aborts
 // (GGML_ASSERT(buffer_id >= 0) in ggml-alloc; measure_subsampling_compute in
-// parakeet_ctc.cpp prices the same way for the same reason). `backend_bytes`
-// lands on m's backend. On a GPU backend the real decode / encode sched
-// assigns the graph input to the CPU (last) backend and copies it into the
-// device split; `cpu_fallback_bytes` sizes that host-side original (0 when m's
-// backend IS the CPU, where the input is part of the measured buffer).
+// parakeet_ctc.cpp prices the same way for the same reason).
+//
+// Exactness: on CPU the real sched's reservation IS this gallocr layout, byte
+// for byte. On a GPU backend the real sched keeps the graph-input original in
+// a CPU-side buffer (sized explicitly into `host_input_bytes`; host RAM) and
+// copies it into the device split as a reusable node, which lets the split
+// allocator come in at most one device-side input slot BELOW `backend_bytes`
+// -- a bounded overcount in the strict direction. test-fit-params asserts
+// exactly that, so a backend that split the graph across backends (per-op
+// fallback this measure cannot see) fails the gate loudly rather than
+// misprojecting silently. A CPU-backend init failure only degrades
+// `host_input_bytes` to 0.
 static bool vae_measure_graph(VaeModel * m, ggml_cgraph * gf, ggml_tensor * input,
-                              size_t & backend_bytes, size_t & cpu_fallback_bytes) {
+                              size_t & backend_bytes, size_t & host_input_bytes) {
     ggml_gallocr_t pricer = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
     if (!pricer) return false;
     ggml_gallocr_reserve_n_size(pricer, gf, nullptr, nullptr, &backend_bytes);
     ggml_gallocr_free(pricer);
 
-    cpu_fallback_bytes = 0;
+    host_input_bytes = 0;
     const bool backend_is_cpu =
         ggml_backend_dev_type(ggml_backend_get_device(m->backend)) == GGML_BACKEND_DEVICE_TYPE_CPU;
     if (!backend_is_cpu) {
         ggml_backend_t cpu = backend_cpu_init();
-        if (!cpu) return false;
+        if (!cpu) return true;
         ggml_backend_buffer_type_t cpu_buft = ggml_backend_get_default_buffer_type(cpu);
-        cpu_fallback_bytes = GGML_PAD(ggml_backend_buft_get_alloc_size(cpu_buft, input),
-                                      ggml_backend_buft_get_alignment(cpu_buft));
+        host_input_bytes = GGML_PAD(ggml_backend_buft_get_alloc_size(cpu_buft, input),
+                                    ggml_backend_buft_get_alignment(cpu_buft));
         ggml_backend_free(cpu);
     }
     return true;
 }
 
-bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes, size_t & cpu_fallback_bytes) {
+bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes, size_t & host_input_bytes) {
     backend_bytes      = 0;
-    cpu_fallback_bytes = 0;
+    host_input_bytes = 0;
     if (!m || T_latent <= 0) return false;
 
     // The worst resident window of the chunked decode: a short latent decodes
@@ -737,14 +744,14 @@ bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
     ggml_build_forward_expand(gf, out);
 
-    const bool ok = vae_measure_graph(m, gf, lat, backend_bytes, cpu_fallback_bytes);
+    const bool ok = vae_measure_graph(m, gf, lat, backend_bytes, host_input_bytes);
     ggml_free(ctx);
     return ok;
 }
 
-bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, size_t & cpu_fallback_bytes) {
+bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, size_t & host_input_bytes) {
     backend_bytes      = 0;
-    cpu_fallback_bytes = 0;
+    host_input_bytes = 0;
     if (!m || !m->has_enc || frames <= 0) return false;
 
     ggml_init_params gp{ ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(8192, false), nullptr, true };
@@ -758,7 +765,7 @@ bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
     ggml_build_forward_expand(gf, z);
 
-    const bool ok = vae_measure_graph(m, gf, a, backend_bytes, cpu_fallback_bytes);
+    const bool ok = vae_measure_graph(m, gf, a, backend_bytes, host_input_bytes);
     ggml_free(ctx);
     return ok;
 }

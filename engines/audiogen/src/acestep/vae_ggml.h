@@ -45,12 +45,14 @@ int vae_model_decode_window_frames(VaeModel * m);
 // preflight: build the identical graph the real call would use for a
 // T_latent-frame decode (its worst resident window when chunked) or a
 // `frames`-frame encode window, and price it with a plain gallocr on m's
-// default buffer type -- `backend_bytes` on m's backend, `cpu_fallback_bytes`
+// default buffer type -- `backend_bytes` on m's backend, `host_input_bytes`
 // the host-side graph input the real sched stages on its CPU (last) backend (0
-// when m's backend IS the CPU). Nothing is allocated, uploaded, or computed.
-// Returns false on graph/allocator construction failure.
-bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes, size_t & cpu_fallback_bytes);
-bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, size_t & cpu_fallback_bytes);
+// when m's backend IS the CPU). Exact on CPU; on GPU a bounded overcount of at
+// most one device-side input slot (see vae_measure_graph). Nothing is
+// allocated, uploaded, or computed. Returns false on graph/allocator
+// construction failure.
+bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes, size_t & host_input_bytes);
+bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, size_t & host_input_bytes);
 
 // Scheduler compute bytes of the most recent real decode window / encode (sum
 // over the sched's backends; 0 before the first). For the fit parity tests.

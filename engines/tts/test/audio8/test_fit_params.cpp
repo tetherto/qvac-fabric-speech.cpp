@@ -15,7 +15,7 @@
 //       4. projected fast arena == the gallocr buffer real fast_step
 //          reserves;
 //       5. a missing / wrong-architecture model is Error, never Success;
-//       6. a weightless description GGUF with the vocabulary stripped loads
+//       8. a weightless description GGUF with the vocabulary stripped loads
 //          metadata-only, while a real load still refuses it.
 //
 //   * With arguments <lm.gguf> <decoder.gguf> [encoder.gguf] [n_gpu_layers]:

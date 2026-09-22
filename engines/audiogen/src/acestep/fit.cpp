@@ -411,14 +411,14 @@ FitResult fit_params(const FitOptions & opts) {
         // phase; the real ensure_vae(true) degrades the same way, so project
         // without the encoder rather than failing.
     }
-    size_t vae_dec_backend = 0, vae_dec_cpu = 0;
-    if (!vae_model_measure_decode(guard.vae, T, vae_dec_backend, vae_dec_cpu)) return fail_measure();
-    size_t vae_enc_backend = 0, vae_enc_cpu = 0;
+    size_t vae_dec_backend = 0, vae_dec_host_in = 0;
+    if (!vae_model_measure_decode(guard.vae, T, vae_dec_backend, vae_dec_host_in)) return fail_measure();
+    size_t vae_enc_backend = 0, vae_enc_host_in = 0;
     uint64_t source_frames = 0;
     if (opts.with_source_audio && vae_model_has_encoder(guard.vae)) {
         source_frames = sat_u64_from_double(std::ceil((double) opts.duration_seconds * SAMPLE_RATE));
         const int enc_frames = (int) std::min<uint64_t>(source_frames, VAE_AUDIO_CHUNK_FRAMES);
-        if (!vae_model_measure_encode(guard.vae, enc_frames, vae_enc_backend, vae_enc_cpu)) {
+        if (!vae_model_measure_encode(guard.vae, enc_frames, vae_enc_backend, vae_enc_host_in)) {
             return fail_measure();
         }
     }
@@ -519,7 +519,7 @@ FitResult fit_params(const FitOptions & opts) {
     // (last) backend before copying it in; that portion is host RAM.
     stage_row("vae", vae_backend, vae_w, 0, 0,
               std::max<uint64_t>(vae_dec_backend, vae_enc_backend),
-              sat_add(vae_host, std::max<uint64_t>(vae_dec_cpu, vae_enc_cpu)));
+              sat_add(vae_host, std::max<uint64_t>(vae_dec_host_in, vae_enc_host_in)));
 
     // ── Phase peaks per pool ────────────────────────────────────────────────
     // Stage weight charges (weights+mmap+state on the stage's backend pool;
@@ -545,9 +545,9 @@ FitResult fit_params(const FitOptions & opts) {
                                                       std::max({ textenc_fwd, textenc_lookup, cond_fwd }));
     const PoolCharge dit_compute     = charge_backend(pools, rb.backend, dit_graph);
     PoolCharge vae_dec_compute = charge_backend(pools, vae_backend, vae_dec_backend);
-    vae_dec_compute.add_host(vae_dec_cpu);
+    vae_dec_compute.add_host(vae_dec_host_in);
     PoolCharge vae_enc_compute = charge_backend(pools, vae_backend, vae_enc_backend);
-    vae_enc_compute.add_host(vae_enc_cpu);
+    vae_enc_compute.add_host(vae_enc_host_in);
 
     PoolCharge peak;
     if (keep_stages) {

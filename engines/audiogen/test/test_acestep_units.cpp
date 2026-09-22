@@ -1251,7 +1251,7 @@ void test_fused_load_fail_closed() {
     std::remove(path.c_str());
 }
 
-// 9c. vae metadata-only measure -------------------------------------------------
+// 9c. vae metadata-only measure ----------------------------------------------
 // A metadata-only VAE (weights sized, never allocated) must still yield decode
 // measurement sizes. The decoder architecture is hardcoded, so any parseable
 // GGUF serves; the earlier sched-based pricing aborted on the buffer-less
@@ -1277,10 +1277,10 @@ void test_vae_metadata_only_measure() {
         CHECK(m != nullptr);
         if (m) {
             CHECK(w.weights_alloc_bytes > 0);
-            size_t backend_bytes = 0, cpu_fallback_bytes = 0;
-            CHECK(vae_model_measure_decode(m, /*T_latent=*/8, backend_bytes, cpu_fallback_bytes));
+            size_t backend_bytes = 0, host_input_bytes = 0;
+            CHECK(vae_model_measure_decode(m, /*T_latent=*/8, backend_bytes, host_input_bytes));
             CHECK(backend_bytes > 0);
-            CHECK(cpu_fallback_bytes == 0);  // the input is part of the CPU measure
+            CHECK(host_input_bytes == 0);  // the input is part of the CPU measure
             vae_model_free(m);
         }
         ggml_backend_free(cpu);
