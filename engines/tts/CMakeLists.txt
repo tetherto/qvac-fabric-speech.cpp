@@ -1901,6 +1901,15 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "${_tcb_parler_gguf}" "${_tcb_parler_ref}"
         REQUIRES "${_tcb_parler_gguf}" "${_tcb_parler_ref}/case0_step_logits.npy")
 
+    # Model-free fused-projection parity + zero-copy logits view on a synthetic
+    # decoder (no fixtures), so it runs on a bare checkout like the sampler test.
+    add_executable(test-parler-decoder-fused test/parler/test_decoder_fused.cpp
+        src/parler/decoder.cpp ${_tcb_parler_core_srcs})
+    target_link_libraries(test-parler-decoder-fused PRIVATE ggml)
+    target_include_directories(test-parler-decoder-fused PRIVATE ggml/include include src)
+    tts_cpp_apply_ccache(test-parler-decoder-fused)
+    tts_cpp_register_test(test-parler-decoder-fused)
+
     add_executable(test-parler-dac test/parler/test_dac.cpp
         src/parler/dac.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac PRIVATE ggml)

@@ -13,11 +13,18 @@ branching.  Pipeline: Flan-T5 encoder (description → cross-attention K/V,
 precomputed once and cached per description) → delay-pattern decoder LM
 (9 DAC codebooks, MusicGen-style stagger, HF-faithful EOS gating) → DAC
 codec decode → 44.1 kHz mono PCM.  Validated backends are CPU, Metal,
-Vulkan, and OpenCL (Adreno): the GPU path (F16 flash attention, fused QKV +
-stacked LM heads, DAC upsampling as phase matmuls) is gated on that
-allowlist in `src/parler/gguf.cpp`, and any other GPU backend is released at
-load and replaced by CPU rather than run unvalidated.  The graph dispatch
-uses the shared `sched_dispatch` dual path like the other engines.
+Vulkan, and OpenCL (Adreno): the GPU path (F16 flash attention, DAC
+upsampling as phase matmuls) is gated on that allowlist in
+`src/parler/gguf.cpp`, and any other GPU backend is released at load and
+replaced by CPU rather than run unvalidated.  GPU loads and mmap-backed CPU
+loads fuse the per-layer QKV projections and the nine LM heads into single
+row-concatenated matmuls (byte-exact; the CPU allocate-and-stream fallback
+stays unfused so the projections are never resident twice, and
+`PARLER_NO_FUSED` disables fusion everywhere).  Every backend samples each
+step over the top-k candidate set with reused scratch buffers, and host
+backends read the step logits in place from the graph buffer instead of
+downloading a copy.  The graph dispatch uses the shared `sched_dispatch`
+dual path like the other engines.
 
 Indic-class checkpoints ship a second, SentencePiece-BPE **prompt**
 tokenizer (90k vocab covering the Indic scripts, byte fallback) alongside
