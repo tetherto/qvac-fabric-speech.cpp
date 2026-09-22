@@ -164,6 +164,9 @@ struct DelayLM::Impl {
         config.n_ff        = (int) meta_u32(arch + ".feed_forward_length");
         config.n_heads     = (int) meta_u32(arch + ".attention.head_count");
         config.n_kv_heads  = (int) meta_u32(arch + ".attention.head_count_kv");
+        if (config.n_embd <= 0 || config.n_heads <= 0) {
+            fail("invalid model geometry");
+        }
         config.head_dim    = (int) meta_u32_or(arch + ".attention.key_length",
                 (uint32_t) (config.n_embd / config.n_heads));
         config.n_ctx_train = (int) meta_u32(arch + ".context_length");
@@ -398,11 +401,9 @@ struct DelayLM::Impl {
         ggml_build_forward_expand(graph, ggml_cpy(graph_ctx, k_rows, cache_write_view(cache_k[il], pos, n_tokens)));
         ggml_build_forward_expand(graph, ggml_cpy(graph_ctx, v_rows, cache_write_view(cache_v[il], pos, n_tokens)));
 
-        ggml_tensor * keys = ggml_reshape_3d(graph_ctx,
-                ggml_cast(graph_ctx, cache_view(cache_k[il], total), GGML_TYPE_F32),
+        ggml_tensor * keys = ggml_reshape_3d(graph_ctx, cache_view(cache_k[il], total),
                 config.head_dim, config.n_kv_heads, total);
-        ggml_tensor * values = ggml_reshape_3d(graph_ctx,
-                ggml_cast(graph_ctx, cache_view(cache_v[il], total), GGML_TYPE_F32),
+        ggml_tensor * values = ggml_reshape_3d(graph_ctx, cache_view(cache_v[il], total),
                 config.head_dim, config.n_kv_heads, total);
 
         q = ggml_permute(graph_ctx, q, 0, 2, 1, 3);

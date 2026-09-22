@@ -24,6 +24,8 @@ constexpr float ROPE_FREQ_SCALE_NEUTRAL = 1.0f;
 constexpr int   GRAPH_NODES    = 16384;
 constexpr int   DEFAULT_SAMPLE_RATE = 24000;
 constexpr int   MAX_CLIP_SECONDS    = 60;
+constexpr int     MAX_PATCH_SIZE  = 8192;
+constexpr int64_t MAX_DOWNSAMPLE  = 1 << 20;
 
 constexpr const char * ENCODER_ARCH = "moss-tts-audio-encoder";
 constexpr const char * DECODER_ARCH = "moss-tts-audio-decoder";
@@ -204,19 +206,30 @@ struct Codec::Impl {
         quantizer.num_quantizers = (int) meta_u32(arch + ".quantizer.num_quantizers");
         quantizer.codebook_size  = (int) meta_u32(arch + ".quantizer.codebook_size");
         quantizer.codebook_dim   = (int) meta_u32(arch + ".quantizer.codebook_dim");
-        if (quantizer.num_quantizers <= 0 || quantizer.codebook_size <= 0) {
+        if (quantizer.num_quantizers <= 0 || quantizer.codebook_size <= 0 ||
+            quantizer.codebook_dim <= 0 || quantizer.rvq_dim <= 0 ||
+            quantizer.input_dim <= 0 || quantizer.output_dim <= 0) {
             fail("invalid quantizer geometry");
         }
     }
 
     void validate_codebooks() {
+        require_matrix(find_tensor("quantizer.input_proj.weight"),
+                quantizer.input_dim, quantizer.rvq_dim);
+        require_matrix(find_tensor("quantizer.output_proj.weight"),
+                quantizer.rvq_dim, quantizer.output_dim);
         for (int iq = 0; iq < quantizer.num_quantizers; ++iq) {
             const ggml_tensor * codebook =
                     require_tensor(quantizer_tensor_name(iq, "codebook.weight"));
-            if (codebook->ne[1] < (int64_t) quantizer.codebook_size) {
+            if (codebook->ne[0] != (int64_t) quantizer.codebook_dim ||
+                codebook->ne[1] < (int64_t) quantizer.codebook_size) {
                 fail("codebook " + std::to_string(iq) +
-                     " holds fewer rows than the declared codebook_size");
+                     " does not match the declared quantizer geometry");
             }
+            require_matrix(find_tensor(quantizer_tensor_name(iq, "in_proj.weight")),
+                    quantizer.rvq_dim, quantizer.codebook_dim);
+            require_matrix(find_tensor(quantizer_tensor_name(iq, "out_proj.weight")),
+                    quantizer.codebook_dim, quantizer.rvq_dim);
         }
     }
 
@@ -232,7 +245,9 @@ struct Codec::Impl {
         block.num_layers       = (int) meta_u32(prefix + ".num_layers");
         block.context          = (int) meta_u32(prefix + ".context");
         block.max_period       = meta_f32(prefix + ".max_period", 10000.0f);
-        if (block.d_model <= 0 || block.num_heads <= 0 || block.d_model % block.num_heads != 0) {
+        if (block.d_model <= 0 || block.num_heads <= 0 || block.d_model % block.num_heads != 0 ||
+            block.input_dimension <= 0 || block.output_dimension <= 0 ||
+            block.num_layers <= 0 || block.context < 0) {
             fail("invalid transformer geometry in " + prefix);
         }
         block.input_proj  = find_tensor("blk." + std::to_string(tensor_block) + ".input_proj.weight");
@@ -268,6 +283,9 @@ struct Codec::Impl {
             if (type == "PatchedPretransform") {
                 module.is_transformer = false;
                 module.patch_size = (int) meta_u32(prefix + ".patch_size");
+                if (module.patch_size < 1 || module.patch_size > MAX_PATCH_SIZE) {
+                    fail("invalid patch size in " + prefix);
+                }
                 continue;
             }
             if (type != "Transformer") {
@@ -276,7 +294,80 @@ struct Codec::Impl {
             module.is_transformer = true;
             read_transformer_meta(prefix, tensor_block, module.transformer);
             read_transformer_layers(tensor_block, module.transformer);
+            validate_transformer_shapes(prefix, module.transformer);
             tensor_block++;
+        }
+        validate_patch_product();
+    }
+
+    void validate_patch_product() {
+        int64_t product = 1;
+        for (const Module & module : modules) {
+            if (!module.is_transformer) {
+                product *= module.patch_size;
+                if (product > MAX_DOWNSAMPLE) {
+                    fail("patch sizes multiply past the supported downsample factor");
+                }
+            }
+        }
+        if (encoder && product != downsample) {
+            fail("patch sizes do not multiply to the downsample rate");
+        }
+    }
+
+    void matrix_dims(const ggml_tensor * tensor, int64_t & in, int64_t & out) const {
+        const int n_dims = ggml_n_dims(tensor);
+        if (n_dims == 3 && tensor->ne[0] == 1) {
+            in  = tensor->ne[1];
+            out = tensor->ne[2];
+            return;
+        }
+        if (n_dims == 4 && tensor->ne[0] == 1 && tensor->ne[1] == 1) {
+            in  = tensor->ne[2];
+            out = tensor->ne[3];
+            return;
+        }
+        in  = tensor->ne[0];
+        out = tensor->ne[1];
+    }
+
+    void require_matrix(const ggml_tensor * tensor, int64_t in, int64_t out) const {
+        if (tensor == nullptr) {
+            return;
+        }
+        int64_t got_in = 0;
+        int64_t got_out = 0;
+        matrix_dims(tensor, got_in, got_out);
+        if (got_in != in || (out > 0 && got_out != out)) {
+            fail(std::string(ggml_get_name(tensor)) + " has unexpected dimensions");
+        }
+    }
+
+    void require_vector(const ggml_tensor * tensor, int64_t n) const {
+        if (tensor != nullptr && (ggml_n_dims(tensor) > 1 || tensor->ne[0] != n)) {
+            fail(std::string(ggml_get_name(tensor)) + " has unexpected dimensions");
+        }
+    }
+
+    void validate_transformer_shapes(const std::string & prefix, const TransformerBlock & block) const {
+        require_matrix(block.input_proj, block.input_dimension, block.d_model);
+        require_matrix(block.output_proj, block.d_model, block.output_dimension);
+        for (const TransformerLayer & layer : block.layers) {
+            require_matrix(layer.attn_qkv, block.d_model, 3 * (int64_t) block.d_model);
+            require_matrix(layer.attn_out, block.d_model, block.d_model);
+            int64_t ffn_in = 0;
+            int64_t ffn_hidden = 0;
+            matrix_dims(layer.ffn_up, ffn_in, ffn_hidden);
+            if (ffn_in != block.d_model) {
+                fail("ffn_up input does not match d_model in " + prefix);
+            }
+            require_matrix(layer.ffn_down, ffn_hidden, block.d_model);
+            require_vector(layer.norm1_w, block.d_model);
+            require_vector(layer.norm1_b, block.d_model);
+            require_vector(layer.norm2_w, block.d_model);
+            require_vector(layer.norm2_b, block.d_model);
+            require_vector(layer.scale1, block.d_model);
+            require_vector(layer.scale2, block.d_model);
         }
     }
 
@@ -433,7 +524,7 @@ struct Codec::Impl {
     ggml_tensor * linear(ggml_tensor * input, ggml_tensor * weight, ggml_tensor * bias) {
         ggml_tensor * cur = as_f32(input);
         if (weight != nullptr) {
-            cur = ggml_mul_mat(graph_ctx, as_f32(as_matrix(weight)), cur);
+            cur = ggml_mul_mat(graph_ctx, as_matrix(weight), cur);
         }
         if (bias != nullptr) {
             cur = ggml_add(graph_ctx, cur, as_f32(bias));
@@ -457,7 +548,7 @@ struct Codec::Impl {
                             const TransformerBlock & block, int64_t frames,
                             ggml_tensor * positions, ggml_tensor * mask) {
         const int d_head = block.d_model / block.num_heads;
-        ggml_tensor * qkv = ggml_mul_mat(graph_ctx, as_f32(as_matrix(layer.attn_qkv)), cur);
+        ggml_tensor * qkv = ggml_mul_mat(graph_ctx, as_matrix(layer.attn_qkv), cur);
         const size_t head_stride = ggml_row_size(qkv->type, d_head);
         ggml_tensor * q = ggml_view_3d(graph_ctx, qkv, d_head, block.num_heads, frames,
                 head_stride, qkv->nb[1], 0);
@@ -478,7 +569,7 @@ struct Codec::Impl {
         attended = ggml_permute(graph_ctx, attended, 0, 2, 1, 3);
         attended = ggml_cont_2d(graph_ctx, attended,
                 attended->ne[0] * attended->ne[1], attended->ne[2] * attended->ne[3]);
-        return ggml_mul_mat(graph_ctx, as_f32(as_matrix(layer.attn_out)), attended);
+        return ggml_mul_mat(graph_ctx, as_matrix(layer.attn_out), attended);
     }
 
     ggml_tensor * transformer_layer(const TransformerLayer & layer, ggml_tensor * cur,
@@ -491,9 +582,9 @@ struct Codec::Impl {
         }
         cur = ggml_add(graph_ctx, cur, attended);
         ggml_tensor * ff = layer_norm(cur, layer.norm2_w, layer.norm2_b);
-        ff = ggml_mul_mat(graph_ctx, as_f32(as_matrix(layer.ffn_up)), ff);
+        ff = ggml_mul_mat(graph_ctx, as_matrix(layer.ffn_up), ff);
         ff = ggml_gelu(graph_ctx, ff);
-        ff = ggml_mul_mat(graph_ctx, as_f32(as_matrix(layer.ffn_down)), ff);
+        ff = ggml_mul_mat(graph_ctx, as_matrix(layer.ffn_down), ff);
         if (layer.scale2 != nullptr) {
             ff = ggml_mul(graph_ctx, ff, as_f32(layer.scale2));
         }
@@ -504,13 +595,13 @@ struct Codec::Impl {
         ggml_tensor * positions = input_i32(sequential_positions(frames));
         ggml_tensor * mask = input_f32(causal_mask(frames, block.context), frames, frames);
         if (block.input_proj != nullptr) {
-            cur = ggml_mul_mat(graph_ctx, as_f32(as_matrix(block.input_proj)), cur);
+            cur = ggml_mul_mat(graph_ctx, as_matrix(block.input_proj), cur);
         }
         for (const TransformerLayer & layer : block.layers) {
             cur = transformer_layer(layer, cur, block, frames, positions, mask);
         }
         if (block.output_proj != nullptr) {
-            cur = ggml_mul_mat(graph_ctx, as_f32(as_matrix(block.output_proj)), cur);
+            cur = ggml_mul_mat(graph_ctx, as_matrix(block.output_proj), cur);
         }
         return cur;
     }

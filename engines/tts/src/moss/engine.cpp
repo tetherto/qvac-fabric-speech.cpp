@@ -142,6 +142,9 @@ struct Engine::Impl {
         if (decoder->is_encoder()) {
             fail("decoder_path points at an encoder checkpoint");
         }
+        if (decoder->num_quantizers() != backbone->config().n_vq) {
+            fail("decoder quantizers do not match the backbone channels");
+        }
         load_reference();
     }
 
@@ -218,10 +221,15 @@ struct Engine::Impl {
         if (codes.empty()) {
             fail("the model produced no audio frames");
         }
+        if (cancel_requested) {
+            result.cancelled = true;
+            return result;
+        }
         const auto decode_start = std::chrono::steady_clock::now();
         result.pcm = decoder->decode(codes);
         result.decode_ms = elapsed_ms(decode_start);
         result.sample_rate = decoder->sample_rate();
+        result.cancelled = cancel_requested;
         return result;
     }
 };

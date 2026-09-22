@@ -10,10 +10,7 @@ namespace tts_cpp::moss {
 struct EngineOptions {
     std::string backbone_path;
     std::string decoder_path;
-    // Required only for voice cloning; leave empty for direct generation.
     std::string encoder_path;
-    // Mono or multi-channel WAV at the codec sample rate; channels are
-    // averaged. There is no resampling: a mismatched rate is rejected.
     std::string reference_audio_path;
     std::string language = "zh";
     int n_threads = 4;
@@ -39,11 +36,6 @@ struct SynthesisResult {
     double decode_ms = 0;
 };
 
-// Persistent MOSS Delay TTS engine (MOSS-TTS-v1.5 / MOSS-TTSD checkpoints).
-// One synthesis at a time per instance; overlapping calls throw. cancel() is
-// safe from another thread and makes the active synthesis return with
-// cancelled = true. Each request reseeds the RNG from the options, so equal
-// requests on one instance produce equal audio.
 class TTS_CPP_API Engine {
 public:
     explicit Engine(const EngineOptions & options);

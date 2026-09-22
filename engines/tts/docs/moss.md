@@ -91,7 +91,13 @@ The public API is `tts_cpp::moss::Engine` in
 construct with `EngineOptions` (model paths, language, sampling, `use_gpu`,
 `context`, `max_new_tokens`), call `synthesize(text)` for a
 `SynthesisResult` (mono PCM, sample rate, frame count, generation and decode
-wall times), and `cancel()` from another thread to stop a run.
+wall times), and `cancel()` from another thread to stop a run. One synthesis
+runs at a time per instance; overlapping calls throw, and the engine rejects
+a decoder whose quantizer count does not match the backbone's channel count.
+`encoder_path` and `reference_audio_path` are needed only for voice cloning:
+the reference WAV must already be at the codec sample rate (channels are
+averaged; there is no resampling). Each request reseeds the RNG from the
+options, so equal requests on one instance produce equal audio.
 
 Generation mirrors the reference loop. The prompt packs the fixed
 `<user_inst>` template between `<|im_start|>`/`<|im_end|>` markers and ends
