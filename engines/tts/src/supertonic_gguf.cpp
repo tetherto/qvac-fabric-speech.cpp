@@ -1885,6 +1885,46 @@ static bool coreml_vocoder_sidecar_enabled() {
 #endif
 }
 
+static bool coreml_vocoder_low_bit_allowed() {
+    return std::getenv("SUPERTONIC_COREML_ALLOW_LOW_BIT") != nullptr;
+}
+
+static void collect_convnext_tensors(const supertonic_vocoder_convnext_weights & c,
+                                     std::vector<const ggml_tensor *> & out) {
+    for (const ggml_tensor * t : { c.dw_w, c.dw_b, c.norm_g, c.norm_b, c.pw1_w,
+                                   c.pw1_b, c.pw2_w, c.pw2_b, c.gamma }) {
+        out.push_back(t);
+    }
+}
+
+static std::vector<const ggml_tensor *> vocoder_weight_tensors(
+        const supertonic_vocoder_weights & v) {
+    std::vector<const ggml_tensor *> out = {
+        v.normalizer_scale, v.latent_mean, v.latent_std, v.embed_w, v.embed_b,
+        v.final_norm_g, v.final_norm_b, v.final_norm_running_mean,
+        v.final_norm_running_var, v.head1_w, v.head1_b, v.head_prelu, v.head2_w,
+    };
+    for (const supertonic_vocoder_convnext_weights & c : v.convnext) {
+        collect_convnext_tensors(c, out);
+    }
+    return out;
+}
+
+int supertonic_tensor_weight_bits(const ggml_tensor * t) {
+    const int64_t block = ggml_blck_size(t->type);
+    if (block <= 0) return 0;
+    return (int) (8 * (int64_t) ggml_type_size(t->type) / block);
+}
+
+const ggml_tensor * supertonic_first_low_bit_vocoder_weight(
+        const supertonic_vocoder_weights & v,
+        const std::unordered_set<std::string> & low_bit_source_tensors) {
+    for (const ggml_tensor * t : vocoder_weight_tensors(v)) {
+        if (t && low_bit_source_tensors.count(ggml_get_name(t)) != 0) return t;
+    }
+    return nullptr;
+}
+
 // The metadata-only load only checks for the sidecar, so a fit preflight
 // stays a preflight (no MLModel is compiled or loaded).  The sidecar's own
 // resident footprint (the MLModel plus two cached window-sized MLMultiArrays)
@@ -1899,6 +1939,21 @@ static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
     if (!coreml_vocoder_sidecar_enabled()) return;
     const std::string sidecar = coreml_vocoder_sidecar_path(gguf_path);
     if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
+    if (!coreml_vocoder_low_bit_allowed()) {
+        const ggml_tensor * low_bit =
+            supertonic_first_low_bit_vocoder_weight(model.vocoder, model.low_bit_source_tensors);
+        if (low_bit) {
+            if (verbose) {
+                fprintf(stderr,
+                        "supertonic: Core ML vocoder sidecar %s skipped: vocoder weight %s is "
+                        "stored below the %d-bit floor; set SUPERTONIC_COREML_ALLOW_LOW_BIT "
+                        "to override\n",
+                        sidecar.c_str(), ggml_get_name(low_bit),
+                        kSupertonicCoremlVocoderMinWeightBits);
+            }
+            return;
+        }
+    }
     if (metadata_only) {
         model.vocoder_on_coreml = true;
         return;
@@ -2275,6 +2330,10 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 (src_it != tensor_to_source_for_alloc.end())
                     ? src_it->second
                     : std::string(name);
+
+            if (supertonic_tensor_weight_bits(src) < kSupertonicCoremlVocoderMinWeightBits) {
+                model.low_bit_source_tensors.insert(name);
+            }
 
             const ggml_type precision_dst_type = target_supertonic_storage_type(
                 decision_name, src->type, precision,
@@ -3005,6 +3064,7 @@ void free_supertonic_model(supertonic_model & model) {
     model.pretransposed_weights.clear();
     model.tensors.clear();
     model.source_tensors.clear();
+    model.low_bit_source_tensors.clear();
     model.vocoder = {};
     model.voices.clear();
     model.unicode_indexer.clear();

@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ggml-backend.h"
@@ -488,6 +489,12 @@ struct supertonic_model {
     std::unordered_map<std::string, ggml_tensor *> source_tensors;
     std::unordered_map<std::string, supertonic_voice_style> voices;
 
+    // Names of the tensors in `tensors` whose GGUF storage sits below
+    // `kSupertonicCoremlVocoderMinWeightBits`.  The loader dequantizes almost
+    // everything to F32 on the way in, so the runtime type no longer says what
+    // tier a weight came off disk at; the Core ML sidecar gate needs that.
+    std::unordered_set<std::string> low_bit_source_tensors;
+
     // Pre-transposed copies of matmul weights, materialized at load time
     // to eliminate the per-call `cont(transpose(w))` dispatch that
     // `dense_matmul_time_ggml` issues on every graph compute.  Keyed by
@@ -858,6 +865,21 @@ bool supertonic_vocoder_forward_ggml(const supertonic_model & model,
 // stack's receptive field (embed + dilated ConvNeXt depthwise chain + head
 // convs), converted from post-unpack frames to latent frames (rounded up).
 int supertonic_coreml_vocoder_context_frames(const supertonic_model & model);
+
+// Lowest weight storage width, in bits, that the Core ML vocoder sidecar may
+// stand in for.  The sidecar always carries reference-precision weights, so
+// below this floor it substitutes a different vocoder instead of accelerating
+// the one the GGUF ships: measured against the ggml vocoder it is cosine
+// 0.9994 on q8_0 but 0.9069 on q4_0.
+constexpr int kSupertonicCoremlVocoderMinWeightBits = 8;
+
+int supertonic_tensor_weight_bits(const ggml_tensor * t);
+
+// The first vocoder weight named in `low_bit_source_tensors`, or nullptr when
+// every one of them came off disk at or above the floor.
+const ggml_tensor * supertonic_first_low_bit_vocoder_weight(
+    const supertonic_vocoder_weights & v,
+    const std::unordered_set<std::string> & low_bit_source_tensors);
 
 bool supertonic_vocoder_trace_scalar(const supertonic_model & model,
                                      const float * latent,

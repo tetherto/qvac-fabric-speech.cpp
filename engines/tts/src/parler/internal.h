@@ -81,7 +81,7 @@ struct parler_dec_layer {
     ggml_tensor * cq = nullptr, * ck = nullptr, * cv = nullptr, * co = nullptr;
     ggml_tensor * ffn_norm_w = nullptr, * ffn_norm_b = nullptr;
     ggml_tensor * up = nullptr, * down = nullptr;
-    ggml_tensor * qkv = nullptr; // GPU: fused [d_model, 3*d_model] of q|k|v (one mul_mat)
+    ggml_tensor * qkv = nullptr; // fused [d_model, 3*d_model] of q|k|v (one mul_mat)
 };
 
 struct parler_dac_residual {
@@ -135,10 +135,10 @@ struct parler_model {
     ggml_tensor * embed_positions = nullptr;   // [d_model, max_position]
     std::vector<ggml_tensor *> dec_embed;      // n_codebooks tables
     std::vector<ggml_tensor *> lm_heads;       // n_codebooks heads
-    ggml_tensor * lm_head_stacked = nullptr;   // GPU: [d_model, vocab*n_codebooks] (one mul_mat)
+    ggml_tensor * lm_head_stacked = nullptr;   // [d_model, vocab*n_codebooks] (one mul_mat)
     ggml_tensor * dec_output_norm_w = nullptr, * dec_output_norm_b = nullptr;
     std::vector<parler_dec_layer> dec_layers;
-    // GPU-only fused-weight buffer (qkv per layer + stacked lm heads)
+    // fused-weight buffer (qkv per layer + stacked lm heads), every backend
     ggml_context        * ctx_fused    = nullptr;
     ggml_backend_buffer_t buffer_fused = nullptr;
     // dac
@@ -194,7 +194,7 @@ void parler_free_model(parler_model & model);
 // Sizes of the load-time buffers, filled by parler_load_gguf_metadata_only.
 struct parler_fit_measure {
     size_t weights_bytes = 0;  // ctx_w on the resolved backend (alloc+stream path)
-    size_t fused_bytes   = 0;  // GPU-only fused qkv stacks + stacked LM heads
+    size_t fused_bytes   = 0;  // fused qkv stacks + stacked LM heads (every backend)
     size_t kv_bytes      = 0;  // decoder self-KV slab at the resolved kv type
 };
 
@@ -211,6 +211,21 @@ struct parler_fit_measure {
 bool parler_load_gguf_metadata_only(const std::string & path, parler_model & model,
                                     int n_gpu_layers, parler_fit_measure & measure,
                                     std::string * error = nullptr);
+
+// Whether the loader fuses the decode projections: GPU loads, mmap-backed CPU
+// loads (the duplicated originals stay file-backed and evictable there), and
+// metadata-only measure loads.  The CPU allocate-and-stream fallback stays
+// unfused so the projections are never resident twice in anonymous memory.
+// Setting PARLER_NO_FUSED disables fusion everywhere.
+bool parler_should_fuse_decode_weights(const parler_model & model, bool measuring);
+
+// Fuse the per-layer q|k|v projections and the n_codebooks LM heads into
+// row-concatenated tensors (fewer decode dispatches; byte-exact results).
+// Exposed so the model-free fused-vs-separate parity test can exercise it on
+// a synthetic model.  A non-null `measure` sizes the fused buffer and wires
+// the pointers without filling (metadata-only loads have no weight data).
+bool parler_fuse_decode_weights(parler_model & model,
+                                parler_fit_measure * measure = nullptr);
 
 // Dual-path graph dispatch honoring the sched_dispatch contract (gf must be
 // freshly built per call; set inputs AFTER this returns true, via
@@ -244,6 +259,16 @@ bool parler_alloc_cross(parler_model & model, int T, size_t * measure_bytes = nu
 ggml_cgraph * parler_build_t5_fit_graph(const parler_model & model, int T);
 
 // ---- parler_decoder.cpp ----
+// Logits handoff for prefill/step: `view` points into the graph's own compute
+// buffer when that buffer is host memory (sampled in place, no download),
+// otherwise into `copy`, filled by one device download.  Both the pointer and
+// the data stay valid only until the next graph prepare on the same allocator,
+// and the logits processors mutate the row in place.
+struct parler_step_logits {
+    float * view = nullptr;
+    std::vector<float> copy;
+};
+
 // Prefill: prompt embeds prepended to the BOS start frame; returns logits for
 // the LAST position, [n_codebooks * dec_vocab] row-major by codebook.
 // n_past_out = prompt_len + 1.
@@ -251,14 +276,14 @@ bool parler_dec_prefill(const parler_model & model,
                         const std::vector<int32_t> & prompt_ids,
                         const std::vector<int32_t> & start_frame,
                         ggml_gallocr_t allocr, int n_threads,
-                        std::vector<float> & logits_out, int & n_past_out);
+                        parler_step_logits & logits_out, int & n_past_out);
 // One decode step: frame = n_codebooks token ids (delay-mask applied by the
 // caller), position = n_past.
 bool parler_dec_step(const parler_model & model,
                      const std::vector<int32_t> & frame,
                      int n_past,
                      ggml_gallocr_t allocr, int n_threads,
-                     std::vector<float> & logits_out);
+                     parler_step_logits & logits_out);
 
 // Fit-graph twins of the decoder graphs: build (but never run) exactly what
 // parler_dec_prefill / parler_dec_step would dispatch, so the fit projector

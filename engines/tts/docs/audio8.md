@@ -382,18 +382,21 @@ the load status: true when a sidecar next to the decoder GGUF initialised (the
 language model and the post transformer still run on `backend_name()`).
 `SynthesisResult::codec_synthesis_backend` is per call: `"ggml"`, or the
 sidecar's compute label (`coreml-all`, `coreml-gpu`, ...) when the synthesis
-stack actually ran there. The two differ whenever a loaded sidecar cannot
-serve a call -- a window that cannot carry the causal context, or a Core ML
-prediction failure -- and the engine falls back to the ggml blocks. Because
-that fallback stays possible, the memory-fit projection (`audio8-fit-params`)
+stack actually ran there. The two differ on the call in which a loaded
+sidecar fails -- a window that cannot carry the causal context, or a Core ML
+prediction failure: the engine falls back to the ggml blocks for that call and
+retires the sidecar, so every later call goes straight to ggml and
+`codec_on_coreml()` turns false, instead of paying a failed Core ML attempt
+ahead of each full ggml pass. Because that fallback stays possible, the memory-fit projection (`audio8-fit-params`)
 prices the ggml synthesis arena whether or not a sidecar is present; with a
 working sidecar it over-reports by that arena rather than under-reporting the
 fallback. `test-audio8-codec-coreml-parity` covers all of it: an absent
 sidecar under `AUDIO8_COREML_STRICT`, a sidecar directory that is not a model
 (load status false, ggml synthesis), and a sidecar exported at a window that
-cannot carry the context (`--window 8`; loaded, falls back bit-exactly to the
-ggml decode, fails under `AUDIO8_COREML_STRICT`), each also through the public
-`Engine` with a synthetic language model.
+cannot carry the context (`--window 8`; loaded, fails under
+`AUDIO8_COREML_STRICT`, falls back bit-exactly to the ggml decode and is
+retired, so the next call reports ggml with no sidecar attached), each also
+through the public `Engine` with a synthetic language model.
 
 ### Engine notes
 

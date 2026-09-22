@@ -239,12 +239,11 @@ jobs:
           cmake --build ggml-src/build -j4
           cmake --install ggml-src/build
 
-      # QVAC-24626: TTS_CPP_COREML defaults OFF (engines/tts/CMakeLists.txt:29)
-      # and gates the tts-cpp.coreml object library, so without it the two
-      # coreml-parity binaries below build but skip with exit 77 - which the
-      # steps treat as failure, correctly. This lane is the only one left that
-      # runs them: #228 moved the Core ML block here but left the conditional
-      # flag behind on build-test, whose macOS row this PR drops.
+      # TTS_CPP_COREML: this lane builds the Core ML sidecar wrappers (Audio8
+      # codec, Supertonic vocoder) and runs their parity tests against
+      # exported fixtures below, so the feature is functionally covered on
+      # every PR, not just compiled. The parity binaries exit 77 when built
+      # without it, which fails their steps on purpose.
       - name: Configure
         run: |
           cmake -S engines/tts -B build \

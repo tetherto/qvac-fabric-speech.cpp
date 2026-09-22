@@ -242,7 +242,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     ::tts_cpp::detail::ensure_backends_loaded();
     // Pixel 9-class Mali GPUs are validated through Vulkan for the complete
     // Parler pipeline, including T5, autoregressive decode, and DAC synthesis.
-    // Parler's GPU path (FA + fused weights + DAC phase-GEMM) is enabled only on
+    // Parler's GPU path (FA + DAC phase-GEMM) is enabled only on
     // backends it has been validated against end-to-end (reference-fixture parity
     // per stage, plus greedy-token identity); anything else falls back to CPU.
     // Metal was validated in PR #103, Vulkan and OpenCL (Adreno) since, and CUDA
@@ -460,84 +460,9 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
         }
     }
 
-    // ---- GPU: fused weights (fewer N=1 decode dispatches; byte-exact row concat) ----
-    // qkv[l] = q|k|v stacked on the output dim -> one mul_mat/layer; lm_head_stacked
-    // = the n_codebooks heads stacked -> one mul_mat/step. Gated on GPU; the CPU path
-    // keeps the separate weights so the reference parity tests stay byte-identical.
-    if (model.on_gpu) {
-        const int nl = hp.dec_n_layer, nq = hp.n_codebooks;
-        const int64_t d = hp.dec_d_model, vocab = model.lm_heads[0]->ne[1];
-        bool fuse_qkv = true;
-        for (int i = 0; i < nl; ++i) {
-            const auto & l = model.dec_layers[i];
-            if (l.q->type != l.k->type || l.q->type != l.v->type ||
-                l.q->ne[0] != d || l.q->ne[1] != d ||
-                l.k->ne[0] != d || l.k->ne[1] != d ||
-                l.v->ne[0] != d || l.v->ne[1] != d) { fuse_qkv = false; break; }
-        }
-        bool fuse_heads = true;
-        for (int k = 0; k < nq; ++k) {
-            if (model.lm_heads[k]->type != model.lm_heads[0]->type ||
-                model.lm_heads[k]->ne[0] != d || model.lm_heads[k]->ne[1] != vocab) { fuse_heads = false; break; }
-        }
-        // Skip the fused context entirely when nothing fuses: an empty ctx makes
-        // ggml_backend_alloc_ctx_tensors return NULL (0 buffers) and abort the load.
-        if (fuse_qkv || fuse_heads) {
-            ggml_init_params ip = { (size_t)(nl + 2) * ggml_tensor_overhead(), nullptr, /*no_alloc=*/ true };
-            model.ctx_fused = ggml_init(ip);
-            if (!model.ctx_fused) return fail("ggml_init(ctx_fused) failed");
-            std::vector<ggml_tensor *> qkv(nl, nullptr);
-            if (fuse_qkv) {
-                for (int i = 0; i < nl; ++i)
-                    qkv[i] = ggml_new_tensor_2d(model.ctx_fused, model.dec_layers[i].q->type, d, 3 * d);
-            }
-            ggml_tensor * heads = fuse_heads
-                ? ggml_new_tensor_2d(model.ctx_fused, model.lm_heads[0]->type, d, vocab * nq) : nullptr;
-            if (measure) {
-                // Size the fused stack and wire the pointers so graph builds
-                // take the fused path exactly as a real GPU load would; the
-                // row-concat fill below needs real weight data, so skip it.
-                measure->fused_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-                    model.ctx_fused, ggml_backend_get_default_buffer_type(model.backend));
-                mark_externally_allocated(model.ctx_fused);
-                if (fuse_qkv) {
-                    for (int i = 0; i < nl; ++i) model.dec_layers[i].qkv = qkv[i];
-                }
-                if (fuse_heads) model.lm_head_stacked = heads;
-                gguf_free(g);
-                ggml_free(ctx_meta);
-                return true;
-            }
-            model.buffer_fused = ggml_backend_alloc_ctx_tensors(model.ctx_fused, model.backend);
-            if (!model.buffer_fused) return fail("failed to allocate fused-weight buffer");
-            // Assemble the row concat in host memory and upload it in one whole-tensor
-            // call: backends that repack quantized weights on set_tensor (OpenCL's
-            // struct-of-arrays) rebuild from the entire tensor and ignore a byte window.
-            std::vector<uint8_t> tmp;
-            auto fuse_rows = [&](ggml_tensor * dst, const ggml_tensor * const * parts, int n) {
-                tmp.resize(ggml_nbytes(dst));
-                size_t off = 0;
-                for (int p = 0; p < n; ++p) {
-                    const size_t nb = ggml_nbytes(parts[p]);
-                    ggml_backend_tensor_get(parts[p], tmp.data() + off, 0, nb);
-                    off += nb;
-                }
-                GGML_ASSERT(off == tmp.size() && "fused weight size mismatch");
-                ggml_backend_tensor_set(dst, tmp.data(), 0, tmp.size());
-            };
-            if (fuse_qkv) {
-                for (int i = 0; i < nl; ++i) {
-                    auto & l = model.dec_layers[i];
-                    const ggml_tensor * parts[3] = { l.q, l.k, l.v };
-                    fuse_rows(qkv[i], parts, 3);
-                    l.qkv = qkv[i];
-                }
-            }
-            if (fuse_heads) {
-                fuse_rows(heads, model.lm_heads.data(), nq);
-                model.lm_head_stacked = heads;
-            }
-        }
+    if (parler_should_fuse_decode_weights(model, measure != nullptr) &&
+        !parler_fuse_decode_weights(model, measure)) {
+        return fail("failed to fuse decode projection weights");
     }
 
     gguf_free(g);
@@ -575,6 +500,127 @@ void parler_free_model(parler_model & model) {
     model.cross_k.clear();
     model.cross_v_t.clear();
     model.cross_len = 0;
+}
+
+static bool qkv_projections_fusable(const parler_model & model) {
+    const int64_t d = model.hparams.dec_d_model;
+    for (const auto & l : model.dec_layers) {
+        if (l.q->type != l.k->type || l.q->type != l.v->type ||
+            l.q->ne[0] != d || l.q->ne[1] != d ||
+            l.k->ne[0] != d || l.k->ne[1] != d ||
+            l.v->ne[0] != d || l.v->ne[1] != d) return false;
+    }
+    return true;
+}
+
+static bool lm_heads_fusable(const parler_model & model) {
+    const int64_t d = model.hparams.dec_d_model;
+    const int64_t vocab = model.lm_heads[0]->ne[1];
+    for (const ggml_tensor * h : model.lm_heads) {
+        if (h->type != model.lm_heads[0]->type ||
+            h->ne[0] != d || h->ne[1] != vocab) return false;
+    }
+    return true;
+}
+
+static void create_fused_tensors(parler_model & model, bool fuse_qkv, bool fuse_heads,
+                                 std::vector<ggml_tensor *> & qkv, ggml_tensor *& heads) {
+    const parler_hparams & hp = model.hparams;
+    const int64_t d = hp.dec_d_model;
+    qkv.assign((size_t) hp.dec_n_layer, nullptr);
+    if (fuse_qkv) {
+        for (int i = 0; i < hp.dec_n_layer; ++i) {
+            qkv[i] = ggml_new_tensor_2d(model.ctx_fused, model.dec_layers[i].q->type, d, 3 * d);
+        }
+    }
+    heads = fuse_heads
+        ? ggml_new_tensor_2d(model.ctx_fused, model.lm_heads[0]->type, d,
+                             model.lm_heads[0]->ne[1] * hp.n_codebooks)
+        : nullptr;
+}
+
+static void size_fused_buffer(parler_model & model, parler_fit_measure & measure) {
+    measure.fused_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+        model.ctx_fused, ggml_backend_get_default_buffer_type(model.backend));
+    mark_externally_allocated(model.ctx_fused);
+}
+
+// Assemble the row concat in host memory and upload it in one whole-tensor
+// call: backends that repack quantized weights on set_tensor (OpenCL's
+// struct-of-arrays) rebuild from the entire tensor and ignore a byte window.
+static void concat_weight_rows(ggml_tensor * dst, const ggml_tensor * const * parts,
+                               int n, std::vector<uint8_t> & tmp) {
+    tmp.resize(ggml_nbytes(dst));
+    size_t off = 0;
+    for (int p = 0; p < n; ++p) {
+        const size_t nb = ggml_nbytes(parts[p]);
+        ggml_backend_tensor_get(parts[p], tmp.data() + off, 0, nb);
+        off += nb;
+    }
+    GGML_ASSERT(off == tmp.size() && "fused weight size mismatch");
+    ggml_backend_tensor_set(dst, tmp.data(), 0, tmp.size());
+}
+
+static void fill_fused_tensors(parler_model & model,
+                               const std::vector<ggml_tensor *> & qkv, ggml_tensor * heads) {
+    std::vector<uint8_t> tmp;
+    for (size_t i = 0; i < qkv.size(); ++i) {
+        if (!qkv[i]) continue;
+        const parler_dec_layer & l = model.dec_layers[i];
+        const ggml_tensor * parts[3] = { l.q, l.k, l.v };
+        concat_weight_rows(qkv[i], parts, 3, tmp);
+    }
+    if (heads) {
+        concat_weight_rows(heads, model.lm_heads.data(), (int) model.lm_heads.size(), tmp);
+    }
+}
+
+static void wire_fused_pointers(parler_model & model,
+                                const std::vector<ggml_tensor *> & qkv, ggml_tensor * heads) {
+    for (size_t i = 0; i < qkv.size(); ++i) {
+        if (qkv[i]) model.dec_layers[i].qkv = qkv[i];
+    }
+    if (heads) model.lm_head_stacked = heads;
+}
+
+bool parler_should_fuse_decode_weights(const parler_model & model, bool measuring) {
+    if (std::getenv("PARLER_NO_FUSED") != nullptr) return false;
+    // The CPU allocate-and-stream fallback would hold the projections twice in
+    // anonymous memory. mmap'd originals are file-backed and evictable once the
+    // fused copies exist, and GPU loads always uploaded a device copy, so those
+    // paths fuse; measure mode prices the mapped path it stands in for.
+    return model.on_gpu || model.map_buf != nullptr || measuring;
+}
+
+bool parler_fuse_decode_weights(parler_model & model, parler_fit_measure * measure) {
+    const parler_hparams & hp = model.hparams;
+    if (hp.dec_n_layer <= 0 || hp.n_codebooks <= 0 ||
+        model.lm_heads.empty() || !model.lm_heads[0]) {
+        return true;
+    }
+    const bool fuse_qkv   = qkv_projections_fusable(model);
+    const bool fuse_heads = lm_heads_fusable(model);
+    // Skip the fused context entirely when nothing fuses: an empty ctx makes
+    // ggml_backend_alloc_ctx_tensors return NULL (0 buffers) and abort the load.
+    if (!fuse_qkv && !fuse_heads) return true;
+
+    ggml_init_params ip = { (size_t) (hp.dec_n_layer + 2) * ggml_tensor_overhead(),
+                            nullptr, /*no_alloc=*/ true };
+    model.ctx_fused = ggml_init(ip);
+    if (!model.ctx_fused) return false;
+    std::vector<ggml_tensor *> qkv;
+    ggml_tensor * heads = nullptr;
+    create_fused_tensors(model, fuse_qkv, fuse_heads, qkv, heads);
+    if (measure) {
+        size_fused_buffer(model, *measure);
+        wire_fused_pointers(model, qkv, heads);
+        return true;
+    }
+    model.buffer_fused = ggml_backend_alloc_ctx_tensors(model.ctx_fused, model.backend);
+    if (!model.buffer_fused) return false;
+    fill_fused_tensors(model, qkv, heads);
+    wire_fused_pointers(model, qkv, heads);
+    return true;
 }
 
 bool parler_graph_prepare(const parler_model & model, ggml_cgraph * gf,
