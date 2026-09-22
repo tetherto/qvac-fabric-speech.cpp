@@ -93,18 +93,28 @@ std::vector<int32_t> sequential_positions(int64_t n) {
     return positions;
 }
 
-std::vector<float> causal_mask(int64_t n, int context) {
-    std::vector<float> mask(n * n, -std::numeric_limits<float>::infinity());
-    for (int64_t iq = 0; iq < n; ++iq) {
-        for (int64_t ik = 0; ik <= iq; ++ik) {
-            if (context > 0 && iq - ik >= context) {
-                continue;
+std::vector<float> banded_causal_mask(int64_t query_start, int64_t query_count,
+                                      int64_t key_start, int64_t key_count, int context) {
+    std::vector<float> mask(query_count * key_count, -std::numeric_limits<float>::infinity());
+    for (int64_t r = 0; r < query_count; ++r) {
+        const int64_t iq = query_start + r;
+        for (int64_t c = 0; c < key_count; ++c) {
+            const int64_t ik = key_start + c;
+            if (ik <= iq && (context <= 0 || iq - ik < context)) {
+                mask[r * key_count + c] = 0.0f;
             }
-            mask[iq * n + ik] = 0.0f;
         }
     }
     return mask;
 }
+
+struct AttentionBand {
+    int64_t query_start = 0;
+    int64_t query_count = 0;
+    int64_t key_start = 0;
+    int64_t key_count = 0;
+    ggml_tensor * mask = nullptr;
+};
 
 int64_t align_up(int64_t value, int64_t multiple) {
     if (multiple <= 1) {
@@ -214,10 +224,13 @@ struct Codec::Impl {
     }
 
     void validate_codebooks() {
-        require_matrix(find_tensor("quantizer.input_proj.weight"),
-                quantizer.input_dim, quantizer.rvq_dim);
-        require_matrix(find_tensor("quantizer.output_proj.weight"),
-                quantizer.rvq_dim, quantizer.output_dim);
+        if (encoder) {
+            require_matrix(require_tensor("quantizer.input_proj.weight"),
+                    quantizer.input_dim, quantizer.rvq_dim);
+        } else {
+            require_matrix(require_tensor("quantizer.output_proj.weight"),
+                    quantizer.rvq_dim, quantizer.output_dim);
+        }
         for (int iq = 0; iq < quantizer.num_quantizers; ++iq) {
             const ggml_tensor * codebook =
                     require_tensor(quantizer_tensor_name(iq, "codebook.weight"));
@@ -226,10 +239,40 @@ struct Codec::Impl {
                 fail("codebook " + std::to_string(iq) +
                      " does not match the declared quantizer geometry");
             }
-            require_matrix(find_tensor(quantizer_tensor_name(iq, "in_proj.weight")),
-                    quantizer.rvq_dim, quantizer.codebook_dim);
-            require_matrix(find_tensor(quantizer_tensor_name(iq, "out_proj.weight")),
+            if (encoder) {
+                require_matrix(require_tensor(quantizer_tensor_name(iq, "in_proj.weight")),
+                        quantizer.rvq_dim, quantizer.codebook_dim);
+            }
+            require_matrix(require_tensor(quantizer_tensor_name(iq, "out_proj.weight")),
                     quantizer.codebook_dim, quantizer.rvq_dim);
+        }
+    }
+
+    void validate_module_chain() {
+        int64_t channels = encoder ? 1 : (int64_t) quantizer.output_dim;
+        for (size_t im = 0; im < modules.size(); ++im) {
+            const Module & module = modules[im];
+            if (!module.is_transformer) {
+                if (encoder) {
+                    channels *= module.patch_size;
+                } else {
+                    if (channels % module.patch_size != 0) {
+                        fail("module " + std::to_string(im) +
+                             " patch size does not divide its input channels");
+                    }
+                    channels /= module.patch_size;
+                }
+                continue;
+            }
+            if (module.transformer.input_dimension != channels) {
+                fail("module " + std::to_string(im) +
+                     " input dimension does not match the chain");
+            }
+            channels = module.transformer.output_dimension;
+        }
+        const int64_t expected = encoder ? (int64_t) quantizer.input_dim : 1;
+        if (channels != expected) {
+            fail("module chain does not end at the expected channel count");
         }
     }
 
@@ -317,6 +360,11 @@ struct Codec::Impl {
 
     void matrix_dims(const ggml_tensor * tensor, int64_t & in, int64_t & out) const {
         const int n_dims = ggml_n_dims(tensor);
+        if (n_dims <= 2) {
+            in  = tensor->ne[0];
+            out = tensor->ne[1];
+            return;
+        }
         if (n_dims == 3 && tensor->ne[0] == 1) {
             in  = tensor->ne[1];
             out = tensor->ne[2];
@@ -327,8 +375,7 @@ struct Codec::Impl {
             out = tensor->ne[3];
             return;
         }
-        in  = tensor->ne[0];
-        out = tensor->ne[1];
+        fail(std::string("unsupported projection rank: ") + ggml_get_name(tensor));
     }
 
     void require_matrix(const ggml_tensor * tensor, int64_t in, int64_t out) const {
@@ -440,6 +487,7 @@ struct Codec::Impl {
         init_backend(use_gpu);
         duplicate_metadata_tensors();
         read_modules();
+        validate_module_chain();
         validate_codebooks();
         if (!encoder) {
             downsample = decoder_upsample_factor();
@@ -544,9 +592,38 @@ struct Codec::Impl {
         return ggml_div(graph_ctx, cur, ggml_repeat(graph_ctx, norm, cur));
     }
 
+    ggml_tensor * time_slice(ggml_tensor * heads_by_time, int64_t first, int64_t count) {
+        return ggml_view_3d(graph_ctx, heads_by_time, heads_by_time->ne[0], heads_by_time->ne[1],
+                count, heads_by_time->nb[1], heads_by_time->nb[2], first * heads_by_time->nb[2]);
+    }
+
+    ggml_tensor * band_attention(ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+                                 const AttentionBand & band, int d_head) {
+        ggml_tensor * q_band = ggml_permute(graph_ctx,
+                time_slice(q, band.query_start, band.query_count), 0, 2, 1, 3);
+        ggml_tensor * k_band = ggml_permute(graph_ctx,
+                time_slice(k, band.key_start, band.key_count), 0, 2, 1, 3);
+        ggml_tensor * v_band = ggml_cont(graph_ctx, ggml_permute(graph_ctx,
+                time_slice(v, band.key_start, band.key_count), 1, 2, 0, 3));
+        ggml_tensor * scores = ggml_mul_mat(graph_ctx, k_band, q_band);
+        scores = ggml_soft_max_ext(graph_ctx, scores, band.mask,
+                1.0f / std::sqrt((float) d_head), 0.0f);
+        return ggml_mul_mat(graph_ctx, v_band, scores);
+    }
+
+    ggml_tensor * banded_attention(ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+                                   const std::vector<AttentionBand> & bands, int d_head) {
+        ggml_tensor * attended = nullptr;
+        for (const AttentionBand & band : bands) {
+            ggml_tensor * piece = band_attention(q, k, v, band, d_head);
+            attended = attended ? ggml_concat(graph_ctx, attended, piece, 1) : piece;
+        }
+        return attended;
+    }
+
     ggml_tensor * attention(const TransformerLayer & layer, ggml_tensor * cur,
                             const TransformerBlock & block, int64_t frames,
-                            ggml_tensor * positions, ggml_tensor * mask) {
+                            ggml_tensor * positions, const std::vector<AttentionBand> & bands) {
         const int d_head = block.d_model / block.num_heads;
         ggml_tensor * qkv = ggml_mul_mat(graph_ctx, as_matrix(layer.attn_qkv), cur);
         const size_t head_stride = ggml_row_size(qkv->type, d_head);
@@ -560,12 +637,7 @@ struct Codec::Impl {
                 block.max_period, ROPE_FREQ_SCALE_NEUTRAL, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(graph_ctx, k, positions, nullptr, d_head, 0, 0,
                 block.max_period, ROPE_FREQ_SCALE_NEUTRAL, 0.0f, 1.0f, 0.0f, 0.0f);
-        q = ggml_permute(graph_ctx, q, 0, 2, 1, 3);
-        k = ggml_permute(graph_ctx, k, 0, 2, 1, 3);
-        v = ggml_cont(graph_ctx, ggml_permute(graph_ctx, v, 1, 2, 0, 3));
-        ggml_tensor * scores = ggml_mul_mat(graph_ctx, k, q);
-        scores = ggml_soft_max_ext(graph_ctx, scores, mask, 1.0f / std::sqrt((float) d_head), 0.0f);
-        ggml_tensor * attended = ggml_mul_mat(graph_ctx, v, scores);
+        ggml_tensor * attended = banded_attention(q, k, v, bands, d_head);
         attended = ggml_permute(graph_ctx, attended, 0, 2, 1, 3);
         attended = ggml_cont_2d(graph_ctx, attended,
                 attended->ne[0] * attended->ne[1], attended->ne[2] * attended->ne[3]);
@@ -574,9 +646,9 @@ struct Codec::Impl {
 
     ggml_tensor * transformer_layer(const TransformerLayer & layer, ggml_tensor * cur,
                                     const TransformerBlock & block, int64_t frames,
-                                    ggml_tensor * positions, ggml_tensor * mask) {
+                                    ggml_tensor * positions, const std::vector<AttentionBand> & bands) {
         ggml_tensor * attended = attention(layer, layer_norm(cur, layer.norm1_w, layer.norm1_b),
-                block, frames, positions, mask);
+                block, frames, positions, bands);
         if (layer.scale1 != nullptr) {
             attended = ggml_mul(graph_ctx, attended, as_f32(layer.scale1));
         }
@@ -591,14 +663,33 @@ struct Codec::Impl {
         return ggml_add(graph_ctx, cur, ff);
     }
 
+    std::vector<AttentionBand> plan_attention_bands(const TransformerBlock & block, int64_t frames) {
+        std::vector<AttentionBand> bands;
+        const int64_t band_rows = block.context > 0 && frames > 2 * (int64_t) block.context
+                ? (int64_t) block.context : frames;
+        for (int64_t query_start = 0; query_start < frames; query_start += band_rows) {
+            AttentionBand band;
+            band.query_start = query_start;
+            band.query_count = std::min(band_rows, frames - query_start);
+            band.key_start = block.context > 0
+                    ? std::max<int64_t>(0, query_start - (block.context - 1)) : 0;
+            band.key_count = query_start + band.query_count - band.key_start;
+            band.mask = input_f32(banded_causal_mask(band.query_start, band.query_count,
+                    band.key_start, band.key_count, block.context),
+                    band.key_count, band.query_count);
+            bands.push_back(band);
+        }
+        return bands;
+    }
+
     ggml_tensor * transformer_block(const TransformerBlock & block, ggml_tensor * cur, int64_t frames) {
         ggml_tensor * positions = input_i32(sequential_positions(frames));
-        ggml_tensor * mask = input_f32(causal_mask(frames, block.context), frames, frames);
+        const std::vector<AttentionBand> bands = plan_attention_bands(block, frames);
         if (block.input_proj != nullptr) {
             cur = ggml_mul_mat(graph_ctx, as_matrix(block.input_proj), cur);
         }
         for (const TransformerLayer & layer : block.layers) {
-            cur = transformer_layer(layer, cur, block, frames, positions, mask);
+            cur = transformer_layer(layer, cur, block, frames, positions, bands);
         }
         if (block.output_proj != nullptr) {
             cur = ggml_mul_mat(graph_ctx, as_matrix(block.output_proj), cur);
