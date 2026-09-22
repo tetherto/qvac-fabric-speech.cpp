@@ -132,6 +132,9 @@ struct Engine::Impl {
         if (options.max_new_tokens < 1) {
             fail("max_new_tokens must be positive");
         }
+        if (options.duration_tokens < 0 || options.duration_tokens > options.max_new_tokens) {
+            fail("duration_tokens must be within 0..max_new_tokens");
+        }
         sampling.text_temperature  = options.text_temperature;
         sampling.text_top_p        = options.text_top_p;
         sampling.text_top_k        = options.text_top_k;
@@ -284,7 +287,7 @@ struct Engine::Impl {
 
     std::vector<DelayRow> build_checked_prompt(const std::string & text) {
         const std::vector<DelayRow> prompt = frontend->build_prompt(backbone->config(), text,
-                options.language, reference_codes, reference_frames);
+                options.language, options.duration_tokens, reference_codes, reference_frames);
         if ((int) prompt.size() + options.max_new_tokens + CONTEXT_HEADROOM > backbone->context()) {
             fail("prompt plus max_new_tokens exceeds the context; raise the context option");
         }

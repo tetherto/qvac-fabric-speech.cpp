@@ -20,7 +20,7 @@ using TextEncoder = std::function<std::vector<int32_t>(const std::string &)>;
 
 std::vector<DelayRow> build_prompt_rows(const DelayConfig & config, const PromptTokens & tokens,
                                         const TextEncoder & encode, const std::string & text,
-                                        const std::string & language,
+                                        const std::string & language, int duration_tokens,
                                         const std::vector<int32_t> & reference_codes,
                                         int reference_frames);
 
@@ -39,7 +39,7 @@ public:
     const PromptTokens & tokens() const;
     std::vector<int32_t> encode(const std::string & text) const;
     std::vector<DelayRow> build_prompt(const DelayConfig & config, const std::string & text,
-                                       const std::string & language,
+                                       const std::string & language, int duration_tokens,
                                        const std::vector<int32_t> & reference_codes,
                                        int reference_frames) const;
 

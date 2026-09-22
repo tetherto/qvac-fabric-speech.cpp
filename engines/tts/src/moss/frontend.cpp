@@ -17,12 +17,16 @@ constexpr const char * AUDIO_PLACEHOLDER = "<|audio|>";
     throw std::runtime_error("moss frontend: " + message);
 }
 
+std::string tokens_field(int duration_tokens) {
+    return duration_tokens > 0 ? std::to_string(duration_tokens) : "None";
+}
+
 std::string user_instruction(const std::string & reference, const std::string & language,
-                             const std::string & text) {
+                             const std::string & text, int duration_tokens) {
     return "<user_inst>\n"
            "- Reference(s):\n" + reference + "\n"
            "- Instruction:\nNone\n"
-           "- Tokens:\nNone\n"
+           "- Tokens:\n" + tokens_field(duration_tokens) + "\n"
            "- Quality:\nNone\n"
            "- Sound Event:\nNone\n"
            "- Ambient Sound:\nNone\n"
@@ -56,7 +60,7 @@ void fill_reference_rows(std::vector<DelayRow> & rows, int64_t offset,
 
 std::vector<DelayRow> build_prompt_rows(const DelayConfig & config, const PromptTokens & tokens,
                                         const TextEncoder & encode, const std::string & text,
-                                        const std::string & language,
+                                        const std::string & language, int duration_tokens,
                                         const std::vector<int32_t> & reference_codes,
                                         int reference_frames) {
     const bool has_reference = reference_frames > 0;
@@ -67,7 +71,7 @@ std::vector<DelayRow> build_prompt_rows(const DelayConfig & config, const Prompt
 
     const std::string reference_field = has_reference ? "[S1]:\n" + std::string(AUDIO_PLACEHOLDER)
                                                       : "None";
-    const std::string content = user_instruction(reference_field, language, text);
+    const std::string content = user_instruction(reference_field, language, text, duration_tokens);
 
     std::vector<int32_t> text_ids;
     std::vector<int32_t> delayed_reference;
@@ -170,12 +174,12 @@ std::vector<int32_t> Frontend::encode(const std::string & text) const {
 }
 
 std::vector<DelayRow> Frontend::build_prompt(const DelayConfig & config, const std::string & text,
-                                             const std::string & language,
+                                             const std::string & language, int duration_tokens,
                                              const std::vector<int32_t> & reference_codes,
                                              int reference_frames) const {
     return build_prompt_rows(config, impl_->tokens,
             [this](const std::string & span) { return impl_->encode(span); },
-            text, language, reference_codes, reference_frames);
+            text, language, duration_tokens, reference_codes, reference_frames);
 }
 
 } // namespace tts_cpp::moss::detail

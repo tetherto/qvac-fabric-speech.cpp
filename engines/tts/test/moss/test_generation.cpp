@@ -273,6 +273,33 @@ std::vector<int32_t> fake_encode(const std::string & span) {
     return ids;
 }
 
+void test_duration_tokens_field() {
+    const DelayConfig config = test_config();
+    PromptTokens tokens;
+    tokens.pad = PAD_TOKEN;
+    tokens.im_start = 2;
+    tokens.im_end = 3;
+    std::string captured;
+    const TextEncoder recorder = [&captured](const std::string & span) {
+        captured += span;
+        return std::vector<int32_t>{(int32_t) (span.size() % 90)};
+    };
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 0, {}, 0);
+    check(captured.find("- Tokens:\nNone\n") != std::string::npos,
+            "free-length prompts carry Tokens: None");
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 38, {}, 0);
+    check(captured.find("- Tokens:\n38\n") != std::string::npos,
+            "duration_tokens lands as the Tokens field");
+    check(captured.find("[pause") == std::string::npos,
+            "the template adds no pause markers of its own");
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola [pause 2.0s] mundo", "es", 0, {}, 0);
+    check(captured.find("- Text:\nhola [pause 2.0s] mundo\n") != std::string::npos,
+            "inline pause markers pass through the text field untouched");
+}
+
 void test_prompt_rows() {
     const DelayConfig config = test_config();
     PromptTokens tokens;
@@ -281,7 +308,7 @@ void test_prompt_rows() {
     tokens.im_end = 3;
 
     const std::vector<DelayRow> plain = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", {}, 0);
+            "hola", "es", 0, {}, 0);
     check(plain.size() > 4, "plain prompt has rows");
     check(plain.front().text == tokens.im_start, "prompt opens with im_start");
     check(plain.back().text == config.audio_start_token_id, "prompt ends with the audio seed row");
@@ -300,7 +327,7 @@ void test_prompt_rows() {
         reference_codes[i] = (int32_t) (i % 7);
     }
     const std::vector<DelayRow> cloned = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", reference_codes, reference_frames);
+            "hola", "es", 0, reference_codes, reference_frames);
     int slot_rows = 0;
     int rows_with_codes = 0;
     for (const DelayRow & row : cloned) {
@@ -333,6 +360,7 @@ int main() {
     test_early_stop_masks();
     test_incremental_de_delay();
     test_segment_extraction();
+    test_duration_tokens_field();
     test_prompt_rows();
     if (failures == 0) {
         std::printf("moss generation conformance: OK\n");

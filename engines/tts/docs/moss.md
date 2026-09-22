@@ -87,7 +87,12 @@ build/moss-cli --backbone moss-tts-delay-f16.gguf \
 # on the GPU: same command plus --gpu
 ```
 
-`--language` defaults to `zh`, matching the reference pipeline. Sampling
+`--language` defaults to `zh`, matching the reference pipeline. The speech
+is directable: `[pause 2.0s]` markers inside the text insert silences of
+roughly the requested length, Pinyin (`ni3 hao3`) and IPA (`/həloʊ/`) notation
+inline in the text steer pronunciation, and `--duration-tokens N` asks the
+model for a target length of N codec frames (12.5 per second; 0 keeps the
+length free). Sampling
 follows the reference defaults — text temperature 1.5 / top-k 50, audio
 temperature 1.7 / top-p 0.8 / top-k 25, repetition penalty 1.0 over the
 audio channels, seed 1234 — and every knob is exposed as a flag
