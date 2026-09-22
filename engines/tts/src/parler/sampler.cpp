@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
-#include <numeric>
 
 namespace tts_cpp {
 namespace parler {
@@ -11,70 +11,123 @@ namespace detail {
 
 namespace {
 
-int32_t sample_row(const float * row, int vocab, const parler_sampling_params & p,
-                   std::mt19937 & rng) {
-    if (p.greedy) {
-        int best = 0;
-        for (int i = 1; i < vocab; ++i) {
-            if (row[i] > row[best]) best = i;
-        }
-        return best;
+int32_t argmax_row(const float * row, int vocab) {
+    int best = 0;
+    for (int i = 1; i < vocab; ++i) {
+        if (row[i] > row[best]) best = i;
     }
+    return best;
+}
 
-    std::vector<float> l(row, row + vocab);
-    if (p.temperature > 0.0f && p.temperature != 1.0f) {
-        for (float & v : l) v /= p.temperature;
+void scale_row(const float * row, int vocab, float temperature,
+               std::vector<float> & scaled) {
+    scaled.resize((size_t) vocab);
+    if (temperature > 0.0f && temperature != 1.0f) {
+        for (int i = 0; i < vocab; ++i) scaled[i] = row[i] / temperature;
+    } else {
+        std::copy(row, row + vocab, scaled.begin());
     }
+}
+
+float top_k_threshold(const std::vector<float> & scaled, int top_k,
+                      std::vector<float> & work) {
+    work = scaled;
+    std::nth_element(work.begin(), work.begin() + (top_k - 1), work.end(),
+                     std::greater<float>());
+    return work[top_k - 1];
+}
+
+// Every id at or above the threshold survives, so threshold ties keep more
+// than top_k candidates -- exactly like masking below the nth_element value.
+void collect_candidates(const std::vector<float> & scaled, float thresh,
+                        std::vector<int> & cand) {
+    cand.clear();
+    for (int i = 0; i < (int) scaled.size(); ++i) {
+        if (scaled[i] >= thresh) cand.push_back(i);
+    }
+}
+
+void sort_candidates_by_logit_descending(const std::vector<float> & scaled,
+                                         std::vector<int> & cand) {
+    std::sort(cand.begin(), cand.end(),
+              [&](int a, int b) { return scaled[a] > scaled[b]; });
+}
+
+float max_candidate_logit(const std::vector<float> & scaled, const std::vector<int> & cand) {
+    float max_l = -std::numeric_limits<float>::infinity();
+    for (int i : cand) max_l = std::max(max_l, scaled[i]);
+    return max_l;
+}
+
+// Numerators of softmax(scaled[cand] - max_l); masked (-inf) candidates get
+// probability zero and are excluded from the returned denominator.
+double softmax_numerators(const std::vector<float> & scaled, const std::vector<int> & cand,
+                          float max_l, std::vector<double> & probs) {
+    probs.assign(cand.size(), 0.0);
+    double denom = 0.0;
+    for (size_t j = 0; j < cand.size(); ++j) {
+        const float v = scaled[cand[j]];
+        if (std::isinf(v) && v < 0) continue;
+        probs[j] = std::exp((double) v - max_l);
+        denom += probs[j];
+    }
+    return denom;
+}
+
+// HF top-p cut: the smallest descending prefix whose mass exceeds top_p.
+size_t nucleus_keep_count(const std::vector<double> & probs, double denom, float top_p) {
+    double cum = 0.0;
+    for (size_t j = 0; j < probs.size(); ++j) {
+        cum += probs[j] / denom;
+        if (cum > top_p) return j + 1;
+    }
+    return probs.size();
+}
+
+int32_t pick_by_cumulative(const std::vector<int> & cand,
+                           const std::vector<double> & probs, double r) {
+    double cum = 0.0;
+    for (size_t j = 0; j < cand.size(); ++j) {
+        cum += probs[j];
+        if (r <= cum) return cand[j];
+    }
+    return cand.back();
+}
+
+// Restores ascending id order afterwards so the multinomial walk sums
+// probabilities in the same order as a full-vocabulary pass.
+void shrink_to_nucleus(const std::vector<float> & scaled, float top_p,
+                       std::vector<int> & cand, std::vector<double> & probs) {
+    sort_candidates_by_logit_descending(scaled, cand);
+    const double denom = softmax_numerators(scaled, cand, scaled[cand[0]], probs);
+    cand.resize(nucleus_keep_count(probs, denom, top_p));
+    std::sort(cand.begin(), cand.end());
+}
+
+// softmax + multinomial over the candidates, one uniform draw per row.
+int32_t draw_from_candidates(const std::vector<float> & scaled,
+                             const std::vector<int> & cand,
+                             std::vector<double> & probs, std::mt19937 & rng) {
+    const float max_l = max_candidate_logit(scaled, cand);
+    const double denom = softmax_numerators(scaled, cand, max_l, probs);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    return pick_by_cumulative(cand, probs, dist(rng) * denom);
+}
+
+int32_t sample_row(const float * row, int vocab, const parler_sampling_params & p,
+                   std::mt19937 & rng, parler_sampler_scratch & s) {
+    if (p.greedy) return argmax_row(row, vocab);
+
+    scale_row(row, vocab, p.temperature, s.scaled);
     if (p.top_k > 0 && p.top_k < vocab) {
-        std::vector<float> sorted(l);
-        std::nth_element(sorted.begin(), sorted.begin() + (p.top_k - 1), sorted.end(),
-                         std::greater<float>());
-        const float thresh = sorted[p.top_k - 1];
-        for (float & v : l) {
-            if (v < thresh) v = -std::numeric_limits<float>::infinity();
-        }
+        collect_candidates(s.scaled, top_k_threshold(s.scaled, p.top_k, s.work), s.cand);
+    } else {
+        collect_candidates(s.scaled, -std::numeric_limits<float>::infinity(), s.cand);
     }
     if (p.top_p < 1.0f) {
-        std::vector<int> idx(vocab);
-        std::iota(idx.begin(), idx.end(), 0);
-        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return l[a] > l[b]; });
-        float max_l = l[idx[0]];
-        double denom = 0.0;
-        std::vector<double> probs(vocab);
-        for (int i = 0; i < vocab; ++i) {
-            probs[i] = std::exp((double) l[idx[i]] - max_l);
-            denom += probs[i];
-        }
-        double cum = 0.0;
-        for (int i = 0; i < vocab; ++i) {
-            cum += probs[i] / denom;
-            if (cum > p.top_p) {
-                for (int j = i + 1; j < vocab; ++j) {
-                    l[idx[j]] = -std::numeric_limits<float>::infinity();
-                }
-                break;
-            }
-        }
+        shrink_to_nucleus(s.scaled, p.top_p, s.cand, s.probs);
     }
-
-    // softmax + multinomial
-    float max_l = -std::numeric_limits<float>::infinity();
-    for (float v : l) max_l = std::max(max_l, v);
-    std::vector<double> probs(vocab, 0.0);
-    double denom = 0.0;
-    for (int i = 0; i < vocab; ++i) {
-        if (std::isinf(l[i]) && l[i] < 0) continue;
-        probs[i] = std::exp((double) l[i] - max_l);
-        denom += probs[i];
-    }
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    double r = dist(rng) * denom;
-    double cum = 0.0;
-    for (int i = 0; i < vocab; ++i) {
-        cum += probs[i];
-        if (r <= cum) return i;
-    }
-    return vocab - 1;
+    return draw_from_candidates(s.scaled, s.cand, s.probs, rng);
 }
 
 } // namespace
@@ -106,14 +159,14 @@ parler_sampling_params parler_resolve_sampling(const parler_sampling_request & r
     return p;
 }
 
-std::vector<int32_t> parler_sample_frame(const float * logits, int n_codebooks, int vocab,
-                                         const parler_sampling_params & params,
-                                         std::mt19937 & rng) {
-    std::vector<int32_t> frame((size_t) n_codebooks);
+void parler_sample_frame(const float * logits, int n_codebooks, int vocab,
+                         const parler_sampling_params & params,
+                         std::mt19937 & rng, parler_sampler_scratch & scratch,
+                         std::vector<int32_t> & frame_out) {
+    frame_out.resize((size_t) n_codebooks);
     for (int k = 0; k < n_codebooks; ++k) {
-        frame[k] = sample_row(logits + (size_t) k * vocab, vocab, params, rng);
+        frame_out[k] = sample_row(logits + (size_t) k * vocab, vocab, params, rng, scratch);
     }
-    return frame;
 }
 
 } // namespace detail

@@ -334,7 +334,7 @@ void run_parity_gates(const std::string & path, int n_gpu_layers) {
             ggml_gallocr_new(ggml_backend_get_default_buffer_type(real.backend));
         std::vector<int32_t> prompt_ids(P, 1);
         std::vector<int32_t> start_frame(real.hparams.n_codebooks, 0);
-        std::vector<float> logits;
+        parler_step_logits logits;
         int n_past = 0;
         if (!parler_dec_prefill(real, prompt_ids, start_frame, allocr, 2, logits, n_past) ||
             !parler_dec_step(real, start_frame, n_past, allocr, 2, logits)) {

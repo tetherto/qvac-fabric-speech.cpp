@@ -100,6 +100,12 @@ are compute-bound rather than weight-bandwidth-bound, and a `bf16` flow on
 AVX512-BF16 CPUs with `f16` elsewhere. See the
 [CosyVoice3 guide](engines/tts/docs/cosyvoice3.md).
 
+Parler's decoder fuses the per-layer QKV projections and its nine LM heads
+into single matmuls on GPU and on mmap-backed CPU loads (byte-exact;
+`PARLER_NO_FUSED` opts out) and samples each step from the top-k candidate
+set, in place on host backends. See the
+[Parler-TTS guide](engines/tts/docs/parler.md).
+
 ### Speech enhancement
 
 | Model | Engine | Task | Rate | Quantization | Backends | Notes |

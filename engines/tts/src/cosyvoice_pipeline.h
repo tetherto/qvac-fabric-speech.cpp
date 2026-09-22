@@ -229,6 +229,20 @@ ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tenso
 ggml_tensor * cosyvoice_conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
 ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
 
+// SineGen2 NSF source excitation (host-side): sample-rate f0 [T_wav] ->
+// source [T_wav].  The per-harmonic sine tracks and the mix/tanh arithmetic
+// run on up to n_threads host threads (<= 0 selects all hardware threads);
+// the RNG draws stay one sequential pass in the original order, so the output
+// is bit-identical for a given seed at any thread count.  Exposed for
+// test-cosyvoice-sinegen, which pins that equality.
+std::vector<float> cosyvoice_sinegen2_source(const std::vector<float> & f0_wav,
+                                             int sampling_rate, int harmonic_num,
+                                             float sine_amp, float noise_std,
+                                             float voiced_threshold, int upsample_scale,
+                                             const std::vector<float> & l_linear_w,
+                                             float l_linear_b, uint32_t seed,
+                                             int n_threads);
+
 // CausalHiFT vocoder: mel [80, mel_len] channel-major (mel[ch*T + t]) -> 24 kHz
 // float PCM.  Runs f0_predictor + SineGen2 excitation + STFT + decode.
 // f0_override (parity tests) skips the predictor: SineGen2 integrates f0 into
