@@ -19,13 +19,15 @@ Cloning needs no speaker encoder: the codec *encoder* turns a reference wav
 into code frames, and those frames are packed, delay-patterned, into the
 user section of the prompt.
 
-**Status — the generation logic is validated by a conformance suite; the
-model graphs load and build on the standard backend roster but have not yet
-been validated against reference output.** `test-moss-generation` pins the
-delay/de-delay round trip, the in-loop drain state machine, the sampling
-primitives, segment extraction, and prompt packing against the upstream
-semantics. End-to-end synthesis against converted checkpoints, reference
-parity, and per-backend validation are the follow-up to this change.
+**Status — CPU and Metal, validated end to end against the released
+checkpoints.** `test-moss-generation` pins the delay/de-delay round trip, the
+in-loop drain state machine, the sampling primitives, segment extraction, and
+prompt packing against the upstream semantics. Against converted
+MOSS-TTS-v1.5 and MOSS-Audio-Tokenizer GGUFs, the codec encoder-to-decoder
+round trip reaches 0.94 correlation on real audio, and full synthesis on
+Metal produces clean speech that terminates generation naturally. Numeric
+reference parity and the remaining backends are the follow-up to this
+change.
 
 ### Convert
 
