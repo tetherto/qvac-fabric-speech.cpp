@@ -1,9 +1,15 @@
 // Decoding-knob resolution: argmax-forcing requests must be repaired to
-// sampling (parler cannot terminate under argmax), everything else passed through.
+// sampling (parler cannot terminate under argmax), everything else passed
+// through.  Plus RNG-stream parity of the candidate-based sampler against a
+// full-vocabulary reference of the HF warper chain.
 
 #include "parler/sampler.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <limits>
+#include <numeric>
 #include <random>
 #include <set>
 #include <string>
@@ -127,10 +133,12 @@ static void test_top_k_1_is_argmax() {
 
     parler_sampling_params p;   // sampling, but with a single-token nucleus
     p.top_k = 1;
+    parler_sampler_scratch scratch;
+    std::vector<int32_t> f;
     bool all_argmax = true;
     for (int seed = 0; seed < 32; ++seed) {
         std::mt19937 rng((uint32_t) seed);
-        const std::vector<int32_t> f = parler_sample_frame(logits.data(), n_cb, vocab, p, rng);
+        parler_sample_frame(logits.data(), n_cb, vocab, p, rng, scratch, f);
         for (int k = 0; k < n_cb; ++k) if (f[k] != argmax[k]) all_argmax = false;
     }
     CHECK(all_argmax, "top_k=1 is argmax for every seed (this is why it is repaired)");
@@ -143,14 +151,147 @@ static void test_top_k_1_is_argmax() {
     std::set<int32_t> seen;
     std::mt19937 rng(1234);
     for (int i = 0; i < 200; ++i) {
-        seen.insert(parler_sample_frame(flat.data(), 1, vocab, s, rng)[0]);
+        parler_sample_frame(flat.data(), 1, vocab, s, rng, scratch, f);
+        seen.insert(f[0]);
     }
     CHECK(seen.size() > 1, "the repaired configuration actually samples");
+}
+
+// The full-vocabulary HF warper chain the shipped sampler used before the
+// candidate-based rewrite: copy the row, temperature, top-k mask, top-p mask,
+// softmax + one multinomial draw.  The rewrite must pick the same token from
+// the same RNG stream.
+static int32_t reference_sample_row(const float * row, int vocab,
+                                    const parler_sampling_params & p,
+                                    std::mt19937 & rng) {
+    if (p.greedy) {
+        int best = 0;
+        for (int i = 1; i < vocab; ++i) {
+            if (row[i] > row[best]) best = i;
+        }
+        return best;
+    }
+
+    std::vector<float> l(row, row + vocab);
+    if (p.temperature > 0.0f && p.temperature != 1.0f) {
+        for (float & v : l) v /= p.temperature;
+    }
+    if (p.top_k > 0 && p.top_k < vocab) {
+        std::vector<float> sorted(l);
+        std::nth_element(sorted.begin(), sorted.begin() + (p.top_k - 1), sorted.end(),
+                         std::greater<float>());
+        const float thresh = sorted[p.top_k - 1];
+        for (float & v : l) {
+            if (v < thresh) v = -std::numeric_limits<float>::infinity();
+        }
+    }
+    if (p.top_p < 1.0f) {
+        std::vector<int> idx(vocab);
+        std::iota(idx.begin(), idx.end(), 0);
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return l[a] > l[b]; });
+        float max_l = l[idx[0]];
+        double denom = 0.0;
+        std::vector<double> probs(vocab);
+        for (int i = 0; i < vocab; ++i) {
+            probs[i] = std::exp((double) l[idx[i]] - max_l);
+            denom += probs[i];
+        }
+        double cum = 0.0;
+        for (int i = 0; i < vocab; ++i) {
+            cum += probs[i] / denom;
+            if (cum > p.top_p) {
+                for (int j = i + 1; j < vocab; ++j) {
+                    l[idx[j]] = -std::numeric_limits<float>::infinity();
+                }
+                break;
+            }
+        }
+    }
+    float max_l = -std::numeric_limits<float>::infinity();
+    for (float v : l) max_l = std::max(max_l, v);
+    std::vector<double> probs(vocab, 0.0);
+    double denom = 0.0;
+    for (int i = 0; i < vocab; ++i) {
+        if (std::isinf(l[i]) && l[i] < 0) continue;
+        probs[i] = std::exp((double) l[i] - max_l);
+        denom += probs[i];
+    }
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    double r = dist(rng) * denom;
+    double cum = 0.0;
+    for (int i = 0; i < vocab; ++i) {
+        cum += probs[i];
+        if (r <= cum) return i;
+    }
+    return vocab - 1;
+}
+
+// Rows mimic what the delay-pattern processor hands the sampler: finite
+// logits, EOS forced to -inf on some rows, and (top_p == 1 cases) tie blocks
+// straddling the top-k threshold, where nth_element's keep-at-threshold
+// semantics must be reproduced exactly.
+static void fill_row(std::vector<float> & row, std::mt19937 & gen,
+                     bool inject_ties, int eos_id) {
+    std::uniform_real_distribution<float> logit(-8.0f, 8.0f);
+    for (float & v : row) v = logit(gen);
+    if (inject_ties) {
+        const float tie = logit(gen);
+        for (size_t i = 0; i < row.size(); i += 7) row[i] = tie;
+    }
+    if (gen() % 2 == 0) row[(size_t) eos_id] = -std::numeric_limits<float>::infinity();
+}
+
+static void test_matches_full_vocab_reference() {
+    const int vocab = 259;
+    const int eos_id = vocab - 2;
+    const float temps[] = { 1.0f, 0.7f, 1.3f, 0.0f };
+    const int   ks[]    = { 0, 2, 50, vocab, vocab + 7 };
+    const float ps[]    = { 1.0f, 0.9f, 0.4f };
+
+    parler_sampler_scratch scratch;
+    std::vector<int32_t> frame;
+    std::mt19937 gen(20260921);
+    std::vector<float> row((size_t) vocab);
+    bool tokens_match = true, streams_match = true;
+    for (float temperature : temps) {
+        for (int top_k : ks) {
+            for (float top_p : ps) {
+                parler_sampling_params p;
+                p.temperature = temperature;
+                p.top_k       = top_k;
+                p.top_p       = top_p;
+                for (int trial = 0; trial < 64; ++trial) {
+                    // exact float ties have no defined order under top-p's
+                    // sort, so tie injection stays on the top_p == 1 lanes
+                    fill_row(row, gen, top_p == 1.0f, eos_id);
+                    const uint32_t seed = gen();
+                    std::mt19937 rng_ref(seed), rng_new(seed);
+                    const int32_t a = reference_sample_row(row.data(), vocab, p, rng_ref);
+                    parler_sample_frame(row.data(), 1, vocab, p, rng_new, scratch, frame);
+                    if (a != frame[0]) tokens_match = false;
+                    if (rng_ref() != rng_new()) streams_match = false;
+                }
+            }
+        }
+    }
+    CHECK(tokens_match, "candidate-based sampler draws the reference tokens");
+    CHECK(streams_match, "candidate-based sampler consumes the same RNG stream");
+
+    // greedy bypasses the RNG entirely
+    parler_sampling_params g;
+    g.greedy = true;
+    fill_row(row, gen, false, eos_id);
+    std::mt19937 rng_a(7), rng_b(7);
+    parler_sample_frame(row.data(), 1, vocab, g, rng_b, scratch, frame);
+    CHECK(reference_sample_row(row.data(), vocab, g, rng_a) == frame[0],
+          "greedy matches the reference argmax");
+    CHECK(rng_a() == rng_b(), "greedy leaves the RNG untouched");
 }
 
 int main() {
     test_resolution();
     test_top_k_1_is_argmax();
+    test_matches_full_vocab_reference();
 
     if (g_failures == 0) {
         fprintf(stderr, "parler sampler: PASS\n");

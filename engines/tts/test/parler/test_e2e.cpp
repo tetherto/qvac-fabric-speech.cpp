@@ -118,7 +118,7 @@ int main(int argc, char ** argv) {
         dcfg.min_new_tokens = hp.gen_min_new_tokens;
         delay_state st(dcfg);
 
-        std::vector<float> logits;
+        parler_step_logits logits;
         int n_past = 0;
         if (!parler_dec_prefill(model, prompt_ids, st.input_frame(), allocr, n_threads,
                                 logits, n_past)) break;
@@ -126,12 +126,12 @@ int main(int argc, char ** argv) {
         bool trace_exact = true;
         int steps_done = 0;
         while (true) {
-            st.process_logits(logits.data(), hp.dec_vocab);
+            st.process_logits(logits.view, hp.dec_vocab);
             // greedy argmax + top-2 margin per codebook
             std::vector<int32_t> frame(n_cb);
             std::vector<float> margin(n_cb, 1e30f);
             for (int k = 0; k < n_cb; ++k) {
-                const float * row = logits.data() + (size_t) k * hp.dec_vocab;
+                const float * row = logits.view + (size_t) k * hp.dec_vocab;
                 int best = 0, second = -1;
                 for (int v = 1; v < hp.dec_vocab; ++v) {
                     if (row[v] > row[best]) { second = best; best = v; }

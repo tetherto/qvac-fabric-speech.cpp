@@ -151,12 +151,13 @@ public:
     std::string backend_name() const;
     BackendDevice backend_device() const;
 
-    // True when an Apple Core ML sidecar for the codec's synthesis stack loaded
-    // (a TTS_CPP_COREML build with a compiled model next to the decoder GGUF).
-    // A load-status query: SynthesisResult::codec_synthesis_backend reports
-    // where each call actually ran, since a loaded sidecar that cannot serve a
-    // call falls back to ggml. The language model and the codec's post
-    // transformer always run on the backend backend_name() reports.
+    // True while an Apple Core ML sidecar for the codec's synthesis stack is
+    // attached (a TTS_CPP_COREML build with a compiled model next to the decoder
+    // GGUF). A sidecar whose first use fails is retired and later calls go
+    // straight to ggml, after which this returns false.
+    // SynthesisResult::codec_synthesis_backend reports where each call actually
+    // ran. The language model and the codec's post transformer always run on
+    // the backend backend_name() reports.
     bool codec_on_coreml() const;
 
 private:

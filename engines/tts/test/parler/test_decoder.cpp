@@ -28,9 +28,9 @@ static std::vector<int32_t> load_ids(const std::string & path) {
     return v;
 }
 
-static bool check_logits(const char * tag, const std::vector<float> & got,
+static bool check_logits(const char * tag, const float * got,
                          const float * ref, int n_cb, int vocab) {
-    compare_stats s = compare_f32(got.data(), ref, (size_t) n_cb * vocab);
+    compare_stats s = compare_f32(got, ref, (size_t) n_cb * vocab);
     print_compare(tag, s);
     if (!std::isfinite(s.mean_abs_err)) {
         fprintf(stderr, "%s: FAIL non-finite logits\n", tag);
@@ -92,7 +92,7 @@ static bool run_case(parler_model & model, ggml_gallocr_t allocr,
     dcfg.min_new_tokens = hp.gen_min_new_tokens;
     delay_state st(dcfg);
 
-    std::vector<float> logits;
+    parler_step_logits logits;
     int n_past = 0;
     if (!parler_dec_prefill(model, prompt_ids, st.input_frame(), allocr, n_threads,
                             logits, n_past)) return false;
@@ -112,7 +112,7 @@ static bool run_case(parler_model & model, ggml_gallocr_t allocr,
     const int S = (int) step_logits.shape[0];
     char tag[48];
     snprintf(tag, sizeof(tag), "%s/prefill/step0", prefix);
-    if (!check_logits(tag, logits, sl, n_cb, vocab)) return false;
+    if (!check_logits(tag, logits.view, sl, n_cb, vocab)) return false;
 
     npy_array greedy = npy_load(base + "_greedy_delayed.npy"); // [9, L]
     const int64_t * gseq = reinterpret_cast<const int64_t *>(greedy.data.data());
@@ -128,7 +128,7 @@ static bool run_case(parler_model & model, ggml_gallocr_t allocr,
         }
         n_past++;
         snprintf(tag, sizeof(tag), "%s/step%03d", prefix, s);
-        if (!check_logits(tag, logits, sl + (size_t) s * n_cb * vocab, n_cb, vocab)) {
+        if (!check_logits(tag, logits.view, sl + (size_t) s * n_cb * vocab, n_cb, vocab)) {
             return false;
         }
     }

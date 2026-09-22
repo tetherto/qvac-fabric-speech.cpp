@@ -99,6 +99,13 @@ different shape legitimately reduces in a different order (worst observed:
 5.12e-4 on CUDA, under 1e-5 on Vulkan, against a 2e-3 bar; the window
 arithmetic errors the check exists to catch are hop-scale).
 
+Parler's autoregressive decode fuses the per-layer QKV projections and the
+nine LM heads into single matmuls on GPU and on mmap-backed CPU loads
+(byte-exact; `PARLER_NO_FUSED` disables fusion), samples each step over the
+top-k candidate set with reused scratch, and on host backends samples the
+step logits in place from the graph buffer instead of downloading a copy
+per step. Details in [docs/parler.md](docs/parler.md).
+
 Audio8 on CUDA required one ggml-cuda fix and a rethink of what its
 harnesses measure. The fix: the transpose fast path of the CUDA copy kernel
 ignores destination strides, so the V-cache append -- a transposed source
@@ -157,7 +164,11 @@ the HiFT tier held at f16, flow f32 -> f16 moves the DiT 1426 -> 1351 ms
 while f16 -> `q8_0` moves it back to 1403 ms. The f16 HiFT tier is worth
 1.13-1.14x on the vocoder decode there — less than the fused snake above it,
 because Metal's `mul_mm` already stages f32 operands as half, so a narrower
-weight dtype saves bandwidth rather than arithmetic.
+weight dtype saves bandwidth rather than arithmetic. The vocoder's host-side
+SineGen2 source excitation is threaded over harmonics and the mix arithmetic
+on the engine's `n_threads` (the RNG pass stays sequential, so the output is
+byte-identical at any thread count): 59.7 -> 34.7 ms on the M3 Ultra and
+49.0 -> 34.7 ms on the M4, same pinned trajectories.
 
 CosyVoice3 on CUDA is covered by the same per-stage reference harnesses as
 its other GPU backends, each registered per backend --
