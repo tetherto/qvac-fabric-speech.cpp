@@ -246,11 +246,17 @@ jobs:
           cmake --build ggml-src/build -j4
           cmake --install ggml-src/build
 
+      # TTS_CPP_COREML: this lane builds the Core ML sidecar wrappers (Audio8
+      # codec, Supertonic vocoder) and runs their parity tests against
+      # exported fixtures below, so the feature is functionally covered on
+      # every PR, not just compiled. The parity binaries exit 77 when built
+      # without it, which fails their steps on purpose.
       - name: Configure
         run: |
           cmake -S engines/tts -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DTTS_CPP_BUILD_TESTS=ON \
+            -DTTS_CPP_COREML=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build

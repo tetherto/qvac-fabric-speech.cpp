@@ -194,12 +194,18 @@ ggml_cgraph * new_parler_graph(ggml_context ** ctx_out) {
 }
 
 bool read_logits(ggml_cgraph * gf, const parler_model & model,
-                 std::vector<float> & logits_out) {
+                 parler_step_logits & logits_out) {
     ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
     if (!logits) return false;
+    if (logits->buffer && ggml_backend_buffer_is_host(logits->buffer) &&
+        logits->type == GGML_TYPE_F32 && ggml_is_contiguous(logits)) {
+        logits_out.view = (float *) logits->data;
+        return true;
+    }
     const size_t n = (size_t) model.hparams.dec_vocab * model.hparams.n_codebooks;
-    logits_out.resize(n);
-    ggml_backend_tensor_get(logits, logits_out.data(), 0, n * sizeof(float));
+    logits_out.copy.resize(n);
+    ggml_backend_tensor_get(logits, logits_out.copy.data(), 0, n * sizeof(float));
+    logits_out.view = logits_out.copy.data();
     return true;
 }
 
@@ -209,7 +215,7 @@ bool parler_dec_prefill(const parler_model & model,
                         const std::vector<int32_t> & prompt_ids,
                         const std::vector<int32_t> & start_frame,
                         ggml_gallocr_t allocr, int n_threads,
-                        std::vector<float> & logits_out, int & n_past_out) {
+                        parler_step_logits & logits_out, int & n_past_out) {
     const parler_hparams & hp = model.hparams;
     const int P = (int) prompt_ids.size();
     const int N = P + 1;
@@ -293,7 +299,7 @@ bool parler_dec_step(const parler_model & model,
                      const std::vector<int32_t> & frame,
                      int n_past,
                      ggml_gallocr_t allocr, int n_threads,
-                     std::vector<float> & logits_out) {
+                     parler_step_logits & logits_out) {
     const parler_hparams & hp = model.hparams;
     if ((int) frame.size() != hp.n_codebooks) return false;
     if (n_past + 1 > hp.n_ctx || n_past + 1 > hp.max_position) {

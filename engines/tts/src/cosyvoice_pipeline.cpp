@@ -17,13 +17,16 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <random>
 #include <stdexcept>
+#include <thread>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1465,45 +1468,134 @@ static std::vector<double> linterp(const std::vector<double> & src, int out_size
     }
     return out;
 }
-static std::vector<float> sinegen2_source(const std::vector<float> & f0_wav,
-                                          int sampling_rate, int harmonic_num,
-                                          float sine_amp, float noise_std,
-                                          float voiced_threshold, int upsample_scale,
-                                          const std::vector<float> & l_linear_w,
-                                          float l_linear_b, uint32_t seed) {
+static std::vector<float> sinegen2_harmonic(const std::vector<float> & f0_wav,
+                                            int h, int sampling_rate,
+                                            int upsample_scale, int T_down) {
     int Tn = (int)f0_wav.size();
-    int H = harmonic_num + 1;
-    int T_down = Tn / upsample_scale;
+    std::vector<double> rad(Tn);
+    double mult = (double)(h + 1) / (double)sampling_rate;
+    for (int t = 0; t < Tn; ++t) { double v = (double)f0_wav[t] * mult; rad[t] = v - std::floor(v); }
+    std::vector<double> rad_down = linterp(rad, T_down);
+    std::vector<double> phase_down(T_down);
+    double acc = 0.0;
+    for (int i = 0; i < T_down; ++i) { acc += rad_down[i]; phase_down[i] = acc * 2.0 * M_PI * upsample_scale; }
+    // CosyVoice3 SineGen2 is CAUSAL: the phase is upsampled with mode='nearest'
+    // (staircase), NOT linear.  The vocoder was trained on this exact
+    // excitation; linear upsampling puts the source off-distribution and the
+    // network renders it with a metallic artifact (wrong harmonic phase).
+    std::vector<float> sine(Tn);
+    for (int t = 0; t < Tn; ++t) {
+        int i0 = t / upsample_scale;
+        if (i0 >= T_down) i0 = T_down - 1;
+        sine[t] = (float)std::sin(phase_down[i0]);
+    }
+    return sine;
+}
+
+static void sinegen2_harmonic_worker(const std::vector<float> & f0_wav,
+                                     int H, int sampling_rate,
+                                     int upsample_scale, int T_down,
+                                     std::atomic<int> & next_h,
+                                     std::vector<std::vector<float>> & sines) {
+    for (int h = next_h.fetch_add(1); h < H; h = next_h.fetch_add(1)) {
+        sines[h] = sinegen2_harmonic(f0_wav, h, sampling_rate, upsample_scale, T_down);
+    }
+}
+
+static int sinegen2_worker_count(int n_threads, int H) {
+    if (n_threads <= 0) n_threads = (int)std::thread::hardware_concurrency();
+    return std::max(1, std::min(n_threads, H));
+}
+
+// Joins every started worker on scope exit, so a throw anywhere (including a
+// std::thread constructor) never destroys a joinable thread; a worker's
+// exception is carried back and rethrown on the calling thread.  Same
+// contract as parakeet's mel_preprocess helpers.
+struct sinegen2_workers {
+    explicit sinegen2_workers(int n) : errors((size_t)std::max(n, 0)) { threads.reserve(errors.size()); }
+    ~sinegen2_workers() { join(); }
+    template <typename F> void start(F && fn) {
+        size_t slot = threads.size();
+        threads.emplace_back([this, slot, fn = std::forward<F>(fn)]() mutable {
+            try { fn(); } catch (...) { errors[slot] = std::current_exception(); }
+        });
+    }
+    void join() { for (auto & t : threads) if (t.joinable()) t.join(); }
+    void rethrow() {
+        join();
+        for (auto & e : errors) if (e) std::rethrow_exception(e);
+    }
+    std::vector<std::thread> threads;
+    std::vector<std::exception_ptr> errors;
+};
+
+// The gauss draws must stay one sequential pass in t-then-h order: their
+// stream position defines the output for a given seed, so this loop must not
+// be threaded or reordered.  It only records the draws; the arithmetic that
+// consumes them is threaded separately in sinegen2_mix_range.
+static std::vector<float> sinegen2_noise(int Tn, int H, uint32_t seed) {
     std::mt19937 rng(seed);
     std::normal_distribution<float> gauss(0.0f, 1.0f);
-    std::vector<std::vector<float>> sines(H, std::vector<float>(Tn, 0.0f));
-    for (int h = 0; h < H; ++h) {
-        std::vector<double> rad(Tn);
-        double mult = (double)(h + 1) / (double)sampling_rate;
-        for (int t = 0; t < Tn; ++t) { double v = (double)f0_wav[t] * mult; rad[t] = v - std::floor(v); }
-        std::vector<double> rad_down = linterp(rad, T_down);
-        std::vector<double> phase_down(T_down);
-        double acc = 0.0;
-        for (int i = 0; i < T_down; ++i) { acc += rad_down[i]; phase_down[i] = acc * 2.0 * M_PI * upsample_scale; }
-        // CosyVoice3 SineGen2 is CAUSAL: the phase is upsampled with mode='nearest'
-        // (staircase), NOT linear.  The vocoder was trained on this exact
-        // excitation; linear upsampling puts the source off-distribution and the
-        // network renders it with a metallic artifact (wrong harmonic phase).
-        for (int t = 0; t < Tn; ++t) {
-            int i0 = t / upsample_scale;
-            if (i0 >= T_down) i0 = T_down - 1;
-            sines[h][t] = (float)std::sin(phase_down[i0]);
-        }
-    }
-    std::vector<float> source(Tn, 0.0f);
-    for (int t = 0; t < Tn; ++t) {
+    std::vector<float> noise((size_t)Tn * H);
+    for (size_t i = 0; i < noise.size(); ++i) noise[i] = gauss(rng);
+    return noise;
+}
+
+static void sinegen2_mix_range(const std::vector<float> & f0_wav,
+                               int t_begin, int t_end, int H,
+                               float sine_amp, float noise_std, float voiced_threshold,
+                               const std::vector<float> & l_linear_w, float l_linear_b,
+                               const std::vector<std::vector<float>> & sines,
+                               const std::vector<float> & noise,
+                               std::vector<float> & source) {
+    for (int t = t_begin; t < t_end; ++t) {
         bool voiced = f0_wav[t] > voiced_threshold;
         float uv = voiced ? 1.0f : 0.0f;
         float noise_amp = uv * noise_std + (1.0f - uv) * sine_amp / 3.0f;
         float s = l_linear_b;
-        for (int h = 0; h < H; ++h) { float sw = sines[h][t] * sine_amp * uv + noise_amp * gauss(rng); s += l_linear_w[h] * sw; }
+        for (int h = 0; h < H; ++h) { float sw = sines[h][t] * sine_amp * uv + noise_amp * noise[(size_t)t * H + h]; s += l_linear_w[h] * sw; }
         source[t] = std::tanh(s);
     }
+}
+
+std::vector<float> cosyvoice_sinegen2_source(const std::vector<float> & f0_wav,
+                                             int sampling_rate, int harmonic_num,
+                                             float sine_amp, float noise_std,
+                                             float voiced_threshold, int upsample_scale,
+                                             const std::vector<float> & l_linear_w,
+                                             float l_linear_b, uint32_t seed,
+                                             int n_threads) {
+    int Tn = (int)f0_wav.size();
+    int H = harmonic_num + 1;
+    int T_down = Tn / upsample_scale;
+    int n_workers = sinegen2_worker_count(n_threads, H);
+    std::vector<std::vector<float>> sines(H);
+    std::atomic<int> next_h(0);
+    std::vector<float> noise;
+    if (n_workers > 1) {
+        sinegen2_workers harm(n_workers);
+        for (int w = 0; w < n_workers; ++w) {
+            harm.start([&] { sinegen2_harmonic_worker(f0_wav, H, sampling_rate,
+                                                      upsample_scale, T_down, next_h, sines); });
+        }
+        noise = sinegen2_noise(Tn, H, seed);
+        harm.rethrow();
+    } else {
+        sinegen2_harmonic_worker(f0_wav, H, sampling_rate, upsample_scale, T_down, next_h, sines);
+        noise = sinegen2_noise(Tn, H, seed);
+    }
+    std::vector<float> source(Tn, 0.0f);
+    int chunk = (Tn + n_workers - 1) / n_workers;
+    sinegen2_workers mix(n_workers - 1);
+    for (int w = 1; w < n_workers; ++w) {
+        mix.start([&, w] { sinegen2_mix_range(f0_wav, w * chunk, std::min((w + 1) * chunk, Tn), H,
+                                              sine_amp, noise_std, voiced_threshold,
+                                              l_linear_w, l_linear_b, sines, noise, source); });
+    }
+    sinegen2_mix_range(f0_wav, 0, std::min(chunk, Tn), H,
+                       sine_amp, noise_std, voiced_threshold,
+                       l_linear_w, l_linear_b, sines, noise, source);
+    mix.rethrow();
     return source;
 }
 
@@ -1831,9 +1923,10 @@ std::vector<float> cosyvoice_hift_synth(model_ctx & m,
     int harmonic_num = 8;
     float sine_amp = 0.1f, noise_std = 0.003f, voiced_threshold = 10.0f;
     auto t_src = cosy_clk::now();
-    auto src = sinegen2_source(f0_up, sampling_rate, harmonic_num,
-                               sine_amp, noise_std, voiced_threshold, 480,
-                               l_linear_w, l_linear_b, (uint32_t)seed);
+    auto src = cosyvoice_sinegen2_source(f0_up, sampling_rate, harmonic_num,
+                                         sine_amp, noise_std, voiced_threshold, 480,
+                                         l_linear_w, l_linear_b, (uint32_t)seed,
+                                         m.n_threads);
     if (tmg) tmg->hift_source_ms += cosy_ms_since(t_src, nullptr);   // pure CPU
     auto t_stft = cosy_clk::now();
     auto s_stft = run_stft(m, src);

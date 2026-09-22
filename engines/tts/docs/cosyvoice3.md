@@ -155,6 +155,16 @@ The per-group form stays for backends whose im2col fusion needs an unbatched
 `GGML_OP_SNAKE` every backend implements, which is also worth 1.09x on the
 CPU vocoder decode.
 
+The vocoder's SineGen2 source excitation (`hift_source`) is host-side work no
+backend touches. Its per-harmonic sine tracks and the mix/tanh arithmetic run
+on the engine's `n_threads` host threads, while the gauss draws stay one
+sequential pass in the original order — the vocoder was trained on this exact
+excitation, so the parallel path must stay byte-identical to the serial one
+at any thread count, which `test-cosyvoice-sinegen` pins. On a pinned
+543-token trajectory this takes `hift_source` from 59.7 to 34.7 ms on an M3
+Ultra (20 threads) and from 49.0 to 34.7 ms on an M4 (4 threads); the
+remainder is the sequential draw pass itself.
+
 `cosyvoice-cli --flow-cut-prompt` enables an opt-in flow shortcut that treats
 the voice-prompt frames as attention conditioning only (the same design
 cosyvoice.cpp uses by default). It cuts DiT time by roughly the prompt's share

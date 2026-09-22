@@ -250,14 +250,17 @@ FitResult fit_params(const FitOptions & opts) {
         ph_hift.arena   = arena.device_bytes;
         uint64_t host   = sat_add(hift_meas.host_bytes, arena.host_bytes);
         // The mel from the flow phase stays alive, plus f0, the upsampled f0,
-        // the 9-harmonic SineGen scratch (sines + phase accumulators), the
-        // excitation, its STFT, the iSTFT window-sum, and the waveform.
+        // the 9-harmonic SineGen scratch (sines, the recorded gauss draws, and
+        // per-worker phase accumulators — one rad per harmonic worker, up to
+        // all 9 concurrently), the excitation, its STFT, the iSTFT window-sum,
+        // and the waveform.
         host = sat_add(host, sat_mul(sat_mul((uint64_t) 80, (uint64_t) T_mel), f32));
         host = sat_add(host, sat_mul((uint64_t) T_mel, f32));
         host = sat_add(host, sat_mul((uint64_t) T_wav, f32));            // f0_up
         host = sat_add(host, sat_mul((uint64_t) T_wav, 9 * f32));        // sines
-        host = sat_add(host, sat_mul((uint64_t) T_wav, 8));              // rad (doubles)
-        host = sat_add(host, sat_mul((uint64_t) T_wav / 480 + 1, 2 * 8));
+        host = sat_add(host, sat_mul((uint64_t) T_wav, 9 * f32));        // noise draws
+        host = sat_add(host, sat_mul((uint64_t) T_wav, 9 * 8));          // rad (doubles, per worker)
+        host = sat_add(host, sat_mul((uint64_t) T_wav / 480 + 1, 9 * 2 * 8));
         host = sat_add(host, sat_mul((uint64_t) T_wav, f32));            // source
         host = sat_add(host, sat_mul(sat_mul((uint64_t) T_stft, 18), f32));
         host = sat_add(host, sat_mul((uint64_t) T_wav + 16, f32));       // w_sum
