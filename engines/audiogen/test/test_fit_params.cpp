@@ -9,8 +9,8 @@
 //      backend (both run the same tensor wiring and buffer-type sizing);
 //   3. compute parity per stage -- the size-only graph measurement equals the
 //      buffer a real forward/decode actually allocates for the same shape
-//      (ggml_gallocr_reserve_n_size / ggml_backend_sched_reserve_size are the
-//      size-only twins of the real allocations);
+//      (ggml_gallocr_reserve_n_size is the size-only twin of the real
+//      allocations);
 //   4. the projection grows with the workload (a longer generation must never
 //      project smaller), and a missing model file is Error, never Success.
 //

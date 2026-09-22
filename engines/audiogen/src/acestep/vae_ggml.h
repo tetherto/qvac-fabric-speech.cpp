@@ -42,12 +42,13 @@ VaeModel * vae_model_load_metadata_only(const std::string & path, ggml_backend_t
 int vae_model_decode_window_frames(VaeModel * m);
 
 // Size-only twins of one decode window / one encode window, for the memory-fit
-// preflight: build the identical graph and scheduler the real call would use
-// for a T_latent-frame decode (its worst resident window when chunked) or an
-// `frames`-frame encode window, and write the scheduler's buffer sizes --
-// `backend_bytes` on m's backend, `cpu_fallback_bytes` on the scheduler's CPU
-// fallback slot (0 when m's backend IS the CPU). Nothing is allocated,
-// uploaded, or computed. Returns false on graph/scheduler construction failure.
+// preflight: build the identical graph the real call would use for a
+// T_latent-frame decode (its worst resident window when chunked) or a
+// `frames`-frame encode window, and price it with a plain gallocr on m's
+// default buffer type -- `backend_bytes` on m's backend, `cpu_fallback_bytes`
+// the host-side graph input the real sched stages on its CPU (last) backend (0
+// when m's backend IS the CPU). Nothing is allocated, uploaded, or computed.
+// Returns false on graph/allocator construction failure.
 bool vae_model_measure_decode(VaeModel * m, int T_latent, size_t & backend_bytes, size_t & cpu_fallback_bytes);
 bool vae_model_measure_encode(VaeModel * m, int frames, size_t & backend_bytes, size_t & cpu_fallback_bytes);
 

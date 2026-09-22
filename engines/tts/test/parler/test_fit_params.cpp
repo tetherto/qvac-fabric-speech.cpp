@@ -19,7 +19,9 @@
 //       5. projected T5 arena == a real gallocr reservation of the same graph;
 //       6. projected DAC window arena == the arena a real parler_dac_decode
 //          leaves in model.dac_allocr;
-//       7. errors and oversized workloads surface as Error, never Success.
+//       7. errors and oversized workloads surface as Error, never Success;
+//       8. a weightless description GGUF with the vocabulary stripped loads
+//          metadata-only and projects, while a real load still refuses it.
 //
 //   * With arguments <parler.gguf> [n_gpu_layers]: the same gates on a real
 //     fixture (plus the GPU fused-weight stack when n_gpu_layers > 0).
@@ -97,9 +99,12 @@ void add_f32(gguf_context * g, ggml_context * ctx, const std::string & name,
     gguf_add_tensor(g, t);
 }
 
-std::string write_tiny_parler_gguf(const tiny_parler & p) {
+std::string write_tiny_parler_gguf(const tiny_parler & p, bool with_vocab = true,
+                                   bool only_meta = false) {
     const std::string path =
-        (fs::temp_directory_path() / "test-parler-fit-tiny.gguf").string();
+        (fs::temp_directory_path() /
+         (with_vocab ? "test-parler-fit-tiny.gguf" : "test-parler-fit-tiny-desc.gguf"))
+            .string();
     gguf_context * g = gguf_init_empty();
     gguf_set_val_str(g, "parler.arch", "parler");
     auto u32 = [&](const char * k, int v) { gguf_set_val_u32(g, k, (uint32_t) v); };
@@ -141,13 +146,15 @@ std::string write_tiny_parler_gguf(const tiny_parler & p) {
     const int32_t rates[2] = { p.dac_rates[0], p.dac_rates[1] };
     gguf_set_arr_data(g, "parler.dac.rates", GGUF_TYPE_INT32, rates, 2);
 
-    const char * toks[] = { "<unk>", "</s>", "\xe2\x96\x81" "a", "\xe2\x96\x81" "b",
-                            "a", "b", "c", "d" };
-    gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 8);
-    const float scores[8] = { 0, 0, -1, -1, -2, -2, -2, -2 };
-    gguf_set_arr_data(g, "tokenizer.ggml.scores", GGUF_TYPE_FLOAT32, scores, 8);
-    gguf_set_val_u32(g, "tokenizer.ggml.unknown_token_id", 0);
-    gguf_set_val_u32(g, "tokenizer.ggml.eos_token_id", 1);
+    if (with_vocab) {
+        const char * toks[] = { "<unk>", "</s>", "\xe2\x96\x81" "a", "\xe2\x96\x81" "b",
+                                "a", "b", "c", "d" };
+        gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 8);
+        const float scores[8] = { 0, 0, -1, -1, -2, -2, -2, -2 };
+        gguf_set_arr_data(g, "tokenizer.ggml.scores", GGUF_TYPE_FLOAT32, scores, 8);
+        gguf_set_val_u32(g, "tokenizer.ggml.unknown_token_id", 0);
+        gguf_set_val_u32(g, "tokenizer.ggml.eos_token_id", 1);
+    }
 
     ggml_init_params ip = { 16u * 1024 * 1024, nullptr, /*no_alloc=*/false };
     ggml_context * ctx = ggml_init(ip);
@@ -233,7 +240,7 @@ std::string write_tiny_parler_gguf(const tiny_parler & p) {
     add_f32(g, ctx, "dac.dec.conv_out.weight", { 7, C, 1 });
     add_f32(g, ctx, "dac.dec.conv_out.bias", { 1 });
 
-    if (!gguf_write_to_file(g, path.c_str(), /*only_meta=*/false)) {
+    if (!gguf_write_to_file(g, path.c_str(), only_meta)) {
         std::fprintf(stderr, "FATAL: cannot write %s\n", path.c_str());
         std::exit(2);
     }
@@ -478,6 +485,41 @@ void run_fit_gates(const std::string & path, int n_gpu_layers) {
     }
 }
 
+// A weightless description GGUF -- tensor headers only, vocabulary stripped --
+// must load metadata-only and yield a projection (a fit measurement never
+// tokenizes text), while a real load still refuses the missing vocabulary.
+void run_weightless_description_gates() {
+    const std::string path =
+        write_tiny_parler_gguf(tiny_parler{}, /*with_vocab=*/false, /*only_meta=*/true);
+
+    parler_model mm;
+    parler_fit_measure fm;
+    std::string error;
+    if (!parler_load_gguf_metadata_only(path, mm, /*n_gpu_layers=*/0, fm, &error)) {
+        fail("metadata-only load refused a vocab-less description: " + error);
+    } else {
+        expect(fm.weights_bytes > 0, "vocab-less description sized 0 weight bytes");
+    }
+    parler_free_model(mm);
+
+    parler_model real;
+    expect(!parler_load_gguf(path, real, /*n_gpu_layers=*/0, &error),
+           "a real load accepted a vocab-less GGUF");
+    parler_free_model(real);
+
+    tts_cpp::parler::FitOptions fopts;
+    fopts.model_gguf_path    = path;
+    fopts.n_gpu_layers       = 0;
+    fopts.description_tokens = 7;
+    fopts.prompt_tokens      = 5;
+    fopts.max_frames         = 16;
+    const tts_cpp::FitResult fit = tts_cpp::parler::fit_params(fopts);
+    expect(fit.status != tts_cpp::FitStatus::Error,
+           "fit_params on a vocab-less description was Error (" + fit.reason + ")");
+
+    fs::remove(path);
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -498,6 +540,7 @@ int main(int argc, char ** argv) {
         run_parity_gates(path, /*n_gpu_layers=*/0);
         run_fit_gates(path, /*n_gpu_layers=*/0);
         fs::remove(path);
+        run_weightless_description_gates();
     }
     if (g_failures == 0) {
         std::printf("test-parler-fit-params: all checks passed\n");

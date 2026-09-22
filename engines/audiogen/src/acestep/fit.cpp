@@ -6,9 +6,8 @@
 // formula: it resolves the same backends (engine_backends.h), drives the same
 // stage loaders in metadata-only mode, and prices the same compute graphs the
 // pipeline builds -- at the workload's shapes -- through ggml's size-only APIs
-// (ggml_backend_alloc_ctx_tensors_from_buft_size, ggml_gallocr_reserve_n_size,
-// ggml_backend_sched_reserve_size), so it tracks runtime changes instead of
-// drifting from them.
+// (ggml_backend_alloc_ctx_tensors_from_buft_size, ggml_gallocr_reserve_n_size),
+// so it tracks runtime changes instead of drifting from them.
 //
 // Residency model (see Engine::Impl in engine.cpp): by default generate()
 // time-shares the stages -- each phase loads its stage and frees it right
@@ -516,8 +515,8 @@ FitResult fit_params(const FitOptions & opts) {
     stage_row("lm", rb.lm, lm_w, lm_head_bytes, lm_w.kv_bytes, lm_graph, lm_host);
     stage_row("detok", rb.detok, detok_w, 0, 0, detok_graph, detok_host);
     stage_row("dit", rb.backend, dit_w, 0, 0, dit_graph, dit_host);
-    // The VAE's sched can split a slice onto its CPU-fallback slot; that
-    // portion is host RAM whatever the VAE backend is.
+    // On a GPU VAE backend the real sched stages the graph input on its CPU
+    // (last) backend before copying it in; that portion is host RAM.
     stage_row("vae", vae_backend, vae_w, 0, 0,
               std::max<uint64_t>(vae_dec_backend, vae_enc_backend),
               sat_add(vae_host, std::max<uint64_t>(vae_dec_cpu, vae_enc_cpu)));
