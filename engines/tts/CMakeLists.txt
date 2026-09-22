@@ -1442,6 +1442,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-cli)
     tts_cpp_register_test(test-moss-cli)
 
+    add_executable(test-moss-dialogue test/moss/test_dialogue.cpp)
+    target_link_libraries(test-moss-dialogue PRIVATE tts-cpp)
+    target_include_directories(test-moss-dialogue PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-dialogue)
+    tts_cpp_register_test(test-moss-dialogue)
+
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
     target_include_directories(test-backend-selection PRIVATE src)

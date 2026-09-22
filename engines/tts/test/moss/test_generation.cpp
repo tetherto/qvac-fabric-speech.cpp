@@ -203,7 +203,7 @@ void test_state_machine_drain() {
     check(row.text == IM_END_TOKEN, "im_end is reachable after the drain");
     check(state.stopping(), "im_end stops the generation");
 
-    const std::vector<int32_t> audio = state.generated_audio(2);
+    const std::vector<int32_t> audio = state.generated_audio(2, 0);
     check(!audio.empty(), "generated audio survives de-delay");
     check(audio.size() % config.n_vq == 0, "generated audio is frame aligned");
     for (int32_t code : audio) {
@@ -285,17 +285,17 @@ void test_duration_tokens_field() {
         return std::vector<int32_t>{(int32_t) (span.size() % 90)};
     };
     captured.clear();
-    build_prompt_rows(config, tokens, recorder, "hola", "es", 0, {}, 0);
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 0, {});
     check(captured.find("- Tokens:\nNone\n") != std::string::npos,
             "free-length prompts carry Tokens: None");
     captured.clear();
-    build_prompt_rows(config, tokens, recorder, "hola", "es", 38, {}, 0);
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 38, {});
     check(captured.find("- Tokens:\n38\n") != std::string::npos,
             "duration_tokens lands as the Tokens field");
     check(captured.find("[pause") == std::string::npos,
             "the template adds no pause markers of its own");
     captured.clear();
-    build_prompt_rows(config, tokens, recorder, "hola [pause 2.0s] mundo", "es", 0, {}, 0);
+    build_prompt_rows(config, tokens, recorder, "hola [pause 2.0s] mundo", "es", 0, {});
     check(captured.find("- Text:\nhola [pause 2.0s] mundo\n") != std::string::npos,
             "inline pause markers pass through the text field untouched");
 }
@@ -308,7 +308,7 @@ void test_prompt_rows() {
     tokens.im_end = 3;
 
     const std::vector<DelayRow> plain = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", 0, {}, 0);
+            "hola", "es", 0, {});
     check(plain.size() > 4, "plain prompt has rows");
     check(plain.front().text == tokens.im_start, "prompt opens with im_start");
     check(plain.back().text == config.audio_start_token_id, "prompt ends with the audio seed row");
@@ -326,8 +326,10 @@ void test_prompt_rows() {
     for (size_t i = 0; i < reference_codes.size(); ++i) {
         reference_codes[i] = (int32_t) (i % 7);
     }
+    PromptAudio cloned_audio;
+    cloned_audio.speaker_codes.push_back(reference_codes);
     const std::vector<DelayRow> cloned = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", 0, reference_codes, reference_frames);
+            "hola", "es", 0, cloned_audio);
     int slot_rows = 0;
     int rows_with_codes = 0;
     for (const DelayRow & row : cloned) {

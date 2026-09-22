@@ -714,12 +714,13 @@ struct Codec::Impl {
         return "quantizer.quantizers." + std::to_string(index) + "." + suffix;
     }
 
-    ggml_tensor * decoder_quantizer(const std::vector<int32_t> & codes, int64_t frames) {
+    ggml_tensor * decoder_quantizer(const std::vector<int32_t> & codes, int64_t frames,
+                                    int n_channels) {
         ggml_tensor * cur = nullptr;
-        for (int iq = 0; iq < quantizer.num_quantizers; ++iq) {
+        for (int iq = 0; iq < n_channels; ++iq) {
             std::vector<int32_t> channel(frames);
             for (int64_t i = 0; i < frames; ++i) {
-                channel[i] = codes[i * quantizer.num_quantizers + iq];
+                channel[i] = codes[i * n_channels + iq];
             }
             ggml_tensor * indices = input_i32(std::move(channel));
             ggml_tensor * codebook = as_f32(require_tensor(quantizer_tensor_name(iq, "codebook.weight")));
@@ -781,8 +782,9 @@ struct Codec::Impl {
         return encoder_quantizer(cur);
     }
 
-    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames) {
-        ggml_tensor * cur = decoder_quantizer(codes, frames);
+    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames,
+                               int n_channels) {
+        ggml_tensor * cur = decoder_quantizer(codes, frames, n_channels);
         int channels = quantizer.output_dim;
         for (const Module & module : modules) {
             if (!module.is_transformer) {
@@ -872,13 +874,16 @@ std::vector<int32_t> Codec::encode(const std::vector<float> & pcm) {
     return codes;
 }
 
-std::vector<float> Codec::decode(const std::vector<int32_t> & codes) {
+std::vector<float> Codec::decode(const std::vector<int32_t> & codes, int n_channels) {
     if (impl_->encoder) {
         fail("decode called on an encoder checkpoint");
     }
-    const int n_q = impl_->quantizer.num_quantizers;
+    const int n_q = n_channels > 0 ? n_channels : impl_->quantizer.num_quantizers;
+    if (n_q > impl_->quantizer.num_quantizers) {
+        fail("decode channel count exceeds the quantizer count");
+    }
     if (codes.empty() || codes.size() % n_q != 0) {
-        fail("decode expects row-major [frames, num_quantizers] codes");
+        fail("decode expects row-major [frames, channels] codes");
     }
     for (int32_t code : codes) {
         if (code < 0 || code >= impl_->quantizer.codebook_size) {
@@ -887,7 +892,7 @@ std::vector<float> Codec::decode(const std::vector<int32_t> & codes) {
     }
     impl_->begin_graph();
     const int64_t frames = (int64_t) codes.size() / n_q;
-    ggml_tensor * output = impl_->build_decode(codes, frames);
+    ggml_tensor * output = impl_->build_decode(codes, frames, n_q);
     ggml_cgraph * graph = impl_->finish_graph(output);
     impl_->compute(graph);
     return impl_->read_f32(output);

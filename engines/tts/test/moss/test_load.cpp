@@ -66,12 +66,15 @@ void test_valid_decoder() {
     check(!codec.is_encoder(), "decoder role");
     check(codec.num_quantizers() == N_VQ, "decoder quantizer count");
     check(codec.samples_per_frame() == OUT_DIM, "decoder upsample from patch product");
+    const std::vector<int32_t> narrow(4, 1);
+    check(codec.decode(narrow, 1).size() == (size_t) (4 * OUT_DIM),
+            "partial-channel decode renders one sample block per frame");
     std::filesystem::remove(path);
 }
 
 void test_engine_rejects_quantizer_mismatch() {
     const auto backbone = write_backbone("engine-backbone", [](gguf_context *) {});
-    const auto decoder = write_decoder("engine-decoder", N_VQ + 1, 3 * D_MODEL,
+    const auto decoder = write_decoder("engine-decoder", N_VQ - 1, 3 * D_MODEL,
             [](gguf_context *) {});
     tts_cpp::moss::EngineOptions options;
     options.backbone_path = backbone.string();
@@ -82,7 +85,7 @@ void test_engine_rejects_quantizer_mismatch() {
         tts_cpp::moss::Engine engine(options);
         check(false, "engine accepted a decoder with mismatched quantizers");
     } catch (const std::runtime_error & e) {
-        check(std::string(e.what()).find("decoder quantizers do not match") != std::string::npos,
+        check(std::string(e.what()).find("fewer quantizers") != std::string::npos,
                 std::string("engine mismatch: wrong failure: ") + e.what());
     }
     std::filesystem::remove(backbone);

@@ -13,6 +13,7 @@ struct EngineOptions {
     std::string decoder_path;
     std::string encoder_path;
     std::string reference_audio_path;
+    std::vector<std::string> dialogue_reference_paths;
     std::string language = "zh";
     int duration_tokens = 0;
     int n_threads = 4;

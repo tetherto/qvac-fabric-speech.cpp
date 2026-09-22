@@ -5,7 +5,9 @@
 #include "gguf.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <functional>
 #include <stdexcept>
@@ -193,6 +195,86 @@ inline std::filesystem::path write_decoder(const char * tag, int num_quantizers,
     add_decoder_tensors(b, num_quantizers, qkv_rows);
     const auto path = temp_gguf(tag);
     b.write(path);
+    return path;
+}
+
+inline void add_encoder_meta(gguf_context * f) {
+    gguf_set_val_str(f, "general.architecture", "moss-tts-audio-encoder");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.sampling_rate", 24000);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.downsample_rate", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.input_dim", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.rvq_dim", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.output_dim", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.num_quantizers", N_VQ);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.codebook_size", CODE_SIZE);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.codebook_dim", CODE_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.block_count", 2);
+    gguf_set_val_str(f, "moss-tts-audio-encoder.encoder.0.module_type", "PatchedPretransform");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.0.patch_size", OUT_DIM);
+    gguf_set_val_str(f, "moss-tts-audio-encoder.encoder.1.module_type", "Transformer");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.input_dimension", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.output_dimension", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.d_model", D_MODEL);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.num_heads", 2);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.num_layers", 1);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.context", 8);
+}
+
+inline void add_encoder_tensors(GgufBuilder & b) {
+    b.add2("quantizer.input_proj.weight", RVQ_DIM, RVQ_DIM);
+    for (int iq = 0; iq < N_VQ; ++iq) {
+        const std::string prefix = "quantizer.quantizers." + std::to_string(iq) + ".";
+        b.add2(prefix + "codebook.weight", CODE_DIM, CODE_SIZE);
+        b.add2(prefix + "in_proj.weight", RVQ_DIM, CODE_DIM);
+        b.add2(prefix + "out_proj.weight", CODE_DIM, RVQ_DIM);
+    }
+    b.add2("blk.0.input_proj.weight", OUT_DIM, D_MODEL);
+    b.add2("blk.0.output_proj.weight", D_MODEL, RVQ_DIM);
+    b.add2("blk.0.layer.0.attn_qkv.weight", D_MODEL, 3 * D_MODEL);
+    b.add2("blk.0.layer.0.attn_output.weight", D_MODEL, D_MODEL);
+    b.add2("blk.0.layer.0.ffn_up.weight", D_MODEL, 2 * D_MODEL);
+    b.add2("blk.0.layer.0.ffn_down.weight", 2 * D_MODEL, D_MODEL);
+    b.add1("blk.0.layer.0.attn_norm.weight", D_MODEL);
+    b.add1("blk.0.layer.0.attn_norm.bias", D_MODEL);
+    b.add1("blk.0.layer.0.ffn_norm.weight", D_MODEL);
+    b.add1("blk.0.layer.0.ffn_norm.bias", D_MODEL);
+}
+
+inline std::filesystem::path write_encoder(const char * tag) {
+    GgufBuilder b;
+    add_encoder_meta(b.file);
+    add_encoder_tensors(b);
+    const auto path = temp_gguf(tag);
+    b.write(path);
+    return path;
+}
+
+inline std::filesystem::path write_tiny_wav(const char * tag, int samples) {
+    const auto path = temp_gguf(tag).replace_extension(".wav");
+    const uint32_t rate = 24000;
+    const uint32_t data_bytes = (uint32_t) samples * 2;
+    std::vector<unsigned char> header = {
+        'R','I','F','F', 0,0,0,0, 'W','A','V','E',
+        'f','m','t',' ', 16,0,0,0, 1,0, 1,0,
+        0,0,0,0, 0,0,0,0, 2,0, 16,0,
+        'd','a','t','a', 0,0,0,0,
+    };
+    auto put32 = [&header](size_t at, uint32_t v) {
+        header[at] = (unsigned char) (v & 0xff);
+        header[at + 1] = (unsigned char) ((v >> 8) & 0xff);
+        header[at + 2] = (unsigned char) ((v >> 16) & 0xff);
+        header[at + 3] = (unsigned char) ((v >> 24) & 0xff);
+    };
+    put32(4, 36 + data_bytes);
+    put32(24, rate);
+    put32(28, rate * 2);
+    put32(40, data_bytes);
+    std::ofstream out(path, std::ios::binary);
+    out.write((const char *) header.data(), (std::streamsize) header.size());
+    for (int i = 0; i < samples; ++i) {
+        const int16_t sample = (int16_t) ((i % 32) * 512 - 8192);
+        out.write((const char *) &sample, 2);
+    }
     return path;
 }
 

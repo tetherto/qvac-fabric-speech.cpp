@@ -18,11 +18,15 @@ struct PromptTokens {
 
 using TextEncoder = std::function<std::vector<int32_t>(const std::string &)>;
 
+struct PromptAudio {
+    std::vector<std::vector<int32_t>> speaker_codes;
+    std::vector<int32_t> continuation_codes;
+};
+
 std::vector<DelayRow> build_prompt_rows(const DelayConfig & config, const PromptTokens & tokens,
                                         const TextEncoder & encode, const std::string & text,
                                         const std::string & language, int duration_tokens,
-                                        const std::vector<int32_t> & reference_codes,
-                                        int reference_frames);
+                                        const PromptAudio & audio);
 
 // Builds the generation prompt as packed rows, mirroring the reference
 // pipeline: the fixed user-instruction template, the reference-audio
@@ -40,8 +44,7 @@ public:
     std::vector<int32_t> encode(const std::string & text) const;
     std::vector<DelayRow> build_prompt(const DelayConfig & config, const std::string & text,
                                        const std::string & language, int duration_tokens,
-                                       const std::vector<int32_t> & reference_codes,
-                                       int reference_frames) const;
+                                       const PromptAudio & audio) const;
 
 private:
     struct Impl;

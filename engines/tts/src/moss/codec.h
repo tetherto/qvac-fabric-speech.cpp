@@ -27,7 +27,7 @@ public:
     const char * backend_name() const;
 
     std::vector<int32_t> encode(const std::vector<float> & pcm);
-    std::vector<float> decode(const std::vector<int32_t> & codes);
+    std::vector<float> decode(const std::vector<int32_t> & codes, int n_channels = 0);
 
 private:
     struct Impl;
