@@ -2999,10 +2999,61 @@ The ANE beats consumer-class GPUs and loses to workstation-class ones; the
 sidecar is presence-driven so the call is per-deployment. Sidecar compute
 scales with padded frames, so window width trades context-repay overhead
 against last-window tail waste (see docs/supertonic.md); 64 stays the
-default. Open follow-ups: the Metal-vs-Core-ML productization comparison
-(which machines ship the sidecar) is the next ticket; batching the window
+default. Which machines ship the sidecar is settled in the Core ML vs Metal
+section below. Open follow-ups: batching the window
 plan through one `predictionsFromBatch:` submit would recover up to ~1 ms of
 per-window dispatch on long utterances; a second, smaller exported window
 would cut the streaming first-chunk floor; the vector estimator stays on ggml
 -- variable text length in its cross-attention plus the per-step loop make a
 fixed-shape export a separate investigation.
+
+---
+
+## Core ML vs Metal: which machines ship the sidecar (2026-09-21)
+
+The productization comparison the sidecar work left open. Full tables in
+docs/supertonic.md; measured with `supertonic-bench` (F1, 5 steps, speed
+1.05, 4 threads, `--n-gpu-layers 99`, 10 runs after 3 warmups and one
+`--prewarm`) on an Apple M4 mini and an Apple M3 Ultra, across five
+utterance lengths from 1.3 s to 28.2 s, the four `SUPERTONIC_COREML_COMPUTE_UNITS`
+placements, the three `supertonic3` tiers the tts-ggml package distributes,
+and exported window widths 64 / 128 / 192 / 256.
+
+Result: there is no single answer, and the split is by GPU class, not by
+utterance length.
+
+- The M4 wins with the sidecar at every length: vocoder 2.5-2.9x (1.6x on a
+  1.3 s utterance, where one padded window dominates), end to end 1.05-1.29x
+  on `supertonic2` and 1.06-1.13x on the larger `supertonic3`.
+- The M3 Ultra loses at every length: vocoder 0.6-0.9x, end to end 0.87-0.97x
+  on `supertonic2` and 0.90-1.00x on `supertonic3`.
+- `coreml-all` == `coreml-ane` >> `coreml-gpu` on both hosts, and the ANE
+  costs the same on both machines (15.3 ms M4 vs 16.2 ms M3 Ultra for the
+  same 22.9 s utterance). The sidecar's cost is fixed; only the Metal
+  baseline it is compared against moves.
+- Tier-independent: only 21 vocoder tensors quantise, so ggml Metal's vocoder
+  costs the same on f32, q8_0 and q4_0, and one f32 sidecar serves all three.
+- No window width flips the M3 Ultra, and none beats 64 overall on either
+  host -- the last window's zero-padded tail costs more than the repeated
+  causal context saves.
+- Sidecar load is free: one-shot process wall clock is unchanged (within
+  repeat spread) with and without it.
+- Parity is a per-tier question. The sidecar carries f32 weights, so against
+  the same-tier ggml vocoder it is cosine 0.9997 / 0.9994 on f32 / q8_0 but
+  0.9069 on q4_0 (log-spectral distance 4.4 / 6.0 / 23.6 dB): on q4_0 it
+  substitutes reference-precision weights for quantised ones and the audio
+  changes. The loader now records each weight's GGUF storage width and the
+  sidecar stays off any vocoder stored below 8 bits per weight
+  (`SUPERTONIC_COREML_ALLOW_LOW_BIT=1` overrides, for measuring that
+  substitution).
+
+So the sidecar ships where the GPU is consumer-class -- iOS, and base / Pro
+Macs -- and stays off Max / Ultra parts. It is presence-driven, so that is a
+packaging decision (publish the `.mlmodelc` beside the GGUF or do not), not a
+build flag, and the same binary covers both. Propagating to `@qvac/tts-ggml`
+therefore needs a registry cut pinning a commit with this work (`speech-cpp`'s
+`coreml` feature already sets `TTS_CPP_COREML`), `coreml` added to tts-ggml's
+osx/ios feature list, and the 49 MB `supertonic3-vocoder.mlmodelc` published to
+the model registry and wired into `download-tts-ggml-models.js` -- which needs
+an archive-and-extract path, since the sidecar is a directory and the
+downloader fetches single files.
