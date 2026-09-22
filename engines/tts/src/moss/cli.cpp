@@ -1,4 +1,4 @@
-#include "tts-cpp/moss/engine.h"
+#include "moss/cli.h"
 
 #include "dr_wav.h"
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace {
+namespace tts_cpp::moss::cli {
 
 void print_usage() {
     std::fprintf(stderr,
@@ -21,6 +21,8 @@ void print_usage() {
         "       [--audio-temperature 1.7] [--audio-top-p 0.8] [--audio-top-k 25]\n"
         "       [--audio-repetition-penalty 1.0]\n");
 }
+
+namespace {
 
 bool save_wav(const std::string & path, const std::vector<float> & pcm, int sample_rate) {
     drwav_data_format format{};
@@ -40,13 +42,9 @@ bool save_wav(const std::string & path, const std::vector<float> & pcm, int samp
     return written == samples.size();
 }
 
-struct CliArgs {
-    tts_cpp::moss::EngineOptions options;
-    std::string text;
-    std::string out_path = "moss-out.wav";
-};
+} // namespace
 
-bool parse_args(int argc, char ** argv, CliArgs & args) {
+bool parse_args(int argc, const char * const * argv, CliArgs & args) {
     for (int i = 1; i < argc; ++i) {
         const std::string flag = argv[i];
         auto next = [&]() -> const char * {
@@ -86,15 +84,8 @@ bool parse_args(int argc, char ** argv, CliArgs & args) {
     return true;
 }
 
-} // namespace
-
-int main(int argc, char ** argv) {
-    CliArgs args;
+int run(const CliArgs & args) {
     try {
-        if (!parse_args(argc, argv, args)) {
-            print_usage();
-            return 1;
-        }
         tts_cpp::moss::Engine engine(args.options);
         std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
         const tts_cpp::moss::SynthesisResult result = engine.synthesize(args.text);
@@ -116,3 +107,5 @@ int main(int argc, char ** argv) {
         return 1;
     }
 }
+
+} // namespace tts_cpp::moss::cli

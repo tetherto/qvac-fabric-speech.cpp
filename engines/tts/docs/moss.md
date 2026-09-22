@@ -25,9 +25,12 @@ in-loop drain state machine, the sampling primitives, segment extraction, and
 prompt packing against the upstream semantics. Against converted
 MOSS-TTS-v1.5 and MOSS-Audio-Tokenizer GGUFs, the codec encoder-to-decoder
 round trip reaches 0.94 correlation on real audio, and full synthesis on
-Metal produces clean speech that terminates generation naturally. Numeric
-reference parity and the remaining backends are the follow-up to this
-change.
+Metal produces clean speech that terminates generation naturally. The codec
+transformers run banded attention: each sliding-window block attends inside
+its configured context window, so attention memory scales with the window
+instead of the clip length, and the banded output matches the dense
+computation on real audio. Numeric reference parity and the remaining
+backends are the follow-up to this change.
 
 ### Convert
 
@@ -112,7 +115,13 @@ frames, concatenated, and decoded by the codec.
 
 ### Test
 
-`test-moss-generation` builds with `TTS_CPP_BUILD_TESTS` and needs no model
-fixtures: it is pure CPU logic over the generation primitives. Run it
-directly; it prints `moss generation conformance: OK` and exits non-zero on
-any failed check.
+The suites build with `TTS_CPP_BUILD_TESTS` and need no model downloads.
+`test-moss-generation` is pure CPU logic over the generation primitives.
+`test-moss-load` builds tiny GGUF fixtures in-test and covers the accept path
+plus every load-time rejection for the backbone, the codec, and the engine
+pairing. `test-moss-cancel` drives a real synthesis on the fixture models and
+cancels it from another thread. `test-moss-cli` covers the flag surface and
+runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
+registered when an interpreter is available, skips without numpy/gguf)
+fabricates a tiny checkpoint on disk, runs both converters, and validates the
+emitted GGUFs.

@@ -583,7 +583,7 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     target_link_libraries(tts-cli PRIVATE tts-cpp)
     tts_cpp_apply_ccache(tts-cli)
 
-    add_executable(moss-cli src/moss/cli.cpp)
+    add_executable(moss-cli src/moss/cli_main.cpp src/moss/cli.cpp)
     target_link_libraries(moss-cli PRIVATE tts-cpp)
     target_include_directories(moss-cli PRIVATE src)
     tts_cpp_apply_ccache(moss-cli)
@@ -1191,6 +1191,13 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
         set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
+        add_test(NAME test-convert-moss
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_moss.py")
+        set_property(TEST test-convert-moss PROPERTY LABELS "unit")
+        set_property(TEST test-convert-moss PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-convert-moss PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+
         # Skips without torch; the TTS CI macOS lane runs it in the export venv.
         add_test(NAME test-audio8-codec-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}"
@@ -1416,6 +1423,18 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-load PRIVATE src)
     tts_cpp_apply_ccache(test-moss-load)
     tts_cpp_register_test(test-moss-load)
+
+    add_executable(test-moss-cancel test/moss/test_cancel.cpp)
+    target_link_libraries(test-moss-cancel PRIVATE tts-cpp)
+    target_include_directories(test-moss-cancel PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-cancel)
+    tts_cpp_register_test(test-moss-cancel)
+
+    add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-cli PRIVATE tts-cpp)
+    target_include_directories(test-moss-cli PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-cli)
+    tts_cpp_register_test(test-moss-cli)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)

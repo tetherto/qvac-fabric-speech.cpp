@@ -249,7 +249,7 @@ struct DelayLM::Impl {
         cache_v.resize(config.n_layers);
         for (int il = 0; il < config.n_layers; ++il) {
             cache_k[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim, n_ctx);
-            cache_v[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim, n_ctx);
+            cache_v[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, n_ctx, kv_dim);
         }
         state_buffer = ggml_backend_alloc_ctx_tensors(state, backend);
         if (!state_buffer) {
@@ -384,6 +384,18 @@ struct DelayLM::Impl {
         return ggml_view_2d(graph_ctx, cache, kv_dim, count, cache->nb[1], first * cache->nb[1]);
     }
 
+    ggml_tensor * cache_write_view_transposed(ggml_tensor * cache, int64_t first, int64_t count) {
+        const int64_t kv_dim = (int64_t) config.head_dim * config.n_kv_heads;
+        return ggml_view_2d(graph_ctx, cache, count, kv_dim, cache->nb[1],
+                first * ggml_element_size(cache));
+    }
+
+    ggml_tensor * value_prefix_view(ggml_tensor * cache, int64_t count) {
+        const size_t row = cache->nb[1];
+        return ggml_view_3d(graph_ctx, cache, count, config.head_dim, config.n_kv_heads,
+                row, row * config.head_dim, 0);
+    }
+
     ggml_tensor * attention(ggml_cgraph * graph, const Layer & layer, int il, ggml_tensor * cur,
                             int64_t n_tokens, int64_t total, ggml_tensor * positions, ggml_tensor * mask) {
         ggml_tensor * q = ggml_mul_mat(graph_ctx, layer.wq, cur);
@@ -399,16 +411,15 @@ struct DelayLM::Impl {
         ggml_tensor * k_rows = ggml_reshape_2d(graph_ctx, ggml_cont(graph_ctx, k), kv_dim, n_tokens);
         ggml_tensor * v_rows = ggml_reshape_2d(graph_ctx, ggml_cont(graph_ctx, v), kv_dim, n_tokens);
         ggml_build_forward_expand(graph, ggml_cpy(graph_ctx, k_rows, cache_write_view(cache_k[il], pos, n_tokens)));
-        ggml_build_forward_expand(graph, ggml_cpy(graph_ctx, v_rows, cache_write_view(cache_v[il], pos, n_tokens)));
+        ggml_build_forward_expand(graph, ggml_cpy(graph_ctx, ggml_transpose(graph_ctx, v_rows),
+                cache_write_view_transposed(cache_v[il], pos, n_tokens)));
 
         ggml_tensor * keys = ggml_reshape_3d(graph_ctx, cache_view(cache_k[il], total),
                 config.head_dim, config.n_kv_heads, total);
-        ggml_tensor * values = ggml_reshape_3d(graph_ctx, cache_view(cache_v[il], total),
-                config.head_dim, config.n_kv_heads, total);
+        ggml_tensor * values = value_prefix_view(cache_v[il], total);
 
         q = ggml_permute(graph_ctx, q, 0, 2, 1, 3);
         keys = ggml_permute(graph_ctx, keys, 0, 2, 1, 3);
-        values = ggml_cont(graph_ctx, ggml_permute(graph_ctx, values, 1, 2, 0, 3));
         ggml_tensor * scores = ggml_mul_mat(graph_ctx, keys, q);
         scores = ggml_soft_max_ext(graph_ctx, scores, mask, 1.0f / std::sqrt((float) config.head_dim), 0.0f);
         ggml_tensor * attended = ggml_mul_mat(graph_ctx, values, scores);
