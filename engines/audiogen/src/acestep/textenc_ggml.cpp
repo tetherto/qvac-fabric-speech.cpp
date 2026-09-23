@@ -291,6 +291,7 @@ bool textenc_model_embed_lookup(TextEncModel * m, const int32_t * token_ids, int
         ggml_free(ctx);
         return false;
     }
+    m->last_compute_bytes = ggml_gallocr_get_buffer_size(ga, 0);
 
     ggml_backend_tensor_set(t_ids, token_ids, 0, (size_t) S * sizeof(int32_t));
     if (ggml_backend_graph_compute(m->backend, gf) != GGML_STATUS_SUCCESS) {
