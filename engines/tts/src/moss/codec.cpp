@@ -26,6 +26,13 @@ constexpr int   DEFAULT_SAMPLE_RATE = 24000;
 constexpr int   MAX_CLIP_SECONDS    = 60;
 constexpr int     MAX_PATCH_SIZE  = 8192;
 constexpr int64_t MAX_DOWNSAMPLE  = 1 << 20;
+constexpr uint32_t MAX_MODULES          = 64;
+constexpr int      MAX_TRANSFORMER_LAYERS = 256;
+constexpr int      MAX_QUANTIZERS       = 64;
+constexpr int      MAX_CODEBOOK_SIZE    = 1 << 20;
+constexpr int      MAX_DIMENSION        = 1 << 16;
+constexpr int      MAX_HEADS            = 1024;
+constexpr int      MAX_CONTEXT          = 1 << 16;
 
 constexpr const char * ENCODER_ARCH = "moss-tts-audio-encoder";
 constexpr const char * DECODER_ARCH = "moss-tts-audio-decoder";
@@ -66,6 +73,18 @@ struct Module {
     TransformerBlock transformer;
 };
 
+struct LayerCache {
+    ggml_tensor * keys = nullptr;
+    ggml_tensor * values = nullptr;
+};
+
+struct BlockStream {
+    std::vector<LayerCache> layers;
+    int64_t position = 0;
+    int64_t cached = 0;
+    int64_t capacity = 0;
+};
+
 struct QuantizerMeta {
     int input_dim      = 0;
     int rvq_dim        = 0;
@@ -85,12 +104,16 @@ struct GraphInputF32 {
     std::vector<float> data;
 };
 
-std::vector<int32_t> sequential_positions(int64_t n) {
+std::vector<int32_t> sequential_positions(int64_t first, int64_t n) {
     std::vector<int32_t> positions(n);
     for (int64_t i = 0; i < n; ++i) {
-        positions[i] = (int32_t) i;
+        positions[i] = (int32_t) (first + i);
     }
     return positions;
+}
+
+bool within(int value, int low, int high) {
+    return value >= low && value <= high;
 }
 
 std::vector<float> banded_causal_mask(int64_t query_start, int64_t query_count,
@@ -144,10 +167,18 @@ struct Codec::Impl {
     ggml_context * graph_ctx = nullptr;
     std::vector<GraphInputI32> inputs_i32;
     std::vector<GraphInputF32> inputs_f32;
+    std::vector<ggml_tensor *> cache_writes;
+
+    ggml_context * stream_ctx = nullptr;
+    ggml_backend_buffer_t stream_buffer = nullptr;
+    std::vector<BlockStream> streams;
+    int64_t frames_decoded = 0;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
         if (graph_ctx) ggml_free(graph_ctx);
+        if (stream_buffer) ggml_backend_buffer_free(stream_buffer);
+        if (stream_ctx) ggml_free(stream_ctx);
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -216,9 +247,12 @@ struct Codec::Impl {
         quantizer.num_quantizers = (int) meta_u32(arch + ".quantizer.num_quantizers");
         quantizer.codebook_size  = (int) meta_u32(arch + ".quantizer.codebook_size");
         quantizer.codebook_dim   = (int) meta_u32(arch + ".quantizer.codebook_dim");
-        if (quantizer.num_quantizers <= 0 || quantizer.codebook_size <= 0 ||
-            quantizer.codebook_dim <= 0 || quantizer.rvq_dim <= 0 ||
-            quantizer.input_dim <= 0 || quantizer.output_dim <= 0) {
+        if (!within(quantizer.num_quantizers, 1, MAX_QUANTIZERS) ||
+            !within(quantizer.codebook_size, 1, MAX_CODEBOOK_SIZE) ||
+            !within(quantizer.codebook_dim, 1, MAX_DIMENSION) ||
+            !within(quantizer.rvq_dim, 1, MAX_DIMENSION) ||
+            !within(quantizer.input_dim, 1, MAX_DIMENSION) ||
+            !within(quantizer.output_dim, 1, MAX_DIMENSION)) {
             fail("invalid quantizer geometry");
         }
     }
@@ -288,9 +322,12 @@ struct Codec::Impl {
         block.num_layers       = (int) meta_u32(prefix + ".num_layers");
         block.context          = (int) meta_u32(prefix + ".context");
         block.max_period       = meta_f32(prefix + ".max_period", 10000.0f);
-        if (block.d_model <= 0 || block.num_heads <= 0 || block.d_model % block.num_heads != 0 ||
-            block.input_dimension <= 0 || block.output_dimension <= 0 ||
-            block.num_layers <= 0 || block.context < 0) {
+        if (!within(block.d_model, 1, MAX_DIMENSION) || !within(block.num_heads, 1, MAX_HEADS) ||
+            block.d_model % block.num_heads != 0 ||
+            !within(block.input_dimension, 1, MAX_DIMENSION) ||
+            !within(block.output_dimension, 1, MAX_DIMENSION) ||
+            !within(block.num_layers, 1, MAX_TRANSFORMER_LAYERS) ||
+            !within(block.context, encoder ? 0 : 1, MAX_CONTEXT)) {
             fail("invalid transformer geometry in " + prefix);
         }
         block.input_proj  = find_tensor("blk." + std::to_string(tensor_block) + ".input_proj.weight");
@@ -317,6 +354,9 @@ struct Codec::Impl {
     void read_modules() {
         const std::string section = encoder ? "encoder" : "decoder";
         const uint32_t block_count = meta_u32(arch + "." + section + ".block_count");
+        if (block_count < 1 || block_count > MAX_MODULES) {
+            fail("invalid module count");
+        }
         modules.resize(block_count);
         int tensor_block = 0;
         for (uint32_t ib = 0; ib < block_count; ++ib) {
@@ -515,6 +555,7 @@ struct Codec::Impl {
         }
         inputs_i32.clear();
         inputs_f32.clear();
+        cache_writes.clear();
         const size_t buffer = (size_t) GRAPH_NODES * ggml_tensor_overhead() + ggml_graph_overhead_custom(GRAPH_NODES, false);
         graph_ctx = ggml_init({buffer, nullptr, true});
         if (!graph_ctx) {
@@ -621,9 +662,31 @@ struct Codec::Impl {
         return attended;
     }
 
+    ggml_tensor * with_history(ggml_tensor * fresh, ggml_tensor * cache, int64_t cached) {
+        if (cache == nullptr || cached == 0) {
+            return fresh;
+        }
+        ggml_tensor * history = ggml_view_3d(graph_ctx, cache, cache->ne[0], cache->ne[1], cached,
+                cache->nb[1], cache->nb[2], 0);
+        return ggml_concat(graph_ctx, history, fresh, 2);
+    }
+
+    void retain_tail(ggml_tensor * sequence, ggml_tensor * cache, int64_t keep) {
+        if (cache == nullptr || keep == 0) {
+            return;
+        }
+        const int64_t first = sequence->ne[2] - keep;
+        ggml_tensor * tail = ggml_view_3d(graph_ctx, sequence, sequence->ne[0], sequence->ne[1], keep,
+                sequence->nb[1], sequence->nb[2], first * sequence->nb[2]);
+        ggml_tensor * slot = ggml_view_3d(graph_ctx, cache, cache->ne[0], cache->ne[1], keep,
+                cache->nb[1], cache->nb[2], 0);
+        cache_writes.push_back(ggml_cpy(graph_ctx, tail, slot));
+    }
+
     ggml_tensor * attention(const TransformerLayer & layer, ggml_tensor * cur,
                             const TransformerBlock & block, int64_t frames,
-                            ggml_tensor * positions, const std::vector<AttentionBand> & bands) {
+                            ggml_tensor * positions, const std::vector<AttentionBand> & bands,
+                            const LayerCache * cache, int64_t cached, int64_t keep) {
         const int d_head = block.d_model / block.num_heads;
         ggml_tensor * qkv = ggml_mul_mat(graph_ctx, as_matrix(layer.attn_qkv), cur);
         const size_t head_stride = ggml_row_size(qkv->type, d_head);
@@ -637,6 +700,12 @@ struct Codec::Impl {
                 block.max_period, ROPE_FREQ_SCALE_NEUTRAL, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(graph_ctx, k, positions, nullptr, d_head, 0, 0,
                 block.max_period, ROPE_FREQ_SCALE_NEUTRAL, 0.0f, 1.0f, 0.0f, 0.0f);
+        if (cache != nullptr) {
+            k = with_history(ggml_cont(graph_ctx, k), cache->keys, cached);
+            v = with_history(ggml_cont(graph_ctx, v), cache->values, cached);
+            retain_tail(k, cache->keys, keep);
+            retain_tail(v, cache->values, keep);
+        }
         ggml_tensor * attended = banded_attention(q, k, v, bands, d_head);
         attended = ggml_permute(graph_ctx, attended, 0, 2, 1, 3);
         attended = ggml_cont_2d(graph_ctx, attended,
@@ -646,9 +715,10 @@ struct Codec::Impl {
 
     ggml_tensor * transformer_layer(const TransformerLayer & layer, ggml_tensor * cur,
                                     const TransformerBlock & block, int64_t frames,
-                                    ggml_tensor * positions, const std::vector<AttentionBand> & bands) {
+                                    ggml_tensor * positions, const std::vector<AttentionBand> & bands,
+                                    const LayerCache * cache, int64_t cached, int64_t keep) {
         ggml_tensor * attended = attention(layer, layer_norm(cur, layer.norm1_w, layer.norm1_b),
-                block, frames, positions, bands);
+                block, frames, positions, bands, cache, cached, keep);
         if (layer.scale1 != nullptr) {
             attended = ggml_mul(graph_ctx, attended, as_f32(layer.scale1));
         }
@@ -663,33 +733,50 @@ struct Codec::Impl {
         return ggml_add(graph_ctx, cur, ff);
     }
 
-    std::vector<AttentionBand> plan_attention_bands(const TransformerBlock & block, int64_t frames) {
+    AttentionBand plan_band(const TransformerBlock & block, int64_t history, int64_t query_start,
+                            int64_t query_count) {
+        AttentionBand band;
+        band.query_start = query_start;
+        band.query_count = query_count;
+        const int64_t first_query = history + query_start;
+        band.key_start = block.context > 0
+                ? std::max<int64_t>(0, first_query - (block.context - 1)) : 0;
+        band.key_count = first_query + query_count - band.key_start;
+        band.mask = input_f32(banded_causal_mask(first_query, query_count,
+                band.key_start, band.key_count, block.context),
+                band.key_count, query_count);
+        return band;
+    }
+
+    std::vector<AttentionBand> plan_attention_bands(const TransformerBlock & block, int64_t frames,
+                                                    int64_t history) {
         std::vector<AttentionBand> bands;
         const int64_t band_rows = block.context > 0 && frames > 2 * (int64_t) block.context
                 ? (int64_t) block.context : frames;
         for (int64_t query_start = 0; query_start < frames; query_start += band_rows) {
-            AttentionBand band;
-            band.query_start = query_start;
-            band.query_count = std::min(band_rows, frames - query_start);
-            band.key_start = block.context > 0
-                    ? std::max<int64_t>(0, query_start - (block.context - 1)) : 0;
-            band.key_count = query_start + band.query_count - band.key_start;
-            band.mask = input_f32(banded_causal_mask(band.query_start, band.query_count,
-                    band.key_start, band.key_count, block.context),
-                    band.key_count, band.query_count);
-            bands.push_back(band);
+            bands.push_back(plan_band(block, history, query_start,
+                    std::min(band_rows, frames - query_start)));
         }
         return bands;
     }
 
-    ggml_tensor * transformer_block(const TransformerBlock & block, ggml_tensor * cur, int64_t frames) {
-        ggml_tensor * positions = input_i32(sequential_positions(frames));
-        const std::vector<AttentionBand> bands = plan_attention_bands(block, frames);
+    ggml_tensor * transformer_block(const TransformerBlock & block, ggml_tensor * cur, int64_t frames,
+                                    BlockStream * stream) {
+        const int64_t first = stream ? stream->position : 0;
+        const int64_t cached = stream ? stream->cached : 0;
+        const int64_t keep = stream ? std::min(cached + frames, stream->capacity) : 0;
+        ggml_tensor * positions = input_i32(sequential_positions(first, frames));
+        const std::vector<AttentionBand> bands = plan_attention_bands(block, frames, cached);
         if (block.input_proj != nullptr) {
             cur = ggml_mul_mat(graph_ctx, as_matrix(block.input_proj), cur);
         }
-        for (const TransformerLayer & layer : block.layers) {
-            cur = transformer_layer(layer, cur, block, frames, positions, bands);
+        for (size_t il = 0; il < block.layers.size(); ++il) {
+            cur = transformer_layer(block.layers[il], cur, block, frames, positions, bands,
+                    stream ? &stream->layers[il] : nullptr, cached, keep);
+        }
+        if (stream != nullptr) {
+            stream->position += frames;
+            stream->cached = keep;
         }
         if (block.output_proj != nullptr) {
             cur = ggml_mul_mat(graph_ctx, as_matrix(block.output_proj), cur);
@@ -771,7 +858,7 @@ struct Codec::Impl {
                 frames /= module.patch_size;
                 continue;
             }
-            cur = transformer_block(module.transformer, cur, frames);
+            cur = transformer_block(module.transformer, cur, frames, nullptr);
             channels = module.transformer.output_dimension;
             tensor_block++;
         }
@@ -781,17 +868,19 @@ struct Codec::Impl {
         return encoder_quantizer(cur);
     }
 
-    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames) {
+    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames, bool streaming) {
         ggml_tensor * cur = decoder_quantizer(codes, frames);
         int channels = quantizer.output_dim;
-        for (const Module & module : modules) {
+        for (size_t im = 0; im < modules.size(); ++im) {
+            const Module & module = modules[im];
             if (!module.is_transformer) {
                 cur = patch_decode(cur, channels, frames, module.patch_size);
                 channels /= module.patch_size;
                 frames *= module.patch_size;
                 continue;
             }
-            cur = transformer_block(module.transformer, cur, frames);
+            cur = transformer_block(module.transformer, cur, frames,
+                    streaming ? &streams[im] : nullptr);
             channels = module.transformer.output_dimension;
         }
         if (channels != 1) {
@@ -816,6 +905,9 @@ struct Codec::Impl {
         ggml_set_output(output);
         ggml_cgraph * graph = ggml_new_graph_custom(graph_ctx, GRAPH_NODES, false);
         ggml_build_forward_expand(graph, output);
+        for (ggml_tensor * write : cache_writes) {
+            ggml_build_forward_expand(graph, write);
+        }
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer})) {
             fail("scheduler initialization failed");
         }
@@ -830,6 +922,79 @@ struct Codec::Impl {
         const ggml_status status = ::tts_cpp::detail::sched_fallback_compute(sched, backend, graph, n_threads);
         if (status != GGML_STATUS_SUCCESS) {
             fail("graph compute failed");
+        }
+    }
+
+    size_t count_cache_tensors() const {
+        size_t count = 0;
+        for (const Module & module : modules) {
+            if (module.is_transformer) {
+                count += 2 * module.transformer.layers.size();
+            }
+        }
+        return count;
+    }
+
+    void create_block_stream(const TransformerBlock & block, BlockStream & stream) {
+        const int d_head = block.d_model / block.num_heads;
+        stream.capacity = std::max(1, block.context - 1);
+        stream.layers.resize(block.layers.size());
+        for (LayerCache & cache : stream.layers) {
+            cache.keys = ggml_new_tensor_3d(stream_ctx, GGML_TYPE_F32, d_head, block.num_heads,
+                    stream.capacity);
+            cache.values = ggml_new_tensor_3d(stream_ctx, GGML_TYPE_F32, d_head, block.num_heads,
+                    stream.capacity);
+        }
+    }
+
+    void allocate_streams() {
+        stream_ctx = ggml_init({(count_cache_tensors() + 8) * ggml_tensor_overhead(), nullptr, true});
+        if (!stream_ctx) {
+            fail("stream state context allocation failed");
+        }
+        streams.resize(modules.size());
+        for (size_t im = 0; im < modules.size(); ++im) {
+            if (modules[im].is_transformer) {
+                create_block_stream(modules[im].transformer, streams[im]);
+            }
+        }
+        stream_buffer = ggml_backend_alloc_ctx_tensors(stream_ctx, backend);
+        if (!stream_buffer) {
+            fail("stream state allocation failed");
+        }
+    }
+
+    void reset_streams() {
+        if (stream_ctx == nullptr) {
+            allocate_streams();
+        }
+        for (BlockStream & stream : streams) {
+            stream.position = 0;
+            stream.cached = 0;
+        }
+    }
+
+    std::vector<float> run_decode(const std::vector<int32_t> & codes, bool streaming) {
+        begin_graph();
+        const int64_t frames = (int64_t) codes.size() / quantizer.num_quantizers;
+        ggml_tensor * output = build_decode(codes, frames, streaming);
+        ggml_cgraph * graph = finish_graph(output);
+        compute(graph);
+        frames_decoded += frames;
+        return read_f32(output);
+    }
+
+    void validate_codes(const std::vector<int32_t> & codes) const {
+        if (encoder) {
+            fail("decode called on an encoder checkpoint");
+        }
+        if (codes.empty() || codes.size() % (size_t) quantizer.num_quantizers != 0) {
+            fail("decode expects row-major [frames, num_quantizers] codes");
+        }
+        for (int32_t code : codes) {
+            if (code < 0 || code >= quantizer.codebook_size) {
+                fail("audio code out of range");
+            }
         }
     }
 
@@ -865,32 +1030,61 @@ std::vector<int32_t> Codec::encode(const std::vector<float> & pcm) {
     ggml_cgraph * graph = impl_->finish_graph(output);
     impl_->compute(graph);
     std::vector<int32_t> codes = impl_->read_i32(output);
-    // The trailing zero-padded partial frame carries no signal; the reference
-    // pipeline keeps only floor(samples / downsample) frames.
     const size_t valid_frames = pcm.size() / (size_t) impl_->downsample;
     codes.resize(valid_frames * (size_t) impl_->quantizer.num_quantizers);
     return codes;
 }
 
 std::vector<float> Codec::decode(const std::vector<int32_t> & codes) {
+    impl_->validate_codes(codes);
+    return impl_->run_decode(codes, false);
+}
+
+void Codec::begin_decode_stream() {
     if (impl_->encoder) {
-        fail("decode called on an encoder checkpoint");
+        fail("decode streams need a decoder checkpoint");
     }
-    const int n_q = impl_->quantizer.num_quantizers;
-    if (codes.empty() || codes.size() % n_q != 0) {
-        fail("decode expects row-major [frames, num_quantizers] codes");
+    impl_->reset_streams();
+}
+
+std::vector<float> Codec::decode_stream(const std::vector<int32_t> & codes) {
+    impl_->validate_codes(codes);
+    if (impl_->stream_ctx == nullptr) {
+        fail("decode_stream called before begin_decode_stream");
     }
-    for (int32_t code : codes) {
-        if (code < 0 || code >= impl_->quantizer.codebook_size) {
-            fail("audio code out of range");
-        }
+    return impl_->run_decode(codes, true);
+}
+
+int64_t Codec::frames_decoded() const {
+    return impl_->frames_decoded;
+}
+
+std::vector<float> decode_segments(Codec & codec, const std::vector<std::vector<int32_t>> & segments,
+                                   int64_t max_single_frames) {
+    std::vector<float> pcm;
+    const size_t stride = (size_t) codec.num_quantizers();
+    for (const std::vector<int32_t> & segment : segments) {
+        const std::vector<float> rendered = segment.size() / stride <= (size_t) max_single_frames
+                ? codec.decode(segment)
+                : decode_in_windows(codec, segment, max_single_frames);
+        pcm.insert(pcm.end(), rendered.begin(), rendered.end());
     }
-    impl_->begin_graph();
-    const int64_t frames = (int64_t) codes.size() / n_q;
-    ggml_tensor * output = impl_->build_decode(codes, frames);
-    ggml_cgraph * graph = impl_->finish_graph(output);
-    impl_->compute(graph);
-    return impl_->read_f32(output);
+    return pcm;
+}
+
+std::vector<float> decode_in_windows(Codec & codec, const std::vector<int32_t> & codes,
+                                     int64_t window_frames) {
+    const size_t stride = (size_t) codec.num_quantizers() * (size_t) window_frames;
+    std::vector<float> pcm;
+    codec.begin_decode_stream();
+    for (size_t begin = 0; begin < codes.size(); begin += stride) {
+        const size_t end = std::min(codes.size(), begin + stride);
+        const std::vector<float> rendered = codec.decode_stream(
+                std::vector<int32_t>(codes.begin() + (std::ptrdiff_t) begin,
+                        codes.begin() + (std::ptrdiff_t) end));
+        pcm.insert(pcm.end(), rendered.begin(), rendered.end());
+    }
+    return pcm;
 }
 
 } // namespace tts_cpp::moss::detail

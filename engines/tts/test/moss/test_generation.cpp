@@ -203,12 +203,13 @@ void test_state_machine_drain() {
     check(row.text == IM_END_TOKEN, "im_end is reachable after the drain");
     check(state.stopping(), "im_end stops the generation");
 
-    const std::vector<int32_t> audio = state.generated_audio(2);
-    check(!audio.empty(), "generated audio survives de-delay");
-    check(audio.size() % config.n_vq == 0, "generated audio is frame aligned");
-    for (int32_t code : audio) {
-        check(code != config.audio_pad_code, "no pad codes leak into decoded segments");
-    }
+    const AudioSegments segments = state.generated_audio(2);
+    check(segments.size() == 1, "one utterance yields one segment");
+    check(!segments.empty() && segments[0].size() % config.n_vq == 0,
+            "generated audio is frame aligned");
+    check(!segments.empty() && std::none_of(segments[0].begin(), segments[0].end(),
+            [&](int32_t code) { return code == config.audio_pad_code; }),
+            "no pad codes leak into decoded segments");
 }
 
 void test_early_stop_masks() {
@@ -260,9 +261,30 @@ void test_segment_extraction() {
         5, 6,
         pad, pad,
     };
-    const std::vector<int32_t> merged = extract_audio_segments(codes, 5, n_vq, pad);
-    check(merged == std::vector<int32_t>({1, 2, 3, 4, 5, 6}), "segments merged without pads");
+    const AudioSegments segments = extract_audio_segments(codes, 5, n_vq, pad);
+    check(segments.size() == 2, "pad frames separate independent segments");
+    check(segments.size() == 2 && segments[0] == std::vector<int32_t>({1, 2}),
+            "first segment keeps its own frames");
+    check(segments.size() == 2 && segments[1] == std::vector<int32_t>({3, 4, 5, 6}),
+            "second segment starts after the separator");
     check(extract_audio_segments({pad, pad}, 1, n_vq, pad).empty(), "all-pad input yields nothing");
+    check(extract_audio_segments({1, 2}, 1, n_vq, pad).size() == 1,
+            "a segment running to the end is kept");
+}
+
+void test_top_k_tie_break() {
+    std::mt19937 rng(3);
+    check(sample_row({1.0f, 5.0f, 5.0f, 0.0f}, 1.0f, 1, true, rng) == 1,
+            "equal logits resolve to the lowest index");
+    std::mt19937 rng_b(3);
+    check(sample_row({5.0f, 1.0f, 5.0f, 5.0f}, 1.0f, 1, true, rng_b) == 0,
+            "the tie break does not depend on position in the vocabulary scan");
+}
+
+void test_top_k_larger_than_vocab() {
+    std::mt19937 rng(5);
+    const int32_t token = sample_row({0.0f, 0.0f, 50.0f}, 1.0f, 100, true, rng);
+    check(token == 2, "top_k beyond the vocabulary keeps every candidate");
 }
 
 std::vector<int32_t> fake_encode(const std::string & span) {
@@ -360,6 +382,8 @@ int main() {
     test_early_stop_masks();
     test_incremental_de_delay();
     test_segment_extraction();
+    test_top_k_tie_break();
+    test_top_k_larger_than_vocab();
     test_duration_tokens_field();
     test_prompt_rows();
     if (failures == 0) {

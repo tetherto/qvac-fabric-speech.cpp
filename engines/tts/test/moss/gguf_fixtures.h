@@ -8,6 +8,8 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,9 +37,20 @@ inline std::filesystem::path temp_gguf(const char * tag) {
         ("moss-" + std::string(tag) + "-" + std::to_string(stamp) + ".gguf");
 }
 
+struct ConstantTensor {
+    ggml_type type;
+    float value;
+};
+
+using ConstantTensors = std::map<std::string, ConstantTensor>;
+
+constexpr float RANDOM_WEIGHT_RANGE = 0.5f;
+
 struct GgufBuilder {
     gguf_context * file;
     ggml_context * tensors;
+    ConstantTensors constants;
+    std::mt19937 * random = nullptr;
 
     GgufBuilder() : file(gguf_init_empty()),
                     tensors(ggml_init({16 * 1024 * 1024, nullptr, false})) {}
@@ -47,18 +60,53 @@ struct GgufBuilder {
         gguf_free(file);
     }
 
-    void add1(const std::string & name, int64_t n) {
-        ggml_tensor * t = ggml_new_tensor_1d(tensors, GGML_TYPE_F32, n);
-        std::memset(t->data, 0, ggml_nbytes(t));
+    ggml_type type_of(const std::string & name) const {
+        const auto found = constants.find(name);
+        return found == constants.end() ? GGML_TYPE_F32 : found->second.type;
+    }
+
+    void fill_constant(ggml_tensor * t, float value) {
+        const int64_t n = ggml_nelements(t);
+        for (int64_t i = 0; i < n; ++i) {
+            if (t->type == GGML_TYPE_F16) {
+                ((ggml_fp16_t *) t->data)[i] = ggml_fp32_to_fp16(value);
+            } else {
+                ((float *) t->data)[i] = value;
+            }
+        }
+    }
+
+    void fill_random(ggml_tensor * t) {
+        std::uniform_real_distribution<float> draw(-RANDOM_WEIGHT_RANGE, RANDOM_WEIGHT_RANGE);
+        const int64_t n = ggml_nelements(t);
+        for (int64_t i = 0; i < n; ++i) {
+            ((float *) t->data)[i] = draw(*random);
+        }
+    }
+
+    void fill(ggml_tensor * t, const std::string & name) {
+        const auto found = constants.find(name);
+        if (found != constants.end()) {
+            fill_constant(t, found->second.value);
+        } else if (random != nullptr) {
+            fill_random(t);
+        } else {
+            std::memset(t->data, 0, ggml_nbytes(t));
+        }
+    }
+
+    void register_tensor(ggml_tensor * t, const std::string & name) {
+        fill(t, name);
         ggml_set_name(t, name.c_str());
         gguf_add_tensor(file, t);
     }
 
+    void add1(const std::string & name, int64_t n) {
+        register_tensor(ggml_new_tensor_1d(tensors, type_of(name), n), name);
+    }
+
     void add2(const std::string & name, int64_t ne0, int64_t ne1) {
-        ggml_tensor * t = ggml_new_tensor_2d(tensors, GGML_TYPE_F32, ne0, ne1);
-        std::memset(t->data, 0, ggml_nbytes(t));
-        ggml_set_name(t, name.c_str());
-        gguf_add_tensor(file, t);
+        register_tensor(ggml_new_tensor_2d(tensors, type_of(name), ne0, ne1), name);
     }
 
     void write(const std::filesystem::path & path) {
@@ -135,8 +183,10 @@ inline void add_backbone_tensors(GgufBuilder & b) {
 }
 
 inline std::filesystem::path write_backbone(const char * tag,
-        const std::function<void(gguf_context *)> & mutate_meta) {
+        const std::function<void(gguf_context *)> & mutate_meta,
+        const ConstantTensors & constants = {}) {
     GgufBuilder b;
+    b.constants = constants;
     add_backbone_meta(b.file);
     add_backbone_tensors(b);
     mutate_meta(b.file);
@@ -186,8 +236,9 @@ inline void add_decoder_tensors(GgufBuilder & b, int num_quantizers, int64_t qkv
 }
 
 inline std::filesystem::path write_decoder(const char * tag, int num_quantizers, int64_t qkv_rows,
-        const std::function<void(gguf_context *)> & mutate_meta) {
+        const std::function<void(gguf_context *)> & mutate_meta, std::mt19937 * random = nullptr) {
     GgufBuilder b;
+    b.random = random;
     add_decoder_meta(b.file, num_quantizers);
     mutate_meta(b.file);
     add_decoder_tensors(b, num_quantizers, qkv_rows);

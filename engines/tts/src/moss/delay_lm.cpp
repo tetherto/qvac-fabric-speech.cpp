@@ -21,9 +21,20 @@ constexpr const char * ARCH = "moss-tts-delay";
 constexpr int GRAPH_NODES = 8192;
 constexpr int MIN_CONTEXT = 32;
 constexpr int MAX_CONTEXT = 32768;
+constexpr int MAX_LAYERS = 512;
+constexpr int MAX_CHANNELS = 64;
+constexpr int MAX_EMBEDDING = 1 << 16;
+constexpr int MAX_FEED_FORWARD = 1 << 18;
+constexpr int MAX_HEADS = 1024;
+constexpr int MAX_HEAD_DIM = 1024;
+constexpr float FFN_DOWN_ACCUMULATION_SCALE = 64.0f;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss delay LM: " + message);
+}
+
+bool within(int value, int low, int high) {
+    return value >= low && value <= high;
 }
 
 struct Layer {
@@ -164,7 +175,7 @@ struct DelayLM::Impl {
         config.n_ff        = (int) meta_u32(arch + ".feed_forward_length");
         config.n_heads     = (int) meta_u32(arch + ".attention.head_count");
         config.n_kv_heads  = (int) meta_u32(arch + ".attention.head_count_kv");
-        if (config.n_embd <= 0 || config.n_heads <= 0) {
+        if (!within(config.n_embd, 1, MAX_EMBEDDING) || !within(config.n_heads, 1, MAX_HEADS)) {
             fail("invalid model geometry");
         }
         config.head_dim    = (int) meta_u32_or(arch + ".attention.key_length",
@@ -181,8 +192,13 @@ struct DelayLM::Impl {
         config.audio_assistant_gen_slot_token_id = (int) meta_u32(arch + ".audio_assistant_gen_slot_token_id");
         config.audio_assistant_delay_slot_token_id = (int) meta_u32(arch + ".audio_assistant_delay_slot_token_id");
         config.sampling_rate = (int) meta_u32_or(arch + ".sampling_rate", 24000);
-        if (config.n_layers <= 0 || config.n_embd <= 0 || config.n_heads <= 0 ||
-            config.n_kv_heads <= 0 || config.n_vq <= 0 || config.head_dim <= 0) {
+        validate_geometry();
+    }
+
+    void validate_geometry() const {
+        if (!within(config.n_layers, 1, MAX_LAYERS) || !within(config.n_kv_heads, 1, MAX_HEADS) ||
+            !within(config.n_vq, 1, MAX_CHANNELS) || !within(config.head_dim, 1, MAX_HEAD_DIM) ||
+            !within(config.n_ff, 1, MAX_FEED_FORWARD)) {
             fail("invalid model geometry");
         }
     }
@@ -428,10 +444,16 @@ struct DelayLM::Impl {
         return ggml_mul_mat(graph_ctx, layer.wo, attended);
     }
 
+    ggml_tensor * scaled_down_projection(ggml_tensor * weight, ggml_tensor * hidden) {
+        ggml_tensor * shrunk = ggml_scale(graph_ctx, hidden, 1.0f / FFN_DOWN_ACCUMULATION_SCALE);
+        return ggml_scale(graph_ctx, ggml_mul_mat(graph_ctx, weight, shrunk),
+                FFN_DOWN_ACCUMULATION_SCALE);
+    }
+
     ggml_tensor * feed_forward(const Layer & layer, ggml_tensor * cur) {
         ggml_tensor * gate = ggml_silu(graph_ctx, ggml_mul_mat(graph_ctx, layer.ffn_gate, cur));
         ggml_tensor * up = ggml_mul_mat(graph_ctx, layer.ffn_up, cur);
-        return ggml_mul_mat(graph_ctx, layer.ffn_down, ggml_mul(graph_ctx, gate, up));
+        return scaled_down_projection(layer.ffn_down, ggml_mul(graph_ctx, gate, up));
     }
 
     std::vector<float> attention_mask(int64_t n_tokens, int64_t total) const {

@@ -4,6 +4,7 @@
 #include "moss/delay_lm.h"
 #include "tts-cpp/moss/engine.h"
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -12,6 +13,8 @@
 
 using tts_cpp::moss::detail::Codec;
 using tts_cpp::moss::detail::DelayLM;
+using tts_cpp::moss::detail::DelayLogits;
+using tts_cpp::moss::detail::DelayRow;
 using namespace moss_fixtures;
 
 namespace {
@@ -89,6 +92,99 @@ void test_engine_rejects_quantizer_mismatch() {
     std::filesystem::remove(decoder);
 }
 
+constexpr uint32_t OVERSIZED = 0x7FFFFFFFu;
+constexpr int BUDGET_MAX_NEW_TOKENS = 24;
+constexpr int TERMINATION_ROWS = 2;
+constexpr float OVERFLOW_EMBEDDING = 1.0f;
+constexpr float OVERFLOW_PROJECTION = 12.5f;
+constexpr float OVERFLOW_DOWN = 1.0f;
+
+tts_cpp::moss::EngineOptions pair_options(const std::filesystem::path & backbone,
+                                          const std::filesystem::path & decoder) {
+    tts_cpp::moss::EngineOptions options;
+    options.backbone_path = backbone.string();
+    options.decoder_path = decoder.string();
+    options.n_threads = 1;
+    options.context = 64;
+    options.max_new_tokens = BUDGET_MAX_NEW_TOKENS;
+    return options;
+}
+
+bool engine_accepts_duration(const std::filesystem::path & backbone,
+                             const std::filesystem::path & decoder, int duration_tokens,
+                             std::string & error) {
+    tts_cpp::moss::EngineOptions options = pair_options(backbone, decoder);
+    options.duration_tokens = duration_tokens;
+    try {
+        tts_cpp::moss::Engine engine(options);
+        return true;
+    } catch (const std::runtime_error & e) {
+        error = e.what();
+        return false;
+    }
+}
+
+void test_duration_budget() {
+    const auto backbone = write_backbone("budget-backbone", [](gguf_context *) {});
+    const auto decoder = write_decoder("budget-decoder", N_VQ, 3 * D_MODEL, [](gguf_context *) {});
+    const int largest = BUDGET_MAX_NEW_TOKENS - (N_VQ - 1) - TERMINATION_ROWS;
+    std::string error;
+    check(engine_accepts_duration(backbone, decoder, largest, error),
+            "a duration that leaves room for the delay drain is accepted: " + error);
+    check(!engine_accepts_duration(backbone, decoder, largest + 1, error) &&
+            error.find("raise max_new_tokens") != std::string::npos,
+            "a duration without room for the delay drain is rejected");
+    check(!engine_accepts_duration(backbone, decoder, -1, error) &&
+            error.find("must not be negative") != std::string::npos,
+            "a negative duration is rejected");
+    check(engine_accepts_duration(backbone, decoder, 0, error), "free length needs no budget");
+    std::filesystem::remove(backbone);
+    std::filesystem::remove(decoder);
+}
+
+void test_engine_accepts_backends_dir() {
+    const auto backbone = write_backbone("backends-backbone", [](gguf_context *) {});
+    const auto decoder = write_decoder("backends-decoder", N_VQ, 3 * D_MODEL, [](gguf_context *) {});
+    tts_cpp::moss::EngineOptions options = pair_options(backbone, decoder);
+    options.backends_dir = std::filesystem::temp_directory_path().string();
+    tts_cpp::moss::Engine engine(options);
+    check(std::string(engine.backend_name()).size() > 0, "engine loads with a backends directory");
+    std::filesystem::remove(backbone);
+    std::filesystem::remove(decoder);
+}
+
+ConstantTensors overflowing_feed_forward() {
+    return {
+        {"token_embd.weight", {GGML_TYPE_F32, OVERFLOW_EMBEDDING}},
+        {"blk.0.ffn_norm.weight", {GGML_TYPE_F32, OVERFLOW_EMBEDDING}},
+        {"blk.0.ffn_gate.weight", {GGML_TYPE_F16, OVERFLOW_PROJECTION}},
+        {"blk.0.ffn_up.weight", {GGML_TYPE_F16, OVERFLOW_PROJECTION}},
+        {"blk.0.ffn_down.weight", {GGML_TYPE_F16, OVERFLOW_DOWN}},
+    };
+}
+
+bool all_finite(const std::vector<float> & values) {
+    for (float value : values) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void test_feed_forward_beyond_half_precision() {
+    const auto path = write_backbone("overflow-backbone", [](gguf_context *) {},
+            overflowing_feed_forward());
+    DelayLM model(path.string(), false, 1, 64);
+    DelayRow row;
+    row.text = SPECIALS;
+    row.audio.assign(N_VQ, 0);
+    const DelayLogits logits = model.prefill({row, row});
+    check(all_finite(logits.text), "a feed-forward sum past the f16 range keeps text logits finite");
+    check(all_finite(logits.audio[0]), "a feed-forward sum past the f16 range keeps audio logits finite");
+    std::filesystem::remove(path);
+}
+
 void test_engine_accepts_matching_pair() {
     const auto backbone = write_backbone("engine-backbone-ok", [](gguf_context *) {});
     const auto decoder = write_decoder("engine-decoder-ok", N_VQ, 3 * D_MODEL,
@@ -108,10 +204,35 @@ void test_engine_accepts_matching_pair() {
 
 int main() {
     try {
+        test_engine_accepts_backends_dir();
         test_valid_backbone();
         test_valid_decoder();
         test_engine_accepts_matching_pair();
         test_engine_rejects_quantizer_mismatch();
+        test_duration_budget();
+        test_feed_forward_beyond_half_precision();
+
+        expect_backbone_failure("oversized block count", [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-delay.block_count", OVERSIZED);
+        }, "invalid model geometry");
+        expect_backbone_failure("oversized channel count", [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-delay.n_vq", OVERSIZED);
+        }, "invalid model geometry");
+        expect_backbone_failure("oversized feed forward", [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-delay.feed_forward_length", OVERSIZED);
+        }, "invalid model geometry");
+        expect_decoder_failure("oversized module count", 3 * D_MODEL, [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-audio-decoder.decoder.block_count", OVERSIZED);
+        }, "invalid module count");
+        expect_decoder_failure("oversized layer count", 3 * D_MODEL, [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-audio-decoder.decoder.0.num_layers", OVERSIZED);
+        }, "invalid transformer geometry");
+        expect_decoder_failure("oversized quantizer count", 3 * D_MODEL, [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-audio-decoder.quantizer.num_quantizers", OVERSIZED);
+        }, "invalid quantizer geometry");
+        expect_decoder_failure("zero decoder context", 3 * D_MODEL, [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-audio-decoder.decoder.0.context", 0);
+        }, "invalid transformer geometry");
 
         expect_backbone_failure("zero heads", [](gguf_context * f) {
             gguf_set_val_u32(f, "moss-tts-delay.attention.head_count", 0);

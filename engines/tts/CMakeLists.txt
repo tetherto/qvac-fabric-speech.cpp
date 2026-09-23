@@ -366,7 +366,6 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/engine.cpp
     src/pocket/fit.cpp
     src/pocket/reference_audio.cpp
-    # MOSS Delay engine (MOSS-TTS-v1.5 / MOSS-TTSD backbone + RVQ codec).
     src/moss/codec.cpp
     src/moss/delay_lm.cpp
     src/moss/generation.cpp
@@ -1435,6 +1434,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-cancel PRIVATE src)
     tts_cpp_apply_ccache(test-moss-cancel)
     tts_cpp_register_test(test-moss-cancel)
+
+    add_executable(test-moss-codec-stream test/moss/test_codec_stream.cpp)
+    target_link_libraries(test-moss-codec-stream PRIVATE tts-cpp)
+    target_include_directories(test-moss-codec-stream PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-codec-stream)
+    tts_cpp_register_test(test-moss-codec-stream)
 
     add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-cli PRIVATE tts-cpp)

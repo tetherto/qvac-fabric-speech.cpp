@@ -5,6 +5,7 @@
 #include "moss/frontend.h"
 #include "moss/generation.h"
 
+#include "backend_selection.h"
 #include "dr_wav.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 namespace tts_cpp::moss {
 namespace {
 
+using detail::AudioSegments;
 using detail::Codec;
 using detail::DelayLM;
 using detail::DelayLogits;
@@ -28,8 +30,8 @@ using detail::Frontend;
 using detail::SamplingConfig;
 
 constexpr int CONTEXT_HEADROOM = 8;
-constexpr int BATCH_SINGLE_DECODE_MAX_FRAMES = 750;
-constexpr int BATCH_CHUNK_LEFT_CONTEXT_FRAMES = 125;
+constexpr int SINGLE_DECODE_MAX_FRAMES = 750;
+constexpr int TERMINATION_ROWS = 2;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss engine: " + message);
@@ -132,8 +134,11 @@ struct Engine::Impl {
         if (options.max_new_tokens < 1) {
             fail("max_new_tokens must be positive");
         }
-        if (options.duration_tokens < 0 || options.duration_tokens > options.max_new_tokens) {
-            fail("duration_tokens must be within 0..max_new_tokens");
+        if (options.duration_tokens < 0) {
+            fail("duration_tokens must not be negative");
+        }
+        if (!options.backends_dir.empty()) {
+            ::tts_cpp::detail::set_backends_directory(options.backends_dir);
         }
         sampling.text_temperature  = options.text_temperature;
         sampling.text_top_p        = options.text_top_p;
@@ -152,7 +157,19 @@ struct Engine::Impl {
         if (decoder->num_quantizers() != backbone->config().n_vq) {
             fail("decoder quantizers do not match the backbone channels");
         }
+        validate_duration_budget();
         load_reference();
+    }
+
+    void validate_duration_budget() const {
+        if (options.duration_tokens == 0) {
+            return;
+        }
+        const int needed = options.duration_tokens + backbone->config().n_vq - 1 + TERMINATION_ROWS;
+        if (needed > options.max_new_tokens) {
+            fail("duration_tokens needs " + std::to_string(needed) +
+                 " generation steps with the delay drain; raise max_new_tokens");
+        }
     }
 
     void load_reference() {
@@ -201,88 +218,97 @@ struct Engine::Impl {
     }
 
     struct StreamProgress {
-        std::vector<int32_t> codes;
+        std::vector<int32_t> pending;
         int scanned_frames = 0;
         int emitted_frames = 0;
+        bool in_segment = false;
         bool audio_emitted = false;
     };
 
-    static bool frame_is_pad(const std::vector<int32_t> & frame, int pad_code) {
-        for (int32_t code : frame) {
-            if (code != pad_code) {
+    int pending_frames(const StreamProgress & progress) const {
+        return (int) (progress.pending.size() / (size_t) backbone->config().n_vq);
+    }
+
+    std::vector<int32_t> take_pending(StreamProgress & progress, int frames) const {
+        const size_t count = (size_t) frames * (size_t) backbone->config().n_vq;
+        std::vector<int32_t> taken(progress.pending.begin(),
+                progress.pending.begin() + (std::ptrdiff_t) count);
+        progress.pending.erase(progress.pending.begin(), progress.pending.begin() + (std::ptrdiff_t) count);
+        return taken;
+    }
+
+    bool deliver(const std::vector<float> & pcm, StreamProgress & progress, const AudioCallback & callback,
+                 const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        if (pcm.empty()) {
+            return true;
+        }
+        if (!progress.audio_emitted) {
+            progress.audio_emitted = true;
+            result.first_audio_ms = elapsed_ms(start);
+        }
+        return callback(pcm.data(), pcm.size(), decoder->sample_rate());
+    }
+
+    bool decode_pending(StreamProgress & progress, int frames, const AudioCallback & callback,
+                        const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        const std::vector<int32_t> codes = take_pending(progress, frames);
+        const auto decode_start = std::chrono::steady_clock::now();
+        const std::vector<float> pcm = decoder->decode_stream(codes);
+        result.decode_ms += elapsed_ms(decode_start);
+        progress.emitted_frames += frames;
+        return deliver(pcm, progress, callback, start, result);
+    }
+
+    bool emit_full_chunks(StreamProgress & progress, const AudioCallback & callback,
+                          const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        const int chunk = std::max(1, options.stream_chunk_frames);
+        while (pending_frames(progress) >= chunk) {
+            if (!decode_pending(progress, chunk, callback, start, result)) {
                 return false;
             }
         }
         return true;
     }
 
-    void collect_ready_frames(const DelayState & state, int prompt_frames,
-                              StreamProgress & progress) const {
+    bool close_segment(StreamProgress & progress, const AudioCallback & callback,
+                       const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        progress.in_segment = false;
+        const int remaining = pending_frames(progress);
+        return remaining == 0 || decode_pending(progress, remaining, callback, start, result);
+    }
+
+    bool consume_frame(const std::vector<int32_t> & frame, StreamProgress & progress,
+                       const AudioCallback & callback,
+                       const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
+        const int n_vq = backbone->config().n_vq;
+        if (detail::frame_is_pad(frame, 0, n_vq, backbone->config().audio_pad_code)) {
+            return !progress.in_segment || close_segment(progress, callback, start, result);
+        }
+        if (!progress.in_segment) {
+            decoder->begin_decode_stream();
+            progress.in_segment = true;
+        }
+        progress.pending.insert(progress.pending.end(), frame.begin(), frame.end());
+        return emit_full_chunks(progress, callback, start, result);
+    }
+
+    bool stream_ready_frames(const DelayState & state, int prompt_frames, StreamProgress & progress,
+                             const AudioCallback & callback,
+                             const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
         const int available = state.available_frames(prompt_frames);
         for (; progress.scanned_frames < available; ++progress.scanned_frames) {
-            const std::vector<int32_t> frame = state.frame_codes(prompt_frames,
-                    progress.scanned_frames);
-            if (!frame_is_pad(frame, backbone->config().audio_pad_code)) {
-                progress.codes.insert(progress.codes.end(), frame.begin(), frame.end());
+            if (!consume_frame(state.frame_codes(prompt_frames, progress.scanned_frames), progress,
+                    callback, start, result)) {
+                return false;
             }
         }
+        return true;
     }
 
-    std::vector<float> decode_frame_range(const std::vector<int32_t> & codes, int begin_frame,
-                                          int end_frame, int left_context_frames,
-                                          SynthesisResult & result) {
-        const int n_vq = backbone->config().n_vq;
-        const int from = left_context_frames > 0 ? std::max(0, begin_frame - left_context_frames) : 0;
-        const std::vector<int32_t> slice(codes.begin() + (size_t) from * n_vq,
-                codes.begin() + (size_t) end_frame * n_vq);
+    void decode_batch(const AudioSegments & segments, SynthesisResult & result) {
         const auto decode_start = std::chrono::steady_clock::now();
-        std::vector<float> pcm = decoder->decode(slice);
-        result.decode_ms += elapsed_ms(decode_start);
-        const size_t skip = (size_t) (begin_frame - from) * decoder->samples_per_frame();
-        pcm.erase(pcm.begin(), pcm.begin() + (std::ptrdiff_t) std::min(skip, pcm.size()));
-        return pcm;
-    }
-
-    bool emit_ready(StreamProgress & progress, const AudioCallback & callback, bool flush,
-                    const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
-        const int chunk = std::max(1, options.stream_chunk_frames);
-        while (true) {
-            const int total = (int) (progress.codes.size() / (size_t) backbone->config().n_vq);
-            const int pending = total - progress.emitted_frames;
-            if (pending <= 0 || (pending < chunk && !flush)) {
-                return true;
-            }
-            const int end = flush ? total : progress.emitted_frames + chunk;
-            const std::vector<float> pcm = decode_frame_range(progress.codes,
-                    progress.emitted_frames, end, options.stream_left_context_frames, result);
-            if (!pcm.empty()) {
-                if (!progress.audio_emitted) {
-                    progress.audio_emitted = true;
-                    result.first_audio_ms = elapsed_ms(start);
-                }
-                if (!callback(pcm.data(), pcm.size(), decoder->sample_rate())) {
-                    return false;
-                }
-            }
-            progress.emitted_frames = end;
-        }
-    }
-
-    void decode_batch(const std::vector<int32_t> & codes, SynthesisResult & result) {
-        const int n_vq = backbone->config().n_vq;
-        const int frames = (int) (codes.size() / (size_t) n_vq);
-        if (frames <= BATCH_SINGLE_DECODE_MAX_FRAMES) {
-            const auto decode_start = std::chrono::steady_clock::now();
-            result.pcm = decoder->decode(codes);
-            result.decode_ms = elapsed_ms(decode_start);
-            return;
-        }
-        for (int begin = 0; begin < frames; begin += BATCH_SINGLE_DECODE_MAX_FRAMES) {
-            const int end = std::min(frames, begin + BATCH_SINGLE_DECODE_MAX_FRAMES);
-            const std::vector<float> pcm = decode_frame_range(codes, begin, end,
-                    BATCH_CHUNK_LEFT_CONTEXT_FRAMES, result);
-            result.pcm.insert(result.pcm.end(), pcm.begin(), pcm.end());
-        }
+        result.pcm = detail::decode_segments(*decoder, segments, SINGLE_DECODE_MAX_FRAMES);
+        result.decode_ms = elapsed_ms(decode_start);
     }
 
     std::vector<DelayRow> build_checked_prompt(const std::string & text) {
@@ -318,15 +344,15 @@ struct Engine::Impl {
             return result;
         }
 
-        const std::vector<int32_t> codes = state.generated_audio((int) prompt.size());
-        if (codes.empty()) {
+        const AudioSegments segments = state.generated_audio((int) prompt.size());
+        if (segments.empty()) {
             fail("the model produced no audio frames");
         }
         if (cancel_requested) {
             result.cancelled = true;
             return result;
         }
-        decode_batch(codes, result);
+        decode_batch(segments, result);
         result.sample_rate = decoder->sample_rate();
         result.cancelled = cancel_requested;
         return result;
@@ -356,14 +382,13 @@ struct Engine::Impl {
         const auto start = std::chrono::steady_clock::now();
         backbone->reset();
         generate_rows(prompt, state, rng, result, [&]() {
-            collect_ready_frames(state, prompt_frames, progress);
-            return emit_ready(progress, callback, false, start, result);
+            return stream_ready_frames(state, prompt_frames, progress, callback, start, result);
         });
         if (!result.cancelled) {
-            collect_ready_frames(state, prompt_frames, progress);
-            if (!emit_ready(progress, callback, true, start, result)) {
-                result.cancelled = true;
-            }
+            const bool delivered =
+                    stream_ready_frames(state, prompt_frames, progress, callback, start, result) &&
+                    close_segment(progress, callback, start, result);
+            result.cancelled = !delivered;
         }
         result.generation_ms = elapsed_ms(start) - result.decode_ms;
         result.sample_rate = decoder->sample_rate();
