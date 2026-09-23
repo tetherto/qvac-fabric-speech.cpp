@@ -49,7 +49,7 @@ void test_option_mapping() {
     check(parse({"moss-cli", "--backbone", "b.gguf", "--decoder", "d.gguf", "--text", "hi",
             "--encoder", "e.gguf", "--ref-audio", "r.wav", "--language", "en",
             "--max-new-tokens", "7", "--context", "128", "--seed", "42", "--threads", "2",
-            "--duration-tokens", "38",
+            "--duration-tokens", "38", "--backends-dir", "/opt/backends",
             "--gpu", "--text-temperature", "0.5", "--audio-top-k", "9", "--out", "x.wav"}, args),
             "full flag surface parses");
     check(args.options.encoder_path == "e.gguf" && args.options.reference_audio_path == "r.wav",
@@ -60,6 +60,7 @@ void test_option_mapping() {
     check(args.options.text_temperature == 0.5f && args.options.audio_top_k == 9,
             "sampling flags map");
     check(args.options.duration_tokens == 38, "duration flag maps");
+    check(args.options.backends_dir == "/opt/backends", "backends directory flag maps");
     check(args.out_path == "x.wav", "output path maps");
 }
 

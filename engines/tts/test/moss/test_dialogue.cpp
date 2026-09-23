@@ -4,6 +4,7 @@
 #include "moss/generation.h"
 #include "tts-cpp/moss/engine.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +16,9 @@ using namespace moss_fixtures;
 using namespace tts_cpp::moss::detail;
 
 namespace {
+
+constexpr int CONTINUATION_FRAMES = 10;
+constexpr uint32_t DIALOGUE_WEIGHT_SEED = 29;
 
 int failures = 0;
 
@@ -107,7 +111,7 @@ void test_continuation_state_and_extraction() {
 
     PromptAudio audio;
     audio.speaker_codes.push_back(ramp_codes(config, 4, 1));
-    audio.continuation_codes = ramp_codes(config, 10, 3);
+    audio.continuation_codes = ramp_codes(config, CONTINUATION_FRAMES, 3);
     const std::vector<DelayRow> prompt = build_prompt_rows(config, tokens, encode,
             "hola", "es", 0, audio);
 
@@ -133,12 +137,19 @@ void test_continuation_state_and_extraction() {
     for (int step = 0; step < 5; ++step) {
         state.step(logits, sampling, rng);
     }
-    const int base_row = (int) prompt.size() - 10;
-    const std::vector<int32_t> emitted = state.generated_audio(base_row, 10);
-    check(!emitted.empty(), "continuation emits audio beyond the references");
-    for (int32_t code : emitted) {
-        check(code == 7, "emitted frames are generated codes, not reference codes");
-    }
+    const int base_row = (int) prompt.size() - CONTINUATION_FRAMES;
+    const AudioSegments segments = state.generated_audio(base_row);
+    check(segments.size() == 1, "references and their continuation form one segment");
+    const std::vector<int32_t> & segment = segments.front();
+    const size_t context = (size_t) CONTINUATION_FRAMES * config.n_vq;
+    check(segment.size() > context, "continuation emits audio beyond the references");
+    const size_t prompt_only = (size_t) (CONTINUATION_FRAMES - (config.n_vq - 1)) * config.n_vq;
+    check(std::equal(audio.continuation_codes.begin(),
+            audio.continuation_codes.begin() + (std::ptrdiff_t) prompt_only, segment.begin()),
+            "the segment opens with the reference codes as decoder context");
+    check(std::all_of(segment.begin() + (std::ptrdiff_t) context, segment.end(),
+            [](int32_t code) { return code == 7; }),
+            "frames after the context are generated codes, not reference codes");
 }
 
 tts_cpp::moss::EngineOptions dialogue_options(const std::filesystem::path & backbone,
@@ -162,6 +173,8 @@ void test_engine_dialogue(const tts_cpp::moss::EngineOptions & options) {
     tts_cpp::moss::Engine engine(options);
     const tts_cpp::moss::SynthesisResult batch = engine.synthesize("[S1] hi [S2] hello");
     check(!batch.pcm.empty(), "dialogue synthesis produces PCM");
+    check(std::any_of(batch.pcm.begin(), batch.pcm.end(), [](float s) { return s != 0.0f; }),
+            "random codec weights make the dialogue parity check meaningful");
 
     std::vector<float> streamed;
     const tts_cpp::moss::SynthesisResult stream = engine.synthesize_stream("[S1] hi [S2] hello",
@@ -199,8 +212,9 @@ int main() {
         test_continuation_state_and_extraction();
 
         const auto backbone = write_backbone("dlg-backbone", [](gguf_context *) {});
+        std::mt19937 weights(DIALOGUE_WEIGHT_SEED);
         const auto decoder = write_decoder("dlg-decoder", N_VQ, 3 * D_MODEL,
-                [](gguf_context *) {});
+                [](gguf_context *) {}, &weights);
         const auto encoder = write_encoder("dlg-encoder");
         const auto s1 = write_tiny_wav("dlg-s1", 64);
         const auto s2 = write_tiny_wav("dlg-s2", 96);

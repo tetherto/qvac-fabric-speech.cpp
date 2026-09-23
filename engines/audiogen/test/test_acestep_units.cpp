@@ -18,6 +18,7 @@
 //   8. stage placement     — which backend the LM / detokenizer / encoders run on.
 //   9. parallel_load       — weight-load row/chunk decomposition parity.
 //   9b. fused load         — LM q|k|v / gate|up row blocks fail closed.
+//   9c. vae measure        — metadata-only VAE yields decode sizes, no abort.
 //   10. quantize policy    — acestep-quantize per-tensor type selection.
 //   11. quantize roundtrip — synthetic GGUF through plan/stream/padding, read back.
 //   12. bpe tokenizer      — byte-level BPE encode/decode on a hand-built vocab.
@@ -31,6 +32,7 @@
 #include "dit_ggml.h"
 #include "dit_gguf.h"
 #include "detok_ggml.h"
+#include "fit_measure.h"
 #include "tok_ggml.h"
 #include "generate_task.h"
 #include "generation_conditioning.h"
@@ -1246,6 +1248,43 @@ void test_fused_load_fail_closed() {
 
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
+    std::remove(path.c_str());
+}
+
+// 9c. vae metadata-only measure ----------------------------------------------
+// A metadata-only VAE (weights sized, never allocated) must still yield decode
+// measurement sizes. The decoder architecture is hardcoded, so any parseable
+// GGUF serves; the earlier sched-based pricing aborted on the buffer-less
+// weights (GGML_ASSERT(buffer_id >= 0) in ggml-alloc).
+void test_vae_metadata_only_measure() {
+    using tts_cpp::acestep::AcestepStageMeasure;
+    using tts_cpp::acestep::backend_cpu_init;
+    using tts_cpp::acestep::vae_model_free;
+    using tts_cpp::acestep::vae_model_load_metadata_only;
+    using tts_cpp::acestep::vae_model_measure_decode;
+
+    const std::string path = test_temp_dir() + "/qvac-acestep-vae-measure-test.gguf";
+    gguf_context * gc = gguf_init_empty();
+    CHECK(gguf_write_to_file(gc, path.c_str(), /*only_meta=*/true));
+    gguf_free(gc);
+
+    ggml_backend_t cpu = backend_cpu_init();
+    CHECK(cpu != nullptr);
+    if (cpu) {
+        AcestepStageMeasure w{};
+        tts_cpp::acestep::VaeModel * m =
+            vae_model_load_metadata_only(path, cpu, /*with_encoder=*/false, /*verbose=*/false, w);
+        CHECK(m != nullptr);
+        if (m) {
+            CHECK(w.weights_alloc_bytes > 0);
+            size_t backend_bytes = 0, host_input_bytes = 0;
+            CHECK(vae_model_measure_decode(m, /*T_latent=*/8, backend_bytes, host_input_bytes));
+            CHECK(backend_bytes > 0);
+            CHECK(host_input_bytes == 0);  // the input is part of the CPU measure
+            vae_model_free(m);
+        }
+        ggml_backend_free(cpu);
+    }
     std::remove(path.c_str());
 }
 
@@ -3006,6 +3045,7 @@ int main() {
     test_parallel_rows();
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();
+    test_vae_metadata_only_measure();
     test_generate_task_kinds();
     test_generate_task_defaults();
     test_generate_task_audio_layout();

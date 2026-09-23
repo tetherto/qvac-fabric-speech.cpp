@@ -39,12 +39,6 @@ struct DelayLogits {
     std::vector<std::vector<float>> audio;
 };
 
-// The MOSS Delay backbone: a Qwen3-style decoder whose input embedding is the
-// text-token embedding plus one embedding per audio codebook channel, and
-// whose output is one text head plus one head per channel. One instance owns
-// the weights, the backend, and a bounded KV cache; calls must be serialized
-// by the caller. prefill() consumes the prompt and step() advances one row,
-// both returning the last row's logits for every head.
 class DelayLM {
 public:
     DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx);
@@ -58,7 +52,6 @@ public:
     int context() const;
     void reset();
 
-    // Tokenizer vocabulary exported alongside the weights.
     std::vector<std::string> tokenizer_tokens() const;
     std::vector<std::string> tokenizer_merges() const;
     int32_t token_id(const std::string & token) const;

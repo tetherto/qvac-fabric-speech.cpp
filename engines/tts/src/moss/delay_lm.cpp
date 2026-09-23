@@ -21,9 +21,20 @@ constexpr const char * ARCH = "moss-tts-delay";
 constexpr int GRAPH_NODES = 8192;
 constexpr int MIN_CONTEXT = 32;
 constexpr int MAX_CONTEXT = 32768;
+constexpr int MAX_LAYERS = 512;
+constexpr int MAX_CHANNELS = 64;
+constexpr int MAX_EMBEDDING = 1 << 16;
+constexpr int MAX_FEED_FORWARD = 1 << 18;
+constexpr int MAX_HEADS = 1024;
+constexpr int MAX_HEAD_DIM = 1024;
+constexpr float FFN_DOWN_ACCUMULATION_SCALE = 64.0f;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss delay LM: " + message);
+}
+
+bool within(int value, int low, int high) {
+    return value >= low && value <= high;
 }
 
 struct Layer {
@@ -164,7 +175,7 @@ struct DelayLM::Impl {
         config.n_ff        = (int) meta_u32(arch + ".feed_forward_length");
         config.n_heads     = (int) meta_u32(arch + ".attention.head_count");
         config.n_kv_heads  = (int) meta_u32(arch + ".attention.head_count_kv");
-        if (config.n_embd <= 0 || config.n_heads <= 0) {
+        if (!within(config.n_embd, 1, MAX_EMBEDDING) || !within(config.n_heads, 1, MAX_HEADS)) {
             fail("invalid model geometry");
         }
         config.head_dim    = (int) meta_u32_or(arch + ".attention.key_length",
@@ -181,8 +192,13 @@ struct DelayLM::Impl {
         config.audio_assistant_gen_slot_token_id = (int) meta_u32(arch + ".audio_assistant_gen_slot_token_id");
         config.audio_assistant_delay_slot_token_id = (int) meta_u32(arch + ".audio_assistant_delay_slot_token_id");
         config.sampling_rate = (int) meta_u32_or(arch + ".sampling_rate", 24000);
-        if (config.n_layers <= 0 || config.n_embd <= 0 || config.n_heads <= 0 ||
-            config.n_kv_heads <= 0 || config.n_vq <= 0 || config.head_dim <= 0) {
+        validate_geometry();
+    }
+
+    void validate_geometry() const {
+        if (!within(config.n_layers, 1, MAX_LAYERS) || !within(config.n_kv_heads, 1, MAX_HEADS) ||
+            !within(config.n_vq, 1, MAX_CHANNELS) || !within(config.head_dim, 1, MAX_HEAD_DIM) ||
+            !within(config.n_ff, 1, MAX_FEED_FORWARD) || config.n_heads % config.n_kv_heads != 0) {
             fail("invalid model geometry");
         }
     }
@@ -217,6 +233,59 @@ struct DelayLM::Impl {
             layer.ffn_gate    = require_tensor(layer_name(il, "ffn_gate.weight"));
             layer.ffn_up      = require_tensor(layer_name(il, "ffn_up.weight"));
             layer.ffn_down    = require_tensor(layer_name(il, "ffn_down.weight"));
+        }
+    }
+
+    void require_shape(const ggml_tensor * tensor, int64_t ne0, int64_t ne1) const {
+        const int64_t rows = ggml_n_dims(tensor) > 1 ? tensor->ne[1] : 1;
+        if (ggml_n_dims(tensor) > 2 || tensor->ne[0] != ne0 || rows != ne1) {
+            fail(std::string(ggml_get_name(tensor)) + " has unexpected dimensions");
+        }
+    }
+
+    void validate_vocabularies() const {
+        if (tok_embd->ne[1] != output_head->ne[1]) {
+            fail("token_embd and output disagree on the text vocabulary");
+        }
+        for (int i = 0; i < config.n_vq; ++i) {
+            if (tok_embd_audio[i]->ne[1] != config.audio_vocab ||
+                output_audio[i]->ne[1] != config.audio_vocab) {
+                fail("audio channel " + std::to_string(i) + " disagrees on the audio vocabulary");
+            }
+        }
+    }
+
+    void validate_head_shapes() const {
+        require_shape(tok_embd, config.n_embd, config.text_vocab);
+        require_shape(output_norm, config.n_embd, 1);
+        require_shape(output_head, config.n_embd, config.text_vocab);
+        for (int i = 0; i < config.n_vq; ++i) {
+            require_shape(tok_embd_audio[i], config.n_embd, config.audio_vocab);
+            require_shape(output_audio[i], config.n_embd, config.audio_vocab);
+        }
+    }
+
+    void validate_layer_shapes(const Layer & layer) const {
+        const int64_t q_dim = (int64_t) config.n_heads * config.head_dim;
+        const int64_t kv_dim = (int64_t) config.n_kv_heads * config.head_dim;
+        require_shape(layer.attn_norm, config.n_embd, 1);
+        require_shape(layer.wq, config.n_embd, q_dim);
+        require_shape(layer.wk, config.n_embd, kv_dim);
+        require_shape(layer.wv, config.n_embd, kv_dim);
+        require_shape(layer.wo, q_dim, config.n_embd);
+        require_shape(layer.attn_q_norm, config.head_dim, 1);
+        require_shape(layer.attn_k_norm, config.head_dim, 1);
+        require_shape(layer.ffn_norm, config.n_embd, 1);
+        require_shape(layer.ffn_gate, config.n_embd, config.n_ff);
+        require_shape(layer.ffn_up, config.n_embd, config.n_ff);
+        require_shape(layer.ffn_down, config.n_ff, config.n_embd);
+    }
+
+    void validate_tensor_shapes() const {
+        validate_vocabularies();
+        validate_head_shapes();
+        for (const Layer & layer : layers) {
+            validate_layer_shapes(layer);
         }
     }
 
@@ -322,6 +391,7 @@ struct DelayLM::Impl {
         init_backend(use_gpu);
         duplicate_metadata_tensors();
         map_tensors();
+        validate_tensor_shapes();
         validate_token_ids();
         allocate_cache();
         upload_weights(path);
@@ -428,10 +498,16 @@ struct DelayLM::Impl {
         return ggml_mul_mat(graph_ctx, layer.wo, attended);
     }
 
+    ggml_tensor * scaled_down_projection(ggml_tensor * weight, ggml_tensor * hidden) {
+        ggml_tensor * shrunk = ggml_scale(graph_ctx, hidden, 1.0f / FFN_DOWN_ACCUMULATION_SCALE);
+        return ggml_scale(graph_ctx, ggml_mul_mat(graph_ctx, weight, shrunk),
+                FFN_DOWN_ACCUMULATION_SCALE);
+    }
+
     ggml_tensor * feed_forward(const Layer & layer, ggml_tensor * cur) {
         ggml_tensor * gate = ggml_silu(graph_ctx, ggml_mul_mat(graph_ctx, layer.ffn_gate, cur));
         ggml_tensor * up = ggml_mul_mat(graph_ctx, layer.ffn_up, cur);
-        return ggml_mul_mat(graph_ctx, layer.ffn_down, ggml_mul(graph_ctx, gate, up));
+        return scaled_down_projection(layer.ffn_down, ggml_mul(graph_ctx, gate, up));
     }
 
     std::vector<float> attention_mask(int64_t n_tokens, int64_t total) const {

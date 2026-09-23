@@ -14,7 +14,9 @@
 //          step) == the gallocr buffer real slow_step calls reserve;
 //       4. projected fast arena == the gallocr buffer real fast_step
 //          reserves;
-//       5. a missing / wrong-architecture model is Error, never Success.
+//       5. a missing / wrong-architecture model is Error, never Success;
+//       8. a weightless description GGUF with the vocabulary stripped loads
+//          metadata-only, while a real load still refuses it.
 //
 //   * With arguments <lm.gguf> <decoder.gguf> [encoder.gguf] [n_gpu_layers]:
 //     the full-pipeline gates on real fixtures -- everything above via
@@ -269,6 +271,35 @@ void run_synthetic_lm_gates() {
         sched_only.add(sched_small);
         sched_only.add(sched_large);
         expect_eq(200, sched_only.total().device_bytes, "sched-only device peak");
+    }
+
+    // 8. A weightless description GGUF with the vocabulary stripped loads
+    //    metadata-only (a fit measurement never tokenizes), while a real load
+    //    still refuses the missing tokenizer keys.
+    {
+        const std::string desc_path = audio8_test::write_tiny_lm_gguf(
+            p, (fs::temp_directory_path() / "test-audio8-fit-tiny-lm-desc.gguf").string(),
+            /*with_vocab=*/false, /*only_meta=*/true);
+
+        lm_model meta_only;
+        fit_load_measure desc_load;
+        std::string desc_error;
+        if (!load_lm_metadata_only(desc_path, /*n_gpu_layers=*/0, meta_only, desc_load,
+                                   &desc_error)) {
+            fail("metadata-only load refused a vocab-less description: " + desc_error);
+        } else {
+            expect(desc_load.weights_bytes > 0,
+                   "vocab-less description sized 0 weight bytes");
+        }
+        free_lm(meta_only);
+
+        lm_model rejected;
+        expect(!load_lm(desc_path, /*n_gpu_layers=*/0, rejected, &desc_error),
+               "a real load accepted a vocab-less GGUF");
+        expect(desc_error.find("tokenizer.ggml.tokens") != std::string::npos,
+               "the real-load rejection does not name the vocabulary: '" + desc_error + "'");
+        free_lm(rejected);
+        fs::remove(desc_path);
     }
 
     fs::remove(path);
