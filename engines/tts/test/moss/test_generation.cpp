@@ -1,8 +1,3 @@
-// Conformance suite for the MOSS Delay generation logic, mirroring the
-// upstream reference self-test: delay/de-delay round trip, the in-loop delay
-// state machine, sampling primitives, segment extraction, and prompt packing.
-// Pure CPU logic; no model fixtures required.
-
 #include "moss/frontend.h"
 #include "moss/generation.h"
 
