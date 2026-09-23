@@ -4,17 +4,26 @@ Native C++17/ggml speech synthesis, voice cloning, and post-synthesis
 enhancement for the QVAC speech stack. There is no Python, PyTorch, or ONNX
 Runtime dependency after models have been converted to GGUF.
 
-This package exposes six public synthesis engine APIs covering seven synthesis
-families and nine model lines: Chatterbox Turbo, Chatterbox Multilingual,
-Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, Audio8, and Pocket TTS. LavaSR is a
-speech-enhancement pipeline, not a TTS synthesizer. The API count follows the
-installed public headers under `include/tts-cpp/`; the two Chatterbox families
-share one engine API, while the Supertonic generations share another.
+This package exposes seven public synthesis engine APIs covering eight synthesis
+families and ten model lines: Chatterbox Turbo, Chatterbox Multilingual,
+Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, Audio8, Pocket TTS, and MOSS
+Delay. LavaSR is a speech-enhancement pipeline, not a TTS synthesizer. The API
+count follows the installed public headers under `include/tts-cpp/`; the two
+Chatterbox families share one engine API, while the Supertonic generations
+share another.
 
 Pocket TTS has a native CPU engine, streaming addon/public SDK support, and
 metadata-only memory preflight. Package rollout and broader platform validation
 remain in progress. See the
 [implementation status and validation guide](docs/pocket-tts.md).
+
+MOSS Delay is the newest engine: its generation logic is pinned by a
+conformance suite, streaming synthesis delivers chunked PCM through the
+pocket callback contract, and end-to-end synthesis against the released
+MOSS-TTS-v1.5 checkpoints runs on CPU and Metal (codec round trip at 0.94
+correlation on real audio; speech output verified by ear). Numeric reference
+parity and the remaining backends are the follow-up. See the
+[MOSS Delay guide](docs/moss.md).
 
 This directory is the in-tree `engines/tts` package in
 [`qvac-fabric-speech.cpp`](../../README.md). It consumes the system
@@ -44,6 +53,7 @@ engine, not every backend ggml can compile.
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports load status, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
+| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice or zero-shot reference WAV | 24 kHz | yes | yes | untested | untested | untested |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
@@ -312,6 +322,7 @@ lane and the other machines are unchanged and are not re-stated here.
 | CosyVoice3 | [docs/cosyvoice3.md](docs/cosyvoice3.md) |
 | Audio8 | [docs/audio8.md](docs/audio8.md) |
 | Pocket TTS | [docs/pocket-tts.md](docs/pocket-tts.md) |
+| MOSS Delay | [docs/moss.md](docs/moss.md) |
 | LavaSR enhancement | [docs/lavasr.md](docs/lavasr.md) |
 | Build paths and repository layout | [docs/build.md](docs/build.md) |
 | CLIs, weight conversion, end-to-end runs | [docs/cli.md](docs/cli.md) |
