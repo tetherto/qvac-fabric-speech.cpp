@@ -9,8 +9,9 @@
 //      backend (both run the same tensor wiring and buffer-type sizing);
 //   3. compute parity per stage -- the size-only graph measurement equals the
 //      buffer a real forward/decode actually allocates for the same shape
-//      (ggml_gallocr_reserve_n_size / ggml_backend_sched_reserve_size are the
-//      size-only twins of the real allocations);
+//      (ggml_gallocr_reserve_n_size is the size-only twin of the real
+//      allocations); the VAE gate is exact on CPU and bounded by one
+//      graph-input slot against a GPU sched (see vae_measure_graph);
 //   4. the projection grows with the workload (a longer generation must never
 //      project smaller), and a missing model file is Error, never Success.
 //
@@ -281,13 +282,33 @@ int main(int argc, char ** argv) {
             expect_eq(w.weights_alloc_bytes, vae_model_weight_bytes(real), "vae weights parity");
 
             const int T_latent = 8;  // below the window core: a single-window decode
-            size_t backend_b = 0, cpu_b = 0;
-            expect(vae_model_measure_decode(meta, T_latent, backend_b, cpu_b), "vae measure decode");
+            size_t backend_b = 0, host_in_b = 0;
+            expect(vae_model_measure_decode(meta, T_latent, backend_b, host_in_b), "vae measure decode");
             std::vector<float> latent((size_t) T_latent * 64, 0.0f);
             std::vector<float> pcm;
             expect(vae_model_decode(real, latent.data(), T_latent, pcm) == T_latent * 1920,
                    "vae real decode");
-            expect_eq(backend_b + cpu_b, vae_model_compute_buffer_bytes(real), "vae compute parity");
+            const uint64_t projected = (uint64_t) backend_b + host_in_b;
+            const uint64_t reserved  = vae_model_compute_buffer_bytes(real);
+            const bool on_cpu = ggml_backend_dev_type(ggml_backend_get_device(rb.backend)) ==
+                                GGML_BACKEND_DEVICE_TYPE_CPU;
+            if (on_cpu) {
+                // CPU-only sched: the reservation IS the gallocr layout.
+                expect_eq(projected, reserved, "vae compute parity");
+            } else {
+                // GPU sched: the device-side input copy is a reusable node, so
+                // the real reservation may come in below the measure by at
+                // most one input slot -- never above (strict direction). The
+                // slack term allows for device-side alignment padding.
+                const uint64_t input_slack = (uint64_t) T_latent * 64 * sizeof(float) + 1024;
+                expect(reserved <= projected,
+                       "vae UNDER-projection: projected " + std::to_string(projected) +
+                       " < sched reserved " + std::to_string(reserved));
+                expect(projected <= reserved + input_slack,
+                       "vae over-projection beyond the input slot: projected " +
+                       std::to_string(projected) + " > reserved " + std::to_string(reserved) +
+                       " + input slack " + std::to_string(input_slack));
+            }
         }
         if (meta) vae_model_free(meta);
         if (real) vae_model_free(real);

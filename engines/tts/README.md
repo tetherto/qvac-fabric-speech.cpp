@@ -18,7 +18,8 @@ remain in progress. See the
 [implementation status and validation guide](docs/pocket-tts.md).
 
 MOSS Delay is the newest engine: its generation logic is pinned by a
-conformance suite, and end-to-end synthesis against the released
+conformance suite, streaming synthesis delivers chunked PCM through the
+pocket callback contract, and end-to-end synthesis against the released
 MOSS-TTS-v1.5 checkpoints runs on CPU and Metal (codec round trip at 0.94
 correlation on real audio; speech output verified by ear). Numeric reference
 parity and the remaining backends are the follow-up. See the

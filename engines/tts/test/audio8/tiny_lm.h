@@ -37,7 +37,8 @@ inline void add_f32(gguf_context * g, ggml_context * ctx, const char * name,
     gguf_add_tensor(g, t);
 }
 
-inline std::string write_tiny_lm_gguf(const tiny_lm & p, const std::string & path) {
+inline std::string write_tiny_lm_gguf(const tiny_lm & p, const std::string & path,
+                                      bool with_vocab = true, bool only_meta = false) {
     gguf_context * g = gguf_init_empty();
     gguf_set_val_str(g, "general.architecture", "audio8-lm");
     auto u32 = [&](const char * k, int v) {
@@ -65,12 +66,14 @@ inline std::string write_tiny_lm_gguf(const tiny_lm & p, const std::string & pat
     b("norm_fast_input", true);       b("qkv_bias", true);
     b("fast_qkv_bias", false);
 
-    const char * toks[] = {"<pad>", "a", "b", "c"};
-    gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 4);
-    const char * merges[] = {"a b"};
-    gguf_set_arr_str(g, "tokenizer.ggml.merges", merges, 1);
-    const int32_t added[] = {0};
-    gguf_set_arr_data(g, "tokenizer.ggml.added_token_ids", GGUF_TYPE_INT32, added, 1);
+    if (with_vocab) {
+        const char * toks[] = {"<pad>", "a", "b", "c"};
+        gguf_set_arr_str(g, "tokenizer.ggml.tokens", toks, 4);
+        const char * merges[] = {"a b"};
+        gguf_set_arr_str(g, "tokenizer.ggml.merges", merges, 1);
+        const int32_t added[] = {0};
+        gguf_set_arr_data(g, "tokenizer.ggml.added_token_ids", GGUF_TYPE_INT32, added, 1);
+    }
 
     ggml_init_params ip = { 16u * 1024 * 1024, nullptr, /*no_alloc=*/false };
     ggml_context * ctx = ggml_init(ip);
@@ -114,7 +117,7 @@ inline std::string write_tiny_lm_gguf(const tiny_lm & p, const std::string & pat
         add_f32(g, ctx, (pre + "ffn_norm").c_str(),  {p.hidden});
     }
 
-    if (!gguf_write_to_file(g, path.c_str(), /*only_meta=*/false)) {
+    if (!gguf_write_to_file(g, path.c_str(), only_meta)) {
         std::fprintf(stderr, "FATAL: cannot write %s\n", path.c_str());
         std::exit(2);
     }

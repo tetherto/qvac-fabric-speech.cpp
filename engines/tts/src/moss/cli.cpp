@@ -14,8 +14,10 @@ namespace tts_cpp::moss::cli {
 void print_usage() {
     std::fprintf(stderr,
         "usage: moss-cli --backbone model.gguf --decoder decoder.gguf --text \"...\" --out out.wav\n"
+        "       --stream --out -   writes raw s16le PCM chunks to stdout\n"
         "       [--encoder encoder.gguf --ref-audio ref.wav]   voice cloning\n"
         "       [--language zh] [--max-new-tokens 2048] [--context 4096]\n"
+        "       [--stream] [--stream-chunk-frames 25] [--stream-left-context-frames 0]\n"
         "       [--seed 1234] [--threads 4] [--gpu]\n"
         "       [--text-temperature 1.5] [--text-top-p 1.0] [--text-top-k 50]\n"
         "       [--audio-temperature 1.7] [--audio-top-p 0.8] [--audio-top-k 25]\n"
@@ -65,6 +67,10 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--seed")          args.options.seed = (uint32_t) std::strtoul(next(), nullptr, 10);
         else if (flag == "--threads")       args.options.n_threads = std::atoi(next());
         else if (flag == "--gpu")           args.options.use_gpu = true;
+        else if (flag == "--stream")        args.stream = true;
+        else if (flag == "--stream-chunk-frames")   args.options.stream_chunk_frames = std::atoi(next());
+        else if (flag == "--stream-left-context-frames")
+            args.options.stream_left_context_frames = std::atoi(next());
         else if (flag == "--text-temperature")  args.options.text_temperature = std::strtof(next(), nullptr);
         else if (flag == "--text-top-p")        args.options.text_top_p = std::strtof(next(), nullptr);
         else if (flag == "--text-top-k")        args.options.text_top_k = std::atoi(next());
@@ -88,18 +94,46 @@ int run(const CliArgs & args) {
     try {
         tts_cpp::moss::Engine engine(args.options);
         std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
-        const tts_cpp::moss::SynthesisResult result = engine.synthesize(args.text);
+        std::vector<float> pcm;
+        tts_cpp::moss::SynthesisResult result;
+        if (args.stream) {
+            const bool to_stdout = args.out_path == "-";
+            size_t chunks = 0;
+            result = engine.synthesize_stream(args.text,
+                    [&](const float * samples, size_t count, int rate) {
+                        if (to_stdout) {
+                            std::vector<drwav_int16> s16(count);
+                            drwav_f32_to_s16(s16.data(), samples, count);
+                            std::fwrite(s16.data(), sizeof(drwav_int16), count, stdout);
+                            std::fflush(stdout);
+                        } else {
+                            pcm.insert(pcm.end(), samples, samples + count);
+                        }
+                        chunks++;
+                        std::fprintf(stderr, "[moss-cli] chunk %zu: %zu samples @ %d Hz\n",
+                                chunks, count, rate);
+                        return true;
+                    });
+            std::fprintf(stderr, "[moss-cli] first audio after %.0f ms in %zu chunks\n",
+                    result.first_audio_ms, chunks);
+            if (to_stdout) {
+                return result.cancelled ? 1 : 0;
+            }
+        } else {
+            result = engine.synthesize(args.text);
+            pcm = result.pcm;
+        }
         if (result.cancelled) {
             std::fprintf(stderr, "[moss-cli] synthesis cancelled\n");
             return 1;
         }
-        if (!save_wav(args.out_path, result.pcm, result.sample_rate)) {
+        if (!save_wav(args.out_path, pcm, result.sample_rate)) {
             std::fprintf(stderr, "[moss-cli] cannot write %s\n", args.out_path.c_str());
             return 1;
         }
         std::fprintf(stderr,
             "[moss-cli] wrote %s: %.2fs @ %d Hz (%d frames, generate %.0f ms, decode %.0f ms)\n",
-            args.out_path.c_str(), (double) result.pcm.size() / result.sample_rate,
+            args.out_path.c_str(), (double) pcm.size() / result.sample_rate,
             result.sample_rate, result.generated_frames, result.generation_ms, result.decode_ms);
         return 0;
     } catch (const std::exception & error) {

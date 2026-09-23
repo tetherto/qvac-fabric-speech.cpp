@@ -6,6 +6,7 @@
 #include "moss/frontend.h"
 #include "moss/generation.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -219,6 +220,36 @@ void test_early_stop_masks() {
     check(row.text != IM_END_TOKEN, "im_end is masked during the ramp-in");
 }
 
+void test_incremental_de_delay() {
+    const DelayConfig config = test_config();
+    const SamplingConfig sampling = greedy_sampling();
+    std::mt19937 rng(7);
+    const std::vector<DelayRow> prompt = seeded_prompt(config);
+    DelayState state(config, prompt, PAD_TOKEN, IM_END_TOKEN);
+    check(state.available_frames((int) prompt.size()) == 0, "no frames before any step");
+    for (int step = 0; step < 6; ++step) {
+        state.step(logits_preferring(config, config.audio_assistant_gen_slot_token_id,
+                step % 7), sampling, rng);
+        const int expected = std::max(0, step + 1 - (config.n_vq - 1));
+        check(state.available_frames((int) prompt.size()) == expected,
+                "frame becomes available n_vq - 1 steps after its row");
+    }
+    const size_t begin = prompt.size() * (size_t) config.n_vq;
+    const std::vector<int32_t> delayed(state.audio_history().begin() + begin,
+            state.audio_history().end());
+    const std::vector<int32_t> expected = apply_de_delay_pattern(delayed,
+            (int) (delayed.size() / (size_t) config.n_vq), config.n_vq, config.audio_pad_code);
+    const int frames = state.available_frames((int) prompt.size());
+    check((size_t) frames * config.n_vq == expected.size(), "incremental frame count matches de-delay");
+    for (int frame = 0; frame < frames; ++frame) {
+        const std::vector<int32_t> codes = state.frame_codes((int) prompt.size(), frame);
+        for (int channel = 0; channel < config.n_vq; ++channel) {
+            check(codes[(size_t) channel] == expected[(size_t) frame * config.n_vq + channel],
+                    "incremental frame matches the batch de-delay");
+        }
+    }
+}
+
 void test_segment_extraction() {
     const int n_vq = 2;
     const int pad = 9;
@@ -300,6 +331,7 @@ int main() {
     test_repetition_penalty_scoping();
     test_state_machine_drain();
     test_early_stop_masks();
+    test_incremental_de_delay();
     test_segment_extraction();
     test_prompt_rows();
     if (failures == 0) {

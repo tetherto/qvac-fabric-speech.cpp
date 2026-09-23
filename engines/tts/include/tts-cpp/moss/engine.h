@@ -1,6 +1,7 @@
 #pragma once
 #include "tts-cpp/export.h"
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +26,8 @@ struct EngineOptions {
     int   audio_top_k       = 25;
     float audio_repetition_penalty = 1.0f;
     uint32_t seed = 1234;
+    int stream_chunk_frames = 25;
+    int stream_left_context_frames = 0;
 };
 
 struct SynthesisResult {
@@ -34,7 +37,10 @@ struct SynthesisResult {
     int generated_frames = 0;
     double generation_ms = 0;
     double decode_ms = 0;
+    double first_audio_ms = 0;
 };
+
+using AudioCallback = std::function<bool(const float *, size_t, int)>;
 
 class TTS_CPP_API Engine {
 public:
@@ -43,6 +49,7 @@ public:
     Engine(const Engine &) = delete;
     Engine & operator=(const Engine &) = delete;
     SynthesisResult synthesize(const std::string & text);
+    SynthesisResult synthesize_stream(const std::string & text, const AudioCallback & callback);
     void cancel() noexcept;
     int sample_rate() const noexcept;
     const char * backend_name() const noexcept;

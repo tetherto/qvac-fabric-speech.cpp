@@ -10,6 +10,7 @@ struct CliArgs {
     EngineOptions options;
     std::string text;
     std::string out_path = "moss-out.wav";
+    bool stream = false;
 };
 
 void print_usage();

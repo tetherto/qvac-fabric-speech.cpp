@@ -9,8 +9,8 @@
 // stage GGUF metadata-only, wires its tensors exactly as the real loaders do,
 // and prices every allocation through ggml's size-only APIs
 // (ggml_backend_alloc_ctx_tensors_from_buft_size for weight/KV buffers,
-// ggml_gallocr_reserve_n_size / ggml_backend_sched_reserve_size for the real
-// compute graphs at the workload's shapes). Nothing is allocated on any device
+// ggml_gallocr_reserve_n_size for the real compute graphs at the workload's
+// shapes). Nothing is allocated on any device
 // and no graph is executed, so a fit call is cheap and safe to run before
 // committing to a full Engine load.
 //
