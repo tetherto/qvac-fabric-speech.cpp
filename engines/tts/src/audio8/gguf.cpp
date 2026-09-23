@@ -598,7 +598,11 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     metadata meta(file.ctx(), "audio8.lm.");
     read_lm_hparams(meta, model.hp);
     raw_metadata shared(file.ctx());
-    read_tokenizer(shared, model.tokenizer);
+    // A weightless fit-measure GGUF may omit the vocabulary (a measurement
+    // never tokenizes); find() would record the absent keys as errors.
+    if (!measure || gguf_find_key(file.ctx(), "tokenizer.ggml.tokens") >= 0) {
+        read_tokenizer(shared, model.tokenizer);
+    }
     if (!meta.ok() || !shared.ok()) {
         if (error) *error = meta.ok() ? shared.error() : meta.error();
         return false;

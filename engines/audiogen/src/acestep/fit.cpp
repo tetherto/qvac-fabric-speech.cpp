@@ -6,9 +6,8 @@
 // formula: it resolves the same backends (engine_backends.h), drives the same
 // stage loaders in metadata-only mode, and prices the same compute graphs the
 // pipeline builds -- at the workload's shapes -- through ggml's size-only APIs
-// (ggml_backend_alloc_ctx_tensors_from_buft_size, ggml_gallocr_reserve_n_size,
-// ggml_backend_sched_reserve_size), so it tracks runtime changes instead of
-// drifting from them.
+// (ggml_backend_alloc_ctx_tensors_from_buft_size, ggml_gallocr_reserve_n_size),
+// so it tracks runtime changes instead of drifting from them.
 //
 // Residency model (see Engine::Impl in engine.cpp): by default generate()
 // time-shares the stages -- each phase loads its stage and frees it right
@@ -412,14 +411,14 @@ FitResult fit_params(const FitOptions & opts) {
         // phase; the real ensure_vae(true) degrades the same way, so project
         // without the encoder rather than failing.
     }
-    size_t vae_dec_backend = 0, vae_dec_cpu = 0;
-    if (!vae_model_measure_decode(guard.vae, T, vae_dec_backend, vae_dec_cpu)) return fail_measure();
-    size_t vae_enc_backend = 0, vae_enc_cpu = 0;
+    size_t vae_dec_backend = 0, vae_dec_host_in = 0;
+    if (!vae_model_measure_decode(guard.vae, T, vae_dec_backend, vae_dec_host_in)) return fail_measure();
+    size_t vae_enc_backend = 0, vae_enc_host_in = 0;
     uint64_t source_frames = 0;
     if (opts.with_source_audio && vae_model_has_encoder(guard.vae)) {
         source_frames = sat_u64_from_double(std::ceil((double) opts.duration_seconds * SAMPLE_RATE));
         const int enc_frames = (int) std::min<uint64_t>(source_frames, VAE_AUDIO_CHUNK_FRAMES);
-        if (!vae_model_measure_encode(guard.vae, enc_frames, vae_enc_backend, vae_enc_cpu)) {
+        if (!vae_model_measure_encode(guard.vae, enc_frames, vae_enc_backend, vae_enc_host_in)) {
             return fail_measure();
         }
     }
@@ -516,11 +515,11 @@ FitResult fit_params(const FitOptions & opts) {
     stage_row("lm", rb.lm, lm_w, lm_head_bytes, lm_w.kv_bytes, lm_graph, lm_host);
     stage_row("detok", rb.detok, detok_w, 0, 0, detok_graph, detok_host);
     stage_row("dit", rb.backend, dit_w, 0, 0, dit_graph, dit_host);
-    // The VAE's sched can split a slice onto its CPU-fallback slot; that
-    // portion is host RAM whatever the VAE backend is.
+    // On a GPU VAE backend the real sched stages the graph input on its CPU
+    // (last) backend before copying it in; that portion is host RAM.
     stage_row("vae", vae_backend, vae_w, 0, 0,
               std::max<uint64_t>(vae_dec_backend, vae_enc_backend),
-              sat_add(vae_host, std::max<uint64_t>(vae_dec_cpu, vae_enc_cpu)));
+              sat_add(vae_host, std::max<uint64_t>(vae_dec_host_in, vae_enc_host_in)));
 
     // ── Phase peaks per pool ────────────────────────────────────────────────
     // Stage weight charges (weights+mmap+state on the stage's backend pool;
@@ -546,9 +545,9 @@ FitResult fit_params(const FitOptions & opts) {
                                                       std::max({ textenc_fwd, textenc_lookup, cond_fwd }));
     const PoolCharge dit_compute     = charge_backend(pools, rb.backend, dit_graph);
     PoolCharge vae_dec_compute = charge_backend(pools, vae_backend, vae_dec_backend);
-    vae_dec_compute.add_host(vae_dec_cpu);
+    vae_dec_compute.add_host(vae_dec_host_in);
     PoolCharge vae_enc_compute = charge_backend(pools, vae_backend, vae_enc_backend);
-    vae_enc_compute.add_host(vae_enc_cpu);
+    vae_enc_compute.add_host(vae_enc_host_in);
 
     PoolCharge peak;
     if (keep_stages) {
