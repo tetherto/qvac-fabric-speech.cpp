@@ -366,6 +366,12 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/engine.cpp
     src/pocket/fit.cpp
     src/pocket/reference_audio.cpp
+    # MOSS Delay engine (MOSS-TTS-v1.5 / MOSS-TTSD backbone + RVQ codec).
+    src/moss/codec.cpp
+    src/moss/delay_lm.cpp
+    src/moss/generation.cpp
+    src/moss/frontend.cpp
+    src/moss/engine.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -573,8 +579,14 @@ if (TTS_CPP_BUILD_EXECUTABLES)
     target_link_libraries(pocket-cli PRIVATE tts-cpp)
     target_include_directories(pocket-cli PRIVATE src)
     tts_cpp_apply_ccache(pocket-cli)
+
     target_link_libraries(tts-cli PRIVATE tts-cpp)
     tts_cpp_apply_ccache(tts-cli)
+
+    add_executable(moss-cli src/moss/cli_main.cpp src/moss/cli.cpp)
+    target_link_libraries(moss-cli PRIVATE tts-cpp)
+    target_include_directories(moss-cli PRIVATE src)
+    tts_cpp_apply_ccache(moss-cli)
 
     add_executable(mel2wav src/mel2wav.cpp)
     target_link_libraries(mel2wav PRIVATE ggml)
@@ -1179,6 +1191,13 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
         set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
+        add_test(NAME test-convert-moss
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_moss.py")
+        set_property(TEST test-convert-moss PROPERTY LABELS "unit")
+        set_property(TEST test-convert-moss PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-convert-moss PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+
         # Skips without torch; the TTS CI macOS lane runs it in the export venv.
         add_test(NAME test-audio8-codec-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}"
@@ -1392,6 +1411,36 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS     "--vocab" "${_tcb_cosy_vocab}" "--merges" "${_tcb_cosy_merges}"
                  "--ref" "${_tcb_cosy_ref}/tokenizer_ref.txt"
         REQUIRES "${_tcb_cosy_vocab}" "${_tcb_cosy_merges}" "${_tcb_cosy_ref}/tokenizer_ref.txt")
+
+    add_executable(test-moss-generation test/moss/test_generation.cpp)
+    target_link_libraries(test-moss-generation PRIVATE tts-cpp)
+    target_include_directories(test-moss-generation PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-generation)
+    tts_cpp_register_test(test-moss-generation)
+
+    add_executable(test-moss-load test/moss/test_load.cpp)
+    target_link_libraries(test-moss-load PRIVATE tts-cpp)
+    target_include_directories(test-moss-load PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-load)
+    tts_cpp_register_test(test-moss-load)
+
+    add_executable(test-moss-stream test/moss/test_stream.cpp)
+    target_link_libraries(test-moss-stream PRIVATE tts-cpp)
+    target_include_directories(test-moss-stream PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-stream)
+    tts_cpp_register_test(test-moss-stream)
+
+    add_executable(test-moss-cancel test/moss/test_cancel.cpp)
+    target_link_libraries(test-moss-cancel PRIVATE tts-cpp)
+    target_include_directories(test-moss-cancel PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-cancel)
+    tts_cpp_register_test(test-moss-cancel)
+
+    add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-cli PRIVATE tts-cpp)
+    target_include_directories(test-moss-cli PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-cli)
+    tts_cpp_register_test(test-moss-cli)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)

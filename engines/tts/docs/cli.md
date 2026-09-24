@@ -17,6 +17,7 @@ Part of the [tts engine documentation](../README.md).
 | `build/lavasr-bench` | LavaSR denoiser/enhancer benchmark and by-ear harness |
 | `build/audio8-cli` | Audio8 text-to-speech and zero-shot voice cloning |
 | `build/pocket-cli` | Pocket text-to-speech and metadata-only memory preflight |
+| `build/moss-cli` | MOSS Delay text-to-speech and zero-shot voice cloning |
 
 `supertonic-bench` is built only by `TTS_CPP_BUILD_TESTS`; it is not in the
 executable gate. The tests also produce the following representative
