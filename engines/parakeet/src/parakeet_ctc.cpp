@@ -154,6 +154,37 @@ struct NemotronPromptGraph {
     ~NemotronPromptGraph() { clear(); }
 };
 
+// The Core ML sidecar intentionally stops at encoder hidden states so it can
+// be shared by every decoder family. CTC models therefore keep their small
+// vocabulary projection on the active ggml backend. Cache this graph by frame
+// count just like the native encoder graphs to avoid rebuilding/allocating it
+// on every benchmark iteration and streaming chunk.
+struct CtcHeadGraph {
+    ggml_context * context = nullptr;
+    ggml_cgraph * graph = nullptr;
+    ggml_gallocr_t allocator = nullptr;
+    ggml_tensor * input = nullptr;
+    ggml_tensor * output = nullptr;
+    int n_frames = 0;
+
+    void clear() {
+        if (allocator) {
+            ggml_gallocr_free(allocator);
+            allocator = nullptr;
+        }
+        if (context) {
+            ggml_free(context);
+            context = nullptr;
+        }
+        graph = nullptr;
+        input = nullptr;
+        output = nullptr;
+        n_frames = 0;
+    }
+
+    ~CtcHeadGraph() { clear(); }
+};
+
 #ifdef PARAKEET_EXPERIMENTAL_FLASH_ATTN
 constexpr bool k_flash_attn_compiled = true;
 #else
@@ -201,6 +232,7 @@ struct ParakeetCtcModel::Impl {
     static constexpr size_t k_encoder_graph_cache_max = 3;
     static constexpr size_t k_pos_proj_cache_max_bytes = (size_t) 256 << 20;
     std::unique_ptr<NemotronPromptGraph> nemotron_prompt_graph;
+    std::unique_ptr<CtcHeadGraph> ctc_head_graph;
 
 #ifdef PARAKEET_USE_COREML
     // Optional Apple Neural Engine encoder sidecar. Non-null only on
@@ -223,6 +255,7 @@ struct ParakeetCtcModel::Impl {
         }
         encoder_graphs.clear();
         nemotron_prompt_graph.reset();
+        ctc_head_graph.reset();
         if (sched)          ggml_backend_sched_free(sched);
         if (weights_buffer) ggml_backend_buffer_free(weights_buffer);
         for (ggml_backend_buffer_t b : weights_extra_buffers) {
@@ -1572,15 +1605,16 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
     const bool supported_sortformer =
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc";
-    if (model.model_type != ParakeetModelType::RNNT &&
+    if (model.model_type != ParakeetModelType::CTC &&
+        model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::NEMOTRON &&
         !supported_sortformer) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder supports Unified RNN-T, TDT, EOU, Nemotron, "
-                "and Sortformer v2.1; "
+                "parakeet: Core ML encoder supports CTC/IndicConformer, Unified RNN-T, "
+                "TDT, EOU, Nemotron, and Sortformer v2.1; "
                 "using ggml for model type %s variant '%s'\n",
                 model_type_name(model.model_type), model.model_variant.c_str());
         }
@@ -3686,7 +3720,7 @@ static int coreml_encoder_out_frames(const EncoderConfig & enc, int n_mel_frames
     return next(next(next(n_mel_frames)));
 }
 
-// Unified RNN-T, TDT, and Sortformer v2.1 batch sidecars use the
+// CTC/IndicConformer, Unified RNN-T, TDT, and Sortformer v2.1 batch sidecars use the
 // full-context contract.
 static bool encoder_is_offline(const EncoderConfig & enc) {
     return enc.att_context_left  < 0
@@ -3702,13 +3736,18 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool capture_intermediates,
                                       bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (model.model_type != ParakeetModelType::RNNT &&
+    if (model.model_type != ParakeetModelType::CTC &&
+        model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::NEMOTRON &&
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    if (model.model_type == ParakeetModelType::CTC) {
+        return encoder_is_offline(model.encoder_cfg) &&
+               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
+    }
     if (model.model_type == ParakeetModelType::RNNT) {
         return encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
@@ -3739,9 +3778,65 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_context_right >= 0;
 }
 
-// Fills out.encoder_out from the Core ML sidecar, honouring run_encoder's contract
-// (encoder_out only; per-stage captures + CTC logits cleared). Returns 0 when handled
-// on Core ML; non-zero lets the caller fall back to the ggml encoder.
+static int run_coreml_ctc_head(ParakeetCtcModel & model,
+                               const std::vector<float> & encoder_out,
+                               int n_frames,
+                               std::vector<float> & logits) {
+    if (!model.impl || !model.impl->backend_active || !model.ctc.w || !model.ctc.b ||
+        n_frames <= 0 || encoder_out.size() !=
+            static_cast<size_t>(n_frames) * model.encoder_cfg.d_model) {
+        return -1;
+    }
+
+    auto & cached = model.impl->ctc_head_graph;
+    if (!cached || cached->n_frames != n_frames) {
+        cached = std::make_unique<CtcHeadGraph>();
+        CtcHeadGraph & graph = *cached;
+        constexpr size_t graph_size = 16;
+        const size_t graph_memory =
+            ggml_tensor_overhead() * graph_size +
+            ggml_graph_overhead_custom(graph_size, false) + 4096;
+        ggml_init_params params = {};
+        params.mem_size = graph_memory;
+        params.no_alloc = true;
+        graph.context = ggml_init(params);
+        if (!graph.context) return -2;
+
+        graph.input = ggml_new_tensor_2d(
+            graph.context, GGML_TYPE_F32, model.encoder_cfg.d_model, n_frames);
+        ggml_set_input(graph.input);
+        graph.output = ggml_add(
+            graph.context,
+            ggml_mul_mat(graph.context, model.ctc.w, graph.input),
+            model.ctc.b);
+        ggml_set_output(graph.output);
+        graph.graph = ggml_new_graph_custom(graph.context, graph_size, false);
+        ggml_build_forward_expand(graph.graph, graph.output);
+        graph.allocator = ggml_gallocr_new(
+            ggml_backend_get_default_buffer_type(model.impl->backend_active));
+        if (!graph.allocator ||
+            !ggml_gallocr_alloc_graph(graph.allocator, graph.graph)) {
+            return -3;
+        }
+        graph.n_frames = n_frames;
+    }
+
+    CtcHeadGraph & graph = *cached;
+    ggml_backend_tensor_set(graph.input, encoder_out.data(), 0,
+                            encoder_out.size() * sizeof(float));
+    if (ggml_backend_graph_compute(model.impl->backend_active, graph.graph) !=
+        GGML_STATUS_SUCCESS) {
+        return -4;
+    }
+    logits.resize(static_cast<size_t>(n_frames) * model.vocab_size);
+    ggml_backend_tensor_get(graph.output, logits.data(), 0,
+                            logits.size() * sizeof(float));
+    return 0;
+}
+
+// Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
+// on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
+// caller fall back to the complete native encoder graph.
 static int run_encoder_coreml(ParakeetCtcModel & model,
                               const float      * mel,
                               int                n_mel_frames,
@@ -3761,6 +3856,14 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
                                            T, d_model, out.encoder_out.data());
     if (rc != 0) return rc;
 
+    if (model.model_type == ParakeetModelType::CTC) {
+        const int head_rc = run_coreml_ctc_head(
+            model, out.encoder_out, T, out.logits);
+        if (head_rc != 0) return 100 - head_rc;
+    } else {
+        out.logits.clear();
+    }
+
     out.used_coreml = true;
     out.subsampling_out.clear();
     out.block_0_post_ff1.clear();
@@ -3769,7 +3872,6 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     out.block_0_post_ff2.clear();
     out.block_0_out.clear();
     out.block_last_out.clear();
-    out.logits.clear();
     return 0;
 }
 #endif  // PARAKEET_USE_COREML
@@ -3971,9 +4073,9 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run a validated Unified RNN-T, TDT, EOU, or
-    // Sortformer FastConformer encoder and hand encoder_out back to the ggml
-    // decoder or diarization head.
+    // Apple Core ML sidecar: run a validated CTC/IndicConformer, Unified RNN-T,
+    // TDT, EOU, Nemotron, or Sortformer FastConformer encoder and hand
+    // encoder_out back to the ggml decoder or diarization head.
     if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
