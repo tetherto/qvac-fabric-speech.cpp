@@ -70,6 +70,19 @@ struct EncoderGraph {
     ggml_tensor * encoder_out_node     = nullptr;
     ggml_tensor * logits_node          = nullptr;
 
+    // QVAC-25495 diagnostic attention captures for block 0 only.
+    ggml_tensor * block_0_attn_qkv_node      = nullptr;
+    ggml_tensor * block_0_attn_k_raw_node    = nullptr;
+    ggml_tensor * block_0_attn_v_raw_node    = nullptr;
+    ggml_tensor * block_0_attn_q_perm_node   = nullptr;
+    ggml_tensor * block_0_attn_k_perm_node   = nullptr;
+    ggml_tensor * block_0_attn_q_u_node      = nullptr;
+    ggml_tensor * block_0_attn_ac_node       = nullptr;
+    ggml_tensor * block_0_attn_bd_node       = nullptr;
+    ggml_tensor * block_0_attn_scores_node   = nullptr;
+    ggml_tensor * block_0_attn_softmax_node  = nullptr;
+    ggml_tensor * block_0_attn_out_node      = nullptr;
+
     // Pristine snapshot of every compute node's source pointers, captured once
     // when the graph is built and reused across runs. ggml_backend_sched rewrites
     // node->src[j] in place when a per-op CPU fallback inserts a cross-backend
@@ -111,6 +124,12 @@ struct EncoderGraph {
         sub_out_node = post_ff1_0_node = post_attn_0_node = nullptr;
         post_conv_0_node = post_ff2_0_node = block_0_out_node = nullptr;
         block_last_out_node = encoder_out_node = logits_node = nullptr;
+        block_0_attn_qkv_node = block_0_attn_ac_node = nullptr;
+        block_0_attn_bd_node = block_0_attn_scores_node = nullptr;
+        block_0_attn_softmax_node = block_0_attn_out_node = nullptr;
+        block_0_attn_k_raw_node = block_0_attn_v_raw_node = nullptr;
+        block_0_attn_q_perm_node = block_0_attn_k_perm_node = nullptr;
+        block_0_attn_q_u_node = nullptr;
         T_mel = 0;
         T_mel_valid = 0;
         T_enc = 0;
@@ -2792,9 +2811,28 @@ struct RelPosAttnInputs {
 ggml_tensor * rel_pos_mha_flash_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                       ggml_tensor * att_mask, const BlockWeights & W,
                                       int H, int HD, int T, bool per_head_mask);
+
+// QVAC-25495 diagnostic capture handles. Populated in the unfused path when
+// non-null; ignored on flash-attn (single FLASH_ATTN_EXT node, nothing to
+// snapshot). Only block 0 in the encoder passes a non-null pointer.
+struct AttnCapture {
+    ggml_tensor * qkv     = nullptr;   // post-projection stacked qkv, or Q alone in the split-w path
+    ggml_tensor * k_raw   = nullptr;   // post-projection K, before permute-cont
+    ggml_tensor * v_raw   = nullptr;   // post-projection V, before permute-cont
+    ggml_tensor * q_perm  = nullptr;   // post cont(permute(q, 0, 2, 1, 3))
+    ggml_tensor * k_perm  = nullptr;   // post cont(permute(k, 0, 2, 1, 3))
+    ggml_tensor * q_u     = nullptr;   // q_perm + u_bias
+    ggml_tensor * ac      = nullptr;
+    ggml_tensor * bd      = nullptr;
+    ggml_tensor * scores  = nullptr;
+    ggml_tensor * softmax = nullptr;
+    ggml_tensor * out     = nullptr;
+};
+
 ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                         ggml_tensor * att_mask, const BlockWeights & W,
-                                        int H, int HD, int T);
+                                        int H, int HD, int T,
+                                        AttnCapture * cap = nullptr);
 
 ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
                                 ggml_tensor * pos_emb,
@@ -2802,10 +2840,12 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
                                 ggml_tensor * att_mask,
                                 const BlockWeights & W,
                                 int H, int HD, int T,
-                                const AttnPath & attn) {
+                                const AttnPath & attn,
+                                AttnCapture * cap = nullptr) {
     ggml_tensor * q;
     ggml_tensor * k;
     ggml_tensor * v;
+    ggml_tensor * qkv_full = nullptr;
     if (W.attn_qkv_w) {
         // Pre-stacked encoder.blk.*.attn.qkv.weight from the converter:
         // one Q8_0 mat-mul produces (3 * n_embd, T) and Q / K / V are
@@ -2828,6 +2868,7 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
         // case; that's what the loader gate is for.
         ggml_tensor * qkv = ggml_mul_mat(ctx, W.attn_qkv_w, xn);
         if (W.attn_qkv_b) qkv = ggml_add(ctx, qkv, W.attn_qkv_b);
+        qkv_full = qkv;
         const int n_embd = HD * H;
         const size_t f = sizeof(float);
         const size_t row_stride = (size_t) 3 * n_embd * f;
@@ -2838,10 +2879,12 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
         q = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_q_w, xn), W.attn_q_b);
         k = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_k_w, xn), W.attn_k_b);
         v = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_v_w, xn), W.attn_v_b);
+        if (cap) { cap->qkv = q; cap->k_raw = k; cap->v_raw = v; }
         q = ggml_reshape_3d(ctx, q, HD, H, T);
         k = ggml_reshape_3d(ctx, k, HD, H, T);
         v = ggml_reshape_3d(ctx, v, HD, H, T);
     }
+    if (cap && !cap->qkv) cap->qkv = qkv_full;
     // The cache holds the projection in the layout its consumer reads: the flash path
     // permutes a (HD, H, 2T-1) tensor as before, the unfused path takes it pre-permuted.
     ggml_tensor * p = attn.flash_attn ? pos_proj : nullptr;
@@ -2857,9 +2900,11 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
 
     const RelPosAttnInputs in = { q, k, v, p, u_bias, v_bias, scale, attn.flash_attn ? nullptr : pos_proj };
     if (attn.flash_attn) {
+        // Flash-attn collapses the whole attention into one op; the qkv
+        // capture is still useful, the others cannot be intercepted.
         return rel_pos_mha_flash_graph(ctx, in, att_mask, W, H, HD, T, attn.per_head_mask);
     }
-    return rel_pos_mha_unfused_graph(ctx, in, att_mask, W, H, HD, T);
+    return rel_pos_mha_unfused_graph(ctx, in, att_mask, W, H, HD, T, cap);
 }
 
 ggml_tensor * rel_pos_mha_flash_graph(ggml_context * ctx, const RelPosAttnInputs & in,
@@ -2957,7 +3002,8 @@ ggml_tensor * attn_context_blocked(ggml_context * ctx, ggml_tensor * k_perm, ggm
 
 ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                         ggml_tensor * att_mask, const BlockWeights & W,
-                                        int H, int HD, int T) {
+                                        int H, int HD, int T,
+                                        AttnCapture * cap) {
     ggml_tensor * q = in.q;
     ggml_tensor * k = in.k;
     ggml_tensor * v = in.v;
@@ -2971,11 +3017,14 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     ggml_tensor * p_perm = in.p_perm ? in.p_perm : ggml_cont(ctx, ggml_permute(ctx, p, 0, 2, 1, 3));
     ggml_tensor * q_u = ggml_add(ctx, q_perm, u_bias);
     ggml_tensor * q_v = ggml_add(ctx, q_perm, v_bias);
+    if (cap) { cap->q_perm = q_perm; cap->k_perm = k_perm; cap->q_u = q_u; }
 
     if (T >= k_attn_block_min_T) {
         ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
         ggml_tensor * flat = attn_context_blocked(ctx, k_perm, p_perm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
-        return maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+        ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+        if (cap) cap->out = out;
+        return out;
     }
 
     ggml_tensor * bd = ggml_mul_mat(ctx, p_perm, q_v);
@@ -2997,7 +3046,16 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     ggml_tensor * merged   = ggml_cont(ctx, ggml_permute(ctx, attn_v, 0, 2, 1, 3));
     ggml_tensor * flat     = ggml_reshape_2d(ctx, merged, HD * H, T);
 
-    return maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+    ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+
+    if (cap) {
+        cap->ac      = ac;
+        cap->bd      = bd;
+        cap->scores  = scores;
+        cap->softmax = attn;
+        cap->out     = out;
+    }
+    return out;
 }
 
 // How the conformer depthwise conv is lowered on the backend that runs the graph.
@@ -3643,7 +3701,67 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
 
             residual = x;
             ggml_tensor * xn = layer_norm_affine(gctx, x, W.norm_attn_w, W.norm_attn_b, eps);
-            y = rel_pos_mha_graph(gctx, xn, g.pe_in, layer_pos_proj(0), g.att_mask, W, H, HD, T, model.impl->attn);
+            AttnCapture blk0_cap;
+            y = rel_pos_mha_graph(gctx, xn, g.pe_in, layer_pos_proj(0), g.att_mask, W, H, HD, T, model.impl->attn, &blk0_cap);
+            // QVAC-25495 diagnostic: expose block 0 attention intermediates
+            // so a parity test can localize where HTP0 diverges from CPU.
+            // Guarded by set_name/set_output so the scheduler keeps the
+            // tensors materialised on the primary backend for host copy.
+            if (blk0_cap.qkv) {
+                g.block_0_attn_qkv_node = blk0_cap.qkv;
+                ggml_set_name(g.block_0_attn_qkv_node, "block_0_attn_qkv");
+                ggml_set_output(g.block_0_attn_qkv_node);
+            }
+            if (blk0_cap.k_raw) {
+                g.block_0_attn_k_raw_node = blk0_cap.k_raw;
+                ggml_set_name(g.block_0_attn_k_raw_node, "block_0_attn_k_raw");
+                ggml_set_output(g.block_0_attn_k_raw_node);
+            }
+            if (blk0_cap.v_raw) {
+                g.block_0_attn_v_raw_node = blk0_cap.v_raw;
+                ggml_set_name(g.block_0_attn_v_raw_node, "block_0_attn_v_raw");
+                ggml_set_output(g.block_0_attn_v_raw_node);
+            }
+            if (blk0_cap.q_perm) {
+                g.block_0_attn_q_perm_node = blk0_cap.q_perm;
+                ggml_set_name(g.block_0_attn_q_perm_node, "block_0_attn_q_perm");
+                ggml_set_output(g.block_0_attn_q_perm_node);
+            }
+            if (blk0_cap.k_perm) {
+                g.block_0_attn_k_perm_node = blk0_cap.k_perm;
+                ggml_set_name(g.block_0_attn_k_perm_node, "block_0_attn_k_perm");
+                ggml_set_output(g.block_0_attn_k_perm_node);
+            }
+            if (blk0_cap.q_u) {
+                g.block_0_attn_q_u_node = blk0_cap.q_u;
+                ggml_set_name(g.block_0_attn_q_u_node, "block_0_attn_q_u");
+                ggml_set_output(g.block_0_attn_q_u_node);
+            }
+            if (blk0_cap.ac) {
+                g.block_0_attn_ac_node = blk0_cap.ac;
+                ggml_set_name(g.block_0_attn_ac_node, "block_0_attn_ac");
+                ggml_set_output(g.block_0_attn_ac_node);
+            }
+            if (blk0_cap.bd) {
+                g.block_0_attn_bd_node = blk0_cap.bd;
+                ggml_set_name(g.block_0_attn_bd_node, "block_0_attn_bd");
+                ggml_set_output(g.block_0_attn_bd_node);
+            }
+            if (blk0_cap.scores) {
+                g.block_0_attn_scores_node = blk0_cap.scores;
+                ggml_set_name(g.block_0_attn_scores_node, "block_0_attn_scores");
+                ggml_set_output(g.block_0_attn_scores_node);
+            }
+            if (blk0_cap.softmax) {
+                g.block_0_attn_softmax_node = blk0_cap.softmax;
+                ggml_set_name(g.block_0_attn_softmax_node, "block_0_attn_softmax");
+                ggml_set_output(g.block_0_attn_softmax_node);
+            }
+            if (blk0_cap.out) {
+                g.block_0_attn_out_node = blk0_cap.out;
+                ggml_set_name(g.block_0_attn_out_node, "block_0_attn_out");
+                ggml_set_output(g.block_0_attn_out_node);
+            }
             x = ggml_add(gctx, residual, y);
             g.post_attn_0_node = x;
             ggml_set_name(g.post_attn_0_node, "block_0_post_attn");
@@ -3702,6 +3820,17 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     g.cgraph = ggml_new_graph_custom(gctx, graph_slots, false);
     if (g.sub_out_node)        ggml_build_forward_expand(g.cgraph, g.sub_out_node);
     if (g.post_ff1_0_node)     ggml_build_forward_expand(g.cgraph, g.post_ff1_0_node);
+    if (g.block_0_attn_qkv_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_qkv_node);
+    if (g.block_0_attn_k_raw_node)   ggml_build_forward_expand(g.cgraph, g.block_0_attn_k_raw_node);
+    if (g.block_0_attn_v_raw_node)   ggml_build_forward_expand(g.cgraph, g.block_0_attn_v_raw_node);
+    if (g.block_0_attn_q_perm_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_q_perm_node);
+    if (g.block_0_attn_k_perm_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_k_perm_node);
+    if (g.block_0_attn_q_u_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_q_u_node);
+    if (g.block_0_attn_ac_node)      ggml_build_forward_expand(g.cgraph, g.block_0_attn_ac_node);
+    if (g.block_0_attn_bd_node)      ggml_build_forward_expand(g.cgraph, g.block_0_attn_bd_node);
+    if (g.block_0_attn_scores_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_scores_node);
+    if (g.block_0_attn_softmax_node) ggml_build_forward_expand(g.cgraph, g.block_0_attn_softmax_node);
+    if (g.block_0_attn_out_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_out_node);
     if (g.post_attn_0_node)    ggml_build_forward_expand(g.cgraph, g.post_attn_0_node);
     if (g.post_conv_0_node)    ggml_build_forward_expand(g.cgraph, g.post_conv_0_node);
     if (g.post_ff2_0_node)     ggml_build_forward_expand(g.cgraph, g.post_ff2_0_node);
@@ -4154,6 +4283,17 @@ int run_encoder(ParakeetCtcModel   & model,
         copy_tensor(g.post_ff2_0_node,      out.block_0_post_ff2);
         copy_tensor(g.block_0_out_node,     out.block_0_out);
         copy_tensor(g.block_last_out_node,  out.block_last_out);
+        copy_tensor(g.block_0_attn_qkv_node,     out.block_0_attn_qkv);
+        copy_tensor(g.block_0_attn_k_raw_node,   out.block_0_attn_k_raw);
+        copy_tensor(g.block_0_attn_v_raw_node,   out.block_0_attn_v_raw);
+        copy_tensor(g.block_0_attn_q_perm_node,  out.block_0_attn_q_perm);
+        copy_tensor(g.block_0_attn_k_perm_node,  out.block_0_attn_k_perm);
+        copy_tensor(g.block_0_attn_q_u_node,     out.block_0_attn_q_u);
+        copy_tensor(g.block_0_attn_ac_node,      out.block_0_attn_ac);
+        copy_tensor(g.block_0_attn_bd_node,      out.block_0_attn_bd);
+        copy_tensor(g.block_0_attn_scores_node,  out.block_0_attn_scores);
+        copy_tensor(g.block_0_attn_softmax_node, out.block_0_attn_softmax);
+        copy_tensor(g.block_0_attn_out_node,     out.block_0_attn_out);
     } else {
         out.subsampling_out.clear();
         out.block_0_post_ff1.clear();
@@ -4162,6 +4302,17 @@ int run_encoder(ParakeetCtcModel   & model,
         out.block_0_post_ff2.clear();
         out.block_0_out.clear();
         out.block_last_out.clear();
+        out.block_0_attn_qkv.clear();
+        out.block_0_attn_k_raw.clear();
+        out.block_0_attn_v_raw.clear();
+        out.block_0_attn_q_perm.clear();
+        out.block_0_attn_k_perm.clear();
+        out.block_0_attn_q_u.clear();
+        out.block_0_attn_ac.clear();
+        out.block_0_attn_bd.clear();
+        out.block_0_attn_scores.clear();
+        out.block_0_attn_softmax.clear();
+        out.block_0_attn_out.clear();
     }
     copy_tensor(g.encoder_out_node,     out.encoder_out);
     copy_tensor(g.logits_node,          out.logits);

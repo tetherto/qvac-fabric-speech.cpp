@@ -642,6 +642,25 @@ struct EncoderOutputs {
     std::vector<float> block_last_out;
     std::vector<float> encoder_out;
     std::vector<float> logits;
+
+    // QVAC-25495 diagnostic: fine-grained snapshots inside block 0's
+    // relative-position multi-head attention. Populated only when
+    // capture_intermediates=true. Empty on the flash-attn path (the
+    // whole attention collapses into one FLASH_ATTN_EXT node — nothing
+    // to intercept). Order: qkv → ac (content×query) → bd (pos×query) →
+    // scores (ac + rel_shift(bd)) → softmax → out (y before residual).
+    std::vector<float> block_0_attn_qkv;
+    std::vector<float> block_0_attn_k_raw;
+    std::vector<float> block_0_attn_v_raw;
+    std::vector<float> block_0_attn_q_perm;
+    std::vector<float> block_0_attn_k_perm;
+    std::vector<float> block_0_attn_q_u;
+    std::vector<float> block_0_attn_ac;
+    std::vector<float> block_0_attn_bd;
+    std::vector<float> block_0_attn_scores;
+    std::vector<float> block_0_attn_softmax;
+    std::vector<float> block_0_attn_out;
+
     int n_enc_frames = 0;
     int d_model      = 0;
     int vocab_size   = 0;

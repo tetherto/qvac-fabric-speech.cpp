@@ -462,6 +462,27 @@ if (PARAKEET_BUILD_EXECUTABLES)
     add_executable(parakeet-fit-params src/fit_cli_main.cpp)
     target_link_libraries(parakeet-fit-params PRIVATE qvac-parakeet)
     parakeet_apply_ccache(parakeet-fit-params)
+
+    # QVAC-25495 diagnostic. Loads the same GGUF twice on two backends
+    # (default cpu vs hexagon) and prints per-stage encoder cosine to
+    # localize the first divergent Conformer stage on HTP0. Kept in the
+    # executables block (not PARAKEET_BUILD_TESTS) so the Android
+    # dynamic-loader build produces it without pulling in the whole
+    # fixture harness.
+    add_executable(test-encoder-backend-parity
+        test/test_encoder_backend_parity.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-encoder-backend-parity PRIVATE ggml)
+    target_include_directories(test-encoder-backend-parity
+        PRIVATE ggml/include src include)
+    if (PARAKEET_FLASH_ATTN)
+        target_compile_definitions(test-encoder-backend-parity
+            PRIVATE PARAKEET_EXPERIMENTAL_FLASH_ATTN)
+    endif()
+    parakeet_apply_ccache(test-encoder-backend-parity)
 endif()
 
 if (PARAKEET_BUILD_TESTS)
