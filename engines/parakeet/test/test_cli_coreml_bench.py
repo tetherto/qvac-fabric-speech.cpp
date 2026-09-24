@@ -13,22 +13,26 @@ def main() -> int:
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--wav", required=True, type=Path)
+    parser.add_argument("--language")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
         result_path = Path(tmp) / "bench.json"
+        command = [
+            str(args.binary),
+            "--model", str(args.model),
+            "--wav", str(args.wav),
+            "--bench",
+            "--bench-warmup", "0",
+            "--bench-runs", "1",
+            "--bench-json", str(result_path),
+            "--require-coreml",
+            "--n-gpu-layers", "999",
+        ]
+        if args.language:
+            command.extend(["--language", args.language])
         completed = subprocess.run(
-            [
-                str(args.binary),
-                "--model", str(args.model),
-                "--wav", str(args.wav),
-                "--bench",
-                "--bench-warmup", "0",
-                "--bench-runs", "1",
-                "--bench-json", str(result_path),
-                "--require-coreml",
-                "--n-gpu-layers", "999",
-            ],
+            command,
             text=True,
             capture_output=True,
             check=False,
