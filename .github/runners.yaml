@@ -24,3 +24,6 @@ windows_2022: windows-2022 # Windows Server 2022 hosted x64
 # Self-hosted
 linux_x64_gpu: qvac-ubuntu2204-x64-gpu # Self-hosted NVIDIA Linux x64 GPU
 macos_arm64_gpu: qvac-macos26-arm64-gpu # Self-hosted Apple Silicon GPU/Metal
+
+# QVAC-24501 verification: temporary comment to exercise the on-PR CI flow.
+# This line is removed before this branch is closed.
