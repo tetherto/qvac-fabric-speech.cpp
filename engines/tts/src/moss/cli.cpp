@@ -24,7 +24,10 @@ void print_usage() {
         "       [--seed 1234] [--threads 4] [--gpu] [--backends-dir dir]\n"
         "       [--text-temperature 1.5] [--text-top-p 1.0] [--text-top-k 50]\n"
         "       [--audio-temperature 1.7] [--audio-top-p 0.8] [--audio-top-k 25]\n"
-        "       [--audio-repetition-penalty 1.0]\n");
+        "       [--audio-repetition-penalty 1.0]\n"
+        "       moss-cli --mode sfx --model sfx.gguf --text \"rain on a tin roof\" --out out.wav\n"
+        "       [--seconds 10] [--negative-prompt \"...\"] [--seed 0] [--threads 4] [--gpu] [--backends-dir dir]\n"
+        "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n");
 }
 
 namespace {
@@ -47,6 +50,66 @@ bool save_wav(const std::string & path, const std::vector<float> & pcm, int samp
     return written == samples.size();
 }
 
+bool parse_mode(const std::string & value, Mode & mode) {
+    if (value == "tts") {
+        mode = Mode::Speech;
+        return true;
+    }
+    if (value == "sfx") {
+        mode = Mode::SoundEffect;
+        return true;
+    }
+    std::fprintf(stderr, "unknown mode: %s (expected tts or sfx)\n", value.c_str());
+    return false;
+}
+
+void share_runtime_flags(CliArgs & args) {
+    args.sound_options.n_threads = args.options.n_threads;
+    args.sound_options.use_gpu = args.options.use_gpu;
+    args.sound_options.backends_dir = args.options.backends_dir;
+    args.sound_request.prompt = args.text;
+}
+
+bool has_required_flags(const CliArgs & args) {
+    if (args.text.empty()) {
+        return false;
+    }
+    if (args.mode == Mode::SoundEffect && args.stream) {
+        std::fprintf(stderr, "--stream is not available in sfx mode\n");
+        return false;
+    }
+    if (args.mode == Mode::SoundEffect) {
+        return !args.sound_options.model_path.empty();
+    }
+    return !args.options.backbone_path.empty() && !args.options.decoder_path.empty();
+}
+
+int run_sound_effect(const CliArgs & args) {
+    tts_cpp::moss::SoundEffectEngine engine(args.sound_options);
+    std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
+    const tts_cpp::moss::SoundEffectResult result = engine.generate(args.sound_request,
+            [](int step, int total) {
+                std::fprintf(stderr, "\r[moss-cli] step %d/%d", step, total);
+                if (step == total) {
+                    std::fprintf(stderr, "\n");
+                }
+                return true;
+            });
+    if (result.cancelled) {
+        std::fprintf(stderr, "[moss-cli] generation cancelled\n");
+        return 1;
+    }
+    if (!save_wav(args.out_path, result.pcm, result.sample_rate)) {
+        std::fprintf(stderr, "[moss-cli] cannot write %s\n", args.out_path.c_str());
+        return 1;
+    }
+    std::fprintf(stderr,
+        "[moss-cli] wrote %s: %.2fs @ %d Hz (text %.0f ms, diffusion %.0f ms, decode %.0f ms)\n",
+        args.out_path.c_str(), (double) result.pcm.size() / result.sample_rate, result.sample_rate,
+        result.text_ms, result.diffusion_ms, result.decode_ms);
+    return 0;
+}
+
 } // namespace
 
 bool parse_args(int argc, const char * const * argv, CliArgs & args) {
@@ -58,7 +121,12 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
             }
             return argv[++i];
         };
-        if (flag == "--backbone")           args.options.backbone_path = next();
+        if (flag == "--mode") {
+            if (!parse_mode(next(), args.mode)) {
+                return false;
+            }
+        }
+        else if (flag == "--backbone")      args.options.backbone_path = next();
         else if (flag == "--decoder")       args.options.decoder_path = next();
         else if (flag == "--encoder")       args.options.encoder_path = next();
         else if (flag == "--ref-audio")     args.options.reference_audio_path = next();
@@ -69,7 +137,16 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--out")           args.out_path = next();
         else if (flag == "--max-new-tokens") args.options.max_new_tokens = std::atoi(next());
         else if (flag == "--context")       args.options.context = std::atoi(next());
-        else if (flag == "--seed")          args.options.seed = (uint32_t) std::strtoul(next(), nullptr, 10);
+        else if (flag == "--seed") {
+            args.options.seed = (uint32_t) std::strtoul(next(), nullptr, 10);
+            args.sound_request.seed = args.options.seed;
+        }
+        else if (flag == "--model")         args.sound_options.model_path = next();
+        else if (flag == "--negative-prompt") args.sound_request.negative_prompt = next();
+        else if (flag == "--seconds")       args.sound_request.seconds = std::strtod(next(), nullptr);
+        else if (flag == "--steps")         args.sound_request.steps = std::atoi(next());
+        else if (flag == "--guidance")      args.sound_request.guidance = std::strtof(next(), nullptr);
+        else if (flag == "--shift")         args.sound_request.shift = std::strtof(next(), nullptr);
         else if (flag == "--threads")       args.options.n_threads = std::atoi(next());
         else if (flag == "--gpu")           args.options.use_gpu = true;
         else if (flag == "--stream")        args.stream = true;
@@ -88,14 +165,15 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
             return false;
         }
     }
-    if (args.options.backbone_path.empty() || args.options.decoder_path.empty() || args.text.empty()) {
-        return false;
-    }
-    return true;
+    share_runtime_flags(args);
+    return has_required_flags(args);
 }
 
 int run(const CliArgs & args) {
     try {
+        if (args.mode == Mode::SoundEffect) {
+            return run_sound_effect(args);
+        }
         tts_cpp::moss::Engine engine(args.options);
         std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
         std::vector<float> pcm;

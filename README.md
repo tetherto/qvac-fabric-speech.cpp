@@ -1,6 +1,6 @@
 # qvac-fabric-speech.cpp
 
-On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/qvac-ext-ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, speech enhancement, and music generation.
+On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/qvac-ext-ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound-effect generation, speech enhancement, and music generation.
 
 | Property | Value |
 |---|---|
@@ -88,6 +88,7 @@ and prediction failures fall back to ggml.
 | Audio8-TTS-Preview-0.6B | tts | multilingual | 44.1 kHz | `f32`, `f16`, `q8_0`; LM also `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML codec-synthesis sidecar (`TTS_CPP_COREML`, Apple) | DualAR + DAC codec, zero-shot cloning from reference audio and transcript |
 | Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | tts | model-advertised multilingual text | 24 kHz | `f32`, `f16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3 backbone over a 32-channel delay pattern + RVQ codec, zero-shot cloning from a reference WAV, MOSS-TTSD two-speaker dialogue, streaming chunked output, pause/duration/pronunciation controls; end-to-end synthesis validated against the released checkpoints, numeric reference parity pending |
+| MOSS-SoundEffect-v2 | tts | text prompt (sound effects, not speech) | 48 kHz | `f16`, `q8_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3-1.7B text encoder + Wan DiT flow matching + DAC decoder, up to 30 s per clip, `moss-cli --mode sfx`; every stage matches the PyTorch pipeline (f16 at cosine 0.99998 or better, q8_0 at 0.9987 after eight sampling steps) |
 
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
@@ -218,7 +219,7 @@ These engines ship inside [QVAC](https://github.com/tetherto/qvac) as SDK addons
 |---|---|---|
 | `third_party/whisper.cpp` | MIT | MIT (OpenAI Whisper), Silero VAD models under their own terms |
 | `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License |
-| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, and LavaSR Apache-2.0; Supertonic OpenRAIL-M |
+| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, and MOSS-SoundEffect Apache-2.0; Supertonic OpenRAIL-M |
 | `engines/audiogen` | MIT | ACE-Step 1.5 MIT, Qwen3-Embedding Apache-2.0, MiniMax-Music3 Community License |
 
 Per-engine `NOTICE` files list every third-party dependency and its license.

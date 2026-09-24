@@ -1,4 +1,4 @@
-# tts engine: MOSS Delay
+# tts engine: MOSS
 
 Part of the [tts engine documentation](../README.md).
 
@@ -184,5 +184,124 @@ that streaming decodes every frame exactly once. `test-moss-cancel` drives a rea
 cancels it from another thread. `test-moss-cli` covers the flag surface and
 runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
 registered when an interpreter is available, skips without numpy/gguf)
-fabricates a tiny checkpoint on disk, runs both converters, and validates the
+fabricates tiny checkpoints on disk, runs the converters, and validates the
 emitted GGUFs.
+
+## MOSS-SoundEffect
+
+[MOSS-SoundEffect-v2](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0)
+turns a text description into a sound effect of up to 30 seconds. It is a
+flow-matching diffusion model: a Qwen3-1.7B text encoder embeds the prompt, a
+30-layer Wan-style DiT (adaLN modulation, RoPE self-attention over the latent
+frames, cross-attention to the text) predicts the velocity, and a continuous
+DAC decoder turns the 128-channel latent (50 frames per second) into 48 kHz
+mono audio. It is not a speech model; it shares the MOSS CLI and the Qwen
+tokenizer with the Delay engine and nothing else.
+
+**Status — CPU and Metal, validated against the reference pipeline.** With
+the same noise, every stage matches the PyTorch fp32 pipeline: the text
+encoder, one DiT velocity for the prompt and for the empty negative prompt,
+an eight-step guided sampling loop, and the VAE decode. An f16 GGUF reaches
+cosine similarity 0.99998 or better on both backends; a q8_0 GGUF reaches
+0.9995 per stage and 0.9987 after the eight sampling steps. The CPU path is
+correct but slow (about ten seconds per DiT pass on an M1 Ultra, so a
+100-step clip takes over half an hour); use `--gpu` where one is available.
+
+### Convert
+
+One GGUF holds the text encoder, the DiT, the VAE decoder, the tokenizer, and
+the generation defaults.
+
+```sh
+python scripts/convert-moss-sfx-to-gguf.py /path/to/MOSS-SoundEffect-v2.0 \
+    --outtype f16 --outfile moss-sfx-v2-f16.gguf
+```
+
+`--outtype` picks the type of the linear weights and of the text token
+embedding: `f16` (6.4 GB) and `q8_0` (3.5 GB) are validated; `bf16` and `f32`
+are also written. Norms, biases, modulation tables, snake parameters, and the
+two small 1x1 projections (`dit.patch_embd`, `vae.post_quant`) stay f32, and
+the VAE convolution kernels stay f16 because ggml's CPU im2col requires it.
+The converter drops the text encoder's unused language-model head, folds the
+VAE weight norm into plain kernels, lays out the transposed convolutions as
+GEMM columns, and stores `1 / (alpha + 1e-9)` next to each snake `alpha`.
+
+### Run
+
+```sh
+build/moss-cli --mode sfx --model moss-sfx-v2-f16.gguf \
+    --text "Heavy rain falling on a tin roof with distant thunder." \
+    --seconds 10 --gpu --out rain.wav
+```
+
+The defaults come from the GGUF and match the reference pipeline: 100 steps,
+guidance 4.0, shift 5.0, and an empty negative prompt. `--steps`,
+`--guidance`, `--shift`, `--negative-prompt`, and `--seed` (0 by default in
+this mode) override them. `--seconds` must be in (0, 30] and is rounded to
+0.1 s the way Python's `round` does. There is no streaming in this mode. On an M1 Ultra a
+100-step clip takes about two minutes on Metal whatever its length, because
+the model always denoises the full 30-second latent and crops the result.
+
+### Engine notes
+
+The public API is `tts_cpp::moss::SoundEffectEngine` in
+[`include/tts-cpp/moss/sound_effect.h`](../include/tts-cpp/moss/sound_effect.h):
+construct with `SoundEffectOptions` (model path, threads, `use_gpu`,
+`backends_dir`), call `generate(request, progress)` for a `SoundEffectResult`
+(mono PCM, sample rate, text, diffusion, and decode wall times), and
+`cancel()` from another thread or `false` from the progress callback to stop
+a run. A request leaves `steps`, `guidance`, and `shift` at zero to use the
+model defaults and rejects negative or non-finite values; guidance 1 skips
+the negative branch. Prompts are capped at 8192 bytes. One generation runs at
+a time per instance; overlapping calls throw.
+
+Generation mirrors the reference pipeline. The prompt gets the training-time
+suffix ` duration: X.Xs` and is cleaned the way upstream's `ftfy`-based
+cleaner does it: HTML entities are unescaped (to a fixed point, or exactly
+twice when the text contains `<`), curly quotes are straightened, full-width
+forms and the ideographic space are narrowed, Latin ligatures are split, and
+Unicode whitespace collapses to single spaces, so Chinese and typographic
+prompts tokenize to the same ids as the Hugging Face tokenizer. Malformed
+UTF-8 becomes U+FFFD byte by byte. Not reproduced: Unicode normalization
+(NFC), mojibake repair, named entities beyond `&amp; &lt; &gt; &quot; &apos;
+&nbsp;` (and named entities without a semicolon), the cp1252 mapping Python
+applies to `&#128;`-`&#159;`, numeric references longer than eight digits,
+halfwidth katakana and the other halfwidth forms past U+FF5E, and ftfy's
+removal of the byte-order mark and control characters. The cleaned prompt is
+tokenized up to 512 tokens; the text encoder
+runs causally over the real tokens and the padding rows of the 512-token
+context stay zero, as upstream. The empty negative prompt is an all-zero
+context. The sampler is first-order Euler over the shifted flow-matching
+schedule, `sigma' = shift * sigma / (1 + (shift - 1) * sigma)`, with classic
+classifier-free guidance. The initial noise comes from a seeded Mersenne
+Twister with a Box-Muller transform, so a seed reproduces a clip across runs
+on one backend, but does not reproduce the PyTorch pipeline's clip for the
+same seed. The DiT graph is built once per request and reused for every step;
+the model refuses to run it once another graph has taken the scheduler. The
+loader validates every tensor's shape and type against the metadata and bounds
+the metadata itself (layer counts, hop length, latent length) so a malformed
+GGUF fails with an error instead of aborting inside ggml. The
+VAE decodes only the frames that cover the requested length, in 256-frame
+windows with 32 frames of context on each side, and the output is cropped to
+the exact sample count.
+
+### Test
+
+`test-moss-sfx` builds a tiny random-weight GGUF in-test and needs no
+download: the schedule, Euler step, guidance, prompt cleaning against
+upstream outputs, Python-compatible rounding, and noise; the load-time
+rejections for metadata bounds, tensor shapes, and tensor types; text-encoder
+causality, zero padding, and an f16 feed-forward sum past the half-precision
+range; DiT conditioning on text and timestep and the scheduler guard;
+windowed VAE decoding against a single window; engine determinism, guidance
+1, cancellation from the callback and from another thread, overlapping calls,
+and request validation; and the CLI's `sfx` and `tts` modes.
+`test-convert-moss` also fabricates a tiny MOSS-SoundEffect pipeline and
+checks the tensor census, the folded weight norm, the f16 and q8_0 paths, and
+the `.pth` VAE checkpoint (when torch is installed). `test-moss-sfx-parity` is the reference check: it
+skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
+`MOSS_SFX_REFERENCE_DIR` at stage dumps from the PyTorch pipeline
+(`MOSS_SFX_GPU=1` runs it on the GPU). The dumps come from
+`scripts/dump-moss-sfx-reference.py <checkpoint> <out_dir> --upstream
+<MOSS-TTS checkout>`, whose defaults are the prompt, duration, and step count
+the test expects.
