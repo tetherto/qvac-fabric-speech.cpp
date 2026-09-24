@@ -75,6 +75,9 @@ void print_usage(const char * argv0) {
         "                       Adreno 6xx OpenCL is skipped unless explicitly enabled\n"
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
         "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
+        "  --backend NAME       auto (default), cpu, opencl, hexagon (HTP0), or exact\n"
+        "                       ggml device name. Explicit selection overrides\n"
+        "                       --n-gpu-layers and fails if unavailable.\n"
         "  --backends-dir DIR                 directory to scan for dynamically-loaded\n"
         "                                     ggml backend .so/.dll/.dylib files\n"
         "                                     (e.g. libspeech-ggml-vulkan.so,\n"
@@ -379,6 +382,7 @@ struct CliOpts {
     std::string model_gguf_path;
     std::string wav_path;
     std::string language;
+    std::string backend = "auto";
     int  n_threads    = 0;
     int  n_gpu_layers = 0;
     bool verbose      = false;
@@ -411,6 +415,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             opts.language = argv[++i];
         } else if (a == "--n-gpu-layers" && i + 1 < argc) {
             opts.n_gpu_layers = std::atoi(argv[++i]);
+        } else if (a == "--backend" && i + 1 < argc) {
+            opts.backend = argv[++i];
         } else if (a == "--opencl-cache-dir" && i + 1 < argc) {
             extra.opencl_cache_dir = argv[++i];
         } else if (a == "--backends-dir" && i + 1 < argc) {
@@ -516,7 +522,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
 
     const auto t_load = clock::now();
     ParakeetCtcModel model;
-    if (int rc = load_from_gguf(opts.model_gguf_path, model, opts.n_threads, opts.n_gpu_layers, opts.verbose); rc != 0) {
+    if (int rc = load_from_gguf(opts.model_gguf_path, model, opts.n_threads, opts.n_gpu_layers, opts.verbose, opts.backend); rc != 0) {
         PARAKEET_LOG_ERROR("error: failed to load %s (rc=%d)\n", opts.model_gguf_path.c_str(), rc);
         return 3;
     }
@@ -587,6 +593,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EngineOptions sf_opts;
         sf_opts.model_gguf_path = extra.diarization_model_path;
         sf_opts.n_gpu_layers    = opts.n_gpu_layers;
+        sf_opts.backend         = opts.backend;
         sf_opts.n_threads       = opts.n_threads;
         sf_opts.verbose         = opts.verbose;
         Engine sf_engine(sf_opts);
@@ -600,6 +607,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EngineOptions asr_opts;
         asr_opts.model_gguf_path = opts.model_gguf_path;
         asr_opts.n_gpu_layers    = opts.n_gpu_layers;
+        asr_opts.backend         = opts.backend;
         asr_opts.n_threads       = opts.n_threads;
         asr_opts.verbose         = opts.verbose;
         asr_opts.language        = opts.language;
@@ -652,6 +660,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EngineOptions eopts;
         eopts.model_gguf_path = opts.model_gguf_path;
         eopts.n_gpu_layers    = opts.n_gpu_layers;
+        eopts.backend         = opts.backend;
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
@@ -1160,6 +1169,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         EngineOptions eopts;
         eopts.model_gguf_path = opts.model_gguf_path;
         eopts.n_gpu_layers    = opts.n_gpu_layers;
+        eopts.backend         = opts.backend;
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;

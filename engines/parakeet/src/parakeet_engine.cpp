@@ -17,6 +17,7 @@
 #include "long_form_encoder.h"
 #include "parakeet_log.h"
 #include "sortformer_finalize.h"
+#include "backend_util.h"
 
 #include <algorithm>
 #include <atomic>
@@ -412,11 +413,12 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
                                   pimpl_->model,
                                   opts.n_threads,
                                   opts.n_gpu_layers,
-                                  opts.verbose);
+                                  opts.verbose,
+                                  opts.backend);
     if (rc != 0) {
         throw std::runtime_error("parakeet::Engine: failed to load GGUF '" +
                                  opts.model_gguf_path +
-                                 "' (rc=" + std::to_string(rc) + ")");
+                                 "' with backend '" + opts.backend + "' (rc=" + std::to_string(rc) + ")");
     }
 
     if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
@@ -471,6 +473,7 @@ bool Engine::is_transcription_model() const {
 }
 
 BackendDevice Engine::backend_device() const {
+    if (backend_is_hexagon(pimpl_->model.backend_active())) return BackendDevice::NPU;
     return model_has_gpu_backend(pimpl_->model) ? BackendDevice::GPU
                                                 : BackendDevice::CPU;
 }

@@ -463,6 +463,11 @@ int load_from_gguf(const std::string & gguf_path,
                    int                 n_gpu_layers,
                    bool                verbose);
 
+int load_from_gguf(const std::string & gguf_path,
+                   ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose,
+                   const std::string & backend);
+
 // ── Memory-fit measurement (see include/parakeet/fit.h) ───────────────────
 
 // Byte totals collected by load_from_gguf_metadata_only.

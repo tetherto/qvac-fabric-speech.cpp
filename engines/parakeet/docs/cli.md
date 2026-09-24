@@ -11,7 +11,7 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
          --pcm-in <raw> --pcm-format s16le|f32le --pcm-rate 16000) [options]
 ```
 
-Useful groups include `--threads`, `--n-gpu-layers`, `--backends-dir`,
+Useful groups include `--threads`, `--n-gpu-layers`, `--backend`, `--backends-dir`,
 `--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
 and `--dump-mel`. Run `parakeet --help` for the complete list. `--bench`
@@ -19,6 +19,12 @@ covers the transcription models only: the diarization path (a Sortformer GGUF
 at `--model`) and the attributed path (`--diarization-model`) return before
 the bench loop, ignoring the `--bench*` flags — time the invocation externally
 to benchmark those.
+
+`--backend hexagon` explicitly requests HTP0, even when OpenCL is present.
+`--backend cpu` and `--backend opencl` select comparison backends. Explicit
+selection overrides `--n-gpu-layers` and fails if unavailable; omit the option
+or use `--backend auto` to preserve automatic selection. See [backends](backends.md)
+for the distinction between selected backend and measured DSP operation execution.
 
 ```bash
 build-parakeet/parakeet \

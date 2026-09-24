@@ -10,6 +10,32 @@ loaded. Parakeet selects one primary GPU through the ggml backend registry when
 cascade. `n_gpu_layers` is currently a boolean offload request: positive means
 the whole encoder, not a partial layer count.
 
+Set `EngineOptions::backend` or CLI `--backend` to select a primary GGML backend
+explicitly. `auto` (the default) preserves the policy below; `cpu`, `opencl`,
+and `hexagon` override `n_gpu_layers`. `hexagon` selects the `HTP0` device from
+the `HTP` registry. An exact GGML device name such as `HTP0` is also accepted.
+An unavailable or failed explicit selection fails loading instead of selecting
+another backend. The existing per-operation CPU scheduler still handles
+unsupported operations; selecting HTP0 does not claim every operation ran there.
+On Android, backend discovery also prepends `backends_dir` to FastRPC's
+semicolon-separated `DSP_LIBRARY_PATH`, preserving existing user paths and
+vendor defaults. This happens even when the first model requests CPU/OpenCL,
+so later models can explicitly select Hexagon. If only legacy
+`ADSP_LIBRARY_PATH` is set, its entries are retained. Set `backends_dir` before
+the first Engine/loader call; registry discovery remains process-global.
+
+Hexagon is experimental and currently targets Parakeet CTC 0.6B Q8_0. Build and
+ship the matching GGML Hexagon backend and DSP library. For device validation,
+run `--backend hexagon --verbose --bench --bench-json result.json`, with the
+existing `--backends-dir` pointing at the installed backend libraries. The JSON
+records the actual backend (`ggml-htp0`), transcript and stage timings. Use a
+separate `GGML_HEXAGON_PROFILE=1` run to collect DSP operation evidence for
+`IM2COL`, `CONV_2D_DW`, and eligible HMX matrix operations; backend identity alone
+does not establish kernel execution or correct transcription. Measure CPU and
+OpenCL with `--backend cpu` and `--backend opencl` using the same model/audio.
+`Engine::backend_device()` identifies Hexagon as `BackendDevice::NPU`, while
+`Engine::backend_name()` reports the resolved device name (`HTP0`).
+
 Runtime tiering is:
 
 1. Prefer OpenCL for Adreno 700+, where it is validated ahead of Vulkan.

@@ -98,6 +98,9 @@ struct EngineOptions {
     // because the .so files ship next to the host's binary in a
     // platform-specific subfolder rather than on the system loader's
     // path.
+    // On Android this directory is also prepended once to FastRPC's
+    // DSP_LIBRARY_PATH before discovery, for bundled Hexagon DSP libraries.
+    // Existing DSP paths (or legacy ADSP paths) and vendor defaults remain.
     //
     // No-op on builds where ggml is statically linked
     // (`GGML_BACKEND_DL=OFF`, e.g. desktop dev cmake builds and the
@@ -192,6 +195,14 @@ struct EngineOptions {
     // - Monolingual CTC and existing transducer families: ignored.
     // Unsupported Nemotron locales and multilingual CTC language IDs throw.
     std::string language;
+
+    // "auto" (or empty) preserves n_gpu_layers and runtime GPU tiering.
+    // "cpu", "opencl", and "hexagon" explicitly select a backend;
+    // "hexagon" selects HTP0. An exact ggml device name (e.g. HTP0)
+    // is also accepted. Explicit selection overrides n_gpu_layers and
+    // fails construction if unavailable or initialization fails. Individual
+    // unsupported operations can still use the existing CPU scheduler.
+    std::string backend = "auto";
 };
 
 // Resolved compute device the Engine is actually running on, after
@@ -203,6 +214,7 @@ struct EngineOptions {
 enum class BackendDevice : int {
     CPU = 0,
     GPU = 1,
+    NPU = 2,
 };
 
 struct EngineResult {
@@ -285,16 +297,13 @@ public:
     // the parakeet.model.type metadata of the loaded GGUF.
     std::string model_type() const;
 
-    // Resolved compute device for this Engine's loaded model. CPU when
-    // the build has no GPU backend compiled in, when no GPU was
-    // requested (n_gpu_layers <= 0), or when the requested GPU backend
-    // refused to initialise (e.g. Adreno-6xx forced to CPU,
-    // GGML_OPENCL_ALLOW_UNKNOWN_GPU=1 but the device lacks the
-    // required subgroup-size extension). GPU otherwise.
+    // Resolved primary compute device: CPU, GPU, or NPU (Hexagon).
+    // In auto mode n_gpu_layers and GPU availability determine CPU fallback.
+    // Explicit backend requests fail construction if unavailable.
     BackendDevice backend_device() const;
 
     // Human-readable name of the active backend, e.g. "CUDA0", "Metal",
-    // "Vulkan0", "OpenCL", "CPU". Sourced from `ggml_backend_name()`
+    // "Vulkan0", "OpenCL", "HTP0", "CPU". Sourced from `ggml_backend_name()`
     // when a GPU backend is active; literal "CPU" otherwise. Stable for
     // the lifetime of the Engine.
     std::string backend_name() const;

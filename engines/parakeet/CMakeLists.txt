@@ -688,6 +688,11 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-parakeet-backend-selection)
     parakeet_register_test(test-parakeet-backend-selection LABEL "unit")
 
+    add_executable(test-parakeet-backend-request test/test_backend_request.cpp)
+    target_link_libraries(test-parakeet-backend-request PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(test-parakeet-backend-request)
+    parakeet_register_test(test-parakeet-backend-request LABEL "unit")
+
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
     target_include_directories(test-parakeet-streaming PRIVATE include src ggml/include)

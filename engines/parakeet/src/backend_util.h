@@ -12,8 +12,36 @@
 #include "ggml-backend.h"
 
 #include <cstring>
+#include <string>
 
 namespace parakeet {
+
+inline bool backend_selection_is_auto(const std::string & requested) {
+    return requested.empty() || requested == "auto";
+}
+
+inline std::string prepend_dsp_library_directory(const std::string & dir, const std::string & paths) {
+    // FastRPC uses ';', unlike the ELF loader's ':'. Preserve any caller
+    // supplied paths and avoid accumulating duplicate entries on each load.
+    if (dir.empty()) return paths;
+    if ((";" + paths + ";").find(";" + dir + ";") != std::string::npos) return paths;
+    return paths.empty() ? dir : dir + ";" + paths;
+}
+
+// Registry names and exact device names are distinct: Hexagon registers as
+// HTP, while its device is HTP0. Never match a generic GPU for an explicit
+// request; this keeps OpenCL present alongside Hexagon without changing it.
+inline bool backend_selection_matches(const std::string & requested,
+                                      const char * reg, const char * device,
+                                      enum ggml_backend_dev_type type) {
+    if (backend_selection_is_auto(requested)) return false;
+    if (requested == "cpu") return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
+    if (requested == "hexagon") {
+        return reg && std::strcmp(reg, "HTP") == 0 && device && std::strcmp(device, "HTP0") == 0;
+    }
+    return device && requested == device;
+}
 
 // Tier ranking for GPU selection (lower = preferred). Pure function so unit
 // tests can exercise the ordering against synthesised device topologies
@@ -101,6 +129,10 @@ inline bool backend_is_vulkan(ggml_backend_t b) {
 
 inline bool backend_is_opencl(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "OpenCL") == 0;
+}
+
+inline bool backend_is_hexagon(ggml_backend_t b) {
+    return std::strcmp(backend_reg_name(b), "HTP") == 0;
 }
 
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {

@@ -278,6 +278,8 @@ std::atomic<bool> g_backends_loaded{false};
 std::atomic<bool> g_backends_dir_warned{false};
 std::atomic<bool> g_opencl_cache_dir_warned{false};
 
+void prepare_hexagon_library_path(const std::string & dir);
+
 // Trigger one-time discovery + load of every available ggml backend.
 // Idempotent: repeated calls inside the same process are no-ops once
 // the registry is populated. Routed through a static guard so we don't
@@ -310,6 +312,10 @@ void ensure_backends_loaded() {
             std::lock_guard<std::mutex> lock(g_backends_dir_mutex);
             dir = g_backends_dir;
             g_recorded_backends_dir = g_backends_dir;
+            // Discovery initializes all backend registries, including HTP
+            // even when this first model requests CPU/OpenCL. Configure the
+            // DSP loader once here so a later explicit HTP0 request works.
+            prepare_hexagon_library_path(dir);
             // Flip the loaded sentinel under the mutex (and *before*
             // we release it for the load-all call below) so any
             // concurrent setter that's about to acquire the mutex
@@ -646,6 +652,58 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers, bool verbose,
         }
     }
     return nullptr;
+}
+
+ggml_backend_t init_explicit_backend(const std::string & requested, ggml_backend_t cpu,
+                                     bool & out_is_mali_vulkan) {
+    ensure_backends_loaded();
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev || !backend_selection_matches(requested, dev_reg_name(dev),
+                    ggml_backend_dev_name(dev), ggml_backend_dev_type(dev))) continue;
+        // Reuse the initialized CPU instance so it is owned/freed only once.
+        if (dev == ggml_backend_get_device(cpu)) return cpu;
+        const char * name = ggml_backend_dev_name(dev);
+        const char * desc = ggml_backend_dev_description(dev);
+        const bool opencl = std::strcmp(dev_reg_name(dev), "OpenCL") == 0;
+        const int adreno = std::max(parse_adreno_version(name), parse_adreno_version(desc));
+        const char * override_env = getenv("PARAKEET_ALLOW_ADRENO_6XX");
+        if (opencl && adreno >= 600 && adreno < 700 && (!override_env || override_env[0] != '1')) {
+            continue;
+        }
+        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            out_is_mali_vulkan = std::strcmp(dev_reg_name(dev), "Vulkan") == 0 &&
+                                (desc_is_mali(desc) || desc_is_mali(name));
+            PARAKEET_LOG_INFO("parakeet: explicitly selected %s backend (%s)\n",
+                              dev_reg_name(dev), name ? name : "unknown");
+            return backend;
+        }
+    }
+    PARAKEET_LOG_ERROR("parakeet: requested backend '%s' unavailable or failed initialization; no fallback\n",
+                       requested.c_str());
+    return nullptr;
+}
+
+// FastRPC resolves DSP-side libraries separately from ggml's host .so loader.
+// Configure it before CPU initialization, which discovers *all* backends.
+// Snapdragon devices supported by ggml-hexagon use DSP_LIBRARY_PATH; unlike
+// legacy ADSP_LIBRARY_PATH, this prepends to the vendor's default search paths.
+void prepare_hexagon_library_path(const std::string & dir) {
+#ifdef __ANDROID__
+    if (dir.empty()) return;
+    if (dir.find(';') != std::string::npos) {
+        PARAKEET_LOG_WARN("parakeet: cannot add backends_dir to FastRPC search path: directory contains ';'\n");
+        return;
+    }
+    const char * prior = std::getenv("DSP_LIBRARY_PATH");
+    if (!prior) prior = std::getenv("ADSP_LIBRARY_PATH");
+    const std::string path = prepend_dsp_library_directory(dir, prior ? prior : "");
+    if (setenv("DSP_LIBRARY_PATH", path.c_str(), 1) != 0) {
+        PARAKEET_LOG_WARN("parakeet: failed to configure DSP_LIBRARY_PATH\n");
+    }
+#else
+    (void) dir;
+#endif
 }
 
 ggml_backend_t init_cpu_backend() {
@@ -1629,7 +1687,8 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                                int                 n_threads,
                                int                 n_gpu_layers,
                                bool                verbose,
-                               GgufLoadMeasure   * measure) {
+                               GgufLoadMeasure   * measure,
+                               const std::string & backend = "auto") {
     auto impl = std::make_shared<ParakeetCtcModel::Impl>();
 
     impl->backend_cpu = init_cpu_backend();
@@ -1651,8 +1710,14 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     bool skipped_unsupported_gpu = false;
     bool gpu_is_mali_vulkan = false;
-    impl->backend_gpu    = init_gpu_backend(n_gpu_layers, verbose, skipped_unsupported_gpu,
-                                            gpu_is_mali_vulkan);
+    if (backend_selection_is_auto(backend)) {
+        impl->backend_gpu = init_gpu_backend(n_gpu_layers, verbose, skipped_unsupported_gpu,
+                                             gpu_is_mali_vulkan);
+    } else {
+        ggml_backend_t selected = init_explicit_backend(backend, impl->backend_cpu, gpu_is_mali_vulkan);
+        if (!selected) return 11;
+        if (selected != impl->backend_cpu) impl->backend_gpu = selected;
+    }
     impl->backend_active = impl->backend_gpu ? impl->backend_gpu : impl->backend_cpu;
     impl->gpu_unsupported = skipped_unsupported_gpu && impl->backend_gpu == nullptr;
     // On Mali-Vulkan the Sortformer head miscomputes (transformer block 0 -> NaN);
@@ -2209,6 +2274,12 @@ int load_from_gguf(const std::string & gguf_path,
                    bool                verbose) {
     return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
                                verbose, /*measure=*/nullptr);
+}
+
+int load_from_gguf(const std::string & gguf_path, ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose, const std::string & backend) {
+    return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
+                               verbose, /*measure=*/nullptr, backend);
 }
 
 int load_from_gguf_metadata_only(const std::string & gguf_path,

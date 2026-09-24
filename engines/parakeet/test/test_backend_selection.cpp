@@ -87,10 +87,40 @@ void test_gpu_tier_policy() {
     CHECK(gpu_tier_for("",      GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::OtherIntegrated);
 }
 
+void test_explicit_selection() {
+    using parakeet::backend_selection_is_auto;
+    using parakeet::backend_selection_matches;
+    CHECK(backend_selection_is_auto("auto"));
+    CHECK(backend_selection_is_auto(""));
+    CHECK(!backend_selection_is_auto("hexagon"));
+    // Both devices advertise GPU. An explicit NPU request must still select
+    // HTP0 when OpenCL is registered first, regardless of normal GPU tiering.
+    CHECK(!backend_selection_matches("hexagon", "OpenCL", "OpenCL", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_selection_matches("hexagon", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("hexagon", "HTP", "HTP1", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_selection_matches("HTP1", "HTP", "HTP1", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("HTP0", "HTP", "HTP1", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_selection_matches("opencl", "OpenCL", "OpenCL0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("opencl", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_selection_matches("cpu", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
+    CHECK(!backend_selection_matches("cpu", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("auto", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("typo", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("hexagon", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_GPU));
+
+    using parakeet::prepend_dsp_library_directory;
+    CHECK(prepend_dsp_library_directory("/app/lib", "") == "/app/lib");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/custom;/vendor/dsp") == "/app/lib;/custom;/vendor/dsp");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/custom;/app/lib") == "/custom;/app/lib");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/app/library") == "/app/lib;/app/library");
+    CHECK(prepend_dsp_library_directory("", "/custom") == "/custom");
+}
+
 }  // namespace
 
 int main() {
     test_gpu_tier_policy();
+    test_explicit_selection();
 
     std::fprintf(stderr, "[test-parakeet-backend-selection] %d/%d checks passed\n",
                  g_checks - g_failures, g_checks);
