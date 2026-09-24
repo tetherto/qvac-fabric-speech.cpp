@@ -304,7 +304,7 @@ public:
 
     // Human-readable name of the active backend, e.g. "CUDA0", "Metal",
     // "Vulkan0", "OpenCL", "HTP0", "CPU". Sourced from `ggml_backend_name()`
-    // when a GPU backend is active; literal "CPU" otherwise. Stable for
+    // when an accelerator backend is active; literal "CPU" otherwise. Stable for
     // the lifetime of the Engine.
     std::string backend_name() const;
 
