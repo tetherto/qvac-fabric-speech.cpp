@@ -113,20 +113,30 @@ uint32_t decode_sequence(const std::string & text, size_t pos, size_t length) {
     return code;
 }
 
+struct DecodedCharacter {
+    uint32_t code;
+    size_t consumed;
+};
+
+DecodedCharacter decode_at(const std::string & text, size_t pos) {
+    const size_t length = sequence_length((unsigned char) text[pos]);
+    if (length == 1) {
+        return {(unsigned char) text[pos], 1};
+    }
+    if (length == 0 || !continuation_bytes_valid(text, pos, length)) {
+        return {REPLACEMENT, 1};
+    }
+    const uint32_t code = decode_sequence(text, pos, length);
+    return is_well_formed(code, length) ? DecodedCharacter{code, length} : DecodedCharacter{REPLACEMENT, 1};
+}
+
 std::vector<uint32_t> decode_utf8(const std::string & text) {
     std::vector<uint32_t> codes;
     codes.reserve(text.size());
     for (size_t pos = 0; pos < text.size();) {
-        const size_t length = sequence_length((unsigned char) text[pos]);
-        const uint32_t code = length > 1 && continuation_bytes_valid(text, pos, length)
-                ? decode_sequence(text, pos, length) : (length == 1 ? (unsigned char) text[pos] : REPLACEMENT);
-        if (length <= 1 || !is_well_formed(code, length)) {
-            codes.push_back(length == 1 ? code : REPLACEMENT);
-            pos++;
-            continue;
-        }
-        codes.push_back(code);
-        pos += length;
+        const DecodedCharacter decoded = decode_at(text, pos);
+        codes.push_back(decoded.code);
+        pos += decoded.consumed;
     }
     return codes;
 }

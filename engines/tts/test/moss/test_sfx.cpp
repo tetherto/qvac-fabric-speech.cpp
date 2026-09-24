@@ -101,6 +101,11 @@ void test_prompt_text() {
     check(clean_prompt("a&#+65;b") == "a&#+65;b", "signed numbers are not references");
     check(clean_prompt(std::string("bad\xff") + "byte") == "bad\ufffdbyte", "invalid UTF-8 becomes the replacement character");
     check(clean_prompt("\xc0\x80z") == "\ufffd\ufffdz", "overlong sequences are replaced byte by byte");
+    check(clean_prompt("caf\xe9 au lait") == "caf\ufffd au lait", "a Latin-1 byte keeps the text after it");
+    check(clean_prompt("\xc3z dog") == "\ufffdz dog", "a truncated two-byte sequence keeps the next character");
+    check(clean_prompt("\xe2\x82z") == "\ufffd\ufffdz", "a truncated three-byte sequence keeps the next character");
+    check(clean_prompt("\xc3\xe4\xb8\xad") == "\ufffd\u4e2d", "a truncated lead keeps the valid character after it");
+    check(clean_prompt("end\xe4\xb8") == "end\ufffd\ufffd", "a sequence cut at the end of the text is replaced");
     check(clean_prompt("a\xed\xa0\x80" "b") == "a\ufffd\ufffd\ufffd" "b", "encoded surrogates are replaced");
     check(clean_prompt("\xf7\xbf\xbf\xbf") == "\ufffd\ufffd\ufffd\ufffd", "code points past U+10FFFF are replaced");
     check(clean_prompt("&lt;&amp;amp;amp;amp;amp;") == "<&", "unescaping that produces a tag stays on the fixed-point path");
