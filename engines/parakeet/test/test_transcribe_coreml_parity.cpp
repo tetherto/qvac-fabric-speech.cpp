@@ -39,6 +39,7 @@ void append_tokens(std::ostringstream & out, const std::vector<int32_t> & tokens
 }
 
 std::string transcribe_in_child(const std::string & gguf, const std::string & wav,
+                                const std::string & language,
                                 bool disable, bool streaming) {
     int fds[2];
     if (pipe(fds) != 0) {
@@ -53,6 +54,7 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
         parakeet::EngineOptions opts;
         opts.model_gguf_path = gguf;
         opts.n_gpu_layers    = 999;
+        opts.language        = language;
         parakeet::Engine engine(opts);
         std::vector<parakeet::StreamingSegment> segments;
         std::vector<parakeet::StreamEvent> events;
@@ -145,12 +147,14 @@ bool parse_child(const std::string & raw, bool & coreml_available,
     return true;
 }
 
-bool compare_mode(const std::string & gguf, const std::string & wav, bool streaming) {
+bool compare_mode(const std::string & gguf, const std::string & wav,
+                  const std::string & language, bool streaming) {
     const char * mode = streaming ? "streaming" : "batch";
     bool coreml_available = false;
     bool coreml_used = false;
     std::string coreml_body;
-    if (!parse_child(transcribe_in_child(gguf, wav, /*disable=*/false, streaming),
+    if (!parse_child(transcribe_in_child(
+                         gguf, wav, language, /*disable=*/false, streaming),
                      coreml_available, coreml_used, coreml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from Core ML %s child\n", mode);
         return false;
@@ -171,7 +175,8 @@ bool compare_mode(const std::string & gguf, const std::string & wav, bool stream
     bool ggml_available = true;
     bool ggml_used = true;
     std::string ggml_body;
-    if (!parse_child(transcribe_in_child(gguf, wav, /*disable=*/true, streaming),
+    if (!parse_child(transcribe_in_child(
+                         gguf, wav, language, /*disable=*/true, streaming),
                      ggml_available, ggml_used, ggml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from ggml %s child\n", mode);
         return false;
@@ -203,14 +208,15 @@ int main(int argc, char ** argv) {
     return 0;
 #else
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <gguf> <wav>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <gguf> <wav> [language]\n", argv[0]);
         return 2;
     }
     const std::string gguf = argv[1];
     const std::string wav  = argv[2];
+    const std::string language = argc >= 4 ? argv[3] : "";
 
-    if (!compare_mode(gguf, wav, /*streaming=*/false) ||
-        !compare_mode(gguf, wav, /*streaming=*/true)) {
+    if (!compare_mode(gguf, wav, language, /*streaming=*/false) ||
+        !compare_mode(gguf, wav, language, /*streaming=*/true)) {
         return 1;
     }
     return 0;
