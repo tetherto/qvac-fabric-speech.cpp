@@ -35,84 +35,118 @@ std::string user_instruction(const std::string & reference, const std::string & 
            "</user_inst>";
 }
 
-std::vector<DelayRow> rows_from_text_ids(const std::vector<int32_t> & text_ids,
-                                         const DelayConfig & config) {
-    std::vector<DelayRow> rows(text_ids.size());
-    for (size_t i = 0; i < text_ids.size(); ++i) {
-        rows[i].text = text_ids[i];
-        rows[i].audio.assign((size_t) config.n_vq, config.audio_pad_code);
+} // namespace
+
+int frames_of(const DelayConfig & config, const std::vector<int32_t> & codes) {
+    if (codes.size() % (size_t) config.n_vq != 0) {
+        fail("audio codes are not a whole number of frames");
     }
-    return rows;
+    return (int) (codes.size() / (size_t) config.n_vq);
 }
 
-void fill_reference_rows(std::vector<DelayRow> & rows, int64_t offset,
-                         const std::vector<int32_t> & delayed, const DelayConfig & config) {
-    const int64_t delayed_rows = (int64_t) delayed.size() / config.n_vq;
-    for (int64_t row = 0; row < delayed_rows; ++row) {
-        for (int channel = 0; channel < config.n_vq; ++channel) {
-            rows[(size_t) (offset + row)].audio[(size_t) channel] =
-                    delayed[(size_t) row * config.n_vq + channel];
+std::string reference_field_for(size_t speakers) {
+    if (speakers == 0) {
+        return "None";
+    }
+    std::string field;
+    for (size_t s = 0; s < speakers; ++s) {
+        if (s > 0) {
+            field += "\n";
+        }
+        field += "[S" + std::to_string(s + 1) + "]:\n" + AUDIO_PLACEHOLDER;
+    }
+    return field;
+}
+
+struct RowBuilder {
+    const DelayConfig & config;
+    const TextEncoder & encode;
+    std::vector<DelayRow> rows;
+
+    void append_text(const std::vector<int32_t> & ids) {
+        for (int32_t id : ids) {
+            DelayRow row;
+            row.text = id;
+            row.audio.assign((size_t) config.n_vq, config.audio_pad_code);
+            rows.push_back(row);
         }
     }
-}
 
-} // namespace
+    void append_encoded(const std::string & span) {
+        append_text(encode(span));
+    }
+
+    void append_delayed(int32_t slot_token, const std::vector<int32_t> & delayed, int64_t count) {
+        for (int64_t r = 0; r < count; ++r) {
+            DelayRow row;
+            row.text = slot_token;
+            row.audio.assign((size_t) config.n_vq, config.audio_pad_code);
+            for (int channel = 0; channel < config.n_vq; ++channel) {
+                row.audio[(size_t) channel] = delayed[(size_t) r * config.n_vq + channel];
+            }
+            rows.push_back(row);
+        }
+    }
+
+    void append_user_audio_block(const std::vector<int32_t> & codes) {
+        const int frames = frames_of(config, codes);
+        append_text({(int32_t) config.audio_start_token_id});
+        const std::vector<int32_t> delayed = apply_delay_pattern(codes, frames,
+                config.n_vq, config.audio_pad_code);
+        append_delayed((int32_t) config.audio_user_slot_token_id, delayed,
+                (int64_t) frames + config.n_vq - 1);
+        append_text({(int32_t) config.audio_end_token_id});
+    }
+
+    void append_continuation_block(const std::vector<int32_t> & codes) {
+        const int frames = frames_of(config, codes);
+        append_text({(int32_t) config.audio_start_token_id});
+        const std::vector<int32_t> delayed = apply_delay_pattern(codes, frames,
+                config.n_vq, config.audio_pad_code);
+        append_delayed((int32_t) config.audio_assistant_gen_slot_token_id, delayed, frames);
+    }
+
+    void append_user_content(const std::string & content,
+                             const std::vector<std::vector<int32_t>> & speaker_codes) {
+        size_t cursor = 0;
+        for (const std::vector<int32_t> & codes : speaker_codes) {
+            const size_t split = content.find(AUDIO_PLACEHOLDER, cursor);
+            if (split == std::string::npos) {
+                fail("reference placeholders do not match the speaker count");
+            }
+            append_encoded(content.substr(cursor, split - cursor));
+            append_user_audio_block(codes);
+            cursor = split + std::string(AUDIO_PLACEHOLDER).size();
+        }
+        append_encoded(content.substr(cursor));
+    }
+};
 
 std::vector<DelayRow> build_prompt_rows(const DelayConfig & config, const PromptTokens & tokens,
                                         const TextEncoder & encode, const std::string & text,
                                         const std::string & language, int duration_tokens,
-                                        const std::vector<int32_t> & reference_codes,
-                                        int reference_frames) {
-    const bool has_reference = reference_frames > 0;
-    if (has_reference &&
-        reference_codes.size() != (size_t) reference_frames * (size_t) config.n_vq) {
-        fail("reference codes do not match the reported frame count");
-    }
-
-    const std::string reference_field = has_reference ? "[S1]:\n" + std::string(AUDIO_PLACEHOLDER)
-                                                      : "None";
+                                        const PromptAudio & audio) {
+    const std::string reference_field = reference_field_for(audio.speaker_codes.size());
     const std::string content = user_instruction(reference_field, language, text, duration_tokens);
 
-    std::vector<int32_t> text_ids;
-    std::vector<int32_t> delayed_reference;
-    int64_t audio_row_offset = -1;
+    RowBuilder builder{config, encode, {}};
+    builder.append_text({tokens.im_start});
+    builder.append_encoded("user\n");
+    builder.append_user_content(content, audio.speaker_codes);
+    builder.append_text({tokens.im_end});
+    builder.append_encoded("\n");
+    builder.append_text({tokens.im_start});
+    builder.append_encoded("assistant\n");
 
-    auto append = [&](const std::vector<int32_t> & ids) {
-        text_ids.insert(text_ids.end(), ids.begin(), ids.end());
-    };
-
-    append({tokens.im_start});
-    append(encode("user\n"));
-    const size_t split = content.find(AUDIO_PLACEHOLDER);
-    if (has_reference && split != std::string::npos) {
-        append(encode(content.substr(0, split)));
-        append({(int32_t) config.audio_start_token_id});
-        audio_row_offset = (int64_t) text_ids.size();
-        delayed_reference = apply_delay_pattern(reference_codes, reference_frames,
-                config.n_vq, config.audio_pad_code);
-        const int64_t slots = (int64_t) reference_frames + config.n_vq - 1;
-        text_ids.insert(text_ids.end(), (size_t) slots,
-                (int32_t) config.audio_user_slot_token_id);
-        append({(int32_t) config.audio_end_token_id});
-        append(encode(content.substr(split + std::string(AUDIO_PLACEHOLDER).size())));
+    if (audio.continuation_codes.empty()) {
+        DelayRow seed;
+        seed.text = config.audio_start_token_id;
+        seed.audio.assign((size_t) config.n_vq, config.audio_pad_code);
+        builder.rows.push_back(seed);
     } else {
-        append(encode(content));
+        builder.append_continuation_block(audio.continuation_codes);
     }
-    append({tokens.im_end});
-    append(encode("\n"));
-    append({tokens.im_start});
-    append(encode("assistant\n"));
-
-    std::vector<DelayRow> rows = rows_from_text_ids(text_ids, config);
-    if (audio_row_offset >= 0) {
-        fill_reference_rows(rows, audio_row_offset, delayed_reference, config);
-    }
-
-    DelayRow seed;
-    seed.text = config.audio_start_token_id;
-    seed.audio.assign((size_t) config.n_vq, config.audio_pad_code);
-    rows.push_back(seed);
-    return rows;
+    return builder.rows;
 }
 
 struct Frontend::Impl {
@@ -175,11 +209,10 @@ std::vector<int32_t> Frontend::encode(const std::string & text) const {
 
 std::vector<DelayRow> Frontend::build_prompt(const DelayConfig & config, const std::string & text,
                                              const std::string & language, int duration_tokens,
-                                             const std::vector<int32_t> & reference_codes,
-                                             int reference_frames) const {
+                                             const PromptAudio & audio) const {
     return build_prompt_rows(config, impl_->tokens,
             [this](const std::string & span) { return impl_->encode(span); },
-            text, language, duration_tokens, reference_codes, reference_frames);
+            text, language, duration_tokens, audio);
 }
 
 } // namespace tts_cpp::moss::detail

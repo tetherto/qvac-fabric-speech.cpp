@@ -87,6 +87,23 @@ class SafeTensorsIndex:
         return np.asarray(np.memmap(loc.shard, mode="r", dtype=dtype, offset=offset, shape=loc.shape))
 
 
+def count_audio_channels(index: "SafeTensorsIndex") -> int:
+    channels = set()
+    for name in index:
+        if (match := re.fullmatch(r"emb_ext\.(\d+)\.weight", name)) is not None:
+            channels.add(int(match.group(1)))
+    return len(channels)
+
+
+def reconcile_n_vq(hparams: dict[str, Any], index: "SafeTensorsIndex") -> None:
+    tensor_n_vq = count_audio_channels(index)
+    config_n_vq = int(hparams.get("n_vq", 0))
+    if tensor_n_vq > 0 and tensor_n_vq != config_n_vq:
+        print(f"note: config declares n_vq={config_n_vq} but the checkpoint carries "
+              f"{tensor_n_vq} audio channels; using {tensor_n_vq}")
+        hparams["n_vq"] = tensor_n_vq
+
+
 def load_hparams(model_dir: Path) -> dict[str, Any]:
     config = json.loads((model_dir / "config.json").read_text())
     language = config.get("language_config")
@@ -189,6 +206,7 @@ def main() -> None:
     outfile = args.outfile or model_dir / f"{model_dir.name}-{args.outtype}.gguf"
     hparams = load_hparams(model_dir)
     index = SafeTensorsIndex(model_dir)
+    reconcile_n_vq(hparams, index)
 
     writer = gguf.GGUFWriter(path=outfile, arch=ARCH)
     try:

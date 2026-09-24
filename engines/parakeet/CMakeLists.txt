@@ -587,6 +587,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_indic_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.q8_0.gguf")
     set(_qvp_indic_q4_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.q4_0.gguf")
     set(_qvp_indic_f16_gguf "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual.f16.gguf")
+    set(_qvp_indic_coreml "${PARAKEET_TEST_MODEL_DIR}/indic-conformer-600m-multilingual-encoder.mlmodelc")
     set(_qvp_jfk_wav       "${PARAKEET_TEST_AUDIO_DIR}/jfk.wav")
     set(_qvp_diar_wav      "${PARAKEET_TEST_AUDIO_DIR}/diarization-sample-16k.wav")
     set(_qvp_fr_multipiece_wav "${PARAKEET_TEST_AUDIO_DIR}/fr-multipiece-16k.wav")
@@ -1190,6 +1191,11 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-encoder-coreml-parity
         ARGS     --model "${_qvp_nemotron_f16_gguf}" --wav "${_qvp_jfk_wav}" --min-cos 0.995
         REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
+    parakeet_register_test(test-encoder-coreml-parity-indic
+        LABEL    "fixture;coreml"
+        EXE      test-encoder-coreml-parity
+        ARGS     --model "${_qvp_indic_f16_gguf}" --wav "${_qvp_hi_wav}" --min-cos 0.995
+        REQUIRES "${_qvp_indic_f16_gguf}" "${_qvp_hi_wav}" "${_qvp_indic_coreml}")
     add_executable(test-encoder-coreml-bypass-parity
         test/test_encoder_coreml_bypass_parity.cpp
         src/parakeet_ctc.cpp
@@ -1291,6 +1297,11 @@ if (PARAKEET_BUILD_TESTS)
             EXE      test-transcribe-coreml-parity
             ARGS     "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_eou_coreml}")
+        parakeet_register_test(test-transcribe-coreml-parity-indic
+            LABEL    "fixture;coreml"
+            EXE      test-transcribe-coreml-parity
+            ARGS     "${_qvp_indic_f16_gguf}" "${_qvp_hi_wav}" "hi"
+            REQUIRES "${_qvp_indic_f16_gguf}" "${_qvp_hi_wav}" "${_qvp_indic_coreml}")
 
         add_executable(test-diarize-coreml-short-parity
             test/test_diarize_coreml_short_parity.cpp)
@@ -1357,6 +1368,20 @@ if (PARAKEET_BUILD_TESTS)
             NOT EXISTS "${_qvp_jfk_wav}" OR
             NOT EXISTS "${_qvp_nemotron_coreml}")
             set_property(TEST test-cli-coreml-bench-nemotron PROPERTY DISABLED TRUE)
+        endif()
+        add_test(
+            NAME test-cli-coreml-bench-indic
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_indic_f16_gguf}"
+                    "--wav" "${_qvp_hi_wav}"
+                    "--language" "hi")
+        set_property(TEST test-cli-coreml-bench-indic PROPERTY LABELS "fixture;coreml")
+        if (NOT EXISTS "${_qvp_indic_f16_gguf}" OR
+            NOT EXISTS "${_qvp_hi_wav}" OR
+            NOT EXISTS "${_qvp_indic_coreml}")
+            set_property(TEST test-cli-coreml-bench-indic PROPERTY DISABLED TRUE)
         endif()
     endif()
 

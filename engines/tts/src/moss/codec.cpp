@@ -23,6 +23,8 @@ constexpr float L2_NORM_EPS    = 3.4526698e-4f;
 constexpr float ROPE_FREQ_SCALE_NEUTRAL = 1.0f;
 constexpr int   GRAPH_NODES    = 16384;
 constexpr int   DEFAULT_SAMPLE_RATE = 24000;
+constexpr int   MIN_SAMPLE_RATE     = 8000;
+constexpr int   MAX_SAMPLE_RATE     = 192000;
 constexpr int   MAX_CLIP_SECONDS    = 60;
 constexpr int     MAX_PATCH_SIZE  = 8192;
 constexpr int64_t MAX_DOWNSAMPLE  = 1 << 20;
@@ -172,6 +174,7 @@ struct Codec::Impl {
     ggml_context * stream_ctx = nullptr;
     ggml_backend_buffer_t stream_buffer = nullptr;
     std::vector<BlockStream> streams;
+    int stream_channels = 0;
     int64_t frames_decoded = 0;
 
     ~Impl() {
@@ -519,7 +522,7 @@ struct Codec::Impl {
         } else {
             fail("unsupported architecture: " + arch);
         }
-        rate = has_key(arch + ".sampling_rate") ? (int) meta_u32(arch + ".sampling_rate") : DEFAULT_SAMPLE_RATE;
+        read_sample_rate();
         if (encoder) {
             downsample = meta_u32(arch + ".downsample_rate");
         }
@@ -536,6 +539,16 @@ struct Codec::Impl {
             fail("invalid frame geometry");
         }
         upload_weights(path);
+    }
+
+    void read_sample_rate() {
+        const uint32_t declared = has_key(arch + ".sampling_rate")
+                ? meta_u32(arch + ".sampling_rate") : (uint32_t) DEFAULT_SAMPLE_RATE;
+        if (declared < (uint32_t) MIN_SAMPLE_RATE || declared > (uint32_t) MAX_SAMPLE_RATE) {
+            fail("sampling rate must be " + std::to_string(MIN_SAMPLE_RATE) + ".." +
+                 std::to_string(MAX_SAMPLE_RATE) + " Hz");
+        }
+        rate = (int) declared;
     }
 
     int64_t decoder_upsample_factor() const {
@@ -801,13 +814,20 @@ struct Codec::Impl {
         return "quantizer.quantizers." + std::to_string(index) + "." + suffix;
     }
 
-    ggml_tensor * decoder_quantizer(const std::vector<int32_t> & codes, int64_t frames) {
+    std::vector<int32_t> channel_codes(const std::vector<int32_t> & codes, int64_t frames,
+                                       int n_channels, int channel) const {
+        std::vector<int32_t> picked(frames);
+        for (int64_t i = 0; i < frames; ++i) {
+            picked[i] = codes[i * n_channels + channel];
+        }
+        return picked;
+    }
+
+    ggml_tensor * decoder_quantizer(const std::vector<int32_t> & codes, int64_t frames,
+                                    int n_channels) {
         ggml_tensor * cur = nullptr;
-        for (int iq = 0; iq < quantizer.num_quantizers; ++iq) {
-            std::vector<int32_t> channel(frames);
-            for (int64_t i = 0; i < frames; ++i) {
-                channel[i] = codes[i * quantizer.num_quantizers + iq];
-            }
+        for (int iq = 0; iq < n_channels; ++iq) {
+            std::vector<int32_t> channel = channel_codes(codes, frames, n_channels, iq);
             ggml_tensor * indices = input_i32(std::move(channel));
             ggml_tensor * codebook = as_f32(require_tensor(quantizer_tensor_name(iq, "codebook.weight")));
             ggml_tensor * embedded = ggml_get_rows(graph_ctx, codebook, indices);
@@ -868,8 +888,9 @@ struct Codec::Impl {
         return encoder_quantizer(cur);
     }
 
-    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames, bool streaming) {
-        ggml_tensor * cur = decoder_quantizer(codes, frames);
+    ggml_tensor * build_decode(const std::vector<int32_t> & codes, int64_t frames, int n_channels,
+                               bool streaming) {
+        ggml_tensor * cur = decoder_quantizer(codes, frames, n_channels);
         int channels = quantizer.output_dim;
         for (size_t im = 0; im < modules.size(); ++im) {
             const Module & module = modules[im];
@@ -974,22 +995,30 @@ struct Codec::Impl {
         }
     }
 
-    std::vector<float> run_decode(const std::vector<int32_t> & codes, bool streaming) {
+    std::vector<float> run_decode(const std::vector<int32_t> & codes, int n_channels, bool streaming) {
         begin_graph();
-        const int64_t frames = (int64_t) codes.size() / quantizer.num_quantizers;
-        ggml_tensor * output = build_decode(codes, frames, streaming);
+        const int64_t frames = (int64_t) codes.size() / n_channels;
+        ggml_tensor * output = build_decode(codes, frames, n_channels, streaming);
         ggml_cgraph * graph = finish_graph(output);
         compute(graph);
         frames_decoded += frames;
         return read_f32(output);
     }
 
-    void validate_codes(const std::vector<int32_t> & codes) const {
+    int resolve_channels(int requested) const {
+        const int n_channels = requested > 0 ? requested : quantizer.num_quantizers;
+        if (n_channels > quantizer.num_quantizers) {
+            fail("decode channel count exceeds the quantizer count");
+        }
+        return n_channels;
+    }
+
+    void validate_codes(const std::vector<int32_t> & codes, int n_channels) const {
         if (encoder) {
             fail("decode called on an encoder checkpoint");
         }
-        if (codes.empty() || codes.size() % (size_t) quantizer.num_quantizers != 0) {
-            fail("decode expects row-major [frames, num_quantizers] codes");
+        if (codes.empty() || codes.size() % (size_t) n_channels != 0) {
+            fail("decode expects row-major [frames, channels] codes");
         }
         for (int32_t code : codes) {
             if (code < 0 || code >= quantizer.codebook_size) {
@@ -1035,24 +1064,26 @@ std::vector<int32_t> Codec::encode(const std::vector<float> & pcm) {
     return codes;
 }
 
-std::vector<float> Codec::decode(const std::vector<int32_t> & codes) {
-    impl_->validate_codes(codes);
-    return impl_->run_decode(codes, false);
+std::vector<float> Codec::decode(const std::vector<int32_t> & codes, int n_channels) {
+    const int channels = impl_->resolve_channels(n_channels);
+    impl_->validate_codes(codes, channels);
+    return impl_->run_decode(codes, channels, false);
 }
 
-void Codec::begin_decode_stream() {
+void Codec::begin_decode_stream(int n_channels) {
     if (impl_->encoder) {
         fail("decode streams need a decoder checkpoint");
     }
+    impl_->stream_channels = impl_->resolve_channels(n_channels);
     impl_->reset_streams();
 }
 
 std::vector<float> Codec::decode_stream(const std::vector<int32_t> & codes) {
-    impl_->validate_codes(codes);
     if (impl_->stream_ctx == nullptr) {
         fail("decode_stream called before begin_decode_stream");
     }
-    return impl_->run_decode(codes, true);
+    impl_->validate_codes(codes, impl_->stream_channels);
+    return impl_->run_decode(codes, impl_->stream_channels, true);
 }
 
 int64_t Codec::frames_decoded() const {
@@ -1060,23 +1091,34 @@ int64_t Codec::frames_decoded() const {
 }
 
 std::vector<float> decode_segments(Codec & codec, const std::vector<std::vector<int32_t>> & segments,
-                                   int64_t max_single_frames) {
+                                   int64_t max_single_frames, int n_channels) {
     std::vector<float> pcm;
-    const size_t stride = (size_t) codec.num_quantizers();
+    const size_t stride = (size_t) (n_channels > 0 ? n_channels : codec.num_quantizers());
     for (const std::vector<int32_t> & segment : segments) {
         const std::vector<float> rendered = segment.size() / stride <= (size_t) max_single_frames
-                ? codec.decode(segment)
-                : decode_in_windows(codec, segment, max_single_frames);
+                ? codec.decode(segment, n_channels)
+                : decode_in_windows(codec, segment, max_single_frames, n_channels);
         pcm.insert(pcm.end(), rendered.begin(), rendered.end());
     }
     return pcm;
 }
 
+std::vector<float> decode_after_context(Codec & codec, const std::vector<std::vector<int32_t>> & segments,
+                                        int64_t context_frames, int64_t max_single_frames,
+                                        int n_channels) {
+    std::vector<float> pcm = decode_segments(codec, segments, max_single_frames, n_channels);
+    const size_t context = std::min(pcm.size(),
+            (size_t) context_frames * (size_t) codec.samples_per_frame());
+    pcm.erase(pcm.begin(), pcm.begin() + (std::ptrdiff_t) context);
+    return pcm;
+}
+
 std::vector<float> decode_in_windows(Codec & codec, const std::vector<int32_t> & codes,
-                                     int64_t window_frames) {
-    const size_t stride = (size_t) codec.num_quantizers() * (size_t) window_frames;
+                                     int64_t window_frames, int n_channels) {
+    const size_t channels = (size_t) (n_channels > 0 ? n_channels : codec.num_quantizers());
+    const size_t stride = channels * (size_t) window_frames;
     std::vector<float> pcm;
-    codec.begin_decode_stream();
+    codec.begin_decode_stream(n_channels);
     for (size_t begin = 0; begin < codes.size(); begin += stride) {
         const size_t end = std::min(codes.size(), begin + stride);
         const std::vector<float> rendered = codec.decode_stream(

@@ -11,6 +11,7 @@
 #include <vector>
 
 using tts_cpp::moss::detail::Codec;
+using tts_cpp::moss::detail::decode_after_context;
 using tts_cpp::moss::detail::decode_in_windows;
 using tts_cpp::moss::detail::decode_segments;
 using namespace moss_fixtures;
@@ -131,6 +132,23 @@ void test_stream_work_is_linear(Codec & codec) {
             "every frame is decoded exactly once while streaming");
 }
 
+void test_context_is_decoded_then_trimmed(Codec & codec) {
+    const std::vector<int32_t> context = random_codes(SHORT_FRAMES, CODE_SEED + 7);
+    const std::vector<int32_t> generated = random_codes(SHORT_FRAMES, CODE_SEED + 8);
+    std::vector<int32_t> joined = context;
+    joined.insert(joined.end(), generated.begin(), generated.end());
+    std::vector<float> expected = codec.decode(joined);
+    expected.erase(expected.begin(),
+            expected.begin() + (std::ptrdiff_t) SHORT_FRAMES * codec.samples_per_frame());
+
+    check(max_abs_diff(decode_after_context(codec, {joined}, SHORT_FRAMES, LONG_FRAMES), expected) < TOLERANCE,
+            "the generated suffix keeps the reference as causal history");
+    check(max_abs_diff(decode_after_context(codec, {joined}, SHORT_FRAMES, WINDOW_FRAMES), expected) < TOLERANCE,
+            "windowed decoding keeps the same history");
+    check(max_abs_diff(codec.decode(generated), expected) > TOLERANCE,
+            "decoding the suffix alone would lose the reference history");
+}
+
 void test_stream_requires_begin() {
     std::mt19937 rng(WEIGHT_SEED);
     const auto path = write_decoder("codec-stream-unstarted", N_VQ, 3 * D_MODEL,
@@ -159,6 +177,7 @@ int main() {
         test_segments_decode_independently(codec);
         test_restarted_stream_forgets_history(codec);
         test_stream_work_is_linear(codec);
+        test_context_is_decoded_then_trimmed(codec);
         test_stream_requires_begin();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "%s\n", e.what());

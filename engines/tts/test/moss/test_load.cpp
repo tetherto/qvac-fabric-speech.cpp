@@ -2,6 +2,7 @@
 
 #include "moss/codec.h"
 #include "moss/delay_lm.h"
+#include "moss/reference_wav.h"
 #include "tts-cpp/moss/engine.h"
 
 #include <cmath>
@@ -15,6 +16,9 @@ using tts_cpp::moss::detail::Codec;
 using tts_cpp::moss::detail::DelayLM;
 using tts_cpp::moss::detail::DelayLogits;
 using tts_cpp::moss::detail::DelayRow;
+using tts_cpp::moss::detail::require_reference_total;
+using tts_cpp::moss::detail::validate_reference_shape;
+using tts_cpp::moss::detail::WavShape;
 using namespace moss_fixtures;
 
 namespace {
@@ -69,12 +73,15 @@ void test_valid_decoder() {
     check(!codec.is_encoder(), "decoder role");
     check(codec.num_quantizers() == N_VQ, "decoder quantizer count");
     check(codec.samples_per_frame() == OUT_DIM, "decoder upsample from patch product");
+    const std::vector<int32_t> narrow(4, 1);
+    check(codec.decode(narrow, 1).size() == (size_t) (4 * OUT_DIM),
+            "partial-channel decode renders one sample block per frame");
     std::filesystem::remove(path);
 }
 
 void test_engine_rejects_quantizer_mismatch() {
     const auto backbone = write_backbone("engine-backbone", [](gguf_context *) {});
-    const auto decoder = write_decoder("engine-decoder", N_VQ + 1, 3 * D_MODEL,
+    const auto decoder = write_decoder("engine-decoder", N_VQ - 1, 3 * D_MODEL,
             [](gguf_context *) {});
     tts_cpp::moss::EngineOptions options;
     options.backbone_path = backbone.string();
@@ -85,7 +92,7 @@ void test_engine_rejects_quantizer_mismatch() {
         tts_cpp::moss::Engine engine(options);
         check(false, "engine accepted a decoder with mismatched quantizers");
     } catch (const std::runtime_error & e) {
-        check(std::string(e.what()).find("decoder quantizers do not match") != std::string::npos,
+        check(std::string(e.what()).find("fewer quantizers") != std::string::npos,
                 std::string("engine mismatch: wrong failure: ") + e.what());
     }
     std::filesystem::remove(backbone);
@@ -185,6 +192,52 @@ void test_feed_forward_beyond_half_precision() {
     std::filesystem::remove(path);
 }
 
+constexpr uint32_t INFLATED_FRAMES = 1000000000u;
+
+constexpr uint32_t MOSS_RATE = 24000;
+constexpr uint32_t PERMISSIVE_RATE = 250000;
+constexpr uint64_t SIXTY_SECONDS_AT_MAX_RATE = 60ull * 192000ull;
+
+bool shape_rejected(const WavShape & shape, int expected_rate, const std::string & expected) {
+    try {
+        validate_reference_shape(shape, expected_rate);
+        return false;
+    } catch (const std::runtime_error & e) {
+        return std::string(e.what()).find(expected) != std::string::npos;
+    }
+}
+
+void test_reference_shape_limits() {
+    check(shape_rejected({INFLATED_FRAMES, MOSS_RATE, 1}, MOSS_RATE, "seconds of audio"),
+            "a header declaring a billion frames is rejected before allocation");
+    check(shape_rejected({SIXTY_SECONDS_AT_MAX_RATE + 1, PERMISSIVE_RATE, 1}, PERMISSIVE_RATE,
+            "more samples than the engine decodes"),
+            "the decoded-sample cap holds even where the declared rate allows more");
+    check(shape_rejected({MOSS_RATE, MOSS_RATE, 0}, MOSS_RATE, "channel count"),
+            "a zero-channel header is rejected");
+    validate_reference_shape({MOSS_RATE, MOSS_RATE, 2}, MOSS_RATE);
+    try {
+        require_reference_total((size_t) MOSS_RATE * 61, (int) MOSS_RATE);
+        check(false, "dialogue references past sixty seconds are rejected");
+    } catch (const std::runtime_error & e) {
+        check(std::string(e.what()).find("total at most") != std::string::npos,
+                std::string("dialogue total: wrong failure: ") + e.what());
+    }
+}
+
+void expect_shaped_backbone_failure(const char * name, const TensorShapes & shapes,
+                                    const std::string & expected) {
+    const auto path = write_backbone(name, [](gguf_context *) {}, {}, shapes);
+    try {
+        DelayLM model(path.string(), false, 1, 64);
+        check(false, std::string(name) + ": accepted invalid GGUF");
+    } catch (const std::runtime_error & e) {
+        check(std::string(e.what()).find(expected) != std::string::npos,
+                std::string(name) + ": wrong failure: " + e.what());
+    }
+    std::filesystem::remove(path);
+}
+
 void test_engine_accepts_matching_pair() {
     const auto backbone = write_backbone("engine-backbone-ok", [](gguf_context *) {});
     const auto decoder = write_decoder("engine-decoder-ok", N_VQ, 3 * D_MODEL,
@@ -211,6 +264,22 @@ int main() {
         test_engine_rejects_quantizer_mismatch();
         test_duration_budget();
         test_feed_forward_beyond_half_precision();
+        test_reference_shape_limits();
+
+        expect_shaped_backbone_failure("text vocabulary mismatch",
+                {{"token_embd.weight", {N_EMBD, TEXT_VOCAB + SPECIALS}}},
+                "disagree on the text vocabulary");
+        expect_shaped_backbone_failure("audio vocabulary mismatch",
+                {{"token_embd_audio.1.weight", {N_EMBD, AUDIO_HEAD + 1}}},
+                "disagrees on the audio vocabulary");
+        expect_shaped_backbone_failure("down projection shape",
+                {{"blk.0.ffn_down.weight", {N_FF, N_EMBD + 1}}}, "unexpected dimensions");
+        expect_backbone_failure("kv heads do not divide heads", [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-delay.attention.head_count_kv", 3);
+        }, "invalid model geometry");
+        expect_decoder_failure("inflated sampling rate", 3 * D_MODEL, [](gguf_context * f) {
+            gguf_set_val_u32(f, "moss-tts-audio-decoder.sampling_rate", INFLATED_FRAMES);
+        }, "sampling rate must be");
 
         expect_backbone_failure("oversized block count", [](gguf_context * f) {
             gguf_set_val_u32(f, "moss-tts-delay.block_count", OVERSIZED);

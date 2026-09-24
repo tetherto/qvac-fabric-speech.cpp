@@ -104,10 +104,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 ## Core ML encoder sidecar
 
-`PARAKEET_COREML=ON` is Apple-only. It enables optional Unified RNN-T, TDT,
-EOU, Nemotron, and tagged Sortformer v2.1 FastConformer encoder sidecars. Mel
-preprocessing, the RNN-T/TDT/EOU/Nemotron decoders, and the Sortformer
-transformer/speaker head remain in the normal ggml pipeline.
+`PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
+Unified RNN-T, TDT, EOU, Nemotron, and tagged Sortformer v2.1 FastConformer
+encoder sidecars. Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders,
+and the Sortformer transformer/speaker head remain in the normal ggml pipeline.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
 is not currently compatible with its TorchScript scalar conversion, and the
@@ -143,6 +143,18 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --n-mel-frames 1501 \
   --palettize-bits 6 --palettize-group-size 16 \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+IndicConformer uses the same fixed-capacity contract. Core ML runs the encoder;
+the multilingual CTC projection and `--language` token mask remain on ggml:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/indic-conformer-600m-multilingual.f16.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/indic-conformer-600m-multilingual-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
 
@@ -271,7 +283,7 @@ force ggml, including for parity or benchmarking. Setting
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
 
-For an unambiguous Unified RNN-T, TDT, EOU, or Sortformer benchmark, configure
+For an unambiguous CTC/IndicConformer, Unified RNN-T, TDT, EOU, or Sortformer benchmark, configure
 the exact build directory with
 Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
 

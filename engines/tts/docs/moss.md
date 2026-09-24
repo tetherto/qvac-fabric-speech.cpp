@@ -84,6 +84,16 @@ build/moss-cli --backbone moss-tts-delay-f16.gguf \
     --encoder moss-codec-encoder-f16.gguf --ref-audio speaker.wav \
     --text "..." --language en --out out.wav
 
+# two-speaker dialogue (MOSS-TTSD checkpoint): one reference per speaker,
+# and the text carries the reference transcripts first, then the turns,
+# all tagged [S1]/[S2]
+build/moss-cli --backbone moss-ttsd-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --encoder moss-codec-encoder-f16.gguf \
+    --dialogue-ref s1.wav --dialogue-ref s2.wav \
+    --text "[S1] <s1 transcript> [S2] <s2 transcript> [S1] ... [S2] ..." \
+    --language en --out dialogue.wav
+
 # on the GPU: same command plus --gpu
 ```
 
@@ -115,6 +125,21 @@ a decoder whose quantizer count does not match the backbone's channel count.
 the reference WAV must already be at the codec sample rate (channels are
 averaged; there is no resampling). Each request reseeds the RNG from the
 options, so equal requests on one instance produce equal audio.
+
+Dialogue runs in the reference pipeline's continuation mode: each speaker's
+reference expands to its own `[Sn]` audio block in the user message, and the
+assistant message opens with the concatenated references' codes truncated by
+`n_vq - 1` rows, so the model continues the delay pattern seamlessly. The
+references also stay in the codec as causal history: the decoder renders them
+together with the generated audio and drops their samples, so the first
+generated frames decode exactly as the reference pipeline's
+decode-then-trim, in batch and in streaming. The codec and the delay model
+validate every tensor against the declared geometry at load, and the codec
+rejects a sampling rate outside 8-192 kHz; reference WAVs are capped at 60
+seconds and at an absolute sample count that does not depend on the model. A backbone may use fewer channels than the codec carries
+(MOSS-TTSD uses the first 16 of the tokenizer's 32 residual quantizers):
+references are truncated to the backbone's channels and the decoder sums
+only those levels.
 
 `synthesize_stream(text, callback)` emits PCM chunks while generation runs:
 a frame is complete `n_vq - 1` steps after its row, completed non-pad frames

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a Parakeet Unified RNN-T, TDT, EOU, Nemotron, or Sortformer v2.1
+"""Export a Parakeet CTC/IndicConformer, Unified RNN-T, TDT, EOU, Nemotron, or Sortformer v2.1
 FastConformer encoder
 from GGUF to a Core ML package consumed by the parakeet.cpp Engine
 (the encoder I/O contract lives in src/coreml/parakeet-encoder.h).
@@ -10,7 +10,8 @@ ref-encoder-from-gguf.py so it matches the ggml encoder numerically.
 Three input-shape modes:
   - Fixed (default): torch.jit.trace at a single mel length (from a sample wav
     or an explicit count). Unified RNN-T and TDT treat that length as a
-    capacity. EOU, Nemotron, and Sortformer batch routing require the exact
+    capacity. CTC/IndicConformer uses the same capacity contract. EOU,
+    Nemotron, and Sortformer batch routing require the exact
     exported length.
   - Sortformer AOSC (--bypass-pre-encode): trace only the Conformer block stack
     at a fixed encoder-frame capacity. The runtime pads shorter cache/FIFO/chunk
@@ -43,6 +44,14 @@ Example:
       --n-mel-frames 1501 \
       --palettize-bits 6 --palettize-group-size 16 \
       --out models/parakeet-unified-en-0.6b-encoder.mlpackage \
+      --compile-dir models
+
+  # IndicConformer multilingual CTC fixed-capacity encoder:
+  python scripts/export-encoder-coreml.py \
+      --gguf models/indic-conformer-600m-multilingual.f16.gguf \
+      --n-mel-frames 1501 \
+      --palettize-bits 6 --palettize-group-size 16 \
+      --out models/indic-conformer-600m-multilingual-encoder.mlpackage \
       --compile-dir models
 
   # EOU fixed shape (the 11-second fixture produces 1101 mel frames):
@@ -124,29 +133,31 @@ def model_type(meta):
 
 def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
     kind = model_type(meta)
-    if kind not in ("rnnt", "tdt", "eou", "nemotron", "sortformer"):
+    if kind not in ("ctc", "rnnt", "tdt", "eou", "nemotron", "sortformer"):
         raise ValueError(
-            "Core ML encoder export supports Unified RNN-T, TDT, EOU, Nemotron, and "
+            "Core ML encoder export supports CTC/IndicConformer, Unified RNN-T, "
+            "TDT, EOU, Nemotron, and "
             f"Sortformer v2.1, got {kind!r}")
     if bypass_pre_encode and kind != "sortformer":
         raise ValueError("--bypass-pre-encode is supported only for Sortformer v2.1")
-    if kind == "rnnt":
+    if kind in ("ctc", "rnnt"):
+        family = "CTC/IndicConformer" if kind == "ctc" else "Unified RNN-T"
         if bool(meta.get("parakeet.encoder.causal_downsampling", False)):
             raise ValueError(
-                "Unified RNN-T Core ML export requires non-causal downsampling")
+                f"{family} Core ML export requires non-causal downsampling")
         if str(meta.get(
                 "parakeet.encoder.conv_context_size", "default")) == "causal":
             raise ValueError(
-                "Unified RNN-T Core ML export requires non-causal convolution")
+                f"{family} Core ML export requires non-causal convolution")
         if str(meta.get(
                 "parakeet.encoder.conv_norm_type", "batch_norm")) != "batch_norm":
             raise ValueError(
-                "Unified RNN-T Core ML export requires batch-normalized convolution")
+                f"{family} Core ML export requires batch-normalized convolution")
         left = int(meta.get("parakeet.encoder.att_context_size_left", -1))
         right = int(meta.get("parakeet.encoder.att_context_size_right", -1))
         if left >= 0 or right >= 0:
             raise ValueError(
-                "Unified RNN-T Core ML export requires unbounded attention context")
+                f"{family} Core ML export requires unbounded attention context")
     if kind == "sortformer":
         variant = str(meta.get("parakeet.model_variant", ""))
         if variant != "sortformer-streaming-v2.1-aosc":

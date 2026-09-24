@@ -190,7 +190,8 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
     }
 
     LongFormPlan coreml;
-    if (model.model_type == ParakeetModelType::RNNT ||
+    if (model.model_type == ParakeetModelType::CTC ||
+        model.model_type == ParakeetModelType::RNNT ||
         model.model_type == ParakeetModelType::TDT) {
         coreml = resolve_coreml_fixed_shape_plan(
             model_coreml_fixed_mel_frames(model),

@@ -16,6 +16,8 @@ void print_usage() {
         "usage: moss-cli --backbone model.gguf --decoder decoder.gguf --text \"...\" --out out.wav\n"
         "       --stream --out -   writes raw s16le PCM chunks to stdout\n"
         "       [--encoder encoder.gguf --ref-audio ref.wav]   voice cloning\n"
+        "       [--encoder encoder.gguf --dialogue-ref s1.wav --dialogue-ref s2.wav]\n"
+        "           two-speaker dialogue: text carries [S1]/[S2] turns, references first\n"
         "       [--language zh] [--duration-tokens 0]   target length, 12.5 tokens per second\n"
         "       [--max-new-tokens 2048] [--context 4096]\n"
         "       [--stream] [--stream-chunk-frames 25]\n"
@@ -60,6 +62,7 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--decoder")       args.options.decoder_path = next();
         else if (flag == "--encoder")       args.options.encoder_path = next();
         else if (flag == "--ref-audio")     args.options.reference_audio_path = next();
+        else if (flag == "--dialogue-ref")  args.options.dialogue_reference_paths.push_back(next());
         else if (flag == "--language")      args.options.language = next();
         else if (flag == "--duration-tokens") args.options.duration_tokens = std::atoi(next());
         else if (flag == "--text")          args.text = next();

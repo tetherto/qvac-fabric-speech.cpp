@@ -371,6 +371,7 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/generation.cpp
     src/moss/frontend.cpp
     src/moss/engine.cpp
+    src/moss/reference_wav.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -1446,6 +1447,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-cli PRIVATE src)
     tts_cpp_apply_ccache(test-moss-cli)
     tts_cpp_register_test(test-moss-cli)
+
+    add_executable(test-moss-dialogue test/moss/test_dialogue.cpp)
+    target_link_libraries(test-moss-dialogue PRIVATE tts-cpp)
+    target_include_directories(test-moss-dialogue PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-dialogue)
+    tts_cpp_register_test(test-moss-dialogue)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)

@@ -47,9 +47,9 @@ public:
 
     DelayRow step(const DelayLogits & logits, const SamplingConfig & sampling, std::mt19937 & rng);
 
-    AudioSegments generated_audio(int prompt_frames) const;
-    int available_frames(int prompt_frames) const;
-    std::vector<int32_t> frame_codes(int prompt_frames, int frame) const;
+    AudioSegments generated_audio(int base_row) const;
+    int available_frames(int base_row) const;
+    std::vector<int32_t> frame_codes(int base_row, int frame) const;
 
 private:
     bool channel_is_sampled(int channel) const;

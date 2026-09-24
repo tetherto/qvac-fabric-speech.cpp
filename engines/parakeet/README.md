@@ -12,7 +12,7 @@ from GGUF metadata.
 |---|---|---:|---|---:|---:|---|---|---|
 | `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English |
 | `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English |
-| `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; requires `--language` or `EngineOptions::language` |
+| `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; optional Core ML offline encoder; requires `--language` or `EngineOptions::language` |
 | `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 x 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder with an optional Core ML sidecar; cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization |
 | `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization |
@@ -55,6 +55,25 @@ the sliding-window `left_context_ms` and `right_lookahead_ms` knobs are ignored
 for Nemotron.
 
 ## Core ML encoder sidecars
+
+IndicConformer CTC uses the fixed-capacity sidecar contract shared by the
+offline TDT and Unified encoders. The FastConformer stack runs in Core ML,
+while the multilingual CTC vocabulary projection and language mask stay on
+ggml. Short inputs are padded to the compiled capacity and long inputs use the
+overlapping encoder-window plan:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/indic-conformer-600m-multilingual.f16.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/indic-conformer-600m-multilingual-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside any quantization as
+`indic-conformer-600m-multilingual-encoder.mlmodelc`. Missing or incompatible
+sidecars and prediction failures fall back to the complete ggml path.
 
 Unified RNN-T uses the same fixed-capacity sidecar contract as TDT. Shorter
 inputs are zero-padded to the exported capacity, and oversized inputs use the
@@ -130,7 +149,7 @@ cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
 or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
 subsequent chunks go directly to ggml. See
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU/Nemotron
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for IndicConformer/Unified RNN-T/TDT/EOU/Nemotron
 details and runtime controls.
 
 ## Performance

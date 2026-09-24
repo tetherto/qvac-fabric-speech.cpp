@@ -423,22 +423,22 @@ DelayRow DelayState::step(const DelayLogits & logits, const SamplingConfig & sam
     return row;
 }
 
-int DelayState::available_frames(int prompt_frames) const {
-    const int64_t rows = (int64_t) (audio_history_.size() / (size_t) config_.n_vq) - prompt_frames;
+int DelayState::available_frames(int base_row) const {
+    const int64_t rows = (int64_t) (audio_history_.size() / (size_t) config_.n_vq) - base_row;
     return (int) std::max<int64_t>(0, rows - (config_.n_vq - 1));
 }
 
-std::vector<int32_t> DelayState::frame_codes(int prompt_frames, int frame) const {
+std::vector<int32_t> DelayState::frame_codes(int base_row, int frame) const {
     std::vector<int32_t> codes((size_t) config_.n_vq, config_.audio_pad_code);
     for (int channel = 0; channel < config_.n_vq; ++channel) {
-        const size_t row = (size_t) (prompt_frames + frame + channel);
+        const size_t row = (size_t) (base_row + frame + channel);
         codes[(size_t) channel] = audio_history_[row * (size_t) config_.n_vq + (size_t) channel];
     }
     return codes;
 }
 
-AudioSegments DelayState::generated_audio(int prompt_frames) const {
-    const size_t begin = (size_t) prompt_frames * config_.n_vq;
+AudioSegments DelayState::generated_audio(int base_row) const {
+    const size_t begin = (size_t) base_row * config_.n_vq;
     if (begin >= audio_history_.size()) {
         return {};
     }

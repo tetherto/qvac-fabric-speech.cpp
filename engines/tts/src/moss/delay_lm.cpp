@@ -198,7 +198,7 @@ struct DelayLM::Impl {
     void validate_geometry() const {
         if (!within(config.n_layers, 1, MAX_LAYERS) || !within(config.n_kv_heads, 1, MAX_HEADS) ||
             !within(config.n_vq, 1, MAX_CHANNELS) || !within(config.head_dim, 1, MAX_HEAD_DIM) ||
-            !within(config.n_ff, 1, MAX_FEED_FORWARD)) {
+            !within(config.n_ff, 1, MAX_FEED_FORWARD) || config.n_heads % config.n_kv_heads != 0) {
             fail("invalid model geometry");
         }
     }
@@ -233,6 +233,59 @@ struct DelayLM::Impl {
             layer.ffn_gate    = require_tensor(layer_name(il, "ffn_gate.weight"));
             layer.ffn_up      = require_tensor(layer_name(il, "ffn_up.weight"));
             layer.ffn_down    = require_tensor(layer_name(il, "ffn_down.weight"));
+        }
+    }
+
+    void require_shape(const ggml_tensor * tensor, int64_t ne0, int64_t ne1) const {
+        const int64_t rows = ggml_n_dims(tensor) > 1 ? tensor->ne[1] : 1;
+        if (ggml_n_dims(tensor) > 2 || tensor->ne[0] != ne0 || rows != ne1) {
+            fail(std::string(ggml_get_name(tensor)) + " has unexpected dimensions");
+        }
+    }
+
+    void validate_vocabularies() const {
+        if (tok_embd->ne[1] != output_head->ne[1]) {
+            fail("token_embd and output disagree on the text vocabulary");
+        }
+        for (int i = 0; i < config.n_vq; ++i) {
+            if (tok_embd_audio[i]->ne[1] != config.audio_vocab ||
+                output_audio[i]->ne[1] != config.audio_vocab) {
+                fail("audio channel " + std::to_string(i) + " disagrees on the audio vocabulary");
+            }
+        }
+    }
+
+    void validate_head_shapes() const {
+        require_shape(tok_embd, config.n_embd, config.text_vocab);
+        require_shape(output_norm, config.n_embd, 1);
+        require_shape(output_head, config.n_embd, config.text_vocab);
+        for (int i = 0; i < config.n_vq; ++i) {
+            require_shape(tok_embd_audio[i], config.n_embd, config.audio_vocab);
+            require_shape(output_audio[i], config.n_embd, config.audio_vocab);
+        }
+    }
+
+    void validate_layer_shapes(const Layer & layer) const {
+        const int64_t q_dim = (int64_t) config.n_heads * config.head_dim;
+        const int64_t kv_dim = (int64_t) config.n_kv_heads * config.head_dim;
+        require_shape(layer.attn_norm, config.n_embd, 1);
+        require_shape(layer.wq, config.n_embd, q_dim);
+        require_shape(layer.wk, config.n_embd, kv_dim);
+        require_shape(layer.wv, config.n_embd, kv_dim);
+        require_shape(layer.wo, q_dim, config.n_embd);
+        require_shape(layer.attn_q_norm, config.head_dim, 1);
+        require_shape(layer.attn_k_norm, config.head_dim, 1);
+        require_shape(layer.ffn_norm, config.n_embd, 1);
+        require_shape(layer.ffn_gate, config.n_embd, config.n_ff);
+        require_shape(layer.ffn_up, config.n_embd, config.n_ff);
+        require_shape(layer.ffn_down, config.n_ff, config.n_embd);
+    }
+
+    void validate_tensor_shapes() const {
+        validate_vocabularies();
+        validate_head_shapes();
+        for (const Layer & layer : layers) {
+            validate_layer_shapes(layer);
         }
     }
 
@@ -338,6 +391,7 @@ struct DelayLM::Impl {
         init_backend(use_gpu);
         duplicate_metadata_tensors();
         map_tensors();
+        validate_tensor_shapes();
         validate_token_ids();
         allocate_cache();
         upload_weights(path);
