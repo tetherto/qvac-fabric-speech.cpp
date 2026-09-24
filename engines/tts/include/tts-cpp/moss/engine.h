@@ -13,7 +13,9 @@ struct EngineOptions {
     std::string decoder_path;
     std::string encoder_path;
     std::string reference_audio_path;
+    std::vector<std::string> dialogue_reference_paths;
     std::string language = "zh";
+    int duration_tokens = 0;
     int n_threads = 4;
     int context = 4096;
     int max_new_tokens = 2048;
@@ -27,7 +29,7 @@ struct EngineOptions {
     float audio_repetition_penalty = 1.0f;
     uint32_t seed = 1234;
     int stream_chunk_frames = 25;
-    int stream_left_context_frames = 0;
+    std::string backends_dir;
 };
 
 struct SynthesisResult {

@@ -16,9 +16,12 @@ void print_usage() {
         "usage: moss-cli --backbone model.gguf --decoder decoder.gguf --text \"...\" --out out.wav\n"
         "       --stream --out -   writes raw s16le PCM chunks to stdout\n"
         "       [--encoder encoder.gguf --ref-audio ref.wav]   voice cloning\n"
-        "       [--language zh] [--max-new-tokens 2048] [--context 4096]\n"
-        "       [--stream] [--stream-chunk-frames 25] [--stream-left-context-frames 0]\n"
-        "       [--seed 1234] [--threads 4] [--gpu]\n"
+        "       [--encoder encoder.gguf --dialogue-ref s1.wav --dialogue-ref s2.wav]\n"
+        "           two-speaker dialogue: text carries [S1]/[S2] turns, references first\n"
+        "       [--language zh] [--duration-tokens 0]   target length, 12.5 tokens per second\n"
+        "       [--max-new-tokens 2048] [--context 4096]\n"
+        "       [--stream] [--stream-chunk-frames 25]\n"
+        "       [--seed 1234] [--threads 4] [--gpu] [--backends-dir dir]\n"
         "       [--text-temperature 1.5] [--text-top-p 1.0] [--text-top-k 50]\n"
         "       [--audio-temperature 1.7] [--audio-top-p 0.8] [--audio-top-k 25]\n"
         "       [--audio-repetition-penalty 1.0]\n");
@@ -59,7 +62,9 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--decoder")       args.options.decoder_path = next();
         else if (flag == "--encoder")       args.options.encoder_path = next();
         else if (flag == "--ref-audio")     args.options.reference_audio_path = next();
+        else if (flag == "--dialogue-ref")  args.options.dialogue_reference_paths.push_back(next());
         else if (flag == "--language")      args.options.language = next();
+        else if (flag == "--duration-tokens") args.options.duration_tokens = std::atoi(next());
         else if (flag == "--text")          args.text = next();
         else if (flag == "--out")           args.out_path = next();
         else if (flag == "--max-new-tokens") args.options.max_new_tokens = std::atoi(next());
@@ -69,8 +74,7 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--gpu")           args.options.use_gpu = true;
         else if (flag == "--stream")        args.stream = true;
         else if (flag == "--stream-chunk-frames")   args.options.stream_chunk_frames = std::atoi(next());
-        else if (flag == "--stream-left-context-frames")
-            args.options.stream_left_context_frames = std::atoi(next());
+        else if (flag == "--backends-dir")  args.options.backends_dir = next();
         else if (flag == "--text-temperature")  args.options.text_temperature = std::strtof(next(), nullptr);
         else if (flag == "--text-top-p")        args.options.text_top_p = std::strtof(next(), nullptr);
         else if (flag == "--text-top-k")        args.options.text_top_k = std::atoi(next());

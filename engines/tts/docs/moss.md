@@ -84,10 +84,27 @@ build/moss-cli --backbone moss-tts-delay-f16.gguf \
     --encoder moss-codec-encoder-f16.gguf --ref-audio speaker.wav \
     --text "..." --language en --out out.wav
 
+# two-speaker dialogue (MOSS-TTSD checkpoint): one reference per speaker,
+# and the text carries the reference transcripts first, then the turns,
+# all tagged [S1]/[S2]
+build/moss-cli --backbone moss-ttsd-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --encoder moss-codec-encoder-f16.gguf \
+    --dialogue-ref s1.wav --dialogue-ref s2.wav \
+    --text "[S1] <s1 transcript> [S2] <s2 transcript> [S1] ... [S2] ..." \
+    --language en --out dialogue.wav
+
 # on the GPU: same command plus --gpu
 ```
 
-`--language` defaults to `zh`, matching the reference pipeline. Sampling
+`--language` defaults to `zh`, matching the reference pipeline. The speech
+is directable: `[pause 2.0s]` markers inside the text insert silences of
+roughly the requested length, Pinyin (`ni3 hao3`) and IPA (`/həloʊ/`) notation
+inline in the text steer pronunciation, and `--duration-tokens N` asks the
+model for a target length of N codec frames (12.5 per second; 0 keeps the
+length free). A target length also needs `n_vq - 1` drain steps plus the
+`audio_end` and `im_end` rows, so the engine rejects a `duration_tokens`
+that does not fit in `max_new_tokens` together with them. Sampling
 follows the reference defaults — text temperature 1.5 / top-k 50, audio
 temperature 1.7 / top-p 0.8 / top-k 25, repetition penalty 1.0 over the
 audio channels, seed 1234 — and every knob is exposed as a flag
@@ -98,7 +115,8 @@ audio channels, seed 1234 — and every knob is exposed as a flag
 The public API is `tts_cpp::moss::Engine` in
 [`include/tts-cpp/moss/engine.h`](../include/tts-cpp/moss/engine.h):
 construct with `EngineOptions` (model paths, language, sampling, `use_gpu`,
-`context`, `max_new_tokens`), call `synthesize(text)` for a
+`backends_dir` for builds that load ggml backends at runtime, `context`,
+`max_new_tokens`), call `synthesize(text)` for a
 `SynthesisResult` (mono PCM, sample rate, frame count, generation and decode
 wall times), and `cancel()` from another thread to stop a run. One synthesis
 runs at a time per instance; overlapping calls throw, and the engine rejects
@@ -108,20 +126,32 @@ the reference WAV must already be at the codec sample rate (channels are
 averaged; there is no resampling). Each request reseeds the RNG from the
 options, so equal requests on one instance produce equal audio.
 
+Dialogue runs in the reference pipeline's continuation mode: each speaker's
+reference expands to its own `[Sn]` audio block in the user message, and the
+assistant message opens with the concatenated references' codes truncated by
+`n_vq - 1` rows, so the model continues the delay pattern seamlessly. The
+references also stay in the codec as causal history: the decoder renders them
+together with the generated audio and drops their samples, so the first
+generated frames decode exactly as the reference pipeline's
+decode-then-trim, in batch and in streaming. The codec and the delay model
+validate every tensor against the declared geometry at load, and the codec
+rejects a sampling rate outside 8-192 kHz; reference WAVs are capped at 60
+seconds and at an absolute sample count that does not depend on the model. A backbone may use fewer channels than the codec carries
+(MOSS-TTSD uses the first 16 of the tokenizer's 32 residual quantizers):
+references are truncated to the backbone's channels and the decoder sums
+only those levels.
+
 `synthesize_stream(text, callback)` emits PCM chunks while generation runs:
 a frame is complete `n_vq - 1` steps after its row, completed non-pad frames
-accumulate, and every `stream_chunk_frames` of them decode as one codec
-graph whose already-emitted samples are dropped. By default each chunk
-re-decodes the whole cumulative prefix, so the streamed audio equals the
-batch render exactly; `stream_left_context_frames > 0` bounds that prefix
-(the chatterbox knob), trading per-chunk cost and memory for boundary
-approximation — measured on real audio, a 125-frame window keeps 0.96
-correlation to the exact render. The callback runs on the calling thread and
-returning false cancels the request; `SynthesisResult::first_audio_ms`
-reports the latency to the first chunk and `pcm` stays empty. The batch path
-switches to chunked decode with a 125-frame window once a render exceeds 60
-seconds of frames, which bounds the codec's attention memory where a single
-graph would not fit; shorter renders keep the exact single-graph decode.
+accumulate, and every `stream_chunk_frames` of them decode incrementally: the
+codec keeps each transformer layer's keys and values for its attention window
+between chunks, so a chunk decodes only its new frames and the streamed audio
+equals the batch render. Codec work stays linear in the output length. The
+callback runs on the calling thread and returning false cancels the request;
+`SynthesisResult::first_audio_ms` reports the latency to the first chunk and
+`pcm` stays empty. The batch path uses the same incremental decode in
+60-second windows once a segment exceeds that length, which bounds the
+codec's graph size without changing the output.
 
 Generation mirrors the reference loop. The prompt packs the fixed
 `<user_inst>` template between `<|im_start|>`/`<|im_end|>` markers and ends
@@ -131,8 +161,14 @@ delay-patterned codes + `audio_end`. During decoding the text channel is
 masked to the control tokens valid at each step, audio channel `c` opens at
 step `c`, and when the model emits the delay slot the drain state machine
 forces delay slots while the channels close one per step and then forces
-`audio_end`. The emitted rows are de-delayed, split into segments at all-pad
-frames, concatenated, and decoded by the codec.
+`audio_end`. The emitted rows are de-delayed and split into segments at
+all-pad frames; each segment decodes from a fresh codec context, in batch and
+in streaming alike, so one segment never attends to another.
+
+On ARM CPUs ggml accumulates f16 dot products in f16, and the backbone's
+feed-forward output exceeds that range; the down projection therefore runs
+on inputs scaled by a power of two and rescales its f32 result, which keeps
+CPU synthesis finite and leaves GPU results unchanged.
 
 ### Test
 
@@ -140,7 +176,11 @@ The suites build with `TTS_CPP_BUILD_TESTS` and need no model downloads.
 `test-moss-generation` is pure CPU logic over the generation primitives.
 `test-moss-load` builds tiny GGUF fixtures in-test and covers the accept path
 plus every load-time rejection for the backbone, the codec, and the engine
-pairing. `test-moss-cancel` drives a real synthesis on the fixture models and
+pairing, including oversized architecture metadata, the duration budget, and
+an f16 feed-forward sum past the half-precision range.
+`test-moss-codec-stream` checks on random codec weights that incremental
+decoding matches a single decode, that segments decode independently, and
+that streaming decodes every frame exactly once. `test-moss-cancel` drives a real synthesis on the fixture models and
 cancels it from another thread. `test-moss-cli` covers the flag surface and
 runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
 registered when an interpreter is available, skips without numpy/gguf)
