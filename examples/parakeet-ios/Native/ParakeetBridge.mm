@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -187,19 +188,35 @@ NSString * model_path() {
 
                         const int sampleCount = static_cast<int>(buffer.frameLength);
                         const double timeOffset = static_cast<double>(totalSamples) / 16000.0;
+                        const double validBatchSeconds = static_cast<double>(sampleCount) / 16000.0;
+                        std::vector<float> paddedSamples;
+                        const float * inferenceSamples = buffer.floatChannelData[0];
+                        int inferenceSampleCount = sampleCount;
+                        if (sampleCount < static_cast<int>(batchFrames)) {
+                            // Keep the final native graph identical to every
+                            // full batch. A short tail otherwise makes ggml
+                            // reallocate its graph while the previous buffer
+                            // is resident, which can exceed the iOS limit.
+                            paddedSamples.assign(batchFrames, 0.0f);
+                            std::copy_n(inferenceSamples, sampleCount, paddedSamples.data());
+                            inferenceSamples = paddedSamples.data();
+                            inferenceSampleCount = static_cast<int>(batchFrames);
+                        }
                         const auto batch = engine->transcribe_samples_stream(
-                            buffer.floatChannelData[0],
-                            sampleCount,
+                            inferenceSamples,
+                            inferenceSampleCount,
                             16000,
                             options,
-                            [onSegment, timeOffset](const parakeet::StreamingSegment & segment) {
+                            [onSegment, timeOffset, validBatchSeconds](const parakeet::StreamingSegment & segment) {
                                 if (segment.text.empty()) return;
+                                if (segment.start_s >= validBatchSeconds) return;
                                 NSString * text = [NSString stringWithUTF8String:segment.text.c_str()];
+                                const double end = std::min(segment.end_s, validBatchSeconds);
                                 dispatch_async(dispatch_get_main_queue(), ^{
                                     onSegment(
                                         text,
                                         timeOffset + segment.start_s,
-                                        timeOffset + segment.end_s
+                                        timeOffset + end
                                     );
                                 });
                             }
