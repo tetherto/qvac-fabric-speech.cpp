@@ -26,7 +26,11 @@ enum AudioPreparation {
     static let maximumBytes: Int64 = 512 * 1024 * 1024
     static let maximumDuration: TimeInterval = 60 * 60
 
-    static func prepare(url sourceURL: URL, displayName: String? = nil) throws -> PreparedAudio {
+    static func prepare(
+        url sourceURL: URL,
+        displayName: String? = nil,
+        useSourceIfCompatible: Bool = false
+    ) throws -> PreparedAudio {
         let values = try sourceURL.resourceValues(forKeys: [.fileSizeKey])
         if Int64(values.fileSize ?? 0) > maximumBytes { throw AudioPreparationError.tooLarge }
 
@@ -40,6 +44,25 @@ enum AudioPreparation {
         let duration = Double(input.length) / input.processingFormat.sampleRate
         if duration > maximumDuration { throw AudioPreparationError.tooLong }
 
+        let isNativeWAV = sourceURL.pathExtension.lowercased() == "wav"
+            && input.fileFormat.commonFormat == .pcmFormatInt16
+            && input.fileFormat.sampleRate == 16_000
+            && input.fileFormat.channelCount == 1
+        if isNativeWAV {
+            let preparedURL: URL
+            if useSourceIfCompatible {
+                preparedURL = sourceURL
+            } else {
+                preparedURL = temporaryWAVURL()
+                try FileManager.default.copyItem(at: sourceURL, to: preparedURL)
+            }
+            return PreparedAudio(
+                url: preparedURL,
+                displayName: displayName ?? sourceURL.deletingPathExtension().lastPathComponent,
+                duration: duration
+            )
+        }
+
         guard let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: 16_000,
@@ -49,9 +72,13 @@ enum AudioPreparation {
             throw AudioPreparationError.unsupportedFormat
         }
 
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("parakeet-\(UUID().uuidString)")
-            .appendingPathExtension("wav")
+        let outputURL = temporaryWAVURL()
+        var conversionCompleted = false
+        defer {
+            if !conversionCompleted {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+        }
         let output = try AVAudioFile(
             forWriting: outputURL,
             settings: outputFormat.settings,
@@ -59,21 +86,8 @@ enum AudioPreparation {
             interleaved: true
         )
 
-        let inputCapacity: AVAudioFrameCount = 32_768
-        guard let inputBuffer = AVAudioPCMBuffer(
-            pcmFormat: input.processingFormat,
-            frameCapacity: inputCapacity
-        ) else {
-            throw AudioPreparationError.unsupportedFormat
-        }
-
-        while input.framePosition < input.length {
-            inputBuffer.frameLength = 0
-            try input.read(into: inputBuffer, frameCount: inputCapacity)
-            if inputBuffer.frameLength == 0 { break }
-
-            let ratio = outputFormat.sampleRate / input.processingFormat.sampleRate
-            let outputCapacity = AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * ratio)) + 64
+        let outputCapacity: AVAudioFrameCount = 32_768
+        while true {
             guard let outputBuffer = AVAudioPCMBuffer(
                 pcmFormat: outputFormat,
                 frameCapacity: outputCapacity
@@ -81,30 +95,63 @@ enum AudioPreparation {
                 throw AudioPreparationError.unsupportedFormat
             }
 
-            var supplied = false
             var conversionError: NSError?
-            let status = converter.convert(to: outputBuffer, error: &conversionError) { _, status in
-                if supplied {
+            var readError: Error?
+            let status = converter.convert(to: outputBuffer, error: &conversionError) { requestedFrames, status in
+                if input.framePosition >= input.length {
+                    status.pointee = .endOfStream
+                    return nil
+                }
+
+                let remaining = input.length - input.framePosition
+                let frameCount = min(requestedFrames, AVAudioFrameCount(remaining))
+                guard let inputBuffer = AVAudioPCMBuffer(
+                    pcmFormat: input.processingFormat,
+                    frameCapacity: frameCount
+                ) else {
+                    readError = AudioPreparationError.unsupportedFormat
                     status.pointee = .noDataNow
                     return nil
                 }
-                supplied = true
+                do {
+                    try input.read(into: inputBuffer, frameCount: frameCount)
+                } catch {
+                    readError = error
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                if inputBuffer.frameLength == 0 {
+                    status.pointee = .endOfStream
+                    return nil
+                }
                 status.pointee = .haveData
                 return inputBuffer
             }
 
+            if let readError { throw readError }
             if status == .error {
                 throw AudioPreparationError.conversionFailed(
                     conversionError?.localizedDescription ?? "unknown converter error"
                 )
             }
             if outputBuffer.frameLength > 0 { try output.write(from: outputBuffer) }
+            if status == .endOfStream { break }
+            if outputBuffer.frameLength == 0 && status == .haveData {
+                throw AudioPreparationError.conversionFailed("converter made no progress")
+            }
         }
 
+        conversionCompleted = true
         return PreparedAudio(
             url: outputURL,
             displayName: displayName ?? sourceURL.deletingPathExtension().lastPathComponent,
             duration: duration
         )
+    }
+
+    private static func temporaryWAVURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("parakeet-\(UUID().uuidString)")
+            .appendingPathExtension("wav")
     }
 }

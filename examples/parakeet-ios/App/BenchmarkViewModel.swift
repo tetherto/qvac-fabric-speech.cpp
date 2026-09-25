@@ -55,7 +55,7 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
             errorMessage = "Bundled sample audio is missing."
             return
         }
-        prepare(url: url, name: "Sample audio")
+        prepare(url: url, name: "Sample audio", useSourceIfCompatible: true)
     }
 
     func importAudio(_ url: URL) {
@@ -106,14 +106,18 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func prepare(url: URL, name: String) {
+    private func prepare(url: URL, name: String, useSourceIfCompatible: Bool = false) {
         guard !isRunning else { return }
         isPreparingAudio = true
         result = nil
         status = "Preparing 16 kHz mono audio…"
         Task.detached(priority: .userInitiated) {
             do {
-                let prepared = try AudioPreparation.prepare(url: url, displayName: name)
+                let prepared = try AudioPreparation.prepare(
+                    url: url,
+                    displayName: name,
+                    useSourceIfCompatible: useSourceIfCompatible
+                )
                 await MainActor.run {
                     self.audio = prepared
                     self.isPreparingAudio = false

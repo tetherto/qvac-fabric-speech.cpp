@@ -80,6 +80,12 @@ NSString * model_path() {
         options.n_gpu_layers = 999;
         options.n_threads = 0;
         options.verbose = true;
+        // The desktop default allows encoder windows that are too large for
+        // iOS memory limits (self-attention grows quadratically with length).
+        // Keep both Metal and Core ML runs bounded to roughly 14 seconds while
+        // preserving one decoder state across the complete recording.
+        options.long_form_window_frames = 180;
+        options.long_form_context_frames = 32;
         auto engine = std::make_unique<parakeet::Engine>(options);
         _modelLoadSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
