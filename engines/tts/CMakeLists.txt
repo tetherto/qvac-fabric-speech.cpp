@@ -372,6 +372,14 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/frontend.cpp
     src/moss/engine.cpp
     src/moss/reference_wav.cpp
+    src/moss/sfx_model.cpp
+    src/moss/sfx_text_encoder.cpp
+    src/moss/sfx_dit.cpp
+    src/moss/sfx_vae.cpp
+    src/moss/sfx_prompt.cpp
+    src/moss/sfx_sampler.cpp
+    src/moss/sfx_tokenizer.cpp
+    src/moss/sfx_engine.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -1453,6 +1461,19 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-dialogue PRIVATE src)
     tts_cpp_apply_ccache(test-moss-dialogue)
     tts_cpp_register_test(test-moss-dialogue)
+
+    add_executable(test-moss-sfx test/moss/test_sfx.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-sfx PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-sfx)
+    tts_cpp_register_test(test-moss-sfx)
+
+    add_executable(test-moss-sfx-parity test/moss/test_sfx_parity.cpp)
+    target_link_libraries(test-moss-sfx-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx-parity PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-sfx-parity)
+    tts_cpp_register_test(test-moss-sfx-parity LABEL "fixture")
+    set_property(TEST test-moss-sfx-parity PROPERTY SKIP_RETURN_CODE 77)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
