@@ -70,7 +70,7 @@ struct EncoderGraph {
     ggml_tensor * encoder_out_node     = nullptr;
     ggml_tensor * logits_node          = nullptr;
 
-    // QVAC-25495 diagnostic attention captures for block 0 only.
+    // Diagnostic attention captures for block 0 only.
     ggml_tensor * block_0_attn_qkv_node      = nullptr;
     ggml_tensor * block_0_attn_k_raw_node    = nullptr;
     ggml_tensor * block_0_attn_v_raw_node    = nullptr;
@@ -2812,7 +2812,7 @@ ggml_tensor * rel_pos_mha_flash_graph(ggml_context * ctx, const RelPosAttnInputs
                                       ggml_tensor * att_mask, const BlockWeights & W,
                                       int H, int HD, int T, bool per_head_mask);
 
-// QVAC-25495 diagnostic capture handles. Populated in the unfused path when
+// Diagnostic capture handles. Populated in the unfused path when
 // non-null; ignored on flash-attn (single FLASH_ATTN_EXT node, nothing to
 // snapshot). Only block 0 in the encoder passes a non-null pointer.
 struct AttnCapture {
@@ -3703,7 +3703,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             ggml_tensor * xn = layer_norm_affine(gctx, x, W.norm_attn_w, W.norm_attn_b, eps);
             AttnCapture blk0_cap;
             y = rel_pos_mha_graph(gctx, xn, g.pe_in, layer_pos_proj(0), g.att_mask, W, H, HD, T, model.impl->attn, &blk0_cap);
-            // QVAC-25495 diagnostic: expose block 0 attention intermediates
+            // Diagnostic: expose block 0 attention intermediates
             // so a parity test can localize where HTP0 diverges from CPU.
             // Guarded by set_name/set_output so the scheduler keeps the
             // tensors materialised on the primary backend for host copy.

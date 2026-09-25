@@ -1,7 +1,7 @@
 // Encoder backend parity: locate the first encoder stage/layer where the
 // Hexagon (HTP0) backend diverges from the CPU reference.
 //
-// QVAC-25495 diagnostic. Per-op test-backend-ops passes 152/152 on HTP0 but
+// Backend parity diagnostic. Per-op test-backend-ops passes 152/152 on HTP0 but
 // end-to-end Parakeet inference produces garbage. This harness loads the same
 // GGUF twice (backend A = "cpu" by default, backend B = "hexagon" by default),
 // runs the same mel through run_encoder() on both, and prints per-stage

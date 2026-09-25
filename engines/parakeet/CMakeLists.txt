@@ -463,7 +463,7 @@ if (PARAKEET_BUILD_EXECUTABLES)
     target_link_libraries(parakeet-fit-params PRIVATE qvac-parakeet)
     parakeet_apply_ccache(parakeet-fit-params)
 
-    # QVAC-25495 diagnostic. Loads the same GGUF twice on two backends
+    # Backend parity diagnostic. Loads the same GGUF twice on two backends
     # (default cpu vs hexagon) and prints per-stage encoder cosine to
     # localize the first divergent Conformer stage on HTP0. Kept in the
     # executables block (not PARAKEET_BUILD_TESTS) so the Android

@@ -643,7 +643,7 @@ struct EncoderOutputs {
     std::vector<float> encoder_out;
     std::vector<float> logits;
 
-    // QVAC-25495 diagnostic: fine-grained snapshots inside block 0's
+    // Diagnostic: fine-grained snapshots inside block 0's
     // relative-position multi-head attention. Populated only when
     // capture_intermediates=true. Empty on the flash-attn path (the
     // whole attention collapses into one FLASH_ATTN_EXT node — nothing
