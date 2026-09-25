@@ -8,8 +8,7 @@ typedef NS_ENUM(NSInteger, PKBackend) {
 };
 
 @interface PKTranscriptionResult : NSObject
-@property(nonatomic, readonly) NSString *text;
-@property(nonatomic, readonly) NSString *backendDescription;
+@property(nonatomic, readonly, copy) NSString *text;
 @property(nonatomic, readonly) NSTimeInterval inferenceSeconds;
 @property(nonatomic, readonly) NSTimeInterval modelLoadSeconds;
 @property(nonatomic, readonly) double realtimeMultiplier;

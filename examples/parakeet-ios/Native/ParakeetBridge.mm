@@ -27,8 +27,7 @@ NSString * model_path() {
 }  // namespace
 
 @interface PKTranscriptionResult ()
-@property(nonatomic, readwrite) NSString *text;
-@property(nonatomic, readwrite) NSString *backendDescription;
+@property(nonatomic, readwrite, copy) NSString *text;
 @property(nonatomic, readwrite) NSTimeInterval inferenceSeconds;
 @property(nonatomic, readwrite) NSTimeInterval modelLoadSeconds;
 @property(nonatomic, readwrite) double realtimeMultiplier;
@@ -161,14 +160,6 @@ NSString * model_path() {
                         (result.inference_ms / 1000.0)
                     : 0.0;
                 output.encoderUsedCoreML = result.encoder_used_coreml;
-                const std::string backendName = engine->backend_name();
-                if (result.encoder_used_coreml) {
-                    output.backendDescription = [NSString stringWithFormat:
-                        @"Core ML encoder + %s decoder", backendName.c_str()];
-                } else {
-                    output.backendDescription = [NSString stringWithFormat:
-                        @"QVAC Metal (%s)", backendName.c_str()];
-                }
 
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(output, nil); });
             } catch (const std::exception & exception) {

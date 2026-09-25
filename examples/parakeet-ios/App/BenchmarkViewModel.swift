@@ -180,7 +180,9 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
                     }
                     guard let nativeResult else { return }
                     self.result = BenchmarkResult(
-                        backendDescription: nativeResult.backendDescription,
+                        backendDescription: self.backend == .coreML
+                            ? "Core ML encoder + QVAC Metal decoder"
+                            : "QVAC Metal encoder + decoder",
                         inferenceSeconds: nativeResult.inferenceSeconds,
                         realtimeMultiplier: audio.duration / nativeResult.inferenceSeconds,
                         modelLoadSeconds: nativeResult.modelLoadSeconds,
