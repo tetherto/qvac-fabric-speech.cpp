@@ -3,6 +3,7 @@
 
 #include <parakeet/engine.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -165,13 +166,20 @@ NSString * model_path() {
 
                 while (!self->_cancelRequested.load()) {
                     @autoreleasepool {
+                        const AVAudioFramePosition remainingFrames =
+                            audioFile.length - audioFile.framePosition;
+                        if (remainingFrames <= 0) break;
+                        const AVAudioFrameCount framesToRead = static_cast<AVAudioFrameCount>(
+                            std::min<AVAudioFramePosition>(remainingFrames, batchFrames)
+                        );
                         AVAudioPCMBuffer * buffer = [[AVAudioPCMBuffer alloc]
                             initWithPCMFormat:format
-                            frameCapacity:batchFrames];
+                            frameCapacity:framesToRead];
                         NSError * readError = nil;
                         if (![audioFile readIntoBuffer:buffer
-                                            frameCount:batchFrames
+                                            frameCount:framesToRead
                                                  error:&readError]) {
+                            if (audioFile.framePosition >= audioFile.length && readError == nil) break;
                             const char * message = readError.localizedDescription.UTF8String;
                             throw std::runtime_error(message != nullptr ? message : "Could not read audio file");
                         }
