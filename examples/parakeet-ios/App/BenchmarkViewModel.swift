@@ -19,11 +19,10 @@ enum DemoBackend: String, CaseIterable, Identifiable {
 
 struct BenchmarkResult {
     let backendDescription: String
-    let medianSeconds: Double
+    let inferenceSeconds: Double
     let realtimeMultiplier: Double
     let modelLoadSeconds: Double
     let transcript: String
-    let runs: Int
 }
 
 @MainActor
@@ -42,7 +41,6 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
 
     private let bridge = ParakeetBridge()
     private var player: AVAudioPlayer?
-    private let measuredRuns = 3
 
     override init() {
         super.init()
@@ -57,7 +55,7 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
             errorMessage = "Bundled sample audio is missing."
             return
         }
-        prepare(url: url, name: "JFK sample")
+        prepare(url: url, name: "Sample audio")
     }
 
     func importAudio(_ url: URL) {
@@ -151,17 +149,11 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
         result = nil
         liveTranscript = ""
         status = "Loading the \(backend.rawValue) model…"
-        run(audio: audio, index: 0, samples: [], lastResult: nil)
+        run(audio: audio)
     }
 
-    private func run(
-        audio: PreparedAudio,
-        index: Int,
-        samples: [Double],
-        lastResult: PKTranscriptionResult?
-    ) {
-        status = "Transcribing run \(index + 1) of \(measuredRuns)…"
-        if index > 0 { liveTranscript = "" }
+    private func run(audio: PreparedAudio) {
+        status = "Transcribing…"
 
         bridge.transcribe(
             wavURL: audio.url,
@@ -183,29 +175,15 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
                         return
                     }
                     guard let nativeResult else { return }
-                    let nextSamples = samples + [nativeResult.inferenceSeconds]
-                    if index + 1 < self.measuredRuns {
-                        self.run(
-                            audio: audio,
-                            index: index + 1,
-                            samples: nextSamples,
-                            lastResult: nativeResult
-                        )
-                        return
-                    }
-
-                    let ordered = nextSamples.sorted()
-                    let median = ordered[ordered.count / 2]
                     self.result = BenchmarkResult(
                         backendDescription: nativeResult.backendDescription,
-                        medianSeconds: median,
-                        realtimeMultiplier: audio.duration / median,
+                        inferenceSeconds: nativeResult.inferenceSeconds,
+                        realtimeMultiplier: audio.duration / nativeResult.inferenceSeconds,
                         modelLoadSeconds: nativeResult.modelLoadSeconds,
-                        transcript: nativeResult.text,
-                        runs: self.measuredRuns
+                        transcript: nativeResult.text
                     )
                     self.isRunning = false
-                    self.status = "Benchmark complete. Showing the median of \(self.measuredRuns) timed runs."
+                    self.status = "Transcription complete."
                 }
             }
         )

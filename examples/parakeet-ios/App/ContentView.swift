@@ -185,7 +185,7 @@ struct ContentView: View {
                     Text(result.backendDescription).font(.headline)
                     Divider()
                     HStack(alignment: .top) {
-                        metric(String(format: "%.2f s", result.medianSeconds), "Median · \(result.runs) runs")
+                        metric(String(format: "%.2f s", result.inferenceSeconds), "Inference")
                         Spacer()
                         metric(String(format: "%.1f×", result.realtimeMultiplier), "Speed")
                         Spacer()

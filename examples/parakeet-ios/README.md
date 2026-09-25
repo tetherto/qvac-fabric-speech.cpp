@@ -14,8 +14,8 @@ GGUF in two on-device modes:
 - **Metal** — encoder and decoder on QVAC Metal through ggml.
 
 The app accepts the bundled sample, Files imports, and direct HTTPS audio URLs.
-Audio is converted locally to mono 16 kHz PCM WAV. Each benchmark runs three
-times, streams timestamped segments into the UI, and reports median inference
+Audio is converted locally to mono 16 kHz PCM WAV. Each benchmark transcribes
+the audio once, streams timestamped segments into the UI, and reports inference
 seconds, real-time speed, and model-load seconds.
 
 ## Requirements

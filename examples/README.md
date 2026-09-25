@@ -61,14 +61,14 @@ inside the app; inference itself does not require a network connection.
 2. Leave the bundled sample selected, or tap **Import file** to choose another
    audio file.
 3. Tap **Transcribe**. The transcript appears while the benchmark runs.
-4. Wait for **Benchmark complete**. The result card shows median inference
+4. Wait for **Transcription complete**. The result card shows inference
    time in seconds, real-time speed, and model-load time.
 5. Switch to **Metal** and tap **Transcribe** again to show the on-device
    backend comparison.
 
 The first run after installation includes model initialization and may be less
-visually smooth. Do one rehearsal before recording. For a fair comparison,
-use the same audio and allow all three timed runs to finish in each mode.
+visually smooth. Do one rehearsal before recording. For a fair comparison, use
+the same audio for each mode and allow each transcription to finish.
 
 ## 4. Record a clean demo
 
