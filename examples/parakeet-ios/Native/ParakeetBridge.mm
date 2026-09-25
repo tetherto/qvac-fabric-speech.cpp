@@ -1,8 +1,11 @@
 #import "ParakeetBridge.h"
+#import <AVFoundation/AVFoundation.h>
 
 #include <parakeet/engine.h>
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -40,6 +43,7 @@ NSString * model_path() {
     PKBackend _loadedBackend;
     NSTimeInterval _modelLoadSeconds;
     std::mutex _engineMutex;
+    std::atomic<bool> _cancelRequested;
 }
 
 - (instancetype)init {
@@ -47,6 +51,7 @@ NSString * model_path() {
     if (self) {
         _queue = dispatch_queue_create("to.tether.qvac.parakeet.inference", DISPATCH_QUEUE_SERIAL);
         _loadedBackend = (PKBackend) -1;
+        _cancelRequested.store(false);
     }
     return self;
 }
@@ -82,8 +87,8 @@ NSString * model_path() {
         options.verbose = true;
         // The desktop default allows encoder windows that are too large for
         // iOS memory limits (self-attention grows quadratically with length).
-        // Keep both Metal and Core ML runs bounded to roughly 14 seconds while
-        // preserving one decoder state across the complete recording.
+        // Keep both Metal and Core ML encoder windows bounded to roughly
+        // 14 seconds inside each app-level audio batch.
         options.long_form_window_frames = 180;
         options.long_form_context_frames = 32;
         auto engine = std::make_unique<parakeet::Engine>(options);
@@ -114,6 +119,7 @@ NSString * model_path() {
                    backend:(PKBackend)backend
                  onSegment:(PKSegmentHandler)onSegment
                 completion:(PKCompletionHandler)completion {
+    _cancelRequested.store(false);
     dispatch_async(_queue, ^{
         @autoreleasepool {
             NSError * loadError = nil;
@@ -124,32 +130,97 @@ NSString * model_path() {
             }
 
             try {
+                NSError * audioError = nil;
+                AVAudioFile * audioFile = [[AVAudioFile alloc]
+                    initForReading:url
+                    commonFormat:AVAudioPCMFormatFloat32
+                    interleaved:NO
+                    error:&audioError];
+                if (audioFile == nil) {
+                    const char * message = audioError.localizedDescription.UTF8String;
+                    throw std::runtime_error(message != nullptr ? message : "Could not open audio file");
+                }
+
+                AVAudioFormat * format = audioFile.processingFormat;
+                if (format.channelCount != 1 || std::llround(format.sampleRate) != 16000) {
+                    throw std::runtime_error("Prepared audio must be mono 16 kHz PCM");
+                }
+
                 parakeet::StreamingOptions options;
                 options.chunk_ms = 8000;
                 options.emit_partials = false;
 
-                const auto result = engine->transcribe_stream(
-                    url.fileSystemRepresentation,
-                    options,
-                    [onSegment](const parakeet::StreamingSegment & segment) {
-                        if (segment.text.empty()) return;
-                        NSString * text = [NSString stringWithUTF8String:segment.text.c_str()];
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            onSegment(text, segment.start_s, segment.end_s);
-                        });
+                // Keep both encoder and decoder intermediates bounded. The
+                // engine's file API windows the encoder, but intentionally
+                // retains the complete encoder output until decoding. That is
+                // appropriate on desktop and can exceed the iOS process limit
+                // for long recordings. Thirty-second batches release all
+                // intermediate tensors before the next section starts.
+                constexpr AVAudioFrameCount batchFrames = 30 * 16000;
+                std::string transcript;
+                int64_t totalSamples = 0;
+                double totalInferenceMs = 0.0;
+                bool usedCoreML = backend == PKBackendCoreML;
+                bool processedAudio = false;
+
+                while (!self->_cancelRequested.load()) {
+                    @autoreleasepool {
+                        AVAudioPCMBuffer * buffer = [[AVAudioPCMBuffer alloc]
+                            initWithPCMFormat:format
+                            frameCapacity:batchFrames];
+                        NSError * readError = nil;
+                        if (![audioFile readIntoBuffer:buffer
+                                            frameCount:batchFrames
+                                                 error:&readError]) {
+                            const char * message = readError.localizedDescription.UTF8String;
+                            throw std::runtime_error(message != nullptr ? message : "Could not read audio file");
+                        }
+                        if (buffer.frameLength == 0) break;
+
+                        const int sampleCount = static_cast<int>(buffer.frameLength);
+                        const double timeOffset = static_cast<double>(totalSamples) / 16000.0;
+                        const auto batch = engine->transcribe_samples_stream(
+                            buffer.floatChannelData[0],
+                            sampleCount,
+                            16000,
+                            options,
+                            [onSegment, timeOffset](const parakeet::StreamingSegment & segment) {
+                                if (segment.text.empty()) return;
+                                NSString * text = [NSString stringWithUTF8String:segment.text.c_str()];
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    onSegment(
+                                        text,
+                                        timeOffset + segment.start_s,
+                                        timeOffset + segment.end_s
+                                    );
+                                });
+                            }
+                        );
+
+                        if (!batch.text.empty()) {
+                            if (!transcript.empty() && transcript.back() != ' ') transcript.push_back(' ');
+                            transcript.append(batch.text);
+                        }
+                        totalSamples += sampleCount;
+                        totalInferenceMs += batch.total_ms;
+                        usedCoreML = usedCoreML && batch.encoder_used_coreml;
+                        processedAudio = true;
                     }
-                );
+                }
+
+                if (self->_cancelRequested.load()) return;
+                if (!processedAudio) throw std::runtime_error("Audio file is empty");
 
                 PKTranscriptionResult * output = [PKTranscriptionResult new];
-                output.text = [NSString stringWithUTF8String:result.text.c_str()];
-                output.inferenceSeconds = result.total_ms / 1000.0;
+                output.text = [NSString stringWithUTF8String:transcript.c_str()];
+                output.inferenceSeconds = totalInferenceMs / 1000.0;
                 output.modelLoadSeconds = self->_modelLoadSeconds;
-                output.realtimeMultiplier = result.total_ms > 0.0
-                    ? ((double) result.audio_samples / result.sample_rate) / (result.total_ms / 1000.0)
+                output.realtimeMultiplier = totalInferenceMs > 0.0
+                    ? (static_cast<double>(totalSamples) / 16000.0) / (totalInferenceMs / 1000.0)
                     : 0.0;
-                output.encoderUsedCoreML = result.encoder_used_coreml;
+                output.encoderUsedCoreML = usedCoreML;
                 const std::string backendName = engine->backend_name();
-                if (result.encoder_used_coreml) {
+                if (usedCoreML) {
                     output.backendDescription = [NSString stringWithFormat:
                         @"Core ML encoder + %s decoder", backendName.c_str()];
                 } else {
@@ -167,6 +238,7 @@ NSString * model_path() {
 }
 
 - (void)cancel {
+    _cancelRequested.store(true);
     std::lock_guard<std::mutex> guard(_engineMutex);
     if (_engine != nullptr) _engine->cancel();
 }
