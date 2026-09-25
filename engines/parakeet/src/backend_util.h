@@ -136,7 +136,7 @@ inline bool backend_is_hexagon(ggml_backend_t b) {
 }
 
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {
-    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b));
+    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b) || backend_is_hexagon(b));
 }
 
 inline void backend_set_n_threads(ggml_backend_t b, int n_threads) {
