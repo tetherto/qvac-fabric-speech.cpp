@@ -1,7 +1,7 @@
 # QVAC patches on vendored whisper.cpp
 
 This directory is a **git subtree** of [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp),
-currently pinned at **v1.9.1** (`f049fff9`; machine-readable pin in
+currently pinned at **v1.9.4** (`927cfce3`; machine-readable pin in
 `UPSTREAM_PIN`, consumed by the divergence-guard CI). It is *upstream-tracking,
 minimally divergent*: the only files that may differ from the pinned upstream
 tag are the ones listed below. CI enforces this (divergence-guard job) —
@@ -23,6 +23,7 @@ exists, so the manifest is meaningful without access to any tracker.
 | File | Change | Why |
 |---|---|---|
 | `src/whisper.cpp` | vocab-logits slice + decoder QKV matmul fusion | decode-time perf on mobile GPUs (quantized decode on Adreno-class hardware): the vocab-logits matmul is sliced to only the rows sampling actually needs instead of the full vocab, and the decoder's three Q/K/V matmuls are fused into one — upstream does neither |
+| `src/whisper.cpp` | BCI model loading and windowed attention | preserve the BCI-specific model header, convolution kernel size, per-layer attention window/mask, and decoder prompt used by `@qvac/bci-whispercpp`; these are existing fork behavior, retained through the v1.9.4 sync |
 | `src/whisper.cpp` | VAD honors `use_gpu` | upstream places the VAD weights per `use_gpu` but forces the compute backends to CPU, so `use_gpu=true` aborts in ggml_backend_sched on every GPU build (ggml-org/whisper.cpp#3508); the backends now follow the same flag, and the LSTM input is made contiguous before its matmul because the CUDA mul-mat-vec kernel rejects the odd-stride transposed view. Default stays CPU. Upstreaming candidate |
 | `src/whisper.cpp`, `include/whisper.h` | memory-fit preflight (`whisper_fit_params` / `whisper_fit_actual`) | project whether a model + workload fits the free device memory WITHOUT reading weight data (QVAC-24283, the SDK's @qvac/model-fit contract: Success=0/Failure=1/Error=2). The projection mirrors the runtime by construction: `whisper_model_load`, `whisper_kv_cache_init` and the VAD init gain an optional measure mode (size buffers via ggml's size-only APIs, seek past tensor payloads, mark tensors externally-allocated), and a size-only twin of `whisper_init_state` prices the four resident schedulers through `ggml_backend_sched_reserve_size`. `whisper_fit_actual` measures the same breakdown from a real load, reproducing `whisper_full`'s worst-case KV recreation when `n_decoders > 1` -- the byte-parity oracle for the tests |
 | `examples/whisper-fit-params/` | new example (`whisper-fit-params` CLI + `whisper-fit-util.h`) | thin front-end over `whisper_fit_params`: exit code == fit status, `--json` for the SDK, `--verify` prints projected-vs-real; the header keeps the strict ERANGE-checked parsers and UTF-8-validating JSON escaper testable model-free |
@@ -31,7 +32,7 @@ exists, so the manifest is meaningful without access to any tracker.
 | `tests/test-whisper-fit-params.cpp` | new file | byte-parity gates: a metadata-only projection must equal what a real load + state init actually allocates (weights, KV caches, all four scheduler compute buffers, VAD, host-overflow split), byte-for-byte including the `n_decoders > 1` KV worst case, and longer audio must grow only host bytes; the `gpu` arm additionally anchors the device/host classifier to the driver's own allocation counter (parity alone cannot see a misclassification shared by both sides) and exits 77 (ctest SKIP) without a GPU device; runs against the committed tiny + silero fixtures |
 | `tests/CMakeLists.txt` | register the two fit tests | the model-free/CPU forms carry the `unit` label and use only committed fixtures, so they run model-download-free in CI; the parity test is registered a second time as `test-whisper-fit-params-gpu` under the `gpu` label -- excluded by the CPU lanes' `-LE 'gpu|...'`, picked up by any `ctest -L gpu` GPU lane (the engines' self-hosted-lane convention), and a ctest SKIP where no GPU exists |
 | `src/whisper-logits-slice.h` | new file | helper implementing the vocab-logits slice above |
-| `include/whisper.h` | API additions | public controls for the logits-slice behavior so bindings/addons can opt in per-decode |
+| `src/whisper.cpp`, `include/whisper.h` | API additions | public controls for the logits-slice behavior and the sampling seed so bindings/addons can opt in per-decode; retain `params.seed` when applying upstream v1.9.4's decoder-0 reset |
 | `src/CMakeLists.txt` | build glue | wire whisper-logits-slice.h; install/export adjustments for the vcpkg port |
 | `CMakeLists.txt` | install/export + robustness | export `whisper-targets`, headers under `include/whisper/`; guard `git-vars`/js-bindings config steps so source-tarball (vcpkg) builds work |
 | `cmake/git-vars.cmake` | robustness | tolerate non-git source trees (vcpkg tarballs) |
@@ -45,7 +46,7 @@ exists, so the manifest is meaningful without access to any tracker.
 | `tests/test-vad-gpu.cpp` | new file | pins the VAD `use_gpu=true` contract for the fix above: init must succeed and produce CPU-matching probabilities; exercises the real GPU path on GPU builds and degrades to CPU-vs-CPU elsewhere; uses only the committed silero test fixture |
 | `tests/CMakeLists.txt` | register the five tests above; gate the parakeet tests behind `WHISPER_BUILD_PARAKEET` | the new tests carry `unit` labels so they run model-free in CI; the upstream parakeet tests link the gated `parakeet` target and must follow its option |
 | `bindings/java/src/main/java/io/github/ggerganov/whispercpp/params/WhisperFullParams.java`, `bindings/java/src/main/java/io/github/ggerganov/whispercpp/params/WhisperVadParams.java` | VAD parameters exposed to the Java binding | keeps the Java surface in step with the VAD options in whisper_full_params |
-| `examples/addon.node/package.json` | cmake-js `^7.1.1` → `^8.0.0` + npm `overrides` pinning transitive `tar` to `^7.5.21` | security: cmake-js 7.x depends on `tar ^6.2.0`, vulnerable to a decompression/parse DoS via unlimited input (GHSA-23hp-3jrh-7fpw) and further criticals fixed only in tar >= 7.5.21; the override guarantees a safe resolution since the example ships no lockfile. Upstreaming candidate |
+| `examples/addon.node/package.json`, `examples/addon.node/package-lock.json` | cmake-js `^7.1.1` → `^8.0.0` + npm `overrides` pinning transitive `tar` to `^7.5.21` | security: cmake-js 7.x depends on `tar ^6.2.0`, vulnerable to a decompression/parse DoS via unlimited input (GHSA-23hp-3jrh-7fpw) and further criticals fixed only in tar >= 7.5.21; the override guarantees a safe resolution, and the upstream lockfile is regenerated to match these constraints. Upstreaming candidate |
 
 **Deliberately dropped from the pre-subtree fork** (not upstream, not restored):
 `examples/talk-llama/llama-hparams.{h,cpp}` carried a stray `kv_only_nextn`
@@ -62,4 +63,5 @@ comment where practical.
 See `docs/UPSTREAM-SYNC.md`. Short version: `git subtree pull
 --prefix third_party/whisper.cpp upstream <tag> --squash`, resolve conflicts
 (expected only in the files above), re-verify this manifest, run the full CI
-matrix.
+matrix. If a repository squash merge removed the subtree ancestry, use the
+runbook's release-to-release three-way patch fallback (used for v1.9.4).

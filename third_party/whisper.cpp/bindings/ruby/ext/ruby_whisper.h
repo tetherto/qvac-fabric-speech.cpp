@@ -110,6 +110,13 @@ typedef struct {
   int n_samples;
 } ruby_whisper_full_args;
 
+typedef struct segments_from_samples_args {
+  VALUE *context;
+  VALUE *params;
+  float *samples;
+  int n_samples;
+} segments_from_samples_args;
+
 typedef struct ruby_whisper_full_parallel_args {
   VALUE *context;
   VALUE *params;
@@ -149,7 +156,6 @@ typedef struct {
   VALUE context;
 } ruby_whisper_parakeet_model;
 
-extern ID id_extended;
 extern ID id_log_callback_thread;
 extern ID id_start_log_callback_thread;
 extern ID id_alive_p;
@@ -163,7 +169,7 @@ extern VALUE ruby_whisper_log_queue_drain(ruby_whisper_log_queue *log_queue);
 #define GetContext(obj, rw) do { \
   TypedData_Get_Struct((obj), ruby_whisper, &ruby_whisper_type, (rw)); \
   if ((rw)->context == NULL) { \
-    rb_raise(rb_eRuntimeError, "Not initialized"); \
+    rb_raise(rb_eRuntimeError, "Already freed or not initialized"); \
   } \
 } while (0)
 
@@ -181,7 +187,7 @@ extern VALUE ruby_whisper_log_queue_drain(ruby_whisper_log_queue *log_queue);
 #define GetVADContext(obj, rwvc) do { \
     TypedData_Get_Struct((obj), ruby_whisper_vad_context, &ruby_whisper_vad_context_type, (rwvc)); \
     if ((rwvc)->context == NULL) { \
-      rb_raise(rb_eRuntimeError, "Not initialized"); \
+      rb_raise(rb_eRuntimeError, "Already freed or not initialized"); \
     } \
 } while (0)
 
@@ -203,7 +209,7 @@ extern VALUE ruby_whisper_log_queue_drain(ruby_whisper_log_queue *log_queue);
 #define GetParakeetContext(obj, rwpc) do { \
   TypedData_Get_Struct((obj), ruby_whisper_parakeet_context, &ruby_whisper_parakeet_context_type, (rwpc)); \
   if ((rwpc)->context == NULL) { \
-    rb_raise(rb_eRuntimeError, "Not initialized"); \
+    rb_raise(rb_eRuntimeError, "Already freed or not initialized"); \
   } \
 } while (0)
 
