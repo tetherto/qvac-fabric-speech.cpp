@@ -80,6 +80,13 @@ NSString * model_path() {
         unsetenv("PARAKEET_COREML_DISABLE");
     }
 
+    // ggml's desktop-oriented Metal residency sets keep every recently used
+    // graph buffer wired for 180 seconds. A long iOS transcription refreshes
+    // that timer on every batch, causing otherwise released buffers to
+    // accumulate until jetsam terminates the app. Let Metal manage residency
+    // normally on iOS so completed batch buffers can be reclaimed promptly.
+    setenv("GGML_METAL_NO_RESIDENCY", "1", 1);
+
     const auto started = std::chrono::steady_clock::now();
     try {
         parakeet::EngineOptions options;
