@@ -163,14 +163,14 @@ final class BenchmarkViewModel: NSObject, ObservableObject {
             wavURL: audio.url,
             backend: backend.native,
             onSegment: { [weak self] text, start, end in
-                Task { @MainActor [weak self] in
+                MainActor.assumeIsolated {
                     guard let self else { return }
                     let stamp = String(format: "%5.1f–%5.1f", start, end)
                     self.liveTranscript += "[\(stamp)] \(text)\n"
                 }
             },
             completion: { [weak self] nativeResult, error in
-                Task { @MainActor [weak self] in
+                MainActor.assumeIsolated {
                     guard let self else { return }
                     if let error {
                         self.isRunning = false
