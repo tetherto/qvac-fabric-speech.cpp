@@ -1,17 +1,15 @@
 #import "ParakeetBridge.h"
-#import <AVFoundation/AVFoundation.h>
+
+#include "LongAudioRunner.h"
 
 #include <parakeet/engine.h>
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
 
 namespace {
 
@@ -139,120 +137,32 @@ NSString * model_path() {
             }
 
             try {
-                NSError * audioError = nil;
-                AVAudioFile * audioFile = [[AVAudioFile alloc]
-                    initForReading:url
-                    commonFormat:AVAudioPCMFormatFloat32
-                    interleaved:NO
-                    error:&audioError];
-                if (audioFile == nil) {
-                    const char * message = audioError.localizedDescription.UTF8String;
-                    throw std::runtime_error(message != nullptr ? message : "Could not open audio file");
-                }
-
-                AVAudioFormat * format = audioFile.processingFormat;
-                if (format.channelCount != 1 || std::llround(format.sampleRate) != 16000) {
-                    throw std::runtime_error("Prepared audio must be mono 16 kHz PCM");
-                }
-
-                parakeet::StreamingOptions options;
-                options.chunk_ms = 8000;
-                options.emit_partials = false;
-
-                // Keep both encoder and decoder intermediates bounded. The
-                // engine's file API windows the encoder, but intentionally
-                // retains the complete encoder output until decoding. That is
-                // appropriate on desktop and can exceed the iOS process limit
-                // for long recordings. Thirty-second batches release all
-                // intermediate tensors before the next section starts.
-                constexpr AVAudioFrameCount batchFrames = 30 * 16000;
-                std::string transcript;
-                int64_t totalSamples = 0;
-                double totalInferenceMs = 0.0;
-                bool usedCoreML = backend == PKBackendCoreML;
-                bool processedAudio = false;
-
-                while (!self->_cancelRequested.load()) {
-                    @autoreleasepool {
-                        const AVAudioFramePosition remainingFrames =
-                            audioFile.length - audioFile.framePosition;
-                        if (remainingFrames <= 0) break;
-                        const AVAudioFrameCount framesToRead = static_cast<AVAudioFrameCount>(
-                            std::min<AVAudioFramePosition>(remainingFrames, batchFrames)
-                        );
-                        AVAudioPCMBuffer * buffer = [[AVAudioPCMBuffer alloc]
-                            initWithPCMFormat:format
-                            frameCapacity:framesToRead];
-                        NSError * readError = nil;
-                        if (![audioFile readIntoBuffer:buffer
-                                            frameCount:framesToRead
-                                                 error:&readError]) {
-                            if (audioFile.framePosition >= audioFile.length && readError == nil) break;
-                            const char * message = readError.localizedDescription.UTF8String;
-                            throw std::runtime_error(message != nullptr ? message : "Could not read audio file");
-                        }
-                        if (buffer.frameLength == 0) break;
-
-                        const int sampleCount = static_cast<int>(buffer.frameLength);
-                        const double timeOffset = static_cast<double>(totalSamples) / 16000.0;
-                        const double validBatchSeconds = static_cast<double>(sampleCount) / 16000.0;
-                        std::vector<float> paddedSamples;
-                        const float * inferenceSamples = buffer.floatChannelData[0];
-                        int inferenceSampleCount = sampleCount;
-                        if (sampleCount < static_cast<int>(batchFrames)) {
-                            // Keep the final native graph identical to every
-                            // full batch. A short tail otherwise makes ggml
-                            // reallocate its graph while the previous buffer
-                            // is resident, which can exceed the iOS limit.
-                            paddedSamples.assign(batchFrames, 0.0f);
-                            std::copy_n(inferenceSamples, sampleCount, paddedSamples.data());
-                            inferenceSamples = paddedSamples.data();
-                            inferenceSampleCount = static_cast<int>(batchFrames);
-                        }
-                        const auto batch = engine->transcribe_samples_stream(
-                            inferenceSamples,
-                            inferenceSampleCount,
-                            16000,
-                            options,
-                            [onSegment, timeOffset, validBatchSeconds](const parakeet::StreamingSegment & segment) {
-                                if (segment.text.empty()) return;
-                                if (segment.start_s >= validBatchSeconds) return;
-                                NSString * text = [NSString stringWithUTF8String:segment.text.c_str()];
-                                const double end = std::min(segment.end_s, validBatchSeconds);
-                                dispatch_async(dispatch_get_main_queue(), ^{
-                                    onSegment(
-                                        text,
-                                        timeOffset + segment.start_s,
-                                        timeOffset + end
-                                    );
-                                });
-                            }
-                        );
-
-                        if (!batch.text.empty()) {
-                            if (!transcript.empty() && transcript.back() != ' ') transcript.push_back(' ');
-                            transcript.append(batch.text);
-                        }
-                        totalSamples += sampleCount;
-                        totalInferenceMs += batch.total_ms;
-                        usedCoreML = usedCoreML && batch.encoder_used_coreml;
-                        processedAudio = true;
-                    }
-                }
-
+                const auto result = run_long_audio_wav(
+                    *engine,
+                    url.fileSystemRepresentation,
+                    self->_cancelRequested,
+                    backend == PKBackendCoreML,
+                    [onSegment](const parakeet::StreamingSegment & segment,
+                                double start,
+                                double end) {
+                        NSString * text = [NSString stringWithUTF8String:segment.text.c_str()];
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            onSegment(text, start, end);
+                        });
+                    });
                 if (self->_cancelRequested.load()) return;
-                if (!processedAudio) throw std::runtime_error("Audio file is empty");
 
                 PKTranscriptionResult * output = [PKTranscriptionResult new];
-                output.text = [NSString stringWithUTF8String:transcript.c_str()];
-                output.inferenceSeconds = totalInferenceMs / 1000.0;
+                output.text = [NSString stringWithUTF8String:result.text.c_str()];
+                output.inferenceSeconds = result.inference_ms / 1000.0;
                 output.modelLoadSeconds = self->_modelLoadSeconds;
-                output.realtimeMultiplier = totalInferenceMs > 0.0
-                    ? (static_cast<double>(totalSamples) / 16000.0) / (totalInferenceMs / 1000.0)
+                output.realtimeMultiplier = result.inference_ms > 0.0
+                    ? (static_cast<double>(result.audio_samples) / 16000.0) /
+                        (result.inference_ms / 1000.0)
                     : 0.0;
-                output.encoderUsedCoreML = usedCoreML;
+                output.encoderUsedCoreML = result.encoder_used_coreml;
                 const std::string backendName = engine->backend_name();
-                if (usedCoreML) {
+                if (result.encoder_used_coreml) {
                     output.backendDescription = [NSString stringWithFormat:
                         @"Core ML encoder + %s decoder", backendName.c_str()];
                 } else {

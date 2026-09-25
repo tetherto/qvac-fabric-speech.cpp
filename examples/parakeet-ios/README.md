@@ -58,3 +58,17 @@ examples/parakeet-ios/scripts/generate-xcode-project.sh \
 
 The GGUF plus Core ML sidecar make the app bundle large. Keep them outside Git
 and provide their paths only at project-generation time.
+
+## Long-audio integration test
+
+Run the same fixed-shape batching path used by the iOS bridge against exactly
+11 minutes of `test.wav`:
+
+```bash
+./examples/parakeet-ios/scripts/test-long-audio.sh
+```
+
+The test requires `ffmpeg`, the Q8 GGUF, and its compiled Core ML sidecar at the
+standard paths under `engines/parakeet/models`. It fails unless all 22 batches
+finish, every encoder batch uses Core ML, live segments are emitted, and the
+final completion result contains a transcript.

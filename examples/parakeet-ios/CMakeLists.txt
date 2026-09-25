@@ -53,6 +53,8 @@ set(APP_SOURCES
     App/AudioPreparation.swift
     Native/ParakeetBridge.h
     Native/ParakeetBridge.mm
+    Native/LongAudioRunner.h
+    Native/LongAudioRunner.cpp
     App/ParakeetLab-Bridging-Header.h
 )
 
@@ -61,6 +63,7 @@ target_link_libraries(ParakeetLab PRIVATE qvac-parakeet)
 target_include_directories(ParakeetLab PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Native"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../engines/parakeet/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../engines/parakeet/src"
 )
 
 find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
