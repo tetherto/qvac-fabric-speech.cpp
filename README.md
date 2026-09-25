@@ -35,8 +35,8 @@ engine-specific guides qualify model-level validation.
 | `whisper-large-v3-turbo` | whisper | 99 + translation | 809 M | `f16`, `q5_0`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA, Core ML | fastest large-class decode |
 | `silero-v5.1.2` | whisper | language agnostic | 2 M | `f16` | CPU, Metal, Vulkan, CUDA | voice activity detection; GPU is opt-in via `use_gpu`, default CPU |
 | `silero-v6.2.0` | whisper | language agnostic | 2 M | `f16` | CPU, Metal, Vulkan, CUDA | voice activity detection; GPU is opt-in via `use_gpu`, default CPU |
-| `nvidia/parakeet-ctc-0.6b` | parakeet | English | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
-| `nvidia/parakeet-ctc-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + streaming + long-form |
+| `nvidia/parakeet-ctc-0.6b` | parakeet | English | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | offline + streaming + long-form |
+| `nvidia/parakeet-ctc-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | offline + streaming + long-form |
 | `ai4bharat/indic-conformer-600m-multilingual` | parakeet | 22 Indic | 600 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan; Core ML offline encoder | CTC export by default; `--head rnnt` exports the Transducer branch; CTC requires `--language` / `EngineOptions::language` |
 | `nvidia/parakeet-unified-en-0.6b` | parakeet | English | 600 M | `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | RNN-T decode; offline + long-form + cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
@@ -59,18 +59,6 @@ hardware decoder parity CI. CUDA in these rows denotes hardware-validated
 availability, not CI coverage.
 
 Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-model` for an attributed "who said what" transcript. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
-
-Sortformer v2.1 can offload either an exact-shape batch encoder or the masked
-AOSC block stack to Apple Core ML; the speaker head remains on ggml. Export the
-batch sidecar with
-`python engines/parakeet/scripts/export-encoder-coreml.py --gguf <v2.1.f16.gguf> --wav <fixed-shape.wav> --out <v2.1-encoder.mlpackage> --compile-dir <model-dir>`.
-For AOSC, replace `--wav` with
-`--bypass-pre-encode --n-encoder-frames 410` and use an
-`-encoder-bypass-pre-encode.mlpackage` output. The compiled directories must
-end in `-encoder.mlmodelc` and `-encoder-bypass-pre-encode.mlmodelc`,
-respectively. Batch inputs must match the exported mel-frame count; AOSC inputs
-may be shorter than its masked capacity. Missing sidecars, incompatible shapes,
-and prediction failures fall back to ggml.
 
 ### Text-to-speech and voice cloning
 
@@ -123,26 +111,46 @@ set, in place on host backends. See the
 | ACE-Step v15 base | audiogen | text-to-music, multi-track (lego) stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar (`AUDIOGEN_COREML`, Apple) | 50 diffusion steps by default, `--task lego --track <layer>` |
 | MiniMax-Music3 | audiogen | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal via `EngineOptions::device`) | 25 fps, 20 flow steps, two GGUF files; `test-minimax-metal-ops` checks Metal condition/vocoder parity on an Apple7+ GPU |
 
-The Audio8 Core ML sidecar takes the codec's synthesis stack (the stage that
-dominates a CPU synthesis) off ggml; it is exported from the decoder GGUF by
-`engines/tts/scripts/export-audio8-codec-coreml.py`, hosts read
-`Engine::codec_on_coreml()` (sidecar loaded) and
-`SynthesisResult::codec_synthesis_backend` (where a call's codec synthesis ran;
-the language model always stays on `backend_name()`), and any sidecar failure
-falls back to ggml -- see the
-[Audio8 guide](engines/tts/docs/audio8.md#core-ml-codec-sidecar). The
-Supertonic Core ML sidecar takes the vocoder off ggml the same way: exported
-from the model GGUF by `engines/tts/scripts/export-supertonic-coreml.py`,
-reported on `Engine::vocoder_on_coreml()` (sidecar loaded) and
-`SynthesisResult::vocoder_synthesis_backend` (where a call's vocoder ran), with any
-failure falling back to ggml -- see the
-[Supertonic guide](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar). The
-ACE-Step Core ML sidecar is exported by
-`engines/audiogen/scripts/export-vae-coreml.py` at its 64-latent-frame Neural
-Engine operating point, optionally weight-palettized (`--palettize 8` halves
-the sidecar at unchanged speed and quality gate); see the
-[audiogen backends guide](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) for
-the measured constraints and benchmark tooling.
+### Apple Core ML sidecars
+
+On Apple builds, an optional Core ML sidecar moves one fixed-shape stage of a
+model to the Neural Engine while the rest of the pipeline stays on ggml. Each
+engine gates its sidecars behind its own CMake option, all defaulting to `OFF`:
+`PARAKEET_COREML`, `TTS_CPP_COREML`, and `AUDIOGEN_COREML`. At load the engine
+looks for a compiled `.mlmodelc` next to the GGUF, named after the GGUF with
+its quantization suffix stripped so one sidecar serves every tier. A missing
+sidecar, a rejected input shape, or a failed prediction falls back to ggml.
+
+| Model | Sidecar | Stage on Core ML | Input routing | Force ggml | Guide |
+|---|---|---|---|---|---|
+| Parakeet CTC 0.6b / 1.1b, IndicConformer, Unified RNN-T, TDT 0.6b-v3 / 1.1b | `<model>-encoder.mlmodelc` | FastConformer encoder | fixed capacity: shorter inputs are zero-padded, longer offline inputs are windowed; Unified RNN-T cache-aware streaming stays on ggml | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#core-ml-encoder-sidecars) |
+| Parakeet EOU 120m | `<model>-encoder.mlmodelc` | encoder | exact compiled shape only; every other length, including mismatched streaming windows, runs on ggml | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#core-ml-encoder-sidecars) |
+| Nemotron 3.5 ASR streaming | `<model>-encoder.mlmodelc` | encoder | exact compiled shape only; longer offline inputs and streaming take the cache-aware ggml path | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#nemotron) |
+| Sortformer v2.1 | `<model>-encoder.mlmodelc`, `<model>-encoder-bypass-pre-encode.mlmodelc` | batch encoder; AOSC block stack | batch: exact compiled shape; AOSC: up to the masked capacity (410 frames by default); the speaker head stays on ggml | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#sortformer-v21) |
+| Supertonic 1 / 2 / 3 | `<model>-vocoder.mlmodelc` | vocoder | 64-latent-frame windows; stays off for vocoder weights stored below 8 bits (`q4_0`) | `SUPERTONIC_COREML_DISABLE=1` | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar) |
+| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack | 64-post-frame windows; a failed call retires the sidecar for the engine's lifetime | `AUDIO8_COREML_DISABLE=1` | [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
+| ACE-Step v15 turbo / sft / base | `<vae>-decoder.mlmodelc` | Oobleck VAE decoder | 64-latent-frame overlapped windows; shorter latents run on ggml | `ACESTEP_COREML_DISABLE=1` | [AudioGen](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
+
+Sidecars are exported from the GGUF by
+`engines/parakeet/scripts/export-encoder-coreml.py`,
+`engines/tts/scripts/export-supertonic-coreml.py`,
+`engines/tts/scripts/export-audio8-codec-coreml.py`, and
+`engines/audiogen/scripts/export-vae-coreml.py`. Hosts can read where a call
+ran from `EngineResult::encoder_used_coreml` (Parakeet),
+`SynthesisResult::vocoder_synthesis_backend` (Supertonic), and
+`SynthesisResult::codec_synthesis_backend` (Audio8).
+
+The English CTC checkpoints meet the same export contract as IndicConformer and
+load through its sidecar path, but among CTC checkpoints the Core ML parity
+tests cover only IndicConformer. Whether a sidecar pays off depends on the GPU
+it replaces: the Supertonic vocoder sidecar runs 1.6-2.9x faster than ggml
+Metal on an M4 mini but slower than an M3 Ultra's GPU, so ship it per
+deployment.
+
+Sortformer v1 and v2, Chatterbox, Parler-TTS, CosyVoice3, Pocket TTS, MOSS
+Delay, LavaSR, and MiniMax-Music3 have no Core ML sidecar and run on the ggml
+backends in their rows. Whisper's encoder sidecar (`WHISPER_COREML`) follows
+upstream whisper.cpp; see [its README](third_party/whisper.cpp/README.md).
 
 ## Performance
 
