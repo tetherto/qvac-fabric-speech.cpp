@@ -58,7 +58,7 @@ engine, not every backend ggml can compile.
 | Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ Core ML vocoder sidecar: `Engine::vocoder_on_coreml()` reports load status, `SynthesisResult::vocoder_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
-| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports load status, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
+| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ Core ML codec sidecar: `Engine::codec_on_coreml()` reports whether it is attached, `SynthesisResult::codec_synthesis_backend` the per-call path, ggml fallback otherwise) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes | untested | untested | untested |
 | MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes | untested | untested | untested |
@@ -211,6 +211,27 @@ measured on one binary on an RTX 3090, Chatterbox Turbo is 8.6x faster on CUDA
 than on that card's Vulkan adapter. Set `TTS_CPP_GPU_BACKEND` to `cuda`,
 `vulkan`, `metal` or `opencl` to pin one for a test arm or a comparison; an
 unrecognised value is rejected rather than silently dropping to the CPU.
+
+### Apple Core ML sidecars
+
+`TTS_CPP_COREML=ON` (Apple-only, default `OFF`) compiles two optional sidecars,
+each loaded from a compiled `.mlmodelc` next to the GGUF and falling back to
+ggml on any failure:
+
+| Model line | Sidecar | Stage on Core ML | Status | Force ggml |
+|---|---|---|---|---|
+| Supertonic 1 / 2 / 3 | `<model>-vocoder.mlmodelc` | vocoder, in 64-latent-frame windows | `Engine::vocoder_on_coreml()` (loaded at construction), `SynthesisResult::vocoder_synthesis_backend` (per call) | `SUPERTONIC_COREML_DISABLE=1` |
+| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack, in 64-post-frame windows | `Engine::codec_on_coreml()` (attached; false once a failed call retires the sidecar), `SynthesisResult::codec_synthesis_backend` (per call) | `AUDIO8_COREML_DISABLE=1` |
+
+One sidecar serves every quantization tier of a model. The Supertonic sidecar
+carries reference-precision weights, so it stays off for vocoders stored below
+8 bits (`q4_0`), where it would change the output rather than accelerate it; it
+beats ggml Metal on an M4 mini's GPU but loses to an M3 Ultra's, so ship it on
+consumer-class GPUs and skip it on Max/Ultra parts. Chatterbox, Parler-TTS,
+CosyVoice3, Pocket TTS, MOSS Delay, and LavaSR have no Core ML sidecar. See the
+[Supertonic guide](docs/supertonic.md#core-ml-vocoder-sidecar) and the [Audio8
+guide](docs/audio8.md#core-ml-codec-sidecar) for export, placement, and
+measurements.
 
 Chatterbox Multilingual's native tokenizer covers `en, es, fr, de, it, pt, nl,
 pl, tr, sv, da, fi, no, el, ms, sw, ar, ko`; `ja`, `he`, `ru`, `zh`, and `hi`

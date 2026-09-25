@@ -10,14 +10,14 @@ from GGUF metadata.
 
 | HF repository | Decoder/task | Mel | `d_model × layers` | Vocab | Parameters | GGUF size | Recorded RTF | Languages and notes |
 |---|---|---:|---|---:|---:|---|---|---|
-| `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English |
-| `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English |
+| `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English; optional Core ML offline encoder |
+| `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English; optional Core ML offline encoder |
 | `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; optional Core ML offline encoder; requires `--language` or `EngineOptions::language` |
 | `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 x 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder with an optional Core ML sidecar; cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
-| `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization |
-| `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization |
-| `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token |
-| `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; cache-aware streaming at 80/160/320/560/1120 ms |
+| `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization; optional Core ML offline encoder |
+| `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization; optional Core ML offline encoder |
+| `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token; Core ML exact-shape encoder |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; cache-aware streaming at 80/160/320/560/1120 ms; Core ML exact-shape offline encoder |
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | Sortformer | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Streaming-trained; sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps; Core ML exact-shape batch/AOSC encoder |
@@ -55,6 +55,32 @@ the sliding-window `left_context_ms` and `right_lookahead_ms` knobs are ignored
 for Nemotron.
 
 ## Core ML encoder sidecars
+
+`PARAKEET_COREML=ON` (Apple-only, default `OFF`) lets the FastConformer encoder
+run from a compiled `<model>-encoder.mlmodelc` next to the GGUF. Mel
+preprocessing and every decoder or speaker head stay on ggml. Each family
+routes inputs to the sidecar under one of three contracts:
+
+| Family | Contract | Inputs the sidecar does not take |
+|---|---|---|
+| CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
+| EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
+| Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
+| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
+| Sortformer v1, v2 | no sidecar | always ggml |
+
+Missing or incompatible sidecars and prediction failures fall back to ggml,
+and `PARAKEET_COREML_DISABLE=1` forces ggml. `Engine::encoder_on_coreml()`
+reports that a sidecar loaded; `EngineResult::encoder_used_coreml` reports
+whether every encoder invocation of a transcription ran on it. TDT and EOU
+export commands, benchmarking, and placement controls are in
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar).
+
+The English CTC checkpoints (`parakeet-ctc-0.6b`, `parakeet-ctc-1.1b`) meet
+the same export contract as IndicConformer (offline, batch-normalized
+convolution, unbounded attention) and load through its sidecar path; among
+CTC checkpoints, the Core ML parity and CLI bench tests cover only
+IndicConformer.
 
 IndicConformer CTC uses the fixed-capacity sidecar contract shared by the
 offline TDT and Unified encoders. The FastConformer stack runs in Core ML,
@@ -148,9 +174,7 @@ sidecar accepts up to its masked encoder-frame capacity (410 for the default
 cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
 or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
-subsequent chunks go directly to ggml. See
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for IndicConformer/Unified RNN-T/TDT/EOU/Nemotron
-details and runtime controls.
+subsequent chunks go directly to ggml.
 
 ## Performance
 
