@@ -1,10 +1,12 @@
 #include "moss/cli.h"
 
 #include "dr_wav.h"
+#include "json.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -27,10 +29,15 @@ void print_usage() {
         "       [--audio-repetition-penalty 1.0]\n"
         "       moss-cli --mode sfx --model sfx.gguf --text \"rain on a tin roof\" --out out.wav\n"
         "       [--seconds 10] [--negative-prompt \"...\"] [--seed 0] [--threads 4] [--gpu] [--backends-dir dir]\n"
-        "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n");
+        "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n"
+        "       moss-cli --mode transcribe --model transcribe.gguf --audio speech.wav [--out transcript.json]\n"
+        "       [--prompt \"...\"] [--max-new-tokens N] [--threads 4] [--gpu] [--backends-dir dir]\n"
+        "           16 kHz WAV in; prints one [start-end] Sxx: text line per segment\n");
 }
 
 namespace {
+
+constexpr const char * DEFAULT_WAV_OUT = "moss-out.wav";
 
 bool save_wav(const std::string & path, const std::vector<float> & pcm, int sample_rate) {
     drwav_data_format format{};
@@ -59,7 +66,11 @@ bool parse_mode(const std::string & value, Mode & mode) {
         mode = Mode::SoundEffect;
         return true;
     }
-    std::fprintf(stderr, "unknown mode: %s (expected tts or sfx)\n", value.c_str());
+    if (value == "transcribe") {
+        mode = Mode::Transcribe;
+        return true;
+    }
+    std::fprintf(stderr, "unknown mode: %s (expected tts, sfx or transcribe)\n", value.c_str());
     return false;
 }
 
@@ -68,9 +79,28 @@ void share_runtime_flags(CliArgs & args) {
     args.sound_options.use_gpu = args.options.use_gpu;
     args.sound_options.backends_dir = args.options.backends_dir;
     args.sound_request.prompt = args.text;
+    args.transcribe_options.model_path = args.sound_options.model_path;
+    args.transcribe_options.n_threads = args.options.n_threads;
+    args.transcribe_options.use_gpu = args.options.use_gpu;
+    args.transcribe_options.backends_dir = args.options.backends_dir;
+    args.transcribe_request.max_new_tokens = args.mode == Mode::Transcribe ? args.options.max_new_tokens : 0;
+    if (args.out_path.empty() && args.mode != Mode::Transcribe) {
+        args.out_path = DEFAULT_WAV_OUT;
+    }
+}
+
+bool has_transcribe_flags(const CliArgs & args) {
+    if (args.stream) {
+        std::fprintf(stderr, "--stream is not available in transcribe mode\n");
+        return false;
+    }
+    return !args.transcribe_options.model_path.empty() && !args.audio_path.empty();
 }
 
 bool has_required_flags(const CliArgs & args) {
+    if (args.mode == Mode::Transcribe) {
+        return has_transcribe_flags(args);
+    }
     if (args.text.empty()) {
         return false;
     }
@@ -110,7 +140,99 @@ int run_sound_effect(const CliArgs & args) {
     return 0;
 }
 
+std::vector<float> mono_mix(const std::vector<float> & interleaved, unsigned channels) {
+    std::vector<float> mono(interleaved.size() / channels, 0.0f);
+    for (size_t i = 0; i < interleaved.size(); ++i) {
+        mono[i / channels] += interleaved[i] / (float) channels;
+    }
+    return mono;
+}
+
+std::vector<float> load_wav(const std::string & path, int & sample_rate) {
+    unsigned channels = 0;
+    unsigned rate = 0;
+    drwav_uint64 frames = 0;
+    float * data = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &channels, &rate, &frames, nullptr);
+    if (data == nullptr || channels == 0) {
+        throw std::runtime_error("cannot read WAV: " + path);
+    }
+    const std::vector<float> interleaved(data, data + frames * channels);
+    drwav_free(data, nullptr);
+    sample_rate = (int) rate;
+    return channels == 1 ? interleaved : mono_mix(interleaved, channels);
+}
+
+void print_segment_lines(const std::vector<tts_cpp::moss::TranscriptSegment> & segments) {
+    for (const auto & segment : segments) {
+        std::printf("[%.2f-%.2f] %s: %s\n", segment.start_s, segment.end_s, segment.speaker.c_str(),
+                segment.text.c_str());
+    }
+}
+
+void print_segments(const tts_cpp::moss::TranscribeResult & result) {
+    print_segment_lines(result.segments);
+    if (result.segments.empty()) {
+        std::printf("%s\n", result.text.c_str());
+    }
+}
+
+bool save_transcript(const std::string & path, const tts_cpp::moss::TranscribeResult & result) {
+    std::ofstream output(path, std::ios::binary);
+    output << transcript_json(result) << "\n";
+    return (bool) output;
+}
+
+int run_transcribe(const CliArgs & args) {
+    int sample_rate = 0;
+    const std::vector<float> pcm = load_wav(args.audio_path, sample_rate);
+    tts_cpp::moss::TranscribeEngine engine(args.transcribe_options);
+    std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
+    const tts_cpp::moss::TranscribeResult result = engine.transcribe(pcm.data(), pcm.size(), sample_rate,
+            args.transcribe_request);
+    if (result.cancelled) {
+        std::fprintf(stderr, "[moss-cli] transcription cancelled\n");
+        return 1;
+    }
+    print_segments(result);
+    if (!args.out_path.empty() && !save_transcript(args.out_path, result)) {
+        std::fprintf(stderr, "[moss-cli] cannot write %s\n", args.out_path.c_str());
+        return 1;
+    }
+    std::fprintf(stderr,
+        "[moss-cli] %.1fs audio, %d audio tokens, %d generated (encode %.0f ms, prefill %.0f ms, decode %.0f ms)\n",
+        (double) pcm.size() / sample_rate, result.audio_tokens, result.generated_tokens,
+        result.encode_ms, result.prefill_ms, result.decode_ms);
+    return 0;
+}
+
 } // namespace
+
+namespace {
+
+nlohmann::ordered_json segments_json(const std::vector<TranscriptSegment> & segments) {
+    nlohmann::ordered_json values = nlohmann::ordered_json::array();
+    for (const auto & segment : segments) {
+        values.push_back({{"start", segment.start_s}, {"end", segment.end_s},
+                          {"speaker", segment.speaker}, {"text", segment.text}});
+    }
+    return values;
+}
+
+} // namespace
+
+std::string transcript_json(const TranscribeResult & result) {
+    nlohmann::ordered_json document = {
+        {"text", result.text},
+        {"segments", segments_json(result.segments)},
+        {"audio_tokens", result.audio_tokens},
+        {"prompt_tokens", result.prompt_tokens},
+        {"generated_tokens", result.generated_tokens},
+        {"encode_ms", result.encode_ms},
+        {"prefill_ms", result.prefill_ms},
+        {"decode_ms", result.decode_ms},
+    };
+    return document.dump(2);
+}
 
 bool parse_args(int argc, const char * const * argv, CliArgs & args) {
     for (int i = 1; i < argc; ++i) {
@@ -142,6 +264,8 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
             args.sound_request.seed = args.options.seed;
         }
         else if (flag == "--model")         args.sound_options.model_path = next();
+        else if (flag == "--audio")         args.audio_path = next();
+        else if (flag == "--prompt")        args.transcribe_request.prompt = next();
         else if (flag == "--negative-prompt") args.sound_request.negative_prompt = next();
         else if (flag == "--seconds")       args.sound_request.seconds = std::strtod(next(), nullptr);
         else if (flag == "--steps")         args.sound_request.steps = std::atoi(next());
@@ -173,6 +297,9 @@ int run(const CliArgs & args) {
     try {
         if (args.mode == Mode::SoundEffect) {
             return run_sound_effect(args);
+        }
+        if (args.mode == Mode::Transcribe) {
+            return run_transcribe(args);
         }
         tts_cpp::moss::Engine engine(args.options);
         std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());

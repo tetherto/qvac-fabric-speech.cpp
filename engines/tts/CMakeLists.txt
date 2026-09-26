@@ -380,6 +380,14 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/sfx_sampler.cpp
     src/moss/sfx_tokenizer.cpp
     src/moss/sfx_engine.cpp
+    src/moss/gguf_metadata.cpp
+    src/moss/transcribe_model.cpp
+    src/moss/transcribe_tensors.cpp
+    src/moss/transcribe_audio.cpp
+    src/moss/transcribe_encoder.cpp
+    src/moss/transcribe_decoder.cpp
+    src/moss/transcribe_text.cpp
+    src/moss/transcribe_engine.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -1474,6 +1482,20 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-sfx-parity)
     tts_cpp_register_test(test-moss-sfx-parity LABEL "fixture")
     set_property(TEST test-moss-sfx-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-moss-transcribe test/moss/test_transcribe.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-transcribe PRIVATE tts-cpp)
+    target_include_directories(test-moss-transcribe PRIVATE src)
+    target_compile_options(test-moss-transcribe PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    tts_cpp_apply_ccache(test-moss-transcribe)
+    tts_cpp_register_test(test-moss-transcribe)
+
+    add_executable(test-moss-transcribe-parity test/moss/test_transcribe_parity.cpp)
+    target_link_libraries(test-moss-transcribe-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-transcribe-parity PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-transcribe-parity)
+    tts_cpp_register_test(test-moss-transcribe-parity LABEL "fixture")
+    set_property(TEST test-moss-transcribe-parity PROPERTY SKIP_RETURN_CODE 77)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
