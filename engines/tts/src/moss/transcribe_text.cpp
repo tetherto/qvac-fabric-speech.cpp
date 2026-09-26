@@ -157,7 +157,7 @@ int append_marked_pads(std::vector<int32_t> & span, int32_t pad, int every, int 
 
 std::vector<int32_t> prompt_body(const TranscribeConfig & config, const TranscribeTokenizer & tokenizer,
                                  const std::string & prompt) {
-    if (!prompt.empty()) {
+    if (!strip_whitespace(prompt).empty()) {
         return tokenizer.encode("\n" + prompt);
     }
     std::vector<int32_t> body = tokenizer.encode("\n");

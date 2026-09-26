@@ -67,7 +67,6 @@ struct TranscribeConfig {
     std::string default_prompt;
     std::vector<int32_t> default_prompt_ids;
     int default_max_new_tokens = 0;
-    int encoder_frames_per_token() const;
     int samples_per_token() const;
 };
 

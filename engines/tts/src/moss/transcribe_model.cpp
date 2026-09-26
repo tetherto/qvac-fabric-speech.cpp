@@ -31,6 +31,9 @@ constexpr int MAX_CHUNK_SECONDS = 120;
 constexpr int MAX_MERGE = 64;
 constexpr int MAX_MARKER_SECONDS = 3600;
 constexpr size_t MAX_PROMPT_IDS = 4096;
+constexpr int MAX_CONTEXT = 1 << 18;
+constexpr float MIN_TOKENS_PER_SECOND = 0.01f;
+constexpr float MAX_TOKENS_PER_SECOND = (float) MAX_SAMPLE_RATE;
 constexpr int ENCODER_STRIDE = 2;
 constexpr size_t TENSOR_SLACK = 8;
 
@@ -136,16 +139,17 @@ void validate_text(const TranscribeTextConfig & text) {
     if (!within(text.n_layers, 1, MAX_LAYERS) || !within(text.n_embd, 1, MAX_WIDTH) ||
         !within(text.n_ff, 1, MAX_WIDTH * 4) || !within(text.n_heads, 1, MAX_HEADS) ||
         !within(text.n_kv_heads, 1, MAX_HEADS) || text.n_heads % text.n_kv_heads != 0 ||
-        !within(text.head_dim, 2, MAX_WIDTH) || text.head_dim % 2 != 0 || text.n_ctx_train < 1) {
+        !within(text.head_dim, 2, MAX_WIDTH) || text.head_dim % 2 != 0 || !within(text.n_ctx_train, 1, MAX_CONTEXT)) {
         fail("invalid decoder geometry");
     }
 }
 
 void validate_prompt_config(const TranscribeConfig & config) {
     if (!within(config.merge_size, 1, MAX_MERGE) || config.encoder.n_ctx % config.merge_size != 0 ||
-        !(config.audio_tokens_per_second > 0.0f) ||
+        !(config.audio_tokens_per_second >= MIN_TOKENS_PER_SECOND &&
+          config.audio_tokens_per_second <= MAX_TOKENS_PER_SECOND) ||
         !within(config.time_marker_every_seconds, 0, MAX_MARKER_SECONDS) ||
-        config.default_prompt_ids.empty() || config.default_max_new_tokens < 1) {
+        config.default_prompt_ids.empty() || !within(config.default_max_new_tokens, 1, config.text.n_ctx_train)) {
         fail("invalid prompt metadata");
     }
 }
@@ -158,10 +162,6 @@ void validate_config(const TranscribeConfig & config) {
 }
 
 } // namespace
-
-int TranscribeConfig::encoder_frames_per_token() const {
-    return merge_size;
-}
 
 int TranscribeConfig::samples_per_token() const {
     return audio.hop_length * ENCODER_STRIDE * merge_size;

@@ -25,10 +25,6 @@ void GgufMetadata::fail(const std::string & message) const {
     throw std::runtime_error(owner_ + ": " + message);
 }
 
-bool GgufMetadata::has(const std::string & key) const {
-    return gguf_find_key(file_, key.c_str()) >= 0;
-}
-
 int64_t GgufMetadata::require(const std::string & key) const {
     const int64_t id = gguf_find_key(file_, key.c_str());
     if (id < 0) {

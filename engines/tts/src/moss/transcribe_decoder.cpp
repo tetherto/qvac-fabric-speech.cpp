@@ -324,7 +324,7 @@ struct TranscribeDecoder::Impl {
         SfxGraph graph(DECODER_GRAPH_NODES);
         ggml_tensor * ids = graph.input_i32(tokens);
         ggml_tensor * positions_input = graph.input_i32(tokens);
-        ggml_tensor * mask = graph.input_f32(pos + tokens, tokens);
+        ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
         ggml_tensor * audio = plan.has_audio ? graph.input_f32(config.n_embd, tokens) : nullptr;
         ggml_tensor * audio_mask = plan.has_audio ? graph.input_f32(1, tokens) : nullptr;
         ggml_tensor * text_mask = plan.has_audio ? graph.input_f32(1, tokens) : nullptr;
@@ -338,7 +338,7 @@ struct TranscribeDecoder::Impl {
 
         model.allocate(graph);
         const std::vector<int32_t> position_data = positions(tokens);
-        const std::vector<float> mask_data = causal_mask(tokens);
+        const std::vector<float> mask_data = mask ? causal_mask(tokens) : std::vector<float>();
         set_input(ids, plan.ids);
         set_input(positions_input, position_data);
         set_input(mask, mask_data);

@@ -360,7 +360,10 @@ The input must be a 16 kHz WAV (stereo is downmixed by averaging). The CLI
 prints one `[start-end] Sxx: text` line per segment and, with `--out`, writes
 a JSON document with the raw text, the segments, the token counts, and the
 stage timings. `--prompt` replaces the default instruction (upstream's
-`examples/prompts.md` lists the English and hotword variants) and
+`examples/prompts.md` lists the English and hotword variants; a blank
+prompt keeps the default, and a custom prompt goes through the built-in
+tokenizer, so CJK punctuation in it may split differently from the Hugging
+Face tokenizer) and
 `--max-new-tokens` raises the model default of 5120, which is short for
 recordings past about fifteen minutes. There is no streaming in this mode.
 On an M1 Ultra with Metal and the f16 model, ten minutes of Spanish take

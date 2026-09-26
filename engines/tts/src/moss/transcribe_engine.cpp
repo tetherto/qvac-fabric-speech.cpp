@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 
@@ -58,6 +59,14 @@ struct TranscribeEngine::Impl {
         detail::validate_transcribe_decoder(*model);
         tokenizer = std::make_unique<TranscribeTokenizer>(*model);
         mel = std::make_unique<TranscribeMel>(model->config().audio, detail::read_mel_filters(*model));
+    }
+
+    void require_context(int prompt_tokens, int limit) const {
+        const int64_t needed = (int64_t) prompt_tokens + limit;
+        if (needed > model->config().text.n_ctx_train) {
+            fail("audio and max_new_tokens need " + std::to_string(needed) + " positions; the decoder holds " +
+                 std::to_string(model->config().text.n_ctx_train));
+        }
     }
 
     int max_new_tokens(const TranscribeRequest & request) const {
@@ -146,6 +155,7 @@ struct TranscribeEngine::Impl {
         const std::vector<int32_t> prompt = detail::transcribe_prompt(model->config(), *tokenizer,
                 result.audio_tokens, request.prompt);
         result.prompt_tokens = (int) prompt.size();
+        require_context(result.prompt_tokens, limit);
 
         const auto prefill_start = std::chrono::steady_clock::now();
         TranscribeDecoder decoder(*model, result.prompt_tokens + limit);

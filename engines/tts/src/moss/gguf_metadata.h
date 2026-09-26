@@ -12,7 +12,6 @@ class GgufMetadata {
 public:
     GgufMetadata(const gguf_context * file, std::string owner);
 
-    bool has(const std::string & key) const;
     uint32_t u32(const std::string & key) const;
     float f32(const std::string & key) const;
     bool boolean(const std::string & key) const;

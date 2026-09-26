@@ -191,6 +191,8 @@ void test_prompt_layout() {
           "empty prompt uses the stored default prompt ids");
     check(transcribe_prompt(config, tokenizer, 3, "ok") == expected_prompt(span, bytes_of("\nok")),
           "a custom prompt replaces the default");
+    check(transcribe_prompt(config, tokenizer, 3, " \n\t") == expected_prompt(span, bytes_of("\nhi")),
+          "a whitespace-only prompt falls back to the default");
 }
 
 void test_detokenizer() {
@@ -275,6 +277,18 @@ void test_model_rejections() {
     expect_model_rejects(write_transcribe_model("transcribe-prompt", WEIGHT_SEED, [](gguf_context * f) {
         gguf_remove_key(f, "moss-transcribe.default_prompt_ids");
     }), "default_prompt_ids", "default prompt ids are required");
+    expect_model_rejects(write_transcribe_model("transcribe-context", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_u32(f, "moss-transcribe.text.context_length", 0x7fffffffu);
+    }), "decoder geometry", "an oversized training context is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-new-tokens", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_u32(f, "moss-transcribe.default_max_new_tokens", TEXT_CTX + 1);
+    }), "prompt metadata", "a default token budget past the context is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-rate-high", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.audio_tokens_per_second", 1e30f);
+    }), "prompt metadata", "a huge token rate is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-rate-low", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.audio_tokens_per_second", 1e-30f);
+    }), "prompt metadata", "a vanishing token rate is rejected");
     const auto healthy = write_transcribe_model("transcribe-threads", WEIGHT_SEED);
     expect_failure([&] { TranscribeModel model(healthy.string(), false, 0); }, "threads", "zero threads rejected");
     std::filesystem::remove(healthy);
@@ -384,6 +398,10 @@ void test_engine_rejections() {
     negative.max_new_tokens = -1;
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, negative); }, "max_new_tokens",
                    "negative max_new_tokens rejected");
+    tts_cpp::moss::TranscribeRequest huge;
+    huge.max_new_tokens = 0x7fffffff;
+    expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, huge); }, "decoder holds",
+                   "a token budget past the decoder context is rejected");
     tts_cpp::moss::TranscribeRequest long_prompt;
     long_prompt.prompt = std::string(10000, 'x');
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, long_prompt); }, "prompt",
