@@ -8,8 +8,9 @@ This package exposes seven public synthesis engine APIs covering eight synthesis
 families and ten model lines: Chatterbox Turbo, Chatterbox Multilingual,
 Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, Audio8, Pocket TTS, and MOSS
 Delay. MOSS-SoundEffect adds a separate text-to-sound-effects API
-(`moss/sound_effect.h`), and LavaSR is a speech-enhancement pipeline; neither
-is a TTS synthesizer. The API
+(`moss/sound_effect.h`), MOSS-Transcribe-Diarize a speech-to-text API with
+speaker labels (`moss/transcribe.h`), and LavaSR is a speech-enhancement
+pipeline; none of them is a TTS synthesizer. The API
 count follows the installed public headers under `include/tts-cpp/`; the two
 Chatterbox families share one engine API, while the Supertonic generations
 share another.
@@ -31,6 +32,13 @@ MOSS-SoundEffect generates sound effects from a text description (up to 30
 seconds of 48 kHz mono audio). It is a text-to-audio model, not a speech
 synthesizer, and ships next to MOSS Delay because it shares the MOSS CLI and
 tokenizer. See the [MOSS guide](docs/moss.md#moss-soundeffect).
+
+MOSS-Transcribe-Diarize transcribes 16 kHz speech in one pass and labels each
+segment with its speaker and start/end timestamps. It is a speech-to-text
+model and ships next to the other MOSS engines because it shares the MOSS CLI
+and tokenizer. The f16 and q8_0 GGUFs reproduce the reference model's
+transcripts on a Spanish and Chinese long-form set (2 to 30 minutes). See the
+[MOSS guide](docs/moss.md#moss-transcribe-diarize).
 
 This directory is the in-tree `engines/tts` package in
 [`qvac-fabric-speech.cpp`](../../README.md). It consumes the system
@@ -62,6 +70,7 @@ engine, not every backend ggml can compile.
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes | untested | untested | untested |
 | MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes | untested | untested | untested |
+| MOSS-Transcribe-Diarize (speech to text with speaker labels) | model-advertised multilingual speech | none | 16 kHz input | yes | yes | untested | untested | untested |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
@@ -351,7 +360,7 @@ lane and the other machines are unchanged and are not re-stated here.
 | CosyVoice3 | [docs/cosyvoice3.md](docs/cosyvoice3.md) |
 | Audio8 | [docs/audio8.md](docs/audio8.md) |
 | Pocket TTS | [docs/pocket-tts.md](docs/pocket-tts.md) |
-| MOSS Delay and MOSS-SoundEffect | [docs/moss.md](docs/moss.md) |
+| MOSS Delay, MOSS-SoundEffect, and MOSS-Transcribe-Diarize | [docs/moss.md](docs/moss.md) |
 | LavaSR enhancement | [docs/lavasr.md](docs/lavasr.md) |
 | Build paths and repository layout | [docs/build.md](docs/build.md) |
 | CLIs, weight conversion, end-to-end runs | [docs/cli.md](docs/cli.md) |

@@ -76,6 +76,14 @@ Apache License 2.0
     Apache-2.0. The native implementation covers the Qwen3 text encoder, the
     audio DiT, the flow-matching sampler, and the DAC decoder.
 
+  MOSS-Transcribe-Diarize
+    https://github.com/OpenMOSS/MOSS-Transcribe-Diarize
+    https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize
+    The canonical repository identifies the code as Apache-2.0. The native
+    implementation covers the Whisper log-mel front end, the audio encoder,
+    the temporal-merge adaptor, the Qwen3 decoder, the prompt layout, and the
+    transcript parser.
+
 =========================================================================
 C++ dependencies
 =========================================================================
