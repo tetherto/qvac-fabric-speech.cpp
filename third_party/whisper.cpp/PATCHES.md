@@ -34,6 +34,7 @@ exists, so the manifest is meaningful without access to any tracker.
 | `src/whisper-logits-slice.h` | new file | helper implementing the vocab-logits slice above |
 | `src/whisper.cpp`, `include/whisper.h` | API additions | public controls for the logits-slice behavior and the sampling seed so bindings/addons can opt in per-decode; retain `params.seed` when applying upstream v1.9.4's decoder-0 reset |
 | `src/CMakeLists.txt` | build glue | wire whisper-logits-slice.h; install/export adjustments for the vcpkg port |
+| `src/CMakeLists.txt`, `cmake/whisper-config.cmake.in` | VitisAI helper export | export the internal object helper without its source include path and find its FlexMLRT dependency for installed static consumers; otherwise enabling VitisAI breaks CMake generation with QVAC's `whisper-targets` export |
 | `CMakeLists.txt` | install/export + robustness | export `whisper-targets`, headers under `include/whisper/`; guard `git-vars`/js-bindings config steps so source-tarball (vcpkg) builds work |
 | `cmake/git-vars.cmake` | robustness | tolerate non-git source trees (vcpkg tarballs) |
 | `cmake/whisper-config.cmake.in` | config fixes | correct find_package config for system-ggml consumers |
@@ -46,7 +47,7 @@ exists, so the manifest is meaningful without access to any tracker.
 | `tests/test-vad-gpu.cpp` | new file | pins the VAD `use_gpu=true` contract for the fix above: init must succeed and produce CPU-matching probabilities; exercises the real GPU path on GPU builds and degrades to CPU-vs-CPU elsewhere; uses only the committed silero test fixture |
 | `tests/CMakeLists.txt` | register the five tests above; gate the parakeet tests behind `WHISPER_BUILD_PARAKEET` | the new tests carry `unit` labels so they run model-free in CI; the upstream parakeet tests link the gated `parakeet` target and must follow its option |
 | `bindings/java/src/main/java/io/github/ggerganov/whispercpp/params/WhisperFullParams.java`, `bindings/java/src/main/java/io/github/ggerganov/whispercpp/params/WhisperVadParams.java` | VAD parameters exposed to the Java binding | keeps the Java surface in step with the VAD options in whisper_full_params |
-| `examples/addon.node/package.json`, `examples/addon.node/package-lock.json` | cmake-js `^7.1.1` → `^8.0.0` + npm `overrides` pinning transitive `tar` to `^7.5.21` | security: cmake-js 7.x depends on `tar ^6.2.0`, vulnerable to a decompression/parse DoS via unlimited input (GHSA-23hp-3jrh-7fpw) and further criticals fixed only in tar >= 7.5.21; the override guarantees a safe resolution, and the upstream lockfile is regenerated to match these constraints. Upstreaming candidate |
+| `examples/addon.node/package.json`, `examples/addon.node/package-lock.json` | cmake-js `^7.1.1` → `^8.0.0` + npm `overrides` pinning transitive `tar` to `^7.5.21` | security: cmake-js 7.x depends on `tar ^6.2.0`, vulnerable to a decompression/parse DoS via unlimited input (GHSA-23hp-3jrh-7fpw) and further criticals fixed only in tar >= 7.5.21; the override guarantees a safe resolution, and the upstream lockfile is regenerated to match these constraints and update vulnerable transitive dependencies flagged by npm audit. Upstreaming candidate |
 
 **Deliberately dropped from the pre-subtree fork** (not upstream, not restored):
 `examples/talk-llama/llama-hparams.{h,cpp}` carried a stray `kv_only_nextn`

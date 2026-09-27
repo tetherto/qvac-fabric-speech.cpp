@@ -41,6 +41,11 @@ endif()
 
 find_dependency(ggml CONFIG REQUIRED)
 
+if (@WHISPER_VITISAI@)
+    # The exported VitisAI helper needs the SDK target for static consumers.
+    find_dependency(FlexmlRT REQUIRED)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/whisper-targets.cmake")
 
 check_required_components(whisper)

@@ -175,7 +175,8 @@ if (WHISPER_VITISAI)
         vitisai/whisper-vitisai-encoder.cpp
         )
 
-    target_include_directories(${TARGET} PUBLIC .)
+    # QVAC: internal headers must not leak source paths into the install export.
+    target_include_directories(${TARGET} PRIVATE .)
 
     set_property(TARGET ${TARGET} PROPERTY POSITION_INDEPENDENT_CODE ON)
     set(WHISPER_EXTRA_FLAGS ${WHISPER_EXTRA_FLAGS} -DWHISPER_USE_VITISAI)
@@ -190,6 +191,9 @@ if (WHISPER_VITISAI)
 
     target_link_libraries(${TARGET} PRIVATE ggml flexmlrt::flexmlrt)
     set_target_properties(${TARGET} PROPERTIES FOLDER "libs")
+    # QVAC: static whisper retains a link-only dependency on this helper.
+    # Its objects are already part of whisper; export its usage requirements.
+    install(TARGETS ${TARGET} EXPORT whisper-targets)
 endif()
 
 # whisper

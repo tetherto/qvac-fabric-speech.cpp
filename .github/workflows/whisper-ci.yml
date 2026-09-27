@@ -16,11 +16,13 @@ on:
     paths:
       - 'third_party/whisper.cpp/**'
       - 'CMakeLists.txt'
+      - 'scripts/check-whisper-packaging.py'
       - '.github/workflows/whisper-ci.yml'
   pull_request:
     paths:
       - 'third_party/whisper.cpp/**'
       - 'CMakeLists.txt'
+      - 'scripts/check-whisper-packaging.py'
       - '.github/workflows/whisper-ci.yml'
   workflow_dispatch:
 
@@ -115,6 +117,11 @@ jobs:
 
       - name: Build
         run: cmake --build build -j4
+
+      - name: Check installed release version and VitisAI exports
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: python3 scripts/check-whisper-packaging.py --build-dir build --ggml-prefix ggml-install
 
       # Excludes gpu/perf (runner limits), medium/large (the committed
       # weightless stubs still burn minutes of zero-weight encode at those
