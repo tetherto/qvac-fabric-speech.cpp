@@ -6,7 +6,7 @@
 #include <memory>
 #include <vector>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 
 void validate_transcribe_encoder(const TranscribeModel & model);
 void validate_transcribe_decoder(const TranscribeModel & model);
@@ -39,4 +39,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

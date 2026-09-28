@@ -6,7 +6,7 @@
 
 struct gguf_context;
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 
 class GgufMetadata {
 public:
@@ -27,4 +27,4 @@ private:
     std::string owner_;
 };
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

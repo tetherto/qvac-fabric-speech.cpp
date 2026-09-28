@@ -2,18 +2,17 @@
 
 #include "moss/gguf_metadata.h"
 
-#include "backend_selection.h"
-#include "backend_util.h"
-#include "gguf_stream.h"
-#include "sched_dispatch.h"
+#include "moss/transcribe_runtime.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
 
+#include <cmath>
+#include <memory>
 #include <stdexcept>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 constexpr const char * ARCH = "moss-transcribe";
@@ -39,6 +38,10 @@ constexpr size_t TENSOR_SLACK = 8;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(std::string(OWNER) + ": " + message);
+}
+
+bool is_positive_finite(float value) {
+    return std::isfinite(value) && value > 0.0f;
 }
 
 bool within(int value, int low, int high) {
@@ -130,7 +133,7 @@ void validate_audio(const TranscribeAudioConfig & audio) {
 void validate_encoder(const TranscribeEncoderConfig & encoder, const TranscribeAudioConfig & audio) {
     if (!within(encoder.n_layers, 1, MAX_LAYERS) || !within(encoder.n_embd, 1, MAX_WIDTH) ||
         !within(encoder.n_ff, 1, MAX_WIDTH * 4) || !within(encoder.n_heads, 1, MAX_HEADS) ||
-        encoder.n_embd % encoder.n_heads != 0 || encoder.n_ctx * ENCODER_STRIDE != audio.chunk_frames) {
+        encoder.n_embd % encoder.n_heads != 0 || encoder.n_ctx * ENCODER_STRIDE != audio.chunk_frames || !is_positive_finite(encoder.eps)) {
         fail("invalid encoder geometry");
     }
 }
@@ -139,13 +142,15 @@ void validate_text(const TranscribeTextConfig & text) {
     if (!within(text.n_layers, 1, MAX_LAYERS) || !within(text.n_embd, 1, MAX_WIDTH) ||
         !within(text.n_ff, 1, MAX_WIDTH * 4) || !within(text.n_heads, 1, MAX_HEADS) ||
         !within(text.n_kv_heads, 1, MAX_HEADS) || text.n_heads % text.n_kv_heads != 0 ||
-        !within(text.head_dim, 2, MAX_WIDTH) || text.head_dim % 2 != 0 || !within(text.n_ctx_train, 1, MAX_CONTEXT)) {
+        !within(text.head_dim, 2, MAX_WIDTH) || text.head_dim % 2 != 0 || !within(text.n_ctx_train, 1, MAX_CONTEXT) ||
+        !is_positive_finite(text.rope_base) || !is_positive_finite(text.rms_eps)) {
         fail("invalid decoder geometry");
     }
 }
 
 void validate_prompt_config(const TranscribeConfig & config) {
     if (!within(config.merge_size, 1, MAX_MERGE) || config.encoder.n_ctx % config.merge_size != 0 ||
+        !is_positive_finite(config.adaptor_eps) ||
         !(config.audio_tokens_per_second >= MIN_TOKENS_PER_SECOND &&
           config.audio_tokens_per_second <= MAX_TOKENS_PER_SECOND) ||
         !within(config.time_marker_every_seconds, 0, MAX_MARKER_SECONDS) ||
@@ -173,13 +178,13 @@ struct TranscribeModel::Impl {
     ggml_context * weights = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
-    ::tts_cpp::detail::sched_fallback sched;
+    std::unique_ptr<TranscribeScheduler> scheduler;
     TranscribeConfig config;
     int n_threads = 1;
-    const SfxGraph * allocated_graph = nullptr;
+    const TranscribeGraph * allocated_graph = nullptr;
 
     ~Impl() {
-        ::tts_cpp::detail::sched_fallback_free(sched);
+        scheduler.reset();
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -210,37 +215,13 @@ struct TranscribeModel::Impl {
         mirror_metadata_tensors();
     }
 
-    void stream_tensors(::tts_cpp::detail::gguf_stream_reader & reader) {
-        for (auto * dst = ggml_get_first_tensor(weights); dst; dst = ggml_get_next_tensor(weights, dst)) {
-            if (!reader.to_backend(ggml_get_name(dst), dst)) {
-                fail(std::string("failed to load tensor: ") + ggml_get_name(dst));
-            }
-        }
-    }
-
     void upload_weights(const std::string & path) {
         weight_buffer = ggml_backend_alloc_ctx_tensors(weights, backend);
         if (!weight_buffer) {
             fail("weight allocation failed");
         }
-        ::tts_cpp::detail::gguf_stream_reader reader(file, path);
-        if (!reader.ok()) {
-            fail("cannot reopen GGUF for streaming: " + path);
-        }
-        stream_tensors(reader);
-    }
-
-    void init_backend(bool use_gpu) {
-        ::tts_cpp::detail::ensure_backends_loaded();
-        if (use_gpu) {
-            backend = ::tts_cpp::detail::init_gpu_backend(1, false, "moss-transcribe");
-        }
-        if (!backend) {
-            backend = ::tts_cpp::detail::init_cpu_backend();
-        }
-        if (!backend) {
-            fail("no compute backend available");
-        }
+        ggml_backend_buffer_set_usage(weight_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        upload_gguf_tensors(file, path, weights);
     }
 
     void read_vocabulary_size() {
@@ -263,10 +244,11 @@ struct TranscribeModel::Impl {
         }
         config = read_config(meta);
         validate_config(config);
-        init_backend(use_gpu);
+        backend = open_transcribe_backend(use_gpu);
         duplicate_metadata_tensors();
         read_vocabulary_size();
         upload_weights(path);
+        scheduler = std::make_unique<TranscribeScheduler>(backend, SCHED_NODES);
     }
 
     ggml_tensor * find(const std::string & name) const {
@@ -277,24 +259,19 @@ struct TranscribeModel::Impl {
         return tensor;
     }
 
-    void allocate(SfxGraph & graph) {
-        if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, SCHED_NODES, {weight_buffer})) {
-            fail("scheduler initialization failed");
-        }
+    void allocate(TranscribeGraph & graph) {
         allocated_graph = nullptr;
-        if (!::tts_cpp::detail::sched_fallback_alloc(sched, graph.graph())) {
+        if (!scheduler->allocate(graph.graph())) {
             fail("graph allocation failed");
         }
         allocated_graph = &graph;
     }
 
-    void compute(SfxGraph & graph) {
+    void compute(TranscribeGraph & graph) {
         if (allocated_graph != &graph) {
             fail("graph is no longer allocated; another graph ran on this model since");
         }
-        const ggml_status status = ::tts_cpp::detail::sched_fallback_compute(sched, backend,
-                graph.graph(), n_threads);
-        if (status != GGML_STATUS_SUCCESS) {
+        if (!scheduler->compute(graph.graph(), n_threads)) {
             fail("graph compute failed");
         }
     }
@@ -323,7 +300,7 @@ std::vector<int32_t> TranscribeModel::tokenizer_types() const {
     return GgufMetadata(impl_->file, OWNER).int_array("tokenizer.ggml.token_type", (size_t) impl_->config.text.vocab);
 }
 
-void TranscribeModel::allocate(SfxGraph & graph) { impl_->allocate(graph); }
-void TranscribeModel::compute(SfxGraph & graph) { impl_->compute(graph); }
+void TranscribeModel::allocate(TranscribeGraph & graph) { impl_->allocate(graph); }
+void TranscribeModel::compute(TranscribeGraph & graph) { impl_->compute(graph); }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

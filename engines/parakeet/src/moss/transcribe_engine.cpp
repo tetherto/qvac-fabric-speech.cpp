@@ -1,11 +1,11 @@
-#include "tts-cpp/moss/transcribe.h"
+#include "parakeet/moss_transcribe.h"
 
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
 
-#include "backend_selection.h"
+#include "parakeet_ctc.h"
 
 #include <algorithm>
 #include <atomic>
@@ -14,7 +14,7 @@
 #include <mutex>
 #include <stdexcept>
 
-namespace tts_cpp::moss {
+namespace parakeet::moss {
 namespace {
 
 using detail::TranscribeDecoder;
@@ -52,7 +52,7 @@ struct TranscribeEngine::Impl {
             fail("model_path is required");
         }
         if (!options.backends_dir.empty()) {
-            ::tts_cpp::detail::set_backends_directory(options.backends_dir);
+            ::parakeet::set_backends_directory(options.backends_dir);
         }
         model = std::make_unique<TranscribeModel>(options.model_path, options.use_gpu, options.n_threads);
         detail::validate_transcribe_encoder(*model);
@@ -144,6 +144,12 @@ struct TranscribeEngine::Impl {
                          const TranscribeProgress & progress) {
         TranscribeResult result;
         const int limit = max_new_tokens(request);
+        result.audio_tokens = detail::transcribe_audio_tokens(model->config(), samples);
+        const std::vector<int32_t> prompt = detail::transcribe_prompt(model->config(), *tokenizer,
+                result.audio_tokens, request.prompt);
+        result.prompt_tokens = (int) prompt.size();
+        require_context(result.prompt_tokens, limit);
+
         const auto encode_start = std::chrono::steady_clock::now();
         std::vector<float> embeddings;
         result.cancelled = !encode_audio(pcm, samples, embeddings);
@@ -151,11 +157,6 @@ struct TranscribeEngine::Impl {
         if (result.cancelled) {
             return result;
         }
-        result.audio_tokens = (int) (embeddings.size() / (size_t) model->config().text.n_embd);
-        const std::vector<int32_t> prompt = detail::transcribe_prompt(model->config(), *tokenizer,
-                result.audio_tokens, request.prompt);
-        result.prompt_tokens = (int) prompt.size();
-        require_context(result.prompt_tokens, limit);
 
         const auto prefill_start = std::chrono::steady_clock::now();
         TranscribeDecoder decoder(*model, result.prompt_tokens + limit);
@@ -207,4 +208,4 @@ const char * TranscribeEngine::backend_name() const noexcept {
     return impl_->model->backend_name();
 }
 
-} // namespace tts_cpp::moss
+} // namespace parakeet::moss

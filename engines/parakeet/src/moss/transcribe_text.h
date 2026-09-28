@@ -2,14 +2,14 @@
 
 #include "moss/transcribe_model.h"
 
-#include "tts-cpp/moss/transcribe.h"
+#include "parakeet/moss_transcribe.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 
 class TranscribeTokenizer {
 public:
@@ -70,4 +70,4 @@ private:
 std::vector<TranscriptSegment> parse_transcript(const std::string & text);
 std::string strip_whitespace(const std::string & text);
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

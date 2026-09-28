@@ -21,6 +21,9 @@
 //                                   SortformerStreamSession
 //   <parakeet/attributed.h>  - transcribe_with_speakers + the
 //                                   attributed-segment types it emits
+//   <parakeet/moss_transcribe.h> - MOSS-Transcribe-Diarize TranscribeEngine
+//                                   (separate from Engine; one-pass
+//                                   transcription with speaker labels)
 //
 // Engine families behind the umbrella `Engine` (auto-routed by GGUF
 // metadata at load time):
@@ -43,3 +46,4 @@
 #include "streaming.h"
 #include "diarization.h"
 #include "attributed.h"
+#include "moss_transcribe.h"

@@ -42,6 +42,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape offline encoder | Core ML is limited to inputs fitting the exported shape; longer offline inputs and streaming use the cache-aware ggml path at 80/160/320/560/1120 ms; empty language selects `auto` |
+| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | parakeet | model-advertised multilingual (validated es, zh) | 0.9 B | `f16`, `q8_0`, `q5_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Whisper-shaped encoder + 4x merge adaptor + Qwen3-0.6B decoder; one-pass transcription with speaker labels and timestamps (`parakeet::moss::TranscribeEngine`, `moss-transcribe` CLI); f16 and q8_0 reproduce the reference model's WER/CER on es/zh files of 2 to 30 minutes |
 
 ### End-of-utterance and diarization
 
@@ -77,7 +78,6 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-
 | Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | tts | model-advertised multilingual text | 24 kHz | `f32`, `f16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3 backbone over a 32-channel delay pattern + RVQ codec, zero-shot cloning from a reference WAV, MOSS-TTSD two-speaker dialogue, streaming chunked output, pause/duration/pronunciation controls; end-to-end synthesis validated against the released checkpoints, numeric reference parity pending |
 | MOSS-SoundEffect-v2 | tts | text prompt (sound effects, not speech) | 48 kHz | `f16`, `q8_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3-1.7B text encoder + Wan DiT flow matching + DAC decoder, up to 30 s per clip, `moss-cli --mode sfx`; every stage matches the PyTorch pipeline (f16 at cosine 0.99998 or better, q8_0 at 0.9987 after eight sampling steps) |
-| MOSS-Transcribe-Diarize | tts | model-advertised multilingual speech | 16 kHz input | `f16`, `q8_0`; converter also writes `q5_0`, `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Whisper-shaped encoder + 4x merge adaptor + Qwen3-0.6B decoder, one-pass transcription with speaker labels and timestamps, `moss-cli --mode transcribe`; greedy transcripts identical to the Hugging Face model on es/zh files of 2 to 30 minutes |
 
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
@@ -227,8 +227,8 @@ These engines ship inside [QVAC](https://github.com/tetherto/qvac) as SDK addons
 | Component | Code license | Model weights |
 |---|---|---|
 | `third_party/whisper.cpp` | MIT | MIT (OpenAI Whisper), Silero VAD models under their own terms |
-| `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License |
-| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, MOSS-SoundEffect, and MOSS-Transcribe-Diarize Apache-2.0; Supertonic OpenRAIL-M |
+| `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License and MOSS-Transcribe-Diarize under Apache-2.0 |
+| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, and MOSS-SoundEffect Apache-2.0; Supertonic OpenRAIL-M |
 | `engines/audiogen` | MIT | ACE-Step 1.5 MIT, Qwen3-Embedding Apache-2.0, MiniMax-Music3 Community License |
 
 Per-engine `NOTICE` files list every third-party dependency and its license.

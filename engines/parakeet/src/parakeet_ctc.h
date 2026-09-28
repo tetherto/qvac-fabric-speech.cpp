@@ -455,6 +455,9 @@ using ParakeetModel = ParakeetCtcModel;
 // process-wide singleton); see implementation comments for the
 // detailed lifetime contract.
 void set_backends_directory(const std::string & dir);
+
+ggml_backend_t init_engine_backend(bool use_gpu);
+ggml_backend_t init_engine_cpu_backend();
 void set_opencl_cache_dir(const std::string & dir);
 
 int load_from_gguf(const std::string & gguf_path,

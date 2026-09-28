@@ -3,7 +3,7 @@
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
 
-#include "tts-cpp/moss/transcribe.h"
+#include "parakeet/moss_transcribe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-using namespace tts_cpp::moss::detail;
+using namespace parakeet::moss::detail;
 
 namespace {
 
@@ -126,15 +126,15 @@ void test_prefill(const Fixture & fixture) {
 }
 
 void test_end_to_end(const Fixture & fixture, const std::string & model_path, bool use_gpu) {
-    tts_cpp::moss::TranscribeOptions options;
+    parakeet::moss::TranscribeOptions options;
     options.model_path = model_path;
     options.use_gpu = use_gpu;
     options.n_threads = PARITY_THREADS;
-    tts_cpp::moss::TranscribeEngine engine(options);
-    tts_cpp::moss::TranscribeRequest request;
+    parakeet::moss::TranscribeEngine engine(options);
+    parakeet::moss::TranscribeRequest request;
     std::vector<int32_t> reference = read_bin<int32_t>(fixture.dir / "generated_ids.bin");
     request.max_new_tokens = (int) reference.size();
-    const tts_cpp::moss::TranscribeResult result = engine.transcribe(fixture.audio.data(), fixture.audio.size(),
+    const parakeet::moss::TranscribeResult result = engine.transcribe(fixture.audio.data(), fixture.audio.size(),
             engine.sample_rate(), request);
     const std::string expected = strip_whitespace(read_text(fixture.dir / "text.txt"));
     std::printf("transcript match: %s\n", result.text == expected ? "exact" : "differs");

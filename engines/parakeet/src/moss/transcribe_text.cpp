@@ -1,13 +1,14 @@
 #include "moss/transcribe_text.h"
 
-#include "qwen_tokenizer.h"
+#include "moss/transcribe_bpe.h"
 
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <unordered_map>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 constexpr int32_t TOKEN_TYPE_CONTROL = 3;
@@ -83,10 +84,10 @@ size_t utf8_length(unsigned char lead) {
 
 using ByteMap = std::unordered_map<std::string, char>;
 
-ByteMap reverse_byte_map(const QwenTokenizer & tokenizer) {
+ByteMap reverse_byte_map(const QwenByteBpe & tokenizer) {
     ByteMap map;
     for (int byte = 0; byte < 256; ++byte) {
-        map.emplace(tokenizer.byte2u[byte], (char) byte);
+        map.emplace(tokenizer.byte_symbols()[(size_t) byte], (char) byte);
     }
     return map;
 }
@@ -101,20 +102,6 @@ std::string bytes_of(const std::string & token, const ByteMap & map) {
         i += length;
     }
     return bytes;
-}
-
-void load_vocabulary(QwenTokenizer & tokenizer, const std::vector<std::string> & tokens) {
-    tokenizer.vocab.reserve(tokens.size());
-    for (size_t id = 0; id < tokens.size(); ++id) {
-        tokenizer.vocab.emplace(tokens[id], (int) id);
-    }
-}
-
-void load_merges(QwenTokenizer & tokenizer, const std::vector<std::string> & merges) {
-    tokenizer.merge_rank.reserve(merges.size());
-    for (size_t rank = 0; rank < merges.size(); ++rank) {
-        tokenizer.merge_rank.emplace(merges[rank], (int) rank);
-    }
 }
 
 void append(std::vector<int32_t> & ids, const std::vector<int32_t> & more) {
@@ -168,8 +155,11 @@ std::vector<int32_t> prompt_body(const TranscribeConfig & config, const Transcri
 } // namespace
 
 struct TranscribeTokenizer::Impl {
-    mutable QwenTokenizer tokenizer;
+    QwenByteBpe tokenizer;
     std::vector<std::string> pieces;
+
+    Impl(const std::vector<std::string> & tokens, const std::vector<std::string> & merges)
+        : tokenizer(tokens, merges) {}
 
     void build_pieces(const std::vector<std::string> & tokens, const std::vector<int32_t> & types) {
         const ByteMap map = reverse_byte_map(tokenizer);
@@ -189,13 +179,11 @@ struct TranscribeTokenizer::Impl {
 
 TranscribeTokenizer::TranscribeTokenizer(const std::vector<std::string> & tokens,
                                          const std::vector<std::string> & merges,
-                                         const std::vector<int32_t> & types) : impl_(new Impl) {
+                                         const std::vector<int32_t> & types) {
     if (tokens.empty() || merges.empty()) {
         fail("GGUF is missing the tokenizer vocabulary");
     }
-    impl_->tokenizer.build_byte_map();
-    load_vocabulary(impl_->tokenizer, tokens);
-    load_merges(impl_->tokenizer, merges);
+    impl_ = std::make_unique<Impl>(tokens, merges);
     impl_->build_pieces(tokens, types);
 }
 
@@ -205,8 +193,7 @@ TranscribeTokenizer::TranscribeTokenizer(const TranscribeModel & model)
 TranscribeTokenizer::~TranscribeTokenizer() = default;
 
 std::vector<int32_t> TranscribeTokenizer::encode(const std::string & text) const {
-    const std::vector<int> ids = impl_->tokenizer.encode(text);
-    return std::vector<int32_t>(ids.begin(), ids.end());
+    return impl_->tokenizer.encode(text);
 }
 
 std::string TranscribeTokenizer::decode(const std::vector<int32_t> & ids) const {
@@ -451,4 +438,4 @@ std::vector<TranscriptSegment> parse_transcript(const std::string & text) {
     return segments;
 }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

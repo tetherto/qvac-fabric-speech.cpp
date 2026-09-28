@@ -1,6 +1,6 @@
 #pragma once
 
-#include "moss/sfx_model.h"
+#include "moss/transcribe_runtime.h"
 
 #include <cstdint>
 #include <memory>
@@ -11,7 +11,7 @@ struct ggml_backend;
 struct ggml_context;
 struct ggml_tensor;
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 
 struct TranscribeAudioConfig {
     int sample_rate = 0;
@@ -85,12 +85,12 @@ public:
     std::vector<std::string> tokenizer_merges() const;
     std::vector<int32_t> tokenizer_types() const;
 
-    void allocate(SfxGraph & graph);
-    void compute(SfxGraph & graph);
+    void allocate(TranscribeGraph & graph);
+    void compute(TranscribeGraph & graph);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

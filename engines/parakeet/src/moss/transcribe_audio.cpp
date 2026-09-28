@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 constexpr double TWO_PI = 6.283185307179586476925286766559;
@@ -221,4 +221,4 @@ int transcribe_audio_tokens(const TranscribeConfig & config, size_t samples) {
     return (int) (chunks - 1) * transcribe_chunk_tokens(config, length) + transcribe_chunk_tokens(config, tail);
 }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

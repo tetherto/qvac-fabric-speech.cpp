@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 std::vector<std::string> read_strings(const gguf_context * file, int64_t id) {
@@ -91,4 +91,4 @@ std::vector<int32_t> GgufMetadata::int_array(const std::string & key, size_t max
     return std::vector<int32_t>(data, data + count);
 }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

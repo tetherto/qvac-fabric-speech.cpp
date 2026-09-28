@@ -1,13 +1,113 @@
 #pragma once
 
-#include "gguf_fixtures.h"
+#include "moss/transcribe_bpe.h"
 
+#include "ggml.h"
+#include "gguf.h"
+
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <random>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace moss_transcribe_fixtures {
 
-using moss_fixtures::GgufBuilder;
+constexpr int SPECIALS = 8;
+constexpr int TEXT_VOCAB = SPECIALS + 256;
+constexpr float RANDOM_WEIGHT_RANGE = 0.5f;
+constexpr size_t FIXTURE_ARENA_BYTES = 16 * 1024 * 1024;
+
+using TensorShapes = std::map<std::string, std::pair<int64_t, int64_t>>;
+using ConstantTensors = std::map<std::string, float>;
+
+inline std::filesystem::path temp_gguf(const char * tag) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path() /
+        ("moss-" + std::string(tag) + "-" + std::to_string(stamp) + ".gguf");
+}
+
+struct GgufBuilder {
+    gguf_context * file;
+    ggml_context * tensors;
+    ConstantTensors constants;
+    TensorShapes shapes;
+    std::mt19937 * random = nullptr;
+
+    GgufBuilder() : file(gguf_init_empty()), tensors(ggml_init({FIXTURE_ARENA_BYTES, nullptr, false})) {}
+
+    ~GgufBuilder() {
+        ggml_free(tensors);
+        gguf_free(file);
+    }
+
+    void fill_constant(ggml_tensor * tensor, float value) {
+        for (int64_t i = 0; i < ggml_nelements(tensor); ++i) {
+            ((float *) tensor->data)[i] = value;
+        }
+    }
+
+    void fill_random(ggml_tensor * tensor) {
+        std::uniform_real_distribution<float> draw(-RANDOM_WEIGHT_RANGE, RANDOM_WEIGHT_RANGE);
+        for (int64_t i = 0; i < ggml_nelements(tensor); ++i) {
+            ((float *) tensor->data)[i] = draw(*random);
+        }
+    }
+
+    void fill(ggml_tensor * tensor, const std::string & name) {
+        const auto found = constants.find(name);
+        if (found != constants.end()) {
+            fill_constant(tensor, found->second);
+        } else {
+            fill_random(tensor);
+        }
+    }
+
+    void register_tensor(ggml_tensor * tensor, const std::string & name) {
+        fill(tensor, name);
+        ggml_set_name(tensor, name.c_str());
+        gguf_add_tensor(file, tensor);
+    }
+
+    void add1(const std::string & name, int64_t n) {
+        register_tensor(ggml_new_tensor_1d(tensors, GGML_TYPE_F32, n), name);
+    }
+
+    void add2(const std::string & name, int64_t ne0, int64_t ne1) {
+        const auto shaped = shapes.find(name);
+        if (shaped != shapes.end()) {
+            ne0 = shaped->second.first;
+            ne1 = shaped->second.second;
+        }
+        register_tensor(ggml_new_tensor_2d(tensors, GGML_TYPE_F32, ne0, ne1), name);
+    }
+
+    void write(const std::filesystem::path & path) {
+        if (!gguf_write_to_file(file, path.string().c_str(), false)) {
+            throw std::runtime_error("cannot write test GGUF");
+        }
+    }
+};
+
+inline std::vector<std::string> byte_complete_vocab() {
+    std::vector<std::string> tokens(TEXT_VOCAB);
+    tokens[0] = "<|endoftext|>";
+    tokens[1] = "<|im_start|>";
+    tokens[2] = "<|im_end|>";
+    for (int i = 3; i < SPECIALS; ++i) {
+        tokens[(size_t) i] = "tok" + std::to_string(i);
+    }
+    const parakeet::moss::detail::QwenByteBpe byte_map({}, {});
+    for (int b = 0; b < 256; ++b) {
+        tokens[(size_t) (SPECIALS + b)] = byte_map.byte_symbols()[(size_t) b];
+    }
+    return tokens;
+}
 
 constexpr int SAMPLE_RATE = 8000;
 constexpr int N_FFT = 16;
@@ -46,7 +146,7 @@ const char * const SYSTEM_PROMPT = "sys";
 const char * const DEFAULT_PROMPT = "hi";
 
 inline std::vector<std::string> transcribe_vocab() {
-    std::vector<std::string> tokens = moss_fixtures::byte_complete_vocab();
+    std::vector<std::string> tokens = byte_complete_vocab();
     tokens[TOKEN_AUDIO_START] = "<|audio_start|>";
     tokens[TOKEN_AUDIO_END] = "<|audio_end|>";
     tokens[TOKEN_AUDIO_PAD] = "<|audio_pad|>";
@@ -55,8 +155,8 @@ inline std::vector<std::string> transcribe_vocab() {
 }
 
 inline std::vector<int32_t> transcribe_token_types() {
-    std::vector<int32_t> types(moss_fixtures::TEXT_VOCAB, TOKEN_TYPE_NORMAL);
-    for (int id = 0; id < moss_fixtures::SPECIALS; ++id) {
+    std::vector<int32_t> types(TEXT_VOCAB, TOKEN_TYPE_NORMAL);
+    for (int id = 0; id < SPECIALS; ++id) {
         types[(size_t) id] = TOKEN_TYPE_CONTROL;
     }
     types[TOKEN_USER_DEFINED] = TOKEN_TYPE_USER_DEFINED;
@@ -64,7 +164,7 @@ inline std::vector<int32_t> transcribe_token_types() {
 }
 
 inline int32_t byte_token(unsigned char byte) {
-    return moss_fixtures::SPECIALS + byte;
+    return SPECIALS + byte;
 }
 
 inline void add_audio_meta(gguf_context * f) {
@@ -143,7 +243,7 @@ inline void add_meta(gguf_context * f) {
 }
 
 inline void transcribe_add_f16_kernel(GgufBuilder & b, const std::string & name, int64_t in, int64_t out) {
-    std::uniform_real_distribution<float> draw(-moss_fixtures::RANDOM_WEIGHT_RANGE, moss_fixtures::RANDOM_WEIGHT_RANGE);
+    std::uniform_real_distribution<float> draw(-RANDOM_WEIGHT_RANGE, RANDOM_WEIGHT_RANGE);
     ggml_tensor * tensor = ggml_new_tensor_3d(b.tensors, GGML_TYPE_F16, CONV_KERNEL, in, out);
     auto * data = (ggml_fp16_t *) tensor->data;
     for (int64_t i = 0; i < ggml_nelements(tensor); ++i) {
@@ -187,7 +287,7 @@ inline void transcribe_add_encoder_tensors(GgufBuilder & b) {
 inline void transcribe_add_text_tensors(GgufBuilder & b) {
     const int64_t q_dim = (int64_t) TEXT_HEADS * TEXT_HEAD_DIM;
     const int64_t kv_dim = (int64_t) TEXT_KV_HEADS * TEXT_HEAD_DIM;
-    b.add2("text.token_embd.weight", TEXT_EMBD, moss_fixtures::TEXT_VOCAB);
+    b.add2("text.token_embd.weight", TEXT_EMBD, TEXT_VOCAB);
     b.add1("text.output_norm.weight", TEXT_EMBD);
     b.add1("text.blk.0.attn_norm.weight", TEXT_EMBD);
     b.add2("text.blk.0.attn_q.weight", TEXT_EMBD, q_dim);
@@ -204,17 +304,17 @@ inline void transcribe_add_text_tensors(GgufBuilder & b) {
 
 inline std::filesystem::path write_transcribe_model(const char * tag, uint32_t seed,
         const std::function<void(gguf_context *)> & mutate_meta = [](gguf_context *) {},
-        const moss_fixtures::TensorShapes & shapes = {}) {
+        const TensorShapes & shapes = {}) {
     std::mt19937 rng(seed);
     GgufBuilder b;
     b.random = &rng;
     b.shapes = shapes;
-    b.constants["audio.mel_filters"] = {GGML_TYPE_F32, MEL_FILTER_WEIGHT};
+    b.constants["audio.mel_filters"] = MEL_FILTER_WEIGHT;
     add_meta(b.file);
     mutate_meta(b.file);
     transcribe_add_encoder_tensors(b);
     transcribe_add_text_tensors(b);
-    const auto path = moss_fixtures::temp_gguf(tag);
+    const auto path = temp_gguf(tag);
     b.write(path);
     return path;
 }

@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 constexpr int ENCODER_GRAPH_NODES = 8192;
@@ -77,7 +77,7 @@ void validate_front_end(const TranscribeModel & model) {
 struct EncoderGraph {
     TranscribeModel & model;
     const TranscribeEncoderConfig & config;
-    SfxGraph & graph;
+    TranscribeGraph & graph;
 
     ggml_context * ctx() const { return graph.ctx(); }
 
@@ -199,7 +199,7 @@ TranscribeChunkEncoding encode_audio_chunk(TranscribeModel & model, const std::v
                                            bool keep_encoder_states) {
     validate_chunk(model, mel, tokens);
     const TranscribeConfig & config = model.config();
-    SfxGraph graph(ENCODER_GRAPH_NODES);
+    TranscribeGraph graph(ENCODER_GRAPH_NODES);
     EncoderGraph builder{model, config.encoder, graph};
     ggml_tensor * input = graph.input_f32(config.audio.chunk_frames, config.audio.n_mels);
     ggml_tensor * states = builder.encode(input);
@@ -220,4 +220,4 @@ TranscribeChunkEncoding encode_audio_chunk(TranscribeModel & model, const std::v
     return encoding;
 }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

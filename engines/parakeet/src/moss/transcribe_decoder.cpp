@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 constexpr int DECODER_GRAPH_NODES = 8192;
@@ -177,7 +177,7 @@ struct TranscribeDecoder::Impl {
                 cache->nb[1] * config.head_dim, 0);
     }
 
-    void store_cache(SfxGraph & graph, int layer, ggml_tensor * k, ggml_tensor * v, int64_t tokens) const {
+    void store_cache(TranscribeGraph & graph, int layer, ggml_tensor * k, ggml_tensor * v, int64_t tokens) const {
         ggml_context * ctx = graph.ctx();
         ggml_tensor * k_rows = ggml_reshape_2d(ctx, ggml_cont(ctx, k), kv_dim(), tokens);
         ggml_tensor * v_rows = ggml_reshape_2d(ctx, ggml_cont(ctx, v), kv_dim(), tokens);
@@ -186,7 +186,7 @@ struct TranscribeDecoder::Impl {
                 value_columns(ctx, layer, pos, tokens)));
     }
 
-    ggml_tensor * attention(SfxGraph & graph, int layer, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
+    ggml_tensor * attention(TranscribeGraph & graph, int layer, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
                             ggml_tensor * mask) const {
         ggml_context * ctx = graph.ctx();
         const int64_t total = pos + tokens;
@@ -220,7 +220,7 @@ struct TranscribeDecoder::Impl {
                 FFN_DOWN_ACCUMULATION_SCALE);
     }
 
-    ggml_tensor * block(SfxGraph & graph, int layer, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
+    ggml_tensor * block(TranscribeGraph & graph, int layer, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
                         ggml_tensor * mask) const {
         ggml_context * ctx = graph.ctx();
         ggml_tensor * attended = attention(graph, layer, rms_norm(ctx, cur, weight(layer, "attn_norm.weight")),
@@ -230,7 +230,7 @@ struct TranscribeDecoder::Impl {
         return ggml_add(ctx, cur, fed);
     }
 
-    ggml_tensor * blocks(SfxGraph & graph, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
+    ggml_tensor * blocks(TranscribeGraph & graph, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
                          ggml_tensor * mask) const {
         for (int layer = 0; layer < config.n_layers; ++layer) {
             cur = block(graph, layer, cur, tokens, positions, mask);
@@ -262,7 +262,7 @@ struct TranscribeDecoder::Impl {
         return ggml_mul_mat(ctx, model.tensor("text.token_embd.weight"), last);
     }
 
-    ggml_tensor * embed(SfxGraph & graph, const BatchPlan & plan, ggml_tensor * ids, ggml_tensor * audio,
+    ggml_tensor * embed(TranscribeGraph & graph, const BatchPlan & plan, ggml_tensor * ids, ggml_tensor * audio,
                         ggml_tensor * audio_mask, ggml_tensor * text_mask) const {
         ggml_context * ctx = graph.ctx();
         ggml_tensor * text = ggml_get_rows(ctx, model.tensor("text.token_embd.weight"), ids);
@@ -321,7 +321,7 @@ struct TranscribeDecoder::Impl {
         if (pos + tokens > n_ctx) {
             fail("decoder context overflow");
         }
-        SfxGraph graph(DECODER_GRAPH_NODES);
+        TranscribeGraph graph(DECODER_GRAPH_NODES);
         ggml_tensor * ids = graph.input_i32(tokens);
         ggml_tensor * positions_input = graph.input_i32(tokens);
         ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
@@ -403,4 +403,4 @@ std::vector<float> TranscribeDecoder::step(int32_t id) {
 int TranscribeDecoder::position() const { return impl_->pos; }
 int TranscribeDecoder::context() const { return impl_->n_ctx; }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

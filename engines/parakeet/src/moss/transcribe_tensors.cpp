@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 namespace {
 
 [[noreturn]] void fail(const ggml_tensor * tensor, const char * problem) {
@@ -45,4 +45,4 @@ void require_transcribe_kernel(const ggml_tensor * tensor, int64_t width, int64_
     }
 }
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

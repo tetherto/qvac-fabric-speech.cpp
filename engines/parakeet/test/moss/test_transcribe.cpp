@@ -1,11 +1,11 @@
 #include "transcribe_fixtures.h"
 
-#include "moss/cli.h"
+#include "moss/transcribe_cli.h"
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
-#include "tts-cpp/moss/transcribe.h"
+#include "parakeet/moss_transcribe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +17,7 @@
 #include <vector>
 
 using namespace moss_transcribe_fixtures;
-using namespace tts_cpp::moss::detail;
+using namespace parakeet::moss::detail;
 
 namespace {
 
@@ -34,6 +34,8 @@ constexpr int REFERENCE_SAMPLES = 1980480;
 constexpr int REFERENCE_AUDIO_TOKENS = 1548;
 constexpr int REFERENCE_SPAN = 1600;
 constexpr int CACHE_ALIGNMENT = 256;
+constexpr int SHORT_CONTEXT = 64;
+constexpr int OVER_CONTEXT_CHUNKS = 10;
 
 int failures = 0;
 
@@ -231,7 +233,7 @@ void test_parser_edge_cases() {
 void test_parser_streaming() {
     const std::string text = "[0.50][S01] hello [1.25][1.25][S02]world[2.00]";
     TranscriptParser parser;
-    std::vector<tts_cpp::moss::TranscriptSegment> streamed;
+    std::vector<parakeet::moss::TranscriptSegment> streamed;
     for (char ch : text) {
         const auto emitted = parser.feed(std::string(1, ch));
         streamed.insert(streamed.end(), emitted.begin(), emitted.end());
@@ -245,7 +247,7 @@ void test_model_loads() {
     const auto path = write_transcribe_model("transcribe-load", WEIGHT_SEED);
     TranscribeModel model(path.string(), false, 1);
     const TranscribeConfig & config = model.config();
-    check(config.text.vocab == moss_fixtures::TEXT_VOCAB, "vocabulary size comes from the embedding table");
+    check(config.text.vocab == TEXT_VOCAB, "vocabulary size comes from the embedding table");
     check(config.samples_per_token() == HOP * 2 * MERGE, "samples per token follow hop, stride and merge");
     check(config.default_prompt_ids.size() == 2, "default prompt ids load");
     validate_transcribe_encoder(model);
@@ -283,6 +285,18 @@ void test_model_rejections() {
     expect_model_rejects(write_transcribe_model("transcribe-new-tokens", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_u32(f, "moss-transcribe.default_max_new_tokens", TEXT_CTX + 1);
     }), "prompt metadata", "a default token budget past the context is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-rope", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.text.rope.freq_base", 0.0f);
+    }), "decoder geometry", "a zero RoPE base is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-rms-eps", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.text.attention.layer_norm_rms_epsilon", NAN);
+    }), "decoder geometry", "a non-finite RMS epsilon is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-enc-eps", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.encoder.attention.layer_norm_epsilon", -1.0f);
+    }), "encoder geometry", "a negative encoder epsilon is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-adaptor-eps", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_f32(f, "moss-transcribe.adaptor.layer_norm_epsilon", INFINITY);
+    }), "prompt metadata", "an infinite adaptor epsilon is rejected");
     expect_model_rejects(write_transcribe_model("transcribe-rate-high", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_f32(f, "moss-transcribe.audio_tokens_per_second", 1e30f);
     }), "prompt metadata", "a huge token rate is rejected");
@@ -295,7 +309,7 @@ void test_model_rejections() {
 }
 
 void test_network_rejections() {
-    const auto shapes = moss_fixtures::TensorShapes{{"adaptor.fc1.weight", {ENC_EMBD, TEXT_EMBD}}};
+    const auto shapes = TensorShapes{{"adaptor.fc1.weight", {ENC_EMBD, TEXT_EMBD}}};
     const auto path = write_transcribe_model("transcribe-adaptor", WEIGHT_SEED, [](gguf_context *) {}, shapes);
     TranscribeModel model(path.string(), false, 1);
     expect_failure([&] { validate_transcribe_encoder(model); }, "adaptor.fc1.weight", "adaptor width is validated");
@@ -345,7 +359,7 @@ void test_decoder_batches() {
     const std::vector<int32_t> prompt = tiny_prompt(5);
     const std::vector<float> audio = random_signal((size_t) 5 * TEXT_EMBD, AUDIO_SEED);
     const std::vector<float> whole = prefill_logits(model, prompt, audio, (int) prompt.size());
-    check(whole.size() == (size_t) moss_fixtures::TEXT_VOCAB, "prefill returns one logit per vocabulary entry");
+    check(whole.size() == (size_t) TEXT_VOCAB, "prefill returns one logit per vocabulary entry");
     check(max_abs_diff(prefill_logits(model, prompt, audio, 1), whole) < LOGIT_TOLERANCE,
           "token-by-token prefill matches a single batch");
     check(max_abs_diff(prefill_logits(model, prompt, audio, 3), whole) < LOGIT_TOLERANCE,
@@ -363,8 +377,8 @@ void test_decoder_batches() {
     std::filesystem::remove(path);
 }
 
-tts_cpp::moss::TranscribeOptions tiny_options(const std::filesystem::path & path) {
-    tts_cpp::moss::TranscribeOptions options;
+parakeet::moss::TranscribeOptions tiny_options(const std::filesystem::path & path) {
+    parakeet::moss::TranscribeOptions options;
     options.model_path = path.string();
     options.n_threads = 1;
     return options;
@@ -372,14 +386,14 @@ tts_cpp::moss::TranscribeOptions tiny_options(const std::filesystem::path & path
 
 void test_engine_end_to_end() {
     const auto path = write_transcribe_model("transcribe-engine", WEIGHT_SEED);
-    tts_cpp::moss::TranscribeEngine engine(tiny_options(path));
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
     const std::vector<float> audio = random_signal(CHUNK_SAMPLES * 2 + 40, AUDIO_SEED);
     const auto result = engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE);
     check(!result.cancelled, "a tiny transcription completes");
     check(result.audio_tokens == 2 * CHUNK_TOKENS + 2, "audio tokens cover full and partial chunks");
     check(result.generated_tokens <= DEFAULT_MAX_NEW_TOKENS, "the model default caps generation");
     check(result.prompt_tokens > result.audio_tokens, "the prompt wraps the audio span");
-    tts_cpp::moss::TranscribeRequest request;
+    parakeet::moss::TranscribeRequest request;
     request.max_new_tokens = 2;
     check(engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, request).generated_tokens <= 2,
           "max_new_tokens overrides the default");
@@ -389,33 +403,44 @@ void test_engine_end_to_end() {
 
 void test_engine_rejections() {
     const auto path = write_transcribe_model("transcribe-reject", WEIGHT_SEED);
-    tts_cpp::moss::TranscribeEngine engine(tiny_options(path));
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
     const std::vector<float> audio = random_signal(CHUNK_SAMPLES, AUDIO_SEED);
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE * 2); }, "sampled at",
                    "wrong sample rate rejected");
     expect_failure([&] { engine.transcribe(audio.data(), 0, SAMPLE_RATE); }, "empty", "empty audio rejected");
-    tts_cpp::moss::TranscribeRequest negative;
+    parakeet::moss::TranscribeRequest negative;
     negative.max_new_tokens = -1;
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, negative); }, "max_new_tokens",
                    "negative max_new_tokens rejected");
-    tts_cpp::moss::TranscribeRequest huge;
+    parakeet::moss::TranscribeRequest huge;
     huge.max_new_tokens = 0x7fffffff;
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, huge); }, "decoder holds",
                    "a token budget past the decoder context is rejected");
-    tts_cpp::moss::TranscribeRequest long_prompt;
+    parakeet::moss::TranscribeRequest long_prompt;
     long_prompt.prompt = std::string(10000, 'x');
     expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, long_prompt); }, "prompt",
                    "oversized prompt rejected");
-    expect_failure([] { tts_cpp::moss::TranscribeEngine missing(tts_cpp::moss::TranscribeOptions{}); }, "model_path",
+    expect_failure([] { parakeet::moss::TranscribeEngine missing(parakeet::moss::TranscribeOptions{}); }, "model_path",
                    "model path required");
+    std::filesystem::remove(path);
+}
+
+void test_engine_rejects_over_context_audio() {
+    const auto path = write_transcribe_model("transcribe-short-context", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_u32(f, "moss-transcribe.text.context_length", SHORT_CONTEXT);
+    });
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
+    const std::vector<float> audio = random_signal((size_t) CHUNK_SAMPLES * OVER_CONTEXT_CHUNKS, AUDIO_SEED);
+    expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE); }, "decoder holds",
+                   "audio past the decoder context is rejected");
     std::filesystem::remove(path);
 }
 
 void test_engine_cancel() {
     const auto path = write_transcribe_model("transcribe-cancel", WEIGHT_SEED, [](gguf_context * f) {
-        gguf_set_val_u32(f, "moss-transcribe.token.im_end", moss_fixtures::TEXT_VOCAB - 1);
+        gguf_set_val_u32(f, "moss-transcribe.token.im_end", TEXT_VOCAB - 1);
     });
-    tts_cpp::moss::TranscribeEngine engine(tiny_options(path));
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
     const std::vector<float> audio = random_signal(CHUNK_SAMPLES, AUDIO_SEED);
     int calls = 0;
     const auto result = engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, {},
@@ -425,29 +450,39 @@ void test_engine_cancel() {
 }
 
 void test_cli_flags() {
-    using tts_cpp::moss::cli::CliArgs;
-    using tts_cpp::moss::cli::parse_args;
-    const char * full[] = {"moss-cli", "--mode", "transcribe", "--model", "t.gguf", "--audio", "a.wav",
-                           "--prompt", "p", "--max-new-tokens", "9", "--gpu"};
-    CliArgs args;
-    check(parse_args(12, full, args), "transcribe flags parse");
-    check(args.transcribe_options.model_path == "t.gguf" && args.audio_path == "a.wav" &&
-          args.transcribe_request.prompt == "p" && args.transcribe_request.max_new_tokens == 9 &&
-          args.transcribe_options.use_gpu && args.out_path.empty(), "transcribe values land in the request");
-    const char * no_audio[] = {"moss-cli", "--mode", "transcribe", "--model", "t.gguf"};
-    CliArgs missing;
-    check(!parse_args(5, no_audio, missing), "--audio is required");
-    const char * streaming[] = {"moss-cli", "--mode", "transcribe", "--model", "t.gguf", "--audio", "a.wav",
-                                "--stream"};
-    CliArgs stream;
-    check(!parse_args(8, streaming, stream), "--stream is rejected in transcribe mode");
+    using parakeet::moss::cli::TranscribeCliArgs;
+    using parakeet::moss::cli::parse_args;
+    const char * full[] = {"moss-transcribe", "--model", "t.gguf", "--audio", "a.wav", "--prompt", "p",
+                           "--max-new-tokens", "9", "--gpu", "--threads", "3", "--out", "o.json"};
+    TranscribeCliArgs args;
+    check(parse_args(14, full, args), "CLI flags parse");
+    check(args.options.model_path == "t.gguf" && args.audio_path == "a.wav" && args.request.prompt == "p" &&
+          args.request.max_new_tokens == 9 && args.options.use_gpu && args.options.n_threads == 3 &&
+          args.out_path == "o.json", "CLI values land in the options and the request");
+    const char * no_audio[] = {"moss-transcribe", "--model", "t.gguf"};
+    TranscribeCliArgs missing;
+    check(!parse_args(3, no_audio, missing), "--audio is required");
+    const char * unknown[] = {"moss-transcribe", "--model", "t.gguf", "--audio", "a.wav", "--stream"};
+    TranscribeCliArgs rejected;
+    check(!parse_args(6, unknown, rejected), "unknown flags are rejected");
+    const char * dangling[] = {"moss-transcribe", "--model"};
+    TranscribeCliArgs incomplete;
+    expect_failure([&] { parse_args(2, dangling, incomplete); }, "missing value", "a flag without a value");
+}
+
+void test_transcript_json_escapes() {
+    parakeet::moss::TranscribeResult result;
+    result.text = "say \"hi\"\n";
+    const std::string json = parakeet::moss::cli::transcript_json(result);
+    check(json.find("\"say \\\"hi\\\"\\n\"") != std::string::npos, "transcript JSON escapes quotes and newlines");
+    check(json.find("\"segments\": []") != std::string::npos, "an empty segment list stays valid JSON");
 }
 
 void test_transcript_json() {
-    tts_cpp::moss::TranscribeResult result;
+    parakeet::moss::TranscribeResult result;
     result.text = "[0][S01]hi[1]";
     result.segments = {{0.0, 1.0, "S01", "hi"}};
-    const std::string json = tts_cpp::moss::cli::transcript_json(result);
+    const std::string json = parakeet::moss::cli::transcript_json(result);
     check(json.find("\"speaker\": \"S01\"") != std::string::npos && json.find("\"text\": \"hi\"") != std::string::npos,
           "transcript JSON carries the segments");
 }
@@ -472,9 +507,11 @@ int main() {
         test_decoder_batches();
         test_engine_end_to_end();
         test_engine_rejections();
+        test_engine_rejects_over_context_audio();
         test_engine_cancel();
         test_cli_flags();
         test_transcript_json();
+        test_transcript_json_escapes();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected: %s\n", e.what());
         return 1;

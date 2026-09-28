@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace tts_cpp::moss::detail {
+namespace parakeet::moss::detail {
 
 class TranscribeFft {
 public:
@@ -52,4 +52,4 @@ int transcribe_chunk_tokens(const TranscribeConfig & config, size_t samples);
 int transcribe_audio_tokens(const TranscribeConfig & config, size_t samples);
 void normalize_log_mel(std::vector<float> & mel);
 
-} // namespace tts_cpp::moss::detail
+} // namespace parakeet::moss::detail

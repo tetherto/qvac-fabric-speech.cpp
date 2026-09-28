@@ -1,12 +1,12 @@
 #pragma once
-#include "tts-cpp/export.h"
+#include "parakeet/export.h"
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace tts_cpp::moss {
+namespace parakeet::moss {
 
 struct TranscribeOptions {
     std::string model_path;
@@ -41,7 +41,7 @@ struct TranscribeResult {
 
 using TranscribeProgress = std::function<bool(int generated_tokens, int max_new_tokens)>;
 
-class TTS_CPP_API TranscribeEngine {
+class PARAKEET_API TranscribeEngine {
 public:
     explicit TranscribeEngine(const TranscribeOptions & options);
     ~TranscribeEngine();
@@ -57,4 +57,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace tts_cpp::moss
+} // namespace parakeet::moss
