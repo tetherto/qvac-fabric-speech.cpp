@@ -2856,12 +2856,19 @@ ggml_tensor * conformer_ff_graph(ggml_context * ctx, ggml_tensor * x,
     return x;
 }
 
-// Transformer-XL relative shift as a view: bd is [2T-1 (position), T (query), H] and the
+// Transformer-XL relative shift as a view: bd is [P (position), T (query), H] and the
 // score bias for (key j, query i) is bd[T-1-i+j, i]. Reading each query row with a stride of
-// 2T-2 elements from offset T-1 lands exactly on that element, so no padding or copies.
+// (P - 1) elements from offset T-1 lands exactly on that element, so no padding or copies.
+// P is normally 2T-1, but when the upstream `p_perm` gets tail-zero-padded to a 32-aligned
+// row width (so the batched attention `bd = mul_mat(p_perm, q_v)` can land on the HMX F16
+// batched kernel) P grows to `hmx_align_up_32(2T-1)`. The rel-shift trick still holds because
+// only the (P - 1)-element stride depends on the actual row width, and the trailing padded
+// columns (T-1 + i0 ... P-1) are never referenced by any query row (max col reached is
+// (T-1) + (T-1) = 2T-2 < P). Parametrising on `bd->ne[0]` keeps this backward-compatible:
+// when p_perm is unpadded, `bd->ne[0] - 1 = 2T - 2` exactly.
 ggml_tensor * rel_shift_view(ggml_context * ctx, ggml_tensor * bd, int T) {
     const size_t f = sizeof(float);
-    return ggml_view_3d(ctx, bd, T, T, bd->ne[2], (size_t) (2 * T - 2) * f, bd->nb[2], (size_t) (T - 1) * f);
+    return ggml_view_3d(ctx, bd, T, T, bd->ne[2], (size_t) (bd->ne[0] - 1) * f, bd->nb[2], (size_t) (T - 1) * f);
 }
 
 struct RelPosAttnInputs {
@@ -3086,28 +3093,27 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     ggml_tensor * q_v = ggml_add(ctx, q_perm, v_bias);
     if (cap) { cap->q_perm = q_perm; cap->k_perm = k_perm; cap->q_u = q_u; }
 
-    // Batched attention matmul src0 (`k_perm`, `p_perm`, `v_for_mm`) is derived
-    // from activations so `ggml_mul_mat` currently sees an F32 src0. Casting
-    // src0 to the activation dtype lets the Hexagon dispatcher pick the F16
-    // batched HMX path (`hmx_mm_f16_f32_batched`: src0=F16, src1=F32) instead
-    // of falling through to HVX-batched-F32. Identity no-op when
+    // Batched attention matmul src0 (`k_perm`, `p_perm`, `v_for_mm`) is
+    // derived from activations so `ggml_mul_mat` currently sees an F32 src0.
+    // Casting src0 to F16 lets the Hexagon dispatcher pick the F16 batched
+    // HMX path (`hmx_mm_f16_f32_batched`: src0=F16, src1=F32) instead of
+    // falling through to HVX-batched-F32. Identity no-op when
     // PARAKEET_F16_ACTIVATIONS is OFF, preserving the F32 fast path.
     //
     // The HMX F16-batched kernel additionally requires k%32==0 and n%32==0
-    // (matmul-ops.c:3081). Parakeet's encoder T (e.g. 376 for 60 s audio)
-    // is not 32-aligned, so we also tail-zero-pad the N axis (`ne1`) of
-    // `k_perm` and the K axis (`ne0`) of `v_for_mm`. `p_perm` is intentionally
-    // not padded: `bd = mul_mat(p_perm, q_v)` feeds `rel_shift_view` whose
-    // stride math assumes `bd->ne[0] == 2T-1`; padding it would require a
-    // parallel rewrite of `rel_shift_view`. `bd` stays on the existing
-    // HVX-batched F32 path.
+    // (matmul-ops.c:3081). Parakeet's encoder T (e.g. 376 for 60 s audio) is
+    // not 32-aligned, so we also tail-zero-pad the relevant axis of every
+    // src0:
+    //   - `k_perm`   ne1=T → hmx_align_up_32(T)      (drives `ac`)
+    //   - `p_perm`   ne1=2T-1 → hmx_align_up_32(2T-1) (drives `bd`)
+    //   - `v_for_mm` ne0=T → hmx_align_up_32(T)      (drives `attn_v`)
+    // Downstream, `rel_shift_view` is parametrised on `bd->ne[0]` so its
+    // stride math walks the padded row width transparently; `ac` is sliced
+    // back to (T, T, H); the softmax output is padded on ne0 to line up
+    // with `v_for_mm`'s padded K axis. All three batched attention MULMATs
+    // then dispatch to `hmx-tiled` (F16 batched) per block × 24 blocks.
     ggml_tensor * k_perm_mm = pad_and_cast_for_hmx(ctx, k_perm, /*dim=*/1);
-    // Leave `p_perm` in F32: ne1 = 2T-1 = 751 is not 32-aligned so HMX can't
-    // take the `bd` matmul anyway, and `p_perm` is a view over the shared
-    // per-layer pos_proj cache — casting that cache tensor to F16 inside the
-    // graph pulls the pos_proj CPY into the batch and there is no in-place
-    // benefit. `bd` stays on the existing hvx-batched-f32 kernel.
-    ggml_tensor * p_perm_mm = p_perm;
+    ggml_tensor * p_perm_mm = pad_and_cast_for_hmx(ctx, p_perm, /*dim=*/1);
 
     if (T >= k_attn_block_min_T) {
         ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
