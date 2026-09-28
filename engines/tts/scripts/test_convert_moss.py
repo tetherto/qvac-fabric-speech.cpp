@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Converter coverage for the MOSS scripts: fabricates a tiny MossTTSDelay
-checkpoint, a tiny MOSS audio tokenizer and a tiny MOSS-SoundEffect pipeline on
-disk, runs the converters, and validates the emitted GGUFs (tensor census,
-mapped names, folded weights, metadata) with the gguf reader. Skips cleanly
-when numpy or gguf are absent.
+checkpoint, a tiny MOSS audio tokenizer, a tiny MOSS-SoundEffect pipeline and a
+tiny MOSS-Speech checkpoint on disk, runs the converters, and validates the
+emitted GGUFs (tensor census, mapped names, folded weights, metadata) with the
+gguf reader. The MOSS-Speech codec helpers run in-process when torch,
+safetensors and soundfile are installed. Skips cleanly when numpy or gguf are
+absent.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import struct
 import subprocess
@@ -44,6 +47,22 @@ SFX_DECODER_DIM = 8
 SFX_RATES = [2, 3]
 SFX_KERNEL = 7
 SFX_GAIN = 2.0
+SPEECH_EMBD = 32
+SPEECH_FF = 64
+SPEECH_HEADS = 2
+SPEECH_KV_HEADS = 1
+SPEECH_HEAD_DIM = 16
+SPEECH_TEXT_VOCAB = 12
+SPEECH_AUDIO_VOCAB = 10
+SPEECH_PLACEHOLDER = 9
+SPEECH_START = 8
+SPEECH_END = 7
+SPEECH_AUDIO_PAD = 6
+SPEECH_TENSORS = 6 + 11 * 3
+VQ_EMBD = 8
+VQ_MELS = 4
+VQ_CODES = 6
+VQ_KERNEL = 3
 
 
 def write_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:
@@ -447,6 +466,271 @@ def check_codec(encoder: Path, decoder: Path) -> None:
     print("codec converter: PASS")
 
 
+def speech_layer(prefix: str) -> dict[str, np.ndarray]:
+    q_dim = SPEECH_HEADS * SPEECH_HEAD_DIM
+    kv_dim = SPEECH_KV_HEADS * SPEECH_HEAD_DIM
+    return {
+        prefix + "input_layernorm.weight": np.ones(SPEECH_EMBD),
+        prefix + "self_attn.q_proj.weight": np.ones((q_dim, SPEECH_EMBD)),
+        prefix + "self_attn.k_proj.weight": np.ones((kv_dim, SPEECH_EMBD)),
+        prefix + "self_attn.v_proj.weight": np.ones((kv_dim, SPEECH_EMBD)),
+        prefix + "self_attn.o_proj.weight": np.ones((SPEECH_EMBD, q_dim)),
+        prefix + "self_attn.q_norm.weight": np.ones(SPEECH_HEAD_DIM),
+        prefix + "self_attn.k_norm.weight": np.ones(SPEECH_HEAD_DIM),
+        prefix + "post_attention_layernorm.weight": np.ones(SPEECH_EMBD),
+        prefix + "mlp.gate_proj.weight": np.ones((SPEECH_FF, SPEECH_EMBD)),
+        prefix + "mlp.up_proj.weight": np.ones((SPEECH_FF, SPEECH_EMBD)),
+        prefix + "mlp.down_proj.weight": np.ones((SPEECH_EMBD, SPEECH_FF)),
+    }
+
+
+def speech_tensors() -> dict[str, np.ndarray]:
+    tensors = {
+        "model.embed_tokens.weight": np.ones((SPEECH_TEXT_VOCAB, SPEECH_EMBD)),
+        "model.audio_embed.weight": np.ones((SPEECH_AUDIO_VOCAB, SPEECH_EMBD)),
+        "model.text_norm.weight": np.ones(SPEECH_EMBD),
+        "model.audio_norm.weight": np.ones(SPEECH_EMBD),
+        "text_lm_head.weight": np.ones((SPEECH_TEXT_VOCAB, SPEECH_EMBD)),
+        "audio_lm_head.weight": np.ones((SPEECH_AUDIO_VOCAB, SPEECH_EMBD)),
+    }
+    for block in ("shared_block", "text_block", "audio_block"):
+        tensors.update(speech_layer(f"model.{block}.layers.0."))
+    return tensors
+
+
+def speech_config() -> dict:
+    return {
+        "channels": 2,
+        "num_hidden_layers": 2,
+        "num_shared_layers": 1,
+        "num_modality_layers": 1,
+        "hidden_size": SPEECH_EMBD,
+        "intermediate_size": SPEECH_FF,
+        "num_attention_heads": SPEECH_HEADS,
+        "num_key_value_heads": SPEECH_KV_HEADS,
+        "head_dim": SPEECH_HEAD_DIM,
+        "max_position_embeddings": 512,
+        "rope_theta": 1000000.0,
+        "rms_norm_eps": 1e-6,
+        "vocab_size": SPEECH_TEXT_VOCAB,
+        "audio_vocab_size": SPEECH_AUDIO_VOCAB,
+        "modality_pad_token_id": SPEECH_PLACEHOLDER,
+        "audio_pad_token_id": SPEECH_AUDIO_PAD,
+        "sosp_token_id": SPEECH_START,
+        "eosp_token_id": SPEECH_END,
+    }
+
+
+def make_speech_checkpoint(root: Path) -> Path:
+    model_dir = root / "moss-speech"
+    model_dir.mkdir()
+    write_safetensors(model_dir / "model.safetensors", speech_tensors())
+    write_json(model_dir / "config.json", speech_config())
+    vocab = {f"tok{i}": i for i in range(3, SPEECH_TEXT_VOCAB)}
+    tokenizer = {
+        "model": {"vocab": vocab, "merges": [["t", "o"]]},
+        "added_tokens": [
+            {"id": 0, "content": "<|endoftext|>", "special": True},
+            {"id": 1, "content": "<|im_start|>", "special": True},
+            {"id": 2, "content": "<|im_end|>", "special": True},
+            {"id": 3, "content": "<|empty|>", "special": False},
+        ],
+    }
+    write_json(model_dir / "tokenizer.json", tokenizer)
+    return model_dir
+
+
+def check_speech(path: Path, matrix_type: gguf.GGMLQuantizationType) -> None:
+    names = reader_tensors(path)
+    assert len(names) == SPEECH_TENSORS, f"speech tensor census: {len(names)} != {SPEECH_TENSORS}"
+    for required in ("text.token_embd.weight", "audio.output.weight", "blk.0.attn_q_norm.weight",
+                     "text.blk.0.ffn_down.weight", "audio.blk.0.attn_output.weight"):
+        assert required in names, f"speech model is missing {required}"
+    assert reader_tensor(path, "audio.blk.0.ffn_gate.weight").tensor_type == matrix_type
+    assert reader_tensor(path, "text.output_norm.weight").tensor_type == gguf.GGMLQuantizationType.F32
+    assert int(reader_field(path, "moss-speech.block_count")[0]) == 1
+    assert int(reader_field(path, "moss-speech.modality_block_count")[0]) == 1
+    assert int(reader_field(path, "moss-speech.audio_vocab_size")[0]) == SPEECH_AUDIO_VOCAB
+    assert int(reader_field(path, "moss-speech.token.speech_end")[0]) == SPEECH_END
+    assert int(reader_field(path, "moss-speech.token.text_placeholder")[0]) == SPEECH_PLACEHOLDER
+    assert int(reader_field(path, "moss-speech.token.im_end")[0]) == 2
+    assert int(reader_field(path, "moss-speech.token.pad")[0]) == 0
+    types = list(reader_field(path, "tokenizer.ggml.token_type"))
+    assert types[0] == gguf.TokenType.CONTROL and types[3] == gguf.TokenType.USER_DEFINED
+    assert types[4] == gguf.TokenType.NORMAL, "special tokens are CONTROL, plain added tokens USER_DEFINED"
+    print(f"speech converter ({matrix_type.name}): PASS")
+
+
+def expect_speech_failure(model_dir: Path, needle: str, label: str) -> None:
+    result = subprocess.run([sys.executable, str(SCRIPTS / "convert-moss-speech-to-gguf.py"), str(model_dir),
+                             "--outfile", str(model_dir.parent / "bad-speech.gguf")], capture_output=True, text=True)
+    assert result.returncode != 0, f"{label}: converter accepted the checkpoint"
+    assert needle in result.stderr, f"{label}: wrong failure: {result.stderr[-400:]}"
+    print(f"speech converter rejects {label}: PASS")
+
+
+def check_speech_rejections(model_dir: Path) -> None:
+    config = speech_config()
+    write_json(model_dir / "config.json", {**config, "num_hidden_layers": 3})
+    expect_speech_failure(model_dir, "num_hidden_layers", "a layer split that does not add up")
+    write_json(model_dir / "config.json", config)
+    write_safetensors(model_dir / "model.safetensors", {**speech_tensors(), "model.extra.weight": np.ones(2)})
+    expect_speech_failure(model_dir, "unmapped tensor", "an unmapped tensor")
+    tensors = speech_tensors()
+    del tensors["audio_lm_head.weight"]
+    write_safetensors(model_dir / "model.safetensors", tensors)
+    expect_speech_failure(model_dir, "architecture needs", "a missing output head")
+    write_safetensors(model_dir / "model.safetensors", speech_tensors())
+
+
+def load_codec_converter():
+    try:
+        import safetensors.torch  # noqa: F401
+        import soundfile  # noqa: F401
+        import torch  # noqa: F401
+        import huggingface_hub  # noqa: F401
+    except ImportError as error:
+        print(f"SKIP: {error.name} is not installed; the speech codec helpers are untested")
+        return None
+    spec = importlib.util.spec_from_file_location("_speech_codec", SCRIPTS / "convert-moss-speech-codec-to-gguf.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_gguf(path: Path, fill) -> None:
+    writer = gguf.GGUFWriter(str(path), "moss-speech-codec")
+    try:
+        fill(writer)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+    finally:
+        writer.close()
+
+
+def vq_layer(prefix: str) -> dict:
+    import torch
+
+    tensors = {prefix + "self_attn.k_proj.weight": torch.ones(VQ_EMBD, VQ_EMBD),
+               prefix + "self_attn.q_proj.bias": torch.ones(VQ_EMBD),
+               prefix + "self_attn_layer_norm.weight": torch.ones(VQ_EMBD),
+               prefix + "self_attn.rotary.inv_freq": torch.ones(VQ_EMBD)}
+    return tensors
+
+
+def write_vq_checkpoint(codec_dir: Path) -> None:
+    import torch
+    from safetensors.torch import save_file
+
+    tensors = {"encoder.conv1.weight": torch.ones(VQ_EMBD, VQ_MELS, VQ_KERNEL),
+               "encoder.conv1.bias": torch.ones(VQ_EMBD),
+               "encoder.embed_positions.weight": torch.ones(4, VQ_EMBD),
+               "encoder.codebook.weight": torch.ones(VQ_CODES, VQ_EMBD),
+               "decoder.layers.0.fc1.weight": torch.ones(2, 2)}
+    tensors.update(vq_layer("encoder.layers.0."))
+    tensors.update(vq_layer("encoder.layers.1."))
+    save_file(tensors, str(codec_dir / "model.safetensors"))
+
+
+def check_vq_encoder(codec, root: Path, quant: str, matrix_type: gguf.GGMLQuantizationType) -> None:
+    codec_dir = root / "speech-codec"
+    out = root / f"vq-{quant}.gguf"
+    write_gguf(out, lambda writer: codec.emit_vq_encoder(writer, codec_dir, {"quantize_position": 1}, quant))
+    names = reader_tensors(out)
+    assert set(names) == {"whispervq.conv1.weight", "whispervq.conv1.bias", "whispervq.pos_embd",
+                          "whispervq.codebook", "whispervq.blk.0.attn_k.weight", "whispervq.blk.0.attn_q.bias",
+                          "whispervq.blk.0.attn_norm.weight"}, f"vq census: {sorted(names)}"
+    assert names["whispervq.conv1.bias"] == (1, VQ_EMBD), "conv biases become columns"
+    assert reader_tensor(out, "whispervq.conv1.weight").tensor_type == gguf.GGMLQuantizationType.F16
+    assert reader_tensor(out, "whispervq.blk.0.attn_k.weight").tensor_type == matrix_type
+    assert reader_tensor(out, "whispervq.codebook").tensor_type == gguf.GGMLQuantizationType.F32
+    print(f"speech codec VQ encoder ({quant}): PASS")
+
+
+def vq_config(**overrides) -> dict:
+    config = {"encoder_causal_attention": True, "encoder_causal_convolution": True, "pooling_position": 16,
+              "quantize_position": 16, "pooling_type": "avg"}
+    config.update(overrides)
+    return config
+
+
+def expect_vq_metadata_failure(codec, config: dict, needle: str, label: str) -> None:
+    try:
+        codec.add_vq_metadata(None, config, {})
+    except ValueError as error:
+        assert needle in str(error), f"{label}: wrong failure: {error}"
+        print(f"speech codec rejects {label}: PASS")
+        return
+    raise AssertionError(f"{label}: accepted")
+
+
+def check_vq_metadata(codec) -> None:
+    expect_vq_metadata_failure(codec, vq_config(encoder_causal_attention=False), "causal", "a bidirectional encoder")
+    expect_vq_metadata_failure(codec, vq_config(pooling_type="max"), "average pool", "a max pool")
+    expect_vq_metadata_failure(codec, vq_config(pooling_position=8), "average pool", "pooling before the quantizer")
+
+
+def write_campplus(path: Path) -> None:
+    def fill(writer: gguf.GGUFWriter) -> None:
+        writer.add_uint32("campplus.embed_dim", 192)
+        writer.add_float32("campplus.scale", 1.0)
+        writer.add_tensor("campplus/head.weight", np.arange(6, dtype=np.float32).reshape(2, 3))
+        writer.add_tensor("other/weight", np.ones(2, dtype=np.float32))
+
+    write_gguf(path, fill)
+
+
+def check_campplus_and_voice(codec, root: Path) -> None:
+    import soundfile
+
+    campplus = root / "campplus.gguf"
+    write_campplus(campplus)
+    voice = root / "voice.wav"
+    soundfile.write(str(voice), np.stack([np.full(40, 0.5), np.full(40, -0.1)], axis=1), 22050, subtype="FLOAT")
+    out = root / "codec-extras.gguf"
+
+    def fill(writer: gguf.GGUFWriter) -> None:
+        codec.copy_campplus(writer, campplus)
+        codec.emit_default_voice(writer, voice)
+
+    write_gguf(out, fill)
+    names = reader_tensors(out)
+    assert set(names) == {"campplus/head.weight", "voice.default_audio"}, f"extras census: {sorted(names)}"
+    head = np.asarray(reader_tensor(out, "campplus/head.weight").data, dtype=np.float32).reshape(-1)
+    assert np.array_equal(head, np.arange(6, dtype=np.float32)), "CAM++ weights are copied verbatim"
+    assert int(reader_field(out, "campplus.embed_dim")[0]) == 192
+    assert "campplus.scale" not in gguf.GGUFReader(str(out)).fields, "only uint32 CAM++ fields are copied"
+    audio = np.asarray(reader_tensor(out, "voice.default_audio").data, dtype=np.float32)
+    assert audio.shape == (40,) and np.allclose(audio, 0.2), "the default voice is downmixed to mono"
+    assert int(reader_field(out, "moss-speech-codec.voice.sample_rate")[0]) == 22050
+    print("speech codec CAM++ copy and default voice: PASS")
+
+
+def check_speech_codec(root: Path) -> None:
+    codec = load_codec_converter()
+    if codec is None:
+        return
+    (root / "speech-codec").mkdir()
+    write_vq_checkpoint(root / "speech-codec")
+    check_vq_encoder(codec, root, "f16", gguf.GGMLQuantizationType.F16)
+    check_vq_encoder(codec, root, "f32", gguf.GGMLQuantizationType.F32)
+    check_vq_metadata(codec)
+    check_campplus_and_voice(codec, root)
+
+
+def check_speech_converters(root: Path) -> None:
+    speech_dir = make_speech_checkpoint(root)
+    for outtype, matrix_type in (("f32", gguf.GGMLQuantizationType.F32), ("f16", gguf.GGMLQuantizationType.F16),
+                                 ("bf16", gguf.GGMLQuantizationType.BF16), ("q8_0", gguf.GGMLQuantizationType.Q8_0)):
+        speech_out = root / f"speech-{outtype}.gguf"
+        run_converter("convert-moss-speech-to-gguf.py",
+                      [str(speech_dir), "--outtype", outtype, "--outfile", str(speech_out)])
+        check_speech(speech_out, matrix_type)
+    check_speech_rejections(speech_dir)
+    check_speech_codec(root)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -490,6 +774,7 @@ def main() -> None:
             write_discrete_vae_checkpoint(sfx_dir)
             expect_converter_failure([str(sfx_dir), "--outfile", str(root / "bad.gguf")], "continuous DAC",
                                      "a quantized DAC checkpoint")
+        check_speech_converters(root)
     print("moss converters: OK")
 
 

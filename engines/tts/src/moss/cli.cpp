@@ -1,6 +1,7 @@
 #include "moss/cli.h"
 
 #include "dr_wav.h"
+#include "voice_features.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -27,7 +28,11 @@ void print_usage() {
         "       [--audio-repetition-penalty 1.0]\n"
         "       moss-cli --mode sfx --model sfx.gguf --text \"rain on a tin roof\" --out out.wav\n"
         "       [--seconds 10] [--negative-prompt \"...\"] [--seed 0] [--threads 4] [--gpu] [--backends-dir dir]\n"
-        "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n");
+        "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n"
+        "       moss-cli --mode s2s --model moss-speech.gguf --codec moss-speech-codec.gguf --audio question.wav\n"
+        "       [--out reply.wav] [--voice voice.wav] [--system \"...\"] [--max-reply-seconds S]\n"
+        "       [--max-new-tokens 1000] [--greedy] [--temperature 0.7] [--top-p 0.95] [--top-k 20]\n"
+        "       [--seed 0] [--text-reply] [--threads 4] [--gpu] [--backends-dir dir]\n");
 }
 
 namespace {
@@ -59,7 +64,11 @@ bool parse_mode(const std::string & value, Mode & mode) {
         mode = Mode::SoundEffect;
         return true;
     }
-    std::fprintf(stderr, "unknown mode: %s (expected tts or sfx)\n", value.c_str());
+    if (value == "s2s") {
+        mode = Mode::SpeechToSpeech;
+        return true;
+    }
+    std::fprintf(stderr, "unknown mode: %s (expected tts, sfx or s2s)\n", value.c_str());
     return false;
 }
 
@@ -68,9 +77,27 @@ void share_runtime_flags(CliArgs & args) {
     args.sound_options.use_gpu = args.options.use_gpu;
     args.sound_options.backends_dir = args.options.backends_dir;
     args.sound_request.prompt = args.text;
+    args.s2s_options.model_path = args.sound_options.model_path;
+    args.s2s_options.n_threads = args.options.n_threads;
+    args.s2s_options.use_gpu = args.options.use_gpu;
+    args.s2s_options.backends_dir = args.options.backends_dir;
+    if (args.mode == Mode::SpeechToSpeech && args.options.max_new_tokens > 0) {
+        args.s2s_request.max_new_tokens = args.options.max_new_tokens;
+    }
+}
+
+bool has_s2s_flags(const CliArgs & args) {
+    if (args.stream) {
+        std::fprintf(stderr, "--stream is not available in s2s mode\n");
+        return false;
+    }
+    return !args.s2s_options.model_path.empty() && !args.s2s_options.codec_path.empty() && !args.audio_path.empty();
 }
 
 bool has_required_flags(const CliArgs & args) {
+    if (args.mode == Mode::SpeechToSpeech) {
+        return has_s2s_flags(args);
+    }
     if (args.text.empty()) {
         return false;
     }
@@ -110,6 +137,55 @@ int run_sound_effect(const CliArgs & args) {
     return 0;
 }
 
+tts_cpp::moss::SpeechMessage audio_message(const std::string & path) {
+    tts_cpp::moss::SpeechMessage message;
+    if (!wav_load(path, message.audio, message.sample_rate)) {
+        throw std::runtime_error("cannot read WAV: " + path);
+    }
+    return message;
+}
+
+tts_cpp::moss::SpeechRequest s2s_request(const CliArgs & args) {
+    tts_cpp::moss::SpeechRequest request = args.s2s_request;
+    if (!args.system_prompt.empty()) {
+        request.messages.push_back({tts_cpp::moss::SpeechRole::System, args.system_prompt, {}, 0});
+    }
+    request.messages.push_back(audio_message(args.audio_path));
+    if (!args.voice_path.empty() && !wav_load(args.voice_path, request.voice, request.voice_sample_rate)) {
+        throw std::runtime_error("cannot read WAV: " + args.voice_path);
+    }
+    return request;
+}
+
+void report_s2s(const CliArgs & args, const tts_cpp::moss::SpeechResult & result) {
+    if (!result.text.empty()) {
+        std::printf("%s\n", result.text.c_str());
+    }
+    std::fprintf(stderr,
+        "[moss-cli] reply %.2fs (%d speech tokens%s) from %d prompt tokens: encode %.0f ms, prefill %.0f ms, "
+        "generate %.0f ms, decode %.0f ms%s%s\n",
+        result.sample_rate > 0 ? (double) result.pcm.size() / result.sample_rate : 0.0, result.reply_tokens,
+        result.truncated ? ", cut at --max-reply-seconds" : "", result.prompt_tokens, result.encode_ms,
+        result.prefill_ms, result.generate_ms, result.decode_ms, result.pcm.empty() ? "" : " -> ",
+        result.pcm.empty() ? "" : args.out_path.c_str());
+}
+
+int run_speech_to_speech(const CliArgs & args) {
+    tts_cpp::moss::SpeechEngine engine(args.s2s_options);
+    std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
+    const tts_cpp::moss::SpeechResult result = engine.respond(s2s_request(args));
+    if (result.cancelled) {
+        std::fprintf(stderr, "[moss-cli] response cancelled\n");
+        return 1;
+    }
+    if (!result.pcm.empty() && !save_wav(args.out_path, result.pcm, result.sample_rate)) {
+        std::fprintf(stderr, "[moss-cli] cannot write %s\n", args.out_path.c_str());
+        return 1;
+    }
+    report_s2s(args, result);
+    return 0;
+}
+
 } // namespace
 
 bool parse_args(int argc, const char * const * argv, CliArgs & args) {
@@ -140,8 +216,19 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--seed") {
             args.options.seed = (uint32_t) std::strtoul(next(), nullptr, 10);
             args.sound_request.seed = args.options.seed;
+            args.s2s_request.seed = args.options.seed;
         }
         else if (flag == "--model")         args.sound_options.model_path = next();
+        else if (flag == "--codec")         args.s2s_options.codec_path = next();
+        else if (flag == "--audio")         args.audio_path = next();
+        else if (flag == "--voice")         args.voice_path = next();
+        else if (flag == "--system")        args.system_prompt = next();
+        else if (flag == "--max-reply-seconds") args.s2s_request.max_reply_seconds = std::strtof(next(), nullptr);
+        else if (flag == "--greedy")        args.s2s_request.greedy = true;
+        else if (flag == "--temperature")   args.s2s_request.temperature = std::strtof(next(), nullptr);
+        else if (flag == "--top-p")         args.s2s_request.top_p = std::strtof(next(), nullptr);
+        else if (flag == "--top-k")         args.s2s_request.top_k = std::atoi(next());
+        else if (flag == "--text-reply")    args.s2s_request.text_reply = true;
         else if (flag == "--negative-prompt") args.sound_request.negative_prompt = next();
         else if (flag == "--seconds")       args.sound_request.seconds = std::strtod(next(), nullptr);
         else if (flag == "--steps")         args.sound_request.steps = std::atoi(next());
@@ -173,6 +260,9 @@ int run(const CliArgs & args) {
     try {
         if (args.mode == Mode::SoundEffect) {
             return run_sound_effect(args);
+        }
+        if (args.mode == Mode::SpeechToSpeech) {
+            return run_speech_to_speech(args);
         }
         tts_cpp::moss::Engine engine(args.options);
         std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());

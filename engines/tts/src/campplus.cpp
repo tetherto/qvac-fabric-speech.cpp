@@ -279,6 +279,23 @@ static inline void sigmoid_inplace(float * x, size_t n) {
 
 // Conv1d:  y[co, to] = bias[co] + sum_{ci, k} w[co, ci, k] * x[ci, to*stride + k*dilation - pad]
 // PyTorch weight layout (numpy order): w is (C_out, C_in, k), stored row-major.
+static int first_valid_output(int offset, int stride) {
+    return offset >= 0 ? 0 : (-offset + stride - 1) / stride;
+}
+
+static int end_valid_output(int offset, int stride, int T_in, int T_out) {
+    if (offset >= T_in) return 0;
+    return std::min(T_out, (T_in - 1 - offset) / stride + 1);
+}
+
+static void accumulate_tap(float * y_row, const float * x_row, float weight,
+                           int offset, int stride, int T_in, int T_out)
+{
+    const int lo = first_valid_output(offset, stride);
+    const int hi = end_valid_output(offset, stride, T_in, T_out);
+    for (int to = lo; to < hi; ++to) y_row[to] += weight * x_row[to * stride + offset];
+}
+
 static void conv1d(const float * x, int C_in, int T_in,
                    const float * w, const float * bias,
                    int C_out, int k, int stride, int pad, int dilation,
@@ -286,27 +303,41 @@ static void conv1d(const float * x, int C_in, int T_in,
 {
     #pragma omp parallel for
     for (int co = 0; co < C_out; ++co) {
-        const float bias_v = bias ? bias[co] : 0.0f;
         const float * w_co = w + (size_t)co * C_in * k;
         float * y_row = y + (size_t)co * T_out;
-        for (int to = 0; to < T_out; ++to) {
-            float acc = bias_v;
-            const int base_t = to * stride - pad;
-            for (int ci = 0; ci < C_in; ++ci) {
-                const float * x_row = x + (size_t)ci * T_in;
-                const float * w_row = w_co + (size_t)ci * k;
-                for (int kk = 0; kk < k; ++kk) {
-                    const int ti = base_t + kk * dilation;
-                    if (ti >= 0 && ti < T_in) acc += w_row[kk] * x_row[ti];
-                }
+        std::fill(y_row, y_row + T_out, bias ? bias[co] : 0.0f);
+        for (int ci = 0; ci < C_in; ++ci) {
+            const float * x_row = x + (size_t)ci * T_in;
+            const float * w_row = w_co + (size_t)ci * k;
+            for (int kk = 0; kk < k; ++kk) {
+                accumulate_tap(y_row, x_row, w_row[kk], kk * dilation - pad, stride, T_in, T_out);
             }
-            y_row[to] = acc;
         }
     }
 }
 
 // Conv2d: input (C_in, H, W), output (C_out, H_out, W_out).
 // Weight: (C_out, C_in, kH, kW) stored row-major.
+static void accumulate_kernel_row(float * y_co, const float * x_c, const float * w_row,
+                                  int kW, int sW, int pW, int hi, int W, int ho, int W_out)
+{
+    for (int kw = 0; kw < kW; ++kw) {
+        accumulate_tap(y_co + (size_t)ho * W_out, x_c + (size_t)hi * W, w_row[kw], kw - pW, sW, W, W_out);
+    }
+}
+
+static void accumulate_output_row(float * y_co, const float * x_c, const float * w_c,
+                                  int H, int W, int kH, int kW, int sH, int sW, int pH, int pW,
+                                  int ho, int W_out)
+{
+    for (int kh = 0; kh < kH; ++kh) {
+        const int hi = ho * sH - pH + kh;
+        if (hi >= 0 && hi < H) {
+            accumulate_kernel_row(y_co, x_c, w_c + (size_t)kh * kW, kW, sW, pW, hi, W, ho, W_out);
+        }
+    }
+}
+
 static void conv2d(const float * x, int C_in, int H, int W,
                    const float * w, const float * bias,
                    int C_out, int kH, int kW,
@@ -315,27 +346,13 @@ static void conv2d(const float * x, int C_in, int H, int W,
 {
     #pragma omp parallel for
     for (int co = 0; co < C_out; ++co) {
-        const float bias_v = bias ? bias[co] : 0.0f;
         const float * w_co = w + (size_t)co * C_in * kH * kW;
+        float * y_co = y + (size_t)co * H_out * W_out;
+        std::fill(y_co, y_co + (size_t)H_out * W_out, bias ? bias[co] : 0.0f);
         for (int ho = 0; ho < H_out; ++ho) {
-            for (int wo = 0; wo < W_out; ++wo) {
-                float acc = bias_v;
-                const int base_h = ho * sH - pH;
-                const int base_w = wo * sW - pW;
-                for (int ci = 0; ci < C_in; ++ci) {
-                    const float * x_c = x + (size_t)ci * H * W;
-                    const float * w_c = w_co + (size_t)ci * kH * kW;
-                    for (int kh = 0; kh < kH; ++kh) {
-                        const int hi = base_h + kh;
-                        if (hi < 0 || hi >= H) continue;
-                        for (int kw = 0; kw < kW; ++kw) {
-                            const int wi = base_w + kw;
-                            if (wi < 0 || wi >= W) continue;
-                            acc += w_c[kh * kW + kw] * x_c[hi * W + wi];
-                        }
-                    }
-                }
-                y[(size_t)co * H_out * W_out + ho * W_out + wo] = acc;
+            for (int ci = 0; ci < C_in; ++ci) {
+                accumulate_output_row(y_co, x + (size_t)ci * H * W, w_co + (size_t)ci * kH * kW,
+                                      H, W, kH, kW, sH, sW, pH, pW, ho, W_out);
             }
         }
     }

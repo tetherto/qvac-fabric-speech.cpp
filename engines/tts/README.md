@@ -8,8 +8,9 @@ This package exposes seven public synthesis engine APIs covering eight synthesis
 families and ten model lines: Chatterbox Turbo, Chatterbox Multilingual,
 Supertonic 1, 2, and 3, Parler-TTS, CosyVoice3, Audio8, Pocket TTS, and MOSS
 Delay. MOSS-SoundEffect adds a separate text-to-sound-effects API
-(`moss/sound_effect.h`), and LavaSR is a speech-enhancement pipeline; neither
-is a TTS synthesizer. The API
+(`moss/sound_effect.h`), MOSS-Speech a speech-to-speech API
+(`moss/speech.h`), and LavaSR is a speech-enhancement pipeline; none of the
+three is a TTS synthesizer. The API
 count follows the installed public headers under `include/tts-cpp/`; the two
 Chatterbox families share one engine API, while the Supertonic generations
 share another.
@@ -31,6 +32,13 @@ MOSS-SoundEffect generates sound effects from a text description (up to 30
 seconds of 48 kHz mono audio). It is a text-to-audio model, not a speech
 synthesizer, and ships next to MOSS Delay because it shares the MOSS CLI and
 tokenizer. See the [MOSS guide](docs/moss.md#moss-soundeffect).
+
+MOSS-Speech answers a spoken question with speech, without a text step in
+between: a 9B Qwen3 model with separate text and audio branches reads the
+user's speech tokens and writes reply speech tokens that the CosyVoice2 flow
+decoder speaks in a built-in default voice or a reference voice. Every stage
+matches the PyTorch pipeline on CPU and Metal, in bf16 and q8_0. See the
+[MOSS guide](docs/moss.md#moss-speech).
 
 This directory is the in-tree `engines/tts` package in
 [`qvac-fabric-speech.cpp`](../../README.md). It consumes the system
@@ -62,6 +70,7 @@ engine, not every backend ggml can compile.
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes | untested | untested | untested |
 | MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes | untested | untested | untested |
+| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes | untested | untested | untested |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
@@ -228,8 +237,9 @@ carries reference-precision weights, so it stays off for vocoders stored below
 8 bits (`q4_0`), where it would change the output rather than accelerate it; it
 beats ggml Metal on an M4 mini's GPU but loses to an M3 Ultra's, so ship it on
 consumer-class GPUs and skip it on Max/Ultra parts. Chatterbox, Parler-TTS,
-CosyVoice3, Pocket TTS, MOSS Delay, and LavaSR have no Core ML sidecar. See the
-[Supertonic guide](docs/supertonic.md#core-ml-vocoder-sidecar) and the [Audio8
+CosyVoice3, Pocket TTS, MOSS Delay, MOSS-Speech, and LavaSR have no Core ML
+sidecar. See the [Supertonic
+guide](docs/supertonic.md#core-ml-vocoder-sidecar) and the [Audio8
 guide](docs/audio8.md#core-ml-codec-sidecar) for export, placement, and
 measurements.
 
@@ -351,7 +361,7 @@ lane and the other machines are unchanged and are not re-stated here.
 | CosyVoice3 | [docs/cosyvoice3.md](docs/cosyvoice3.md) |
 | Audio8 | [docs/audio8.md](docs/audio8.md) |
 | Pocket TTS | [docs/pocket-tts.md](docs/pocket-tts.md) |
-| MOSS Delay and MOSS-SoundEffect | [docs/moss.md](docs/moss.md) |
+| MOSS Delay, MOSS-SoundEffect, and MOSS-Speech | [docs/moss.md](docs/moss.md) |
 | LavaSR enhancement | [docs/lavasr.md](docs/lavasr.md) |
 | Build paths and repository layout | [docs/build.md](docs/build.md) |
 | CLIs, weight conversion, end-to-end runs | [docs/cli.md](docs/cli.md) |
