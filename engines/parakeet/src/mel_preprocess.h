@@ -39,6 +39,7 @@ struct MelConfig {
     float preemph              = 0.97f;
     float log_zero_guard_value = kDefaultLogZeroGuard;
     MelNormalize normalize     = MelNormalize::PerFeature;
+    bool right_zero_pad        = false;
 
     std::vector<float> filterbank;
     std::vector<float> window;
