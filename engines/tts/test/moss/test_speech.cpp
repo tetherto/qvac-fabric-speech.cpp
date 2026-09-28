@@ -129,6 +129,41 @@ void test_generation_limits() {
     check(text.stopping() && text.channel() == SpeechChannel::Text, "the pad token stops a text reply");
 }
 
+void test_generation_text_minimum() {
+    std::mt19937 rng(0);
+    SpeechGenerationState state(fixture_tokens(), {byte_token('a'), TOKEN_AUDIO_PAD}, {20, 2, 0});
+    std::vector<float> text = peaked(moss_fixtures::TEXT_VOCAB, TOKEN_IM_END);
+    text[(size_t) byte_token('b')] = HIGH - 1.0f;
+    check(state.next({text, peaked(AUDIO_VOCAB, 3)}, GREEDY, rng).text == byte_token('b'),
+          "im_end is masked before min_new_tokens");
+    check(state.next({text, peaked(AUDIO_VOCAB, 3)}, GREEDY, rng).text == byte_token('b') && !state.stopping(),
+          "im_end stays masked for min_new_tokens steps");
+    state.next({text, peaked(AUDIO_VOCAB, 3)}, GREEDY, rng);
+    check(state.stopping(), "im_end stops generation once the minimum is met");
+}
+
+void test_reply_codes_follow_speech() {
+    const std::vector<SpeechRow> spoken_after_text{{byte_token('a'), 9}, {TOKEN_SPEECH_START, 9},
+        {TOKEN_TEXT_PLACEHOLDER, 7}, {TOKEN_TEXT_PLACEHOLDER, 8}, {TOKEN_TEXT_PLACEHOLDER, TOKEN_SPEECH_END},
+        {TOKEN_IM_END, 3}};
+    check(speech_reply_codes(spoken_after_text, fixture_tokens()) == std::vector<int32_t>{7, 8},
+          "reply codes start at the first speech row");
+    const std::vector<SpeechRow> text_only{{byte_token('a'), 9}, {byte_token('b'), 10}, {TOKEN_IM_END, 3}};
+    check(speech_reply_codes(text_only, fixture_tokens()).empty(), "a text reply carries no speech codes");
+}
+
+void test_generation_heads() {
+    std::mt19937 rng(0);
+    SpeechGenerationState state(fixture_tokens(), {TOKEN_SPEECH_START, TOKEN_AUDIO_PAD}, {20, 0, 0});
+    check(state.upcoming_channel() == SpeechChannel::Audio, "speech-start announces the audio channel");
+    const SpeechRow row = state.next({{}, peaked(AUDIO_VOCAB, 7)}, GREEDY, rng);
+    check(row.text == TOKEN_TEXT_PLACEHOLDER && row.audio == 7, "an audio step needs no text logits");
+    state.next({{}, peaked(AUDIO_VOCAB, TOKEN_SPEECH_END)}, GREEDY, rng);
+    check(state.upcoming_channel() == SpeechChannel::Text, "speech-end announces the text channel");
+    expect_failure([&] { state.next({{}, peaked(AUDIO_VOCAB, 3)}, GREEDY, rng); }, "text logits",
+                   "a text step without text logits");
+}
+
 SpeechLmConfig fixture_config() {
     SpeechLmConfig config;
     config.tokens = fixture_tokens();
@@ -284,6 +319,42 @@ void test_lm_batches_and_steps() {
     std::filesystem::remove(path);
 }
 
+void test_lm_skips_the_text_head() {
+    const auto path = write_lm("speech-heads", WEIGHT_SEED);
+    SpeechLM lm(path.string(), false, 1);
+    const std::vector<SpeechRow> rows = mixed_rows();
+    const SpeechLogits whole = prefill(lm, rows, (int) rows.size());
+    const std::vector<SpeechRow> head(rows.begin(), rows.end() - 2);
+    lm.begin((int) rows.size() + 1);
+    lm.prefill(head, 4);
+    const SpeechLogits audio_only = lm.step(rows[rows.size() - 2], {false, true});
+    check(audio_only.text.empty() && !audio_only.audio.empty(), "an audio-only step returns only the audio head");
+    check(close(lm.step(rows.back()), whole), "an audio-only step still fills the text branch cache");
+    std::filesystem::remove(path);
+}
+
+void test_generation_loop() {
+    const auto path = write_lm("speech-loop", WEIGHT_SEED);
+    SpeechLM lm(path.string(), false, 1);
+    const std::vector<SpeechRow> prompt = mixed_rows();
+    const SpeechSampling sampled{true, 0.9f, 0.95f, 5};
+    auto run = [&](const SpeechContinue & keep_going, std::vector<SpeechRow> & generated) {
+        lm.begin((int) prompt.size() + 8);
+        SpeechGenerationState state(fixture_tokens(), prompt.back(), {8, 0, 0});
+        const bool finished = run_speech_generation(lm, state, lm.prefill(prompt, 4), sampled, AUDIO_SEED, keep_going);
+        generated = state.generated();
+        return finished;
+    };
+    std::vector<SpeechRow> first;
+    std::vector<SpeechRow> second;
+    check(run([](int) { return true; }, first) && run([](int) { return true; }, second) &&
+          same_rows(first, second), "a seed reproduces the reply");
+    std::vector<SpeechRow> stopped;
+    check(!run([](int generated) { return generated < 3; }, stopped) && stopped.size() == 3,
+          "the progress callback stops generation");
+    std::filesystem::remove(path);
+}
+
 SpeechVqConfig vq_config() {
     SpeechVqConfig config;
     config.hop_length = 160;
@@ -320,13 +391,18 @@ void test_tokenizer_encodes() {
     std::filesystem::remove(path);
 }
 
+void expect_tokenizer_rejects(const std::filesystem::path & path, const std::string & label) {
+    expect_failure([&] { SpeechTokenizer tokenizer(path.string(), false, 1); }, "geometry", label);
+    std::filesystem::remove(path);
+}
+
 void test_tokenizer_rejections() {
-    const auto bad = write_vq("speech-vq-geometry", WEIGHT_SEED, [](gguf_context * f) {
+    expect_tokenizer_rejects(write_vq("speech-vq-geometry", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_u32(f, "moss-speech-codec.vq.context_length", VQ_CTX - 1);
-    });
-    expect_failure([&] { SpeechTokenizer tokenizer(bad.string(), false, 1); }, "geometry",
-                   "a window too short for the chunk");
-    std::filesystem::remove(bad);
+    }), "a window too short for the chunk");
+    expect_tokenizer_rejects(write_vq("speech-vq-padding", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_set_val_u32(f, "moss-speech-codec.vq.chunk_samples", VQ_CHUNK + 1);
+    }), "a chunk whose padded segment outgrows the window");
 }
 
 tts_cpp::moss::SpeechRequest valid_request() {
@@ -352,6 +428,11 @@ void test_request_validation() {
     reject([](auto & r) { r.max_new_tokens = -1; }, "max_new_tokens", "negative max_new_tokens");
     reject([](auto & r) { r.max_reply_seconds = NAN; }, "max_reply_seconds", "a non-finite reply limit");
     reject([](auto & r) { r.voice = {0.1f}; r.voice_sample_rate = 0; }, "voice prompt", "a voice without a rate");
+    reject([](auto & r) { r.voice.assign(16000 * 61, 0.1f); r.voice_sample_rate = 16000; }, "voice prompt",
+           "a voice longer than 60 s");
+    reject([](auto & r) { r.max_new_tokens = 4097; }, "max_new_tokens", "max_new_tokens past the cap");
+    check_speech_context(10, 20, 30);
+    expect_failure([] { check_speech_context(11, 20, 30); }, "context", "a conversation past the model context");
     tts_cpp::moss::SpeechRequest greedy = valid_request();
     greedy.greedy = true;
     greedy.temperature = 0.0f;
@@ -371,6 +452,11 @@ void test_cli_flags() {
           args.s2s_request.max_reply_seconds == 12.0f && args.s2s_request.max_new_tokens == 300 &&
           args.s2s_request.greedy && args.s2s_request.top_k == 5 && args.s2s_request.seed == 7 &&
           args.s2s_request.text_reply, "s2s values land in the request");
+    const char * defaults[] = {"moss-cli", "--mode", "s2s", "--model", "lm.gguf", "--codec", "c.gguf", "--audio",
+                               "q.wav"};
+    CliArgs plain;
+    check(parse_args(9, defaults, plain) && plain.s2s_request.max_new_tokens == 0,
+          "without --max-new-tokens the engine default applies");
     const char * no_codec[] = {"moss-cli", "--mode", "s2s", "--model", "lm.gguf", "--audio", "q.wav"};
     CliArgs missing;
     check(!parse_args(7, no_codec, missing), "--codec is required");
@@ -387,11 +473,16 @@ int main() {
         test_generation_switches_channels();
         test_generation_constraints();
         test_generation_limits();
+        test_generation_heads();
+        test_generation_text_minimum();
+        test_reply_codes_follow_speech();
         test_prompt_layout();
         test_reply_text();
         test_lm_loads_and_validates();
         test_lm_rejections();
         test_lm_batches_and_steps();
+        test_lm_skips_the_text_head();
+        test_generation_loop();
         test_segment_arithmetic();
         test_tokenizer_encodes();
         test_tokenizer_rejections();

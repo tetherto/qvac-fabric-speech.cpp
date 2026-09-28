@@ -3,6 +3,7 @@
 #include "moss/speech_lm.h"
 
 #include <cstdint>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -30,12 +31,15 @@ public:
     bool stopping() const;
     bool truncated() const;
     SpeechChannel channel() const;
+    SpeechChannel upcoming_channel() const;
     const std::vector<SpeechRow> & generated() const;
     SpeechRow next(SpeechLogits logits, const SpeechSampling & sampling, std::mt19937 & rng);
 
 private:
-    void update_channel(const SpeechRow & last);
+    SpeechChannel channel_after(const SpeechRow & last) const;
+    int32_t sample_text(std::vector<float> logits, const SpeechSampling & sampling, std::mt19937 & rng) const;
     void constrain_audio(std::vector<float> & audio) const;
+    void constrain_text(std::vector<float> & text) const;
     int32_t sample(std::vector<float> logits, const SpeechSampling & sampling, std::mt19937 & rng) const;
     int32_t limit_reply(int32_t audio);
     void record(const SpeechRow & row);
@@ -49,6 +53,11 @@ private:
     bool stopping_ = false;
     bool truncated_ = false;
 };
+
+using SpeechContinue = std::function<bool(int generated)>;
+
+bool run_speech_generation(SpeechLM & lm, SpeechGenerationState & state, SpeechLogits logits,
+                           const SpeechSampling & sampling, uint32_t seed, const SpeechContinue & keep_going);
 
 std::vector<int32_t> speech_reply_codes(const std::vector<SpeechRow> & generated, const SpeechTokens & tokens);
 

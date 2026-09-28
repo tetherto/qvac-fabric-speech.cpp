@@ -33,12 +33,16 @@ struct SpeechLmConfig {
     SpeechTokens tokens;
     std::string audio_system_prompt;
     std::string text_system_prompt;
-    std::string audio_reply_prefix;
 };
 
 struct SpeechRow {
     int32_t text = 0;
     int32_t audio = 0;
+};
+
+struct SpeechHeads {
+    bool text = true;
+    bool audio = true;
 };
 
 struct SpeechLogits {
@@ -63,7 +67,7 @@ public:
     int position() const;
     int context() const;
     SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens);
-    SpeechLogits step(const SpeechRow & row);
+    SpeechLogits step(const SpeechRow & row, SpeechHeads heads = {});
 
 private:
     struct Impl;

@@ -90,7 +90,6 @@ inline void add_lm_meta(gguf_context * f) {
     gguf_set_val_u32(f, "moss-speech.token.pad", TOKEN_PAD);
     gguf_set_val_str(f, "moss-speech.audio_output_system_prompt", AUDIO_SYSTEM_PROMPT);
     gguf_set_val_str(f, "moss-speech.text_output_system_prompt", TEXT_SYSTEM_PROMPT);
-    gguf_set_val_str(f, "moss-speech.audio_reply_prefix", "<|object_ref_start|>");
     add_tokenizer_meta(f);
 }
 

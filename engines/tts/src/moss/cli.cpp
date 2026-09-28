@@ -81,9 +81,6 @@ void share_runtime_flags(CliArgs & args) {
     args.s2s_options.n_threads = args.options.n_threads;
     args.s2s_options.use_gpu = args.options.use_gpu;
     args.s2s_options.backends_dir = args.options.backends_dir;
-    if (args.mode == Mode::SpeechToSpeech && args.options.max_new_tokens > 0) {
-        args.s2s_request.max_new_tokens = args.options.max_new_tokens;
-    }
 }
 
 bool has_s2s_flags(const CliArgs & args) {
@@ -211,7 +208,10 @@ bool parse_args(int argc, const char * const * argv, CliArgs & args) {
         else if (flag == "--duration-tokens") args.options.duration_tokens = std::atoi(next());
         else if (flag == "--text")          args.text = next();
         else if (flag == "--out")           args.out_path = next();
-        else if (flag == "--max-new-tokens") args.options.max_new_tokens = std::atoi(next());
+        else if (flag == "--max-new-tokens") {
+            args.options.max_new_tokens = std::atoi(next());
+            args.s2s_request.max_new_tokens = args.options.max_new_tokens;
+        }
         else if (flag == "--context")       args.options.context = std::atoi(next());
         else if (flag == "--seed") {
             args.options.seed = (uint32_t) std::strtoul(next(), nullptr, 10);

@@ -13,7 +13,7 @@ The default reply voice (a WAV such as the upstream assets/prompt_en.wav) is
 stored as raw mono samples so the engine can speak without a voice prompt.
 
 usage: convert-moss-speech-codec-to-gguf.py <codec_dir> --campplus-gguf campplus.gguf
-           --voice-wav prompt_en.wav [--quant f16|q8_0] [--outfile out.gguf]
+           --voice-wav prompt_en.wav [--outtype f16|q8_0|f32] [--outfile out.gguf]
 """
 from __future__ import annotations
 
@@ -283,12 +283,12 @@ def main() -> None:
     parser.add_argument("codec_dir", type=Path)
     parser.add_argument("--campplus-gguf", type=Path, required=True)
     parser.add_argument("--voice-wav", type=Path, required=True)
-    parser.add_argument("--quant", choices=("f32", "f16", "q8_0"), default="f16")
+    parser.add_argument("--outtype", choices=("f32", "f16", "q8_0"), default="f16")
     parser.add_argument("--outfile", type=Path, default=None)
     args = parser.parse_args()
     codec_dir = args.codec_dir.resolve()
-    outfile = args.outfile or codec_dir / f"moss-speech-codec-{args.quant}.gguf"
-    convert(codec_dir, args.campplus_gguf, args.voice_wav, outfile, args.quant)
+    outfile = args.outfile or codec_dir / f"moss-speech-codec-{args.outtype}.gguf"
+    convert(codec_dir, args.campplus_gguf, args.voice_wav, outfile, args.outtype)
 
 
 if __name__ == "__main__":

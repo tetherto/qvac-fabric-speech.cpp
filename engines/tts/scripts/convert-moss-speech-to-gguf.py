@@ -27,7 +27,6 @@ LAYER_TENSORS = 11
 GLOBAL_TENSORS = 6
 AUDIO_OUTPUT_SYSTEM_PROMPT = "You are a helpful assistant. Respond with spoken outputs."
 TEXT_OUTPUT_SYSTEM_PROMPT = "You are a helpful assistant. Respond with text outputs."
-AUDIO_REPLY_PREFIX = "<|object_ref_start|>"
 TEXT_PLACEHOLDER_TOKEN_ID = 151667
 AUDIO_PAD_TOKEN_ID = 512
 SOSP_TOKEN_ID = 151646
@@ -235,7 +234,6 @@ def add_token_metadata(writer: gguf.GGUFWriter, tokens: list[str], config: dict[
 def add_prompt_metadata(writer: gguf.GGUFWriter) -> None:
     writer.add_string(f"{ARCH}.audio_output_system_prompt", AUDIO_OUTPUT_SYSTEM_PROMPT)
     writer.add_string(f"{ARCH}.text_output_system_prompt", TEXT_OUTPUT_SYSTEM_PROMPT)
-    writer.add_string(f"{ARCH}.audio_reply_prefix", AUDIO_REPLY_PREFIX)
 
 
 def validate_config(config: dict[str, Any]) -> None:

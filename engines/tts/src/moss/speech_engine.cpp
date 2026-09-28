@@ -12,7 +12,6 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
-#include <random>
 #include <stdexcept>
 
 namespace tts_cpp::moss {
@@ -26,7 +25,7 @@ using detail::SpeechTurn;
 using detail::SpeechTurnRole;
 
 constexpr int DEFAULT_MAX_NEW_TOKENS = 1000;
-constexpr int MAX_NEW_TOKENS = 16384;
+constexpr int MAX_NEW_TOKENS = 4096;
 constexpr int MIN_NEW_TOKENS = 10;
 constexpr int PREFILL_BATCH_TOKENS = 256;
 constexpr size_t MAX_MESSAGES = 256;
@@ -34,6 +33,7 @@ constexpr size_t MAX_TEXT_BYTES = 16384;
 constexpr int MIN_SAMPLE_RATE = 8000;
 constexpr int MAX_SAMPLE_RATE = 192000;
 constexpr double MAX_AUDIO_SECONDS = 600.0;
+constexpr double MAX_VOICE_SECONDS = 60.0;
 constexpr float MAX_TEMPERATURE = 10.0f;
 constexpr float MAX_REPLY_SECONDS = 3600.0f;
 
@@ -54,12 +54,13 @@ SpeechTurnRole turn_role(SpeechRole role) {
     return SpeechTurnRole::User;
 }
 
-void validate_audio(const std::vector<float> & audio, int sample_rate, const char * what) {
+void validate_audio(const std::vector<float> & audio, int sample_rate, double max_seconds, const char * what) {
     if (sample_rate < MIN_SAMPLE_RATE || sample_rate > MAX_SAMPLE_RATE) {
-        fail(std::string(what) + " sample rate must be in [8000, 192000] Hz");
+        fail(std::string(what) + " sample rate must be in [" + std::to_string(MIN_SAMPLE_RATE) + ", " +
+             std::to_string(MAX_SAMPLE_RATE) + "] Hz");
     }
-    if ((double) audio.size() / sample_rate > MAX_AUDIO_SECONDS) {
-        fail(std::string(what) + " is longer than " + std::to_string((int) MAX_AUDIO_SECONDS) + " s");
+    if ((double) audio.size() / sample_rate > max_seconds) {
+        fail(std::string(what) + " is longer than " + std::to_string((int) max_seconds) + " s");
     }
 }
 
@@ -71,7 +72,7 @@ void validate_message(const SpeechMessage & message) {
         fail("message text must be at most " + std::to_string(MAX_TEXT_BYTES) + " bytes");
     }
     if (!message.audio.empty()) {
-        validate_audio(message.audio, message.sample_rate, "message audio");
+        validate_audio(message.audio, message.sample_rate, MAX_AUDIO_SECONDS, "message audio");
     }
 }
 
@@ -89,7 +90,7 @@ void validate_messages(const std::vector<SpeechMessage> & messages) {
 
 void validate_sampling(const SpeechRequest & request) {
     if (!request.greedy && !(request.temperature > 0.0f && request.temperature <= MAX_TEMPERATURE)) {
-        fail("temperature must be in (0, 10]");
+        fail("temperature must be in (0, " + std::to_string((int) MAX_TEMPERATURE) + "]");
     }
     if (!(request.top_p > 0.0f && request.top_p <= 1.0f) || request.top_k < 0) {
         fail("top_p must be in (0, 1] and top_k must not be negative");
@@ -99,7 +100,7 @@ void validate_sampling(const SpeechRequest & request) {
     }
     if (!std::isfinite(request.max_reply_seconds) || request.max_reply_seconds < 0.0f ||
         request.max_reply_seconds > MAX_REPLY_SECONDS) {
-        fail("max_reply_seconds must be in [0, 3600]");
+        fail("max_reply_seconds must be in [0, " + std::to_string((int) MAX_REPLY_SECONDS) + "]");
     }
 }
 
@@ -115,7 +116,13 @@ void validate_speech_request(const SpeechRequest & request) {
     validate_messages(request.messages);
     validate_sampling(request);
     if (!request.voice.empty()) {
-        validate_audio(request.voice, request.voice_sample_rate, "voice prompt");
+        validate_audio(request.voice, request.voice_sample_rate, MAX_VOICE_SECONDS, "voice prompt");
+    }
+}
+
+void check_speech_context(size_t prompt_rows, int max_new_tokens, int n_ctx_train) {
+    if ((int64_t) prompt_rows + max_new_tokens > n_ctx_train) {
+        fail("the conversation and max_new_tokens exceed the model context");
     }
 }
 
@@ -175,17 +182,8 @@ struct SpeechEngine::Impl {
 
     bool generate(detail::SpeechGenerationState & state, detail::SpeechLogits logits, const SpeechRequest & request,
                   const detail::SpeechLimits & limits, const SpeechProgress & progress) {
-        std::mt19937 rng(request.seed);
-        while (!state.stopping()) {
-            const SpeechRow row = state.next(std::move(logits), sampling_of(request), rng);
-            if (!keep_going(progress, (int) state.generated().size(), limits.max_new_tokens)) {
-                return false;
-            }
-            if (!state.stopping()) {
-                logits = lm->step(row);
-            }
-        }
-        return true;
+        return detail::run_speech_generation(*lm, state, std::move(logits), sampling_of(request), request.seed,
+                [&](int generated) { return keep_going(progress, generated, limits.max_new_tokens); });
     }
 
     const detail::SpeechVoice & reply_voice(const SpeechRequest & request, detail::SpeechVoice & custom) {
@@ -215,9 +213,7 @@ struct SpeechEngine::Impl {
         result.encode_ms = elapsed_ms(encode_start);
         result.prompt_tokens = (int) prompt.size();
         const detail::SpeechLimits limits = limits_of(request);
-        if ((int64_t) prompt.size() + limits.max_new_tokens > lm->config().n_ctx_train) {
-            fail("the conversation and max_new_tokens exceed the model context");
-        }
+        detail::check_speech_context(prompt.size(), limits.max_new_tokens, lm->config().n_ctx_train);
 
         const auto prefill_start = std::chrono::steady_clock::now();
         lm->begin(result.prompt_tokens + limits.max_new_tokens);

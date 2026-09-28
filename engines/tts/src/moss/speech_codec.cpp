@@ -11,6 +11,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 
@@ -27,6 +28,10 @@ constexpr int MEL_BANDS = 80;
 constexpr float PROMPT_MAGNITUDE_EPS = 1e-9f;
 constexpr int CANCELLED = 2;
 constexpr int DEFAULT_SEED = 0;
+constexpr int MIN_VOICE_RATE = 8000;
+constexpr int MAX_VOICE_RATE = 192000;
+constexpr double MAX_VOICE_SECONDS = 60.0;
+constexpr size_t DECODER_SPEAKER_DIM = 192;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(std::string(OWNER) + ": " + message);
@@ -42,9 +47,14 @@ std::vector<float> read_f32_tensor(const gguf_context * file, const std::string 
     if (id < 0 || gguf_get_tensor_type(file, id) != GGML_TYPE_F32) {
         fail(std::string("missing f32 tensor: ") + name);
     }
-    std::vector<float> values(gguf_get_tensor_size(file, id) / sizeof(float));
+    const size_t offset = gguf_get_data_offset(file) + gguf_get_tensor_offset(file, id);
+    const size_t bytes = gguf_get_tensor_size(file, id);
+    if (offset + bytes > std::filesystem::file_size(path)) {
+        fail(std::string("tensor runs past the end of the file: ") + name);
+    }
+    std::vector<float> values(bytes / sizeof(float));
     std::ifstream input(path, std::ios::binary);
-    input.seekg((std::streamoff) (gguf_get_data_offset(file) + gguf_get_tensor_offset(file, id)));
+    input.seekg((std::streamoff) offset);
     if (!input.read(reinterpret_cast<char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)))) {
         fail(std::string("cannot read tensor: ") + name);
     }
@@ -55,18 +65,36 @@ std::vector<float> resampled(const std::vector<float> & pcm, int from, int to) {
     return from == to ? pcm : resample_sinc(pcm, from, to);
 }
 
+void add_row(std::vector<double> & sums, const float * row) {
+    for (size_t c = 0; c < sums.size(); ++c) {
+        sums[c] += row[c];
+    }
+}
+
+void subtract_row(float * row, const std::vector<double> & sums, double rows) {
+    for (size_t c = 0; c < sums.size(); ++c) {
+        row[c] -= (float) (sums[c] / rows);
+    }
+}
+
+std::vector<double> column_sums(const std::vector<float> & frames, size_t rows, size_t columns) {
+    std::vector<double> sums(columns, 0.0);
+    for (size_t r = 0; r < rows; ++r) {
+        add_row(sums, frames.data() + r * columns);
+    }
+    return sums;
+}
+
 void subtract_column_means(std::vector<float> & frames, size_t rows, size_t columns) {
-    std::vector<double> means(columns, 0.0);
+    const std::vector<double> sums = column_sums(frames, rows, columns);
     for (size_t r = 0; r < rows; ++r) {
-        for (size_t c = 0; c < columns; ++c) {
-            means[c] += frames[r * columns + c];
-        }
+        subtract_row(frames.data() + r * columns, sums, (double) rows);
     }
-    for (size_t r = 0; r < rows; ++r) {
-        for (size_t c = 0; c < columns; ++c) {
-            frames[r * columns + c] -= (float) (means[c] / (double) rows);
-        }
-    }
+}
+
+bool valid_voice(const std::vector<float> & pcm, int rate) {
+    return !pcm.empty() && rate >= MIN_VOICE_RATE && rate <= MAX_VOICE_RATE &&
+           (double) pcm.size() / rate <= MAX_VOICE_SECONDS;
 }
 
 } // namespace
@@ -81,6 +109,7 @@ struct SpeechCodec::Impl {
     std::vector<float> default_audio;
     int default_rate = 0;
     int token_mel_ratio = 0;
+    size_t speaker_dim = 0;
     campplus_weights speaker;
     std::unique_ptr<SpeechVoice> cached_default;
 
@@ -95,11 +124,12 @@ struct SpeechCodec::Impl {
             fail("unsupported architecture");
         }
         token_mel_ratio = (int) meta.u32("s3gen.encoder.token_mel_ratio");
+        speaker_dim = meta.u32("s3gen.spk_embed_dim");
         default_rate = (int) meta.u32(std::string(ARCH) + ".voice.sample_rate");
         prompt_mel_filters = read_f32_tensor(handle.file, path, PROMPT_MEL_FILTERS);
         fbank_filters = read_f32_tensor(handle.file, path, FBANK_FILTERS);
         default_audio = read_f32_tensor(handle.file, path, DEFAULT_VOICE);
-        if (token_mel_ratio < 1 || default_rate < 8000 || default_audio.empty()) {
+        if (token_mel_ratio < 1 || speaker_dim != DECODER_SPEAKER_DIM || !valid_voice(default_audio, default_rate)) {
             fail("invalid decoder metadata");
         }
     }
@@ -132,15 +162,15 @@ struct SpeechCodec::Impl {
         }
         subtract_column_means(fbank, frames, MEL_BANDS);
         std::vector<float> embedding;
-        if (!campplus_embed(fbank, (int) frames, speaker, nullptr, embedding)) {
-            fail("speaker encoder failed");
+        if (!campplus_embed(fbank, (int) frames, speaker, nullptr, embedding) || embedding.size() != speaker_dim) {
+            fail("speaker encoder failed or does not match the decoder's speaker width");
         }
         return embedding;
     }
 
     SpeechVoice voice(const std::vector<float> & pcm, int rate) {
-        if (pcm.empty() || rate < 8000) {
-            fail("voice prompt must hold audio at 8 kHz or more");
+        if (!valid_voice(pcm, rate)) {
+            fail("voice prompt must hold up to 60 s of audio at 8 to 192 kHz");
         }
         const std::vector<float> pcm_24k = resampled(pcm, rate, OUTPUT_SAMPLE_RATE);
         SpeechVoice result;

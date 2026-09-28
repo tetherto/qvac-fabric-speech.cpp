@@ -43,6 +43,15 @@ constexpr int CENTERED = 1;
 constexpr float POWER_SPECTRUM = 2.0f;
 constexpr float NO_LOG = -1.0f;
 constexpr size_t TENSOR_SLACK = 8;
+constexpr int MIN_SAMPLE_RATE = 8000;
+constexpr int MAX_SAMPLE_RATE = 192000;
+constexpr int MAX_FFT = 1 << 14;
+constexpr int MAX_MELS = 512;
+constexpr int MAX_CHUNK_SECONDS = 120;
+constexpr int MAX_CONTEXT = 1 << 16;
+constexpr int MAX_POOLING = 64;
+constexpr int MAX_CODEBOOK = 1 << 20;
+constexpr int FEED_FORWARD_WIDTH_FACTOR = 4;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(std::string(OWNER) + ": " + message);
@@ -77,13 +86,21 @@ SpeechVqConfig read_config(const GgufMetadata & meta) {
     return c;
 }
 
+bool valid_bounds(const SpeechVqConfig & c) {
+    return within(c.sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE) && within(c.n_fft, 2, MAX_FFT) &&
+           within(c.hop_length, 1, c.n_fft) && within(c.n_mels, 1, MAX_MELS) &&
+           within(c.chunk_samples, c.n_fft, c.sample_rate * MAX_CHUNK_SECONDS) && within(c.n_layers, 1, MAX_LAYERS) &&
+           within(c.n_embd, 1, MAX_WIDTH) && within(c.n_ff, 1, MAX_WIDTH * FEED_FORWARD_WIDTH_FACTOR) &&
+           within(c.n_heads, 1, MAX_HEADS) && c.n_embd % c.n_heads == 0 && within(c.n_ctx, 1, MAX_CONTEXT) &&
+           within(c.pooling_kernel, 1, MAX_POOLING) && within(c.codebook_size, 1, MAX_CODEBOOK);
+}
+
+size_t padded_segment_frames(const SpeechVqConfig & c) {
+    return ceil_div((size_t) c.chunk_samples, (size_t) c.samples_per_token()) * (size_t) c.pooling_kernel;
+}
+
 void validate_config(const SpeechVqConfig & c) {
-    if (!within(c.sample_rate, 8000, 192000) || !within(c.n_fft, 2, 1 << 14) || !within(c.hop_length, 1, c.n_fft) ||
-        !within(c.n_mels, 1, 512) || !within(c.chunk_samples, c.n_fft, c.sample_rate * 120) ||
-        !within(c.n_layers, 1, MAX_LAYERS) || !within(c.n_embd, 1, MAX_WIDTH) || !within(c.n_ff, 1, MAX_WIDTH * 4) ||
-        !within(c.n_heads, 1, MAX_HEADS) || c.n_embd % c.n_heads != 0 || !within(c.n_ctx, 1, 1 << 16) ||
-        !within(c.pooling_kernel, 1, 64) || !within(c.codebook_size, 1, 1 << 20) ||
-        (size_t) c.chunk_samples / (size_t) (c.hop_length * CONV_DOWNSAMPLE) > (size_t) c.n_ctx) {
+    if (!valid_bounds(c) || padded_segment_frames(c) > (size_t) c.n_ctx) {
         fail("invalid tokenizer geometry");
     }
 }
@@ -96,24 +113,32 @@ float whisper_log(float energy) {
     return std::log10(std::max(energy, MEL_FLOOR));
 }
 
+void scatter_frame(std::vector<float> & out, const float * frame, size_t t, size_t frames, size_t mels) {
+    for (size_t m = 0; m < mels; ++m) {
+        out[m * frames + t] = frame[m];
+    }
+}
+
 std::vector<float> transposed(const std::vector<float> & frames_by_mels, size_t frames, size_t mels) {
     std::vector<float> out(frames * mels);
     for (size_t t = 0; t < frames; ++t) {
-        for (size_t m = 0; m < mels; ++m) {
-            out[m * frames + t] = frames_by_mels[t * mels + m];
-        }
+        scatter_frame(out, frames_by_mels.data() + t * mels, t, frames, mels);
     }
     return out;
+}
+
+double squared_norm(const float * values, size_t width) {
+    double sum = 0.0;
+    for (size_t d = 0; d < width; ++d) {
+        sum += (double) values[d] * values[d];
+    }
+    return sum;
 }
 
 std::vector<float> half_squared_norms(const std::vector<float> & codebook, size_t entries, size_t width) {
     std::vector<float> norms(entries);
     for (size_t e = 0; e < entries; ++e) {
-        double sum = 0.0;
-        for (size_t d = 0; d < width; ++d) {
-            sum += (double) codebook[e * width + d] * codebook[e * width + d];
-        }
-        norms[e] = (float) (-0.5 * sum);
+        norms[e] = (float) (-0.5 * squared_norm(codebook.data() + e * width, width));
     }
     return norms;
 }

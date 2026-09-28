@@ -28,6 +28,7 @@ constexpr int MAX_WIDTH = 1 << 16;
 constexpr int MAX_HEADS = 1024;
 constexpr int MAX_THREADS = 1024;
 constexpr int MAX_CONTEXT = 1 << 18;
+constexpr int MAX_VOCAB = 1 << 24;
 constexpr int CACHE_ALIGNMENT = 256;
 constexpr size_t TENSOR_SLACK = 8;
 constexpr float FFN_DOWN_ACCUMULATION_SCALE = 64.0f;
@@ -86,7 +87,6 @@ SpeechLmConfig read_config(const GgufMetadata & meta) {
     config.tokens            = read_tokens(meta);
     config.audio_system_prompt = meta.str(key("audio_output_system_prompt"));
     config.text_system_prompt  = meta.str(key("text_output_system_prompt"));
-    config.audio_reply_prefix  = meta.str(key("audio_reply_prefix"));
     return config;
 }
 
@@ -106,7 +106,7 @@ bool in_vocab(int32_t id, int vocab) {
 
 void validate_tokens(const SpeechLmConfig & c) {
     const SpeechTokens & t = c.tokens;
-    if (!within(c.text_vocab, 1, 1 << 24) || !within(c.audio_vocab, 1, 1 << 24) ||
+    if (!within(c.text_vocab, 1, MAX_VOCAB) || !within(c.audio_vocab, 1, MAX_VOCAB) ||
         !in_vocab(t.text_placeholder, c.text_vocab) || !in_vocab(t.speech_start, c.text_vocab) ||
         !in_vocab(t.im_start, c.text_vocab) || !in_vocab(t.im_end, c.text_vocab) || !in_vocab(t.pad, c.text_vocab) ||
         !in_vocab(t.audio_pad, c.audio_vocab) || !in_vocab(t.speech_end, c.audio_vocab)) {
@@ -505,7 +505,16 @@ struct SpeechLM::Impl {
         return values;
     }
 
-    SpeechLogits forward(const BatchInputs & inputs, bool want_logits) {
+    static ggml_tensor * request_output(SfxGraph & graph, ggml_tensor * logits, bool wanted) {
+        if (!wanted) {
+            return nullptr;
+        }
+        ggml_set_output(logits);
+        ggml_build_forward_expand(graph.graph(), logits);
+        return logits;
+    }
+
+    SpeechLogits forward(const BatchInputs & inputs, SpeechHeads heads) {
         const int64_t tokens = (int64_t) inputs.text_ids.size();
         if (state == nullptr) {
             fail("begin() must be called before running the model");
@@ -522,14 +531,10 @@ struct SpeechLM::Impl {
         ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
         ggml_tensor * shared = block_forward(graph, SHARED_BLOCK, embed(graph, text_ids, audio_ids, text_select,
                 audio_select), tokens, positions_input, mask);
-        ggml_tensor * text_logits = branch_logits(graph, TEXT_BLOCK, "text", shared, tokens, positions_input, mask);
-        ggml_tensor * audio_logits = branch_logits(graph, AUDIO_BLOCK, "audio", shared, tokens, positions_input, mask);
-        if (want_logits) {
-            ggml_set_output(text_logits);
-            ggml_set_output(audio_logits);
-            ggml_build_forward_expand(graph.graph(), text_logits);
-            ggml_build_forward_expand(graph.graph(), audio_logits);
-        }
+        ggml_tensor * text_logits = request_output(graph, branch_logits(graph, TEXT_BLOCK, "text", shared, tokens,
+                positions_input, mask), heads.text);
+        ggml_tensor * audio_logits = request_output(graph, branch_logits(graph, AUDIO_BLOCK, "audio", shared, tokens,
+                positions_input, mask), heads.audio);
 
         allocate(graph);
         set_input(text_ids, inputs.text_ids);
@@ -542,7 +547,7 @@ struct SpeechLM::Impl {
         }
         compute(graph);
         pos += (int) tokens;
-        return want_logits ? SpeechLogits{read_logits(text_logits), read_logits(audio_logits)} : SpeechLogits{};
+        return SpeechLogits{read_logits(text_logits), read_logits(audio_logits)};
     }
 
     SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens) {
@@ -553,7 +558,8 @@ struct SpeechLM::Impl {
         const size_t batch = (size_t) batch_tokens;
         for (size_t first = 0; first < rows.size(); first += batch) {
             const size_t count = std::min(batch, rows.size() - first);
-            logits = forward(plan_batch(rows.data() + first, count), first + count == rows.size());
+            const bool last = first + count == rows.size();
+            logits = forward(plan_batch(rows.data() + first, count), {last, last});
         }
         return logits;
     }
@@ -588,8 +594,8 @@ SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_to
     return impl_->prefill(rows, batch_tokens);
 }
 
-SpeechLogits SpeechLM::step(const SpeechRow & row) {
-    return impl_->forward(impl_->plan_batch(&row, 1), true);
+SpeechLogits SpeechLM::step(const SpeechRow & row, SpeechHeads heads) {
+    return impl_->forward(impl_->plan_batch(&row, 1), heads);
 }
 
 } // namespace tts_cpp::moss::detail

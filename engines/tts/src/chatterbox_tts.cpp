@@ -123,6 +123,8 @@ static bool backend_is_arm_mali(ggml_backend_t b) {
 // destroying members at another struct's offsets (observed as a SIGSEGV in
 // ~sched_fallback on the Vulkan load path, where a bool was read as this).
 namespace {
+static constexpr int MAX_TOKEN_MEL_RATIO = 16;
+
 struct model_ctx {
     ggml_backend_t backend = nullptr;
     // Scheduler bundle [backend, CPU-last] (sched_dispatch.h) routing ops the
@@ -352,6 +354,19 @@ static model_ctx load_s3gen_gguf(const std::string & path, int n_gpu_layers, boo
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &tmp_ctx };
     gguf_context * g = gguf_init_from_file(path.c_str(), gp);
     if (!g) throw std::runtime_error("gguf_init_from_file failed: " + path);
+    {
+        int64_t k_ratio = gguf_find_key(g, "s3gen.encoder.token_mel_ratio");
+        int64_t k_vocab = gguf_find_key(g, "s3gen.speech_vocab_size");
+        const bool typed = (k_ratio < 0 || gguf_get_kv_type(g, k_ratio) == GGUF_TYPE_UINT32) &&
+                           (k_vocab < 0 || gguf_get_kv_type(g, k_vocab) == GGUF_TYPE_UINT32);
+        if (typed && k_ratio >= 0) m.token_mel_ratio = (int) gguf_get_val_u32(g, k_ratio);
+        if (typed && k_vocab >= 0) m.speech_vocab    = (int) gguf_get_val_u32(g, k_vocab);
+        if (!typed || m.token_mel_ratio < 1 || m.token_mel_ratio > MAX_TOKEN_MEL_RATIO || m.speech_vocab < 1) {
+            gguf_free(g);
+            ggml_free(tmp_ctx);
+            throw std::runtime_error("s3gen GGUF has an invalid token_mel_ratio or speech_vocab_size: " + path);
+        }
+    }
     m.backend = s3gen_init_backend(n_gpu_layers, verbose);
     m.is_mali = backend_is_arm_mali(m.backend);
     if (verbose && m.is_mali)
@@ -415,15 +430,6 @@ static model_ctx load_s3gen_gguf(const std::string & path, int n_gpu_layers, boo
         m.meanflow    = (k_mf >= 0) ? gguf_get_val_bool(g, k_mf) : true;
         m.n_timesteps = (k_ts >= 0) ? (int) gguf_get_val_u32(g, k_ts) : (m.meanflow ? 2 : 10);
         m.cfg_rate    = (k_cf >= 0) ? gguf_get_val_f32(g, k_cf) : (m.meanflow ? 0.0f : 0.7f);
-        int64_t k_ratio = gguf_find_key(g, "s3gen.encoder.token_mel_ratio");
-        int64_t k_vocab = gguf_find_key(g, "s3gen.speech_vocab_size");
-        if (k_ratio >= 0) m.token_mel_ratio = (int) gguf_get_val_u32(g, k_ratio);
-        if (k_vocab >= 0) m.speech_vocab    = (int) gguf_get_val_u32(g, k_vocab);
-        if (m.token_mel_ratio < 1 || m.token_mel_ratio > 16 || m.speech_vocab < 1) {
-            gguf_free(g);
-            ggml_free(tmp_ctx);
-            throw std::runtime_error("s3gen GGUF has an invalid token_mel_ratio or speech_vocab_size: " + path);
-        }
         if (k_mf < 0 && k_ts < 0 && k_cf < 0) {
             // Pre-§3.19 GGUFs lack the variant keys.  Defaults match the
             // historical Turbo behaviour, so legacy chatterbox-s3gen.gguf
@@ -977,6 +983,12 @@ static const std::vector<float> & cached_pos_emb(int T, int D) {
 // (s3gen_measure_fit) so the priced graph is the executed graph by
 // construction.  Resets `cache` and rebuilds its ctx/graph for length T; the
 // caller creates the gallocr (or prices the graph without one).
+static ggml_tensor * repeat_along_dim0(ggml_context * ctx, ggml_tensor * x, int copies) {
+    ggml_tensor * out = x;
+    for (int r = 1; r < copies; ++r) out = ggml_concat(ctx, out, x, 0);
+    return out;
+}
+
 static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, int T, int D) {
     const int H = 8, HEAD_DIM = 64;
     const int ratio = m.token_mel_ratio;
@@ -1036,8 +1048,7 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
     ggml_tensor * up_b = find_tensor(m, "flow/encoder/up_layer/conv/b");
     ggml_tensor * xu = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     ggml_tensor * xu_3d = ggml_reshape_3d(ctx, xu, 1, xu->ne[0], xu->ne[1]);
-    ggml_tensor * xu_rep = xu_3d;
-    for (int r = 1; r < ratio; ++r) xu_rep = ggml_concat(ctx, xu_rep, xu_3d, 0);
+    ggml_tensor * xu_rep = repeat_along_dim0(ctx, xu_3d, ratio);
     xu = ggml_cont(ctx, ggml_reshape_2d(ctx, xu_rep, xu_3d->ne[1]*ratio, xu_3d->ne[2]));
     xu = zero_pad_dim0(ctx, xu, 2 * ratio, 0);
     xu = conv1d_f32(ctx, up_w, xu, 1, 0, 1);

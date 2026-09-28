@@ -296,6 +296,22 @@ static void accumulate_tap(float * y_row, const float * x_row, float weight,
     for (int to = lo; to < hi; ++to) y_row[to] += weight * x_row[to * stride + offset];
 }
 
+static void accumulate_kernel(float * y_row, const float * x_row, const float * w_row,
+                              int k, int stride, int pad, int dilation, int T_in, int T_out)
+{
+    for (int kk = 0; kk < k; ++kk) {
+        accumulate_tap(y_row, x_row, w_row[kk], kk * dilation - pad, stride, T_in, T_out);
+    }
+}
+
+static void convolve_output_channel(float * y_row, const float * x, int C_in, int T_in, const float * w_co,
+                                    int k, int stride, int pad, int dilation, int T_out)
+{
+    for (int ci = 0; ci < C_in; ++ci) {
+        accumulate_kernel(y_row, x + (size_t)ci * T_in, w_co + (size_t)ci * k, k, stride, pad, dilation, T_in, T_out);
+    }
+}
+
 static void conv1d(const float * x, int C_in, int T_in,
                    const float * w, const float * bias,
                    int C_out, int k, int stride, int pad, int dilation,
@@ -303,16 +319,9 @@ static void conv1d(const float * x, int C_in, int T_in,
 {
     #pragma omp parallel for
     for (int co = 0; co < C_out; ++co) {
-        const float * w_co = w + (size_t)co * C_in * k;
         float * y_row = y + (size_t)co * T_out;
         std::fill(y_row, y_row + T_out, bias ? bias[co] : 0.0f);
-        for (int ci = 0; ci < C_in; ++ci) {
-            const float * x_row = x + (size_t)ci * T_in;
-            const float * w_row = w_co + (size_t)ci * k;
-            for (int kk = 0; kk < k; ++kk) {
-                accumulate_tap(y_row, x_row, w_row[kk], kk * dilation - pad, stride, T_in, T_out);
-            }
-        }
+        convolve_output_channel(y_row, x, C_in, T_in, w + (size_t)co * C_in * k, k, stride, pad, dilation, T_out);
     }
 }
 
@@ -338,6 +347,25 @@ static void accumulate_output_row(float * y_co, const float * x_c, const float *
     }
 }
 
+static void accumulate_input_channels(float * y_co, const float * x, int C_in, const float * w_co,
+                                      int H, int W, int kH, int kW, int sH, int sW, int pH, int pW,
+                                      int ho, int W_out)
+{
+    for (int ci = 0; ci < C_in; ++ci) {
+        accumulate_output_row(y_co, x + (size_t)ci * H * W, w_co + (size_t)ci * kH * kW,
+                              H, W, kH, kW, sH, sW, pH, pW, ho, W_out);
+    }
+}
+
+static void convolve_output_plane(float * y_co, const float * x, int C_in, const float * w_co,
+                                  int H, int W, int kH, int kW, int sH, int sW, int pH, int pW,
+                                  int H_out, int W_out)
+{
+    for (int ho = 0; ho < H_out; ++ho) {
+        accumulate_input_channels(y_co, x, C_in, w_co, H, W, kH, kW, sH, sW, pH, pW, ho, W_out);
+    }
+}
+
 static void conv2d(const float * x, int C_in, int H, int W,
                    const float * w, const float * bias,
                    int C_out, int kH, int kW,
@@ -346,15 +374,10 @@ static void conv2d(const float * x, int C_in, int H, int W,
 {
     #pragma omp parallel for
     for (int co = 0; co < C_out; ++co) {
-        const float * w_co = w + (size_t)co * C_in * kH * kW;
         float * y_co = y + (size_t)co * H_out * W_out;
         std::fill(y_co, y_co + (size_t)H_out * W_out, bias ? bias[co] : 0.0f);
-        for (int ho = 0; ho < H_out; ++ho) {
-            for (int ci = 0; ci < C_in; ++ci) {
-                accumulate_output_row(y_co, x + (size_t)ci * H * W, w_co + (size_t)ci * kH * kW,
-                                      H, W, kH, kW, sH, sW, pH, pW, ho, W_out);
-            }
-        }
+        convolve_output_plane(y_co, x, C_in, w + (size_t)co * C_in * kH * kW, H, W, kH, kW, sH, sW, pH, pW,
+                              H_out, W_out);
     }
 }
 
