@@ -65,6 +65,8 @@ struct TranscribeConfig {
     bool time_markers = true;
     std::string system_prompt;
     std::string default_prompt;
+    std::string hotword_prefix;
+    std::string hotword_separator;
     std::vector<int32_t> default_prompt_ids;
     int default_max_new_tokens = 0;
     int samples_per_token() const;

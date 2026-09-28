@@ -195,6 +195,8 @@ def check_transcribe(path: Path, model_dir: Path) -> None:
     reference = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     prompt = reader_string(path, "moss-transcribe.default_prompt")
     assert stored == reference.encode(prompt, add_special_tokens=False).ids, "prompt ids come from tokenizers"
+    assert reader_string(path, "moss-transcribe.hotword_prefix") == "热词提示：", "hotword prefix follows upstream"
+    assert reader_string(path, "moss-transcribe.hotword_separator") == ", "
     assert int(reader_field(path, "moss-transcribe.token.audio_pad")[0]) == first_added + 5
     print("transcribe converter: PASS")
 

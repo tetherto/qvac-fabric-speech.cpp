@@ -17,6 +17,7 @@ struct TranscribeOptions {
 
 struct TranscribeRequest {
     std::string prompt;
+    std::vector<std::string> hotwords;
     int max_new_tokens = 0;
 };
 
