@@ -3085,6 +3085,15 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-supertonic-fit-params)
     tts_cpp_register_test(test-supertonic-fit-params LABEL "unit")
+
+    # fit_price_graph on a metadata-only graph: weights marked allocated with
+    # no backend buffer must price under the forced scheduler shape instead of
+    # aborting in ggml-alloc, and must agree with the direct pricer.
+    add_executable(test-fit-price-unbuffered test/test_fit_price_unbuffered.cpp)
+    target_link_libraries(test-fit-price-unbuffered PRIVATE tts-cpp ggml)
+    target_include_directories(test-fit-price-unbuffered PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-fit-price-unbuffered)
+    tts_cpp_register_test(test-fit-price-unbuffered LABEL "unit")
     tts_cpp_register_test(test-supertonic-fit-params-v2
         EXE      test-supertonic-fit-params
         LABEL    "fixture"
