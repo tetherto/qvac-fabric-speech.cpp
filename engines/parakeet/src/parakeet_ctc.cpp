@@ -179,6 +179,73 @@ constexpr bool k_flash_attn_compiled = true;
 constexpr bool k_flash_attn_compiled = false;
 #endif
 
+// `PARAKEET_F16_ACTIVATIONS` (build flag, default OFF) lets the encoder cast
+// specific tensors to F16 so the Hexagon HMX v79 path (F16-only) can accept
+// them. The encoder residual stream stays F32 because Hexagon's quantized MM
+// kernels only carry a `quantize_f32_q8_0_*` activation quantizer
+// (matmul-ops.c:843) — feeding F16 activations to Q8_0 FF/Conv/attn
+// projections fails with DSP NO_SUPPORT. The flag scope is narrow: cast
+// (and 32-align pad) `k_perm` / `v_for_mm` / softmax output right before the
+// batched attention MULMATs in `rel_pos_mha_unfused_graph`, matching whisper's
+// convention of casting only at the attention matmul boundary. When the flag
+// is OFF the helpers below are compile-time no-ops.
+#ifdef PARAKEET_F16_ACTIVATIONS
+constexpr bool k_f16_activations_compiled = true;
+#else
+constexpr bool k_f16_activations_compiled = false;
+#endif
+
+// Cast an F32 tensor to F16. No-op when the flag is OFF or when `t` is already
+// F16. Used inside `pad_and_cast_for_hmx` at the batched attention MULMAT
+// boundary so `hmx_mm_f16_f32_batched` (src0=F16, src1=F32) engages.
+static inline ggml_tensor * cast_to_activation(ggml_context * ctx, ggml_tensor * t) {
+#ifdef PARAKEET_F16_ACTIVATIONS
+    if (t && t->type != GGML_TYPE_F16) return ggml_cast(ctx, t, GGML_TYPE_F16);
+#else
+    (void) ctx;
+#endif
+    return t;
+}
+
+// Round N up to the next multiple of 32. The Hexagon HMX F16-batched kernel
+// (hmx_mm_f16_f32_batched) refuses non-32-aligned N or K at runtime
+// (matmul-ops.c:3081); zero-padding the src0 tensor to a 32-aligned tail
+// clears that gate.
+static inline int hmx_align_up_32(int n) { return (n + 31) & ~31; }
+
+// F32 tail-zero-pad along `dim` (0 or 1) up to a 32-aligned length, then cast
+// to activation dtype. Order matters: PAD must run in F32 because Hexagon's
+// PAD kernel only accepts F32 (`ggml_hexagon_supported_pad`). No-op when
+// PARAKEET_F16_ACTIVATIONS is OFF or when `t` is already 32-aligned along
+// `dim`, so the F32 fast path is preserved bit-exactly.
+static inline ggml_tensor * pad_and_cast_for_hmx(ggml_context * ctx,
+                                                 ggml_tensor * t, int dim) {
+    if (!k_f16_activations_compiled) return t;
+    const int n     = (int) t->ne[dim];
+    const int n_pad = hmx_align_up_32(n);
+    if (n_pad != n) {
+        int rp[4] = {0, 0, 0, 0};
+        rp[dim] = n_pad - n;
+        t = ggml_pad(ctx, t, rp[0], rp[1], rp[2], rp[3]);
+    }
+    return cast_to_activation(ctx, t);
+}
+
+// Tail-zero-pad an F32 tensor along dim 0 to a 32-aligned length; no cast.
+// Used on the softmax output before the batched `attn_v` matmul so its K axis
+// matches the padded `v_for_mm` src0. Padding zeros produce zero contribution
+// at padded positions, keeping the F32 result byte-identical to the unpadded
+// computation.
+static inline ggml_tensor * pad_ne0_for_hmx(ggml_context * ctx, ggml_tensor * t) {
+    if (!k_f16_activations_compiled) return t;
+    const int n     = (int) t->ne[0];
+    const int n_pad = hmx_align_up_32(n);
+    if (n_pad != n) {
+        t = ggml_pad(ctx, t, n_pad - n, 0, 0, 0);
+    }
+    return t;
+}
+
 struct ParakeetCtcModel::Impl {
     gguf_context         * gguf           = nullptr;
     ggml_context         * ctx            = nullptr;
@@ -3019,16 +3086,50 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     ggml_tensor * q_v = ggml_add(ctx, q_perm, v_bias);
     if (cap) { cap->q_perm = q_perm; cap->k_perm = k_perm; cap->q_u = q_u; }
 
+    // Batched attention matmul src0 (`k_perm`, `p_perm`, `v_for_mm`) is derived
+    // from activations so `ggml_mul_mat` currently sees an F32 src0. Casting
+    // src0 to the activation dtype lets the Hexagon dispatcher pick the F16
+    // batched HMX path (`hmx_mm_f16_f32_batched`: src0=F16, src1=F32) instead
+    // of falling through to HVX-batched-F32. Identity no-op when
+    // PARAKEET_F16_ACTIVATIONS is OFF, preserving the F32 fast path.
+    //
+    // The HMX F16-batched kernel additionally requires k%32==0 and n%32==0
+    // (matmul-ops.c:3081). Parakeet's encoder T (e.g. 376 for 60 s audio)
+    // is not 32-aligned, so we also tail-zero-pad the N axis (`ne1`) of
+    // `k_perm` and the K axis (`ne0`) of `v_for_mm`. `p_perm` is intentionally
+    // not padded: `bd = mul_mat(p_perm, q_v)` feeds `rel_shift_view` whose
+    // stride math assumes `bd->ne[0] == 2T-1`; padding it would require a
+    // parallel rewrite of `rel_shift_view`. `bd` stays on the existing
+    // HVX-batched F32 path.
+    ggml_tensor * k_perm_mm = pad_and_cast_for_hmx(ctx, k_perm, /*dim=*/1);
+    // Leave `p_perm` in F32: ne1 = 2T-1 = 751 is not 32-aligned so HMX can't
+    // take the `bd` matmul anyway, and `p_perm` is a view over the shared
+    // per-layer pos_proj cache — casting that cache tensor to F16 inside the
+    // graph pulls the pos_proj CPY into the batch and there is no in-place
+    // benefit. `bd` stays on the existing hvx-batched-f32 kernel.
+    ggml_tensor * p_perm_mm = p_perm;
+
     if (T >= k_attn_block_min_T) {
         ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
-        ggml_tensor * flat = attn_context_blocked(ctx, k_perm, p_perm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
+        v_for_mm = pad_and_cast_for_hmx(ctx, v_for_mm, /*dim=*/0);
+        ggml_tensor * flat = attn_context_blocked(ctx, k_perm_mm, p_perm_mm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
         ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
         if (cap) cap->out = out;
         return out;
     }
 
-    ggml_tensor * bd = ggml_mul_mat(ctx, p_perm, q_v);
-    ggml_tensor * ac     = ggml_mul_mat(ctx, k_perm, q_u);
+    ggml_tensor * bd = ggml_mul_mat(ctx, p_perm_mm, q_v);
+    ggml_tensor * ac     = ggml_mul_mat(ctx, k_perm_mm, q_u);
+
+    // When `k_perm` was tail-padded above the `ac` output is (T_pad, T, H);
+    // slice the padded tail off (its rows are dots against zero keys) and
+    // materialise a contiguous copy so the subsequent add + softmax see
+    // exactly the pre-refactor (T, T, H) shape. No-op when unpadded, so the
+    // F32 fast path is preserved.
+    if (ac->ne[0] > (int64_t) T) {
+        ac = ggml_cont(ctx, ggml_view_3d(ctx, ac, T, T, H, ac->nb[1], ac->nb[2], 0));
+    }
+
     ggml_tensor * scores = ggml_add(ctx, ac, rel_shift_view(ctx, bd, T));
 
     ggml_tensor * attn;
@@ -3041,8 +3142,15 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
         attn = ggml_soft_max_ext(ctx, scores, nullptr, scale, 0.0f);
     }
 
+    // For the batched `attn_v = mul_mat(v_for_mm, attn)`, K==T is the matmul
+    // reduction axis. Pad `v_for_mm` on its K axis (ne0=T→T_pad) and pad
+    // `attn` correspondingly with zeros so the reduction over padded keys
+    // contributes nothing. `attn_v`'s F32 output shape (HD, T, H) is
+    // unchanged either way.
     ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
-    ggml_tensor * attn_v   = ggml_mul_mat(ctx, v_for_mm, attn);
+    v_for_mm = pad_and_cast_for_hmx(ctx, v_for_mm, /*dim=*/0);
+    ggml_tensor * attn_for_mm = pad_ne0_for_hmx(ctx, attn);
+    ggml_tensor * attn_v   = ggml_mul_mat(ctx, v_for_mm, attn_for_mm);
     ggml_tensor * merged   = ggml_cont(ctx, ggml_permute(ctx, attn_v, 0, 2, 1, 3));
     ggml_tensor * flat     = ggml_reshape_2d(ctx, merged, HD * H, T);
 
@@ -3665,6 +3773,15 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         ggml_set_name(g.sub_out_node, "subsampling_out");
         ggml_set_output(g.sub_out_node);
     }
+
+    // NB: with PARAKEET_F16_ACTIVATIONS we intentionally keep the encoder
+    // residual stream in F32. Hexagon's quantized MM kernels only carry a
+    // `quantize_f32_q8_0_*` activation quantizer (matmul-ops.c:843) — feeding
+    // them F16 activations fails with DSP NO_SUPPORT on every FF/Conv/attn
+    // projection matmul. Following whisper.cpp's convention the flag only
+    // pads+casts to F16 at the batched attention matmul boundary in
+    // `rel_pos_mha_unfused_graph`, which is the site the HMX F16-batched
+    // kernel (`hmx_mm_f16_f32_batched`) can accept (src0=F16, src1=F32).
 
     if (enc.xscaling) {
         x = ggml_scale(gctx, x, std::sqrt((float) d_model));
@@ -4759,6 +4876,8 @@ void ctc_greedy_decode_window(const float * logits,
 
 
 bool flash_attn_compiled() { return k_flash_attn_compiled; }
+
+bool f16_activations_compiled() { return k_f16_activations_compiled; }
 
 // Builds one encoder block on the model's active backend and reports whether the
 // graph contains `op`: lets a test see which attention path the loader chose.

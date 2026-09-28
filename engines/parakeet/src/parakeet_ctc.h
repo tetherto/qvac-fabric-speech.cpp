@@ -814,9 +814,12 @@ int profile_block_substages(ParakeetCtcModel & model,
                             int timed_runs,
                             BlockSubstageTimes & out);
 
-// Test diagnostics: whether fused attention is compiled in, and whether the encoder
-// graph built for this model contains a given op.
+// Test diagnostics: whether fused attention is compiled in, whether the encoder
+// activation stream is compiled to run in F16 (PARAKEET_F16_ACTIVATIONS build
+// flag), and whether the encoder graph built for this model contains a given
+// op.
 bool flash_attn_compiled();
+bool f16_activations_compiled();
 bool encoder_graph_uses_op(const ParakeetCtcModel & model, enum ggml_op op);
 
 }
