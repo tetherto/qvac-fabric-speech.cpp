@@ -59,7 +59,7 @@ LibriSpeech WER within noise of the CPU reference) but is not yet covered by
 hardware decoder parity CI. CUDA in these rows denotes hardware-validated
 availability, not CI coverage.
 
-Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarization GGUF via `--diarization-model` for an attributed "who said what" transcript. Download the Nemotron GGUF with `python engines/parakeet/scripts/download_nemotron_diarization.py`. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
+Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarization GGUF via `--diarization-model` for an attributed "who said what" transcript. Nemotron streaming defaults to 0 ms left context and accepts an explicit 80 ms encoder frame. Download the Nemotron GGUF with `python engines/parakeet/scripts/download_nemotron_diarization.py`. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
 
 ### Text-to-speech and voice cloning
 

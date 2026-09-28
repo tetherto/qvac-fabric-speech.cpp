@@ -1238,19 +1238,28 @@ static void append_nemotron_diarization_segments(
     }
 }
 
-static DiarizationResult engine_impl_diarize_nemotron(
+static float nemotron_audio_gain(const float * samples, int n_samples) {
+    const float peak = std::fabs(*std::max_element(samples, samples + n_samples,
+        [](float lhs, float rhs) { return std::fabs(lhs) < std::fabs(rhs); }));
+    return 1.0f / (peak + 1.0e-3f);
+}
+
+static std::vector<float> normalize_nemotron_audio(
+    const float * samples, int n_samples, float gain) {
+    std::vector<float> normalized(samples, samples + n_samples);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+        [gain](float sample) { return sample * gain; });
+    return normalized;
+}
+
+static DiarizationResult engine_impl_diarize_nemotron_with_gain(
     Engine::Impl & impl, const float * samples, int n_samples,
-    int sample_rate, const DiarizationOptions & options) {
+    int sample_rate, const DiarizationOptions & options, float gain) {
     if (!samples || n_samples <= 0 || sample_rate != impl.model.mel_cfg.sample_rate) {
         throw std::runtime_error("Nemotron diarization requires nonempty 16 kHz audio");
     }
     const auto start = std::chrono::steady_clock::now();
-    const float peak = std::fabs(*std::max_element(samples, samples + n_samples,
-        [](float lhs, float rhs) { return std::fabs(lhs) < std::fabs(rhs); }));
-    const float gain = 1.0f / (peak + 1.0e-3f);
-    std::vector<float> normalized(samples, samples + n_samples);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-        [gain](float sample) { return sample * gain; });
+    const std::vector<float> normalized = normalize_nemotron_audio(samples, n_samples, gain);
     std::vector<float> mel;
     int mel_frames = 0;
     if (compute_log_mel(normalized.data(), n_samples, impl.model.mel_cfg,
@@ -1275,6 +1284,17 @@ static DiarizationResult engine_impl_diarize_nemotron(
     append_nemotron_diarization_segments(result, options);
     result.total_ms = ms_since(start);
     return result;
+}
+
+static DiarizationResult engine_impl_diarize_nemotron(
+    Engine::Impl & impl, const float * samples, int n_samples,
+    int sample_rate, const DiarizationOptions & options) {
+    if (!samples || n_samples <= 0) {
+        throw std::runtime_error("Nemotron diarization requires nonempty 16 kHz audio");
+    }
+    return engine_impl_diarize_nemotron_with_gain(
+        impl, samples, n_samples, sample_rate, options,
+        nemotron_audio_gain(samples, n_samples));
 }
 
 static void average_nemotron_coarse_probabilities(
@@ -1304,11 +1324,13 @@ static DiarizationResult engine_impl_diarize_nemotron_streaming(
     Engine::Impl & impl, const float * samples, int n_samples,
     int sample_rate, const DiarizationOptions & options,
     SortformerSpeakerCache & cache, const SortformerStreamingConfig & config,
-    int left_context, int right_context, int committed_samples) {
+    int actual_left_context_samples, int right_context, int committed_samples,
+    float gain) {
     const auto started = std::chrono::steady_clock::now();
+    const std::vector<float> normalized = normalize_nemotron_audio(samples, n_samples, gain);
     std::vector<float> mel;
     int mel_frames = 0;
-    if (compute_log_mel(samples, n_samples, impl.model.mel_cfg,
+    if (compute_log_mel(normalized.data(), n_samples, impl.model.mel_cfg,
         impl.mel_state, mel, mel_frames) != 0) {
         throw std::runtime_error("Nemotron streaming mel preprocessing failed");
     }
@@ -1316,7 +1338,8 @@ static DiarizationResult engine_impl_diarize_nemotron_streaming(
     mel_frames = std::min(mel_frames, (n_samples + hop - 1) / hop);
     const int factor = impl.model.nemotron_diarization_cfg.subsampling_factor;
     const int chunk_frames = (mel_frames + factor - 1) / factor;
-    const int left = std::min(left_context, chunk_frames);
+    const int left = std::min(
+        (actual_left_context_samples + hop * factor - 1) / (hop * factor), chunk_frames);
     const int requested_committed =
         (committed_samples + hop * factor - 1) / (hop * factor);
     const int right = std::min(right_context,
@@ -2209,6 +2232,7 @@ struct SortformerStreamSession::Impl {
 
     SortformerSpeakerCache cache;
     bool                   cache_active = false;
+    float                  nemotron_stream_gain = 0.0f;
 
     // Speaking vs silent from Sortformer probs: max probability above opts.threshold.
     // Initial Unknown forces a transition on the first chunk.
@@ -2318,13 +2342,18 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
     DiarizationResult diar;
     {
         const float * win = ring.data() + off;
+        if (engine_impl->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION &&
+            nemotron_stream_gain == 0.0f) {
+            nemotron_stream_gain = nemotron_audio_gain(win, n);
+        }
         if (cache_active) {
             diar = engine_impl->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION
                 ? engine_impl_diarize_nemotron_streaming(
                     *engine_impl, win, n, opts.sample_rate, diopts, cache,
-                    sortformer_cfg, lc_enc_frames_expected,
+                    sortformer_cfg, static_cast<int>(emit_start_sample - window_start_sample),
                     rc_enc_frames_expected,
-                    static_cast<int>(emit_end_sample - emit_start_sample))
+                    static_cast<int>(emit_end_sample - emit_start_sample),
+                    nemotron_stream_gain)
                 : engine_impl_diarize_streaming_helper(
                     *engine_impl, win, n, opts.sample_rate, diopts, cache,
                     sortformer_cfg, lc_enc_frames_expected, rc_enc_frames_expected);
@@ -2332,7 +2361,8 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
             // v1 path: full history_ms re-encoded each chunk; overlap-based
             // slot remap downstream.
             diar = engine_impl->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION
-                ? engine_impl_diarize_nemotron(*engine_impl, win, n, opts.sample_rate, diopts)
+                ? engine_impl_diarize_nemotron_with_gain(
+                    *engine_impl, win, n, opts.sample_rate, diopts, nemotron_stream_gain)
                 : engine_impl_diarize_helper(*engine_impl, win, n, opts.sample_rate, diopts);
         }
     }
@@ -2619,6 +2649,7 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
     constexpr int kNemotronRightContextMs = 80;
     constexpr int kNemotronUpdateFrames = 40;
     constexpr int kNemotronSilenceFramesPerSpeaker = 1;
+    constexpr int kSortformerLeftContextMs = 80;
     const bool is_nemotron =
         pimpl_->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION;
     SortformerStreamingOptions effective = opts;
@@ -2629,7 +2660,8 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
             effective.spkcache_len = kNemotronSpeakerCacheFrames;
         }
         if (effective.fifo_len == defaults.fifo_len) effective.fifo_len = kNemotronFifoFrames;
-        if (effective.chunk_left_context_ms == defaults.chunk_left_context_ms) {
+        if (effective.chunk_left_context_ms ==
+            SortformerStreamingOptions::unspecified_left_context_ms) {
             effective.chunk_left_context_ms = 0;
         }
         if (effective.chunk_right_context_ms == defaults.chunk_right_context_ms) {
@@ -2649,6 +2681,9 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
             throw std::runtime_error(
                 "Nemotron AOSC chunk and context durations must align to encoder frames");
         }
+    } else if (effective.chunk_left_context_ms ==
+        SortformerStreamingOptions::unspecified_left_context_ms) {
+        effective.chunk_left_context_ms = kSortformerLeftContextMs;
     }
     if (effective.history_ms < effective.chunk_ms) {
         throw std::runtime_error("Engine::diarize_start: history_ms must be >= chunk_ms");

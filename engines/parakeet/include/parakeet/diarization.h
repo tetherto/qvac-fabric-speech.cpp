@@ -73,7 +73,8 @@ struct SortformerStreamingOptions {
     bool  spkcache_enable        = true;
     int   spkcache_len           = 188;    // total cache rows (encoder frames)
     int   fifo_len               = 188;    // FIFO warmup buffer (encoder frames)
-    int   chunk_left_context_ms  = 80;     // ~1 encoder frame at v2.1 (80ms)
+    static constexpr int unspecified_left_context_ms = -1;
+    int   chunk_left_context_ms  = unspecified_left_context_ms;
     int   chunk_right_context_ms = 560;    // ~7 encoder frames at v2.1 (560ms)
     int   spkcache_update_period = 144;    // pop_out_len on FIFO overflow
 };

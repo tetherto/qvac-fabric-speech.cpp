@@ -47,7 +47,9 @@ directly. Use it with `--model` for standalone diarization or
 `--diarization-model` with a Parakeet ASR model for speaker attribution. Its
 native output contains eight independent speaker probabilities every 10 ms.
 The streaming API uses a speaker cache and 80 ms encoder frames; its default
-chunk is 1040 ms with 80 ms right context. Custom chunk and context durations
+chunk is 1040 ms with 0 ms left and 80 ms right context. Explicit 80 ms left
+context retains one encoder frame. Streaming uses a gain from its first window
+for the whole session; offline inference normalizes its full input. Custom chunk and context durations
 must be multiples of 80 ms. The Q8 checkpoint is covered by a numerical
 reference test against NVIDIA's C++ implementation. Vulkan inference and cached
 streaming pass the same numerical and session tests on an AMD Radeon RX 7600 XT.
@@ -70,8 +72,9 @@ python -m pip install -r models/sources/NeMo-Speech.cpp/requirements.txt
 python scripts/convert_nemotron_diarization.py
 ```
 
-The conversion script downloads the checkpoint and a pinned converter source
-checkout when needed. It writes `models/Nemotron-3-Diarization.converted.q8_0.gguf`
+The conversion script downloads the checkpoint and checks the converter source
+revision, updating a stale checkout to the pinned revision. It writes
+`models/Nemotron-3-Diarization.converted.q8_0.gguf`
 and leaves the official GGUF intact.
 
 Nemotron 3.5 ASR offline inference uses the GGUF's default 320 ms operating point

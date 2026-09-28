@@ -27,6 +27,11 @@ constexpr float kNormalizationFloor = 1.0e-3f;
 constexpr double kRegressionSeparation = 3.0;
 constexpr int kTailSamples = 1280;
 constexpr int kShortHistoryMs = 1500;
+constexpr int kStreamLeftContextMs = 160;
+constexpr int kExplicitLeftContextMs = 80;
+constexpr int kFirstWindowMs = kStreamChunkMs + kStreamRightContextMs;
+constexpr float kQuietAudioScale = 0.1f;
+constexpr float kMaximumGainScoreDifference = 0.0002f;
 
 static bool valid_probabilities(const std::vector<float> & probabilities) {
     for (float probability : probabilities) {
@@ -160,6 +165,58 @@ static bool emits_short_final_tail(
         static_cast<double>(kTailSamples) / kSampleRate - kFrameStrideSeconds;
 }
 
+struct FirstChunkOutput {
+    double last_segment_end_s = 0.0;
+    float vad_score = -1.0f;
+};
+
+static FirstChunkOutput run_first_chunk(
+    parakeet::Engine & engine, const std::vector<float> & samples) {
+    FirstChunkOutput output;
+    parakeet::SortformerStreamingOptions options;
+    options.threshold = 0.0f;
+    options.min_segment_ms = 0;
+    options.chunk_left_context_ms = kStreamLeftContextMs;
+    options.on_event = [&output](const parakeet::StreamEvent & event) {
+        output.vad_score = event.vad_score;
+    };
+    auto session = engine.diarize_start(options,
+        [&output](const parakeet::StreamingDiarizationSegment & segment) {
+            if (segment.speaker_id >= 0) {
+                output.last_segment_end_s = std::max(
+                    output.last_segment_end_s, segment.end_s);
+            }
+        });
+    session->feed_pcm_f32(samples.data(),
+        kSampleRate * kFirstWindowMs / 1000);
+    return output;
+}
+
+static std::vector<float> scale_audio(
+    const std::vector<float> & samples, float scale) {
+    std::vector<float> scaled = samples;
+    for (float & sample : scaled) sample *= scale;
+    return scaled;
+}
+
+static bool preserves_first_chunk_and_gain(
+    parakeet::Engine & engine, const std::vector<float> & samples) {
+    const auto original = run_first_chunk(engine, samples);
+    const auto quiet = run_first_chunk(
+        engine, scale_audio(samples, kQuietAudioScale));
+    const double expected_end_s = static_cast<double>(kStreamChunkMs) / 1000.0;
+    const bool passed = original.last_segment_end_s >= expected_end_s - kFrameStrideSeconds &&
+        quiet.last_segment_end_s >= expected_end_s - kFrameStrideSeconds &&
+        original.vad_score >= 0.0f && quiet.vad_score >= 0.0f &&
+        std::fabs(original.vad_score - quiet.vad_score) < kMaximumGainScoreDifference;
+    if (!passed) {
+        std::fprintf(stderr, "first chunk: end=%f quiet end=%f score=%f quiet score=%f\n",
+            original.last_segment_end_s, quiet.last_segment_end_s,
+            original.vad_score, quiet.vad_score);
+    }
+    return passed;
+}
+
 }
 
 int main(int argc, char ** argv) {
@@ -230,7 +287,17 @@ int main(int argc, char ** argv) {
     }
     const auto default_session = engine.diarize_start({}, {});
     if (!default_session->aosc_active() ||
-        default_session->options().chunk_ms != kStreamChunkMs) return 1;
+        default_session->options().chunk_ms != kStreamChunkMs ||
+        default_session->options().chunk_left_context_ms != 0) return 1;
+    parakeet::SortformerStreamingOptions explicit_context;
+    explicit_context.chunk_left_context_ms = kExplicitLeftContextMs;
+    const auto explicit_session = engine.diarize_start(explicit_context, {});
+    if (explicit_session->options().chunk_left_context_ms !=
+        kExplicitLeftContextMs) return 1;
+    if (!preserves_first_chunk_and_gain(engine, samples)) {
+        std::fprintf(stderr, "Nemotron first chunk or streaming gain mismatch\n");
+        return 1;
+    }
     parakeet::SortformerStreamingOptions short_history;
     short_history.history_ms = kShortHistoryMs;
     const auto short_history_session = engine.diarize_start(short_history, {});

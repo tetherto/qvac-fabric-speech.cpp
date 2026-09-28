@@ -1,6 +1,7 @@
 """Tests for Nemotron 3 Diarization model preparation scripts."""
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -53,11 +54,81 @@ class NemotronPreparationTests(unittest.TestCase):
         self.assertNotEqual(output.name, downloader.GGUF_FILENAME)
 
     def test_uses_existing_converter_checkout(self):
+        calls = []
+
+        def fake_run(command, **arguments):
+            calls.append(command)
+            output = converter.CONVERTER_REVISION + "\n" if "rev-parse" in command else ""
+            return subprocess.CompletedProcess(command, 0, output)
+
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            (directory / ".git").mkdir()
             script = directory / "convert_model.py"
             script.touch()
-            self.assertEqual(converter.ensure_converter(directory), script)
+            self.assertEqual(converter.ensure_converter(directory, run=fake_run), script)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0][-2:], ["rev-parse", "HEAD"])
+
+    def test_accepts_pinned_converter_worktree(self):
+        def fake_run(command, **arguments):
+            output = converter.CONVERTER_REVISION + "\n" if "rev-parse" in command else ""
+            return subprocess.CompletedProcess(command, 0, output)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / ".git").write_text("gitdir: linked-worktree")
+            script = directory / "convert_model.py"
+            script.touch()
+            self.assertEqual(converter.ensure_converter(directory, run=fake_run), script)
+
+    def test_rejects_modified_converter_script(self):
+        def fake_run(command, **arguments):
+            if "rev-parse" in command:
+                output = converter.CONVERTER_REVISION + "\n"
+            elif "status" in command:
+                output = " M convert_model.py\n"
+            else:
+                output = ""
+            return subprocess.CompletedProcess(command, 0, output)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / ".git").mkdir()
+            (directory / "convert_model.py").touch()
+            with self.assertRaises(RuntimeError):
+                converter.ensure_converter(directory, run=fake_run)
+
+    def test_updates_stale_converter_checkout(self):
+        calls = []
+        revision = "old-revision"
+
+        def fake_run(command, **arguments):
+            nonlocal revision
+            calls.append(command)
+            if "checkout" in command:
+                revision = converter.CONVERTER_REVISION
+            if "rev-parse" in command:
+                return subprocess.CompletedProcess(command, 0, revision + "\n")
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / ".git").mkdir()
+            script = directory / "convert_model.py"
+            script.touch()
+            self.assertEqual(converter.ensure_converter(directory, run=fake_run), script)
+        self.assertEqual([command[-2] for command in calls if "rev-parse" in command],
+                         ["rev-parse", "rev-parse"])
+        self.assertTrue(any("fetch" in command for command in calls))
+        self.assertTrue(any("checkout" in command for command in calls))
+
+    def test_rejects_non_git_converter_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "convert_model.py").touch()
+            with self.assertRaises(RuntimeError):
+                converter.ensure_converter(directory)
 
     def test_fetches_pinned_converter_source(self):
         calls = []
@@ -71,12 +142,17 @@ class NemotronPreparationTests(unittest.TestCase):
                 if "checkout" in command:
                     directory.mkdir(parents=True)
                     script.touch()
+                if "rev-parse" in command:
+                    return subprocess.CompletedProcess(
+                        command, 0, converter.CONVERTER_REVISION + "\n")
+                return subprocess.CompletedProcess(command, 0, "")
 
             self.assertEqual(converter.ensure_converter(directory, run=fake_run), script)
 
         self.assertEqual(calls[0][1], "clone")
         self.assertEqual(calls[1][-1], converter.CONVERTER_REVISION)
         self.assertEqual(calls[2][-1], converter.CONVERTER_REVISION)
+        self.assertEqual(calls[3][-2:], ["rev-parse", "HEAD"])
 
 
 if __name__ == "__main__":

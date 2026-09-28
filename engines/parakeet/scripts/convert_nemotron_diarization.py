@@ -21,19 +21,40 @@ OUTPUT_TYPE = "q8_0"
 
 def ensure_converter(converter_directory, run=subprocess.run):
     converter = converter_directory / "convert_model.py"
-    if converter.is_file():
-        return converter
     converter_directory.parent.mkdir(parents=True, exist_ok=True)
-    if not (converter_directory / ".git").is_dir():
+    if converter_directory.exists() and not (converter_directory / ".git").exists():
+        raise RuntimeError(f"Converter directory is not a Git checkout: {converter_directory}")
+    if converter.is_file() and converter_revision(converter_directory, run) == CONVERTER_REVISION:
+        verify_converter_file(converter_directory, run)
+        return converter
+    if not (converter_directory / ".git").exists():
         run(["git", "clone", "--filter=blob:none", "--no-checkout",
              CONVERTER_REPOSITORY, str(converter_directory)], check=True)
     run(["git", "-C", str(converter_directory), "fetch", "origin",
          CONVERTER_REVISION], check=True)
     run(["git", "-C", str(converter_directory), "checkout",
          "--detach", CONVERTER_REVISION], check=True)
+    if converter_revision(converter_directory, run) != CONVERTER_REVISION:
+        raise RuntimeError("Converter checkout does not match the pinned revision")
     if not converter.is_file():
         raise FileNotFoundError(converter)
+    verify_converter_file(converter_directory, run)
     return converter
+
+
+def converter_revision(converter_directory, run):
+    result = run(["git", "-C", str(converter_directory), "rev-parse", "HEAD"],
+                 check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def verify_converter_file(converter_directory, run):
+    run(["git", "-C", str(converter_directory), "ls-files", "--error-unmatch",
+         "--", "convert_model.py"], check=True, capture_output=True, text=True)
+    result = run(["git", "-C", str(converter_directory), "status", "--porcelain",
+                  "--", "convert_model.py"], check=True, capture_output=True, text=True)
+    if result.stdout.strip():
+        raise RuntimeError("Converter script differs from the pinned revision")
 
 
 def convert_model(source, output, converter, run=subprocess.run):
