@@ -4,7 +4,10 @@ Parakeet is a pure C++/ggml implementation of NVIDIA FastConformer ASR,
 end-of-turn detection, and Sortformer speaker diarization. Inference requires no
 Python, PyTorch, NeMo, or ONNX Runtime. A single `parakeet::Engine` loads CTC,
 RNN-T, TDT, EOU, Nemotron, or Sortformer GGUFs and selects the implementation
-from GGUF metadata.
+from GGUF metadata. MOSS-Transcribe-Diarize, a Qwen3-based model that
+transcribes and labels speakers in one pass, ships alongside with its own
+`parakeet::moss::TranscribeEngine` and `moss-transcribe` CLI; see
+[docs/moss-transcribe.md](docs/moss-transcribe.md).
 
 ## Supported checkpoints
 
@@ -21,6 +24,7 @@ from GGUF metadata.
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | Sortformer | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Streaming-trained; sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps; Core ML exact-shape batch/AOSC encoder |
+| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | Whisper-shaped encoder + Qwen3 decoder (text, speakers, timestamps) | 80 | 1024 × 24 encoder, 1024 × 28 decoder | 151936 | 0.9 B | 1.8 GB f16 / 0.98 GB q8_0 / 0.64 GB q5_0 | 0.05–0.39 f16 Metal (2 to 30 min) | Multilingual checkpoint, validated on Spanish and Chinese; English long-form skips spans, as in the reference model; separate `moss-transcribe` API and CLI |
 
 TDT 0.6B-v3 and TDT 1.1B are distinct model contracts: only 0.6B-v3 is
 multilingual and punctuation/capitalization-aware. Encoder topology, including
@@ -241,6 +245,7 @@ optimization history: [docs/performance.md](docs/performance.md).
 | Public C++ API and Sortformer AOSC | [docs/api.md](docs/api.md) |
 | CLI, microphone examples, memory-fit preflight | [docs/cli.md](docs/cli.md) |
 | Tests and NeMo parity | [docs/testing.md](docs/testing.md) |
+| MOSS-Transcribe-Diarize (conversion, CLI, API, tests) | [docs/moss-transcribe.md](docs/moss-transcribe.md) |
 | Benchmark method, CI snapshots, decode optimization history | [docs/performance.md](docs/performance.md) |
 
 ## License

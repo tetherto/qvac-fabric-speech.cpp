@@ -2345,6 +2345,17 @@ std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
     return model_active_backend_name(m);
 }
 
+ggml_backend_t init_engine_backend(bool use_gpu) {
+    bool skipped_unsupported_gpu = false;
+    bool is_mali_vulkan = false;
+    ggml_backend_t backend = use_gpu ? init_gpu_backend(1, false, skipped_unsupported_gpu, is_mali_vulkan) : nullptr;
+    return backend ? backend : init_cpu_backend();
+}
+
+ggml_backend_t init_engine_cpu_backend() {
+    return init_cpu_backend();
+}
+
 ggml_backend_t model_active_backend(ParakeetCtcModel & m) {
     if (!m.impl) return nullptr;
     return m.impl->backend_active;
