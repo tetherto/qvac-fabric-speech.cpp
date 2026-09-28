@@ -1715,10 +1715,12 @@ static void load_diarization_weights(ggml_context * context, ParakeetCtcModel & 
     weights.upsample_w = ggml_get_tensor(context, "subpixel_upsample.weight");
     if (!weights.upsample_w || weights.upsample_w->ne[0] != 3 ||
         weights.upsample_w->ne[1] != cfg.output_width ||
-        weights.upsample_w->ne[2] != cfg.output_width * cfg.subsampling_factor) {
+        weights.upsample_w->ne[2] !=
+            static_cast<int64_t>(cfg.output_width) * cfg.subsampling_factor) {
         throw std::runtime_error("Nemotron 3 Diarization tensor shape mismatch: subpixel_upsample.weight");
     }
-    weights.upsample_b = require_diarization_tensor(context, "subpixel_upsample.bias", cfg.output_width * cfg.subsampling_factor);
+    weights.upsample_b = require_diarization_tensor(context, "subpixel_upsample.bias",
+        static_cast<int64_t>(cfg.output_width) * cfg.subsampling_factor);
     weights.hidden_w = require_diarization_tensor(context, "head.first_hidden_to_hidden.weight", cfg.output_width, cfg.output_width);
     weights.hidden_b = require_diarization_tensor(context, "head.first_hidden_to_hidden.bias", cfg.output_width);
     weights.speakers_w = require_diarization_tensor(context, "head.single_hidden_to_spks.weight", cfg.output_width, cfg.speakers);

@@ -32,6 +32,8 @@ int main(int argc, char ** argv) {
         config.speakers != 8 || config.output_stride != 1 ||
         weights.layers.size() != static_cast<size_t>(config.encoder_layers) ||
         !weights.feature_projection || !weights.upsample_w ||
+        weights.upsample_w->ne[2] !=
+            static_cast<int64_t>(config.output_width) * config.subsampling_factor ||
         !weights.silence_embedding || !weights.speakers_w ||
         model.mel_cfg.filterbank.size() != 128 * 257 ||
         model.mel_cfg.window.size() != 400 ||

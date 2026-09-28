@@ -112,7 +112,8 @@ ggml_tensor * speaker_head(
         ggml_permute(context, convolved, 1, 0, 2, 3));
     channels_first = ggml_add(context, channels_first, weights.upsample_b);
     ggml_tensor * upsampled = ggml_reshape_2d(context,
-        channels_first, config.output_width, frames * config.subsampling_factor);
+        channels_first, config.output_width,
+        static_cast<int64_t>(frames) * config.subsampling_factor);
     ggml_tensor * hidden = linear(context, ggml_relu(context, upsampled),
         weights.hidden_w, weights.hidden_b);
     ggml_tensor * logits = linear(context, ggml_relu(context, hidden),
@@ -195,7 +196,8 @@ int run_nemotron_diarization_chunk(
     ggml_context * context = ggml_init(parameters);
     if (!context) return 3;
     ggml_tensor * input = ggml_new_tensor_2d(context, GGML_TYPE_F32,
-        config.subsampling_factor * model.mel_cfg.n_mels, chunk_frames);
+        static_cast<int64_t>(config.subsampling_factor) * model.mel_cfg.n_mels,
+        chunk_frames);
     ggml_tensor * state_input = state_frames > 0
         ? ggml_new_tensor_2d(context, GGML_TYPE_F32, config.encoder_width, state_frames)
         : nullptr;
