@@ -1,5 +1,7 @@
 #include "moss/transcribe_cli.h"
 
+#include "moss/transcribe_text.h"
+
 #include "mel_preprocess.h"
 #include "parakeet/cli.h"
 
@@ -41,9 +43,7 @@ std::string quoted(const std::string & text) {
 }
 
 std::string number(double value) {
-    char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%.6g", value);
-    return buffer;
+    return detail::format_decimal(value);
 }
 
 std::string segment_json(const TranscriptSegment & segment) {

@@ -51,17 +51,17 @@ build/moss-transcribe --model moss-transcribe-diarize-f16.gguf \
 ```
 
 The input must be a 16 kHz WAV (stereo is downmixed by averaging). The CLI
-prints one `[start-end] Sxx: text` line per segment and, with `--out`, writes
-a JSON document with the raw text, the segments, the token counts, and the
-stage timings. `--hotwords "Tether,QVAC,vcpkg"` lists names and domain
-terms the audio is likely to contain; they are appended to the default
-instruction the way upstream's hotword recipe does it. `--prompt` replaces
-the default instruction instead (upstream's `examples/prompts.md` lists the
-English and speaker-only variants; a blank prompt keeps the default) and
-cannot be combined with `--hotwords`. `--max-new-tokens` raises the model
-default of 5120, which is short for recordings past about fifteen minutes. There is no streaming in this mode.
-On an M1 Ultra with Metal and the f16 model, ten minutes of Spanish take
-about 95 seconds.
+prints one `[start-end] Sxx: text` line per segment and, with `--out`,
+writes a JSON document with the raw text, the segments, the token counts,
+and the stage timings. `--hotwords "Tether,QVAC,vcpkg"` lists names and
+domain terms the audio is likely to contain; they are appended to the
+default instruction the way upstream's hotword recipe does it. `--prompt`
+replaces the default instruction instead (upstream's `examples/prompts.md`
+lists the English and speaker-only variants; a blank prompt keeps the
+default) and cannot be combined with `--hotwords`. `--max-new-tokens` raises
+the model default of 5120, which is short for recordings past about fifteen
+minutes. There is no streaming in this mode. On an M1 Ultra with Metal and
+the f16 model, ten minutes of Spanish take about 95 seconds.
 
 ## Engine notes
 
@@ -110,7 +110,12 @@ speaker, text, and an end timestamp no earlier than the start; anything else
 stays in the text or is dropped, exactly as upstream does. The loader
 validates every tensor's shape and type against the metadata and bounds the
 metadata itself, so a malformed GGUF fails with an error instead of aborting
-inside ggml.
+inside ggml. Weights are read straight into host-visible buffers (CPU, and
+Metal's shared memory) with no staging copy; on other GPU backends float
+tensors stream in 8 MiB chunks and quantized tensors go up whole, because the
+OpenCL and CPU-repacking backends rebuild their layout from the full tensor.
+Timestamps are parsed and JSON numbers written in the C locale, so a host
+application with a comma-decimal locale gets the same segments and valid JSON.
 
 ## Test
 
@@ -119,14 +124,16 @@ download: the mixed-radix FFT against a direct DFT, the log-mel
 normalization, the chunk and token arithmetic against the reference
 processor's counts, the time-marker placement, the prompt layout for the
 default and a custom prompt, the pre-tokenizer's Unicode classes, hotword
-sanitation and bounds, byte-level decoding with control tokens skipped, the transcript parser (edge cases and character-by-character
-streaming), the load-time rejections, encoder chunks, decoder prefill in
-uneven batches against a single batch, audio injection, engine
-end-to-end, hotword prompts, cancellation, request validation, and the
-`moss-transcribe` CLI flags and JSON output. `test-converter-moss-transcribe` fabricates a tiny
-checkpoint and checks the tensor census, the column biases, the token types,
-the stored prompt ids, the hotword metadata, and the q8_0 path (skipped without `numpy`, `gguf`, or
-`tokenizers`).
+sanitation and bounds, byte-level decoding with control tokens skipped, the
+transcript parser (edge cases and character-by-character streaming), the
+load-time rejections, encoder chunks, decoder prefill in uneven batches
+against a single batch, audio injection, engine end-to-end, hotword prompts,
+cancellation, request validation, the `moss-transcribe` CLI flags and
+JSON output, the timestamp and JSON numbers under a comma-decimal locale, and
+the weight-upload plan per buffer kind. `test-converter-moss-transcribe` fabricates a tiny checkpoint
+and checks the tensor census, the column biases, the token types, the stored
+prompt ids, the hotword metadata, and the q8_0 path (skipped without
+`numpy`, `gguf`, or `tokenizers`).
 `test-moss-transcribe-parity` is the reference check: it skips unless
 `MOSS_TRANSCRIBE_MODEL` points at an f16 GGUF (a quantized model passes the
 stage checks but its greedy transcript drifts from the fp32 one, although it

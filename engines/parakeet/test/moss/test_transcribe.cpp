@@ -5,14 +5,18 @@
 #include "moss/transcribe_bpe.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
+#include "moss/transcribe_runtime.h"
 #include "moss/transcribe_text.h"
 #include "parakeet/moss_transcribe.h"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <locale>
 #include <random>
 #include <string>
 #include <vector>
@@ -37,6 +41,8 @@ constexpr int REFERENCE_SPAN = 1600;
 constexpr int CACHE_ALIGNMENT = 256;
 constexpr int SHORT_CONTEXT = 64;
 constexpr int OVER_CONTEXT_CHUNKS = 10;
+const char * const COMMA_DECIMAL_LOCALES[] = {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "de_DE",
+                                              "fr_FR", "German_Germany.1252"};
 
 int failures = 0;
 
@@ -551,6 +557,62 @@ void test_transcript_json() {
           "transcript JSON carries the segments");
 }
 
+bool comma_decimal_active() {
+    return std::strtod("1.25", nullptr) != 1.25;
+}
+
+bool try_comma_decimal_locale(const char * name) {
+    if (std::setlocale(LC_ALL, name) == nullptr) {
+        return false;
+    }
+    try {
+        std::locale::global(std::locale(name));
+    } catch (const std::runtime_error &) {
+        std::setlocale(LC_ALL, "C");
+        return false;
+    }
+    return comma_decimal_active();
+}
+
+bool enter_comma_decimal_locale() {
+    for (const char * name : COMMA_DECIMAL_LOCALES) {
+        if (try_comma_decimal_locale(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void leave_comma_decimal_locale() {
+    std::setlocale(LC_ALL, "C");
+    std::locale::global(std::locale::classic());
+}
+
+void test_locale_independent_numbers() {
+    const bool exercised = enter_comma_decimal_locale();
+    if (!exercised) {
+        std::printf("note: no comma-decimal locale installed; numbers checked in the C locale only\n");
+    }
+    const auto segments = parse_transcript("[0.50][S01] hello [1.25]");
+    check(segments.size() == 1 && segments[0].start_s == 0.5 && segments[0].end_s == 1.25,
+          "timestamps parse the same under a comma-decimal locale");
+    parakeet::moss::TranscribeResult result;
+    result.segments = {{0.5, 1.25, "S01", "hello"}};
+    const std::string json = parakeet::moss::cli::transcript_json(result);
+    check(json.find("\"start\": 0.5, \"end\": 1.25") != std::string::npos,
+          "transcript JSON keeps a dot decimal under a comma-decimal locale");
+    check(parse_decimal("2.75") == 2.75 && format_decimal(2.75) == "2.75", "decimal helpers ignore the locale");
+    leave_comma_decimal_locale();
+}
+
+void test_upload_plan() {
+    check(plan_upload(true, true) == TensorUpload::InPlace && plan_upload(true, false) == TensorUpload::InPlace,
+          "host buffers read tensors in place without a staging copy");
+    check(plan_upload(false, false) == TensorUpload::Chunked, "device float tensors stream in bounded chunks");
+    check(plan_upload(false, true) == TensorUpload::Whole,
+          "device quantized tensors upload whole, as the OpenCL and repacking backends require");
+}
+
 } // namespace
 
 int main() {
@@ -579,6 +641,8 @@ int main() {
         test_cli_flags();
         test_transcript_json();
         test_transcript_json_escapes();
+        test_locale_independent_numbers();
+        test_upload_plan();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected: %s\n", e.what());
         return 1;

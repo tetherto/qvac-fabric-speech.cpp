@@ -15,7 +15,6 @@
 namespace parakeet::moss::detail {
 namespace {
 
-constexpr size_t STREAM_CHUNK_BYTES = 8u << 20;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss transcribe: " + message);
@@ -33,6 +32,10 @@ void read_exactly(std::ifstream & file, void * data, size_t bytes, const char * 
     if (bytes != 0 && !file.read(static_cast<char *>(data), (std::streamsize) bytes)) {
         fail(std::string("short read on tensor ") + name);
     }
+}
+
+void read_in_place(std::ifstream & file, ggml_tensor * tensor, size_t bytes) {
+    read_exactly(file, tensor->data, bytes, ggml_get_name(tensor));
 }
 
 void upload_whole(std::ifstream & file, ggml_tensor * tensor, size_t bytes, std::vector<uint8_t> & scratch) {
@@ -56,14 +59,21 @@ void upload_tensor(const gguf_context * gguf, std::ifstream & file, ggml_tensor 
     if (!file.seekg((std::streamoff) offset)) {
         fail(std::string("cannot seek to tensor ") + ggml_get_name(tensor));
     }
-    if (ggml_is_quantized(tensor->type)) {
-        upload_whole(file, tensor, bytes, scratch);
-    } else {
-        upload_chunked(file, tensor, bytes, scratch);
+    switch (plan_upload(ggml_backend_buffer_is_host(tensor->buffer), ggml_is_quantized(tensor->type))) {
+        case TensorUpload::InPlace: read_in_place(file, tensor, bytes); break;
+        case TensorUpload::Whole:   upload_whole(file, tensor, bytes, scratch); break;
+        case TensorUpload::Chunked: upload_chunked(file, tensor, bytes, scratch); break;
     }
 }
 
 } // namespace
+
+TensorUpload plan_upload(bool host_buffer, bool quantized) {
+    if (host_buffer) {
+        return TensorUpload::InPlace;
+    }
+    return quantized ? TensorUpload::Whole : TensorUpload::Chunked;
+}
 
 TranscribeGraph::TranscribeGraph(int max_nodes) {
     const size_t bytes = (size_t) max_nodes * ggml_tensor_overhead() + ggml_graph_overhead_custom(max_nodes, false);

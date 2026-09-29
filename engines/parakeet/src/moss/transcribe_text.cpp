@@ -3,8 +3,9 @@
 #include "moss/transcribe_bpe.h"
 
 #include <algorithm>
-#include <cstdlib>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -14,6 +15,7 @@ namespace {
 constexpr int32_t TOKEN_TYPE_CONTROL = 3;
 constexpr size_t MAX_TIMESTAMP_CHARS = 32;
 constexpr size_t MAX_SPEAKER_CHARS = 16;
+constexpr int DECIMAL_DIGITS = 6;
 constexpr const char * WHITESPACE = " \t\n\v\f\r";
 
 [[noreturn]] void fail(const std::string & message) {
@@ -66,7 +68,7 @@ bool parse_timestamp(const std::string & text, double & value) {
     if (text.empty() || !all_timestamp_chars(text) || count_char(text, '.') > 1 || count_char(text, '.') == text.size()) {
         return false;
     }
-    value = std::strtod(text.c_str(), nullptr);
+    value = parse_decimal(text);
     return true;
 }
 
@@ -503,6 +505,22 @@ std::vector<TranscriptSegment> parse_transcript(const std::string & text) {
     const std::vector<TranscriptSegment> tail = parser.close();
     segments.insert(segments.end(), tail.begin(), tail.end());
     return segments;
+}
+
+double parse_decimal(const std::string & text) {
+    std::istringstream stream(text);
+    stream.imbue(std::locale::classic());
+    double value = 0.0;
+    stream >> value;
+    return value;
+}
+
+std::string format_decimal(double value) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream.precision(DECIMAL_DIGITS);
+    stream << value;
+    return stream.str();
 }
 
 } // namespace parakeet::moss::detail
