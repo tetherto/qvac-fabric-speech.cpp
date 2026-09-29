@@ -1,6 +1,7 @@
 #include "moss/transcribe_bpe.h"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 
@@ -9,6 +10,13 @@ namespace {
 
 using Codepoints = std::vector<uint32_t>;
 
+struct UnicodeRange {
+    uint32_t first;
+    uint32_t last;
+};
+
+#include "moss/transcribe_unicode.inc"
+
 constexpr uint32_t FIRST_PRINTABLE = 33;
 constexpr uint32_t LAST_PRINTABLE = 126;
 constexpr uint32_t FIRST_LATIN = 161;
@@ -16,22 +24,23 @@ constexpr uint32_t LAST_LATIN_BEFORE_SOFT_HYPHEN = 172;
 constexpr uint32_t FIRST_LATIN_AFTER_SOFT_HYPHEN = 174;
 constexpr uint32_t LAST_BYTE = 255;
 constexpr uint32_t REMAPPED_BYTE_BASE = 256;
-constexpr uint32_t FIRST_NON_ASCII = 0x80;
-
-bool is_ascii_letter(uint32_t cp) {
-    return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z');
+template <size_t Size>
+bool in_ranges(uint32_t cp, const UnicodeRange (&ranges)[Size]) {
+    const auto found = std::upper_bound(std::begin(ranges), std::end(ranges), cp,
+            [](uint32_t value, const UnicodeRange & range) { return value < range.first; });
+    return found != std::begin(ranges) && cp <= std::prev(found)->last;
 }
 
 bool is_letter(uint32_t cp) {
-    return is_ascii_letter(cp) || cp >= FIRST_NON_ASCII;
+    return in_ranges(cp, LETTER_RANGES);
 }
 
 bool is_number(uint32_t cp) {
-    return cp >= '0' && cp <= '9';
+    return in_ranges(cp, NUMBER_RANGES);
 }
 
 bool is_space(uint32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0b || cp == 0x0c;
+    return in_ranges(cp, WHITE_SPACE_RANGES);
 }
 
 bool is_newline(uint32_t cp) {
@@ -148,8 +157,20 @@ size_t punctuation_end(const Codepoints & cps, size_t i) {
     return run_end(cps, run_end(cps, j, is_punctuation), is_newline);
 }
 
+size_t last_newline_end(const Codepoints & cps, size_t first, size_t last) {
+    size_t end = first;
+    for (size_t k = first; k < last; ++k) {
+        end = is_newline(cps[k]) ? k + 1 : end;
+    }
+    return end;
+}
+
 size_t whitespace_end(const Codepoints & cps, size_t i) {
     const size_t j = run_end(cps, i, is_space);
+    const size_t newline = last_newline_end(cps, i, j);
+    if (newline > i) {
+        return newline;
+    }
     return j < cps.size() && j - i > 1 ? j - 1 : j;
 }
 

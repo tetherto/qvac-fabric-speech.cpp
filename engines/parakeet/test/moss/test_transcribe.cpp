@@ -2,16 +2,21 @@
 
 #include "moss/transcribe_cli.h"
 #include "moss/transcribe_audio.h"
+#include "moss/transcribe_bpe.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
+#include "moss/transcribe_runtime.h"
 #include "moss/transcribe_text.h"
 #include "parakeet/moss_transcribe.h"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <locale>
 #include <random>
 #include <string>
 #include <vector>
@@ -36,6 +41,8 @@ constexpr int REFERENCE_SPAN = 1600;
 constexpr int CACHE_ALIGNMENT = 256;
 constexpr int SHORT_CONTEXT = 64;
 constexpr int OVER_CONTEXT_CHUNKS = 10;
+const char * const COMMA_DECIMAL_LOCALES[] = {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "de_DE",
+                                              "fr_FR", "German_Germany.1252"};
 
 int failures = 0;
 
@@ -208,6 +215,37 @@ void test_detokenizer() {
     check(tokenizer.encode("h\xc3\xa9") == bytes_of("h\xc3\xa9"), "byte-level encode round-trips");
 }
 
+using Pieces = std::vector<std::string>;
+
+void test_pretokenizer_unicode() {
+    check(qwen_pretokenize("\xe8\x8c\x83\xe5\x9b\xb4\xe3\x80\x82\xe7\x83\xad\xe8\xaf\x8d") ==
+          Pieces{"\xe8\x8c\x83\xe5\x9b\xb4", "\xe3\x80\x82\xe7\x83\xad\xe8\xaf\x8d"},
+          "CJK punctuation is not a letter and prefixes the next word");
+    check(qwen_pretokenize("  \n  x") == Pieces{"  \n", " ", " x"}, "whitespace ending in a newline splits there");
+    check(qwen_pretokenize("a\xe3\x80\x80" "b") == Pieces{"a", "\xe3\x80\x80" "b"},
+          "the ideographic space is whitespace");
+    check(qwen_pretokenize("x\xef\xbc\x91\xef\xbc\x92") == Pieces{"x", "\xef\xbc\x91", "\xef\xbc\x92"},
+          "full-width digits are single numbers");
+    check(qwen_pretokenize("caf\xc3\xa9 it's") == Pieces{"caf\xc3\xa9", " it", "'s"},
+          "accented letters stay in the word and contractions split");
+}
+
+void test_hotword_sanitation() {
+    check(sanitize_hotword("  Q\nV[A]C  <|x|>  ") == "Q V A C x", "breakers become spaces and runs collapse");
+    check(sanitize_hotwords({"QVAC", " ", "QVAC", "vcpkg"}) == std::vector<std::string>{"QVAC", "vcpkg"},
+          "empty and duplicate hotwords are dropped");
+    expect_failure([] { sanitize_hotword(std::string(MAX_HOTWORD_BYTES + 1, 'x')); }, "at most",
+                   "an oversized hotword is rejected");
+    expect_failure([] { sanitize_hotwords(std::vector<std::string>(MAX_HOTWORDS + 1, "x")); }, "at most",
+                   "too many hotwords are rejected");
+    TranscribeConfig config;
+    config.default_prompt = DEFAULT_PROMPT;
+    config.hotword_prefix = HOTWORD_PREFIX;
+    config.hotword_separator = HOTWORD_SEPARATOR;
+    check(hotword_prompt(config, {"QVAC", "vcpkg"}) == "hi Hotwords: QVAC, vcpkg",
+          "hotwords extend the default prompt with the model's prefix and separator");
+}
+
 void test_parser_basic() {
     const auto segments = parse_transcript("[0.50][S01] hello there [1.25][1.25][S02]world[2]");
     check(segments.size() == 2, "two segments parse");
@@ -285,6 +323,9 @@ void test_model_rejections() {
     expect_model_rejects(write_transcribe_model("transcribe-new-tokens", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_u32(f, "moss-transcribe.default_max_new_tokens", TEXT_CTX + 1);
     }), "prompt metadata", "a default token budget past the context is rejected");
+    expect_model_rejects(write_transcribe_model("transcribe-no-hotwords", WEIGHT_SEED, [](gguf_context * f) {
+        gguf_remove_key(f, "moss-transcribe.hotword_prefix");
+    }), "hotword_prefix", "the hotword prefix is required");
     expect_model_rejects(write_transcribe_model("transcribe-rope", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_f32(f, "moss-transcribe.text.rope.freq_base", 0.0f);
     }), "decoder geometry", "a zero RoPE base is rejected");
@@ -425,6 +466,30 @@ void test_engine_rejections() {
     std::filesystem::remove(path);
 }
 
+void test_engine_hotwords() {
+    const auto path = write_transcribe_model("transcribe-hotwords", WEIGHT_SEED);
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
+    const std::vector<float> audio = random_signal(CHUNK_SAMPLES, AUDIO_SEED);
+    parakeet::moss::TranscribeRequest plain;
+    plain.max_new_tokens = 1;
+    parakeet::moss::TranscribeRequest hinted = plain;
+    hinted.hotwords = {"QVAC", "vcpkg"};
+    const int extra = (int) std::string(" Hotwords: QVAC, vcpkg").size();
+    check(engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, hinted).prompt_tokens ==
+          engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, plain).prompt_tokens + extra,
+          "hotwords add their byte tokens to the prompt");
+    parakeet::moss::TranscribeRequest blank = plain;
+    blank.hotwords = {" ", "[]"};
+    check(engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, blank).prompt_tokens ==
+          engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, plain).prompt_tokens,
+          "hotwords that sanitize to nothing keep the default prompt");
+    parakeet::moss::TranscribeRequest mixed = hinted;
+    mixed.prompt = "custom";
+    expect_failure([&] { engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, mixed); }, "custom prompt",
+                   "hotwords with a custom prompt are rejected");
+    std::filesystem::remove(path);
+}
+
 void test_engine_rejects_over_context_audio() {
     const auto path = write_transcribe_model("transcribe-short-context", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_u32(f, "moss-transcribe.text.context_length", SHORT_CONTEXT);
@@ -459,6 +524,11 @@ void test_cli_flags() {
     check(args.options.model_path == "t.gguf" && args.audio_path == "a.wav" && args.request.prompt == "p" &&
           args.request.max_new_tokens == 9 && args.options.use_gpu && args.options.n_threads == 3 &&
           args.out_path == "o.json", "CLI values land in the options and the request");
+    const char * hinted[] = {"moss-transcribe", "--model", "t.gguf", "--audio", "a.wav", "--hotwords", "QVAC,,vcpkg"};
+    TranscribeCliArgs hotwords;
+    check(parse_args(7, hinted, hotwords) &&
+          hotwords.request.hotwords == std::vector<std::string>{"QVAC", "", "vcpkg"},
+          "--hotwords splits on commas");
     const char * no_audio[] = {"moss-transcribe", "--model", "t.gguf"};
     TranscribeCliArgs missing;
     check(!parse_args(3, no_audio, missing), "--audio is required");
@@ -487,6 +557,62 @@ void test_transcript_json() {
           "transcript JSON carries the segments");
 }
 
+bool comma_decimal_active() {
+    return std::strtod("1.25", nullptr) != 1.25;
+}
+
+bool try_comma_decimal_locale(const char * name) {
+    if (std::setlocale(LC_ALL, name) == nullptr) {
+        return false;
+    }
+    try {
+        std::locale::global(std::locale(name));
+    } catch (const std::runtime_error &) {
+        std::setlocale(LC_ALL, "C");
+        return false;
+    }
+    return comma_decimal_active();
+}
+
+bool enter_comma_decimal_locale() {
+    for (const char * name : COMMA_DECIMAL_LOCALES) {
+        if (try_comma_decimal_locale(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void leave_comma_decimal_locale() {
+    std::setlocale(LC_ALL, "C");
+    std::locale::global(std::locale::classic());
+}
+
+void test_locale_independent_numbers() {
+    const bool exercised = enter_comma_decimal_locale();
+    if (!exercised) {
+        std::printf("note: no comma-decimal locale installed; numbers checked in the C locale only\n");
+    }
+    const auto segments = parse_transcript("[0.50][S01] hello [1.25]");
+    check(segments.size() == 1 && segments[0].start_s == 0.5 && segments[0].end_s == 1.25,
+          "timestamps parse the same under a comma-decimal locale");
+    parakeet::moss::TranscribeResult result;
+    result.segments = {{0.5, 1.25, "S01", "hello"}};
+    const std::string json = parakeet::moss::cli::transcript_json(result);
+    check(json.find("\"start\": 0.5, \"end\": 1.25") != std::string::npos,
+          "transcript JSON keeps a dot decimal under a comma-decimal locale");
+    check(parse_decimal("2.75") == 2.75 && format_decimal(2.75) == "2.75", "decimal helpers ignore the locale");
+    leave_comma_decimal_locale();
+}
+
+void test_upload_plan() {
+    check(plan_upload(true, true) == TensorUpload::InPlace && plan_upload(true, false) == TensorUpload::InPlace,
+          "host buffers read tensors in place without a staging copy");
+    check(plan_upload(false, false) == TensorUpload::Chunked, "device float tensors stream in bounded chunks");
+    check(plan_upload(false, true) == TensorUpload::Whole,
+          "device quantized tensors upload whole, as the OpenCL and repacking backends require");
+}
+
 } // namespace
 
 int main() {
@@ -497,6 +623,8 @@ int main() {
         test_audio_span_markers();
         test_prompt_layout();
         test_detokenizer();
+        test_pretokenizer_unicode();
+        test_hotword_sanitation();
         test_parser_basic();
         test_parser_edge_cases();
         test_parser_streaming();
@@ -507,11 +635,14 @@ int main() {
         test_decoder_batches();
         test_engine_end_to_end();
         test_engine_rejections();
+        test_engine_hotwords();
         test_engine_rejects_over_context_audio();
         test_engine_cancel();
         test_cli_flags();
         test_transcript_json();
         test_transcript_json_escapes();
+        test_locale_independent_numbers();
+        test_upload_plan();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected: %s\n", e.what());
         return 1;

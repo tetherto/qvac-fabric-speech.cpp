@@ -144,6 +144,8 @@ constexpr int CONV_KERNEL = 3;
 constexpr float MEL_FILTER_WEIGHT = 0.1f;
 const char * const SYSTEM_PROMPT = "sys";
 const char * const DEFAULT_PROMPT = "hi";
+const char * const HOTWORD_PREFIX = " Hotwords: ";
+const char * const HOTWORD_SEPARATOR = ", ";
 
 inline std::vector<std::string> transcribe_vocab() {
     std::vector<std::string> tokens = byte_complete_vocab();
@@ -214,6 +216,8 @@ inline void add_prompt_meta(gguf_context * f) {
     gguf_set_val_bool(f, "moss-transcribe.time_markers", true);
     gguf_set_val_str(f, "moss-transcribe.system_prompt", SYSTEM_PROMPT);
     gguf_set_val_str(f, "moss-transcribe.default_prompt", DEFAULT_PROMPT);
+    gguf_set_val_str(f, "moss-transcribe.hotword_prefix", HOTWORD_PREFIX);
+    gguf_set_val_str(f, "moss-transcribe.hotword_separator", HOTWORD_SEPARATOR);
     const int32_t prompt_ids[] = {byte_token('h'), byte_token('i')};
     gguf_set_arr_data(f, "moss-transcribe.default_prompt_ids", GGUF_TYPE_INT32, prompt_ids, 2);
     gguf_set_val_u32(f, "moss-transcribe.default_max_new_tokens", DEFAULT_MAX_NEW_TOKENS);

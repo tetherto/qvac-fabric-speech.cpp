@@ -30,6 +30,16 @@ private:
 
 std::vector<int32_t> transcribe_audio_span(const TranscribeConfig & config, const TranscribeTokenizer & tokenizer,
                                            int audio_tokens);
+constexpr size_t MAX_HOTWORDS = 64;
+constexpr size_t MAX_HOTWORD_BYTES = 64;
+
+double parse_decimal(const std::string & text);
+std::string format_decimal(double value);
+
+std::string sanitize_hotword(const std::string & hotword);
+std::vector<std::string> sanitize_hotwords(const std::vector<std::string> & hotwords);
+std::string hotword_prompt(const TranscribeConfig & config, const std::vector<std::string> & hotwords);
+
 std::vector<int32_t> transcribe_prompt(const TranscribeConfig & config, const TranscribeTokenizer & tokenizer,
                                        int audio_tokens, const std::string & prompt);
 

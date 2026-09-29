@@ -316,21 +316,47 @@ VALUE ruby_whisper_model_type(VALUE self)
 static bool
 check_memory_view(rb_memory_view_t *memview)
 {
+  rb_memory_view_prepare_item_desc(memview);
+
   if (!memview->format) {
-    rb_warn("currently format is required");
+    rb_warn("format is required");
     return false;
   }
 
-  if (strcmp(memview->format, "f") == 0) {
-    // accept
-  } else if (strcmp(memview->format, "e") == 0) {
-    if (IS_BIGENDIAN) {
-      rb_warn("currently format \"e\" is only supported on little-endian environment");
-      return false;
-    }
-  } else {
-    rb_warn("currently only format \"f\" and \"e\" on little-endian environment is supported for MemoryView, but given: %s", memview->format);
+  if (memview->item_desc.length != 1) {
+    rb_warn("format must be exact one character");
     return false;
+  }
+
+  rb_memory_view_item_component_t component = memview->item_desc.components[0];
+
+  if (component.offset) {
+    rb_warn("format has offset");
+    return false;
+  }
+  if (component.repeat != 1) {
+    rb_warn("format repeated");
+    return false;
+  }
+  switch (component.format) {
+    case 'f':
+      // accept
+      break;
+    case 'e':
+      if (IS_BIGENDIAN) {
+        rb_warn("currently format \"e\" is only supported on little-endian environment");
+        return false;
+      }
+      break;
+    case 'g':
+      if (!IS_BIGENDIAN) {
+        rb_warn("currently format \"g\" is only supported on big-endian environment");
+        return false;
+      }
+      break;
+    default:
+      rb_warn("currently only format \"f\", \"e\" on little-endian environment and \"g\" on big-endian environment are supported for MemoryView, but given: %c", component.format);
+      return false;
   }
 
   if (memview->ndim != 1 && !(memview->ndim == 2 && memview->shape[1] == 1)) {
@@ -349,7 +375,11 @@ fill_samples(VALUE rb_args)
 
   if (RB_TYPE_P(*args->src, T_ARRAY)) {
     for (int i = 0; i < args->n_samples; i++) {
-      args->dest[i] = RFLOAT_VALUE(rb_ary_entry(*args->src, i));
+      VALUE sample = rb_ary_entry(*args->src, i);
+      if (!RB_FLOAT_TYPE_P(sample)) {
+        sample = rb_to_float(sample);
+      }
+      args->dest[i] = RFLOAT_VALUE(sample);
     }
   } else {
     // TODO: use rb_block_call
@@ -357,6 +387,9 @@ fill_samples(VALUE rb_args)
     for (int i = 0; i < args->n_samples; i++) {
       // TODO: check if iter is exhausted and raise ArgumentError appropriately
       VALUE sample = rb_funcall(iter, id_next, 0);
+      if (!RB_FLOAT_TYPE_P(sample)) {
+        sample = rb_to_float(sample);
+      }
       args->dest[i] = RFLOAT_VALUE(sample);
     }
   }
@@ -387,12 +420,23 @@ parse_samples(VALUE *samples, VALUE *n_samples)
       }
       parsed.n_samples = (int)RARRAY_LEN(*samples);
     } else if (memview_available) {
-      bool memview_got = rb_memory_view_get(*samples, &parsed.memview, RUBY_MEMORY_VIEW_SIMPLE);
+      bool memview_got = rb_memory_view_get(*samples, &parsed.memview, RUBY_MEMORY_VIEW_FORMAT | RUBY_MEMORY_VIEW_ROW_MAJOR);
       if (memview_got) {
         parsed.memview_exported = check_memory_view(&parsed.memview);
         if (!parsed.memview_exported) {
           rb_memory_view_release(&parsed.memview);
           parsed.memview = (rb_memory_view_t){0};
+        }
+      } else {
+        // Sometimes MemoryView producers accept only SIMPLE flag even when they provide suitable MemoryView
+        parsed.memview = (rb_memory_view_t){0};
+        bool simple_memview_got = rb_memory_view_get(*samples, &parsed.memview, RUBY_MEMORY_VIEW_SIMPLE);
+        if (simple_memview_got) {
+          parsed.memview_exported = check_memory_view(&parsed.memview);
+          if (!parsed.memview_exported) {
+            rb_memory_view_release(&parsed.memview);
+            parsed.memview = (rb_memory_view_t){0};
+          }
         }
       }
       if (parsed.memview_exported) {
@@ -745,6 +789,56 @@ ruby_whisper_full_get_segment_no_speech_prob(VALUE self, VALUE i_segment)
   return DBL2NUM(no_speech_prob);
 }
 
+static VALUE
+ruby_whisper_full_n_vad_segments(VALUE self)
+{
+  ruby_whisper *rw;
+  GetContext(self, rw);
+
+  return INT2NUM(whisper_full_n_vad_segments(rw->context));
+}
+
+static int
+ruby_whisper_full_check_vad_segment_index(const ruby_whisper *rw, const VALUE i_segment)
+{
+    const int c_i_segment = NUM2INT(i_segment);
+    if (c_i_segment < 0 || c_i_segment >= whisper_full_n_vad_segments(rw->context)) {
+      rb_raise(rb_eIndexError, "segment index %d out of range", c_i_segment);
+    }
+    return c_i_segment;
+}
+
+static VALUE
+ruby_whisper_full_get_vad_segment_t0(VALUE self, VALUE i_segment)
+{
+  ruby_whisper *rw;
+  GetContext(self, rw);
+  const int c_i_segment = ruby_whisper_full_check_vad_segment_index(rw, i_segment);
+
+  return LONG2NUM(whisper_full_get_vad_segment_t0(rw->context, c_i_segment));
+}
+
+static VALUE
+ruby_whisper_full_get_vad_segment_t1(VALUE self, VALUE i_segment)
+{
+  ruby_whisper *rw;
+  GetContext(self, rw);
+  const int c_i_segment = ruby_whisper_full_check_vad_segment_index(rw, i_segment);
+
+  return LONG2NUM(whisper_full_get_vad_segment_t1(rw->context, c_i_segment));
+}
+
+static VALUE
+ruby_whisper_context_free(VALUE self)
+{
+  ruby_whisper *rw;
+  GetContext(self, rw);
+  whisper_free(rw->context);
+  rw->context = NULL;
+
+  return Qnil;
+}
+
 // High level API
 
 static VALUE
@@ -830,8 +924,12 @@ init_ruby_whisper_context(VALUE *mWhisper)
   rb_define_method(cContext, "full_get_segment_speaker_turn_next", ruby_whisper_full_get_segment_speaker_turn_next, 1);
   rb_define_method(cContext, "full_get_segment_text", ruby_whisper_full_get_segment_text, 1);
   rb_define_method(cContext, "full_get_segment_no_speech_prob", ruby_whisper_full_get_segment_no_speech_prob, 1);
+  rb_define_method(cContext, "full_n_vad_segments", ruby_whisper_full_n_vad_segments, 0);
+  rb_define_method(cContext, "full_get_vad_segment_t0", ruby_whisper_full_get_vad_segment_t0, 1);
+  rb_define_method(cContext, "full_get_vad_segment_t1", ruby_whisper_full_get_vad_segment_t1, 1);
   rb_define_method(cContext, "full", ruby_whisper_full, -1);
   rb_define_method(cContext, "full_parallel", ruby_whisper_full_parallel, -1);
+  rb_define_method(cContext, "free", ruby_whisper_context_free, 0);
 
   // High level
   rb_define_method(cContext, "full_get_segment", ruby_whisper_full_get_segment, 1);

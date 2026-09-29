@@ -1,5 +1,7 @@
 #include "moss/transcribe_cli.h"
 
+#include "moss/transcribe_text.h"
+
 #include "mel_preprocess.h"
 #include "parakeet/cli.h"
 
@@ -41,9 +43,7 @@ std::string quoted(const std::string & text) {
 }
 
 std::string number(double value) {
-    char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%.6g", value);
-    return buffer;
+    return detail::format_decimal(value);
 }
 
 std::string segment_json(const TranscriptSegment & segment) {
@@ -109,12 +109,24 @@ int transcribe_file(const TranscribeCliArgs & args) {
     return 0;
 }
 
+std::vector<std::string> split_hotwords(const std::string & list) {
+    std::vector<std::string> hotwords;
+    size_t start = 0;
+    for (size_t comma = list.find(','); comma != std::string::npos; comma = list.find(',', start)) {
+        hotwords.push_back(list.substr(start, comma - start));
+        start = comma + 1;
+    }
+    hotwords.push_back(list.substr(start));
+    return hotwords;
+}
+
 } // namespace
 
 void print_usage() {
     std::fprintf(stderr,
         "usage: %s --model moss-transcribe.gguf --audio speech.wav [--out transcript.json]\n"
-        "       [--prompt \"...\"] [--max-new-tokens N] [--threads 4] [--gpu] [--backends-dir dir]\n"
+        "       [--prompt \"...\" | --hotwords \"QVAC,vcpkg,Parakeet\"] [--max-new-tokens N]\n"
+        "       [--threads 4] [--gpu] [--backends-dir dir]\n"
         "           16 kHz WAV in; prints one [start-end] Sxx: text line per segment\n", PROGRAM);
 }
 
@@ -131,6 +143,7 @@ bool parse_args(int argc, const char * const * argv, TranscribeCliArgs & args) {
         else if (flag == "--audio")          args.audio_path = next();
         else if (flag == "--out")            args.out_path = next();
         else if (flag == "--prompt")         args.request.prompt = next();
+        else if (flag == "--hotwords")       args.request.hotwords = split_hotwords(next());
         else if (flag == "--max-new-tokens") args.request.max_new_tokens = std::atoi(next());
         else if (flag == "--threads")        args.options.n_threads = std::atoi(next());
         else if (flag == "--gpu")            args.options.use_gpu = true;
