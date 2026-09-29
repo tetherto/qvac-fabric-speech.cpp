@@ -142,8 +142,8 @@ struct SpeechCodec::Impl {
         }
     }
 
-    std::vector<int32_t> encode(const std::vector<float> & pcm, int rate) {
-        return tokenizer->encode(resampled(pcm, rate, tokenizer->config().sample_rate));
+    std::vector<int32_t> encode(const std::vector<float> & pcm, int rate, const std::function<bool()> & stop = {}) {
+        return tokenizer->encode(resampled(pcm, rate, tokenizer->config().sample_rate), stop);
     }
 
     std::vector<float> prompt_feat(const std::vector<float> & pcm_24k) const {
@@ -250,8 +250,9 @@ int SpeechCodec::sample_rate() const { return OUTPUT_SAMPLE_RATE; }
 int SpeechCodec::token_mel_ratio() const { return impl_->token_mel_ratio; }
 SpeechTokenizer & SpeechCodec::tokenizer() { return *impl_->tokenizer; }
 
-std::vector<int32_t> SpeechCodec::encode(const std::vector<float> & pcm, int sample_rate) {
-    return impl_->encode(pcm, sample_rate);
+std::vector<int32_t> SpeechCodec::encode(const std::vector<float> & pcm, int sample_rate,
+                                         const std::function<bool()> & stop) {
+    return impl_->encode(pcm, sample_rate, stop);
 }
 
 std::vector<float> SpeechCodec::prompt_feat(const std::vector<float> & pcm_24k) const {

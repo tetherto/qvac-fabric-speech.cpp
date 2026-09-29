@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,7 +39,7 @@ public:
     const SpeechVqConfig & config() const;
     std::vector<float> log_mel(const float * samples, size_t count) const;
     std::vector<int32_t> encode_segment(const float * samples, size_t count);
-    std::vector<int32_t> encode(const std::vector<float> & pcm_16k);
+    std::vector<int32_t> encode(const std::vector<float> & pcm_16k, const std::function<bool()> & stop = {});
 
 private:
     struct Impl;

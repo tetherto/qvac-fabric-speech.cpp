@@ -451,10 +451,10 @@ struct SpeechTokenizer::Impl {
         return codes;
     }
 
-    std::vector<int32_t> encode(const std::vector<float> & pcm) {
+    std::vector<int32_t> encode(const std::vector<float> & pcm, const std::function<bool()> & stop) {
         std::vector<int32_t> codes;
         const size_t chunk = (size_t) config.chunk_samples;
-        for (size_t first = 0; first < pcm.size(); first += chunk) {
+        for (size_t first = 0; first < pcm.size() && !(stop && stop()); first += chunk) {
             const std::vector<int32_t> part = encode_segment(pcm.data() + first, std::min(chunk, pcm.size() - first));
             codes.insert(codes.end(), part.begin(), part.end());
         }
@@ -478,8 +478,8 @@ std::vector<int32_t> SpeechTokenizer::encode_segment(const float * samples, size
     return impl_->encode_segment(samples, count);
 }
 
-std::vector<int32_t> SpeechTokenizer::encode(const std::vector<float> & pcm_16k) {
-    return impl_->encode(pcm_16k);
+std::vector<int32_t> SpeechTokenizer::encode(const std::vector<float> & pcm_16k, const std::function<bool()> & stop) {
+    return impl_->encode(pcm_16k, stop);
 }
 
 } // namespace tts_cpp::moss::detail

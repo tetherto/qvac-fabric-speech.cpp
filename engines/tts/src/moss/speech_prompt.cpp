@@ -218,11 +218,19 @@ std::vector<SpeechRow> speech_prompt(const SpeechLmConfig & config, const Speech
     return rows;
 }
 
-std::string speech_reply_text(const SpeechTextTokenizer & tokenizer, const std::vector<SpeechRow> & generated) {
-    if (generated.empty()) {
-        return {};
-    }
-    const std::vector<SpeechRow> kept(generated.begin(), generated.end() - 1);
+bool is_speech_stop_row(const SpeechRow & row, const SpeechTokens & tokens) {
+    return row.text == tokens.pad || row.text == tokens.im_end;
+}
+
+size_t speech_reply_rows(const std::vector<SpeechRow> & generated, const SpeechTokens & tokens) {
+    const bool ends_on_stop = !generated.empty() && is_speech_stop_row(generated.back(), tokens);
+    return generated.size() - (ends_on_stop ? 1 : 0);
+}
+
+std::string speech_reply_text(const SpeechTextTokenizer & tokenizer, const std::vector<SpeechRow> & generated,
+                              const SpeechTokens & tokens) {
+    const std::vector<SpeechRow> kept(generated.begin(),
+            generated.begin() + (std::ptrdiff_t) speech_reply_rows(generated, tokens));
     std::string text = tokenizer.decode(text_channel(kept));
     replace_all(text, EMPTY_MARK, EMPTY_REPLACEMENT);
     replace_all(text, END_EMPTY_MARK, END_EMPTY_REPLACEMENT);

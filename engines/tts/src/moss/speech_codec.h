@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,7 +34,8 @@ public:
     int sample_rate() const;
     int token_mel_ratio() const;
     SpeechTokenizer & tokenizer();
-    std::vector<int32_t> encode(const std::vector<float> & pcm, int sample_rate);
+    std::vector<int32_t> encode(const std::vector<float> & pcm, int sample_rate,
+                                const std::function<bool()> & stop = {});
     std::vector<float> prompt_feat(const std::vector<float> & pcm_24k) const;
     std::vector<float> speaker_embedding(const std::vector<float> & pcm_16k) const;
     SpeechVoice voice(const std::vector<float> & pcm, int sample_rate);

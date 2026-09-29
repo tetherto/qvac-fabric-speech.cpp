@@ -1,6 +1,7 @@
 #include "moss/speech_generation.h"
 
 #include "moss/generation.h"
+#include "moss/speech_prompt.h"
 
 #include <algorithm>
 #include <limits>
@@ -114,8 +115,10 @@ int32_t SpeechGenerationState::limit_reply(int32_t audio) {
 void SpeechGenerationState::record(const SpeechRow & row) {
     generated_.push_back(row);
     last_ = row;
-    stopping_ = row.text == tokens_.pad || row.text == tokens_.im_end ||
-                (int) generated_.size() >= limits_.max_new_tokens;
+    const bool stop_row = is_speech_stop_row(row, tokens_);
+    const bool out_of_tokens = (int) generated_.size() >= limits_.max_new_tokens;
+    stopping_ = stop_row || out_of_tokens;
+    truncated_ = truncated_ || (out_of_tokens && !stop_row);
 }
 
 SpeechRow SpeechGenerationState::next(SpeechLogits logits, const SpeechSampling & sampling, std::mt19937 & rng) {
@@ -144,7 +147,7 @@ bool run_speech_generation(SpeechLM & lm, SpeechGenerationState & state, SpeechL
 
 std::vector<int32_t> speech_reply_codes(const std::vector<SpeechRow> & generated, const SpeechTokens & tokens) {
     std::vector<int32_t> codes;
-    const size_t kept = generated.empty() ? 0 : generated.size() - 1;
+    const size_t kept = speech_reply_rows(generated, tokens);
     for (size_t i = first_speech_row(generated, kept, tokens);
          i < kept && is_speech_row(generated[i], tokens) && is_reply_code(generated[i].audio, tokens); ++i) {
         codes.push_back(generated[i].audio);

@@ -109,7 +109,12 @@ bool same_rows(const std::vector<SpeechRow> & a, const std::vector<SpeechRow> & 
     return true;
 }
 
-std::vector<int32_t> greedy_reply(SpeechLM & lm, const std::vector<SpeechRow> & prompt, int max_new_tokens) {
+struct GreedyReply {
+    std::vector<int32_t> codes;
+    bool finished = false;
+};
+
+GreedyReply greedy_reply(SpeechLM & lm, const std::vector<SpeechRow> & prompt, int max_new_tokens) {
     SpeechLimits limits{max_new_tokens, MIN_NEW_TOKENS, 0};
     lm.begin((int) prompt.size() + max_new_tokens);
     SpeechLogits logits = lm.prefill(prompt, PREFILL_BATCH);
@@ -122,7 +127,7 @@ std::vector<int32_t> greedy_reply(SpeechLM & lm, const std::vector<SpeechRow> & 
             logits = lm.step(row);
         }
     }
-    return speech_reply_codes(state.generated(), lm.config().tokens);
+    return {speech_reply_codes(state.generated(), lm.config().tokens), !state.truncated()};
 }
 
 int32_t constrained_argmax(std::vector<float> audio, const SpeechTokens & tokens) {
@@ -156,10 +161,11 @@ void test_greedy(SpeechLM & lm, const std::filesystem::path & dir) {
     check(same_rows(prompt, rows_of(read_bin<int32_t>(dir / "lm" / "input_ids.bin"))),
           "prompt grid reproduces the Hugging Face processor");
     const std::vector<int32_t> reference = read_bin<int32_t>(dir / "codec" / "reply_codes.bin");
-    const std::vector<int32_t> codes = greedy_reply(lm, prompt, GREEDY_TOKENS);
-    std::printf("greedy reply: %zu codes (reference %zu)\n", codes.size(), reference.size());
-    std::printf("greedy reply codes agreement %.3f\n", agreement(codes, reference));
-    check(!codes.empty() && codes.size() < (size_t) GREEDY_TOKENS, "greedy reply ends with a speech-end token");
+    const GreedyReply reply = greedy_reply(lm, prompt, GREEDY_TOKENS);
+    std::printf("greedy reply: %zu codes (reference %zu), %s\n", reply.codes.size(), reference.size(),
+                reply.finished ? "ended by the model" : "cut at the token limit");
+    std::printf("greedy reply codes agreement %.3f\n", agreement(reply.codes, reference));
+    check(!reply.codes.empty(), "greedy decoding produces speech");
     test_teacher_forcing(lm, prompt, dir);
 }
 

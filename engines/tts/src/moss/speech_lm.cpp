@@ -550,13 +550,13 @@ struct SpeechLM::Impl {
         return SpeechLogits{read_logits(text_logits), read_logits(audio_logits)};
     }
 
-    SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens) {
+    SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop) {
         if (rows.empty() || batch_tokens < 1) {
             fail("prefill needs at least one row and a positive batch size");
         }
         SpeechLogits logits;
         const size_t batch = (size_t) batch_tokens;
-        for (size_t first = 0; first < rows.size(); first += batch) {
+        for (size_t first = 0; first < rows.size() && !(stop && stop()); first += batch) {
             const size_t count = std::min(batch, rows.size() - first);
             const bool last = first + count == rows.size();
             logits = forward(plan_batch(rows.data() + first, count), {last, last});
@@ -590,8 +590,8 @@ std::vector<int32_t> SpeechLM::tokenizer_types() const {
 
 void SpeechLM::begin(int n_ctx) { impl_->begin(n_ctx); }
 
-SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_tokens) {
-    return impl_->prefill(rows, batch_tokens);
+SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop) {
+    return impl_->prefill(rows, batch_tokens, stop);
 }
 
 SpeechLogits SpeechLM::step(const SpeechRow & row, SpeechHeads heads) {

@@ -154,18 +154,26 @@ struct SpeechEngine::Impl {
         return (float) vq.sample_rate / (float) vq.samples_per_token();
     }
 
+    bool cancelled() const {
+        return cancel_requested.load();
+    }
+
+    detail::SpeechStop stop_signal() const {
+        return [this] { return cancelled(); };
+    }
+
     SpeechTurn turn_of(const SpeechMessage & message) {
         SpeechTurn turn{turn_role(message.role), message.text, {}, !message.audio.empty()};
         if (turn.is_audio) {
-            turn.audio_codes = codec->encode(message.audio, message.sample_rate);
+            turn.audio_codes = codec->encode(message.audio, message.sample_rate, stop_signal());
         }
         return turn;
     }
 
     std::vector<SpeechTurn> turns_of(const std::vector<SpeechMessage> & messages) {
         std::vector<SpeechTurn> turns;
-        for (const SpeechMessage & message : messages) {
-            turns.push_back(turn_of(message));
+        for (size_t i = 0; i < messages.size() && !cancelled(); ++i) {
+            turns.push_back(turn_of(messages[i]));
         }
         return turns;
     }
@@ -204,29 +212,56 @@ struct SpeechEngine::Impl {
         result.cancelled = cancel_requested.load();
     }
 
+    std::vector<SpeechRow> encode_prompt(const SpeechRequest & request, SpeechResult & result) {
+        const auto encode_start = std::chrono::steady_clock::now();
+        std::vector<SpeechTurn> turns = turns_of(request.messages);
+        result.encode_ms = elapsed_ms(encode_start);
+        if (cancelled()) {
+            return {};
+        }
+        return detail::speech_prompt(lm->config(), *tokenizer, turns, !request.text_reply);
+    }
+
+    detail::SpeechLogits prefill_prompt(const std::vector<SpeechRow> & prompt, const detail::SpeechLimits & limits,
+                                        SpeechResult & result) {
+        const auto prefill_start = std::chrono::steady_clock::now();
+        lm->begin(result.prompt_tokens + limits.max_new_tokens);
+        detail::SpeechLogits logits = lm->prefill(prompt, PREFILL_BATCH_TOKENS, stop_signal());
+        result.prefill_ms = elapsed_ms(prefill_start);
+        return logits;
+    }
+
+    static SpeechResult cancelled_result(SpeechResult result) {
+        result.cancelled = true;
+        return result;
+    }
+
     SpeechResult run(const SpeechRequest & request, const SpeechProgress & progress) {
         SpeechResult result;
         result.sample_rate = codec->sample_rate();
-        const auto encode_start = std::chrono::steady_clock::now();
-        const std::vector<SpeechRow> prompt = detail::speech_prompt(lm->config(), *tokenizer,
-                turns_of(request.messages), !request.text_reply);
-        result.encode_ms = elapsed_ms(encode_start);
+        const std::vector<SpeechRow> prompt = encode_prompt(request, result);
+        if (cancelled()) {
+            return cancelled_result(result);
+        }
         result.prompt_tokens = (int) prompt.size();
         const detail::SpeechLimits limits = limits_of(request);
         detail::check_speech_context(prompt.size(), limits.max_new_tokens, lm->config().n_ctx_train);
+        detail::SpeechLogits logits = prefill_prompt(prompt, limits, result);
+        if (cancelled()) {
+            return cancelled_result(result);
+        }
+        return reply(request, progress, prompt.back(), limits, std::move(logits), result);
+    }
 
-        const auto prefill_start = std::chrono::steady_clock::now();
-        lm->begin(result.prompt_tokens + limits.max_new_tokens);
-        detail::SpeechLogits logits = lm->prefill(prompt, PREFILL_BATCH_TOKENS);
-        result.prefill_ms = elapsed_ms(prefill_start);
-
+    SpeechResult reply(const SpeechRequest & request, const SpeechProgress & progress, const SpeechRow & last_prompt_row,
+                       const detail::SpeechLimits & limits, detail::SpeechLogits logits, SpeechResult result) {
         const auto generate_start = std::chrono::steady_clock::now();
-        detail::SpeechGenerationState state(lm->config().tokens, prompt.back(), limits);
+        detail::SpeechGenerationState state(lm->config().tokens, last_prompt_row, limits);
         result.cancelled = !generate(state, std::move(logits), request, limits, progress);
         result.generate_ms = elapsed_ms(generate_start);
         result.generated_tokens = (int) state.generated().size();
         result.truncated = state.truncated();
-        result.text = detail::speech_reply_text(*tokenizer, state.generated());
+        result.text = detail::speech_reply_text(*tokenizer, state.generated(), lm->config().tokens);
         const std::vector<int32_t> codes = detail::speech_reply_codes(state.generated(), lm->config().tokens);
         result.reply_tokens = (int) codes.size();
         if (!result.cancelled && !request.text_reply) {

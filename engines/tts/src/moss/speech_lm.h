@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,6 +41,8 @@ struct SpeechRow {
     int32_t audio = 0;
 };
 
+using SpeechStop = std::function<bool()>;
+
 struct SpeechHeads {
     bool text = true;
     bool audio = true;
@@ -66,7 +69,7 @@ public:
     void begin(int n_ctx);
     int position() const;
     int context() const;
-    SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens);
+    SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop = {});
     SpeechLogits step(const SpeechRow & row, SpeechHeads heads = {});
 
 private:

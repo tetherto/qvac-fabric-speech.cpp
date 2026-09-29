@@ -123,7 +123,13 @@ void test_generation_limits() {
     SpeechGenerationState bounded(fixture_tokens(), {TOKEN_SPEECH_START, TOKEN_AUDIO_PAD}, {2, 0, 0});
     bounded.next(logits_for(0, 7), GREEDY, rng);
     bounded.next(logits_for(0, 7), GREEDY, rng);
-    check(bounded.stopping(), "max_new_tokens stops generation");
+    check(bounded.stopping() && bounded.truncated(), "max_new_tokens stops generation and marks it truncated");
+    check(speech_reply_codes(bounded.generated(), fixture_tokens()) == std::vector<int32_t>{7, 7},
+          "a length-limited reply keeps its last code");
+    SpeechGenerationState single(fixture_tokens(), {TOKEN_SPEECH_START, TOKEN_AUDIO_PAD}, {1, 0, 0});
+    single.next(logits_for(0, 9), GREEDY, rng);
+    check(speech_reply_codes(single.generated(), fixture_tokens()) == std::vector<int32_t>{9},
+          "a one-token limit still yields its code");
     SpeechGenerationState text(fixture_tokens(), {byte_token('a'), TOKEN_AUDIO_PAD}, {20, 0, 0});
     text.next(logits_for(TOKEN_PAD, 7), GREEDY, rng);
     check(text.stopping() && text.channel() == SpeechChannel::Text, "the pad token stops a text reply");
@@ -237,7 +243,10 @@ void test_reply_text() {
     std::vector<SpeechRow> rows = text_rows("ok");
     rows.insert(rows.begin(), {TOKEN_TEXT_PLACEHOLDER, 7});
     rows.push_back({TOKEN_IM_END, TOKEN_AUDIO_PAD});
-    check(speech_reply_text(tokenizer, rows) == "ok", "reply text skips control tokens and the stop row");
+    check(speech_reply_text(tokenizer, rows, fixture_tokens()) == "ok",
+          "reply text skips control tokens and the stop row");
+    check(speech_reply_text(tokenizer, text_rows("cut"), fixture_tokens()) == "cut",
+          "a length-limited text reply keeps its last token");
 }
 
 void test_lm_loads_and_validates() {
@@ -312,6 +321,10 @@ void test_lm_batches_and_steps() {
     std::vector<SpeechRow> ignored = rows;
     ignored[0].audio = 8;
     check(close(prefill(lm, ignored, 4), whole), "text rows ignore the audio channel");
+    int batches = 0;
+    lm.begin((int) rows.size() + 1);
+    lm.prefill(rows, 2, [&] { return batches++ > 0; });
+    check(lm.position() == 2, "a stop request ends prefill between batches");
     const std::vector<SpeechRow> overlong((size_t) lm.context() + 1, {byte_token('a'), TOKEN_AUDIO_PAD});
     expect_failure([&] { lm.begin(1); lm.prefill(overlong, (int) overlong.size()); }, "overflow",
                    "a prefill past the aligned context");
@@ -388,6 +401,9 @@ void test_tokenizer_encodes() {
     check(tokenizer.log_mel(audio.data(), 16).size() == (size_t) VQ_MELS * (per_token / VQ_HOP),
           "the log-mel covers the padded segment");
     expect_failure([&] { tokenizer.encode_segment(audio.data(), VQ_CHUNK + 1); }, "segment", "an oversized segment");
+    int segments = 0;
+    const std::vector<int32_t> first = tokenizer.encode(audio, [&] { return segments++ > 0; });
+    check(first.size() == VQ_CHUNK / per_token, "a stop request ends encoding between segments");
     std::filesystem::remove(path);
 }
 

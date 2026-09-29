@@ -332,7 +332,8 @@ with the reference noise (0.99977), and the prefill logits of both heads
 teacher forcing, greedy decoding picks the reference's audio code at 93.5 %
 of the positions in both bf16 and q8_0; the misses are near-ties between
 bf16 on MPS and ggml, so free-running greedy replies drift apart after a few
-tokens while staying on topic. Sampled replies to English questions are
+tokens: in bf16 the greedy reply still ends on its own, while in q8_0 it can run
+on to the token limit, so keep the default sampling for q8_0. Sampled replies to English questions are
 coherent and intelligible in both quantizations. On an M1 Ultra with Metal
 the LM runs at about 32 tokens per second in bf16 and 47 in q8_0, faster than
 the 12.5 tokens per second of speech it produces; while it speaks, each step
@@ -389,10 +390,12 @@ that holds the conversation as `SpeechMessage`s. Each message carries either
 text or audio (PCM plus sample rate), roles are system, user, and assistant,
 and the last message must be the user's. The `SpeechResult` holds the reply
 PCM at 24 kHz, the text channel's output, token counts, whether the reply was
-truncated, and the encode, prefill, generation, and decode wall times.
-`cancel()` from another thread or `false` from the progress callback stops a
-run; one response runs at a time per instance. A request holds up to 256
-messages, each with up to 16384 bytes of text or 600 s of audio.
+truncated by `max_reply_seconds` or `max_new_tokens`, and the encode, prefill, generation, and decode wall times.
+`cancel()` from another thread stops a run at the next speech-tokenizer
+segment, prefill batch, generation step, or decoder step, and `false` from the
+progress callback stops generation; one response runs at a time per
+instance. A request holds up to 256 messages, each with up to 16384 bytes of
+text or 600 s of audio.
 
 The prompt follows the upstream processor: each turn is
 `<|im_start|>role\n` + content + `<|im_end|>\n`, a spoken turn is the
@@ -409,7 +412,8 @@ for the first ten, as Hugging Face's minimum-length processor does, the same tem
 and top-k/top-p apply to both heads, the text channel is forced to the
 placeholder while speaking, and generation stops on `<|im_end|>` or the pad
 token. The reply's speech codes are the audio channel from the first
-speech row up to the first end-of-speech.
+speech row up to the first end-of-speech. A stop row closes the reply and is
+dropped; a reply cut by `max_new_tokens` keeps its last row.
 
 The voice prompt is prepared the way the CosyVoice2 frontend does it: speech
 tokens from the Whisper-VQ encoder, an 80-band 24 kHz mel trimmed to four
