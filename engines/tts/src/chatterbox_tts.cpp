@@ -123,6 +123,8 @@ static bool backend_is_arm_mali(ggml_backend_t b) {
 // destroying members at another struct's offsets (observed as a SIGSEGV in
 // ~sched_fallback on the Vulkan load path, where a bool was read as this).
 namespace {
+static constexpr int MAX_TOKEN_MEL_RATIO = 16;
+
 struct model_ctx {
     ggml_backend_t backend = nullptr;
     // Scheduler bundle [backend, CPU-last] (sched_dispatch.h) routing ops the
@@ -149,6 +151,9 @@ struct model_ctx {
     bool  meanflow    = true;
     int   n_timesteps = 2;
     float cfg_rate    = 0.0f;
+
+    int   token_mel_ratio = 2;
+    int   speech_vocab    = 6561;
 
     // True when the chosen GPU backend is an ARM Mali/Immortalis Vulkan device,
     // detected once at load time. Gates the CFM unfused-attention fix below.
@@ -349,6 +354,19 @@ static model_ctx load_s3gen_gguf(const std::string & path, int n_gpu_layers, boo
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &tmp_ctx };
     gguf_context * g = gguf_init_from_file(path.c_str(), gp);
     if (!g) throw std::runtime_error("gguf_init_from_file failed: " + path);
+    {
+        int64_t k_ratio = gguf_find_key(g, "s3gen.encoder.token_mel_ratio");
+        int64_t k_vocab = gguf_find_key(g, "s3gen.speech_vocab_size");
+        const bool typed = (k_ratio < 0 || gguf_get_kv_type(g, k_ratio) == GGUF_TYPE_UINT32) &&
+                           (k_vocab < 0 || gguf_get_kv_type(g, k_vocab) == GGUF_TYPE_UINT32);
+        if (typed && k_ratio >= 0) m.token_mel_ratio = (int) gguf_get_val_u32(g, k_ratio);
+        if (typed && k_vocab >= 0) m.speech_vocab    = (int) gguf_get_val_u32(g, k_vocab);
+        if (!typed || m.token_mel_ratio < 1 || m.token_mel_ratio > MAX_TOKEN_MEL_RATIO || m.speech_vocab < 1) {
+            gguf_free(g);
+            ggml_free(tmp_ctx);
+            throw std::runtime_error("s3gen GGUF has an invalid token_mel_ratio or speech_vocab_size: " + path);
+        }
+    }
     m.backend = s3gen_init_backend(n_gpu_layers, verbose);
     m.is_mali = backend_is_arm_mali(m.backend);
     if (verbose && m.is_mali)
@@ -965,9 +983,16 @@ static const std::vector<float> & cached_pos_emb(int T, int D) {
 // (s3gen_measure_fit) so the priced graph is the executed graph by
 // construction.  Resets `cache` and rebuilds its ctx/graph for length T; the
 // caller creates the gallocr (or prices the graph without one).
+static ggml_tensor * repeat_along_dim0(ggml_context * ctx, ggml_tensor * x, int copies) {
+    ggml_tensor * out = x;
+    for (int r = 1; r < copies; ++r) out = ggml_concat(ctx, out, x, 0);
+    return out;
+}
+
 static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, int T, int D) {
     const int H = 8, HEAD_DIM = 64;
-    const int T2 = 2 * T;
+    const int ratio = m.token_mel_ratio;
+    const int T2 = ratio * T;
     if (cache.allocr) { ggml_gallocr_free(cache.allocr); cache.allocr = nullptr; }
     if (cache.ctx)    { ggml_free(cache.ctx);            cache.ctx    = nullptr; }
     cache.buf.resize(64 * 1024 * 1024);
@@ -1018,14 +1043,14 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
         x = conformer_block(ctx, w, x, pos1, D, T, H, HEAD_DIM);
     }
 
-    // Upsample1D 2x
+    // Upsample1D by token_mel_ratio
     ggml_tensor * up_w = find_tensor(m, "flow/encoder/up_layer/conv/w");
     ggml_tensor * up_b = find_tensor(m, "flow/encoder/up_layer/conv/b");
     ggml_tensor * xu = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     ggml_tensor * xu_3d = ggml_reshape_3d(ctx, xu, 1, xu->ne[0], xu->ne[1]);
-    ggml_tensor * xu_2x = ggml_concat(ctx, xu_3d, xu_3d, 0);
-    xu = ggml_cont(ctx, ggml_reshape_2d(ctx, xu_2x, xu_3d->ne[1]*2, xu_3d->ne[2]));
-    xu = zero_pad_dim0(ctx, xu, 4, 0);
+    ggml_tensor * xu_rep = repeat_along_dim0(ctx, xu_3d, ratio);
+    xu = ggml_cont(ctx, ggml_reshape_2d(ctx, xu_rep, xu_3d->ne[1]*ratio, xu_3d->ne[2]));
+    xu = zero_pad_dim0(ctx, xu, 2 * ratio, 0);
     xu = conv1d_f32(ctx, up_w, xu, 1, 0, 1);
     xu = ggml_add(ctx, xu, ggml_reshape_2d(ctx, up_b, 1, D));
     x = ggml_cont(ctx, ggml_permute(ctx, xu, 1, 0, 2, 3));
@@ -1040,7 +1065,7 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
     x = ggml_add(ctx, ggml_mul(ctx, x, unw), unb);
     x = ggml_scale(ctx, x, std::sqrt((float)D));
 
-    // 4 up_conformer blocks at length 2T
+    // 4 up_conformer blocks at length ratio * T
     for (int i = 0; i < 4; ++i) {
         auto w = load_conformer(m, "flow/encoder/up_block" + std::to_string(i));
         x = conformer_block(ctx, w, x, pos2, D, T2, H, HEAD_DIM);
@@ -1061,7 +1086,7 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
 }
 
 static std::vector<float> run_encoder(const model_ctx & m, const std::vector<float> & input_embed, int T, int D = 512) {
-    const int T2 = 2 * T;
+    const int T2 = m.token_mel_ratio * T;
 
     graph_cache & cache = g_encoder_graph_cache;
     if (cache.key != (int64_t) T || cache.ctx == nullptr) {
@@ -2589,14 +2614,6 @@ int s3gen_synthesize_to_wav(
     // chunk, and we'll trim the 6 mel frames corresponding to the pre-
     // lookahead window right after CFM.
     const int32_t S3GEN_SIL = tts_cpp::chatterbox::kS3GenSilenceToken;
-    const int32_t VOCAB_SIZE = 6561;
-    std::vector<int32_t> padded;
-    for (int32_t t : speech_tokens) {
-        if (t >= 0 && t < VOCAB_SIZE) padded.push_back(t);
-    }
-    if (opts.append_lookahead_silence) {
-        for (int i = 0; i < pre_lookahead_len; ++i) padded.push_back(S3GEN_SIL);
-    }
 
     // Cache the loaded model across invocations so the streaming driver
     // pays the ~700 ms GGUF-load cost only once.  Keyed on (path,
@@ -2618,6 +2635,14 @@ int s3gen_synthesize_to_wav(
     // ggml-metal.  After the kernel fixes in ggml/src/ggml-metal/, HiFT runs
     // on the main backend directly on every platform.
     const model_ctx & m_hift = m;
+
+    std::vector<int32_t> padded;
+    for (int32_t t : speech_tokens) {
+        if (t >= 0 && t < m.speech_vocab) padded.push_back(t);
+    }
+    if (opts.append_lookahead_silence) {
+        for (int i = 0; i < pre_lookahead_len; ++i) padded.push_back(S3GEN_SIL);
+    }
 
     // If neither --ref-dir nor any C++ override populated the three
     // conditioning tensors above, pull the built-in voice from the GGUF.
@@ -2693,7 +2718,7 @@ int s3gen_synthesize_to_wav(
     std::vector<float> mu_T = run_encoder(m, input_embed, n_total, D);
     double prof_encoder_ms = now_ms() - encoder_t0;
     vlog("  [encoder] %.1f ms\n", prof_encoder_ms);
-    int T_mu = 2 * n_total;
+    int T_mu = m.token_mel_ratio * n_total;
     vlog("  encoder output: (%d, 80) = %zu floats\n", T_mu, mu_T.size());
 
     // Streaming: trim the last `pre_lookahead_len * token_mel_ratio = 6`
@@ -2702,7 +2727,7 @@ int s3gen_synthesize_to_wav(
     // decoder).  Doing it here — not post-CFM — keeps mu / cond / z and
     // CFM's internal attention all sized consistently with Python, so
     // a Python-dumped noise tensor produces bit-exact mel output in C++.
-    const int TOKEN_MEL_RATIO_PRE = 2;  // each speech token expands to 2 mels
+    const int TOKEN_MEL_RATIO_PRE = m.token_mel_ratio;
     if (!opts.finalize) {
         const int trim = pre_lookahead_len * TOKEN_MEL_RATIO_PRE;  // 6
         if (T_mu <= trim) {
@@ -2844,7 +2869,7 @@ int s3gen_synthesize_to_wav(
     vlog("Initializing CFM noise (seed=%d, %s)...\n", seed,
             meanflow ? "meanflow" : "standard CFM + CFG");
     std::vector<float> z(T_mu * MEL);
-    int n_speech_part = 2 * (int)padded.size();
+    int n_speech_part = m.token_mel_ratio * (int)padded.size();
     int prompt_len_in_mu = T_mu - n_speech_part;
     vlog("  T_mu=%d prompt_len_in_mu=%d n_speech_part=%d\n",
             T_mu, prompt_len_in_mu, n_speech_part);

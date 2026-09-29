@@ -13,6 +13,7 @@ Part of the [qvac-fabric-speech.cpp documentation](../README.md).
 | `supertonic-cli` | tts | standalone Supertonic synthesis |
 | `cosyvoice-cli` | tts | CosyVoice3 synthesis |
 | `audio8-cli` | tts | Audio8 synthesis and zero-shot voice cloning |
+| `moss-cli` | tts | MOSS Delay synthesis, MOSS-SoundEffect (`--mode sfx`), and MOSS-Speech speech-to-speech (`--mode s2s`) |
 | `music-cli` | audiogen | end-to-end text-to-music |
 | `acestep-cli` | audiogen | Oobleck VAE decode and roundtrip harness |
 | `acestep-quantize` | audiogen | requantize converted ACE-Step or MiniMax-Music3 stage GGUFs |

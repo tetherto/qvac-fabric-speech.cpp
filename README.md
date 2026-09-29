@@ -79,6 +79,7 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarizatio
 | Pocket TTS | tts | English | 24 kHz | `f32`; `f16` as storage | CPU | FlowLM + Mimi, prepared voice, streaming; cloning requires encoder-enabled weights |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | tts | model-advertised multilingual text | 24 kHz | `f32`, `f16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3 backbone over a 32-channel delay pattern + RVQ codec, zero-shot cloning from a reference WAV, MOSS-TTSD two-speaker dialogue, streaming chunked output, pause/duration/pronunciation controls; end-to-end synthesis validated against the released checkpoints, numeric reference parity pending |
 | MOSS-SoundEffect-v2 | tts | text prompt (sound effects, not speech) | 48 kHz | `f16`, `q8_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3-1.7B text encoder + Wan DiT flow matching + DAC decoder, up to 30 s per clip, `moss-cli --mode sfx`; every stage matches the PyTorch pipeline (f16 at cosine 0.99998 or better, q8_0 at 0.9987 after eight sampling steps) |
+| MOSS-Speech | tts | spoken English and Chinese in, speech (or text) out | 24 kHz | LM `bf16`, `q8_0`; converter also writes `f16`, `f32`; codec `f16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | speech-to-speech without a text step: 9B Qwen3 trunk split into text and audio branches + Whisper-VQ speech tokenizer + CosyVoice2 flow/HiFT decoder with a built-in default voice or a reference WAV (`tts_cpp::moss::SpeechEngine`, `moss-cli --mode s2s`); every stage matches the PyTorch pipeline (prefill logits 0.99997, speech tokens 45/45, reply mel 0.9998), bf16 and q8_0 pick the reference's greedy audio code at 93.5 % of positions under teacher forcing |
 
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
@@ -151,8 +152,8 @@ Metal on an M4 mini but slower than an M3 Ultra's GPU, so ship it per
 deployment.
 
 Sortformer v1 and v2, Chatterbox, Parler-TTS, CosyVoice3, Pocket TTS, MOSS
-Delay, LavaSR, and MiniMax-Music3 have no Core ML sidecar and run on the ggml
-backends in their rows. Whisper's encoder sidecar (`WHISPER_COREML`) follows
+Delay, MOSS-Speech, LavaSR, and MiniMax-Music3 have no Core ML sidecar and run
+on the ggml backends in their rows. Whisper's encoder sidecar (`WHISPER_COREML`) follows
 upstream whisper.cpp; see [its README](third_party/whisper.cpp/README.md).
 
 ## Performance
@@ -229,7 +230,7 @@ These engines ship inside [QVAC](https://github.com/tetherto/qvac) as SDK addons
 |---|---|---|
 | `third_party/whisper.cpp` | MIT | MIT (OpenAI Whisper), Silero VAD models under their own terms |
 | `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License and MOSS-Transcribe-Diarize under Apache-2.0 |
-| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, and MOSS-SoundEffect Apache-2.0; Supertonic OpenRAIL-M |
+| `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, MOSS-SoundEffect, and MOSS-Speech Apache-2.0; Supertonic OpenRAIL-M |
 | `engines/audiogen` | MIT | ACE-Step 1.5 MIT, Qwen3-Embedding Apache-2.0, MiniMax-Music3 Community License |
 
 Per-engine `NOTICE` files list every third-party dependency and its license.

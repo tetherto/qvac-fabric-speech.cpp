@@ -305,3 +305,152 @@ skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
 `scripts/dump-moss-sfx-reference.py <checkpoint> <out_dir> --upstream
 <MOSS-TTS checkout>`, whose defaults are the prompt, duration, and step count
 the test expects.
+
+## MOSS-Speech
+
+[MOSS-Speech](https://huggingface.co/fnlp/MOSS-Speech) answers a spoken
+question with speech, without a text step in between. A 9B Qwen3 language
+model shares its first 32 layers between two channels, then splits into a
+4-layer text branch and a 4-layer audio branch, each with its own KV cache,
+final norm, and head. Each position carries a (text, audio) token pair: the
+text channel reads the text embedding, and a text placeholder hands the
+position to the audio embedding. The companion
+[codec](https://huggingface.co/fnlp/MOSS-Speech-Codec) turns user speech into
+tokens with a causal Whisper-VQ encoder (12.5 tokens per second, 16384 codes)
+and speaks the reply with the CosyVoice2 flow-matching decoder and HiFT
+vocoder at 24 kHz, conditioned on a voice prompt and a CAM++ speaker
+embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
+reuses it; the codec only changes the token-to-mel ratio and the speech
+vocabulary, which the S3Gen loader now reads from the GGUF.
+
+**Status — CPU and Metal, validated against the reference pipeline.** Every
+stage matches the PyTorch pipeline on a real question: the log-mel features
+(cosine 1.0) and the 45 user speech tokens (45 of 45), the voice-prompt mel
+(1.0) and the CAM++ embedding (0.99991), the reply mel from the flow decoder
+with the reference noise (0.99977), and the prefill logits of both heads
+(text 0.99997, audio 0.999998 in bf16; 0.99994 and 0.999998 in q8_0). With
+teacher forcing, greedy decoding picks the reference's audio code at 93.5 %
+of the positions in both bf16 and q8_0; the misses are near-ties between
+bf16 on MPS and ggml, so free-running greedy replies drift apart after a few
+tokens: in bf16 the greedy reply still ends on its own, while in q8_0 it can run
+on to the token limit, so keep the default sampling for q8_0. Sampled replies to English questions are
+coherent and intelligible in both quantizations. On an M1 Ultra with Metal
+the LM runs at about 32 tokens per second in bf16 and 47 in q8_0, faster than
+the 12.5 tokens per second of speech it produces; while it speaks, each step
+skips the text head, which the audio channel does not read.
+
+### Convert
+
+```sh
+# language model: shared trunk, both branches, both heads, tokenizer,
+# special tokens, and the default system prompts
+python scripts/convert-moss-speech-to-gguf.py /path/to/MOSS-Speech \
+    --outtype q8_0 --outfile moss-speech-q8_0.gguf
+
+# codec: Whisper-VQ encoder + CosyVoice2 flow + HiFT + CAM++ + default voice
+python scripts/convert-moss-speech-codec-to-gguf.py /path/to/MOSS-Speech-Codec \
+    --campplus-gguf cosyvoice3-campplus-f32.gguf \
+    --voice-wav /path/to/MOSS-Speech/assets/prompt_en.wav \
+    --outtype f16 --outfile moss-speech-codec-f16.gguf
+```
+
+The LM converter writes `bf16` (18.2 GB, the default), `q8_0` (9.7 GB),
+`f16`, and `f32`; norms stay f32. The codec converter needs torch,
+safetensors, transformers, librosa, and soundfile, and takes the CAM++
+weights from the CosyVoice3 CAM++ GGUF (the same network the CosyVoice2
+frontend runs). `--voice-wav` becomes the default reply voice, stored as mono
+float samples at its original rate (at most 60 s). The codec's `--outtype` is
+`f16` (1.3 GB, validated), `q8_0`, or `f32`; the conv kernels and the
+Whisper-VQ matrices stay f16 in the quantized file.
+
+### Run
+
+```sh
+build/moss-cli --mode s2s --model moss-speech-q8_0.gguf \
+    --codec moss-speech-codec-f16.gguf --audio question.wav \
+    --gpu --out reply.wav
+```
+
+`--audio` is the user turn (any rate from 8 to 192 kHz, stereo downmixed).
+`--voice ref.wav` (up to 60 s) replaces the default voice, `--system "..."` adds a system
+turn, and `--text-reply` asks for a text answer instead of speech (printed to
+stdout). Sampling defaults to the upstream values: temperature 0.7, top-p
+0.95, top-k 20, seed 0; `--greedy`, `--temperature`, `--top-p`, `--top-k`, and
+`--seed` override them. `--max-new-tokens` bounds the whole reply (1000 by
+default, at most 4096) and `--max-reply-seconds` cuts the spoken part cleanly by forcing
+the end-of-speech code. There is no streaming in this mode.
+
+### Engine notes
+
+The public API is `tts_cpp::moss::SpeechEngine` in
+[`include/tts-cpp/moss/speech.h`](../include/tts-cpp/moss/speech.h):
+construct with `SpeechOptions` (LM and codec paths, threads, `use_gpu`,
+`backends_dir`) and call `respond(request, progress)` with a `SpeechRequest`
+that holds the conversation as `SpeechMessage`s. Each message carries either
+text or audio (PCM plus sample rate), roles are system, user, and assistant,
+and the last message must be the user's. The `SpeechResult` holds the reply
+PCM at 24 kHz, the text channel's output, token counts, whether the reply was
+truncated by `max_reply_seconds` or `max_new_tokens`, and the encode, prefill, generation, and decode wall times.
+`cancel()` from another thread stops a run at the next speech-tokenizer
+segment, prefill batch, generation step, or decoder step, and `false` from the
+progress callback stops generation; one response runs at a time per
+instance. A request holds up to 256 messages, each with up to 16384 bytes of
+text or 600 s of audio.
+
+The prompt follows the upstream processor: each turn is
+`<|im_start|>role\n` + content + `<|im_end|>\n`, a spoken turn is the
+speech-start token, one placeholder row per speech code, and the
+end-of-speech code, and when the conversation does not open with a system turn the default
+one ("Respond with spoken outputs", or with text outputs for `--text-reply`)
+is appended after the turns, as upstream does. The spoken reply opens with
+the assistant header and the speech-start token. Generation mirrors the
+reference loop: the channel switches to audio after speech-start and back to
+text after end-of-speech, audio codes past end-of-speech are masked, the
+end-of-speech code is masked for the first nine tokens (upstream's
+`min_new_tokens` of 10 counts from one) and `<|im_end|>` on the text channel
+for the first ten, as Hugging Face's minimum-length processor does, the same temperature
+and top-k/top-p apply to both heads, the text channel is forced to the
+placeholder while speaking, and generation stops on `<|im_end|>` or the pad
+token. The reply's speech codes are the audio channel from the first
+speech row up to the first end-of-speech. A stop row closes the reply and is
+dropped; a reply cut by `max_new_tokens` keeps its last row.
+
+The voice prompt is prepared the way the CosyVoice2 frontend does it: speech
+tokens from the Whisper-VQ encoder, an 80-band 24 kHz mel trimmed to four
+frames per token, and a CAM++ embedding of the 16 kHz audio. The default
+voice is prepared once per engine and cached. CAM++ runs on the scalar CPU
+path, which is the one that matches the reference; its convolutions now
+accumulate along time rows so the compiler vectorizes them, with the same
+summation order per output, which cuts the 36-second default voice from
+about 24 s to about 4 s on an M1 Ultra. The flow decoder's source noise in
+HiFT is random, so the reply waveform is compared with the reference through
+its log-mel spectrum. The LM loader validates the geometry, the special
+tokens, and every tensor's shape before it allocates; the KV cache is sized
+from the prompt plus `max_new_tokens`, rounded up to 256 positions.
+
+### Test
+
+`test-moss-speech` needs no download: it builds a tiny random-weight LM and
+a tiny Whisper-VQ GGUF in-test and covers the generation state machine
+(channel switches, masked codes, the minimum length, the reply-length cut,
+the stop tokens, and reply code extraction), the prompt layout against the
+processor's grid, the reply text, the LM load-time rejections, batched
+prefill against one batch and against cached steps, the embedding selection
+per channel, context overflow, the tokenizer's segment arithmetic, log-mel
+normalization, per-segment encoding and its rejections, request validation,
+and the CLI's `s2s` flags. `test-convert-moss` fabricates a tiny MOSS-Speech
+checkpoint and checks the tensor census, the metadata, the token types, all
+four output types, and the rejections, and exercises the codec converter's
+Whisper-VQ, CAM++, and default-voice helpers when torch is installed.
+`test-moss-speech-parity` is the reference check: it skips unless
+`MOSS_SPEECH_MODEL` and `MOSS_SPEECH_REFERENCE_DIR` point at the converted LM
+and at dumps of the PyTorch pipeline, and it adds the tokenizer and decoder
+stages when `MOSS_SPEECH_CODEC` points at the codec GGUF (`MOSS_SPEECH_GPU=1`
+runs it on the GPU, `MOSS_SPEECH_DUMP_MEL=<file>` writes the reply mel). It
+prints every number in the status paragraph above and fails below backend-safe
+floors: cosine 0.9999 for the user log-mel, 0.999 for the voice mel and the
+CAM++ embedding, 0.99 for the reply spectrum and the prefill logits, 95 % of
+the user speech tokens, and 90 % teacher-forced agreement. The dumps come from
+`scripts/dump-moss-speech-reference.py <MOSS-Speech> <MOSS-Speech-Codec>
+<out_dir> --upstream <MOSS-Speech checkout> --user-wav question.wav --device
+mps`, which writes the `lm/` and `codec/` folders the test reads.
