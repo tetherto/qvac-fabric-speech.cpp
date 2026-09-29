@@ -3112,12 +3112,22 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     // back to (T, T, H); the softmax output is padded on ne0 to line up
     // with `v_for_mm`'s padded K axis. All three batched attention MULMATs
     // then dispatch to `hmx-tiled` (F16 batched) per block × 24 blocks.
-    ggml_tensor * k_perm_mm = pad_and_cast_for_hmx(ctx, k_perm, /*dim=*/1);
-    ggml_tensor * p_perm_mm = pad_and_cast_for_hmx(ctx, p_perm, /*dim=*/1);
+    //
+    // The T ≥ k_attn_block_min_T (1024) blocked branch below intentionally
+    // bypasses the pad+cast: its per-block `attn_probs_block` builds strided
+    // views over `k_perm` / `p_perm` and mixes `ac_b` (whose ne0 is src0.ne1)
+    // with `rel_shift_block_view(bd_b)` (whose ne0 stays T), so a padded
+    // src0.ne1 would break the downstream ADD's shape check
+    // (`ggml_can_repeat` failure in `attn_probs_block`). Long-form audio hits
+    // this branch and stays on HVX-batched-F32 as before; Parakeet-CTC
+    // production audio is well under T=1024 so the HMX-F16 dispatch is
+    // unaffected in practice.
+    const bool use_blocked_attn = T >= k_attn_block_min_T;
+    ggml_tensor * k_perm_mm = use_blocked_attn ? k_perm : pad_and_cast_for_hmx(ctx, k_perm, /*dim=*/1);
+    ggml_tensor * p_perm_mm = use_blocked_attn ? p_perm : pad_and_cast_for_hmx(ctx, p_perm, /*dim=*/1);
 
-    if (T >= k_attn_block_min_T) {
+    if (use_blocked_attn) {
         ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
-        v_for_mm = pad_and_cast_for_hmx(ctx, v_for_mm, /*dim=*/0);
         ggml_tensor * flat = attn_context_blocked(ctx, k_perm_mm, p_perm_mm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
         ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
         if (cap) cap->out = out;
