@@ -33,6 +33,20 @@ C++ Dependencies
     https://github.com/llvm/llvm-project
 
 =========================================================================
+Model implementations
+=========================================================================
+
+--- apache-2.0 (Apache License 2.0) ---
+
+  MOSS-Transcribe-Diarize
+    https://github.com/OpenMOSS/MOSS-Transcribe-Diarize
+    https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize
+    The canonical repository identifies the code as Apache-2.0. The native
+    implementation covers the Whisper log-mel front end, the audio encoder,
+    the temporal-merge adaptor, the Qwen3 decoder and its byte-level BPE
+    tokenizer, the prompt layout, and the transcript parser.
+
+=========================================================================
 Python Dependencies
 =========================================================================
 

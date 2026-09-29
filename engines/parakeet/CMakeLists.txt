@@ -245,7 +245,25 @@ endif()
 # at runtime).
 add_library(parakeet-backend-defs INTERFACE)
 
+set(PARAKEET_MOSS_SOURCES
+    src/moss/gguf_metadata.cpp
+    src/moss/transcribe_runtime.cpp
+    src/moss/transcribe_bpe.cpp
+    src/moss/transcribe_model.cpp
+    src/moss/transcribe_tensors.cpp
+    src/moss/transcribe_audio.cpp
+    src/moss/transcribe_encoder.cpp
+    src/moss/transcribe_decoder.cpp
+    src/moss/transcribe_text.cpp
+    src/moss/transcribe_engine.cpp
+    src/moss/transcribe_cli.cpp
+)
+
+set_source_files_properties(${PARAKEET_MOSS_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fno-fast-math>")
+
 set(PARAKEET_LIB_SOURCES
+    ${PARAKEET_MOSS_SOURCES}
     src/parakeet_ctc.cpp
     src/parakeet_coreml_path.cpp
     src/coreml/parakeet_coreml_shape.cpp
@@ -463,6 +481,10 @@ if (PARAKEET_BUILD_EXECUTABLES)
     add_executable(parakeet-fit-params src/fit_cli_main.cpp)
     target_link_libraries(parakeet-fit-params PRIVATE qvac-parakeet)
     parakeet_apply_ccache(parakeet-fit-params)
+
+    add_executable(moss-transcribe src/moss/transcribe_cli_main.cpp)
+    target_link_libraries(moss-transcribe PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(moss-transcribe)
 endif()
 
 if (PARAKEET_BUILD_TESTS)
@@ -1124,6 +1146,36 @@ if (PARAKEET_BUILD_TESTS)
             "${_qvp_nemotron_stream_1120_ref}" 13 --n-gpu-layers 1)
     endif()
 
+    set(PARAKEET_MOSS_TEST_SOURCES
+        ${PARAKEET_MOSS_SOURCES}
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+
+    add_executable(test-moss-transcribe test/moss/test_transcribe.cpp ${PARAKEET_MOSS_TEST_SOURCES})
+    target_link_libraries(test-moss-transcribe PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-moss-transcribe PRIVATE src include ggml/include)
+    target_compile_options(test-moss-transcribe PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    parakeet_apply_backend_defs(test-moss-transcribe)
+    parakeet_apply_ccache(test-moss-transcribe)
+    parakeet_register_test(test-moss-transcribe LABEL "unit")
+
+    add_executable(test-moss-transcribe-parity test/moss/test_transcribe_parity.cpp ${PARAKEET_MOSS_TEST_SOURCES})
+    target_link_libraries(test-moss-transcribe-parity PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-moss-transcribe-parity PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-moss-transcribe-parity)
+    parakeet_apply_ccache(test-moss-transcribe-parity)
+    parakeet_register_test(test-moss-transcribe-parity LABEL "fixture")
+    set_property(TEST test-moss-transcribe-parity PROPERTY SKIP_RETURN_CODE 77)
+
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
         add_test(
@@ -1131,6 +1183,13 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_nemo_to_gguf.py")
         set_property(TEST test-converter-rnnt PROPERTY LABELS unit)
+        add_test(
+            NAME test-converter-moss-transcribe
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_moss_transcribe.py")
+        set_property(TEST test-converter-moss-transcribe PROPERTY LABELS unit)
+        set_property(TEST test-converter-moss-transcribe PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-converter-moss-transcribe PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
     endif()
 
     find_program(PARAKEET_BASH_EXECUTABLE bash)

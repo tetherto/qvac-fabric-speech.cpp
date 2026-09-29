@@ -42,6 +42,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/parakeet-tdt-0.6b-v3` | parakeet | ~25 + punctuation and capitalization | 600 M | `f32`, `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | graph decoder on Metal/Vulkan/CUDA; scalar on CPU/OpenCL |
 | `nvidia/parakeet-tdt-1.1b` | parakeet | English | 1.1 B | `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML offline encoder | no punctuation; graph decoder on Metal/Vulkan/CUDA |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | parakeet | locale-conditioned multilingual | 600 M | `f16` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape offline encoder | Core ML is limited to inputs fitting the exported shape; longer offline inputs and streaming use the cache-aware ggml path at 80/160/320/560/1120 ms; empty language selects `auto` |
+| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | parakeet | model-advertised multilingual (validated es, zh) | 0.9 B | `f16`, `q8_0`, `q5_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Whisper-shaped encoder + 4x merge adaptor + Qwen3-0.6B decoder; one-pass transcription with speaker labels and timestamps (`parakeet::moss::TranscribeEngine`, `moss-transcribe` CLI); f16 and q8_0 reproduce the reference model's WER/CER on es/zh files of 2 to 30 minutes |
 
 ### End-of-utterance and diarization
 
@@ -227,7 +228,7 @@ These engines ship inside [QVAC](https://github.com/tetherto/qvac) as SDK addons
 | Component | Code license | Model weights |
 |---|---|---|
 | `third_party/whisper.cpp` | MIT | MIT (OpenAI Whisper), Silero VAD models under their own terms |
-| `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License |
+| `engines/parakeet` | Apache-2.0 | CC-BY-4.0, except `parakeet_realtime_eou_120m-v1` under the NVIDIA Open Model License and MOSS-Transcribe-Diarize under Apache-2.0 |
 | `engines/tts` | MIT | Chatterbox MIT; Parler, CosyVoice3, Audio8, LavaSR, and MOSS-SoundEffect Apache-2.0; Supertonic OpenRAIL-M |
 | `engines/audiogen` | MIT | ACE-Step 1.5 MIT, Qwen3-Embedding Apache-2.0, MiniMax-Music3 Community License |
 
