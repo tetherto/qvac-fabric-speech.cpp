@@ -3,8 +3,9 @@
 #include "moss/transcribe_bpe.h"
 
 #include <algorithm>
-#include <cstdlib>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -14,6 +15,7 @@ namespace {
 constexpr int32_t TOKEN_TYPE_CONTROL = 3;
 constexpr size_t MAX_TIMESTAMP_CHARS = 32;
 constexpr size_t MAX_SPEAKER_CHARS = 16;
+constexpr int DECIMAL_DIGITS = 6;
 constexpr const char * WHITESPACE = " \t\n\v\f\r";
 
 [[noreturn]] void fail(const std::string & message) {
@@ -66,7 +68,7 @@ bool parse_timestamp(const std::string & text, double & value) {
     if (text.empty() || !all_timestamp_chars(text) || count_char(text, '.') > 1 || count_char(text, '.') == text.size()) {
         return false;
     }
-    value = std::strtod(text.c_str(), nullptr);
+    value = parse_decimal(text);
     return true;
 }
 
@@ -240,6 +242,73 @@ std::vector<int32_t> transcribe_prompt(const TranscribeConfig & config, const Tr
     ids.push_back(tokens.im_start);
     append(ids, tokenizer.encode("assistant\n"));
     return ids;
+}
+
+namespace {
+
+bool is_hotword_breaker(unsigned char ch) {
+    return ch < 0x20 || ch == 0x7F || ch == '[' || ch == ']' || ch == '<' || ch == '>' || ch == '|';
+}
+
+std::string collapse_spaces(const std::string & text) {
+    std::string out;
+    for (char ch : text) {
+        if (ch != ' ' || (!out.empty() && out.back() != ' ')) {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::string replace_breakers(const std::string & text) {
+    std::string out = text;
+    for (char & ch : out) {
+        ch = is_hotword_breaker((unsigned char) ch) ? ' ' : ch;
+    }
+    return out;
+}
+
+bool contains(const std::vector<std::string> & values, const std::string & value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+void append_unique(std::vector<std::string> & values, const std::string & value) {
+    if (!value.empty() && !contains(values, value)) {
+        values.push_back(value);
+    }
+}
+
+std::string join(const std::vector<std::string> & values, const std::string & separator) {
+    std::string out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        out += (i == 0 ? "" : separator) + values[i];
+    }
+    return out;
+}
+
+} // namespace
+
+std::string sanitize_hotword(const std::string & hotword) {
+    const std::string clean = strip_whitespace(collapse_spaces(replace_breakers(hotword)));
+    if (clean.size() > MAX_HOTWORD_BYTES) {
+        fail("each hotword must be at most " + std::to_string(MAX_HOTWORD_BYTES) + " bytes");
+    }
+    return clean;
+}
+
+std::vector<std::string> sanitize_hotwords(const std::vector<std::string> & hotwords) {
+    if (hotwords.size() > MAX_HOTWORDS) {
+        fail("at most " + std::to_string(MAX_HOTWORDS) + " hotwords are allowed");
+    }
+    std::vector<std::string> clean;
+    for (const std::string & hotword : hotwords) {
+        append_unique(clean, sanitize_hotword(hotword));
+    }
+    return clean;
+}
+
+std::string hotword_prompt(const TranscribeConfig & config, const std::vector<std::string> & hotwords) {
+    return config.default_prompt + config.hotword_prefix + join(hotwords, config.hotword_separator);
 }
 
 std::string strip_whitespace(const std::string & text) {
@@ -436,6 +505,22 @@ std::vector<TranscriptSegment> parse_transcript(const std::string & text) {
     const std::vector<TranscriptSegment> tail = parser.close();
     segments.insert(segments.end(), tail.begin(), tail.end());
     return segments;
+}
+
+double parse_decimal(const std::string & text) {
+    std::istringstream stream(text);
+    stream.imbue(std::locale::classic());
+    double value = 0.0;
+    stream >> value;
+    return value;
+}
+
+std::string format_decimal(double value) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream.precision(DECIMAL_DIGITS);
+    stream << value;
+    return stream.str();
 }
 
 } // namespace parakeet::moss::detail

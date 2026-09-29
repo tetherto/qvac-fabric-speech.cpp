@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -12,6 +13,12 @@ struct ggml_tensor;
 struct gguf_context;
 
 namespace parakeet::moss::detail {
+
+constexpr size_t STREAM_CHUNK_BYTES = 8u << 20;
+
+enum class TensorUpload { InPlace, Whole, Chunked };
+
+TensorUpload plan_upload(bool host_buffer, bool quantized);
 
 class TranscribeGraph {
 public:

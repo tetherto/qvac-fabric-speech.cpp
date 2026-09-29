@@ -69,6 +69,17 @@ struct TranscribeEngine::Impl {
         }
     }
 
+    std::string resolved_prompt(const TranscribeRequest & request) const {
+        const std::vector<std::string> hotwords = detail::sanitize_hotwords(request.hotwords);
+        if (hotwords.empty()) {
+            return request.prompt;
+        }
+        if (!detail::strip_whitespace(request.prompt).empty()) {
+            fail("hotwords extend the default prompt; write them into the custom prompt instead");
+        }
+        return detail::hotword_prompt(model->config(), hotwords);
+    }
+
     int max_new_tokens(const TranscribeRequest & request) const {
         if (request.max_new_tokens < 0) {
             fail("max_new_tokens must be positive, or 0 for the model default");
@@ -146,7 +157,7 @@ struct TranscribeEngine::Impl {
         const int limit = max_new_tokens(request);
         result.audio_tokens = detail::transcribe_audio_tokens(model->config(), samples);
         const std::vector<int32_t> prompt = detail::transcribe_prompt(model->config(), *tokenizer,
-                result.audio_tokens, request.prompt);
+                result.audio_tokens, resolved_prompt(request));
         result.prompt_tokens = (int) prompt.size();
         require_context(result.prompt_tokens, limit);
 

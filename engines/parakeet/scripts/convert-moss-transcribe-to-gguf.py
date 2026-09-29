@@ -27,6 +27,8 @@ DEFAULT_PROMPT = (
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
 SYSTEM_PROMPT = "You are a helpful assistant."
+HOTWORD_PREFIX = "热词提示："
+HOTWORD_SEPARATOR = ", "
 AUDIO_START_TOKEN = "<|audio_start|>"
 AUDIO_END_TOKEN = "<|audio_end|>"
 AUDIO_PAD_TOKEN = "<|audio_pad|>"
@@ -437,6 +439,8 @@ def add_prompt_metadata(writer: gguf.GGUFWriter, processor: dict[str, Any], gene
     writer.add_bool(f"{ARCH}.time_markers", bool(processor.get("enable_time_marker", True)))
     writer.add_string(f"{ARCH}.system_prompt", SYSTEM_PROMPT)
     writer.add_string(f"{ARCH}.default_prompt", DEFAULT_PROMPT)
+    writer.add_string(f"{ARCH}.hotword_prefix", HOTWORD_PREFIX)
+    writer.add_string(f"{ARCH}.hotword_separator", HOTWORD_SEPARATOR)
     writer.add_uint32(f"{ARCH}.default_max_new_tokens", int(generation.get("max_new_tokens", DEFAULT_MAX_NEW_TOKENS)))
 
 

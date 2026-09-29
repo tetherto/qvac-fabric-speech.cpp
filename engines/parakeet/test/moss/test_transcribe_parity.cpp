@@ -109,6 +109,56 @@ void test_encoder(const Fixture & fixture) {
     report("adaptor chunk 0", cosine(encoding.embeddings, head), STAGE_COSINE);
 }
 
+struct TokenizerCase {
+    std::string text;
+    std::vector<int32_t> ids;
+};
+
+uint32_t read_u32(std::ifstream & input) {
+    uint32_t value = 0;
+    input.read(reinterpret_cast<char *>(&value), sizeof(value));
+    return value;
+}
+
+bool read_case(std::ifstream & input, TokenizerCase & item) {
+    const uint32_t bytes = read_u32(input);
+    if (!input) {
+        return false;
+    }
+    item.text.assign(bytes, '\0');
+    input.read(item.text.data(), bytes);
+    item.ids.assign(read_u32(input), 0);
+    input.read(reinterpret_cast<char *>(item.ids.data()), (std::streamsize) (item.ids.size() * sizeof(int32_t)));
+    return (bool) input;
+}
+
+std::vector<TokenizerCase> read_tokenizer_cases(const std::filesystem::path & path) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<TokenizerCase> cases;
+    for (TokenizerCase item; read_case(input, item);) {
+        cases.push_back(item);
+    }
+    return cases;
+}
+
+void check_tokenizer_case(const TranscribeTokenizer & tokenizer, const TokenizerCase & item) {
+    check(tokenizer.encode(item.text) == item.ids, "tokenizer matches Hugging Face on: " + item.text);
+}
+
+void test_tokenizer_cases(const Fixture & fixture) {
+    const std::filesystem::path path = fixture.dir / "tokenizer_cases.bin";
+    if (!std::filesystem::exists(path)) {
+        std::printf("tokenizer cases: skipped (no tokenizer_cases.bin)\n");
+        return;
+    }
+    const TranscribeTokenizer tokenizer(fixture.model);
+    const std::vector<TokenizerCase> cases = read_tokenizer_cases(path);
+    for (const TokenizerCase & item : cases) {
+        check_tokenizer_case(tokenizer, item);
+    }
+    std::printf("tokenizer cases: %zu checked\n", cases.size());
+}
+
 void test_prompt(const Fixture & fixture) {
     const TranscribeTokenizer tokenizer(fixture.model);
     const TranscribeConfig & config = fixture.model.config();
@@ -165,6 +215,7 @@ int main() {
         const Fixture fixture{model, dir, read_bin<float>(dir / "audio.bin")};
         test_mel(fixture);
         test_prompt(fixture);
+        test_tokenizer_cases(fixture);
         test_encoder(fixture);
         test_prefill(fixture);
         test_end_to_end(fixture, model_path, use_gpu);

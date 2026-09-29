@@ -116,6 +116,8 @@ TranscribeConfig read_config(const GgufMetadata & meta) {
     config.time_markers = meta.boolean(key("time_markers"));
     config.system_prompt = meta.str(key("system_prompt"));
     config.default_prompt = meta.str(key("default_prompt"));
+    config.hotword_prefix = meta.str(key("hotword_prefix"));
+    config.hotword_separator = meta.str(key("hotword_separator"));
     config.default_prompt_ids = meta.int_array(key("default_prompt_ids"), MAX_PROMPT_IDS);
     config.default_max_new_tokens = (int) meta.u32(key("default_max_new_tokens"));
     return config;
