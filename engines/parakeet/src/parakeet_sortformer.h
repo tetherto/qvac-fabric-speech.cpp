@@ -105,6 +105,14 @@ struct SortformerSpeakerCache {
 // Reset to a fresh empty state. Allocates mean_sil_emb to D zeros.
 void sortformer_cache_reset(SortformerSpeakerCache & cache, int D);
 
+void sortformer_update_speaker_cache(
+    SortformerSpeakerCache & cache,
+    const float * committed_embeddings, int committed_frames,
+    const float * probabilities, int previous_speaker_frames,
+    int previous_fifo_frames, int left_context_frames,
+    int speakers, int embedding_width,
+    const SortformerStreamingConfig & config);
+
 // Fit projection: size the compute buffers of the diarization head graph at
 // `T_enc` encoder frames, without allocating or executing it.
 // `out_active_bytes` is the resolved head backend's buffer, sized with a

@@ -597,6 +597,19 @@ void sortformer_cache_reset(SortformerSpeakerCache & cache, int D) {
     }
 }
 
+void sortformer_update_speaker_cache(
+    SortformerSpeakerCache & cache,
+    const float * committed_embeddings, int committed_frames,
+    const float * probabilities, int previous_speaker_frames,
+    int previous_fifo_frames, int left_context_frames,
+    int speakers, int embedding_width,
+    const SortformerStreamingConfig & config) {
+    streaming_update(cache, committed_embeddings, committed_frames,
+        probabilities, previous_speaker_frames, previous_fifo_frames,
+        left_context_frames, speakers, embedding_width, config);
+    ++cache.chunk_index;
+}
+
 int sortformer_measure_head(const ParakeetCtcModel & model, int T_enc,
                             size_t & out_active_bytes,
                             size_t & out_host_input_bytes) {

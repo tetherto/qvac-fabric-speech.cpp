@@ -52,6 +52,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/diar_sortformer_4spk-v1` | parakeet | diarization, up to 4 speakers | 123 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + sliding-history live |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | streaming-trained encoder |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape batch/AOSC encoder | Audio-Online Speaker Cache, stable slots across gaps; speaker head stays on ggml |
+| `nvidia/Nemotron-3-Diarization` | parakeet | diarization, up to 8 speakers | — | official `q8_0` GGUF | CPU, Vulkan (RX 7600 XT tested); other ggml backends require validation | 10 ms probabilities, offline and AOSC streaming |
 
 Parakeet's CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0
 transcripts, Sortformer and streaming output byte-equal to the previous build,
@@ -59,7 +60,7 @@ LibriSpeech WER within noise of the CPU reference) but is not yet covered by
 hardware decoder parity CI. CUDA in these rows denotes hardware-validated
 availability, not CI coverage.
 
-Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer GGUF via `--diarization-model` for an attributed "who said what" transcript. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
+Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarization GGUF via `--diarization-model` for an attributed "who said what" transcript. Nemotron streaming defaults to 0 ms left context and accepts an explicit 80 ms encoder frame. Download the Nemotron GGUF with `python engines/parakeet/scripts/download_nemotron_diarization.py`. See the [Parakeet backend, Core ML, streaming, conversion, and package guide](engines/parakeet/README.md).
 
 ### Text-to-speech and voice cloning
 

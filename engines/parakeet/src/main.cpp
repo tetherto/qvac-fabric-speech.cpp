@@ -51,6 +51,7 @@ void print_usage(const char * argv0) {
         "  Nemotron   (3.5 ASR Streaming 0.6B)       -> locale-conditioned ASR with\n"
         "                                                cache-aware streaming\n"
         "  Sortformer (diar_sortformer_4spk-v1, v2)   -> 4-speaker diarization\n"
+        "  Nemotron 3 Diarization                    -> 8-speaker, 10 ms diarization\n"
         "Combined ASR + diarization (\"who said what\") via --diarization-model.\n"
         "\n"
         "options:\n"
@@ -140,7 +141,7 @@ void print_usage(const char * argv0) {
         "                       JSON Lines, one per segment. For Sortformer streaming, prints\n"
         "                       speaker segments instead of text.\n"
         "\n"
-        "  --diarization-model PATH         path to a Sortformer GGUF; combined with a CTC/RNN-T/TDT/EOU\n"
+        "  --diarization-model PATH         path to a Sortformer or Nemotron diarization GGUF; combined with a CTC/RNN-T/TDT/EOU\n"
         "                                    --model, runs speaker-attributed transcription\n"
         "                                    (writes [start-end] speaker_N: text per segment).\n"
         "                                    Implies --emit text|jsonl per the same flag.\n"
@@ -580,9 +581,10 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     const double audio_ms = 1000.0 * (double) samples.size() / (double) sr;
 
     if (!extra.diarization_model_path.empty()) {
-        if (model.model_type == ParakeetModelType::SORTFORMER) {
+        if (model.model_type == ParakeetModelType::SORTFORMER ||
+            model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION) {
             PARAKEET_LOG_ERROR("error: --diarization-model expects --model to be a transcription\n"
-                                 "       (CTC/RNN-T/TDT/EOU) GGUF; got Sortformer at --model. Swap them.\n");
+                                 "       (CTC/RNN-T/TDT/EOU) GGUF; got a diarization model at --model. Swap them.\n");
             return 5;
         }
 
@@ -594,7 +596,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         Engine sf_engine(sf_opts);
 
         if (!sf_engine.is_diarization_model()) {
-            PARAKEET_LOG_ERROR("error: --diarization-model %s is not a Sortformer GGUF\n",
+            PARAKEET_LOG_ERROR("error: --diarization-model %s is not a diarization GGUF\n",
                          extra.diarization_model_path.c_str());
             return 5;
         }
@@ -650,7 +652,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         return 0;
     }
 
-    if (model.model_type == ParakeetModelType::SORTFORMER) {
+    if (model.model_type == ParakeetModelType::SORTFORMER ||
+        model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION) {
         EngineOptions eopts;
         eopts.model_gguf_path = opts.model_gguf_path;
         eopts.n_gpu_layers    = opts.n_gpu_layers;
@@ -664,7 +667,9 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         if (extra.stream) {
             SortformerStreamingOptions sopts;
             sopts.sample_rate    = sr;
-            sopts.chunk_ms       = extra.stream_chunk_ms > 0 ? extra.stream_chunk_ms : 2000;
+            sopts.chunk_ms       = model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION &&
+                                   extra.stream_chunk_ms == 1000
+                                 ? 1040 : extra.stream_chunk_ms;
             sopts.history_ms     = extra.stream_history_ms;
             if (sopts.history_ms < sopts.chunk_ms) sopts.history_ms = sopts.chunk_ms;
             sopts.threshold      = 0.5f;

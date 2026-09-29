@@ -273,6 +273,7 @@ set(PARAKEET_LIB_SOURCES
     src/parakeet_tdt.cpp
     src/parakeet_eou.cpp
     src/parakeet_sortformer.cpp
+    src/parakeet_diarization_v3.cpp
     src/parakeet_log.cpp
     src/mel_preprocess.cpp
     src/sentencepiece_bpe.cpp
@@ -535,19 +536,14 @@ if (PARAKEET_BUILD_TESTS)
         # A test that finds its backend without the feature under test exits 3.
         set_property(TEST ${target} PROPERTY SKIP_RETURN_CODE 3)
         if (WIN32)
-            # When ggml builds as shared (the clang-cl / MSVC default with
-            # GGML_BACKEND_DL on), test exes link against import libs and
-            # need to find `speech-ggml-*.dll` at runtime. CMake places
-            # those at `${CMAKE_BINARY_DIR}/bin`, but Windows has no rpath
-            # and the test exes live next to the binary root, not in bin/.
-            # Without this, the OS loader fails with STATUS_DLL_NOT_FOUND
-            # (0xc0000135) before main() runs. Inject the bin/ dir into
-            # the test's PATH; configure-time $ENV{PATH} is appended so
-            # any compiler-runtime DLLs the user needs stay reachable.
-            # Static-ggml builds (msys2 .a archives) are unaffected --
-            # the prepended dir simply doesn't exist and is ignored.
-            set_property(TEST ${target} PROPERTY ENVIRONMENT
-                "PATH=${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
+            set(_qprt_test_path "${CMAKE_BINARY_DIR}/bin;$ENV{PATH}")
+            if (PARAKEET_USE_SYSTEM_GGML AND GGML_LIBRARY)
+                get_filename_component(_qprt_ggml_lib_dir "${GGML_LIBRARY}" DIRECTORY)
+                get_filename_component(_qprt_ggml_prefix "${_qprt_ggml_lib_dir}" DIRECTORY)
+                set(_qprt_test_path "${_qprt_ggml_prefix}/bin;${_qprt_test_path}")
+            endif()
+            string(REPLACE ";" "\\;" _qprt_test_path "${_qprt_test_path}")
+            set_property(TEST ${target} PROPERTY ENVIRONMENT "PATH=${_qprt_test_path}")
         endif()
         set(_qprt_missing "")
         foreach (_qprt_req IN LISTS QPRT_REQUIRES)
@@ -907,6 +903,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -925,6 +922,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -946,6 +944,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -957,6 +956,45 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "${_qvp_nemotron_f16_gguf}"
         REQUIRES "${_qvp_nemotron_f16_gguf}")
 
+    set(PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF
+        "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf"
+        CACHE FILEPATH "Nemotron 3 Diarization GGUF fixture")
+    add_executable(test-nemotron-diarization-loader
+        test/test_nemotron_diarization_loader.cpp)
+    target_link_libraries(test-nemotron-diarization-loader PRIVATE qvac-parakeet)
+    target_include_directories(test-nemotron-diarization-loader PRIVATE src include)
+    parakeet_apply_ccache(test-nemotron-diarization-loader)
+    parakeet_register_test(test-nemotron-diarization-loader
+        LABEL "fixture"
+        ARGS "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
+
+    add_executable(test-nemotron-diarization
+        test/test_nemotron_diarization.cpp)
+    target_link_libraries(test-nemotron-diarization PRIVATE qvac-parakeet)
+    target_include_directories(test-nemotron-diarization PRIVATE src include)
+    parakeet_apply_ccache(test-nemotron-diarization)
+    parakeet_register_test(test-nemotron-diarization
+        LABEL "fixture"
+        ARGS "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+             "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+             "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin")
+
+    set(PARAKEET_TEST_GPU_LAYERS 99)
+    parakeet_register_test(test-nemotron-diarization-gpu
+        EXE test-nemotron-diarization
+        LABEL "gpu"
+        ARGS "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+             "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+             "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin"
+             "${PARAKEET_TEST_GPU_LAYERS}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin")
+
     add_executable(test-nemotron
         test/test_nemotron.cpp
         src/parakeet_ctc.cpp
@@ -967,6 +1005,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1117,6 +1156,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1481,6 +1521,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1509,6 +1550,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1535,6 +1577,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1556,6 +1599,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1584,6 +1628,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1618,6 +1663,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1655,6 +1701,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1678,6 +1725,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1720,6 +1768,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp)
     target_link_libraries(test-fit-params PRIVATE ggml parakeet-backend-defs)
@@ -1768,6 +1817,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp)
     target_link_libraries(test-fit-cli PRIVATE ggml parakeet-backend-defs)
@@ -1785,6 +1835,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1816,6 +1867,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)

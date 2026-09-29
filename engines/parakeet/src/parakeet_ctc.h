@@ -319,7 +319,56 @@ enum class ParakeetModelType {
     EOU,
     NEMOTRON,
     SORTFORMER,
+    NEMOTRON_DIARIZATION,
 };
+
+struct NemotronDiarizationConfig {
+    int encoder_width = 0;
+    int encoder_layers = 0;
+    int attention_heads = 0;
+    int feed_forward_width = 0;
+    int output_width = 0;
+    int speakers = 0;
+    int subsampling_factor = 0;
+    int output_stride = 0;
+    int position_limit = 0;
+    float rope_base = 0.0f;
+    float rotary_fraction = 0.0f;
+};
+
+struct NemotronDiarizationLayer {
+    ggml_tensor * norm1_w = nullptr;
+    ggml_tensor * norm1_b = nullptr;
+    ggml_tensor * qkv_w = nullptr;
+    ggml_tensor * attention_w = nullptr;
+    ggml_tensor * attention_b = nullptr;
+    ggml_tensor * norm2_w = nullptr;
+    ggml_tensor * norm2_b = nullptr;
+    ggml_tensor * feed_forward_in_w = nullptr;
+    ggml_tensor * feed_forward_in_b = nullptr;
+    ggml_tensor * feed_forward_out_w = nullptr;
+    ggml_tensor * feed_forward_out_b = nullptr;
+};
+
+struct NemotronDiarizationWeights {
+    ggml_tensor * feature_projection = nullptr;
+    ggml_tensor * embedding_norm_w = nullptr;
+    ggml_tensor * embedding_norm_b = nullptr;
+    std::vector<NemotronDiarizationLayer> layers;
+    ggml_tensor * final_norm_w = nullptr;
+    ggml_tensor * final_norm_b = nullptr;
+    ggml_tensor * encoder_projection_w = nullptr;
+    ggml_tensor * encoder_projection_b = nullptr;
+    ggml_tensor * upsample_w = nullptr;
+    ggml_tensor * upsample_b = nullptr;
+    ggml_tensor * hidden_w = nullptr;
+    ggml_tensor * hidden_b = nullptr;
+    ggml_tensor * speakers_w = nullptr;
+    ggml_tensor * speakers_b = nullptr;
+    ggml_tensor * silence_embedding = nullptr;
+};
+
+void validate_nemotron_silence_embedding_type(const ggml_tensor * tensor);
 
 // EOU prediction-net + joint weights. Same shape as TdtWeights minus the
 // duration head: `joint.out` is (vocab+1, joint_hidden) -- where vocab
@@ -423,6 +472,9 @@ struct ParakeetCtcModel {
     // CPU-resident copies of the Sortformer head weights; populated at load only
     // on Mali-Vulkan, where the head runs on CPU while the encoder stays on GPU.
     SortformerWeights         sortformer_cpu;
+
+    NemotronDiarizationConfig nemotron_diarization_cfg;
+    NemotronDiarizationWeights nemotron_diarization;
 
     NemotronConfig nemotron_cfg;
     NemotronWeights nemotron;

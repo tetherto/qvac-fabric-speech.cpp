@@ -390,7 +390,7 @@ int compute_log_mel_impl(const float        * samples,
                     (size_t) n * sizeof(float));
         for (int i = 0; i < pad; ++i) {
             const int src = std::max(n - 2 - i, 0);
-            state.x_padded[pad + n + i] = state.x[src];
+            state.x_padded[pad + n + i] = cfg.right_zero_pad ? 0.0f : state.x[src];
         }
     }
 
