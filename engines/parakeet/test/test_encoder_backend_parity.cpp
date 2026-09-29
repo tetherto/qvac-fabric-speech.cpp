@@ -8,6 +8,9 @@
 // cosine similarity, max_abs difference, and relative L2 for every captured
 // tensor. It also sweeps max_layers to pinpoint the first Conformer block
 // that diverges.
+// For Sortformer, also compares head probabilities on identical CPU encoder
+// output. PARAKEET_TRACE_SORTFORMER_HEAD=1 prints per-node head differences;
+// observation disables fusion, so use the default run for acceptance.
 //
 // Usage:
 //   test-encoder-backend-parity --model <gguf> --wav <wav>
@@ -18,13 +21,17 @@
 // per-stage table is always printed so a failure is actionable.
 
 #include "parakeet_ctc.h"
+#include "parakeet_sortformer.h"
 #include "mel_preprocess.h"
+#include "ggml.h"
+#include "ggml-backend.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -40,7 +47,9 @@ void usage(const char * argv0) {
         "for the same mel input. Defaults: backend-a=cpu, backend-b=hexagon,\n"
         "min-cos=0.99. With --layer-sweep, additionally sweeps max_layers over\n"
         "{0, 1, 2, 4, 8, and every 4th layer} to identify the first diverging\n"
-        "Conformer block.\n",
+        "Conformer block. Sortformer also checks head probability parity\n"
+        "(max absolute error <= 0.05). Set PARAKEET_TRACE_SORTFORMER_HEAD=1\n"
+        "for a per-node head diagnostic with fusion disabled by observation.\n",
         argv0);
 }
 
@@ -114,6 +123,33 @@ struct StageRef {
     const char * name;
     const std::vector<float> parakeet::EncoderOutputs::* ptr;
 };
+
+// Optional per-node head trace. Requesting observations prevents fusion, so
+// normal head parity below also runs without a callback by default.
+struct HeadTrace {
+    std::map<std::string, std::vector<float>> reference;
+    bool compare = false;
+    size_t index = 0;
+};
+
+bool trace_head(ggml_tensor * t, bool ask, void * user_data) {
+    if (ask) return t->type == GGML_TYPE_F32 && ggml_is_contiguous(t);
+    auto & trace = *static_cast<HeadTrace *>(user_data);
+    std::vector<float> values(ggml_nelements(t));
+    ggml_backend_tensor_get(t, values.data(), 0, values.size() * sizeof(float));
+    const std::string key = std::to_string(trace.index++) + ":" + ggml_op_name(t->op) + ":" + t->name;
+    if (!trace.compare) {
+        trace.reference[key] = std::move(values);
+    } else {
+        const auto found = trace.reference.find(key);
+        if (found != trace.reference.end() && found->second.size() == values.size()) {
+            const Metrics m = compute_metrics(found->second, values);
+            std::fprintf(stderr, "[head-trace] %-32s cos=%.6f max_abs=%.3e rel_l2=%.3e%s\n",
+                         key.c_str(), m.cosine, m.max_abs, m.rel_l2, m.nonfinite ? " NONFINITE" : "");
+        }
+    }
+    return true;
+}
 
 const StageRef kStages[] = {
     {"subsampling_out",      &parakeet::EncoderOutputs::subsampling_out},
@@ -279,6 +315,31 @@ int main(int argc, char ** argv) {
                 first_fail_reported = true;
             }
         }
+    }
+
+    if (model_a.model_type == ParakeetModelType::SORTFORMER) {
+        // Give both heads identical encoder output to isolate head errors.
+        const char * trace_env = std::getenv("PARAKEET_TRACE_SORTFORMER_HEAD");
+        const bool trace_enabled = trace_env && std::strcmp(trace_env, "1") == 0;
+        HeadTrace trace;
+        if (trace_enabled) ggml_backend_sched_set_eval_callback(model_sched(model_a), trace_head, &trace);
+        SortformerDiarizationResult head_a, head_b;
+        int rc = sortformer_diarize_ggml(model_a, out_a.encoder_out.data(), out_a.n_enc_frames,
+                                        out_a.d_model, {}, head_a);
+        ggml_backend_sched_set_eval_callback(model_sched(model_a), nullptr, nullptr);
+        if (rc != 0) return 7;
+        trace.compare = true;
+        trace.index = 0;
+        if (trace_enabled) ggml_backend_sched_set_eval_callback(model_sched(model_b), trace_head, &trace);
+        rc = sortformer_diarize_ggml(model_b, out_a.encoder_out.data(), out_a.n_enc_frames,
+                                    out_a.d_model, {}, head_b);
+        ggml_backend_sched_set_eval_callback(model_sched(model_b), nullptr, nullptr);
+        if (rc != 0 || head_a.speaker_probs.size() != head_b.speaker_probs.size()) return 7;
+        const Metrics m = compute_metrics(head_a.speaker_probs, head_b.speaker_probs);
+        const bool ok = !m.nonfinite && m.cosine >= min_cos && m.max_abs <= 0.05;
+        std::fprintf(stderr, "[head-parity] cos=%.6f max_abs=%.3e rel_l2=%.3e %s\n",
+                     m.cosine, m.max_abs, m.rel_l2, ok ? "OK" : "FAIL");
+        if (!ok) ++failures;
     }
 
     if (layer_sweep) {

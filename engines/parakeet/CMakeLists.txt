@@ -492,12 +492,14 @@ if (PARAKEET_BUILD_EXECUTABLES)
 
     # Backend parity diagnostic. Loads the same GGUF twice on two backends
     # (default cpu vs hexagon) and prints per-stage encoder cosine to
-    # localize the first divergent Conformer stage on HTP0. Kept in the
+    # localize the first divergent Conformer stage on HTP0, and compares
+    # Sortformer head probabilities on identical encoder input. Kept in the
     # executables block (not PARAKEET_BUILD_TESTS) so the Android
     # dynamic-loader build produces it without pulling in the whole
     # fixture harness.
     add_executable(test-encoder-backend-parity
         test/test_encoder_backend_parity.cpp
+        src/parakeet_sortformer.cpp
         src/parakeet_ctc.cpp
         src/parakeet_log.cpp
         src/mel_preprocess.cpp

@@ -92,6 +92,7 @@ struct TdtRuntimeWeights {
     int num_durations = 5;
 
     const TdtWeights * weights = nullptr;
+    ggml_tensor *      graph_embed = nullptr; // native embedding or F32 copy in persist_ctx
     ggml_backend_t     backend = nullptr;
     int                n_threads = 0;
     bool               use_graphs = false;

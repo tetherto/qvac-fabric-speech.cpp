@@ -135,6 +135,19 @@ inline bool backend_is_hexagon(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "HTP") == 0;
 }
 
+// Decoder graphs execute directly, without scheduler fallback. Probe the
+// actual embedding type before putting GET_ROWS into those graphs.
+inline bool backend_runs_embedding_lookup(ggml_backend_t b, ggml_tensor * embedding) {
+    if (!b || !embedding) return false;
+    ggml_init_params ip = { 2 * ggml_tensor_overhead(), nullptr, true };
+    ggml_context * ctx = ggml_init(ip);
+    if (!ctx) return false;
+    ggml_tensor * token = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    const bool supported = ggml_backend_supports_op(b, ggml_get_rows(ctx, embedding, token));
+    ggml_free(ctx);
+    return supported;
+}
+
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {
     return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b) || backend_is_hexagon(b));
 }

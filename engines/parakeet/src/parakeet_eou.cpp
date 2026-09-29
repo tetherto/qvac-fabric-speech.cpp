@@ -178,7 +178,7 @@ LstmBodyOuts build_lstm_body(EouRuntimeWeights & rt,
     const int H = rt.H_pred;
     const int L = rt.L;
 
-    ggml_tensor * x = ggml_get_rows(gctx, rt.weights->predict_embed, token_in);
+    ggml_tensor * x = ggml_get_rows(gctx, rt.graph_embed, token_in);
     x = ggml_reshape_1d(gctx, x, H);
 
     std::vector<ggml_tensor *> h_new_per_layer(L);
@@ -560,6 +560,7 @@ EouRuntimeWeights & EouRuntimeWeights::operator=(EouRuntimeWeights && o) noexcep
     eou_id   = o.eou_id;
     eob_id   = o.eob_id;
     weights  = o.weights;   o.weights = nullptr;
+    graph_embed = o.graph_embed; o.graph_embed = nullptr;
     backend  = o.backend;   o.backend = nullptr;
     n_threads     = o.n_threads;
     use_graphs    = o.use_graphs;
@@ -616,6 +617,7 @@ void EouRuntimeWeights::release() noexcept {
     lj_token_out = nullptr;
     h_persist = nullptr; c_persist = nullptr; pred_persist = nullptr;
     enc_proj_persist = nullptr;
+    graph_embed = nullptr;
     // backend is owned by ParakeetCtcModel::Impl; don't free here.
 }
 
@@ -727,6 +729,17 @@ static int eou_prepare_runtime_impl(const ParakeetCtcModel & model, EouRuntimeWe
 
         const int T_max = EouRuntimeWeights::k_enc_proj_T_max;
 
+        W.graph_embed = W.weights->predict_embed;
+        if (!backend_runs_embedding_lookup(W.backend, W.graph_embed)) {
+            W.graph_embed = ggml_new_tensor_2d(W.persist_ctx, GGML_TYPE_F32,
+                                              W.weights->predict_embed->ne[0], W.weights->predict_embed->ne[1]);
+            ggml_set_name(W.graph_embed, "eou.predict.embed.f32");
+            if (!backend_runs_embedding_lookup(W.backend, W.graph_embed)) {
+                std::fprintf(stderr, "eou_prepare_runtime: backend cannot read F32 embeddings\n");
+                return 4;
+            }
+        }
+
         W.h_persist        = ggml_new_tensor_2d(W.persist_ctx, GGML_TYPE_F32, W.H_pred,  W.L);
         W.c_persist        = ggml_new_tensor_2d(W.persist_ctx, GGML_TYPE_F32, W.H_pred,  W.L);
         W.pred_persist     = ggml_new_tensor_1d(W.persist_ctx, GGML_TYPE_F32, W.H_pred);
@@ -755,6 +768,11 @@ static int eou_prepare_runtime_impl(const ParakeetCtcModel & model, EouRuntimeWe
             }
         }
         W.enc_proj_T_max = T_max;
+        if (!measure && W.graph_embed != W.weights->predict_embed) {
+            std::vector<float> embedding;
+            dequantize_to_f32(W.weights->predict_embed, embedding);
+            ggml_backend_tensor_set(W.graph_embed, embedding.data(), 0, embedding.size() * sizeof(float));
+        }
     }
 
     const size_t graph_slots = 2048;
