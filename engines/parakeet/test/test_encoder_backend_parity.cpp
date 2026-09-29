@@ -75,6 +75,41 @@ Metrics compute_metrics(const std::vector<float> & a, const std::vector<float> &
     return m;
 }
 
+// Reconcile a `block_0_attn_qkv` capture pair when the two backends took
+// different loader paths. Some backends load a pre-stacked
+// `encoder.blk.*.attn.qkv.weight` (single Q8_0 mat-mul, capture is the full
+// 3*d_model x T post-projection tensor) while others load split
+// attn_q / attn_k / attn_v weights (capture is the Q projection alone,
+// d_model x T). Compared naively the shared prefix of the two vectors mixes
+// Q with K / V per frame on the stacked side, and cosine collapses to ~0.04
+// despite the underlying Q values matching bit-for-bit.
+//
+// The stacked layout is [Q_dmodel | K_dmodel | V_dmodel] per T frame in ggml
+// row-major order (Q at offset 0 within each 3*d_model stride, matching the
+// view offsets used to build q / k / v in rel_pos_mha_graph). Extract the Q
+// slice from the stacked side into a fresh buffer so the caller can compare
+// like-for-like. Same-size captures are returned untouched; unrelated size
+// mismatches (not a 3:1 ratio) are also left alone.
+void align_qkv_captures(std::vector<float> & a, std::vector<float> & b, int d_model) {
+    if (a.size() == b.size()) return;
+    const bool a_stacked = (a.size() == 3 * b.size());
+    const bool b_stacked = (b.size() == 3 * a.size());
+    if (!a_stacked && !b_stacked) return;
+    if (d_model <= 0) return;
+    std::vector<float>       & wide   = a_stacked ? a : b;
+    const std::vector<float> & narrow = a_stacked ? b : a;
+    const size_t n_frames = narrow.size() / (size_t) d_model;
+    std::vector<float> q_slice;
+    q_slice.reserve(narrow.size());
+    for (size_t f = 0; f < n_frames; ++f) {
+        const size_t base = f * 3 * (size_t) d_model;
+        for (int i = 0; i < d_model; ++i) {
+            q_slice.push_back(wide[base + i]);
+        }
+    }
+    wide.swap(q_slice);
+}
+
 struct StageRef {
     const char * name;
     const std::vector<float> parakeet::EncoderOutputs::* ptr;
@@ -210,20 +245,31 @@ int main(int argc, char ** argv) {
 
     bool first_fail_reported = false;
     int failures = 0;
+    const int d_model = model_a.encoder_cfg.d_model;
     for (const auto & stage : kStages) {
-        const auto & va = out_a.*(stage.ptr);
-        const auto & vb = out_b.*(stage.ptr);
+        auto va = out_a.*(stage.ptr);
+        auto vb = out_b.*(stage.ptr);
         if (va.empty() || vb.empty()) {
             std::fprintf(stderr, "  %-20s %10s %14s %14s %14s\n",
                          stage.name, "(empty)", "-", "-", "-");
             continue;
         }
+        // The `block_0_attn_qkv` capture is (n_embd, T) on backends that
+        // took the split-Q/K/V loader path and (3*n_embd, T) on backends
+        // that took the pre-stacked qkv path. Extract the Q slice from the
+        // stacked side so we compare like-for-like. No-op when sizes match.
+        const bool is_qkv_stage = std::strcmp(stage.name, "block_0_attn_qkv") == 0;
+        const bool sized_mismatch = va.size() != vb.size();
+        if (is_qkv_stage && sized_mismatch) {
+            align_qkv_captures(va, vb, d_model);
+        }
         Metrics m = compute_metrics(va, vb);
         const bool ok = !m.nonfinite && m.cosine >= min_cos;
-        std::fprintf(stderr, "  %-20s %10zu %14.6f %14.3e %14.3e  %s%s\n",
+        std::fprintf(stderr, "  %-20s %10zu %14.6f %14.3e %14.3e  %s%s%s\n",
                      stage.name, va.size(), m.cosine, m.max_abs, m.rel_l2,
                      ok ? "OK" : "FAIL",
-                     m.nonfinite ? " (non-finite!)" : "");
+                     m.nonfinite ? " (non-finite!)" : "",
+                     (is_qkv_stage && sized_mismatch) ? " (Q slice)" : "");
         if (!ok) {
             failures++;
             if (!first_fail_reported) {
