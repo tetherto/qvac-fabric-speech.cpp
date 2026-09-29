@@ -1156,6 +1156,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_tdt.cpp
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
