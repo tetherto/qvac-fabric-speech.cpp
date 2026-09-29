@@ -23,6 +23,10 @@ using namespace tts_cpp::moss::detail;
 
 namespace {
 
+constexpr size_t UTF8_TWO_BYTE_LITERAL_SIZE = 3;
+static_assert(sizeof("\u00e9") == UTF8_TWO_BYTE_LITERAL_SIZE,
+              "prompt tests need UTF-8 narrow literals; compile with /utf-8 on MSVC");
+
 constexpr uint32_t WEIGHT_SEED = 20260924;
 constexpr float TOLERANCE = 1e-4f;
 constexpr int SMALL_WINDOW = 16;

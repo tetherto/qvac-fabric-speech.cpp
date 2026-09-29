@@ -1472,6 +1472,7 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-moss-sfx test/moss/test_sfx.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-sfx PRIVATE tts-cpp)
     target_include_directories(test-moss-sfx PRIVATE src)
+    target_compile_options(test-moss-sfx PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     tts_cpp_apply_ccache(test-moss-sfx)
     tts_cpp_register_test(test-moss-sfx)
 
