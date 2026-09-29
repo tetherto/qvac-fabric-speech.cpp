@@ -314,46 +314,64 @@ long (stitched) utterance, and checks that a cancel between windows stops the
 pass; both run on the TTS CI macOS lane, which converts the decoder from the
 upstream checkpoint and exports the sidecar itself.
 
-Two things the exporter does that are worth knowing before reading it. Every
-transposed convolution is emitted in its exact phase form -- a causal `Conv1d`
-over the input followed by a depth-to-space shuffle, which is also how
+Four things the exporter does are worth knowing before reading it, all of
+them there to keep the whole stack on the Neural Engine, whose compute plan
+was read with `MLComputePlan` on an M2 running macOS 15.7. Every transposed
+convolution is emitted in its exact phase form -- a causal `Conv1d` over the
+input followed by a depth-to-space shuffle, which is also how
 `codec_ops.cpp` computes it -- rather than as `ConvTranspose1d`, whose native
 Neural Engine kernel miscomputes at stride 4 (the ACE-Step VAE export hit
-this first). And the Snake activation squares its sine as a product,
-`sin * sin`, never `sin ** 2`: the `pow` the latter lowers to is miscomputed
-on the Neural Engine when its result feeds a convolution (measured on an M2,
-macOS 15.7: the first DAC stage came out at cosine 0.39 against the CPU, with
-the Snake alone and the convolution alone both exact), while the product is
-exact on every compute unit.
+this first). The Snake activation's sine is a range-reduced polynomial, not
+`torch.sin`: the Neural Engine has no `sin` (or `cos`) kernel, so every one of
+the 29 Snakes would otherwise bounce to the CPU. The argument is reduced in
+*turns* (u = t / 2pi, f = u - round(u), r = 2pi f) and sin(r) is a degree-9
+odd least-squares fit on [-pi, pi] (max error 6e-6); reducing in radians,
+t - 2pi round(t / 2pi), is miscomputed on the Neural Engine (NaN and inf on
+the M2) while the turns form is exact, and the stack's activations keep
+|alpha x| below 7 anyway. The square is spelled as a product, never `** 2`:
+the `pow` the latter lowers to is miscomputed on the Neural Engine when its
+result feeds a convolution (the first DAC stage came out at cosine 0.39
+against the CPU). And every stage longer than 8192 samples is folded into
+rows of 8192, (1, C, L) -> (1, C, L / 8192, 8192): the Neural Engine takes
+this stack's causal convolutions only up to 16384 samples per row, and from
+32768 on the plan drops them to the GPU and then alternates devices op by op
+through the whole tail, which is where the original export lost most of its
+speed. Each causal convolution takes its left context from the end of the
+previous row (zeros before the first row, which is the causal padding), the
+transposed convolution's depth-to-space runs along the row and its output is
+re-split into rows of the same width, so the fold is exact: the PyTorch
+rebuild matches the reference decode at cosine 1.0000000 with it, and the
+compiled plan places 669 of its 670 operations on the Neural Engine (the
+last is the output reshape). `--snake sin` and `--fold-rows 0` export the
+flat, `torch.sin` form for comparison.
 
 Measured on an Apple M2 (macOS 15.7, f32 decoder GGUF, ggml Metal as the
-reference, `bench-audio8-codec-coreml`, median of 3), synthesis stage only,
-parity cosine 0.99999 in every cell:
+reference, `bench-audio8-codec-coreml`, median of 3 inside each cell),
+synthesis stage only, window 64, all-units placement. The flat `torch.sin`
+export is the original sidecar; the folded polynomial export is the default.
+The two were run interleaved over three rounds because a laptop's Metal
+baseline drifts by up to 2x between cells as the chip heats; the Core ML
+times are the stable column, so read those:
 
-| window | placement | 10 s (216 frames) | 24 s (517 frames) |
-|---:|---|---:|---:|
-| 64 | `coreml-all` (default) | 1518 -> 1198 ms, **1.27x** | 3683 -> 3023 ms, **1.22x** |
-| 64 | `cpu_and_gpu` | 1466 -> 976 ms, **1.50x** | 3628 -> 2500 ms, **1.45x** |
-| 32 | `coreml-all` | 1.27x | 1.22x |
-| 32 | `cpu_and_gpu` | 1.25x | 1.28x |
-| 128 | `coreml-all` | 0.51x | 0.49x |
-| 128 | `cpu_and_gpu` | 1.53x | 1.51x |
+| export | 10 s (216 frames) | 24 s (517 frames) | parity |
+|---|---:|---:|---:|
+| ggml Metal (reference) | 1587 / 3269 / 2265 ms | 4294 / 7068 / 6082 ms | |
+| flat, `torch.sin` | 1287 / 2037 / 1599 ms | 3308 / 4281 / 4104 ms | 0.99999 |
+| folded, polynomial (default) | 1334 / 1380 / 1338 ms | 4526 / 3262 / 3293 ms | 0.99998 |
 
-Two placement facts sit behind that table. On this OS the Neural Engine has
-no `sin` kernel, so every Snake activation leaves it: the compute plan puts
-the first twelve sines on the CPU and, from the second DAC stage on, hands
-the whole tail of the graph (17 sines, 18 convolutions) to the GPU, and the
-device handoffs eat most of what the Neural Engine saves on the convolutions
-it does keep. `AUDIO8_COREML_COMPUTE_UNITS=cpu_and_gpu` is therefore the
-faster choice on a macOS 15 host; the default stays all-units because it is
-correct everywhere, because the ACE-Step sidecar measured all-units best on an
-M5 running macOS 26, and because the TTS CI macOS lane (macOS 26) reports the
-default's speedup in its job summary for the current OS. And the 128-frame
-window, which only buys a few percent on the GPU, collapses to half of Metal's
-speed under mixed placement, so 64 is the default: the widest window that is
-robust under either placement, at a causal-context overhead of 10 in 64 frames.
-The very first load of a fresh export pays a one-time on-device compilation
-(tens of seconds), which the OS caches for later loads.
+Against the flat export the folded one is 1.2x faster on the 10 s decode and
+1.25x on the 24 s one once both are warm; against the Metal baseline it lands
+between 1.2x (Metal's best cell) and 1.9x (its typical cells). The flat
+export's numbers show why it needed help: with `sin` on the CPU and the tail
+on the GPU its all-units plan alternated between three devices, and
+`AUDIO8_COREML_COMPUTE_UNITS=cpu_and_gpu` was its faster placement (1.4x);
+with the folded polynomial export the plan is Neural Engine only, all-units
+and `cpu_and_ane` measure the same, and `cpu_and_gpu` (which then runs the
+polynomial on the GPU) is the slower choice. A 128-frame window buys nothing
+on the Neural Engine and collapses under mixed placement, so 64 stays the
+default at a causal-context overhead of 10 in 64 frames. The very first load
+of a fresh export pays a one-time on-device compilation (tens of seconds),
+which the OS caches for later loads.
 
 Those are steady-state numbers from a resident engine. A one-shot
 `audio8-cli` run also pays the sidecar's first-prediction warm-up and, for a
