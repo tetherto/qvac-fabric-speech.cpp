@@ -14,8 +14,9 @@ Part of the [qvac-fabric-speech.cpp documentation](../README.md).
 | TTS + cloning + enhancement |  | text-to-music               |
 +-----------------------------+  +-----------------------------+
                     |                     :
-                    v                     : optional encoder sidecar
-   ggml-speech (qvac-ext-ggml@speech)     v
+                    v                     : optional encoder, vocoder,
+   ggml-speech (qvac-ext-ggml@speech)     : codec, and VAE sidecars
+                    |                     v
                     |                Apple Core ML
    +--------+-------+-------+---------+
    v        v       v       v         v
@@ -31,11 +32,13 @@ Every component consumes one system ggml, so the whole stack shares a single ggm
 whisper   wav  -> log-mel -> encoder -> decoder -> text            (+ Silero VAD, + Core ML encoder)
 parakeet  wav  -> log-mel -> FastConformer encoder -> CTC | RNN-T | TDT | EOU | Nemotron | Sortformer
                                                    -> text | speaker segments | turn boundary
+                             (+ Core ML encoder)
 tts       text -> LM (T3 / Llama / Qwen2.5) -> acoustic tokens -> CFM or flow -> vocoder -> wav
                                                    (+ LavaSR denoise -> bandwidth extension)
+                                                   (+ Core ML Supertonic vocoder, Audio8 codec)
 audiogen  caption + lyrics -> ACE-Step LM -> FSQ detokenizer -> text encoder
                            -> condition encoder -> DiT flow matching
-                           -> Oobleck VAE -> 48 kHz stereo
+                           -> Oobleck VAE -> 48 kHz stereo   (+ Core ML VAE decoder)
           short query -> LM inspire (Simple Mode) -> caption + lyrics + metadata
           caption + lyrics -> LM format (Query Rewriting) -> detailed request
                            -> same ACE-Step pipeline

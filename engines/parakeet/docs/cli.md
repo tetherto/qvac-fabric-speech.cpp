@@ -14,7 +14,10 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
 Useful groups include `--threads`, `--n-gpu-layers`, `--backends-dir`,
 `--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
-and `--dump-mel`. Run `parakeet --help` for the complete list. `--bench`
+and `--dump-mel`. Run `parakeet --help` for the complete list.
+`--require-coreml` (with `--bench`, CTC/IndicConformer, Unified RNN-T, TDT,
+EOU, and Nemotron only) fails unless every timed encoder invocation ran on the
+[Core ML sidecar](backends.md#core-ml-encoder-sidecar). `--bench`
 covers the transcription models only: the diarization path (a Sortformer GGUF
 at `--model`) and the attributed path (`--diarization-model`) return before
 the bench loop, ignoring the `--bench*` flags — time the invocation externally

@@ -17,6 +17,8 @@ Include `<parakeet/parakeet.h>` for the complete surface or individual headers.
 | `Engine::diarize_start` | Live Sortformer session |
 | `transcribe_with_speakers` / `transcribe_samples_with_speakers` | CTC, RNN-T, TDT, or EOU transcription attributed with Sortformer |
 | `EngineOptions::prewarm` / `prewarm_audio_seconds` | Run a configurable encoder-only synthetic forward during construction |
+| `Engine::encoder_on_coreml` / `encoder_backend` | Whether an Apple Core ML encoder sidecar loaded (`encoder_backend()` returns the Core ML label, otherwise `backend_name()`); see [Core ML encoder sidecar](backends.md#core-ml-encoder-sidecar) |
+| `EngineResult::encoder_used_coreml` | Whether every encoder invocation of this transcription ran on the Core ML sidecar |
 | `parakeet_log_set` | Install the host logging sink |
 | `parakeet_cli_main` | Embed the same CLI entry point exported by the library |
 | `fit_params` | Memory-fit preflight: project whether a GGUF + workload fits the device without loading weights (`<parakeet/fit.h>`) |

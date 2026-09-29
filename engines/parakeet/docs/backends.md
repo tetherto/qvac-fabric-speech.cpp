@@ -108,6 +108,9 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 Unified RNN-T, TDT, EOU, Nemotron, and tagged Sortformer v2.1 FastConformer
 encoder sidecars. Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders,
 and the Sortformer transformer/speaker head remain in the normal ggml pipeline.
+Sortformer v1 and v2 have no sidecar. The English CTC checkpoints satisfy the
+CTC/IndicConformer export contract; among CTC checkpoints, the Core ML parity
+tests cover only IndicConformer.
 
 Create an export environment with versions supported by Core ML Tools. NumPy 2
 is not currently compatible with its TorchScript scalar conversion, and the
@@ -159,9 +162,8 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
 ```
 
 Nemotron supports an exact-shape offline encoder. Export it using `--wav` or
-`--n-mel-frames`. Longer offline inputs are split into exact-shape windows with
-the trained asymmetric attention context, bounding both Core ML and fallback
-Metal memory. Native cache-aware streaming remains on ggml.
+`--n-mel-frames`. Longer offline inputs and native cache-aware streaming run on
+the cache-aware ggml path.
 
 Unified RNN-T uses the same fixed-capacity contract:
 
@@ -237,28 +239,29 @@ python engines/parakeet/scripts/bench-encoder-coreml.py \
 ```
 
 The default export uses Float16 input, output, weights, and intermediates.
-Unified RNN-T and TDT shorter inputs are zero-padded to the exported mel-frame
-capacity, while longer offline inputs are automatically divided into overlapping
-windows that fit that capacity. EOU uses exact-shape routing because padding
-future frames can change token and end-of-turn decisions. Longer offline inputs
-are divided into overlapping windows that each exactly match the compiled shape,
-with the final window shifted backward so it contains only real mel frames. Shorter inputs and
-mismatching streaming windows use ggml; EOU never pads them. The TDT example
-uses this addon's 15-second shape (1501
-mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional 6-bit
-grouped-channel LUT weights. Grouped palettization requires coremltools 8+ and
-macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS 16
-compatible Float16 model. `--flexible` exports a Unified RNN-T or TDT RangeDim
-model, but it is a correctness/experimentation path: measured flexible graphs place no operations
-on ANE and can be substantially slower than ggml Metal. Flexible EOU export is
-rejected.
+CTC/IndicConformer, Unified RNN-T, and TDT shorter inputs are zero-padded to the
+exported mel-frame capacity, while longer offline inputs are automatically
+divided into overlapping windows that fit that capacity. EOU uses exact-shape
+routing because padding future frames can change token and end-of-turn
+decisions: only calls at the compiled mel-frame count use Core ML. Shorter
+inputs, longer offline inputs, and mismatching streaming windows use ggml: EOU
+never pads, and windowed causal/chunked attention parity has not been validated
+for oversized inputs. The TDT example uses this addon's 15-second shape (1501
+mel frames; its centred-STFT frontend emits `1 + samples/hop`) and optional
+6-bit grouped-channel LUT weights. Grouped palettization requires coremltools 8+
+and macOS 15 / iOS 18; omit both `--palettize-*` arguments for a macOS 13 / iOS
+16 compatible Float16 model. `--flexible` exports a CTC/IndicConformer, Unified
+RNN-T, or TDT RangeDim model, but it is a correctness/experimentation path:
+measured flexible graphs place no operations on ANE and can be substantially
+slower than ggml Metal. Flexible EOU export is rejected.
 
 Nemotron routing requires the exact exported mel-frame count because its
 causal, chunk-limited attention geometry is baked into the compiled program.
-The long-form planner shifts boundary windows rather than zero-padding them,
-so every invocation retains the exact sidecar shape and committed centres cover
-the input without gaps or duplication. Native cache-aware streaming stays on
-ggml. Flexible Nemotron exports are rejected.
+Longer offline inputs use the native cache-aware ggml encoder instead of
+windowing the sidecar, because an independent exact-shape window cannot
+preserve the encoder's full-depth receptive field. Shorter inputs are never
+padded, and native cache-aware streaming stays on ggml. Flexible Nemotron
+exports are rejected.
 
 Sortformer batch routing requires the exact exported mel-frame count because
 its graph has no validity-mask input; shorter and mismatched batch inputs stay
@@ -283,9 +286,11 @@ force ggml, including for parity or benchmarking. Setting
 windowing; an input larger than a fixed Core ML sidecar then falls back to the
 single-pass ggml encoder.
 
-For an unambiguous CTC/IndicConformer, Unified RNN-T, TDT, EOU, or Sortformer benchmark, configure
-the exact build directory with
-Core ML enabled, compile the sidecar beside the GGUF, and require Core ML:
+For an unambiguous CTC/IndicConformer, Unified RNN-T, TDT, EOU, or Nemotron
+benchmark, configure the exact build directory with Core ML enabled, compile
+the sidecar beside the GGUF, and require Core ML. `--require-coreml` rejects
+Sortformer GGUFs; their Core ML parity is covered by the diarization tests
+instead:
 
 ```bash
 cmake -S engines/parakeet -B build-parakeet-coreml \
@@ -303,8 +308,8 @@ cmake --build build-parakeet-coreml --target parakeet-cli -j
   --require-coreml --verbose
 ```
 
-The JSON may still contain `"backend": "ggml-metal"` because the TDT decoder
-or EOU decoder continues to use Metal. Confirm encoder execution using `encoder_backend` and
+The JSON may still contain `"backend": "ggml-metal"` because the decoder
+continues to use Metal. Confirm encoder execution using `encoder_backend` and
 `encoder_coreml_all_runs`. A `coreml-all` encoder label means Core ML may place
 operations across ANE, GPU, and CPU; it does not mean ANE-only execution.
 

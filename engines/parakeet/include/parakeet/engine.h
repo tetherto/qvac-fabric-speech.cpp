@@ -300,21 +300,22 @@ public:
     std::string backend_name() const;
 
     // Reports whether an Apple Core ML encoder sidecar loaded for this model.
-    // Returns "coreml" when loaded; otherwise identical to backend_name().
-    // Validated deployments are offline TDT, Unified RNN-T, Nemotron, and
-    // exact-fixed-shape EOU encoders.
-    // Their decoders always run on the ggml backend reported by backend_name().
+    // Returns the sidecar's compute label (for example "coreml-all") when
+    // loaded; otherwise identical to backend_name(). Supported families are
+    // CTC/IndicConformer, Unified RNN-T, TDT, EOU, Nemotron, and Sortformer
+    // v2.1. Decoders and the Sortformer speaker head always run on the ggml
+    // backend reported by backend_name().
     std::string encoder_backend() const;
 
     // True when an Apple Core ML encoder sidecar loaded. This is a load-status
-    // query, not a guarantee that every call shape uses Core ML: unsupported
-    // or streaming shapes fall back to ggml. Longer offline EOU inputs may be
-    // spliced into overlapping exact-sidecar-shape windows, but shorter EOU
-    // calls are never padded. Supported deployments are TDT, Unified RNN-T,
-    // Nemotron, and EOU encoders.
+    // query, not a guarantee that every call shape uses Core ML; the per-call
+    // truth is EngineResult::encoder_used_coreml. CTC/IndicConformer, Unified
+    // RNN-T, and TDT pad shorter inputs to the compiled capacity and window
+    // longer offline inputs. EOU and Nemotron use Core ML only at the exact
+    // compiled shape: shorter calls are never padded, longer EOU inputs run on
+    // ggml, and longer Nemotron inputs take the cache-aware ggml path.
     // Always false on non-Apple builds and when the sidecar is absent or failed
-    // to initialise. Oversized Nemotron inputs use exact-shape overlapping
-    // windows with the model's trained asymmetric attention context.
+    // to initialise.
     bool encoder_on_coreml() const;
 
     // True when a GPU was detected but the engine fell back to CPU because the

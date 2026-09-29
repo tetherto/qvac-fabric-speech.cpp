@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Converter coverage for the MOSS Delay scripts: fabricates a tiny
-MossTTSDelay checkpoint and a tiny MOSS audio tokenizer on disk, runs both
-converters, and validates the emitted GGUFs (tensor census, mapped names,
-metadata) with the gguf reader. Skips cleanly when numpy or gguf are absent.
+"""Converter coverage for the MOSS scripts: fabricates a tiny MossTTSDelay
+checkpoint, a tiny MOSS audio tokenizer and a tiny MOSS-SoundEffect pipeline on
+disk, runs the converters, and validates the emitted GGUFs (tensor census,
+mapped names, folded weights, metadata) with the gguf reader. Skips cleanly
+when numpy or gguf are absent.
 """
 from __future__ import annotations
 
@@ -35,6 +36,14 @@ RVQ_DIM = 8
 CODE_DIM = 4
 CODE_SIZE = 8
 OUT_DIM = 4
+SFX_WIDTH = 32
+SFX_FF = 64
+SFX_HEAD_DIM = 16
+SFX_LATENT = 4
+SFX_DECODER_DIM = 8
+SFX_RATES = [2, 3]
+SFX_KERNEL = 7
+SFX_GAIN = 2.0
 
 
 def write_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:
@@ -183,6 +192,228 @@ def make_codec_checkpoint(root: Path) -> Path:
     return model_dir
 
 
+def sfx_text_encoder_tensors() -> dict[str, np.ndarray]:
+    kv_dim = SFX_HEAD_DIM
+    q_dim = 2 * SFX_HEAD_DIM
+    layer = "model.layers.0."
+    return {
+        "model.embed_tokens.weight": np.ones((TEXT_VOCAB, SFX_WIDTH)),
+        "model.norm.weight": np.ones(SFX_WIDTH),
+        "lm_head.weight": np.ones((TEXT_VOCAB, SFX_WIDTH)),
+        layer + "input_layernorm.weight": np.ones(SFX_WIDTH),
+        layer + "self_attn.q_proj.weight": np.ones((q_dim, SFX_WIDTH)),
+        layer + "self_attn.k_proj.weight": np.ones((kv_dim, SFX_WIDTH)),
+        layer + "self_attn.v_proj.weight": np.ones((kv_dim, SFX_WIDTH)),
+        layer + "self_attn.o_proj.weight": np.ones((SFX_WIDTH, q_dim)),
+        layer + "self_attn.q_norm.weight": np.ones(SFX_HEAD_DIM),
+        layer + "self_attn.k_norm.weight": np.ones(SFX_HEAD_DIM),
+        layer + "post_attention_layernorm.weight": np.ones(SFX_WIDTH),
+        layer + "mlp.gate_proj.weight": np.ones((SFX_FF, SFX_WIDTH)),
+        layer + "mlp.up_proj.weight": np.ones((SFX_FF, SFX_WIDTH)),
+        layer + "mlp.down_proj.weight": np.ones((SFX_WIDTH, SFX_FF)),
+    }
+
+
+def sfx_dit_tensors() -> dict[str, np.ndarray]:
+    tensors: dict[str, np.ndarray] = {
+        "patch_embedding.weight": np.ones((SFX_WIDTH, SFX_LATENT, 1)),
+        "patch_embedding.bias": np.ones(SFX_WIDTH),
+        "scale_shift_table": np.ones((1, 2, SFX_WIDTH)),
+        "proj_out.weight": np.ones((SFX_LATENT, SFX_WIDTH)),
+        "proj_out.bias": np.ones(SFX_LATENT),
+    }
+    for linear, (rows, cols) in {
+        "condition_embedder.text_embedder.linear_1": (SFX_WIDTH, SFX_WIDTH),
+        "condition_embedder.text_embedder.linear_2": (SFX_WIDTH, SFX_WIDTH),
+        "condition_embedder.time_embedder.linear_1": (SFX_WIDTH, SFX_WIDTH),
+        "condition_embedder.time_embedder.linear_2": (SFX_WIDTH, SFX_WIDTH),
+        "condition_embedder.time_proj": (6 * SFX_WIDTH, SFX_WIDTH),
+    }.items():
+        tensors[linear + ".weight"] = np.ones((rows, cols))
+        tensors[linear + ".bias"] = np.ones(rows)
+    block = "blocks.0."
+    for attn in ("attn1", "attn2"):
+        for proj in ("to_q", "to_k", "to_v", "to_out.0"):
+            tensors[f"{block}{attn}.{proj}.weight"] = np.ones((SFX_WIDTH, SFX_WIDTH))
+            tensors[f"{block}{attn}.{proj}.bias"] = np.ones(SFX_WIDTH)
+        tensors[f"{block}{attn}.norm_q.weight"] = np.ones(SFX_WIDTH)
+        tensors[f"{block}{attn}.norm_k.weight"] = np.ones(SFX_WIDTH)
+    tensors[block + "norm2.weight"] = np.ones(SFX_WIDTH)
+    tensors[block + "norm2.bias"] = np.ones(SFX_WIDTH)
+    tensors[block + "ffn.net.0.proj.weight"] = np.ones((SFX_FF, SFX_WIDTH))
+    tensors[block + "ffn.net.0.proj.bias"] = np.ones(SFX_FF)
+    tensors[block + "ffn.net.2.weight"] = np.ones((SFX_WIDTH, SFX_FF))
+    tensors[block + "ffn.net.2.bias"] = np.ones(SFX_WIDTH)
+    tensors[block + "scale_shift_table"] = np.ones((1, 6, SFX_WIDTH))
+    return tensors
+
+
+def add_weight_norm(tensors: dict[str, np.ndarray], prefix: str, shape: tuple[int, ...]) -> None:
+    direction = np.arange(1, int(np.prod(shape)) + 1, dtype=np.float64).reshape(shape)
+    norm = np.sqrt((direction ** 2).sum(axis=tuple(range(1, len(shape))), keepdims=True))
+    tensors[prefix + ".weight_v"] = direction
+    tensors[prefix + ".weight_g"] = SFX_GAIN * norm
+
+
+def add_residual_units(tensors: dict[str, np.ndarray], prefix: str, channels: int) -> None:
+    for unit in range(3):
+        unit_prefix = f"{prefix}.{unit + 2}.block"
+        tensors[unit_prefix + ".0.alpha"] = np.ones((1, channels, 1))
+        add_weight_norm(tensors, unit_prefix + ".1", (channels, channels, SFX_KERNEL))
+        tensors[unit_prefix + ".1.bias"] = np.ones(channels)
+        tensors[unit_prefix + ".2.alpha"] = np.ones((1, channels, 1))
+        add_weight_norm(tensors, unit_prefix + ".3", (channels, channels, 1))
+        tensors[unit_prefix + ".3.bias"] = np.ones(channels)
+
+
+def sfx_vae_tensors() -> dict[str, np.ndarray]:
+    tensors: dict[str, np.ndarray] = {
+        "post_quant_conv.weight": np.ones((SFX_LATENT, SFX_LATENT, 1)),
+        "post_quant_conv.bias": np.ones(SFX_LATENT),
+    }
+    add_weight_norm(tensors, "decoder.model.0", (SFX_DECODER_DIM, SFX_LATENT, SFX_KERNEL))
+    tensors["decoder.model.0.bias"] = np.ones(SFX_DECODER_DIM)
+    channels = SFX_DECODER_DIM
+    for block, rate in enumerate(SFX_RATES):
+        prefix = f"decoder.model.{block + 1}.block"
+        tensors[prefix + ".0.alpha"] = np.full((1, channels, 1), 0.5)
+        add_weight_norm(tensors, prefix + ".1", (channels, channels // 2, 2 * rate))
+        tensors[prefix + ".1.bias"] = np.ones(channels // 2)
+        add_residual_units(tensors, prefix, channels // 2)
+        channels //= 2
+    last = len(SFX_RATES) + 1
+    tensors[f"decoder.model.{last}.alpha"] = np.ones((1, channels, 1))
+    add_weight_norm(tensors, f"decoder.model.{last + 1}", (1, channels, SFX_KERNEL))
+    tensors[f"decoder.model.{last + 1}.bias"] = np.ones(1)
+    return tensors
+
+
+def write_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value))
+
+
+def make_sfx_checkpoint(root: Path) -> Path:
+    model_dir = root / "sfx"
+    for sub in ("text_encoder", "transformer", "vae", "tokenizer", "scheduler"):
+        (model_dir / sub).mkdir(parents=True)
+    write_safetensors(model_dir / "text_encoder" / "model.safetensors", sfx_text_encoder_tensors())
+    write_safetensors(model_dir / "transformer" / "diffusion_pytorch_model.safetensors", sfx_dit_tensors())
+    write_safetensors(model_dir / "vae" / "vae.safetensors", sfx_vae_tensors())
+    write_json(model_dir / "text_encoder" / "config.json", {
+        "num_hidden_layers": 1, "hidden_size": SFX_WIDTH, "intermediate_size": SFX_FF,
+        "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": SFX_HEAD_DIM,
+        "rope_theta": 1000000.0, "rms_norm_eps": 1e-6})
+    write_json(model_dir / "transformer" / "config.json", {
+        "dim": SFX_WIDTH, "in_dim": SFX_LATENT, "out_dim": SFX_LATENT, "ffn_dim": SFX_FF,
+        "text_dim": SFX_WIDTH, "freq_dim": SFX_WIDTH, "eps": 1e-6, "patch_size": [1],
+        "num_heads": 2, "num_layers": 1, "has_image_input": False, "vae_type": "dac"})
+    write_json(model_dir / "vae" / "config.json", {
+        "latent_dim": SFX_LATENT, "decoder_dim": SFX_DECODER_DIM, "decoder_rates": SFX_RATES,
+        "sample_rate": 48000})
+    write_json(model_dir / "model_index.json", {"max_inference_seconds": 30})
+    write_json(model_dir / "scheduler" / "scheduler_config.json", {"shift": 5.0, "num_train_timesteps": 1000})
+    vocab = {f"tok{i}": i for i in range(TEXT_VOCAB)}
+    write_json(model_dir / "tokenizer" / "tokenizer.json", {
+        "model": {"vocab": vocab, "merges": ["a b"]},
+        "added_tokens": [{"id": 0, "content": "<|endoftext|>"}]})
+    write_json(model_dir / "tokenizer" / "tokenizer_config.json", {"pad_token": "<|endoftext|>"})
+    return model_dir
+
+
+def reader_tensor(path: Path, name: str):
+    reader = gguf.GGUFReader(str(path))
+    return next(t for t in reader.tensors if t.name == name)
+
+
+def reader_field(path: Path, key: str) -> list:
+    field = gguf.GGUFReader(str(path)).fields[key]
+    return [field.parts[index][0] for index in field.data]
+
+
+def check_sfx(path: Path) -> None:
+    names = reader_tensors(path)
+    expected = 2 + 11 + 15 + 27 + 4 + 28 * len(SFX_RATES) + 4
+    assert len(names) == expected, f"sfx tensor census: {len(names)} != {expected}"
+    assert "text.blk.0.attn_q.weight" in names and "dit.blk.0.cross_norm.bias" in names
+    assert not any(name.startswith("lm_head") for name in names), "the unused LM head is dropped"
+    assert names["dit.patch_embd.weight"] == (SFX_LATENT, SFX_WIDTH), "patch conv becomes a linear"
+    assert names["dit.blk.0.modulation"] == (SFX_WIDTH, 6), "modulation drops its batch axis"
+    up_width = SFX_RATES[0] * 2 * (SFX_DECODER_DIM // 2)
+    assert names["vae.blk.0.up.weight"] == (SFX_DECODER_DIM, up_width), "transposed conv becomes GEMM columns"
+    conv_in = reader_tensor(path, "vae.conv_in.weight")
+    assert conv_in.tensor_type == gguf.GGMLQuantizationType.F16, "conv kernels stay F16 for im2col"
+    direction = np.arange(1, SFX_DECODER_DIM * SFX_LATENT * SFX_KERNEL + 1, dtype=np.float32)
+    assert np.allclose(np.asarray(conv_in.data, dtype=np.float32).reshape(-1), SFX_GAIN * direction,
+                       rtol=1e-3), "weight norm folds to g * v / |v|"
+    inv = np.asarray(reader_tensor(path, "vae.blk.0.snake.inv").data, dtype=np.float32).reshape(-1)
+    assert np.allclose(inv, 2.0, rtol=1e-6), "snake stores 1 / (alpha + eps)"
+    assert list(reader_field(path, "moss-sfx.vae.decoder_rates")) == SFX_RATES
+    assert int(reader_field(path, "tokenizer.ggml.padding_token_id")[0]) == 0
+    print("sound effect converter: PASS")
+
+
+def check_sfx_half(path: Path) -> None:
+    tensor = reader_tensor(path, "dit.blk.0.self_q.weight")
+    assert tensor.tensor_type == gguf.GGMLQuantizationType.F16, "f16 stores linear weights as f16"
+    assert reader_tensor(path, "text.output_norm.weight").tensor_type == gguf.GGMLQuantizationType.F32
+    print("sound effect f16 converter: PASS")
+
+
+def move_vae_to_checkpoint(model_dir: Path) -> bool:
+    try:
+        import torch
+    except ImportError:
+        print("SKIP: torch is not installed; the .pth VAE path is untested")
+        return False
+    vae_dir = model_dir / "vae"
+    state = {name: torch.from_numpy(np.asarray(tensor, dtype=np.float32)) for name, tensor in sfx_vae_tensors().items()}
+    kwargs = {"latent_dim": SFX_LATENT, "decoder_dim": SFX_DECODER_DIM, "decoder_rates": SFX_RATES,
+              "sample_rate": 48000, "continuous": True}
+    torch.save({"state_dict": state, "metadata": {"kwargs": kwargs}}, vae_dir / "vae.pth")
+    (vae_dir / "vae.safetensors").unlink()
+    write_json(vae_dir / "config.json", {"latent_dim": SFX_LATENT, "sample_rate": 48000})
+    return True
+
+
+def check_sfx_bfloat(path: Path) -> None:
+    tensor = reader_tensor(path, "dit.blk.0.self_q.weight")
+    assert tensor.tensor_type == gguf.GGMLQuantizationType.BF16, "bf16 stores linear weights as bf16"
+    print("sound effect bf16 converter: PASS")
+
+
+def expect_converter_failure(args: list[str], needle: str, label: str) -> None:
+    result = subprocess.run([sys.executable, str(SCRIPTS / "convert-moss-sfx-to-gguf.py"), *args],
+                            capture_output=True, text=True)
+    assert result.returncode != 0, f"{label}: converter accepted the checkpoint"
+    assert needle in result.stderr, f"{label}: wrong failure: {result.stderr[-400:]}"
+    print(f"sound effect converter rejects {label}: PASS")
+
+
+def add_unmapped_dit_tensor(model_dir: Path) -> None:
+    tensors = sfx_dit_tensors()
+    tensors["blocks.0.unknown.weight"] = np.ones(SFX_WIDTH)
+    write_safetensors(model_dir / "transformer" / "diffusion_pytorch_model.safetensors", tensors)
+
+
+def restore_dit_tensors(model_dir: Path) -> None:
+    write_safetensors(model_dir / "transformer" / "diffusion_pytorch_model.safetensors", sfx_dit_tensors())
+
+
+def write_discrete_vae_checkpoint(model_dir: Path) -> None:
+    import torch
+
+    state = {name: torch.from_numpy(np.asarray(tensor, dtype=np.float32)) for name, tensor in sfx_vae_tensors().items()}
+    torch.save({"state_dict": state, "metadata": {"kwargs": {"decoder_rates": SFX_RATES, "continuous": False}}},
+               model_dir / "vae" / "vae.pth")
+
+
+def check_sfx_quantized(path: Path) -> None:
+    tensor = reader_tensor(path, "dit.blk.0.self_q.weight")
+    assert tensor.tensor_type == gguf.GGMLQuantizationType.Q8_0, "q8_0 quantizes linear weights"
+    assert reader_tensor(path, "dit.blk.0.self_q.bias").tensor_type == gguf.GGMLQuantizationType.F32
+    print("sound effect q8_0 converter: PASS")
+
+
 def run_converter(script: str, args: list[str]) -> None:
     result = subprocess.run([sys.executable, str(SCRIPTS / script), *args],
                             capture_output=True, text=True)
@@ -233,6 +464,32 @@ def main() -> None:
                        "--encoder-outfile", str(encoder_out),
                        "--decoder-outfile", str(decoder_out)])
         check_codec(encoder_out, decoder_out)
+
+        sfx_dir = make_sfx_checkpoint(root)
+        sfx_out = root / "sfx.gguf"
+        run_converter("convert-moss-sfx-to-gguf.py", [str(sfx_dir), "--outtype", "f32", "--outfile", str(sfx_out)])
+        check_sfx(sfx_out)
+        sfx_q8 = root / "sfx-q8.gguf"
+        run_converter("convert-moss-sfx-to-gguf.py", [str(sfx_dir), "--outtype", "q8_0", "--outfile", str(sfx_q8)])
+        check_sfx_quantized(sfx_q8)
+        sfx_f16 = root / "sfx-f16.gguf"
+        run_converter("convert-moss-sfx-to-gguf.py", [str(sfx_dir), "--outtype", "f16", "--outfile", str(sfx_f16)])
+        check_sfx_half(sfx_f16)
+        sfx_bf16 = root / "sfx-bf16.gguf"
+        run_converter("convert-moss-sfx-to-gguf.py", [str(sfx_dir), "--outtype", "bf16", "--outfile", str(sfx_bf16)])
+        check_sfx_bfloat(sfx_bf16)
+        add_unmapped_dit_tensor(sfx_dir)
+        expect_converter_failure([str(sfx_dir), "--outfile", str(root / "bad.gguf")], "unmapped DiT tensor",
+                                 "an unmapped DiT tensor")
+        restore_dit_tensors(sfx_dir)
+        if move_vae_to_checkpoint(sfx_dir):
+            sfx_pth = root / "sfx-pth.gguf"
+            run_converter("convert-moss-sfx-to-gguf.py", [str(sfx_dir), "--outtype", "f32", "--outfile", str(sfx_pth)])
+            check_sfx(sfx_pth)
+            print("sound effect .pth VAE converter: PASS")
+            write_discrete_vae_checkpoint(sfx_dir)
+            expect_converter_failure([str(sfx_dir), "--outfile", str(root / "bad.gguf")], "continuous DAC",
+                                     "a quantized DAC checkpoint")
     print("moss converters: OK")
 
 
