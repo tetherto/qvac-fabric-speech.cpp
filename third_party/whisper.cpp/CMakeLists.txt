@@ -1,9 +1,26 @@
 cmake_minimum_required(VERSION 3.5) # for add_link_options and implicit target directories.
 project("whisper.cpp" C CXX)
-project("whisper.cpp" VERSION 1.9.1)
 include(CheckIncludeFileCXX)
 
-set(SOVERSION 1)
+### whisper.cpp version
+set(WHISPER_VERSION_MAJOR 1)
+set(WHISPER_VERSION_MINOR 9)
+set(WHISPER_VERSION_PATCH 4)
+set(WHISPER_VERSION_BASE "${WHISPER_VERSION_MAJOR}.${WHISPER_VERSION_MINOR}.${WHISPER_VERSION_PATCH}")
+
+# whether this is a development/nightly build
+# set this to OFF when making a release from a release tag (vX.Y.Z)
+# ref: https://github.com/ggml-org/ggml/discussions/1579
+option(WHISPER_BUILD_IS_DEV "whisper: dev build" ON)
+
+if (WHISPER_BUILD_IS_DEV)
+    set(WHISPER_VERSION "${WHISPER_VERSION_BASE}-dev")
+else()
+    # TODO: check that the current commit is tagged correctly according to the version specified above
+    set(WHISPER_VERSION "${WHISPER_VERSION_BASE}")
+endif()
+
+message(STATUS "whisper.cpp version: ${WHISPER_VERSION}")
 
 #set(CMAKE_WARN_DEPRECATED YES)
 set(CMAKE_WARN_UNUSED_CLI YES)
@@ -76,8 +93,14 @@ option(WHISPER_ALL_WARNINGS           "whisper: enable all compiler warnings"   
 option(WHISPER_ALL_WARNINGS_3RD_PARTY "whisper: enable all compiler warnings in 3rd party libs" OFF)
 
 # build
-option(WHISPER_FATAL_WARNINGS  "whisper: enable -Werror flag"               OFF)
-option(WHISPER_USE_SYSTEM_GGML "whisper: use system-installed GGML library" OFF)
+option(WHISPER_FATAL_WARNINGS   "whisper: enable -Werror flag"                    OFF)
+option(WHISPER_USE_SYSTEM_GGML  "whisper: use system-installed GGML library"      OFF)
+option(WHISPER_USE_SYSTEM_LLAMA "whisper: use system-installed llama.cpp library" OFF)
+
+if (WHISPER_USE_SYSTEM_LLAMA AND NOT WHISPER_USE_SYSTEM_GGML)
+    message(STATUS "WHISPER_USE_SYSTEM_LLAMA=ON: setting WHISPER_USE_SYSTEM_GGML=ON")
+    set(WHISPER_USE_SYSTEM_GGML ON CACHE BOOL "" FORCE)
+endif()
 
 # sanitizers
 option(WHISPER_SANITIZE_THREAD    "whisper: enable thread sanitizer"    OFF)
@@ -105,6 +128,7 @@ endif()
 option(WHISPER_COREML                "whisper: enable Core ML framework"  OFF)
 option(WHISPER_COREML_ALLOW_FALLBACK "whisper: allow non-CoreML fallback" OFF)
 option(WHISPER_OPENVINO              "whisper: support for OpenVINO"      OFF)
+option(WHISPER_VITISAI               "whisper: support for AMD Vitis AI"  OFF)
 
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
@@ -187,9 +211,12 @@ add_subdirectory(src)
 
 include(CMakePackageConfigHelpers)
 
-set(WHISPER_BUILD_NUMBER        ${BUILD_NUMBER})
-set(WHISPER_BUILD_COMMIT        ${BUILD_COMMIT})
-set(WHISPER_INSTALL_VERSION     ${CMAKE_PROJECT_VERSION})
+if (NOT DEFINED WHISPER_BUILD_NUMBER)
+    set(WHISPER_BUILD_NUMBER        ${BUILD_NUMBER})
+endif()
+if (NOT DEFINED WHISPER_BUILD_COMMIT)
+    set(WHISPER_BUILD_COMMIT        ${BUILD_COMMIT})
+endif()
 
 set(WHISPER_INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_INCLUDEDIR}/whisper CACHE PATH "Location of header  files")
 set(WHISPER_LIB_INSTALL_DIR     ${CMAKE_INSTALL_LIBDIR}     CACHE PATH "Location of library files")
@@ -216,7 +243,7 @@ install(
   DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/whisper)
 
 target_compile_definitions(whisper PRIVATE
-    WHISPER_VERSION="${PROJECT_VERSION}"
+    WHISPER_VERSION="${WHISPER_VERSION}"
 )
 
 if (WHISPER_BUILD_PARAKEET) # QVAC patch, see PATCHES.md
@@ -224,7 +251,7 @@ set_target_properties(parakeet PROPERTIES PUBLIC_HEADER ${CMAKE_CURRENT_SOURCE_D
 install(TARGETS parakeet LIBRARY PUBLIC_HEADER)
 
 target_compile_definitions(parakeet PRIVATE
-    PARAKEET_VERSION="${PROJECT_VERSION}"
+    PARAKEET_VERSION="${WHISPER_VERSION}"
 )
 endif()
 
@@ -234,12 +261,12 @@ configure_package_config_file(
   INSTALL_DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/whisper)
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/whisper-version.cmake
-    VERSION ${WHISPER_INSTALL_VERSION}
+    ${CMAKE_CURRENT_BINARY_DIR}/whisper-config-version.cmake
+    VERSION ${WHISPER_VERSION}
     COMPATIBILITY SameMajorVersion)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/whisper-config.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/whisper-version.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/whisper-config-version.cmake
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/whisper)
 
 configure_file(cmake/whisper.pc.in
@@ -264,12 +291,12 @@ configure_package_config_file(
     PARAKEET_BIN_INSTALL_DIR)
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/parakeet-version.cmake
-    VERSION ${WHISPER_INSTALL_VERSION}
+    ${CMAKE_CURRENT_BINARY_DIR}/parakeet-config-version.cmake
+    VERSION ${WHISPER_VERSION}
     COMPATIBILITY SameMajorVersion)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/parakeet-config.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/parakeet-version.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/parakeet-config-version.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/parakeet)
 
 configure_file(cmake/parakeet.pc.in

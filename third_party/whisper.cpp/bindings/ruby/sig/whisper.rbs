@@ -131,6 +131,12 @@ module Whisper
 
     def full_get_segment_no_speech_prob: (Integer) -> Float
 
+    def full_n_vad_segments: () -> Integer
+
+    def full_get_vad_segment_t0: (Integer) -> Integer
+
+    def full_get_vad_segment_t1: (Integer) -> Integer
+
     # Run the entire model: PCM -> log mel spectrogram -> encoder -> decoder -> text  
     # Not thread safe for same context  
     # Uses the specified decoding strategy to obtain the text.
@@ -152,6 +158,9 @@ module Whisper
     def full_parallel: (Whisper::Params, Array[Float], ?Integer n_samples) -> self
                      | (Whisper::Params, _Samples, ?Integer n_samples) -> self
                      | (Whisper::Params, _Samples, ?Integer? n_samples, Integer n_processors) -> self
+
+    # Free context and unload the model.
+    def free: () -> void
 
     class Params
       def self.new: (
@@ -702,6 +711,8 @@ module Whisper
       def each_segment: { (Segment) -> void } -> void
                       | () -> Enumerator[Segment]
 
+      def free: () -> void
+
       class Params
         def self.new: (?use_gpu: boolish, ?gpu_device: Integer) -> instance
         def use_gpu: () -> boolish
@@ -994,6 +1005,7 @@ module Whisper
       def segments_from_samples: (Params, Array[Float] samples, ?Integer n_samples) -> Segments
                                | (Params, _Samples, ?Integer n_samples) -> Segments
       def detect: (path wav_file_path, Params) -> Segments
+      def free: () -> void
     end
 
     class Segments
