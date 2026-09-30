@@ -960,10 +960,22 @@ if (PARAKEET_BUILD_TESTS)
         "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf"
         CACHE FILEPATH "Nemotron 3 Diarization GGUF fixture")
     add_executable(test-nemotron-diarization-loader
-        test/test_nemotron_diarization_loader.cpp)
-    target_link_libraries(test-nemotron-diarization-loader PRIVATE qvac-parakeet)
-    target_include_directories(test-nemotron-diarization-loader PRIVATE src include)
-    parakeet_apply_ccache(test-nemotron-diarization-loader)
+        test/test_nemotron_diarization_loader.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_link_libraries(test-nemotron-diarization-loader PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-nemotron-diarization-loader PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-nemotron-diarization-loader)
     parakeet_register_test(test-nemotron-diarization-loader
         LABEL "fixture"
         ARGS "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
