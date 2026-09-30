@@ -29,8 +29,13 @@ are intentionally left hardcoded — they are GitHub aliases, not fleet labels.
 `matrix.os` values (and `matrix.os == '...'` conditionals) are **not** managed by
 the catalog — they are frozen logical identities used in cache keys and
 `runner.os` checks. A matrix lane pairs, e.g., `os: macos-26` with the
-`qvac-macos26-arm64-gpu` runner. Where a matrix job's `runs-on` depends on the
-lane, drive it from the outputs via a conditional keyed on `matrix.os`:
+`qvac-macos26-arm64-gpu` runner.
+
+A matrix row cannot carry the fork-authorization gate: a job-level `if:` is
+evaluated before `matrix`, so it cannot see `matrix.os`. A matrix that mixes
+hosted and self-hosted lanes therefore runs fork code on our hardware with no
+approval. Split the self-hosted lane into its own job instead — which is what
+`tts-ci.yml` does with `build-test` (hosted) and `build-test-macos` (gated):
 
 ```yaml
 jobs:
@@ -39,14 +44,27 @@ jobs:
       contents: read
     uses: ./.github/workflows/reusable-runner-names.yml
 
-  build-test:
+  authorize:
+    uses: ./.github/workflows/reusable-authorize-self-hosted.yml
+
+  build-test:                        # hosted lanes only - no gate needed
     needs: runner_names
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-26]
-    runs-on: ${{ matrix.os == 'macos-26' && needs.runner_names.outputs.macos_arm64_gpu || needs.runner_names.outputs.ubuntu_2404 }}
+        os: [ubuntu-24.04]
+    runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
+    steps: ...
+
+  build-test-macos:                  # self-hosted - its own job, gated
+    needs: [runner_names, authorize]
+    if: needs.authorize.outputs.allowed == 'true'
+    runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
     steps: ...
 ```
+
+`validate-runner-names.mjs` does not check for the gate — it checks hardcoded
+labels and the `runner_names` dependency — so this shape is the only thing
+keeping fork code off the fleet.
 
 Standalone (non-matrix) jobs are simpler:
 

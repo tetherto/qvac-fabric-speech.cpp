@@ -37,6 +37,9 @@ if (SPEECH_BUILD_WHISPER)
     # leaves CMP0077 OLD in its scope, so its option() defaults would clobber
     # plain normal-variable set()s on the first configure.
     set(WHISPER_USE_SYSTEM_GGML ON  CACHE BOOL "umbrella: one shared system ggml" FORCE)
+    # The umbrella (and speech-cpp port) ships the release in UPSTREAM_PIN.
+    # Override upstream's nightly default, including stale build caches.
+    set(WHISPER_BUILD_IS_DEV OFF CACHE BOOL "umbrella: pinned Whisper release" FORCE)
     set(WHISPER_BUILD_TESTS     ${SPEECH_BUILD_WHISPER_TESTS} CACHE BOOL "umbrella: see SPEECH_BUILD_WHISPER_TESTS" FORCE)
     set(WHISPER_BUILD_EXAMPLES  ${SPEECH_BUILD_EXECUTABLES} CACHE BOOL "umbrella: whisper-cli lives in examples/" FORCE)
     # Upstream ships its own C-API parakeet which collides with

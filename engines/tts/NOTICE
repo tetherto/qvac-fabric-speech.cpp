@@ -69,6 +69,22 @@ Apache License 2.0
     The canonical repository and model card identify code and weights as
     Apache-2.0.
 
+  MOSS-SoundEffect-v2.0
+    https://github.com/OpenMOSS/MOSS-TTS/tree/main/moss_soundeffect_v2
+    https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0
+    The canonical repository and model card identify code and weights as
+    Apache-2.0. The native implementation covers the Qwen3 text encoder, the
+    audio DiT, the flow-matching sampler, and the DAC decoder.
+
+  MOSS-Speech
+    https://github.com/OpenMOSS/MOSS-Speech
+    https://huggingface.co/fnlp/MOSS-Speech
+    https://huggingface.co/fnlp/MOSS-Speech-Codec
+    The canonical repository identifies the code as Apache-2.0. The native
+    implementation covers the split Qwen3 language model, the Whisper-VQ speech
+    tokenizer, and the CosyVoice2 flow decoder, HiFT vocoder, and CAM++ speaker
+    embedding; the default reply voice is the repository's assets/prompt_en.wav.
+
 =========================================================================
 C++ dependencies
 =========================================================================

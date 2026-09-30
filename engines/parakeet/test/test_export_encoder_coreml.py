@@ -54,6 +54,18 @@ def rnnt_meta():
     }
 
 
+def indic_ctc_meta():
+    return {
+        "parakeet.model.type": "ctc",
+        "parakeet.encoder.causal_downsampling": False,
+        "parakeet.encoder.conv_context_size": "default",
+        "parakeet.encoder.conv_norm_type": "batch_norm",
+        "parakeet.encoder.att_context_style": "regular",
+        "parakeet.encoder.att_context_size_left": -1,
+        "parakeet.encoder.att_context_size_right": -1,
+    }
+
+
 def sortformer_v2_1_meta():
     return {
         "parakeet.model.type": "sortformer",
@@ -84,6 +96,33 @@ def nemotron_meta():
 
 
 class ExportContractTests(unittest.TestCase):
+    def test_accepts_indic_ctc_fixed_and_flexible(self):
+        self.assertEqual(
+            EXPORTER.validate_export_contract(indic_ctc_meta()), "ctc")
+        self.assertEqual(
+            EXPORTER.validate_export_contract(indic_ctc_meta(), flexible=True),
+            "ctc")
+
+    def test_rejects_incompatible_indic_ctc_metadata(self):
+        invalid_cases = (
+            ("parakeet.encoder.causal_downsampling", True,
+             "non-causal downsampling"),
+            ("parakeet.encoder.conv_context_size", "causal",
+             "non-causal convolution"),
+            ("parakeet.encoder.conv_norm_type", "layer_norm",
+             "batch-normalized convolution"),
+            ("parakeet.encoder.att_context_size_left", 70,
+             "unbounded attention context"),
+            ("parakeet.encoder.att_context_size_right", 1,
+             "unbounded attention context"),
+        )
+        for key, value, message in invalid_cases:
+            with self.subTest(key=key, value=value):
+                meta = indic_ctc_meta()
+                meta[key] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    EXPORTER.validate_export_contract(meta)
+
     def test_accepts_offline_rnnt_fixed_and_flexible(self):
         self.assertEqual(
             EXPORTER.validate_export_contract(rnnt_meta()), "rnnt")

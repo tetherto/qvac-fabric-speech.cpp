@@ -72,14 +72,41 @@ struct fit_price_aggregate {
     }
 };
 
+// A metadata-only model marks its weights allocated (non-null data) without a
+// backend buffer. The scheduler places leafs from that buffer and skips view
+// ops when it assigns backends, so a reshape or transpose over such a weight
+// reaches the size-only reserve unassigned and aborts it
+// (GGML_ASSERT(buffer_id >= 0) in ggml-alloc). Detected through the operands
+// of the graph's nodes: ggml exposes nodes, not leafs.
+inline bool tensor_is_unbuffered_weight(const ggml_tensor * t) {
+    return t && t->data && !t->buffer && !t->view_src;
+}
+
+inline bool graph_has_unbuffered_weights(ggml_cgraph * graph) {
+    const int n_nodes = ggml_graph_n_nodes(graph);
+    for (int i = 0; i < n_nodes; ++i) {
+        const ggml_tensor * node = ggml_graph_node(graph, i);
+        for (int s = 0; s < GGML_MAX_SRC; ++s) {
+            if (tensor_is_unbuffered_weight(node->src[s])) return true;
+        }
+    }
+    return false;
+}
+
 // Price one freshly built graph. The graph's weight/state leafs must already
 // be marked externally allocated (non-null data) so only true compute scratch
 // is counted. Returns false when no pricer could be constructed.
+//
+// The scheduler shape is used where the backend cannot run every op, except
+// on a metadata-only model, which the scheduler cannot place; the direct
+// pricer then sizes every op on the primary backend, an upper bound on the
+// device figure with nothing charged to the host slot.
 inline bool fit_price_graph(ggml_backend_t backend, ggml_cgraph * graph,
                             size_t sched_graph_size, fit_graph_price & out) {
     out = fit_graph_price{};
     const bool use_sched =
-        sched_force_enabled() || !graph_fully_supported(backend, graph);
+        (sched_force_enabled() || !graph_fully_supported(backend, graph)) &&
+        !graph_has_unbuffered_weights(graph);
     if (!use_sched) {
         ggml_gallocr_t pricer =
             ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));

@@ -18,6 +18,16 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | ACE-Step v15 (base and turbo DiT variants) | text-to-music, multi-track (lego) stems, editing, LRC timestamps | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar |
 | MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
 
+On Apple, `AUDIOGEN_COREML=ON` (default `OFF`) adds an optional Core ML
+sidecar for the ACE-Step Oobleck VAE decoder, loaded from
+`<vae>-decoder.mlmodelc` next to the VAE GGUF (`vae-BF16.gguf` resolves to
+`vae-decoder.mlmodelc`). Every DiT variant shares that VAE, so one sidecar
+serves them all. It decodes in 64-latent-frame overlapped windows; latents
+shorter than one window and any sidecar failure fall back to ggml, and
+`ACESTEP_COREML_DISABLE=1` forces ggml. Measured on an M5, it decodes 1.24x
+(30 s) to 1.32x (60 s) faster than ggml Metal. MiniMax-Music3 has no Core ML
+sidecar. See [docs/backends.md](docs/backends.md#core-ml-vae-decoder-sidecar).
+
 ## Performance
 
 The [desktop benchmark workflow](../../.github/workflows/speech-benchmark-desktop.yml)

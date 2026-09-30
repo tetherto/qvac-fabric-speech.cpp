@@ -10,6 +10,7 @@
 //   <tts-cpp/audio8/engine.h>
 //   <tts-cpp/pocket/engine.h>
 //   <tts-cpp/moss/engine.h>
+// Sound-effect generation is exposed by <tts-cpp/moss/sound_effect.h>.
 // Speech enhancement is exposed by <tts-cpp/lavasr/denoiser.h> and
 // <tts-cpp/lavasr/enhancer.h>.
 //

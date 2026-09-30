@@ -173,6 +173,37 @@ struct NemotronPromptGraph {
     ~NemotronPromptGraph() { clear(); }
 };
 
+// The Core ML sidecar intentionally stops at encoder hidden states so it can
+// be shared by every decoder family. CTC models therefore keep their small
+// vocabulary projection on the active ggml backend. Cache this graph by frame
+// count just like the native encoder graphs to avoid rebuilding/allocating it
+// on every benchmark iteration and streaming chunk.
+struct CtcHeadGraph {
+    ggml_context * context = nullptr;
+    ggml_cgraph * graph = nullptr;
+    ggml_gallocr_t allocator = nullptr;
+    ggml_tensor * input = nullptr;
+    ggml_tensor * output = nullptr;
+    int n_frames = 0;
+
+    void clear() {
+        if (allocator) {
+            ggml_gallocr_free(allocator);
+            allocator = nullptr;
+        }
+        if (context) {
+            ggml_free(context);
+            context = nullptr;
+        }
+        graph = nullptr;
+        input = nullptr;
+        output = nullptr;
+        n_frames = 0;
+    }
+
+    ~CtcHeadGraph() { clear(); }
+};
+
 #ifdef PARAKEET_EXPERIMENTAL_FLASH_ATTN
 constexpr bool k_flash_attn_compiled = true;
 #else
@@ -287,6 +318,7 @@ struct ParakeetCtcModel::Impl {
     static constexpr size_t k_encoder_graph_cache_max = 3;
     static constexpr size_t k_pos_proj_cache_max_bytes = (size_t) 256 << 20;
     std::unique_ptr<NemotronPromptGraph> nemotron_prompt_graph;
+    std::unique_ptr<CtcHeadGraph> ctc_head_graph;
 
 #ifdef PARAKEET_USE_COREML
     // Optional Apple Neural Engine encoder sidecar. Non-null only on
@@ -309,6 +341,7 @@ struct ParakeetCtcModel::Impl {
         }
         encoder_graphs.clear();
         nemotron_prompt_graph.reset();
+        ctc_head_graph.reset();
         if (sched)          ggml_backend_sched_free(sched);
         if (weights_buffer) ggml_backend_buffer_free(weights_buffer);
         for (ggml_backend_buffer_t b : weights_extra_buffers) {
@@ -1716,15 +1749,16 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
     const bool supported_sortformer =
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc";
-    if (model.model_type != ParakeetModelType::RNNT &&
+    if (model.model_type != ParakeetModelType::CTC &&
+        model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::NEMOTRON &&
         !supported_sortformer) {
         if (verbose) {
             PARAKEET_LOG_INFO(
-                "parakeet: Core ML encoder supports Unified RNN-T, TDT, EOU, Nemotron, "
-                "and Sortformer v2.1; "
+                "parakeet: Core ML encoder supports CTC/IndicConformer, Unified RNN-T, "
+                "TDT, EOU, Nemotron, and Sortformer v2.1; "
                 "using ggml for model type %s variant '%s'\n",
                 model_type_name(model.model_type), model.model_variant.c_str());
         }
@@ -1763,6 +1797,148 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
     }
 }
 #endif  // PARAKEET_USE_COREML
+
+static constexpr int kDiarizationEncoderWidth = 512;
+static constexpr int kDiarizationEncoderLayers = 31;
+static constexpr int kDiarizationAttentionHeads = 8;
+static constexpr int kDiarizationFeedForwardWidth = 2048;
+static constexpr int kDiarizationOutputWidth = 192;
+static constexpr int kDiarizationSpeakers = 8;
+static constexpr int kDiarizationStackFactor = 8;
+static constexpr int kDiarizationOutputStride = 1;
+
+void validate_nemotron_silence_embedding_type(const ggml_tensor * tensor) {
+    if (!tensor || tensor->type != GGML_TYPE_F32) {
+        throw std::runtime_error("Nemotron 3 Diarization tensor type mismatch: learnable_sil_emb");
+    }
+}
+
+static ggml_tensor * require_diarization_tensor(
+    ggml_context * context, const std::string & name,
+    int64_t width, int64_t height = 1) {
+    ggml_tensor * tensor = ggml_get_tensor(context, name.c_str());
+    if (!tensor || tensor->ne[0] != width || tensor->ne[1] != height) {
+        throw std::runtime_error("Nemotron 3 Diarization tensor shape mismatch: " + name);
+    }
+    return tensor;
+}
+
+static void load_diarization_layers(
+    ggml_context * context, const NemotronDiarizationConfig & cfg,
+    NemotronDiarizationWeights & weights) {
+    weights.layers.resize(cfg.encoder_layers);
+    for (int index = 0; index < cfg.encoder_layers; ++index) {
+        auto & layer = weights.layers[index];
+        const std::string prefix = "encoder.layers." + std::to_string(index) + ".";
+        layer.norm1_w = require_diarization_tensor(context, prefix + "norm1.weight", cfg.encoder_width);
+        layer.norm1_b = require_diarization_tensor(context, prefix + "norm1.bias", cfg.encoder_width);
+        layer.qkv_w = require_diarization_tensor(context, prefix + "attn.w_qkv.weight", cfg.encoder_width, 3 * cfg.encoder_width);
+        layer.attention_w = require_diarization_tensor(context, prefix + "attn.out_proj.weight", cfg.encoder_width, cfg.encoder_width);
+        layer.attention_b = require_diarization_tensor(context, prefix + "attn.out_proj.bias", cfg.encoder_width);
+        layer.norm2_w = require_diarization_tensor(context, prefix + "norm2.weight", cfg.encoder_width);
+        layer.norm2_b = require_diarization_tensor(context, prefix + "norm2.bias", cfg.encoder_width);
+        layer.feed_forward_in_w = require_diarization_tensor(context, prefix + "ffn.net.0.weight", cfg.encoder_width, cfg.feed_forward_width);
+        layer.feed_forward_in_b = require_diarization_tensor(context, prefix + "ffn.net.0.bias", cfg.feed_forward_width);
+        layer.feed_forward_out_w = require_diarization_tensor(context, prefix + "ffn.net.3.weight", cfg.feed_forward_width, cfg.encoder_width);
+        layer.feed_forward_out_b = require_diarization_tensor(context, prefix + "ffn.net.3.bias", cfg.encoder_width);
+    }
+}
+
+static void load_diarization_weights(ggml_context * context, ParakeetCtcModel & model) {
+    const auto & cfg = model.nemotron_diarization_cfg;
+    auto & weights = model.nemotron_diarization;
+    const int stacked_width = model.mel_cfg.n_mels * cfg.subsampling_factor;
+    weights.feature_projection = require_diarization_tensor(context, "encoder.pre_encode.proj.weight", stacked_width, cfg.encoder_width);
+    weights.embedding_norm_w = require_diarization_tensor(context, "encoder.embed_norm.weight", cfg.encoder_width);
+    weights.embedding_norm_b = require_diarization_tensor(context, "encoder.embed_norm.bias", cfg.encoder_width);
+    load_diarization_layers(context, cfg, weights);
+    weights.final_norm_w = require_diarization_tensor(context, "encoder.final_norm.weight", cfg.encoder_width);
+    weights.final_norm_b = require_diarization_tensor(context, "encoder.final_norm.bias", cfg.encoder_width);
+    weights.encoder_projection_w = require_diarization_tensor(context, "encoder_proj.weight", cfg.encoder_width, cfg.output_width);
+    weights.encoder_projection_b = require_diarization_tensor(context, "encoder_proj.bias", cfg.output_width);
+    weights.upsample_w = ggml_get_tensor(context, "subpixel_upsample.weight");
+    if (!weights.upsample_w || weights.upsample_w->ne[0] != 3 ||
+        weights.upsample_w->ne[1] != cfg.output_width ||
+        weights.upsample_w->ne[2] !=
+            static_cast<int64_t>(cfg.output_width) * cfg.subsampling_factor) {
+        throw std::runtime_error("Nemotron 3 Diarization tensor shape mismatch: subpixel_upsample.weight");
+    }
+    weights.upsample_b = require_diarization_tensor(context, "subpixel_upsample.bias",
+        static_cast<int64_t>(cfg.output_width) * cfg.subsampling_factor);
+    weights.hidden_w = require_diarization_tensor(context, "head.first_hidden_to_hidden.weight", cfg.output_width, cfg.output_width);
+    weights.hidden_b = require_diarization_tensor(context, "head.first_hidden_to_hidden.bias", cfg.output_width);
+    weights.speakers_w = require_diarization_tensor(context, "head.single_hidden_to_spks.weight", cfg.output_width, cfg.speakers);
+    weights.speakers_b = require_diarization_tensor(context, "head.single_hidden_to_spks.bias", cfg.speakers);
+    weights.silence_embedding = require_diarization_tensor(context, "learnable_sil_emb", cfg.encoder_width);
+    validate_nemotron_silence_embedding_type(weights.silence_embedding);
+}
+
+static void load_diarization_metadata(gguf_context * gguf, ParakeetCtcModel & model) {
+    if (get_str(gguf, "sortformer.version", "") != "v3" ||
+        get_str(gguf, "sortformer.encoder.type", "") != "transformer_rope" ||
+        get_str(gguf, "sortformer.encoder.subsampling_type", "") != "feature_stacking" ||
+        !get_bool(gguf, "sortformer.high_resolution", false) ||
+        !get_bool(gguf, "sortformer.learnable_silence", false) ||
+        !get_bool(gguf, "sortformer.encoder.pre_block_norm", false) ||
+        get_bool(gguf, "sortformer.encoder.qkv_bias", true) ||
+        get_bool(gguf, "sortformer.encoder.qk_norm", false) ||
+        get_u32(gguf, "sortformer.transformer.n_layers", 1) != 0) {
+        throw std::runtime_error("unsupported Nemotron 3 Diarization model contract");
+    }
+    auto & cfg = model.nemotron_diarization_cfg;
+    cfg.encoder_width = get_u32(gguf, "sortformer.encoder.d_model", 0);
+    cfg.encoder_layers = get_u32(gguf, "sortformer.encoder.n_layers", 0);
+    cfg.attention_heads = get_u32(gguf, "sortformer.encoder.n_heads", 0);
+    cfg.feed_forward_width = get_u32(gguf, "sortformer.encoder.d_ff", 0);
+    cfg.output_width = get_u32(gguf, "sortformer.transformer.hidden_size", 0);
+    cfg.speakers = get_u32(gguf, "sortformer.num_speakers", 0);
+    cfg.subsampling_factor = get_u32(gguf, "sortformer.encoder.subsampling_factor", 0);
+    cfg.output_stride = get_u32(gguf, "sortformer.output_subsampling_factor", 0);
+    cfg.position_limit = get_u32(gguf, "sortformer.encoder.pos_emb_max_len", 0);
+    cfg.rope_base = get_f32(gguf, "sortformer.encoder.rope_base", 0.0f);
+    cfg.rotary_fraction = get_f32(gguf, "sortformer.encoder.rotary_fraction", 0.0f);
+    if (cfg.encoder_width != kDiarizationEncoderWidth ||
+        cfg.encoder_layers != kDiarizationEncoderLayers ||
+        cfg.attention_heads != kDiarizationAttentionHeads ||
+        cfg.feed_forward_width != kDiarizationFeedForwardWidth ||
+        cfg.output_width != kDiarizationOutputWidth ||
+        cfg.speakers != kDiarizationSpeakers ||
+        cfg.subsampling_factor != kDiarizationStackFactor ||
+        get_u32(gguf, "sortformer.upsample_factor", 0) != kDiarizationStackFactor ||
+        cfg.output_stride != kDiarizationOutputStride ||
+        cfg.position_limit < 1 || cfg.rope_base <= 0.0f ||
+        cfg.rotary_fraction != 1.0f) {
+        throw std::runtime_error("unsupported Nemotron 3 Diarization dimensions");
+    }
+    model.model_type = ParakeetModelType::NEMOTRON_DIARIZATION;
+    model.model_variant = "nemotron-3-diarization";
+    model.mel_cfg.sample_rate = get_u32(gguf, "sortformer.preprocessor.sample_rate", 0);
+    model.mel_cfg.n_fft = get_u32(gguf, "sortformer.preprocessor.n_fft", 0);
+    model.mel_cfg.n_mels = get_u32(gguf, "sortformer.preprocessor.features", 0);
+    model.mel_cfg.win_length = static_cast<int>(
+        get_f32(gguf, "sortformer.preprocessor.window_size", 0.0f) * model.mel_cfg.sample_rate + 0.5f);
+    model.mel_cfg.hop_length = static_cast<int>(
+        get_f32(gguf, "sortformer.preprocessor.window_stride", 0.0f) * model.mel_cfg.sample_rate + 0.5f);
+    model.mel_cfg.preemph = get_f32(gguf, "sortformer.preprocessor.preemph", 0.0f);
+    model.mel_cfg.log_zero_guard_value = get_f32(gguf, "sortformer.preprocessor.log_zero_guard", kDefaultLogZeroGuard);
+    model.mel_cfg.normalize = MelNormalize::None;
+    model.mel_cfg.right_zero_pad = true;
+    if (model.mel_cfg.sample_rate != 16000 || model.mel_cfg.n_fft != 512 ||
+        model.mel_cfg.n_mels != 128 || model.mel_cfg.win_length != 400 ||
+        model.mel_cfg.hop_length != 160 ||
+        get_str(gguf, "sortformer.preprocessor.normalize", "") != "NA") {
+        throw std::runtime_error("unsupported Nemotron 3 Diarization frontend");
+    }
+}
+
+static void make_diarization_window(MelConfig & config) {
+    config.window.resize(config.win_length);
+    const float denominator = static_cast<float>(config.win_length - 1);
+    const float full_circle = 2.0f * 3.14159265358979323846f;
+    for (int sample = 0; sample < config.win_length; ++sample) {
+        config.window[sample] = 0.5f - 0.5f * std::cos(full_circle * sample / denominator);
+    }
+}
 
 // Shared body of load_from_gguf and load_from_gguf_metadata_only. When
 // `measure` is non-null the load is metadata-only: every allocation the real
@@ -1945,6 +2121,23 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             return 2;
         }
         const char * arch = gguf_get_val_str(g, id);
+        if (std::strcmp(arch, "sortformer") == 0) {
+            load_diarization_metadata(g, out_model);
+            load_diarization_weights(impl->ctx, out_model);
+            out_model.mel_filterbank = require_diarization_tensor(
+                impl->ctx, "preprocessor.fb", out_model.mel_cfg.n_fft / 2 + 1,
+                out_model.mel_cfg.n_mels);
+            if (!measure) {
+                out_model.mel_cfg.filterbank = read_filterbank_to_vector(out_model.mel_filterbank);
+                make_diarization_window(out_model.mel_cfg);
+            }
+            if (impl->backend_blas) {
+                ggml_backend_free(impl->backend_blas);
+                impl->backend_blas = nullptr;
+            }
+            out_model.impl = impl;
+            return 0;
+        }
         if (std::strcmp(arch, "parakeet-ctc") != 0) {
             PARAKEET_LOG_ERROR("gguf: expected arch=parakeet-ctc, got '%s'\n", arch);
             return 2;
@@ -2482,6 +2675,17 @@ std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
     return model_active_backend_name(m);
 }
 
+ggml_backend_t init_engine_backend(bool use_gpu) {
+    bool skipped_unsupported_gpu = false;
+    bool is_mali_vulkan = false;
+    ggml_backend_t backend = use_gpu ? init_gpu_backend(1, false, skipped_unsupported_gpu, is_mali_vulkan) : nullptr;
+    return backend ? backend : init_cpu_backend();
+}
+
+ggml_backend_t init_engine_cpu_backend() {
+    return init_cpu_backend();
+}
+
 ggml_backend_t model_active_backend(ParakeetCtcModel & m) {
     if (!m.impl) return nullptr;
     return m.impl->backend_active;
@@ -2508,6 +2712,7 @@ const char * model_type_name(ParakeetModelType model_type) {
         case ParakeetModelType::EOU:        return "eou";
         case ParakeetModelType::NEMOTRON:   return "nemotron";
         case ParakeetModelType::SORTFORMER: return "sortformer";
+        case ParakeetModelType::NEMOTRON_DIARIZATION: return "nemotron-diarization";
         case ParakeetModelType::CTC:
         default:                            return "ctc";
     }
@@ -2528,6 +2733,18 @@ std::string join_frames(const std::vector<int32_t> & values) {
 void print_model_summary(const ParakeetCtcModel & m) {
     const char * mt = model_type_name(m.model_type);
     PARAKEET_LOG_INFO("parakeet-%s loaded:\n", mt);
+    if (m.model_type == ParakeetModelType::NEMOTRON_DIARIZATION) {
+        const auto & cfg = m.nemotron_diarization_cfg;
+        PARAKEET_LOG_INFO(
+            "  encoder: RoPE %d layers, width=%d, heads=%d, feature stack=%dx\n"
+            "  diarization: speakers=%d, output_stride=%d mel frame\n",
+            cfg.encoder_layers, cfg.encoder_width, cfg.attention_heads,
+            cfg.subsampling_factor, cfg.speakers, cfg.output_stride);
+        PARAKEET_LOG_INFO("  preproc: sr=%d n_fft=%d win=%d hop=%d n_mels=%d\n",
+            m.mel_cfg.sample_rate, m.mel_cfg.n_fft, m.mel_cfg.win_length,
+            m.mel_cfg.hop_length, m.mel_cfg.n_mels);
+        return;
+    }
     const char * conv_norm = m.encoder_cfg.conv_norm_type == ConvNormType::LayerNorm ? "ln" : "bn";
     PARAKEET_LOG_INFO("  encoder: d_model=%d n_layers=%d n_heads=%d head_dim=%d ff_dim=%d conv_k=%d sub=%dx xscaling=%d untie=%d use_bias=%d conv_norm=%s\n",
                       m.encoder_cfg.d_model, m.encoder_cfg.n_layers, m.encoder_cfg.n_heads,
@@ -4033,7 +4250,7 @@ static int coreml_encoder_out_frames(const EncoderConfig & enc, int n_mel_frames
     return next(next(next(n_mel_frames)));
 }
 
-// Unified RNN-T, TDT, and Sortformer v2.1 batch sidecars use the
+// CTC/IndicConformer, Unified RNN-T, TDT, and Sortformer v2.1 batch sidecars use the
 // full-context contract.
 static bool encoder_is_offline(const EncoderConfig & enc) {
     return enc.att_context_left  < 0
@@ -4049,13 +4266,18 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool capture_intermediates,
                                       bool allow_coreml_padded) {
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
-    if (model.model_type != ParakeetModelType::RNNT &&
+    if (model.model_type != ParakeetModelType::CTC &&
+        model.model_type != ParakeetModelType::RNNT &&
         model.model_type != ParakeetModelType::TDT &&
         model.model_type != ParakeetModelType::EOU &&
         model.model_type != ParakeetModelType::NEMOTRON &&
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    if (model.model_type == ParakeetModelType::CTC) {
+        return encoder_is_offline(model.encoder_cfg) &&
+               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
+    }
     if (model.model_type == ParakeetModelType::RNNT) {
         return encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
@@ -4086,9 +4308,65 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_context_right >= 0;
 }
 
-// Fills out.encoder_out from the Core ML sidecar, honouring run_encoder's contract
-// (encoder_out only; per-stage captures + CTC logits cleared). Returns 0 when handled
-// on Core ML; non-zero lets the caller fall back to the ggml encoder.
+static int run_coreml_ctc_head(ParakeetCtcModel & model,
+                               const std::vector<float> & encoder_out,
+                               int n_frames,
+                               std::vector<float> & logits) {
+    if (!model.impl || !model.impl->backend_active || !model.ctc.w || !model.ctc.b ||
+        n_frames <= 0 || encoder_out.size() !=
+            static_cast<size_t>(n_frames) * model.encoder_cfg.d_model) {
+        return -1;
+    }
+
+    auto & cached = model.impl->ctc_head_graph;
+    if (!cached || cached->n_frames != n_frames) {
+        cached = std::make_unique<CtcHeadGraph>();
+        CtcHeadGraph & graph = *cached;
+        constexpr size_t graph_size = 16;
+        const size_t graph_memory =
+            ggml_tensor_overhead() * graph_size +
+            ggml_graph_overhead_custom(graph_size, false) + 4096;
+        ggml_init_params params = {};
+        params.mem_size = graph_memory;
+        params.no_alloc = true;
+        graph.context = ggml_init(params);
+        if (!graph.context) return -2;
+
+        graph.input = ggml_new_tensor_2d(
+            graph.context, GGML_TYPE_F32, model.encoder_cfg.d_model, n_frames);
+        ggml_set_input(graph.input);
+        graph.output = ggml_add(
+            graph.context,
+            ggml_mul_mat(graph.context, model.ctc.w, graph.input),
+            model.ctc.b);
+        ggml_set_output(graph.output);
+        graph.graph = ggml_new_graph_custom(graph.context, graph_size, false);
+        ggml_build_forward_expand(graph.graph, graph.output);
+        graph.allocator = ggml_gallocr_new(
+            ggml_backend_get_default_buffer_type(model.impl->backend_active));
+        if (!graph.allocator ||
+            !ggml_gallocr_alloc_graph(graph.allocator, graph.graph)) {
+            return -3;
+        }
+        graph.n_frames = n_frames;
+    }
+
+    CtcHeadGraph & graph = *cached;
+    ggml_backend_tensor_set(graph.input, encoder_out.data(), 0,
+                            encoder_out.size() * sizeof(float));
+    if (ggml_backend_graph_compute(model.impl->backend_active, graph.graph) !=
+        GGML_STATUS_SUCCESS) {
+        return -4;
+    }
+    logits.resize(static_cast<size_t>(n_frames) * model.vocab_size);
+    ggml_backend_tensor_get(graph.output, logits.data(), 0,
+                            logits.size() * sizeof(float));
+    return 0;
+}
+
+// Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
+// on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
+// caller fall back to the complete native encoder graph.
 static int run_encoder_coreml(ParakeetCtcModel & model,
                               const float      * mel,
                               int                n_mel_frames,
@@ -4108,6 +4386,14 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
                                            T, d_model, out.encoder_out.data());
     if (rc != 0) return rc;
 
+    if (model.model_type == ParakeetModelType::CTC) {
+        const int head_rc = run_coreml_ctc_head(
+            model, out.encoder_out, T, out.logits);
+        if (head_rc != 0) return 100 - head_rc;
+    } else {
+        out.logits.clear();
+    }
+
     out.used_coreml = true;
     out.subsampling_out.clear();
     out.block_0_post_ff1.clear();
@@ -4116,7 +4402,6 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     out.block_0_post_ff2.clear();
     out.block_0_out.clear();
     out.block_last_out.clear();
-    out.logits.clear();
     return 0;
 }
 #endif  // PARAKEET_USE_COREML
@@ -4318,9 +4603,9 @@ int run_encoder(ParakeetCtcModel   & model,
     const bool all_valid = (mel_valid == n_mel_frames);
 
 #ifdef PARAKEET_USE_COREML
-    // Apple Core ML sidecar: run a validated Unified RNN-T, TDT, EOU, or
-    // Sortformer FastConformer encoder and hand encoder_out back to the ggml
-    // decoder or diarization head.
+    // Apple Core ML sidecar: run a validated CTC/IndicConformer, Unified RNN-T,
+    // TDT, EOU, Nemotron, or Sortformer FastConformer encoder and hand
+    // encoder_out back to the ggml decoder or diarization head.
     if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);

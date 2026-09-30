@@ -1,0 +1,24 @@
+# Nemotron 3 Diarization native port
+
+Nemotron 3 Diarization is a separate diarization architecture from the four-speaker Sortformer checkpoints currently supported by the Parakeet engine. Its public checkpoint has eight speaker channels and 10 ms activity frames. The existing `sortformer_diarize_ggml` graph expects a FastConformer encoder, an 18-layer post-layer-normalization speaker transformer, and 80 ms output frames. Loading the new checkpoint through that graph would produce invalid results.
+
+## Source contract
+
+- Model: [nvidia/Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), released September 23, 2026.
+- License: [OpenMDW 1.1](https://openmdw.ai/license/1-1/). Commercial use is permitted. Redistributed model materials must retain the license and applicable origin notices.
+- Reference implementation: [NVIDIA NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp), Apache 2.0.
+- Official checkpoint: `Nemotron-3-Diarization.q8_0.gguf` in the model repository. It uses `general.architecture=sortformer` and `sortformer.version=v3`, unlike this engine's `parakeet-ctc` GGUF format.
+
+The official GGUF declares a 128-bin mel frontend, 8x feature stacking, a 31-layer 512-wide RoPE encoder with eight attention heads, a 512-to-192 projection, an 8x subpixel Conv1D output head, and eight independent sigmoid speaker outputs. The model has 360 tensors. The learned silence embedding and model-specific AOSC scoring values are part of the checkpoint. The native prediction stride is 10 ms; speaker-cache embeddings remain on the 80 ms encoder grid.
+
+`scripts/download_nemotron_diarization.py` fetches the official GGUF at a pinned model revision and can also fetch the `.nemo` source with `--include-source`. `scripts/convert_nemotron_diarization.py` fetches the source and a pinned NeMo-Speech.cpp converter checkout, then produces a separate Q8 GGUF when conversion is needed. NVIDIA's published GGUF is the default fixture and requires no conversion.
+
+## Current implementation
+
+The Parakeet engine loads the official GGUF as a separate model type. The loader validates its metadata and tensor shapes. Its native ggml graph implements feature stacking, the RoPE encoder, subpixel upsampling, and the eight-channel speaker head. The public offline API and CLI return 10 ms probabilities and segments; the existing attribution path accepts the model as its diarization input.
+
+The live API uses the existing Audio-Online Speaker Cache update and compression logic on 80 ms embeddings. It initializes the silence profile from the checkpoint, averages 10 ms probabilities to the cache grid, and returns native probabilities for committed frames. The default live geometry is 1040 ms chunks, 80 ms right context, 264 speaker-cache rows, 80 FIFO rows, and a 40-frame update period. Chunk and context durations must align to 80 ms encoder frames.
+
+The fixture test compares all offline per-frame probabilities on `diarization-sample-16k.wav` with the output of NVIDIA NeMo-Speech.cpp revision `97a15afa5caa9bce5baaa86c1184103877af4101`. The tracked binary contains 2731 frames and eight little-endian float32 probabilities per frame. The test also exercises cached live updates and cache compression with deliberately short buffers. The same test passes on Vulkan with an AMD Radeon RX 7600 XT. The model weights are downloaded separately and are not tracked here.
+
+Long-form streaming quality, overlap and eight-speaker scenarios, GPU performance, other GPU backends, and the `qvac/` package integration workflow still need validation. The local repository rules require coordination with the developer before running the full `qvac/` end-to-end workflow.

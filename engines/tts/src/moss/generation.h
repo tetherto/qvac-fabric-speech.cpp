@@ -31,16 +31,12 @@ void apply_repetition_penalty(std::vector<float> & logits, const std::vector<int
 int32_t sample_row(std::vector<float> logits, float top_p, int top_k, bool do_sample,
                    std::mt19937 & rng);
 
-// Splits a de-delayed code stream into utterance segments at all-pad frames
-// and concatenates the surviving segments, matching the reference pipeline.
-std::vector<int32_t> extract_audio_segments(const std::vector<int32_t> & codes, int n_frames,
-                                            int n_vq, int pad_code);
+using AudioSegments = std::vector<std::vector<int32_t>>;
 
-// Port of the reference in-loop delay state machine: every step consumes the
-// previous row's logits and emits exactly one packed row; the delay structure
-// is expressed through which audio channels carry the pad code. The model
-// ends audio by emitting the delay slot, which arms a drain of exactly n_vq
-// steps before the forced audio end; only im_end stops the generation.
+bool frame_is_pad(const std::vector<int32_t> & codes, int frame, int n_vq, int pad_code);
+AudioSegments extract_audio_segments(const std::vector<int32_t> & codes, int n_frames,
+                                     int n_vq, int pad_code);
+
 class DelayState {
 public:
     DelayState(const DelayConfig & config, const std::vector<DelayRow> & prompt_rows,
@@ -51,9 +47,9 @@ public:
 
     DelayRow step(const DelayLogits & logits, const SamplingConfig & sampling, std::mt19937 & rng);
 
-    std::vector<int32_t> generated_audio(int prompt_frames) const;
-    int available_frames(int prompt_frames) const;
-    std::vector<int32_t> frame_codes(int prompt_frames, int frame) const;
+    AudioSegments generated_audio(int base_row) const;
+    int available_frames(int base_row) const;
+    std::vector<int32_t> frame_codes(int base_row, int frame) const;
 
 private:
     bool channel_is_sampled(int channel) const;

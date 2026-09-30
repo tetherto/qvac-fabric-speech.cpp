@@ -5,9 +5,13 @@
 #include "gguf.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,11 +26,11 @@ constexpr int N_KV_HEADS = 1;
 constexpr int N_VQ       = 2;
 constexpr int SPECIALS   = 8;
 constexpr int TEXT_VOCAB = SPECIALS + 256;
-constexpr int AUDIO_HEAD = 8;
 constexpr int D_MODEL    = 8;
 constexpr int RVQ_DIM    = 8;
 constexpr int CODE_DIM   = 4;
 constexpr int CODE_SIZE  = 8;
+constexpr int AUDIO_HEAD = CODE_SIZE + 1;
 constexpr int OUT_DIM    = 4;
 
 inline std::filesystem::path temp_gguf(const char * tag) {
@@ -35,9 +39,22 @@ inline std::filesystem::path temp_gguf(const char * tag) {
         ("moss-" + std::string(tag) + "-" + std::to_string(stamp) + ".gguf");
 }
 
+struct ConstantTensor {
+    ggml_type type;
+    float value;
+};
+
+using ConstantTensors = std::map<std::string, ConstantTensor>;
+using TensorShapes = std::map<std::string, std::pair<int64_t, int64_t>>;
+
+constexpr float RANDOM_WEIGHT_RANGE = 0.5f;
+
 struct GgufBuilder {
     gguf_context * file;
     ggml_context * tensors;
+    ConstantTensors constants;
+    TensorShapes shapes;
+    std::mt19937 * random = nullptr;
 
     GgufBuilder() : file(gguf_init_empty()),
                     tensors(ggml_init({16 * 1024 * 1024, nullptr, false})) {}
@@ -47,18 +64,58 @@ struct GgufBuilder {
         gguf_free(file);
     }
 
-    void add1(const std::string & name, int64_t n) {
-        ggml_tensor * t = ggml_new_tensor_1d(tensors, GGML_TYPE_F32, n);
-        std::memset(t->data, 0, ggml_nbytes(t));
+    ggml_type type_of(const std::string & name) const {
+        const auto found = constants.find(name);
+        return found == constants.end() ? GGML_TYPE_F32 : found->second.type;
+    }
+
+    void fill_constant(ggml_tensor * t, float value) {
+        const int64_t n = ggml_nelements(t);
+        for (int64_t i = 0; i < n; ++i) {
+            if (t->type == GGML_TYPE_F16) {
+                ((ggml_fp16_t *) t->data)[i] = ggml_fp32_to_fp16(value);
+            } else {
+                ((float *) t->data)[i] = value;
+            }
+        }
+    }
+
+    void fill_random(ggml_tensor * t) {
+        std::uniform_real_distribution<float> draw(-RANDOM_WEIGHT_RANGE, RANDOM_WEIGHT_RANGE);
+        const int64_t n = ggml_nelements(t);
+        for (int64_t i = 0; i < n; ++i) {
+            ((float *) t->data)[i] = draw(*random);
+        }
+    }
+
+    void fill(ggml_tensor * t, const std::string & name) {
+        const auto found = constants.find(name);
+        if (found != constants.end()) {
+            fill_constant(t, found->second.value);
+        } else if (random != nullptr) {
+            fill_random(t);
+        } else {
+            std::memset(t->data, 0, ggml_nbytes(t));
+        }
+    }
+
+    void register_tensor(ggml_tensor * t, const std::string & name) {
+        fill(t, name);
         ggml_set_name(t, name.c_str());
         gguf_add_tensor(file, t);
     }
 
+    void add1(const std::string & name, int64_t n) {
+        register_tensor(ggml_new_tensor_1d(tensors, type_of(name), n), name);
+    }
+
     void add2(const std::string & name, int64_t ne0, int64_t ne1) {
-        ggml_tensor * t = ggml_new_tensor_2d(tensors, GGML_TYPE_F32, ne0, ne1);
-        std::memset(t->data, 0, ggml_nbytes(t));
-        ggml_set_name(t, name.c_str());
-        gguf_add_tensor(file, t);
+        const auto shaped = shapes.find(name);
+        if (shaped != shapes.end()) {
+            ne0 = shaped->second.first;
+            ne1 = shaped->second.second;
+        }
+        register_tensor(ggml_new_tensor_2d(tensors, type_of(name), ne0, ne1), name);
     }
 
     void write(const std::filesystem::path & path) {
@@ -135,8 +192,11 @@ inline void add_backbone_tensors(GgufBuilder & b) {
 }
 
 inline std::filesystem::path write_backbone(const char * tag,
-        const std::function<void(gguf_context *)> & mutate_meta) {
+        const std::function<void(gguf_context *)> & mutate_meta,
+        const ConstantTensors & constants = {}, const TensorShapes & shapes = {}) {
     GgufBuilder b;
+    b.constants = constants;
+    b.shapes = shapes;
     add_backbone_meta(b.file);
     add_backbone_tensors(b);
     mutate_meta(b.file);
@@ -186,13 +246,96 @@ inline void add_decoder_tensors(GgufBuilder & b, int num_quantizers, int64_t qkv
 }
 
 inline std::filesystem::path write_decoder(const char * tag, int num_quantizers, int64_t qkv_rows,
-        const std::function<void(gguf_context *)> & mutate_meta) {
+        const std::function<void(gguf_context *)> & mutate_meta, std::mt19937 * random = nullptr) {
     GgufBuilder b;
+    b.random = random;
     add_decoder_meta(b.file, num_quantizers);
     mutate_meta(b.file);
     add_decoder_tensors(b, num_quantizers, qkv_rows);
     const auto path = temp_gguf(tag);
     b.write(path);
+    return path;
+}
+
+inline void add_encoder_meta(gguf_context * f) {
+    gguf_set_val_str(f, "general.architecture", "moss-tts-audio-encoder");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.sampling_rate", 24000);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.downsample_rate", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.input_dim", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.rvq_dim", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.output_dim", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.num_quantizers", N_VQ);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.codebook_size", CODE_SIZE);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.quantizer.codebook_dim", CODE_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.block_count", 2);
+    gguf_set_val_str(f, "moss-tts-audio-encoder.encoder.0.module_type", "PatchedPretransform");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.0.patch_size", OUT_DIM);
+    gguf_set_val_str(f, "moss-tts-audio-encoder.encoder.1.module_type", "Transformer");
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.input_dimension", OUT_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.output_dimension", RVQ_DIM);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.d_model", D_MODEL);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.num_heads", 2);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.num_layers", 1);
+    gguf_set_val_u32(f, "moss-tts-audio-encoder.encoder.1.context", 8);
+}
+
+inline void add_encoder_tensors(GgufBuilder & b) {
+    b.add2("quantizer.input_proj.weight", RVQ_DIM, RVQ_DIM);
+    for (int iq = 0; iq < N_VQ; ++iq) {
+        const std::string prefix = "quantizer.quantizers." + std::to_string(iq) + ".";
+        b.add2(prefix + "codebook.weight", CODE_DIM, CODE_SIZE);
+        b.add2(prefix + "in_proj.weight", RVQ_DIM, CODE_DIM);
+        b.add2(prefix + "out_proj.weight", CODE_DIM, RVQ_DIM);
+    }
+    b.add2("blk.0.input_proj.weight", OUT_DIM, D_MODEL);
+    b.add2("blk.0.output_proj.weight", D_MODEL, RVQ_DIM);
+    b.add2("blk.0.layer.0.attn_qkv.weight", D_MODEL, 3 * D_MODEL);
+    b.add2("blk.0.layer.0.attn_output.weight", D_MODEL, D_MODEL);
+    b.add2("blk.0.layer.0.ffn_up.weight", D_MODEL, 2 * D_MODEL);
+    b.add2("blk.0.layer.0.ffn_down.weight", 2 * D_MODEL, D_MODEL);
+    b.add1("blk.0.layer.0.attn_norm.weight", D_MODEL);
+    b.add1("blk.0.layer.0.attn_norm.bias", D_MODEL);
+    b.add1("blk.0.layer.0.ffn_norm.weight", D_MODEL);
+    b.add1("blk.0.layer.0.ffn_norm.bias", D_MODEL);
+}
+
+inline std::filesystem::path write_encoder(const char * tag,
+        const std::function<void(gguf_context *)> & mutate_meta = [](gguf_context *) {}) {
+    GgufBuilder b;
+    add_encoder_meta(b.file);
+    mutate_meta(b.file);
+    add_encoder_tensors(b);
+    const auto path = temp_gguf(tag);
+    b.write(path);
+    return path;
+}
+
+inline std::filesystem::path write_tiny_wav(const char * tag, int samples) {
+    const auto path = temp_gguf(tag).replace_extension(".wav");
+    const uint32_t rate = 24000;
+    const uint32_t data_bytes = (uint32_t) samples * 2;
+    std::vector<unsigned char> header = {
+        'R','I','F','F', 0,0,0,0, 'W','A','V','E',
+        'f','m','t',' ', 16,0,0,0, 1,0, 1,0,
+        0,0,0,0, 0,0,0,0, 2,0, 16,0,
+        'd','a','t','a', 0,0,0,0,
+    };
+    auto put32 = [&header](size_t at, uint32_t v) {
+        header[at] = (unsigned char) (v & 0xff);
+        header[at + 1] = (unsigned char) ((v >> 8) & 0xff);
+        header[at + 2] = (unsigned char) ((v >> 16) & 0xff);
+        header[at + 3] = (unsigned char) ((v >> 24) & 0xff);
+    };
+    put32(4, 36 + data_bytes);
+    put32(24, rate);
+    put32(28, rate * 2);
+    put32(40, data_bytes);
+    std::ofstream out(path, std::ios::binary);
+    out.write((const char *) header.data(), (std::streamsize) header.size());
+    for (int i = 0; i < samples; ++i) {
+        const int16_t sample = (int16_t) ((i % 32) * 512 - 8192);
+        out.write((const char *) &sample, 2);
+    }
     return path;
 }
 

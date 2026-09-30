@@ -1,8 +1,3 @@
-// Conformance suite for the MOSS Delay generation logic, mirroring the
-// upstream reference self-test: delay/de-delay round trip, the in-loop delay
-// state machine, sampling primitives, segment extraction, and prompt packing.
-// Pure CPU logic; no model fixtures required.
-
 #include "moss/frontend.h"
 #include "moss/generation.h"
 
@@ -203,12 +198,13 @@ void test_state_machine_drain() {
     check(row.text == IM_END_TOKEN, "im_end is reachable after the drain");
     check(state.stopping(), "im_end stops the generation");
 
-    const std::vector<int32_t> audio = state.generated_audio(2);
-    check(!audio.empty(), "generated audio survives de-delay");
-    check(audio.size() % config.n_vq == 0, "generated audio is frame aligned");
-    for (int32_t code : audio) {
-        check(code != config.audio_pad_code, "no pad codes leak into decoded segments");
-    }
+    const AudioSegments segments = state.generated_audio(2);
+    check(segments.size() == 1, "one utterance yields one segment");
+    check(!segments.empty() && segments[0].size() % config.n_vq == 0,
+            "generated audio is frame aligned");
+    check(!segments.empty() && std::none_of(segments[0].begin(), segments[0].end(),
+            [&](int32_t code) { return code == config.audio_pad_code; }),
+            "no pad codes leak into decoded segments");
 }
 
 void test_early_stop_masks() {
@@ -260,9 +256,30 @@ void test_segment_extraction() {
         5, 6,
         pad, pad,
     };
-    const std::vector<int32_t> merged = extract_audio_segments(codes, 5, n_vq, pad);
-    check(merged == std::vector<int32_t>({1, 2, 3, 4, 5, 6}), "segments merged without pads");
+    const AudioSegments segments = extract_audio_segments(codes, 5, n_vq, pad);
+    check(segments.size() == 2, "pad frames separate independent segments");
+    check(segments.size() == 2 && segments[0] == std::vector<int32_t>({1, 2}),
+            "first segment keeps its own frames");
+    check(segments.size() == 2 && segments[1] == std::vector<int32_t>({3, 4, 5, 6}),
+            "second segment starts after the separator");
     check(extract_audio_segments({pad, pad}, 1, n_vq, pad).empty(), "all-pad input yields nothing");
+    check(extract_audio_segments({1, 2}, 1, n_vq, pad).size() == 1,
+            "a segment running to the end is kept");
+}
+
+void test_top_k_tie_break() {
+    std::mt19937 rng(3);
+    check(sample_row({1.0f, 5.0f, 5.0f, 0.0f}, 1.0f, 1, true, rng) == 1,
+            "equal logits resolve to the lowest index");
+    std::mt19937 rng_b(3);
+    check(sample_row({5.0f, 1.0f, 5.0f, 5.0f}, 1.0f, 1, true, rng_b) == 0,
+            "the tie break does not depend on position in the vocabulary scan");
+}
+
+void test_top_k_larger_than_vocab() {
+    std::mt19937 rng(5);
+    const int32_t token = sample_row({0.0f, 0.0f, 50.0f}, 1.0f, 100, true, rng);
+    check(token == 2, "top_k beyond the vocabulary keeps every candidate");
 }
 
 std::vector<int32_t> fake_encode(const std::string & span) {
@@ -273,6 +290,33 @@ std::vector<int32_t> fake_encode(const std::string & span) {
     return ids;
 }
 
+void test_duration_tokens_field() {
+    const DelayConfig config = test_config();
+    PromptTokens tokens;
+    tokens.pad = PAD_TOKEN;
+    tokens.im_start = 2;
+    tokens.im_end = 3;
+    std::string captured;
+    const TextEncoder recorder = [&captured](const std::string & span) {
+        captured += span;
+        return std::vector<int32_t>{(int32_t) (span.size() % 90)};
+    };
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 0, {});
+    check(captured.find("- Tokens:\nNone\n") != std::string::npos,
+            "free-length prompts carry Tokens: None");
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola", "es", 38, {});
+    check(captured.find("- Tokens:\n38\n") != std::string::npos,
+            "duration_tokens lands as the Tokens field");
+    check(captured.find("[pause") == std::string::npos,
+            "the template adds no pause markers of its own");
+    captured.clear();
+    build_prompt_rows(config, tokens, recorder, "hola [pause 2.0s] mundo", "es", 0, {});
+    check(captured.find("- Text:\nhola [pause 2.0s] mundo\n") != std::string::npos,
+            "inline pause markers pass through the text field untouched");
+}
+
 void test_prompt_rows() {
     const DelayConfig config = test_config();
     PromptTokens tokens;
@@ -281,7 +325,7 @@ void test_prompt_rows() {
     tokens.im_end = 3;
 
     const std::vector<DelayRow> plain = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", {}, 0);
+            "hola", "es", 0, {});
     check(plain.size() > 4, "plain prompt has rows");
     check(plain.front().text == tokens.im_start, "prompt opens with im_start");
     check(plain.back().text == config.audio_start_token_id, "prompt ends with the audio seed row");
@@ -299,8 +343,10 @@ void test_prompt_rows() {
     for (size_t i = 0; i < reference_codes.size(); ++i) {
         reference_codes[i] = (int32_t) (i % 7);
     }
+    PromptAudio cloned_audio;
+    cloned_audio.speaker_codes.push_back(reference_codes);
     const std::vector<DelayRow> cloned = build_prompt_rows(config, tokens, fake_encode,
-            "hola", "es", reference_codes, reference_frames);
+            "hola", "es", 0, cloned_audio);
     int slot_rows = 0;
     int rows_with_codes = 0;
     for (const DelayRow & row : cloned) {
@@ -333,6 +379,9 @@ int main() {
     test_early_stop_masks();
     test_incremental_de_delay();
     test_segment_extraction();
+    test_top_k_tie_break();
+    test_top_k_larger_than_vocab();
+    test_duration_tokens_field();
     test_prompt_rows();
     if (failures == 0) {
         std::printf("moss generation conformance: OK\n");

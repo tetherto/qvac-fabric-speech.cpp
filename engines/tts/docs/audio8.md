@@ -378,8 +378,9 @@ fails below the parity gate, so its numbers are correctness-checked, and the
 TTS CI macOS lane appends its table to the job summary.
 
 Two reports tell a host where the codec ran. `Engine::codec_on_coreml()` is
-the load status: true when a sidecar next to the decoder GGUF initialised (the
-language model and the post transformer still run on `backend_name()`).
+the attachment status: true while a sidecar next to the decoder GGUF is
+attached (the language model and the post transformer still run on
+`backend_name()`).
 `SynthesisResult::codec_synthesis_backend` is per call: `"ggml"`, or the
 sidecar's compute label (`coreml-all`, `coreml-gpu`, ...) when the synthesis
 stack actually ran there. The two differ on the call in which a loaded

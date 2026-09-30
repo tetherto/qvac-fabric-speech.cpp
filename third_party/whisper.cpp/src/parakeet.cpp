@@ -685,6 +685,34 @@ static void read_safe(parakeet_model_loader * loader, T & dest) {
     BYTESWAP_VALUE(dest);
 }
 
+
+static bool parakeet_validate_hparams(const std::map<parakeet_hparam, int32_t> & hparam_values) {
+    for (const auto & hparam_expected : PARAKEET_HPARAM_MODEL_VALUES) {
+        const parakeet_hparam hparam = hparam_expected.first;
+        const auto hparam_value = hparam_values.find(hparam);
+        if (hparam_value == hparam_values.end()) {
+            PARAKEET_LOG_ERROR("%s: missing Parakeet metadata: %s\n",
+                    __func__, PARAKEET_HPARAM_NAMES.at(hparam));
+            return false;
+        }
+
+        const int32_t actual = hparam_value->second;
+        const int32_t expected = hparam_expected.second;
+        if(actual <=0 || actual > expected){
+            PARAKEET_LOG_ERROR("%s: invalid Parakeet metadata: %s = %d, expected > 0 and <= %d\n. Unsafe parameter loaded. ",
+                __func__, PARAKEET_HPARAM_NAMES.at(hparam), actual, expected);
+            return false;
+        }
+        if(actual != expected){
+            PARAKEET_LOG_WARN("%s: non-standard Parakeet metadata: %s = %d, expected %d\n. Transcription will be affected. ",
+                __func__, PARAKEET_HPARAM_NAMES.at(hparam), actual, expected);
+        }
+
+    }
+
+    return true;
+}
+
 static bool parakeet_lstm_state_init(
                struct parakeet_state & pstate,
                       ggml_backend_t   backend,
@@ -1003,21 +1031,33 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
     //load hparams
     parakeet_hparams hparams;
     {
-        read_safe(loader, hparams.n_vocab);
-        read_safe(loader, hparams.n_audio_ctx);
-        read_safe(loader, hparams.n_audio_state);
-        read_safe(loader, hparams.n_audio_head);
-        read_safe(loader, hparams.n_audio_layer);
-        read_safe(loader, hparams.n_mels);
+        std::map<parakeet_hparam, int32_t>hparam_values;
+        auto read_hparam = [&] (parakeet_hparam hparam, int32_t &value){
+            read_safe(loader, value);
+            hparam_values[hparam] = value;
+        };
+        read_hparam(PARAKEET_HPARAM_N_VOCAB, hparams.n_vocab);
+        read_hparam(PARAKEET_HPARAM_N_AUDIO_CTX, hparams.n_audio_ctx);
+        read_hparam(PARAKEET_HPARAM_N_AUDIO_STATE, hparams.n_audio_state);
+        read_hparam(PARAKEET_HPARAM_N_AUDIO_HEAD, hparams.n_audio_head);
+        read_hparam(PARAKEET_HPARAM_N_AUDIO_LAYER, hparams.n_audio_layer);
+        read_hparam(PARAKEET_HPARAM_N_MELS, hparams.n_mels);
+        /*
+        ftype just requires the type check already being done in the loading process.
+        */
         read_safe(loader, hparams.ftype);
-        read_safe(loader, hparams.n_fft);
-        read_safe(loader, hparams.subsampling_factor);
-        read_safe(loader, hparams.n_subsampling_channels);
-        read_safe(loader, hparams.n_conv_kernel);
-        read_safe(loader, hparams.n_pred_dim);
-        read_safe(loader, hparams.n_pred_layers);
-        read_safe(loader, hparams.n_tdt_durations);
-        read_safe(loader, hparams.n_max_tokens);
+        read_hparam(PARAKEET_HPARAM_N_FFT, hparams.n_fft);
+        read_hparam(PARAKEET_HPARAM_SUBSAMPLING_FACTOR, hparams.subsampling_factor);
+        read_hparam(PARAKEET_HPARAM_N_SUBSAMPLING_CHANNELS, hparams.n_subsampling_channels);
+        read_hparam(PARAKEET_HPARAM_N_CONV_KERNEL, hparams.n_conv_kernel);
+        read_hparam(PARAKEET_HPARAM_N_PRED_DIM, hparams.n_pred_dim);
+        read_hparam(PARAKEET_HPARAM_N_PRED_LAYERS, hparams.n_pred_layers);
+        read_hparam(PARAKEET_HPARAM_N_TDT_DURATIONS, hparams.n_tdt_durations);
+        read_hparam(PARAKEET_HPARAM_N_MAX_TOKENS, hparams.n_max_tokens);
+
+        if(!parakeet_validate_hparams(hparam_values)) {
+            return false;
+        }
 
         hparams.arch = PARAKEET_ARCH_TDT;
         wctx.model.hparams = hparams;
@@ -1397,6 +1437,11 @@ static bool parakeet_model_load(struct parakeet_model_loader * loader, parakeet_
 
             if (loader->eof(loader->context)) {
                 break;
+            }
+
+            if (n_dims < 0 || n_dims > 4) {
+                  PARAKEET_LOG_ERROR("%s: invalid n_dims %d in model file (expected 0 <= n_dims <= 4)\n", __func__, n_dims);
+                  return false;
             }
 
             int32_t nelements = 1;
@@ -2257,12 +2302,7 @@ static struct ggml_cgraph * parakeet_build_graph_joint(
     ggml_set_output(logits);
     ggml_set_name(logits, "logits");
 
-    struct ggml_tensor * probs = ggml_soft_max(ctx0, logits);
-    struct ggml_tensor * log_probs = ggml_log(ctx0, probs);
-    ggml_set_output(log_probs);
-    ggml_format_name(log_probs, "log_probs");
-
-    ggml_build_forward_expand(gf, log_probs);
+    ggml_build_forward_expand(gf, logits);
 
     ggml_free(ctx0);
 
@@ -2428,19 +2468,25 @@ static parakeet_token_data create_token_data(
                         float   token_logit,
                           int   n_vocab_logits) {
 
+    float max_logit = token_logit;
+    for (int i = 0; i < n_vocab_logits; ++i) {
+        max_logit = std::max(max_logit, pstate.logits[i]);
+    }
+
     float token_sum = 0.0f;
     for (int i = 0; i < n_vocab_logits; ++i) {
-        token_sum += expf(pstate.logits[i]);
+        token_sum += expf(pstate.logits[i] - max_logit);
     }
-    float token_p = expf(token_logit) / token_sum;
+
+    const float log_z = max_logit + logf(token_sum);
 
     parakeet_token_data token_data;
     token_data.id = token_id;
     token_data.duration_idx = duration_idx;
     token_data.duration_value = duration_value;
     token_data.frame_index = frame_index;
-    token_data.p = token_p;
-    token_data.plog = token_logit;
+    token_data.p = expf(token_logit - log_z);
+    token_data.plog = token_logit - log_z;
     token_data.t0 = frame_index * pctx.model.hparams.subsampling_factor;
     token_data.t1 = (frame_index + duration_value) * pctx.model.hparams.subsampling_factor;
     token_data.is_word_start = is_word_start_token(pctx.vocab, token_id);
@@ -2521,8 +2567,8 @@ static bool parakeet_decode(
         // find the max index of the duration logits, and look up that index
         // value in the tdt_durations array to get the actual duration value.
         int best_duration_idx = 0;
-        float best_duration_logit = -1e10f;
-        for (int i = 0; i < n_tdt_durations; ++i) {
+        float best_duration_logit = pstate.logits[n_vocab_logits];
+        for (int i = 1; i < n_tdt_durations; ++i) {
             if (pstate.logits[n_vocab_logits + i] > best_duration_logit) {
                 best_duration_logit = pstate.logits[n_vocab_logits + i];
                 best_duration_idx = i;
@@ -3064,7 +3110,9 @@ struct parakeet_context * parakeet_init_from_buffer_with_params_no_state(void * 
 
         size_t size_to_copy = buf->current_offset + read_size < buf->size ? read_size : buf->size - buf->current_offset;
 
-        memcpy(output, buf->buffer + buf->current_offset, size_to_copy);
+        if (size_to_copy > 0 && buf->buffer != nullptr) {
+            memcpy(output, buf->buffer + buf->current_offset, size_to_copy);
+        }
         buf->current_offset += size_to_copy;
 
         return size_to_copy;

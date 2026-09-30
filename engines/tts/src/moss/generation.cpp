@@ -17,18 +17,17 @@ constexpr float MASKED = -std::numeric_limits<float>::infinity();
     throw std::runtime_error("moss generation: " + message);
 }
 
-std::vector<float> softmax(const std::vector<float> & logits) {
+float finite_maximum(const std::vector<float> & logits) {
     float best = MASKED;
     for (float logit : logits) {
         if (std::isfinite(logit) && logit > best) {
             best = logit;
         }
     }
-    std::vector<float> probs(logits.size(), 0.0f);
-    if (!std::isfinite(best)) {
-        probs[0] = 1.0f;
-        return probs;
-    }
+    return best;
+}
+
+float exponentiate_finite(const std::vector<float> & logits, float best, std::vector<float> & probs) {
     float total = 0.0f;
     for (size_t i = 0; i < logits.size(); ++i) {
         if (std::isfinite(logits[i])) {
@@ -36,9 +35,23 @@ std::vector<float> softmax(const std::vector<float> & logits) {
             total += probs[i];
         }
     }
+    return total;
+}
+
+void normalize(std::vector<float> & probs, float total) {
     for (float & p : probs) {
         p /= total;
     }
+}
+
+std::vector<float> softmax(const std::vector<float> & logits) {
+    const float best = finite_maximum(logits);
+    std::vector<float> probs(logits.size(), 0.0f);
+    if (!std::isfinite(best)) {
+        probs[0] = 1.0f;
+        return probs;
+    }
+    normalize(probs, exponentiate_finite(logits, best, probs));
     return probs;
 }
 
@@ -54,57 +67,86 @@ size_t multinomial(const std::vector<float> & probs, std::mt19937 & rng) {
     return probs.size() - 1;
 }
 
+bool past_nucleus(size_t rank, float cumulative, float top_p) {
+    return rank > 0 && cumulative > top_p;
+}
+
 void mask_beyond_top_p(std::vector<float> & probs, std::vector<size_t> & order, float top_p) {
-    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return probs[a] > probs[b]; });
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return probs[a] > probs[b]; });
     float cumulative = 0.0f;
     for (size_t rank = 0; rank < order.size(); ++rank) {
-        // HF keeps the first token whose cumulative crosses the threshold.
-        if (rank > 0 && cumulative > top_p) {
+        if (past_nucleus(rank, cumulative, top_p)) {
             probs[order[rank]] = 0.0f;
         }
         cumulative += probs[order[rank]];
     }
 }
 
+void keep_top_p(std::vector<float> & probs, float top_p) {
+    if (top_p >= 1.0f) {
+        return;
+    }
+    std::vector<size_t> order(probs.size());
+    std::iota(order.begin(), order.end(), 0);
+    mask_beyond_top_p(probs, order, top_p);
+    normalize(probs, std::accumulate(probs.begin(), probs.end(), 0.0f));
+}
+
 int32_t argmax(const std::vector<float> & logits) {
     return (int32_t) (std::max_element(logits.begin(), logits.end()) - logits.begin());
 }
 
-int32_t sample_top_k(std::vector<float> & logits, float top_p, int top_k, std::mt19937 & rng) {
-    const int k = std::min<int>(top_k, (int) logits.size());
-    std::vector<size_t> indices(logits.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::nth_element(indices.begin(), indices.begin() + (k - 1), indices.end(),
-            [&](size_t a, size_t b) { return logits[a] > logits[b]; });
-    indices.resize(k);
-    std::vector<float> subset(k);
-    for (int i = 0; i < k; ++i) {
-        subset[i] = logits[indices[i]];
-    }
-    std::vector<float> probs = softmax(subset);
-    if (top_p < 1.0f) {
-        std::vector<size_t> order(probs.size());
-        std::iota(order.begin(), order.end(), 0);
-        mask_beyond_top_p(probs, order, top_p);
-        const float total = std::accumulate(probs.begin(), probs.end(), 0.0f);
-        for (float & p : probs) {
-            p /= total;
-        }
-    }
-    return (int32_t) indices[multinomial(probs, rng)];
+struct Candidate {
+    float logit;
+    int32_t index;
+};
+
+bool ranks_higher(const Candidate & a, const Candidate & b) {
+    return a.logit > b.logit || (a.logit == b.logit && a.index < b.index);
 }
 
-int32_t sample_top_p(std::vector<float> & logits, float top_p, std::mt19937 & rng) {
-    std::vector<float> probs = softmax(logits);
-    if (top_p < 1.0f) {
-        std::vector<size_t> order(probs.size());
-        std::iota(order.begin(), order.end(), 0);
-        mask_beyond_top_p(probs, order, top_p);
-        const float total = std::accumulate(probs.begin(), probs.end(), 0.0f);
-        for (float & p : probs) {
-            p /= total;
-        }
+void offer_candidate(std::vector<Candidate> & heap, size_t k, Candidate candidate) {
+    if (heap.size() < k) {
+        heap.push_back(candidate);
+        std::push_heap(heap.begin(), heap.end(), ranks_higher);
+        return;
     }
+    if (ranks_higher(candidate, heap.front())) {
+        std::pop_heap(heap.begin(), heap.end(), ranks_higher);
+        heap.back() = candidate;
+        std::push_heap(heap.begin(), heap.end(), ranks_higher);
+    }
+}
+
+std::vector<Candidate> top_k_candidates(const std::vector<float> & logits, size_t k) {
+    std::vector<Candidate> heap;
+    heap.reserve(k);
+    for (size_t i = 0; i < logits.size(); ++i) {
+        offer_candidate(heap, k, {logits[i], (int32_t) i});
+    }
+    std::sort_heap(heap.begin(), heap.end(), ranks_higher);
+    return heap;
+}
+
+std::vector<float> candidate_logits(const std::vector<Candidate> & candidates) {
+    std::vector<float> subset(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        subset[i] = candidates[i].logit;
+    }
+    return subset;
+}
+
+int32_t sample_top_k(const std::vector<float> & logits, float top_p, int top_k, std::mt19937 & rng) {
+    const size_t k = std::min<size_t>((size_t) top_k, logits.size());
+    const std::vector<Candidate> candidates = top_k_candidates(logits, k);
+    std::vector<float> probs = softmax(candidate_logits(candidates));
+    keep_top_p(probs, top_p);
+    return candidates[multinomial(probs, rng)].index;
+}
+
+int32_t sample_top_p(const std::vector<float> & logits, float top_p, std::mt19937 & rng) {
+    std::vector<float> probs = softmax(logits);
+    keep_top_p(probs, top_p);
     return (int32_t) multinomial(probs, rng);
 }
 
@@ -177,31 +219,30 @@ int32_t sample_row(std::vector<float> logits, float top_p, int top_k, bool do_sa
     return sample_top_p(logits, top_p, rng);
 }
 
-std::vector<int32_t> extract_audio_segments(const std::vector<int32_t> & codes, int n_frames,
-                                            int n_vq, int pad_code) {
-    std::vector<int32_t> merged;
-    int segment_start = -1;
-    for (int t = 0; t <= n_frames; ++t) {
-        bool all_pad = true;
-        if (t < n_frames) {
-            for (int c = 0; c < n_vq; ++c) {
-                if (codes[(size_t) t * n_vq + c] != pad_code) {
-                    all_pad = false;
-                    break;
-                }
-            }
+bool frame_is_pad(const std::vector<int32_t> & codes, int frame, int n_vq, int pad_code) {
+    const size_t first = (size_t) frame * (size_t) n_vq;
+    return std::all_of(codes.begin() + (std::ptrdiff_t) first,
+            codes.begin() + (std::ptrdiff_t) (first + (size_t) n_vq),
+            [pad_code](int32_t code) { return code == pad_code; });
+}
+
+AudioSegments extract_audio_segments(const std::vector<int32_t> & codes, int n_frames,
+                                     int n_vq, int pad_code) {
+    AudioSegments segments;
+    bool in_segment = false;
+    for (int t = 0; t < n_frames; ++t) {
+        const bool pad = frame_is_pad(codes, t, n_vq, pad_code);
+        if (!pad && !in_segment) {
+            segments.emplace_back();
         }
-        if (!all_pad && segment_start < 0) {
-            segment_start = t;
-        }
-        if (all_pad && segment_start >= 0) {
-            merged.insert(merged.end(),
-                    codes.begin() + (size_t) segment_start * n_vq,
-                    codes.begin() + (size_t) t * n_vq);
-            segment_start = -1;
+        in_segment = !pad;
+        if (!pad) {
+            segments.back().insert(segments.back().end(),
+                    codes.begin() + (std::ptrdiff_t) ((size_t) t * n_vq),
+                    codes.begin() + (std::ptrdiff_t) ((size_t) (t + 1) * n_vq));
         }
     }
-    return merged;
+    return segments;
 }
 
 DelayState::DelayState(const DelayConfig & config, const std::vector<DelayRow> & prompt_rows,
@@ -305,9 +346,6 @@ std::unordered_set<int32_t> DelayState::merged_channel_seen(const std::vector<in
     return seen;
 }
 
-// The reference scopes the repetition-penalty history per sampling call:
-// channel 0 is penalized only against its own history, and the remaining
-// sampled channels share the combined history of exactly those channels.
 std::vector<int32_t> DelayState::next_audio_codes(const DelayLogits & logits,
                                                   const SamplingConfig & sampling,
                                                   std::mt19937 & rng) const {
@@ -385,22 +423,22 @@ DelayRow DelayState::step(const DelayLogits & logits, const SamplingConfig & sam
     return row;
 }
 
-int DelayState::available_frames(int prompt_frames) const {
-    const int64_t rows = (int64_t) (audio_history_.size() / (size_t) config_.n_vq) - prompt_frames;
+int DelayState::available_frames(int base_row) const {
+    const int64_t rows = (int64_t) (audio_history_.size() / (size_t) config_.n_vq) - base_row;
     return (int) std::max<int64_t>(0, rows - (config_.n_vq - 1));
 }
 
-std::vector<int32_t> DelayState::frame_codes(int prompt_frames, int frame) const {
+std::vector<int32_t> DelayState::frame_codes(int base_row, int frame) const {
     std::vector<int32_t> codes((size_t) config_.n_vq, config_.audio_pad_code);
     for (int channel = 0; channel < config_.n_vq; ++channel) {
-        const size_t row = (size_t) (prompt_frames + frame + channel);
+        const size_t row = (size_t) (base_row + frame + channel);
         codes[(size_t) channel] = audio_history_[row * (size_t) config_.n_vq + (size_t) channel];
     }
     return codes;
 }
 
-std::vector<int32_t> DelayState::generated_audio(int prompt_frames) const {
-    const size_t begin = (size_t) prompt_frames * config_.n_vq;
+AudioSegments DelayState::generated_audio(int base_row) const {
+    const size_t begin = (size_t) base_row * config_.n_vq;
     if (begin >= audio_history_.size()) {
         return {};
     }

@@ -83,14 +83,10 @@ jobs:
           # asserts the feature detection sees it (test-backend-features).
           - os: ubuntu-24.04
             llamafile: ON
-          # Self-hosted Apple silicon, not hosted macOS: hosted macos-14
-          # exposes an Apple Paravirtual device without simdgroup matmul, so
-          # Metal-touching tests abort at kernel encode (QVAC-22775). This is
-          # the runner audiogen-ci.yml already uses for its enforced Metal
-          # parity step; here it additionally unlocks test-metal-ops, the
-          # fixture-free TTS Metal kernel parity suite.
-          - os: macos-26
-    runs-on: ${{ matrix.os == 'macos-26' && needs.runner_names.outputs.macos_arm64_gpu || needs.runner_names.outputs.ubuntu_2404 }}
+    # Hosted only. The self-hosted lane is `build-test-macos`, which carries the
+    # fork-ci gate; a job-level `if` cannot see `matrix.os`, so a row here could
+    # not be gated.
+    runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
     name: build-test (${{ matrix.os }}${{ matrix.llamafile == 'ON' && ', tinyBLAS' || '' }})
     timeout-minutes: 60
     steps:
@@ -161,17 +157,14 @@ jobs:
           cmake --build ggml-src/build -j4
           cmake --install ggml-src/build
 
-      # TTS_CPP_COREML on macOS: the Apple lane builds the Core ML Audio8
-      # codec sidecar wrapper and runs the parity test against a converted
-      # decoder GGUF + exported sidecar (see the "Core ML Audio8 fixture"
-      # steps below), so the feature is functionally covered on every PR, not
-      # just compiled.
+      # No TTS_CPP_COREML here: this job is hosted-only now, and the option is
+      # Apple-only (it FATAL_ERRORs on other systems, engines/tts/CMakeLists.txt:34).
+      # Core ML is built and parity-tested in build-test-macos.
       - name: Configure
         run: |
           cmake -S engines/tts -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DTTS_CPP_BUILD_TESTS=ON \
-            ${{ runner.os == 'macOS' && '-DTTS_CPP_COREML=ON' || '' }} \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build

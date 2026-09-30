@@ -366,12 +366,27 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/engine.cpp
     src/pocket/fit.cpp
     src/pocket/reference_audio.cpp
-    # MOSS Delay engine (MOSS-TTS-v1.5 / MOSS-TTSD backbone + RVQ codec).
     src/moss/codec.cpp
     src/moss/delay_lm.cpp
     src/moss/generation.cpp
     src/moss/frontend.cpp
     src/moss/engine.cpp
+    src/moss/reference_wav.cpp
+    src/moss/sfx_model.cpp
+    src/moss/sfx_text_encoder.cpp
+    src/moss/sfx_dit.cpp
+    src/moss/sfx_vae.cpp
+    src/moss/sfx_prompt.cpp
+    src/moss/sfx_sampler.cpp
+    src/moss/sfx_tokenizer.cpp
+    src/moss/sfx_engine.cpp
+    src/moss/gguf_metadata.cpp
+    src/moss/speech_lm.cpp
+    src/moss/speech_tokenizer.cpp
+    src/moss/speech_codec.cpp
+    src/moss/speech_prompt.cpp
+    src/moss/speech_generation.cpp
+    src/moss/speech_engine.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -1436,11 +1451,50 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-cancel)
     tts_cpp_register_test(test-moss-cancel)
 
+    add_executable(test-moss-codec-stream test/moss/test_codec_stream.cpp)
+    target_link_libraries(test-moss-codec-stream PRIVATE tts-cpp)
+    target_include_directories(test-moss-codec-stream PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-codec-stream)
+    tts_cpp_register_test(test-moss-codec-stream)
+
     add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-cli PRIVATE tts-cpp)
     target_include_directories(test-moss-cli PRIVATE src)
     tts_cpp_apply_ccache(test-moss-cli)
     tts_cpp_register_test(test-moss-cli)
+
+    add_executable(test-moss-dialogue test/moss/test_dialogue.cpp)
+    target_link_libraries(test-moss-dialogue PRIVATE tts-cpp)
+    target_include_directories(test-moss-dialogue PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-dialogue)
+    tts_cpp_register_test(test-moss-dialogue)
+
+    add_executable(test-moss-sfx test/moss/test_sfx.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-sfx PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx PRIVATE src)
+    target_compile_options(test-moss-sfx PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    tts_cpp_apply_ccache(test-moss-sfx)
+    tts_cpp_register_test(test-moss-sfx)
+
+    add_executable(test-moss-speech test/moss/test_speech.cpp src/moss/cli.cpp)
+    target_link_libraries(test-moss-speech PRIVATE tts-cpp)
+    target_include_directories(test-moss-speech PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-speech)
+    tts_cpp_register_test(test-moss-speech)
+
+    add_executable(test-moss-sfx-parity test/moss/test_sfx_parity.cpp)
+    target_link_libraries(test-moss-sfx-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx-parity PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-sfx-parity)
+    tts_cpp_register_test(test-moss-sfx-parity LABEL "fixture")
+    set_property(TEST test-moss-sfx-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-moss-speech-parity test/moss/test_speech_parity.cpp)
+    target_link_libraries(test-moss-speech-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-speech-parity PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-speech-parity)
+    tts_cpp_register_test(test-moss-speech-parity LABEL "fixture")
+    set_property(TEST test-moss-speech-parity PROPERTY SKIP_RETURN_CODE 77)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
@@ -3052,6 +3106,15 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-supertonic-fit-params PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-supertonic-fit-params)
     tts_cpp_register_test(test-supertonic-fit-params LABEL "unit")
+
+    # fit_price_graph on a metadata-only graph: weights marked allocated with
+    # no backend buffer must price under the forced scheduler shape instead of
+    # aborting in ggml-alloc, and must agree with the direct pricer.
+    add_executable(test-fit-price-unbuffered test/test_fit_price_unbuffered.cpp)
+    target_link_libraries(test-fit-price-unbuffered PRIVATE tts-cpp ggml)
+    target_include_directories(test-fit-price-unbuffered PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-fit-price-unbuffered)
+    tts_cpp_register_test(test-fit-price-unbuffered LABEL "unit")
     tts_cpp_register_test(test-supertonic-fit-params-v2
         EXE      test-supertonic-fit-params
         LABEL    "fixture"

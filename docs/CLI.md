@@ -13,6 +13,7 @@ Part of the [qvac-fabric-speech.cpp documentation](../README.md).
 | `supertonic-cli` | tts | standalone Supertonic synthesis |
 | `cosyvoice-cli` | tts | CosyVoice3 synthesis |
 | `audio8-cli` | tts | Audio8 synthesis and zero-shot voice cloning |
+| `moss-cli` | tts | MOSS Delay synthesis, MOSS-SoundEffect (`--mode sfx`), and MOSS-Speech speech-to-speech (`--mode s2s`) |
 | `music-cli` | audiogen | end-to-end text-to-music |
 | `acestep-cli` | audiogen | Oobleck VAE decode and roundtrip harness |
 | `acestep-quantize` | audiogen | requantize converted ACE-Step or MiniMax-Music3 stage GGUFs |
@@ -60,11 +61,10 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --compile-dir engines/parakeet/models
 ```
 
-EOU Core ML is correctness-first: direct calls use Core ML only at the
-sidecar's exact mel-frame shape, while longer offline inputs are divided into
-overlapping exact-shape windows made entirely from real mel frames. Shorter
-inputs, startup/tail streaming windows, and other mismatching calls fall back
-to ggml; EOU never pads a short call to activate Core ML. Use
+EOU Core ML is correctness-first: calls use Core ML only at the sidecar's
+exact mel-frame shape. Shorter inputs, longer offline inputs, startup/tail
+streaming windows, and other mismatching calls fall back to ggml; EOU never
+pads a short call to activate Core ML. Use
 `PARAKEET_COREML_DISABLE=1` for a forced-ggml comparison, or run the
 `parakeet-eou` desktop benchmark family for required-Core-ML versus Metal
 timing and normalized JFK WER.

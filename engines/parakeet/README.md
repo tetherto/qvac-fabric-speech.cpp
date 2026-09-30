@@ -4,23 +4,29 @@ Parakeet is a pure C++/ggml implementation of NVIDIA FastConformer ASR,
 end-of-turn detection, and Sortformer speaker diarization. Inference requires no
 Python, PyTorch, NeMo, or ONNX Runtime. A single `parakeet::Engine` loads CTC,
 RNN-T, TDT, EOU, Nemotron, or Sortformer GGUFs and selects the implementation
-from GGUF metadata.
+from GGUF metadata. MOSS-Transcribe-Diarize, a Qwen3-based model that
+transcribes and labels speakers in one pass (with optional per-request
+hotwords), ships alongside with its own `parakeet::moss::TranscribeEngine`
+and `moss-transcribe` CLI; see
+[docs/moss-transcribe.md](docs/moss-transcribe.md).
 
 ## Supported checkpoints
 
 | HF repository | Decoder/task | Mel | `d_model × layers` | Vocab | Parameters | GGUF size | Recorded RTF | Languages and notes |
 |---|---|---:|---|---:|---:|---|---|---|
-| `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English |
-| `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English |
-| `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; requires `--language` or `EngineOptions::language` |
+| `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English; optional Core ML offline encoder |
+| `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English; optional Core ML offline encoder |
+| `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; optional Core ML offline encoder; requires `--language` or `EngineOptions::language` |
 | `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 x 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder with an optional Core ML sidecar; cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
-| `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization |
-| `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization |
-| `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token |
-| `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; cache-aware streaming at 80/160/320/560/1120 ms |
+| `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization; optional Core ML offline encoder |
+| `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization; optional Core ML offline encoder |
+| `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token; Core ML exact-shape encoder |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; cache-aware streaming at 80/160/320/560/1120 ms; Core ML exact-shape offline encoder |
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | Sortformer | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Streaming-trained; sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps; Core ML exact-shape batch/AOSC encoder |
+| `nvidia/Nemotron-3-Diarization` | Nemotron diarization + AOSC | 128 | 512 × 31 RoPE | n/a | — | 107 MB q8_0 GGUF | not benchmarked | Eight speakers, 10 ms probabilities, native offline and cached streaming |
+| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | Whisper-shaped encoder + Qwen3 decoder (text, speakers, timestamps) | 80 | 1024 × 24 encoder, 1024 × 28 decoder | 151936 | 0.9 B | 1.8 GB f16 / 0.98 GB q8_0 / 0.64 GB q5_0 | 0.05–0.39 f16 Metal (2 to 30 min) | Multilingual checkpoint, validated on Spanish and Chinese; English long-form skips spans, as in the reference model; per-request hotwords; separate `moss-transcribe` API and CLI |
 
 TDT 0.6B-v3 and TDT 1.1B are distinct model contracts: only 0.6B-v3 is
 multilingual and punctuation/capitalization-aware. Encoder topology, including
@@ -41,7 +47,42 @@ and only encodes `chunk + right context` new frames per step. The
 `parakeet.unified.*` metadata existed fall back to the published checkpoint
 contexts.
 
-Nemotron offline inference uses the GGUF's default 320 ms operating point
+Nemotron 3 Diarization loads NVIDIA's official `Nemotron-3-Diarization.q8_0.gguf`
+directly. Use it with `--model` for standalone diarization or
+`--diarization-model` with a Parakeet ASR model for speaker attribution. Its
+native output contains eight independent speaker probabilities every 10 ms.
+The streaming API uses a speaker cache and 80 ms encoder frames; its default
+chunk is 1040 ms with 0 ms left and 80 ms right context. Explicit 80 ms left
+context retains one encoder frame. Streaming uses a gain from its first window
+for the whole session; offline inference normalizes its full input. Custom chunk and context durations
+must be multiples of 80 ms. The Q8 checkpoint is covered by a numerical
+reference test against NVIDIA's C++ implementation. Vulkan inference and cached
+streaming pass the same numerical and session tests on an AMD Radeon RX 7600 XT.
+GPU performance and streaming accuracy on long conversations remain unmeasured.
+
+Install `huggingface_hub` and download the pinned official GGUF into `models/`:
+
+```bash
+python -m pip install huggingface_hub
+python scripts/download_nemotron_diarization.py
+```
+
+Add `--include-source` to also download the original `.nemo` checkpoint. To
+produce a separate Q8 GGUF from that checkpoint, prepare the pinned NVIDIA
+converter checkout, install its Python requirements, and run:
+
+```bash
+python scripts/convert_nemotron_diarization.py --prepare-only
+python -m pip install -r models/sources/NeMo-Speech.cpp/requirements.txt
+python scripts/convert_nemotron_diarization.py
+```
+
+The conversion script downloads the checkpoint and checks the converter source
+revision, updating a stale checkout to the pinned revision. It writes
+`models/Nemotron-3-Diarization.converted.q8_0.gguf`
+and leaves the official GGUF intact.
+
+Nemotron 3.5 ASR offline inference uses the GGUF's default 320 ms operating point
 (`att_context_size=[56,3]`). `EngineOptions::language` accepts the locale aliases
 stored in the GGUF, and an empty value resolves to `auto`. The selected locale is
 broadcast as a 128-wide one-hot prompt, concatenated to every encoder frame, and
@@ -55,6 +96,51 @@ the sliding-window `left_context_ms` and `right_lookahead_ms` knobs are ignored
 for Nemotron.
 
 ## Core ML encoder sidecars
+
+`PARAKEET_COREML=ON` (Apple-only, default `OFF`) lets the FastConformer encoder
+run from a compiled `<model>-encoder.mlmodelc` next to the GGUF. Mel
+preprocessing and every decoder or speaker head stay on ggml. Each family
+routes inputs to the sidecar under one of three contracts:
+
+| Family | Contract | Inputs the sidecar does not take |
+|---|---|---|
+| CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
+| EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
+| Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
+| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
+| Sortformer v1, v2 | no sidecar | always ggml |
+
+Missing or incompatible sidecars and prediction failures fall back to ggml,
+and `PARAKEET_COREML_DISABLE=1` forces ggml. `Engine::encoder_on_coreml()`
+reports that a sidecar loaded; `EngineResult::encoder_used_coreml` reports
+whether every encoder invocation of a transcription ran on it. TDT and EOU
+export commands, benchmarking, and placement controls are in
+[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar).
+
+The English CTC checkpoints (`parakeet-ctc-0.6b`, `parakeet-ctc-1.1b`) meet
+the same export contract as IndicConformer (offline, batch-normalized
+convolution, unbounded attention) and load through its sidecar path; among
+CTC checkpoints, the Core ML parity and CLI bench tests cover only
+IndicConformer.
+
+IndicConformer CTC uses the fixed-capacity sidecar contract shared by the
+offline TDT and Unified encoders. The FastConformer stack runs in Core ML,
+while the multilingual CTC vocabulary projection and language mask stay on
+ggml. Short inputs are padded to the compiled capacity and long inputs use the
+overlapping encoder-window plan:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/indic-conformer-600m-multilingual.f16.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/indic-conformer-600m-multilingual-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside any quantization as
+`indic-conformer-600m-multilingual-encoder.mlmodelc`. Missing or incompatible
+sidecars and prediction failures fall back to the complete ggml path.
 
 Unified RNN-T uses the same fixed-capacity sidecar contract as TDT. Shorter
 inputs are zero-padded to the exported capacity, and oversized inputs use the
@@ -129,9 +215,7 @@ sidecar accepts up to its masked encoder-frame capacity (410 for the default
 cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
 or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
-subsequent chunks go directly to ggml. See
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar) for Unified RNN-T/TDT/EOU/Nemotron
-details and runtime controls.
+subsequent chunks go directly to ggml.
 
 ## Performance
 
@@ -198,11 +282,14 @@ optimization history: [docs/performance.md](docs/performance.md).
 | Public C++ API and Sortformer AOSC | [docs/api.md](docs/api.md) |
 | CLI, microphone examples, memory-fit preflight | [docs/cli.md](docs/cli.md) |
 | Tests and NeMo parity | [docs/testing.md](docs/testing.md) |
+| MOSS-Transcribe-Diarize (conversion, CLI, API, tests) | [docs/moss-transcribe.md](docs/moss-transcribe.md) |
 | Benchmark method, CI snapshots, decode optimization history | [docs/performance.md](docs/performance.md) |
 
 ## License
 
 Code is Apache-2.0. CTC, RNN-T, TDT, and Sortformer weights are CC-BY-4.0 unless
 their model card says otherwise. `parakeet_realtime_eou_120m-v1` uses the
-NVIDIA Open Model License. Nemotron 3.5 ASR Streaming 0.6B uses OpenMDW-1.1.
+NVIDIA Open Model License. Nemotron 3.5 ASR Streaming 0.6B and Nemotron 3
+Diarization use OpenMDW-1.1; redistribution of their weights must retain the
+license and applicable origin notices.
 No weights are shipped by this repository.
