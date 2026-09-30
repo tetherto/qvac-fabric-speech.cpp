@@ -684,6 +684,11 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_abcba_rttm    "${PARAKEET_TEST_AUDIO_DIR}/abcba.rttm")
     set(_qvp_abcdba_wav    "${PARAKEET_TEST_AUDIO_DIR}/abcdba.wav")
     set(_qvp_abcdba_rttm   "${PARAKEET_TEST_AUDIO_DIR}/abcdba.rttm")
+    # 6-minute mono 16 kHz PCM WAV, > k_enc_proj_T_max = 4096 encoder frames
+    # (frame stride 80 ms => 4096 * 0.08 = 327.68 s ~= 5.5 min). Staged
+    # optionally so tests that need to cross the window-split boundary
+    # register but stay DISABLED on hosts without it.
+    set(_qvp_speech_6min_wav "${PARAKEET_TEST_AUDIO_DIR}/speech-6min.wav")
     set(_qvp_ctc_ref       "${PARAKEET_TEST_REF_DIR}/ctc-ref")
     set(_qvp_tdt_ref       "${PARAKEET_TEST_REF_DIR}/tdt-ref")
     set(_qvp_rnnt_hybrid_ref "${PARAKEET_TEST_REF_DIR}/rnnt-ref")
@@ -793,6 +798,46 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-parakeet-streaming
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+
+    # Quantized TDT and EOU decoded on Hexagon HTP0. Hexagon GET_ROWS accepts
+    # F32 only, so backend_runs_embedding_lookup() rejects the Q8_0
+    # predict_embed and tdt_prepare_runtime / eou_prepare_runtime allocate an
+    # F32 copy (see parakeet_tdt.cpp:1282, parakeet_eou.cpp:732). These tests
+    # exercise that F32 fallback end to end: transcribe (Mode 1) must produce
+    # non-empty text and match the streaming (Mode 2) tokenization across the
+    # standard chunk_ms sweep. Auto-skip via SKIP_RETURN_CODE on hosts
+    # without HTP0.
+    parakeet_register_test(test-streaming-tdt-hexagon
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                 "--backend" "hexagon"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-streaming-eou-hexagon
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                 "--backend" "hexagon"
+        REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}")
+
+    # Long-form offline TDT and EOU that cross k_enc_proj_T_max = 4096
+    # encoder frames. tdt_decode_graph and eou_decode_graph split the encoded
+    # recording into bounded projection windows while preserving predictor
+    # state and (for TDT) the duration carry across each split; without a
+    # test above 4096 frames, a state-carry bug at the boundary would go
+    # unnoticed. speech-6min.wav is ~5.5 min => ~4500 encoder frames, which
+    # forces one window transition. Auto-DISABLED when the fixture is not
+    # staged. See parakeet_tdt.cpp:1878 and parakeet_eou.cpp for the split.
+    parakeet_register_test(test-streaming-tdt-long-form
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_speech_6min_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_speech_6min_wav}")
+    parakeet_register_test(test-streaming-eou-long-form
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_speech_6min_wav}"
+        REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_speech_6min_wav}")
 
     add_executable(test-unified-streaming test/test_unified_streaming.cpp)
     target_link_libraries(test-unified-streaming PRIVATE qvac-parakeet)
@@ -911,6 +956,48 @@ if (PARAKEET_BUILD_TESTS)
                  "--wav"   "${_qvp_abcdba_wav}"
                  "--ref-rttm" "${_qvp_abcdba_rttm}"
         REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_abcdba_wav}" "${_qvp_abcdba_rttm}")
+
+    # test-encoder-backend-parity (built above, outside PARAKEET_BUILD_TESTS)
+    # is registered here so ctest exercises the per-stage CPU-vs-Hexagon
+    # encoder cosine gate on every Parakeet family. The harness auto-skips
+    # (returns 3, treated as SKIPPED via SKIP_RETURN_CODE) on builds without
+    # the requested backend, so a CPU-only host build shows these as "Not
+    # Run" rather than failing.
+    #
+    # Coverage of PARAKEET_F16_ACTIVATIONS: the compile-time flag drives the
+    # F16 pad+cast helpers in parakeet_ctc.cpp. When the flag is ON (default
+    # after f409940a) these tests exercise the padded attention boundary
+    # against CPU. When the flag is OFF the helpers become no-ops and the
+    # same tests structurally validate the F32 fast path. To cover BOTH
+    # settings in one CI matrix, build twice: once with
+    # `-DPARAKEET_F16_ACTIVATIONS=ON` and once with `OFF`, then run
+    # `ctest -L parity`.
+    if (TARGET test-encoder-backend-parity)
+        parakeet_register_test(test-encoder-backend-parity-ctc
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_ctc_f16_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_ctc_f16_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-tdt
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_tdt_f16_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-eou
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.995"
+            REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-sortformer
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_sf_f16_gguf}" "--wav" "${_qvp_diar_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_sf_f16_gguf}" "${_qvp_diar_wav}")
+    endif()
 
     add_executable(test-perf-regression test/test_perf_regression.cpp)
     target_link_libraries(test-perf-regression PRIVATE qvac-parakeet)
