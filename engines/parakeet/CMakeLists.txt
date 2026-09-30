@@ -1685,7 +1685,7 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-tdt-unroll-parity
         ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
-    # Multi-piece French guard for the on-device predictor (QVAC-21005): the gpu0
+    # Multi-piece French guard for the on-device predictor: the gpu0
     # scalar path and the gpu1 graph path must produce identical token IDs on a
     # word with multiple word-final sub-words (e.g. "analyses"). English jfk does
     # not exercise this, and the divergence only surfaces when the graph path runs
