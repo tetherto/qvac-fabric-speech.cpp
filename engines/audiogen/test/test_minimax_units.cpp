@@ -6,6 +6,7 @@
 #include "minimax/mm3-flash-attn.h"
 #include "minimax/mm3-flow-runtime.h"
 #include "minimax/mm3-linear.h"
+#include "minimax/mm3-lm-graph.h"
 #include "minimax/mm3-replay-io.h"
 #include "minimax/mm3-window-orchestrator.h"
 #include "minimax/progress.h"
@@ -790,6 +791,314 @@ void test_dit_block_batches_cfg_branches() {
 
     ggml_backend_buffer_free(fixture.buffer);
     ggml_free(fixture.ctx);
+    ggml_backend_free(cpu);
+}
+
+// Uploads a stacked copy of the parts, rows in the given order.
+void stack_rows(ggml_tensor * stacked, const std::vector<ggml_tensor *> & parts) {
+    size_t offset = 0;
+    for (ggml_tensor * part : parts) {
+        std::vector<uint8_t> bytes(ggml_nbytes(part));
+        ggml_backend_tensor_get(part, bytes.data(), 0, bytes.size());
+        ggml_backend_tensor_set(stacked, bytes.data(), offset, bytes.size());
+        offset += bytes.size();
+    }
+}
+
+void test_lm_positions_tile_cfg_rows() {
+    MM3LmGraph graph;
+    graph.kv_pos = 3;
+    graph.n_ctx  = 8;
+    mm3_lm_fill_positions(&graph, 2);
+    CHECK(graph.pos_host == std::vector<int32_t>({ 3, 4, 3, 4 }));
+    CHECK(graph.rows_host == std::vector<int64_t>({ 3, 4, 11, 12 }));
+}
+
+constexpr int64_t kLmTestHidden   = 8;
+constexpr int64_t kLmTestHeadDim  = 4;
+constexpr int64_t kLmTestHeads    = 2;
+constexpr int64_t kLmTestKvHeads  = 1;
+constexpr int64_t kLmTestFfn      = 12;
+constexpr int64_t kLmTestContext  = 8;
+constexpr int64_t kLmTestTokens   = 3;
+constexpr int64_t kLmTestRows     = MM3_LM_CFG_ROWS;
+constexpr int     kLmTestCaches   = 4;
+
+struct LmBlockFixture {
+    MM3LmConfig    config;
+    MM3LmLayer     separate;
+    MM3LmLayer     stacked;
+    ggml_context * ctx = nullptr;
+    ggml_tensor *  full   = nullptr;
+    ggml_tensor *  prefix = nullptr;
+    ggml_tensor *  last   = nullptr;
+    ggml_tensor *  swapped = nullptr;
+    ggml_tensor *  k_cache[kLmTestCaches] = {};
+    ggml_tensor *  v_cache[kLmTestCaches] = {};
+    std::vector<float> input;
+    ggml_backend_buffer_t buffer = nullptr;
+};
+
+void define_lm_block_weights(LmBlockFixture & f) {
+    const int64_t H = kLmTestHidden;
+    const int64_t Q = kLmTestHeadDim * kLmTestHeads;
+    const int64_t K = kLmTestHeadDim * kLmTestKvHeads;
+    const int64_t F = kLmTestFfn;
+    auto matrix = [&](int64_t in, int64_t out) { return ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, in, out); };
+    auto vec    = [&](int64_t n) { return ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, n); };
+    f.separate.attn_norm   = vec(H);
+    f.separate.attn_q      = matrix(H, Q);
+    f.separate.attn_k      = matrix(H, K);
+    f.separate.attn_v      = matrix(H, K);
+    f.separate.attn_output = matrix(Q, H);
+    f.separate.attn_q_norm = vec(kLmTestHeadDim);
+    f.separate.attn_k_norm = vec(kLmTestHeadDim);
+    f.separate.ffn_norm    = vec(H);
+    f.separate.ffn_gate    = matrix(H, F);
+    f.separate.ffn_up      = matrix(H, F);
+    f.separate.ffn_down    = matrix(F, H);
+    f.stacked              = f.separate;
+    f.stacked.attn_q = f.stacked.attn_k = f.stacked.attn_v = nullptr;
+    f.stacked.ffn_gate = f.stacked.ffn_up = nullptr;
+    f.stacked.attn_qkv     = matrix(H, Q + 2 * K);
+    f.stacked.ffn_gate_up  = matrix(H, 2 * F);
+}
+
+void fill_lm_block_weights(LmBlockFixture & f, std::mt19937 & random) {
+    const MM3LmLayer & w = f.separate;
+    for (ggml_tensor * t : { w.attn_q, w.attn_k, w.attn_v, w.attn_output, w.ffn_gate, w.ffn_up, w.ffn_down }) {
+        fill_uniform(t, random, 0.0f);
+    }
+    for (ggml_tensor * t : { w.attn_norm, w.attn_q_norm, w.attn_k_norm, w.ffn_norm }) {
+        fill_uniform(t, random, 1.0f);
+    }
+    stack_rows(f.stacked.attn_qkv, { w.attn_q, w.attn_k, w.attn_v });
+    stack_rows(f.stacked.ffn_gate_up, { w.ffn_gate, w.ffn_up });
+}
+
+// Copies tokens [first, first + count) of both CFG rows of the full input.
+void slice_lm_tokens(const LmBlockFixture & f, ggml_tensor * dst, int64_t first, int64_t count) {
+    std::vector<float> values;
+    for (int64_t b = 0; b < kLmTestRows; b++) {
+        const auto begin = f.input.begin() + (b * kLmTestTokens + first) * kLmTestHidden;
+        values.insert(values.end(), begin, begin + count * kLmTestHidden);
+    }
+    ggml_backend_tensor_set(dst, values.data(), 0, values.size() * sizeof(float));
+}
+
+LmBlockFixture make_lm_block_fixture(ggml_backend_t cpu) {
+    LmBlockFixture f;
+    f.config.embedding_length = (uint32_t) kLmTestHidden;
+    f.config.key_length       = (uint32_t) kLmTestHeadDim;
+    f.config.head_count       = (uint32_t) kLmTestHeads;
+    f.config.head_count_kv    = (uint32_t) kLmTestKvHeads;
+    f.config.rms_eps          = 1e-6f;
+    f.config.rope_freq_base   = 10000.0f;
+
+    ggml_init_params params = { ggml_tensor_overhead() * 40, nullptr, true };
+    f.ctx                   = ggml_init(params);
+    define_lm_block_weights(f);
+    f.full   = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kLmTestHidden, kLmTestTokens, kLmTestRows);
+    f.prefix = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kLmTestHidden, kLmTestTokens - 1, kLmTestRows);
+    f.last   = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kLmTestHidden, 1, kLmTestRows);
+    f.swapped = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kLmTestHidden, kLmTestTokens, kLmTestRows);
+    for (int i = 0; i < kLmTestCaches; i++) {
+        const int64_t width = kLmTestHeadDim * kLmTestKvHeads;
+        f.k_cache[i]        = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F16, width, kLmTestContext * kLmTestRows);
+        f.v_cache[i]        = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F16, width, kLmTestContext * kLmTestRows);
+    }
+    f.buffer = ggml_backend_alloc_ctx_tensors(f.ctx, cpu);
+    ggml_backend_buffer_clear(f.buffer, 0);
+
+    std::mt19937 random(2027);
+    fill_lm_block_weights(f, random);
+    f.input = fill_uniform(f.full, random, 0.0f);
+    slice_lm_tokens(f, f.prefix, 0, kLmTestTokens - 1);
+    slice_lm_tokens(f, f.last, kLmTestTokens - 1, 1);
+    const size_t row_bytes = (size_t) (kLmTestHidden * kLmTestTokens) * sizeof(float);
+    ggml_backend_tensor_set(f.swapped, f.input.data() + row_bytes / sizeof(float), 0, row_bytes);
+    ggml_backend_tensor_set(f.swapped, f.input.data(), row_bytes, row_bytes);
+    return f;
+}
+
+struct LmStep {
+    ggml_tensor * h      = nullptr;
+    int64_t       kv_pos = 0;
+    int           cache  = 0;
+};
+
+// Runs one block over h (T tokens starting at kv_pos) through the production
+// position, row and mask helpers, writing the step into cache `cache`.
+std::vector<float> run_lm_block(ggml_backend_t cpu, const LmBlockFixture & f, const MM3LmLayer & w, LmStep step,
+                                bool flash) {
+    const int64_t T    = step.h->ne[1];
+    const int64_t n_kv = step.kv_pos + T;
+    MM3LmGraph    host;
+    host.kv_pos = step.kv_pos;
+    host.n_ctx  = kLmTestContext;
+    mm3_lm_fill_positions(&host, T);
+    mm3_lm_fill_mask(&host, T, n_kv);
+
+    CpuGraph      graph     = new_cpu_graph();
+    ggml_tensor * positions = ggml_new_tensor_1d(graph.ctx, GGML_TYPE_I32, T * kLmTestRows);
+    ggml_tensor * rows      = ggml_new_tensor_1d(graph.ctx, GGML_TYPE_I64, T * kLmTestRows);
+    ggml_tensor * mask      = ggml_new_tensor_2d(graph.ctx, GGML_TYPE_F16, n_kv, T);
+    for (ggml_tensor * t : { positions, rows, mask }) {
+        ggml_set_input(t);
+    }
+    ggml_tensor * y = mm3_lm_block(graph.ctx, graph.graph, f.config, w, step.h, positions, mask, rows,
+                                   f.k_cache[step.cache], f.v_cache[step.cache], n_kv, flash, GGML_PREC_F32);
+    ggml_build_forward_expand(graph.graph, y);
+    ggml_gallocr_t allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(cpu));
+    CHECK(ggml_gallocr_alloc_graph(allocator, graph.graph));
+    ggml_backend_tensor_set(positions, host.pos_host.data(), 0, ggml_nbytes(positions));
+    ggml_backend_tensor_set(rows, host.rows_host.data(), 0, ggml_nbytes(rows));
+    ggml_backend_tensor_set(mask, host.mask_host.data(), 0, ggml_nbytes(mask));
+    CHECK(ggml_backend_graph_compute(cpu, graph.graph) == GGML_STATUS_SUCCESS);
+    std::vector<float> values((size_t) ggml_nelements(y));
+    ggml_backend_tensor_get(y, values.data(), 0, ggml_nbytes(y));
+    ggml_gallocr_free(allocator);
+    ggml_free(graph.ctx);
+    return values;
+}
+
+std::vector<float> lm_token(const std::vector<float> & out, int64_t tokens, int64_t t, int64_t b) {
+    const auto begin = out.begin() + (b * tokens + t) * kLmTestHidden;
+    return std::vector<float>(begin, begin + kLmTestHidden);
+}
+
+// The LM block must give the same result with stacked and separate q/k/v and
+// gate/up weights, a cache filled incrementally (prefix, then one token) must
+// reproduce a single pass over the whole sequence, and each CFG row must only
+// see its own history: swapping the rows' inputs swaps their outputs. The
+// cache holds one [D * heads] row per position with CFG row b at b * n_ctx.
+void test_lm_block_stacking_and_cache() {
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+
+    for (bool flash : { false, true }) {
+        LmBlockFixture f = make_lm_block_fixture(cpu);
+        const std::vector<float> full    = run_lm_block(cpu, f, f.separate, { f.full, 0, 0 }, flash);
+        const std::vector<float> stacked = run_lm_block(cpu, f, f.stacked, { f.full, 0, 1 }, flash);
+        const std::vector<float> prefix  = run_lm_block(cpu, f, f.stacked, { f.prefix, 0, 2 }, flash);
+        const std::vector<float> last    = run_lm_block(cpu, f, f.stacked, { f.last, kLmTestTokens - 1, 2 }, flash);
+        const std::vector<float> swapped = run_lm_block(cpu, f, f.stacked, { f.swapped, 0, 3 }, flash);
+        CHECK(all_close(full, stacked, 1e-5f));
+        for (int64_t t = 0; t < kLmTestTokens; t++) {
+            CHECK(all_close(lm_token(full, kLmTestTokens, t, 0), lm_token(swapped, kLmTestTokens, t, 1), 1e-5f));
+            CHECK(all_close(lm_token(full, kLmTestTokens, t, 1), lm_token(swapped, kLmTestTokens, t, 0), 1e-5f));
+        }
+        for (int64_t b = 0; b < kLmTestRows; b++) {
+            for (int64_t t = 0; t + 1 < kLmTestTokens; t++) {
+                CHECK(all_close(lm_token(full, kLmTestTokens, t, b), lm_token(prefix, kLmTestTokens - 1, t, b), 1e-4f));
+            }
+            CHECK(all_close(lm_token(full, kLmTestTokens, kLmTestTokens - 1, b), lm_token(last, 1, 0, b), 1e-4f));
+        }
+        ggml_backend_buffer_free(f.buffer);
+        ggml_free(f.ctx);
+    }
+    ggml_backend_free(cpu);
+}
+
+struct DepthStackFixture {
+    MM3DepthConfig config;
+    MM3DepthLayer  separate;
+    MM3DepthLayer  stacked;
+    ggml_context * ctx   = nullptr;
+    ggml_tensor *  h     = nullptr;
+    ggml_tensor *  rows  = nullptr;
+    ggml_tensor *  mask  = nullptr;
+    ggml_tensor *  k_cache[2] = {};
+    ggml_tensor *  v_cache[2] = {};
+    ggml_backend_buffer_t buffer = nullptr;
+};
+
+constexpr int64_t kDepthTestHidden = 8;
+constexpr int64_t kDepthTestHeads  = 2;
+constexpr int64_t kDepthTestFfn    = 12;
+constexpr int64_t kDepthTestSeed   = 2;
+
+void define_depth_stack_weights(DepthStackFixture & f) {
+    const int64_t H = kDepthTestHidden;
+    const int64_t F = kDepthTestFfn;
+    auto matrix = [&](int64_t in, int64_t out) { return ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, in, out); };
+    f.separate.attn_norm   = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, H);
+    f.separate.ffn_norm    = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, H);
+    f.separate.attn_q      = matrix(H, H);
+    f.separate.attn_k      = matrix(H, H);
+    f.separate.attn_v      = matrix(H, H);
+    f.separate.attn_output = matrix(H, H);
+    f.separate.ffn_gate    = matrix(H, F);
+    f.separate.ffn_up      = matrix(H, F);
+    f.separate.ffn_down    = matrix(F, H);
+    f.stacked              = f.separate;
+    f.stacked.attn_q = f.stacked.attn_k = f.stacked.attn_v = nullptr;
+    f.stacked.ffn_gate = f.stacked.ffn_up = nullptr;
+    f.stacked.attn_qkv     = matrix(H, 3 * H);
+    f.stacked.ffn_gate_up  = matrix(H, 2 * F);
+}
+
+void fill_depth_stack_inputs(DepthStackFixture & f, std::mt19937 & random) {
+    const MM3DepthLayer & w = f.separate;
+    for (ggml_tensor * t : { w.attn_q, w.attn_k, w.attn_v, w.attn_output, w.ffn_gate, w.ffn_up, w.ffn_down }) {
+        fill_uniform(t, random, 0.0f);
+    }
+    fill_uniform(w.attn_norm, random, 1.0f);
+    fill_uniform(w.ffn_norm, random, 1.0f);
+    stack_rows(f.stacked.attn_qkv, { w.attn_q, w.attn_k, w.attn_v });
+    stack_rows(f.stacked.ffn_gate_up, { w.ffn_gate, w.ffn_up });
+    fill_uniform(f.h, random, 0.0f);
+    const int64_t rows[kDepthTestSeed] = { 0, 1 };
+    ggml_backend_tensor_set(f.rows, rows, 0, sizeof(rows));
+    const float mask[kDepthTestSeed * kDepthTestSeed] = { 0.0f, -INFINITY, 0.0f, 0.0f };
+    ggml_backend_tensor_set(f.mask, mask, 0, sizeof(mask));
+}
+
+DepthStackFixture make_depth_stack_fixture(ggml_backend_t cpu) {
+    DepthStackFixture f;
+    f.config.embedding_length    = (uint32_t) kDepthTestHidden;
+    f.config.feed_forward_length = (uint32_t) kDepthTestFfn;
+    f.config.head_count          = (uint32_t) kDepthTestHeads;
+    f.config.head_dim            = (uint32_t) (kDepthTestHidden / kDepthTestHeads);
+    f.config.rms_eps             = 1e-6f;
+
+    ggml_init_params params = { ggml_tensor_overhead() * 32, nullptr, true };
+    f.ctx                   = ggml_init(params);
+    define_depth_stack_weights(f);
+    f.h    = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kDepthTestHidden, kDepthTestSeed, 2);
+    f.rows = ggml_new_tensor_1d(f.ctx, GGML_TYPE_I64, kDepthTestSeed);
+    f.mask = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, kDepthTestSeed, kDepthTestSeed);
+    for (int i = 0; i < 2; i++) {
+        const int64_t D = kDepthTestHidden / kDepthTestHeads;
+        f.k_cache[i]    = ggml_new_tensor_4d(f.ctx, GGML_TYPE_F32, D, kDepthTestSeed, kDepthTestHeads, 2);
+        f.v_cache[i]    = ggml_new_tensor_4d(f.ctx, GGML_TYPE_F32, D, kDepthTestSeed, kDepthTestHeads, 2);
+    }
+    f.buffer = ggml_backend_alloc_ctx_tensors(f.ctx, cpu);
+    ggml_backend_buffer_clear(f.buffer, 0);
+    std::mt19937 random(2028);
+    fill_depth_stack_inputs(f, random);
+    return f;
+}
+
+std::vector<float> run_depth_stack_block(ggml_backend_t cpu, const DepthStackFixture & f, const MM3DepthLayer & w,
+                                         int cache) {
+    CpuGraph      graph = new_cpu_graph();
+    ggml_tensor * y     = mm3_depth_block(graph.ctx, graph.graph, f.config, w, f.h, f.mask, f.k_cache[cache],
+                                          f.v_cache[cache], f.rows, kDepthTestSeed);
+    return compute_cpu_graph(cpu, graph, y);
+}
+
+// The depth block must give the same result with stacked and separate q/k/v
+// and gate/up weights.
+void test_depth_block_stacked_matches_separate() {
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+    DepthStackFixture f = make_depth_stack_fixture(cpu);
+    CHECK(all_close(run_depth_stack_block(cpu, f, f.separate, 0), run_depth_stack_block(cpu, f, f.stacked, 1), 1e-5f));
+    ggml_backend_buffer_free(f.buffer);
+    ggml_free(f.ctx);
     ggml_backend_free(cpu);
 }
 
@@ -1848,6 +2157,9 @@ int main() {
     test_flow_schedule();
     test_depth_step_layout();
     test_depth_kv_cache_matches_full_prefix();
+    test_depth_block_stacked_matches_separate();
+    test_lm_positions_tile_cfg_rows();
+    test_lm_block_stacking_and_cache();
     test_linear_folds_cfg_rows_into_columns();
     test_dit_block_batches_cfg_branches();
     test_production_dit_readback_preserves_velocity();

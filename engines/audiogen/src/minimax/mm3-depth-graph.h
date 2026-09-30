@@ -135,13 +135,12 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
 
     ggml_tensor * n = mm3_depth_norm(ctx, h, w.attn_norm, c.rms_eps);
 
-    ggml_tensor * q = mm3_linear(ctx, w.attn_q, n, GGML_PREC_F32);
-    ggml_tensor * k = mm3_linear(ctx, w.attn_k, n, GGML_PREC_F32);
-    ggml_tensor * v = mm3_linear(ctx, w.attn_v, n, GGML_PREC_F32);
+    const MM3AttentionInputs inputs = { w.attn_qkv, w.attn_q, w.attn_k, w.attn_v };
+    const MM3HeadProjections heads  = mm3_project_heads(ctx, inputs, n, D, Nh, Nh, GGML_PREC_F32);
 
-    q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, D, Nh, T, B), 0, 2, 1, 3));
-    k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, D, Nh, T, B), 0, 2, 1, 3));
-    v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, D, Nh, T, B), 0, 2, 1, 3));
+    ggml_tensor * q = ggml_cont(ctx, ggml_permute(ctx, heads.q, 0, 2, 1, 3));
+    ggml_tensor * k = ggml_cont(ctx, ggml_permute(ctx, heads.k, 0, 2, 1, 3));
+    ggml_tensor * v = ggml_cont(ctx, ggml_permute(ctx, heads.v, 0, 2, 1, 3));
 
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, k, rows));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, v, rows));
@@ -162,10 +161,9 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
 
     h = ggml_add(ctx, h, mm3_linear(ctx, w.attn_output, attn, GGML_PREC_F32));
 
-    ggml_tensor * n2   = mm3_depth_norm(ctx, h, w.ffn_norm, c.rms_eps);
-    ggml_tensor * gate = ggml_silu(ctx, mm3_linear(ctx, w.ffn_gate, n2, GGML_PREC_F32));
-    ggml_tensor * up   = mm3_linear(ctx, w.ffn_up, n2, GGML_PREC_F32);
-    ggml_tensor * y    = mm3_linear(ctx, w.ffn_down, ggml_mul(ctx, gate, up), GGML_PREC_F32);
+    ggml_tensor * n2    = mm3_depth_norm(ctx, h, w.ffn_norm, c.rms_eps);
+    ggml_tensor * gated = mm3_gated_ffn_input(ctx, w.ffn_gate_up, w.ffn_gate, w.ffn_up, n2, GGML_PREC_F32);
+    ggml_tensor * y     = mm3_linear(ctx, w.ffn_down, gated, GGML_PREC_F32);
     return ggml_add(ctx, h, y);
 }
 

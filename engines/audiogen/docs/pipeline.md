@@ -87,18 +87,28 @@ which CUDA and Vulkan serve with matrix-vector kernels that keep the
 activations and the accumulation in f32 at no cost in speed (CUDA needs a ggml
 that routes `GGML_PREC_F32` on half-precision weights to that kernel,
 [qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104); an
-older one computes the same products with f16 activations). The flow DiT runs both
-branches as one batched forward with a condition gate per branch, which adds
-about 100 MB of DiT compute buffer at the 689-frame window. With the `f16` pair on an RTX 5090
-this generates a 20 s vocal track (500 frames) in 12.3 s on CUDA and 13.8 s on
-Vulkan (15.1 s and 15.7 s before) and a 2-minute song (3000 frames) in 78.3 s
-and 87.2 s (102.3 s and 105.4 s before); the LM decode step drops from 15.8 to
-10.0 ms on CUDA and from 15.7 to 11.9 ms on Vulkan over the 2-minute context.
-A 3001-iteration teacher-forced replay of that song agrees with the CPU
-rendering as closely as before (CFG-guided argmax agreement 99.67 % on CUDA and
-99.83 % on Vulkan, against 99.60 % and 99.87 %), and a 20 s replay through the
-full flow reproduces the CPU audio at 0.99991 (CUDA) and 0.99995 (Vulkan)
-waveform correlation.
+older one computes the same products with f16 activations). The LM and the depth
+decoder also load each layer's q/k/v and gate/up projections stacked into one
+matrix when the parts share a type (MiniMax's own conversions always do; a
+mixed k-quant layer keeps them separate), so a layer reads its input with two
+products instead of five, and the LM keeps its K/V cache as one
+`[head_dim * heads]` row per position with the unconditional row's positions
+after the conditional row's, which attention reads in place. The flow DiT runs
+both branches as one batched forward with a condition gate per branch, which
+adds about 100 MB of DiT compute buffer at the 689-frame window; its biases are
+added straight after their products, where CUDA folds them into the GEMM's f32
+conversion
+([qvac-ext-ggml#105](https://github.com/tetherto/qvac-ext-ggml/pull/105)). With
+the `f16` pair on an RTX 5090 this generates a 20 s vocal track (500 frames) in
+11.7 s on CUDA and 13.2 s on Vulkan (15.1 s and 15.7 s before) and a 2-minute
+song (3000 frames) in 73.9 s and 84.2 s (102.3 s and 105.4 s before); the LM
+decode step drops from 15.8 to 9.6 ms on CUDA and from 15.7 to 11.3 ms on
+Vulkan over the 2-minute context. A 3001-iteration teacher-forced replay of
+that song agrees with the CPU rendering as closely as before (CFG-guided argmax
+agreement 99.70 % on both backends, against 99.60 % on CUDA and 99.87 % on
+Vulkan before), and a 20 s replay through the full flow reproduces the CPU
+audio at 0.99982 (CUDA) and 0.99987 (Vulkan) waveform correlation (0.99988 and
+0.99989 before).
 
 The frame rate, maximum frame count, CFG scale, and output sample rate come from
 GGUF metadata. Current converted files specify 25 frames per second, at most

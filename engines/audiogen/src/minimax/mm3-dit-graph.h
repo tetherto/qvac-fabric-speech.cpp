@@ -206,15 +206,6 @@ static ggml_tensor * mm3_dit_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
 }
 
-// Views one of the q/k/v projections inside the fused QKV output as
-// [head_dim, heads, tokens, branches]. RoPE and the flash-attention cast read
-// the view directly, so the projections are never copied out.
-static ggml_tensor * mm3_dit_head_view(ggml_context * ctx, ggml_tensor * qkv, int64_t D, int64_t Nh,
-                                       int64_t offset) {
-    return ggml_view_4d(ctx, qkv, D, Nh, qkv->ne[1], qkv->ne[2], (size_t) D * qkv->nb[0], qkv->nb[1], qkv->nb[2],
-                        (size_t) offset * qkv->nb[0]);
-}
-
 static ggml_tensor * mm3_dit_rope(ggml_context * ctx, const MM3DitConfig & c, ggml_tensor * x,
                                   ggml_tensor * positions) {
     return ggml_rope_ext(ctx, x, positions, NULL, (int) c.rope_dim, GGML_ROPE_TYPE_NEOX, 0, c.rope_theta, 1.0f, 0.0f,
@@ -232,9 +223,9 @@ static ggml_tensor * mm3_dit_block(ggml_context * ctx, const MM3DitGraph & g, co
     ggml_tensor * n   = mm3_dit_ln(ctx, h, w.attn_norm_w, w.attn_norm_b, c.layer_norm_eps);
     ggml_tensor * qkv = mm3_linear(ctx, w.attn_qkv, n);
 
-    ggml_tensor * q = mm3_dit_rope(ctx, c, mm3_dit_head_view(ctx, qkv, D, Nh, 0), positions);
-    ggml_tensor * k = mm3_dit_rope(ctx, c, mm3_dit_head_view(ctx, qkv, D, Nh, E), positions);
-    ggml_tensor * v = mm3_dit_head_view(ctx, qkv, D, Nh, 2 * E);
+    ggml_tensor * q = mm3_dit_rope(ctx, c, mm3_head_view(ctx, qkv, D, Nh, 0), positions);
+    ggml_tensor * k = mm3_dit_rope(ctx, c, mm3_head_view(ctx, qkv, D, Nh, E), positions);
+    ggml_tensor * v = mm3_head_view(ctx, qkv, D, Nh, 2 * E);
 
     q = ggml_permute(ctx, q, 0, 2, 1, 3);
     k = ggml_permute(ctx, k, 0, 2, 1, 3);
@@ -254,13 +245,13 @@ static ggml_tensor * mm3_dit_block(ggml_context * ctx, const MM3DitGraph & g, co
     h    = ggml_add(ctx, h, mm3_linear(ctx, w.attn_output, attn));
 
     ggml_tensor * n2 = mm3_dit_ln(ctx, h, w.ffn_norm_w, w.ffn_norm_b, c.layer_norm_eps);
-    ggml_tensor * f  = ggml_add(ctx, mm3_linear(ctx, w.ffn_in_w, n2), w.ffn_in_b);
+    ggml_tensor * f  = mm3_linear_bias(ctx, w.ffn_in_w, w.ffn_in_b, n2);
 
     // value_gate order: the value half comes first, so the swapped SwiGLU
     // computes value * silu(gate) without splitting the halves apart.
     ggml_tensor * y = ggml_swiglu_swapped(ctx, f);
 
-    y = ggml_add(ctx, mm3_linear(ctx, w.ffn_out_w, y), w.ffn_out_b);
+    y = mm3_linear_bias(ctx, w.ffn_out_w, w.ffn_out_b, y);
     return ggml_add(ctx, h, y);
 }
 

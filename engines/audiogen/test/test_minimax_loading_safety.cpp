@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -151,6 +152,93 @@ void test_truncated_tiny_gguf() {
     std::filesystem::remove(path);
 }
 
+constexpr int64_t kStackWidth = 4;
+
+ggml_tensor * add_stack_part(ggml_context * context, gguf_context * gguf, const char * name, ggml_type type,
+                             int64_t rows, float base) {
+    ggml_tensor * tensor = ggml_new_tensor_2d(context, type, kStackWidth, rows);
+    ggml_set_name(tensor, name);
+    for (int64_t i = 0; i < ggml_nelements(tensor); i++) {
+        const float value = base + (float) i;
+        if (type == GGML_TYPE_F16) {
+            static_cast<ggml_fp16_t *>(tensor->data)[i] = ggml_fp32_to_fp16(value);
+        } else {
+            static_cast<float *>(tensor->data)[i] = value;
+        }
+    }
+    gguf_add_tensor(gguf, tensor);
+    return tensor;
+}
+
+// Two F32 parts that stack and an F16 part that does not stack with them.
+bool write_stacking_gguf(const std::filesystem::path & path) {
+    constexpr size_t kContextBytes = 16384;
+    ggml_init_params params = { kContextBytes, nullptr, false };
+    ggml_context * context = ggml_init(params);
+    if (!context) {
+        return false;
+    }
+    gguf_context * gguf = gguf_init_empty();
+    add_stack_part(context, gguf, "part.a", GGML_TYPE_F32, 2, 0.0f);
+    add_stack_part(context, gguf, "part.b", GGML_TYPE_F32, 3, 100.0f);
+    add_stack_part(context, gguf, "part.half", GGML_TYPE_F16, 2, 200.0f);
+    const bool written = gguf_write_to_file(gguf, path.string().c_str(), false);
+    gguf_free(gguf);
+    ggml_free(context);
+    return written;
+}
+
+std::vector<float> expected_stack() {
+    std::vector<float> values;
+    for (int64_t i = 0; i < 2 * kStackWidth; i++) {
+        values.push_back((float) i);
+    }
+    for (int64_t i = 0; i < 3 * kStackWidth; i++) {
+        values.push_back(100.0f + (float) i);
+    }
+    return values;
+}
+
+// Stacking must concatenate the parts row for row, and quietly decline (no
+// load error) whenever the parts cannot share one tensor, so the caller falls
+// back to loading them one by one.
+void test_stacked_projection_loading() {
+    const std::filesystem::path path = tiny_gguf_path();
+    CHECK(write_stacking_gguf(path));
+    GGUFModel gf = {};
+    CHECK(gf_load(&gf, path.string().c_str()));
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+
+    WeightCtx wctx = {};
+    wctx_init(&wctx, 4);
+    std::map<std::string, ggml_tensor *> tmap;
+    std::vector<std::string>             errors;
+    MM3Loader                            loader{ &wctx, &gf, &tmap, &errors };
+
+    ggml_tensor * stacked = loader.try_stacked("part.ab", { "part.a", "part.b" }, kStackWidth, { 2, 3 });
+    CHECK(stacked != nullptr);
+    CHECK(loader.try_stacked("part.mixed", { "part.a", "part.half" }, kStackWidth, { 2, 2 }) == nullptr);
+    CHECK(loader.try_stacked("part.missing", { "part.a", "part.none" }, kStackWidth, { 2, 2 }) == nullptr);
+    CHECK(loader.try_stacked("part.shape", { "part.a", "part.b" }, kStackWidth, { 2, 2 }) == nullptr);
+    CHECK(errors.empty());
+    CHECK(tmap.size() == 1 && tmap.count("part.ab") == 1);
+
+    if (stacked && cpu && wctx_alloc(&wctx, cpu)) {
+        CHECK(stacked->type == GGML_TYPE_F32 && stacked->ne[0] == kStackWidth && stacked->ne[1] == 5);
+        std::vector<float> values((size_t) ggml_nelements(stacked));
+        ggml_backend_tensor_get(stacked, values.data(), 0, ggml_nbytes(stacked));
+        CHECK(values == expected_stack());
+    }
+
+    wctx_free(&wctx);
+    if (cpu) {
+        ggml_backend_free(cpu);
+    }
+    gf_close(&gf);
+    std::filesystem::remove(path);
+}
+
 MM3LmConfig valid_lm_config() {
     MM3LmConfig config;
     config.block_count = 1;
@@ -265,6 +353,7 @@ int main() {
     test_typed_metadata_getters();
     test_tensor_range_validation();
     test_truncated_tiny_gguf();
+    test_stacked_projection_loading();
     test_context_metadata_validation();
     test_context_position_validation();
     test_context_bucket_validation();
