@@ -88,18 +88,7 @@ static bool mm3_flow_sample_chunk(const MM3Model & m, const float * noise, const
         // allocator recycles input blocks for intermediates once their last
         // consumer has run, so data left in mm3_dit_cond does not survive a
         // graph compute.
-        if (!mm3_dit_run(m, &g_mm3_dit, out_latents.data(), cond, 1.0f, t, L, pred_c.data(), err)) {
-            return false;
-        }
-
-        if (tts_cpp::minimax::detail::cancellation_requested(should_cancel)) {
-            if (err) {
-                *err = MM3_ERR_CANCELLED;
-            }
-            return false;
-        }
-
-        if (!mm3_dit_run(m, &g_mm3_dit, out_latents.data(), cond, 0.0f, t, L, pred_u.data(), err)) {
+        if (!mm3_dit_run_cfg(m, &g_mm3_dit, out_latents.data(), cond, t, L, pred_c.data(), pred_u.data(), err)) {
             return false;
         }
 

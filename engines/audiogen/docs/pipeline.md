@@ -49,13 +49,15 @@ single-shot decode, so the `q4_k_m` pair completes full generations on a
 10 GiB GPU (RTX 3080, peak 9.4 GiB alongside a desktop) and on a 16 GB
 Apple-silicon Mac over Metal (peak RSS 8.4 GiB), both of which the `q8_0`
 pair cannot fit. The flow DiT runs with flash attention by default on a GPU
-backend (off on CPU); set `MM3_DIT_NO_FLASH=1` to force it off. The LM keeps
-non-flash attention by default because flash attention drifts its sampled
-logits; set `MM3_LM_FLASH=1` to opt it in on a GPU, or `MM3_LM_NO_FLASH=1` to
-force it off (this wins if both are set). One MiniMax engine instance may be
-active at a time because its compute graphs are shared. The weight-free
-`test-minimax-metal-ops` regression compares the 4096-channel condition
-projection and every DAC transposed-convolution stride against CPU on Metal.
+backend (off on CPU); set `MM3_DIT_NO_FLASH=1` to force it off. The LM runs
+flash attention by default on CUDA and Vulkan, where its teacher-forced logits
+were measured against the CPU rendering, and keeps the explicit-softmax path on
+every other backend; set `MM3_LM_FLASH=1` to opt another GPU backend in, or
+`MM3_LM_NO_FLASH=1` to force it off (this wins if both are set). One MiniMax
+engine instance may be active at a time because its compute graphs are shared.
+The weight-free `test-minimax-metal-ops` regression compares the 4096-channel
+condition projection and every DAC transposed-convolution stride against CPU on
+Metal.
 
 Vulkan and CUDA are the measured GPU backends at `q8_0`/`f16`, both on an RTX
 5090. On each, `mm3-replay --mode replay` forcing the recorded official prompt
@@ -76,6 +78,27 @@ byte-identical, and `q4_k_m` generates faster than `q8_0` (Strix Vulkan
 94.7 s vs 105.5 s, CPU 397 s vs 471 s for the same 12 s clip). OpenCL
 remains unmeasured for MiniMax and takes the same all-on-GPU placement, so
 measure it the same way before shipping it.
+
+Every stage evaluates both classifier-free-guidance branches in one pass. The
+LM and the RVQ depth decoder fold the conditional and unconditional rows into
+the columns of each weight product, so a decode step streams every weight once
+instead of once per branch; those two-column products request `GGML_PREC_F32`,
+which CUDA and Vulkan serve with matrix-vector kernels that keep the
+activations and the accumulation in f32 at no cost in speed (CUDA needs a ggml
+that routes `GGML_PREC_F32` on half-precision weights to that kernel,
+[qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104); an
+older one computes the same products with f16 activations). The flow DiT runs both
+branches as one batched forward with a condition gate per branch, which adds
+about 100 MB of DiT compute buffer at the 689-frame window. With the `f16` pair on an RTX 5090
+this generates a 20 s vocal track (500 frames) in 12.3 s on CUDA and 13.8 s on
+Vulkan (15.1 s and 15.7 s before) and a 2-minute song (3000 frames) in 78.3 s
+and 87.2 s (102.3 s and 105.4 s before); the LM decode step drops from 15.8 to
+10.0 ms on CUDA and from 15.7 to 11.9 ms on Vulkan over the 2-minute context.
+A 3001-iteration teacher-forced replay of that song agrees with the CPU
+rendering as closely as before (CFG-guided argmax agreement 99.67 % on CUDA and
+99.83 % on Vulkan, against 99.60 % and 99.87 %), and a 20 s replay through the
+full flow reproduces the CPU audio at 0.99991 (CUDA) and 0.99995 (Vulkan)
+waveform correlation.
 
 The frame rate, maximum frame count, CFG scale, and output sample rate come from
 GGUF metadata. Current converted files specify 25 frames per second, at most

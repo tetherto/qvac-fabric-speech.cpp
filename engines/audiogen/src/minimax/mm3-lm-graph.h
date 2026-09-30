@@ -5,6 +5,7 @@
 #include "backend.h"
 #include "ggml.h"
 #include "mm3-flash-attn.h"
+#include "mm3-linear.h"
 
 #include <algorithm>
 #include <chrono>
@@ -133,9 +134,17 @@ static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_t
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
 }
 
+// Decode steps project two columns (the CFG pair), which the GPU matrix-vector
+// kernels serve in f32 at no cost; the prefill's wide products keep the default
+// precision and its tensor-core GEMMs.
+static ggml_prec mm3_lm_linear_precision(bool decode) {
+    return decode ? GGML_PREC_F32 : GGML_PREC_DEFAULT;
+}
+
 static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM3LmConfig & c, const MM3LmLayer & w,
                                   ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
-                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash) {
+                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
+                                  ggml_prec precision) {
     const int64_t H   = (int64_t) c.embedding_length;
     const int64_t D   = (int64_t) c.key_length;
     const int64_t Nh  = (int64_t) c.head_count;
@@ -145,9 +154,9 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
 
     ggml_tensor * n = mm3_lm_rms(ctx, h, w.attn_norm, c.rms_eps);
 
-    ggml_tensor * q = ggml_mul_mat(ctx, w.attn_q, n);
-    ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);
-    ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
+    ggml_tensor * q = mm3_linear(ctx, w.attn_q, n, precision);
+    ggml_tensor * k = mm3_linear(ctx, w.attn_k, n, precision);
+    ggml_tensor * v = mm3_linear(ctx, w.attn_v, n, precision);
 
     q = ggml_reshape_4d(ctx, q, D, Nh, T, B);
     k = ggml_reshape_4d(ctx, k, D, Nkv, T, B);
@@ -181,12 +190,12 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     }
     attn = ggml_reshape_3d(ctx, attn, H, T, B);
 
-    h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
+    h = ggml_add(ctx, h, mm3_linear(ctx, w.attn_output, attn, precision));
 
     ggml_tensor * n2   = mm3_lm_rms(ctx, h, w.ffn_norm, c.rms_eps);
-    ggml_tensor * gate = ggml_silu(ctx, ggml_mul_mat(ctx, w.ffn_gate, n2));
-    ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
-    return ggml_add(ctx, h, ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up)));
+    ggml_tensor * gate = ggml_silu(ctx, mm3_linear(ctx, w.ffn_gate, n2, precision));
+    ggml_tensor * up   = mm3_linear(ctx, w.ffn_up, n2, precision);
+    return ggml_add(ctx, h, mm3_linear(ctx, w.ffn_down, ggml_mul(ctx, gate, up), precision));
 }
 
 static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad,
@@ -265,7 +274,7 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
 
     for (size_t i = 0; i < m.lm.blk.size(); i++) {
         h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn);
+                         n_kv_pad, g->use_flash_attn, mm3_lm_linear_precision(decode));
     }
     h = mm3_lm_rms(ctx, h, m.lm.output_norm, c.rms_eps);
 
@@ -276,7 +285,7 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
     ggml_set_name(s->out_hidden, "mm3_lm_last_hidden");
     ggml_set_output(s->out_hidden);
 
-    s->out_logits = ggml_mul_mat(ctx, m.lm.output_compact, last);
+    s->out_logits = mm3_linear(ctx, m.lm.output_compact, last, mm3_lm_linear_precision(decode));
     ggml_set_name(s->out_logits, "mm3_lm_logits");
     ggml_set_output(s->out_logits);
 
@@ -366,8 +375,9 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         g->cpu_backend = bp.cpu_backend;
         g->backend_ref = true;
 
-        g->use_flash_attn =
-            mm3_use_flash_attn(bp.has_gpu, /*default_on=*/false, "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
+        g->use_flash_attn = mm3_use_flash_attn(
+            bp.has_gpu, mm3_lm_flash_attn_default(tts_cpp::acestep::backend_reg_name(bp.backend)),
+            "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
         g->lm_token    = lt;
         g->synth_token = st;
     }

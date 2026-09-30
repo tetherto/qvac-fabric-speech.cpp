@@ -101,6 +101,29 @@ from the harness: no failures and no silent renders in 180 rounds, 10/10
 unique WAV hashes per lane, and duration error at most 1.2 s against the
 requested song length.
 
+### MiniMax-Music3 f16 on RTX 5090 (2026-09)
+
+`mm3-replay --mode full` on the RTX 5090 box with the `f16` pair: one fixed
+caption, seed 7, warm driver shader cache, in-process pipeline time (the
+`[MM3-Pipe]` total, model load excluded). Before is engine `075045a2` on ggml
+`speech@8b980299`; after adds the CFG batching and LM flash attention described
+in [docs/pipeline.md](docs/pipeline.md) and runs on the same ggml plus its CUDA
+fix that serves `GGML_PREC_F32` on half-precision weights with the f32
+matrix-vector kernel
+([qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104)). CUDA 13.3 (CUDA graphs on), Vulkan SDK 1.4.341.1, driver
+595.91.07.
+
+| Song | Backend | Before | After | RTF after | Speedup |
+|---|---|--:|--:|--:|--:|
+| 20 s (500 frames) | CUDA | 15,120 ms | 12,260 ms | 0.61 | 1.23x |
+| 20 s (500 frames) | Vulkan | 15,682 ms | 13,819 ms | 0.69 | 1.13x |
+| 2 min (3000 frames) | CUDA | 102,289 ms | 78,304 ms | 0.65 | 1.31x |
+| 2 min (3000 frames) | Vulkan | 105,393 ms | 87,163 ms | 0.73 | 1.21x |
+
+On the 2-minute song the LM decode step drops from 15.8 to 10.0 ms (CUDA) and
+15.7 to 11.9 ms (Vulkan), the depth decoder from 7.3 to 6.3 ms and 8.6 to
+7.9 ms per frame, and the flow stage from 29.3 to 25.8 s and 28.5 to 24.1 s.
+
 ### speech-cpp CI (2026-09-07, CPU + macOS)
 
 | Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |

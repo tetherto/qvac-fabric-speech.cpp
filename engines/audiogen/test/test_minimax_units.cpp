@@ -2,8 +2,10 @@
 #include "minimax/backend.h"
 #include "minimax/bpe.h"
 #include "minimax/mm3-depth-graph.h"
+#include "minimax/mm3-dit-graph.h"
 #include "minimax/mm3-flash-attn.h"
 #include "minimax/mm3-flow-runtime.h"
+#include "minimax/mm3-linear.h"
 #include "minimax/mm3-replay-io.h"
 #include "minimax/mm3-window-orchestrator.h"
 #include "minimax/progress.h"
@@ -524,6 +526,270 @@ void test_depth_kv_cache_matches_full_prefix() {
 
     ggml_backend_buffer_free(wbuf);
     ggml_free(wctx);
+    ggml_backend_free(cpu);
+}
+
+constexpr size_t kTestGraphNodes = 256;
+
+struct CpuGraph {
+    ggml_context * ctx   = nullptr;
+    ggml_cgraph *  graph = nullptr;
+};
+
+CpuGraph new_cpu_graph() {
+    ggml_init_params params = {
+        ggml_tensor_overhead() * kTestGraphNodes + ggml_graph_overhead_custom(kTestGraphNodes, false), nullptr, true
+    };
+    CpuGraph graph;
+    graph.ctx   = ggml_init(params);
+    graph.graph = ggml_new_graph_custom(graph.ctx, kTestGraphNodes, false);
+    return graph;
+}
+
+std::vector<float> compute_cpu_graph(ggml_backend_t cpu, const CpuGraph & graph, ggml_tensor * output) {
+    ggml_build_forward_expand(graph.graph, output);
+    ggml_gallocr_t allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(cpu));
+    CHECK(ggml_gallocr_alloc_graph(allocator, graph.graph));
+    CHECK(ggml_backend_graph_compute(cpu, graph.graph) == GGML_STATUS_SUCCESS);
+    std::vector<float> values(static_cast<size_t>(ggml_nelements(output)));
+    ggml_backend_tensor_get(output, values.data(), 0, ggml_nbytes(output));
+    ggml_gallocr_free(allocator);
+    ggml_free(graph.ctx);
+    return values;
+}
+
+std::vector<float> fill_uniform(ggml_tensor * tensor, std::mt19937 & random, float base) {
+    std::uniform_real_distribution<float> spread(-0.5f, 0.5f);
+    std::vector<float> values(static_cast<size_t>(ggml_nelements(tensor)));
+    for (float & value : values) {
+        value = base + spread(random);
+    }
+    ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(float));
+    return values;
+}
+
+bool all_close(const std::vector<float> & left, const std::vector<float> & right, float tolerance) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < left.size(); i++) {
+        if (std::fabs(left[i] - right[i]) > tolerance * (1.0f + std::fabs(left[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<float> host_matvec(const std::vector<float> & weight, const std::vector<float> & x, int64_t rows,
+                               int64_t inner, int64_t column) {
+    std::vector<float> y(static_cast<size_t>(rows), 0.0f);
+    for (int64_t r = 0; r < rows; r++) {
+        for (int64_t k = 0; k < inner; k++) {
+            y[static_cast<size_t>(r)] += weight[static_cast<size_t>(r * inner + k)] *
+                                         x[static_cast<size_t>(column * inner + k)];
+        }
+    }
+    return y;
+}
+
+// The CFG rows must reach ggml_mul_mat as columns of one 2-D operand, not as a
+// broadcast batch: GPU matrix-vector kernels stream the weights once per batch
+// entry, which is what doubled the AR stage's weight traffic.
+void test_linear_folds_cfg_rows_into_columns() {
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+
+    constexpr int64_t K = 6;
+    constexpr int64_t M = 3;
+    constexpr int64_t B = 2;
+
+    ggml_init_params weight_params = { ggml_tensor_overhead() * 4, nullptr, true };
+    ggml_context *   wctx          = ggml_init(weight_params);
+    ggml_tensor *    weight        = ggml_new_tensor_2d(wctx, GGML_TYPE_F32, K, M);
+    ggml_tensor *    x             = ggml_new_tensor_3d(wctx, GGML_TYPE_F32, K, 1, B);
+    ggml_backend_buffer_t buffer   = ggml_backend_alloc_ctx_tensors(wctx, cpu);
+
+    std::mt19937             random(7);
+    const std::vector<float> weight_values = fill_uniform(weight, random, 0.0f);
+    const std::vector<float> x_values      = fill_uniform(x, random, 0.0f);
+
+    CpuGraph      graph   = new_cpu_graph();
+    ggml_tensor * y       = mm3_linear(graph.ctx, weight, x);
+    ggml_tensor * product = y->src[0];
+    CHECK(y->ne[0] == M && y->ne[1] == 1 && y->ne[2] == B);
+    CHECK(product->op == GGML_OP_MUL_MAT);
+    CHECK(product->src[1]->ne[1] == B && product->src[1]->ne[2] == 1);
+
+    const std::vector<float> values = compute_cpu_graph(cpu, graph, y);
+    std::vector<float>       expected;
+    for (int64_t column = 0; column < B; column++) {
+        const std::vector<float> row = host_matvec(weight_values, x_values, M, K, column);
+        expected.insert(expected.end(), row.begin(), row.end());
+    }
+    CHECK(all_close(values, expected, 1e-5f));
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(wctx);
+    ggml_backend_free(cpu);
+}
+
+struct DitBlockFixture {
+    MM3DitConfig   config;
+    MM3DitBlock    block;
+    ggml_context * ctx       = nullptr;
+    ggml_tensor *  pair      = nullptr;
+    ggml_tensor *  first     = nullptr;
+    ggml_tensor *  second    = nullptr;
+    ggml_tensor *  positions = nullptr;
+    ggml_backend_buffer_t buffer = nullptr;
+};
+
+constexpr int64_t kDitTestEmbedding = 8;
+constexpr int64_t kDitTestHeads     = 2;
+constexpr int64_t kDitTestFfInner   = 6;
+constexpr int64_t kDitTestTokens    = 5;
+
+void define_dit_block_weights(DitBlockFixture & f) {
+    const int64_t E  = kDitTestEmbedding;
+    const int64_t FI = kDitTestFfInner;
+    f.block.attn_norm_w = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, E);
+    f.block.attn_norm_b = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, E);
+    f.block.attn_qkv    = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, E, 3 * E);
+    f.block.attn_output = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, E, E);
+    f.block.ffn_norm_w  = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, E);
+    f.block.ffn_norm_b  = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, E);
+    f.block.ffn_in_w    = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, E, 2 * FI);
+    f.block.ffn_in_b    = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, 2 * FI);
+    f.block.ffn_out_w   = ggml_new_tensor_2d(f.ctx, GGML_TYPE_F32, FI, E);
+    f.block.ffn_out_b   = ggml_new_tensor_1d(f.ctx, GGML_TYPE_F32, E);
+}
+
+void fill_dit_block_weights(DitBlockFixture & f, std::mt19937 & random) {
+    for (ggml_tensor * t : { f.block.attn_norm_b, f.block.attn_qkv, f.block.attn_output, f.block.ffn_norm_b,
+                             f.block.ffn_in_w, f.block.ffn_in_b, f.block.ffn_out_w, f.block.ffn_out_b }) {
+        fill_uniform(t, random, 0.0f);
+    }
+    fill_uniform(f.block.attn_norm_w, random, 1.0f);
+    fill_uniform(f.block.ffn_norm_w, random, 1.0f);
+}
+
+void fill_dit_block_inputs(DitBlockFixture & f, std::mt19937 & random) {
+    const std::vector<float> pair       = fill_uniform(f.pair, random, 0.0f);
+    const size_t             per_branch = pair.size() / 2;
+    ggml_backend_tensor_set(f.first, pair.data(), 0, per_branch * sizeof(float));
+    ggml_backend_tensor_set(f.second, pair.data() + per_branch, 0, per_branch * sizeof(float));
+    std::vector<int32_t> positions(static_cast<size_t>(kDitTestTokens));
+    for (size_t i = 0; i < positions.size(); i++) {
+        positions[i] = static_cast<int32_t>(i);
+    }
+    ggml_backend_tensor_set(f.positions, positions.data(), 0, positions.size() * sizeof(int32_t));
+}
+
+DitBlockFixture make_dit_block_fixture(ggml_backend_t cpu) {
+    DitBlockFixture f;
+    f.config.embedding_length = static_cast<uint32_t>(kDitTestEmbedding);
+    f.config.head_count       = static_cast<uint32_t>(kDitTestHeads);
+    f.config.head_dim         = static_cast<uint32_t>(kDitTestEmbedding / kDitTestHeads);
+    f.config.ff_inner         = static_cast<uint32_t>(kDitTestFfInner);
+    f.config.rope_dim         = f.config.head_dim;
+    f.config.rope_theta       = 10000.0f;
+    f.config.layer_norm_eps   = 1e-5f;
+
+    ggml_init_params params = { ggml_tensor_overhead() * 16, nullptr, true };
+    f.ctx                   = ggml_init(params);
+    define_dit_block_weights(f);
+    f.pair      = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kDitTestEmbedding, kDitTestTokens, 2);
+    f.first     = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kDitTestEmbedding, kDitTestTokens, 1);
+    f.second    = ggml_new_tensor_3d(f.ctx, GGML_TYPE_F32, kDitTestEmbedding, kDitTestTokens, 1);
+    f.positions = ggml_new_tensor_1d(f.ctx, GGML_TYPE_I32, kDitTestTokens);
+    f.buffer    = ggml_backend_alloc_ctx_tensors(f.ctx, cpu);
+
+    std::mt19937 random(2026);
+    fill_dit_block_weights(f, random);
+    fill_dit_block_inputs(f, random);
+    return f;
+}
+
+std::vector<float> run_dit_block(ggml_backend_t cpu, const DitBlockFixture & f, const MM3DitGraph & dit,
+                                 ggml_tensor * h) {
+    CpuGraph graph = new_cpu_graph();
+    return compute_cpu_graph(cpu, graph, mm3_dit_block(graph.ctx, dit, f.config, f.block, h, f.positions));
+}
+
+ggml_tensor * split_dit_rows(ggml_context * ctx, ggml_tensor * x, int64_t rows, int64_t offset) {
+    return ggml_cont(ctx, ggml_view_2d(ctx, x, rows, x->ne[1], x->nb[1], (size_t) offset * x->nb[0]));
+}
+
+// One branch of the DiT block written the explicit way: every projection and
+// GLU half copied out before use. mm3_dit_block reads them through views and a
+// fused SwiGLU instead, and must compute the same thing.
+ggml_tensor * explicit_dit_block(ggml_context * ctx, const MM3DitGraph & dit, const DitBlockFixture & f,
+                                 ggml_tensor * h) {
+    const MM3DitConfig & c  = f.config;
+    const MM3DitBlock &  w  = f.block;
+    const int64_t        E  = (int64_t) c.embedding_length;
+    const int64_t        D  = (int64_t) c.head_dim;
+    const int64_t        Nh = (int64_t) c.head_count;
+    const int64_t        FI = (int64_t) c.ff_inner;
+    const int64_t        S  = h->ne[1];
+
+    ggml_tensor * x   = ggml_reshape_2d(ctx, h, E, S);
+    ggml_tensor * n   = mm3_dit_ln(ctx, x, w.attn_norm_w, w.attn_norm_b, c.layer_norm_eps);
+    ggml_tensor * qkv = ggml_mul_mat(ctx, w.attn_qkv, n);
+    ggml_tensor * q   = ggml_reshape_3d(ctx, split_dit_rows(ctx, qkv, E, 0), D, Nh, S);
+    ggml_tensor * k   = ggml_reshape_3d(ctx, split_dit_rows(ctx, qkv, E, E), D, Nh, S);
+    ggml_tensor * v   = ggml_reshape_3d(ctx, split_dit_rows(ctx, qkv, E, 2 * E), D, Nh, S);
+    q = ggml_permute(ctx, mm3_dit_rope(ctx, c, q, f.positions), 0, 2, 1, 3);
+    k = ggml_permute(ctx, mm3_dit_rope(ctx, c, k, f.positions), 0, 2, 1, 3);
+    v = ggml_permute(ctx, v, 0, 2, 1, 3);
+
+    const float   scale = 1.0f / sqrtf((float) D);
+    ggml_tensor * attn  = nullptr;
+    if (dit.use_flash_attn) {
+        attn = ggml_flash_attn_ext(ctx, q, ggml_cast(ctx, k, GGML_TYPE_F16), ggml_cast(ctx, v, GGML_TYPE_F16), NULL,
+                                   scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+    } else {
+        attn = mm3_dit_attn_f32(ctx, q, k, v, scale);
+    }
+    x = ggml_add(ctx, x, ggml_mul_mat(ctx, w.attn_output, ggml_reshape_2d(ctx, attn, Nh * D, S)));
+
+    ggml_tensor * n2 = mm3_dit_ln(ctx, x, w.ffn_norm_w, w.ffn_norm_b, c.layer_norm_eps);
+    ggml_tensor * ff = ggml_add(ctx, ggml_mul_mat(ctx, w.ffn_in_w, n2), w.ffn_in_b);
+    ggml_tensor * y  = ggml_mul(ctx, split_dit_rows(ctx, ff, FI, 0), ggml_silu(ctx, split_dit_rows(ctx, ff, FI, FI)));
+    return ggml_add(ctx, x, ggml_add(ctx, ggml_mul_mat(ctx, w.ffn_out_w, y), w.ffn_out_b));
+}
+
+std::vector<float> run_explicit_dit_block(ggml_backend_t cpu, const DitBlockFixture & f, const MM3DitGraph & dit,
+                                          ggml_tensor * h) {
+    CpuGraph graph = new_cpu_graph();
+    return compute_cpu_graph(cpu, graph, explicit_dit_block(graph.ctx, dit, f, h));
+}
+
+// Both CFG branches now share one DiT forward; a branch of the batched block
+// must equal the same branch run on its own and the explicit single-branch
+// formulation, with and without flash attention.
+void test_dit_block_batches_cfg_branches() {
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+
+    DitBlockFixture fixture = make_dit_block_fixture(cpu);
+    for (bool flash : { false, true }) {
+        MM3DitGraph dit;
+        dit.use_flash_attn = flash;
+        const std::vector<float> pair   = run_dit_block(cpu, fixture, dit, fixture.pair);
+        std::vector<float>       joined = run_dit_block(cpu, fixture, dit, fixture.first);
+        const std::vector<float> second = run_dit_block(cpu, fixture, dit, fixture.second);
+        CHECK(all_close(joined, run_explicit_dit_block(cpu, fixture, dit, fixture.first), 1e-5f));
+        CHECK(all_close(second, run_explicit_dit_block(cpu, fixture, dit, fixture.second), 1e-5f));
+        joined.insert(joined.end(), second.begin(), second.end());
+        CHECK(all_close(pair, joined, 1e-5f));
+    }
+
+    ggml_backend_buffer_free(fixture.buffer);
+    ggml_free(fixture.ctx);
     ggml_backend_free(cpu);
 }
 
@@ -1480,6 +1746,15 @@ void test_flash_attn_policy() {
     set_env("MM3_LM_NO_FLASH", nullptr);
     set_env("MM3_LM_FLASH", nullptr);
     set_env("MM3_DIT_NO_FLASH", nullptr);
+
+    CHECK(mm3_lm_flash_attn_default("CUDA"));
+    CHECK(mm3_lm_flash_attn_default("Vulkan"));
+    CHECK(!mm3_lm_flash_attn_default("Metal"));
+    CHECK(!mm3_lm_flash_attn_default("MTL"));
+    CHECK(!mm3_lm_flash_attn_default("OpenCL"));
+    CHECK(!mm3_lm_flash_attn_default("CPU"));
+    CHECK(!mm3_lm_flash_attn_default(""));
+    CHECK(!mm3_lm_flash_attn_default(nullptr));
 }
 
 void test_replay_io() {
@@ -1573,6 +1848,8 @@ int main() {
     test_flow_schedule();
     test_depth_step_layout();
     test_depth_kv_cache_matches_full_prefix();
+    test_linear_folds_cfg_rows_into_columns();
+    test_dit_block_batches_cfg_branches();
     test_production_dit_readback_preserves_velocity();
     test_depth_step_fused_readback_matches_source_tensors();
     test_production_cfg_euler_step();
