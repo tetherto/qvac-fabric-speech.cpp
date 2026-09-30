@@ -44,8 +44,12 @@ weights and graphs live on the first usable backend the ggml registry offers
 full model pair must fit in device memory (~22 GB for the f16 pair, 12.7 GB
 for `q8_0`, 7.6 GB for `q4_k_m`). The LM's KV cache and compute buffers are
 released after the AR stage and rebuilt on the next generation, and the
-vocoder decodes in overlapped tiles whose interiors are bit-identical to a
-single-shot decode, so the `q4_k_m` pair completes full generations on a
+vocoder decodes in overlapped tiles whose 32-frame overlap exceeds its conv
+stack's receptive field, so no tile interior depends on context outside the
+tile: the tiled output is bit-identical to a single-shot decode on the CPU and
+matches it to rounding on GPU backends (waveform correlation 0.99999994 on
+CUDA and 0.999996 on Vulkan, RTX 5090), whose GEMM kernels depend on the
+product shape. Together these let the `q4_k_m` pair complete full generations on a
 10 GiB GPU (RTX 3080, peak 9.4 GiB alongside a desktop) and on a 16 GB
 Apple-silicon Mac over Metal (peak RSS 8.4 GiB), both of which the `q8_0`
 pair cannot fit. The flow DiT runs with flash attention by default on a GPU
@@ -159,9 +163,12 @@ hiddens as raw f32 files; because the LM and depth decoder still run under
 forced tokens, replay-mode dumps are teacher-forced and directly comparable
 across quantization levels and backends. `test-minimax-quality` (built with
 `AUDIOGEN_BUILD_TESTS`, skipped unless `AUDIOGEN_TEST_MINIMAX_MODELS_DIR` is
-set) is the model-backed regression: it asserts DiT determinism and that a
-short generation's final flow latents land on the learned data manifold
-instead of stalling near the Gaussian noise they started from.
+set) is the model-backed regression: it asserts DiT determinism, that the
+tiled vocoder decode matches a single-shot decode (bit for bit on the CPU,
+within rounding on a GPU) and that two shifted tiles agree bit for bit over
+their shared interior on any backend, and that a short generation's final
+flow latents land on the learned data manifold instead of stalling near the
+Gaussian noise they started from.
 `test-minimax-quality-q4` runs the same checks against the pair named by
 `AUDIOGEN_TEST_MINIMAX_Q4_MODELS_DIR`.
 
