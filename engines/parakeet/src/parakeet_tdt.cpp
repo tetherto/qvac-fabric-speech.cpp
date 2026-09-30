@@ -1552,9 +1552,9 @@ bool run_lstm_joint_step(TdtRuntimeWeights & rt,
     return true;
 }
 
-// Compute the full-window encoder-side projection straight into
-// rt.enc_proj_persist (no host download). Falls back to per-step host
-// gemv if T exceeds the persistent buffer size.
+// Compute one bounded window's encoder-side projection straight into
+// rt.enc_proj_persist (no host download). The offline caller splits longer
+// sequences before reaching this graph path.
 bool run_enc_proj(TdtRuntimeWeights & rt,
                   const float * encoder_out,
                   int T) {
@@ -1869,11 +1869,31 @@ int tdt_greedy_decode(const ParakeetCtcModel & model,
     TdtDecodeState state;
     result.token_ids.clear();
     result.token_ids.reserve(T_enc);
+    result.steps = 0;
 
-    if (int rc = tdt_decode_window(model, W, encoder_out, T_enc, D_enc,
-                                   opts, state, result.token_ids, result.steps);
-        rc != 0) {
-        return rc;
+    // The offline encoder may concatenate many windows, but the graph
+    // decoder's persistent projection holds at most enc_proj_T_max frames.
+    // Keep one predictor state (including TDT duration carry) across bounded
+    // decoder windows. Short inputs retain their single-window path.
+    const int window_frames = W.use_graphs ? W.enc_proj_T_max : T_enc;
+    if (window_frames > 0 && T_enc > window_frames) {
+        for (int start = 0; start < T_enc; start += window_frames) {
+            const int frames = std::min(window_frames, T_enc - start);
+            int steps = 0;
+            if (int rc = tdt_decode_window(
+                    model, W, encoder_out + (size_t) start * D_enc,
+                    frames, D_enc, opts, state, result.token_ids, steps);
+                rc != 0) {
+                return rc;
+            }
+            result.steps += steps;
+        }
+    } else {
+        if (int rc = tdt_decode_window(model, W, encoder_out, T_enc, D_enc,
+                                       opts, state, result.token_ids, result.steps);
+            rc != 0) {
+            return rc;
+        }
     }
 
     result.text = detokenize(model.vocab, result.token_ids);

@@ -1121,13 +1121,32 @@ int eou_greedy_decode(const ParakeetCtcModel & model,
     result.token_ids.clear();
     result.segments.clear();
     result.token_ids.reserve(T_enc);
+    result.steps = 0;
 
-    if (int rc = eou_decode_window(model, W, encoder_out, T_enc, D_enc,
-                                   opts, state,
-                                   result.token_ids, result.segments,
-                                   result.steps);
-        rc != 0) {
-        return rc;
+    // Offline encoder windows are concatenated before decoding. Bound each
+    // graph projection to its persistent buffer while preserving predictor
+    // state and cumulative EOU token indices across decoder windows.
+    const int window_frames = W.use_graphs ? W.enc_proj_T_max : T_enc;
+    if (window_frames > 0 && T_enc > window_frames) {
+        for (int start = 0; start < T_enc; start += window_frames) {
+            const int frames = std::min(window_frames, T_enc - start);
+            int steps = 0;
+            if (int rc = eou_decode_window(
+                    model, W, encoder_out + (size_t) start * D_enc,
+                    frames, D_enc, opts, state, result.token_ids,
+                    result.segments, steps);
+                rc != 0) {
+                return rc;
+            }
+            result.steps += steps;
+        }
+    } else {
+        if (int rc = eou_decode_window(model, W, encoder_out, T_enc, D_enc,
+                                       opts, state, result.token_ids,
+                                       result.segments, result.steps);
+            rc != 0) {
+            return rc;
+        }
     }
 
     result.eou_count = (int) result.segments.size();
