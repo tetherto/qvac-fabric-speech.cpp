@@ -92,6 +92,7 @@ struct TdtRuntimeWeights {
     int num_durations = 5;
 
     const TdtWeights * weights = nullptr;
+    ggml_tensor *      graph_embed = nullptr; // native embedding or F32 copy in persist_ctx
     ggml_backend_t     backend = nullptr;
     int                n_threads = 0;
     bool               use_graphs = false;
@@ -224,7 +225,7 @@ struct TdtRuntimeWeights {
     static constexpr size_t k_enc_proj_cache_max = 3;
     // ~5 minutes of audio at the encoder's 80 ms-frame rate fits in 4096
     // rows; H_joint=640 * f32 → ~10 MB, fine for any backend we target.
-    // Audio that exceeds this falls back to a per-call dynamic-T allocation.
+    // Longer offline sequences use bounded windows with shared predictor state.
     static constexpr int k_enc_proj_T_max = 4096;
 
     TdtRuntimeWeights() = default;
