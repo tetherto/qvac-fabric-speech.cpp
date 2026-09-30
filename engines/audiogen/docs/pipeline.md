@@ -82,14 +82,17 @@ measure it the same way before shipping it.
 Every stage evaluates both classifier-free-guidance branches in one pass. The
 LM and the RVQ depth decoder fold the conditional and unconditional rows into
 the columns of each weight product, so a decode step streams every weight once
-instead of once per branch; those two-column products request `GGML_PREC_F32`,
-which CUDA and Vulkan serve with matrix-vector kernels that keep the
-activations and the accumulation in f32 at no cost in speed (CUDA needs a ggml
-that routes `GGML_PREC_F32` on half-precision weights to that kernel,
-[qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104); an
-older one computes the same products with f16 activations). The LM and the depth
-decoder also load each layer's q/k/v and gate/up projections stacked into one
-matrix when the parts share a type (MiniMax's own conversions always do; a
+instead of once per branch. For float (`f16`/`bf16`/`f32`) weights those
+two-column products request `GGML_PREC_F32`, which CUDA and Vulkan serve with
+matrix-vector kernels that keep the activations and the accumulation in f32 at
+no cost in speed; CUDA needs a ggml that routes the request on half-precision
+weights to that kernel
+([qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104)), and
+an older one computes the same products with f16 activations. Quantized
+weights keep the default precision and their integer kernels, since CUDA would
+serve the request by dequantizing the whole matrix for an f32 GEMM. The LM and
+the depth decoder also load each layer's q/k/v and gate/up projections stacked
+into one matrix when the parts share a type (MiniMax's own conversions always do; a
 mixed k-quant layer keeps them separate), so a layer reads its input with two
 products instead of five, and the LM keeps its K/V cache as one
 `[head_dim * heads]` row per position with the unconditional row's positions

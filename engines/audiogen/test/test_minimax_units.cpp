@@ -635,6 +635,26 @@ void test_linear_folds_cfg_rows_into_columns() {
     ggml_backend_free(cpu);
 }
 
+// The f32 request reaches ggml only for float weights: a quantized weight keeps
+// the default precision and with it its integer kernels.
+void test_linear_precision_follows_weight_type() {
+    ggml_init_params params = { ggml_tensor_overhead() * kTestGraphNodes, nullptr, true };
+    ggml_context *   ctx    = ggml_init(params);
+    ggml_tensor *    x      = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, 1, 2);
+    for (ggml_type type : { GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16 }) {
+        ggml_tensor * y = mm3_linear(ctx, ggml_new_tensor_2d(ctx, type, 64, 8), x, GGML_PREC_F32);
+        CHECK(y->src[0]->op_params[0] == GGML_PREC_F32);
+    }
+    ggml_tensor * wide = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 256, 1, 2);
+    for (ggml_type type : { GGML_TYPE_Q8_0, GGML_TYPE_Q4_K }) {
+        ggml_tensor * y = mm3_linear(ctx, ggml_new_tensor_2d(ctx, type, 256, 8), wide, GGML_PREC_F32);
+        CHECK(y->src[0]->op_params[0] == GGML_PREC_DEFAULT);
+    }
+    ggml_tensor * y = mm3_linear(ctx, ggml_new_tensor_2d(ctx, GGML_TYPE_F16, 64, 8), x);
+    CHECK(y->src[0]->op_params[0] == GGML_PREC_DEFAULT);
+    ggml_free(ctx);
+}
+
 struct DitBlockFixture {
     MM3DitConfig   config;
     MM3DitBlock    block;
@@ -2161,6 +2181,7 @@ int main() {
     test_lm_positions_tile_cfg_rows();
     test_lm_block_stacking_and_cache();
     test_linear_folds_cfg_rows_into_columns();
+    test_linear_precision_follows_weight_type();
     test_dit_block_batches_cfg_branches();
     test_production_dit_readback_preserves_velocity();
     test_depth_step_fused_readback_matches_source_tensors();

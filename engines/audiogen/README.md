@@ -128,6 +128,15 @@ On the 2-minute song the LM decode step drops from 15.8 to 9.6 ms (CUDA) and
 The LM and depth steps now stream their f16 weights at about 1.55 TB/s on
 CUDA, close to what the card sustains, so the AR loop is bandwidth-bound.
 
+The quantized pairs speed up as well (same box and method, 20 s track):
+
+| Pair | Backend | Before | After | Speedup |
+|---|---|--:|--:|--:|
+| `q8_0` | CUDA | 11,229 ms | 9,070 ms | 1.24x |
+| `q8_0` | Vulkan | 13,055 ms | 10,175 ms | 1.28x |
+| `q4_k_m` | CUDA | 9,705 ms | 7,505 ms | 1.29x |
+| `q4_k_m` | Vulkan | 11,388 ms | 8,504 ms | 1.34x |
+
 ### speech-cpp CI (2026-09-07, CPU + macOS)
 
 | Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |

@@ -10,12 +10,24 @@
 // the weights once per batch entry, so the columns are folded into ne[1]
 // first and the original shape is restored afterwards. `x` must be contiguous.
 // GGML_PREC_F32 keeps the activations and the accumulation in f32, which the
-// matrix-vector kernels do at no cost; large products leave it at the default
-// so they keep the half-precision tensor-core GEMMs.
-static ggml_tensor * mm3_linear_columns(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x, ggml_prec precision) {
+// matrix-vector kernels do at no cost for float weights (see
+// mm3_weight_precision); large products leave it at the default so they keep
+// the half-precision tensor-core GEMMs.
+// A GGML_PREC_F32 request is only passed on for float weights. For those the
+// small-batch kernels keep f32 activations at no cost; a quantized weight would
+// instead leave its integer kernels (CUDA dequantizes the whole matrix for an f32
+// GEMM, 4.5x slower on a q8_0 LM decode step), so it keeps the default precision.
+static ggml_prec mm3_weight_precision(const ggml_tensor * weight, ggml_prec requested) {
+    const bool float_weight =
+        weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16 || weight->type == GGML_TYPE_BF16;
+    return float_weight ? requested : GGML_PREC_DEFAULT;
+}
+
+static ggml_tensor * mm3_linear_columns(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x,
+                                        ggml_prec precision) {
     const int64_t columns = ggml_nelements(x) / x->ne[0];
     ggml_tensor * y       = ggml_mul_mat(ctx, weight, ggml_reshape_2d(ctx, x, x->ne[0], columns));
-    ggml_mul_mat_set_prec(y, precision);
+    ggml_mul_mat_set_prec(y, mm3_weight_precision(weight, precision));
     return y;
 }
 
