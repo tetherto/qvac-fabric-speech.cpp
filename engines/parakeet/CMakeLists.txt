@@ -367,28 +367,42 @@ if (PARAKEET_BUILD_LIBRARY)
     endif()
 
     # `PARAKEET_F16_ACTIVATIONS` narrows the F32 encoder residual stream at
-    # exactly one site: the batched attention MULMATs in
-    # `rel_pos_mha_unfused_graph`. `k_perm` and `v_for_mm` are zero-padded on
-    # their matmul-N/K axis to a 32-aligned tail and cast to F16, and the
-    # softmax output is zero-padded to match; the two MULMATs (`ac`,
-    # `attn_v`) then land on the Hexagon HMX F16-batched kernel
+    # exactly one site: the three batched attention MULMATs in
+    # `rel_pos_mha_unfused_graph`. `k_perm` / `p_perm` / `v_for_mm` are
+    # zero-padded on their matmul N/K axis to a 32-aligned tail and cast to
+    # F16, and the softmax output is zero-padded to match; the MULMATs
+    # (`ac`, `bd`, `attn_v`) then land on the Hexagon HMX F16-batched kernel
     # (`hmx_mm_f16_f32_batched`) instead of `hvx-batched-f32`. Everything
     # else — subsampling, FF/Conv projections, layer norms, residual adds,
-    # the `bd` matmul (rel-shift constraints), the `attn_out` Q8_0 matmul,
-    # the CTC head — stays F32 exactly as before, so downstream decoders and
-    # every other backend are unaffected. When OFF (default) the helpers
-    # early-return with the input tensor unmodified: no PAD, no CAST, no
-    # CONT nodes added, byte-identical to the pre-refactor graph on every
-    # backend (CPU / OpenCL / Metal / Vulkan / Hexagon).
+    # the `attn_out` Q8_0 matmul, the CTC head — stays F32 exactly as
+    # before, so downstream decoders and every other backend are unaffected.
+    # When OFF the helpers early-return with the input tensor unmodified:
+    # no PAD, no CAST, no CONT nodes added, byte-identical to the
+    # pre-refactor graph on every backend (CPU / OpenCL / Metal / Vulkan /
+    # Hexagon).
+    #
+    # Default flipped ON after full correctness validation (2026-09-30):
+    #   * All four Parakeet variants (CTC / TDT / EOU / Sortformer)
+    #     produce byte-identical transcripts on CPU, Hexagon HTP0 and
+    #     OpenCL Adreno with the flag ON vs OFF
+    #   * LibriSpeech dev-clean 100-clip WER on Hexagon: delta = 0.000%
+    #     (2.349% both configs; 100/100 hypotheses byte-identical)
+    #   * Long-form 191 s clip: byte-identical CPU vs HTP0 vs OpenCL
+    #   * Per-stage encoder cosine vs CPU >= 0.9994 at every stage
+    #   * Perf: -47% encoder-time on Hexagon CTC (4790 -> 2541 ms median
+    #     on speech-60, RTF 12.5x -> 23.6x realtime)
+    # Set `-DPARAKEET_F16_ACTIVATIONS=OFF` to opt out (e.g. for a
+    # backend-specific build where the extra PAD/CAST/CONT nodes have no
+    # perf upside and the byte-identical fallback is desired).
     #
     # Motivation: HMX v79 is F16-only. A prior attempt to route these
     # matmuls to HMX by casting src0 without alignment padding failed the
     # kernel's `n%32==0 && k%32==0` gate (matmul-ops.c:3081); a full F16
     # residual-stream refactor failed on-device because Hexagon carries
-    # only `quantize_f32_q8_0_*` — Q8_0×F16 FF/Conv matmuls return
+    # only `quantize_f32_q8_0_*` — Q8_0xF16 FF/Conv matmuls return
     # DSP NO_SUPPORT. The narrow boundary cast + N/K pad matches
     # whisper.cpp's convention and preserves transcript byte-parity.
-    option(PARAKEET_F16_ACTIVATIONS "parakeet: cast attention K/V-perm and softmax output to F16 (with 32-aligned pad) at the batched attention MULMAT boundary so Hexagon HMX F16-batched engages; default OFF." OFF)
+    option(PARAKEET_F16_ACTIVATIONS "parakeet: cast attention K/V-perm and softmax output to F16 (with 32-aligned pad) at the batched attention MULMAT boundary so Hexagon HMX F16-batched engages; default ON (validated 2026-09-30)." ON)
     if (PARAKEET_F16_ACTIVATIONS)
         target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_F16_ACTIVATIONS=1)
     endif()
