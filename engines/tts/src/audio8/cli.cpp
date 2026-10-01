@@ -27,6 +27,7 @@ bool apply_flag(options & opts, const std::string & flag, const char * value) {
     else if (flag == "--out") opts.out = value;
     else if (flag == "--dump-codes") opts.codes_out = value;
     else if (flag == "--backends-dir") opts.backends_dir = value;
+    else if (flag == "--backend") opts.backend = value;
     else if (flag == "--seed") opts.seed = std::atoi(value);
     else if (flag == "--threads" || flag == "-t") opts.threads = std::atoi(value);
     else if (flag == "--n-gpu-layers" || flag == "-ngl") opts.n_gpu_layers = std::atoi(value);
@@ -58,7 +59,12 @@ void print_usage(const char * program) {
                  "[--top-p F]\n"
                  "          [--max-frames N] [--threads N] [--output-sample-rate N]\n"
                  "          [--n-gpu-layers N] [--dump-codes codes.txt]\n"
-                 "          [--backends-dir DIR] [--verbose]\n",
+                 "          [--backend NAME] [--backends-dir DIR] [--verbose]\n"
+                 "\n"
+                 "  --backend NAME   explicit backend: auto (default), cpu,\n"
+                 "                   hexagon (Snapdragon HTP0), or an exact\n"
+                 "                   ggml device name. Overrides --n-gpu-layers\n"
+                 "                   when non-auto.\n",
                  program);
 }
 

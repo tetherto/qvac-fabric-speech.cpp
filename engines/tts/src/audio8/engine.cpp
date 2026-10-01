@@ -422,6 +422,19 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
+    // Explicit backend routing. Scaffold for Hexagon HTP0 integration:
+    // the string is accepted and threaded through today, but the only
+    // paths currently honoured are "auto" (default, tier-based GPU
+    // selection via n_gpu_layers) and "cpu". Non-auto accelerator names
+    // (notably "hexagon") trip a clear error until the per-backend init
+    // path lands; see QVAC-26269 follow-up cycles.
+    if (!opts.backend.empty() && opts.backend != "auto" && opts.backend != "cpu") {
+        throw std::runtime_error(
+            "audio8: EngineOptions::backend=\"" + opts.backend +
+            "\" is accepted at the CLI/API boundary but not yet routed "
+            "through load_lm / load_codec. Use \"auto\" or \"cpu\" for "
+            "now; Hexagon support is in progress.");
+    }
     require(!opts.lm_gguf_path.empty(), "lm_gguf_path is required");
     require(!opts.codec_decoder_gguf_path.empty(), "codec_decoder_gguf_path is required");
 
