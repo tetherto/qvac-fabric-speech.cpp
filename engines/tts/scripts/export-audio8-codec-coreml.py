@@ -38,6 +38,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,6 +54,46 @@ def constant(array):
                         requires_grad=False)
 
 
+# The Neural Engine takes this stack's causal convolutions only up to 16384
+# samples per row (measured on an M2, macOS 15.7: 16384 stays, 32768 and up
+# go to the GPU, and the plan then alternates devices op by op through the
+# whole tail). Folding a long sequence into rows of FOLD_ROW samples, (1, C, L)
+# -> (1, C, L / FOLD_ROW, FOLD_ROW), keeps every op on it: each causal
+# convolution takes its left context from the end of the previous row (zeros
+# for the first row, which is the causal padding), so the fold is exact.
+# 0 disables folding (`--fold-rows 0`).
+FOLD_ROW = 8192
+
+
+def fold(x):
+    """(1, C, L) -> (1, C, L / FOLD_ROW, FOLD_ROW) when the sequence is long
+    enough to leave the Neural Engine and divides evenly; otherwise unchanged."""
+    if FOLD_ROW and x.dim() == 3 and x.shape[-1] > FOLD_ROW and x.shape[-1] % FOLD_ROW == 0:
+        return x.reshape(x.shape[0], x.shape[1], x.shape[-1] // FOLD_ROW, FOLD_ROW)
+    return x
+
+
+def unfold(x):
+    if x.dim() == 4:
+        return x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3])
+    return x
+
+
+def causal_context(x, left):
+    """Left-pad a folded (1, C, H, W) tensor with the last `left` samples of
+    the previous row (zeros before row 0), so a valid conv along W equals the
+    causal conv along the unfolded sequence."""
+    if left == 0:
+        return x
+    prev = torch.cat([torch.zeros_like(x[:, :, :1, :]), x[:, :, :-1, :]], dim=2)
+    return torch.cat([prev[:, :, :, -left:], x], dim=3)
+
+
+def per_channel(param, x):
+    """A (1, C, 1) parameter broadcast against a 3-D or folded 4-D activation."""
+    return param if x.dim() == 3 else param.unsqueeze(-1)
+
+
 class CausalConv(nn.Module):
     """A ggml tap-major kernel [taps, out, in] as a left-padded Conv1d."""
 
@@ -66,6 +107,9 @@ class CausalConv(nn.Module):
         self.left = (taps - 1) * dilation
 
     def forward(self, x):
+        if x.dim() == 4:
+            return F.conv2d(causal_context(x, self.left), self.conv.weight.unsqueeze(2),
+                            self.conv.bias, dilation=(1, self.conv.dilation[0]))
         return self.conv(F.pad(x, (self.left, 0)))
 
 
@@ -82,6 +126,9 @@ class CausalDepthwiseConv(nn.Module):
         self.left = taps - 1
 
     def forward(self, x):
+        if x.dim() == 4:
+            return F.conv2d(causal_context(x, self.left), self.conv.weight.unsqueeze(2),
+                            self.conv.bias, groups=self.conv.groups)
         return self.conv(F.pad(x, (self.left, 0)))
 
 
@@ -118,6 +165,16 @@ class CausalConvTranspose(nn.Module):
         self.out_ch = out_ch
 
     def forward(self, x):
+        if x.dim() == 4:
+            y = F.conv2d(causal_context(x, self.left), self.conv.weight.unsqueeze(2), self.conv.bias)
+            batch, _, rows, width = y.shape
+            y = y.view(batch, self.stride, self.out_ch, rows, width)
+            # Depth-to-space along the row, then split each row of width *
+            # stride samples into stride rows of the original width: a
+            # row-major reshape, so time order is kept and the row width stays
+            # what the Neural Engine accepts.
+            y = y.permute(0, 2, 3, 4, 1).reshape(batch, self.out_ch, rows, width * self.stride)
+            return y.reshape(batch, self.out_ch, rows * self.stride, width)
         y = self.conv(F.pad(x, (self.left, 0)))
         batch, _, length = y.shape
         y = y.view(batch, self.stride, self.out_ch, length)
@@ -127,11 +184,26 @@ class CausalConvTranspose(nn.Module):
 class Snake(nn.Module):
     """x + sin(alpha x)^2 / (alpha + eps), the division folded into a multiply.
 
-    The square is spelled as a product on purpose: `torch.sin(...) ** 2`
-    lowers to a `pow` that the Neural Engine miscomputes when its result feeds
-    a convolution (measured on an M2, macOS 15.7: the first DAC stage comes
-    out at cosine 0.39 against the CPU, every other unit exact), while
-    `sin * sin` is exact on every compute unit."""
+    Two spellings of the sine, chosen by `Snake.mode`:
+
+    `sin`: `torch.sin`, squared as a product on purpose -- `** 2` lowers to a
+    `pow` the Neural Engine miscomputes when its result feeds a convolution
+    (measured on an M2, macOS 15.7: the first DAC stage at cosine 0.39 against
+    the CPU, every other unit exact), while `sin * sin` is exact everywhere.
+    The Neural Engine has no `sin` kernel on macOS 15, though, so every Snake
+    leaves it and the plan pays a device handoff per activation.
+
+    `poly`: an odd degree-9 polynomial for sin on [-pi, pi] (a least-squares
+    fit on Chebyshev nodes, max error 6e-6) after reducing the argument in
+    *turns*: u = t / 2pi, f = u - round(u), r = 2pi f. Every op has
+    a Neural Engine kernel, so the whole stack stays on it. The reduction must
+    be done in turns: reducing in radians (t - 2pi round(t / 2pi)) is
+    miscomputed on the Neural Engine (NaN / inf on an M2, macOS 15.7) while the
+    turns form is exact there (probe: cosine 0.999996 against fp32 torch,
+    the same as `sin`). fp16 keeps `u` exact to the integer for |u| < 2048,
+    i.e. |alpha x| < ~12800; the stack's activations stay far below that."""
+
+    mode = 'poly'
 
     def __init__(self, alpha, eps):
         super().__init__()
@@ -140,8 +212,19 @@ class Snake(nn.Module):
         self.scale = constant(1.0 / (alpha + eps))
 
     def forward(self, x):
-        wave = torch.sin(self.alpha * x)
-        return x + self.scale * (wave * wave)
+        t = per_channel(self.alpha, x) * x
+        if Snake.mode == 'poly':
+            u = t * (1.0 / (2.0 * math.pi))
+            r = (u - torch.round(u)) * (2.0 * math.pi)
+            r2 = r * r
+            # Degree-9 odd least-squares fit on Chebyshev nodes over [-pi, pi]
+            # (max error 6e-6, float32 Horner), not the Taylor coefficients
+            # (2e-3 at the ends of the range).
+            wave = r * (0.9999791158 + r2 * (-0.1666240169 + r2 * (0.008308850563
+                        + r2 * (-0.0001926317971 + r2 * 2.147054556e-06))))
+        else:
+            wave = torch.sin(t)
+        return x + per_channel(self.scale, x) * (wave * wave)
 
 
 def pointwise(weight, bias):
@@ -169,9 +252,10 @@ class ConvNeXtBlock(nn.Module):
         mean = y.mean(dim=1, keepdim=True)
         centred = y - mean
         var = (centred * centred).mean(dim=1, keepdim=True)
-        y = centred * torch.rsqrt(var + self.eps) * self.norm_w + self.norm_b
+        y = (centred * torch.rsqrt(var + self.eps) * per_channel(self.norm_w, y)
+             + per_channel(self.norm_b, y))
         y = self.pwconv2(F.gelu(self.pwconv1(y)))
-        return x + y * self.gamma
+        return x + y * per_channel(self.gamma, y)
 
 
 class ResidualUnit(nn.Module):
@@ -195,7 +279,9 @@ class DecoderStage(nn.Module):
             ResidualUnit(t, f'{prefix}/{2 + r}/block', d, snake_eps) for r, d in enumerate(dilations))
 
     def forward(self, x):
-        x = self.conv_t(self.snake(x))
+        # Fold on entry, and again after the upsampling: a stage whose input is
+        # still short can produce a row the Neural Engine no longer takes.
+        x = fold(self.conv_t(self.snake(fold(x))))
         for unit in self.units:
             x = unit(x)
         return x
@@ -234,7 +320,7 @@ class SynthesisStack(nn.Module):
         x = self.dec_in(self.latent(post))
         for stage in self.stages:
             x = stage(x)
-        return torch.tanh(self.dec_out(self.snake_out(x)))
+        return unfold(torch.tanh(self.dec_out(self.snake_out(fold(x)))))
 
 
 # The quantizer's resamplers are a fixed pair of stride-2 stages
@@ -385,6 +471,11 @@ def parse_args():
                    help='post frames per sidecar call (default %(default)s)')
     p.add_argument('--out', help='.mlpackage path (default: <sidecar stem>.mlpackage next to the GGUF)')
     p.add_argument('--compile-dir', help='also compile to <dir>/<stem>.mlmodelc, where the engine looks')
+    p.add_argument('--fold-rows', type=int, default=FOLD_ROW,
+                   help='fold stages longer than this many samples into rows of that width so the '
+                        'Neural Engine keeps them (16384 is its limit, measured on an M2); 0 leaves sequences flat')
+    p.add_argument('--snake', default='poly', choices=['poly', 'sin'],
+                   help='sine spelling: a range-reduced polynomial (stays on the Neural Engine) or torch.sin (leaves it)')
     p.add_argument('--compute-units', default='ALL', choices=['ALL', 'CPU_AND_NE', 'CPU_AND_GPU', 'CPU_ONLY'])
     p.add_argument('--palettize', type=int, default=0, choices=[0, 4, 6, 8],
                    help='k-means weight LUT bits (0 = keep float16 weights)')
@@ -395,6 +486,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    Snake.mode = args.snake
+    global FOLD_ROW
+    FOLD_ROW = args.fold_rows
     model, hp = load_stack(args.gguf)
     print(f'[load] synthesis stack ready from {args.gguf}: latent_dim={hp["latent_dim"]} '
           f'frame_size={hp["frame_size"]} strides={hp["decoder_strides"]}')
