@@ -131,7 +131,7 @@ void gather_shifted(const float * src, int64_t len, int64_t start, int64_t n, fl
     const int64_t lo = std::clamp<int64_t>(-start, 0, n);
     const int64_t hi = std::clamp<int64_t>(len - start, lo, n);
     std::memset(out, 0, (size_t) lo * sizeof(float));
-    std::memcpy(out + lo, src + start + lo, (size_t) (hi - lo) * sizeof(float));
+    if (hi > lo) std::memcpy(out + lo, src + start + lo, (size_t) (hi - lo) * sizeof(float));
     std::memset(out + hi, 0, (size_t) (n - hi) * sizeof(float));
 }
 
@@ -223,6 +223,7 @@ ggml_tensor * parler_dac_accel_snake(ggml_context * ctx, ggml_tensor * x, ggml_t
                                      ggml_tensor * inv) {
     GGML_ASSERT(ggml_is_contiguous(x) && ggml_is_contiguous(alpha) && ggml_is_contiguous(inv));
     GGML_ASSERT(x->ne[2] == 1 && x->ne[3] == 1);
+    GGML_ASSERT(ggml_nelements(alpha) == x->ne[1] && ggml_nelements(inv) == x->ne[1]);
     ggml_tensor * args[] = { x, alpha, inv };
     return ggml_custom_4d(ctx, GGML_TYPE_F32, x->ne[0], x->ne[1], 1, 1,
                           args, 3, snake_op, GGML_N_TASKS_MAX, nullptr);
@@ -232,6 +233,7 @@ ggml_tensor * parler_dac_accel_conv1d(ggml_context * ctx, ggml_tensor * x, ggml_
                                       ggml_tensor * bias, int dilation, ggml_tensor * residual) {
     GGML_ASSERT(ggml_is_contiguous(x) && ggml_is_contiguous(w) && ggml_is_contiguous(bias));
     GGML_ASSERT(!residual || ggml_is_contiguous(residual));
+    GGML_ASSERT(ggml_nelements(bias) == w->ne[2]);
     ggml_tensor * args[] = { x, w, bias, residual };
     return ggml_custom_4d(ctx, GGML_TYPE_F32, x->ne[0], w->ne[2], 1, 1,
                           args, residual ? 4 : 3, conv1d_op, GGML_N_TASKS_MAX,

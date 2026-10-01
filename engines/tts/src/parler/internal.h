@@ -335,6 +335,17 @@ bool parler_dac_accel_enabled(const parler_model & model);
 ggml_tensor * parler_dac_accel_conv1d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w,
                                       ggml_tensor * bias, int dilation, ggml_tensor * residual);
 
+// DAC graph pieces, exposed for the model-free kernel test.  The snake runs
+// fused when alpha and its reciprocals carry one value per channel of x
+// (vForce when `accel`, else ggml_snake) and as the broadcasting elementwise
+// chain otherwise; the stride-1 "same" conv (padding (K-1)/2 * dilation, plus
+// bias and an optional residual) takes the Accelerate kernel only for a
+// per-channel bias.
+ggml_tensor * parler_dac_snake(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * alpha,
+                               ggml_tensor * inv, ggml_tensor * eps);
+ggml_tensor * parler_dac_conv_same(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * w,
+                                   ggml_tensor * b, int dilation, ggml_tensor * residual);
+
 // Snake over x [T, C] with per-channel alpha and 1 / (alpha + eps) on vForce.
 ggml_tensor * parler_dac_accel_snake(ggml_context * ctx, ggml_tensor * x, ggml_tensor * alpha,
                                      ggml_tensor * inv);

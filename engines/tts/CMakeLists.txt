@@ -2022,10 +2022,10 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-parler-decoder-fused)
     tts_cpp_register_test(test-parler-decoder-fused)
 
-    # Model-free: the fused snake on every build, plus the Accelerate DAC
-    # kernels against naive references where they are compiled in.
+    # Model-free: the DAC snake and conv routing on every build, plus the
+    # Accelerate DAC kernels against naive references where they are compiled in.
     add_executable(test-parler-dac-cpu-kernels test/parler/test_dac_cpu_kernels.cpp
-        src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
+        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac-cpu-kernels PRIVATE ggml)
     target_include_directories(test-parler-dac-cpu-kernels PRIVATE ggml/include include src)
     tts_cpp_apply_ccache(test-parler-dac-cpu-kernels)

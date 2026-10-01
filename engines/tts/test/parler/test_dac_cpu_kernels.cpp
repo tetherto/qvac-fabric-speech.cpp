@@ -1,11 +1,12 @@
-// Model-free coverage for the CPU DAC kernels.  Every build: the fused
-// ggml_snake over precomputed 1 / (alpha + eps) matches the snake definition.
-// Accelerate builds additionally pin the cblas kernels against naive
-// double-precision references -- the stride-1 "same" conv1d (every DAC
-// dilation, the k=1 residual form, lengths that span several row tiles, one
-// and several threads), the transposed conv (sgemm columns + ggml_col2im_1d,
-// every DAC stride) and the vForce snake -- plus the switches that route the
-// DAC onto them (CPU only, PARLER_DAC_NO_ACCEL, shape exactness).
+// Model-free coverage for the CPU DAC kernels against naive double-precision
+// references.  Every build: the DAC snake (fused ggml_snake over precomputed
+// 1 / (alpha + eps), and the broadcasting chain for a scalar alpha) and the
+// ggml "same" conv.  Accelerate builds additionally pin the cblas kernels --
+// the conv1d (every DAC dilation, the k=1 residual form, row tiles, one- and
+// two-frame inputs, a scalar bias routed back to ggml, one and several
+// threads), the transposed conv (sgemm columns + ggml_col2im_1d, every DAC
+// stride) and the vForce snake -- plus the switches that route the DAC onto
+// them (CPU only, PARLER_DAC_NO_ACCEL, shape exactness).
 
 #include "parler/internal.h"
 #include "backend_selection.h"
@@ -59,8 +60,11 @@ struct graph_input {
     const std::vector<float> * values = nullptr;
 };
 
+// Inputs a graph does not consume (the snake epsilon on the fused route) get
+// no buffer and are skipped.
 void set_inputs(const std::vector<graph_input> & inputs) {
     for (const graph_input & in : inputs) {
+        if (!in.tensor->buffer) continue;
         ggml_backend_tensor_set(in.tensor, in.values->data(), 0, in.values->size() * sizeof(float));
     }
 }
@@ -132,9 +136,14 @@ double snake_one(double x, double alpha) {
     return x + s * s / (alpha + (double) PARLER_DAC_SNAKE_EPS);
 }
 
+// A one-element parameter broadcasts over every channel, as ggml_add does.
+float channel_value(const std::vector<float> & v, size_t channel) {
+    return v[v.size() == 1 ? 0 : channel];
+}
+
 std::vector<double> snake_ref(const std::vector<float> & x, const std::vector<float> & alpha, int64_t T) {
     std::vector<double> y(x.size());
-    for (size_t i = 0; i < x.size(); ++i) y[i] = snake_one(x[i], alpha[i / T]);
+    for (size_t i = 0; i < x.size(); ++i) y[i] = snake_one(x[i], channel_value(alpha, i / T));
     return y;
 }
 
@@ -142,6 +151,7 @@ struct conv_case {
     int64_t L, IC, OC, K;
     int     dilation;
     bool    residual;
+    bool    scalar_bias;
 };
 
 double conv1d_channel_taps(const std::vector<float> & x, const std::vector<float> & w,
@@ -168,7 +178,7 @@ void conv1d_ref_channel(const std::vector<float> & x, const std::vector<float> &
                         const conv_case & c, int64_t oc, std::vector<double> & y) {
     for (int64_t t = 0; t < c.L; ++t) {
         const double r = c.residual ? res[oc * c.L + t] : 0.0;
-        y[oc * c.L + t] = conv1d_tap_sum(x, w, c, t, oc) + b[oc] + r;
+        y[oc * c.L + t] = conv1d_tap_sum(x, w, c, t, oc) + channel_value(b, oc) + r;
     }
 }
 
@@ -224,75 +234,91 @@ std::vector<double> convt_ref(const std::vector<float> & x, const std::vector<fl
 
 struct snake_data {
     int64_t T = 0, C = 0;
-    std::vector<float> x, alpha, inv;
+    std::vector<float> x, alpha, inv, eps;
 };
 
-snake_data make_snake_data(det_rng & rng) {
+snake_data make_snake_data(det_rng & rng, bool per_channel) {
     snake_data d;
     d.T = 1500;
     d.C = 6;
     d.x     = random_values((size_t) (d.T * d.C), rng, 6.0f, 0.0f);
-    d.alpha = random_values((size_t) d.C, rng, 1.5f, 1.0f);
+    d.alpha = random_values(per_channel ? (size_t) d.C : 1, rng, 1.5f, 1.0f);
     d.inv.resize(d.alpha.size());
     std::transform(d.alpha.begin(), d.alpha.end(), d.inv.begin(),
                    [](float a) { return 1.0f / (a + PARLER_DAC_SNAKE_EPS); });
+    d.eps = { PARLER_DAC_SNAKE_EPS };
     return d;
 }
 
 std::vector<float> run_snake(ggml_backend_t backend, const snake_data & d, bool accel) {
+    const int64_t n_alpha = (int64_t) d.alpha.size();
     return run_graph(backend, 4, [&](ggml_context * ctx, std::vector<graph_input> & in) {
         ggml_tensor * x = input_2d(ctx, in, d.x, d.T, d.C);
-        ggml_tensor * a = input_3d(ctx, in, d.alpha, 1, d.C, 1);
-        ggml_tensor * v = input_3d(ctx, in, d.inv, 1, d.C, 1);
-        return accel ? parler_dac_accel_snake(ctx, x, a, v) : ggml_snake(ctx, x, a, v);
+        ggml_tensor * a = input_3d(ctx, in, d.alpha, 1, n_alpha, 1);
+        ggml_tensor * v = input_3d(ctx, in, d.inv, 1, n_alpha, 1);
+        ggml_tensor * e = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+        in.push_back({ e, &d.eps });
+        return parler_dac_snake(ctx, accel, x, a, v, e);
     });
 }
 
-void test_fused_snake(ggml_backend_t backend) {
+void run_snake_case(ggml_backend_t backend, bool per_channel, bool accel) {
     det_rng rng;
-    const snake_data d = make_snake_data(rng);
-    CHECK(matches("ggml_snake over reciprocals", run_snake(backend, d, false),
-                  snake_ref(d.x, d.alpha, d.T)),
-          "fused ggml_snake matches x + sin^2(a x) / (a + eps)");
-    if (parler_dac_accel_compiled()) {
-        CHECK(matches("vForce snake", run_snake(backend, d, true), snake_ref(d.x, d.alpha, d.T)),
-              "Accelerate snake matches x + sin^2(a x) / (a + eps)");
+    const snake_data d = make_snake_data(rng, per_channel);
+    char what[96];
+    snprintf(what, sizeof(what), "snake, %s alpha, %s", per_channel ? "per-channel" : "scalar",
+             accel ? "Accelerate route" : "ggml route");
+    CHECK(matches(what, run_snake(backend, d, accel), snake_ref(d.x, d.alpha, d.T)),
+          "the DAC snake matches x + sin^2(a x) / (a + eps), broadcasting a scalar alpha");
+}
+
+void test_snake(ggml_backend_t backend) {
+    const bool per_channel[] = { true, false };
+    for (bool pc : per_channel) {
+        run_snake_case(backend, pc, false);
+        if (parler_dac_accel_compiled()) run_snake_case(backend, pc, true);
     }
 }
 
-void run_conv_case(ggml_backend_t backend, const conv_case & c, int n_threads) {
+void run_conv_case(ggml_backend_t backend, const conv_case & c, bool accel, int n_threads) {
     det_rng rng;
+    const int64_t n_bias = c.scalar_bias ? 1 : c.OC;
     const std::vector<float> x   = random_values((size_t) (c.L * c.IC), rng, 1.0f, 0.0f);
     const std::vector<float> w   = random_values((size_t) (c.K * c.IC * c.OC), rng, 0.2f, 0.0f);
-    const std::vector<float> b   = random_values((size_t) c.OC, rng, 0.5f, 0.0f);
+    const std::vector<float> b   = random_values((size_t) n_bias, rng, 0.5f, 0.0f);
     const std::vector<float> res = random_values((size_t) (c.L * c.OC), rng, 1.0f, 0.0f);
     const std::vector<float> got = run_graph(backend, n_threads,
         [&](ggml_context * ctx, std::vector<graph_input> & in) {
             ggml_tensor * xt = input_3d(ctx, in, x, c.L, c.IC, 1);
             ggml_tensor * wt = input_3d(ctx, in, w, c.K, c.IC, c.OC);
-            ggml_tensor * bt = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, c.OC);
+            ggml_tensor * bt = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_bias);
             in.push_back({ bt, &b });
             ggml_tensor * rt = c.residual ? input_3d(ctx, in, res, c.L, c.OC, 1) : nullptr;
-            return parler_dac_accel_conv1d(ctx, xt, wt, bt, c.dilation, rt);
+            return parler_dac_conv_same(ctx, accel, xt, wt, bt, c.dilation, rt);
         });
-    char what[128];
-    snprintf(what, sizeof(what), "conv1d L=%lld IC=%lld OC=%lld K=%lld d=%d%s, %d threads",
+    char what[160];
+    snprintf(what, sizeof(what), "conv1d L=%lld IC=%lld OC=%lld K=%lld d=%d%s%s, %s, %d threads",
              (long long) c.L, (long long) c.IC, (long long) c.OC, (long long) c.K, c.dilation,
-             c.residual ? " +residual" : "", n_threads);
-    CHECK(matches(what, got, conv1d_ref(x, w, b, res, c)), "Accelerate conv1d matches the reference");
+             c.residual ? " +residual" : "", c.scalar_bias ? " scalar-bias" : "",
+             accel ? "Accelerate route" : "ggml route", n_threads);
+    CHECK(matches(what, got, conv1d_ref(x, w, b, res, c)), "the DAC conv matches the reference");
 }
 
-void test_accel_conv1d(ggml_backend_t backend) {
+void test_conv_same(ggml_backend_t backend, bool accel) {
     const conv_case cases[] = {
-        { 300, 200, 24, 7, 1, false },   // several im2col row tiles
-        { 257,  48, 16, 7, 3, false },
-        { 190,  32,  8, 7, 9, false },   // padding wider than a tap stride
-        { 333,  96, 40, 1, 1, true  },   // the k=1 residual form
-        {  50, 128,  1, 7, 1, false },   // conv_out: a single output channel
+        { 300, 200, 24, 7, 1, false, false },   // several im2col row tiles
+        { 257,  48, 16, 7, 3, false, false },
+        { 190,  32,  8, 7, 9, false, false },   // padding wider than a tap stride
+        { 333,  96, 40, 1, 1, true,  false },   // the k=1 residual form
+        {  50, 128,  1, 7, 1, false, false },   // conv_out: a single output channel
+        {   1,  32,  8, 7, 9, false, false },   // one frame: every tap but one is padding
+        {   2,  32,  8, 7, 3, false, false },
+        { 120,  64, 16, 7, 1, false, true  },   // a scalar bias broadcasts
+        {  90,  48, 12, 1, 1, true,  true  },
     };
     const int threads[] = { 1, 4 };
     for (const conv_case & c : cases) {
-        for (int n : threads) run_conv_case(backend, c, n);
+        for (int n : threads) run_conv_case(backend, c, accel, n);
     }
 }
 
@@ -374,11 +400,12 @@ int main() {
         fprintf(stderr, "parler dac cpu kernels: no CPU backend\n");
         return 1;
     }
-    test_fused_snake(backend);
+    test_snake(backend);
+    test_conv_same(backend, false);
     test_accel_switches();
     test_scratch_bound();
     if (parler_dac_accel_compiled()) {
-        test_accel_conv1d(backend);
+        test_conv_same(backend, true);
         test_accel_convt(backend);
     } else {
         fprintf(stderr, "parler dac cpu kernels: Accelerate kernels not compiled in; cblas cases skipped\n");
