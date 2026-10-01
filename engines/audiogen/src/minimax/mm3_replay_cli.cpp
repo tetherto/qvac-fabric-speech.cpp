@@ -134,10 +134,11 @@ VelocityDivergence velocity_divergence(const std::vector<float> & first, const s
 }
 
 // The DiT must emit byte-identical velocities for identical inputs across
-// repeated graph computes: run a conditional pass, an interleaved
-// unconditional pass (gate 0), then the conditional pass again, and require
-// run 3 == run 1. This regressed once when the flow loop relied on a resident
-// condition upload that the graph allocator had recycled between computes.
+// repeated graph computes: run the production CFG pair, an interleaved pass
+// with the branch gates swapped, then the CFG pair again, and require run 3 ==
+// run 1 for both branches. This regressed once when the flow loop relied on a
+// resident condition upload that the graph allocator had recycled between
+// computes.
 int run_condcheck(const MM3Model & model) {
     const int64_t L = 128;
     const int64_t N = (int64_t) model.synth_cfg.dit.in_channels * L;
@@ -145,19 +146,29 @@ int run_condcheck(const MM3Model & model) {
     std::vector<float> latents, condition;
     tts_cpp::minimax::detail::fill_noise(1234, 0, latents, N);
     tts_cpp::minimax::detail::fill_noise(1234, 1, condition, CN);
-    std::vector<float> first((size_t) N), unconditional((size_t) N), repeat((size_t) N);
+    std::vector<float> first((size_t) N), first_unconditional((size_t) N);
+    std::vector<float> swapped((size_t) N), swapped_unconditional((size_t) N);
+    std::vector<float> repeat((size_t) N), repeat_unconditional((size_t) N);
+    const std::vector<MM3DitBranch> swapped_branches = {
+        { MM3_DIT_UNCONDITIONED_GATE, swapped_unconditional.data() },
+        { MM3_DIT_CONDITIONED_GATE, swapped.data() },
+    };
     std::string error;
     if (!mm3_dit_prepare(model, &g_mm3_dit, &error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, first.data(), &error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 0.0f, 0.5f, L, unconditional.data(), &error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, repeat.data(), &error)) {
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, first.data(),
+                         first_unconditional.data(), &error) ||
+        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), swapped_branches, 0.5f, L, &error) ||
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, repeat.data(),
+                         repeat_unconditional.data(), &error)) {
         fprintf(stderr, "condcheck error: %s\n", error.c_str());
         return 1;
     }
     const VelocityDivergence divergence = velocity_divergence(first, repeat);
-    fprintf(stderr, "[condcheck] cos(first,repeat)=%.9f max_abs_diff=%.6g\n", divergence.cosine,
-            divergence.max_abs);
-    return divergence.max_abs < 1e-4 ? 0 : 2;
+    const VelocityDivergence unconditional_divergence =
+        velocity_divergence(first_unconditional, repeat_unconditional);
+    fprintf(stderr, "[condcheck] cos(first,repeat)=%.9f max_abs_diff=%.6g, unconditional max_abs_diff=%.6g\n",
+            divergence.cosine, divergence.max_abs, unconditional_divergence.max_abs);
+    return divergence.max_abs < 1e-4 && unconditional_divergence.max_abs < 1e-4 ? 0 : 2;
 }
 
 MM3GenRequest build_base_request(const CliOptions & options, const MM3Model & model) {

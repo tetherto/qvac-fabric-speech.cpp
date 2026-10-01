@@ -147,8 +147,11 @@ struct MM3SynthConfig {
     MM3VocConfig   voc;
 };
 
+// attn_qkv and ffn_gate_up hold the [q|k|v] and [gate|up] rows stacked into
+// one matrix when the parts share a type; the separate tensors stay null then.
 struct MM3LmLayer {
     ggml_tensor * attn_norm   = nullptr;
+    ggml_tensor * attn_qkv    = nullptr;
     ggml_tensor * attn_q      = nullptr;
     ggml_tensor * attn_k      = nullptr;
     ggml_tensor * attn_v      = nullptr;
@@ -156,6 +159,7 @@ struct MM3LmLayer {
     ggml_tensor * attn_q_norm = nullptr;
     ggml_tensor * attn_k_norm = nullptr;
     ggml_tensor * ffn_norm    = nullptr;
+    ggml_tensor * ffn_gate_up = nullptr;
     ggml_tensor * ffn_gate    = nullptr;
     ggml_tensor * ffn_up      = nullptr;
     ggml_tensor * ffn_down    = nullptr;
@@ -168,13 +172,16 @@ struct MM3LmWeights {
     std::vector<MM3LmLayer> blk;
 };
 
+// Stacked the same way as MM3LmLayer.
 struct MM3DepthLayer {
     ggml_tensor * attn_norm   = nullptr;
+    ggml_tensor * attn_qkv    = nullptr;
     ggml_tensor * attn_q      = nullptr;
     ggml_tensor * attn_k      = nullptr;
     ggml_tensor * attn_v      = nullptr;
     ggml_tensor * attn_output = nullptr;
     ggml_tensor * ffn_norm    = nullptr;
+    ggml_tensor * ffn_gate_up = nullptr;
     ggml_tensor * ffn_gate    = nullptr;
     ggml_tensor * ffn_up      = nullptr;
     ggml_tensor * ffn_down    = nullptr;
@@ -351,6 +358,14 @@ static std::vector<std::string> mm3_get_str_arr(const GGUFModel & gf, const char
     return out;
 }
 
+static int64_t mm3_total_rows(const std::vector<int64_t> & rows) {
+    int64_t total = 0;
+    for (int64_t count : rows) {
+        total += count;
+    }
+    return total;
+}
+
 struct MM3Loader {
     WeightCtx *                            wctx   = nullptr;
     const GGUFModel *                      gf     = nullptr;
@@ -391,6 +406,64 @@ struct MM3Loader {
             (*tmap)[name] = t;
         }
         return t;
+    }
+
+    // The file's [e0, e1] matrix of that name, or nullptr when it is absent or
+    // has another shape.
+    const ggml_tensor * file_matrix(const std::string & name, int64_t e0, int64_t e1) const {
+        if (gguf_find_tensor(gf->gguf, name.c_str()) < 0) {
+            return nullptr;
+        }
+        const ggml_tensor * src = ggml_get_tensor(gf->meta, name.c_str());
+        const bool shape_ok = src && src->ne[0] == e0 && src->ne[1] == e1 && src->ne[2] == 1 && src->ne[3] == 1;
+        return shape_ok ? src : nullptr;
+    }
+
+    // The type every part shares when each is an [e0, rows[i]] matrix in the
+    // file, else GGML_TYPE_COUNT.
+    ggml_type stacked_type(const std::vector<std::string> & parts, int64_t e0,
+                           const std::vector<int64_t> & rows) const {
+        ggml_type type = GGML_TYPE_COUNT;
+        for (size_t i = 0; i < parts.size(); i++) {
+            const ggml_tensor * src = file_matrix(parts[i], e0, rows[i]);
+            if (!src || (i > 0 && src->type != type)) {
+                return GGML_TYPE_COUNT;
+            }
+            type = src->type;
+        }
+        return type;
+    }
+
+    void queue_stacked_copies(ggml_tensor * dst, const std::vector<std::string> & parts) {
+        size_t offset = 0;
+        for (const std::string & part : parts) {
+            const size_t nbytes = ggml_nbytes(ggml_get_tensor(gf->meta, part.c_str()));
+            wctx->pending.push_back({ dst, gf_get_data(*gf, part.c_str()), nbytes, offset });
+            offset += nbytes;
+        }
+    }
+
+    // Loads same-width matrices as one tensor stacked along ne[1] in the given
+    // order, so projections of one input run as a single matrix product.
+    // Returns nullptr without an error when a part is missing, misshapen or of
+    // another type (a mixed k-quant layer); the caller then loads the parts one
+    // by one, which reports any real problem.
+    ggml_tensor * try_stacked(const std::string & name, const std::vector<std::string> & parts, int64_t e0,
+                              const std::vector<int64_t> & rows) {
+        if (parts.empty() || parts.size() != rows.size()) {
+            return nullptr;
+        }
+        const ggml_type type = stacked_type(parts, e0, rows);
+        if (type == GGML_TYPE_COUNT) {
+            return nullptr;
+        }
+        ggml_tensor * dst = ggml_new_tensor_2d(wctx->ctx, type, e0, mm3_total_rows(rows));
+        ggml_set_name(dst, name.c_str());
+        queue_stacked_copies(dst, parts);
+        if (tmap) {
+            (*tmap)[name] = dst;
+        }
+        return dst;
     }
 
     // Loads only the semantic-block + EOS rows of an output-head tensor, skipping the
@@ -784,6 +857,35 @@ static bool mm3_available(const MM3Model & m) {
     return m.lm_file.probe_ok && m.synth_file.probe_ok && m.meta_errors.empty();
 }
 
+// Loads a layer's q/k/v (or gate/up) projections stacked into one matrix, or
+// one by one when they cannot be stacked. `prefix` is the layer's name prefix,
+// e.g. "blk.3." or "depth.blk.3.".
+static void mm3_load_attention_inputs(MM3Loader & ld, const std::string & prefix, int64_t H, int64_t Q, int64_t K,
+                                      ggml_tensor ** qkv, ggml_tensor ** q, ggml_tensor ** k, ggml_tensor ** v) {
+    const std::string q_name = prefix + "attn_q.weight";
+    const std::string k_name = prefix + "attn_k.weight";
+    const std::string v_name = prefix + "attn_v.weight";
+    *qkv = ld.try_stacked(prefix + "attn_qkv.weight", { q_name, k_name, v_name }, H, { Q, K, K });
+    if (*qkv) {
+        return;
+    }
+    *q = ld.req(q_name, H, Q);
+    *k = ld.req(k_name, H, K);
+    *v = ld.req(v_name, H, K);
+}
+
+static void mm3_load_ffn_inputs(MM3Loader & ld, const std::string & prefix, int64_t H, int64_t F,
+                                ggml_tensor ** gate_up, ggml_tensor ** gate, ggml_tensor ** up) {
+    const std::string gate_name = prefix + "ffn_gate.weight";
+    const std::string up_name   = prefix + "ffn_up.weight";
+    *gate_up = ld.try_stacked(prefix + "ffn_gate_up.weight", { gate_name, up_name }, H, { F, F });
+    if (*gate_up) {
+        return;
+    }
+    *gate = ld.req(gate_name, H, F);
+    *up   = ld.req(up_name, H, F);
+}
+
 static bool mm3_load_lm_tensors(MM3Model * m, const GGUFModel & gf, std::vector<std::string> * errs) {
     const MM3LmConfig & c = m->lm_cfg;
     const int64_t       H = c.embedding_length;
@@ -804,18 +906,16 @@ static bool mm3_load_lm_tensors(MM3Model * m, const GGUFModel & gf, std::vector<
 
     m->lm.blk.assign((size_t) L, MM3LmLayer{});
     for (int i = 0; i < L; i++) {
-        MM3LmLayer & b = m->lm.blk[(size_t) i];
-        b.attn_norm    = ld.req(mm3_fmt("blk.%d.attn_norm.weight", i), H);
-        b.attn_q       = ld.req(mm3_fmt("blk.%d.attn_q.weight", i), H, Q);
-        b.attn_k       = ld.req(mm3_fmt("blk.%d.attn_k.weight", i), H, K);
-        b.attn_v       = ld.req(mm3_fmt("blk.%d.attn_v.weight", i), H, K);
-        b.attn_output  = ld.req(mm3_fmt("blk.%d.attn_output.weight", i), Q, H);
-        b.attn_q_norm  = ld.req(mm3_fmt("blk.%d.attn_q_norm.weight", i), D);
-        b.attn_k_norm  = ld.req(mm3_fmt("blk.%d.attn_k_norm.weight", i), D);
-        b.ffn_norm     = ld.req(mm3_fmt("blk.%d.ffn_norm.weight", i), H);
-        b.ffn_gate     = ld.req(mm3_fmt("blk.%d.ffn_gate.weight", i), H, F);
-        b.ffn_up       = ld.req(mm3_fmt("blk.%d.ffn_up.weight", i), H, F);
-        b.ffn_down     = ld.req(mm3_fmt("blk.%d.ffn_down.weight", i), F, H);
+        MM3LmLayer &      b      = m->lm.blk[(size_t) i];
+        const std::string prefix = mm3_fmt("blk.%d.", i);
+        b.attn_norm    = ld.req(prefix + "attn_norm.weight", H);
+        mm3_load_attention_inputs(ld, prefix, H, Q, K, &b.attn_qkv, &b.attn_q, &b.attn_k, &b.attn_v);
+        b.attn_output  = ld.req(prefix + "attn_output.weight", Q, H);
+        b.attn_q_norm  = ld.req(prefix + "attn_q_norm.weight", D);
+        b.attn_k_norm  = ld.req(prefix + "attn_k_norm.weight", D);
+        b.ffn_norm     = ld.req(prefix + "ffn_norm.weight", H);
+        mm3_load_ffn_inputs(ld, prefix, H, F, &b.ffn_gate_up, &b.ffn_gate, &b.ffn_up);
+        b.ffn_down     = ld.req(prefix + "ffn_down.weight", F, H);
         if (!errs->empty()) {
             break;
         }
@@ -853,16 +953,14 @@ static bool mm3_load_synth_tensors(MM3Model * m, const GGUFModel & gf, std::vect
 
         m->synth.depth.blk.assign((size_t) L, MM3DepthLayer{});
         for (int i = 0; i < L && errs->empty(); i++) {
-            MM3DepthLayer & b = m->synth.depth.blk[(size_t) i];
-            b.attn_norm       = ld.req(mm3_fmt("depth.blk.%d.attn_norm.weight", i), H);
-            b.attn_q          = ld.req(mm3_fmt("depth.blk.%d.attn_q.weight", i), H, H);
-            b.attn_k          = ld.req(mm3_fmt("depth.blk.%d.attn_k.weight", i), H, H);
-            b.attn_v          = ld.req(mm3_fmt("depth.blk.%d.attn_v.weight", i), H, H);
-            b.attn_output     = ld.req(mm3_fmt("depth.blk.%d.attn_output.weight", i), H, H);
-            b.ffn_norm        = ld.req(mm3_fmt("depth.blk.%d.ffn_norm.weight", i), H);
-            b.ffn_gate        = ld.req(mm3_fmt("depth.blk.%d.ffn_gate.weight", i), H, F);
-            b.ffn_up          = ld.req(mm3_fmt("depth.blk.%d.ffn_up.weight", i), H, F);
-            b.ffn_down        = ld.req(mm3_fmt("depth.blk.%d.ffn_down.weight", i), F, H);
+            MM3DepthLayer &   b      = m->synth.depth.blk[(size_t) i];
+            const std::string prefix = mm3_fmt("depth.blk.%d.", i);
+            b.attn_norm       = ld.req(prefix + "attn_norm.weight", H);
+            mm3_load_attention_inputs(ld, prefix, H, H, H, &b.attn_qkv, &b.attn_q, &b.attn_k, &b.attn_v);
+            b.attn_output     = ld.req(prefix + "attn_output.weight", H, H);
+            b.ffn_norm        = ld.req(prefix + "ffn_norm.weight", H);
+            mm3_load_ffn_inputs(ld, prefix, H, F, &b.ffn_gate_up, &b.ffn_gate, &b.ffn_up);
+            b.ffn_down        = ld.req(prefix + "ffn_down.weight", F, H);
         }
     }
 

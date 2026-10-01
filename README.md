@@ -200,6 +200,7 @@ build pins.
 | TTS | Supertonic 3 | end-to-end wall 0.61–0.82 s on every GPU lane (RTF 0.024–0.031) — [full table](engines/tts/README.md#supertonic-3-multi-machine-benchmark-2026-09) |
 | TTS | Audio8 0.6b | GPU RTF 0.12–0.65, faster than real time on every GPU lane — [full table](engines/tts/README.md#audio8-multi-machine-benchmark-2026-09) |
 | Music | ACE-Step 1.5 | generation 1,338–2,330 ms on the GPU lanes (RTF 0.14–0.25) — [full table](engines/audiogen/README.md#ace-step-15-multi-machine-benchmark-2026-09) |
+| Music | MiniMax-Music3 f16 | 2-minute song in 73.9 s on RTX 5090 CUDA and 84.2 s on Vulkan (RTF 0.62 / 0.70), 1.38x / 1.25x faster than before — [full table](engines/audiogen/README.md#minimax-music3-f16-on-rtx-5090-2026-09) |
 
 ### Brain-computer interface
 

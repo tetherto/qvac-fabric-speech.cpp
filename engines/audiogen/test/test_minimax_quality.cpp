@@ -173,20 +173,26 @@ bool dit_is_deterministic_across_computes(const MM3Model & model, std::string * 
     std::vector<float> latents, condition;
     tts_cpp::minimax::detail::fill_noise(7, 0, latents, N);
     tts_cpp::minimax::detail::fill_noise(7, 1, condition, CN);
-    std::vector<float> first((size_t) N), unconditional((size_t) N), repeat((size_t) N);
+    std::vector<float> first((size_t) N), first_unconditional((size_t) N);
+    std::vector<float> swapped((size_t) N), swapped_unconditional((size_t) N);
+    std::vector<float> repeat((size_t) N), repeat_unconditional((size_t) N);
+    const std::vector<MM3DitBranch> swapped_branches = {
+        { MM3_DIT_UNCONDITIONED_GATE, swapped_unconditional.data() },
+        { MM3_DIT_CONDITIONED_GATE, swapped.data() },
+    };
     if (!mm3_dit_prepare(model, &g_mm3_dit, error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, first.data(), error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 0.0f, 0.5f, L, unconditional.data(), error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, repeat.data(), error)) {
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, first.data(),
+                         first_unconditional.data(), error) ||
+        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), swapped_branches, 0.5f, L, error) ||
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, repeat.data(),
+                         repeat_unconditional.data(), error)) {
         return false;
     }
-    for (int64_t i = 0; i < N; ++i) {
-        if (first[(size_t) i] != repeat[(size_t) i]) {
-            if (error) {
-                *error = "DiT output changed between identical computes at index " + std::to_string(i);
-            }
-            return false;
+    if (first != repeat || first_unconditional != repeat_unconditional) {
+        if (error) {
+            *error = "DiT output changed between identical computes";
         }
+        return false;
     }
     return true;
 }
