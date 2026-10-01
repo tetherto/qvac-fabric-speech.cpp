@@ -387,26 +387,80 @@ constexpr int PROBE_NODES = 2;
 // never an integrated one while a discrete one is visible.
 constexpr int AUTO_VULKAN_DEVICE = -1;
 
+// Resolve a device's registry name without pulling in a shared helper
+// (dev_reg_name is Parakeet-local). Returns an empty string on nullptr
+// so string comparisons are safe either way.
+const char * audio8_dev_reg_name(ggml_backend_dev_t dev) {
+    if (!dev) return "";
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    const char * n = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return n ? n : "";
+}
+
+// Registry names and exact device names are distinct in ggml. Hexagon
+// registers as "HTP" and exposes a single device "HTP0". "cpu" and "opencl"
+// select by registry; "hexagon" selects by matching BOTH; anything else is
+// treated as an exact ggml device name (e.g. "HTP0", "CUDA0"). Mirrors the
+// Parakeet matcher in engines/parakeet/src/backend_util.h so a user who
+// learned the names on one engine finds them identical on the other.
+bool backend_selection_matches(const std::string & requested,
+                               const char * reg, const char * device,
+                               enum ggml_backend_dev_type type) {
+    if (requested.empty() || requested == "auto") return false;
+    if (requested == "cpu")    return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
+    if (requested == "hexagon") {
+        return reg && std::strcmp(reg, "HTP") == 0 &&
+               device && std::strcmp(device, "HTP0") == 0;
+    }
+    return device && requested == device;
+}
+
+// Walks the ggml device registry and inits the first device whose reg +
+// device name match `requested`. Returns nullptr when no device matches or
+// init itself failed. On failure the caller emits a user-visible
+// "failed to init a compute backend" error.
+ggml_backend_t init_explicit_backend(const std::string & requested) {
+    ::tts_cpp::detail::ensure_backends_loaded();
+    const size_t n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) continue;
+        const char * reg_name  = audio8_dev_reg_name(dev);
+        const char * dev_name  = ggml_backend_dev_name(dev);
+        const enum ggml_backend_dev_type dev_type = ggml_backend_dev_type(dev);
+        if (!backend_selection_matches(requested, reg_name, dev_name, dev_type)) {
+            continue;
+        }
+        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            std::fprintf(stderr,
+                "[audio8] explicitly selected %s backend (%s)\n",
+                reg_name ? reg_name : "?", dev_name ? dev_name : "unknown");
+            return backend;
+        }
+    }
+    std::fprintf(stderr,
+        "[audio8] requested backend \"%s\" unavailable or failed initialization; "
+        "no fallback\n", requested.c_str());
+    return nullptr;
+}
+
 // Audio8's GPU path is enabled only on backends its whole graph set has been
 // validated against, stage by stage, against the F32 reference. Anything else
 // falls back to CPU rather than running unverified kernels.
 //
 // `backend` is EngineOptions::backend (CLI --backend): "" / "auto" takes the
-// legacy tier-based GPU path; "cpu" short-circuits to the CPU backend; any
-// other explicit name (today just "hexagon" for Snapdragon HTP0) returns
-// nullptr until the per-backend init path lands (QVAC-26269 Cycle 2b), so a
-// user-visible "failed to init a compute backend" error fires in the caller.
+// legacy tier-based GPU path; "cpu" short-circuits to the CPU backend;
+// "hexagon" or an exact ggml device name is resolved against the ggml device
+// registry via init_explicit_backend. Explicit requests never fall back to
+// CPU on failure -- the caller sees a hard "failed to init a compute
+// backend" error instead of running on the wrong device.
 ggml_backend_t init_backend(int n_gpu_layers, const std::string & backend) {
     if (backend == "cpu") {
         return ::tts_cpp::detail::init_cpu_backend();
     }
     if (!backend.empty() && backend != "auto") {
-        std::fprintf(stderr,
-            "[audio8] backend \"%s\" requested but no init path is wired yet; "
-            "Hexagon support is in progress (QVAC-26269). "
-            "Use --backend auto or --backend cpu for now.\n",
-            backend.c_str());
-        return nullptr;
+        return init_explicit_backend(backend);
     }
     using ::tts_cpp::detail::GpuBackendRequirement;
     ggml_backend_t gpu = ::tts_cpp::detail::init_gpu_backend(
