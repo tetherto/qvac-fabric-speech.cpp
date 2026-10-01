@@ -121,7 +121,11 @@ nine LM heads into single matmuls on GPU and on mmap-backed CPU loads
 (byte-exact; `PARLER_NO_FUSED` disables fusion), samples each step over the
 top-k candidate set with reused scratch, and on host backends samples the
 step logits in place from the graph buffer instead of downloading a copy
-per step. Details in [docs/parler.md](docs/parler.md).
+per step. On CPU the decoder runs flash attention over an F32 KV cache, and
+on Apple builds the DAC's convolutions run on Accelerate (`PARLER_NO_FA` and
+`PARLER_DAC_NO_ACCEL` opt out). Details in
+[docs/parler.md](docs/parler.md); M3 Ultra CPU numbers in
+[docs/performance.md](docs/performance.md#parler-tts-on-cpu-mac-studio-m3-ultra).
 
 Audio8 on CUDA required one ggml-cuda fix and a rethink of what its
 harnesses measure. The fix: the transpose fast path of the CUDA copy kernel

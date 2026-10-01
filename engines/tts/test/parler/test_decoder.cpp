@@ -152,6 +152,12 @@ int main(int argc, char ** argv) {
         return 1;
     }
     g_gpu = model.on_gpu;  // GPU-aware bars apply only when the load actually landed on a GPU
+    if (!g_gpu && std::getenv("PARLER_NO_FA") == nullptr &&
+        !(model.use_fa && model.kv_type == GGML_TYPE_F32)) {
+        fprintf(stderr, "parler decoder: FAIL a CPU load must select flash attention over an F32 KV cache\n");
+        parler_free_model(model);
+        return 1;
+    }
     int rc = 1;
 
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));

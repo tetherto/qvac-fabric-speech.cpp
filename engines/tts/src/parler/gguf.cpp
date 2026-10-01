@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 namespace tts_cpp {
 namespace parler {
@@ -66,16 +68,15 @@ bool kv_bool(const gguf_context * g, const char * key, bool & out, std::string *
     return true;
 }
 
-// FA probe: build a representative flash_attn_ext node and ask the backend if
-// it supports it. CPU returns false so it keeps the validated manual F32 path.
-bool parler_probe_fa_f16(ggml_backend_t backend, int head_dim, int n_heads) {
-    if (::tts_cpp::detail::backend_is_cpu(backend)) return false;
+// FA probe: build a representative flash_attn_ext node over `kv_type` K/V and
+// ask the backend if it supports it.
+bool parler_probe_fa(ggml_backend_t backend, int head_dim, int n_heads, ggml_type kv_type) {
     ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, /*no_alloc=*/ true };
     ggml_context * c = ggml_init(ip);
     if (!c) return false;
     ggml_tensor * q = ggml_new_tensor_3d(c, GGML_TYPE_F32, head_dim, 16, n_heads);
-    ggml_tensor * k = ggml_new_tensor_3d(c, GGML_TYPE_F16, head_dim, 16, n_heads);
-    ggml_tensor * v = ggml_new_tensor_3d(c, GGML_TYPE_F16, head_dim, 16, n_heads);
+    ggml_tensor * k = ggml_new_tensor_3d(c, kv_type, head_dim, 16, n_heads);
+    ggml_tensor * v = ggml_new_tensor_3d(c, kv_type, head_dim, 16, n_heads);
     ggml_tensor * op = ggml_flash_attn_ext(c, q, k, v, nullptr, 1.0f / (float) head_dim, 0.0f, 0.0f);
     const bool ok = op && ggml_backend_supports_op(backend, op);
     ggml_free(c);
@@ -94,6 +95,59 @@ void mark_externally_allocated(ggml_context * ctx) {
             t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
         }
     }
+}
+
+std::vector<std::pair<ggml_tensor *, ggml_tensor **>> dac_snake_slots(parler_model & model) {
+    std::vector<std::pair<ggml_tensor *, ggml_tensor **>> slots;
+    for (parler_dac_block & b : model.dac_blocks) {
+        slots.emplace_back(b.snake_alpha, &b.snake_inv);
+        for (parler_dac_residual & r : b.res) {
+            slots.emplace_back(r.snake1_alpha, &r.snake1_inv);
+            slots.emplace_back(r.snake2_alpha, &r.snake2_inv);
+        }
+    }
+    slots.emplace_back(model.dac_snake_out_alpha, &model.dac_snake_out_inv);
+    return slots;
+}
+
+bool all_f32(const std::vector<std::pair<ggml_tensor *, ggml_tensor **>> & slots) {
+    for (const auto & slot : slots) {
+        if (slot.first->type != GGML_TYPE_F32 || !ggml_is_contiguous(slot.first)) return false;
+    }
+    return true;
+}
+
+void fill_snake_inverse(ggml_tensor * alpha, ggml_tensor * inv) {
+    std::vector<float> v((size_t) ggml_nelements(alpha));
+    ggml_backend_tensor_get(alpha, v.data(), 0, v.size() * sizeof(float));
+    for (float & a : v) a = 1.0f / (a + PARLER_DAC_SNAKE_EPS);
+    ggml_backend_tensor_set(inv, v.data(), 0, v.size() * sizeof(float));
+}
+
+void fill_snake_inverses(const std::vector<std::pair<ggml_tensor *, ggml_tensor **>> & slots) {
+    for (const auto & slot : slots) fill_snake_inverse(slot.first, *slot.second);
+}
+
+// CPU backend only: the reciprocals the fused ggml_snake nodes consume.  A
+// GGUF with non-F32 snake alphas keeps the elementwise chain instead.
+bool build_dac_snake_inverses(parler_model & model, parler_fit_measure * measure) {
+    if (model.on_gpu) return true;
+    const auto slots = dac_snake_slots(model);
+    if (!all_f32(slots)) return true;
+    ggml_init_params ip = { slots.size() * ggml_tensor_overhead(), nullptr, /*no_alloc=*/ true };
+    model.ctx_snake = ggml_init(ip);
+    if (!model.ctx_snake) return false;
+    for (const auto & slot : slots) *slot.second = ggml_dup_tensor(model.ctx_snake, slot.first);
+    if (measure) {
+        measure->snake_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+            model.ctx_snake, ggml_backend_get_default_buffer_type(model.backend));
+        mark_externally_allocated(model.ctx_snake);
+        return true;
+    }
+    model.buffer_snake = ggml_backend_alloc_ctx_tensors(model.ctx_snake, model.backend);
+    if (!model.buffer_snake) return false;
+    fill_snake_inverses(slots);
+    return true;
 }
 
 } // namespace
@@ -251,7 +305,7 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     // per stage, plus greedy-token identity); anything else falls back to CPU.
     // Metal was validated in PR #103, Vulkan and OpenCL (Adreno) since, and CUDA
     // against the same reference fixtures on an RTX 3090. Feature-level
-    // probes such as parler_probe_fa_f16() still apply on top, so a validated backend
+    // probes such as parler_probe_fa() still apply on top, so a validated backend
     // that lacks an individual capability degrades rather than breaking.
     // Filtering at the walk rather than after it matters on a host carrying an
     // unvalidated backend the walk would otherwise return: rejecting the winner
@@ -266,9 +320,11 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     if (!model.backend) return fail("failed to init backend");
 
     model.on_gpu  = !::tts_cpp::detail::backend_is_cpu(model.backend);
-    model.use_fa  = parler_probe_fa_f16(model.backend, hp.dec_d_model / hp.dec_n_head, hp.dec_n_head)
+    const ggml_type fa_kv_type = parler_fa_kv_type(model.on_gpu);
+    model.use_fa  = parler_probe_fa(model.backend, hp.dec_d_model / hp.dec_n_head, hp.dec_n_head,
+                                    fa_kv_type)
                     && std::getenv("PARLER_NO_FA") == nullptr;
-    model.kv_type = model.use_fa ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    model.kv_type = model.use_fa ? fa_kv_type : GGML_TYPE_F32;
 
     // On the CPU backend, back each verbatim ctx_w tensor with the mmap'd GGUF
     // (bounds + 32B-align guarded, alloc+stream fallback) instead of a dirty
@@ -468,6 +524,9 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
         !parler_fuse_decode_weights(model, measure)) {
         return fail("failed to fuse decode projection weights");
     }
+    if (!build_dac_snake_inverses(model, measure)) {
+        return fail("failed to build the DAC snake reciprocals");
+    }
 
     gguf_free(g);
     ggml_free(ctx_meta);
@@ -489,6 +548,8 @@ bool parler_load_gguf_metadata_only(const std::string & path, parler_model & mod
 void parler_free_model(parler_model & model) {
     ::tts_cpp::detail::sched_fallback_free(model.sched_fb);
     if (model.dac_allocr)   { ggml_gallocr_free(model.dac_allocr); model.dac_allocr = nullptr; }
+    if (model.buffer_snake) { ggml_backend_buffer_free(model.buffer_snake); model.buffer_snake = nullptr; }
+    if (model.ctx_snake)    { ggml_free(model.ctx_snake); model.ctx_snake = nullptr; }
     if (model.buffer_cross) { ggml_backend_buffer_free(model.buffer_cross); model.buffer_cross = nullptr; }
     if (model.ctx_cross)    { ggml_free(model.ctx_cross); model.ctx_cross = nullptr; }
     if (model.buffer_fused) { ggml_backend_buffer_free(model.buffer_fused); model.buffer_fused = nullptr; }
@@ -585,6 +646,14 @@ static void wire_fused_pointers(parler_model & model,
         if (qkv[i]) model.dec_layers[i].qkv = qkv[i];
     }
     if (heads) model.lm_head_stacked = heads;
+}
+
+bool parler_dac_uses_fused_snake(const parler_model & model) {
+    return model.dac_snake_out_inv != nullptr;
+}
+
+ggml_type parler_fa_kv_type(bool on_gpu) {
+    return on_gpu ? GGML_TYPE_F16 : GGML_TYPE_F32;
 }
 
 bool parler_should_fuse_decode_weights(const parler_model & model, bool measuring) {

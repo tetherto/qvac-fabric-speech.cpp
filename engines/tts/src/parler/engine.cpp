@@ -41,7 +41,7 @@ struct Engine::Impl {
     int resolve_threads() const {
         if (opts.n_threads > 0) return opts.n_threads;
         const unsigned hw = std::thread::hardware_concurrency();
-        return (int) std::min(hw ? hw : 4u, 4u);
+        return (int) std::min(hw ? hw : PARLER_DEFAULT_THREADS, PARLER_DEFAULT_THREADS);
     }
 
     void check_cancel() const {

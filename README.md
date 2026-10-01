@@ -96,7 +96,9 @@ AVX512-BF16 CPUs with `f16` elsewhere. See the
 Parler's decoder fuses the per-layer QKV projections and its nine LM heads
 into single matmuls on GPU and on mmap-backed CPU loads (byte-exact;
 `PARLER_NO_FUSED` opts out) and samples each step from the top-k candidate
-set, in place on host backends. See the
+set, in place on host backends. On CPU it runs flash attention over an F32 KV
+cache, and on Apple builds its DAC convolutions run on Accelerate
+(`PARLER_NO_FA` and `PARLER_DAC_NO_ACCEL` opt out). See the
 [Parler-TTS guide](engines/tts/docs/parler.md).
 
 ### Speech enhancement

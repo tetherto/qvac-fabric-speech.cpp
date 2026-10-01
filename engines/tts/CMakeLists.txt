@@ -346,6 +346,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/delay.cpp
     src/parler/sampler.cpp
     src/parler/dac.cpp
+    src/parler/dac_accel.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -2021,8 +2022,17 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-parler-decoder-fused)
     tts_cpp_register_test(test-parler-decoder-fused)
 
+    # Model-free: the fused snake on every build, plus the Accelerate DAC
+    # kernels against naive references where they are compiled in.
+    add_executable(test-parler-dac-cpu-kernels test/parler/test_dac_cpu_kernels.cpp
+        src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
+    target_link_libraries(test-parler-dac-cpu-kernels PRIVATE ggml)
+    target_include_directories(test-parler-dac-cpu-kernels PRIVATE ggml/include include src)
+    tts_cpp_apply_ccache(test-parler-dac-cpu-kernels)
+    tts_cpp_register_test(test-parler-dac-cpu-kernels LABEL "unit")
+
     add_executable(test-parler-dac test/parler/test_dac.cpp
-        src/parler/dac.cpp ${_tcb_parler_core_srcs})
+        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac PRIVATE ggml)
     target_include_directories(test-parler-dac PRIVATE ggml/include include src)
     tts_cpp_apply_ccache(test-parler-dac)
@@ -2062,7 +2072,7 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-e2e test/parler/test_e2e.cpp
         src/parler/t5.cpp src/parler/decoder.cpp src/parler/delay.cpp
-        src/parler/dac.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
+        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
         src/parler/bpe_tokenizer.cpp
         src/parler/text_norm.cpp src/parler/engine.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-e2e PRIVATE ggml)
@@ -3675,10 +3685,19 @@ set(TTS_CPP_POINTWISE_ACCEL_TARGETS
     test-supertonic-pipeline
     supertonic-bench)
 
+# Parler's DAC kernels (src/parler/dac_accel.cpp) are Accelerate-only: the
+# test targets that compile them, or check the exactness they imply, get the
+# framework on Apple and nothing elsewhere.
+set(TTS_CPP_PARLER_ACCEL_TARGETS
+    test-parler-dac
+    test-parler-dac-cpu-kernels
+    test-parler-e2e
+    test-parler-engine-stream)
+
 if (APPLE)
     find_library(TTS_CPP_ACCELERATE_FRAMEWORK Accelerate)
     if (TTS_CPP_ACCELERATE_FRAMEWORK)
-        foreach(_tts_accel_target ${TTS_CPP_POINTWISE_ACCEL_TARGETS})
+        foreach(_tts_accel_target ${TTS_CPP_POINTWISE_ACCEL_TARGETS} ${TTS_CPP_PARLER_ACCEL_TARGETS})
             if (TARGET ${_tts_accel_target})
                 target_link_libraries(${_tts_accel_target} PRIVATE ${TTS_CPP_ACCELERATE_FRAMEWORK})
                 target_compile_definitions(${_tts_accel_target} PRIVATE TTS_CPP_USE_ACCELERATE)

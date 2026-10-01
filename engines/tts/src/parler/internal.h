@@ -18,6 +18,10 @@ namespace detail {
 // graph-node budget for every parler graph builder (t5 / decoder / dac)
 constexpr int PARLER_MAX_NODES = 4096;
 
+// Thread count of an EngineOptions::n_threads = 0 engine (capped at the core
+// count when that is known).
+constexpr unsigned PARLER_DEFAULT_THREADS = 4;
+
 // Frames per DAC decode window. The DAC is fully convolutional, so a whole-sequence
 // graph grows the compute buffer without bound (~1.96 MiB/frame); windowing makes the
 // peak O(1) in output length. Context of parler_dac_rf_frames() on each side keeps
@@ -86,13 +90,16 @@ struct parler_dec_layer {
 
 struct parler_dac_residual {
     ggml_tensor * snake1_alpha = nullptr;
+    ggml_tensor * snake1_inv   = nullptr;                  // 1 / (alpha + eps), CPU only
     ggml_tensor * conv1_w = nullptr, * conv1_b = nullptr;  // k7, dilated
     ggml_tensor * snake2_alpha = nullptr;
+    ggml_tensor * snake2_inv   = nullptr;
     ggml_tensor * conv2_w = nullptr, * conv2_b = nullptr;  // k1
 };
 
 struct parler_dac_block {
     ggml_tensor * snake_alpha = nullptr;
+    ggml_tensor * snake_inv   = nullptr;
     ggml_tensor * convt_w = nullptr, * convt_b = nullptr;  // k=2*stride
     int stride = 0;
     parler_dac_residual res[3];                            // dilations 1, 3, 9
@@ -115,12 +122,14 @@ struct parler_model {
     ggml_backend_buffer_t          map_buf = nullptr;
     mutable ::tts_cpp::detail::sched_fallback sched_fb;
 
-    // GPU flash-attention self-attn path (F16 KV). Probed at load; CPU keeps
-    // the validated manual F32 path so the reference parity tests are exact.
+    // Flash-attention path for self- and cross-attention, probed at load over
+    // parler_fa_kv_type(); PARLER_NO_FA (or a failed probe) keeps the manual
+    // softmax(QK^T)V path over an F32 cache.
     bool      use_fa  = false;
     ggml_type kv_type = GGML_TYPE_F32;
     // On a GPU backend the DAC upsampling runs conv_transpose_1d as phase-matmuls
-    // (Metal's conv_transpose kernel is ~an order slower); CPU keeps the direct op.
+    // (Metal's conv_transpose kernel is ~an order slower); CPU keeps the direct op,
+    // or sgemm + col2im on Accelerate builds (parler_dac_accel_enabled).
     bool      on_gpu  = false;
 
     // t5
@@ -146,6 +155,11 @@ struct parler_model {
     ggml_tensor * dac_conv_in_w = nullptr, * dac_conv_in_b = nullptr;
     std::vector<parler_dac_block> dac_blocks;
     ggml_tensor * dac_snake_out_alpha = nullptr;
+    ggml_tensor * dac_snake_out_inv   = nullptr;
+    // CPU backend: per-channel 1 / (alpha + eps) for every snake, so the DAC
+    // runs each snake as one fused ggml_snake node.  Null on GPU backends.
+    ggml_context        * ctx_snake    = nullptr;
+    ggml_backend_buffer_t buffer_snake = nullptr;
     ggml_tensor * dac_conv_out_w = nullptr, * dac_conv_out_b = nullptr;
     // Reused across windows AND across calls: one bounded arena for the whole
     // process instead of a fresh large allocation per decode (streaming makes one
@@ -160,8 +174,8 @@ struct parler_model {
     ggml_tensor * memory_v = nullptr;
 
     // per-description cross-attention K/V (rebuilt when the description changes).
-    // cross_k[l]=[d_model,T]; cross_v_t[l]=[d_model,T] F16 non-transposed under FA,
-    // else [T,d_model] F32 transposed.
+    // cross_k[l]=[d_model,T]; cross_v_t[l]=[d_model,T] non-transposed under FA,
+    // else [T,d_model] transposed; both of kv_type.
     ggml_context        * ctx_cross    = nullptr;
     ggml_backend_buffer_t buffer_cross = nullptr;
     std::vector<ggml_tensor *> cross_k;
@@ -196,6 +210,7 @@ struct parler_fit_measure {
     size_t weights_bytes = 0;  // ctx_w on the resolved backend (alloc+stream path)
     size_t fused_bytes   = 0;  // fused qkv stacks + stacked LM heads (every backend)
     size_t kv_bytes      = 0;  // decoder self-KV slab at the resolved kv type
+    size_t snake_bytes   = 0;  // CPU DAC snake reciprocals
 };
 
 // Metadata-only twin of parler_load_gguf: same backend policy, FA probe, KV
@@ -211,6 +226,11 @@ struct parler_fit_measure {
 bool parler_load_gguf_metadata_only(const std::string & path, parler_model & model,
                                     int n_gpu_layers, parler_fit_measure & measure,
                                     std::string * error = nullptr);
+
+// Element type of the self-KV cache and the cross K/V under flash attention:
+// F16 on GPU backends; F32 on CPU, whose FA kernel then multiplies and
+// accumulates in F32 like the manual path, so it costs no precision.
+ggml_type parler_fa_kv_type(bool on_gpu);
 
 // Whether the loader fuses the decode projections: GPU loads, mmap-backed CPU
 // loads (the duplicated originals stay file-backed and evictable there), and
@@ -292,6 +312,45 @@ bool parler_dec_step(const parler_model & model,
 // valid until the next parler graph build on this thread.
 ggml_cgraph * parler_build_prefill_fit_graph(const parler_model & model, int prompt_tokens);
 ggml_cgraph * parler_build_step_fit_graph(const parler_model & model, int n_past);
+
+// ---- parler_gguf.cpp: DAC snake reciprocals ----
+// Snake epsilon of the DAC: snake(x) = x + sin^2(alpha x) / (alpha + eps).
+constexpr float PARLER_DAC_SNAKE_EPS = 1e-9f;
+
+// Whether the DAC graph runs its snakes as fused ggml_snake nodes over the
+// precomputed reciprocals: CPU loads whose snake alphas are F32 (every shipped
+// GGUF); GPU graphs keep the elementwise chain they were validated with.
+bool parler_dac_uses_fused_snake(const parler_model & model);
+
+// ---- parler_dac_accel.cpp ----
+// Accelerate (cblas_sgemm) kernels for the DAC conv stack on the CPU backend
+// of Apple builds; parler_dac_accel_compiled() is false elsewhere and the
+// builders below then return null.  PARLER_DAC_NO_ACCEL keeps the ggml kernels.
+bool parler_dac_accel_compiled();
+bool parler_dac_accel_enabled(const parler_model & model);
+
+// Stride-1 "same" conv1d (padding (K-1)/2 * dilation) of x [L, IC] with
+// w [K, IC, OC], plus bias [OC] and an optional residual [L, OC]: im2col in
+// cache-sized row tiles, one sgemm per tile, tiles spread over the threads.
+ggml_tensor * parler_dac_accel_conv1d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w,
+                                      ggml_tensor * bias, int dilation, ggml_tensor * residual);
+
+// Snake over x [T, C] with per-channel alpha and 1 / (alpha + eps) on vForce.
+ggml_tensor * parler_dac_accel_snake(ggml_context * ctx, ggml_tensor * x, ggml_tensor * alpha,
+                                     ggml_tensor * inv);
+
+// Host bytes of the conv kernels' im2col tiles (one per worker thread, kept
+// for the thread's lifetime) for n_threads workers; 0 off the Accelerate path.
+size_t parler_dac_accel_scratch_bytes(const parler_model & model, int n_threads);
+
+// GEMM half of a transposed conv1d: columns [K*OC, IL] = w [K, OC, IC] . x^T,
+// for x [IL, IC]; ggml_col2im_1d overlap-adds them into the signal.
+ggml_tensor * parler_dac_accel_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w);
+
+// Whether the DAC's CPU rounding depends on the window shape, so a windowed
+// or ranged decode matches a whole-sequence one only within float tolerance:
+// tinyBLAS (GGML_LLAMAFILE) and the Accelerate kernels both tile by shape.
+bool parler_dac_cpu_is_shape_exact();
 
 // ---- parler_dac.cpp ----
 // DAC receptive field in latent frames, derived from the loaded conv geometry.
