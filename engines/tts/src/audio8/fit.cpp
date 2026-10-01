@@ -124,17 +124,21 @@ FitResult fit_params(const FitOptions & opts) {
     model_guard m;
     detail::fit_load_measure lm_load, dec_load, enc_load;
     std::string error;
+    // fit measurement always goes through the GPU/CPU auto path (empty
+    // backend string); the Hexagon-specific allocation shape is still being
+    // validated and preflight should keep reporting the current numbers.
+    const std::string fit_backend;
     if (!detail::load_lm_metadata_only(opts.lm_gguf_path, opts.n_gpu_layers,
-                                       m.lm, lm_load, &error) ||
+                                       fit_backend, m.lm, lm_load, &error) ||
         !detail::load_codec_metadata_only(opts.codec_decoder_gguf_path, opts.n_gpu_layers,
-                                          m.decoder, dec_load, &error) ||
+                                          fit_backend, m.decoder, dec_load, &error) ||
         !m.decoder.has_decoder) {
         r.reason = "model-unreadable";
         return r;
     }
     if (cloning) {
         if (!detail::load_codec_metadata_only(opts.codec_encoder_gguf_path, opts.n_gpu_layers,
-                                              m.encoder, enc_load, &error) ||
+                                              fit_backend, m.encoder, enc_load, &error) ||
             !m.encoder.has_encoder) {
             r.reason = "model-unreadable";
             return r;
