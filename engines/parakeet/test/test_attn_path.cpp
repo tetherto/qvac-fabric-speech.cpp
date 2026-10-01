@@ -32,7 +32,7 @@ ggml_backend_t init_first_gpu() {
 // The policy keys on registry names; a backend that renames itself would make the
 // engine and this test agree on "unfused" silently, so every GPU name must be known.
 bool known_gpu_backend_name(const char * name) {
-    static const char * const known[] = {"CUDA", "MTL", "Metal", "Vulkan", "OpenCL", "HIP", "SYCL"};
+    static const char * const known[] = {"CUDA", "MTL", "Metal", "Vulkan", "OpenCL", "HIP", "SYCL", "HTP"};
     for (const char * k : known) {
         if (std::strcmp(name, k) == 0) return true;
     }
@@ -66,10 +66,10 @@ int check_policy() {
 
     if (ggml_backend_t gpu = init_first_gpu()) {
         const bool fused_backend = parakeet::backend_is_cuda(gpu) || parakeet::backend_is_metal(gpu) ||
-                                   parakeet::backend_is_vulkan(gpu);
+                                   parakeet::backend_is_vulkan(gpu) || parakeet::backend_is_hexagon(gpu);
         std::printf("[attn-path] GPU backend %s, fused attention backend: %s\n",
                     parakeet::backend_reg_name(gpu), fused_backend ? "yes" : "no");
-        failures += check(parakeet::flash_attn_allowed(true, gpu) == fused_backend, "GPU takes the fused graph only on CUDA, Metal and Vulkan");
+        failures += check(parakeet::flash_attn_allowed(true, gpu) == fused_backend, "GPU takes the fused graph only on CUDA, Metal, Vulkan and Hexagon");
         failures += check(!parakeet::flash_attn_allowed(false, gpu),               "GPU keeps the unfused graph when compiled out");
         ggml_backend_free(gpu);
     } else {
@@ -87,7 +87,7 @@ int check_graph(const char * gguf, int n_gpu_layers) {
     }
     const std::string backend = model_encoder_backend_name(model);
     ggml_backend_t    active  = model_active_backend(model);
-    const bool fused_backend  = active && (backend_is_cuda(active) || backend_is_metal(active) || backend_is_vulkan(active));
+    const bool fused_backend  = active && (backend_is_cuda(active) || backend_is_metal(active) || backend_is_vulkan(active) || backend_is_hexagon(active));
     const bool uses_fa        = encoder_graph_uses_op(model, GGML_OP_FLASH_ATTN_EXT);
     std::printf("[attn-path] encoder backend %s, flash-attn compiled %d, graph uses it %d\n",
                 backend.c_str(), (int) flash_attn_compiled(), (int) uses_fa);
