@@ -217,6 +217,18 @@ or incompatible sidecars and prediction failures fall back to ggml. A bypass
 sidecar that fails prediction is quarantined for the lifetime of the engine so
 subsequent chunks go directly to ggml.
 
+## Backend selection
+
+`parakeet-cli --backend NAME` selects the runtime device for encoder and head
+inference. Accepted values: `auto` (default), `cpu`, `opencl`, `hexagon`
+(Snapdragon HTP0), or an exact ggml device name such as `HTP0`. The C++ API
+takes the same value via `EngineOptions::device`. Hexagon is experimental and
+currently targets Parakeet CTC 0.6B Q8_0; other Parakeet variants (TDT, EOU,
+Sortformer) also run on it. Selecting `hexagon` requires a build with the
+matching ggml Hexagon backend and DSP library staged next to the binary; see
+[docs/backends.md](docs/backends.md) for the full backend model, device
+naming, and Core ML encoder-sidecar interaction.
+
 ## Performance
 
 `RTF = inference_time / audio_duration`; lower is faster. The latest recorded

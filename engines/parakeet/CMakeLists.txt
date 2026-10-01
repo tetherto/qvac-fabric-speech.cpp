@@ -385,6 +385,47 @@ if (PARAKEET_BUILD_LIBRARY)
         target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_EXPERIMENTAL_FLASH_ATTN)
     endif()
 
+    # `PARAKEET_F16_ACTIVATIONS` narrows the F32 encoder residual stream at
+    # exactly one site: the three batched attention MULMATs in
+    # `rel_pos_mha_unfused_graph`. `k_perm` / `p_perm` / `v_for_mm` are
+    # zero-padded on their matmul N/K axis to a 32-aligned tail and cast to
+    # F16, and the softmax output is zero-padded to match; the MULMATs
+    # (`ac`, `bd`, `attn_v`) then land on the Hexagon HMX F16-batched kernel
+    # (`hmx_mm_f16_f32_batched`) instead of `hvx-batched-f32`. Everything
+    # else — subsampling, FF/Conv projections, layer norms, residual adds,
+    # the `attn_out` Q8_0 matmul, the CTC head — stays F32 exactly as
+    # before, so downstream decoders and every other backend are unaffected.
+    # When OFF the helpers early-return with the input tensor unmodified:
+    # no PAD, no CAST, no CONT nodes added, byte-identical to the
+    # pre-refactor graph on every backend (CPU / OpenCL / Metal / Vulkan /
+    # Hexagon).
+    #
+    # Default flipped ON after full correctness validation (2026-09-30):
+    #   * All four Parakeet variants (CTC / TDT / EOU / Sortformer)
+    #     produce byte-identical transcripts on CPU, Hexagon HTP0 and
+    #     OpenCL Adreno with the flag ON vs OFF
+    #   * LibriSpeech dev-clean 100-clip WER on Hexagon: delta = 0.000%
+    #     (2.349% both configs; 100/100 hypotheses byte-identical)
+    #   * Long-form 191 s clip: byte-identical CPU vs HTP0 vs OpenCL
+    #   * Per-stage encoder cosine vs CPU >= 0.9994 at every stage
+    #   * Perf: -47% encoder-time on Hexagon CTC (4790 -> 2541 ms median
+    #     on speech-60, RTF 12.5x -> 23.6x realtime)
+    # Set `-DPARAKEET_F16_ACTIVATIONS=OFF` to opt out (e.g. for a
+    # backend-specific build where the extra PAD/CAST/CONT nodes have no
+    # perf upside and the byte-identical fallback is desired).
+    #
+    # Motivation: HMX v79 is F16-only. A prior attempt to route these
+    # matmuls to HMX by casting src0 without alignment padding failed the
+    # kernel's `n%32==0 && k%32==0` gate (matmul-ops.c:3081); a full F16
+    # residual-stream refactor failed on-device because Hexagon carries
+    # only `quantize_f32_q8_0_*` — Q8_0xF16 FF/Conv matmuls return
+    # DSP NO_SUPPORT. The narrow boundary cast + N/K pad matches
+    # whisper.cpp's convention and preserves transcript byte-parity.
+    option(PARAKEET_F16_ACTIVATIONS "parakeet: cast attention K/V-perm and softmax output to F16 (with 32-aligned pad) at the batched attention MULMAT boundary so Hexagon HMX F16-batched engages; default ON (validated 2026-09-30)." ON)
+    if (PARAKEET_F16_ACTIVATIONS)
+        target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+    endif()
+
     # -----------------------------------------------------------------------
     # Apple Core ML encoder sidecar.
     #
@@ -481,6 +522,33 @@ if (PARAKEET_BUILD_EXECUTABLES)
     add_executable(parakeet-fit-params src/fit_cli_main.cpp)
     target_link_libraries(parakeet-fit-params PRIVATE qvac-parakeet)
     parakeet_apply_ccache(parakeet-fit-params)
+
+    # Backend parity diagnostic. Loads the same GGUF twice on two backends
+    # (default cpu vs hexagon) and prints per-stage encoder cosine to
+    # localize the first divergent Conformer stage on HTP0, and compares
+    # Sortformer head probabilities on identical encoder input. Kept in the
+    # executables block (not PARAKEET_BUILD_TESTS) so the Android
+    # dynamic-loader build produces it without pulling in the whole
+    # fixture harness.
+    add_executable(test-encoder-backend-parity
+        test/test_encoder_backend_parity.cpp
+        src/parakeet_sortformer.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_log.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp)
+    target_link_libraries(test-encoder-backend-parity PRIVATE ggml)
+    target_include_directories(test-encoder-backend-parity
+        PRIVATE ggml/include src include)
+    if (PARAKEET_FLASH_ATTN)
+        target_compile_definitions(test-encoder-backend-parity
+            PRIVATE PARAKEET_EXPERIMENTAL_FLASH_ATTN)
+    endif()
+    if (PARAKEET_F16_ACTIVATIONS)
+        target_compile_definitions(test-encoder-backend-parity
+            PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+    endif()
+    parakeet_apply_ccache(test-encoder-backend-parity)
 
     add_executable(moss-transcribe src/moss/transcribe_cli_main.cpp)
     target_link_libraries(moss-transcribe PRIVATE qvac-parakeet)
@@ -616,6 +684,11 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_abcba_rttm    "${PARAKEET_TEST_AUDIO_DIR}/abcba.rttm")
     set(_qvp_abcdba_wav    "${PARAKEET_TEST_AUDIO_DIR}/abcdba.wav")
     set(_qvp_abcdba_rttm   "${PARAKEET_TEST_AUDIO_DIR}/abcdba.rttm")
+    # 6-minute mono 16 kHz PCM WAV, > k_enc_proj_T_max = 4096 encoder frames
+    # (frame stride 80 ms => 4096 * 0.08 = 327.68 s ~= 5.5 min). Staged
+    # optionally so tests that need to cross the window-split boundary
+    # register but stay DISABLED on hosts without it.
+    set(_qvp_speech_6min_wav "${PARAKEET_TEST_AUDIO_DIR}/speech-6min.wav")
     set(_qvp_ctc_ref       "${PARAKEET_TEST_REF_DIR}/ctc-ref")
     set(_qvp_tdt_ref       "${PARAKEET_TEST_REF_DIR}/tdt-ref")
     set(_qvp_rnnt_hybrid_ref "${PARAKEET_TEST_REF_DIR}/rnnt-ref")
@@ -707,6 +780,11 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-parakeet-backend-selection)
     parakeet_register_test(test-parakeet-backend-selection LABEL "unit")
 
+    add_executable(test-parakeet-backend-request test/test_backend_request.cpp)
+    target_link_libraries(test-parakeet-backend-request PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(test-parakeet-backend-request)
+    parakeet_register_test(test-parakeet-backend-request LABEL "unit")
+
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
     target_include_directories(test-parakeet-streaming PRIVATE include src ggml/include)
@@ -720,6 +798,46 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-parakeet-streaming
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+
+    # Quantized TDT and EOU decoded on Hexagon HTP0. Hexagon GET_ROWS accepts
+    # F32 only, so backend_runs_embedding_lookup() rejects the Q8_0
+    # predict_embed and tdt_prepare_runtime / eou_prepare_runtime allocate an
+    # F32 copy (see parakeet_tdt.cpp:1282, parakeet_eou.cpp:732). These tests
+    # exercise that F32 fallback end to end: transcribe (Mode 1) must produce
+    # non-empty text and match the streaming (Mode 2) tokenization across the
+    # standard chunk_ms sweep. Auto-skip via SKIP_RETURN_CODE on hosts
+    # without HTP0.
+    parakeet_register_test(test-streaming-tdt-hexagon
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                 "--backend" "hexagon"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-streaming-eou-hexagon
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                 "--backend" "hexagon"
+        REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}")
+
+    # Long-form offline TDT and EOU that cross k_enc_proj_T_max = 4096
+    # encoder frames. tdt_decode_graph and eou_decode_graph split the encoded
+    # recording into bounded projection windows while preserving predictor
+    # state and (for TDT) the duration carry across each split; without a
+    # test above 4096 frames, a state-carry bug at the boundary would go
+    # unnoticed. speech-6min.wav is ~5.5 min => ~4500 encoder frames, which
+    # forces one window transition. Auto-DISABLED when the fixture is not
+    # staged. See parakeet_tdt.cpp:1878 and parakeet_eou.cpp for the split.
+    parakeet_register_test(test-streaming-tdt-long-form
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_speech_6min_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_speech_6min_wav}")
+    parakeet_register_test(test-streaming-eou-long-form
+        LABEL    "fixture"
+        EXE      test-parakeet-streaming
+        ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_speech_6min_wav}"
+        REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_speech_6min_wav}")
 
     add_executable(test-unified-streaming test/test_unified_streaming.cpp)
     target_link_libraries(test-unified-streaming PRIVATE qvac-parakeet)
@@ -838,6 +956,48 @@ if (PARAKEET_BUILD_TESTS)
                  "--wav"   "${_qvp_abcdba_wav}"
                  "--ref-rttm" "${_qvp_abcdba_rttm}"
         REQUIRES "${_qvp_sfsv21_q8_gguf}" "${_qvp_abcdba_wav}" "${_qvp_abcdba_rttm}")
+
+    # test-encoder-backend-parity (built above, outside PARAKEET_BUILD_TESTS)
+    # is registered here so ctest exercises the per-stage CPU-vs-Hexagon
+    # encoder cosine gate on every Parakeet family. The harness auto-skips
+    # (returns 3, treated as SKIPPED via SKIP_RETURN_CODE) on builds without
+    # the requested backend, so a CPU-only host build shows these as "Not
+    # Run" rather than failing.
+    #
+    # Coverage of PARAKEET_F16_ACTIVATIONS: the compile-time flag drives the
+    # F16 pad+cast helpers in parakeet_ctc.cpp. When the flag is ON (default
+    # after f409940a) these tests exercise the padded attention boundary
+    # against CPU. When the flag is OFF the helpers become no-ops and the
+    # same tests structurally validate the F32 fast path. To cover BOTH
+    # settings in one CI matrix, build twice: once with
+    # `-DPARAKEET_F16_ACTIVATIONS=ON` and once with `OFF`, then run
+    # `ctest -L parity`.
+    if (TARGET test-encoder-backend-parity)
+        parakeet_register_test(test-encoder-backend-parity-ctc
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_ctc_f16_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_ctc_f16_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-tdt
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_tdt_f16_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-eou
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_eou_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.995"
+            REQUIRES "${_qvp_eou_q8_gguf}" "${_qvp_jfk_wav}")
+        parakeet_register_test(test-encoder-backend-parity-sortformer
+            LABEL    "parity"
+            EXE      test-encoder-backend-parity
+            ARGS     "--model" "${_qvp_sf_f16_gguf}" "--wav" "${_qvp_diar_wav}"
+                     "--backend-a" "cpu" "--backend-b" "hexagon" "--min-cos" "0.999"
+            REQUIRES "${_qvp_sf_f16_gguf}" "${_qvp_diar_wav}")
+    endif()
 
     add_executable(test-perf-regression test/test_perf_regression.cpp)
     target_link_libraries(test-perf-regression PRIVATE qvac-parakeet)
@@ -960,10 +1120,22 @@ if (PARAKEET_BUILD_TESTS)
         "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf"
         CACHE FILEPATH "Nemotron 3 Diarization GGUF fixture")
     add_executable(test-nemotron-diarization-loader
-        test/test_nemotron_diarization_loader.cpp)
-    target_link_libraries(test-nemotron-diarization-loader PRIVATE qvac-parakeet)
-    target_include_directories(test-nemotron-diarization-loader PRIVATE src include)
-    parakeet_apply_ccache(test-nemotron-diarization-loader)
+        test/test_nemotron_diarization_loader.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_link_libraries(test-nemotron-diarization-loader PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-nemotron-diarization-loader PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-nemotron-diarization-loader)
     parakeet_register_test(test-nemotron-diarization-loader
         LABEL "fixture"
         ARGS "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
@@ -1744,7 +1916,7 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-tdt-unroll-parity
         ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
-    # Multi-piece French guard for the on-device predictor (QVAC-21005): the gpu0
+    # Multi-piece French guard for the on-device predictor: the gpu0
     # scalar path and the gpu1 graph path must produce identical token IDs on a
     # word with multiple word-final sub-words (e.g. "analyses"). English jfk does
     # not exercise this, and the divergence only surfaces when the graph path runs

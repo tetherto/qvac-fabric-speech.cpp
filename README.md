@@ -10,7 +10,7 @@ On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/
 | Models | every model loads from GGUF (see [Supported models](#supported-models)) |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android (arm64-v8a), iOS (arm64) |
-| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
+| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Hexagon (Snapdragon HTP0, Parakeet only), Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
 | Quantization | `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `q5_0`, `q5_1`, `q4_0`, `q4_k_m` (per model, see tables) |
 | Shared ggml | one `ggml-speech` vcpkg port, built from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 | Language | C++17 |

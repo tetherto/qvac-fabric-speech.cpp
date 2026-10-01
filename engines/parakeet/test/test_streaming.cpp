@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,7 @@ namespace {
 struct Opts {
     std::string model_path;
     std::string wav_path;
+    std::string backend;         // "auto" (default), "cpu", "opencl", "hexagon", or an exact ggml device name
     int  n_gpu_layers = 0;
     int  n_threads    = 0;
     bool verbose      = false;
@@ -35,6 +38,8 @@ void print_usage(const char * argv0) {
         "across a range of chunk sizes, plus the Mode 3 (stream_start) error path.\n"
         "\n"
         "options:\n"
+        "  --backend NAME       backend routing: auto (default), cpu, opencl,\n"
+        "                       hexagon, or an exact ggml device name (e.g. HTP0)\n"
         "  --n-gpu-layers N     offload to GPU backend when > 0\n"
         "  --threads N          CPU threads (0 = hardware_concurrency)\n"
         "  --verbose            print per-test segment counts and timings\n",
@@ -46,6 +51,7 @@ int parse_args(int argc, char ** argv, Opts & o) {
         std::string a = argv[i];
         if (a == "--model" && i + 1 < argc) o.model_path = argv[++i];
         else if (a == "--wav" && i + 1 < argc) o.wav_path = argv[++i];
+        else if (a == "--backend" && i + 1 < argc) o.backend = argv[++i];
         else if (a == "--n-gpu-layers" && i + 1 < argc) o.n_gpu_layers = std::atoi(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) o.n_threads = std::atoi(argv[++i]);
         else if (a == "--verbose" || a == "-v") o.verbose = true;
@@ -78,9 +84,27 @@ int main(int argc, char ** argv) {
     eopts.n_gpu_layers    = opts.n_gpu_layers;
     eopts.n_threads       = opts.n_threads;
     eopts.verbose         = opts.verbose;
+    if (!opts.backend.empty()) eopts.backend = opts.backend;
 
-    std::fprintf(stderr, "[test-streaming] loading %s\n", opts.model_path.c_str());
-    Engine engine(eopts);
+    std::fprintf(stderr, "[test-streaming] loading %s%s%s\n", opts.model_path.c_str(),
+                 opts.backend.empty() ? "" : " on backend ", opts.backend.c_str());
+    // Route unavailable-backend failures through the skip return code so
+    // hexagon-tagged registrations turn into "Not Run" on hosts without
+    // HTP0 instead of failing the suite.
+    std::unique_ptr<Engine> engine_ptr;
+    try {
+        engine_ptr = std::make_unique<Engine>(eopts);
+    } catch (const std::runtime_error & e) {
+        const std::string what = e.what();
+        if (!opts.backend.empty() && (what.find("rc=11") != std::string::npos ||
+                                      what.find(opts.backend) != std::string::npos)) {
+            std::fprintf(stderr, "[test-streaming] SKIP: backend '%s' unavailable: %s\n",
+                         opts.backend.c_str(), e.what());
+            return 3;  // SKIP_RETURN_CODE
+        }
+        throw;
+    }
+    Engine & engine = *engine_ptr;
 
     std::fprintf(stderr, "[test-streaming] Mode 1 reference: transcribe(%s)\n",
                  opts.wav_path.c_str());

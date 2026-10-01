@@ -70,6 +70,19 @@ struct EncoderGraph {
     ggml_tensor * encoder_out_node     = nullptr;
     ggml_tensor * logits_node          = nullptr;
 
+    // Diagnostic attention captures for block 0 only.
+    ggml_tensor * block_0_attn_qkv_node      = nullptr;
+    ggml_tensor * block_0_attn_k_raw_node    = nullptr;
+    ggml_tensor * block_0_attn_v_raw_node    = nullptr;
+    ggml_tensor * block_0_attn_q_perm_node   = nullptr;
+    ggml_tensor * block_0_attn_k_perm_node   = nullptr;
+    ggml_tensor * block_0_attn_q_u_node      = nullptr;
+    ggml_tensor * block_0_attn_ac_node       = nullptr;
+    ggml_tensor * block_0_attn_bd_node       = nullptr;
+    ggml_tensor * block_0_attn_scores_node   = nullptr;
+    ggml_tensor * block_0_attn_softmax_node  = nullptr;
+    ggml_tensor * block_0_attn_out_node      = nullptr;
+
     // Pristine snapshot of every compute node's source pointers, captured once
     // when the graph is built and reused across runs. ggml_backend_sched rewrites
     // node->src[j] in place when a per-op CPU fallback inserts a cross-backend
@@ -111,6 +124,12 @@ struct EncoderGraph {
         sub_out_node = post_ff1_0_node = post_attn_0_node = nullptr;
         post_conv_0_node = post_ff2_0_node = block_0_out_node = nullptr;
         block_last_out_node = encoder_out_node = logits_node = nullptr;
+        block_0_attn_qkv_node = block_0_attn_ac_node = nullptr;
+        block_0_attn_bd_node = block_0_attn_scores_node = nullptr;
+        block_0_attn_softmax_node = block_0_attn_out_node = nullptr;
+        block_0_attn_k_raw_node = block_0_attn_v_raw_node = nullptr;
+        block_0_attn_q_perm_node = block_0_attn_k_perm_node = nullptr;
+        block_0_attn_q_u_node = nullptr;
         T_mel = 0;
         T_mel_valid = 0;
         T_enc = 0;
@@ -190,6 +209,73 @@ constexpr bool k_flash_attn_compiled = true;
 #else
 constexpr bool k_flash_attn_compiled = false;
 #endif
+
+// `PARAKEET_F16_ACTIVATIONS` (build flag, default OFF) lets the encoder cast
+// specific tensors to F16 so the Hexagon HMX v79 path (F16-only) can accept
+// them. The encoder residual stream stays F32 because Hexagon's quantized MM
+// kernels only carry a `quantize_f32_q8_0_*` activation quantizer
+// (matmul-ops.c:843) — feeding F16 activations to Q8_0 FF/Conv/attn
+// projections fails with DSP NO_SUPPORT. The flag scope is narrow: cast
+// (and 32-align pad) `k_perm` / `v_for_mm` / softmax output right before the
+// batched attention MULMATs in `rel_pos_mha_unfused_graph`, matching whisper's
+// convention of casting only at the attention matmul boundary. When the flag
+// is OFF the helpers below are compile-time no-ops.
+#ifdef PARAKEET_F16_ACTIVATIONS
+constexpr bool k_f16_activations_compiled = true;
+#else
+constexpr bool k_f16_activations_compiled = false;
+#endif
+
+// Cast an F32 tensor to F16. No-op when the flag is OFF or when `t` is already
+// F16. Used inside `pad_and_cast_for_hmx` at the batched attention MULMAT
+// boundary so `hmx_mm_f16_f32_batched` (src0=F16, src1=F32) engages.
+static inline ggml_tensor * cast_to_activation(ggml_context * ctx, ggml_tensor * t) {
+#ifdef PARAKEET_F16_ACTIVATIONS
+    if (t && t->type != GGML_TYPE_F16) return ggml_cast(ctx, t, GGML_TYPE_F16);
+#else
+    (void) ctx;
+#endif
+    return t;
+}
+
+// Round N up to the next multiple of 32. The Hexagon HMX F16-batched kernel
+// (hmx_mm_f16_f32_batched) refuses non-32-aligned N or K at runtime
+// (matmul-ops.c:3081); zero-padding the src0 tensor to a 32-aligned tail
+// clears that gate.
+static inline int hmx_align_up_32(int n) { return (n + 31) & ~31; }
+
+// F32 tail-zero-pad along `dim` (0 or 1) up to a 32-aligned length, then cast
+// to activation dtype. Order matters: PAD must run in F32 because Hexagon's
+// PAD kernel only accepts F32 (`ggml_hexagon_supported_pad`). No-op when
+// PARAKEET_F16_ACTIVATIONS is OFF or when `t` is already 32-aligned along
+// `dim`, so the F32 fast path is preserved bit-exactly.
+static inline ggml_tensor * pad_and_cast_for_hmx(ggml_context * ctx,
+                                                 ggml_tensor * t, int dim) {
+    if (!k_f16_activations_compiled) return t;
+    const int n     = (int) t->ne[dim];
+    const int n_pad = hmx_align_up_32(n);
+    if (n_pad != n) {
+        int rp[4] = {0, 0, 0, 0};
+        rp[dim] = n_pad - n;
+        t = ggml_pad(ctx, t, rp[0], rp[1], rp[2], rp[3]);
+    }
+    return cast_to_activation(ctx, t);
+}
+
+// Tail-zero-pad an F32 tensor along dim 0 to a 32-aligned length; no cast.
+// Used on the softmax output before the batched `attn_v` matmul so its K axis
+// matches the padded `v_for_mm` src0. Padding zeros produce zero contribution
+// at padded positions, keeping the F32 result byte-identical to the unpadded
+// computation.
+static inline ggml_tensor * pad_ne0_for_hmx(ggml_context * ctx, ggml_tensor * t) {
+    if (!k_f16_activations_compiled) return t;
+    const int n     = (int) t->ne[0];
+    const int n_pad = hmx_align_up_32(n);
+    if (n_pad != n) {
+        t = ggml_pad(ctx, t, n_pad - n, 0, 0, 0);
+    }
+    return t;
+}
 
 struct ParakeetCtcModel::Impl {
     gguf_context         * gguf           = nullptr;
@@ -311,6 +397,8 @@ std::atomic<bool> g_backends_loaded{false};
 std::atomic<bool> g_backends_dir_warned{false};
 std::atomic<bool> g_opencl_cache_dir_warned{false};
 
+void prepare_hexagon_library_path(const std::string & dir);
+
 // Trigger one-time discovery + load of every available ggml backend.
 // Idempotent: repeated calls inside the same process are no-ops once
 // the registry is populated. Routed through a static guard so we don't
@@ -343,6 +431,10 @@ void ensure_backends_loaded() {
             std::lock_guard<std::mutex> lock(g_backends_dir_mutex);
             dir = g_backends_dir;
             g_recorded_backends_dir = g_backends_dir;
+            // Discovery initializes all backend registries, including HTP
+            // even when this first model requests CPU/OpenCL. Configure the
+            // DSP loader once here so a later explicit HTP0 request works.
+            prepare_hexagon_library_path(dir);
             // Flip the loaded sentinel under the mutex (and *before*
             // we release it for the load-all call below) so any
             // concurrent setter that's about to acquire the mutex
@@ -679,6 +771,58 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers, bool verbose,
         }
     }
     return nullptr;
+}
+
+ggml_backend_t init_explicit_backend(const std::string & requested, ggml_backend_t cpu,
+                                     bool & out_is_mali_vulkan) {
+    ensure_backends_loaded();
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev || !backend_selection_matches(requested, dev_reg_name(dev),
+                    ggml_backend_dev_name(dev), ggml_backend_dev_type(dev))) continue;
+        // Reuse the initialized CPU instance so it is owned/freed only once.
+        if (dev == ggml_backend_get_device(cpu)) return cpu;
+        const char * name = ggml_backend_dev_name(dev);
+        const char * desc = ggml_backend_dev_description(dev);
+        const bool opencl = std::strcmp(dev_reg_name(dev), "OpenCL") == 0;
+        const int adreno = std::max(parse_adreno_version(name), parse_adreno_version(desc));
+        const char * override_env = getenv("PARAKEET_ALLOW_ADRENO_6XX");
+        if (opencl && adreno >= 600 && adreno < 700 && (!override_env || override_env[0] != '1')) {
+            continue;
+        }
+        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            out_is_mali_vulkan = std::strcmp(dev_reg_name(dev), "Vulkan") == 0 &&
+                                (desc_is_mali(desc) || desc_is_mali(name));
+            PARAKEET_LOG_INFO("parakeet: explicitly selected %s backend (%s)\n",
+                              dev_reg_name(dev), name ? name : "unknown");
+            return backend;
+        }
+    }
+    PARAKEET_LOG_ERROR("parakeet: requested backend '%s' unavailable or failed initialization; no fallback\n",
+                       requested.c_str());
+    return nullptr;
+}
+
+// FastRPC resolves DSP-side libraries separately from ggml's host .so loader.
+// Configure it before CPU initialization, which discovers *all* backends.
+// Snapdragon devices supported by ggml-hexagon use DSP_LIBRARY_PATH; unlike
+// legacy ADSP_LIBRARY_PATH, this prepends to the vendor's default search paths.
+void prepare_hexagon_library_path(const std::string & dir) {
+#ifdef __ANDROID__
+    if (dir.empty()) return;
+    if (dir.find(';') != std::string::npos) {
+        PARAKEET_LOG_WARN("parakeet: cannot add backends_dir to FastRPC search path: directory contains ';'\n");
+        return;
+    }
+    const char * prior = std::getenv("DSP_LIBRARY_PATH");
+    if (!prior) prior = std::getenv("ADSP_LIBRARY_PATH");
+    const std::string path = prepend_dsp_library_directory(dir, prior ? prior : "");
+    if (setenv("DSP_LIBRARY_PATH", path.c_str(), 1) != 0) {
+        PARAKEET_LOG_WARN("parakeet: failed to configure DSP_LIBRARY_PATH\n");
+    }
+#else
+    (void) dir;
+#endif
 }
 
 ggml_backend_t init_cpu_backend() {
@@ -1805,7 +1949,8 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                                int                 n_threads,
                                int                 n_gpu_layers,
                                bool                verbose,
-                               GgufLoadMeasure   * measure) {
+                               GgufLoadMeasure   * measure,
+                               const std::string & backend = "auto") {
     auto impl = std::make_shared<ParakeetCtcModel::Impl>();
 
     impl->backend_cpu = init_cpu_backend();
@@ -1827,8 +1972,14 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     bool skipped_unsupported_gpu = false;
     bool gpu_is_mali_vulkan = false;
-    impl->backend_gpu    = init_gpu_backend(n_gpu_layers, verbose, skipped_unsupported_gpu,
-                                            gpu_is_mali_vulkan);
+    if (backend_selection_is_auto(backend)) {
+        impl->backend_gpu = init_gpu_backend(n_gpu_layers, verbose, skipped_unsupported_gpu,
+                                             gpu_is_mali_vulkan);
+    } else {
+        ggml_backend_t selected = init_explicit_backend(backend, impl->backend_cpu, gpu_is_mali_vulkan);
+        if (!selected) return 11;
+        if (selected != impl->backend_cpu) impl->backend_gpu = selected;
+    }
     impl->backend_active = impl->backend_gpu ? impl->backend_gpu : impl->backend_cpu;
     impl->gpu_unsupported = skipped_unsupported_gpu && impl->backend_gpu == nullptr;
     // On Mali-Vulkan the Sortformer head miscomputes (transformer block 0 -> NaN);
@@ -1914,11 +2065,25 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         }
     }
 
+    // Hexagon uploads quantized weights in its tiled representation. Use
+    // the explicit repack buffer so the scheduler recognizes those weights
+    // as Hexagon-only and uses tensor_get for any CPU fallback. Its default
+    // host-visible buffer lets CPU kernels read tiled bytes as ordinary GGUF
+    // blocks, corrupting the Sortformer head's very first projection.
+    ggml_backend_buffer_type_t weights_buft = ggml_backend_get_default_buffer_type(impl->backend_active);
+    if (backend_is_hexagon(impl->backend_active)) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(impl->backend_active);
+        auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
+            ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(dev), "ggml_backend_dev_get_extra_bufts");
+        ggml_backend_buffer_type_t * extra = get_extra_bufts ? get_extra_bufts(dev) : nullptr;
+        if (extra && extra[0]) weights_buft = extra[0];
+    }
+
     if (measure) {
         measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            impl->ctx, ggml_backend_get_default_buffer_type(impl->backend_active));
+            impl->ctx, weights_buft);
     } else {
-        impl->weights_buffer = ggml_backend_alloc_ctx_tensors(impl->ctx, impl->backend_active);
+        impl->weights_buffer = ggml_backend_alloc_ctx_tensors_from_buft(impl->ctx, weights_buft);
         if (!impl->weights_buffer) {
             PARAKEET_LOG_ERROR("gguf: ggml_backend_alloc_ctx_tensors failed\n");
             return 12;
@@ -2402,6 +2567,12 @@ int load_from_gguf(const std::string & gguf_path,
                    bool                verbose) {
     return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
                                verbose, /*measure=*/nullptr);
+}
+
+int load_from_gguf(const std::string & gguf_path, ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose, const std::string & backend) {
+    return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
+                               verbose, /*measure=*/nullptr, backend);
 }
 
 int load_from_gguf_metadata_only(const std::string & gguf_path,
@@ -2916,12 +3087,19 @@ ggml_tensor * conformer_ff_graph(ggml_context * ctx, ggml_tensor * x,
     return x;
 }
 
-// Transformer-XL relative shift as a view: bd is [2T-1 (position), T (query), H] and the
+// Transformer-XL relative shift as a view: bd is [P (position), T (query), H] and the
 // score bias for (key j, query i) is bd[T-1-i+j, i]. Reading each query row with a stride of
-// 2T-2 elements from offset T-1 lands exactly on that element, so no padding or copies.
+// (P - 1) elements from offset T-1 lands exactly on that element, so no padding or copies.
+// P is normally 2T-1, but when the upstream `p_perm` gets tail-zero-padded to a 32-aligned
+// row width (so the batched attention `bd = mul_mat(p_perm, q_v)` can land on the HMX F16
+// batched kernel) P grows to `hmx_align_up_32(2T-1)`. The rel-shift trick still holds because
+// only the (P - 1)-element stride depends on the actual row width, and the trailing padded
+// columns (T-1 + i0 ... P-1) are never referenced by any query row (max col reached is
+// (T-1) + (T-1) = 2T-2 < P). Parametrising on `bd->ne[0]` keeps this backward-compatible:
+// when p_perm is unpadded, `bd->ne[0] - 1 = 2T - 2` exactly.
 ggml_tensor * rel_shift_view(ggml_context * ctx, ggml_tensor * bd, int T) {
     const size_t f = sizeof(float);
-    return ggml_view_3d(ctx, bd, T, T, bd->ne[2], (size_t) (2 * T - 2) * f, bd->nb[2], (size_t) (T - 1) * f);
+    return ggml_view_3d(ctx, bd, T, T, bd->ne[2], (size_t) (bd->ne[0] - 1) * f, bd->nb[2], (size_t) (T - 1) * f);
 }
 
 struct RelPosAttnInputs {
@@ -2938,9 +3116,28 @@ struct RelPosAttnInputs {
 ggml_tensor * rel_pos_mha_flash_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                       ggml_tensor * att_mask, const BlockWeights & W,
                                       int H, int HD, int T, bool per_head_mask);
+
+// Diagnostic capture handles. Populated in the unfused path when
+// non-null; ignored on flash-attn (single FLASH_ATTN_EXT node, nothing to
+// snapshot). Only block 0 in the encoder passes a non-null pointer.
+struct AttnCapture {
+    ggml_tensor * qkv     = nullptr;   // post-projection stacked qkv, or Q alone in the split-w path
+    ggml_tensor * k_raw   = nullptr;   // post-projection K, before permute-cont
+    ggml_tensor * v_raw   = nullptr;   // post-projection V, before permute-cont
+    ggml_tensor * q_perm  = nullptr;   // post cont(permute(q, 0, 2, 1, 3))
+    ggml_tensor * k_perm  = nullptr;   // post cont(permute(k, 0, 2, 1, 3))
+    ggml_tensor * q_u     = nullptr;   // q_perm + u_bias
+    ggml_tensor * ac      = nullptr;
+    ggml_tensor * bd      = nullptr;
+    ggml_tensor * scores  = nullptr;
+    ggml_tensor * softmax = nullptr;
+    ggml_tensor * out     = nullptr;
+};
+
 ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                         ggml_tensor * att_mask, const BlockWeights & W,
-                                        int H, int HD, int T);
+                                        int H, int HD, int T,
+                                        AttnCapture * cap = nullptr);
 
 ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
                                 ggml_tensor * pos_emb,
@@ -2948,10 +3145,12 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
                                 ggml_tensor * att_mask,
                                 const BlockWeights & W,
                                 int H, int HD, int T,
-                                const AttnPath & attn) {
+                                const AttnPath & attn,
+                                AttnCapture * cap = nullptr) {
     ggml_tensor * q;
     ggml_tensor * k;
     ggml_tensor * v;
+    ggml_tensor * qkv_full = nullptr;
     if (W.attn_qkv_w) {
         // Pre-stacked encoder.blk.*.attn.qkv.weight from the converter:
         // one Q8_0 mat-mul produces (3 * n_embd, T) and Q / K / V are
@@ -2974,6 +3173,7 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
         // case; that's what the loader gate is for.
         ggml_tensor * qkv = ggml_mul_mat(ctx, W.attn_qkv_w, xn);
         if (W.attn_qkv_b) qkv = ggml_add(ctx, qkv, W.attn_qkv_b);
+        qkv_full = qkv;
         const int n_embd = HD * H;
         const size_t f = sizeof(float);
         const size_t row_stride = (size_t) 3 * n_embd * f;
@@ -2984,10 +3184,12 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
         q = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_q_w, xn), W.attn_q_b);
         k = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_k_w, xn), W.attn_k_b);
         v = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_v_w, xn), W.attn_v_b);
+        if (cap) { cap->qkv = q; cap->k_raw = k; cap->v_raw = v; }
         q = ggml_reshape_3d(ctx, q, HD, H, T);
         k = ggml_reshape_3d(ctx, k, HD, H, T);
         v = ggml_reshape_3d(ctx, v, HD, H, T);
     }
+    if (cap && !cap->qkv) cap->qkv = qkv_full;
     // The cache holds the projection in the layout its consumer reads: the flash path
     // permutes a (HD, H, 2T-1) tensor as before, the unfused path takes it pre-permuted.
     ggml_tensor * p = attn.flash_attn ? pos_proj : nullptr;
@@ -3003,9 +3205,11 @@ ggml_tensor * rel_pos_mha_graph(ggml_context * ctx, ggml_tensor * xn,
 
     const RelPosAttnInputs in = { q, k, v, p, u_bias, v_bias, scale, attn.flash_attn ? nullptr : pos_proj };
     if (attn.flash_attn) {
+        // Flash-attn collapses the whole attention into one op; the qkv
+        // capture is still useful, the others cannot be intercepted.
         return rel_pos_mha_flash_graph(ctx, in, att_mask, W, H, HD, T, attn.per_head_mask);
     }
-    return rel_pos_mha_unfused_graph(ctx, in, att_mask, W, H, HD, T);
+    return rel_pos_mha_unfused_graph(ctx, in, att_mask, W, H, HD, T, cap);
 }
 
 ggml_tensor * rel_pos_mha_flash_graph(ggml_context * ctx, const RelPosAttnInputs & in,
@@ -3103,7 +3307,8 @@ ggml_tensor * attn_context_blocked(ggml_context * ctx, ggml_tensor * k_perm, ggm
 
 ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInputs & in,
                                         ggml_tensor * att_mask, const BlockWeights & W,
-                                        int H, int HD, int T) {
+                                        int H, int HD, int T,
+                                        AttnCapture * cap) {
     ggml_tensor * q = in.q;
     ggml_tensor * k = in.k;
     ggml_tensor * v = in.v;
@@ -3117,15 +3322,61 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
     ggml_tensor * p_perm = in.p_perm ? in.p_perm : ggml_cont(ctx, ggml_permute(ctx, p, 0, 2, 1, 3));
     ggml_tensor * q_u = ggml_add(ctx, q_perm, u_bias);
     ggml_tensor * q_v = ggml_add(ctx, q_perm, v_bias);
+    if (cap) { cap->q_perm = q_perm; cap->k_perm = k_perm; cap->q_u = q_u; }
 
-    if (T >= k_attn_block_min_T) {
+    // Batched attention matmul src0 (`k_perm`, `p_perm`, `v_for_mm`) is
+    // derived from activations so `ggml_mul_mat` currently sees an F32 src0.
+    // Casting src0 to F16 lets the Hexagon dispatcher pick the F16 batched
+    // HMX path (`hmx_mm_f16_f32_batched`: src0=F16, src1=F32) instead of
+    // falling through to HVX-batched-F32. Identity no-op when
+    // PARAKEET_F16_ACTIVATIONS is OFF, preserving the F32 fast path.
+    //
+    // The HMX F16-batched kernel additionally requires k%32==0 and n%32==0
+    // (matmul-ops.c:3081). Parakeet's encoder T (e.g. 376 for 60 s audio) is
+    // not 32-aligned, so we also tail-zero-pad the relevant axis of every
+    // src0:
+    //   - `k_perm`   ne1=T → hmx_align_up_32(T)      (drives `ac`)
+    //   - `p_perm`   ne1=2T-1 → hmx_align_up_32(2T-1) (drives `bd`)
+    //   - `v_for_mm` ne0=T → hmx_align_up_32(T)      (drives `attn_v`)
+    // Downstream, `rel_shift_view` is parametrised on `bd->ne[0]` so its
+    // stride math walks the padded row width transparently; `ac` is sliced
+    // back to (T, T, H); the softmax output is padded on ne0 to line up
+    // with `v_for_mm`'s padded K axis. All three batched attention MULMATs
+    // then dispatch to `hmx-tiled` (F16 batched) per block × 24 blocks.
+    //
+    // The T ≥ k_attn_block_min_T (1024) blocked branch below intentionally
+    // bypasses the pad+cast: its per-block `attn_probs_block` builds strided
+    // views over `k_perm` / `p_perm` and mixes `ac_b` (whose ne0 is src0.ne1)
+    // with `rel_shift_block_view(bd_b)` (whose ne0 stays T), so a padded
+    // src0.ne1 would break the downstream ADD's shape check
+    // (`ggml_can_repeat` failure in `attn_probs_block`). Long-form audio hits
+    // this branch and stays on HVX-batched-F32 as before; Parakeet-CTC
+    // production audio is well under T=1024 so the HMX-F16 dispatch is
+    // unaffected in practice.
+    const bool use_blocked_attn = T >= k_attn_block_min_T;
+    ggml_tensor * k_perm_mm = use_blocked_attn ? k_perm : pad_and_cast_for_hmx(ctx, k_perm, /*dim=*/1);
+    ggml_tensor * p_perm_mm = use_blocked_attn ? p_perm : pad_and_cast_for_hmx(ctx, p_perm, /*dim=*/1);
+
+    if (use_blocked_attn) {
         ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
-        ggml_tensor * flat = attn_context_blocked(ctx, k_perm, p_perm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
-        return maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+        ggml_tensor * flat = attn_context_blocked(ctx, k_perm_mm, p_perm_mm, v_for_mm, q_u, q_v, att_mask, scale, T, H, HD);
+        ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+        if (cap) cap->out = out;
+        return out;
     }
 
-    ggml_tensor * bd = ggml_mul_mat(ctx, p_perm, q_v);
-    ggml_tensor * ac     = ggml_mul_mat(ctx, k_perm, q_u);
+    ggml_tensor * bd = ggml_mul_mat(ctx, p_perm_mm, q_v);
+    ggml_tensor * ac     = ggml_mul_mat(ctx, k_perm_mm, q_u);
+
+    // When `k_perm` was tail-padded above the `ac` output is (T_pad, T, H);
+    // slice the padded tail off (its rows are dots against zero keys) and
+    // materialise a contiguous copy so the subsequent add + softmax see
+    // exactly the pre-refactor (T, T, H) shape. No-op when unpadded, so the
+    // F32 fast path is preserved.
+    if (ac->ne[0] > (int64_t) T) {
+        ac = ggml_cont(ctx, ggml_view_3d(ctx, ac, T, T, H, ac->nb[1], ac->nb[2], 0));
+    }
+
     ggml_tensor * scores = ggml_add(ctx, ac, rel_shift_view(ctx, bd, T));
 
     ggml_tensor * attn;
@@ -3138,12 +3389,28 @@ ggml_tensor * rel_pos_mha_unfused_graph(ggml_context * ctx, const RelPosAttnInpu
         attn = ggml_soft_max_ext(ctx, scores, nullptr, scale, 0.0f);
     }
 
+    // For the batched `attn_v = mul_mat(v_for_mm, attn)`, K==T is the matmul
+    // reduction axis. Pad `v_for_mm` on its K axis (ne0=T→T_pad) and pad
+    // `attn` correspondingly with zeros so the reduction over padded keys
+    // contributes nothing. `attn_v`'s F32 output shape (HD, T, H) is
+    // unchanged either way.
     ggml_tensor * v_for_mm = ggml_cont(ctx, ggml_permute(ctx, v_perm, 1, 0, 2, 3));
-    ggml_tensor * attn_v   = ggml_mul_mat(ctx, v_for_mm, attn);
+    v_for_mm = pad_and_cast_for_hmx(ctx, v_for_mm, /*dim=*/0);
+    ggml_tensor * attn_for_mm = pad_ne0_for_hmx(ctx, attn);
+    ggml_tensor * attn_v   = ggml_mul_mat(ctx, v_for_mm, attn_for_mm);
     ggml_tensor * merged   = ggml_cont(ctx, ggml_permute(ctx, attn_v, 0, 2, 1, 3));
     ggml_tensor * flat     = ggml_reshape_2d(ctx, merged, HD * H, T);
 
-    return maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+    ggml_tensor * out = maybe_add_bias(ctx, ggml_mul_mat(ctx, W.attn_out_w, flat), W.attn_out_b);
+
+    if (cap) {
+        cap->ac      = ac;
+        cap->bd      = bd;
+        cap->scores  = scores;
+        cap->softmax = attn;
+        cap->out     = out;
+    }
+    return out;
 }
 
 // How the conformer depthwise conv is lowered on the backend that runs the graph.
@@ -3754,6 +4021,15 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
         ggml_set_output(g.sub_out_node);
     }
 
+    // NB: with PARAKEET_F16_ACTIVATIONS we intentionally keep the encoder
+    // residual stream in F32. Hexagon's quantized MM kernels only carry a
+    // `quantize_f32_q8_0_*` activation quantizer (matmul-ops.c:843) — feeding
+    // them F16 activations fails with DSP NO_SUPPORT on every FF/Conv/attn
+    // projection matmul. Following whisper.cpp's convention the flag only
+    // pads+casts to F16 at the batched attention matmul boundary in
+    // `rel_pos_mha_unfused_graph`, which is the site the HMX F16-batched
+    // kernel (`hmx_mm_f16_f32_batched`) can accept (src0=F16, src1=F32).
+
     if (enc.xscaling) {
         x = ggml_scale(gctx, x, std::sqrt((float) d_model));
     }
@@ -3789,7 +4065,67 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
 
             residual = x;
             ggml_tensor * xn = layer_norm_affine(gctx, x, W.norm_attn_w, W.norm_attn_b, eps);
-            y = rel_pos_mha_graph(gctx, xn, g.pe_in, layer_pos_proj(0), g.att_mask, W, H, HD, T, model.impl->attn);
+            AttnCapture blk0_cap;
+            y = rel_pos_mha_graph(gctx, xn, g.pe_in, layer_pos_proj(0), g.att_mask, W, H, HD, T, model.impl->attn, &blk0_cap);
+            // Diagnostic: expose block 0 attention intermediates
+            // so a parity test can localize where HTP0 diverges from CPU.
+            // Guarded by set_name/set_output so the scheduler keeps the
+            // tensors materialised on the primary backend for host copy.
+            if (blk0_cap.qkv) {
+                g.block_0_attn_qkv_node = blk0_cap.qkv;
+                ggml_set_name(g.block_0_attn_qkv_node, "block_0_attn_qkv");
+                ggml_set_output(g.block_0_attn_qkv_node);
+            }
+            if (blk0_cap.k_raw) {
+                g.block_0_attn_k_raw_node = blk0_cap.k_raw;
+                ggml_set_name(g.block_0_attn_k_raw_node, "block_0_attn_k_raw");
+                ggml_set_output(g.block_0_attn_k_raw_node);
+            }
+            if (blk0_cap.v_raw) {
+                g.block_0_attn_v_raw_node = blk0_cap.v_raw;
+                ggml_set_name(g.block_0_attn_v_raw_node, "block_0_attn_v_raw");
+                ggml_set_output(g.block_0_attn_v_raw_node);
+            }
+            if (blk0_cap.q_perm) {
+                g.block_0_attn_q_perm_node = blk0_cap.q_perm;
+                ggml_set_name(g.block_0_attn_q_perm_node, "block_0_attn_q_perm");
+                ggml_set_output(g.block_0_attn_q_perm_node);
+            }
+            if (blk0_cap.k_perm) {
+                g.block_0_attn_k_perm_node = blk0_cap.k_perm;
+                ggml_set_name(g.block_0_attn_k_perm_node, "block_0_attn_k_perm");
+                ggml_set_output(g.block_0_attn_k_perm_node);
+            }
+            if (blk0_cap.q_u) {
+                g.block_0_attn_q_u_node = blk0_cap.q_u;
+                ggml_set_name(g.block_0_attn_q_u_node, "block_0_attn_q_u");
+                ggml_set_output(g.block_0_attn_q_u_node);
+            }
+            if (blk0_cap.ac) {
+                g.block_0_attn_ac_node = blk0_cap.ac;
+                ggml_set_name(g.block_0_attn_ac_node, "block_0_attn_ac");
+                ggml_set_output(g.block_0_attn_ac_node);
+            }
+            if (blk0_cap.bd) {
+                g.block_0_attn_bd_node = blk0_cap.bd;
+                ggml_set_name(g.block_0_attn_bd_node, "block_0_attn_bd");
+                ggml_set_output(g.block_0_attn_bd_node);
+            }
+            if (blk0_cap.scores) {
+                g.block_0_attn_scores_node = blk0_cap.scores;
+                ggml_set_name(g.block_0_attn_scores_node, "block_0_attn_scores");
+                ggml_set_output(g.block_0_attn_scores_node);
+            }
+            if (blk0_cap.softmax) {
+                g.block_0_attn_softmax_node = blk0_cap.softmax;
+                ggml_set_name(g.block_0_attn_softmax_node, "block_0_attn_softmax");
+                ggml_set_output(g.block_0_attn_softmax_node);
+            }
+            if (blk0_cap.out) {
+                g.block_0_attn_out_node = blk0_cap.out;
+                ggml_set_name(g.block_0_attn_out_node, "block_0_attn_out");
+                ggml_set_output(g.block_0_attn_out_node);
+            }
             x = ggml_add(gctx, residual, y);
             g.post_attn_0_node = x;
             ggml_set_name(g.post_attn_0_node, "block_0_post_attn");
@@ -3848,6 +4184,17 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     g.cgraph = ggml_new_graph_custom(gctx, graph_slots, false);
     if (g.sub_out_node)        ggml_build_forward_expand(g.cgraph, g.sub_out_node);
     if (g.post_ff1_0_node)     ggml_build_forward_expand(g.cgraph, g.post_ff1_0_node);
+    if (g.block_0_attn_qkv_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_qkv_node);
+    if (g.block_0_attn_k_raw_node)   ggml_build_forward_expand(g.cgraph, g.block_0_attn_k_raw_node);
+    if (g.block_0_attn_v_raw_node)   ggml_build_forward_expand(g.cgraph, g.block_0_attn_v_raw_node);
+    if (g.block_0_attn_q_perm_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_q_perm_node);
+    if (g.block_0_attn_k_perm_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_k_perm_node);
+    if (g.block_0_attn_q_u_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_q_u_node);
+    if (g.block_0_attn_ac_node)      ggml_build_forward_expand(g.cgraph, g.block_0_attn_ac_node);
+    if (g.block_0_attn_bd_node)      ggml_build_forward_expand(g.cgraph, g.block_0_attn_bd_node);
+    if (g.block_0_attn_scores_node)  ggml_build_forward_expand(g.cgraph, g.block_0_attn_scores_node);
+    if (g.block_0_attn_softmax_node) ggml_build_forward_expand(g.cgraph, g.block_0_attn_softmax_node);
+    if (g.block_0_attn_out_node)     ggml_build_forward_expand(g.cgraph, g.block_0_attn_out_node);
     if (g.post_attn_0_node)    ggml_build_forward_expand(g.cgraph, g.post_attn_0_node);
     if (g.post_conv_0_node)    ggml_build_forward_expand(g.cgraph, g.post_conv_0_node);
     if (g.post_ff2_0_node)     ggml_build_forward_expand(g.cgraph, g.post_ff2_0_node);
@@ -4368,6 +4715,17 @@ int run_encoder(ParakeetCtcModel   & model,
         copy_tensor(g.post_ff2_0_node,      out.block_0_post_ff2);
         copy_tensor(g.block_0_out_node,     out.block_0_out);
         copy_tensor(g.block_last_out_node,  out.block_last_out);
+        copy_tensor(g.block_0_attn_qkv_node,     out.block_0_attn_qkv);
+        copy_tensor(g.block_0_attn_k_raw_node,   out.block_0_attn_k_raw);
+        copy_tensor(g.block_0_attn_v_raw_node,   out.block_0_attn_v_raw);
+        copy_tensor(g.block_0_attn_q_perm_node,  out.block_0_attn_q_perm);
+        copy_tensor(g.block_0_attn_k_perm_node,  out.block_0_attn_k_perm);
+        copy_tensor(g.block_0_attn_q_u_node,     out.block_0_attn_q_u);
+        copy_tensor(g.block_0_attn_ac_node,      out.block_0_attn_ac);
+        copy_tensor(g.block_0_attn_bd_node,      out.block_0_attn_bd);
+        copy_tensor(g.block_0_attn_scores_node,  out.block_0_attn_scores);
+        copy_tensor(g.block_0_attn_softmax_node, out.block_0_attn_softmax);
+        copy_tensor(g.block_0_attn_out_node,     out.block_0_attn_out);
     } else {
         out.subsampling_out.clear();
         out.block_0_post_ff1.clear();
@@ -4376,6 +4734,17 @@ int run_encoder(ParakeetCtcModel   & model,
         out.block_0_post_ff2.clear();
         out.block_0_out.clear();
         out.block_last_out.clear();
+        out.block_0_attn_qkv.clear();
+        out.block_0_attn_k_raw.clear();
+        out.block_0_attn_v_raw.clear();
+        out.block_0_attn_q_perm.clear();
+        out.block_0_attn_k_perm.clear();
+        out.block_0_attn_q_u.clear();
+        out.block_0_attn_ac.clear();
+        out.block_0_attn_bd.clear();
+        out.block_0_attn_scores.clear();
+        out.block_0_attn_softmax.clear();
+        out.block_0_attn_out.clear();
     }
     copy_tensor(g.encoder_out_node,     out.encoder_out);
     copy_tensor(g.logits_node,          out.logits);
@@ -4822,6 +5191,8 @@ void ctc_greedy_decode_window(const float * logits,
 
 
 bool flash_attn_compiled() { return k_flash_attn_compiled; }
+
+bool f16_activations_compiled() { return k_f16_activations_compiled; }
 
 // Builds one encoder block on the model's active backend and reports whether the
 // graph contains `op`: lets a test see which attention path the loader chose.

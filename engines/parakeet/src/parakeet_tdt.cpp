@@ -420,7 +420,7 @@ LstmCellOuts build_lstm_cells(TdtRuntimeWeights & rt,
 
     // Embedding lookup. predict_embed has ne[0]=H, ne[1]=vocab+1; result
     // is [H, 1]. Reshape to [H] for the per-step LSTM input.
-    ggml_tensor * x = ggml_get_rows(gctx, rt.weights->predict_embed, token_in);
+    ggml_tensor * x = ggml_get_rows(gctx, rt.graph_embed, token_in);
     x = ggml_reshape_1d(gctx, x, H);
 
     LstmCellOuts outs;
@@ -1011,6 +1011,7 @@ TdtRuntimeWeights & TdtRuntimeWeights::operator=(TdtRuntimeWeights && o) noexcep
     L            = o.L;
     num_durations = o.num_durations;
     weights      = o.weights;        o.weights = nullptr;
+    graph_embed  = o.graph_embed;    o.graph_embed = nullptr;
     backend      = o.backend;        o.backend = nullptr;
     n_threads    = o.n_threads;
     use_graphs   = o.use_graphs;
@@ -1085,6 +1086,7 @@ void TdtRuntimeWeights::release() {
     if (alloc_lstm)  { ggml_gallocr_free(alloc_lstm);  alloc_lstm  = nullptr; }
     if (persist_buffer) { ggml_backend_buffer_free(persist_buffer); persist_buffer = nullptr; }
     if (persist_ctx) { ggml_free(persist_ctx); persist_ctx = nullptr; }
+    graph_embed = nullptr;
     if (gctx)        { ggml_free(gctx);                gctx        = nullptr; }
     // backend is owned by ParakeetCtcModel::Impl; don't free here.
 }
@@ -1277,6 +1279,19 @@ static int tdt_prepare_runtime_impl(const ParakeetCtcModel & model, TdtRuntimeWe
         const int L       = W.L;
         const int T_max   = TdtRuntimeWeights::k_enc_proj_T_max;
 
+        W.graph_embed = W.weights->predict_embed;
+        if (!backend_runs_embedding_lookup(W.backend, W.graph_embed)) {
+            // Hexagon GET_ROWS supports F32 only. Convert once at preparation
+            // so the recurrent decoder can keep executing on the backend.
+            W.graph_embed = ggml_new_tensor_2d(W.persist_ctx, GGML_TYPE_F32,
+                                              W.weights->predict_embed->ne[0], W.weights->predict_embed->ne[1]);
+            ggml_set_name(W.graph_embed, "tdt.predict.embed.f32");
+            if (!backend_runs_embedding_lookup(W.backend, W.graph_embed)) {
+                std::fprintf(stderr, "tdt_prepare_runtime: backend cannot read F32 embeddings\n");
+                return 3;
+            }
+        }
+
         W.hc_persist       = ggml_new_tensor_2d(W.persist_ctx, GGML_TYPE_F32, 2 * H_pred, L);
         // Pred is the last layer's h, so it is a view rather than its own tensor:
         // the LSTM write-back updates it for free.
@@ -1317,6 +1332,12 @@ static int tdt_prepare_runtime_impl(const ParakeetCtcModel & model, TdtRuntimeWe
             }
         }
         W.enc_proj_T_max = T_max;
+
+        if (!measure && W.graph_embed != W.weights->predict_embed) {
+            std::vector<float> embedding;
+            dequantize_to_f32(W.weights->predict_embed, embedding);
+            ggml_backend_tensor_set(W.graph_embed, embedding.data(), 0, embedding.size() * sizeof(float));
+        }
 
         // Uploads write through real device pointers; a measured runtime has
         // none (its tensors carry the externally-allocated marker only).
@@ -1531,9 +1552,9 @@ bool run_lstm_joint_step(TdtRuntimeWeights & rt,
     return true;
 }
 
-// Compute the full-window encoder-side projection straight into
-// rt.enc_proj_persist (no host download). Falls back to per-step host
-// gemv if T exceeds the persistent buffer size.
+// Compute one bounded window's encoder-side projection straight into
+// rt.enc_proj_persist (no host download). The offline caller splits longer
+// sequences before reaching this graph path.
 bool run_enc_proj(TdtRuntimeWeights & rt,
                   const float * encoder_out,
                   int T) {
@@ -1848,11 +1869,31 @@ int tdt_greedy_decode(const ParakeetCtcModel & model,
     TdtDecodeState state;
     result.token_ids.clear();
     result.token_ids.reserve(T_enc);
+    result.steps = 0;
 
-    if (int rc = tdt_decode_window(model, W, encoder_out, T_enc, D_enc,
-                                   opts, state, result.token_ids, result.steps);
-        rc != 0) {
-        return rc;
+    // The offline encoder may concatenate many windows, but the graph
+    // decoder's persistent projection holds at most enc_proj_T_max frames.
+    // Keep one predictor state (including TDT duration carry) across bounded
+    // decoder windows. Short inputs retain their single-window path.
+    const int window_frames = W.use_graphs ? W.enc_proj_T_max : T_enc;
+    if (window_frames > 0 && T_enc > window_frames) {
+        for (int start = 0; start < T_enc; start += window_frames) {
+            const int frames = std::min(window_frames, T_enc - start);
+            int steps = 0;
+            if (int rc = tdt_decode_window(
+                    model, W, encoder_out + (size_t) start * D_enc,
+                    frames, D_enc, opts, state, result.token_ids, steps);
+                rc != 0) {
+                return rc;
+            }
+            result.steps += steps;
+        }
+    } else {
+        if (int rc = tdt_decode_window(model, W, encoder_out, T_enc, D_enc,
+                                       opts, state, result.token_ids, result.steps);
+            rc != 0) {
+            return rc;
+        }
     }
 
     result.text = detokenize(model.vocab, result.token_ids);
