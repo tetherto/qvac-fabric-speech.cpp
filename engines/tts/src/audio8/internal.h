@@ -347,7 +347,8 @@ struct codec_model {
     std::vector<resample_stage> downsample;
 };
 
-bool load_lm(const std::string & path, int n_gpu_layers, lm_model & model,
+bool load_lm(const std::string & path, int n_gpu_layers,
+             const std::string & backend, lm_model & model,
              std::string * error);
 void free_lm(lm_model & model);
 
@@ -366,11 +367,11 @@ struct fit_load_measure {
 };
 
 bool load_lm_metadata_only(const std::string & path, int n_gpu_layers,
-                           lm_model & model, fit_load_measure & measure,
-                           std::string * error);
+                           const std::string & backend, lm_model & model,
+                           fit_load_measure & measure, std::string * error);
 bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
-                              codec_model & model, fit_load_measure & measure,
-                              std::string * error);
+                              const std::string & backend, codec_model & model,
+                              fit_load_measure & measure, std::string * error);
 
 // What a codec GGUF says about itself: which half it holds and the shapes it
 // was converted with.
@@ -384,7 +385,8 @@ struct codec_header {
 bool peek_codec_header(const std::string & path, codec_header & header,
                        std::string * error);
 
-bool load_codec(const std::string & path, int n_gpu_layers, codec_model & model,
+bool load_codec(const std::string & path, int n_gpu_layers,
+                const std::string & backend, codec_model & model,
                 std::string * error);
 void free_codec(codec_model & model);
 

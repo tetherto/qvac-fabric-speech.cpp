@@ -390,13 +390,30 @@ constexpr int AUTO_VULKAN_DEVICE = -1;
 // Audio8's GPU path is enabled only on backends its whole graph set has been
 // validated against, stage by stage, against the F32 reference. Anything else
 // falls back to CPU rather than running unverified kernels.
-ggml_backend_t init_backend(int n_gpu_layers) {
+//
+// `backend` is EngineOptions::backend (CLI --backend): "" / "auto" takes the
+// legacy tier-based GPU path; "cpu" short-circuits to the CPU backend; any
+// other explicit name (today just "hexagon" for Snapdragon HTP0) returns
+// nullptr until the per-backend init path lands (QVAC-26269 Cycle 2b), so a
+// user-visible "failed to init a compute backend" error fires in the caller.
+ggml_backend_t init_backend(int n_gpu_layers, const std::string & backend) {
+    if (backend == "cpu") {
+        return ::tts_cpp::detail::init_cpu_backend();
+    }
+    if (!backend.empty() && backend != "auto") {
+        std::fprintf(stderr,
+            "[audio8] backend \"%s\" requested but no init path is wired yet; "
+            "Hexagon support is in progress (QVAC-26269). "
+            "Use --backend auto or --backend cpu for now.\n",
+            backend.c_str());
+        return nullptr;
+    }
     using ::tts_cpp::detail::GpuBackendRequirement;
-    ggml_backend_t backend = ::tts_cpp::detail::init_gpu_backend(
+    ggml_backend_t gpu = ::tts_cpp::detail::init_gpu_backend(
         n_gpu_layers, true, "audio8", AUTO_VULKAN_DEVICE, false, nullptr,
         GpuBackendRequirement::Vulkan | GpuBackendRequirement::Metal |
             GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA);
-    return backend ? backend : ::tts_cpp::detail::init_cpu_backend();
+    return gpu ? gpu : ::tts_cpp::detail::init_cpu_backend();
 }
 
 // Looks tensors up by name and remembers the first one that was missing, so a
@@ -863,7 +880,8 @@ void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
 // non-null the load is metadata-only: every allocation the real path makes is
 // sized into `measure` instead of performed and no tensor data is read; see
 // the declaration comments in internal.h.
-static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & model,
+static bool load_lm_impl(const std::string & path, int n_gpu_layers,
+                         const std::string & backend, lm_model & model,
                          std::string * error, fit_load_measure * measure) {
     gguf_file file(path);
     if (!file.ok()) {
@@ -897,7 +915,7 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
         return false;
     }
 
-    model.backend = init_backend(n_gpu_layers);
+    model.backend = init_backend(n_gpu_layers, backend);
     if (!model.backend) {
         if (error) *error = "audio8: failed to init a compute backend";
         return false;
@@ -949,16 +967,17 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     return true;
 }
 
-bool load_lm(const std::string & path, int n_gpu_layers, lm_model & model,
+bool load_lm(const std::string & path, int n_gpu_layers,
+             const std::string & backend, lm_model & model,
              std::string * error) {
-    return load_lm_impl(path, n_gpu_layers, model, error, /*measure=*/nullptr);
+    return load_lm_impl(path, n_gpu_layers, backend, model, error, /*measure=*/nullptr);
 }
 
 bool load_lm_metadata_only(const std::string & path, int n_gpu_layers,
-                           lm_model & model, fit_load_measure & measure,
-                           std::string * error) {
+                           const std::string & backend, lm_model & model,
+                           fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
-    return load_lm_impl(path, n_gpu_layers, model, error, &measure);
+    return load_lm_impl(path, n_gpu_layers, backend, model, error, &measure);
 }
 
 void free_fast_graphs(lm_model & model) {
@@ -1000,7 +1019,8 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 
 // Shared body of load_codec and load_codec_metadata_only; same measure
 // semantics as load_lm_impl.
-static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_model & model,
+static bool load_codec_impl(const std::string & path, int n_gpu_layers,
+                            const std::string & backend, codec_model & model,
                             std::string * error, fit_load_measure * measure) {
     gguf_file file(path);
     if (!file.ok()) {
@@ -1026,7 +1046,7 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_mo
         return false;
     }
 
-    model.backend = init_backend(n_gpu_layers);
+    model.backend = init_backend(n_gpu_layers, backend);
     if (!model.backend) {
         if (error) *error = "audio8: failed to init a compute backend";
         return false;
@@ -1060,16 +1080,17 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_mo
     return true;
 }
 
-bool load_codec(const std::string & path, int n_gpu_layers, codec_model & model,
+bool load_codec(const std::string & path, int n_gpu_layers,
+                const std::string & backend, codec_model & model,
                 std::string * error) {
-    return load_codec_impl(path, n_gpu_layers, model, error, /*measure=*/nullptr);
+    return load_codec_impl(path, n_gpu_layers, backend, model, error, /*measure=*/nullptr);
 }
 
 bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
-                              codec_model & model, fit_load_measure & measure,
-                              std::string * error) {
+                              const std::string & backend, codec_model & model,
+                              fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
-    return load_codec_impl(path, n_gpu_layers, model, error, &measure);
+    return load_codec_impl(path, n_gpu_layers, backend, model, error, &measure);
 }
 
 void free_codec(codec_model & model) {
