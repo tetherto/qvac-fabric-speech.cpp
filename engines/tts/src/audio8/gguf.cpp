@@ -1,3 +1,5 @@
+#include <utility>
+#include <algorithm>
 #include "audio8/internal.h"
 
 #include "audio8/coreml_path.h"
@@ -141,19 +143,124 @@ ggml_context * new_weight_context(int64_t n_tensors) {
     return ggml_init(params);
 }
 
-void clone_tensor_headers(const ggml_context * meta, ggml_context * dst) {
+// A weight assembled at load from several GGUF tensors stacked row-wise, so
+// a decode step issues one matrix-vector product where the file stores three
+// (q, k, v) or two (w1, w3). The parts share a type and a row width, so their
+// payloads concatenate byte for byte; views over the fused tensor stand in
+// for the original names.
+struct fused_weight {
+    std::string name;
+    std::vector<std::string> parts;
+    ggml_tensor * tensor = nullptr;
+};
+
+// The LM's two transformers store their projections per block as
+// <branch>/blk/<n>/{wq,wk,wv,w1,w3} (+ _b biases). Everything else, the codec
+// included, is cloned as is.
+bool fused_part_name(const std::string & name, std::string & block, std::string & leaf) {
+    for (const char * branch : {"lm/blk/", "fast/blk/"}) {
+        const std::string head(branch);
+        if (name.compare(0, head.size(), head) != 0) continue;
+        const size_t slash = name.find('/', head.size());
+        if (slash == std::string::npos) return false;
+        block = name.substr(0, slash + 1);
+        leaf = name.substr(slash + 1);
+        return leaf == "wq" || leaf == "wk" || leaf == "wv" || leaf == "w1" || leaf == "w3" ||
+               leaf == "wq_b" || leaf == "wk_b" || leaf == "wv_b";
+    }
+    return false;
+}
+
+// Row-stacks `parts` (all present, same type and ne[0]) into one header named
+// `name`; returns null when the parts are absent or do not line up, in which
+// case they are cloned individually.
+ggml_tensor * fuse_headers(ggml_context * meta, ggml_context * dst, const std::string & name,
+                           const std::vector<std::string> & parts) {
+    std::vector<ggml_tensor *> found;
+    for (const std::string & part : parts) {
+        ggml_tensor * t = ggml_get_tensor(meta, part.c_str());
+        if (!t) return nullptr;
+        found.push_back(t);
+    }
+    // Matrices stack along ne[1] (rows), so every part must share ne[0] and the
+    // type; vectors (biases) simply concatenate along ne[0].
+    const bool vectors = ggml_n_dims(found[0]) == 1;
+    int64_t rows = 0;
+    for (ggml_tensor * t : found) {
+        if (t->type != found[0]->type || ggml_n_dims(t) != ggml_n_dims(found[0]) ||
+            ggml_n_dims(t) > 2 || (!vectors && t->ne[0] != found[0]->ne[0])) {
+            return nullptr;
+        }
+        rows += vectors ? t->ne[0] : t->ne[1];
+    }
+    ggml_tensor * fused = vectors
+                              ? ggml_new_tensor_1d(dst, found[0]->type, rows)
+                              : ggml_new_tensor_2d(dst, found[0]->type, found[0]->ne[0], rows);
+    ggml_set_name(fused, name.c_str());
+    return fused;
+}
+
+void clone_tensor_headers(const ggml_context * meta, ggml_context * dst,
+                          std::vector<fused_weight> & fused) {
     ggml_context * source = const_cast<ggml_context *>(meta);
+    std::vector<std::string> blocks;
     for (ggml_tensor * t = ggml_get_first_tensor(source); t;
          t = ggml_get_next_tensor(source, t)) {
+        std::string block, leaf;
+        if (fused_part_name(ggml_get_name(t), block, leaf)) {
+            if (std::find(blocks.begin(), blocks.end(), block) == blocks.end()) {
+                blocks.push_back(block);
+            }
+            continue;
+        }
         ggml_set_name(ggml_dup_tensor(dst, t), ggml_get_name(t));
+    }
+    for (const std::string & block : blocks) {
+        const std::vector<std::pair<std::string, std::vector<std::string>>> groups = {
+            {"wqkv", {block + "wq", block + "wk", block + "wv"}},
+            {"wqkv_b", {block + "wq_b", block + "wk_b", block + "wv_b"}},
+            {"w13", {block + "w1", block + "w3"}},
+        };
+        for (const auto & group : groups) {
+            ggml_tensor * t = fuse_headers(source, dst, block + group.first, group.second);
+            if (t) {
+                fused.push_back({block + group.first, group.second, t});
+                continue;
+            }
+            for (const std::string & part : group.second) {
+                ggml_tensor * original = ggml_get_tensor(source, part.c_str());
+                if (original) ggml_set_name(ggml_dup_tensor(dst, original), part.c_str());
+            }
+        }
     }
 }
 
-bool stream_weights(const gguf_file & file, ggml_context * ctx) {
+bool stream_weights(const gguf_file & file, ggml_context * ctx,
+                    const std::vector<fused_weight> & fused) {
     ::tts_cpp::detail::gguf_stream_reader reader(file.ctx(), file.path());
     if (!reader.ok()) return false;
     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
-        if (!reader.to_backend(ggml_get_name(t), t)) return false;
+        const char * name = ggml_get_name(t);
+        const auto it = std::find_if(fused.begin(), fused.end(),
+                                     [&](const fused_weight & f) { return f.name == name; });
+        if (it == fused.end()) {
+            if (!reader.to_backend(name, t)) return false;
+            continue;
+        }
+        // Assembled on the host and uploaded whole: quantized tensors must
+        // reach some backends in a single set (see gguf_stream_reader).
+        std::vector<uint8_t> staged(ggml_nbytes(t));
+        size_t offset = 0;
+        for (const std::string & part : it->parts) {
+            const int64_t id = gguf_find_tensor(file.ctx(), part.c_str());
+            if (id < 0) return false;
+            const size_t bytes = gguf_get_tensor_size(file.ctx(), id);
+            if (offset + bytes > staged.size()) return false;
+            if (!reader.to_host(part.c_str(), staged.data() + offset, bytes)) return false;
+            offset += bytes;
+        }
+        if (offset != staged.size()) return false;
+        ggml_backend_tensor_set(t, staged.data(), 0, staged.size());
     }
     return true;
 }
@@ -179,12 +286,15 @@ void mark_externally_allocated(ggml_context * ctx) {
 bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context ** ctx,
                   ggml_backend_buffer_t * buffer, std::string * error,
                   size_t * measure_bytes = nullptr) {
-    *ctx = new_weight_context(gguf_get_n_tensors(file.ctx()));
+    // Views over fused weights are tensors too: room for the block projections
+    // that stay as views (3 per block) on top of the file's own count.
+    *ctx = new_weight_context(gguf_get_n_tensors(file.ctx()) * 2);
     if (!*ctx) {
         if (error) *error = "audio8: failed to create the weight context";
         return false;
     }
-    clone_tensor_headers(file.meta(), *ctx);
+    std::vector<fused_weight> fused;
+    clone_tensor_headers(file.meta(), *ctx, fused);
     if (measure_bytes) {
         *measure_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
             *ctx, ggml_backend_get_default_buffer_type(backend));
@@ -196,7 +306,7 @@ bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context *
         if (error) *error = "audio8: failed to allocate the weight buffer";
         return false;
     }
-    if (!stream_weights(file, *ctx)) {
+    if (!stream_weights(file, *ctx, fused)) {
         if (error) *error = "audio8: failed to read tensor data from " + file.path();
         return false;
     }
@@ -234,39 +344,83 @@ public:
     }
     bool ok() const { return error_.empty(); }
     const std::string & error() const { return error_; }
+    ggml_context * ctx() const { return ctx_; }
 
 private:
     ggml_context * ctx_;
     std::string error_;
 };
 
+// Row counts of one transformer's fused projections.
+struct branch_dims {
+    int64_t q_rows = 0;
+    int64_t kv_rows = 0;
+    int64_t inter = 0;
+};
+
+// Rows [first, first + rows) of a fused weight, under the original name so
+// every consumer of the per-projection tensors keeps working.
+ggml_tensor * row_view(ggml_context * ctx, ggml_tensor * fused, int64_t first, int64_t rows,
+                       const std::string & name) {
+    ggml_tensor * view =
+        ggml_n_dims(fused) == 1
+            ? ggml_view_1d(ctx, fused, rows, static_cast<size_t>(first) * fused->nb[0])
+            : ggml_view_2d(ctx, fused, fused->ne[0], rows, fused->nb[1],
+                           static_cast<size_t>(first) * fused->nb[1]);
+    ggml_set_name(view, name.c_str());
+    return view;
+}
+
 void read_attention(tensor_map & map, const std::string & prefix, bool has_bias,
-                    attention_weights & attn) {
-    attn.wq = map.get(prefix + "wq");
-    attn.wk = map.get(prefix + "wk");
-    attn.wv = map.get(prefix + "wv");
+                    attention_weights & attn, const branch_dims & dims = branch_dims{}) {
+    attn.wqkv = map.maybe(prefix + "wqkv");
+    if (attn.wqkv) {
+        attn.wq = row_view(map.ctx(), attn.wqkv, 0, dims.q_rows, prefix + "wq");
+        attn.wk = row_view(map.ctx(), attn.wqkv, dims.q_rows, dims.kv_rows, prefix + "wk");
+        attn.wv = row_view(map.ctx(), attn.wqkv, dims.q_rows + dims.kv_rows, dims.kv_rows,
+                           prefix + "wv");
+    } else {
+        attn.wq = map.get(prefix + "wq");
+        attn.wk = map.get(prefix + "wk");
+        attn.wv = map.get(prefix + "wv");
+    }
     attn.wo = map.get(prefix + "wo");
     attn.attn_norm = map.get(prefix + "attn_norm");
     if (!has_bias) return;
+    attn.wqkv_b = map.maybe(prefix + "wqkv_b");
+    if (attn.wqkv_b) {
+        attn.wq_b = row_view(map.ctx(), attn.wqkv_b, 0, dims.q_rows, prefix + "wq_b");
+        attn.wk_b = row_view(map.ctx(), attn.wqkv_b, dims.q_rows, dims.kv_rows, prefix + "wk_b");
+        attn.wv_b = row_view(map.ctx(), attn.wqkv_b, dims.q_rows + dims.kv_rows, dims.kv_rows,
+                             prefix + "wv_b");
+        return;
+    }
     attn.wq_b = map.get(prefix + "wq_b");
     attn.wk_b = map.get(prefix + "wk_b");
     attn.wv_b = map.get(prefix + "wv_b");
 }
 
 void read_block(tensor_map & map, const std::string & prefix, bool has_bias,
-                block_weights & block) {
-    read_attention(map, prefix, has_bias, block.attn);
-    block.w1 = map.get(prefix + "w1");
+                const branch_dims & dims, block_weights & block) {
+    read_attention(map, prefix, has_bias, block.attn, dims);
+    block.w13 = map.maybe(prefix + "w13");
+    if (block.w13) {
+        block.w1 = row_view(map.ctx(), block.w13, 0, dims.inter, prefix + "w1");
+        block.w3 = row_view(map.ctx(), block.w13, dims.inter, dims.inter, prefix + "w3");
+    } else {
+        block.w1 = map.get(prefix + "w1");
+        block.w3 = map.get(prefix + "w3");
+    }
     block.w2 = map.get(prefix + "w2");
-    block.w3 = map.get(prefix + "w3");
     block.ffn_norm = map.get(prefix + "ffn_norm");
 }
 
 void read_branch(tensor_map & map, const std::string & branch, int depth, bool has_bias,
-                 std::vector<block_weights> & blocks) {
+                 const branch_dims & dims, std::vector<block_weights> & blocks) {
     blocks.resize(depth);
     for (int index = 0; index < depth; ++index) {
-        read_block(map, branch + "/blk/" + std::to_string(index) + "/", has_bias, blocks[index]);
+        read_block(map, branch + "/blk/" + std::to_string(index) + "/", has_bias, dims,
+                   blocks[index]);
     }
 }
 
@@ -635,13 +789,21 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     model.sem_head = map.get("lm/sem_head");
     model.rope_cos = map.get("lm/rope_cos");
     model.rope_sin = map.get("lm/rope_sin");
-    read_branch(map, "lm", model.hp.depth, model.hp.qkv_bias, model.blocks);
+    const branch_dims slow_dims = {static_cast<int64_t>(model.hp.n_head) * model.hp.head_dim,
+                                   static_cast<int64_t>(model.hp.n_kv) * model.hp.head_dim,
+                                   static_cast<int64_t>(model.hp.inter)};
+    read_branch(map, "lm", model.hp.depth, model.hp.qkv_bias, slow_dims, model.blocks);
     model.fast_emb = map.get("fast/emb");
     model.fast_norm = map.get("fast/norm");
     model.fast_out = map.get("fast/out");
     model.fast_rope_cos = map.get("fast/rope_cos");
     model.fast_rope_sin = map.get("fast/rope_sin");
-    read_branch(map, "fast", model.hp.fast_depth, model.hp.fast_qkv_bias, model.fast_blocks);
+    const branch_dims fast_dims = {
+        static_cast<int64_t>(model.hp.fast_n_head) * model.hp.fast_head_dim,
+        static_cast<int64_t>(model.hp.fast_n_kv) * model.hp.fast_head_dim,
+        static_cast<int64_t>(model.hp.fast_inter)};
+    read_branch(map, "fast", model.hp.fast_depth, model.hp.fast_qkv_bias, fast_dims,
+                model.fast_blocks);
     if (!map.ok()) {
         if (error) *error = map.error();
         return false;
@@ -686,6 +848,10 @@ void free_fast_graphs(lm_model & model) {
         if (cached.allocr) ggml_gallocr_free(cached.allocr);
     }
     model.fast_graphs.clear();
+    if (model.frame_graph.ctx) ggml_free(model.frame_graph.ctx);
+    if (model.frame_graph.allocr) ggml_gallocr_free(model.frame_graph.allocr);
+    model.frame_graph = lm_model::fast_graph{};
+    model.frame_chosen.clear();
 }
 
 void free_lm(lm_model & model) {

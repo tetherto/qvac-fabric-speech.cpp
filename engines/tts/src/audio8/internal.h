@@ -111,6 +111,11 @@ struct attention_weights {
     ggml_tensor * wk_b = nullptr;
     ggml_tensor * wv_b = nullptr;
     ggml_tensor * attn_norm = nullptr;
+    // The three projections stacked row-wise into one weight (rows q, then k,
+    // then v) so a step issues one matrix-vector product instead of three.
+    // wq/wk/wv are then views into it. Null where the loader could not fuse.
+    ggml_tensor * wqkv = nullptr;
+    ggml_tensor * wqkv_b = nullptr;
 };
 
 struct block_weights {
@@ -119,6 +124,9 @@ struct block_weights {
     ggml_tensor * w2 = nullptr;
     ggml_tensor * w3 = nullptr;
     ggml_tensor * ffn_norm = nullptr;
+    // w1 stacked over w3 (gate rows, then up rows): one product, then
+    // ggml_swiglu over the halves. w1/w3 are views into it when set.
+    ggml_tensor * w13 = nullptr;
 };
 
 // One transformer's KV slab: [head_dim * n_kv, capacity] per layer, stacked
@@ -179,6 +187,11 @@ struct lm_model {
         bool use_sched = false;
     };
     std::vector<fast_graph> fast_graphs;
+    // The greedy whole-frame graph (fast_frame), built once and replayed the
+    // same way: its two inputs are written before every run and its chosen
+    // codes read after. Same scheduler caveat as the per-position graphs.
+    fast_graph frame_graph;
+    std::vector<ggml_tensor *> frame_chosen;
     // Set when a build lands on the scheduler fallback, which reallocates one
     // shared arena per graph and so cannot hand out memory a graph may keep.
     bool fast_cache_off = false;

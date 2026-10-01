@@ -43,7 +43,9 @@ ggml_tensor * run_block(ggml_context * ctx, ggml_cgraph * graph, const block_wei
     ggml_tensor * hidden = ggml_add(
         ctx, x, attention(ctx, graph, block.attn, normed, rope, cache, shape, mask));
     ggml_tensor * gated = rms_norm(ctx, hidden, block.ffn_norm, eps);
-    return ggml_add(ctx, hidden, swiglu(ctx, block.w1, block.w2, block.w3, gated));
+    ggml_tensor * ffn = block.w13 ? swiglu_fused(ctx, block.w13, block.w2, gated)
+                                  : swiglu(ctx, block.w1, block.w2, block.w3, gated);
+    return ggml_add(ctx, hidden, ffn);
 }
 
 ggml_tensor * run_blocks(ggml_context * ctx, ggml_cgraph * graph,
@@ -351,6 +353,8 @@ void disable_fast_cache(lm_model & model) {
     for (lm_model::fast_graph & cached : model.fast_graphs) {
         drop_cached_fast_graph(cached);
     }
+    drop_cached_fast_graph(model.frame_graph);
+    model.frame_chosen.clear();
     model.fast_cache_off = true;
 }
 
@@ -466,17 +470,53 @@ void build_fast_frame_fit_graph(lm_model & model, scratch & build) {
 // Greedy expansion of one frame in a single graph. The sampled path cannot do
 // this: argmax is the only picker the backend can evaluate, so any other one has
 // to return to the host between positions.
-bool fast_frame(lm_model & model, const std::vector<float> & fast_input, int semantic,
-                int n_threads, std::vector<int32_t> & codes_out, std::string * error) {
-    const lm_hparams & hp = model.hp;
+// The whole-frame graph never changes between frames either -- the positions,
+// the shapes and the cache slots are the same every time -- so it is built and
+// allocated once, like the per-position graphs, and replayed with fresh inputs.
+// Returns null once the cache is off (including the build that discovers the
+// scheduler is needed), and the caller falls back to building per frame.
+lm_model::fast_graph * cached_frame_graph(lm_model & model, std::string * error) {
+    if (model.frame_graph.graph) return &model.frame_graph;
+    scratch build(AUDIO8_MAX_NODES);
+    if (!build.ok()) {
+        if (error) *error = "audio8: failed to create the fast frame context";
+        return nullptr;
+    }
+    lm_model::fast_graph & cached = model.frame_graph;
+    std::vector<ggml_tensor *> chosen = build_fast_frame_graph(model, build);
+    cached.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    if (!cached.allocr) {
+        if (error) *error = "audio8: failed to create the fast frame allocator";
+        return nullptr;
+    }
+    if (!prepare_graph(model.backend, model.sched, model.buffer_w, cached.allocr,
+                       build.graph, "fast frame", cached.use_sched, error)) {
+        ggml_gallocr_free(cached.allocr);
+        cached.allocr = nullptr;
+        return nullptr;
+    }
+    if (cached.use_sched) {
+        ggml_gallocr_free(cached.allocr);
+        cached = lm_model::fast_graph{};
+        disable_fast_cache(model);
+        return nullptr;
+    }
+    cached.ctx = build.ctx;
+    cached.graph = build.graph;
+    model.frame_chosen = std::move(chosen);
+    build.release();
+    return &cached;
+}
+
+bool fast_frame_uncached(lm_model & model, const std::vector<float> & fast_input,
+                         int32_t first_code, std::vector<int32_t> & codes_out,
+                         int n_threads, std::string * error) {
     scratch build(AUDIO8_MAX_NODES);
     if (!build.ok()) {
         if (error) *error = "audio8: failed to create the fast frame context";
         return false;
     }
-    const int32_t first_code = clamp_to_codebook(hp, semantic);
     const std::vector<ggml_tensor *> chosen = build_fast_frame_graph(model, build);
-
     bool use_sched = false;
     if (!prepare_graph(model.backend, model.sched, model.buffer_w, model.frame_allocr,
                        build.graph, "fast frame", use_sched, error)) {
@@ -488,11 +528,41 @@ bool fast_frame(lm_model & model, const std::vector<float> & fast_input, int sem
                        "fast frame", error)) {
         return false;
     }
-
-    codes_out.assign(hp.num_codebooks, 0);
-    codes_out[0] = first_code;
     read_chosen(chosen, codes_out);
     return true;
+}
+
+// Greedy expansion of one frame in a single graph. The sampled path cannot do
+// this: argmax is the only picker the backend can evaluate, so any other one has
+// to return to the host between positions.
+bool fast_frame(lm_model & model, const std::vector<float> & fast_input, int semantic,
+                int n_threads, std::vector<int32_t> & codes_out, std::string * error) {
+    const lm_hparams & hp = model.hp;
+    const int32_t first_code = clamp_to_codebook(hp, semantic);
+    codes_out.assign(hp.num_codebooks, 0);
+    codes_out[0] = first_code;
+
+    lm_model::fast_graph * cached = nullptr;
+    if (!model.fast_cache_off) {
+        std::string build_error;
+        cached = cached_frame_graph(model, &build_error);
+        if (!cached && !model.fast_cache_off) {
+            if (error) *error = build_error;
+            return false;
+        }
+    }
+    bool ok;
+    if (!cached) {
+        ok = fast_frame_uncached(model, fast_input, first_code, codes_out, n_threads, error);
+    } else {
+        write_input(cached->graph, "input", fast_input.data(),
+                    fast_input.size() * sizeof(float));
+        write_input(cached->graph, "first_code", &first_code, sizeof(first_code));
+        ok = compute_graph(model.backend, model.sched, cached->graph, cached->use_sched,
+                           n_threads, "fast frame", error);
+        if (ok) read_chosen(model.frame_chosen, codes_out);
+    }
+    return ok;
 }
 
 bool fast_step(lm_model & model, const std::vector<float> & fast_input, int semantic,

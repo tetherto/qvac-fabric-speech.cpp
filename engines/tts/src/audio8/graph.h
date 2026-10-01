@@ -90,6 +90,10 @@ ggml_tensor * linear(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x,
 // projections and the gate reach the backend as one fusable run.
 ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
                      ggml_tensor * w3, ggml_tensor * x);
+// swiglu over a fused [in, 2 * inter] weight whose first half of rows is w1
+// (the gated branch) and second half w3.
+ggml_tensor * swiglu_fused(ggml_context * ctx, ggml_tensor * w13, ggml_tensor * w2,
+                           ggml_tensor * x);
 
 struct attention_shape {
     int n_head = 0;

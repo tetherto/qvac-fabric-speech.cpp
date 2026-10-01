@@ -239,19 +239,54 @@ ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
     return precise_mul_mat(ctx, w2, gated);
 }
 
+ggml_tensor * swiglu_fused(ggml_context * ctx, ggml_tensor * w13, ggml_tensor * w2,
+                           ggml_tensor * x) {
+    // One [2 * inter, width] product; ggml_swiglu applies silu to the first
+    // half of the rows (w1's) and multiplies by the second (w3's).
+    ggml_tensor * gated = ggml_swiglu(ctx, precise_mul_mat(ctx, w13, x));
+    return precise_mul_mat(ctx, w2, gated);
+}
+
+// Rows [first, first + count) of a fused projection output [rows, width] as
+// [head_dim, heads, width]. A single column is contiguous as a view; wider
+// inputs (the prefill) need one copy.
+ggml_tensor * split_heads(ggml_context * ctx, ggml_tensor * qkv, int first, int count,
+                          int head_dim, int heads) {
+    const int width = static_cast<int>(qkv->ne[1]);
+    ggml_tensor * rows = ggml_view_2d(ctx, qkv, count, width, qkv->nb[1],
+                                      static_cast<size_t>(first) * qkv->nb[0]);
+    if (width > 1) rows = ggml_cont(ctx, rows);
+    return ggml_reshape_3d(ctx, rows, head_dim, heads, width);
+}
+
 ggml_tensor * attention(ggml_context * ctx, ggml_cgraph * graph,
                         const attention_weights & weights, ggml_tensor * x,
                         const rope_planes & rope, const kv_cache & cache,
                         const attention_shape & shape, ggml_tensor * mask) {
-    ggml_tensor * key = project_heads(ctx, weights.wk, weights.wk_b, x, shape.head_dim,
-                                      shape.n_kv);
-    ggml_tensor * value = project_heads(ctx, weights.wv, weights.wv_b, x, shape.head_dim,
-                                        shape.n_kv);
+    ggml_tensor * key;
+    ggml_tensor * value;
+    ggml_tensor * query;
+    // The fused product needs the fused bias wherever the projections have one;
+    // a loader that stacked the weights but not the biases falls back.
+    const bool fused = weights.wqkv && (!weights.wq_b || weights.wqkv_b);
+    if (fused) {
+        // One product for the three projections, then row views of its output.
+        ggml_tensor * qkv = linear(ctx, weights.wqkv, x, weights.wqkv_b);
+        const int nq = shape.n_head * shape.head_dim;
+        const int nkv = shape.n_kv * shape.head_dim;
+        ggml_tensor * q = split_heads(ctx, qkv, 0, nq, shape.head_dim, shape.n_head);
+        key = split_heads(ctx, qkv, nq, nkv, shape.head_dim, shape.n_kv);
+        value = split_heads(ctx, qkv, nq + nkv, nkv, shape.head_dim, shape.n_kv);
+        query = ggml_permute(ctx, apply_rope(ctx, q, rope), 0, 2, 1, 3);
+    } else {
+        key = project_heads(ctx, weights.wk, weights.wk_b, x, shape.head_dim, shape.n_kv);
+        value = project_heads(ctx, weights.wv, weights.wv_b, x, shape.head_dim, shape.n_kv);
+        query = rotated_query(ctx, weights, x, rope, shape);
+    }
     append_keys(ctx, graph, cache, shape, apply_rope(ctx, key, rope));
     append_values(ctx, graph, cache, shape, value);
 
     const int total = shape.n_past + shape.width;
-    ggml_tensor * query = rotated_query(ctx, weights, x, rope, shape);
     ggml_tensor * keys = ggml_permute(ctx, cache_keys(ctx, cache, shape, total), 0, 2, 1, 3);
     ggml_tensor * values = cache_values(ctx, cache, shape, total);
     ggml_tensor * merged = attend(ctx, query, keys, values, mask, shape.head_dim,
