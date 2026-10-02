@@ -234,7 +234,7 @@ ggml on any failure:
 | Model line | Sidecar | Stage on Core ML | Status | Force ggml |
 |---|---|---|---|---|
 | Supertonic 1 / 2 / 3 | `<model>-vocoder.mlmodelc` | vocoder, in 64-latent-frame windows | `Engine::vocoder_on_coreml()` (loaded at construction), `SynthesisResult::vocoder_synthesis_backend` (per call) | `SUPERTONIC_COREML_DISABLE=1` |
-| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack, in 64-post-frame windows | `Engine::codec_on_coreml()` (attached; false once a failed call retires the sidecar), `SynthesisResult::codec_synthesis_backend` (per call) | `AUDIO8_COREML_DISABLE=1` |
+| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack, in 64-post-frame windows synthesised on a worker while the language model is still generating (`AUDIO8_COREML_STREAM_DISABLE=1` waits for the last frame) | `Engine::codec_on_coreml()` (attached; false once a failed call retires the sidecar), `SynthesisResult::codec_synthesis_backend` (per call) | `AUDIO8_COREML_DISABLE=1` |
 
 One sidecar serves every quantization tier of a model. The Supertonic sidecar
 carries reference-precision weights, so it stays off for vocoders stored below

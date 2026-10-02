@@ -93,19 +93,18 @@ public:
             return true;
         }
 
-        scratch_.resize(std::min(nbytes, (size_t) CHUNK));
-        size_t done = 0;
-        while (done < nbytes) {
-            const size_t n = std::min((size_t) CHUNK, nbytes - done);
-            if (std::fread(scratch_.data(), 1, n, f_) != n) {
-                std::fprintf(stderr, "gguf_stream_reader: short read on tensor '%s' "
-                             "(%zu of %zu bytes)\n", name, done, nbytes);
-                return false;
-            }
-            ggml_backend_tensor_set(dst, scratch_.data(), done, n);
-            done += n;
-        }
-        return true;
+        return stream_chunks(name, dst, 0, nbytes);
+    }
+
+    // Stream tensor `name`'s payload, `nbytes` long, into `dst` from byte
+    // `offset` on, CHUNK bytes at a time: one part of a tensor assembled from
+    // several. Plain types only, since every backend honours (offset, size)
+    // for them; a quantized destination has to be uploaded whole (above).
+    bool to_backend_at(const char * name, ggml_tensor * dst, size_t offset, size_t nbytes) {
+        size_t sz = 0;
+        if (ggml_is_quantized(dst->type) || offset + nbytes > ggml_nbytes(dst)) return false;
+        if (!locate(name, nbytes, sz)) return false;
+        return stream_chunks(name, dst, offset, sz);
     }
 
     // Read tensor `name`'s payload into a host buffer of exactly `nbytes`.
@@ -121,6 +120,22 @@ public:
     }
 
 private:
+    bool stream_chunks(const char * name, ggml_tensor * dst, size_t offset, size_t nbytes) {
+        scratch_.resize(std::min(nbytes, (size_t) CHUNK));
+        size_t done = 0;
+        while (done < nbytes) {
+            const size_t n = std::min((size_t) CHUNK, nbytes - done);
+            if (std::fread(scratch_.data(), 1, n, f_) != n) {
+                std::fprintf(stderr, "gguf_stream_reader: short read on tensor '%s' "
+                             "(%zu of %zu bytes)\n", name, done, nbytes);
+                return false;
+            }
+            ggml_backend_tensor_set(dst, scratch_.data(), offset + done, n);
+            done += n;
+        }
+        return true;
+    }
+
     // 8 MiB: large enough that fread/ggml_backend_tensor_set call overhead
     // is negligible against disk/flash bandwidth, small enough to be noise
     // next to the weight buffers themselves.

@@ -120,7 +120,8 @@ cache, and on Apple builds its DAC convolutions run on Accelerate
 ### Apple Core ML sidecars
 
 On Apple builds, an optional Core ML sidecar moves one fixed-shape stage of a
-model to the Neural Engine while the rest of the pipeline stays on ggml. Each
+model to Core ML, which places it on the Neural Engine, the GPU or the CPU,
+while the rest of the pipeline stays on ggml. Each
 engine gates its sidecars behind its own CMake option, all defaulting to `OFF`:
 `PARAKEET_COREML`, `TTS_CPP_COREML`, and `AUDIOGEN_COREML`. At load the engine
 looks for a compiled `.mlmodelc` next to the GGUF, named after the GGUF with
@@ -134,7 +135,7 @@ sidecar, a rejected input shape, or a failed prediction falls back to ggml.
 | Nemotron 3.5 ASR streaming | `<model>-encoder.mlmodelc` | encoder | exact compiled shape only; longer offline inputs and streaming take the cache-aware ggml path | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#nemotron) |
 | Sortformer v2.1 | `<model>-encoder.mlmodelc`, `<model>-encoder-bypass-pre-encode.mlmodelc` | batch encoder; AOSC block stack | batch: exact compiled shape; AOSC: up to the masked capacity (410 frames by default); the speaker head stays on ggml | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#sortformer-v21) |
 | Supertonic 1 / 2 / 3 | `<model>-vocoder.mlmodelc` | vocoder | 64-latent-frame windows; stays off for vocoder weights stored below 8 bits (`q4_0`) | `SUPERTONIC_COREML_DISABLE=1` | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar) |
-| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack | 64-post-frame windows; a failed call retires the sidecar for the engine's lifetime | `AUDIO8_COREML_DISABLE=1` | [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
+| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack | 64-post-frame windows, synthesised on a worker while the language model is still generating; a failed call retires the sidecar for the engine's lifetime | `AUDIO8_COREML_DISABLE=1` | [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | ACE-Step v15 turbo / sft / base | `<vae>-decoder.mlmodelc` | Oobleck VAE decoder | 64-latent-frame overlapped windows; shorter latents run on ggml | `ACESTEP_COREML_DISABLE=1` | [AudioGen](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 
 Sidecars are exported from the GGUF by
