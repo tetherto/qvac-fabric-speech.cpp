@@ -81,6 +81,10 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarizatio
 | MOSS-SoundEffect-v2 | tts | text prompt (sound effects, not speech) | 48 kHz | `f16`, `q8_0`; converter also writes `f32`, `bf16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | Qwen3-1.7B text encoder + Wan DiT flow matching + DAC decoder, up to 30 s per clip, `moss-cli --mode sfx`; every stage matches the PyTorch pipeline (f16 at cosine 0.99998 or better, q8_0 at 0.9987 after eight sampling steps) |
 | MOSS-Speech | tts | spoken English and Chinese in, speech (or text) out | 24 kHz | LM `bf16`, `q8_0`; converter also writes `f16`, `f32`; codec `f16` | CPU, Metal; Vulkan, OpenCL and CUDA untested | speech-to-speech without a text step: 9B Qwen3 trunk split into text and audio branches + Whisper-VQ speech tokenizer + CosyVoice2 flow/HiFT decoder with a built-in default voice or a reference WAV (`tts_cpp::moss::SpeechEngine`, `moss-cli --mode s2s`); every stage matches the PyTorch pipeline (prefill logits 0.99997, speech tokens 45/45, reply mel 0.9998), bf16 and q8_0 pick the reference's greedy audio code at 93.5 % of positions under teacher forcing |
 
+By default, MOSS-Speech replies end when the model finishes or exhausts the remaining
+context. `--max-new-tokens N` sets an explicit reply budget; `0` uses the
+remaining context. See the [MOSS guide](engines/tts/docs/moss.md#moss-speech).
+
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
 backend for a test arm or comparison and rejects a value that selects no usable

@@ -40,6 +40,10 @@ decoder speaks in a built-in default voice or a reference voice. Every stage
 matches the PyTorch pipeline on CPU and Metal, in bf16 and q8_0. See the
 [MOSS guide](docs/moss.md#moss-speech).
 
+By default, MOSS-Speech replies end when the model finishes or exhausts the remaining
+context. `--max-new-tokens N` sets an explicit reply budget; `0` uses the
+remaining context.
+
 This directory is the in-tree `engines/tts` package in
 [`qvac-fabric-speech.cpp`](../../README.md). It consumes the system
 `ggml-speech` package built from
