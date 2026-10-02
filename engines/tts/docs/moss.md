@@ -376,8 +376,10 @@ build/moss-cli --mode s2s --model moss-speech-q8_0.gguf \
 turn, and `--text-reply` asks for a text answer instead of speech (printed to
 stdout). Sampling defaults to the upstream values: temperature 0.7, top-p
 0.95, top-k 20, seed 0; `--greedy`, `--temperature`, `--top-p`, `--top-k`, and
-`--seed` override them. `--max-new-tokens` bounds the whole reply (1000 by
-default, at most 4096) and `--max-reply-seconds` cuts the spoken part cleanly by forcing
+`--seed` override them. By default, generation continues until the model ends
+its reply or the remaining model context is exhausted. `--max-new-tokens N`
+sets an explicit reply budget (`0`, the default, uses the remaining context),
+and `--max-reply-seconds` cuts the spoken part cleanly by forcing
 the end-of-speech code. There is no streaming in this mode.
 
 ### Engine notes
