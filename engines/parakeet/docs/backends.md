@@ -85,9 +85,16 @@ Radeon RX 7600 XT (Vulkan), and an Apple M3 Ultra (Metal). When the active
 backend cannot run fused flash attention for this graph, the encoder uses an
 unfused attention (matmul, softmax, matmul) that stays on the GPU instead of
 sending 31 attention ops per call to the CPU. ggml-opencl takes that path on
-Adreno unless `GGML_OPENCL_FA_ADRENO=1` is set. OpenCL and Mali Vulkan are
-untested on hardware; the Mali routing of the Sortformer head does not apply
-to this model. See
+Adreno unless `GGML_OPENCL_FA_ADRENO=1` is set. Adreno's ggml-opencl and
+ggml-vulkan matmul kernels narrow activations to half precision by default,
+which put the Adreno 830 at the edge of the reference tolerance (relative L2
+0.0030 on OpenCL, 0.0040 on Vulkan against 0.003), so on Adreno the graph
+requests `GGML_PREC_F32` on every matmul; that halves the error for a 2-3 %
+cost. Both Adreno backends then pass the reference test on a Snapdragon 8
+Elite, and OpenCL, which the tier policy selects on Adreno 700+, runs the
+model about twice as fast as its CPU. ggml-vulkan on that GPU is slower than
+the CPU for this model. Mali Vulkan is untested on hardware; the Mali routing
+of the Sortformer head does not apply to this model. See
 [Nemotron 3 Diarization on GPU](performance.md#nemotron-3-diarization-on-gpu)
 for timings and accuracy.
 

@@ -52,7 +52,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/diar_sortformer_4spk-v1` | parakeet | diarization, up to 4 speakers | 123 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + sliding-history live |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | streaming-trained encoder |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape batch/AOSC encoder | Audio-Online Speaker Cache, stable slots across gaps; speaker head stays on ggml |
-| `nvidia/Nemotron-3-Diarization` | parakeet | diarization, up to 8 speakers | — | official `q8_0` GGUF | CPU, Metal, Vulkan, CUDA; OpenCL untested | 10 ms probabilities, offline and AOSC streaming |
+| `nvidia/Nemotron-3-Diarization` | parakeet | diarization, up to 8 speakers | — | official `q8_0` GGUF | CPU, Metal, Vulkan, OpenCL, CUDA | 10 ms probabilities, offline and AOSC streaming |
 
 Parakeet's CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0
 transcripts, Sortformer and streaming output byte-equal to the previous build,

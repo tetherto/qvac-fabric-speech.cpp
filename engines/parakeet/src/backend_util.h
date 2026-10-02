@@ -11,6 +11,8 @@
 
 #include "ggml-backend.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <string>
 
@@ -133,6 +135,20 @@ inline bool backend_is_opencl(ggml_backend_t b) {
 
 inline bool backend_is_hexagon(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "HTP") == 0;
+}
+
+inline bool description_names_adreno(const char * description) {
+    if (!description) return false;
+    std::string lowered(description);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered.find("adreno") != std::string::npos;
+}
+
+inline bool backend_is_adreno(ggml_backend_t b) {
+    ggml_backend_dev_t dev = b ? ggml_backend_get_device(b) : nullptr;
+    return dev && (description_names_adreno(ggml_backend_dev_name(dev)) ||
+                   description_names_adreno(ggml_backend_dev_description(dev)));
 }
 
 // Decoder graphs execute directly, without scheduler fallback. Probe the

@@ -1,3 +1,4 @@
+#include "backend_util.h"
 #include "mel_preprocess.h"
 #include "parakeet/engine.h"
 #include "parakeet_ctc.h"
@@ -320,6 +321,11 @@ int main(int argc, char ** argv) {
     }
     if (gpu_layers == 0 && !parakeet::nemotron_diarization_uses_fused_attention(model)) {
         std::fprintf(stderr, "Nemotron CPU inference did not select fused attention\n");
+        return 1;
+    }
+    if (parakeet::nemotron_diarization_uses_f32_matmuls(model) !=
+        parakeet::backend_is_adreno(parakeet::model_active_backend(model))) {
+        std::fprintf(stderr, "Nemotron F32 matmul precision does not follow the Adreno GPU\n");
         return 1;
     }
     if (parakeet::prewarm_nemotron_diarization(model, kPrewarmSeconds) != 0) {

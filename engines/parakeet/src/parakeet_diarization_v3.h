@@ -60,6 +60,8 @@ int nemotron_diarization_stream_state_frames();
 
 bool nemotron_diarization_uses_fused_attention(const ParakeetCtcModel & model);
 
+bool nemotron_diarization_uses_f32_matmuls(const ParakeetCtcModel & model);
+
 int measure_nemotron_diarization(
     const ParakeetCtcModel & model,
     int mel_frames,

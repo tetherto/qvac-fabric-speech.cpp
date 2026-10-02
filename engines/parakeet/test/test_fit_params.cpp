@@ -47,7 +47,10 @@
 // (CMake registers the CPU form, n_gpu_layers omitted = 0 -- the only backend
 // every CI lane has; pass e.g. 99 to check parity on a GPU backend, which
 // exits 3 (skipped) when no GPU backend is available. Nemotron 3 Diarization
-// also has a gpu-labelled registration.)
+// also has a gpu-labelled registration. The test sets
+// GGML_VK_DISABLE_GRAPH_OPTIMIZE unless the caller did: ggml-vulkan reorders
+// nodes inside the scheduler, which can shorten tensor lifetimes below the
+// projected graph-as-built, as on an Adreno 830.)
 // Exit 0 on success; non-zero with a FAIL line per broken invariant.
 
 #include "parakeet/fit.h"
@@ -95,6 +98,17 @@ void expect(bool cond, const std::string & what) {
 }
 
 constexpr int kSkipReturnCode = 3;
+constexpr char kVulkanGraphReorderVariable[] = "GGML_VK_DISABLE_GRAPH_OPTIMIZE";
+constexpr char kVulkanGraphReorderDisabled[] = "1";
+
+void disable_vulkan_graph_reordering() {
+    if (std::getenv(kVulkanGraphReorderVariable)) return;
+#ifdef _WIN32
+    _putenv_s(kVulkanGraphReorderVariable, kVulkanGraphReorderDisabled);
+#else
+    setenv(kVulkanGraphReorderVariable, kVulkanGraphReorderDisabled, 0);
+#endif
+}
 constexpr float kDiarizationShortSeconds = 60.0f;
 constexpr float kDiarizationLongSeconds = 300.0f;
 constexpr size_t kGraphInputAlignmentSlack = 1024;
@@ -219,6 +233,7 @@ int main(int argc, char ** argv) {
     }
     const std::string model_path   = argv[1];
     const int         n_gpu_layers = argc > 2 ? std::atoi(argv[2]) : 0;
+    disable_vulkan_graph_reordering();
 
     constexpr float kAudioSeconds = 10.0f;
 

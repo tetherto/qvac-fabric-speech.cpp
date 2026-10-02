@@ -121,4 +121,20 @@ and about 3x on the 273 s offline graph (CUDA 16.6 -> 50.8 ms, Vulkan 28.3 ->
 the fused attention to the CPU instead, which is what the scheduler would do
 without the fallback, makes a streaming chunk 10x slower (CUDA 38.7 ms,
 Vulkan 40.0 ms). The unfused path passes the same NeMo-Speech.cpp reference
-check on CPU, CUDA, Vulkan, and Metal.
+check on CPU, CUDA, Vulkan, Metal, and Adreno OpenCL.
+
+On a Samsung Galaxy S25 (Snapdragon 8 Elite, Adreno 830), the same 27.3 s
+clip and harness, with the F32 matmul precision Adreno receives:
+
+| Backend | Offline 27.3 s | Streaming 27.3 s | Slowest chunk | Max abs | Rel L2 |
+|---|---:|---:|---:|---:|---:|
+| CPU, Oryon | 331 ms | 5.7 s | 478 ms | 0.027 | 0.0017 |
+| OpenCL, Adreno 830 | 176 ms | 2.3 s | 154 ms | 0.033 | 0.0015 |
+| Vulkan, Adreno 830 | 726 ms | 12.4 s | 712 ms | 0.035 | 0.0016 |
+
+Without the F32 request, OpenCL measured 0.037 and 0.0030 and Vulkan 0.042
+and 0.0040, at 2-3 % less time. OpenCL runs the unfused attention because
+ggml-opencl rejects flash attention on Adreno. With
+`GGML_OPENCL_FA_ADRENO=1` it takes 108 ms offline and 86 ms per chunk, but it
+fails the test's negative-peak check and changes the streaming segments, so
+leave it off.

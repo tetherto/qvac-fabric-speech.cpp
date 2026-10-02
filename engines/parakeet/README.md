@@ -25,7 +25,7 @@ and `moss-transcribe` CLI; see
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | Sortformer | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Streaming-trained; sliding-history streaming |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | Sortformer + AOSC | 128 | 512 × 17 | n/a | 117 M | 251 MiB f16 / 134 MiB q8_0 / 72 MiB q4_0 | similar to v1 offline | Audio-Online Speaker Cache preserves slots across long gaps; Core ML exact-shape batch/AOSC encoder |
-| `nvidia/Nemotron-3-Diarization` | Nemotron diarization + AOSC | 128 | 512 × 31 RoPE | n/a | — | 107 MB q8_0 GGUF | 0.0002 q8_0 CUDA / 0.0002 q8_0 Vulkan / 0.0006 q8_0 Metal | Eight speakers, 10 ms probabilities, native offline and cached streaming |
+| `nvidia/Nemotron-3-Diarization` | Nemotron diarization + AOSC | 128 | 512 × 31 RoPE | n/a | — | 107 MB q8_0 GGUF | 0.0002 q8_0 CUDA / 0.0002 q8_0 Vulkan / 0.0006 q8_0 Metal / 0.0065 q8_0 OpenCL (Adreno 830) | Eight speakers, 10 ms probabilities, native offline and cached streaming |
 | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | Whisper-shaped encoder + Qwen3 decoder (text, speakers, timestamps) | 80 | 1024 × 24 encoder, 1024 × 28 decoder | 151936 | 0.9 B | 1.8 GB f16 / 0.98 GB q8_0 / 0.64 GB q5_0 | 0.05–0.39 f16 Metal (2 to 30 min) | Multilingual checkpoint, validated on Spanish and Chinese; English long-form skips spans, as in the reference model; per-request hotwords; separate `moss-transcribe` API and CLI |
 
 TDT 0.6B-v3 and TDT 1.1B are distinct model contracts: only 0.6B-v3 is
@@ -58,11 +58,13 @@ for the whole session; offline inference normalizes its full input. Custom chunk
 must be multiples of 80 ms. The Q8 checkpoint is covered by a numerical
 reference test against NVIDIA's C++ implementation. With `--n-gpu-layers` or
 `EngineOptions::n_gpu_layers` above zero the whole graph runs on CUDA, Vulkan,
-or Metal; offline inference and cached streaming pass the same numerical and
-session tests on an RTX 5090 (CUDA and Vulkan), an AMD Radeon RX 7600 XT
-(Vulkan), and an Apple M3 Ultra (Metal). Backends without fused flash
+Metal, or OpenCL; offline inference and cached streaming pass the same
+numerical and session tests on an RTX 5090 (CUDA and Vulkan), an AMD Radeon
+RX 7600 XT (Vulkan), an Apple M3 Ultra (Metal), and the Adreno 830 of a
+Snapdragon 8 Elite (OpenCL and Vulkan). Backends without fused flash
 attention for this graph, such as ggml-opencl on Adreno, keep attention on
-the GPU with an unfused path; OpenCL is untested on hardware.
+the GPU with an unfused path, and Adreno GPUs run the matmuls at F32
+precision.
 `EngineOptions::prewarm` runs one offline pass and one chunk at the default
 live geometry, and `parakeet-fit-params` projects the model's memory. GPU
 timings and accuracy are in

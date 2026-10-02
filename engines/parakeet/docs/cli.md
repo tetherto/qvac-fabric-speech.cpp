@@ -118,6 +118,12 @@ and 80 FIFO rows). On a backend without fused flash attention the graph uses
 unfused attention, whose score matrix grows with the square of the input
 length, and the projection prices that graph.
 
+The projection prices each graph as built. ggml-vulkan reorders graph nodes
+inside the scheduler, which can shorten tensor lifetimes: on an Adreno 830
+the Nemotron 3 Diarization streaming graph reserves 2.2 MiB (24 %) less than
+projected. `test-fit-params` therefore sets `GGML_VK_DISABLE_GRAPH_OPTIMIZE`
+before it compares the projection with real reservations.
+
 The projection is exact where it can be: `test-fit-params` asserts the
 projected weight, encoder-compute, Sortformer-head, Nemotron
 prompt/step/pre-encode, and Nemotron 3 Diarization graph bytes equal what a

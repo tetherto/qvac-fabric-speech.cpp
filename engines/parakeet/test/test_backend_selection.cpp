@@ -116,11 +116,23 @@ void test_explicit_selection() {
     CHECK(prepend_dsp_library_directory("", "/custom") == "/custom");
 }
 
+void test_adreno_descriptions() {
+    using parakeet::description_names_adreno;
+    CHECK(description_names_adreno("QUALCOMM Adreno(TM) 830 (OpenCL 3.0 Adreno(TM) 830)"));
+    CHECK(description_names_adreno("Adreno (TM) 830"));
+    CHECK(description_names_adreno("adreno 740"));
+    CHECK(!description_names_adreno("NVIDIA GeForce RTX 5090"));
+    CHECK(!description_names_adreno("Mali-G715"));
+    CHECK(!description_names_adreno(""));
+    CHECK(!description_names_adreno(nullptr));
+}
+
 }  // namespace
 
 int main() {
     test_gpu_tier_policy();
     test_explicit_selection();
+    test_adreno_descriptions();
 
     std::fprintf(stderr, "[test-parakeet-backend-selection] %d/%d checks passed\n",
                  g_checks - g_failures, g_checks);
