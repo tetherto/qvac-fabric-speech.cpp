@@ -31,7 +31,8 @@ void print_usage() {
         "       [--steps N] [--guidance G] [--shift S]   defaults come from the model file\n"
         "       moss-cli --mode s2s --model moss-speech.gguf --codec moss-speech-codec.gguf --audio question.wav\n"
         "       [--out reply.wav] [--voice voice.wav] [--system \"...\"] [--max-reply-seconds S]\n"
-        "       [--max-new-tokens 1000] [--greedy] [--temperature 0.7] [--top-p 0.95] [--top-k 20]\n"
+        "       [--max-new-tokens 0]   0: use remaining model context; positive: explicit reply budget\n"
+        "       [--greedy] [--temperature 0.7] [--top-p 0.95] [--top-k 20]\n"
         "       [--seed 0] [--text-reply] [--threads 4] [--gpu] [--backends-dir dir]\n");
 }
 
@@ -162,7 +163,7 @@ void report_s2s(const CliArgs & args, const tts_cpp::moss::SpeechResult & result
         "[moss-cli] reply %.2fs (%d speech tokens%s) from %d prompt tokens: encode %.0f ms, prefill %.0f ms, "
         "generate %.0f ms, decode %.0f ms%s%s\n",
         result.sample_rate > 0 ? (double) result.pcm.size() / result.sample_rate : 0.0, result.reply_tokens,
-        result.truncated ? ", cut at --max-reply-seconds" : "", result.prompt_tokens, result.encode_ms,
+        result.truncated ? ", context or requested generation limit reached" : "", result.prompt_tokens, result.encode_ms,
         result.prefill_ms, result.generate_ms, result.decode_ms, result.pcm.empty() ? "" : " -> ",
         result.pcm.empty() ? "" : args.out_path.c_str());
 }

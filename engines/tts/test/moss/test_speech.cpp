@@ -446,7 +446,22 @@ void test_request_validation() {
     reject([](auto & r) { r.voice = {0.1f}; r.voice_sample_rate = 0; }, "voice prompt", "a voice without a rate");
     reject([](auto & r) { r.voice.assign(16000 * 61, 0.1f); r.voice_sample_rate = 16000; }, "voice prompt",
            "a voice longer than 60 s");
-    reject([](auto & r) { r.max_new_tokens = 4097; }, "max_new_tokens", "max_new_tokens past the cap");
+    auto large_budget = valid_request();
+    large_budget.max_new_tokens = 4097;
+    validate_speech_request(large_budget);
+    check(speech_generation_budget(100, 0, 32768) == 32668,
+          "default reply budget uses remaining context instead of stopping at 1000 or 4096 tokens");
+    check(speech_generation_budget(30000, 0, 32768) == 2768,
+          "default reply budget accounts for conversation history");
+    check(speech_generation_budget(100, 4097, 32768) == 4097,
+          "an explicitly requested budget above 4096 is allowed when it fits the context");
+    check(speech_generation_budget(10, 20, 30) == 20, "an explicit budget fits exactly in remaining context");
+    expect_failure([] { speech_generation_budget(11, 20, 30); }, "context", "explicit budget exceeds remaining context");
+    expect_failure([] { speech_generation_budget(30, 0, 30); }, "context", "a full context cannot start a reply");
+    expect_failure([] { speech_generation_budget(31, 0, 30); }, "context", "an oversized prompt cannot start a reply");
+    expect_failure([] { speech_generation_budget(std::numeric_limits<size_t>::max(), 0, 30); }, "context",
+                   "an oversized prompt is checked before converting its size");
+    expect_failure([] { speech_generation_budget(10, -1, 30); }, "max_new_tokens", "a negative generation budget");
     check_speech_context(10, 20, 30);
     expect_failure([] { check_speech_context(11, 20, 30); }, "context", "a conversation past the model context");
     tts_cpp::moss::SpeechRequest greedy = valid_request();

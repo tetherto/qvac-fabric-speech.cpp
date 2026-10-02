@@ -31,6 +31,8 @@ struct SpeechRequest {
     int voice_sample_rate = 0;
     bool text_reply = false;
     float max_reply_seconds = 0.0f;
+    // 0 generates until the model ends its reply or its remaining context is exhausted.
+    // A positive value is an explicit per-request budget, validated against that context.
     int max_new_tokens = 0;
     bool greedy = false;
     float temperature = 0.7f;
