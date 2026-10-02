@@ -57,25 +57,84 @@ ggml_tensor * cache_values(ggml_context * ctx, const kv_cache & cache,
                         static_cast<size_t>(shape.layer) * layer_bytes);
 }
 
+// rows: [stride, width], one position per row; a row stride wider than the
+// cache's is fine, ggml_cpy follows it.
 void append_keys(ggml_context * ctx, ggml_cgraph * graph, const kv_cache & cache,
-                 const attention_shape & shape, ggml_tensor * keys) {
+                 const attention_shape & shape, ggml_tensor * rows) {
     const size_t layer_bytes = static_cast<size_t>(cache.capacity) * cache.stride * FLOAT;
     const size_t offset = static_cast<size_t>(shape.layer) * layer_bytes +
                           static_cast<size_t>(shape.n_past) * cache.stride * FLOAT;
     ggml_tensor * slot = ggml_view_2d(ctx, cache.k, cache.stride, shape.width,
                                       static_cast<size_t>(cache.stride) * FLOAT, offset);
-    ggml_tensor * flat = ggml_reshape_2d(ctx, keys, cache.stride, shape.width);
-    ggml_build_forward_expand(graph, ggml_cpy(ctx, flat, slot));
+    ggml_build_forward_expand(graph, ggml_cpy(ctx, rows, slot));
 }
 
 void append_values(ggml_context * ctx, ggml_cgraph * graph, const kv_cache & cache,
-                   const attention_shape & shape, ggml_tensor * values) {
+                   const attention_shape & shape, ggml_tensor * rows) {
     const size_t column = static_cast<size_t>(cache.capacity) * FLOAT;
     const size_t offset = static_cast<size_t>(shape.layer) * column * cache.stride +
                           static_cast<size_t>(shape.n_past) * FLOAT;
     ggml_tensor * slot = ggml_view_2d(ctx, cache.v, shape.width, cache.stride, column, offset);
-    ggml_tensor * flat = ggml_reshape_2d(ctx, values, cache.stride, shape.width);
-    ggml_build_forward_expand(graph, ggml_cpy(ctx, ggml_transpose(ctx, flat), slot));
+    ggml_build_forward_expand(graph, ggml_cpy(ctx, ggml_transpose(ctx, rows), slot));
+}
+
+// The rotated query [head_dim, n_head, width] and the rotated keys and the
+// values as [head_dim * n_kv, width] rows.
+struct projected_heads {
+    ggml_tensor * query = nullptr;
+    ggml_tensor * key_rows = nullptr;
+    ggml_tensor * value_rows = nullptr;
+};
+
+ggml_tensor * as_rows(ggml_context * ctx, ggml_tensor * heads) {
+    return ggml_reshape_2d(ctx, heads, heads->ne[0] * heads->ne[1], heads->ne[2]);
+}
+
+projected_heads project_separately(ggml_context * ctx, const attention_weights & weights,
+                                   ggml_tensor * x, const rope_planes & rope,
+                                   const attention_shape & shape) {
+    projected_heads out;
+    out.query = apply_rope(ctx, project_heads(ctx, weights.wq, weights.wq_b, x,
+                                              shape.head_dim, shape.n_head), rope);
+    out.key_rows = as_rows(ctx, apply_rope(ctx, project_heads(ctx, weights.wk, weights.wk_b,
+                                                              x, shape.head_dim, shape.n_kv),
+                                           rope));
+    out.value_rows = as_rows(ctx, project_heads(ctx, weights.wv, weights.wv_b, x,
+                                                shape.head_dim, shape.n_kv));
+    return out;
+}
+
+ggml_tensor * head_slice(ggml_context * ctx, ggml_tensor * heads, int first, int count) {
+    return ggml_view_3d(ctx, heads, heads->ne[0], count, heads->ne[2], heads->nb[1],
+                        heads->nb[2], static_cast<size_t>(first) * heads->nb[1]);
+}
+
+ggml_tensor * row_slice(ggml_context * ctx, ggml_tensor * heads, int first, int count) {
+    return ggml_view_2d(ctx, heads, heads->ne[0] * count, heads->ne[2], heads->nb[2],
+                        static_cast<size_t>(first) * heads->nb[1]);
+}
+
+// One matmul yields q, k and v as consecutive heads, and q and k rotate in one
+// pass; every value is computed exactly as the separate path computes it.
+projected_heads project_stacked(ggml_context * ctx, const attention_weights & weights,
+                                ggml_tensor * x, const rope_planes & rope,
+                                const attention_shape & shape) {
+    const int rotated_heads = shape.n_head + shape.n_kv;
+    ggml_tensor * heads = project_heads(ctx, weights.wqkv, weights.wqkv_b, x, shape.head_dim,
+                                        rotated_heads + shape.n_kv);
+    ggml_tensor * rotated = apply_rope(ctx, head_slice(ctx, heads, 0, rotated_heads), rope);
+    projected_heads out;
+    out.query = head_slice(ctx, rotated, 0, shape.n_head);
+    out.key_rows = row_slice(ctx, rotated, shape.n_head, shape.n_kv);
+    out.value_rows = row_slice(ctx, heads, rotated_heads, shape.n_kv);
+    return out;
+}
+
+projected_heads project_attention(ggml_context * ctx, const attention_weights & weights,
+                                  ggml_tensor * x, const rope_planes & rope,
+                                  const attention_shape & shape) {
+    return weights.wqkv ? project_stacked(ctx, weights, x, rope, shape)
+                        : project_separately(ctx, weights, x, rope, shape);
 }
 
 ggml_tensor * attend(ggml_context * ctx, ggml_tensor * query, ggml_tensor * keys,
@@ -85,6 +144,7 @@ ggml_tensor * attend(ggml_context * ctx, ggml_tensor * query, ggml_tensor * keys
     ggml_tensor * scores = precise_mul_mat(ctx, keys, query);
     ggml_tensor * weights = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
     ggml_tensor * blended = multiply_mat(ctx, values, weights, precise_values);
+    if (blended->ne[1] == 1) return ggml_reshape_2d(ctx, blended, head_dim * n_head, 1);
     ggml_tensor * merged = ggml_cont(ctx, ggml_permute(ctx, blended, 0, 2, 1, 3));
     return ggml_reshape_2d(ctx, merged, head_dim * n_head, blended->ne[1]);
 }
@@ -239,19 +299,21 @@ ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
     return precise_mul_mat(ctx, w2, gated);
 }
 
+ggml_tensor * swiglu_stacked(ggml_context * ctx, ggml_tensor * w13, ggml_tensor * w2,
+                             ggml_tensor * x) {
+    return precise_mul_mat(ctx, w2, ggml_swiglu(ctx, precise_mul_mat(ctx, w13, x)));
+}
+
 ggml_tensor * attention(ggml_context * ctx, ggml_cgraph * graph,
                         const attention_weights & weights, ggml_tensor * x,
                         const rope_planes & rope, const kv_cache & cache,
                         const attention_shape & shape, ggml_tensor * mask) {
-    ggml_tensor * key = project_heads(ctx, weights.wk, weights.wk_b, x, shape.head_dim,
-                                      shape.n_kv);
-    ggml_tensor * value = project_heads(ctx, weights.wv, weights.wv_b, x, shape.head_dim,
-                                        shape.n_kv);
-    append_keys(ctx, graph, cache, shape, apply_rope(ctx, key, rope));
-    append_values(ctx, graph, cache, shape, value);
+    const projected_heads heads = project_attention(ctx, weights, x, rope, shape);
+    append_keys(ctx, graph, cache, shape, heads.key_rows);
+    append_values(ctx, graph, cache, shape, heads.value_rows);
 
     const int total = shape.n_past + shape.width;
-    ggml_tensor * query = rotated_query(ctx, weights, x, rope, shape);
+    ggml_tensor * query = ggml_permute(ctx, heads.query, 0, 2, 1, 3);
     ggml_tensor * keys = ggml_permute(ctx, cache_keys(ctx, cache, shape, total), 0, 2, 1, 3);
     ggml_tensor * values = cache_values(ctx, cache, shape, total);
     ggml_tensor * merged = attend(ctx, query, keys, values, mask, shape.head_dim,
@@ -272,6 +334,27 @@ ggml_tensor * windowed_attention(ggml_context * ctx, const attention_weights & w
     ggml_tensor * merged = attend(ctx, query, keys, values, mask, shape.head_dim,
                                   shape.n_head, shape.precise_values);
     return linear(ctx, weights.wo, merged, nullptr);
+}
+
+windowed_step windowed_attention_after(ggml_context * ctx, const attention_weights & weights,
+                                       ggml_tensor * x, const rope_planes & rope,
+                                       const attention_shape & shape, ggml_tensor * held_keys,
+                                       ggml_tensor * held_values, ggml_tensor * mask) {
+    ggml_tensor * key = apply_rope(ctx, project_heads(ctx, weights.wk, weights.wk_b, x,
+                                                      shape.head_dim, shape.n_kv),
+                                   rope);
+    ggml_tensor * value = project_heads(ctx, weights.wv, weights.wv_b, x, shape.head_dim,
+                                        shape.n_kv);
+    windowed_step step;
+    step.keys = held_keys ? ggml_concat(ctx, held_keys, key, 2) : key;
+    step.values = held_values ? ggml_concat(ctx, held_values, value, 2) : value;
+    ggml_tensor * query = rotated_query(ctx, weights, x, rope, shape);
+    ggml_tensor * keys = ggml_permute(ctx, step.keys, 0, 2, 1, 3);
+    ggml_tensor * values = ggml_cont(ctx, ggml_permute(ctx, step.values, 1, 2, 0, 3));
+    ggml_tensor * merged = attend(ctx, query, keys, values, mask, shape.head_dim,
+                                  shape.n_head, shape.precise_values);
+    step.out = linear(ctx, weights.wo, merged, nullptr);
+    return step;
 }
 
 void fill_causal_mask(float * mask, int keys, int queries, int first_query, int window) {

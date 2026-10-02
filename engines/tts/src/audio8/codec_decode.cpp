@@ -15,6 +15,7 @@
 
 #include "audio8/codec_ops.h"
 #include "audio8/graph.h"
+#include "audio8/window_stream.h"
 
 #include "fit_price.h"
 #include "fit_util.h"
@@ -508,6 +509,283 @@ bool decode_codes(codec_model & model, const int32_t * codes, int n_frames,
     stage_timer measure(clock.synthesis_ms);
     return run_synthesis_blocks(model, post, n_frames, n_threads, cancel, pcm_out, taps,
                                 clock, error);
+}
+
+namespace {
+
+const char * const HELD_KEYS = "held_keys_";
+const char * const HELD_VALUES = "held_values_";
+
+std::string held_name(const char * kind, size_t layer) {
+    return std::string(kind) + std::to_string(layer);
+}
+
+ggml_tensor * held_input(ggml_context * ctx, const transformer_spec & spec, const char * kind,
+                         size_t layer, int held) {
+    ggml_tensor * t = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, spec.head_dim, spec.n_kv, held);
+    ggml_set_name(t, held_name(kind, layer).c_str());
+    ggml_set_input(t);
+    return t;
+}
+
+window_history held_inputs(ggml_context * ctx, const window_transformer & post, int held) {
+    window_history inputs;
+    if (held == 0) return inputs;
+    for (size_t layer = 0; layer < post.blocks.size(); ++layer) {
+        inputs.keys.push_back(held_input(ctx, post.spec, HELD_KEYS, layer, held));
+        inputs.values.push_back(held_input(ctx, post.spec, HELD_VALUES, layer, held));
+    }
+    return inputs;
+}
+
+struct post_chunk_graph {
+    ggml_tensor * post = nullptr;
+    window_history reached;
+};
+
+void mark_history(ggml_cgraph * graph, const window_history & reached) {
+    for (size_t layer = 0; layer < reached.keys.size(); ++layer) {
+        mark_output(graph, reached.keys[layer]);
+        mark_output(graph, reached.values[layer]);
+    }
+}
+
+post_chunk_graph build_post_chunk(ggml_context * ctx, ggml_cgraph * graph,
+                                  const codec_model & model, int first, int width, int held) {
+    ggml_tensor * codes = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, width, model.hp.num_codebooks);
+    ggml_set_name(codes, CODE_INPUT);
+    ggml_set_input(codes);
+    ggml_tensor * mask = input_f32(ctx, MASK_INPUT, held + width, width);
+    ggml_tensor * latent =
+        ggml_add(ctx, sum_quantizers(ctx, model.semantic_quantizers, codes, 0),
+                 sum_quantizers(ctx, model.residual_quantizers, codes, 1));
+    post_chunk_graph built;
+    built.post = window_forward_after(ctx, model.post, latent, mask, first,
+                                      held_inputs(ctx, model.post, held), built.reached,
+                                      model.precise_outputs);
+    mark_output(graph, built.post);
+    mark_history(graph, built.reached);
+    return built;
+}
+
+void write_held(ggml_cgraph * graph, const post_history & history) {
+    for (size_t layer = 0; history.held > 0 && layer < history.keys.size(); ++layer) {
+        write_input(graph, held_name(HELD_KEYS, layer).c_str(), history.keys[layer].data(),
+                    history.keys[layer].size() * sizeof(float));
+        write_input(graph, held_name(HELD_VALUES, layer).c_str(),
+                    history.values[layer].data(),
+                    history.values[layer].size() * sizeof(float));
+    }
+}
+
+// What the next chunk needs: the last window - 1 positions, which its first
+// query reaches back to. Only those are read back.
+void keep_tail(ggml_tensor * t, int keep, std::vector<float> & out) {
+    const size_t per_position = static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]);
+    const size_t skipped = static_cast<size_t>(t->ne[2] - keep) * per_position;
+    out.resize(per_position * static_cast<size_t>(keep));
+    ggml_backend_tensor_get(t, out.data(), skipped * sizeof(float), out.size() * sizeof(float));
+}
+
+void remember(const window_history & reached, int keep, post_history & history) {
+    history.keys.resize(reached.keys.size());
+    history.values.resize(reached.values.size());
+    for (size_t layer = 0; layer < reached.keys.size(); ++layer) {
+        keep_tail(reached.keys[layer], keep, history.keys[layer]);
+        keep_tail(reached.values[layer], keep, history.values[layer]);
+    }
+    history.held = keep;
+}
+
+void append_post(ggml_tensor * t, std::vector<float> & post) {
+    std::vector<float> chunk;
+    read_output(t, chunk);
+    post.insert(post.end(), chunk.begin(), chunk.end());
+}
+
+}  // namespace
+
+bool post_has_window(const codec_model & model) {
+    return model.post.spec.window > 0;
+}
+
+bool extend_post(codec_model & model, const int32_t * codes, int end, int n_threads,
+                 post_history & history, std::vector<float> & post, std::string * error) {
+    const int width = end - history.done;
+    if (width <= 0) return true;
+    if (!post_has_window(model)) {
+        if (error) *error = "audio8: the post transformer has no attention window to carry";
+        return false;
+    }
+    if (!check_decodable(model, end, error)) return false;
+    scratch work(AUDIO8_MAX_NODES);
+    if (!work.ok()) {
+        if (error) *error = "audio8: failed to create the post chunk context";
+        return false;
+    }
+    const post_chunk_graph built =
+        build_post_chunk(work.ctx, work.graph, model, history.done, width, history.held);
+    bool use_sched = false;
+    if (!prepare_graph(model.backend, model.sched, model.buffer_w, model.allocr, work.graph,
+                       "post chunk", use_sched, error)) {
+        return false;
+    }
+    const std::vector<int32_t> clamped = clamped_codes(model.hp, codes, width);
+    write_input(work.graph, CODE_INPUT, clamped.data(), clamped.size() * sizeof(int32_t));
+    const std::vector<float> mask = window_mask_after(model.post.spec, history.held, width);
+    write_input(work.graph, MASK_INPUT, mask.data(), mask.size() * sizeof(float));
+    write_held(work.graph, history);
+    if (!compute_graph(model.backend, model.sched, work.graph, use_sched, n_threads,
+                       "post chunk", error)) {
+        return false;
+    }
+    append_post(built.post, post);
+    remember(built.reached, std::min(model.post.spec.window - 1, history.held + width), history);
+    history.done = end;
+    return true;
+}
+
+namespace {
+
+void place_frame(const std::vector<int32_t> & frames, int books, int frame, int first,
+                 int count, std::vector<int32_t> & rows) {
+    for (int book = 0; book < books; ++book) {
+        rows[static_cast<size_t>(book) * count + (frame - first)] =
+            frames[static_cast<size_t>(frame) * books + book];
+    }
+}
+
+}  // namespace
+
+std::vector<int32_t> codebook_rows(const std::vector<int32_t> & frames, int books, int first,
+                                   int end) {
+    const int count = end - first;
+    std::vector<int32_t> rows(static_cast<size_t>(books) * count);
+    for (int frame = first; frame < end; ++frame) {
+        place_frame(frames, books, frame, first, count, rows);
+    }
+    return rows;
+}
+
+namespace {
+
+#ifdef TTS_CPP_USE_COREML
+bool coreml_streaming_enabled() {
+    return std::getenv("AUDIO8_COREML_STREAM_DISABLE") == nullptr;
+}
+
+window_stream_shape stream_shape(const codec_model & model) {
+    window_stream_shape shape;
+    shape.window = static_cast<int>(audio8_coreml_codec_window_frames(model.coreml));
+    shape.context = synthesis_context_frames(model);
+    shape.latent_dim = model.hp.latent_dim;
+    shape.frame_size = model.hp.frame_size;
+    return shape;
+}
+
+window_stream_hooks stream_hooks(codec_model & model, const std::vector<int32_t> & frames,
+                                 int n_threads, const cancel_hook & cancel) {
+    window_stream_hooks hooks;
+    const std::shared_ptr<post_history> history = std::make_shared<post_history>();
+    hooks.extend_post = [&model, &frames, n_threads, history](int end,
+                                                              std::vector<float> & post,
+                                                              std::string * error) {
+        const std::vector<int32_t> rows =
+            codebook_rows(frames, model.hp.num_codebooks, history->done, end);
+        return extend_post(model, rows.data(), end, n_threads, *history, post, error);
+    };
+    hooks.synthesize = [&model](const float * post, float * pcm) {
+        return audio8_coreml_codec_synthesize(model.coreml, post, pcm) == 0;
+    };
+    hooks.cancelled = cancel;
+    return hooks;
+}
+#endif
+
+void note_streamed_synthesis(const codec_model & model, const window_stream & stream,
+                             decode_timing & clock) {
+    clock.block_frames = stream.window_frames();
+    clock.block_scratch = 0;
+    clock.streamed_windows = stream.streamed_windows();
+#ifdef TTS_CPP_USE_COREML
+    clock.synthesis_backend = audio8_coreml_codec_backend_label(model.coreml);
+#else
+    (void) model;
+#endif
+}
+
+bool fall_back_from_stream(codec_model & model, const int32_t * codes, int n_frames,
+                           int n_threads, const cancel_hook & cancel,
+                           std::vector<float> & pcm_out, std::string * error,
+                           decode_timing * timing) {
+    pcm_out.clear();
+    if (timing) *timing = decode_timing{};
+#ifdef TTS_CPP_USE_COREML
+    retire_coreml_sidecar(model, "prediction failed");
+    if (coreml_strict()) {
+        if (error) {
+            *error = "audio8: Core ML synthesis unavailable for " + std::to_string(n_frames) +
+                     " frames and AUDIO8_COREML_STRICT is set; failing instead of the ggml "
+                     "fallback";
+        }
+        return false;
+    }
+    std::fprintf(stderr, "[audio8] Core ML synthesis unavailable for %d frames; using ggml\n",
+                 n_frames);
+#endif
+    return decode_codes(model, codes, n_frames, n_threads, cancel, pcm_out, error, nullptr,
+                        timing);
+}
+
+}  // namespace
+
+std::unique_ptr<window_stream> open_synthesis_stream(codec_model & model,
+                                                     const std::vector<int32_t> & frames,
+                                                     int n_threads, const cancel_hook & cancel) {
+#ifdef TTS_CPP_USE_COREML
+    if (!model.coreml || !coreml_streaming_enabled() || !post_has_window(model)) return nullptr;
+    const window_stream_shape shape = stream_shape(model);
+    if (shape.context >= shape.window) return nullptr;
+    return std::unique_ptr<window_stream>(
+        new window_stream(shape, stream_hooks(model, frames, n_threads, cancel)));
+#else
+    (void) model;
+    (void) frames;
+    (void) n_threads;
+    (void) cancel;
+    return nullptr;
+#endif
+}
+
+bool finish_synthesis_stream(codec_model & model, window_stream & stream,
+                             const int32_t * codes, int n_frames, int n_threads,
+                             const cancel_hook & cancel, std::vector<float> & pcm_out,
+                             std::string * error, decode_timing * timing) {
+    decode_timing discarded;
+    decode_timing & clock = timing ? *timing : discarded;
+    const double post_before = stream.post_ms();
+    double finish_ms = 0.0;
+    window_stream_status status = window_stream_status::failed;
+    {
+        stage_timer measure(finish_ms);
+        status = stream.finish(n_frames, pcm_out, error);
+    }
+    clock.latent_ms = stream.post_ms();
+    clock.synthesis_ms = finish_ms - (stream.post_ms() - post_before);
+    switch (status) {
+        case window_stream_status::done:
+            note_streamed_synthesis(model, stream, clock);
+            return true;
+        case window_stream_status::cancelled:
+            if (error) *error = CANCELLED;
+            return false;
+        case window_stream_status::failed:
+            return false;
+        case window_stream_status::unavailable:
+            break;
+    }
+    return fall_back_from_stream(model, codes, n_frames, n_threads, cancel, pcm_out, error,
+                                 timing);
 }
 
 // Fit measurement (include/tts-cpp/audio8/fit.h): price what one decode_codes

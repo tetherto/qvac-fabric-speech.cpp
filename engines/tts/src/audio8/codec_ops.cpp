@@ -262,9 +262,56 @@ ggml_tensor * window_forward(ggml_context * ctx, const window_transformer & tran
     return rms_norm(ctx, x, transformer.norm, spec.norm_eps);
 }
 
+namespace {
+
+ggml_tensor * attend_block_after(ggml_context * ctx, const scaled_block_weights & block,
+                                 ggml_tensor * x, const rope_planes & rope,
+                                 const attention_shape & shape, ggml_tensor * mask, float eps,
+                                 ggml_tensor * held_keys, ggml_tensor * held_values,
+                                 windowed_step & step) {
+    ggml_tensor * normed = rms_norm(ctx, x, block.attn.attn_norm, eps);
+    step = windowed_attention_after(ctx, block.attn, normed, rope, shape, held_keys,
+                                    held_values, mask);
+    return scaled_residual(ctx, x, step.out, block.attn_scale);
+}
+
+ggml_tensor * held_at(const std::vector<ggml_tensor *> & held, size_t layer) {
+    return layer < held.size() ? held[layer] : nullptr;
+}
+
+}  // namespace
+
+ggml_tensor * window_forward_after(ggml_context * ctx, const window_transformer & transformer,
+                                   ggml_tensor * x, ggml_tensor * mask, int first,
+                                   const window_history & held, window_history & reached,
+                                   bool precise_attention_values) {
+    const transformer_spec & spec = transformer.spec;
+    const rope_planes rope = rope_window(ctx, transformer.rope_cos, transformer.rope_sin,
+                                         first, length_of(x));
+    const attention_shape shape = shape_for(spec, length_of(x), precise_attention_values);
+    reached.keys.assign(transformer.blocks.size(), nullptr);
+    reached.values.assign(transformer.blocks.size(), nullptr);
+    for (size_t layer = 0; layer < transformer.blocks.size(); ++layer) {
+        windowed_step step;
+        x = attend_block_after(ctx, transformer.blocks[layer], x, rope, shape, mask,
+                               spec.norm_eps, held_at(held.keys, layer),
+                               held_at(held.values, layer), step);
+        x = feed_forward_block(ctx, transformer.blocks[layer], x, spec.norm_eps);
+        reached.keys[layer] = step.keys;
+        reached.values[layer] = step.values;
+    }
+    return rms_norm(ctx, x, transformer.norm, spec.norm_eps);
+}
+
 std::vector<float> window_mask(const transformer_spec & spec, int length) {
     std::vector<float> mask(static_cast<size_t>(length) * length);
     fill_causal_mask(mask.data(), length, length, /*first_query=*/0, spec.window);
+    return mask;
+}
+
+std::vector<float> window_mask_after(const transformer_spec & spec, int held, int length) {
+    std::vector<float> mask(static_cast<size_t>(held + length) * length);
+    fill_causal_mask(mask.data(), held + length, length, /*first_query=*/held, spec.window);
     return mask;
 }
 

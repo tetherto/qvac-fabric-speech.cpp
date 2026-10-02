@@ -357,6 +357,7 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_ops.cpp
     src/audio8/codec_decode.cpp
     src/audio8/codec_encode.cpp
+    src/audio8/window_stream.cpp
     src/audio8/coreml_path.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
@@ -1619,6 +1620,17 @@ if (TTS_CPP_BUILD_TESTS)
 
     # The fast-AR graph cache against the dual-path dispatch: the scheduler
     # must bypass it and must not leave it poisoned for the direct path after.
+    # The load-time stacking of the LM's projections against the separate
+    # weights, byte for byte, on a synthetic LM. No fixtures.
+    add_executable(test-audio8-lm-fusion
+        test/audio8/test_lm_fusion.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/sampling.cpp ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-lm-fusion PRIVATE ggml)
+    target_include_directories(test-audio8-lm-fusion PRIVATE include src test)
+    tts_cpp_apply_ccache(test-audio8-lm-fusion)
+    tts_cpp_register_test(test-audio8-lm-fusion LABEL "unit")
+
     add_executable(test-audio8-fast-cache-sched
         test/audio8/test_fast_cache_sched.cpp
         src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
@@ -1635,8 +1647,9 @@ if (TTS_CPP_BUILD_TESTS)
         test/audio8/test_quantised_precision.cpp
         src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        src/audio8/window_stream.cpp
         ${_tcb_audio8_core_srcs})
-    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml)
+    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml Threads::Threads)
     target_include_directories(test-audio8-quantised-precision PRIVATE include src)
     tts_cpp_apply_ccache(test-audio8-quantised-precision)
     tts_cpp_register_test(test-audio8-quantised-precision
@@ -1646,8 +1659,9 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-audio8-codec test/audio8/test_codec.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        src/audio8/window_stream.cpp
         ${_tcb_audio8_core_srcs})
-    target_link_libraries(test-audio8-codec PRIVATE ggml)
+    target_link_libraries(test-audio8-codec PRIVATE ggml Threads::Threads)
     target_include_directories(test-audio8-codec PRIVATE include src test)
     tts_cpp_apply_ccache(test-audio8-codec)
     tts_cpp_register_test(test-audio8-codec
@@ -1743,10 +1757,14 @@ if (TTS_CPP_BUILD_TESTS)
             LABEL    "gpu"
             ARGS     "${_tcb_audio8_lm}"
             REQUIRES "${_tcb_audio8_lm}")
+        tts_cpp_register_test(test-audio8-lm-fusion-${suffix}
+            EXE      test-audio8-lm-fusion
+            LABEL    "gpu")
         set_property(TEST test-audio8-lm-${suffix} test-audio8-codec-${suffix}
                           test-audio8-engine-${suffix}
                           test-audio8-quantised-precision-${suffix}
-                          test-audio8-fast-cache-sched-${suffix} APPEND
+                          test-audio8-fast-cache-sched-${suffix}
+                          test-audio8-lm-fusion-${suffix} APPEND
                      PROPERTY ENVIRONMENT "AUDIO8_TEST_GPU=${suffix}"
                                           "TTS_CPP_GPU_BACKEND=${suffix}")
     endfunction()
@@ -1819,6 +1837,15 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-audio8-coreml-windows PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-coreml-windows)
     tts_cpp_register_test(test-audio8-coreml-windows LABEL "unit")
+
+    # The synthesis stream that overlaps the Core ML codec with generation,
+    # driven by a fake causal synthesizer. No models, so it runs everywhere.
+    add_executable(test-audio8-window-stream test/audio8/test_window_stream.cpp
+        src/audio8/window_stream.cpp)
+    target_include_directories(test-audio8-window-stream PRIVATE src)
+    target_link_libraries(test-audio8-window-stream PRIVATE Threads::Threads)
+    tts_cpp_apply_ccache(test-audio8-window-stream)
+    tts_cpp_register_test(test-audio8-window-stream LABEL "unit")
 
     # Model-free on every host: the Supertonic vocoder sidecar's naming rule.
     add_executable(test-supertonic-coreml-path test/test_supertonic_coreml_path.cpp

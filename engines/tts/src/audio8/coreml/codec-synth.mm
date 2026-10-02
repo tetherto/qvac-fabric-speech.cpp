@@ -28,30 +28,32 @@ uint16_t encode_float16(float f) {
     return out;
 }
 
-MLComputeUnits requested_compute_units(std::string * label) {
+struct placement {
+    MLComputeUnits units;
+    const char *   label;
+};
+
+constexpr placement CPU_PLACEMENT = {MLComputeUnitsCPUOnly, "coreml-cpu"};
+constexpr placement GPU_PLACEMENT = {MLComputeUnitsCPUAndGPU, "coreml-gpu"};
+constexpr placement ANE_PLACEMENT = {MLComputeUnitsCPUAndNeuralEngine, "coreml-ane"};
+constexpr placement ALL_PLACEMENT = {MLComputeUnitsAll, "coreml-all"};
+
+placement requested_placement() {
     const char * env = std::getenv("AUDIO8_COREML_COMPUTE_UNITS");
     const std::string requested = env != nullptr ? env : "";
-    if (requested == "cpu_only") {
-        *label = "coreml-cpu";
-        return MLComputeUnitsCPUOnly;
-    }
-    if (requested == "cpu_and_gpu") {
-        *label = "coreml-gpu";
-        return MLComputeUnitsCPUAndGPU;
-    }
-    if (requested == "cpu_and_ane") {
-        *label = "coreml-ane";
-        return MLComputeUnitsCPUAndNeuralEngine;
-    }
-    *label = "coreml-all";
-    return MLComputeUnitsAll;
+    if (requested == "cpu_only") return CPU_PLACEMENT;
+    if (requested == "cpu_and_gpu") return GPU_PLACEMENT;
+    if (requested == "cpu_and_ane") return ANE_PLACEMENT;
+    return ALL_PLACEMENT;
 }
 
 MLModel * load_model(const char * path_mlmodelc, std::string * label) {
     NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
     if (path == nil) return nil;
+    const placement where = requested_placement();
+    *label = where.label;
     MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-    config.computeUnits = requested_compute_units(label);
+    config.computeUnits = where.units;
     NSError * err   = nil;
     MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
                                         configuration:config

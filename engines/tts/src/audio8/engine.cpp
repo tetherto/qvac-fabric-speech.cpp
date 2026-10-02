@@ -2,6 +2,7 @@
 
 #include "audio8/internal.h"
 #include "audio8/sampling.h"
+#include "audio8/window_stream.h"
 #include "backend_selection.h"
 #include "backend_util.h"
 #include "voice_features.h"
@@ -259,8 +260,14 @@ struct Engine::Impl {
         return sampler.pick(logits, sampling, rng);
     }
 
-    std::vector<int32_t> generate_codes(const prompt_frames & prompt, int n_threads,
-                                        int & n_frames) {
+    void offer_to_codec(window_stream * stream, int n_frames) {
+        if (!stream) return;
+        std::string error;
+        if (!stream->advance(n_frames, &error)) throw std::runtime_error(error);
+    }
+
+    void generate_codes(const prompt_frames & prompt, int n_threads, window_stream * stream,
+                        std::vector<int32_t> & codes, int & n_frames) {
         require(prompt.width < lm.hp.max_seq_len,
                 "the prompt is " + std::to_string(prompt.width) +
                     " frames, which does not fit the model's context of " +
@@ -279,7 +286,7 @@ struct Engine::Impl {
         run_slow(prompt.values.data(), prompt.width, 0, n_threads, timings.prefill_ms,
                  sem_logits, fast_input);
 
-        std::vector<int32_t> codes;
+        codes.clear();
         std::vector<int32_t> frame;
         std::vector<int32_t> column(lm.hp.num_codebooks + 1);
         n_frames = 0;
@@ -292,6 +299,7 @@ struct Engine::Impl {
             run_fast(fast_input, semantic, n_threads, pick, frame);
             codes.insert(codes.end(), frame.begin(), frame.end());
             ++n_frames;
+            offer_to_codec(stream, n_frames);
             if (step + 1 == budget) break;
 
             column[0] = semantic;
@@ -299,29 +307,26 @@ struct Engine::Impl {
             run_slow(column.data(), 1, prompt.width + step, n_threads,
                      timings.slow_decode_ms, sem_logits, fast_input);
         }
-        return codes;
     }
 
-    // generate_codes emits frame-major; the codec reads codebook-major.
-    std::vector<int32_t> as_codebook_rows(const std::vector<int32_t> & frames,
-                                          int n_frames) const {
-        std::vector<int32_t> rows(frames.size());
-        const int books = lm.hp.num_codebooks;
-        for (int frame = 0; frame < n_frames; ++frame) {
-            for (int book = 0; book < books; ++book) {
-                rows[static_cast<size_t>(book) * n_frames + frame] =
-                    frames[static_cast<size_t>(frame) * books + book];
-            }
+    bool decode_frames(window_stream * stream, const std::vector<int32_t> & frames,
+                       int n_frames, int n_threads, std::vector<float> & pcm,
+                       decode_timing & timing, std::string & error) {
+        const std::vector<int32_t> rows =
+            codebook_rows(frames, lm.hp.num_codebooks, 0, n_frames);
+        if (stream) {
+            return finish_synthesis_stream(decoder, *stream, rows.data(), n_frames, n_threads,
+                                           cancel_probe(), pcm, &error, &timing);
         }
-        return rows;
+        return decode_codes(decoder, rows.data(), n_frames, n_threads, cancel_probe(), pcm,
+                            &error, nullptr, &timing);
     }
 
-    void run_codec(const std::vector<int32_t> & frames, int n_frames, int n_threads,
-                   SynthesisResult & result) {
+    void run_codec(window_stream * stream, const std::vector<int32_t> & frames, int n_frames,
+                   int n_threads, SynthesisResult & result) {
         decode_timing timing;
         std::string error;
-        if (!decode_codes(decoder, as_codebook_rows(frames, n_frames).data(), n_frames,
-                          n_threads, cancel_probe(), result.pcm, &error, nullptr, &timing)) {
+        if (!decode_frames(stream, frames, n_frames, n_threads, result.pcm, timing, error)) {
             throw std::runtime_error(error);
         }
         result.codec_synthesis_backend = timing.synthesis_backend;
@@ -329,9 +334,10 @@ struct Engine::Impl {
         timings.codec_synth_ms = timing.synthesis_ms;
         if (opts.verbose) {
             std::fprintf(stderr,
-                         "[audio8-timing] codec block %d frames, %.0f MB scratch, synthesis on %s\n",
+                         "[audio8-timing] codec block %d frames, %.0f MB scratch, synthesis on "
+                         "%s, %d windows during generation\n",
                          timing.block_frames, timing.block_scratch / (1024.0 * 1024.0),
-                         timing.synthesis_backend.c_str());
+                         timing.synthesis_backend.c_str(), timing.streamed_windows);
         }
     }
 
@@ -362,15 +368,18 @@ struct Engine::Impl {
         const int n_threads = resolve_threads(opts.n_threads);
 
         const prompt_frames prompt = prompt_for(text, voice, n_threads);
+        std::vector<int32_t> frames;
         int n_frames = 0;
-        const std::vector<int32_t> frames = generate_codes(prompt, n_threads, n_frames);
+        const std::unique_ptr<window_stream> stream =
+            open_synthesis_stream(decoder, frames, n_threads, cancel_probe());
+        generate_codes(prompt, n_threads, stream.get(), frames, n_frames);
         require(n_frames > 0, "the model emitted no audio frames");
         check_cancel();
 
         SynthesisResult result;
         result.frames = n_frames;
         result.codes.assign(frames.begin(), frames.end());
-        run_codec(frames, n_frames, n_threads, result);
+        run_codec(stream.get(), frames, n_frames, n_threads, result);
 
         const int native = decoder.hp.sample_rate;
         resample(result.pcm, native);
