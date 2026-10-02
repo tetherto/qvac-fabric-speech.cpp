@@ -56,6 +56,25 @@ ggml_tensor * window_forward(ggml_context * ctx, const window_transformer & tran
 // at once.
 std::vector<float> window_mask(const transformer_spec & spec, int length);
 
+// Per layer, the rotated keys and the values of a run of positions,
+// [head_dim, n_kv, positions]; null where a layer holds none.
+struct window_history {
+    std::vector<ggml_tensor *> keys;
+    std::vector<ggml_tensor *> values;
+};
+
+// window_forward for positions [first, first + length) that follow positions
+// whose keys and values `held` carries: each layer attends over those and its
+// own. `reached` gets every layer's keys and values, the held ones followed by
+// the new. The mask is window_mask_after's.
+ggml_tensor * window_forward_after(ggml_context * ctx, const window_transformer & transformer,
+                                   ggml_tensor * x, ggml_tensor * mask, int first,
+                                   const window_history & held, window_history & reached,
+                                   bool precise_attention_values);
+
+// [held + length, length]: query q sits at key held + q.
+std::vector<float> window_mask_after(const transformer_spec & spec, int held, int length);
+
 // Kernel widths, which the two layouts spell differently: a full kernel is
 // [in, out, taps] and a depthwise one [channels, taps].
 int conv_taps(const conv_weights & conv);

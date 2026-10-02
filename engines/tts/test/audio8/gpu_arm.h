@@ -62,10 +62,35 @@ inline bool report_wrong_gpu(const char * tag, const std::string & got) {
     return false;
 }
 
+inline bool is_discrete_vulkan(ggml_backend_dev_t device) {
+    return ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_GPU &&
+           tts_cpp::detail::reg_name_is_vulkan(
+               ggml_backend_reg_name(ggml_backend_dev_backend_reg(device)));
+}
+
+inline bool discrete_vulkan_visible() {
+    for (size_t index = 0; index < ggml_backend_dev_count(); ++index) {
+        if (is_discrete_vulkan(ggml_backend_dev_get(index))) return true;
+    }
+    return false;
+}
+
+// A Vulkan arm on a host with a discrete adapter must not land on an integrated
+// one: it is slower, and the RADV iGPU of a Ryzen 9950X3D misses the GPU bars.
+inline bool on_preferred_vulkan_device(const char * tag, ggml_backend_t backend) {
+    if (requested_gpu() != VULKAN_ARM || !discrete_vulkan_visible()) return true;
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    if (device && ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_GPU) return true;
+    std::fprintf(stderr, "%s: FAIL ran on the integrated Vulkan adapter %s while a discrete "
+                         "one is visible\n",
+                 tag, device ? ggml_backend_dev_description(device) : "(none)");
+    return false;
+}
+
 inline bool check_requested_gpu(const char * tag, ggml_backend_t backend) {
     if (!is_gpu_test()) return true;
     if (backend && registry_is_requested(tts_cpp::detail::backend_reg_name(backend))) {
-        return true;
+        return on_preferred_vulkan_device(tag, backend);
     }
     return report_wrong_gpu(tag, backend ? ggml_backend_name(backend) : "");
 }

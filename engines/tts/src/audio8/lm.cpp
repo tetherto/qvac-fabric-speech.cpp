@@ -36,6 +36,11 @@ ggml_tensor * embed_frames(ggml_context * ctx, const lm_model & model, int width
     return ggml_add(ctx, base, stacked);
 }
 
+ggml_tensor * feed_forward(ggml_context * ctx, const block_weights & block, ggml_tensor * x) {
+    return block.w13 ? swiglu_stacked(ctx, block.w13, block.w2, x)
+                     : swiglu(ctx, block.w1, block.w2, block.w3, x);
+}
+
 ggml_tensor * run_block(ggml_context * ctx, ggml_cgraph * graph, const block_weights & block,
                         ggml_tensor * x, const rope_planes & rope, const kv_cache & cache,
                         const attention_shape & shape, ggml_tensor * mask, float eps) {
@@ -43,7 +48,7 @@ ggml_tensor * run_block(ggml_context * ctx, ggml_cgraph * graph, const block_wei
     ggml_tensor * hidden = ggml_add(
         ctx, x, attention(ctx, graph, block.attn, normed, rope, cache, shape, mask));
     ggml_tensor * gated = rms_norm(ctx, hidden, block.ffn_norm, eps);
-    return ggml_add(ctx, hidden, swiglu(ctx, block.w1, block.w2, block.w3, gated));
+    return ggml_add(ctx, hidden, feed_forward(ctx, block, gated));
 }
 
 ggml_tensor * run_blocks(ggml_context * ctx, ggml_cgraph * graph,
@@ -102,6 +107,7 @@ void fill_frame_inputs(const lm_hparams & hp, const int32_t * frames, int width,
                 frame[book + 1] + book * hp.codebook_size;
         }
     }
+    if (width == 1) return;
     inputs.mask.resize(static_cast<size_t>(width) * (n_past + width));
     fill_causal_mask(inputs.mask.data(), n_past + width, width, n_past, /*window=*/0);
 }
@@ -111,6 +117,7 @@ void set_frame_inputs(ggml_cgraph * graph, const frame_inputs & inputs) {
     write_input(graph, "codebook_ids", inputs.codes.data(),
                 inputs.codes.size() * sizeof(int32_t));
     write_input(graph, "semantic_gate", inputs.gate.data(), inputs.gate.size() * sizeof(float));
+    if (inputs.mask.empty()) return;
     write_input(graph, "mask", inputs.mask.data(), inputs.mask.size() * sizeof(float));
 }
 
@@ -155,7 +162,7 @@ void build_slow_graph(lm_model & model, scratch & build, int width, int n_past,
                       slow_graph_outputs & outs) {
     const lm_hparams & hp = model.hp;
     ggml_context * ctx = build.ctx;
-    ggml_tensor * mask = input_f32(ctx, "mask", n_past + width, width);
+    ggml_tensor * mask = width == 1 ? nullptr : input_f32(ctx, "mask", n_past + width, width);
     ggml_tensor * hidden = embed_frames(ctx, model, width);
     const rope_planes rope = rope_window(ctx, model.rope_cos, model.rope_sin, n_past, width);
     hidden = run_blocks(ctx, build.graph, model.blocks, hidden, rope, model.slow_kv,
@@ -232,23 +239,15 @@ ggml_tensor * build_fast_pass_graph(lm_model & model, scratch & build, int posit
                                     bool is_code) {
     const lm_hparams & hp = model.hp;
     ggml_context * ctx = build.ctx;
-    const int keys = position + 1;
-    ggml_tensor * mask = input_f32(ctx, "mask", keys, 1);
     ggml_tensor * hidden = fast_input_tensor(ctx, model, is_code);
     const rope_planes rope = rope_window(ctx, model.fast_rope_cos, model.fast_rope_sin,
                                          position, 1);
     hidden = run_blocks(ctx, build.graph, model.fast_blocks, hidden, rope, model.fast_kv,
-                        fast_shape(model, position), mask, hp.rms_eps);
+                        fast_shape(model, position), /*mask=*/nullptr, hp.rms_eps);
     return mark_output(build.graph,
                        multiply_mat(ctx, model.fast_out,
                                     rms_norm(ctx, hidden, model.fast_norm, hp.rms_eps),
                                     model.precise_outputs));
-}
-
-void write_fast_mask(ggml_cgraph * graph, int position) {
-    std::vector<float> mask_values(position + 1);
-    fill_causal_mask(mask_values.data(), position + 1, 1, position, /*window=*/0);
-    write_input(graph, "mask", mask_values.data(), mask_values.size() * sizeof(float));
 }
 
 void drop_cached_fast_graph(lm_model::fast_graph & cached) {
@@ -281,7 +280,6 @@ bool build_cached_fast_graph(lm_model & model, int position, bool is_code,
         cached.allocr = nullptr;
         return false;
     }
-    write_fast_mask(build.graph, position);
     cached.ctx = build.ctx;
     cached.graph = build.graph;
     build.release();
@@ -324,7 +322,6 @@ bool fast_pass_uncached(lm_model & model, const fast_source & source, int positi
                        build.graph, "fast", use_sched, error)) {
         return false;
     }
-    write_fast_mask(build.graph, position);
     return run_fast_graph(model, build.graph, use_sched, source, logits, n_threads,
                           logits_out, error);
 }

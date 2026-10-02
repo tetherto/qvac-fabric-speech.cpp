@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -102,14 +103,19 @@ struct lm_hparams {
     bool fast_qkv_bias = false;
 };
 
+// The language model's loader stacks q, k and v (and w1 and w3) into one
+// weight when their rows share a layout, so a block holds either the fused
+// tensor or the separate ones, never both.
 struct attention_weights {
     ggml_tensor * wq = nullptr;
     ggml_tensor * wk = nullptr;
     ggml_tensor * wv = nullptr;
+    ggml_tensor * wqkv = nullptr;
     ggml_tensor * wo = nullptr;
     ggml_tensor * wq_b = nullptr;
     ggml_tensor * wk_b = nullptr;
     ggml_tensor * wv_b = nullptr;
+    ggml_tensor * wqkv_b = nullptr;
     ggml_tensor * attn_norm = nullptr;
 };
 
@@ -118,6 +124,7 @@ struct block_weights {
     ggml_tensor * w1 = nullptr;
     ggml_tensor * w2 = nullptr;
     ggml_tensor * w3 = nullptr;
+    ggml_tensor * w13 = nullptr;
     ggml_tensor * ffn_norm = nullptr;
 };
 
@@ -492,6 +499,8 @@ struct decode_timing {
     int block_frames = 0;
     size_t block_scratch = 0;
     std::string synthesis_backend = "ggml";  // or the sidecar's compute label
+    // Core ML windows synthesised while the language model was still running.
+    int streamed_windows = 0;
 };
 
 // Frames of history a synthesis block or Core ML window needs before its own.
@@ -509,6 +518,43 @@ bool decode_codes(codec_model & model, const int32_t * codes, int n_frames,
                   int n_threads, const cancel_hook & cancel,
                   std::vector<float> & pcm_out, std::string * error,
                   decode_taps * taps = nullptr, decode_timing * timing = nullptr);
+
+// The post transformer a chunk at a time: each call computes frames [done,
+// end) from their codes and the keys and values the previous chunk left for its
+// last window - 1 positions, so an utterance costs one pass however it is cut.
+struct post_history {
+    int done = 0;
+    int held = 0;
+    std::vector<std::vector<float>> keys;
+    std::vector<std::vector<float>> values;
+};
+
+// codes: [num_codebooks, end - history.done]. Appends [latent_dim, end -
+// history.done] to `post`. Refuses a post transformer without a finite
+// attention window, whose history would be the whole utterance.
+bool extend_post(codec_model & model, const int32_t * codes, int end, int n_threads,
+                 post_history & history, std::vector<float> & post, std::string * error);
+bool post_has_window(const codec_model & model);
+
+// Frame-major codes, as the language model emits them, to the codec's
+// [num_codebooks, end - first] rows for frames [first, end).
+std::vector<int32_t> codebook_rows(const std::vector<int32_t> & frames, int books, int first,
+                                   int end);
+
+// Synthesis that overlaps generation (window_stream.h): null unless a Core ML
+// sidecar is attached. `frames` grows frame-major while the stream lives.
+class window_stream;
+std::unique_ptr<window_stream> open_synthesis_stream(codec_model & model,
+                                                     const std::vector<int32_t> & frames,
+                                                     int n_threads, const cancel_hook & cancel);
+
+// decode_codes for a streamed utterance: the remaining windows, then the
+// stitched waveform. A sidecar failure retires it and reruns the whole
+// utterance on the ggml blocks, as decode_codes does.
+bool finish_synthesis_stream(codec_model & model, window_stream & stream,
+                             const int32_t * codes, int n_frames, int n_threads,
+                             const cancel_hook & cancel, std::vector<float> & pcm_out,
+                             std::string * error, decode_timing * timing);
 
 // The convolutional encoder's output, [latent_dim, 4 * frames], and what the
 // downsampling stages and the pre-module make of it, [latent_dim, frames].
