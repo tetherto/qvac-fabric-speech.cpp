@@ -76,6 +76,17 @@ Metal because ggml-vulkan implements `GGML_OP_LSTM_CELL` and
 `GGML_OP_TDT_STEP`. Validated against the NeMo stream-step references at
 80/160/320/560/1120 ms on an RTX 3090 (`test-nemotron-stream-step-vulkan*`).
 
+Nemotron 3 Diarization runs on CUDA, Vulkan, and Metal. The feature-stacking
+projection, the 31-layer RoPE encoder with fused flash attention, the subpixel
+upsampler, and the speaker head form one GPU split, and offline inference and
+cached streaming pass the NeMo-Speech.cpp reference test
+(`test-nemotron-diarization-gpu`) on an RTX 5090 (CUDA and Vulkan), an AMD
+Radeon RX 7600 XT (Vulkan), and an Apple M3 Ultra (Metal). OpenCL and Mali
+Vulkan are untested; the Mali routing of the Sortformer head does not apply
+to this model. See
+[Nemotron 3 Diarization on GPU](performance.md#nemotron-3-diarization-on-gpu)
+for timings and accuracy.
+
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control

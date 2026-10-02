@@ -1940,6 +1940,15 @@ static void make_diarization_window(MelConfig & config) {
     }
 }
 
+static void exclude_weights_from_graph_measure(ggml_context * ctx) {
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t;
+         t = ggml_get_next_tensor(ctx, t)) {
+        if (!t->data && !t->view_src) {
+            t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
+        }
+    }
+}
+
 // Shared body of load_from_gguf and load_from_gguf_metadata_only. When
 // `measure` is non-null the load is metadata-only: every allocation the real
 // path makes is sized into `measure` instead of performed and no tensor data
@@ -2127,7 +2136,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
             out_model.mel_filterbank = require_diarization_tensor(
                 impl->ctx, "preprocessor.fb", out_model.mel_cfg.n_fft / 2 + 1,
                 out_model.mel_cfg.n_mels);
-            if (!measure) {
+            if (measure) {
+                exclude_weights_from_graph_measure(impl->ctx);
+            } else {
                 out_model.mel_cfg.filterbank = read_filterbank_to_vector(out_model.mel_filterbank);
                 make_diarization_window(out_model.mel_cfg);
             }
@@ -2536,18 +2547,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     }
 
     if (measure) {
-        // Mark every still-unclaimed weight tensor externally-allocated
-        // (dummy non-NULL data, same trick ggml's own measure paths use) so
-        // graph measurement via ggml_gallocr excludes the weights from the
-        // measured compute buffers instead of counting them as graph-owned
-        // leafs. The model must never have tensor data read/written after
-        // this -- see load_from_gguf_metadata_only.
-        for (ggml_tensor * t = ggml_get_first_tensor(impl->ctx); t;
-             t = ggml_get_next_tensor(impl->ctx, t)) {
-            if (!t->data && !t->view_src) {
-                t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-            }
-        }
+        exclude_weights_from_graph_measure(impl->ctx);
     }
 
     if (verbose) {

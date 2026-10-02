@@ -1928,8 +1928,9 @@ if (PARAKEET_BUILD_TESTS)
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_fr_multipiece_wav}")
 
     # Fit-projection parity (include/parakeet/fit.h): metadata-only projection
-    # vs the buffers a real load/encode actually allocates, on the CPU backend.
-    # One binary, registered once per model family fixture present.
+    # vs the buffers a real load/encode actually allocates, on the CPU backend
+    # (plus the GPU backend for Nemotron 3 Diarization). One binary,
+    # registered once per model family fixture present.
     add_executable(test-fit-params
         test/test_fit_params.cpp
         src/parakeet_ctc.cpp
@@ -1975,6 +1976,16 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-fit-params
         ARGS     "${_qvp_nemotron_f16_gguf}"
         REQUIRES "${_qvp_nemotron_f16_gguf}")
+    parakeet_register_test(test-fit-params-nemotron-diarization
+        LABEL    "fixture"
+        EXE      test-fit-params
+        ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
+    parakeet_register_test(test-fit-params-nemotron-diarization-gpu
+        LABEL    "gpu"
+        EXE      test-fit-params
+        ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${PARAKEET_TEST_GPU_LAYERS}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
 
     # Model-free CLI-layer unit tests: strict parsers, saturating arithmetic,
     # JSON escaping, and the parakeet-fit-params exit-code contract.
