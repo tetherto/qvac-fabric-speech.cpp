@@ -84,7 +84,9 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarizatio
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
 backend for a test arm or comparison and rejects a value that selects no usable
-device. The per-model validation each backend column rests on is documented in
+device. Among several Vulkan adapters, Audio8 runs on a discrete one whenever one
+is visible rather than on the first adapter listed, which on a desktop with an
+integrated GPU is the iGPU. The per-model validation each backend column rests on is documented in
 the [TTS capability table](engines/tts/README.md#capabilities).
 
 CosyVoice3's weight tiers are platform-dependent: `q8_0` LM + `q8_0` flow +

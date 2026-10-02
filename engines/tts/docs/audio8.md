@@ -16,7 +16,11 @@ the prompt.
 **Status — CPU, Metal, OpenCL, and desktop Vulkan, validated against the
 reference.**  Text-to-speech and voice cloning both run in-process on macOS and
 iOS Metal, on Android/Adreno OpenCL, and on Linux and Windows Vulkan.  Pass
-`--n-gpu-layers 99` to offload every stage; omit it for CPU.  On Metal that is
+`--n-gpu-layers 99` to offload every stage; omit it for CPU.  With several
+Vulkan adapters the engine takes the one with the most free memory and never an
+integrated one while a discrete one is visible: on a desktop whose Ryzen
+9950X3D iGPU enumerates ahead of an RTX 5090, taking the first adapter ran
+Audio8 on the iGPU, several times slower and outside the GPU accuracy bars.  On Metal that is
 **4.2x** CPU at q4_0 and **3.2x** at q8_0 on an iPhone 17, measured on device
 with both arms in one launch.  At F32 the GPU reproduces the CPU code trajectory
 exactly, frame for frame, which is the strongest available statement that the

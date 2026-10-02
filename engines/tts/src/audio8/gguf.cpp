@@ -383,13 +383,17 @@ bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context *
 // A capability probe only ever holds its operand and the op asked about.
 constexpr int PROBE_NODES = 2;
 
+// init_gpu_backend's auto-pick: the Vulkan adapter with the most free memory,
+// never an integrated one while a discrete one is visible.
+constexpr int AUTO_VULKAN_DEVICE = -1;
+
 // Audio8's GPU path is enabled only on backends its whole graph set has been
 // validated against, stage by stage, against the F32 reference. Anything else
 // falls back to CPU rather than running unverified kernels.
 ggml_backend_t init_backend(int n_gpu_layers) {
     using ::tts_cpp::detail::GpuBackendRequirement;
     ggml_backend_t backend = ::tts_cpp::detail::init_gpu_backend(
-        n_gpu_layers, true, "audio8", 0, false, nullptr,
+        n_gpu_layers, true, "audio8", AUTO_VULKAN_DEVICE, false, nullptr,
         GpuBackendRequirement::Vulkan | GpuBackendRequirement::Metal |
             GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA);
     return backend ? backend : ::tts_cpp::detail::init_cpu_backend();

@@ -224,6 +224,9 @@ measured on one binary on an RTX 3090, Chatterbox Turbo is 8.6x faster on CUDA
 than on that card's Vulkan adapter. Set `TTS_CPP_GPU_BACKEND` to `cuda`,
 `vulkan`, `metal` or `opencl` to pin one for a test arm or a comparison; an
 unrecognised value is rejected rather than silently dropping to the CPU.
+Among several Vulkan adapters, Audio8 takes the one with the most free memory
+and never an integrated adapter while a discrete one is visible; Supertonic and
+CosyVoice3 take `EngineOptions::vulkan_device` (default: the first adapter).
 
 ### Apple Core ML sidecars
 
