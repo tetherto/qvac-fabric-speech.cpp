@@ -1,9 +1,9 @@
 // Unit tests for the shared dual-path dispatch helpers in
 // src/sched_dispatch.{h,cpp} (per-op GPU->CPU fallback for the T3 eval
 // paths): graph_fully_supported walk, TTS_CPP_FORCE_SCHED escape
-// hatch, sched_fallback lifecycle (ensure/alloc/compute/free) and both
-// branches of the pre-allocated-op abort guard (see main for the
-// --sched-abort-repro mode that pins the GGML_ABORT side).
+// hatch, sched_fallback lifecycle (ensure/alloc/compute/free), both
+// branches of the pre-allocated-op guard, and the scheduler's own refusal
+// of a graph that slips past the guard.
 //
 // No GGUF / model file required — every test builds a tiny graph on the
 // CPU backend, so the scheduler is exercised as the single-backend
@@ -22,7 +22,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <vector>
 
 using namespace tts_cpp::detail;
@@ -252,57 +251,41 @@ void test_abort_guard_both_branches(ggml_backend_t cpu) {
     sched_fallback_free(fb);
 }
 
-// Child half of the repro: bypass the guard, feed the rejected graph to the
-// sched — ggml is expected to GGML_ABORT here.
-int run_sched_abort_repro_child(ggml_backend_t cpu, ggml_type bad) {
-    setrows_graph g(bad, cpu);
-    sched_fallback fb;
-    if (!g.slab_buf || !sched_fallback_ensure(fb, cpu, 2048, {})) {
-        std::fprintf(stderr, "ERROR: repro setup failed\n");
-        return 1;
-    }
-    sched_fallback_alloc(fb, g.gf);  // expected to abort inside ggml
-    std::fprintf(stderr, "ERROR: sched alloc did not abort on the rejected graph\n");
-    return 1;
-}
-
-// Parent half: re-exec self so the child's SIGABRT doesn't fail ctest; the
-// abort message reaches ctest's output for PASS_REGULAR_EXPRESSION.
-int run_sched_abort_repro(ggml_backend_t cpu, const char * self) {
+// Guard bypassed: the scheduler must refuse the rejected graph by failing
+// the allocation, and stay usable for the next graph.
+void test_sched_refuses_rejected_graph(ggml_backend_t cpu) {
     const ggml_type bad = find_cpu_rejected_setrows_type(cpu);
     if (bad == GGML_TYPE_COUNT) {
         std::fprintf(stderr, "SKIP: no cpu-unsupported set_rows dst type\n");
-        return 0;
+        return;
     }
-    const std::string cmd = std::string("\"") + self + "\" --sched-abort-repro-child "
-                          + std::to_string((int) bad);
-    if (std::system(cmd.c_str()) == 0) {
-        std::fprintf(stderr, "ERROR: abort-repro child exited cleanly\n");
-        return 1;
-    }
-    std::fprintf(stderr, "abort-repro: child aborted as expected\n");
-    return 0;
+    setrows_graph rejected(bad, cpu);
+    CHECK(rejected.slab_buf != nullptr);
+
+    sched_fallback fb;
+    CHECK(sched_fallback_ensure(fb, cpu, 2048, {}));
+    CHECK(!sched_fallback_alloc(fb, rejected.gf));
+
+    setrows_graph accepted(GGML_TYPE_F32, cpu);
+    CHECK(accepted.slab_buf != nullptr);
+    CHECK(sched_fallback_alloc(fb, accepted.gf));
+
+    sched_fallback_free(fb);
 }
 
 } // namespace
 
-int main(int argc, char ** argv) {
+int main() {
     ggml_backend_t cpu = tts_cpp::detail::init_cpu_backend();
     if (!cpu) {
         std::fprintf(stderr, "test-t3-sched-dispatch: no CPU backend registered\n");
         return 2;
     }
 
-    if (argc > 1 && std::strcmp(argv[1], "--sched-abort-repro") == 0) {
-        return run_sched_abort_repro(cpu, argv[0]);
-    }
-    if (argc > 2 && std::strcmp(argv[1], "--sched-abort-repro-child") == 0) {
-        return run_sched_abort_repro_child(cpu, (ggml_type) std::atoi(argv[2]));
-    }
-
     test_walk_and_force_env(cpu);
     test_sched_lifecycle_and_compute(cpu);
     test_abort_guard_both_branches(cpu);
+    test_sched_refuses_rejected_graph(cpu);
 
     ggml_backend_free(cpu);
 

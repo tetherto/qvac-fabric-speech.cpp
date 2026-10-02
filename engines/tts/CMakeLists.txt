@@ -3408,23 +3408,13 @@ if (TTS_CPP_BUILD_TESTS)
 
     # T3 dual-path dispatch helper unit tests (src/sched_dispatch.{h,cpp}):
     # supports_op walk, force-env escape hatch, sched_fallback lifecycle,
-    # pre-allocated-op abort guard.  CPU-only, no GGUF needed.
+    # pre-allocated-op guard and the scheduler refusing a graph that bypasses
+    # it.  CPU-only, no GGUF needed.
     add_executable(test-t3-sched-dispatch test/test_t3_sched_dispatch.cpp)
     target_link_libraries(test-t3-sched-dispatch PRIVATE tts-cpp ggml tts-cpp-backend-defs)
     target_include_directories(test-t3-sched-dispatch PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-t3-sched-dispatch)
     tts_cpp_register_test(test-t3-sched-dispatch LABEL "unit")
-
-    # Same binary, guard bypassed: passes only while ggml still ABORTs on the
-    # rejected graph, so a ggml sync that un-mirrors the abort guard fails here.
-    tts_cpp_register_test(test-t3-sched-dispatch-abort-repro
-                          EXE test-t3-sched-dispatch
-                          ARGS --sched-abort-repro
-                          LABEL "unit")
-    set_property(TEST test-t3-sched-dispatch-abort-repro PROPERTY PASS_REGULAR_EXPRESSION
-                 "pre-allocated tensor" "SKIP: no cpu-unsupported set_rows dst type")
-    set_property(TEST test-t3-sched-dispatch-abort-repro PROPERTY FAIL_REGULAR_EXPRESSION
-                 "ERROR:")
 
     # Real per-op migration through sched_dispatch: a BLAS (ACCEL) primary
     # rejects everything but matmul-class ops, so add/scale/cpy nodes
