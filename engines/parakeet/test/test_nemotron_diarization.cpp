@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -36,6 +37,10 @@ constexpr float kMaximumGainScoreDifference = 0.0002f;
 constexpr float kPrewarmSeconds = 1.0f;
 constexpr int kForcedLongFormFrames = 100;
 constexpr double kMaximumLongFormDifference = 1.0e-4;
+constexpr int kBeyondLimitRepeats = 15;
+constexpr float kSpeakerActivityThreshold = 0.5f;
+constexpr double kTailCoverageSeconds = 1.0;
+constexpr double kMaximumRepeatActivityShare = 0.05;
 constexpr double kMaximumPrewarmDifference = 1.0e-5;
 
 static bool valid_probabilities(const std::vector<float> & probabilities) {
@@ -269,6 +274,72 @@ static bool long_form_matches_single_pass(
     return false;
 }
 
+static std::vector<float> repeat_audio(const std::vector<float> & samples, int repeats) {
+    std::vector<float> repeated;
+    repeated.reserve(samples.size() * repeats);
+    for (int repeat = 0; repeat < repeats; ++repeat) {
+        repeated.insert(repeated.end(), samples.begin(), samples.end());
+    }
+    return repeated;
+}
+
+static int active_frames(
+    const parakeet::DiarizationResult & result, int speaker, int first, int last) {
+    int active = 0;
+    for (int frame = first; frame < last; ++frame) {
+        active += result.speaker_probs[static_cast<size_t>(frame) * result.num_spks + speaker] >
+            kSpeakerActivityThreshold;
+    }
+    return active;
+}
+
+static bool repeats_keep_speaker_activity(
+    const parakeet::DiarizationResult & result, int repeats) {
+    const int block = result.n_frames / repeats;
+    const int tolerance = static_cast<int>(block * kMaximumRepeatActivityShare);
+    for (int speaker = 0; speaker < result.num_spks; ++speaker) {
+        const int first = active_frames(result, speaker, 0, block);
+        const int last = active_frames(result, speaker, (repeats - 1) * block, repeats * block);
+        if (std::abs(first - last) > tolerance) {
+            std::fprintf(stderr, "speaker %d active frames: first repeat %d, last repeat %d\n",
+                speaker, first, last);
+            return false;
+        }
+    }
+    return true;
+}
+
+static double last_segment_end(const parakeet::DiarizationResult & result) {
+    double end_s = 0.0;
+    for (const auto & segment : result.segments) end_s = std::max(end_s, segment.end_s);
+    return end_s;
+}
+
+static bool diarizes_beyond_position_limit(
+    parakeet::Engine & engine, const parakeet::ParakeetCtcModel & model,
+    const std::vector<float> & samples) {
+    const std::vector<float> audio = repeat_audio(samples, kBeyondLimitRepeats);
+    const int samples_count = static_cast<int>(audio.size());
+    const long long mel_frames = parakeet::nemotron_diarization_mel_frames(model, samples_count);
+    if (parakeet::nemotron_diarization_encoder_frames(model, mel_frames) <=
+        model.nemotron_diarization_cfg.position_limit) {
+        std::fprintf(stderr, "beyond-limit input is not beyond the position limit\n");
+        return false;
+    }
+    const auto result = engine.diarize_samples(audio.data(), samples_count, kSampleRate, {});
+    const double duration_s = static_cast<double>(samples_count) / kSampleRate;
+    const bool covered = result.n_frames == mel_frames &&
+        result.speaker_probs.size() == static_cast<size_t>(result.n_frames) * result.num_spks &&
+        valid_probabilities(result.speaker_probs) && valid_segments(result) &&
+        last_segment_end(result) >= duration_s - kTailCoverageSeconds;
+    if (!covered) {
+        std::fprintf(stderr, "beyond-limit frames=%d expected=%lld last segment end=%f of %f\n",
+            result.n_frames, mel_frames, last_segment_end(result), duration_s);
+        return false;
+    }
+    return repeats_keep_speaker_activity(result, kBeyondLimitRepeats);
+}
+
 static bool prewarmed_engine_matches(
     const char * model_path, int gpu_layers, const std::vector<float> & samples,
     const parakeet::DiarizationResult & expected) {
@@ -370,6 +441,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
     if (!long_form_matches_single_pass(argv[1], gpu_layers, samples, result)) return 1;
+    if (!diarizes_beyond_position_limit(engine, model, samples)) {
+        std::fprintf(stderr, "Nemotron diarization beyond the position limit failed\n");
+        return 1;
+    }
     if (!matches_negative_peak_reference(engine, model, samples)) {
         std::fprintf(stderr, "Nemotron negative peak reference mismatch\n");
         return 1;

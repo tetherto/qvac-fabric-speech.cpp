@@ -1405,15 +1405,11 @@ static DiarizationResult engine_impl_diarize_nemotron_long_form(
     Engine::Impl & impl, const float * samples, int n_samples,
     int sample_rate, const DiarizationOptions & options);
 
-static int nemotron_mel_frames(const ParakeetCtcModel & model, int n_samples) {
-    return 1 + n_samples / model.mel_cfg.hop_length;
-}
-
 static bool nemotron_offline_uses_long_form(
     const Engine::Impl & impl, const float * samples, int n_samples) {
     return samples && n_samples > 0 && nemotron_diarization_uses_long_form(
         impl.model, impl.opts.long_form_window_frames,
-        nemotron_mel_frames(impl.model, n_samples));
+        nemotron_diarization_mel_frames(impl.model, n_samples));
 }
 
 DiarizationResult Engine::diarize_samples(const float * samples,
@@ -2807,6 +2803,19 @@ static void hold_last_frame(std::vector<float> & probabilities, int speakers, in
     probabilities.resize(target);
 }
 
+static int nemotron_long_form_block_samples(int sample_rate) {
+    return static_cast<int>(
+        static_cast<long long>(sample_rate) * kNemotronLongFormChunkMs / kMillisecondsPerSecond);
+}
+
+static void feed_in_blocks(SortformerStreamSession & session, const float * samples,
+                           int n_samples, int block_samples) {
+    for (long long offset = 0; offset < n_samples; offset += block_samples) {
+        const int block = static_cast<int>(std::min<long long>(block_samples, n_samples - offset));
+        session.feed_pcm_f32(samples + offset, block);
+    }
+}
+
 static std::vector<float> nemotron_long_form_probabilities(
     Engine::Impl & impl, const float * samples, int n_samples, int sample_rate) {
     std::vector<float> probabilities;
@@ -2815,7 +2824,7 @@ static std::vector<float> nemotron_long_form_probabilities(
     session_impl->probability_sink = &probabilities;
     session_impl->nemotron_stream_gain = nemotron_audio_gain(samples, n_samples);
     SortformerStreamSession session(std::move(session_impl));
-    session.feed_pcm_f32(samples, n_samples);
+    feed_in_blocks(session, samples, n_samples, nemotron_long_form_block_samples(sample_rate));
     session.finalize();
     return probabilities;
 }
@@ -2829,7 +2838,7 @@ static DiarizationResult engine_impl_diarize_nemotron_long_form(
     const auto start = std::chrono::steady_clock::now();
     DiarizationResult result;
     result.num_spks = impl.model.nemotron_diarization_cfg.speakers;
-    result.n_frames = nemotron_mel_frames(impl.model, n_samples);
+    result.n_frames = static_cast<int>(nemotron_diarization_mel_frames(impl.model, n_samples));
     result.speaker_probs = nemotron_long_form_probabilities(impl, samples, n_samples, sample_rate);
     hold_last_frame(result.speaker_probs, result.num_spks, result.n_frames);
     result.frame_stride_s = static_cast<double>(impl.model.mel_cfg.hop_length) / sample_rate;

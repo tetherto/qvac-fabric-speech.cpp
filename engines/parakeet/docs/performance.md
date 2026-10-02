@@ -162,4 +162,7 @@ path reaches 3.70 % and 4.36 % on CUDA, Vulkan, Metal, Adreno OpenCL and
 Vulkan, and the Snapdragon CPU; the x86 CPU reaches 3.71 % on `abcba` but
 8.0 % on `abcdba`, where one near-tie flips a speaker, which is why the tests
 gate at 15 %. On the RTX 5090 a
-273 s input takes 87 ms long-form against 58 ms for the single graph.
+273 s input takes 82 ms long-form against 57 ms for the single graph, and a
+one-hour input takes 1.0 s. The engine feeds the long-form session in 30 s
+blocks, so its sample ring stays bounded instead of holding a copy of the
+whole input.

@@ -7,6 +7,7 @@
 
 namespace parakeet {
 
+constexpr int kMillisecondsPerSecond = 1000;
 constexpr int kNemotronChunkMs = 1040;
 constexpr int kNemotronSpeakerCacheFrames = 264;
 constexpr int kNemotronFifoFrames = 80;
@@ -52,6 +53,10 @@ int run_nemotron_diarization(
 int prewarm_nemotron_diarization(
     const ParakeetCtcModel & model,
     float audio_seconds);
+
+long long nemotron_diarization_mel_frames(
+    const ParakeetCtcModel & model,
+    long long samples);
 
 int nemotron_diarization_encoder_frames(
     const ParakeetCtcModel & model,

@@ -43,7 +43,8 @@
 //      saturates beyond it; audio past the model's position limit projects
 //      through the long-form path, or is Error/"workload-too-large" with
 //      long-form disabled, up to the largest float duration (no overflow on
-//      the way to either verdict).
+//      the way to either verdict). Fit counts mel frames like the runtime,
+//      so both take the long-form path at the exact window boundary.
 //
 // Usage: test-fit-params <model.gguf> [n_gpu_layers]
 // (CMake registers the CPU form, n_gpu_layers omitted = 0 -- the only backend
@@ -115,7 +116,13 @@ constexpr float kDiarizationShortSeconds = 60.0f;
 constexpr float kDiarizationWindowSeconds = 90.0f;
 constexpr float kDiarizationLongSeconds = 1200.0f;
 constexpr int kLongFormDisabled = -1;
+constexpr int kBoundaryWindowFrames = 100;
+constexpr float kBoundarySeconds = 8.0f;
 constexpr size_t kGraphInputAlignmentSlack = 1024;
+
+long long workload_samples(const parakeet::ParakeetCtcModel & model, float audio_seconds) {
+    return (long long) std::ceil((double) audio_seconds * model.mel_cfg.sample_rate);
+}
 
 size_t sched_reserved_bytes(const parakeet::ParakeetCtcModel & model) {
     ggml_backend_sched_t sched = parakeet::model_sched(model);
@@ -163,8 +170,8 @@ void check_diarization_reservation(const parakeet::ParakeetCtcModel & model,
 
 void check_nemotron_diarization_compute(const parakeet::ParakeetCtcModel & model,
                                         const parakeet::FitResult & fit, float audio_seconds) {
-    const int offline_mel = (int) std::ceil(
-        (double) audio_seconds * model.mel_cfg.sample_rate / model.mel_cfg.hop_length);
+    const int offline_mel = (int) parakeet::nemotron_diarization_mel_frames(
+        model, workload_samples(model, audio_seconds));
     const int stream_mel = parakeet::nemotron_diarization_stream_mel_frames(model);
     const int stream_state = parakeet::nemotron_diarization_stream_state_frames();
     parakeet::NemotronDiarizationFitMeasure offline;
@@ -229,6 +236,28 @@ void check_nemotron_diarization_workloads(const parakeet::ParakeetCtcModel & mod
     expect(fd.status == parakeet::FitStatus::Error && fd.reason == "workload-too-large",
            "single-pass audio beyond the position limit was '" + fd.reason +
            "', not workload-too-large");
+}
+
+void check_nemotron_diarization_window_boundary(const parakeet::ParakeetCtcModel & model,
+                                                const parakeet::FitOptions & fopts) {
+    const long long mel = parakeet::nemotron_diarization_mel_frames(
+        model, workload_samples(model, kBoundarySeconds));
+    const bool runtime_long_form =
+        parakeet::nemotron_diarization_uses_long_form(model, kBoundaryWindowFrames, mel);
+    parakeet::NemotronDiarizationFitMeasure chunk;
+    if (parakeet::measure_nemotron_diarization(
+            model, parakeet::nemotron_diarization_long_form_mel_frames(model),
+            parakeet::nemotron_diarization_stream_state_frames(), chunk) != 0) {
+        fail("measure of the long-form chunk graph failed");
+        return;
+    }
+    const parakeet::FitResult fb = fit_at(fopts, kBoundarySeconds, kBoundaryWindowFrames);
+    const bool fit_long_form = fb.device.encoder_compute_bytes >= chunk.device_compute_bytes;
+    expect(runtime_long_form && fit_long_form,
+           "fit and runtime disagree at the long-form window boundary: runtime long-form=" +
+           std::to_string(runtime_long_form) + " fit compute " +
+           std::to_string(fb.device.encoder_compute_bytes) + " < long-form chunk " +
+           std::to_string(chunk.device_compute_bytes));
 }
 
 void check_nemotron_diarization_huge_workload(const parakeet::ParakeetCtcModel & model,
@@ -305,6 +334,7 @@ int main(int argc, char ** argv) {
         check_nemotron_diarization_compute(model, fit, kAudioSeconds);
         check_nemotron_diarization_workloads(model, fopts);
         check_nemotron_diarization_huge_workload(model, fopts);
+        check_nemotron_diarization_window_boundary(model, fopts);
     }
 
     // 2 + 3. Parity against a real load on the same (CPU) backend.

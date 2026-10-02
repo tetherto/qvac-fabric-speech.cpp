@@ -18,7 +18,6 @@ namespace {
 constexpr float kLayerNormEpsilon = 1.0e-5f;
 constexpr size_t kGraphSlots = 4096;
 constexpr float kDefaultPrewarmSeconds = 1.0f;
-constexpr int kMillisecondsPerSecond = 1000;
 constexpr size_t kProbeTensorSlots = 32;
 constexpr int kQkvComponents = 3;
 
@@ -413,6 +412,11 @@ int prewarm_nemotron_diarization(const ParakeetCtcModel & model, float audio_sec
     if (offline != 0) return offline;
     return run_zero_chunk(model, nemotron_diarization_stream_mel_frames(model),
         nemotron_diarization_stream_state_frames());
+}
+
+long long nemotron_diarization_mel_frames(
+    const ParakeetCtcModel & model, long long samples) {
+    return 1 + samples / model.mel_cfg.hop_length;
 }
 
 int nemotron_diarization_encoder_frames(

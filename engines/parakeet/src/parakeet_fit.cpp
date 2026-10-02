@@ -232,9 +232,16 @@ std::string nemotron_diarization_report(const DiarizationFitGraphs & graphs, boo
     return s + "\n";
 }
 
+long long nemotron_workload_mel_frames(const ParakeetCtcModel & model, float audio_seconds) {
+    const uint64_t samples = std::min<uint64_t>(
+        sat_u64_from_double(std::ceil((double) audio_seconds * model.mel_cfg.sample_rate)),
+        (uint64_t) std::numeric_limits<long long>::max());
+    return nemotron_diarization_mel_frames(model, (long long) samples);
+}
+
 void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoadMeasure & lm,
                                   const FitOptions & opts, FitResult & r) {
-    const long long total_mel = total_mel_frames(opts.audio_seconds, model.mel_cfg);
+    const long long total_mel = nemotron_workload_mel_frames(model, opts.audio_seconds);
     const int offline_frames = nemotron_diarization_encoder_frames(model, total_mel);
     const int window = nemotron_diarization_long_form_frames(model, opts.long_form_window_frames);
     const bool long_form = nemotron_diarization_uses_long_form(
