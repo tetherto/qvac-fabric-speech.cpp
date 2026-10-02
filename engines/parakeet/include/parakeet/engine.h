@@ -131,7 +131,10 @@ struct EngineOptions {
     // When `prewarm == true`, the Engine constructor runs one
     // synthetic encoder-only forward pass using a
     // `prewarm_audio_seconds`-long all-zero mel input. Decoder
-    // predictor/joint graphs are not executed. The
+    // predictor/joint graphs are not executed. Nemotron 3
+    // Diarization instead runs one offline pass of that length and
+    // one chunk at the default live-stream geometry, so both its
+    // offline and streaming kernels are built. The
     // intent is to amortise the *first-call* cold cost into
     // construction:
     //

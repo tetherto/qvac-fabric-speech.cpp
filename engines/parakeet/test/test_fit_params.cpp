@@ -35,15 +35,25 @@
 //      operating point bounds every explicit one, and the device projection
 //      GROWS with audio length (the full-length prompt conditioning),
 //      unlike the saturating legacy families.
+//   8. Nemotron 3 Diarization only: the projected compute is the larger of
+//      the offline and default live-stream graphs, which share the model
+//      scheduler; after real runs of both, the scheduler reservation equals
+//      the projection on CPU and stays within the graph-input slots on GPU.
+//      The device projection grows with audio length, and audio beyond the
+//      model's position limit is Error/"workload-too-large", up to the
+//      largest float duration (no overflow on the way to the check).
 //
 // Usage: test-fit-params <model.gguf> [n_gpu_layers]
 // (CMake registers the CPU form, n_gpu_layers omitted = 0 -- the only backend
-// every CI lane has; pass e.g. 99 manually to check parity on a GPU backend.)
+// every CI lane has; pass e.g. 99 to check parity on a GPU backend, which
+// exits 3 (skipped) when no GPU backend is available. Nemotron 3 Diarization
+// also has a gpu-labelled registration.)
 // Exit 0 on success; non-zero with a FAIL line per broken invariant.
 
 #include "parakeet/fit.h"
 #include "long_form.h"
 #include "parakeet_ctc.h"
+#include "parakeet_diarization_v3.h"
 #include "parakeet_sortformer.h"
 #include "parakeet_tdt.h"
 
@@ -53,6 +63,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -81,6 +92,122 @@ void fail(const std::string & what) {
 
 void expect(bool cond, const std::string & what) {
     if (!cond) fail(what);
+}
+
+constexpr int kSkipReturnCode = 3;
+constexpr float kDiarizationShortSeconds = 60.0f;
+constexpr float kDiarizationLongSeconds = 300.0f;
+constexpr size_t kGraphInputAlignmentSlack = 1024;
+
+size_t sched_reserved_bytes(const parakeet::ParakeetCtcModel & model) {
+    ggml_backend_sched_t sched = parakeet::model_sched(model);
+    const int backends = sched ? ggml_backend_sched_get_n_backends(sched) : 0;
+    size_t reserved = 0;
+    for (int i = 0; i < backends; ++i) {
+        reserved += ggml_backend_sched_get_buffer_size(
+            sched, ggml_backend_sched_get_backend(sched, i));
+    }
+    return reserved;
+}
+
+bool run_diarization_workloads(const parakeet::ParakeetCtcModel & model,
+                               int offline_mel, int stream_mel, int stream_state) {
+    const int n_mels = model.mel_cfg.n_mels;
+    const std::vector<float> offline((size_t) offline_mel * n_mels, 0.0f);
+    const std::vector<float> stream((size_t) stream_mel * n_mels, 0.0f);
+    const std::vector<float> state(
+        (size_t) stream_state * model.nemotron_diarization_cfg.encoder_width, 0.0f);
+    std::vector<float> probabilities;
+    parakeet::NemotronDiarizationChunk chunk;
+    return parakeet::run_nemotron_diarization(model, offline.data(), offline_mel,
+                                              probabilities) == 0 &&
+           parakeet::run_nemotron_diarization_chunk(model, stream.data(), stream_mel,
+                                                    state.data(), stream_state, chunk) == 0;
+}
+
+void check_diarization_reservation(const parakeet::ParakeetCtcModel & model,
+                                   size_t projected, size_t input_slack) {
+    const size_t reserved = sched_reserved_bytes(model);
+    if (ggml_backend_sched_get_n_backends(parakeet::model_sched(model)) <= 1) {
+        expect(reserved == projected,
+               "nemotron diarization parity: projected " + std::to_string(projected) +
+               " != sched reserved " + std::to_string(reserved));
+        return;
+    }
+    expect(reserved <= projected,
+           "nemotron diarization UNDER-projection: projected " +
+           std::to_string(projected) + " < sched reserved " + std::to_string(reserved));
+    expect(projected <= reserved + input_slack,
+           "nemotron diarization over-projection beyond the input slots: projected " +
+           std::to_string(projected) + " > reserved " + std::to_string(reserved) +
+           " + input slack " + std::to_string(input_slack));
+}
+
+void check_nemotron_diarization_compute(const parakeet::ParakeetCtcModel & model,
+                                        const parakeet::FitResult & fit, float audio_seconds) {
+    const int offline_mel = (int) std::ceil(
+        (double) audio_seconds * model.mel_cfg.sample_rate / model.mel_cfg.hop_length);
+    const int stream_mel = parakeet::nemotron_diarization_stream_mel_frames(model);
+    const int stream_state = parakeet::nemotron_diarization_stream_state_frames();
+    parakeet::NemotronDiarizationFitMeasure offline;
+    parakeet::NemotronDiarizationFitMeasure stream;
+    if (parakeet::measure_nemotron_diarization(model, offline_mel, 0, offline) != 0 ||
+        parakeet::measure_nemotron_diarization(model, stream_mel, stream_state, stream) != 0) {
+        fail("measure_nemotron_diarization failed on a real-loaded model");
+        return;
+    }
+    const size_t device = std::max(offline.device_compute_bytes, stream.device_compute_bytes);
+    const size_t host_inputs = std::max(offline.host_input_bytes, stream.host_input_bytes);
+    expect(fit.device.encoder_compute_bytes == device,
+           "nemotron diarization compute composition: projected " +
+           std::to_string(fit.device.encoder_compute_bytes) + " != max(offline " +
+           std::to_string(offline.device_compute_bytes) + ", stream " +
+           std::to_string(stream.device_compute_bytes) + ")");
+    if (!run_diarization_workloads(model, offline_mel, stream_mel, stream_state)) {
+        fail("real nemotron diarization runs failed");
+        return;
+    }
+    check_diarization_reservation(model, device + host_inputs,
+                                  host_inputs + kGraphInputAlignmentSlack);
+}
+
+void check_nemotron_diarization_workloads(const parakeet::ParakeetCtcModel & model,
+                                          const parakeet::FitOptions & fopts) {
+    parakeet::FitOptions shorter = fopts;
+    shorter.audio_seconds = kDiarizationShortSeconds;
+    parakeet::FitOptions longer = fopts;
+    longer.audio_seconds = kDiarizationLongSeconds;
+    const parakeet::FitResult fs = parakeet::fit_params(shorter);
+    const parakeet::FitResult fl = parakeet::fit_params(longer);
+    expect(fs.status != parakeet::FitStatus::Error && fl.status != parakeet::FitStatus::Error,
+           "nemotron diarization projection errored below the position limit");
+    expect(fl.device.total_bytes > fs.device.total_bytes,
+           "nemotron diarization device projection did not grow with audio length: " +
+           std::to_string(fs.device.total_bytes) + " -> " +
+           std::to_string(fl.device.total_bytes));
+    expect(fl.host_bytes > fs.host_bytes,
+           "nemotron diarization host extras did not grow with audio length");
+    const auto & cfg = model.nemotron_diarization_cfg;
+    parakeet::FitOptions beyond = fopts;
+    beyond.audio_seconds = (float) ((double) (cfg.position_limit + 1) *
+        cfg.subsampling_factor * model.mel_cfg.hop_length / model.mel_cfg.sample_rate);
+    const parakeet::FitResult fb = parakeet::fit_params(beyond);
+    expect(fb.status == parakeet::FitStatus::Error && fb.reason == "workload-too-large",
+           "audio beyond the position limit was '" + fb.reason + "', not workload-too-large");
+}
+
+void check_nemotron_diarization_huge_workload(const parakeet::ParakeetCtcModel & model,
+                                              const parakeet::FitOptions & fopts) {
+    const int saturated = parakeet::nemotron_diarization_encoder_frames(
+        model, std::numeric_limits<long long>::max());
+    expect(saturated == std::numeric_limits<int>::max(),
+           "nemotron diarization encoder frames did not saturate at the largest mel count: " +
+           std::to_string(saturated));
+    parakeet::FitOptions huge = fopts;
+    huge.audio_seconds = std::numeric_limits<float>::max();
+    const parakeet::FitResult fh = parakeet::fit_params(huge);
+    expect(fh.status == parakeet::FitStatus::Error && fh.reason == "workload-too-large",
+           "the largest float audio duration was '" + fh.reason + "', not workload-too-large");
 }
 
 }  // namespace
@@ -115,9 +242,31 @@ int main(int argc, char ** argv) {
         return g_failures;  // nothing below is meaningful without a projection
     }
     std::printf("%s", fit.report.c_str());
+    if (n_gpu_layers > 0 && fit.device_is_cpu) {
+        std::printf("test-fit-params: no GPU backend, skipping\n");
+        return kSkipReturnCode;
+    }
+
+    // 8. Nemotron 3 Diarization: no FastConformer encoder, so it replaces
+    //    the encoder-window checks below.
+    if (fit.model_type == "nemotron-diarization") {
+        parakeet::ParakeetCtcModel model;
+        if (parakeet::load_from_gguf(model_path, model, /*n_threads=*/0,
+                                     n_gpu_layers, /*verbose=*/false) != 0) {
+            fail("real load_from_gguf failed");
+            return g_failures;
+        }
+        const size_t real_weights = parakeet::model_weights_buffer_bytes(model);
+        expect(real_weights == fit.device.weights_bytes,
+               "weights parity: projected " + std::to_string(fit.device.weights_bytes) +
+               " != allocated " + std::to_string(real_weights));
+        check_nemotron_diarization_compute(model, fit, kAudioSeconds);
+        check_nemotron_diarization_workloads(model, fopts);
+        check_nemotron_diarization_huge_workload(model, fopts);
+    }
 
     // 2 + 3. Parity against a real load on the same (CPU) backend.
-    {
+    if (fit.model_type != "nemotron-diarization") {
         parakeet::ParakeetCtcModel model;
         if (parakeet::load_from_gguf(model_path, model, /*n_threads=*/0,
                                      n_gpu_layers, /*verbose=*/false) != 0) {
@@ -385,7 +534,7 @@ int main(int argc, char ** argv) {
     //    transcription models. Nemotron's device projection also grows: the
     //    locale-prompt projection graph runs over the FULL stitched encoder
     //    output, so it scales with audio_seconds by design.)
-    if (fit.model_type != "sortformer") {
+    if (fit.model_type != "sortformer" && fit.model_type != "nemotron-diarization") {
         parakeet::FitOptions a = fopts;  a.audio_seconds = 600.0f;
         parakeet::FitOptions b = fopts;  b.audio_seconds = 7200.0f;
         const parakeet::FitResult fa = parakeet::fit_params(a);

@@ -107,10 +107,21 @@ streaming operating point to project (one of the GGUF's allowed values,
 80/160/320/560/1120 on the shipped checkpoint); the default projects the
 largest operating point, which bounds every other.
 
+Nemotron 3 Diarization is modelled as well. It runs the whole input through
+one graph, so its device projection grows with the audio, and audio past the
+GGUF's `sortformer.encoder.pos_emb_max_len` encoder frames (400 s on the
+official checkpoint) is an error with reason `workload-too-large`, as it is
+at runtime. Offline and live sessions share the model scheduler, so the
+compute figure is the larger of the offline graph and one chunk at the
+default live geometry (1040 ms chunk, 80 ms right context, 264 speaker-cache
+and 80 FIFO rows). On a backend without fused flash attention the graph uses
+unfused attention, whose score matrix grows with the square of the input
+length, and the projection prices that graph.
+
 The projection is exact where it can be: `test-fit-params` asserts the
-projected weight, encoder-compute, Sortformer-head, and Nemotron
-prompt/step/pre-encode bytes equal what a real load/encode/diarize/stream
-allocates, byte for byte. For the legacy families (CTC/RNN-T/TDT/EOU) the
+projected weight, encoder-compute, Sortformer-head, Nemotron
+prompt/step/pre-encode, and Nemotron 3 Diarization graph bytes equal what a
+real load/encode/diarize/stream allocates, byte for byte. For the legacy families (CTC/RNN-T/TDT/EOU) the
 projection covers the offline paths; their streaming sessions build smaller
 per-chunk graphs but rotate through the same graph cache with
 session-dependent keys, so treat the offline projection as a guide, not a

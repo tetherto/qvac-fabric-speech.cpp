@@ -77,3 +77,48 @@ Word error rate on the same 500-utterance LibriSpeech subset, Whisper text
 normalisation: CPU 2.22 %, CUDA q8_0 2.21 % and q4_0 2.28 %, Metal q8_0
 2.15 % and q4_0 2.24 %. Sortformer, streaming and ASR-plus-diarization
 outputs are byte-equal to the previous build on both backends.
+
+### Nemotron 3 Diarization on GPU
+
+Nemotron 3 Diarization runs its whole graph on CUDA, Vulkan, and Metal as one
+scheduler split with no CPU fallback. Medians of warm runs of the official
+q8_0 GGUF with a prewarmed engine on `diarization-sample-16k.wav` (27.3 s)
+and the same clip repeated ten times (273 s). Streaming uses the default live
+geometry (1040 ms chunks, 80 ms right context, 264 speaker-cache and 80 FIFO
+rows) and feeds 100 ms blocks as fast as the engine accepts them; the time
+covers the whole session including `finalize()`.
+
+| Backend | Offline 27.3 s | Offline 273 s | Streaming 27.3 s | Streaming 273 s | Slowest chunk |
+|---|---:|---:|---:|---:|---:|
+| CPU, Ryzen 9 9950X3D, 32 threads | 118-246 ms | 1169 ms | 2.1 s | 36.3 s | 459 ms |
+| CUDA, RTX 5090 | 5.9 ms | 40.4 ms | 91 ms | 1.0 s | 4.1 ms |
+| Vulkan, RTX 5090 | 5.9 ms | 59.4 ms | 106 ms | 1.09 s | 8.9 ms |
+| Metal, Apple M3 Ultra | 16.2 ms | 199 ms | 333 ms | 3.87 s | 15.7 ms |
+
+The CPU host was shared with other jobs, so its row is indicative only.
+Offline probabilities against the NeMo-Speech.cpp reference on the 27.3 s
+clip, as maximum absolute error and relative L2 error: CPU 0.023 and 0.0016,
+CUDA 0.037 and 0.0021, Vulkan 0.031 and 0.0016, Metal 0.033 and 0.0015. The
+test tolerance is 0.04 and 0.003. On the 273 s input, the GPU probabilities
+differ from CPU by 0.0005 to 0.0006 on average, and 0.02 % to 0.03 % of
+frame decisions at the 0.5 threshold flip. The per-block error stays flat
+across the input, so long contexts do not drift. Setting `GGML_PREC_F32` on
+the matmuls lowers the CUDA maximum error to 0.033 at a 10 % cost and doubles
+the Vulkan time, so the graph keeps the default precision.
+
+The first call compiles GPU kernels. With the NVIDIA shader disk cache
+disabled, Vulkan spends 2.3 s on the first offline call and 0.25 s on the
+first streaming chunk; CUDA spends 67 ms. `EngineOptions::prewarm` runs one
+offline pass of `prewarm_audio_seconds` and one chunk at the default live
+geometry during construction, after which the first offline call takes 8 ms
+on both backends and no streaming chunk exceeds 5 ms.
+
+Backends without fused flash attention for this graph, such as ggml-opencl
+on Adreno, use an unfused attention on the GPU. Forced on the RTX 5090, it
+costs 15 % per streaming chunk (CUDA 3.80 -> 4.35 ms, Vulkan 3.90 -> 4.48 ms)
+and about 3x on the 273 s offline graph (CUDA 16.6 -> 50.8 ms, Vulkan 28.3 ->
+61.1 ms), because its score matrix is quadratic in the input length. Sending
+the fused attention to the CPU instead, which is what the scheduler would do
+without the fallback, makes a streaming chunk 10x slower (CUDA 38.7 ms,
+Vulkan 40.0 ms). The unfused path passes the same NeMo-Speech.cpp reference
+check on CPU, CUDA, Vulkan, and Metal.
