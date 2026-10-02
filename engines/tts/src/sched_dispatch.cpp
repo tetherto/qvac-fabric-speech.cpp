@@ -32,19 +32,19 @@ bool sched_force_enabled() {
 // MIRRORS SCHEDULER INTERNALS — re-verify on EVERY ggml-speech sync.
 //
 // This re-derives, outside the scheduler, the exact condition under which
-// ggml_backend_sched_backend_id_from_cur() hits
-//   GGML_ABORT("pre-allocated tensor (%s) in a buffer (%s) that cannot run
-//               the operation (%s)")
+// ggml_backend_sched_backend_id_from_cur() rejects a node with
+//   "pre-allocated tensor (%s) in a buffer (%s) cannot run the operation (%s)"
 // (ggml src/ggml-backend.cpp, backend-assignment pass; see
 // ggml_backend_sched_backend_from_buffer just above it: a backend qualifies
 // for a pre-allocated node only when it supports BOTH the buffer type and
 // the op).  Our sched set is exactly [primary, CPU-last], so checking those
-// two candidates is complete FOR THE CURRENT PREDICATE.  If a ggml sync
-// changes that assignment logic, this guard silently stops matching and the
-// uncatchable abort comes back — the deeper fix (converting the ABORT into
-// an error status inside ggml) belongs in qvac-ext-ggml and rides the
-// registry release train.  Both sides of the mirror are pinned in CI by
-// test-t3-sched-dispatch (guard branches) and its -abort-repro twin.
+// two candidates is complete FOR THE CURRENT PREDICATE.  qvac-ext-ggml
+// 6cc71f22 (in ggml-speech 2026-10-02) turned the rejection from a
+// GGML_ABORT into a failed sched allocation; older ggml-speech pins still
+// abort, so if a ggml sync changes that assignment logic and this guard
+// silently stops matching, those pins abort again.  Both sides of the mirror
+// are pinned in CI by test-t3-sched-dispatch (guard branches) and its
+// -abort-repro twin.
 bool graph_has_unsupported_preallocated_op(ggml_backend_t primary, const ggml_cgraph * gf) {
     if (!primary || !gf) return false;
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);

@@ -56,10 +56,11 @@ bool sched_force_enabled();
 // Pre-sched abort guard: true if some node is BOTH bound to a pre-allocated
 // buffer (node->buffer, or view_src->buffer — e.g. an op writing a
 // persistent KV-cache slab) AND runnable by neither the primary backend nor
-// the CPU device for that buffer type.  ggml_backend_sched would GGML_ABORT
-// on such a node ("pre-allocated tensor in a buffer that cannot run the
-// operation") instead of falling back; callers must fail gracefully rather
-// than enter the scheduler.
+// the CPU device for that buffer type.  ggml_backend_sched rejects such a
+// node ("pre-allocated tensor in a buffer that cannot run the operation")
+// instead of falling back: ggml-speech pins before qvac-ext-ggml 6cc71f22
+// GGML_ABORT, later pins fail the allocation.  Callers must fail gracefully
+// rather than enter the scheduler.
 bool graph_has_unsupported_preallocated_op(ggml_backend_t primary, const ggml_cgraph * gf);
 
 // Lazy one-time creation, guarded by the null check (see threading note

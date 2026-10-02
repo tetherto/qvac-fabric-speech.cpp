@@ -3415,8 +3415,9 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-t3-sched-dispatch)
     tts_cpp_register_test(test-t3-sched-dispatch LABEL "unit")
 
-    # Same binary, guard bypassed: passes only while ggml still ABORTs on the
-    # rejected graph, so a ggml sync that un-mirrors the abort guard fails here.
+    # Same binary, guard bypassed: passes only while ggml still rejects the
+    # graph (GGML_ABORT before qvac-ext-ggml 6cc71f22, a failed sched
+    # allocation from it on), so a ggml sync that un-mirrors the guard fails here.
     tts_cpp_register_test(test-t3-sched-dispatch-abort-repro
                           EXE test-t3-sched-dispatch
                           ARGS --sched-abort-repro

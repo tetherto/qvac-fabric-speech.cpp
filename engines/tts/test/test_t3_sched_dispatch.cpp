@@ -3,7 +3,7 @@
 // paths): graph_fully_supported walk, TTS_CPP_FORCE_SCHED escape
 // hatch, sched_fallback lifecycle (ensure/alloc/compute/free) and both
 // branches of the pre-allocated-op abort guard (see main for the
-// --sched-abort-repro mode that pins the GGML_ABORT side).
+// --sched-abort-repro mode that pins ggml's rejection of the graph).
 //
 // No GGUF / model file required — every test builds a tiny graph on the
 // CPU backend, so the scheduler is exercised as the single-backend
@@ -253,7 +253,8 @@ void test_abort_guard_both_branches(ggml_backend_t cpu) {
 }
 
 // Child half of the repro: bypass the guard, feed the rejected graph to the
-// sched — ggml is expected to GGML_ABORT here.
+// sched. ggml must reject it: ggml-speech pins before qvac-ext-ggml 6cc71f22
+// GGML_ABORT here, later pins log the same message and fail the allocation.
 int run_sched_abort_repro_child(ggml_backend_t cpu, ggml_type bad) {
     setrows_graph g(bad, cpu);
     sched_fallback fb;
@@ -261,13 +262,16 @@ int run_sched_abort_repro_child(ggml_backend_t cpu, ggml_type bad) {
         std::fprintf(stderr, "ERROR: repro setup failed\n");
         return 1;
     }
-    sched_fallback_alloc(fb, g.gf);  // expected to abort inside ggml
-    std::fprintf(stderr, "ERROR: sched alloc did not abort on the rejected graph\n");
+    if (!sched_fallback_alloc(fb, g.gf)) {
+        std::fprintf(stderr, "abort-repro: sched alloc failed on the rejected graph\n");
+        return 1;
+    }
+    std::fprintf(stderr, "ERROR: sched alloc accepted the rejected graph\n");
     return 1;
 }
 
-// Parent half: re-exec self so the child's SIGABRT doesn't fail ctest; the
-// abort message reaches ctest's output for PASS_REGULAR_EXPRESSION.
+// Parent half: re-exec self so a child SIGABRT doesn't fail ctest; ggml's
+// rejection message reaches ctest's output for PASS_REGULAR_EXPRESSION.
 int run_sched_abort_repro(ggml_backend_t cpu, const char * self) {
     const ggml_type bad = find_cpu_rejected_setrows_type(cpu);
     if (bad == GGML_TYPE_COUNT) {
@@ -280,7 +284,7 @@ int run_sched_abort_repro(ggml_backend_t cpu, const char * self) {
         std::fprintf(stderr, "ERROR: abort-repro child exited cleanly\n");
         return 1;
     }
-    std::fprintf(stderr, "abort-repro: child aborted as expected\n");
+    std::fprintf(stderr, "abort-repro: child rejected the graph as expected\n");
     return 0;
 }
 
