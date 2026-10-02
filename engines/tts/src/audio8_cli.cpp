@@ -108,6 +108,7 @@ tts_cpp::audio8::EngineOptions to_engine_options(const options & opts) {
     engine.output_sample_rate = opts.output_sample_rate;
     engine.verbose = opts.verbose;
     engine.backends_dir = opts.backends_dir;
+    if (!opts.backend.empty()) engine.backend = opts.backend;
     return engine;
 }
 

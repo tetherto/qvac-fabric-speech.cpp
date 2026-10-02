@@ -44,6 +44,16 @@ struct EngineOptions {
     // when no validated GPU is present.
     int n_gpu_layers = 0;
 
+    // Explicit backend selection. Accepted values: "auto" / "" (default,
+    // tier-based GPU selection honouring n_gpu_layers), "cpu", or a specific
+    // backend name such as "hexagon" (Snapdragon HTP0) or an exact ggml
+    // device name (e.g. "HTP0"). Explicit requests fail construction when
+    // the named backend is unavailable; "auto" never fails on that path and
+    // falls back to CPU. Hexagon is experimental and currently requires a
+    // build that ships the matching ggml Hexagon backend and DSP library
+    // next to the binary.
+    std::string backend = "auto";
+
     // Sampling. The reference filters candidates by top_k and top_p on the raw
     // logits and only then applies the temperature, and this follows it.
     // greedy ignores all three and takes the argmax, which is what the parity
