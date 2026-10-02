@@ -17,6 +17,8 @@ constexpr float kLayerNormEpsilon = 1.0e-5f;
 constexpr size_t kGraphSlots = 4096;
 constexpr float kDefaultPrewarmSeconds = 1.0f;
 constexpr int kMillisecondsPerSecond = 1000;
+constexpr size_t kProbeTensorSlots = 32;
+constexpr int kQkvComponents = 3;
 
 ggml_tensor * layer_norm(
     ggml_context * context, ggml_tensor * input,
@@ -41,40 +43,94 @@ ggml_tensor * qkv_view(
         static_cast<size_t>(component * config.encoder_width) * qkv->nb[0]);
 }
 
+struct AttentionHeads {
+    ggml_tensor * query = nullptr;
+    ggml_tensor * key = nullptr;
+    ggml_tensor * value = nullptr;
+};
+
+int head_width_of(const NemotronDiarizationConfig & config) {
+    return config.encoder_width / config.attention_heads;
+}
+
+float attention_scale(const NemotronDiarizationConfig & config) {
+    return 1.0f / std::sqrt(static_cast<float>(head_width_of(config)));
+}
+
+ggml_tensor * rotate(
+    ggml_context * context, ggml_tensor * heads, ggml_tensor * positions,
+    const NemotronDiarizationConfig & config) {
+    const int rotary_width = static_cast<int>(head_width_of(config) * config.rotary_fraction);
+    return ggml_rope_ext(context, heads, positions, nullptr, rotary_width,
+        GGML_ROPE_TYPE_NEOX, config.position_limit, config.rope_base,
+        1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+}
+
+AttentionHeads attention_heads(
+    ggml_context * context, ggml_tensor * qkv, ggml_tensor * positions,
+    const NemotronDiarizationConfig & config, int frames) {
+    AttentionHeads heads;
+    heads.query = ggml_permute(context,
+        rotate(context, qkv_view(context, qkv, config, 0, frames), positions, config), 0, 2, 1, 3);
+    heads.key = ggml_permute(context,
+        rotate(context, qkv_view(context, qkv, config, 1, frames), positions, config), 0, 2, 1, 3);
+    heads.value = ggml_permute(context, qkv_view(context, qkv, config, 2, frames), 0, 2, 1, 3);
+    return heads;
+}
+
+ggml_tensor * fused_attention(
+    ggml_context * context, const AttentionHeads & heads,
+    const NemotronDiarizationConfig & config) {
+    return ggml_flash_attn_ext(context, heads.query, heads.key, heads.value,
+        nullptr, attention_scale(config), 0.0f, 0.0f);
+}
+
+ggml_tensor * unfused_attention(
+    ggml_context * context, const AttentionHeads & heads,
+    const NemotronDiarizationConfig & config) {
+    ggml_tensor * scores = ggml_mul_mat(context,
+        ggml_cont(context, heads.key), ggml_cont(context, heads.query));
+    scores = ggml_soft_max_ext(context, scores, nullptr, attention_scale(config), 0.0f);
+    ggml_tensor * values = ggml_cont(context, ggml_permute(context, heads.value, 1, 0, 2, 3));
+    return ggml_permute(context, ggml_mul_mat(context, values, scores), 0, 2, 1, 3);
+}
+
 ggml_tensor * rotary_attention(
     ggml_context * context, ggml_tensor * input, ggml_tensor * positions,
     const NemotronDiarizationConfig & config,
-    const NemotronDiarizationLayer & layer, int frames) {
+    const NemotronDiarizationLayer & layer, int frames, bool use_fused_attention) {
     ggml_tensor * qkv = linear(context, input, layer.qkv_w, nullptr);
-    ggml_tensor * query = qkv_view(context, qkv, config, 0, frames);
-    ggml_tensor * key = qkv_view(context, qkv, config, 1, frames);
-    ggml_tensor * value = qkv_view(context, qkv, config, 2, frames);
-    const int head_width = config.encoder_width / config.attention_heads;
-    const int rotary_width = static_cast<int>(head_width * config.rotary_fraction);
-    query = ggml_rope_ext(context, query, positions, nullptr, rotary_width,
-        GGML_ROPE_TYPE_NEOX, config.position_limit, config.rope_base,
-        1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    key = ggml_rope_ext(context, key, positions, nullptr, rotary_width,
-        GGML_ROPE_TYPE_NEOX, config.position_limit, config.rope_base,
-        1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    query = ggml_permute(context, query, 0, 2, 1, 3);
-    key = ggml_permute(context, key, 0, 2, 1, 3);
-    value = ggml_permute(context, value, 0, 2, 1, 3);
-    ggml_tensor * attended = ggml_flash_attn_ext(context, query, key, value,
-        nullptr, 1.0f / std::sqrt(static_cast<float>(head_width)), 0.0f, 0.0f);
+    const AttentionHeads heads = attention_heads(context, qkv, positions, config, frames);
+    ggml_tensor * attended = use_fused_attention
+        ? fused_attention(context, heads, config)
+        : unfused_attention(context, heads, config);
     ggml_tensor * merged = ggml_reshape_2d(context,
         ggml_cont(context, attended), config.encoder_width, frames);
     return linear(context, merged, layer.attention_w, layer.attention_b);
 }
 
+bool backend_runs_fused_attention(
+    ggml_backend_t backend, const NemotronDiarizationConfig & config, int frames) {
+    ggml_init_params parameters = {ggml_tensor_overhead() * kProbeTensorSlots, nullptr, true};
+    ggml_context * context = ggml_init(parameters);
+    if (!context) return false;
+    ggml_tensor * qkv = ggml_new_tensor_2d(context, GGML_TYPE_F32,
+        static_cast<int64_t>(kQkvComponents) * config.encoder_width, frames);
+    ggml_tensor * positions = ggml_new_tensor_1d(context, GGML_TYPE_I32, frames);
+    const AttentionHeads heads = attention_heads(context, qkv, positions, config, frames);
+    const bool supported = ggml_backend_supports_op(backend, fused_attention(context, heads, config));
+    ggml_free(context);
+    return supported;
+}
+
 ggml_tensor * encoder_layer(
     ggml_context * context, ggml_tensor * input, ggml_tensor * positions,
     const NemotronDiarizationConfig & config,
-    const NemotronDiarizationLayer & layer, int frames) {
+    const NemotronDiarizationLayer & layer, int frames, bool use_fused_attention) {
     ggml_tensor * normalized = layer_norm(
         context, input, layer.norm1_w, layer.norm1_b);
     ggml_tensor * attended = rotary_attention(
-        context, normalized, positions, config, layer, frames);
+        context, normalized, positions, config, layer, frames, use_fused_attention);
     ggml_tensor * residual = ggml_add(context, input, attended);
     normalized = layer_norm(context, residual, layer.norm2_w, layer.norm2_b);
     ggml_tensor * hidden = linear(context, normalized,
@@ -89,7 +145,7 @@ ggml_tensor * encode(
     ggml_context * context, ggml_tensor * stacked, ggml_tensor * state,
     ggml_tensor * positions, ggml_tensor ** chunk_embeddings,
     const NemotronDiarizationConfig & config,
-    const NemotronDiarizationWeights & weights, int frames) {
+    const NemotronDiarizationWeights & weights, int frames, bool use_fused_attention) {
     *chunk_embeddings = linear(context, stacked, weights.feature_projection, nullptr);
     ggml_tensor * encoded = state
         ? ggml_concat(context, state, *chunk_embeddings, 1)
@@ -97,7 +153,8 @@ ggml_tensor * encode(
     encoded = layer_norm(context, encoded,
         weights.embedding_norm_w, weights.embedding_norm_b);
     for (const auto & layer : weights.layers) {
-        encoded = encoder_layer(context, encoded, positions, config, layer, frames);
+        encoded = encoder_layer(context, encoded, positions, config, layer, frames,
+            use_fused_attention);
     }
     return layer_norm(context, encoded,
         weights.final_norm_w, weights.final_norm_b);
@@ -185,9 +242,17 @@ void add_graph_inputs(
     ggml_set_input(graph.positions);
 }
 
+bool graph_runs_fused_attention(
+    const ParakeetCtcModel & model, int frames, NemotronAttention attention) {
+    if (attention == NemotronAttention::Unfused) return false;
+    ggml_backend_sched_t scheduler = model_sched(model);
+    return scheduler && backend_runs_fused_attention(
+        ggml_backend_sched_get_backend(scheduler, 0), model.nemotron_diarization_cfg, frames);
+}
+
 bool build_graph(
     const ParakeetCtcModel & model, int chunk_frames, int state_frames,
-    DiarizationGraph & graph) {
+    NemotronAttention attention, DiarizationGraph & graph) {
     graph.context = new_graph_context();
     if (!graph.context) return false;
     add_graph_inputs(model, chunk_frames, state_frames, graph);
@@ -195,7 +260,8 @@ bool build_graph(
     const int frames = state_frames + chunk_frames;
     ggml_tensor * encoded = encode(graph.context, graph.input, graph.state_input,
         graph.positions, &graph.chunk_embeddings,
-        config, model.nemotron_diarization, frames);
+        config, model.nemotron_diarization, frames,
+        graph_runs_fused_attention(model, frames, attention));
     graph.output = speaker_head(graph.context, encoded,
         config, model.nemotron_diarization, frames);
     ggml_set_output(graph.output);
@@ -285,7 +351,8 @@ int run_zero_chunk(const ParakeetCtcModel & model, int mel_frames, int state_fra
 
 int run_nemotron_diarization_chunk(
     const ParakeetCtcModel & model, const float * mel, int mel_frames,
-    const float * state, int state_frames, NemotronDiarizationChunk & output) {
+    const float * state, int state_frames, NemotronDiarizationChunk & output,
+    NemotronAttention attention) {
     const auto & config = model.nemotron_diarization_cfg;
     if (!mel || (state_frames > 0 && !state)) return 1;
     const int shape = validate_chunk_shape(config, mel_frames, state_frames);
@@ -297,7 +364,7 @@ int run_nemotron_diarization_chunk(
     std::vector<int32_t> position_values;
     fill_positions(state_frames + chunk_frames, position_values);
     DiarizationGraph graph;
-    if (!build_graph(model, chunk_frames, state_frames, graph)) return 3;
+    if (!build_graph(model, chunk_frames, state_frames, attention, graph)) return 3;
     const int result = compute_graph(model, graph, stacked, state,
         state_frames, position_values, output);
     ggml_free(graph.context);
@@ -306,10 +373,10 @@ int run_nemotron_diarization_chunk(
 
 int run_nemotron_diarization(
     const ParakeetCtcModel & model, const float * mel, int mel_frames,
-    std::vector<float> & probabilities) {
+    std::vector<float> & probabilities, NemotronAttention attention) {
     NemotronDiarizationChunk chunk;
     const int result = run_nemotron_diarization_chunk(
-        model, mel, mel_frames, nullptr, 0, chunk);
+        model, mel, mel_frames, nullptr, 0, chunk, attention);
     if (result != 0) return result;
     probabilities = std::move(chunk.probabilities);
     probabilities.resize(static_cast<size_t>(mel_frames) *
@@ -345,6 +412,12 @@ int nemotron_diarization_stream_state_frames() {
     return kNemotronSpeakerCacheFrames + kNemotronFifoFrames;
 }
 
+bool nemotron_diarization_uses_fused_attention(const ParakeetCtcModel & model) {
+    const int frames = nemotron_diarization_stream_state_frames() +
+        nemotron_diarization_encoder_frames(model, nemotron_diarization_stream_mel_frames(model));
+    return graph_runs_fused_attention(model, frames, NemotronAttention::Automatic);
+}
+
 int measure_nemotron_diarization(
     const ParakeetCtcModel & model, int mel_frames, int state_frames,
     NemotronDiarizationFitMeasure & output) {
@@ -355,7 +428,8 @@ int measure_nemotron_diarization(
     ggml_backend_sched_t scheduler = model_sched(model);
     if (!scheduler) return 3;
     DiarizationGraph graph;
-    if (!build_graph(model, chunk_frames_for(config, mel_frames), state_frames, graph)) return 3;
+    if (!build_graph(model, chunk_frames_for(config, mel_frames), state_frames,
+            NemotronAttention::Automatic, graph)) return 3;
     const int result = measure_graph(scheduler, graph, output);
     ggml_free(graph.context);
     return result;

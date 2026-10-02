@@ -13,6 +13,11 @@ constexpr int kNemotronFifoFrames = 80;
 constexpr int kNemotronRightContextMs = 80;
 constexpr int kNemotronUpdateFrames = 40;
 
+enum class NemotronAttention {
+    Automatic,
+    Unfused,
+};
+
 struct NemotronDiarizationChunk {
     std::vector<float> probabilities;
     std::vector<float> embeddings;
@@ -31,13 +36,15 @@ int run_nemotron_diarization_chunk(
     int mel_frames,
     const float * state,
     int state_frames,
-    NemotronDiarizationChunk & output);
+    NemotronDiarizationChunk & output,
+    NemotronAttention attention = NemotronAttention::Automatic);
 
 int run_nemotron_diarization(
     const ParakeetCtcModel & model,
     const float * mel,
     int mel_frames,
-    std::vector<float> & probabilities);
+    std::vector<float> & probabilities,
+    NemotronAttention attention = NemotronAttention::Automatic);
 
 int prewarm_nemotron_diarization(
     const ParakeetCtcModel & model,
@@ -50,6 +57,8 @@ int nemotron_diarization_encoder_frames(
 int nemotron_diarization_stream_mel_frames(const ParakeetCtcModel & model);
 
 int nemotron_diarization_stream_state_frames();
+
+bool nemotron_diarization_uses_fused_attention(const ParakeetCtcModel & model);
 
 int measure_nemotron_diarization(
     const ParakeetCtcModel & model,

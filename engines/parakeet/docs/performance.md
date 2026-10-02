@@ -112,3 +112,13 @@ first streaming chunk; CUDA spends 67 ms. `EngineOptions::prewarm` runs one
 offline pass of `prewarm_audio_seconds` and one chunk at the default live
 geometry during construction, after which the first offline call takes 8 ms
 on both backends and no streaming chunk exceeds 5 ms.
+
+Backends without fused flash attention for this graph, such as ggml-opencl
+on Adreno, use an unfused attention on the GPU. Forced on the RTX 5090, it
+costs 15 % per streaming chunk (CUDA 3.80 -> 4.35 ms, Vulkan 3.90 -> 4.48 ms)
+and about 3x on the 273 s offline graph (CUDA 16.6 -> 50.8 ms, Vulkan 28.3 ->
+61.1 ms), because its score matrix is quadratic in the input length. Sending
+the fused attention to the CPU instead, which is what the scheduler would do
+without the fallback, makes a streaming chunk 10x slower (CUDA 38.7 ms,
+Vulkan 40.0 ms). The unfused path passes the same NeMo-Speech.cpp reference
+check on CPU, CUDA, Vulkan, and Metal.

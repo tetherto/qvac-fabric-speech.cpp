@@ -114,7 +114,9 @@ official checkpoint) is an error with reason `workload-too-large`, as it is
 at runtime. Offline and live sessions share the model scheduler, so the
 compute figure is the larger of the offline graph and one chunk at the
 default live geometry (1040 ms chunk, 80 ms right context, 264 speaker-cache
-and 80 FIFO rows).
+and 80 FIFO rows). On a backend without fused flash attention the graph uses
+unfused attention, whose score matrix grows with the square of the input
+length, and the projection prices that graph.
 
 The projection is exact where it can be: `test-fit-params` asserts the
 projected weight, encoder-compute, Sortformer-head, Nemotron

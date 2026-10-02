@@ -60,7 +60,9 @@ reference test against NVIDIA's C++ implementation. With `--n-gpu-layers` or
 `EngineOptions::n_gpu_layers` above zero the whole graph runs on CUDA, Vulkan,
 or Metal; offline inference and cached streaming pass the same numerical and
 session tests on an RTX 5090 (CUDA and Vulkan), an AMD Radeon RX 7600 XT
-(Vulkan), and an Apple M3 Ultra (Metal). OpenCL is untested.
+(Vulkan), and an Apple M3 Ultra (Metal). Backends without fused flash
+attention for this graph, such as ggml-opencl on Adreno, keep attention on
+the GPU with an unfused path; OpenCL is untested on hardware.
 `EngineOptions::prewarm` runs one offline pass and one chunk at the default
 live geometry, and `parakeet-fit-params` projects the model's memory. GPU
 timings and accuracy are in
