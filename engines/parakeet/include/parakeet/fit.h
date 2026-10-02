@@ -25,10 +25,12 @@
 // over the whole stitched encoder output, not per window) PLUS one live
 // streaming session at the FitOptions::nemotron_chunk_ms operating point (its
 // step graph, per-chunk pre-encode graph, and host-resident caches).
-// Nemotron 3 Diarization runs the whole input through one graph and shares
-// the model scheduler with its live sessions, so its compute projection is
-// the larger of that offline graph and one chunk at the default live geometry
-// (1040 ms chunk, 80 ms right context, 264 speaker-cache and 80 FIFO rows).
+// Nemotron 3 Diarization runs offline inputs up to the long-form window as
+// one graph and longer ones through its cached long-form path; every graph
+// shares the model scheduler, so its compute projection is the largest of
+// the single-pass graph (bounded by the window), one chunk at the default
+// live geometry (1040 ms chunk, 80 ms right context, 264 speaker-cache and
+// 80 FIFO rows), and one 30 s long-form chunk when the workload needs it.
 //
 // Status semantics follow the SDK's @qvac/model-fit contract:
 //   Success -- a projection was made and it fits (result.fits == true).
@@ -78,9 +80,9 @@ struct FitOptions {
     // (full-input mel, encoder-output slab, ...) keep growing with it.
     // Exceptions that keep growing on the device too: Sortformer (no
     // windowing), Nemotron (its locale-prompt projection graph runs over
-    // the full stitched encoder output), and Nemotron 3 Diarization (no
-    // windowing; inputs past its positional limit are Error/
-    // "workload-too-large").
+    // the full stitched encoder output). Nemotron 3 Diarization saturates at
+    // its long-form window; with long-form disabled, inputs past its
+    // positional limit are Error/"workload-too-large".
     float audio_seconds = 300.0f;
 
     // Same semantics as the EngineOptions fields of the same name (0 = auto).

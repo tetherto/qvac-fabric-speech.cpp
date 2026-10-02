@@ -28,6 +28,13 @@
 //                                 --ref-rttm <rttm>
 //                                 [--chunk-ms 2000]
 //                                 [--der-max 30.0]
+//                                 [--offline]
+//                                 [--long-form-window-frames 0]
+//                                 [--n-gpu-layers 0]
+//
+// --offline scores Engine::diarize_samples on the whole file instead of a
+// streaming session; Nemotron 3 Diarization then takes its long-form path
+// once the file exceeds the long-form window.
 //
 // Exit codes:
 //    0 = PASS  (all three invariants satisfied)
@@ -64,6 +71,7 @@
 namespace {
 
 constexpr double FRAME_S = 0.01;  // 10 ms grid
+constexpr int    kMinSegmentMs = 200;
 
 using parakeet_test::file_exists;
 using parakeet_test::load_wav_pcm16le_mono;
@@ -223,12 +231,65 @@ int dominant_hyp_in_range(const HypTimeline & hyp,
 
 }  // namespace
 
+std::vector<parakeet::StreamingDiarizationSegment> streaming_segments(
+    parakeet::Engine & engine, const std::vector<float> & samples, int sr, int chunk_ms) {
+    // Defaults pull the new AOSC config (spkcache_enable=true, fifo_len=188,
+    // chunk_left_context_ms=80, chunk_right_context_ms=560, etc.) from
+    // the public SortformerStreamingOptions struct. We only override the
+    // bits that follow the WAV + the CLI chunk knob.
+    parakeet::SortformerStreamingOptions sopts;
+    sopts.sample_rate    = sr;
+    sopts.chunk_ms       = chunk_ms;
+    // min_segment_ms 200 matches the other streaming test; otherwise
+    // very-short transient segments inflate the segment count without
+    // contributing to the speaker-correctness verdict.
+    sopts.min_segment_ms = kMinSegmentMs;
+
+    std::vector<parakeet::StreamingDiarizationSegment> hyp_segs;
+    auto on_seg = [&](const parakeet::StreamingDiarizationSegment & s) {
+        if (s.speaker_id < 0) return;
+        if (s.end_s <= s.start_s) return;
+        hyp_segs.push_back(s);
+    };
+
+    auto session = engine.diarize_start(sopts, on_seg);
+    const int feed_samples = std::max(1, (sr * chunk_ms) / 1000);
+    size_t off = 0;
+    while (off < samples.size()) {
+        const int n = std::min(feed_samples, (int) (samples.size() - off));
+        session->feed_pcm_f32(samples.data() + off, n);
+        off += n;
+    }
+    try { session->finalize(); } catch (...) { /* same as streaming test */ }
+    return hyp_segs;
+}
+
+std::vector<parakeet::StreamingDiarizationSegment> offline_segments(
+    parakeet::Engine & engine, const std::vector<float> & samples, int sr) {
+    parakeet::DiarizationOptions options;
+    options.min_segment_ms = kMinSegmentMs;
+    const parakeet::DiarizationResult result =
+        engine.diarize_samples(samples.data(), (int) samples.size(), sr, options);
+    std::vector<parakeet::StreamingDiarizationSegment> hyp_segs;
+    for (const auto & segment : result.segments) {
+        parakeet::StreamingDiarizationSegment s;
+        s.speaker_id = segment.speaker_id;
+        s.start_s    = segment.start_s;
+        s.end_s      = segment.end_s;
+        hyp_segs.push_back(s);
+    }
+    return hyp_segs;
+}
+
 int main(int argc, char ** argv) {
     std::string gguf;
     std::string wav;
     std::string ref_rttm;
     int    chunk_ms = 2000;
     double der_max  = 30.0;
+    bool   offline  = false;
+    int    long_form_window_frames = 0;
+    int    n_gpu_layers = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -237,6 +298,11 @@ int main(int argc, char ** argv) {
         else if (a == "--ref-rttm" && i + 1 < argc) ref_rttm = argv[++i];
         else if (a == "--chunk-ms" && i + 1 < argc) chunk_ms = std::atoi(argv[++i]);
         else if (a == "--der-max"  && i + 1 < argc) der_max  = std::atof(argv[++i]);
+        else if (a == "--offline") offline = true;
+        else if (a == "--long-form-window-frames" && i + 1 < argc) {
+            long_form_window_frames = std::atoi(argv[++i]);
+        }
+        else if (a == "--n-gpu-layers" && i + 1 < argc) n_gpu_layers = std::atoi(argv[++i]);
         else {
             std::fprintf(stderr,
                 "[aosc-spk-test] unknown / incomplete option: %s\n", a.c_str());
@@ -246,7 +312,8 @@ int main(int argc, char ** argv) {
     if (gguf.empty() || wav.empty() || ref_rttm.empty()) {
         std::fprintf(stderr,
             "[aosc-spk-test] Usage: --model <gguf> --wav <wav> "
-            "--ref-rttm <rttm> [--chunk-ms 2000] [--der-max 30.0]\n");
+            "--ref-rttm <rttm> [--chunk-ms 2000] [--der-max 30.0] [--offline] "
+            "[--long-form-window-frames 0] [--n-gpu-layers 0]\n");
         return 2;
     }
 
@@ -276,6 +343,8 @@ int main(int argc, char ** argv) {
     parakeet::EngineOptions eopts;
     eopts.model_gguf_path = gguf;
     eopts.verbose         = false;
+    eopts.long_form_window_frames = long_form_window_frames;
+    eopts.n_gpu_layers    = n_gpu_layers;
     parakeet::Engine engine(eopts);
     if (!engine.is_diarization_model()) {
         std::fprintf(stderr,
@@ -283,40 +352,15 @@ int main(int argc, char ** argv) {
         return 14;
     }
 
-    // Defaults pull the new AOSC config (spkcache_enable=true, fifo_len=188,
-    // chunk_left_context_ms=80, chunk_right_context_ms=560, etc.) from
-    // the public SortformerStreamingOptions struct. We only override the
-    // bits that follow the WAV + the CLI chunk knob.
-    parakeet::SortformerStreamingOptions sopts;
-    sopts.sample_rate    = sr;
-    sopts.chunk_ms       = chunk_ms;
-    // min_segment_ms 200 matches the other streaming test; otherwise
-    // very-short transient segments inflate the segment count without
-    // contributing to the speaker-correctness verdict.
-    sopts.min_segment_ms = 200;
-
     std::fprintf(stderr,
-        "[aosc-spk-test] model=%s wav=%s samples=%zu sr=%d chunk_ms=%d "
-        "der_max=%.2f%% (AOSC: spkcache=%d len=%d fifo=%d)\n",
-        gguf.c_str(), wav.c_str(), samples.size(), sr, chunk_ms, der_max,
-        (int) sopts.spkcache_enable, sopts.spkcache_len, sopts.fifo_len);
+        "[aosc-spk-test] model=%s wav=%s samples=%zu sr=%d mode=%s chunk_ms=%d "
+        "der_max=%.2f%%\n",
+        gguf.c_str(), wav.c_str(), samples.size(), sr,
+        offline ? "offline" : "streaming", chunk_ms, der_max);
 
-    std::vector<parakeet::StreamingDiarizationSegment> hyp_segs;
-    auto on_seg = [&](const parakeet::StreamingDiarizationSegment & s) {
-        if (s.speaker_id < 0) return;
-        if (s.end_s <= s.start_s) return;
-        hyp_segs.push_back(s);
-    };
-
-    auto session = engine.diarize_start(sopts, on_seg);
-    const int feed_samples = std::max(1, (sr * chunk_ms) / 1000);
-    size_t off = 0;
-    while (off < samples.size()) {
-        const int n = std::min(feed_samples, (int) (samples.size() - off));
-        session->feed_pcm_f32(samples.data() + off, n);
-        off += n;
-    }
-    try { session->finalize(); } catch (...) { /* same as streaming test */ }
+    const std::vector<parakeet::StreamingDiarizationSegment> hyp_segs = offline
+        ? offline_segments(engine, samples, sr)
+        : streaming_segments(engine, samples, sr, chunk_ms);
 
     if (hyp_segs.empty()) {
         std::fprintf(stderr,
