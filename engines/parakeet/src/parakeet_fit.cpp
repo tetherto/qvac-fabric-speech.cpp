@@ -168,49 +168,98 @@ uint64_t nemotron_diarization_host_bytes(const ParakeetCtcModel & model,
     return sat_add(host, sched_input_bytes);
 }
 
-std::string nemotron_diarization_report(int offline_frames, int stream_frames,
-                                        const NemotronDiarizationFitMeasure & offline,
-                                        const NemotronDiarizationFitMeasure & stream) {
+struct DiarizationGraphShape {
+    int mel_frames = 0;
+    int state_frames = 0;
+};
+
+struct DiarizationGraphMeasure {
+    NemotronDiarizationFitMeasure bytes;
+    int frames = 0;
+};
+
+struct DiarizationFitGraphs {
+    DiarizationGraphMeasure single_pass;
+    DiarizationGraphMeasure stream;
+    DiarizationGraphMeasure long_form;
+};
+
+bool measure_diarization_graph(const ParakeetCtcModel & model, const DiarizationGraphShape & shape,
+                               DiarizationGraphMeasure & measure) {
+    measure.frames = shape.state_frames +
+                     nemotron_diarization_encoder_frames(model, shape.mel_frames);
+    return measure_nemotron_diarization(model, shape.mel_frames, shape.state_frames,
+                                        measure.bytes) == 0;
+}
+
+bool measure_diarization_graphs(const ParakeetCtcModel & model, int single_pass_mel,
+                                bool long_form, DiarizationFitGraphs & graphs) {
+    const int state = nemotron_diarization_stream_state_frames();
+    const DiarizationGraphShape single_pass{single_pass_mel, 0};
+    const DiarizationGraphShape stream{nemotron_diarization_stream_mel_frames(model), state};
+    const DiarizationGraphShape chunk{nemotron_diarization_long_form_mel_frames(model), state};
+    return measure_diarization_graph(model, single_pass, graphs.single_pass) &&
+           measure_diarization_graph(model, stream, graphs.stream) &&
+           (!long_form || measure_diarization_graph(model, chunk, graphs.long_form));
+}
+
+size_t largest_device_bytes(const DiarizationFitGraphs & graphs) {
+    return std::max({graphs.single_pass.bytes.device_compute_bytes,
+                     graphs.stream.bytes.device_compute_bytes,
+                     graphs.long_form.bytes.device_compute_bytes});
+}
+
+size_t largest_host_input_bytes(const DiarizationFitGraphs & graphs) {
+    return std::max({graphs.single_pass.bytes.host_input_bytes,
+                     graphs.stream.bytes.host_input_bytes,
+                     graphs.long_form.bytes.host_input_bytes});
+}
+
+std::string diarization_graph_report(const char * label, const DiarizationGraphMeasure & graph) {
     char line[kReportLineBytes];
-    std::snprintf(line, sizeof(line),
-                  "diarization: offline graph %s (%d encoder frames); "
-                  "stream graph %s (%d encoder frames)\n",
-                  fmt_mib(offline.device_compute_bytes).c_str(), offline_frames,
-                  fmt_mib(stream.device_compute_bytes).c_str(), stream_frames);
+    std::snprintf(line, sizeof(line), "%s%s (%d encoder frames)", label,
+                  fmt_mib(graph.bytes.device_compute_bytes).c_str(), graph.frames);
     return line;
+}
+
+std::string nemotron_diarization_report(const DiarizationFitGraphs & graphs, bool long_form) {
+    std::string s = "diarization: " +
+                    diarization_graph_report("single-pass graph ", graphs.single_pass) +
+                    diarization_graph_report("; stream graph ", graphs.stream);
+    if (long_form) {
+        s += diarization_graph_report("; long-form chunk graph ", graphs.long_form);
+    }
+    return s + "\n";
 }
 
 void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoadMeasure & lm,
                                   const FitOptions & opts, FitResult & r) {
     const long long total_mel = total_mel_frames(opts.audio_seconds, model.mel_cfg);
     const int offline_frames = nemotron_diarization_encoder_frames(model, total_mel);
-    if (offline_frames > model.nemotron_diarization_cfg.position_limit) {
+    const int window = nemotron_diarization_long_form_frames(model, opts.long_form_window_frames);
+    const bool long_form = nemotron_diarization_uses_long_form(
+        model, opts.long_form_window_frames, total_mel);
+    if (!long_form && offline_frames > model.nemotron_diarization_cfg.position_limit) {
         r.reason = "workload-too-large";
         return;
     }
-    const int stream_mel = nemotron_diarization_stream_mel_frames(model);
-    const int stream_state = nemotron_diarization_stream_state_frames();
-    NemotronDiarizationFitMeasure offline;
-    NemotronDiarizationFitMeasure stream;
-    if (measure_nemotron_diarization(model, (int) total_mel, 0, offline) != 0 ||
-        measure_nemotron_diarization(model, stream_mel, stream_state, stream) != 0) {
+    const long long window_mel =
+        (long long) window * model.nemotron_diarization_cfg.subsampling_factor;
+    DiarizationFitGraphs graphs;
+    if (!measure_diarization_graphs(model, (int) (long_form ? window_mel : total_mel),
+                                    long_form, graphs)) {
         r.reason = "measurement-failed";
         return;
     }
     r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;
-    r.device.encoder_compute_bytes =
-        std::max(offline.device_compute_bytes, stream.device_compute_bytes);
+    r.device.encoder_compute_bytes = largest_device_bytes(graphs);
     r.device.total_bytes = sat_add(r.device.weights_bytes, r.device.encoder_compute_bytes);
     r.host_bytes = nemotron_diarization_host_bytes(
-        model, opts, total_mel, offline_frames,
-        std::max(offline.host_input_bytes, stream.host_input_bytes));
+        model, opts, total_mel, offline_frames, largest_host_input_bytes(graphs));
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
-    const int stream_frames =
-        stream_state + nemotron_diarization_encoder_frames(model, stream_mel);
-    r.report = model_device_report(r) +
-               nemotron_diarization_report(offline_frames, stream_frames, offline, stream) +
+    r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
-                                        "offline and stream graphs share one buffer");
+                                        "every diarization graph shares one buffer");
 }
 
 }  // namespace

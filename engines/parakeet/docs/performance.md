@@ -138,3 +138,28 @@ ggml-opencl rejects flash attention on Adreno. With
 `GGML_OPENCL_FA_ADRENO=1` it takes 108 ms offline and 86 ms per chunk, but it
 fails the test's negative-peak check and changes the streaming segments, so
 leave it off.
+
+### Nemotron 3 Diarization on long offline inputs
+
+A single offline graph loses speaker identity on inputs longer than about
+two minutes, so offline inputs past the 90 s long-form window run through
+the speaker-cache path in 30 s chunks with 1040 ms of left and right
+context. Frame-level DER (no collar, optimal speaker mapping, 200 ms
+minimum segment) against the fixture RTTMs, RTX 5090 CUDA:
+
+| Input | Single graph | Long-form, 1.04 s chunks | 10 s chunks | 30 s chunks | 60 s chunks |
+|---|---:|---:|---:|---:|---:|
+| `abcba.wav`, 160.6 s, 3 speakers | 28.3 % | 12.4 % | 26.9 % | 3.7 % | 3.9 % |
+| `abcdba.wav`, 191.2 s, 4 speakers | 47.5 % | 23.4 % | 14.5 % | 4.3 % | 4.4 % |
+
+On prefixes of the same files the single graph matches the 30 s long-form
+path to within 0.2 points up to 105 s (3.2-4.1 %), slips at 120 s (5.2-5.4 %
+against 4.4-4.5 %), and collapses at 140 s (34-36 % against 4.1-5.1 %); the
+single graph also fails the re-entry check of `test-sortformer-aosc-speakers`
+on both full files. The 90 s auto window keeps single-graph results for short
+inputs and leaves a margin below the measured degradation. The long-form
+path reaches 3.70 % and 4.36 % on CUDA, Vulkan, Metal, Adreno OpenCL and
+Vulkan, and the Snapdragon CPU; the x86 CPU reaches 3.71 % on `abcba` but
+8.0 % on `abcdba`, where one near-tie flips a speaker, which is why the tests
+gate at 15 %. On the RTX 5090 a
+273 s input takes 87 ms long-form against 58 ms for the single graph.

@@ -1401,11 +1401,30 @@ static DiarizationResult engine_impl_diarize_nemotron_streaming(
     return result;
 }
 
+static DiarizationResult engine_impl_diarize_nemotron_long_form(
+    Engine::Impl & impl, const float * samples, int n_samples,
+    int sample_rate, const DiarizationOptions & options);
+
+static int nemotron_mel_frames(const ParakeetCtcModel & model, int n_samples) {
+    return 1 + n_samples / model.mel_cfg.hop_length;
+}
+
+static bool nemotron_offline_uses_long_form(
+    const Engine::Impl & impl, const float * samples, int n_samples) {
+    return samples && n_samples > 0 && nemotron_diarization_uses_long_form(
+        impl.model, impl.opts.long_form_window_frames,
+        nemotron_mel_frames(impl.model, n_samples));
+}
+
 DiarizationResult Engine::diarize_samples(const float * samples,
                                           int n_samples,
                                           int sample_rate,
                                           const DiarizationOptions & opts) {
     if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION) {
+        if (nemotron_offline_uses_long_form(*pimpl_, samples, n_samples)) {
+            return engine_impl_diarize_nemotron_long_form(
+                *pimpl_, samples, n_samples, sample_rate, opts);
+        }
         return engine_impl_diarize_nemotron(*pimpl_, samples, n_samples, sample_rate, opts);
     }
     return engine_impl_diarize_helper(*pimpl_, samples, n_samples, sample_rate, opts);
@@ -2248,6 +2267,7 @@ struct SortformerStreamSession::Impl {
     SortformerSpeakerCache cache;
     bool                   cache_active = false;
     float                  nemotron_stream_gain = 0.0f;
+    std::vector<float> *   probability_sink = nullptr;
 
     // Speaking vs silent from Sortformer probs: max probability above opts.threshold.
     // Initial Unknown forces a transition on the first chunk.
@@ -2380,6 +2400,11 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
                     *engine_impl, win, n, opts.sample_rate, diopts, nemotron_stream_gain)
                 : engine_impl_diarize_helper(*engine_impl, win, n, opts.sample_rate, diopts);
         }
+    }
+
+    if (probability_sink && cache_active) {
+        probability_sink->insert(probability_sink->end(),
+            diar.speaker_probs.begin(), diar.speaker_probs.end());
     }
 
     // AOSC's `sortformer_aosc_step` returns segments + speaker_probs spanning
@@ -2647,21 +2672,13 @@ void SortformerStreamSession::cancel() {
     pimpl_->cancelled = true;
 }
 
-std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
-    const SortformerStreamingOptions & opts,
+static std::unique_ptr<SortformerStreamSession::Impl> make_diarization_session(
+    Engine::Impl & engine, const SortformerStreamingOptions & opts,
     SortformerSegmentCallback on_segment) {
-    if (!is_diarization_model() || !pimpl_->sortformer_ready) {
-        throw std::runtime_error("Engine::diarize_start: loaded GGUF is not a Sortformer model");
-    }
-    if (opts.sample_rate != pimpl_->model.mel_cfg.sample_rate) {
-        throw std::runtime_error("Engine::diarize_start: sample_rate mismatch");
-    }
-    if (opts.chunk_ms <= 0)   throw std::runtime_error("Engine::diarize_start: chunk_ms must be > 0");
-    if (opts.history_ms <= 0) throw std::runtime_error("Engine::diarize_start: history_ms must be > 0");
     constexpr int kNemotronSilenceFramesPerSpeaker = 1;
     constexpr int kSortformerLeftContextMs = 80;
     const bool is_nemotron =
-        pimpl_->model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION;
+        engine.model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION;
     SortformerStreamingOptions effective = opts;
     const SortformerStreamingOptions defaults;
     if (is_nemotron) {
@@ -2681,9 +2698,9 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
             effective.spkcache_update_period = kNemotronUpdateFrames;
         }
         const int coarse_frame_ms =
-            1000 * pimpl_->model.mel_cfg.hop_length *
-            pimpl_->model.nemotron_diarization_cfg.subsampling_factor /
-            pimpl_->model.mel_cfg.sample_rate;
+            1000 * engine.model.mel_cfg.hop_length *
+            engine.model.nemotron_diarization_cfg.subsampling_factor /
+            engine.model.mel_cfg.sample_rate;
         if (effective.spkcache_enable &&
             (effective.chunk_ms % coarse_frame_ms != 0 ||
              effective.chunk_left_context_ms % coarse_frame_ms != 0 ||
@@ -2699,18 +2716,18 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
         throw std::runtime_error("Engine::diarize_start: history_ms must be >= chunk_ms");
     }
     auto impl = std::make_unique<SortformerStreamSession::Impl>();
-    impl->engine_impl     = pimpl_.get();
+    impl->engine_impl     = &engine;
     impl->opts            = effective;
     impl->on_segment      = std::move(on_segment);
     impl->chunk_samples   = effective.sample_rate * effective.chunk_ms / 1000;
     impl->history_samples = effective.sample_rate * effective.history_ms / 1000;
     impl->ring.reserve(impl->history_samples);
 
-    const std::string & variant = pimpl_->model.model_variant;
+    const std::string & variant = engine.model.model_variant;
     const bool model_is_v2_1 = !variant.empty()
         ? (variant == "sortformer-streaming-v2.1-aosc")
-        : (pimpl_->model.encoder_cfg.n_layers == 17 &&
-           pimpl_->model.mel_cfg.n_mels == 128);
+        : (engine.model.encoder_cfg.n_layers == 17 &&
+           engine.model.mel_cfg.n_mels == 128);
     impl->cache_active = opts.spkcache_enable && (model_is_v2_1 || is_nemotron);
 
     if (impl->cache_active) {
@@ -2724,11 +2741,11 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
         }
         // chunk_len in encoder frames; derived from chunk_ms.
         const int enc_frame_ms =
-            1000 * pimpl_->model.mel_cfg.hop_length *
+            1000 * engine.model.mel_cfg.hop_length *
             (is_nemotron
-                ? pimpl_->model.nemotron_diarization_cfg.subsampling_factor
-                : pimpl_->model.encoder_cfg.subsampling_factor) /
-            pimpl_->model.mel_cfg.sample_rate;
+                ? engine.model.nemotron_diarization_cfg.subsampling_factor
+                : engine.model.encoder_cfg.subsampling_factor) /
+            engine.model.mel_cfg.sample_rate;
         impl->sortformer_cfg.chunk_len =
             std::max(1, effective.chunk_ms / std::max(1, enc_frame_ms));
         const int lc_ms = std::max(0, effective.chunk_left_context_ms);
@@ -2744,11 +2761,11 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
         // Reset cache to a clean state with mean_sil_emb zeros at the model's
         // fc_d_model dimension.
         sortformer_cache_reset(impl->cache, is_nemotron
-            ? pimpl_->model.nemotron_diarization_cfg.encoder_width
-            : pimpl_->model.encoder_cfg.d_model);
-        if (is_nemotron && pimpl_->model.nemotron_diarization.silence_embedding) {
+            ? engine.model.nemotron_diarization_cfg.encoder_width
+            : engine.model.encoder_cfg.d_model);
+        if (is_nemotron && engine.model.nemotron_diarization.silence_embedding) {
             ggml_backend_tensor_get(
-                pimpl_->model.nemotron_diarization.silence_embedding,
+                engine.model.nemotron_diarization.silence_embedding,
                 impl->cache.mean_sil_emb.data(), 0,
                 impl->cache.mean_sil_emb.size() * sizeof(float));
         }
@@ -2764,7 +2781,79 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
             impl->sortformer_cfg.chunk_right_context,
             impl->sortformer_cfg.spkcache_update_period);
     }
-    return std::make_unique<SortformerStreamSession>(std::move(impl));
+    return impl;
+}
+
+static SortformerStreamingOptions nemotron_long_form_options(int sample_rate) {
+    SortformerStreamingOptions options;
+    options.sample_rate = sample_rate;
+    options.chunk_ms = kNemotronLongFormChunkMs;
+    options.chunk_left_context_ms = kNemotronLongFormContextMs;
+    options.chunk_right_context_ms = kNemotronLongFormContextMs;
+    options.history_ms = std::max(options.history_ms, options.chunk_ms);
+    return options;
+}
+
+static void hold_last_frame(std::vector<float> & probabilities, int speakers, int frames) {
+    const size_t target = static_cast<size_t>(frames) * speakers;
+    if (probabilities.size() < static_cast<size_t>(speakers)) {
+        probabilities.resize(target, 0.0f);
+        return;
+    }
+    const std::vector<float> last(probabilities.end() - speakers, probabilities.end());
+    while (probabilities.size() < target) {
+        probabilities.insert(probabilities.end(), last.begin(), last.end());
+    }
+    probabilities.resize(target);
+}
+
+static std::vector<float> nemotron_long_form_probabilities(
+    Engine::Impl & impl, const float * samples, int n_samples, int sample_rate) {
+    std::vector<float> probabilities;
+    auto session_impl = make_diarization_session(
+        impl, nemotron_long_form_options(sample_rate), nullptr);
+    session_impl->probability_sink = &probabilities;
+    session_impl->nemotron_stream_gain = nemotron_audio_gain(samples, n_samples);
+    SortformerStreamSession session(std::move(session_impl));
+    session.feed_pcm_f32(samples, n_samples);
+    session.finalize();
+    return probabilities;
+}
+
+static DiarizationResult engine_impl_diarize_nemotron_long_form(
+    Engine::Impl & impl, const float * samples, int n_samples,
+    int sample_rate, const DiarizationOptions & options) {
+    if (sample_rate != impl.model.mel_cfg.sample_rate) {
+        throw std::runtime_error("Nemotron diarization requires nonempty 16 kHz audio");
+    }
+    const auto start = std::chrono::steady_clock::now();
+    DiarizationResult result;
+    result.num_spks = impl.model.nemotron_diarization_cfg.speakers;
+    result.n_frames = nemotron_mel_frames(impl.model, n_samples);
+    result.speaker_probs = nemotron_long_form_probabilities(impl, samples, n_samples, sample_rate);
+    hold_last_frame(result.speaker_probs, result.num_spks, result.n_frames);
+    result.frame_stride_s = static_cast<double>(impl.model.mel_cfg.hop_length) / sample_rate;
+    result.audio_samples = n_samples;
+    result.sample_rate = sample_rate;
+    result.decode_ms = ms_since(start);
+    append_nemotron_diarization_segments(result, options);
+    result.total_ms = ms_since(start);
+    return result;
+}
+
+std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
+    const SortformerStreamingOptions & opts,
+    SortformerSegmentCallback on_segment) {
+    if (!is_diarization_model() || !pimpl_->sortformer_ready) {
+        throw std::runtime_error("Engine::diarize_start: loaded GGUF is not a Sortformer model");
+    }
+    if (opts.sample_rate != pimpl_->model.mel_cfg.sample_rate) {
+        throw std::runtime_error("Engine::diarize_start: sample_rate mismatch");
+    }
+    if (opts.chunk_ms <= 0)   throw std::runtime_error("Engine::diarize_start: chunk_ms must be > 0");
+    if (opts.history_ms <= 0) throw std::runtime_error("Engine::diarize_start: history_ms must be > 0");
+    return std::make_unique<SortformerStreamSession>(
+        make_diarization_session(*pimpl_, opts, std::move(on_segment)));
 }
 
 }

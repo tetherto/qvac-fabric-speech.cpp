@@ -69,7 +69,11 @@ precision.
 live geometry, and `parakeet-fit-params` projects the model's memory. GPU
 timings and accuracy are in
 [docs/performance.md](docs/performance.md#nemotron-3-diarization-on-gpu).
-Streaming accuracy on long conversations remains unmeasured.
+Offline inputs longer than 90 s (`EngineOptions::long_form_window_frames`)
+are diarized by the cached long-form path in 30 s chunks instead of one
+graph: a single graph loses speaker identity past about two minutes (DER
+28-48 % on the 160 s and 191 s `abcba`/`abcdba` fixtures against 3.7-4.4 %
+long-form), and inputs past 400 s now run instead of failing.
 
 Install `huggingface_hub` and download the pinned official GGUF into `models/`:
 

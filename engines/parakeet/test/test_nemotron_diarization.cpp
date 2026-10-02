@@ -34,6 +34,8 @@ constexpr int kFirstWindowMs = kStreamChunkMs + kStreamRightContextMs;
 constexpr float kQuietAudioScale = 0.1f;
 constexpr float kMaximumGainScoreDifference = 0.0002f;
 constexpr float kPrewarmSeconds = 1.0f;
+constexpr int kForcedLongFormFrames = 100;
+constexpr double kMaximumLongFormDifference = 1.0e-4;
 constexpr double kMaximumPrewarmDifference = 1.0e-5;
 
 static bool valid_probabilities(const std::vector<float> & probabilities) {
@@ -237,6 +239,36 @@ static bool preserves_first_chunk_and_gain(
     return passed;
 }
 
+static bool long_form_window_resolves(const parakeet::ParakeetCtcModel & model) {
+    const int limit = model.nemotron_diarization_cfg.position_limit;
+    return parakeet::nemotron_diarization_long_form_frames(model, 0) ==
+               std::min(parakeet::kNemotronLongFormAutoFrames, limit) &&
+           parakeet::nemotron_diarization_long_form_frames(model, -1) == 0 &&
+           parakeet::nemotron_diarization_long_form_frames(model, limit + 1) == limit &&
+           parakeet::nemotron_diarization_long_form_frames(model, kForcedLongFormFrames) ==
+               kForcedLongFormFrames;
+}
+
+static bool long_form_matches_single_pass(
+    const char * model_path, int gpu_layers, const std::vector<float> & samples,
+    const parakeet::DiarizationResult & expected) {
+    parakeet::EngineOptions options;
+    options.model_gguf_path = model_path;
+    options.prewarm = false;
+    options.n_gpu_layers = gpu_layers;
+    options.long_form_window_frames = kForcedLongFormFrames;
+    parakeet::Engine engine(options);
+    const auto actual = engine.diarize_samples(
+        samples.data(), static_cast<int>(samples.size()), kSampleRate, {});
+    const double difference = maximum_probability_error(
+        actual.speaker_probs, expected.speaker_probs);
+    if (actual.n_frames == expected.n_frames && valid_segments(actual) &&
+        difference <= kMaximumLongFormDifference) return true;
+    std::fprintf(stderr, "Nemotron long-form frames=%d expected=%d difference=%f\n",
+        actual.n_frames, expected.n_frames, difference);
+    return false;
+}
+
 static bool prewarmed_engine_matches(
     const char * model_path, int gpu_layers, const std::vector<float> & samples,
     const parakeet::DiarizationResult & expected) {
@@ -333,6 +365,11 @@ int main(int argc, char ** argv) {
         return 1;
     }
     if (!prewarmed_engine_matches(argv[1], gpu_layers, samples, result)) return 1;
+    if (!long_form_window_resolves(model)) {
+        std::fprintf(stderr, "Nemotron long-form window resolution mismatch\n");
+        return 1;
+    }
+    if (!long_form_matches_single_pass(argv[1], gpu_layers, samples, result)) return 1;
     if (!matches_negative_peak_reference(engine, model, samples)) {
         std::fprintf(stderr, "Nemotron negative peak reference mismatch\n");
         return 1;

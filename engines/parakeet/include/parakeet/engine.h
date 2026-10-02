@@ -184,6 +184,13 @@ struct EngineOptions {
     //     < 0  disabled: always single-pass (legacy behaviour; OOMs on long
     //          inputs -- for A/B testing only).
     //
+    // Nemotron 3 Diarization reads long_form_window_frames with the same
+    // signs: inputs longer than the window (auto: min(pos_emb_max_len, 1125),
+    // 90 s) are diarized by the model's cached long-form path, 30 s chunks
+    // with 1040 ms of left and right context, instead of one graph. A single
+    // graph loses speaker identity past about two minutes; < 0 keeps the
+    // single graph, which fails past pos_emb_max_len.
+    //
     // long_form_context_frames -- shared left/right context each window carries
     // so its committed centre frames see enough neighbourhood to match the
     // single-pass encoder. Trimmed off after the encoder runs, so it never
