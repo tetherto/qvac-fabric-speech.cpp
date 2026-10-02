@@ -40,7 +40,8 @@
 //      scheduler; after real runs of both, the scheduler reservation equals
 //      the projection on CPU and stays within the graph-input slots on GPU.
 //      The device projection grows with audio length, and audio beyond the
-//      model's position limit is Error/"workload-too-large".
+//      model's position limit is Error/"workload-too-large", up to the
+//      largest float duration (no overflow on the way to the check).
 //
 // Usage: test-fit-params <model.gguf> [n_gpu_layers]
 // (CMake registers the CPU form, n_gpu_layers omitted = 0 -- the only backend
@@ -62,6 +63,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -194,6 +196,20 @@ void check_nemotron_diarization_workloads(const parakeet::ParakeetCtcModel & mod
            "audio beyond the position limit was '" + fb.reason + "', not workload-too-large");
 }
 
+void check_nemotron_diarization_huge_workload(const parakeet::ParakeetCtcModel & model,
+                                              const parakeet::FitOptions & fopts) {
+    const int saturated = parakeet::nemotron_diarization_encoder_frames(
+        model, std::numeric_limits<long long>::max());
+    expect(saturated == std::numeric_limits<int>::max(),
+           "nemotron diarization encoder frames did not saturate at the largest mel count: " +
+           std::to_string(saturated));
+    parakeet::FitOptions huge = fopts;
+    huge.audio_seconds = std::numeric_limits<float>::max();
+    const parakeet::FitResult fh = parakeet::fit_params(huge);
+    expect(fh.status == parakeet::FitStatus::Error && fh.reason == "workload-too-large",
+           "the largest float audio duration was '" + fh.reason + "', not workload-too-large");
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -246,6 +262,7 @@ int main(int argc, char ** argv) {
                " != allocated " + std::to_string(real_weights));
         check_nemotron_diarization_compute(model, fit, kAudioSeconds);
         check_nemotron_diarization_workloads(model, fopts);
+        check_nemotron_diarization_huge_workload(model, fopts);
     }
 
     // 2 + 3. Parity against a real load on the same (CPU) backend.

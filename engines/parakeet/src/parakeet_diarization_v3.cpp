@@ -207,8 +207,12 @@ struct DiarizationGraph {
     ggml_tensor * output = nullptr;
 };
 
+long long ceil_divide(long long value, long long divisor) {
+    return value / divisor + (value % divisor != 0);
+}
+
 int chunk_frames_for(const NemotronDiarizationConfig & config, int mel_frames) {
-    return (mel_frames + config.subsampling_factor - 1) / config.subsampling_factor;
+    return static_cast<int>(ceil_divide(mel_frames, config.subsampling_factor));
 }
 
 int validate_chunk_shape(
@@ -399,7 +403,7 @@ int nemotron_diarization_encoder_frames(
     const ParakeetCtcModel & model, long long mel_frames) {
     const long long factor = std::max(1, model.nemotron_diarization_cfg.subsampling_factor);
     return static_cast<int>(std::min<long long>(
-        (mel_frames + factor - 1) / factor, std::numeric_limits<int>::max()));
+        ceil_divide(mel_frames, factor), std::numeric_limits<int>::max()));
 }
 
 int nemotron_diarization_stream_mel_frames(const ParakeetCtcModel & model) {
