@@ -18,7 +18,6 @@ namespace {
 constexpr float kLayerNormEpsilon = 1.0e-5f;
 constexpr size_t kGraphSlots = 4096;
 constexpr float kDefaultPrewarmSeconds = 1.0f;
-constexpr int kMillisecondsPerSecond = 1000;
 constexpr size_t kProbeTensorSlots = 32;
 constexpr int kQkvComponents = 3;
 
@@ -415,6 +414,11 @@ int prewarm_nemotron_diarization(const ParakeetCtcModel & model, float audio_sec
         nemotron_diarization_stream_state_frames());
 }
 
+long long nemotron_diarization_mel_frames(
+    const ParakeetCtcModel & model, long long samples) {
+    return 1 + samples / model.mel_cfg.hop_length;
+}
+
 int nemotron_diarization_encoder_frames(
     const ParakeetCtcModel & model, long long mel_frames) {
     const long long factor = std::max(1, model.nemotron_diarization_cfg.subsampling_factor);
@@ -428,8 +432,28 @@ int nemotron_diarization_stream_mel_frames(const ParakeetCtcModel & model) {
         (static_cast<long long>(kMillisecondsPerSecond) * model.mel_cfg.hop_length));
 }
 
+int nemotron_diarization_long_form_mel_frames(const ParakeetCtcModel & model) {
+    const long long window_ms = kNemotronLongFormChunkMs + 2LL * kNemotronLongFormContextMs;
+    return static_cast<int>(window_ms * model.mel_cfg.sample_rate /
+        (static_cast<long long>(kMillisecondsPerSecond) * model.mel_cfg.hop_length));
+}
+
 int nemotron_diarization_stream_state_frames() {
     return kNemotronSpeakerCacheFrames + kNemotronFifoFrames;
+}
+
+int nemotron_diarization_long_form_frames(
+    const ParakeetCtcModel & model, int requested_frames) {
+    const int limit = model.nemotron_diarization_cfg.position_limit;
+    if (requested_frames < 0) return 0;
+    if (requested_frames == 0) return std::min(kNemotronLongFormAutoFrames, limit);
+    return std::min(requested_frames, limit);
+}
+
+bool nemotron_diarization_uses_long_form(
+    const ParakeetCtcModel & model, int requested_frames, long long mel_frames) {
+    const int window = nemotron_diarization_long_form_frames(model, requested_frames);
+    return window > 0 && nemotron_diarization_encoder_frames(model, mel_frames) > window;
 }
 
 bool nemotron_diarization_uses_fused_attention(const ParakeetCtcModel & model) {

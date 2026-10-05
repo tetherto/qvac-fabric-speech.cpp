@@ -75,7 +75,8 @@ void append_values(ggml_context * ctx, ggml_cgraph * graph, const kv_cache & cac
     const size_t offset = static_cast<size_t>(shape.layer) * column * cache.stride +
                           static_cast<size_t>(shape.n_past) * FLOAT;
     ggml_tensor * slot = ggml_view_2d(ctx, cache.v, shape.width, cache.stride, column, offset);
-    ggml_build_forward_expand(graph, ggml_cpy(ctx, ggml_transpose(ctx, rows), slot));
+    // OpenCL CPY aborts on strided src on Adreno 830; materialise contiguously first.
+    ggml_build_forward_expand(graph, ggml_cpy(ctx, ggml_cont(ctx, ggml_transpose(ctx, rows)), slot));
 }
 
 // The rotated query [head_dim, n_head, width] and the rotated keys and the
