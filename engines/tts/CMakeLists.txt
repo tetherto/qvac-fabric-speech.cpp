@@ -373,6 +373,7 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/generation.cpp
     src/moss/frontend.cpp
     src/moss/engine.cpp
+    src/moss/fit.cpp
     src/moss/reference_wav.cpp
     src/moss/sfx_model.cpp
     src/moss/sfx_text_encoder.cpp
@@ -1434,6 +1435,18 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-generation PRIVATE src)
     tts_cpp_apply_ccache(test-moss-generation)
     tts_cpp_register_test(test-moss-generation)
+
+    add_executable(test-moss-fit-models test/moss/test_fit_models.cpp)
+    target_link_libraries(test-moss-fit-models PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(test-moss-fit-models)
+    tts_cpp_register_test(test-moss-fit-models LABEL "fixture")
+    set_property(TEST test-moss-fit-models PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-moss-fit test/moss/test_fit.cpp)
+    target_link_libraries(test-moss-fit PRIVATE tts-cpp)
+    target_include_directories(test-moss-fit PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-fit)
+    tts_cpp_register_test(test-moss-fit)
 
     add_executable(test-moss-load test/moss/test_load.cpp)
     target_link_libraries(test-moss-load PRIVATE tts-cpp)
