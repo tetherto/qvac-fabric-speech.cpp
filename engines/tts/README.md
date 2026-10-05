@@ -83,6 +83,11 @@ for explicitly (`EngineOptions::backend = "hexagon"`, `--backend hexagon`); on a
 Galaxy S25 it renders 2.0-2.2x faster than the Adreno OpenCL path. See
 [Snapdragon Hexagon NPU](docs/supertonic.md#snapdragon-hexagon-npu).
 
+Parler-TTS mini runs on HTP0 the same way, from a `q8_0`, `f16` or `f32` GGUF;
+on a Galaxy S25 it renders a 4.5 s utterance 1.3x faster than OpenCL and an
+11.5 s one 1.9x faster. See
+[Snapdragon Hexagon NPU](docs/parler.md#snapdragon-hexagon-npu).
+
 Chatterbox on CUDA depends on two ggml-cuda fixes carried by
 [`qvac-ext-ggml@speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
 Without the first (`im2col` / `pad` striding the grid Y and Z axes, which are

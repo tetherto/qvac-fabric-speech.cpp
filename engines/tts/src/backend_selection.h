@@ -125,6 +125,21 @@ ggml_backend_t init_requested_backend(const std::string & requested,
 
 std::string dsp_library_path_with(const std::string & dir, const char * current);
 
+// Buffer type for model weights on `backend`: the Hexagon repack type on
+// HTP (its matmuls read quantized weights only from repacked buffers),
+// otherwise the backend's default buffer type.
+ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t backend);
+
+// Whether `backend` allocates from the host's RAM: CPU, integrated GPUs,
+// Apple Metal, and Hexagon, whose buffers are system memory mapped into the
+// DSP.  A fit projection charges host-side buffers against the same pool.
+bool backend_shares_host_memory(ggml_backend_t backend);
+
+// Free and total memory of `backend`'s device.  Hexagon reports none of its
+// own, so a host-memory device that reports zero takes the CPU device's
+// figures.
+void backend_memory(ggml_backend_t backend, size_t & free_bytes, size_t & total_bytes);
+
 // Convenience wrapper that picks up the registered CPU device and
 // returns its init handle. Mirrors parakeet-cpp's
 // `init_cpu_backend()`. Never throws; returns nullptr when the

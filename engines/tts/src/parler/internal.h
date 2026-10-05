@@ -101,6 +101,7 @@ struct parler_dac_block {
     ggml_tensor * snake_alpha = nullptr;
     ggml_tensor * snake_inv   = nullptr;
     ggml_tensor * convt_w = nullptr, * convt_b = nullptr;  // k=2*stride
+    ggml_tensor * convt_cols_w = nullptr;                  // [IC, K*OC], Hexagon only
     int stride = 0;
     parler_dac_residual res[3];                            // dilations 1, 3, 9
 };
@@ -131,6 +132,11 @@ struct parler_model {
     // (Metal's conv_transpose kernel is ~an order slower); CPU keeps the direct op,
     // or sgemm + col2im on Accelerate builds (parler_dac_accel_enabled).
     bool      on_gpu  = false;
+    // The Hexagon NPU counts as on_gpu for the decoder; its DAC fuses the
+    // snakes, lowers each transposed conv to one GEMM into columns plus
+    // col2im_1d (parler_dac_convt_columns), and multiplies F16 operands on HMX
+    // (parler_dac_uses_f16_gemm).
+    bool      on_hexagon = false;
 
     // t5
     ggml_tensor * t5_embed = nullptr;
@@ -156,10 +162,12 @@ struct parler_model {
     std::vector<parler_dac_block> dac_blocks;
     ggml_tensor * dac_snake_out_alpha = nullptr;
     ggml_tensor * dac_snake_out_inv   = nullptr;
-    // CPU backend: per-channel 1 / (alpha + eps) for every snake, so the DAC
-    // runs each snake as one fused ggml_snake node.  Null on GPU backends.
-    ggml_context        * ctx_snake    = nullptr;
-    ggml_backend_buffer_t buffer_snake = nullptr;
+    // DAC tensors derived from the weights at load: per-channel
+    // 1 / (alpha + eps) for every snake on CPU and Hexagon, so each snake runs
+    // as one fused ggml_snake node, and on Hexagon the transposed-conv kernels
+    // rearranged for the columns GEMM.  Null on GPU backends.
+    ggml_context        * ctx_dac_derived    = nullptr;
+    ggml_backend_buffer_t buffer_dac_derived = nullptr;
     ggml_tensor * dac_conv_out_w = nullptr, * dac_conv_out_b = nullptr;
     // Reused across windows AND across calls: one bounded arena for the whole
     // process instead of a fresh large allocation per decode (streaming makes one
@@ -201,16 +209,20 @@ struct parler_model {
 };
 
 // ---- parler_gguf.cpp ----
+// `backend` is the EngineOptions::backend request: empty or "auto" keeps the
+// n_gpu_layers policy walk, anything else selects that device with no fallback
+// (the load fails when it is missing).
 bool parler_load_gguf(const std::string & path, parler_model & model,
-                      int n_gpu_layers = 0, std::string * error = nullptr);
+                      int n_gpu_layers = 0, std::string * error = nullptr,
+                      const std::string & backend = {});
 void parler_free_model(parler_model & model);
 
 // Sizes of the load-time buffers, filled by parler_load_gguf_metadata_only.
 struct parler_fit_measure {
-    size_t weights_bytes = 0;  // ctx_w on the resolved backend (alloc+stream path)
-    size_t fused_bytes   = 0;  // fused qkv stacks + stacked LM heads (every backend)
-    size_t kv_bytes      = 0;  // decoder self-KV slab at the resolved kv type
-    size_t snake_bytes   = 0;  // CPU DAC snake reciprocals
+    size_t weights_bytes     = 0;  // ctx_w on the resolved backend (alloc+stream path)
+    size_t fused_bytes       = 0;  // fused qkv stacks + stacked LM heads (every backend)
+    size_t kv_bytes          = 0;  // decoder self-KV slab at the resolved kv type
+    size_t dac_derived_bytes = 0;  // DAC snake reciprocals and Hexagon convt columns weights
 };
 
 // Metadata-only twin of parler_load_gguf: same backend policy, FA probe, KV
@@ -225,7 +237,8 @@ struct parler_fit_measure {
 // parler_free_model as usual (no buffers exist in measure mode).
 bool parler_load_gguf_metadata_only(const std::string & path, parler_model & model,
                                     int n_gpu_layers, parler_fit_measure & measure,
-                                    std::string * error = nullptr);
+                                    std::string * error = nullptr,
+                                    const std::string & backend = {});
 
 // Element type of the self-KV cache and the cross K/V under flash attention:
 // F16 on GPU backends; F32 on CPU, whose FA kernel then multiplies and
@@ -318,9 +331,21 @@ ggml_cgraph * parler_build_step_fit_graph(const parler_model & model, int n_past
 constexpr float PARLER_DAC_SNAKE_EPS = 1e-9f;
 
 // Whether the DAC graph runs its snakes as fused ggml_snake nodes over the
-// precomputed reciprocals: CPU loads whose snake alphas are F32 (every shipped
-// GGUF); GPU graphs keep the elementwise chain they were validated with.
+// precomputed reciprocals: CPU and Hexagon loads whose snake alphas are F32
+// (every shipped GGUF); GPU graphs keep the elementwise chain they were
+// validated with.
 bool parler_dac_uses_fused_snake(const parler_model & model);
+
+// Weight types a Parler GGUF may carry to load on Hexagon: the q8_0, f16 and
+// f32 tiers.  HTP has no K-quant matmul and looks up embedding rows only from
+// F32/F16 tables, so the q6_k tier is refused instead of falling back.
+bool parler_hexagon_runs_weight_type(ggml_type type);
+
+// Rearranges a [K, OC, IC] transposed-conv kernel into the [IC, K*OC] row-major
+// matrix parler_dac_convt_columns multiplies by: row k + K*oc holds the IC
+// taps of (k, oc), the column order ggml_col2im_1d scatters from.
+void parler_dac_convt_cols_from_kernel(const float * kernel, int64_t K, int64_t OC,
+                                       int64_t IC, float * cols);
 
 // ---- parler_dac_accel.cpp ----
 // Accelerate (cblas_sgemm) kernels for the DAC conv stack on the CPU backend
@@ -340,11 +365,19 @@ ggml_tensor * parler_dac_accel_conv1d(ggml_context * ctx, ggml_tensor * x, ggml_
 // (vForce when `accel`, else ggml_snake) and as the broadcasting elementwise
 // chain otherwise; the stride-1 "same" conv (padding (K-1)/2 * dilation, plus
 // bias and an optional residual) takes the Accelerate kernel only for a
-// per-channel bias.
+// per-channel bias, and with `f16_gemm` multiplies F16 im2col columns at
+// default precision instead of F32 columns with F32 accumulation.
 ggml_tensor * parler_dac_snake(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * alpha,
                                ggml_tensor * inv, ggml_tensor * eps);
 ggml_tensor * parler_dac_conv_same(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * w,
-                                   ggml_tensor * b, int dilation, ggml_tensor * residual);
+                                   ggml_tensor * b, int dilation, ggml_tensor * residual,
+                                   bool f16_gemm = false);
+
+// Whether the DAC GEMMs take F16 operands at default precision: Hexagon,
+// whose HMX multiplies in F16 (about 72 dB against the F32 reference, the
+// GPU bar is 50 dB) and has no fast F32 im2col.  Every other backend keeps F32
+// columns with F32 accumulation.
+bool parler_dac_uses_f16_gemm(const parler_model & model);
 
 // Snake over x [T, C] with per-channel alpha and 1 / (alpha + eps) on vForce.
 ggml_tensor * parler_dac_accel_snake(ggml_context * ctx, ggml_tensor * x, ggml_tensor * alpha,
@@ -357,6 +390,15 @@ size_t parler_dac_accel_scratch_bytes(const parler_model & model, int n_threads)
 // GEMM half of a transposed conv1d: columns [K*OC, IL] = w [K, OC, IC] . x^T,
 // for x [IL, IC]; ggml_col2im_1d overlap-adds them into the signal.
 ggml_tensor * parler_dac_accel_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w);
+
+// ---- parler_dac.cpp: Hexagon transposed conv ----
+// Transposed conv1d (K = 2*stride, trimmed by stride/2 per side) of x [IL, IC]
+// as one ggml_mul_mat into columns [K*OC, IL] over w_cols [IC, K*OC] (see
+// parler_dac_convt_cols_from_kernel) plus ggml_col2im_1d; returns
+// [IL*stride, OC, 1] without bias.  `f32_precision` asks the GEMM for F32
+// accumulation; Hexagon passes false (parler_dac_uses_f16_gemm).
+ggml_tensor * parler_dac_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w_cols,
+                                       int stride, bool f32_precision);
 
 // Whether the DAC's CPU rounding depends on the window shape, so a windowed
 // or ranged decode matches a whole-sequence one only within float tolerance:

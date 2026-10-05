@@ -16,7 +16,8 @@ codec decode → 44.1 kHz mono PCM.  Validated backends are CPU, Metal,
 Vulkan, and OpenCL (Adreno): the GPU path (F16 flash attention, DAC
 upsampling as phase matmuls) is gated on that allowlist in
 `src/parler/gguf.cpp`, and any other GPU backend is released at load and
-replaced by CPU rather than run unvalidated.  GPU loads and mmap-backed CPU
+replaced by CPU rather than run unvalidated.  The Hexagon NPU runs only on
+explicit request (see [Snapdragon Hexagon NPU](#snapdragon-hexagon-npu)).  GPU loads and mmap-backed CPU
 loads fuse the per-layer QKV projections and the nine LM heads into single
 row-concatenated matmuls (byte-exact; the CPU allocate-and-stream fallback
 stays unfused so the projections are never resident twice, and
@@ -163,3 +164,68 @@ the bounded parity harness.
 Streaming is available through the `parler::Engine` callback API using
 `stream_chunk_frames` and `stream_first_chunk_frames`. Neither `parler-cli` nor
 the limited `tts-cli` Parler route exposes those controls.
+
+## Snapdragon Hexagon NPU
+
+Parler-TTS runs on the Snapdragon Hexagon NPU (HTP0; measured on a Snapdragon
+8 Elite, Hexagon v79) when it is requested explicitly:
+`EngineOptions::backend = "hexagon"` or `--backend hexagon` on `parler-cli`,
+`parler-bench` and `parler-fit-params`. There is no fallback: construction
+fails when HTP0 is missing, and the automatic `--n-gpu-layers` walk never
+selects it. The T5 encoder, the decoder (prefill and every step, flash
+attention over an F16 KV cache) and the DAC all run on the NPU; the host only
+samples. Weights and the fused decoder stacks go into the Hexagon repack
+buffer type. HTP has no K-quant matmul and looks up embedding rows only from
+F32/F16 tables, so a `q6_k` GGUF is refused at load: use `q8_0`, `f16` or
+`f32`. It needs a `qvac-ext-ggml@speech` build with the Hexagon fixes for
+fused F32-precision matmuls and the tanh GELU.
+
+The Hexagon DAC runs each snake as one fused node, each transposed
+convolution as one GEMM into columns plus `ggml_col2im_1d` (the kernels are
+rearranged at load, about 97 MB more for mini), and its convolutions over F16
+im2col columns on HMX, which multiplies in F16 anyway; HTP has no fast F32
+im2col.
+
+Accuracy against the HF fixtures, `f32` GGUF (`PARLER_TEST_BACKEND=hexagon`
+runs the fixture tests on any named backend):
+
+| Check | Hexagon | CPU | OpenCL (Adreno 830) |
+|---|--:|--:|--:|
+| T5 cross states, relative error | 5.9e-7 | 2.7e-4 | 1.6e-6 |
+| decoder argmax agreement, 360 teacher-forced predictions | 359 | 360 | 360 |
+| DAC waveform SNR | 70.5 dB | 126.9 dB | 121.7 dB |
+| greedy end-to-end token trace | 429 / 429 | 429 / 429 | 429 / 429 |
+
+The F16 HMX products set the DAC's SNR, well inside the 50 dB accelerator bar.
+With the `q8_0` GGUF the decoder agrees with the 200-step `f32` reference on
+97.25% of 3,600 teacher-forced predictions on Hexagon and 97.72% on CPU.
+
+Galaxy S25, `parler-mini-v1` `q8_0`, `parler-bench` greedy for 398 decoder
+steps (4.54 s of audio), median of 3 warm runs, each backend started from
+thermal status 0, ms:
+
+| Backend | T5 | prefill | decode | DAC | total | vs OpenCL |
+|---|--:|--:|--:|--:|--:|--:|
+| CPU (4 threads) | 178 | 168 | 6,369 | 23,563 | 29,602 | 0.28x |
+| OpenCL (Adreno 830) | 71 | 70 | 6,314 | 1,838 | 8,294 | 1.00x |
+| Hexagon | 47 | 24 | 5,080 | 1,218 | 6,368 | 1.30x |
+| Hexagon, `GGML_HEXAGON_OPPOLL=1` | 43 | 19 | 3,889 | 1,165 | 5,116 | 1.62x |
+
+The same for 998 steps (11.51 s of audio), median of 2 warm runs. OpenCL's
+decoder slows from 15.9 to 27.3 ms per step as the context grows; Hexagon's
+from 12.8 to 13.8 ms:
+
+| Backend | T5 | prefill | decode | DAC | total | vs OpenCL |
+|---|--:|--:|--:|--:|--:|--:|
+| CPU (4 threads) | 166 | 159 | 20,750 | 60,064 | 81,139 | 0.40x |
+| OpenCL (Adreno 830) | 72 | 72 | 27,290 | 4,908 | 32,341 | 1.00x |
+| Hexagon | 48 | 24 | 13,776 | 3,022 | 16,870 | 1.92x |
+| Hexagon, `GGML_HEXAGON_OPPOLL=1` | 45 | 20 | 11,685 | 3,159 | 14,909 | 2.17x |
+
+A decode step streams about 375 MB of `q8_0` weights through HVX at about
+52 GB/s (7.2 ms of 9.5 ms DSP time at 220 tokens of context); attention adds about 3.3 us per
+context token. By default the host blocks on the DSP queue during each step
+and the CPU clocks down, so the host work between steps runs slowly;
+`GGML_HEXAGON_OPPOLL=1` polls instead, which cuts decoding by a quarter but
+keeps one core busy and heats the phone like the CPU backend (thermal status
+2 after the benchmark, against 0 with the default wait).

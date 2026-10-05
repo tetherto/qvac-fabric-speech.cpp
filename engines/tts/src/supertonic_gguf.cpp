@@ -263,18 +263,6 @@ ggml_backend_t init_requested_supertonic_backend(const std::string & requested, 
     throw std::runtime_error("supertonic: requested backend '" + requested + "' is not available");
 }
 
-ggml_backend_buffer_type_t supertonic_weight_buffer_type(ggml_backend_t backend) {
-    ggml_backend_buffer_type_t fallback = ggml_backend_get_default_buffer_type(backend);
-    if (!::tts_cpp::detail::backend_is_hexagon(backend)) return fallback;
-    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
-    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
-    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
-                               reg, "ggml_backend_dev_get_extra_bufts")
-                         : nullptr;
-    ggml_backend_buffer_type_t * extra = get_extra ? get_extra(dev) : nullptr;
-    return extra && extra[0] ? extra[0] : fallback;
-}
-
 ggml_backend_t init_supertonic_backend(int n_gpu_layers, bool verbose, int vulkan_device = 0,
                                        bool * out_gpu_unsupported = nullptr,
                                        const std::string & requested_backend = {}) {
@@ -2488,11 +2476,11 @@ static bool load_supertonic_gguf_impl(const std::string & path,
 
         if (measure) {
             measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-                model.ctx_w, supertonic_weight_buffer_type(model.backend));
+                model.ctx_w, ::tts_cpp::detail::weight_buffer_type(model.backend));
             supertonic_mark_externally_allocated(model.ctx_w);
         } else {
         model.buffer_w = ggml_backend_alloc_ctx_tensors_from_buft(model.ctx_w,
-                                                                  supertonic_weight_buffer_type(model.backend));
+                                                                  ::tts_cpp::detail::weight_buffer_type(model.backend));
         if (!model.buffer_w) throw std::runtime_error("ggml_backend_alloc_ctx_tensors failed");
         }
 
@@ -2900,7 +2888,7 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 }
                 if (measure) {
                     measure->extra_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-                        model.ctx_w_extra, supertonic_weight_buffer_type(model.backend));
+                        model.ctx_w_extra, ::tts_cpp::detail::weight_buffer_type(model.backend));
                     supertonic_mark_externally_allocated(model.ctx_w_extra);
                     // Register the pointer map so the graph builders take the
                     // same pretransposed dispatch a real load enables; the
@@ -2910,7 +2898,7 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                     }
                 } else {
                 model.buffer_w_extra = ggml_backend_alloc_ctx_tensors_from_buft(
-                    model.ctx_w_extra, supertonic_weight_buffer_type(model.backend));
+                    model.ctx_w_extra, ::tts_cpp::detail::weight_buffer_type(model.backend));
                 if (!model.buffer_w_extra) {
                     throw std::runtime_error(
                         "ggml_backend_alloc_ctx_tensors ctx_w_extra failed");

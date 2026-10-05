@@ -92,7 +92,7 @@ FitResult fit_params(const FitOptions & opts) {
     detail::parler_fit_measure load;
     std::string error;
     if (!detail::parler_load_gguf_metadata_only(opts.model_gguf_path, m.model,
-                                                opts.n_gpu_layers, load, &error)) {
+                                                opts.n_gpu_layers, load, &error, opts.backend)) {
         r.reason = "model-unreadable";
         return r;
     }
@@ -105,16 +105,13 @@ FitResult fit_params(const FitOptions & opts) {
     }
     r.device_name   = ggml_backend_name(backend);
     r.device_is_cpu = ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
-    // Unified-memory devices (CPU, integrated GPUs, Apple Metal) draw the
-    // "device" figure from the same physical RAM the host-side buffers live
-    // in, so the verdict must charge both against it.
-    r.device_shares_host_memory =
-        r.device_is_cpu ||
-        ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU ||
-        ::tts_cpp::detail::backend_is_metal(backend);
+    // Unified-memory devices (CPU, integrated GPUs, Apple Metal, Hexagon)
+    // draw the "device" figure from the same physical RAM the host-side
+    // buffers live in, so the verdict must charge both against it.
+    r.device_shares_host_memory = ::tts_cpp::detail::backend_shares_host_memory(backend);
     {
         size_t free_b = 0, total_b = 0;
-        ggml_backend_dev_memory(dev, &free_b, &total_b);
+        ::tts_cpp::detail::backend_memory(backend, free_b, total_b);
         r.device_free_bytes  = free_b;
         r.device_total_bytes = total_b;
     }
@@ -254,7 +251,7 @@ FitResult fit_params(const FitOptions & opts) {
     }
 
     r.device.weights_bytes       = sat_add(sat_add(load.weights_bytes, load.fused_bytes),
-                                           load.snake_bytes);
+                                           load.dac_derived_bytes);
     r.device.state_bytes         = state;
     r.device.lm_compute_bytes    = lm_compute;
     r.device.codec_compute_bytes = codec_compute;

@@ -32,7 +32,7 @@ static bool check_logits(const char * tag, const float * got,
                          const float * ref, int n_cb, int vocab) {
     compare_stats s = compare_f32(got, ref, (size_t) n_cb * vocab);
     print_compare(tag, s);
-    if (!std::isfinite(s.mean_abs_err)) {
+    if (s.non_finite > 0 || !std::isfinite(s.mean_abs_err)) {
         fprintf(stderr, "%s: FAIL non-finite logits\n", tag);
         return false;
     }
@@ -147,7 +147,8 @@ int main(int argc, char ** argv) {
     parler_model model;
     std::string err;
     const int ngl = std::getenv("PARLER_TEST_GPU") ? 99 : 0;
-    if (!parler_load_gguf(argv[1], model, ngl, &err)) {
+    const char * backend = std::getenv("PARLER_TEST_BACKEND");
+    if (!parler_load_gguf(argv[1], model, ngl, &err, backend ? backend : "")) {
         fprintf(stderr, "load failed: %s\n", err.c_str());
         return 1;
     }

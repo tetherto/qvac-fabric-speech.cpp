@@ -39,9 +39,9 @@ static bool run_case(parler_model & model, const std::string & ref_dir, const ch
     // numpy [1, T, d] C-order flat index == ggml [d, T] flat index
     compare_stats s = compare_f32(states.data(), npy_as_f32(ref), states.size());
     print_compare(name, s);
-    // NaN guard: comparisons against NaN are false, so a NaN output would
-    // otherwise sail under the max_abs bar with max_abs == 0.
-    if (!std::isfinite(s.mean_abs_err)) {
+    // NaN guard: compare_f32 skips non-finite elements, so an all-NaN output
+    // would otherwise sail under the max_abs bar with max_abs == 0.
+    if (s.non_finite > 0 || !std::isfinite(s.mean_abs_err)) {
         fprintf(stderr, "%s: FAIL non-finite output\n", name);
         return false;
     }
@@ -68,7 +68,8 @@ int main(int argc, char ** argv) {
     parler_model model;
     std::string err;
     const int ngl = std::getenv("PARLER_TEST_GPU") ? 99 : 0;
-    if (!parler_load_gguf(argv[1], model, ngl, &err)) {
+    const char * backend = std::getenv("PARLER_TEST_BACKEND");
+    if (!parler_load_gguf(argv[1], model, ngl, &err, backend ? backend : "")) {
         fprintf(stderr, "load failed: %s\n", err.c_str());
         return 1;
     }

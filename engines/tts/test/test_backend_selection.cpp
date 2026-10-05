@@ -78,10 +78,19 @@ void check_dsp_library_path() {
 
 void check_requested_init() {
     using tts_cpp::detail::init_requested_backend;
+    using tts_cpp::detail::weight_buffer_type;
 
     ggml_backend_t cpu = init_requested_backend("cpu", /*verbose=*/false, "test");
     check(cpu != nullptr, "an explicit cpu request must initialise the CPU backend");
-    if (cpu) ggml_backend_free(cpu);
+    if (cpu) {
+        check(weight_buffer_type(cpu) == ggml_backend_get_default_buffer_type(cpu),
+              "CPU weights must use the default buffer type");
+        check(tts_cpp::detail::backend_shares_host_memory(cpu), "the CPU backend allocates from host memory");
+        size_t free_bytes = 0, total_bytes = 0;
+        tts_cpp::detail::backend_memory(cpu, free_bytes, total_bytes);
+        check(total_bytes > 0, "the CPU backend must report host memory");
+        ggml_backend_free(cpu);
+    }
     check(init_requested_backend("no-such-device", /*verbose=*/false, "test") == nullptr,
           "a request for a missing device must return no backend");
 }

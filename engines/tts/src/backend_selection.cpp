@@ -226,6 +226,37 @@ bool backend_request_matches(const std::string & requested,
     return device_name && requested == device_name;
 }
 
+ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t backend) {
+    ggml_backend_buffer_type_t fallback = ggml_backend_get_default_buffer_type(backend);
+    if (!backend_is_hexagon(backend)) return fallback;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
+                               reg, "ggml_backend_dev_get_extra_bufts")
+                         : nullptr;
+    ggml_backend_buffer_type_t * extra = get_extra ? get_extra(dev) : nullptr;
+    return extra && extra[0] ? extra[0] : fallback;
+}
+
+bool backend_shares_host_memory(ggml_backend_t backend) {
+    ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr;
+    if (!dev) return false;
+    const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_CPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU ||
+           backend_is_metal(backend) || backend_is_hexagon(backend);
+}
+
+void backend_memory(ggml_backend_t backend, size_t & free_bytes, size_t & total_bytes) {
+    free_bytes  = 0;
+    total_bytes = 0;
+    ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr;
+    if (!dev) return;
+    ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+    if (total_bytes > 0 || !backend_shares_host_memory(backend)) return;
+    ggml_backend_dev_t host = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (host) ggml_backend_dev_memory(host, &free_bytes, &total_bytes);
+}
+
 ggml_backend_t init_requested_backend(const std::string & requested,
                                       bool verbose,
                                       const char * log_prefix) {

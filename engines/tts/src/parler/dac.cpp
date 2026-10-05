@@ -17,20 +17,23 @@ namespace {
 // residual dilations, shared by the graph builder and the receptive-field derivation
 const int dilations[3] = { 1, 3, 9 };
 
-// F32 conv1d via im2col + mul_mat (ggml_conv_1d's F16 im2col loses too much
-// precision over the 26-conv DAC stack).  kernel ne=[K, IC, OC].
+// conv1d via im2col + mul_mat.  kernel ne=[K, IC, OC].
 //
-// Keeping im2col in F32 only helps if the matmul that consumes it stays in F32 too, so
-// the contraction asks for it explicitly: backends are free to multiply f32 operands in
-// fp16 for GGML_PREC_DEFAULT, and over 26 convolutions that dominates the output error.
-ggml_tensor * conv1d_f32(ggml_context * ctx, ggml_tensor * kernel, ggml_tensor * input,
-                         int stride, int padding, int dilation) {
+// F32 by default (ggml_conv_1d's F16 im2col loses too much precision over the
+// 26-conv DAC stack against the >120 dB reference bar).  Keeping im2col in F32
+// only helps if the matmul that consumes it stays in F32 too, so the
+// contraction asks for it explicitly: backends are free to multiply f32
+// operands in fp16 for GGML_PREC_DEFAULT, and over 26 convolutions that
+// dominates the output error.  `f16_gemm` (Hexagon) writes F16 columns for
+// HMX, which multiplies in F16 anyway; HTP has no fast F32 im2col.
+ggml_tensor * conv1d(ggml_context * ctx, ggml_tensor * kernel, ggml_tensor * input,
+                     int stride, int padding, int dilation, bool f16_gemm) {
     ggml_tensor * im2col = ggml_im2col(ctx, kernel, input, stride, 0, padding, 0, dilation, 0,
-                                       false, GGML_TYPE_F32);
+                                       false, f16_gemm ? GGML_TYPE_F16 : GGML_TYPE_F32);
     ggml_tensor * result = ggml_mul_mat(ctx,
         ggml_reshape_2d(ctx, im2col, im2col->ne[0], im2col->ne[2] * im2col->ne[1]),
         ggml_reshape_2d(ctx, kernel, kernel->ne[0] * kernel->ne[1], kernel->ne[2]));
-    ggml_mul_mat_set_prec(result, GGML_PREC_F32);
+    if (!f16_gemm) ggml_mul_mat_set_prec(result, GGML_PREC_F32);
     return ggml_reshape_3d(ctx, result, im2col->ne[1], kernel->ne[2], im2col->ne[2]);
 }
 
@@ -108,9 +111,9 @@ ggml_tensor * snake_fused_cpu(ggml_context * ctx, bool accel, ggml_tensor * x,
 }
 
 ggml_tensor * conv_same_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w,
-                             ggml_tensor * b, int dilation, ggml_tensor * residual) {
+                             ggml_tensor * b, int dilation, ggml_tensor * residual, bool f16_gemm) {
     const int padding = (int) (w->ne[0] - 1) / 2 * dilation;
-    ggml_tensor * y = add_bias(ctx, conv1d_f32(ctx, w, x, 1, padding, dilation), b);
+    ggml_tensor * y = add_bias(ctx, conv1d(ctx, w, x, 1, padding, dilation, f16_gemm), b);
     return residual ? ggml_add(ctx, residual, y) : y;
 }
 
@@ -124,13 +127,15 @@ ggml_tensor * conv_transpose_accel(ggml_context * ctx, ggml_tensor * x, ggml_ten
     return ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], 1);
 }
 
-ggml_tensor * conv_transpose_trimmed_with_bias(ggml_context * ctx, bool accel, bool convt_mm,
-                                               ggml_tensor * x, ggml_tensor * w, ggml_tensor * b,
-                                               int stride) {
-    ggml_tensor * y = accel    ? conv_transpose_accel(ctx, x, w, stride)
-                    : convt_mm ? conv_transpose_1d_matmul(ctx, w, x, stride)
-                               : conv_transpose_1d_trim(ctx, w, x, stride, stride / 2);
-    return add_bias(ctx, y, b);
+ggml_tensor * conv_transpose_trimmed_with_bias(ggml_context * ctx, bool accel, bool convt_mm, bool f16_gemm,
+                                               ggml_tensor * x, const parler_dac_block & blk) {
+    ggml_tensor * w = blk.convt_w;
+    const int stride = blk.stride;
+    ggml_tensor * y = blk.convt_cols_w ? parler_dac_convt_columns(ctx, x, blk.convt_cols_w, stride, !f16_gemm)
+                    : accel            ? conv_transpose_accel(ctx, x, w, stride)
+                    : convt_mm         ? conv_transpose_1d_matmul(ctx, w, x, stride)
+                                       : conv_transpose_1d_trim(ctx, w, x, stride, stride / 2);
+    return add_bias(ctx, y, blk.convt_b);
 }
 
 // Builds the DAC graph for a window of `n_win` frames. Inputs are the named
@@ -171,26 +176,27 @@ ggml_cgraph * build_dac_graph(ggml_context * ctx, const parler_model & model,
     ggml_tensor * x = ggml_cont(ctx, ggml_transpose(ctx, latent));
     x = ggml_reshape_3d(ctx, x, n_win, hp.dac_latent, 1);
 
-    const bool accel = parler_dac_accel_enabled(model);
-    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_in_w, model.dac_conv_in_b, 1, nullptr);
+    const bool accel    = parler_dac_accel_enabled(model);
+    const bool f16_gemm = parler_dac_uses_f16_gemm(model);
+    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_in_w, model.dac_conv_in_b, 1, nullptr, f16_gemm);
 
     for (const parler_dac_block & blk : model.dac_blocks) {
         const int s = blk.stride;
         x = parler_dac_snake(ctx, accel, x, blk.snake_alpha, blk.snake_inv, eps);
         const int64_t t_in = x->ne[0];
-        x = conv_transpose_trimmed_with_bias(ctx, accel, convt_mm, x, blk.convt_w, blk.convt_b, s);
+        x = conv_transpose_trimmed_with_bias(ctx, accel, convt_mm, f16_gemm, x, blk);
         GGML_ASSERT(x->ne[0] == t_in * s);
         for (int j = 0; j < 3; ++j) {
             const parler_dac_residual & r = blk.res[j];
             ggml_tensor * y = parler_dac_snake(ctx, accel, x, r.snake1_alpha, r.snake1_inv, eps);
-            y = parler_dac_conv_same(ctx, accel, y, r.conv1_w, r.conv1_b, dilations[j], nullptr);
+            y = parler_dac_conv_same(ctx, accel, y, r.conv1_w, r.conv1_b, dilations[j], nullptr, f16_gemm);
             y = parler_dac_snake(ctx, accel, y, r.snake2_alpha, r.snake2_inv, eps);
-            x = parler_dac_conv_same(ctx, accel, y, r.conv2_w, r.conv2_b, 1, x);
+            x = parler_dac_conv_same(ctx, accel, y, r.conv2_w, r.conv2_b, 1, x, f16_gemm);
         }
     }
 
     x = parler_dac_snake(ctx, accel, x, model.dac_snake_out_alpha, model.dac_snake_out_inv, eps);
-    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_out_w, model.dac_conv_out_b, 1, nullptr);
+    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_out_w, model.dac_conv_out_b, 1, nullptr, f16_gemm);
     ggml_tensor * wav = ggml_tanh(ctx, x);
     ggml_set_name(wav, "wav");
     ggml_set_output(wav);
@@ -289,6 +295,20 @@ bool decode_window(const parler_model & model, const int32_t * codes, int n_fram
 
 } // namespace
 
+ggml_tensor * parler_dac_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w_cols,
+                                       int stride, bool f32_precision) {
+    const int64_t IL = x->ne[0];
+    const int64_t IC = x->ne[1];
+    const int64_t K  = 2 * (int64_t) stride;
+    const int64_t OC = w_cols->ne[1] / K;
+    GGML_ASSERT(w_cols->ne[0] == IC && w_cols->ne[1] == K * OC);
+    ggml_tensor * xt   = ggml_cont(ctx, ggml_transpose(ctx, ggml_reshape_2d(ctx, x, IL, IC)));  // [IC, IL]
+    ggml_tensor * cols = ggml_mul_mat(ctx, w_cols, xt);                                         // [K*OC, IL]
+    if (f32_precision) ggml_mul_mat_set_prec(cols, GGML_PREC_F32);
+    ggml_tensor * y = ggml_col2im_1d(ctx, cols, stride, (int) OC, stride / 2);                  // [IL*s, OC]
+    return ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], 1);
+}
+
 ggml_tensor * parler_dac_snake(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * alpha,
                                ggml_tensor * inv, ggml_tensor * eps) {
     return snake_is_per_channel(x, alpha, inv) ? snake_fused_cpu(ctx, accel, x, alpha, inv)
@@ -296,10 +316,14 @@ ggml_tensor * parler_dac_snake(ggml_context * ctx, bool accel, ggml_tensor * x, 
 }
 
 ggml_tensor * parler_dac_conv_same(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * w,
-                                   ggml_tensor * b, int dilation, ggml_tensor * residual) {
+                                   ggml_tensor * b, int dilation, ggml_tensor * residual, bool f16_gemm) {
     return accel && bias_is_per_channel(w, b)
         ? parler_dac_accel_conv1d(ctx, x, w, b, dilation, residual)
-        : conv_same_ggml(ctx, x, w, b, dilation, residual);
+        : conv_same_ggml(ctx, x, w, b, dilation, residual, f16_gemm);
+}
+
+bool parler_dac_uses_f16_gemm(const parler_model & model) {
+    return model.on_hexagon;
 }
 
 // Propagates the support radius forward through the conv stack, in samples at each

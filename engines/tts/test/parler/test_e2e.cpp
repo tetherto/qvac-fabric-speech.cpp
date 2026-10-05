@@ -70,7 +70,8 @@ int main(int argc, char ** argv) {
     parler_model model;
     std::string err;
     const int ngl = std::getenv("PARLER_TEST_GPU") ? 99 : 0;
-    if (!parler_load_gguf(model_path, model, ngl, &err)) {
+    const char * backend = std::getenv("PARLER_TEST_BACKEND");
+    if (!parler_load_gguf(model_path, model, ngl, &err, backend ? backend : "")) {
         fprintf(stderr, "load failed: %s\n", err.c_str());
         return 1;
     }

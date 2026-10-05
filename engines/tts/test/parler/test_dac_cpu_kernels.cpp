@@ -1,7 +1,9 @@
 // Model-free coverage for the CPU DAC kernels against naive double-precision
 // references.  Every build: the DAC snake (fused ggml_snake over precomputed
-// 1 / (alpha + eps), and the broadcasting chain for a scalar alpha) and the
-// ggml "same" conv.  Accelerate builds additionally pin the cblas kernels --
+// 1 / (alpha + eps), and the broadcasting chain for a scalar alpha), the
+// ggml "same" conv, and the Hexagon transposed-conv lowering (kernel
+// rearranged at load, one GEMM into columns, ggml_col2im_1d) at every DAC
+// stride.  Accelerate builds additionally pin the cblas kernels --
 // the conv1d (every DAC dilation, the k=1 residual form, row tiles, one- and
 // two-frame inputs, a scalar bias routed back to ggml, one and several
 // threads), the transposed conv (sgemm columns + ggml_col2im_1d, every DAC
@@ -36,8 +38,10 @@ static int g_failures = 0;
 
 namespace {
 
-constexpr int    GRAPH_NODES   = 64;
-constexpr double REL_TOLERANCE = 1e-5;
+constexpr int    GRAPH_NODES       = 64;
+constexpr double REL_TOLERANCE     = 1e-5;
+// F16 im2col columns round every input to 11 significant bits.
+constexpr double F16_REL_TOLERANCE = 2e-3;
 
 struct det_rng {
     uint32_t state = 0x2545F491u;
@@ -119,14 +123,15 @@ double max_rel_error(const std::vector<float> & got, const std::vector<double> &
     return max_err / std::max(max_ref, 1e-30);
 }
 
-bool matches(const char * what, const std::vector<float> & got, const std::vector<double> & ref) {
+bool matches(const char * what, const std::vector<float> & got, const std::vector<double> & ref,
+             double tolerance = REL_TOLERANCE) {
     if (got.size() != ref.size()) {
         fprintf(stderr, "  %s: size %zu != reference %zu\n", what, got.size(), ref.size());
         return false;
     }
     const double rel = max_rel_error(got, ref);
     fprintf(stderr, "  %s: max relative error %.3g\n", what, rel);
-    return rel <= REL_TOLERANCE;
+    return rel <= tolerance;
 }
 
 // ---- references (x is [L, C], L fastest; ggml weight layouts) -------------
@@ -280,7 +285,8 @@ void test_snake(ggml_backend_t backend) {
     }
 }
 
-void run_conv_case(ggml_backend_t backend, const conv_case & c, bool accel, int n_threads) {
+void run_conv_case(ggml_backend_t backend, const conv_case & c, bool accel, int n_threads,
+                   bool f16_gemm = false) {
     det_rng rng;
     const int64_t n_bias = c.scalar_bias ? 1 : c.OC;
     const std::vector<float> x   = random_values((size_t) (c.L * c.IC), rng, 1.0f, 0.0f);
@@ -294,14 +300,26 @@ void run_conv_case(ggml_backend_t backend, const conv_case & c, bool accel, int 
             ggml_tensor * bt = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_bias);
             in.push_back({ bt, &b });
             ggml_tensor * rt = c.residual ? input_3d(ctx, in, res, c.L, c.OC, 1) : nullptr;
-            return parler_dac_conv_same(ctx, accel, xt, wt, bt, c.dilation, rt);
+            return parler_dac_conv_same(ctx, accel, xt, wt, bt, c.dilation, rt, f16_gemm);
         });
-    char what[160];
+    char what[176];
     snprintf(what, sizeof(what), "conv1d L=%lld IC=%lld OC=%lld K=%lld d=%d%s%s, %s, %d threads",
              (long long) c.L, (long long) c.IC, (long long) c.OC, (long long) c.K, c.dilation,
              c.residual ? " +residual" : "", c.scalar_bias ? " scalar-bias" : "",
-             accel ? "Accelerate route" : "ggml route", n_threads);
-    CHECK(matches(what, got, conv1d_ref(x, w, b, res, c)), "the DAC conv matches the reference");
+             accel ? "Accelerate route" : f16_gemm ? "F16 GEMM route" : "ggml route", n_threads);
+    CHECK(matches(what, got, conv1d_ref(x, w, b, res, c), f16_gemm ? F16_REL_TOLERANCE : REL_TOLERANCE),
+          "the DAC conv matches the reference");
+}
+
+// The Hexagon lowering: F16 im2col columns, default-precision GEMM.
+void test_conv_same_f16_gemm(ggml_backend_t backend) {
+    const conv_case cases[] = {
+        { 300, 200, 24, 7, 1, false, false },
+        { 190,  32,  8, 7, 9, false, false },
+        { 333,  96, 40, 1, 1, true,  false },
+        {  50, 128,  1, 7, 1, false, false },
+    };
+    for (const conv_case & c : cases) run_conv_case(backend, c, false, 4, true);
 }
 
 void test_conv_same(ggml_backend_t backend, bool accel) {
@@ -343,6 +361,47 @@ void run_convt_case(ggml_backend_t backend, const convt_case & c) {
     CHECK(matches(what, got, convt_ref(x, w, b, c)), "Accelerate transposed conv matches the reference");
 }
 
+std::vector<float> convt_cols_weight(const std::vector<float> & w, const convt_case & c) {
+    const int64_t K = 2 * c.stride;
+    std::vector<float> cols(w.size());
+    parler_dac_convt_cols_from_kernel(w.data(), K, c.OC, c.IC, cols.data());
+    return cols;
+}
+
+void run_convt_columns_case(ggml_backend_t backend, const convt_case & c) {
+    det_rng rng;
+    const int64_t K = 2 * c.stride;
+    const std::vector<float> x    = random_values((size_t) (c.IL * c.IC), rng, 1.0f, 0.0f);
+    const std::vector<float> w    = random_values((size_t) (K * c.OC * c.IC), rng, 0.2f, 0.0f);
+    const std::vector<float> b    = random_values((size_t) c.OC, rng, 0.5f, 0.0f);
+    const std::vector<float> cols = convt_cols_weight(w, c);
+    const std::vector<float> got  = run_graph(backend, 4,
+        [&](ggml_context * ctx, std::vector<graph_input> & in) {
+            ggml_tensor * xt = input_3d(ctx, in, x, c.IL, c.IC, 1);
+            ggml_tensor * wt = input_2d(ctx, in, cols, c.IC, K * c.OC);
+            ggml_tensor * bt = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, c.OC);
+            in.push_back({ bt, &b });
+            return ggml_add(ctx, parler_dac_convt_columns(ctx, xt, wt, c.stride, true), bt);
+        });
+    char what[112];
+    snprintf(what, sizeof(what), "conv_transpose columns IL=%lld IC=%lld OC=%lld s=%d",
+             (long long) c.IL, (long long) c.IC, (long long) c.OC, c.stride);
+    CHECK(matches(what, got, convt_ref(x, w, b, c)),
+          "the columns-GEMM transposed conv matches the reference");
+}
+
+// Every DAC stride (8, 8, 4, 2), with one and two input frames at the edges.
+void test_convt_columns(ggml_backend_t backend) {
+    const convt_case cases[] = {
+        { 141, 64, 24, 8 },
+        {  70, 40, 16, 4 },
+        {  33, 24,  8, 2 },
+        {   1, 32,  8, 8 },
+        {   2, 16,  4, 2 },
+    };
+    for (const convt_case & c : cases) run_convt_columns_case(backend, c);
+}
+
 void test_accel_convt(ggml_backend_t backend) {
     const convt_case cases[] = {
         { 141, 64, 24, 8 },   // spreads over several column spans
@@ -379,10 +438,18 @@ void test_accel_switches() {
     parler_model gpu_model;
     gpu_model.on_gpu = true;
     CHECK(!parler_dac_accel_enabled(gpu_model), "GPU models never take the Accelerate DAC");
+    CHECK(!parler_dac_uses_f16_gemm(gpu_model), "GPU models keep F32 DAC GEMMs");
+
+    parler_model hexagon_model;
+    hexagon_model.on_gpu     = true;
+    hexagon_model.on_hexagon = true;
+    CHECK(parler_dac_uses_f16_gemm(hexagon_model), "Hexagon models run the DAC GEMMs in F16 on HMX");
+    CHECK(!parler_dac_accel_enabled(hexagon_model), "Hexagon models never take the Accelerate DAC");
 
     parler_model cpu_model;
     CHECK(parler_dac_accel_enabled(cpu_model) == parler_dac_accel_compiled(),
           "CPU models take the Accelerate DAC exactly when it is compiled in");
+    CHECK(!parler_dac_uses_f16_gemm(cpu_model), "CPU models keep F32 DAC GEMMs");
     if (parler_dac_accel_compiled()) {
         CHECK(!parler_dac_cpu_is_shape_exact(), "the Accelerate DAC is not shape-exact");
     }
@@ -402,6 +469,8 @@ int main() {
     }
     test_snake(backend);
     test_conv_same(backend, false);
+    test_conv_same_f16_gemm(backend);
+    test_convt_columns(backend);
     test_accel_switches();
     test_scratch_bound();
     if (parler_dac_accel_compiled()) {

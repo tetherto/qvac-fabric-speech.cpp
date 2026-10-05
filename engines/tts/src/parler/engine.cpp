@@ -200,7 +200,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
     std::string err;
-    if (!parler_load_gguf(opts.model_gguf_path, pimpl_->model, opts.n_gpu_layers, &err)) {
+    if (!parler_load_gguf(opts.model_gguf_path, pimpl_->model, opts.n_gpu_layers, &err, opts.backend)) {
         throw std::runtime_error("parler: " + err);
     }
     if (!pimpl_->tokenizer.load(pimpl_->model.tok_pieces, pimpl_->model.tok_scores,
