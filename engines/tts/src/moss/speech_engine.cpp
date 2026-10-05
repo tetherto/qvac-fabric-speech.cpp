@@ -24,8 +24,6 @@ using detail::SpeechTextTokenizer;
 using detail::SpeechTurn;
 using detail::SpeechTurnRole;
 
-constexpr int DEFAULT_MAX_NEW_TOKENS = 1000;
-constexpr int MAX_NEW_TOKENS = 4096;
 constexpr int MIN_NEW_TOKENS = 10;
 constexpr int PREFILL_BATCH_TOKENS = 256;
 constexpr size_t MAX_MESSAGES = 256;
@@ -95,8 +93,8 @@ void validate_sampling(const SpeechRequest & request) {
     if (!(request.top_p > 0.0f && request.top_p <= 1.0f) || request.top_k < 0) {
         fail("top_p must be in (0, 1] and top_k must not be negative");
     }
-    if (request.max_new_tokens < 0 || request.max_new_tokens > MAX_NEW_TOKENS) {
-        fail("max_new_tokens must be 0.." + std::to_string(MAX_NEW_TOKENS));
+    if (request.max_new_tokens < 0) {
+        fail("max_new_tokens must not be negative");
     }
     if (!std::isfinite(request.max_reply_seconds) || request.max_reply_seconds < 0.0f ||
         request.max_reply_seconds > MAX_REPLY_SECONDS) {
@@ -124,6 +122,18 @@ void check_speech_context(size_t prompt_rows, int max_new_tokens, int n_ctx_trai
     if ((int64_t) prompt_rows + max_new_tokens > n_ctx_train) {
         fail("the conversation and max_new_tokens exceed the model context");
     }
+}
+
+int speech_generation_budget(size_t prompt_rows, int requested_tokens, int n_ctx_train) {
+    if (requested_tokens < 0) {
+        fail("max_new_tokens must not be negative");
+    }
+    if (n_ctx_train <= 0 || prompt_rows >= (size_t) n_ctx_train) {
+        fail("the conversation leaves no room for a reply in the model context");
+    }
+    const int budget = requested_tokens > 0 ? requested_tokens : n_ctx_train - (int) prompt_rows;
+    check_speech_context(prompt_rows, budget, n_ctx_train);
+    return budget;
 }
 
 } // namespace detail
@@ -178,8 +188,8 @@ struct SpeechEngine::Impl {
         return turns;
     }
 
-    detail::SpeechLimits limits_of(const SpeechRequest & request) const {
-        const int max_new = request.max_new_tokens > 0 ? request.max_new_tokens : DEFAULT_MAX_NEW_TOKENS;
+    detail::SpeechLimits limits_of(const SpeechRequest & request, size_t prompt_rows) const {
+        const int max_new = detail::speech_generation_budget(prompt_rows, request.max_new_tokens, lm->config().n_ctx_train);
         const int reply_codes = (int) std::ceil(request.max_reply_seconds * tokens_per_second());
         return {max_new, MIN_NEW_TOKENS, reply_codes};
     }
@@ -244,8 +254,7 @@ struct SpeechEngine::Impl {
             return cancelled_result(result);
         }
         result.prompt_tokens = (int) prompt.size();
-        const detail::SpeechLimits limits = limits_of(request);
-        detail::check_speech_context(prompt.size(), limits.max_new_tokens, lm->config().n_ctx_train);
+        const detail::SpeechLimits limits = limits_of(request, prompt.size());
         detail::SpeechLogits logits = prefill_prompt(prompt, limits, result);
         if (cancelled()) {
             return cancelled_result(result);
