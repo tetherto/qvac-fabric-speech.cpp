@@ -19,16 +19,22 @@ on:
     paths:
       - 'engines/tts/**'
       - 'engines/test/**'
+      - 'scripts/ci/moss-vulkan-e2e.py'
       - '.github/workflows/tts-ci.yml'
   pull_request:
     paths:
       - 'engines/tts/**'
       - 'engines/test/**'
+      - 'scripts/ci/moss-vulkan-e2e.py'
       - '.github/workflows/tts-ci.yml'
   workflow_dispatch:
     inputs:
       run_gpu:
         description: 'Also run the GPU ctest lane (on the self-hosted NVIDIA Linux runner)'
+        type: boolean
+        default: false
+      run_moss_e2e:
+        description: 'Run full OpenMOSS checkpoints through Vulkan (native CLIs, S3 models, audio artifacts)'
         type: boolean
         default: false
 
@@ -54,7 +60,7 @@ permissions:
 # github.event.inputs.* is a string even for a `type: boolean` input, hence
 # the explicit == 'true'.
 concurrency:
-  group: tts-ci-${{ ((github.event.inputs.run_gpu == 'true' || github.ref == 'refs/heads/master') && github.run_id) || github.ref }}
+  group: tts-ci-${{ ((github.event.inputs.run_gpu == 'true' || github.event.inputs.run_moss_e2e == 'true' || github.ref == 'refs/heads/master') && github.run_id) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -63,6 +69,7 @@ env:
 
 jobs:
   runner_names:
+    if: github.event.inputs.run_moss_e2e != 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/reusable-runner-names.yml
@@ -71,6 +78,77 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/reusable-authorize-self-hosted.yml
+
+  moss-vulkan-e2e:
+    needs: authorize
+    if: github.event_name == 'workflow_dispatch' && inputs.run_moss_e2e && needs.authorize.outputs.allowed == 'true'
+    # Same Linux GPU label exported by reusable-runner-names.yml. This manual
+    # lane retains the authorization gate but needs no hosted matrix planner.
+    runs-on: qvac-ubuntu2204-x64-gpu
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        model: [tts-f16, ttsd-f16, sfx-f16, sfx-q8_0, speech-bf16, speech-q8_0, transcribe-f16, transcribe-q5_0, transcribe-q8_0]
+    env:
+      GGML_E2E_SHA: b470fbd0b14186320fabf8e2d1da8a67f8701a31
+    steps:
+      - name: Manual Workspace Cleanup
+        run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+        shell: bash
+        working-directory: .
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Build pinned ggml and OpenMOSS CLIs (Vulkan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p moss-e2e-results
+          git rev-parse HEAD > moss-e2e-results/speech-commit.txt
+          nvidia-smi > moss-e2e-results/gpu.txt
+          command -v aws
+          git init -q ggml-src
+          git -C ggml-src remote add origin "$GGML_REPO"
+          git -C ggml-src fetch --depth 1 origin "$GGML_E2E_SHA"
+          git -C ggml-src checkout -q FETCH_HEAD
+          git -C ggml-src rev-parse HEAD > moss-e2e-results/ggml-commit.txt
+          cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF \
+            -DGGML_VULKAN=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF \
+            -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
+          cmake --build ggml-src/build -j4
+          cmake --install ggml-src/build
+          cmake -S . -B build-moss-e2e -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_BUILD_WHISPER=OFF -DSPEECH_BUILD_AUDIOGEN=OFF \
+            -DSPEECH_BUILD_TESTS=OFF -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+          cmake --build build-moss-e2e --target moss-cli moss-transcribe -j4
+      - name: Generate and transcribe with full checkpoints
+        env:
+          MODEL_CASE: ${{ matrix.model }}
+          MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: python3 scripts/ci/moss-vulkan-e2e.py --case "$MODEL_CASE"
+      - name: Upload generated audio, transcripts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moss-vulkan-${{ matrix.model }}
+          path: moss-e2e-results/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove downloaded checkpoint weights
+        if: always()
+        run: rm -rf models-moss-e2e
 
   build-test:
     needs: runner_names
