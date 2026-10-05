@@ -1156,6 +1156,24 @@ if (PARAKEET_BUILD_TESTS)
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin")
 
     set(PARAKEET_TEST_GPU_LAYERS 99)
+    set(PARAKEET_TEST_LONG_FORM_DER_MAX 15.0)
+    parakeet_register_test(test-nemotron-diarization-long-form-abcba
+        LABEL    "fixture"
+        EXE      test-sortformer-aosc-speakers
+        ARGS     "--model" "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                 "--wav"   "${_qvp_abcba_wav}"
+                 "--ref-rttm" "${_qvp_abcba_rttm}"
+                 "--offline" "--der-max" "${PARAKEET_TEST_LONG_FORM_DER_MAX}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${_qvp_abcba_wav}" "${_qvp_abcba_rttm}")
+    parakeet_register_test(test-nemotron-diarization-long-form-abcdba
+        LABEL    "fixture"
+        EXE      test-sortformer-aosc-speakers
+        ARGS     "--model" "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                 "--wav"   "${_qvp_abcdba_wav}"
+                 "--ref-rttm" "${_qvp_abcdba_rttm}"
+                 "--offline" "--der-max" "${PARAKEET_TEST_LONG_FORM_DER_MAX}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${_qvp_abcdba_wav}" "${_qvp_abcdba_rttm}")
+
     parakeet_register_test(test-nemotron-diarization-gpu
         EXE test-nemotron-diarization
         LABEL "gpu"
@@ -1166,6 +1184,15 @@ if (PARAKEET_BUILD_TESTS)
         REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/reference/nemotron-3-diarization-sample-f32.bin")
+    parakeet_register_test(test-nemotron-diarization-long-form-abcdba-gpu
+        LABEL    "gpu"
+        EXE      test-sortformer-aosc-speakers
+        ARGS     "--model" "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                 "--wav"   "${_qvp_abcdba_wav}"
+                 "--ref-rttm" "${_qvp_abcdba_rttm}"
+                 "--offline" "--der-max" "${PARAKEET_TEST_LONG_FORM_DER_MAX}"
+                 "--n-gpu-layers" "${PARAKEET_TEST_GPU_LAYERS}"
+        REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${_qvp_abcdba_wav}" "${_qvp_abcdba_rttm}")
 
     add_executable(test-nemotron
         test/test_nemotron.cpp

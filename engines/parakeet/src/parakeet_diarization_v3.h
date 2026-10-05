@@ -7,11 +7,15 @@
 
 namespace parakeet {
 
+constexpr int kMillisecondsPerSecond = 1000;
 constexpr int kNemotronChunkMs = 1040;
 constexpr int kNemotronSpeakerCacheFrames = 264;
 constexpr int kNemotronFifoFrames = 80;
 constexpr int kNemotronRightContextMs = 80;
 constexpr int kNemotronUpdateFrames = 40;
+constexpr int kNemotronLongFormAutoFrames = 1125;
+constexpr int kNemotronLongFormChunkMs = 30000;
+constexpr int kNemotronLongFormContextMs = 1040;
 
 enum class NemotronAttention {
     Automatic,
@@ -50,6 +54,10 @@ int prewarm_nemotron_diarization(
     const ParakeetCtcModel & model,
     float audio_seconds);
 
+long long nemotron_diarization_mel_frames(
+    const ParakeetCtcModel & model,
+    long long samples);
+
 int nemotron_diarization_encoder_frames(
     const ParakeetCtcModel & model,
     long long mel_frames);
@@ -57,6 +65,17 @@ int nemotron_diarization_encoder_frames(
 int nemotron_diarization_stream_mel_frames(const ParakeetCtcModel & model);
 
 int nemotron_diarization_stream_state_frames();
+
+int nemotron_diarization_long_form_mel_frames(const ParakeetCtcModel & model);
+
+int nemotron_diarization_long_form_frames(
+    const ParakeetCtcModel & model,
+    int requested_frames);
+
+bool nemotron_diarization_uses_long_form(
+    const ParakeetCtcModel & model,
+    int requested_frames,
+    long long mel_frames);
 
 bool nemotron_diarization_uses_fused_attention(const ParakeetCtcModel & model);
 

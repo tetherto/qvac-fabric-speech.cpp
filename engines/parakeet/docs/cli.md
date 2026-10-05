@@ -107,14 +107,18 @@ streaming operating point to project (one of the GGUF's allowed values,
 80/160/320/560/1120 on the shipped checkpoint); the default projects the
 largest operating point, which bounds every other.
 
-Nemotron 3 Diarization is modelled as well. It runs the whole input through
-one graph, so its device projection grows with the audio, and audio past the
-GGUF's `sortformer.encoder.pos_emb_max_len` encoder frames (400 s on the
-official checkpoint) is an error with reason `workload-too-large`, as it is
-at runtime. Offline and live sessions share the model scheduler, so the
-compute figure is the larger of the offline graph and one chunk at the
-default live geometry (1040 ms chunk, 80 ms right context, 264 speaker-cache
-and 80 FIFO rows). On a backend without fused flash attention the graph uses
+Nemotron 3 Diarization is modelled as well. Offline inputs up to the
+long-form window (90 s by default, `--window-frames` overrides it) run as one
+graph, so the device projection grows with the audio up to the window and
+saturates beyond it, where the engine switches to its long-form path. Every
+graph shares the model scheduler, so the compute figure is the largest of
+the single-pass graph, one chunk at the default live geometry (1040 ms
+chunk, 80 ms right context, 264 speaker-cache and 80 FIFO rows), and, for
+longer workloads, one 30 s long-form chunk. With long-form disabled
+(`--window-frames -1`), audio past the GGUF's
+`sortformer.encoder.pos_emb_max_len` encoder frames (400 s on the official
+checkpoint) is an error with reason `workload-too-large`, as it is at
+runtime. On a backend without fused flash attention the graph uses
 unfused attention, whose score matrix grows with the square of the input
 length, and the projection prices that graph.
 
