@@ -58,13 +58,8 @@ bool          dit_gguf_has(const DitGGUF & g, const std::string & name);
 // ->data is already set), and skip the corresponding upload/copy.
 ggml_backend_buffer_t dit_gguf_cpu_map_buffer(const DitGGUF & g);
 
-// Map-in-place needs a host-memory backend that also computes on a plain CPU
-// buffer. Hexagon reports host-visible buffers but only computes on its own
-// session buffers, so its weights are uploaded instead.
 bool dit_gguf_backend_maps_weights(ggml_backend_t backend);
 
-// Buffer type for a stage's uploaded weights: the backend default, except on
-// Hexagon, whose matmuls only accept weights repacked into its extra buffer type.
 ggml_backend_buffer_type_t dit_gguf_weight_buffer_type(ggml_backend_t backend);
 
 // Point `dst` at its bytes inside the mmap and attach `map_buf`. `dst` must have

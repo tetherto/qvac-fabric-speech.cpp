@@ -30,8 +30,6 @@ struct AcestepBackends {
     ggml_backend_t enc   = nullptr;
     ggml_backend_t lm    = nullptr;
     ggml_backend_t detok = nullptr;
-    // Owned third backend when an explicit LM request names a device that is
-    // neither the primary nor the CPU backend (e.g. OpenCL beside Hexagon).
     ggml_backend_t lm_extra = nullptr;
 
     bool              on_gpu              = false;
@@ -52,8 +50,6 @@ inline int resolve_thread_count(int n_threads) {
     return nth < 1 ? 4 : nth;
 }
 
-// An explicit request either yields its device or nothing; only "auto" falls
-// back, and only "auto" consults n_gpu_layers.
 inline ggml_backend_t acquire_primary_backend(const BackendRequest & req, GpuFallbackReason & reason) {
     if (!backend_request_is_auto(req.backend)) {
         ggml_backend_t backend = backend_requested_init(req.backend, &reason);
@@ -80,8 +76,6 @@ inline void free_acestep_backends(AcestepBackends & b) {
     b = AcestepBackends{};
 }
 
-// An explicit LM request reuses the primary or CPU backend when it names the
-// same device, and otherwise initialises (and owns) a backend of its own.
 inline bool place_requested_lm(const BackendRequest & req, AcestepBackends & out) {
     ggml_backend_dev_t dev = backend_requested_device(req.lm_backend);
     if (!dev) {
@@ -99,8 +93,6 @@ inline bool place_requested_lm(const BackendRequest & req, AcestepBackends & out
     return out.lm != nullptr;
 }
 
-// Dedicated CPU backend for the stages the placement policy pins off an
-// accelerator; with a CPU primary the one backend serves every stage.
 inline bool attach_cpu_backend(AcestepBackends & out) {
     if (!out.on_gpu) {
         backend_set_n_threads(out.backend, out.nth);
@@ -113,10 +105,6 @@ inline bool attach_cpu_backend(AcestepBackends & out) {
     return true;
 }
 
-// The DiT, the VAE and the one-shot text/cond encoders run on an active
-// accelerator; the LM and the FSQ detokenizer are allowlisted per backend,
-// with the ACESTEP_* environment escape hatches applied after the allowlist
-// (see stage_placement.h).
 inline void assign_stage_backends(AcestepBackends & out) {
     out.enc   = out.backend;
     out.lm    = out.backend;
@@ -181,8 +169,6 @@ inline int vae_gpu_layers_from_env(int n_gpu_layers) {
     return n_gpu_layers;
 }
 
-// The same override for an explicit backend request: only the CPU choice
-// changes it, since "GPU" already means the requested device.
 inline std::string vae_backend_request_from_env(const std::string & backend) {
     const char * e = std::getenv("ACESTEP_VAE_GPU");
     if (backend_request_is_auto(backend) || !e || e[0] == '1') return backend;

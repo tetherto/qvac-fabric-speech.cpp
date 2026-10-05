@@ -175,4 +175,8 @@ emits the projection for the SDK; the library entry point is
 hosts can link the CLI as `acestep_fit_cli_main`. Workload knobs: `--duration`,
 `--text-tokens`, `--lyric-tokens`, `--lm-cfg`, `--guidance`,
 `--with-source-audio`, `--margin-mib`. Placement knobs: `--n-gpu-layers`, `--backend` and
-`--lm-backend`, with the same meaning as in `music-cli`.
+`--lm-backend`, with the same meaning as in `music-cli`. Every device a stage
+lands on is its own memory pool: a third device picked by `--lm-backend` is
+listed under `extraDevices` in the JSON and must hold its stages plus the
+margin, while devices that share host memory (unified memory, or the Hexagon
+NPU, which reports none of its own) are charged against host RAM.

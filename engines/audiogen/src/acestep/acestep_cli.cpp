@@ -81,7 +81,6 @@ static void synthetic_latent_channel(std::vector<float> & latent, int c, int fra
         latent[(size_t) t * VAE_LATENT_CHANNELS + c] = amp * sinf(2.0f * (float) M_PI * freq * ((float) t / frames) + phase);
 }
 
-// Structured synthetic latent (no DiT): per-channel low-frequency sinusoids.
 static std::vector<float> synthetic_latent(int frames) {
     std::vector<float> latent((size_t) frames * VAE_LATENT_CHANNELS);
     for (int c = 0; c < VAE_LATENT_CHANNELS; ++c) synthetic_latent_channel(latent, c, frames);

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -71,6 +72,22 @@ void print_usage(const char * argv0) {
         argv0);
 }
 
+const char * json_bool(bool v) {
+    return v ? "true" : "false";
+}
+
+void print_extra_devices_json(const std::vector<tts_cpp::acestep::FitDevicePool> & extras) {
+    std::printf("  \"extraDevices\": [");
+    for (size_t i = 0; i < extras.size(); ++i) {
+        const tts_cpp::acestep::FitDevicePool & d = extras[i];
+        std::printf("%s\n    {\"name\": \"%s\", \"sharesHostMemory\": %s, \"freeBytes\": %" PRIu64
+                    ", \"totalBytes\": %" PRIu64 ", \"peakBytes\": %" PRIu64 "}",
+                    i ? "," : "", json_escape(d.name).c_str(), json_bool(d.shares_host_memory), d.free_bytes,
+                    d.total_bytes, d.peak_bytes);
+    }
+    std::printf("%s],\n", extras.empty() ? "" : "\n  ");
+}
+
 void print_json(const tts_cpp::acestep::FitResult & r, uint64_t margin_bytes) {
     auto b = [](bool v) { return v ? "true" : "false"; };
     std::printf("{\n");
@@ -102,6 +119,7 @@ void print_json(const tts_cpp::acestep::FitResult & r, uint64_t margin_bytes) {
     std::printf("\n  ],\n");
     std::printf("  \"peakDeviceBytes\": %" PRIu64 ",\n", r.peak_device_bytes);
     std::printf("  \"peakHostBytes\": %" PRIu64 ",\n", r.peak_host_bytes);
+    print_extra_devices_json(r.extra_devices);
     std::printf("  \"marginBytes\": %" PRIu64 "\n", margin_bytes);
     std::printf("}\n");
 }

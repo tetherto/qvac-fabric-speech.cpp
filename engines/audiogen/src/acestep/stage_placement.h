@@ -42,7 +42,6 @@ inline bool backend_name_is_cuda(const char * name) {
     return name && std::strcmp(name, "CUDA") == 0;
 }
 
-// ggml-hexagon registers as "HTP" (its devices are "HTP0", "HTP1", ...).
 inline bool backend_name_is_hexagon(const char * name) {
     return name && std::strcmp(name, "HTP") == 0;
 }

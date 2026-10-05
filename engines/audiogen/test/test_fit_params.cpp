@@ -102,6 +102,7 @@ int main(int argc, char ** argv) {
     expect(!fit.report.empty(), "empty report");
     expect(fit.device_total_bytes > 0, "device_total_bytes == 0");
     expect(fit.host_total_bytes > 0, "host_total_bytes == 0");
+    expect(fit.extra_devices.empty(), "automatic resolution placed a stage on a third device");
     if (g_failures) {
         return g_failures;  // nothing below is meaningful without a projection
     }

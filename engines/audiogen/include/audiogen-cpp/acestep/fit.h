@@ -21,9 +21,10 @@
 // everything else is one stage plus its compute). With ACESTEP_KEEP_STAGES (or
 // FitOptions::keep_stages = 1) every stage stays resident and the projection
 // is the SUM of all weights/KV/persistent graphs plus the largest ephemeral
-// compute. The verdict per memory pool (the primary device, and host RAM for
-// CPU-placed stages and host-side buffers) must hold for the fit to pass; on
-// unified-memory devices the pools are one and the requirements add.
+// compute. The verdict per memory pool (every device a stage is placed on, and
+// host RAM for CPU-placed stages and host-side buffers) must hold for the fit
+// to pass; devices that share host memory (unified memory, or an NPU that
+// reports no memory of its own) add their requirements to host RAM's.
 //
 // Status semantics follow the SDK's @qvac/model-fit contract:
 //   Success -- a projection was made and it fits (result.fits == true).
@@ -132,6 +133,14 @@ struct FitStageProjection {
     uint64_t host_bytes         = 0;  // stage-phase host-RAM buffers (masks, latents, PCM, ...)
 };
 
+struct FitDevicePool {
+    std::string name;
+    bool        shares_host_memory = false;
+    uint64_t    free_bytes         = 0;
+    uint64_t    total_bytes        = 0;
+    uint64_t    peak_bytes         = 0;
+};
+
 struct FitResult {
     FitStatus   status = FitStatus::Error;
     bool        fits   = false;  // status == Success
@@ -165,6 +174,8 @@ struct FitResult {
     // Peak projected bytes per pool under the projected residency mode.
     uint64_t peak_device_bytes = 0;  // on the primary device pool
     uint64_t peak_host_bytes   = 0;  // on the host pool (CPU stages + host buffers)
+
+    std::vector<FitDevicePool> extra_devices;
 
     // Human-readable projection table (multi-line, suitable for logging).
     std::string report;

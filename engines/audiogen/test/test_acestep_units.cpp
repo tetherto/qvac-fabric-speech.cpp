@@ -34,6 +34,7 @@
 #include "engine_backends.h"
 #include "detok_ggml.h"
 #include "fit_measure.h"
+#include "fit_pools.h"
 #include "tok_ggml.h"
 #include "generate_task.h"
 #include "generation_conditioning.h"
@@ -48,6 +49,7 @@
 #include "quantize_gguf.h"
 #include "quantize_policy.h"
 #include "qwen3_block.h"
+#include "stage_dump_io.h"
 #include "stage_placement.h"
 #include "vae_coreml_path.h"
 #include "vae_coreml_windows.h"
@@ -64,6 +66,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -851,8 +854,6 @@ void test_gpu_tier_policy() {
 }
 
 // 6d. explicit backend requests ----------------------------------------------
-// "hexagon" must reach only the HTP0 NPU session and never a generic GPU, and
-// the NPU must never be picked by the automatic GPU walk.
 void test_backend_request_matching() {
     using tts_cpp::acestep::backend_request_is_auto;
     using tts_cpp::acestep::backend_request_matches;
@@ -889,8 +890,6 @@ void test_dsp_library_path() {
     CHECK(prepend_dsp_library_directory("", "/vendor/dsp") == "/vendor/dsp");
 }
 
-// Holds on any machine: the CPU device always answers "cpu", and a name no
-// device carries fails without falling back.
 void test_backend_requested_init() {
     using tts_cpp::GpuFallbackReason;
     using tts_cpp::acestep::backend_is_cpu_device;
@@ -907,8 +906,34 @@ void test_backend_requested_init() {
     CHECK(reason == GpuFallbackReason::no_devices);
 }
 
-// The CPU backend keeps mapping weights off the GGUF and allocating the rest
-// in its default buffer; only Hexagon switches to uploads into its repack type.
+void test_backend_init_first_matching() {
+    using tts_cpp::GpuFallbackReason;
+    using tts_cpp::acestep::backend_device_matches_request;
+    using tts_cpp::acestep::backend_init_first_matching;
+    using tts_cpp::acestep::backend_request_outcome;
+    using tts_cpp::acestep::RequestedBackendInit;
+
+    const RequestedBackendInit cpu = backend_init_first_matching("cpu");
+    CHECK(cpu.backend != nullptr);
+    CHECK(cpu.saw_device);
+    CHECK(backend_request_outcome(cpu) == GpuFallbackReason::none);
+    if (cpu.backend) {
+        CHECK(backend_device_matches_request("cpu", ggml_backend_get_device(cpu.backend)));
+        CHECK(!backend_device_matches_request("hexagon", ggml_backend_get_device(cpu.backend)));
+        ggml_backend_free(cpu.backend);
+    }
+    CHECK(!backend_device_matches_request("cpu", nullptr));
+
+    const RequestedBackendInit missing = backend_init_first_matching("no-such-device");
+    CHECK(missing.backend == nullptr);
+    CHECK(!missing.saw_device);
+    CHECK(backend_request_outcome(missing) == GpuFallbackReason::no_devices);
+
+    RequestedBackendInit refused;
+    refused.saw_device = true;
+    CHECK(backend_request_outcome(refused) == GpuFallbackReason::init_failed);
+}
+
 void test_weight_placement_on_cpu() {
     using tts_cpp::acestep::backend_requested_init;
     using tts_cpp::acestep::dit_gguf_backend_maps_weights;
@@ -922,8 +947,6 @@ void test_weight_placement_on_cpu() {
     ggml_backend_free(cpu);
 }
 
-// An explicit LM request naming the primary device shares it instead of
-// opening a second backend, and an unknown name fails the whole resolution.
 void test_lm_backend_request() {
     using tts_cpp::acestep::AcestepBackends;
     using tts_cpp::acestep::BackendRequest;
@@ -942,6 +965,154 @@ void test_lm_backend_request() {
     req.lm_backend = "no-such-device";
     CHECK(!resolve_acestep_backends(req, rb));
     CHECK(rb.backend == nullptr);
+}
+
+constexpr uint64_t FIT_TEST_GIB    = 1ull << 30;
+constexpr uint64_t FIT_TEST_MARGIN = 256ull << 20;
+
+ggml_backend_dev_t fit_test_device(int & tag) {
+    return reinterpret_cast<ggml_backend_dev_t>(&tag);
+}
+
+tts_cpp::acestep::FitPool fit_test_pool(ggml_backend_dev_t dev, bool shares_host_memory, uint64_t free_gib) {
+    tts_cpp::acestep::FitPool pool;
+    pool.device             = dev;
+    pool.shares_host_memory = shares_host_memory;
+    pool.free_bytes         = free_gib * FIT_TEST_GIB;
+    pool.total_bytes        = pool.free_bytes;
+    return pool;
+}
+
+void test_fit_pool_sharing() {
+    using tts_cpp::acestep::backend_requested_init;
+    using tts_cpp::acestep::fit_device_shares_host_memory;
+    using tts_cpp::acestep::fit_pool_for_device;
+    using tts_cpp::acestep::FitPool;
+
+    CHECK(fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_CPU, "CPU", 32 * FIT_TEST_GIB));
+    CHECK(fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_IGPU, "Vulkan", 8 * FIT_TEST_GIB));
+    CHECK(fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_GPU, "MTL", 24 * FIT_TEST_GIB));
+    CHECK(fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_GPU, "HTP", 0));
+    CHECK(!fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_GPU, "CUDA", 8 * FIT_TEST_GIB));
+    CHECK(!fit_device_shares_host_memory(GGML_BACKEND_DEVICE_TYPE_GPU, "OpenCL", 4 * FIT_TEST_GIB));
+
+    ggml_backend_t cpu = backend_requested_init("cpu");
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+    const FitPool pool = fit_pool_for_device(ggml_backend_get_device(cpu));
+    CHECK(pool.device == ggml_backend_get_device(cpu));
+    CHECK(pool.shares_host_memory);
+    CHECK(pool.total_bytes > 0);
+    ggml_backend_free(cpu);
+}
+
+void test_fit_pools_charge_distinct_lm_device() {
+    using tts_cpp::acestep::fit_budget_checks;
+    using tts_cpp::acestep::fit_charge;
+    using tts_cpp::acestep::fit_checks_headroom;
+    using tts_cpp::acestep::fit_checks_hold;
+    using tts_cpp::acestep::fit_pool_register;
+    using tts_cpp::acestep::FIT_HOST_POOL;
+    using tts_cpp::acestep::FitBudgetCheck;
+    using tts_cpp::acestep::FitPool;
+    using tts_cpp::acestep::PoolCharge;
+
+    int                      host_tag = 0, lm_tag = 0, unknown_tag = 0;
+    const ggml_backend_dev_t host = fit_test_device(host_tag);
+    const ggml_backend_dev_t lm   = fit_test_device(lm_tag);
+
+    std::vector<FitPool> pools;
+    CHECK(fit_pool_register(pools, fit_test_pool(host, true, 16)) == FIT_HOST_POOL);
+    const size_t primary = fit_pool_register(pools, fit_test_pool(host, true, 16));
+    const size_t lm_pool = fit_pool_register(pools, fit_test_pool(lm, false, 1));
+    CHECK(primary == FIT_HOST_POOL);
+    CHECK(lm_pool == 1);
+    CHECK(pools.size() == 2);
+
+    PoolCharge peak = fit_charge(pools, host, 2 * FIT_TEST_GIB);
+    peak.add(fit_charge(pools, lm, 3 * FIT_TEST_GIB));
+    CHECK(peak.bytes[FIT_HOST_POOL] == 2 * FIT_TEST_GIB);
+    CHECK(peak.bytes[lm_pool] == 3 * FIT_TEST_GIB);
+    CHECK(!fit_checks_hold(fit_budget_checks(pools, peak, primary, FIT_TEST_MARGIN)));
+
+    pools[lm_pool].free_bytes = 8 * FIT_TEST_GIB;
+    const std::vector<FitBudgetCheck> checks = fit_budget_checks(pools, peak, primary, FIT_TEST_MARGIN);
+    CHECK(checks.size() == 2);
+    CHECK(fit_checks_hold(checks));
+    CHECK(fit_checks_headroom(checks) == 5 * FIT_TEST_GIB - FIT_TEST_MARGIN);
+
+    CHECK(fit_charge(pools, fit_test_device(unknown_tag), 1).bytes[FIT_HOST_POOL] == 1);
+}
+
+void test_fit_pools_shared_budget() {
+    using tts_cpp::acestep::fit_budget_checks;
+    using tts_cpp::acestep::fit_charge;
+    using tts_cpp::acestep::fit_checks_headroom;
+    using tts_cpp::acestep::fit_checks_hold;
+    using tts_cpp::acestep::fit_pool_register;
+    using tts_cpp::acestep::fit_shared_budget_pool;
+    using tts_cpp::acestep::FIT_HOST_POOL;
+    using tts_cpp::acestep::FitBudgetCheck;
+    using tts_cpp::acestep::FitPool;
+    using tts_cpp::acestep::PoolCharge;
+
+    int                      host_tag = 0, npu_tag = 0, metal_tag = 0;
+    const ggml_backend_dev_t host  = fit_test_device(host_tag);
+    const ggml_backend_dev_t npu   = fit_test_device(npu_tag);
+    const ggml_backend_dev_t metal = fit_test_device(metal_tag);
+
+    std::vector<FitPool> npu_pools;
+    fit_pool_register(npu_pools, fit_test_pool(host, true, 4));
+    const size_t npu_primary = fit_pool_register(npu_pools, fit_test_pool(npu, true, 0));
+    CHECK(fit_shared_budget_pool(npu_pools, npu_primary) == FIT_HOST_POOL);
+    PoolCharge npu_peak = fit_charge(npu_pools, host, FIT_TEST_GIB);
+    npu_peak.add(fit_charge(npu_pools, npu, 2 * FIT_TEST_GIB));
+    const std::vector<FitBudgetCheck> npu_checks = fit_budget_checks(npu_pools, npu_peak, npu_primary, FIT_TEST_MARGIN);
+    CHECK(npu_checks.size() == 1);
+    CHECK(fit_checks_hold(npu_checks));
+    CHECK(fit_checks_headroom(npu_checks) == FIT_TEST_GIB - FIT_TEST_MARGIN);
+    npu_peak.add(fit_charge(npu_pools, npu, FIT_TEST_GIB));
+    CHECK(!fit_checks_hold(fit_budget_checks(npu_pools, npu_peak, npu_primary, FIT_TEST_MARGIN)));
+
+    std::vector<FitPool> metal_pools;
+    fit_pool_register(metal_pools, fit_test_pool(host, true, 64));
+    const size_t metal_primary = fit_pool_register(metal_pools, fit_test_pool(metal, true, 2));
+    CHECK(fit_shared_budget_pool(metal_pools, metal_primary) == metal_primary);
+    PoolCharge metal_peak = fit_charge(metal_pools, host, FIT_TEST_GIB);
+    metal_peak.add(fit_charge(metal_pools, metal, 2 * FIT_TEST_GIB));
+    CHECK(!fit_checks_hold(fit_budget_checks(metal_pools, metal_peak, metal_primary, FIT_TEST_MARGIN)));
+}
+
+void test_fit_pools_check_every_discrete_device() {
+    using tts_cpp::acestep::fit_budget_checks;
+    using tts_cpp::acestep::fit_charge;
+    using tts_cpp::acestep::fit_checks_headroom;
+    using tts_cpp::acestep::fit_checks_hold;
+    using tts_cpp::acestep::fit_pool_register;
+    using tts_cpp::acestep::FitBudgetCheck;
+    using tts_cpp::acestep::FitPool;
+    using tts_cpp::acestep::PoolCharge;
+
+    int                      host_tag = 0, dit_tag = 0, lm_tag = 0;
+    const ggml_backend_dev_t host = fit_test_device(host_tag);
+    const ggml_backend_dev_t dit  = fit_test_device(dit_tag);
+    const ggml_backend_dev_t lm   = fit_test_device(lm_tag);
+
+    std::vector<FitPool> pools;
+    fit_pool_register(pools, fit_test_pool(host, true, 32));
+    const size_t primary = fit_pool_register(pools, fit_test_pool(dit, false, 8));
+    const size_t lm_pool = fit_pool_register(pools, fit_test_pool(lm, false, 2));
+
+    PoolCharge peak = fit_charge(pools, host, FIT_TEST_GIB);
+    peak.add(fit_charge(pools, dit, 4 * FIT_TEST_GIB)).add(fit_charge(pools, lm, 3 * FIT_TEST_GIB));
+    const std::vector<FitBudgetCheck> tight = fit_budget_checks(pools, peak, primary, FIT_TEST_MARGIN);
+    CHECK(tight.size() == 3);
+    CHECK(!fit_checks_hold(tight));
+
+    pools[lm_pool].free_bytes = 4 * FIT_TEST_GIB;
+    const std::vector<FitBudgetCheck> roomy = fit_budget_checks(pools, peak, primary, FIT_TEST_MARGIN);
+    CHECK(fit_checks_hold(roomy));
+    CHECK(fit_checks_headroom(roomy) == FIT_TEST_GIB - FIT_TEST_MARGIN);
 }
 
 // 7. stage placement ---------------------------------------------------------
@@ -1176,8 +1347,6 @@ void set_env(const char * key, const char * value) {
 #endif
 }
 
-// ACESTEP_VAE_GPU=0 moves the VAE of an explicit request to the CPU; any other
-// value keeps the requested device, and "auto" keeps the n_gpu_layers path.
 void test_vae_backend_request_env() {
     using tts_cpp::acestep::vae_backend_request_from_env;
 
@@ -1377,6 +1546,68 @@ void test_fused_load_fail_closed() {
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
     std::remove(path.c_str());
+}
+
+std::string write_raw_stage_dump(const char * name, const std::vector<int32_t> & header, size_t n_floats) {
+    const std::string path = test_temp_dir() + "/" + name;
+    FILE *            f    = fopen(path.c_str(), "wb");
+    CHECK(f != nullptr);
+    if (!f) return path;
+    const std::vector<float> payload(n_floats, 1.0f);
+    fwrite(header.data(), sizeof(int32_t), header.size(), f);
+    fwrite(payload.data(), sizeof(float), payload.size(), f);
+    fclose(f);
+    return path;
+}
+
+void expect_stage_dump_rejected(const char * name, const std::vector<int32_t> & header, size_t n_floats) {
+    const std::string  path = write_raw_stage_dump(name, header, n_floats);
+    std::vector<float> out;
+    int                d0 = 0, d1 = 0;
+    bool               read  = true;
+    bool               threw = false;
+    try {
+        read = tts_cpp::acestep::read_stage_dump("test", path.c_str(), out, &d0, &d1);
+    } catch (const std::exception &) {
+        threw = true;
+    }
+    CHECK(!threw);
+    CHECK(!read);
+    CHECK(out.empty());
+    std::remove(path.c_str());
+}
+
+void test_stage_dump_round_trip() {
+    using tts_cpp::acestep::read_stage_dump;
+    using tts_cpp::acestep::write_stage_dump;
+
+    const std::string        path = test_temp_dir() + "/qvac-acestep-stage-dump.bin";
+    const std::vector<float> v    = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
+    CHECK(write_stage_dump("test", path.c_str(), v, 3, 2));
+    std::vector<float> out;
+    int                d0 = 0, d1 = 0;
+    CHECK(read_stage_dump("test", path.c_str(), out, &d0, &d1));
+    CHECK(d0 == 3);
+    CHECK(d1 == 2);
+    CHECK(out == v);
+    std::remove(path.c_str());
+}
+
+void test_stage_dump_rejects_malformed() {
+    constexpr int32_t BIG = std::numeric_limits<int32_t>::max();
+    expect_stage_dump_rejected("qvac-acestep-dump-huge.bin", { 2, BIG, BIG }, 0);
+    expect_stage_dump_rejected("qvac-acestep-dump-huge-frames.bin", { 2, BIG, 64 }, 0);
+    expect_stage_dump_rejected("qvac-acestep-dump-truncated.bin", { 2, 4, 64 }, 10);
+    expect_stage_dump_rejected("qvac-acestep-dump-rank.bin", { 3, 2, 3 }, 6);
+    expect_stage_dump_rejected("qvac-acestep-dump-zero.bin", { 2, 0, 3 }, 0);
+    expect_stage_dump_rejected("qvac-acestep-dump-negative.bin", { 2, -1, 3 }, 3);
+    expect_stage_dump_rejected("qvac-acestep-dump-short-header.bin", { 2, 3 }, 0);
+
+    std::vector<float> out;
+    int                d0 = 0, d1 = 0;
+    const std::string  missing = test_temp_dir() + "/qvac-acestep-dump-missing.bin";
+    std::remove(missing.c_str());
+    CHECK(!tts_cpp::acestep::read_stage_dump("test", missing.c_str(), out, &d0, &d1));
 }
 
 // 9c. vae metadata-only measure ----------------------------------------------
@@ -3171,7 +3402,12 @@ int main() {
     test_backend_request_matching();
     test_dsp_library_path();
     test_backend_requested_init();
+    test_backend_init_first_matching();
     test_lm_backend_request();
+    test_fit_pool_sharing();
+    test_fit_pools_charge_distinct_lm_device();
+    test_fit_pools_shared_budget();
+    test_fit_pools_check_every_discrete_device();
     test_weight_placement_on_cpu();
     test_stage_placement();
     test_placement_env();
@@ -3179,6 +3415,8 @@ int main() {
     test_parallel_rows();
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();
+    test_stage_dump_round_trip();
+    test_stage_dump_rejects_malformed();
     test_vae_metadata_only_measure();
     test_generate_task_kinds();
     test_generate_task_defaults();

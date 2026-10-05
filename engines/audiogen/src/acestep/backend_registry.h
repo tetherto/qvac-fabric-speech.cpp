@@ -59,8 +59,6 @@ inline std::string prepend_dsp_library_directory(const std::string & dir, const 
     return paths.empty() ? dir : dir + sep + paths;
 }
 
-// FastRPC loads the libggml-htp-v*.so DSP skeletons through its own search
-// path, so the staged backends dir must be on it before HTP sessions open.
 inline void prepare_dsp_library_path(const std::string & dir) {
 #ifdef __ANDROID__
     if (dir.empty()) return;
@@ -110,35 +108,46 @@ inline const char * backend_dev_reg_name(ggml_backend_dev_t dev) {
     return name ? name : "";
 }
 
+inline bool backend_device_matches_request(const std::string & requested, ggml_backend_dev_t dev) {
+    return dev && backend_request_matches(requested, backend_dev_reg_name(dev), ggml_backend_dev_name(dev),
+                                          ggml_backend_dev_type(dev));
+}
+
 inline ggml_backend_dev_t backend_requested_device(const std::string & requested) {
     const size_t n_dev = ggml_backend_dev_count();
     for (size_t i = 0; i < n_dev; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (dev && backend_request_matches(requested, backend_dev_reg_name(dev), ggml_backend_dev_name(dev),
-                                           ggml_backend_dev_type(dev))) {
-            return dev;
-        }
+        if (backend_device_matches_request(requested, dev)) return dev;
     }
     return nullptr;
 }
 
-inline ggml_backend_t backend_requested_init(const std::string & requested, GpuFallbackReason * reason = nullptr) {
-    bool         saw_device = false;
-    const size_t n_dev      = ggml_backend_dev_count();
-    for (size_t i = 0; i < n_dev; ++i) {
+struct RequestedBackendInit {
+    ggml_backend_t backend    = nullptr;
+    bool           saw_device = false;
+};
+
+inline RequestedBackendInit backend_init_first_matching(const std::string & requested) {
+    RequestedBackendInit result;
+    const size_t         n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev && !result.backend; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (!dev || !backend_request_matches(requested, backend_dev_reg_name(dev), ggml_backend_dev_name(dev),
-                                             ggml_backend_dev_type(dev))) {
-            continue;
-        }
-        saw_device = true;
-        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
-            if (reason) *reason = GpuFallbackReason::none;
-            return backend;
-        }
+        if (!backend_device_matches_request(requested, dev)) continue;
+        result.saw_device = true;
+        result.backend    = ggml_backend_dev_init(dev, nullptr);
     }
-    if (reason) *reason = saw_device ? GpuFallbackReason::init_failed : GpuFallbackReason::no_devices;
-    return nullptr;
+    return result;
+}
+
+inline GpuFallbackReason backend_request_outcome(const RequestedBackendInit & init) {
+    if (init.backend) return GpuFallbackReason::none;
+    return init.saw_device ? GpuFallbackReason::init_failed : GpuFallbackReason::no_devices;
+}
+
+inline ggml_backend_t backend_requested_init(const std::string & requested, GpuFallbackReason * reason = nullptr) {
+    const RequestedBackendInit init = backend_init_first_matching(requested);
+    if (reason) *reason = backend_request_outcome(init);
+    return init.backend;
 }
 
 inline bool backend_is_cpu_device(ggml_backend_t backend) {
@@ -356,8 +365,6 @@ inline void backend_set_n_threads(ggml_backend_t backend, int n_threads) {
     if (set_n_threads) set_n_threads(backend, n_threads);
 }
 
-// Backend for the per-stage smoke harnesses: an explicit --backend request with
-// no fallback, else the GPU walk for --gpu, else the CPU with `n_threads`.
 inline ggml_backend_t backend_init_for_tool(const char * requested, bool gpu, int n_threads) {
     ggml_backend_t backend = nullptr;
     if (requested && !backend_request_is_auto(requested)) {

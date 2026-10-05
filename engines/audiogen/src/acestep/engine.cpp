@@ -125,7 +125,7 @@ struct Engine::Impl {
     ggml_backend_t backend       = nullptr;  // primary backend (GPU or CPU) for textenc/cond/DiT
     ggml_backend_t backend_cpu   = nullptr;  // CPU backend for the stages pinned off the GPU; == backend when primary is CPU
     ggml_backend_t backend_lm    = nullptr;  // backend the LM loads on (see create)
-    ggml_backend_t backend_lm_extra = nullptr;  // owned when an explicit LM request names a third device
+    ggml_backend_t backend_lm_extra = nullptr;
     ggml_backend_t backend_enc   = nullptr;  // backend for textenc + cond (see create)
     ggml_backend_t backend_detok = nullptr;  // backend the FSQ detok loads on (CPU off-GPU, GPU on Vulkan; see create)
     TextEncModel * textenc = nullptr;

@@ -29,6 +29,7 @@
 #include "acestep/engine_backends.h"
 #include "acestep/engine_paths.h"
 #include "acestep/fit_measure.h"
+#include "acestep/fit_pools.h"
 #include "acestep/fit_util.h"
 #include "acestep/lm_ggml.h"
 #include "acestep/stage_placement.h"
@@ -42,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <vector>
@@ -92,44 +94,50 @@ bool env_keep_stages() {
     return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y');
 }
 
-// Which memory pool a backend's allocations land in: the primary-device pool
-// or the host pool. On a CPU-only run everything is the host pool.
-struct Pools {
-    ggml_backend_dev_t device = nullptr;  // primary (DiT) device
-    ggml_backend_dev_t host   = nullptr;  // CPU device
-    bool               split  = false;    // device != host (a GPU is active)
-};
+PoolCharge charge_backend(const std::vector<FitPool> & pools, ggml_backend_t backend, uint64_t bytes) {
+    return fit_charge(pools, backend ? ggml_backend_get_device(backend) : nullptr, bytes);
+}
 
-struct PoolCharge {
-    uint64_t device = 0;
-    uint64_t host   = 0;
+void register_backend_pools(std::vector<FitPool> & pools, std::initializer_list<ggml_backend_t> backends) {
+    for (ggml_backend_t backend : backends) {
+        fit_pool_register(pools, fit_pool_for_device(ggml_backend_get_device(backend)));
+    }
+}
 
-    PoolCharge & add_device(uint64_t b) { device = sat_add(device, b); return *this; }
-    PoolCharge & add_host(uint64_t b)   { host   = sat_add(host, b);   return *this; }
-    PoolCharge & add(const PoolCharge & o) {
-        device = sat_add(device, o.device);
-        host   = sat_add(host, o.host);
-        return *this;
+std::vector<FitDevicePool> extra_device_pools(const std::vector<FitPool> & pools, const PoolCharge & peak,
+                                              size_t primary) {
+    std::vector<FitDevicePool> extras;
+    for (size_t i = 0; i < pools.size(); ++i) {
+        if (i == FIT_HOST_POOL || i == primary) continue;
+        FitDevicePool d;
+        d.name               = ggml_backend_dev_name(pools[i].device);
+        d.shares_host_memory = pools[i].shares_host_memory;
+        d.free_bytes         = pools[i].free_bytes;
+        d.total_bytes        = pools[i].total_bytes;
+        d.peak_bytes         = peak.bytes[i];
+        extras.push_back(std::move(d));
     }
-    PoolCharge & max_with(const PoolCharge & o) {
-        // Per-pool max: phases do not overlap in time, so each pool's peak is
-        // the largest single-phase charge on that pool.
-        device = std::max(device, o.device);
-        host   = std::max(host, o.host);
-        return *this;
-    }
-};
+    return extras;
+}
 
-// Charge `bytes` allocated on `backend` to the right pool.
-PoolCharge charge_backend(const Pools & pools, ggml_backend_t backend, uint64_t bytes) {
-    PoolCharge c;
-    ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr;
-    if (pools.split && dev == pools.device) {
-        c.device = bytes;
-    } else {
-        c.host = bytes;
+std::string format_extra_device_lines(const std::vector<FitDevicePool> & extras) {
+    std::string s;
+    char        line[320];
+    for (const FitDevicePool & d : extras) {
+        std::snprintf(line, sizeof(line), "extra:    %s, free %s / total %s%s\n", d.name.c_str(),
+                      fmt_mib(d.free_bytes).c_str(), fmt_mib(d.total_bytes).c_str(),
+                      d.shares_host_memory ? " (shares host RAM)" : "");
+        s += line;
     }
-    return c;
+    return s;
+}
+
+std::string format_extra_device_peaks(const std::vector<FitDevicePool> & extras) {
+    std::string s;
+    for (const FitDevicePool & d : extras) {
+        s += ", " + d.name + " " + fmt_mib(d.peak_bytes);
+    }
+    return s;
 }
 
 }  // namespace
@@ -222,33 +230,22 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
 
-    Pools pools;
-    pools.host   = ggml_backend_get_device(rb.backend_cpu);
-    pools.device = ggml_backend_get_device(rb.backend);
-    pools.split  = rb.on_gpu && pools.device != pools.host;
-    if (!pools.host || !pools.device) {
+    if (!ggml_backend_get_device(rb.backend_cpu) || !ggml_backend_get_device(rb.backend)) {
         r.reason = "no-backend-device";
         return r;
     }
+    std::vector<FitPool> pools;
+    register_backend_pools(pools, { rb.backend_cpu, rb.backend, rb.enc, rb.detok, rb.lm, vae_backend });
+    const size_t    primary      = fit_pool_of(pools, ggml_backend_get_device(rb.backend));
+    const FitPool & primary_pool = pools[primary];
 
-    r.device_name   = ggml_backend_name(rb.backend);
-    r.device_is_cpu = !rb.on_gpu;
-    // Unified-memory devices (CPU, integrated GPUs, Apple Metal) draw the
-    // "device" figure from the same physical RAM the host pool lives in, so
-    // the verdict must charge both against it. Discrete GPUs keep them apart.
-    r.device_shares_host_memory =
-        !pools.split ||
-        ggml_backend_dev_type(pools.device) == GGML_BACKEND_DEVICE_TYPE_IGPU ||
-        backend_name_is_metal(backend_reg_name(rb.backend));
-    {
-        size_t free_b = 0, total_b = 0;
-        ggml_backend_dev_memory(pools.device, &free_b, &total_b);
-        r.device_free_bytes  = free_b;
-        r.device_total_bytes = total_b;
-        ggml_backend_dev_memory(pools.host, &free_b, &total_b);
-        r.host_free_bytes  = free_b;
-        r.host_total_bytes = total_b;
-    }
+    r.device_name               = ggml_backend_name(rb.backend);
+    r.device_is_cpu             = !rb.on_gpu;
+    r.device_shares_host_memory = primary_pool.shares_host_memory;
+    r.device_free_bytes         = primary_pool.free_bytes;
+    r.device_total_bytes        = primary_pool.total_bytes;
+    r.host_free_bytes           = pools[FIT_HOST_POOL].free_bytes;
+    r.host_total_bytes          = pools[FIT_HOST_POOL].total_bytes;
 
     const bool keep_stages =
         opts.keep_stages == 1 || (opts.keep_stages == -1 && env_keep_stages());
@@ -435,7 +432,7 @@ FitResult fit_params(const FitOptions & opts) {
         FitStageProjection s;
         s.name               = name;
         s.device_name        = ggml_backend_name(backend);
-        s.on_gpu             = pools.split && ggml_backend_get_device(backend) == pools.device;
+        s.on_gpu             = !backend_is_cpu_device(backend);
         s.weights_bytes      = sat_add(w.weights_alloc_bytes, extra_weights);
         s.weights_mmap_bytes = w.weights_mapped_bytes;
         s.state_bytes        = state;
@@ -554,18 +551,18 @@ FitResult fit_params(const FitOptions & opts) {
     PoolCharge vae_enc_compute = charge_backend(pools, vae_backend, vae_enc_backend);
     vae_enc_compute.add_host(vae_enc_host_in);
 
-    PoolCharge peak;
+    PoolCharge peak(pools.size());
     if (keep_stages) {
         // Everything resident: all stage buffers, the two persistent graph
         // caches (DiT forward, LM decode), plus the largest ephemeral graph.
-        PoolCharge resident;
+        PoolCharge resident(pools.size());
         resident.add(textenc_static).add(cond_static).add(detok_static)
                 .add(lm_static).add(dit_static).add(vae_static)
                 .add(dit_compute).add(lm_compute);
-        PoolCharge ephemeral;  // per-call graphs: encoders, detok, VAE windows
+        PoolCharge ephemeral(pools.size());  // per-call graphs: encoders, detok, VAE windows
         ephemeral.max_with(enc_compute).max_with(detok_compute)
                  .max_with(vae_dec_compute).max_with(vae_enc_compute);
-        PoolCharge host_only;
+        PoolCharge host_only(pools.size());
         host_only.add_host(std::max({ lm_host, detok_host, enc_host,
                                       dit_host, vae_host, vae_enc_host }));
         peak = resident;
@@ -591,30 +588,13 @@ FitResult fit_params(const FitOptions & opts) {
             peak.max_with(phase(vae_static, vae_enc_compute, vae_enc_host));
         }
     }
-    r.peak_device_bytes = pools.split ? peak.device : 0;
-    r.peak_host_bytes   = pools.split ? peak.host : sat_add(peak.device, peak.host);
-    if (!pools.split) {
-        // Single pool: everything is host RAM; report it under the device
-        // figures too so callers looking at one number see the truth.
-        r.peak_device_bytes = r.peak_host_bytes;
-    }
+    r.peak_device_bytes = peak.bytes[primary];
+    r.peak_host_bytes   = peak.bytes[FIT_HOST_POOL];
+    r.extra_devices     = extra_device_pools(pools, peak, primary);
 
     // ── Verdict ─────────────────────────────────────────────────────────────
-    // Saturating arithmetic: an overflow must surface as DOES-NOT-FIT, never
-    // wrap into a false FITS.
-    bool fits;
-    if (!pools.split) {
-        fits = sat_add(r.peak_device_bytes, opts.margin_bytes) <= r.device_free_bytes;
-    } else if (r.device_shares_host_memory) {
-        // Unified memory (Metal, iGPU): both pools are the same physical RAM;
-        // charge everything against the device's free figure.
-        fits = sat_add(sat_add(r.peak_device_bytes, r.peak_host_bytes), opts.margin_bytes) <=
-               r.device_free_bytes;
-    } else {
-        // Discrete VRAM: each pool must hold with the margin.
-        fits = sat_add(r.peak_device_bytes, opts.margin_bytes) <= r.device_free_bytes &&
-               sat_add(r.peak_host_bytes, opts.margin_bytes) <= r.host_free_bytes;
-    }
+    const std::vector<FitBudgetCheck> checks = fit_budget_checks(pools, peak, primary, opts.margin_bytes);
+    const bool                        fits   = fit_checks_hold(checks);
     r.fits   = fits;
     r.status = fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = fits ? "fits" : "does-not-fit";
@@ -632,11 +612,12 @@ FitResult fit_params(const FitOptions & opts) {
                       fmt_mib(r.device_free_bytes).c_str(), fmt_mib(r.device_total_bytes).c_str(),
                       r.device_shares_host_memory ? " (shares host RAM)" : "");
         s += line;
-        if (pools.split && !r.device_shares_host_memory) {
+        if (primary != FIT_HOST_POOL && fit_shared_budget_pool(pools, primary) == FIT_HOST_POOL) {
             std::snprintf(line, sizeof(line), "host:     free %s / total %s\n",
                           fmt_mib(r.host_free_bytes).c_str(), fmt_mib(r.host_total_bytes).c_str());
             s += line;
         }
+        s += format_extra_device_lines(r.extra_devices);
         std::snprintf(line, sizeof(line),
                       "workload: %.1f s -> <=%d LM codes, %d latent frames, DiT T=%d, enc_S=%d%s%s\n",
                       (double) opts.duration_seconds, max_codes, latent_frames, T, enc_S,
@@ -658,22 +639,12 @@ FitResult fit_params(const FitOptions & opts) {
                           st.host_bytes ? (" host " + fmt_mib(st.host_bytes)).c_str() : "");
             s += line;
         }
-        std::snprintf(line, sizeof(line), "peak:     device %s, host %s, margin %s\n",
+        std::snprintf(line, sizeof(line), "peak:     device %s, host %s%s, margin %s\n",
                       fmt_mib(r.peak_device_bytes).c_str(), fmt_mib(r.peak_host_bytes).c_str(),
-                      fmt_mib(opts.margin_bytes).c_str());
+                      format_extra_device_peaks(r.extra_devices).c_str(), fmt_mib(opts.margin_bytes).c_str());
         s += line;
         if (r.fits) {
-            uint64_t headroom;
-            if (!pools.split) {
-                headroom = r.device_free_bytes - sat_add(r.peak_device_bytes, opts.margin_bytes);
-            } else if (r.device_shares_host_memory) {
-                headroom = r.device_free_bytes -
-                           sat_add(sat_add(r.peak_device_bytes, r.peak_host_bytes), opts.margin_bytes);
-            } else {
-                headroom = std::min(
-                    r.device_free_bytes - sat_add(r.peak_device_bytes, opts.margin_bytes),
-                    r.host_free_bytes - sat_add(r.peak_host_bytes, opts.margin_bytes));
-            }
+            const uint64_t headroom = fit_checks_headroom(checks);
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n", fmt_mib(headroom).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT\n");

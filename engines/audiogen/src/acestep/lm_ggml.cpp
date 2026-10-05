@@ -213,9 +213,6 @@ static bool lm_build_partial_head(LMModel * m, int offset, int count) {
     return true;
 }
 
-// The forward graphs look tokens up in the tied embedding with GET_ROWS and
-// run without a scheduler, so a backend that cannot gather rows of that
-// tensor (Hexagon repacks quantized weights) cannot host the LM at all.
 static bool lm_backend_runs_embedding_lookup(ggml_backend_t backend, ggml_tensor * embed) {
     ggml_init_params ip{ ggml_tensor_overhead() * 2, nullptr, /*no_alloc=*/true };
     ggml_context *   ctx = ggml_init(ip);
