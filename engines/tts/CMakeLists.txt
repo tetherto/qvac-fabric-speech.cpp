@@ -346,6 +346,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/delay.cpp
     src/parler/sampler.cpp
     src/parler/dac.cpp
+    src/parler/dac_accel.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -356,6 +357,7 @@ set(TTS_CPP_LIB_SOURCES
     src/audio8/codec_ops.cpp
     src/audio8/codec_decode.cpp
     src/audio8/codec_encode.cpp
+    src/audio8/window_stream.cpp
     src/audio8/coreml_path.cpp
     src/audio8/sampling.cpp
     src/audio8/engine.cpp
@@ -1618,6 +1620,17 @@ if (TTS_CPP_BUILD_TESTS)
 
     # The fast-AR graph cache against the dual-path dispatch: the scheduler
     # must bypass it and must not leave it poisoned for the direct path after.
+    # The load-time stacking of the LM's projections against the separate
+    # weights, byte for byte, on a synthetic LM. No fixtures.
+    add_executable(test-audio8-lm-fusion
+        test/audio8/test_lm_fusion.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/sampling.cpp ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-lm-fusion PRIVATE ggml)
+    target_include_directories(test-audio8-lm-fusion PRIVATE include src test)
+    tts_cpp_apply_ccache(test-audio8-lm-fusion)
+    tts_cpp_register_test(test-audio8-lm-fusion LABEL "unit")
+
     add_executable(test-audio8-fast-cache-sched
         test/audio8/test_fast_cache_sched.cpp
         src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
@@ -1634,8 +1647,9 @@ if (TTS_CPP_BUILD_TESTS)
         test/audio8/test_quantised_precision.cpp
         src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        src/audio8/window_stream.cpp
         ${_tcb_audio8_core_srcs})
-    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml)
+    target_link_libraries(test-audio8-quantised-precision PRIVATE ggml Threads::Threads)
     target_include_directories(test-audio8-quantised-precision PRIVATE include src)
     tts_cpp_apply_ccache(test-audio8-quantised-precision)
     tts_cpp_register_test(test-audio8-quantised-precision
@@ -1645,8 +1659,9 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-audio8-codec test/audio8/test_codec.cpp
         src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/codec_encode.cpp
+        src/audio8/window_stream.cpp
         ${_tcb_audio8_core_srcs})
-    target_link_libraries(test-audio8-codec PRIVATE ggml)
+    target_link_libraries(test-audio8-codec PRIVATE ggml Threads::Threads)
     target_include_directories(test-audio8-codec PRIVATE include src test)
     tts_cpp_apply_ccache(test-audio8-codec)
     tts_cpp_register_test(test-audio8-codec
@@ -1742,10 +1757,14 @@ if (TTS_CPP_BUILD_TESTS)
             LABEL    "gpu"
             ARGS     "${_tcb_audio8_lm}"
             REQUIRES "${_tcb_audio8_lm}")
+        tts_cpp_register_test(test-audio8-lm-fusion-${suffix}
+            EXE      test-audio8-lm-fusion
+            LABEL    "gpu")
         set_property(TEST test-audio8-lm-${suffix} test-audio8-codec-${suffix}
                           test-audio8-engine-${suffix}
                           test-audio8-quantised-precision-${suffix}
-                          test-audio8-fast-cache-sched-${suffix} APPEND
+                          test-audio8-fast-cache-sched-${suffix}
+                          test-audio8-lm-fusion-${suffix} APPEND
                      PROPERTY ENVIRONMENT "AUDIO8_TEST_GPU=${suffix}"
                                           "TTS_CPP_GPU_BACKEND=${suffix}")
     endfunction()
@@ -1818,6 +1837,15 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-audio8-coreml-windows PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-coreml-windows)
     tts_cpp_register_test(test-audio8-coreml-windows LABEL "unit")
+
+    # The synthesis stream that overlaps the Core ML codec with generation,
+    # driven by a fake causal synthesizer. No models, so it runs everywhere.
+    add_executable(test-audio8-window-stream test/audio8/test_window_stream.cpp
+        src/audio8/window_stream.cpp)
+    target_include_directories(test-audio8-window-stream PRIVATE src)
+    target_link_libraries(test-audio8-window-stream PRIVATE Threads::Threads)
+    tts_cpp_apply_ccache(test-audio8-window-stream)
+    tts_cpp_register_test(test-audio8-window-stream LABEL "unit")
 
     # Model-free on every host: the Supertonic vocoder sidecar's naming rule.
     add_executable(test-supertonic-coreml-path test/test_supertonic_coreml_path.cpp
@@ -2021,8 +2049,17 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-parler-decoder-fused)
     tts_cpp_register_test(test-parler-decoder-fused)
 
+    # Model-free: the DAC snake and conv routing on every build, plus the
+    # Accelerate DAC kernels against naive references where they are compiled in.
+    add_executable(test-parler-dac-cpu-kernels test/parler/test_dac_cpu_kernels.cpp
+        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
+    target_link_libraries(test-parler-dac-cpu-kernels PRIVATE ggml)
+    target_include_directories(test-parler-dac-cpu-kernels PRIVATE ggml/include include src)
+    tts_cpp_apply_ccache(test-parler-dac-cpu-kernels)
+    tts_cpp_register_test(test-parler-dac-cpu-kernels LABEL "unit")
+
     add_executable(test-parler-dac test/parler/test_dac.cpp
-        src/parler/dac.cpp ${_tcb_parler_core_srcs})
+        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac PRIVATE ggml)
     target_include_directories(test-parler-dac PRIVATE ggml/include include src)
     tts_cpp_apply_ccache(test-parler-dac)
@@ -2062,7 +2099,7 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-e2e test/parler/test_e2e.cpp
         src/parler/t5.cpp src/parler/decoder.cpp src/parler/delay.cpp
-        src/parler/dac.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
+        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
         src/parler/bpe_tokenizer.cpp
         src/parler/text_norm.cpp src/parler/engine.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-e2e PRIVATE ggml)
@@ -3405,8 +3442,9 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-t3-sched-dispatch)
     tts_cpp_register_test(test-t3-sched-dispatch LABEL "unit")
 
-    # Same binary, guard bypassed: passes only while ggml still ABORTs on the
-    # rejected graph, so a ggml sync that un-mirrors the abort guard fails here.
+    # Same binary, guard bypassed: passes only while ggml still rejects the
+    # graph (GGML_ABORT before qvac-ext-ggml 6cc71f22, a failed sched
+    # allocation from it on), so a ggml sync that un-mirrors the guard fails here.
     tts_cpp_register_test(test-t3-sched-dispatch-abort-repro
                           EXE test-t3-sched-dispatch
                           ARGS --sched-abort-repro
@@ -3675,10 +3713,19 @@ set(TTS_CPP_POINTWISE_ACCEL_TARGETS
     test-supertonic-pipeline
     supertonic-bench)
 
+# Parler's DAC kernels (src/parler/dac_accel.cpp) are Accelerate-only: the
+# test targets that compile them, or check the exactness they imply, get the
+# framework on Apple and nothing elsewhere.
+set(TTS_CPP_PARLER_ACCEL_TARGETS
+    test-parler-dac
+    test-parler-dac-cpu-kernels
+    test-parler-e2e
+    test-parler-engine-stream)
+
 if (APPLE)
     find_library(TTS_CPP_ACCELERATE_FRAMEWORK Accelerate)
     if (TTS_CPP_ACCELERATE_FRAMEWORK)
-        foreach(_tts_accel_target ${TTS_CPP_POINTWISE_ACCEL_TARGETS})
+        foreach(_tts_accel_target ${TTS_CPP_POINTWISE_ACCEL_TARGETS} ${TTS_CPP_PARLER_ACCEL_TARGETS})
             if (TARGET ${_tts_accel_target})
                 target_link_libraries(${_tts_accel_target} PRIVATE ${TTS_CPP_ACCELERATE_FRAMEWORK})
                 target_compile_definitions(${_tts_accel_target} PRIVATE TTS_CPP_USE_ACCELERATE)

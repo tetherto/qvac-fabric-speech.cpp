@@ -11,9 +11,39 @@
 
 #include "ggml-backend.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <string>
 
 namespace parakeet {
+
+inline bool backend_selection_is_auto(const std::string & requested) {
+    return requested.empty() || requested == "auto";
+}
+
+inline std::string prepend_dsp_library_directory(const std::string & dir, const std::string & paths) {
+    // FastRPC uses ';', unlike the ELF loader's ':'. Preserve any caller
+    // supplied paths and avoid accumulating duplicate entries on each load.
+    if (dir.empty()) return paths;
+    if ((";" + paths + ";").find(";" + dir + ";") != std::string::npos) return paths;
+    return paths.empty() ? dir : dir + ";" + paths;
+}
+
+// Registry names and exact device names are distinct: Hexagon registers as
+// HTP, while its device is HTP0. Never match a generic GPU for an explicit
+// request; this keeps OpenCL present alongside Hexagon without changing it.
+inline bool backend_selection_matches(const std::string & requested,
+                                      const char * reg, const char * device,
+                                      enum ggml_backend_dev_type type) {
+    if (backend_selection_is_auto(requested)) return false;
+    if (requested == "cpu") return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
+    if (requested == "hexagon") {
+        return reg && std::strcmp(reg, "HTP") == 0 && device && std::strcmp(device, "HTP0") == 0;
+    }
+    return device && requested == device;
+}
 
 // Tier ranking for GPU selection (lower = preferred). Pure function so unit
 // tests can exercise the ordering against synthesised device topologies
@@ -103,8 +133,39 @@ inline bool backend_is_opencl(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "OpenCL") == 0;
 }
 
+inline bool backend_is_hexagon(ggml_backend_t b) {
+    return std::strcmp(backend_reg_name(b), "HTP") == 0;
+}
+
+inline bool description_names_adreno(const char * description) {
+    if (!description) return false;
+    std::string lowered(description);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered.find("adreno") != std::string::npos;
+}
+
+inline bool backend_is_adreno(ggml_backend_t b) {
+    ggml_backend_dev_t dev = b ? ggml_backend_get_device(b) : nullptr;
+    return dev && (description_names_adreno(ggml_backend_dev_name(dev)) ||
+                   description_names_adreno(ggml_backend_dev_description(dev)));
+}
+
+// Decoder graphs execute directly, without scheduler fallback. Probe the
+// actual embedding type before putting GET_ROWS into those graphs.
+inline bool backend_runs_embedding_lookup(ggml_backend_t b, ggml_tensor * embedding) {
+    if (!b || !embedding) return false;
+    ggml_init_params ip = { 2 * ggml_tensor_overhead(), nullptr, true };
+    ggml_context * ctx = ggml_init(ip);
+    if (!ctx) return false;
+    ggml_tensor * token = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    const bool supported = ggml_backend_supports_op(b, ggml_get_rows(ctx, embedding, token));
+    ggml_free(ctx);
+    return supported;
+}
+
 inline bool flash_attn_allowed(bool compiled_in, ggml_backend_t b) {
-    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b));
+    return compiled_in && b && (backend_is_cuda(b) || backend_is_metal(b) || backend_is_vulkan(b) || backend_is_hexagon(b));
 }
 
 inline void backend_set_n_threads(ggml_backend_t b, int n_threads) {

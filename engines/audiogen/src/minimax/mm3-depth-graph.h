@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mm3-linear.h"
 #include "mm3-model.h"
 #include "mm3-sample.h"
 
@@ -134,13 +135,12 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
 
     ggml_tensor * n = mm3_depth_norm(ctx, h, w.attn_norm, c.rms_eps);
 
-    ggml_tensor * q = ggml_mul_mat(ctx, w.attn_q, n);
-    ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);
-    ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
+    const MM3AttentionInputs inputs = { w.attn_qkv, w.attn_q, w.attn_k, w.attn_v };
+    const MM3HeadProjections heads  = mm3_project_heads(ctx, inputs, n, D, Nh, Nh, GGML_PREC_F32);
 
-    q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, D, Nh, T, B), 0, 2, 1, 3));
-    k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, D, Nh, T, B), 0, 2, 1, 3));
-    v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, D, Nh, T, B), 0, 2, 1, 3));
+    ggml_tensor * q = ggml_cont(ctx, ggml_permute(ctx, heads.q, 0, 2, 1, 3));
+    ggml_tensor * k = ggml_cont(ctx, ggml_permute(ctx, heads.k, 0, 2, 1, 3));
+    ggml_tensor * v = ggml_cont(ctx, ggml_permute(ctx, heads.v, 0, 2, 1, 3));
 
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, k, rows));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, v, rows));
@@ -159,12 +159,11 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
     attn               = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
     attn               = ggml_reshape_3d(ctx, attn, H, T, B);
 
-    h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
+    h = ggml_add(ctx, h, mm3_linear(ctx, w.attn_output, attn, GGML_PREC_F32));
 
-    ggml_tensor * n2   = mm3_depth_norm(ctx, h, w.ffn_norm, c.rms_eps);
-    ggml_tensor * gate = ggml_silu(ctx, ggml_mul_mat(ctx, w.ffn_gate, n2));
-    ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
-    ggml_tensor * y    = ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up));
+    ggml_tensor * n2    = mm3_depth_norm(ctx, h, w.ffn_norm, c.rms_eps);
+    ggml_tensor * gated = mm3_gated_ffn_input(ctx, w.ffn_gate_up, w.ffn_gate, w.ffn_up, n2, GGML_PREC_F32);
+    ggml_tensor * y     = mm3_linear(ctx, w.ffn_down, gated, GGML_PREC_F32);
     return ggml_add(ctx, h, y);
 }
 
@@ -253,17 +252,19 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
         ggml_set_name(s->in_sem, "mm3_depth_semantic_id");
         ggml_set_input(s->in_sem);
 
-        ggml_tensor * tok0   = ggml_mul_mat(ctx, w.proj, s->in_hidden);
-        ggml_tensor * shared = ggml_mul_mat(ctx, w.proj, ggml_get_rows(ctx, m.lm.token_embd, s->in_sem));
-        shared               = ggml_concat(ctx, shared, shared, 2);
-        seq                  = ggml_concat(ctx, tok0, shared, 1);
+        ggml_tensor * semantic = ggml_get_rows(ctx, m.lm.token_embd, s->in_sem);
+        ggml_tensor * tok0     = mm3_linear(ctx, w.proj, s->in_hidden, GGML_PREC_F32);
+        ggml_tensor * shared   = mm3_linear(ctx, w.proj, semantic, GGML_PREC_F32);
+        shared                 = ggml_concat(ctx, shared, shared, 2);
+        seq                    = ggml_concat(ctx, tok0, shared, 1);
     } else {
         s->in_ac = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
         ggml_set_name(s->in_ac, "mm3_depth_acoustic_rows");
         ggml_set_input(s->in_ac);
 
-        ggml_tensor * ac = ggml_mul_mat(ctx, w.proj, ggml_get_rows(ctx, w.audio_embd, s->in_ac));
-        seq              = ggml_concat(ctx, ac, ac, 2);
+        ggml_tensor * acoustic = ggml_get_rows(ctx, w.audio_embd, s->in_ac);
+        ggml_tensor * ac       = mm3_linear(ctx, w.proj, acoustic, GGML_PREC_F32);
+        seq                    = ggml_concat(ctx, ac, ac, 2);
     }
 
     ggml_tensor * pos =
@@ -278,7 +279,7 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
     ggml_tensor * last = ggml_cont(
         ctx, ggml_view_3d(ctx, h, H, 1, 2, h->nb[1], h->nb[2], (size_t) (T - 1) * h->nb[1]));
 
-    ggml_tensor * logits = ggml_mul_mat(ctx, w.head[(size_t) (cb - 1)], last);
+    ggml_tensor * logits = mm3_linear(ctx, w.head[(size_t) (cb - 1)], last, GGML_PREC_F32);
     ggml_set_name(last, "mm3_depth_hidden");
     ggml_set_name(logits, "mm3_depth_logits");
 

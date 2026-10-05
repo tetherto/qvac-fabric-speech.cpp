@@ -10,6 +10,32 @@ loaded. Parakeet selects one primary GPU through the ggml backend registry when
 cascade. `n_gpu_layers` is currently a boolean offload request: positive means
 the whole encoder, not a partial layer count.
 
+Set `EngineOptions::backend` or CLI `--backend` to select a primary GGML backend
+explicitly. `auto` (the default) preserves the policy below; `cpu`, `opencl`,
+and `hexagon` override `n_gpu_layers`. `hexagon` selects the `HTP0` device from
+the `HTP` registry. An exact GGML device name such as `HTP0` is also accepted.
+An unavailable or failed explicit selection fails loading instead of selecting
+another backend. The existing per-operation CPU scheduler still handles
+unsupported operations; selecting HTP0 does not claim every operation ran there.
+On Android, backend discovery also prepends `backends_dir` to FastRPC's
+semicolon-separated `DSP_LIBRARY_PATH`, preserving existing user paths and
+vendor defaults. This happens even when the first model requests CPU/OpenCL,
+so later models can explicitly select Hexagon. If only legacy
+`ADSP_LIBRARY_PATH` is set, its entries are retained. Set `backends_dir` before
+the first Engine/loader call; registry discovery remains process-global.
+
+Hexagon is experimental and currently targets Parakeet CTC 0.6B Q8_0. Build and
+ship the matching GGML Hexagon backend and DSP library. For device validation,
+run `--backend hexagon --verbose --bench --bench-json result.json`, with the
+existing `--backends-dir` pointing at the installed backend libraries. The JSON
+records the actual backend (`ggml-htp0`), transcript and stage timings. Use a
+separate `GGML_HEXAGON_PROFILE=1` run to collect DSP operation evidence for
+`IM2COL`, `CONV_2D_DW`, and eligible HMX matrix operations; backend identity alone
+does not establish kernel execution or correct transcription. Measure CPU and
+OpenCL with `--backend cpu` and `--backend opencl` using the same model/audio.
+`Engine::backend_device()` identifies Hexagon as `BackendDevice::NPU`, while
+`Engine::backend_name()` reports the resolved device name (`HTP0`).
+
 Runtime tiering is:
 
 1. Prefer OpenCL for Adreno 700+, where it is validated ahead of Vulkan.
@@ -49,6 +75,28 @@ decode takes the same fused LSTM-cell and transducer-step graphs as CUDA and
 Metal because ggml-vulkan implements `GGML_OP_LSTM_CELL` and
 `GGML_OP_TDT_STEP`. Validated against the NeMo stream-step references at
 80/160/320/560/1120 ms on an RTX 3090 (`test-nemotron-stream-step-vulkan*`).
+
+Nemotron 3 Diarization runs on CUDA, Vulkan, and Metal. The feature-stacking
+projection, the 31-layer RoPE encoder with fused flash attention, the subpixel
+upsampler, and the speaker head form one GPU split, and offline inference and
+cached streaming pass the NeMo-Speech.cpp reference test
+(`test-nemotron-diarization-gpu`) on an RTX 5090 (CUDA and Vulkan), an AMD
+Radeon RX 7600 XT (Vulkan), and an Apple M3 Ultra (Metal). When the active
+backend cannot run fused flash attention for this graph, the encoder uses an
+unfused attention (matmul, softmax, matmul) that stays on the GPU instead of
+sending 31 attention ops per call to the CPU. ggml-opencl takes that path on
+Adreno unless `GGML_OPENCL_FA_ADRENO=1` is set. Adreno's ggml-opencl and
+ggml-vulkan matmul kernels narrow activations to half precision by default,
+which put the Adreno 830 at the edge of the reference tolerance (relative L2
+0.0030 on OpenCL, 0.0040 on Vulkan against 0.003), so on Adreno the graph
+requests `GGML_PREC_F32` on every matmul; that halves the error for a 2-3 %
+cost. Both Adreno backends then pass the reference test on a Snapdragon 8
+Elite, and OpenCL, which the tier policy selects on Adreno 700+, runs the
+model about twice as fast as its CPU. ggml-vulkan on that GPU is slower than
+the CPU for this model. Mali Vulkan is untested on hardware; the Mali routing
+of the Sortformer head does not apply to this model. See
+[Nemotron 3 Diarization on GPU](performance.md#nemotron-3-diarization-on-gpu)
+for timings and accuracy.
 
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the

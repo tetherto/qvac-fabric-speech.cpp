@@ -17,9 +17,11 @@
 // Max latent frames per vocoder graph. The im2col columns of the full-rate
 // convolutions scale with decoded length (a 689-frame window needs a 1.29 GiB
 // compute buffer, which does not fit next to the weights on a 10 GiB GPU), so
-// longer windows decode as overlapped tiles; the interior of each tile is
-// bit-identical to a single-shot decode because MM3_VOC_OVERLAP exceeds the
-// conv stack's receptive field.
+// longer windows decode as overlapped tiles. MM3_VOC_OVERLAP exceeds the conv
+// stack's receptive field (8 frames leak, 16 do not), so a tile interior never
+// sees past its context: it is bit-identical to a single-shot decode on the CPU
+// and matches it to rounding on GPU backends, whose GEMM kernels depend on the
+// product shape.
 #define MM3_VOC_CHUNK   256
 
 #define MM3_VOC_OVERLAP 32
@@ -512,8 +514,8 @@ static bool mm3_vocoder_decode(const MM3Model & m, const std::vector<float> & la
     return mm3_vocoder_decode_tiled(m, latents, L, out_stereo, MM3_VOC_CHUNK, MM3_VOC_OVERLAP, err);
 }
 
-// Tiled decode with explicit chunk/overlap so the tile-vs-single-shot
-// bit-equality is testable; production callers use the MM3_VOC_* constants.
+// Tiled decode with explicit chunk/overlap so the tiling is testable against a
+// single-shot decode; production callers use the MM3_VOC_* constants.
 static bool mm3_vocoder_decode_tiled(const MM3Model & m, const std::vector<float> & latents, int64_t L,
                                      std::vector<float> & out_stereo, int64_t chunk, int64_t overlap,
                                      std::string * err) {

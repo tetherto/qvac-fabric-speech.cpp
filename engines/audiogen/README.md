@@ -101,6 +101,42 @@ from the harness: no failures and no silent renders in 180 rounds, 10/10
 unique WAV hashes per lane, and duration error at most 1.2 s against the
 requested song length.
 
+### MiniMax-Music3 f16 on RTX 5090 (2026-09)
+
+`mm3-replay --mode full` on the RTX 5090 box with the `f16` pair: one fixed
+caption, seed 7, warm driver shader cache, in-process pipeline time (the
+`[MM3-Pipe]` total, model load excluded). Before is engine `075045a2` on ggml
+`speech@8b980299`; after adds the CFG batching, LM flash attention, stacked
+projections and LM cache layout described in [docs/pipeline.md](docs/pipeline.md)
+and runs on the same ggml plus two CUDA changes: `GGML_PREC_F32` served on
+half-precision weights by the f32 matrix-vector kernel
+([qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104)) and a
+row-bias add folded into the half-precision cuBLAS GEMM's f32 conversion
+([qvac-ext-ggml#105](https://github.com/tetherto/qvac-ext-ggml/pull/105)). CUDA 13.3 (CUDA graphs on), Vulkan SDK 1.4.341.1, driver
+595.91.07.
+
+| Song | Backend | Before | After | RTF after | Speedup |
+|---|---|--:|--:|--:|--:|
+| 20 s (500 frames) | CUDA | 15,120 ms | 11,660 ms | 0.58 | 1.30x |
+| 20 s (500 frames) | Vulkan | 15,682 ms | 13,247 ms | 0.66 | 1.18x |
+| 2 min (3000 frames) | CUDA | 102,289 ms | 73,949 ms | 0.62 | 1.38x |
+| 2 min (3000 frames) | Vulkan | 105,393 ms | 84,222 ms | 0.70 | 1.25x |
+
+On the 2-minute song the LM decode step drops from 15.8 to 9.6 ms (CUDA) and
+15.7 to 11.3 ms (Vulkan), the depth decoder from 7.3 to 6.1 ms and 8.6 to
+7.4 ms per frame, and the flow stage from 29.3 to 23.1 s and 28.5 to 24.2 s.
+The LM and depth steps now stream their f16 weights at about 1.55 TB/s on
+CUDA, close to what the card sustains, so the AR loop is bandwidth-bound.
+
+The quantized pairs speed up as well (same box and method, 20 s track):
+
+| Pair | Backend | Before | After | Speedup |
+|---|---|--:|--:|--:|
+| `q8_0` | CUDA | 11,229 ms | 9,070 ms | 1.24x |
+| `q8_0` | Vulkan | 13,055 ms | 10,175 ms | 1.28x |
+| `q4_k_m` | CUDA | 9,705 ms | 7,505 ms | 1.29x |
+| `q4_k_m` | Vulkan | 11,388 ms | 8,504 ms | 1.34x |
+
 ### speech-cpp CI (2026-09-07, CPU + macOS)
 
 | Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |

@@ -168,8 +168,8 @@ static std::vector<std::pair<int, int>> dac_window_graphs(int begin, int end, in
 // never built computes the same values through differently shaped GPU
 // kernels, whose reduction order differs, so those ranges are held to a
 // measured tolerance instead. The plain ggml CPU path reduces every shape in
-// one deterministic order; a tinyBLAS CPU build does not
-// (cpu_matmul_is_shape_exact), and is held to the GPU tolerance too.
+// one deterministic order; a tinyBLAS or Accelerate CPU build does not
+// (parler_dac_cpu_is_shape_exact), and is held to the GPU tolerance too.
 static bool range_shares_full_decode_graphs(int a, int b, int n_frames, int rf) {
     const auto full   = dac_window_graphs(0, n_frames, n_frames, rf);
     const auto ranged = dac_window_graphs(a, b, n_frames, rf);
@@ -235,9 +235,9 @@ static bool test_range_equivalence(const parler_model & model, const std::string
     const int W = PARLER_DAC_WINDOW_FRAMES;
     const int R = parler_dac_rf_frames(model);
     const bool cpu_backend = ::tts_cpp::detail::backend_is_cpu(model.backend);
-    const bool cpu_exact   = cpu_backend && !::tts_cpp::detail::backend_has_feature(model.backend, "LLAMAFILE");
+    const bool cpu_exact   = cpu_backend && parler_dac_cpu_is_shape_exact();
     if (cpu_backend && !cpu_exact) {
-        fprintf(stderr, "range-equivalence: CPU backend carries tinyBLAS (LLAMAFILE); "
+        fprintf(stderr, "range-equivalence: CPU DAC GEMMs round by shape (tinyBLAS or Accelerate); "
                         "windows the full decode never built are held to %.0e instead of bit identity\n",
                 RANGE_TOLERANCE);
     }
@@ -341,8 +341,12 @@ int main(int argc, char ** argv) {
     }
 
     int rc = 0;
+    if (!model.on_gpu && !parler_dac_uses_fused_snake(model)) {
+        fprintf(stderr, "parler dac: FAIL a CPU load must run every snake as one fused node\n");
+        rc = 1;
+    }
     try {
-        if (!test_convt_micro(model, ref_dir)) rc = 1;
+        if (rc == 0 && !test_convt_micro(model, ref_dir)) rc = 1;
 
         std::vector<float> latent;
         if (rc == 0 && !test_wav_case(model, ref_dir, "dacrand_codes.npy", "dacrand_wav.npy", &latent)) rc = 1;

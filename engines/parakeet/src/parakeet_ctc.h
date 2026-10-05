@@ -518,6 +518,11 @@ int load_from_gguf(const std::string & gguf_path,
                    int                 n_gpu_layers,
                    bool                verbose);
 
+int load_from_gguf(const std::string & gguf_path,
+                   ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose,
+                   const std::string & backend);
+
 // ── Memory-fit measurement (see include/parakeet/fit.h) ───────────────────
 
 // Byte totals collected by load_from_gguf_metadata_only.
@@ -692,6 +697,25 @@ struct EncoderOutputs {
     std::vector<float> block_last_out;
     std::vector<float> encoder_out;
     std::vector<float> logits;
+
+    // Diagnostic: fine-grained snapshots inside block 0's
+    // relative-position multi-head attention. Populated only when
+    // capture_intermediates=true. Empty on the flash-attn path (the
+    // whole attention collapses into one FLASH_ATTN_EXT node — nothing
+    // to intercept). Order: qkv → ac (content×query) → bd (pos×query) →
+    // scores (ac + rel_shift(bd)) → softmax → out (y before residual).
+    std::vector<float> block_0_attn_qkv;
+    std::vector<float> block_0_attn_k_raw;
+    std::vector<float> block_0_attn_v_raw;
+    std::vector<float> block_0_attn_q_perm;
+    std::vector<float> block_0_attn_k_perm;
+    std::vector<float> block_0_attn_q_u;
+    std::vector<float> block_0_attn_ac;
+    std::vector<float> block_0_attn_bd;
+    std::vector<float> block_0_attn_scores;
+    std::vector<float> block_0_attn_softmax;
+    std::vector<float> block_0_attn_out;
+
     int n_enc_frames = 0;
     int d_model      = 0;
     int vocab_size   = 0;
@@ -845,9 +869,12 @@ int profile_block_substages(ParakeetCtcModel & model,
                             int timed_runs,
                             BlockSubstageTimes & out);
 
-// Test diagnostics: whether fused attention is compiled in, and whether the encoder
-// graph built for this model contains a given op.
+// Test diagnostics: whether fused attention is compiled in, whether the encoder
+// activation stream is compiled to run in F16 (PARAKEET_F16_ACTIVATIONS build
+// flag), and whether the encoder graph built for this model contains a given
+// op.
 bool flash_attn_compiled();
+bool f16_activations_compiled();
 bool encoder_graph_uses_op(const ParakeetCtcModel & model, enum ggml_op op);
 
 }

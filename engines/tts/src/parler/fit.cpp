@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <thread>
 
 namespace tts_cpp {
 namespace parler {
@@ -244,10 +245,16 @@ FitResult fit_params(const FitOptions & opts) {
         host = sat_add(host, sat_mul(sat_mul(books, (uint64_t) n_win), 4));
         host = sat_add(host, sat_mul(sat_mul((uint64_t) n_frames,
                                              (uint64_t) hp.dac_hop), f32));
+        // Accelerate DAC: per-thread im2col tiles, bounded by every core (and
+        // by the engine's default count where the core count is unknown).
+        host = sat_add(host, detail::parler_dac_accel_scratch_bytes(
+            m.model, (int) std::max(std::thread::hardware_concurrency(),
+                                    detail::PARLER_DEFAULT_THREADS)));
         r.host_bytes = host;
     }
 
-    r.device.weights_bytes       = sat_add(load.weights_bytes, load.fused_bytes);
+    r.device.weights_bytes       = sat_add(sat_add(load.weights_bytes, load.fused_bytes),
+                                           load.snake_bytes);
     r.device.state_bytes         = state;
     r.device.lm_compute_bytes    = lm_compute;
     r.device.codec_compute_bytes = codec_compute;

@@ -26,6 +26,21 @@ backends read the step logits in place from the graph buffer instead of
 downloading a copy.  The graph dispatch uses the shared `sched_dispatch`
 dual path like the other engines.
 
+On the CPU backend the decoder's self- and cross-attention also run through
+ggml's flash-attention kernel, over an F32 KV cache, so they multiply and
+accumulate in F32 like the manual softmax(QK^T)V path while no longer copying
+the whole cache every step (`PARLER_NO_FA` restores the manual path), and the
+FFN's exact-erf GELU is viewed as rows so every thread shares it.  The CPU DAC
+runs each snake activation as one fused node (over reciprocals precomputed at
+load from the F32 snake alphas every converted GGUF carries); on Apple
+builds its convolutions and transposed convolutions run on Accelerate's sgemm
+with the snakes on vForce (`PARLER_DAC_NO_ACCEL` keeps the ggml kernels), which
+also shrinks the DAC compute buffer from 268 MiB to 99 MiB.  Accelerate tiles
+by shape, so a windowed or streamed DAC decode matches a whole-sequence one
+within float tolerance there rather than bit for bit, as on a tinyBLAS build.
+See [Performance](performance.md#parler-tts-on-cpu-mac-studio-m3-ultra) for
+the Mac Studio M3 Ultra numbers.
+
 Indic-class checkpoints ship a second, SentencePiece-BPE **prompt**
 tokenizer (90k vocab covering the Indic scripts, byte fallback) alongside
 the Flan-T5 description tokenizer; the converter embeds both

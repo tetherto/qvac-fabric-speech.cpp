@@ -92,14 +92,51 @@ ggml_tensor * add_bias(ggml_context * ctx, ggml_tensor * x, ggml_tensor * bias) 
 }
 
 // snake(x, alpha) = x + (alpha + 1e-9)^-1 * sin(alpha*x)^2; alpha ne=[1, C, 1]
-ggml_tensor * snake(ggml_context * ctx, ggml_tensor * x, ggml_tensor * alpha, ggml_tensor * eps) {
+ggml_tensor * snake_elementwise(ggml_context * ctx, ggml_tensor * x, ggml_tensor * alpha,
+                                ggml_tensor * eps) {
     ggml_tensor * s2 = ggml_sqr(ctx, ggml_sin(ctx, ggml_mul(ctx, x, alpha)));
     return ggml_add(ctx, x, ggml_div(ctx, s2, ggml_add(ctx, alpha, eps)));
 }
 
+bool snake_is_per_channel(const ggml_tensor * x, const ggml_tensor * alpha, const ggml_tensor * inv) {
+    return inv && ggml_nelements(alpha) == x->ne[1] && ggml_nelements(inv) == x->ne[1];
+}
+
+ggml_tensor * snake_fused_cpu(ggml_context * ctx, bool accel, ggml_tensor * x,
+                              ggml_tensor * alpha, ggml_tensor * inv) {
+    return accel ? parler_dac_accel_snake(ctx, x, alpha, inv) : ggml_snake(ctx, x, alpha, inv);
+}
+
+ggml_tensor * conv_same_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w,
+                             ggml_tensor * b, int dilation, ggml_tensor * residual) {
+    const int padding = (int) (w->ne[0] - 1) / 2 * dilation;
+    ggml_tensor * y = add_bias(ctx, conv1d_f32(ctx, w, x, 1, padding, dilation), b);
+    return residual ? ggml_add(ctx, residual, y) : y;
+}
+
+bool bias_is_per_channel(const ggml_tensor * w, const ggml_tensor * b) {
+    return ggml_nelements(b) == w->ne[2];
+}
+
+ggml_tensor * conv_transpose_accel(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, int stride) {
+    ggml_tensor * cols = parler_dac_accel_convt_columns(ctx, x, w);
+    ggml_tensor * y = ggml_col2im_1d(ctx, cols, stride, (int) w->ne[1], stride / 2);
+    return ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], 1);
+}
+
+ggml_tensor * conv_transpose_trimmed_with_bias(ggml_context * ctx, bool accel, bool convt_mm,
+                                               ggml_tensor * x, ggml_tensor * w, ggml_tensor * b,
+                                               int stride) {
+    ggml_tensor * y = accel    ? conv_transpose_accel(ctx, x, w, stride)
+                    : convt_mm ? conv_transpose_1d_matmul(ctx, w, x, stride)
+                               : conv_transpose_1d_trim(ctx, w, x, stride, stride / 2);
+    return add_bias(ctx, y, b);
+}
+
 // Builds the DAC graph for a window of `n_win` frames. Inputs are the named
-// tensors "dac_codes" ([n_win, n_q] I32) and "snake_eps"; outputs are "latent"
-// and "wav" (n_win * dac_hop samples).
+// tensors "dac_codes" ([n_win, n_q] I32) and "snake_eps" (consumed only by the
+// elementwise snake chain); outputs are "latent" and "wav" (n_win * dac_hop
+// samples).
 ggml_cgraph * build_dac_graph(ggml_context * ctx, const parler_model & model,
                               int n_win, bool convt_mm) {
     const parler_hparams & hp = model.hparams;
@@ -134,35 +171,38 @@ ggml_cgraph * build_dac_graph(ggml_context * ctx, const parler_model & model,
     ggml_tensor * x = ggml_cont(ctx, ggml_transpose(ctx, latent));
     x = ggml_reshape_3d(ctx, x, n_win, hp.dac_latent, 1);
 
-    x = add_bias(ctx, conv1d_f32(ctx, model.dac_conv_in_w, x, 1, 3, 1), model.dac_conv_in_b);
+    const bool accel = parler_dac_accel_enabled(model);
+    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_in_w, model.dac_conv_in_b, 1, nullptr);
 
     for (const parler_dac_block & blk : model.dac_blocks) {
         const int s = blk.stride;
-        x = snake(ctx, x, blk.snake_alpha, eps);
+        x = parler_dac_snake(ctx, accel, x, blk.snake_alpha, blk.snake_inv, eps);
         const int64_t t_in = x->ne[0];
-        x = convt_mm ? conv_transpose_1d_matmul(ctx, blk.convt_w, x, s)
-                     : conv_transpose_1d_trim(ctx, blk.convt_w, x, s, s / 2);
+        x = conv_transpose_trimmed_with_bias(ctx, accel, convt_mm, x, blk.convt_w, blk.convt_b, s);
         GGML_ASSERT(x->ne[0] == t_in * s);
-        x = add_bias(ctx, x, blk.convt_b);
         for (int j = 0; j < 3; ++j) {
             const parler_dac_residual & r = blk.res[j];
-            const int d = dilations[j];
-            ggml_tensor * y = snake(ctx, x, r.snake1_alpha, eps);
-            y = add_bias(ctx, conv1d_f32(ctx, r.conv1_w, y, 1, 3 * d, d), r.conv1_b);
-            y = snake(ctx, y, r.snake2_alpha, eps);
-            y = add_bias(ctx, conv1d_f32(ctx, r.conv2_w, y, 1, 0, 1), r.conv2_b);
-            x = ggml_add(ctx, x, y);
+            ggml_tensor * y = parler_dac_snake(ctx, accel, x, r.snake1_alpha, r.snake1_inv, eps);
+            y = parler_dac_conv_same(ctx, accel, y, r.conv1_w, r.conv1_b, dilations[j], nullptr);
+            y = parler_dac_snake(ctx, accel, y, r.snake2_alpha, r.snake2_inv, eps);
+            x = parler_dac_conv_same(ctx, accel, y, r.conv2_w, r.conv2_b, 1, x);
         }
     }
 
-    x = snake(ctx, x, model.dac_snake_out_alpha, eps);
-    x = add_bias(ctx, conv1d_f32(ctx, model.dac_conv_out_w, x, 1, 3, 1), model.dac_conv_out_b);
+    x = parler_dac_snake(ctx, accel, x, model.dac_snake_out_alpha, model.dac_snake_out_inv, eps);
+    x = parler_dac_conv_same(ctx, accel, x, model.dac_conv_out_w, model.dac_conv_out_b, 1, nullptr);
     ggml_tensor * wav = ggml_tanh(ctx, x);
     ggml_set_name(wav, "wav");
     ggml_set_output(wav);
     ggml_build_forward_expand(gf, wav);
 
     return gf;
+}
+
+void set_snake_eps_if_used(ggml_cgraph * gf) {
+    if (ggml_tensor * eps_t = ggml_graph_get_tensor(gf, "snake_eps")) {
+        ggml_backend_tensor_set(eps_t, &PARLER_DAC_SNAKE_EPS, 0, sizeof(PARLER_DAC_SNAKE_EPS));
+    }
 }
 
 // Decodes frames [w0, w1) of the full [n_q, n_frames] `codes` and appends the
@@ -211,8 +251,7 @@ bool decode_window(const parler_model & model, const int32_t * codes, int n_fram
 
         ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "dac_codes"), win_codes.data(), 0,
                                 win_codes.size() * sizeof(int32_t));
-        const float eps_val = 1e-9f;
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "snake_eps"), &eps_val, 0, sizeof(eps_val));
+        set_snake_eps_if_used(gf);
 
         if (!parler_graph_compute(model, gf, use_sched, n_threads, "parler_dac_decode")) {
             err = "graph compute failed for a " + std::to_string(n_win) + "-frame window";
@@ -249,6 +288,19 @@ bool decode_window(const parler_model & model, const int32_t * codes, int n_fram
 }
 
 } // namespace
+
+ggml_tensor * parler_dac_snake(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * alpha,
+                               ggml_tensor * inv, ggml_tensor * eps) {
+    return snake_is_per_channel(x, alpha, inv) ? snake_fused_cpu(ctx, accel, x, alpha, inv)
+                                               : snake_elementwise(ctx, x, alpha, eps);
+}
+
+ggml_tensor * parler_dac_conv_same(ggml_context * ctx, bool accel, ggml_tensor * x, ggml_tensor * w,
+                                   ggml_tensor * b, int dilation, ggml_tensor * residual) {
+    return accel && bias_is_per_channel(w, b)
+        ? parler_dac_accel_conv1d(ctx, x, w, b, dilation, residual)
+        : conv_same_ggml(ctx, x, w, b, dilation, residual);
+}
 
 // Propagates the support radius forward through the conv stack, in samples at each
 // stage's own rate, then converts to latent frames. Conservative: the transposed

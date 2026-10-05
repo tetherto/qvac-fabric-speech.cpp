@@ -3,8 +3,8 @@
 //   * result.pcm == concat(callback chunks);
 //   * streamed pcm == whole-utterance decode -- BIT-IDENTICAL on the plain ggml
 //     CPU path (the DAC is local/convolutional so a prefix decode reproduces the
-//     interior exactly), within tolerance on GPU and on a tinyBLAS CPU build
-//     (shape-dependent rounding; cpu_matmul_is_shape_exact).
+//     interior exactly), within tolerance on GPU and on a tinyBLAS or
+//     Accelerate CPU build (shape-dependent rounding; cpu_dac_is_shape_exact).
 //
 // A fixed seed makes the AR codes identical between the streamed and batch
 // runs, so the only difference under test is windowed-vs-whole DAC decode.  Both
@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,15 @@ static int g_failures = 0;
             std::fprintf(stderr, "FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__); \
         }                                                                 \
     } while (0)
+
+// Apple builds run the CPU DAC GEMMs on Accelerate unless PARLER_DAC_NO_ACCEL
+// is set; this target is compiled with the engine's TTS_CPP_USE_ACCELERATE.
+static bool cpu_dac_is_shape_exact() {
+#if defined(TTS_CPP_USE_ACCELERATE)
+    if (std::getenv("PARLER_DAC_NO_ACCEL") == nullptr) return false;
+#endif
+    return tts_cpp::detail::cpu_matmul_is_shape_exact();
+}
 
 static void run_case(const std::string & model, int n_gpu_layers) {
     const char * prompt =
@@ -92,8 +102,8 @@ static void run_case(const std::string & model, int n_gpu_layers) {
         std::fprintf(stderr, "  max|stream-batch| = %.3g\n", max_abs);
         if (gpu) {
             CHECK(max_abs < 1e-3, "GPU: streamed pcm within tolerance of whole-utterance decode");
-        } else if (!tts_cpp::detail::cpu_matmul_is_shape_exact()) {
-            CHECK(max_abs < 1e-3, "CPU (tinyBLAS): streamed pcm within tolerance of whole-utterance decode");
+        } else if (!cpu_dac_is_shape_exact()) {
+            CHECK(max_abs < 1e-3, "CPU (tinyBLAS/Accelerate): streamed pcm within tolerance of whole-utterance decode");
         } else {
             CHECK(max_abs == 0.0, "CPU: streamed pcm BIT-IDENTICAL to whole-utterance decode");
         }

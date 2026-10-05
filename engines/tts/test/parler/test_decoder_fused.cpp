@@ -4,6 +4,8 @@
 // byte-for-byte on the decode step (and within float tolerance on prefill,
 // where the wider GEMM may tile differently), and on a host backend the
 // prefill/step logits hand out a zero-copy view into the graph buffer.
+// The CPU flash-attention path (F32 KV, non-transposed cross V) must match
+// the manual softmax(QK^T)V path within float tolerance on the same weights.
 // Also pins the fusion gate: mmap-backed CPU, GPU, and measure loads fuse;
 // the CPU allocate-and-stream fallback and PARLER_NO_FUSED do not.
 // Runs on a synthetic two-layer model, so it needs no GGUF fixture.
@@ -12,6 +14,7 @@
 #include "backend_selection.h"
 #include "../test_env_portable.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -45,6 +48,12 @@ constexpr int BOS_ID     = 30;
 constexpr int PROMPT_VOCAB = 8;
 constexpr int N_THREADS  = 2;
 constexpr int N_STEPS    = 3;
+// FA reorders the softmax reduction (online, per KV row) against the manual
+// path; logits are O(1) here, so rounding stays orders of magnitude below this.
+constexpr float FA_TOLERANCE = 1e-4f;
+// f16 projections round their activations to half precision, so a last-bit
+// difference upstream can flip one rounding and move a logit by ~one f16 ulp.
+constexpr float FA_TOLERANCE_F16 = 4e-3f;
 
 // xorshift-based deterministic fill: the values only need to be finite,
 // spread out, and identical across the two runs.
@@ -93,7 +102,25 @@ ggml_tensor * new_f32(ggml_context * ctx, int64_t ne0, int64_t ne1) {
     return ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1);
 }
 
-bool build_model(parler_model & model, ggml_type wtype) {
+// [D, CROSS_LEN] token-major -> [CROSS_LEN, D]
+std::vector<float> transpose_cross(const std::vector<float> & v) {
+    std::vector<float> t(v.size());
+    for (size_t i = 0; i < v.size(); ++i) {
+        const size_t tok = i / D, ch = i % D;
+        t[ch * CROSS_LEN + tok] = v[i];
+    }
+    return t;
+}
+
+// The same cross V values in either layout: non-transposed [D, CROSS_LEN]
+// for flash attention, transposed [CROSS_LEN, D] for the manual path.
+void fill_cross_v(ggml_tensor * t, det_rng & rng, bool transposed) {
+    const std::vector<float> v = random_host_values(t, rng, 0.0f);
+    const std::vector<float> host = transposed ? transpose_cross(v) : v;
+    ggml_backend_tensor_set(t, host.data(), 0, host.size() * sizeof(float));
+}
+
+bool build_model(parler_model & model, ggml_type wtype, bool fa = false) {
     parler_hparams & hp = model.hparams;
     hp.dec_n_layer    = N_LAYER;
     hp.dec_d_model    = D;
@@ -111,8 +138,8 @@ bool build_model(parler_model & model, ggml_type wtype) {
     model.backend = ::tts_cpp::detail::init_cpu_backend();
     if (!model.backend) return false;
     model.on_gpu  = false;
-    model.use_fa  = false;
-    model.kv_type = GGML_TYPE_F32;
+    model.use_fa  = fa;
+    model.kv_type = fa ? parler_fa_kv_type(false) : GGML_TYPE_F32;
 
     {
         ggml_init_params ip = { 64 * ggml_tensor_overhead(), nullptr, /*no_alloc=*/ true };
@@ -179,13 +206,14 @@ bool build_model(parler_model & model, ggml_type wtype) {
         model.cross_v_t.resize(N_LAYER);
         for (int l = 0; l < N_LAYER; ++l) {
             model.cross_k[l]   = new_f32(model.ctx_cross, D, CROSS_LEN);
-            model.cross_v_t[l] = new_f32(model.ctx_cross, CROSS_LEN, D);
+            model.cross_v_t[l] = fa ? new_f32(model.ctx_cross, D, CROSS_LEN)
+                                    : new_f32(model.ctx_cross, CROSS_LEN, D);
         }
         model.buffer_cross = ggml_backend_alloc_ctx_tensors(model.ctx_cross, model.backend);
         if (!model.buffer_cross) return false;
         for (int l = 0; l < N_LAYER; ++l) {
             fill_f32_tensor(model.cross_k[l], rng, 0.0f);
-            fill_f32_tensor(model.cross_v_t[l], rng, 0.0f);
+            fill_cross_v(model.cross_v_t[l], rng, !fa);
         }
         model.cross_len = CROSS_LEN;
     }
@@ -275,6 +303,45 @@ void run_type_case(ggml_type wtype) {
     parler_free_model(model);
 }
 
+float max_block_diff(const std::vector<std::vector<float>> & a,
+                     const std::vector<std::vector<float>> & b) {
+    float m = 0.0f;
+    for (size_t s = 0; s < a.size(); ++s) m = std::max(m, max_abs_diff(a[s], b[s]));
+    return m;
+}
+
+bool decode_model(ggml_type wtype, bool fa, std::vector<std::vector<float>> & out) {
+    parler_model model;
+    bool ok = build_model(model, wtype, fa);
+    ggml_gallocr_t allocr = ok ? ggml_gallocr_new(
+        ggml_backend_get_default_buffer_type(model.backend)) : nullptr;
+    bool zero_copy = false;
+    ok = ok && allocr && run_decode(model, allocr, out, zero_copy);
+    if (allocr) ggml_gallocr_free(allocr);
+    parler_free_model(model);
+    return ok;
+}
+
+void run_fa_case(ggml_type wtype) {
+    fprintf(stderr, "parler decoder cpu flash attention: projections %s\n", ggml_type_name(wtype));
+    std::vector<std::vector<float>> manual, fa;
+    CHECK(decode_model(wtype, false, manual), "manual-attention decode runs");
+    CHECK(decode_model(wtype, true, fa), "flash-attention decode runs");
+    if (manual.size() != fa.size() || manual.empty()) {
+        CHECK(false, "both attention paths produced the same number of logits blocks");
+        return;
+    }
+    const float diff = max_block_diff(manual, fa);
+    const float bar  = wtype == GGML_TYPE_F16 ? FA_TOLERANCE_F16 : FA_TOLERANCE;
+    fprintf(stderr, "  max |manual - fa| = %.3g (bar %.0e)\n", diff, bar);
+    CHECK(diff <= bar, "CPU flash attention matches the manual path within float tolerance");
+}
+
+void test_fa_kv_type() {
+    CHECK(parler_fa_kv_type(false) == GGML_TYPE_F32, "CPU flash attention keeps an F32 KV cache");
+    CHECK(parler_fa_kv_type(true) == GGML_TYPE_F16, "GPU flash attention stores an F16 KV cache");
+}
+
 void test_fusion_gate() {
     parler_model m;
     m.on_gpu  = false;
@@ -306,8 +373,10 @@ void test_fusion_gate() {
 
 int main() {
     test_fusion_gate();
+    test_fa_kv_type();
     const ggml_type types[] = { GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K };
     for (ggml_type t : types) run_type_case(t);
+    for (ggml_type t : types) run_fa_case(t);
 
     if (g_failures == 0) {
         fprintf(stderr, "parler decoder fused: PASS\n");

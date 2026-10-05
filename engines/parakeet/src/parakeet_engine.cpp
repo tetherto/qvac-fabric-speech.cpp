@@ -18,6 +18,7 @@
 #include "long_form_encoder.h"
 #include "parakeet_log.h"
 #include "sortformer_finalize.h"
+#include "backend_util.h"
 #include "ggml-backend.h"
 
 #include <algorithm>
@@ -393,6 +394,18 @@ static void prewarm_encoder(ParakeetCtcModel & model, float audio_seconds) {
     }
 }
 
+static void prewarm_model(ParakeetCtcModel & model, float audio_seconds) {
+    if (model.model_type != ParakeetModelType::NEMOTRON_DIARIZATION) {
+        prewarm_encoder(model, audio_seconds);
+        return;
+    }
+    if (const int rc = prewarm_nemotron_diarization(model, audio_seconds); rc != 0) {
+        std::fprintf(stderr,
+            "[parakeet] prewarm_nemotron_diarization: rc=%d -- "
+            "first diarize will pay the cold cost the prewarm was meant to cover\n", rc);
+    }
+}
+
 Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
     pimpl_->opts = opts;
 
@@ -415,11 +428,12 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
                                   pimpl_->model,
                                   opts.n_threads,
                                   opts.n_gpu_layers,
-                                  opts.verbose);
+                                  opts.verbose,
+                                  opts.backend);
     if (rc != 0) {
         throw std::runtime_error("parakeet::Engine: failed to load GGUF '" +
                                  opts.model_gguf_path +
-                                 "' (rc=" + std::to_string(rc) + ")");
+                                 "' with backend '" + opts.backend + "' (rc=" + std::to_string(rc) + ")");
     }
 
     if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
@@ -444,8 +458,8 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
         pimpl_->sortformer_ready = true;
     }
 
-    if (opts.prewarm && pimpl_->model.model_type != ParakeetModelType::NEMOTRON_DIARIZATION) {
-        prewarm_encoder(pimpl_->model, opts.prewarm_audio_seconds);
+    if (opts.prewarm) {
+        prewarm_model(pimpl_->model, opts.prewarm_audio_seconds);
     }
 }
 
@@ -476,6 +490,7 @@ bool Engine::is_transcription_model() const {
 }
 
 BackendDevice Engine::backend_device() const {
+    if (backend_is_hexagon(pimpl_->model.backend_active())) return BackendDevice::NPU;
     return model_has_gpu_backend(pimpl_->model) ? BackendDevice::GPU
                                                 : BackendDevice::CPU;
 }
@@ -2643,11 +2658,6 @@ std::unique_ptr<SortformerStreamSession> Engine::diarize_start(
     }
     if (opts.chunk_ms <= 0)   throw std::runtime_error("Engine::diarize_start: chunk_ms must be > 0");
     if (opts.history_ms <= 0) throw std::runtime_error("Engine::diarize_start: history_ms must be > 0");
-    constexpr int kNemotronChunkMs = 1040;
-    constexpr int kNemotronSpeakerCacheFrames = 264;
-    constexpr int kNemotronFifoFrames = 80;
-    constexpr int kNemotronRightContextMs = 80;
-    constexpr int kNemotronUpdateFrames = 40;
     constexpr int kNemotronSilenceFramesPerSpeaker = 1;
     constexpr int kSortformerLeftContextMs = 80;
     const bool is_nemotron =

@@ -5,6 +5,7 @@
 #include "backend.h"
 #include "ggml.h"
 #include "mm3-flash-attn.h"
+#include "mm3-linear.h"
 
 #include <algorithm>
 #include <chrono>
@@ -133,9 +134,37 @@ static ggml_tensor * mm3_lm_attn_f32(ggml_context * ctx, ggml_tensor * q, ggml_t
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
 }
 
+// Decode steps project two columns (the CFG pair), which the GPU matrix-vector
+// kernels serve in f32 at no cost; the prefill's wide products keep the default
+// precision and its tensor-core GEMMs.
+static ggml_prec mm3_lm_linear_precision(bool decode) {
+    return decode ? GGML_PREC_F32 : GGML_PREC_DEFAULT;
+}
+
+static ggml_tensor * mm3_lm_rope(ggml_context * ctx, const MM3LmConfig & c, ggml_tensor * x, ggml_tensor * positions) {
+    return ggml_rope_ext(ctx, x, positions, NULL, (int) c.key_length, GGML_ROPE_TYPE_NEOX, 0, c.rope_freq_base, 1.0f,
+                         0.0f, 1.0f, 0.0f, 0.0f);
+}
+
+// [D, heads, T * B] -> the cache's [D * heads, T * B] row layout.
+static ggml_tensor * mm3_lm_cache_rows(ggml_context * ctx, ggml_tensor * x) {
+    return ggml_view_2d(ctx, x, x->ne[0] * x->ne[1], x->ne[2], x->nb[2], 0);
+}
+
+// The live [D, n_kv, heads, B] window of a cache laid out as one
+// [D * heads] row per position, the positions of CFG row b starting at row
+// b * n_ctx.
+static ggml_tensor * mm3_lm_cache_window(ggml_context * ctx, ggml_tensor * cache, int64_t D, int64_t heads,
+                                         int64_t n_kv, int64_t B) {
+    const int64_t n_ctx = cache->ne[1] / B;
+    return ggml_view_4d(ctx, cache, D, n_kv, heads, B, cache->nb[1], (size_t) D * cache->nb[0],
+                        (size_t) n_ctx * cache->nb[1], 0);
+}
+
 static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM3LmConfig & c, const MM3LmLayer & w,
                                   ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
-                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash) {
+                                  ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
+                                  ggml_prec precision) {
     const int64_t H   = (int64_t) c.embedding_length;
     const int64_t D   = (int64_t) c.key_length;
     const int64_t Nh  = (int64_t) c.head_count;
@@ -143,33 +172,24 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     const int64_t T   = h->ne[1];
     const int64_t B   = h->ne[2];
 
-    ggml_tensor * n = mm3_lm_rms(ctx, h, w.attn_norm, c.rms_eps);
+    // Tokens of both CFG rows run as one flat axis of T * B columns, so RoPE
+    // sees three dimensions and the cache writes need no permute.
+    ggml_tensor * n = ggml_reshape_2d(ctx, mm3_lm_rms(ctx, h, w.attn_norm, c.rms_eps), H, T * B);
 
-    ggml_tensor * q = ggml_mul_mat(ctx, w.attn_q, n);
-    ggml_tensor * k = ggml_mul_mat(ctx, w.attn_k, n);
-    ggml_tensor * v = ggml_mul_mat(ctx, w.attn_v, n);
+    const MM3AttentionInputs inputs = { w.attn_qkv, w.attn_q, w.attn_k, w.attn_v };
+    const MM3HeadProjections heads  = mm3_project_heads(ctx, inputs, n, D, Nh, Nkv, precision);
 
-    q = ggml_reshape_4d(ctx, q, D, Nh, T, B);
-    k = ggml_reshape_4d(ctx, k, D, Nkv, T, B);
-    v = ggml_reshape_4d(ctx, v, D, Nkv, T, B);
+    ggml_tensor * q = ggml_mul(ctx, ggml_rms_norm(ctx, heads.q, c.rms_eps), w.attn_q_norm);
+    ggml_tensor * k = ggml_mul(ctx, ggml_rms_norm(ctx, heads.k, c.rms_eps), w.attn_k_norm);
+    q               = mm3_lm_rope(ctx, c, q, positions);
+    k               = mm3_lm_rope(ctx, c, k, positions);
 
-    q = ggml_mul(ctx, ggml_rms_norm(ctx, q, c.rms_eps), w.attn_q_norm);
-    k = ggml_mul(ctx, ggml_rms_norm(ctx, k, c.rms_eps), w.attn_k_norm);
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, mm3_lm_cache_rows(ctx, k), rows));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, mm3_lm_cache_rows(ctx, heads.v), rows));
 
-    q = ggml_rope_ext(ctx, q, positions, NULL, (int) D, GGML_ROPE_TYPE_NEOX, 0, c.rope_freq_base, 1.0f, 0.0f, 1.0f,
-                      0.0f, 0.0f);
-    k = ggml_rope_ext(ctx, k, positions, NULL, (int) D, GGML_ROPE_TYPE_NEOX, 0, c.rope_freq_base, 1.0f, 0.0f, 1.0f,
-                      0.0f, 0.0f);
-
-    ggml_tensor * k_w = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
-    ggml_tensor * v_w = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
-    ggml_build_forward_expand(gf, ggml_set_rows(ctx, kcache, k_w, rows));
-    ggml_build_forward_expand(gf, ggml_set_rows(ctx, vcache, v_w, rows));
-
-    ggml_tensor * k_win = ggml_view_4d(ctx, kcache, D, n_kv_pad, Nkv, B, kcache->nb[1], kcache->nb[2], kcache->nb[3], 0);
-    ggml_tensor * v_win = ggml_view_4d(ctx, vcache, D, n_kv_pad, Nkv, B, vcache->nb[1], vcache->nb[2], vcache->nb[3], 0);
-
-    ggml_tensor * q4 = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+    ggml_tensor * k_win = mm3_lm_cache_window(ctx, kcache, D, Nkv, n_kv_pad, B);
+    ggml_tensor * v_win = mm3_lm_cache_window(ctx, vcache, D, Nkv, n_kv_pad, B);
+    ggml_tensor * q4    = ggml_view_4d(ctx, q, D, T, Nh, B, q->nb[2], q->nb[1], (size_t) T * q->nb[2], 0);
 
     const float   scale = 1.0f / sqrtf((float) D);
     ggml_tensor * attn;
@@ -181,12 +201,11 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     }
     attn = ggml_reshape_3d(ctx, attn, H, T, B);
 
-    h = ggml_add(ctx, h, ggml_mul_mat(ctx, w.attn_output, attn));
+    h = ggml_add(ctx, h, mm3_linear(ctx, w.attn_output, attn, precision));
 
-    ggml_tensor * n2   = mm3_lm_rms(ctx, h, w.ffn_norm, c.rms_eps);
-    ggml_tensor * gate = ggml_silu(ctx, ggml_mul_mat(ctx, w.ffn_gate, n2));
-    ggml_tensor * up   = ggml_mul_mat(ctx, w.ffn_up, n2);
-    return ggml_add(ctx, h, ggml_mul_mat(ctx, w.ffn_down, ggml_mul(ctx, gate, up)));
+    ggml_tensor * n2    = mm3_lm_rms(ctx, h, w.ffn_norm, c.rms_eps);
+    ggml_tensor * gated = mm3_gated_ffn_input(ctx, w.ffn_gate_up, w.ffn_gate, w.ffn_up, n2, precision);
+    return ggml_add(ctx, h, mm3_linear(ctx, w.ffn_down, gated, precision));
 }
 
 static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad,
@@ -218,11 +237,11 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, MM3_LM_MAX_NODES, false);
 
-    s->in_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+    s->in_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T * B);
     ggml_set_name(s->in_pos, "mm3_lm_positions");
     ggml_set_input(s->in_pos);
 
-    s->in_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, T);
+    s->in_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, T * B);
     ggml_set_name(s->in_rows, "mm3_lm_kv_rows");
     ggml_set_input(s->in_rows);
 
@@ -265,7 +284,7 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
 
     for (size_t i = 0; i < m.lm.blk.size(); i++) {
         h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn);
+                         n_kv_pad, g->use_flash_attn, mm3_lm_linear_precision(decode));
     }
     h = mm3_lm_rms(ctx, h, m.lm.output_norm, c.rms_eps);
 
@@ -276,7 +295,7 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
     ggml_set_name(s->out_hidden, "mm3_lm_last_hidden");
     ggml_set_output(s->out_hidden);
 
-    s->out_logits = ggml_mul_mat(ctx, m.lm.output_compact, last);
+    s->out_logits = mm3_linear(ctx, m.lm.output_compact, last, mm3_lm_linear_precision(decode));
     ggml_set_name(s->out_logits, "mm3_lm_logits");
     ggml_set_output(s->out_logits);
 
@@ -366,8 +385,9 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         g->cpu_backend = bp.cpu_backend;
         g->backend_ref = true;
 
-        g->use_flash_attn =
-            mm3_use_flash_attn(bp.has_gpu, /*default_on=*/false, "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
+        g->use_flash_attn = mm3_use_flash_attn(
+            bp.has_gpu, mm3_lm_flash_attn_default(tts_cpp::acestep::backend_reg_name(bp.backend)),
+            "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
         g->lm_token    = lt;
         g->synth_token = st;
     }
@@ -396,10 +416,10 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
     g->kv_v.assign((size_t) L, nullptr);
     for (int i = 0; i < L; i++) {
         char nm[64];
-        g->kv_k[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F16, D, want, Nkv, MM3_LM_CFG_ROWS);
+        g->kv_k[(size_t) i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, D * Nkv, want * MM3_LM_CFG_ROWS);
         snprintf(nm, sizeof(nm), "mm3.lm.kv_k.%d", i);
         ggml_set_name(g->kv_k[(size_t) i], nm);
-        g->kv_v[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F16, D, want, Nkv, MM3_LM_CFG_ROWS);
+        g->kv_v[(size_t) i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, D * Nkv, want * MM3_LM_CFG_ROWS);
         snprintf(nm, sizeof(nm), "mm3.lm.kv_v.%d", i);
         ggml_set_name(g->kv_v[(size_t) i], nm);
     }
@@ -432,20 +452,34 @@ static void mm3_lm_reset(MM3LmGraph * g) {
     g->kv_pos = 0;
 }
 
-static void mm3_lm_upload_step(MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad) {
-    g->pos_host.resize((size_t) T);
-    g->rows_host.resize((size_t) T);
+static void mm3_lm_fill_mask(MM3LmGraph * g, int64_t T, int64_t n_kv_pad) {
     g->mask_host.resize((size_t) (n_kv_pad * T));
     for (int64_t i = 0; i < T; i++) {
-        const int64_t abs      = g->kv_pos + i;
-        g->pos_host[(size_t) i]  = (int32_t) abs;
-        g->rows_host[(size_t) i] = abs;
+        const int64_t abs = g->kv_pos + i;
         for (int64_t j = 0; j < n_kv_pad; j++) {
             g->mask_host[(size_t) (i * n_kv_pad + j)] = ggml_fp32_to_fp16(j <= abs ? 0.0f : -INFINITY);
         }
     }
-    ggml_backend_tensor_set(s->in_pos, g->pos_host.data(), 0, (size_t) T * sizeof(int32_t));
-    ggml_backend_tensor_set(s->in_rows, g->rows_host.data(), 0, (size_t) T * sizeof(int64_t));
+}
+
+// Positions and cache rows for the flat T * B token axis: column b * T + i is
+// token i of CFG row b, at position kv_pos + i and cache row b * n_ctx + that.
+static void mm3_lm_fill_positions(MM3LmGraph * g, int64_t T) {
+    const int64_t columns = T * MM3_LM_CFG_ROWS;
+    g->pos_host.resize((size_t) columns);
+    g->rows_host.resize((size_t) columns);
+    for (int64_t column = 0; column < columns; column++) {
+        const int64_t position        = g->kv_pos + column % T;
+        g->pos_host[(size_t) column]  = (int32_t) position;
+        g->rows_host[(size_t) column] = (column / T) * g->n_ctx + position;
+    }
+}
+
+static void mm3_lm_upload_step(MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad) {
+    mm3_lm_fill_positions(g, T);
+    mm3_lm_fill_mask(g, T, n_kv_pad);
+    ggml_backend_tensor_set(s->in_pos, g->pos_host.data(), 0, g->pos_host.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(s->in_rows, g->rows_host.data(), 0, g->rows_host.size() * sizeof(int64_t));
     ggml_backend_tensor_set(s->in_mask, g->mask_host.data(), 0, (size_t) (n_kv_pad * T) * sizeof(uint16_t));
 }
 

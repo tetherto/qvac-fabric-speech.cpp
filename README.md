@@ -10,7 +10,7 @@ On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/
 | Models | every model loads from GGUF (see [Supported models](#supported-models)) |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android (arm64-v8a), iOS (arm64) |
-| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
+| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Hexagon (Snapdragon HTP0, Parakeet only), Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
 | Quantization | `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `q5_0`, `q5_1`, `q4_0`, `q4_k_m` (per model, see tables) |
 | Shared ggml | one `ggml-speech` vcpkg port, built from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 | Language | C++17 |
@@ -52,7 +52,7 @@ engine-specific guides qualify model-level validation.
 | `nvidia/diar_sortformer_4spk-v1` | parakeet | diarization, up to 4 speakers | 123 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | offline + sliding-history live |
 | `nvidia/diar_streaming_sortformer_4spk-v2` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | streaming-trained encoder |
 | `nvidia/diar_streaming_sortformer_4spk-v2.1` | parakeet | diarization, up to 4 speakers | 117 M | `f16`, `q8_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA; Core ML exact-shape batch/AOSC encoder | Audio-Online Speaker Cache, stable slots across gaps; speaker head stays on ggml |
-| `nvidia/Nemotron-3-Diarization` | parakeet | diarization, up to 8 speakers | — | official `q8_0` GGUF | CPU, Vulkan (RX 7600 XT tested); other ggml backends require validation | 10 ms probabilities, offline and AOSC streaming |
+| `nvidia/Nemotron-3-Diarization` | parakeet | diarization, up to 8 speakers | — | official `q8_0` GGUF | CPU, Metal, Vulkan, OpenCL, CUDA | 10 ms probabilities, offline and AOSC streaming |
 
 Parakeet's CUDA path was validated on an RTX 3080 (TDT q8_0 and q4_0
 transcripts, Sortformer and streaming output byte-equal to the previous build,
@@ -88,7 +88,9 @@ remaining context. See the [MOSS guide](engines/tts/docs/moss.md#moss-speech).
 When a TTS build carries both CUDA and Vulkan, backend selection prefers CUDA
 on NVIDIA hardware; `TTS_CPP_GPU_BACKEND=cuda|vulkan|metal|opencl` pins one
 backend for a test arm or comparison and rejects a value that selects no usable
-device. The per-model validation each backend column rests on is documented in
+device. Among several Vulkan adapters, Audio8 runs on a discrete one whenever one
+is visible rather than on the first adapter listed, which on a desktop with an
+integrated GPU is the iGPU. The per-model validation each backend column rests on is documented in
 the [TTS capability table](engines/tts/README.md#capabilities).
 
 CosyVoice3's weight tiers are platform-dependent: `q8_0` LM + `q8_0` flow +
@@ -100,7 +102,9 @@ AVX512-BF16 CPUs with `f16` elsewhere. See the
 Parler's decoder fuses the per-layer QKV projections and its nine LM heads
 into single matmuls on GPU and on mmap-backed CPU loads (byte-exact;
 `PARLER_NO_FUSED` opts out) and samples each step from the top-k candidate
-set, in place on host backends. See the
+set, in place on host backends. On CPU it runs flash attention over an F32 KV
+cache, and on Apple builds its DAC convolutions run on Accelerate
+(`PARLER_NO_FA` and `PARLER_DAC_NO_ACCEL` opt out). See the
 [Parler-TTS guide](engines/tts/docs/parler.md).
 
 ### Speech enhancement
@@ -122,7 +126,8 @@ set, in place on host backends. See the
 ### Apple Core ML sidecars
 
 On Apple builds, an optional Core ML sidecar moves one fixed-shape stage of a
-model to the Neural Engine while the rest of the pipeline stays on ggml. Each
+model to Core ML, which places it on the Neural Engine, the GPU or the CPU,
+while the rest of the pipeline stays on ggml. Each
 engine gates its sidecars behind its own CMake option, all defaulting to `OFF`:
 `PARAKEET_COREML`, `TTS_CPP_COREML`, and `AUDIOGEN_COREML`. At load the engine
 looks for a compiled `.mlmodelc` next to the GGUF, named after the GGUF with
@@ -136,7 +141,7 @@ sidecar, a rejected input shape, or a failed prediction falls back to ggml.
 | Nemotron 3.5 ASR streaming | `<model>-encoder.mlmodelc` | encoder | exact compiled shape only; longer offline inputs and streaming take the cache-aware ggml path | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#nemotron) |
 | Sortformer v2.1 | `<model>-encoder.mlmodelc`, `<model>-encoder-bypass-pre-encode.mlmodelc` | batch encoder; AOSC block stack | batch: exact compiled shape; AOSC: up to the masked capacity (410 frames by default); the speaker head stays on ggml | `PARAKEET_COREML_DISABLE=1` | [Parakeet](engines/parakeet/README.md#sortformer-v21) |
 | Supertonic 1 / 2 / 3 | `<model>-vocoder.mlmodelc` | vocoder | 64-latent-frame windows; stays off for vocoder weights stored below 8 bits (`q4_0`) | `SUPERTONIC_COREML_DISABLE=1` | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar) |
-| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack | 64-post-frame windows; a failed call retires the sidecar for the engine's lifetime | `AUDIO8_COREML_DISABLE=1` | [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
+| Audio8-TTS-Preview-0.6B | `audio8-codec-decoder.mlmodelc` | codec synthesis stack | 64-post-frame windows, synthesised on a worker while the language model is still generating; a failed call retires the sidecar for the engine's lifetime | `AUDIO8_COREML_DISABLE=1` | [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | ACE-Step v15 turbo / sft / base | `<vae>-decoder.mlmodelc` | Oobleck VAE decoder | 64-latent-frame overlapped windows; shorter latents run on ggml | `ACESTEP_COREML_DISABLE=1` | [AudioGen](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 
 Sidecars are exported from the GGUF by
@@ -204,6 +209,7 @@ build pins.
 | TTS | Supertonic 3 | end-to-end wall 0.61–0.82 s on every GPU lane (RTF 0.024–0.031) — [full table](engines/tts/README.md#supertonic-3-multi-machine-benchmark-2026-09) |
 | TTS | Audio8 0.6b | GPU RTF 0.12–0.65, faster than real time on every GPU lane — [full table](engines/tts/README.md#audio8-multi-machine-benchmark-2026-09) |
 | Music | ACE-Step 1.5 | generation 1,338–2,330 ms on the GPU lanes (RTF 0.14–0.25) — [full table](engines/audiogen/README.md#ace-step-15-multi-machine-benchmark-2026-09) |
+| Music | MiniMax-Music3 f16 | 2-minute song in 73.9 s on RTX 5090 CUDA and 84.2 s on Vulkan (RTF 0.62 / 0.70), 1.38x / 1.25x faster than before — [full table](engines/audiogen/README.md#minimax-music3-f16-on-rtx-5090-2026-09) |
 
 ### Brain-computer interface
 

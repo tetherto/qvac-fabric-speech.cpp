@@ -17,6 +17,8 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace tts_cpp {
 namespace audio8 {
@@ -141,21 +143,194 @@ ggml_context * new_weight_context(int64_t n_tensors) {
     return ggml_init(params);
 }
 
-void clone_tensor_headers(const ggml_context * meta, ggml_context * dst) {
+// A weight the loader assembles by concatenating the rows of several GGUF
+// tensors, so one matmul replaces several; see docs/audio8.md ("The language
+// model's projections are fused at load").
+struct fused_weight {
+    std::string name;
+    std::vector<std::string> parts;
+};
+
+using fusion_plan = std::vector<fused_weight>;
+
+const std::vector<std::string> QKV_PARTS = {"wq", "wk", "wv"};
+const std::vector<std::string> QKV_BIAS_PARTS = {"wq_b", "wk_b", "wv_b"};
+const std::vector<std::string> GATE_UP_PARTS = {"w1", "w3"};
+
+bool fusion_disabled() {
+    return std::getenv("AUDIO8_LM_FUSION_DISABLE") != nullptr;
+}
+
+ggml_tensor * meta_tensor(const gguf_file & file, const std::string & name) {
+    return ggml_get_tensor(const_cast<ggml_context *>(file.meta()), name.c_str());
+}
+
+constexpr int VECTOR_DIMS = 1;
+constexpr int MATRIX_DIMS = 2;
+
+// Rows are whole blocks in every storage type, so matrices that share a type
+// and a row width, or vectors that share a type, stack as a byte concatenation.
+bool stacks_with(const ggml_tensor * first, const ggml_tensor * part) {
+    if (!part || part->type != first->type || ggml_n_dims(part) != ggml_n_dims(first)) {
+        return false;
+    }
+    if (ggml_n_dims(first) == VECTOR_DIMS) return true;
+    return ggml_n_dims(first) == MATRIX_DIMS && part->ne[0] == first->ne[0];
+}
+
+bool rows_stack(const gguf_file & file, const fused_weight & fused) {
+    const ggml_tensor * first = meta_tensor(file, fused.parts.front());
+    if (!first) return false;
+    for (const std::string & name : fused.parts) {
+        if (!stacks_with(first, meta_tensor(file, name))) return false;
+    }
+    return true;
+}
+
+fused_weight named_fusion(const std::string & prefix, const std::string & name,
+                          const std::vector<std::string> & suffixes) {
+    fused_weight fused;
+    fused.name = prefix + name;
+    for (const std::string & suffix : suffixes) fused.parts.push_back(prefix + suffix);
+    return fused;
+}
+
+// A file that already carries a tensor under the stacked name keeps its own;
+// two tensors of one name would leave the loader writing the stack into the
+// file's.
+bool plan_fusion(const gguf_file & file, const fused_weight & fused, fusion_plan & plan) {
+    if (meta_tensor(file, fused.name) || !rows_stack(file, fused)) return false;
+    plan.push_back(fused);
+    return true;
+}
+
+// The biases only stack together with their weights: the graph reads either
+// both stacked or both separate.
+void plan_layer_fusions(const gguf_file & file, const std::string & prefix,
+                        fusion_plan & plan) {
+    if (plan_fusion(file, named_fusion(prefix, "wqkv", QKV_PARTS), plan)) {
+        plan_fusion(file, named_fusion(prefix, "wqkv_b", QKV_BIAS_PARTS), plan);
+    }
+    plan_fusion(file, named_fusion(prefix, "w13", GATE_UP_PARTS), plan);
+}
+
+void plan_branch_fusions(const gguf_file & file, const std::string & branch, int depth,
+                         fusion_plan & plan) {
+    for (int index = 0; index < depth; ++index) {
+        plan_layer_fusions(file, branch + "/blk/" + std::to_string(index) + "/", plan);
+    }
+}
+
+fusion_plan plan_lm_fusions(const gguf_file & file, const lm_hparams & hp) {
+    fusion_plan plan;
+    if (fusion_disabled()) return plan;
+    plan_branch_fusions(file, "lm", hp.depth, plan);
+    plan_branch_fusions(file, "fast", hp.fast_depth, plan);
+    return plan;
+}
+
+std::unordered_set<std::string> fused_parts(const fusion_plan & plan) {
+    std::unordered_set<std::string> parts;
+    for (const fused_weight & fused : plan) parts.insert(fused.parts.begin(), fused.parts.end());
+    return parts;
+}
+
+void clone_tensor_headers(const ggml_context * meta, ggml_context * dst,
+                          const std::unordered_set<std::string> & skipped) {
     ggml_context * source = const_cast<ggml_context *>(meta);
     for (ggml_tensor * t = ggml_get_first_tensor(source); t;
          t = ggml_get_next_tensor(source, t)) {
+        if (skipped.count(ggml_get_name(t))) continue;
         ggml_set_name(ggml_dup_tensor(dst, t), ggml_get_name(t));
     }
 }
 
-bool stream_weights(const gguf_file & file, ggml_context * ctx) {
-    ::tts_cpp::detail::gguf_stream_reader reader(file.ctx(), file.path());
-    if (!reader.ok()) return false;
+int64_t stacked_rows(const gguf_file & file, const fused_weight & fused, int dim) {
+    int64_t total = 0;
+    for (const std::string & name : fused.parts) total += meta_tensor(file, name)->ne[dim];
+    return total;
+}
+
+void add_fused_header(const gguf_file & file, const fused_weight & fused, ggml_context * dst) {
+    const ggml_tensor * first = meta_tensor(file, fused.parts.front());
+    ggml_tensor * t = ggml_n_dims(first) == VECTOR_DIMS
+                          ? ggml_new_tensor_1d(dst, first->type, stacked_rows(file, fused, 0))
+                          : ggml_new_tensor_2d(dst, first->type, first->ne[0],
+                                               stacked_rows(file, fused, 1));
+    ggml_set_name(t, fused.name.c_str());
+}
+
+void add_fused_headers(const gguf_file & file, const fusion_plan & plan, ggml_context * dst) {
+    for (const fused_weight & fused : plan) add_fused_header(file, fused, dst);
+}
+
+bool read_parts(::tts_cpp::detail::gguf_stream_reader & reader, const gguf_file & file,
+                const fused_weight & fused, std::vector<uint8_t> & bytes) {
+    size_t offset = 0;
+    for (const std::string & name : fused.parts) {
+        const size_t size = ggml_nbytes(meta_tensor(file, name));
+        if (offset + size > bytes.size()) return false;
+        if (!reader.to_host(name.c_str(), bytes.data() + offset, size)) return false;
+        offset += size;
+    }
+    return offset == bytes.size();
+}
+
+bool stream_parts_in_place(::tts_cpp::detail::gguf_stream_reader & reader,
+                           const gguf_file & file, const fused_weight & fused,
+                           ggml_tensor * dst) {
+    size_t offset = 0;
+    for (const std::string & name : fused.parts) {
+        const size_t size = ggml_nbytes(meta_tensor(file, name));
+        if (!reader.to_backend_at(name.c_str(), dst, offset, size)) return false;
+        offset += size;
+    }
+    return offset == ggml_nbytes(dst);
+}
+
+// Plain types stream each part in chunks at its offset; a quantised stack is
+// staged on the host and uploaded in one call, which is what the OpenCL
+// quantised layouts need (gguf_stream.h). The staging buffer is reused.
+bool stream_fused(::tts_cpp::detail::gguf_stream_reader & reader, const gguf_file & file,
+                  const fused_weight & fused, ggml_context * ctx,
+                  std::vector<uint8_t> & bytes) {
+    ggml_tensor * dst = ggml_get_tensor(ctx, fused.name.c_str());
+    if (!ggml_is_quantized(dst->type)) return stream_parts_in_place(reader, file, fused, dst);
+    bytes.resize(ggml_nbytes(dst));
+    if (!read_parts(reader, file, fused, bytes)) return false;
+    ggml_backend_tensor_set(dst, bytes.data(), 0, bytes.size());
+    return true;
+}
+
+bool stream_plain(::tts_cpp::detail::gguf_stream_reader & reader, ggml_context * ctx,
+                  const std::unordered_set<std::string> & fused_names) {
     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+        if (fused_names.count(ggml_get_name(t))) continue;
         if (!reader.to_backend(ggml_get_name(t), t)) return false;
     }
     return true;
+}
+
+bool stream_all_fused(::tts_cpp::detail::gguf_stream_reader & reader, const gguf_file & file,
+                      const fusion_plan & plan, ggml_context * ctx) {
+    std::vector<uint8_t> bytes;
+    for (const fused_weight & fused : plan) {
+        if (!stream_fused(reader, file, fused, ctx, bytes)) return false;
+    }
+    return true;
+}
+
+std::unordered_set<std::string> fused_names(const fusion_plan & plan) {
+    std::unordered_set<std::string> names;
+    for (const fused_weight & fused : plan) names.insert(fused.name);
+    return names;
+}
+
+bool stream_weights(const gguf_file & file, ggml_context * ctx, const fusion_plan & plan) {
+    ::tts_cpp::detail::gguf_stream_reader reader(file.ctx(), file.path());
+    if (!reader.ok()) return false;
+    return stream_plain(reader, ctx, fused_names(plan)) &&
+           stream_all_fused(reader, file, plan, ctx);
 }
 
 // Mark every unallocated tensor in `ctx` externally allocated (dummy non-null
@@ -178,13 +353,15 @@ void mark_externally_allocated(ggml_context * ctx) {
 // no tensor data leaves the disk.
 bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context ** ctx,
                   ggml_backend_buffer_t * buffer, std::string * error,
-                  size_t * measure_bytes = nullptr) {
-    *ctx = new_weight_context(gguf_get_n_tensors(file.ctx()));
+                  size_t * measure_bytes = nullptr, const fusion_plan & plan = {}) {
+    *ctx = new_weight_context(gguf_get_n_tensors(file.ctx()) +
+                              static_cast<int64_t>(plan.size()));
     if (!*ctx) {
         if (error) *error = "audio8: failed to create the weight context";
         return false;
     }
-    clone_tensor_headers(file.meta(), *ctx);
+    clone_tensor_headers(file.meta(), *ctx, fused_parts(plan));
+    add_fused_headers(file, plan, *ctx);
     if (measure_bytes) {
         *measure_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
             *ctx, ggml_backend_get_default_buffer_type(backend));
@@ -196,7 +373,7 @@ bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context *
         if (error) *error = "audio8: failed to allocate the weight buffer";
         return false;
     }
-    if (!stream_weights(file, *ctx)) {
+    if (!stream_weights(file, *ctx, plan)) {
         if (error) *error = "audio8: failed to read tensor data from " + file.path();
         return false;
     }
@@ -206,13 +383,17 @@ bool load_weights(const gguf_file & file, ggml_backend_t backend, ggml_context *
 // A capability probe only ever holds its operand and the op asked about.
 constexpr int PROBE_NODES = 2;
 
+// init_gpu_backend's auto-pick: the Vulkan adapter with the most free memory,
+// never an integrated one while a discrete one is visible.
+constexpr int AUTO_VULKAN_DEVICE = -1;
+
 // Audio8's GPU path is enabled only on backends its whole graph set has been
 // validated against, stage by stage, against the F32 reference. Anything else
 // falls back to CPU rather than running unverified kernels.
 ggml_backend_t init_backend(int n_gpu_layers) {
     using ::tts_cpp::detail::GpuBackendRequirement;
     ggml_backend_t backend = ::tts_cpp::detail::init_gpu_backend(
-        n_gpu_layers, true, "audio8", 0, false, nullptr,
+        n_gpu_layers, true, "audio8", AUTO_VULKAN_DEVICE, false, nullptr,
         GpuBackendRequirement::Vulkan | GpuBackendRequirement::Metal |
             GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA);
     return backend ? backend : ::tts_cpp::detail::init_cpu_backend();
@@ -232,6 +413,9 @@ public:
     ggml_tensor * maybe(const std::string & name) const {
         return ggml_get_tensor(ctx_, name.c_str());
     }
+    void reject(const std::string & why) {
+        if (error_.empty()) error_ = why;
+    }
     bool ok() const { return error_.empty(); }
     const std::string & error() const { return error_; }
 
@@ -240,34 +424,130 @@ private:
     std::string error_;
 };
 
-void read_attention(tensor_map & map, const std::string & prefix, bool has_bias,
-                    attention_weights & attn) {
+// What a branch's projections must measure, from its hparams: the graph cuts
+// the q, k and v heads and the gate and up halves by these counts, so a file
+// that disagrees is refused here instead of aborting in a reshape.
+struct projection_geometry {
+    int hidden = 0;
+    int n_head = 0;
+    int n_kv = 0;
+    int head_dim = 0;
+    int inter = 0;
+    bool bias = false;
+};
+
+std::string extent(int64_t cols, int64_t rows) {
+    return "[" + std::to_string(cols) + ", " + std::to_string(rows) + "]";
+}
+
+void expect_shape(tensor_map & map, const std::string & name, const ggml_tensor * t,
+                  int64_t cols, int64_t rows) {
+    if (!t || (t->ne[0] == cols && t->ne[1] == rows && t->ne[2] == 1)) return;
+    map.reject("audio8: " + name + " is " + extent(t->ne[0], t->ne[1]) +
+               ", the model's head geometry needs " + extent(cols, rows));
+}
+
+void expect_length(tensor_map & map, const std::string & name, const ggml_tensor * t,
+                   int64_t length) {
+    if (!t || (t->ne[0] == length && ggml_n_dims(t) == 1)) return;
+    map.reject("audio8: " + name + " holds " + std::to_string(ggml_nelements(t)) +
+               " values, the model's head geometry needs " + std::to_string(length));
+}
+
+void check_stacked_attention(tensor_map & map, const std::string & prefix,
+                             const projection_geometry & g, const attention_weights & attn) {
+    const int64_t rows = static_cast<int64_t>(g.n_head + 2 * g.n_kv) * g.head_dim;
+    expect_shape(map, prefix + "wqkv", attn.wqkv, g.hidden, rows);
+    if (g.bias) expect_length(map, prefix + "wqkv_b", attn.wqkv_b, rows);
+}
+
+void check_separate_attention(tensor_map & map, const std::string & prefix,
+                              const projection_geometry & g, const attention_weights & attn) {
+    const int64_t q_rows = static_cast<int64_t>(g.n_head) * g.head_dim;
+    const int64_t kv_rows = static_cast<int64_t>(g.n_kv) * g.head_dim;
+    expect_shape(map, prefix + "wq", attn.wq, g.hidden, q_rows);
+    expect_shape(map, prefix + "wk", attn.wk, g.hidden, kv_rows);
+    expect_shape(map, prefix + "wv", attn.wv, g.hidden, kv_rows);
+    if (!g.bias) return;
+    expect_length(map, prefix + "wq_b", attn.wq_b, q_rows);
+    expect_length(map, prefix + "wk_b", attn.wk_b, kv_rows);
+    expect_length(map, prefix + "wv_b", attn.wv_b, kv_rows);
+}
+
+void check_gate_up(tensor_map & map, const std::string & prefix, const projection_geometry & g,
+                   const block_weights & block) {
+    if (block.w13) {
+        expect_shape(map, prefix + "w13", block.w13, g.hidden, 2 * static_cast<int64_t>(g.inter));
+        return;
+    }
+    expect_shape(map, prefix + "w1", block.w1, g.hidden, g.inter);
+    expect_shape(map, prefix + "w3", block.w3, g.hidden, g.inter);
+}
+
+void check_projections(tensor_map & map, const std::string & prefix,
+                       const projection_geometry & g, const block_weights & block) {
+    if (block.attn.wqkv) {
+        check_stacked_attention(map, prefix, g, block.attn);
+    } else {
+        check_separate_attention(map, prefix, g, block.attn);
+    }
+    check_gate_up(map, prefix, g, block);
+}
+
+void read_projections(tensor_map & map, const std::string & prefix, bool has_bias,
+                      attention_weights & attn) {
+    attn.wqkv = map.maybe(prefix + "wqkv");
+    if (attn.wqkv) {
+        if (has_bias) attn.wqkv_b = map.get(prefix + "wqkv_b");
+        return;
+    }
     attn.wq = map.get(prefix + "wq");
     attn.wk = map.get(prefix + "wk");
     attn.wv = map.get(prefix + "wv");
-    attn.wo = map.get(prefix + "wo");
-    attn.attn_norm = map.get(prefix + "attn_norm");
     if (!has_bias) return;
     attn.wq_b = map.get(prefix + "wq_b");
     attn.wk_b = map.get(prefix + "wk_b");
     attn.wv_b = map.get(prefix + "wv_b");
 }
 
-void read_block(tensor_map & map, const std::string & prefix, bool has_bias,
-                block_weights & block) {
-    read_attention(map, prefix, has_bias, block.attn);
-    block.w1 = map.get(prefix + "w1");
-    block.w2 = map.get(prefix + "w2");
-    block.w3 = map.get(prefix + "w3");
-    block.ffn_norm = map.get(prefix + "ffn_norm");
+void read_attention(tensor_map & map, const std::string & prefix, bool has_bias,
+                    attention_weights & attn) {
+    read_projections(map, prefix, has_bias, attn);
+    attn.wo = map.get(prefix + "wo");
+    attn.attn_norm = map.get(prefix + "attn_norm");
 }
 
-void read_branch(tensor_map & map, const std::string & branch, int depth, bool has_bias,
-                 std::vector<block_weights> & blocks) {
+void read_gate_up(tensor_map & map, const std::string & prefix, block_weights & block) {
+    block.w13 = map.maybe(prefix + "w13");
+    if (block.w13) return;
+    block.w1 = map.get(prefix + "w1");
+    block.w3 = map.get(prefix + "w3");
+}
+
+void read_block(tensor_map & map, const std::string & prefix, const projection_geometry & g,
+                block_weights & block) {
+    read_attention(map, prefix, g.bias, block.attn);
+    read_gate_up(map, prefix, block);
+    block.w2 = map.get(prefix + "w2");
+    block.ffn_norm = map.get(prefix + "ffn_norm");
+    check_projections(map, prefix, g, block);
+}
+
+void read_branch(tensor_map & map, const std::string & branch, int depth,
+                 const projection_geometry & g, std::vector<block_weights> & blocks) {
     blocks.resize(depth);
     for (int index = 0; index < depth; ++index) {
-        read_block(map, branch + "/blk/" + std::to_string(index) + "/", has_bias, blocks[index]);
+        read_block(map, branch + "/blk/" + std::to_string(index) + "/", g, blocks[index]);
     }
+}
+
+projection_geometry slow_geometry(const lm_hparams & hp) {
+    return {hp.hidden, hp.n_head, hp.n_kv, hp.head_dim, hp.inter, hp.qkv_bias};
+}
+
+projection_geometry fast_geometry(const lm_hparams & hp) {
+    return {hp.fast_hidden, hp.fast_n_head, hp.fast_n_kv, hp.fast_head_dim, hp.fast_inter,
+            hp.fast_qkv_bias};
 }
 
 void read_lm_hparams(metadata & meta, lm_hparams & hp) {
@@ -624,7 +904,8 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     }
     model.precise_outputs = ::tts_cpp::detail::backend_is_metal(model.backend);
     if (!load_weights(file, model.backend, &model.ctx_w, &model.buffer_w, error,
-                      measure ? &measure->weights_bytes : nullptr)) {
+                      measure ? &measure->weights_bytes : nullptr,
+                      plan_lm_fusions(file, model.hp))) {
         return false;
     }
 
@@ -635,13 +916,13 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     model.sem_head = map.get("lm/sem_head");
     model.rope_cos = map.get("lm/rope_cos");
     model.rope_sin = map.get("lm/rope_sin");
-    read_branch(map, "lm", model.hp.depth, model.hp.qkv_bias, model.blocks);
+    read_branch(map, "lm", model.hp.depth, slow_geometry(model.hp), model.blocks);
     model.fast_emb = map.get("fast/emb");
     model.fast_norm = map.get("fast/norm");
     model.fast_out = map.get("fast/out");
     model.fast_rope_cos = map.get("fast/rope_cos");
     model.fast_rope_sin = map.get("fast/rope_sin");
-    read_branch(map, "fast", model.hp.fast_depth, model.hp.fast_qkv_bias, model.fast_blocks);
+    read_branch(map, "fast", model.hp.fast_depth, fast_geometry(model.hp), model.fast_blocks);
     if (!map.ok()) {
         if (error) *error = map.error();
         return false;

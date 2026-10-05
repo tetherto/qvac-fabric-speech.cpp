@@ -27,6 +27,18 @@ ggml_tensor * layer_norm(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w,
     return ggml_add(ctx, ggml_mul(ctx, x, w), b);
 }
 
+// Rows the FFN activation is viewed as before the exact-erf GELU: ggml-cpu
+// splits unary ops by row, so a decode step's single [d_ff, 1] row would run
+// on one thread.  Elementwise, so the reshape cannot change a single bit.
+constexpr int64_t GELU_ROW_SPLIT = 32;
+
+ggml_tensor * gelu_erf_rows(ggml_context * ctx, ggml_tensor * x) {
+    if (x->ne[0] % GELU_ROW_SPLIT != 0) return ggml_gelu_erf(ctx, x);
+    ggml_tensor * rows = ggml_reshape_2d(ctx, x, x->ne[0] / GELU_ROW_SPLIT,
+                                         GELU_ROW_SPLIT * x->ne[1]);
+    return ggml_reshape_2d(ctx, ggml_gelu_erf(ctx, rows), x->ne[0], x->ne[1]);
+}
+
 // self+cross+ffn stack over inpL = [d_model, N] at cache position n_past.
 // Returns the final-layer-norm output [d_model, N].
 ggml_tensor * build_dec_core(ggml_context * ctx, ggml_cgraph * gf,
@@ -114,9 +126,9 @@ ggml_tensor * build_dec_core(ggml_context * ctx, ggml_cgraph * gf,
         ggml_tensor * ckqv;
         if (model.use_fa) {
             ggml_tensor * cK = ggml_view_3d(ctx, model.cross_k[il],
-                HD, Tc, H, model.cross_k[il]->nb[1], kv_head_row, 0);    // [HD, Tc, H] F16
+                HD, Tc, H, model.cross_k[il]->nb[1], kv_head_row, 0);    // [HD, Tc, H]
             ggml_tensor * cV = ggml_view_3d(ctx, model.cross_v_t[il],
-                HD, Tc, H, model.cross_v_t[il]->nb[1], kv_head_row, 0);  // [HD, Tc, H] F16 (non-transposed)
+                HD, Tc, H, model.cross_v_t[il]->nb[1], kv_head_row, 0);  // [HD, Tc, H] (non-transposed)
             ggml_tensor * cattn = ggml_flash_attn_ext(ctx, cQ, cK, cV, nullptr, scale, 0.0f, 0.0f);
             ckqv = ggml_reshape_2d(ctx, cattn, d, N);
         } else {
@@ -135,7 +147,7 @@ ggml_tensor * build_dec_core(ggml_context * ctx, ggml_cgraph * gf,
 
         // ---- ffn (exact-erf gelu) ----
         cur = layer_norm(ctx, inpL, l.ffn_norm_w, l.ffn_norm_b, hp.dec_ln_eps);
-        cur = ggml_gelu_erf(ctx, ggml_mul_mat(ctx, l.up, cur));
+        cur = gelu_erf_rows(ctx, ggml_mul_mat(ctx, l.up, cur));
         cur = ggml_mul_mat(ctx, l.down, cur);
         inpL = ggml_add(ctx, inpL, cur);
     }

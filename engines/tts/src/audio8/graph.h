@@ -91,6 +91,11 @@ ggml_tensor * linear(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x,
 ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
                      ggml_tensor * w3, ggml_tensor * x);
 
+// The same SwiGLU from w1 and w3 stacked into one [w1; w3] weight: one matmul,
+// whose lower half gates the upper half.
+ggml_tensor * swiglu_stacked(ggml_context * ctx, ggml_tensor * w13, ggml_tensor * w2,
+                             ggml_tensor * x);
+
 struct attention_shape {
     int n_head = 0;
     int n_kv = 0;
@@ -102,7 +107,8 @@ struct attention_shape {
 };
 
 // Projects x, rotates, appends to the cache and reads the whole prefix back.
-// Returns [dim, width]; mask is [n_past + width, width].
+// Returns [dim, width]; mask is [n_past + width, width], and may be null for a
+// single position, which sees the whole prefix.
 ggml_tensor * attention(ggml_context * ctx, ggml_cgraph * graph,
                         const attention_weights & weights, ggml_tensor * x,
                         const rope_planes & rope, const kv_cache & cache,
@@ -113,6 +119,21 @@ ggml_tensor * attention(ggml_context * ctx, ggml_cgraph * graph,
 ggml_tensor * windowed_attention(ggml_context * ctx, const attention_weights & weights,
                                  ggml_tensor * x, const rope_planes & rope,
                                  const attention_shape & shape, ggml_tensor * mask);
+
+// windowed_attention for positions that follow earlier ones: held_keys (rotated)
+// and held_values are their [head_dim, n_kv, held] keys and values, or null,
+// and mask is [held + width, width]. Also returns the keys and values it
+// attended over, the held ones followed by x's.
+struct windowed_step {
+    ggml_tensor * out = nullptr;
+    ggml_tensor * keys = nullptr;
+    ggml_tensor * values = nullptr;
+};
+
+windowed_step windowed_attention_after(ggml_context * ctx, const attention_weights & weights,
+                                       ggml_tensor * x, const rope_planes & rope,
+                                       const attention_shape & shape, ggml_tensor * held_keys,
+                                       ggml_tensor * held_values, ggml_tensor * mask);
 
 // Fills a [keys, queries] f32 mask with 0 where a query may attend and
 // -INFINITY elsewhere. `window` of 0 means unlimited history.

@@ -1,3 +1,4 @@
+#include "backend_util.h"
 #include "mel_preprocess.h"
 #include "parakeet/engine.h"
 #include "parakeet_ctc.h"
@@ -32,6 +33,8 @@ constexpr int kExplicitLeftContextMs = 80;
 constexpr int kFirstWindowMs = kStreamChunkMs + kStreamRightContextMs;
 constexpr float kQuietAudioScale = 0.1f;
 constexpr float kMaximumGainScoreDifference = 0.0002f;
+constexpr float kPrewarmSeconds = 1.0f;
+constexpr double kMaximumPrewarmDifference = 1.0e-5;
 
 static bool valid_probabilities(const std::vector<float> & probabilities) {
     for (float probability : probabilities) {
@@ -96,17 +99,34 @@ static std::vector<float> make_negative_biased_audio(
 
 static bool infer_probabilities(
     const parakeet::ParakeetCtcModel & model,
-    const std::vector<float> & audio, std::vector<float> & probabilities) {
+    const std::vector<float> & audio, std::vector<float> & probabilities,
+    parakeet::NemotronAttention attention = parakeet::NemotronAttention::Automatic) {
     std::vector<float> mel;
     int mel_frames = 0;
     if (parakeet::compute_log_mel(audio.data(), static_cast<int>(audio.size()),
         model.mel_cfg, mel, mel_frames) != 0) return false;
     return parakeet::run_nemotron_diarization(
-        model, mel.data(), mel_frames, probabilities) == 0;
+        model, mel.data(), mel_frames, probabilities, attention) == 0;
 }
 
 static void apply_peak_gain(std::vector<float> & audio, float peak) {
     for (float & sample : audio) sample /= peak + kNormalizationFloor;
+}
+
+static float peak_magnitude(const std::vector<float> & audio) {
+    return std::fabs(*std::max_element(audio.begin(), audio.end(),
+        [](float lhs, float rhs) { return std::fabs(lhs) < std::fabs(rhs); }));
+}
+
+static bool unfused_attention_matches_reference(
+    const parakeet::ParakeetCtcModel & model, const std::vector<float> & samples,
+    const char * reference_path) {
+    std::vector<float> normalized = samples;
+    apply_peak_gain(normalized, peak_magnitude(samples));
+    std::vector<float> probabilities;
+    return infer_probabilities(model, normalized, probabilities,
+               parakeet::NemotronAttention::Unfused) &&
+           matches_reference(probabilities, reference_path);
 }
 
 static double maximum_probability_error(
@@ -217,6 +237,24 @@ static bool preserves_first_chunk_and_gain(
     return passed;
 }
 
+static bool prewarmed_engine_matches(
+    const char * model_path, int gpu_layers, const std::vector<float> & samples,
+    const parakeet::DiarizationResult & expected) {
+    parakeet::EngineOptions options;
+    options.model_gguf_path = model_path;
+    options.prewarm = true;
+    options.prewarm_audio_seconds = kPrewarmSeconds;
+    options.n_gpu_layers = gpu_layers;
+    parakeet::Engine engine(options);
+    const auto actual = engine.diarize_samples(
+        samples.data(), static_cast<int>(samples.size()), kSampleRate, {});
+    const double difference = maximum_probability_error(
+        actual.speaker_probs, expected.speaker_probs);
+    if (difference <= kMaximumPrewarmDifference) return true;
+    std::fprintf(stderr, "Nemotron prewarmed engine difference: %f\n", difference);
+    return false;
+}
+
 }
 
 int main(int argc, char ** argv) {
@@ -277,6 +315,24 @@ int main(int argc, char ** argv) {
         return 1;
     }
     if (!matches_reference(result.speaker_probs, argv[3])) return 1;
+    if (!unfused_attention_matches_reference(model, samples, argv[3])) {
+        std::fprintf(stderr, "Nemotron unfused attention reference mismatch\n");
+        return 1;
+    }
+    if (gpu_layers == 0 && !parakeet::nemotron_diarization_uses_fused_attention(model)) {
+        std::fprintf(stderr, "Nemotron CPU inference did not select fused attention\n");
+        return 1;
+    }
+    if (parakeet::nemotron_diarization_uses_f32_matmuls(model) !=
+        parakeet::backend_is_adreno(parakeet::model_active_backend(model))) {
+        std::fprintf(stderr, "Nemotron F32 matmul precision does not follow the Adreno GPU\n");
+        return 1;
+    }
+    if (parakeet::prewarm_nemotron_diarization(model, kPrewarmSeconds) != 0) {
+        std::fprintf(stderr, "Nemotron prewarm failed\n");
+        return 1;
+    }
+    if (!prewarmed_engine_matches(argv[1], gpu_layers, samples, result)) return 1;
     if (!matches_negative_peak_reference(engine, model, samples)) {
         std::fprintf(stderr, "Nemotron negative peak reference mismatch\n");
         return 1;

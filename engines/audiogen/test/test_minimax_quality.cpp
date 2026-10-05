@@ -11,7 +11,8 @@
 // learned latent distribution has a per-element std of ~2.2, while a broken
 // trajectory stalls near the ~1.0 std of the Gaussian noise it started from
 // (measured 1.39 for both historical bugs). A healthy run must also keep the
-// DiT deterministic across repeated computes with interleaved CFG branches.
+// DiT deterministic across repeated computes with interleaved CFG branches, and
+// the vocoder's overlapped tiles must decode without seams.
 //
 // Requires AUDIOGEN_TEST_MINIMAX_MODELS_DIR; exits 77 (ctest skip) otherwise.
 // With --q4 the model directory comes from AUDIOGEN_TEST_MINIMAX_Q4_MODELS_DIR
@@ -52,10 +53,47 @@ double latent_std(const std::vector<float> & latents) {
     return std::sqrt(sum_sq / (double) latents.size() - mean * mean);
 }
 
-// The tiled vocoder decode must be bit-identical to a single-shot decode:
-// MM3_VOC_OVERLAP frames of context exceed the conv stack's receptive field,
-// so every tile interior reproduces the full-length computation exactly.
-bool vocoder_tiling_is_bit_exact(const MM3Model & model, std::string * error) {
+// Latent frames between the two equal-length tiles of the context check.
+constexpr int64_t kVocoderTileShift = 64;
+
+// How closely a GPU's tiled decode must track its single-shot decode. GPU
+// backends choose GEMM kernels by product shape, so a 256-frame tile and the
+// 689-frame window round differently; an RTX 5090 measures 0.99999994 on CUDA
+// and 0.999996 on Vulkan, while a misplaced or cropped tile falls far below.
+constexpr double kMinTiledCorrelation = 0.9999;
+
+bool decode_vocoder_window(const MM3Model & model, const std::vector<float> & latents, int64_t L,
+                           std::vector<float> & audio, std::string * error) {
+    const int64_t channels = (int64_t) model.synth_cfg.voc.channels;
+    audio.assign((size_t) (channels * L * (int64_t) model.synth_cfg.voc.total_upsample), 0.0f);
+    return mm3_vocoder_decode_tiled(model, latents, L, audio, L, MM3_VOC_OVERLAP, error);
+}
+
+// Frames [start, start + width) of every row of planar [rows][L] latents.
+std::vector<float> latent_window(const std::vector<float> & latents, int64_t L, int64_t rows, int64_t start,
+                                 int64_t width) {
+    std::vector<float> window((size_t) (rows * width));
+    for (int64_t row = 0; row < rows; row++) {
+        std::memcpy(window.data() + row * width, latents.data() + row * L + start, (size_t) width * sizeof(float));
+    }
+    return window;
+}
+
+double waveform_correlation(const std::vector<float> & a, const std::vector<float> & b) {
+    double ab = 0.0, aa = 0.0, bb = 0.0;
+    for (size_t i = 0; i < a.size(); i++) {
+        ab += (double) a[i] * b[i];
+        aa += (double) a[i] * a[i];
+        bb += (double) b[i] * b[i];
+    }
+    return ab / std::sqrt(aa * bb);
+}
+
+// The tiled vocoder decode must reproduce a single-shot decode of the whole
+// window: bit for bit on the CPU, whose kernels compute every element the same
+// way at any length, and to rounding on a GPU, whose GEMM kernels depend on the
+// product shape. vocoder_tile_interiors_ignore_context checks the seams exactly.
+bool vocoder_tiling_matches_single_shot(const MM3Model & model, std::string * error) {
     const int64_t L  = (int64_t) model.synth_cfg.dit.window_latents;
     const int64_t FC = (int64_t) model.synth_cfg.voc.fold_channels;
     if (L <= MM3_VOC_CHUNK) {
@@ -66,17 +104,64 @@ bool vocoder_tiling_is_bit_exact(const MM3Model & model, std::string * error) {
     tts_cpp::minimax::detail::fill_noise(11, 0, latents, L * 2 * FC);
 
     std::vector<float> single, tiled;
-    const int64_t T = L * (int64_t) model.synth_cfg.voc.total_upsample;
-    single.assign((size_t) (2 * T), 0.0f);
-    tiled.assign((size_t) (2 * T), 0.0f);
-    if (!mm3_vocoder_prepare(model, &g_mm3_voc, error) ||
-        !mm3_vocoder_decode_tiled(model, latents, L, single, L, MM3_VOC_OVERLAP, error) ||
-        !mm3_vocoder_decode_tiled(model, latents, L, tiled, MM3_VOC_CHUNK, MM3_VOC_OVERLAP, error)) {
+    if (!mm3_vocoder_prepare(model, &g_mm3_voc, error) || !decode_vocoder_window(model, latents, L, single, error)) {
         return false;
     }
-    if (std::memcmp(single.data(), tiled.data(), single.size() * sizeof(float)) != 0) {
-        *error = "tiled vocoder output differs from single-shot output";
+    tiled.assign(single.size(), 0.0f);
+    if (!mm3_vocoder_decode_tiled(model, latents, L, tiled, MM3_VOC_CHUNK, MM3_VOC_OVERLAP, error)) {
         return false;
+    }
+    if (!g_backend_cache.has_gpu) {
+        if (std::memcmp(single.data(), tiled.data(), single.size() * sizeof(float)) != 0) {
+            *error = "tiled vocoder output differs from single-shot output on the CPU";
+            return false;
+        }
+        return true;
+    }
+    const double correlation = waveform_correlation(single, tiled);
+    std::fprintf(stderr, "[quality] tiled vs single-shot vocoder correlation %.9f\n", correlation);
+    if (!(correlation >= kMinTiledCorrelation)) {
+        *error = "tiled vocoder output correlates with single-shot output at " + std::to_string(correlation);
+        return false;
+    }
+    return true;
+}
+
+// A tile's output must not depend on anything more than MM3_VOC_OVERLAP frames
+// beyond it, or the tiled decode would carry seams. Two tiles of the production
+// length, shifted against each other, run the same kernels on every backend, so
+// their shared interior must match bit for bit wherever the overlap covers the
+// conv stack's receptive field.
+bool vocoder_tile_interiors_ignore_context(const MM3Model & model, std::string * error) {
+    const int64_t L        = (int64_t) model.synth_cfg.dit.window_latents;
+    const int64_t channels = (int64_t) model.synth_cfg.voc.channels;
+    const int64_t rows     = channels * (int64_t) model.synth_cfg.voc.fold_channels;
+    const int64_t up       = (int64_t) model.synth_cfg.voc.total_upsample;
+    const int64_t width    = MM3_VOC_CHUNK;
+    const int64_t interior = width - kVocoderTileShift - 2 * MM3_VOC_OVERLAP;
+    if (L < width + kVocoderTileShift || interior <= 0) {
+        *error = "window_latents is too short for two shifted vocoder tiles";
+        return false;
+    }
+    std::vector<float> latents;
+    tts_cpp::minimax::detail::fill_noise(13, 0, latents, L * rows);
+
+    std::vector<float> first, shifted;
+    if (!mm3_vocoder_prepare(model, &g_mm3_voc, error) ||
+        !decode_vocoder_window(model, latent_window(latents, L, rows, 0, width), width, first, error) ||
+        !decode_vocoder_window(model, latent_window(latents, L, rows, kVocoderTileShift, width), width, shifted,
+                               error)) {
+        return false;
+    }
+    const size_t channel = (size_t) (width * up);
+    const size_t samples = (size_t) (interior * up) * sizeof(float);
+    for (size_t ch = 0; ch < (size_t) channels; ch++) {
+        const float * a = first.data() + ch * channel + (size_t) ((kVocoderTileShift + MM3_VOC_OVERLAP) * up);
+        const float * b = shifted.data() + ch * channel + (size_t) (MM3_VOC_OVERLAP * up);
+        if (std::memcmp(a, b, samples) != 0) {
+            *error = "vocoder tile interiors depend on context beyond MM3_VOC_OVERLAP frames";
+            return false;
+        }
     }
     return true;
 }
@@ -88,20 +173,26 @@ bool dit_is_deterministic_across_computes(const MM3Model & model, std::string * 
     std::vector<float> latents, condition;
     tts_cpp::minimax::detail::fill_noise(7, 0, latents, N);
     tts_cpp::minimax::detail::fill_noise(7, 1, condition, CN);
-    std::vector<float> first((size_t) N), unconditional((size_t) N), repeat((size_t) N);
+    std::vector<float> first((size_t) N), first_unconditional((size_t) N);
+    std::vector<float> swapped((size_t) N), swapped_unconditional((size_t) N);
+    std::vector<float> repeat((size_t) N), repeat_unconditional((size_t) N);
+    const std::vector<MM3DitBranch> swapped_branches = {
+        { MM3_DIT_UNCONDITIONED_GATE, swapped_unconditional.data() },
+        { MM3_DIT_CONDITIONED_GATE, swapped.data() },
+    };
     if (!mm3_dit_prepare(model, &g_mm3_dit, error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, first.data(), error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 0.0f, 0.5f, L, unconditional.data(), error) ||
-        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), 1.0f, 0.5f, L, repeat.data(), error)) {
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, first.data(),
+                         first_unconditional.data(), error) ||
+        !mm3_dit_run(model, &g_mm3_dit, latents.data(), condition.data(), swapped_branches, 0.5f, L, error) ||
+        !mm3_dit_run_cfg(model, &g_mm3_dit, latents.data(), condition.data(), 0.5f, L, repeat.data(),
+                         repeat_unconditional.data(), error)) {
         return false;
     }
-    for (int64_t i = 0; i < N; ++i) {
-        if (first[(size_t) i] != repeat[(size_t) i]) {
-            if (error) {
-                *error = "DiT output changed between identical computes at index " + std::to_string(i);
-            }
-            return false;
+    if (first != repeat || first_unconditional != repeat_unconditional) {
+        if (error) {
+            *error = "DiT output changed between identical computes";
         }
+        return false;
     }
     return true;
 }
@@ -138,8 +229,13 @@ int main(int argc, char ** argv) {
         ++failures;
     }
 
-    if (!vocoder_tiling_is_bit_exact(model, &error)) {
+    if (!vocoder_tiling_matches_single_shot(model, &error)) {
         std::fprintf(stderr, "FAIL vocoder tiling: %s\n", error.c_str());
+        ++failures;
+    }
+
+    if (!vocoder_tile_interiors_ignore_context(model, &error)) {
+        std::fprintf(stderr, "FAIL vocoder tile context: %s\n", error.c_str());
         ++failures;
     }
 

@@ -16,7 +16,11 @@ the prompt.
 **Status — CPU, Metal, OpenCL, and desktop Vulkan, validated against the
 reference.**  Text-to-speech and voice cloning both run in-process on macOS and
 iOS Metal, on Android/Adreno OpenCL, and on Linux and Windows Vulkan.  Pass
-`--n-gpu-layers 99` to offload every stage; omit it for CPU.  On Metal that is
+`--n-gpu-layers 99` to offload every stage; omit it for CPU.  With several
+Vulkan adapters the engine takes the one with the most free memory and never an
+integrated one while a discrete one is visible: on a desktop whose Ryzen
+9950X3D iGPU enumerates ahead of an RTX 5090, taking the first adapter ran
+Audio8 on the iGPU, several times slower and outside the GPU accuracy bars.  On Metal that is
 **4.2x** CPU at q4_0 and **3.2x** at q8_0 on an iPhone 17, measured on device
 with both arms in one launch.  At F32 the GPU reproduces the CPU code trajectory
 exactly, frame for frame, which is the strongest available statement that the
@@ -314,63 +318,143 @@ long (stitched) utterance, and checks that a cancel between windows stops the
 pass; both run on the TTS CI macOS lane, which converts the decoder from the
 upstream checkpoint and exports the sidecar itself.
 
-Two things the exporter does that are worth knowing before reading it. Every
-transposed convolution is emitted in its exact phase form -- a causal `Conv1d`
-over the input followed by a depth-to-space shuffle, which is also how
+**The sidecar works while the language model is still generating.**
+`Engine::synthesize` hands each window to a worker thread as soon as the frames
+it covers exist, so on anything longer than one window most of the codec runs
+alongside the autoregressive loop and only the last window is left once
+generation stops.  Every window but the end-aligned last one sits where it
+would sit in the plan for any longer utterance, so the stream hands off exactly
+the windows the after-generation pass would pick, each as soon as one frame
+past its end exists, which is what proves it is not the last.  Its input comes
+from the post transformer run a chunk at a time: the transformer is causal
+with a 128-frame attention window per layer, so each chunk computes only its
+new frames, attending over the rotated keys and the values the previous chunk
+left for its last 127 positions in every layer, and an utterance costs one
+post-transformer pass however it is cut (recomputing each window's history
+instead cost 190 ms per 512 frames on an M4 mini and 600 ms on a 42 s
+utterance, against 30-75 ms for one pass).  `test-audio8-codec` checks that
+one chunk is the whole-sequence pass exactly and that a run cut into chunks of
+1 to 200 frames matches it (9.5e-7 on the CPU), and fails when the history
+held is one position short.  Those passes are ggml graphs, so they run on the
+calling thread between language-model steps (ggml-metal shares one command
+queue per device); only the sidecar predictions run on the worker.  A cancel
+stops the worker between windows, and a failed prediction retires the sidecar
+and reruns the whole utterance on the ggml blocks after generation, as before.
+`test-audio8-window-stream` drives the scheduler with a fake causal
+synthesizer at every length up to four windows and checks that it asks for
+each frame's post column once; `test-audio8-codec-coreml-parity` holds the
+streamed waveform to the after-generation one (cosine 0.99999; measured
+0.999996-0.999999 on an M3 Ultra and an M4 mini) and checks that every window
+but the last went during generation.
+`AUDIO8_COREML_STREAM_DISABLE=1` synthesises after generation instead; the
+Apple silicon table under Engine notes measures both.  In
+the timing breakdown `codec-latent` then includes the streamed post passes,
+and `codec-synth` counts only what is left after the last frame;
+`--verbose` reports how many windows went during generation.
+
+Overlap only pays where the sidecar does not compete with the language
+model, which holds the GPU and, on Metal, one host core issuing its kernels.
+Measured with `audio8-cli` at all three tiers, on the 512-frame benchmark text
+and on 37-42 s utterances, against the same build synthesising after
+generation:
+
+- On an M3 Ultra (macOS 15.7.9) the folded export's all-units plan puts 125
+  of its 670 operations on the Neural Engine and 544 on the GPU. Streaming
+  takes 0.75-1.28 s of synthesis off the end and costs the language model
+  30-150 ms of GPU contention, so a run is 9-11% shorter.
+  `cpu_and_ane` keeps the sidecar off the GPU, but synthesises at half the
+  speed (1.73 s per 512 frames against 0.83 s), so streamed it lands within
+  1% of all-units with a 170 ms tail instead of 72 ms.
+- On an M4 mini (macOS 15.3.2) the plan is Neural Engine only, all-units and
+  `cpu_and_ane` measure the same, and synthesis takes 2.2 s per 512 frames.
+  Streaming leaves only the last window's 0.22 s, but the Neural Engine draws
+  on the memory bandwidth the language model's decode is bound by, which
+  slows the decode by 1.2-2.3 s, so a run is 5-8% shorter at `q4_0` and
+  `q8_0` and 2-3% at `f16`, the most bandwidth-bound tier.
+
+The CPU is no better a place for it: `cpu_only` takes performance cores the
+language model's host thread needs (the M4 mini's fast-head decode grew by
+0.78 s per 512 frames) and runs the f16 program less accurately (cosine
+0.9992-0.9996 against 0.99999). Measured end to end the same way, the folded
+export synthesises after generation more slowly than the flat `torch.sin` one
+on both machines (0.84 against 0.39 s per 512 frames on the M3 Ultra, 2.23
+against 1.57 s on the M4 mini), unlike on the M2 below; streamed, the M3
+Ultra's difference disappears into generation, while the M4 mini's run is
+0.45 s longer with it.
+
+Four things the exporter does are worth knowing before reading it, all of
+them there to keep the whole stack on the Neural Engine, whose compute plan
+was read with `MLComputePlan` on an M2 running macOS 15.7. Every transposed
+convolution is emitted in its exact phase form -- a causal `Conv1d` over the
+input followed by a depth-to-space shuffle, which is also how
 `codec_ops.cpp` computes it -- rather than as `ConvTranspose1d`, whose native
 Neural Engine kernel miscomputes at stride 4 (the ACE-Step VAE export hit
-this first). And the Snake activation squares its sine as a product,
-`sin * sin`, never `sin ** 2`: the `pow` the latter lowers to is miscomputed
-on the Neural Engine when its result feeds a convolution (measured on an M2,
-macOS 15.7: the first DAC stage came out at cosine 0.39 against the CPU, with
-the Snake alone and the convolution alone both exact), while the product is
-exact on every compute unit.
+this first). The Snake activation's sine is a range-reduced polynomial, not
+`torch.sin`: the Neural Engine has no `sin` (or `cos`) kernel, so every one of
+the 29 Snakes would otherwise bounce to the CPU. The argument is reduced in
+*turns* (u = t / 2pi, f = u - round(u), r = 2pi f) and sin(r) is a degree-9
+odd least-squares fit on [-pi, pi] (max error 6e-6); reducing in radians,
+t - 2pi round(t / 2pi), is miscomputed on the Neural Engine (NaN and inf on
+the M2) while the turns form is exact, and the stack's activations keep
+|alpha x| below 7 anyway. The square is spelled as a product, never `** 2`:
+the `pow` the latter lowers to is miscomputed on the Neural Engine when its
+result feeds a convolution (the first DAC stage came out at cosine 0.39
+against the CPU). And every stage longer than 8192 samples is folded into
+rows of 8192, (1, C, L) -> (1, C, L / 8192, 8192): the Neural Engine takes
+this stack's causal convolutions only up to 16384 samples per row, and from
+32768 on the plan drops them to the GPU and then alternates devices op by op
+through the whole tail, which is where the original export lost most of its
+speed. Each causal convolution takes its left context from the end of the
+previous row (zeros before the first row, which is the causal padding), the
+transposed convolution's depth-to-space runs along the row and its output is
+re-split into rows of the same width, so the fold is exact: the PyTorch
+rebuild matches the reference decode at cosine 1.0000000 with it, and the
+compiled plan places 669 of its 670 operations on the Neural Engine (the
+last is the output reshape). `--snake sin` and `--fold-rows 0` export the
+flat, `torch.sin` form for comparison.
 
 Measured on an Apple M2 (macOS 15.7, f32 decoder GGUF, ggml Metal as the
-reference, `bench-audio8-codec-coreml`, median of 3), synthesis stage only,
-parity cosine 0.99999 in every cell:
+reference, `bench-audio8-codec-coreml`, median of 3 inside each cell),
+synthesis stage only, window 64, all-units placement. The flat `torch.sin`
+export is the original sidecar; the folded polynomial export is the default.
+The two were run interleaved over three rounds because a laptop's Metal
+baseline drifts by up to 2x between cells as the chip heats; the Core ML
+times are the stable column, so read those:
 
-| window | placement | 10 s (216 frames) | 24 s (517 frames) |
-|---:|---|---:|---:|
-| 64 | `coreml-all` (default) | 1518 -> 1198 ms, **1.27x** | 3683 -> 3023 ms, **1.22x** |
-| 64 | `cpu_and_gpu` | 1466 -> 976 ms, **1.50x** | 3628 -> 2500 ms, **1.45x** |
-| 32 | `coreml-all` | 1.27x | 1.22x |
-| 32 | `cpu_and_gpu` | 1.25x | 1.28x |
-| 128 | `coreml-all` | 0.51x | 0.49x |
-| 128 | `cpu_and_gpu` | 1.53x | 1.51x |
+| export | 10 s (216 frames) | 24 s (517 frames) | parity |
+|---|---:|---:|---:|
+| ggml Metal (reference) | 1587 / 3269 / 2265 ms | 4294 / 7068 / 6082 ms | |
+| flat, `torch.sin` | 1287 / 2037 / 1599 ms | 3308 / 4281 / 4104 ms | 0.99999 |
+| folded, polynomial (default) | 1334 / 1380 / 1338 ms | 4526 / 3262 / 3293 ms | 0.99998 |
 
-Two placement facts sit behind that table. On this OS the Neural Engine has
-no `sin` kernel, so every Snake activation leaves it: the compute plan puts
-the first twelve sines on the CPU and, from the second DAC stage on, hands
-the whole tail of the graph (17 sines, 18 convolutions) to the GPU, and the
-device handoffs eat most of what the Neural Engine saves on the convolutions
-it does keep. `AUDIO8_COREML_COMPUTE_UNITS=cpu_and_gpu` is therefore the
-faster choice on a macOS 15 host; the default stays all-units because it is
-correct everywhere, because the ACE-Step sidecar measured all-units best on an
-M5 running macOS 26, and because the TTS CI macOS lane (macOS 26) reports the
-default's speedup in its job summary for the current OS. And the 128-frame
-window, which only buys a few percent on the GPU, collapses to half of Metal's
-speed under mixed placement, so 64 is the default: the widest window that is
-robust under either placement, at a causal-context overhead of 10 in 64 frames.
-The very first load of a fresh export pays a one-time on-device compilation
-(tens of seconds), which the OS caches for later loads.
+Against the flat export the folded one is 1.2x faster on the 10 s decode and
+1.25x on the 24 s one once both are warm; against the Metal baseline it lands
+between 1.2x (Metal's best cell) and 1.9x (its typical cells). The flat
+export's numbers show why it needed help: with `sin` on the CPU and the tail
+on the GPU its all-units plan alternated between three devices, and
+`AUDIO8_COREML_COMPUTE_UNITS=cpu_and_gpu` was its faster placement (1.4x);
+with the folded polynomial export the plan is Neural Engine only, all-units
+and `cpu_and_ane` measure the same, and `cpu_and_gpu` (which then runs the
+polynomial on the GPU) is the slower choice. A 128-frame window buys nothing
+on the Neural Engine and collapses under mixed placement, so 64 stays the
+default at a causal-context overhead of 10 in 64 frames. The very first load
+of a fresh export pays a one-time on-device compilation (tens of seconds),
+which the OS caches for later loads.
 
-Those are steady-state numbers from a resident engine. A one-shot
-`audio8-cli` run also pays the sidecar's first-prediction warm-up and, for a
-short utterance, the fixed window: a 4.3 s synthesis (92 frames, two 64-frame
-windows for what ggml does in one block) came out at 747 ms on the sidecar
-against 654 ms on Metal under all-units placement, and at 560 ms with
-`cpu_and_gpu`; at 23.8 s (512 frames) the same one-shot run measured 3444 ms
-on Metal, 3241 ms on the sidecar with all units and 2408 ms with
-`cpu_and_gpu`. The engine keeps the sidecar resident across `synthesize()`
-calls, so a host that speaks more than once pays the warm-up once.
+Those are steady-state numbers for the synthesis stage alone, measured before
+the sidecar overlapped generation. A one-shot `audio8-cli` run also pays the
+sidecar's first-prediction warm-up, which now lands on the worker during
+generation for anything longer than one window. The engine keeps the sidecar
+resident across `synthesize()` calls, so a host that speaks more than once
+pays the load and the warm-up once.
 
 Set `AUDIO8_COREML_DISABLE=1` to force the ggml synthesis, including for
 parity or benchmarking. `AUDIO8_COREML_STRICT=1` turns the silent ggml
 fallback into a synthesis failure, so a test cannot measure ggml and attribute
 it to Core ML -- the parity test and benchmark set it for their Core ML legs.
 `AUDIO8_COREML_COMPUTE_UNITS=cpu_only|cpu_and_gpu|cpu_and_ane` overrides the
-default all-units placement for comparisons. `bench-audio8-codec-coreml`
+default all-units placement for comparisons, and `AUDIO8_COREML_STREAM_DISABLE=1`
+moves the synthesis back after generation. `bench-audio8-codec-coreml`
 times the ggml GPU synthesis against the sidecar on deterministic 10 s and
 24 s code sequences (median of 3 after a warm-up that absorbs the one-time
 on-device compilation of a fresh export) and prints a markdown table; it
@@ -453,14 +537,72 @@ the scoping per backend, over the LM's built graphs and the codec decoder's
 resident weights.
 
 **The fast head's graphs are built once and replayed.**  Every frame walks the
-same positions with the same shapes, and each position's causal mask is all
-zeros -- a fast position attends to the whole frame prefix -- so the mask
-depends only on the position and is written when the graph is built.  A cached
+same positions with the same shapes, and a single position attends to the
+whole prefix, so its causal mask would be all zeros and no mask is built at
+all; the slow decode step drops its mask for the same reason, and adding
+zero before the softmax was exact, so nothing changes.  A cached
 graph must own its allocator (a shared arena moves under the other graphs the
 first time a bigger one reserves) and must never reach the scheduler fallback,
 which resets one shared arena per graph; a build that lands there drops what
 was built and the per-call path serves the rest of the model's life.
 `test-audio8-fast-cache-sched` pins both transitions.
+
+**The language model's projections are fused at load.**  A decode step is one
+token wide, so on a GPU its cost follows the number of dispatched kernels
+rather than the bytes of weights they read: on Metal an M3 Ultra paid about
+8 us per dispatch with roughly 24 dispatches per layer, 600 for a slow step
+and 1100 for a frame of the fast head.  The loader therefore stacks each
+layer's `wq`, `wk` and `wv` (and their biases) into one `wqkv` weight and `w1`
+and `w3` into one `w13`, by concatenating rows as the file is streamed -- a row
+is whole blocks in every storage type, so this works for every tier without
+reconverting a GGUF, and each stacked weight is staged on the host and uploaded
+in one call, which the OpenCL quantised layouts need.  The graph then runs one
+QKV matmul instead of three, rotates the query and key heads together in one
+four-kernel RoPE instead of two, and feeds one gate/up matmul to
+`ggml_swiglu` instead of two; a one-position step also skips the head-merge
+copy, whose output already has the merged layout, so it issues eight fewer
+kernels per layer.
+Every row is still computed by the same kernel from the same inputs, so the
+output is bit-identical: `test-audio8-lm-fusion` loads a synthetic model with
+distinct weights, in f32 and with q8_0 matrices, both ways and compares a
+prefill, decode steps and a sampled fast-head frame byte for byte (it fails if
+the rows are stacked out of order or the keys skip the rotation), and on the
+real q8_0 and f32 models the codes and the waveform match the unfused build
+exactly on CPU and on Metal.  `AUDIO8_LM_FUSION_DISABLE=1` loads the separate
+weights for comparison.  Since the graph cuts heads and halves by the hparams,
+the loader checks every projection against that geometry, stacked or not, and
+refuses a file that disagrees by name instead of aborting in a reshape on the
+first step; a file that already carries a tensor under a stacked name keeps
+its own.  Measured end to end below; on CPU, which is not
+dispatch-bound, it is neutral.
+
+**Measured on Apple silicon (2026-10).**  One `audio8-cli` synthesis per
+process, seed 42, the synthesis time `--verbose` reports (median of three after
+a warm-up), on ggml `speech@d96479a1`: the 76-word benchmark text at the
+default 512-frame cap (23.8 s) and a 117-word one that runs to 792-907 frames
+by tier (37-42 s).  Metal is the ggml lane, master `c0151cd5` against this
+change.  Core ML is the folded codec sidecar at its default all-units placement
+next to the Metal language model, master `faa3f07a` synthesising after
+generation against this change synthesising during it.  An M3 Ultra (60-core
+GPU, macOS 15.7.9) and an M4 mini (10-core GPU, macOS 15.3.2); every Metal
+waveform is byte-identical before and after on both.
+
+| machine | LM tier | Metal, 512 frames | Core ML, 512 frames | Metal, 37-42 s | Core ML, 37-42 s |
+|---|---|---:|---:|---:|---:|
+| M3 Ultra | `q4_0` | 7.51 -> 5.90 s, **1.27x** | 7.83 -> 5.50 s, **1.42x** | 13.47 -> 10.59 s, **1.27x** | 13.87 -> 9.83 s, **1.41x** |
+| M3 Ultra | `q8_0` | 7.66 -> 6.15 s, **1.25x** | 7.98 -> 5.85 s, **1.37x** | 12.34 -> 9.92 s, **1.24x** | 12.76 -> 9.39 s, **1.36x** |
+| M3 Ultra | `f16` | 8.54 -> 6.68 s, **1.28x** | 8.85 -> 6.42 s, **1.38x** | 13.21 -> 10.52 s, **1.26x** | 13.77 -> 10.03 s, **1.37x** |
+| M4 mini | `q4_0` | 10.60 -> 10.01 s, **1.06x** | 9.84 -> 8.50 s, **1.16x** | 19.14 -> 18.02 s, **1.06x** | 17.63 -> 15.18 s, **1.16x** |
+| M4 mini | `q8_0` | 12.91 -> 12.31 s, **1.05x** | 12.19 -> 10.94 s, **1.11x** | 20.85 -> 19.86 s, **1.05x** | 19.46 -> 17.49 s, **1.11x** |
+| M4 mini | `f16` | 17.28 -> 16.69 s, **1.04x** | 16.50 -> 15.62 s, **1.06x** | 26.89 -> 25.95 s, **1.04x** | 25.68 -> 23.95 s, **1.07x** |
+
+The language model is most of every run (its decode steps were 94% of the M3
+Ultra's), so the fused projections carry the M3 Ultra, whose large GPU leaves a
+step dispatch-bound; the M4 mini is closer to its memory bandwidth and gains
+4-6% from them.  The overlap adds 9-11% on the M3 Ultra and 2-8% on the M4
+mini against the same build synthesising after generation (above).  With
+both, the Core ML lane is 1.13-1.14x the Metal lane at `q8_0` on the M4 mini
+and 1.05-1.06x on the M3 Ultra.
 
 **Sampling follows the reference's order, which is unusual.**  top-k and top-p
 run on the raw logits and the temperature is applied to what survives, so
@@ -493,10 +635,12 @@ ctest -R audio8 --output-on-failure
 | `test-audio8-cli` | the CLI's flags, `-ngl` and `--n-gpu-layers` among them, and the `--dump-codes` file format |
 | `test-audio8-cli-verbose` | the same flags through the binary: `--verbose` reaching stderr and codes surviving a synthesis |
 | `test-audio8-sampling-filter` | the top-k / top-p / temperature candidate filter on synthetic score vectors: k and p cutoffs, temperature ordering, degenerate cases |
+| `test-audio8-lm-fusion` | the load-time stacked projections against the separate weights, byte for byte, on a synthetic LM in f32 and q8_0 |
+| `test-audio8-window-stream` | the Core ML synthesis stream with a fake causal synthesizer: which windows go during generation, stitching, failure, cancel |
 
-`test-audio8-ras`, `test-audio8-cli`, and `test-audio8-sampling-filter` are the
-three that run on a checkout with no models; every other target needs the
-dumps.
+`test-audio8-ras`, `test-audio8-cli`, `test-audio8-sampling-filter`,
+`test-audio8-lm-fusion` and `test-audio8-window-stream` are the ones that run
+on a checkout with no models; every other target needs the dumps.
 
 On a build with a GPU backend compiled in, the `lm`, `codec` and `engine`
 suites are registered a second time per backend as `test-audio8-<suite>-metal`,

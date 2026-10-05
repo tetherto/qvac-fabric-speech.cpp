@@ -82,7 +82,9 @@ struct StageTimings {
     double fast_decode_ms  = 0.0;  // per-frame fast-AR passes and their sampling
     double slow_decode_ms  = 0.0;  // per-frame slow-AR steps after the prefill
     double codec_latent_ms = 0.0;  // quantiser banks, post transformer
-    double codec_synth_ms  = 0.0;  // upsampling and the sample-rate stack
+    // Upsampling and the sample-rate stack. On the Core ML sidecar most windows
+    // run during generation, so this is only the part left after the last frame.
+    double codec_synth_ms  = 0.0;
     double resample_ms     = 0.0;  // only when output_sample_rate differs
     double total_ms        = 0.0;
 };

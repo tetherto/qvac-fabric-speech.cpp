@@ -1,7 +1,7 @@
 // Core ML codec sidecar: parity against the ggml synthesis through the
-// production dispatch, the public load-status and per-call backend reports,
-// and the fallbacks (no sidecar, invalid sidecar, sidecar that loads but
-// cannot serve). Skips (77) without TTS_CPP_COREML, a staged
+// production dispatch, the stream that overlaps it with generation, the public
+// load-status and per-call backend reports, and the fallbacks (no sidecar,
+// invalid sidecar, sidecar that loads but cannot serve). Skips (77) without TTS_CPP_COREML, a staged
 // AUDIO8_COREML_TEST_MODELS_DIR, or a compiled sidecar next to the decoder
 // GGUF there. Optional: AUDIO8_COREML_FALLBACK_MODELS_DIR (a sidecar whose
 // window cannot carry the causal context) and AUDIO8_COREML_TEST_LM_GGUF (a
@@ -29,13 +29,16 @@ int main() {
 
 #include "audio8/coreml/codec-synth.h"
 #include "audio8/coreml_path.h"
+#include "audio8/coreml_windows.h"
 #include "audio8/internal.h"
+#include "audio8/window_stream.h"
 #include "test_env_portable.h"
 #include "tiny_lm.h"
 #include "tts-cpp/audio8/engine.h"
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 
 using namespace tts_cpp::audio8::detail;
 namespace fs = std::filesystem;
@@ -43,6 +46,9 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr double MIN_COSINE   = 0.999;
+// Streamed and batch synthesis both run on the sidecar; they differ only in
+// the rounding of post passes over different spans.
+constexpr double STREAM_MIN_COSINE = 0.99999;
 constexpr int    SHORT_FRAMES = 10;
 constexpr int    LONG_FRAMES  = 200;
 constexpr int    N_THREADS    = 4;
@@ -193,6 +199,89 @@ void check_cancellation(codec_model & coreml) {
     if (g_failures == 0) std::fprintf(stderr, "[coreml-parity] cancel: one window kept (%zu samples)\n", pcm.size());
 }
 
+void place_frame(const std::vector<int32_t> & rows, int books, int n_frames, int frame,
+                 std::vector<int32_t> & frames) {
+    for (int book = 0; book < books; ++book) {
+        frames[static_cast<size_t>(frame) * books + book] =
+            rows[static_cast<size_t>(book) * n_frames + frame];
+    }
+}
+
+// Codebook-major codes back to the frame-major order the language model emits.
+std::vector<int32_t> frame_major(const std::vector<int32_t> & rows, int books, int n_frames) {
+    std::vector<int32_t> frames(rows.size());
+    for (int frame = 0; frame < n_frames; ++frame) place_frame(rows, books, n_frames, frame, frames);
+    return frames;
+}
+
+bool stream_frames(window_stream & stream, int n_frames, std::string & error) {
+    for (int frame = 1; frame <= n_frames; ++frame) {
+        if (!stream.advance(frame, &error)) return false;
+    }
+    return true;
+}
+
+int leading_windows(codec_model & model, int n_frames) {
+    const int window = static_cast<int>(audio8_coreml_codec_window_frames(model.coreml));
+    return static_cast<int>(
+               plan_coreml_windows(n_frames, window, synthesis_context_frames(model)).size()) -
+           1;
+}
+
+// The engine's path: frames offered one at a time while they are generated,
+// the rest after the last one. It has to stream every window that becomes
+// final early and stitch the waveform the batch windows produce.
+void check_streamed(codec_model & coreml, int n_frames) {
+    const std::vector<int32_t> rows = make_codes(coreml.hp, n_frames, 0x13579bdfu);
+    const std::vector<int32_t> frames = frame_major(rows, coreml.hp.num_codebooks, n_frames);
+    std::vector<float> batch, streamed;
+    decode_timing t_batch, t_stream;
+    std::string error;
+    expect(decode(coreml, rows, n_frames, nullptr, batch, t_batch, error),
+           "batch decode failed: " + error);
+    const std::unique_ptr<window_stream> stream =
+        open_synthesis_stream(coreml, frames, N_THREADS, nullptr);
+    if (!stream) {
+        fail("no synthesis stream opened although a sidecar is attached");
+        return;
+    }
+    expect(stream_frames(*stream, n_frames, error), "streamed advance failed: " + error);
+    expect(finish_synthesis_stream(coreml, *stream, rows.data(), n_frames, N_THREADS, nullptr,
+                                   streamed, &error, &t_stream),
+           "streamed finish failed: " + error);
+    expect(t_stream.streamed_windows == leading_windows(coreml, n_frames),
+           "streamed " + std::to_string(t_stream.streamed_windows) + " windows, expected " +
+               std::to_string(leading_windows(coreml, n_frames)));
+    expect(t_stream.synthesis_backend.rfind("coreml", 0) == 0,
+           "streamed synthesis ran on " + t_stream.synthesis_backend);
+    expect(streamed.size() == batch.size(), "streamed and batch lengths differ");
+    if (streamed.size() != batch.size()) return;
+    const double cos = cosine(streamed, batch);
+    std::fprintf(stderr, "[coreml-parity] streamed: frames=%d windows during generation=%d "
+                         "cosine=%.7f max_abs=%.3e against batch (min cosine %.5f)\n",
+                 n_frames, t_stream.streamed_windows, cos, max_abs_err(streamed, batch),
+                 STREAM_MIN_COSINE);
+    expect(cos >= STREAM_MIN_COSINE, "streamed: cosine below the gate");
+}
+
+void check_streamed_cancel(codec_model & coreml) {
+    const std::vector<int32_t> rows = make_codes(coreml.hp, LONG_FRAMES, 11u);
+    const std::vector<int32_t> frames = frame_major(rows, coreml.hp.num_codebooks, LONG_FRAMES);
+    const std::unique_ptr<window_stream> stream =
+        open_synthesis_stream(coreml, frames, N_THREADS, [] { return true; });
+    if (!stream) {
+        fail("no synthesis stream opened for the cancel check");
+        return;
+    }
+    std::vector<float> pcm;
+    std::string error;
+    stream_frames(*stream, LONG_FRAMES, error);
+    const bool ran = finish_synthesis_stream(coreml, *stream, rows.data(), LONG_FRAMES,
+                                             N_THREADS, nullptr, pcm, &error, nullptr);
+    expect(!ran && error == CANCELLED,
+           "streamed cancel " + std::string(ran ? "was ignored" : "stopped with '" + error + "'"));
+}
+
 // A language model the public Engine accepts next to this decoder: the two
 // GGUFs must agree on the codebook count and the semantic codebook size.
 std::string write_matching_tiny_lm(const codec_hparams & hp) {
@@ -298,6 +387,9 @@ void check_unservable_sidecar(const std::string & dir, const std::string & lm) {
                                   ") carries the context (" + std::to_string(context) + "); it would serve");
 
     const std::vector<int32_t> codes = make_codes(codec.model.hp, SHORT_FRAMES, 5u);
+    const std::vector<int32_t> no_frames;
+    expect(!open_synthesis_stream(codec.model, no_frames, N_THREADS, nullptr),
+           "a sidecar that cannot carry the context opened a synthesis stream");
     std::string error;
     {
         owned_codec strict_codec;
@@ -384,6 +476,9 @@ int main() {
     check_parity("short", ggml.model, coreml.model, SHORT_FRAMES);
     check_parity("long", ggml.model, coreml.model, LONG_FRAMES);
     check_cancellation(coreml.model);
+    check_streamed(coreml.model, SHORT_FRAMES);
+    check_streamed(coreml.model, LONG_FRAMES);
+    check_streamed_cancel(coreml.model);
 
     const std::string tiny_lm = write_matching_tiny_lm(coreml.model.hp);
     check_public_load_status(tiny_lm, gguf, /*want_loaded=*/true, "sidecar present");

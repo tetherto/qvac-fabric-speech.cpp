@@ -165,9 +165,9 @@ bool parler_alloc_cross(parler_model & model, int T, size_t * measure_bytes) {
     if (!model.ctx_cross) return false;
     model.cross_k.assign(hp.dec_n_layer, nullptr);
     model.cross_v_t.assign(hp.dec_n_layer, nullptr);
-    // FA path keeps cross-K/V in F16 and stores V non-transposed [dec_d, T] so
-    // both view as [HD, T, H]; manual path keeps F32 K and transposed V^T [T, dec_d].
-    const ggml_type ct = model.use_fa ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    // FA path stores V non-transposed [dec_d, T] so K and V both view as
+    // [HD, T, H]; the manual path stores transposed V^T [T, dec_d].
+    const ggml_type ct = model.kv_type;
     for (int il = 0; il < hp.dec_n_layer; ++il) {
         model.cross_k[il]   = ggml_new_tensor_2d(model.ctx_cross, ct, hp.dec_d_model, T);
         model.cross_v_t[il] = model.use_fa

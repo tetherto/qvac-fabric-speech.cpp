@@ -13,6 +13,7 @@
 #include "fit_util.h"
 #include "long_form.h"
 #include "parakeet_ctc.h"
+#include "parakeet_diarization_v3.h"
 #include "parakeet_eou.h"
 #include "parakeet_log.h"
 #include "parakeet_sortformer.h"
@@ -63,6 +64,154 @@ int encoder_out_frames(const EncoderConfig & enc, long long n_mel_frames) {
 using fitutil::sat_add;
 using fitutil::sat_mul;
 using fitutil::sat_u64_from_double;
+
+constexpr size_t kReportLineBytes = 256;
+constexpr uint64_t kNemotronDiarizationSampleCopies = 2;
+
+// On a unified-memory device (CPU, integrated GPU, Apple Metal) the "device"
+// buffers and the host extras compete for the same physical RAM, so both
+// count against the free figure. Saturating arithmetic: an overflow must
+// surface as DOES-NOT-FIT, never wrap into a false FITS.
+uint64_t apply_fit_verdict(FitResult & r, uint64_t margin_bytes) {
+    uint64_t required = sat_add(r.device.total_bytes, margin_bytes);
+    if (r.device_shares_host_memory) {
+        required = sat_add(required, r.host_bytes);
+    }
+    r.fits   = required <= r.device_free_bytes;
+    r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
+    r.reason = r.fits ? "fits" : "does-not-fit";
+    return required;
+}
+
+std::string model_device_report(const FitResult & r) {
+    std::string s;
+    char line[kReportLineBytes];
+    std::snprintf(line, sizeof(line), "model:    %s%s%s%s\n",
+                  r.model_type.c_str(),
+                  r.model_variant.empty() ? "" : " (",
+                  r.model_variant.c_str(),
+                  r.model_variant.empty() ? "" : ")");
+    s += line;
+    std::snprintf(line, sizeof(line), "device:   %s (%s), free %s / total %s\n",
+                  r.device_name.c_str(), r.device_is_cpu ? "CPU" : "GPU",
+                  fmt_mib(r.device_free_bytes).c_str(),
+                  fmt_mib(r.device_total_bytes).c_str());
+    s += line;
+    return s;
+}
+
+std::string device_projection_report(const FitResult & r, uint64_t margin_bytes,
+                                     uint64_t required, const std::string & compute_detail) {
+    std::string s = "device projection:\n";
+    char line[kReportLineBytes];
+    std::snprintf(line, sizeof(line), "  weights:         %14s\n",
+                  fmt_mib(r.device.weights_bytes).c_str());
+    s += line;
+    std::snprintf(line, sizeof(line), "  encoder compute: %14s (%s)\n",
+                  fmt_mib(r.device.encoder_compute_bytes).c_str(), compute_detail.c_str());
+    s += line;
+    std::snprintf(line, sizeof(line), "  decoder state:   %14s\n",
+                  fmt_mib(r.device.decoder_state_bytes).c_str());
+    s += line;
+    std::snprintf(line, sizeof(line), "  decoder compute: %14s\n",
+                  fmt_mib(r.device.decoder_compute_bytes).c_str());
+    s += line;
+    std::snprintf(line, sizeof(line), "  total:           %14s\n",
+                  fmt_mib(r.device.total_bytes).c_str());
+    s += line;
+    std::snprintf(line, sizeof(line), "host extras:       %14s%s\n",
+                  fmt_mib(r.host_bytes).c_str(),
+                  r.device_shares_host_memory
+                      ? " (same RAM pool as the device projection)" : "");
+    s += line;
+    std::snprintf(line, sizeof(line), "margin:            %14s\n",
+                  fmt_mib(margin_bytes).c_str());
+    s += line;
+    if (r.fits) {
+        std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
+                      fmt_mib(r.device_free_bytes - required).c_str());
+    } else {
+        std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
+                      fmt_mib(required - r.device_free_bytes).c_str());
+    }
+    s += line;
+    return s;
+}
+
+// Clamp through double before the integer conversion: a float audio_seconds
+// large enough to overflow long long must saturate (and then surface as
+// workload-too-large / DOES-NOT-FIT), not hit UB.
+long long total_mel_frames(float audio_seconds, const MelConfig & mel) {
+    return (long long) std::min<uint64_t>(
+        std::max<uint64_t>(1, sat_u64_from_double(
+            std::ceil((double) audio_seconds *
+                      (double) mel.sample_rate / (double) mel.hop_length))),
+        (uint64_t) std::numeric_limits<long long>::max());
+}
+
+uint64_t f32_bytes(uint64_t values) {
+    return sat_mul(values, sizeof(float));
+}
+
+uint64_t nemotron_diarization_host_bytes(const ParakeetCtcModel & model,
+                                         const FitOptions & opts, long long total_mel,
+                                         int offline_frames, uint64_t sched_input_bytes) {
+    const auto & cfg = model.nemotron_diarization_cfg;
+    const uint64_t samples = sat_u64_from_double(
+        std::ceil((double) opts.audio_seconds * model.mel_cfg.sample_rate));
+    const uint64_t stacked_frames = sat_mul((uint64_t) offline_frames, (uint64_t) cfg.subsampling_factor);
+    uint64_t host = sat_mul(f32_bytes(samples), kNemotronDiarizationSampleCopies);
+    host = sat_add(host, f32_bytes(sat_mul((uint64_t) total_mel, (uint64_t) model.mel_cfg.n_mels)));
+    host = sat_add(host, f32_bytes(sat_mul(stacked_frames, (uint64_t) model.mel_cfg.n_mels)));
+    host = sat_add(host, f32_bytes(sat_mul(stacked_frames, (uint64_t) cfg.speakers)));
+    host = sat_add(host, f32_bytes(sat_mul((uint64_t) offline_frames, (uint64_t) cfg.encoder_width)));
+    return sat_add(host, sched_input_bytes);
+}
+
+std::string nemotron_diarization_report(int offline_frames, int stream_frames,
+                                        const NemotronDiarizationFitMeasure & offline,
+                                        const NemotronDiarizationFitMeasure & stream) {
+    char line[kReportLineBytes];
+    std::snprintf(line, sizeof(line),
+                  "diarization: offline graph %s (%d encoder frames); "
+                  "stream graph %s (%d encoder frames)\n",
+                  fmt_mib(offline.device_compute_bytes).c_str(), offline_frames,
+                  fmt_mib(stream.device_compute_bytes).c_str(), stream_frames);
+    return line;
+}
+
+void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoadMeasure & lm,
+                                  const FitOptions & opts, FitResult & r) {
+    const long long total_mel = total_mel_frames(opts.audio_seconds, model.mel_cfg);
+    const int offline_frames = nemotron_diarization_encoder_frames(model, total_mel);
+    if (offline_frames > model.nemotron_diarization_cfg.position_limit) {
+        r.reason = "workload-too-large";
+        return;
+    }
+    const int stream_mel = nemotron_diarization_stream_mel_frames(model);
+    const int stream_state = nemotron_diarization_stream_state_frames();
+    NemotronDiarizationFitMeasure offline;
+    NemotronDiarizationFitMeasure stream;
+    if (measure_nemotron_diarization(model, (int) total_mel, 0, offline) != 0 ||
+        measure_nemotron_diarization(model, stream_mel, stream_state, stream) != 0) {
+        r.reason = "measurement-failed";
+        return;
+    }
+    r.device.weights_bytes         = lm.weights_bytes + lm.repack_bytes;
+    r.device.encoder_compute_bytes =
+        std::max(offline.device_compute_bytes, stream.device_compute_bytes);
+    r.device.total_bytes = sat_add(r.device.weights_bytes, r.device.encoder_compute_bytes);
+    r.host_bytes = nemotron_diarization_host_bytes(
+        model, opts, total_mel, offline_frames,
+        std::max(offline.host_input_bytes, stream.host_input_bytes));
+    const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
+    const int stream_frames =
+        stream_state + nemotron_diarization_encoder_frames(model, stream_mel);
+    r.report = model_device_report(r) +
+               nemotron_diarization_report(offline_frames, stream_frames, offline, stream) +
+               device_projection_report(r, opts.margin_bytes, required,
+                                        "offline and stream graphs share one buffer");
+}
 
 }  // namespace
 
@@ -162,16 +311,14 @@ FitResult fit_params(const FitOptions & opts) {
         r.device_total_bytes = total_b;
     }
 
+    if (model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION) {
+        project_nemotron_diarization(model, lm, opts, r);
+        return r;
+    }
+
     // ── Workload → worst-case single-encode window ─────────────────────────
     const MelConfig & mel = model.mel_cfg;
-    // Clamp through double before the integer conversion: a float
-    // audio_seconds large enough to overflow long long must saturate (and
-    // then surface as workload-too-large / DOES-NOT-FIT), not hit UB.
-    const long long total_mel = (long long) std::min<uint64_t>(
-        std::max<uint64_t>(1, sat_u64_from_double(
-            std::ceil((double) opts.audio_seconds *
-                      (double) mel.sample_rate / (double) mel.hop_length))),
-        (uint64_t) std::numeric_limits<long long>::max());
+    const long long total_mel = total_mel_frames(opts.audio_seconds, mel);
 
     // The transcribe paths bound device memory by sliding the encoder over
     // long inputs (resolve_long_form_plan + run_encoder_windowed). Offline
@@ -291,6 +438,8 @@ FitResult fit_params(const FitOptions & opts) {
     switch (model.model_type) {
         case ParakeetModelType::CTC:
             break;  // the CTC head lives inside the encoder graph, already measured
+        case ParakeetModelType::NEMOTRON_DIARIZATION:
+            break;
         case ParakeetModelType::RNNT:
         case ParakeetModelType::TDT:
         case ParakeetModelType::NEMOTRON:  // shares the RNN-T runtime
@@ -389,34 +538,12 @@ FitResult fit_params(const FitOptions & opts) {
         sat_add(sat_add(r.device.weights_bytes, r.device.encoder_compute_bytes),
                 sat_add(r.device.decoder_state_bytes, r.device.decoder_compute_bytes));
 
-    // ── Verdict ────────────────────────────────────────────────────────────
-    // On a unified-memory device (CPU, integrated GPU, Apple Metal) the
-    // "device" buffers and the host extras compete for the same physical RAM,
-    // so both count against the free figure. Saturating arithmetic: an
-    // overflow must surface as DOES-NOT-FIT, never wrap into a false FITS.
-    uint64_t required = sat_add(r.device.total_bytes, opts.margin_bytes);
-    if (r.device_shares_host_memory) {
-        required = sat_add(required, r.host_bytes);
-    }
-    r.fits   = required <= r.device_free_bytes;
-    r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
-    r.reason = r.fits ? "fits" : "does-not-fit";
+    const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
 
     // ── Report ─────────────────────────────────────────────────────────────
     {
-        std::string s;
-        char line[256];
-        std::snprintf(line, sizeof(line), "model:    %s%s%s%s\n",
-                      r.model_type.c_str(),
-                      r.model_variant.empty() ? "" : " (",
-                      r.model_variant.c_str(),
-                      r.model_variant.empty() ? "" : ")");
-        s += line;
-        std::snprintf(line, sizeof(line), "device:   %s (%s), free %s / total %s\n",
-                      r.device_name.c_str(), r.device_is_cpu ? "CPU" : "GPU",
-                      fmt_mib(r.device_free_bytes).c_str(),
-                      fmt_mib(r.device_total_bytes).c_str());
-        s += line;
+        std::string s = model_device_report(r);
+        char line[kReportLineBytes];
         std::snprintf(line, sizeof(line),
                       "workload: %.1f s audio -> worst window %d mel frames (%d encoder frames)\n",
                       (double) opts.audio_seconds, window_mel, window_enc);
@@ -432,39 +559,9 @@ FitResult fit_params(const FitOptions & opts) {
                           fmt_mib(nsm.device_subsampling_bytes).c_str());
             s += line;
         }
-        s += "device projection:\n";
-        std::snprintf(line, sizeof(line), "  weights:         %14s\n",
-                      fmt_mib(r.device.weights_bytes).c_str());
-        s += line;
-        std::snprintf(line, sizeof(line), "  encoder compute: %14s (%zu resident graph%s)\n",
-                      fmt_mib(r.device.encoder_compute_bytes).c_str(),
+        std::snprintf(line, sizeof(line), "%zu resident graph%s",
                       resident_mel.size(), resident_mel.size() == 1 ? "" : "s");
-        s += line;
-        std::snprintf(line, sizeof(line), "  decoder state:   %14s\n",
-                      fmt_mib(r.device.decoder_state_bytes).c_str());
-        s += line;
-        std::snprintf(line, sizeof(line), "  decoder compute: %14s\n",
-                      fmt_mib(r.device.decoder_compute_bytes).c_str());
-        s += line;
-        std::snprintf(line, sizeof(line), "  total:           %14s\n",
-                      fmt_mib(r.device.total_bytes).c_str());
-        s += line;
-        std::snprintf(line, sizeof(line), "host extras:       %14s%s\n",
-                      fmt_mib(r.host_bytes).c_str(),
-                      r.device_shares_host_memory
-                          ? " (same RAM pool as the device projection)" : "");
-        s += line;
-        std::snprintf(line, sizeof(line), "margin:            %14s\n",
-                      fmt_mib(opts.margin_bytes).c_str());
-        s += line;
-        if (r.fits) {
-            std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - required).c_str());
-        } else {
-            std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(required - r.device_free_bytes).c_str());
-        }
-        s += line;
+        s += device_projection_report(r, opts.margin_bytes, required, line);
         r.report = std::move(s);
     }
 

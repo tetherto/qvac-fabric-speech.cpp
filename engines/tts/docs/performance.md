@@ -145,6 +145,74 @@ is very low; expected to be larger on bandwidth-limited silicon
 (M4 / A-series) where each saved `ggml_add` dispatch is worth more
 relative to compute.
 
+### Parler-TTS on CPU (Mac Studio M3 Ultra)
+
+CPU backend only (`GGML_METAL=OFF`, `GGML_NATIVE=OFF` as in the prebuilds),
+16 threads, `parler-bench` greedy for a fixed 1200 decode steps (13.83 s of
+audio) so both builds do identical work, median of 3 runs after a warm-up,
+inference only. "Before" is the previous `master`; both use the same
+`ggml-speech`.
+
+| Model | Decode ms/step | DAC s | Total s | RTF | Speedup |
+|---|--:|--:|--:|--:|--:|
+| mini-v1 `f32`  | 18.26 → 12.18 | 4.13 → 1.40 | 26.07 → 16.07 | 1.886 → **1.162** | 1.62x |
+| mini-v1 `f16`  | 14.29 → 7.43  | 4.12 → 1.39 | 21.31 → 10.35 | 1.541 → **0.748** | 2.06x |
+| mini-v1 `q8_0` | 12.62 → 5.85  | 4.12 → 1.39 | 19.28 → 8.45  | 1.394 → **0.611** | 2.28x |
+| mini-v1 `q6_k` | 12.46 → 5.49  | 4.13 → 1.39 | 19.13 → 8.02  | 1.384 → **0.580** | 2.38x |
+| Indic `f16`    | 14.12 → 7.40  | 4.13 → 1.39 | 21.09 → 10.30 | 1.525 → **0.745** | 2.05x |
+| Indic `q8_0`   | 12.66 → 6.04  | 4.13 → 1.40 | 19.36 → 8.68  | 1.400 → **0.627** | 2.23x |
+| Indic `q6_k`   | 12.36 → 5.85  | 4.13 → 1.40 | 19.03 → 8.45  | 1.376 → **0.611** | 2.25x |
+
+One-shot `parler-cli` runs (a fresh process per utterance, so model load and
+the cold first synthesis included; sampled, seed 42, 16 threads, median of 3)
+on the 3 s / 17 s / 25-30 s benchmark prompts:
+
+| Model | RTF before (short / med / long) | RTF after |
+|---|---|---|
+| mini-v1 `q8_0` | 1.51 / 2.04 / 2.62 | **0.82 / 0.83 / 0.82** |
+| mini-v1 `f16`  | 1.88 / 2.46 / 2.77 | **1.37 / 1.24 / 1.29** |
+| Indic `q8_0`   | 1.49 / 2.10 / 2.59 | **0.81 / 0.85 / 0.91** |
+
+Where the time went, and what replaced it:
+
+- **Attention.** The manual CPU path copied the whole K cache and a
+  transposed V cache into fresh tensors for every layer of every step, so
+  per-step cost grew with the utterance (over a third of the decode
+  profile was `memmove`/`dup`). Flash attention over the existing F32 cache
+  reads it in place.
+- **GELU.** ggml-cpu splits unary ops by row, and a decode step's FFN
+  activation is a single row, so the exact-erf GELU ran on one thread
+  (46 µs per layer, 1.1 ms per step). It is now viewed as 32 rows.
+- **DAC.** Per-element snake chains, `im2col` copies and ggml's F32 GEMM
+  (about 0.5 TFLOPS here) became one fused snake node and Accelerate sgemm
+  calls (1.6 to 4.9 TFLOPS on these shapes), and the DAC compute buffer
+  dropped from 268 MiB to 99 MiB.
+
+Decode is now bound by memory traffic: the 144 decode matmuls alone stream
+`q8_0` weights at about 170 GB/s (2.2 ms per step, saturating at 8 threads),
+`f32` weights cost four times that, and the F32 KV read grows with context
+(about 470 MB per step at 2400 steps). The engine's default of
+`min(cores, 4)` threads leaves speed on the table here: mini-v1 `q8_0` runs at
+RTF 0.85 at 4 threads, 0.66 at 8, 0.63 at 12 and 0.62 at 16, so pass
+`n_threads` on desktop-class CPUs, but stay at or below 16 on this machine
+(20 threads drops `f32` to RTF 2.69). A persistent ggml thread pool was
+measured and left out: it is 15-20 % faster once warm, but in a fresh process
+at 15 threads or more macOS demotes its long-lived workers and decode runs 3-4x
+slower for many seconds.
+
+Quality is unchanged. Teacher-forced argmax agreement with the HF f32
+reference over a 200-step trace (3600 codebook rows) is identical for `f32`
+(100 %) and `f16` (99.69 %); `q8_0` (97.94 → 97.89 %) and `q6_k`
+(95.17 → 94.72 %) flip rows in both directions (40/38 and 83/67, McNemar
+p = 0.91 and 0.22), the rounding noise of quantized activations rather than
+a bias.
+
+```bash
+./build/parler-bench --model models/parler-mini-v1-q8_0.gguf \
+    --text "The quick brown fox jumps over the lazy dog." \
+    --threads 16 --max-frames 1200 --runs 3 --warmup 1
+```
+
 ### Reproducing these numbers
 
 ```bash

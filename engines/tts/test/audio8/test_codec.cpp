@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <iterator>
 #include <vector>
 
 using namespace tts_cpp::audio8::detail;
@@ -376,6 +377,108 @@ bool check_cancelled_encode(codec_model & model, const npy_array & audio, int n_
     return report_cancel("cancelled encode", ran, error, codes.size(), 0);
 }
 
+// The streamed Core ML path builds the post transformer's output a chunk at a
+// time (extend_post), carrying each layer's last keys and values forward.
+// Stitched, the chunks have to match the whole-sequence pass: chunks of one
+// frame, chunks narrower and wider than the attention window, and a run long
+// enough that the window slides past the start.
+const int POST_CHUNKS[] = {64, 54, 1, 7, 54, 128, 200, 92};
+
+void copy_fixture_frame(const std::vector<int32_t> & rows, int books, int n_fixture,
+                        int frame, std::vector<int32_t> & frames) {
+    for (int book = 0; book < books; ++book) {
+        frames[static_cast<size_t>(frame) * books + book] =
+            rows[static_cast<size_t>(book) * n_fixture + frame % n_fixture];
+    }
+}
+
+// The fixture's codes repeated out to n_frames, frame-major as the language
+// model emits them.
+std::vector<int32_t> tiled_frames(const std::vector<int32_t> & rows, int books, int n_fixture,
+                                  int n_frames) {
+    std::vector<int32_t> frames(static_cast<size_t>(books) * n_frames);
+    for (int frame = 0; frame < n_frames; ++frame) {
+        copy_fixture_frame(rows, books, n_fixture, frame, frames);
+    }
+    return frames;
+}
+
+int total_chunk_frames() {
+    int total = 0;
+    for (int chunk : POST_CHUNKS) total += chunk;
+    return total;
+}
+
+bool extend_by(codec_model & model, const std::vector<int32_t> & frames, int chunk,
+               int n_threads, post_history & history, std::vector<float> & post) {
+    const int end = history.done + chunk;
+    const std::vector<int32_t> rows =
+        codebook_rows(frames, model.hp.num_codebooks, history.done, end);
+    std::string error;
+    if (extend_post(model, rows.data(), end, n_threads, history, post, &error)) return true;
+    std::fprintf(stderr, "post chunk to %d: %s\n", end, error.c_str());
+    return false;
+}
+
+bool post_in_chunks(codec_model & model, const std::vector<int32_t> & frames,
+                    const std::vector<int> & chunks, int n_threads, std::vector<float> & post) {
+    post_history history;
+    for (int chunk : chunks) {
+        if (!extend_by(model, frames, chunk, n_threads, history, post)) return false;
+    }
+    return true;
+}
+
+bool same_post(const char * tag, const std::vector<float> & got,
+               const std::vector<float> & want) {
+    if (got.size() != want.size()) {
+        std::fprintf(stderr, "%s: FAIL %zu values against %zu\n", tag, got.size(), want.size());
+        return false;
+    }
+    return report(tag, compare_f32(got.data(), want.data(), got.size()), latent_tolerance());
+}
+
+// Without an attention window the history would be the whole utterance, so
+// the chunked pass refuses rather than carrying a negative number of positions.
+bool check_windowless_post(codec_model & model, const std::vector<int32_t> & rows,
+                           int n_fixture, int n_threads) {
+    const int restore = model.post.spec.window;
+    model.post.spec.window = 0;
+    const std::vector<int32_t> frames =
+        tiled_frames(rows, model.hp.num_codebooks, n_fixture, n_fixture);
+    post_history history;
+    std::vector<float> post;
+    std::string error;
+    const bool ran = extend_post(model, codebook_rows(frames, model.hp.num_codebooks, 0, n_fixture).data(),
+                                 n_fixture, n_threads, history, post, &error);
+    model.post.spec.window = restore;
+    if (!ran && post.empty() && error.find("window") != std::string::npos) return true;
+    std::fprintf(stderr, "windowless post: FAIL %s\n",
+                 ran ? "a post pass without a window ran" : error.c_str());
+    return false;
+}
+
+// One chunk over the fixture is the whole-sequence pass, which decode_codes
+// already tapped; many chunks over a longer run must then agree with one.
+bool check_streamed_post(codec_model & model, const std::vector<int32_t> & rows,
+                         int n_fixture, const std::vector<float> & whole, int n_threads) {
+    const std::vector<int32_t> fixture_frames =
+        tiled_frames(rows, model.hp.num_codebooks, n_fixture, n_fixture);
+    std::vector<float> single;
+    bool ok = post_in_chunks(model, fixture_frames, {n_fixture}, n_threads, single) &&
+              same_post("post one chunk", single, whole);
+
+    const int n_frames = total_chunk_frames();
+    const std::vector<int32_t> frames =
+        tiled_frames(rows, model.hp.num_codebooks, n_fixture, n_frames);
+    std::vector<float> once, chunked;
+    const std::vector<int> chunks(std::begin(POST_CHUNKS), std::end(POST_CHUNKS));
+    ok &= post_in_chunks(model, frames, {n_frames}, n_threads, once) &&
+          post_in_chunks(model, frames, chunks, n_threads, chunked) &&
+          same_post("post chunks", chunked, once);
+    return ok;
+}
+
 bool run_decode(codec_model & model, const fixture & data, int n_threads) {
     const npy_array codes = data.load("codes");
     const std::vector<int32_t> values = to_i32(codes);
@@ -398,6 +501,8 @@ bool run_decode(codec_model & model, const fixture & data, int n_threads) {
     ok &= check_scratch_budget();
     ok &= check_budgeted_decode(model, values, n_frames, n_threads, pcm);
     ok &= check_cancelled_decode(model, values, n_frames, n_threads);
+    ok &= check_streamed_post(model, values, n_frames, taps.post, n_threads);
+    ok &= check_windowless_post(model, values, n_frames, n_threads);
     return ok;
 }
 
