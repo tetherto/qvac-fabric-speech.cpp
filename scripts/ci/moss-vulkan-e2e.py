@@ -103,12 +103,31 @@ def run_case(case, build, models, output):
 
     def invoke(name, args, wav=True):
         log = output / f"{name}.log"
-        with log.open("w") as stream:
-            stream.write(json.dumps(args) + "\n")
-            stream.flush()
-            subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
-                           check=True, timeout=1200,
-                           env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
+        # Capture memory immediately around inference, not just before the
+        # build/download. Include UUIDs to identify runner services sharing a GPU.
+        def gpu_snapshot(phase):
+            with (output / f"{name}-gpu-{phase}.txt").open("w") as stream:
+                for query in [
+                    ["--query-gpu=uuid,name,memory.total,memory.used,memory.free", "--format=csv"],
+                    ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv"],
+                ]:
+                    subprocess.run(["nvidia-smi", *query], stdout=stream,
+                                   stderr=subprocess.STDOUT, check=False, timeout=30)
+
+        gpu_snapshot("before")
+        try:
+            with log.open("w") as stream:
+                stream.write(json.dumps(args) + "\n")
+                stream.flush()
+                subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
+                               check=True, timeout=1200,
+                               env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # Put the actual engine error in the job log as well as the artifact.
+            print(log.read_text(errors="replace")[-12000:], file=sys.stderr, flush=True)
+            raise
+        finally:
+            gpu_snapshot("after")
         if not re.search(r"\[(?:moss-cli|moss-transcribe)\] backend: Vulkan\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select Vulkan; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": "Vulkan"}

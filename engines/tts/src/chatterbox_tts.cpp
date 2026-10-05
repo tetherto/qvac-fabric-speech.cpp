@@ -1096,7 +1096,9 @@ static std::vector<float> run_encoder(const model_ctx & m, const std::vector<flo
     }
     ggml_cgraph * gf = cache.gf;
 
-    ggml_gallocr_alloc_graph(cache.allocr, gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, gf)) {
+        throw std::runtime_error("s3gen encoder: graph allocation failed");
+    }
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "x_in"), input_embed.data(), 0, input_embed.size()*sizeof(float));
 
     // Cached positional embeddings — same (T, D) keys reused across every
@@ -1468,7 +1470,9 @@ static std::vector<float> compute_time_mlp(const model_ctx & m, float t_val) {
         cache.backend = m.backend;
     }
 
-    ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, cache.gf)) {
+        throw std::runtime_error("s3gen time MLP: graph allocation failed");
+    }
     ggml_backend_tensor_set(cache.x_in, t_sin.data(), 0, t_sin.size() * sizeof(float));
     compute(m.backend, cache.gf);
 
@@ -1500,7 +1504,11 @@ static std::vector<float> compute_time_mixed(const model_ctx & m,
 
     ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     ggml_gallocr_reserve(allocr, gf);
-    ggml_gallocr_alloc_graph(allocr, gf);
+    if (!ggml_gallocr_alloc_graph(allocr, gf)) {
+        ggml_gallocr_free(allocr);
+        ggml_free(ctx);
+        throw std::runtime_error("s3gen time mixer: graph allocation failed");
+    }
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "t_in"), t_mlp.data(), 0, t_mlp.size()*sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "r_in"), r_mlp.data(), 0, r_mlp.size()*sizeof(float));
     compute(m.backend, gf);
@@ -1669,7 +1677,9 @@ static std::vector<float> cfm_estimator_forward(
     // dispatch elsewhere in the pipeline (e.g. during T3→S3Gen transition)
     // so it overlaps with other host work, which is a bigger refactor.
 
-    ggml_gallocr_alloc_graph(cache.allocr, gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, gf)) {
+        throw std::runtime_error("s3gen CFM estimator: graph allocation failed");
+    }
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "x_in"), x.data(), 0, x.size()*sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mu_in"), mu.data(), 0, mu.size()*sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "spks_in"), spks.data(), 0, spks.size()*sizeof(float));
@@ -1789,7 +1799,9 @@ static void cfm_estimator_forward_b2(
     }
     ggml_cgraph * gf = cache.gf;
 
-    ggml_gallocr_alloc_graph(cache.allocr, gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, gf)) {
+        throw std::runtime_error("s3gen batched CFM estimator: graph allocation failed");
+    }
 
     // Stage inputs: cond slice [0, T*MEL), uncond slice [T*MEL, 2*T*MEL).
     const size_t one_tm = (size_t) T * MEL * sizeof(float);
@@ -2046,7 +2058,9 @@ static std::vector<float> run_f0_predictor(const model_ctx & m, const std::vecto
     }
     ggml_cgraph * gf = cache.gf;
 
-    ggml_gallocr_alloc_graph(cache.allocr, gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, gf)) {
+        throw std::runtime_error("s3gen F0 predictor: graph allocation failed");
+    }
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mel_in"), mel.data(), 0, mel.size()*sizeof(float));
     compute(m.backend, gf);
     ggml_tensor * y_out = ggml_graph_get_tensor(gf, "out");
@@ -2145,7 +2159,9 @@ static std::vector<float> run_stft(const model_ctx & m, const std::vector<float>
         ggml_gallocr_reserve(cache.allocr, cache.gf);
     }
 
-    ggml_gallocr_alloc_graph(cache.allocr, cache.gf);
+    if (!ggml_gallocr_alloc_graph(cache.allocr, cache.gf)) {
+        throw std::runtime_error("s3gen STFT: graph allocation failed");
+    }
     ggml_backend_tensor_set(ggml_graph_get_tensor(cache.gf, "s"),
                             src.data(), 0, src.size() * sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(cache.gf, "k"),
@@ -2379,7 +2395,9 @@ static std::vector<float> run_hift_decode(const model_ctx & m,
             cache.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
             ggml_gallocr_reserve(cache.allocr, gf);
         }
-        ggml_gallocr_alloc_graph(cache.allocr, gf);
+        if (!ggml_gallocr_alloc_graph(cache.allocr, gf)) {
+            throw std::runtime_error("s3gen HiFT: graph allocation failed");
+        }
     } else {
         s3gen_sched_prepare(m, gf);
     }
