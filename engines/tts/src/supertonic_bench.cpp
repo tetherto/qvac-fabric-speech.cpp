@@ -54,6 +54,7 @@ void usage(const char * argv0) {
         "          [--voice M1] [--language en] [--steps 5] [--speed 1.05]\n"
         "          [--seed 42] [--noise-npy /path/to/noise.npy]\n"
         "          [--runs 5] [--warmup 1] [--threads N] [--n-gpu-layers N]\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--vulkan-device N] (-1 = auto-pick adapter with most free VRAM)\n"
         "          [--f16-attn 0|1] [--f16-weights 0|1]\n"
         "          [--precision auto|f32|f16|q8_0]   (default: auto)\n"
@@ -170,6 +171,7 @@ int main(int argc, char ** argv) {
     int warmup = 1;
     int n_threads = 0;
     int n_gpu_layers = 0;
+    std::string backend;
     // -1 = auto (GPU on, CPU off); 0/1 to force.  See model.use_f16_attn.
     int f16_attn = -1;
     // Phase 2A — F16 load-time materialization of the hot matmul /
@@ -252,6 +254,7 @@ int main(int argc, char ** argv) {
         else if (a == "--warmup") warmup = std::stoi(next("--warmup"));
         else if (a == "--threads") n_threads = std::stoi(next("--threads"));
         else if (a == "--n-gpu-layers") n_gpu_layers = std::stoi(next("--n-gpu-layers"));
+        else if (a == "--backend") backend = next("--backend");
         else if (a == "--vulkan-device") vulkan_device = std::stoi(next("--vulkan-device"));
         else if (a == "--prewarm") prewarm_text = next("--prewarm");
         else if (a == "--f16-attn") f16_attn = std::stoi(next("--f16-attn"));
@@ -310,7 +313,7 @@ int main(int argc, char ** argv) {
     supertonic_model model;
     if (!load_supertonic_gguf(model_path, model, n_gpu_layers,
                               /*verbose=*/false, f16_weights, precision,
-                              vulkan_device, f16_weights_deny_list)) {
+                              vulkan_device, f16_weights_deny_list, backend)) {
         fprintf(stderr, "failed to load model\n");
         return 1;
     }

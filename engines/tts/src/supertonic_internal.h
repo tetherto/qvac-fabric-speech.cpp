@@ -630,7 +630,8 @@ bool load_supertonic_gguf(const std::string & path,
                           int f16_weights = -1,
                           supertonic_precision precision = supertonic_precision::Auto,
                           int vulkan_device = 0,
-                          const std::vector<std::string> & f16_weights_deny_list = {});
+                          const std::vector<std::string> & f16_weights_deny_list = {},
+                          const std::string & backend = {});
 void free_supertonic_model(supertonic_model & model);
 void supertonic_set_n_threads(supertonic_model & model, int n_threads);
 
@@ -678,7 +679,8 @@ bool load_supertonic_gguf_metadata_only(const std::string & path,
                                         supertonic_precision precision,
                                         int vulkan_device,
                                         const std::vector<std::string> & f16_weights_deny_list,
-                                        supertonic_fit_load_measure & out);
+                                        supertonic_fit_load_measure & out,
+                                        const std::string & backend = {});
 
 // Size-only pricing of the per-stage thread_local graph-cache arenas at the
 // given shapes -- the SAME one-graph builders the runtime dispatches off the

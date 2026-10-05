@@ -119,6 +119,14 @@ struct EngineOptions {
     int   n_threads     = 0;
     int   n_gpu_layers  = 0;
 
+    // Explicit compute device. Empty or "auto" (default) keeps the
+    // n_gpu_layers policy walk. "cpu", "opencl", "hexagon" (the
+    // Snapdragon HTP0 NPU) or an exact ggml device name select that
+    // device and override n_gpu_layers; there is no fallback, so the
+    // constructor throws when it is missing. The automatic walk never
+    // picks Hexagon.
+    std::string backend;
+
     // desired output sample rate in Hz. Supertonic natively
     // emits at the model's metadata rate (typically 44.1 kHz); when this is a
     // positive rate other than the native one the engine resamples the final

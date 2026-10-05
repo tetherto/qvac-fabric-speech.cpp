@@ -74,6 +74,11 @@ engine, not every backend ggml can compile.
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
+Supertonic 3 also runs on the Snapdragon Hexagon NPU (HTP0) when it is asked
+for explicitly (`EngineOptions::backend = "hexagon"`, `--backend hexagon`); on a
+Galaxy S25 it renders 2.0-2.2x faster than the Adreno OpenCL path. See
+[Snapdragon Hexagon NPU](docs/supertonic.md#snapdragon-hexagon-npu).
+
 Chatterbox on CUDA depends on two ggml-cuda fixes carried by
 [`qvac-ext-ggml@speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
 Without the first (`im2col` / `pad` striding the grid Y and Z axes, which are

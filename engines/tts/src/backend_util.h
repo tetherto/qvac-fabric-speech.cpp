@@ -81,6 +81,10 @@ inline bool reg_name_is_cuda(const char * n) {
     return n && std::strcmp(n, "CUDA") == 0;
 }
 
+inline bool reg_name_is_hexagon(const char * n) {
+    return n && std::strcmp(n, "HTP") == 0;
+}
+
 // Which backend a resident tensor's buffer belongs to. Graph builders see the
 // weight but not the backend that holds it, and the buffer carries the answer.
 inline const char * buft_reg_name(ggml_backend_buffer_type_t buft) {
@@ -107,6 +111,10 @@ inline bool backend_is_opencl(ggml_backend_t b) {
 
 inline bool backend_is_cuda(ggml_backend_t b) {
     return reg_name_is_cuda(backend_reg_name(b));
+}
+
+inline bool backend_is_hexagon(ggml_backend_t b) {
+    return reg_name_is_hexagon(backend_reg_name(b));
 }
 
 // Null-safe ASCII case-insensitive substring match: device name capitalisation

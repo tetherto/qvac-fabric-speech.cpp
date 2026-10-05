@@ -10,7 +10,7 @@ On-device speech and audio AI in pure C++ on [ggml](https://github.com/tetherto/
 | Models | every model loads from GGUF (see [Supported models](#supported-models)) |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android (arm64-v8a), iOS (arm64) |
-| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Hexagon (Snapdragon HTP0: Parakeet; ACE-Step on explicit request), Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
+| Backends | CPU, Metal, Vulkan, OpenCL (Adreno), CUDA, Hexagon (Snapdragon HTP0: Parakeet; ACE-Step and Supertonic 3 on explicit request), Apple Core ML (encoder, codec, VAE, and vocoder sidecars) |
 | Quantization | `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `q5_0`, `q5_1`, `q4_0`, `q4_k_m` (per model, see tables) |
 | Shared ggml | one `ggml-speech` vcpkg port, built from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 | Language | C++17 |
@@ -70,7 +70,7 @@ Pair any CTC, RNN-T, TDT, or EOU GGUF with a Sortformer or Nemotron 3 Diarizatio
 | Chatterbox Multilingual | tts | 23 | 24 kHz | `f16`, `q8_0`, `q5_0`, `q4_0` | CPU, Metal, Vulkan, OpenCL, CUDA | zero-shot voice cloning, CFG, `--cfm-steps` knob, streaming |
 | Supertonic v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming |
 | Supertonic v2 | tts | 5 (`en`, `ko`, `es`, `pt`, `fr`) | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming |
-| Supertonic v3 | tts | 31 + `na` | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA; optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming, `na` for unknown source language |
+| Supertonic v3 | tts | 31 + `na` | 44.1 kHz | `f32`, `f16`, `q8_0` | CPU, Metal, Vulkan, OpenCL, CUDA, Hexagon (`--backend hexagon`); optional Core ML vocoder sidecar (`TTS_CPP_COREML`, Apple) | preset voices, streaming, `na` for unknown source language |
 | Parler-TTS mini-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice, no cloning |
 | Parler-TTS large-v1 | tts | English | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | description-conditioned voice |
 | Indic Parler-TTS | tts | 21 Indic | 44.1 kHz | `f32`, `f16`, `q8_0`, `q6_k` | CPU, Metal, Vulkan, OpenCL, CUDA | Indic prompt BPE tokenizer |

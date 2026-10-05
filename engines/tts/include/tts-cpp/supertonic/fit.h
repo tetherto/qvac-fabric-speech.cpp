@@ -74,6 +74,7 @@ struct FitOptions {
     // a validated GPU, or CPU without Accelerate/CBLAS pointwise kernels.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
+    std::string backend;
     // Mirrors the default Engine allocation policy by construction.
     std::string precision = "auto";
     // EngineOptions::f16_weights tri-state (-1 auto / 0 off / 1 on).

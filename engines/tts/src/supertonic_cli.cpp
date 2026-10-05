@@ -27,6 +27,8 @@ void usage(const char * argv0) {
         "           --speed is the exact multiplier and --pace the 3-step enum\n"
         "           relative to the GGUF default -- they are mutually exclusive)\n"
         "          [--seed 42] [--threads N] [--n-gpu-layers N]\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device;\n"
+        "                            overrides --n-gpu-layers, no fallback)\n"
         "          [--output-sample-rate HZ] (resample output; 0 = native model\n"
         "                            rate, else 8000..192000; default 0)\n"
         "          [--vulkan-device N] (Vulkan adapter index; ignored unless\n"
@@ -164,6 +166,7 @@ int main(int argc, char ** argv) {
         else if (arg == "--seed") opts.seed = std::stoi(next("--seed"));
         else if (arg == "--threads") opts.n_threads = std::stoi(next("--threads"));
         else if (arg == "--n-gpu-layers") opts.n_gpu_layers = std::stoi(next("--n-gpu-layers"));
+        else if (arg == "--backend") opts.backend = next("--backend");
         else if (arg == "--output-sample-rate") {
             // validate at parse time (mirrors chatterbox_cli /
             // tts-cli) so a bad rate fails fast with a friendly message rather

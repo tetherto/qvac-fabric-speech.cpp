@@ -49,6 +49,14 @@ std::atomic<bool> g_backends_loaded{false};
 std::atomic<bool> g_backends_dir_warned{false};
 std::atomic<bool> g_opencl_cache_dir_warned{false};
 constexpr const char * VULKAN_BACKEND_NAME = "Vulkan";
+constexpr const char * CPU_BACKEND_NAME = "CPU";
+constexpr const char * BACKEND_REQUEST_AUTO = "auto";
+constexpr const char * BACKEND_REQUEST_CPU = "cpu";
+constexpr const char * BACKEND_REQUEST_OPENCL = "opencl";
+constexpr const char * BACKEND_REQUEST_HEXAGON = "hexagon";
+constexpr const char * HEXAGON_PRIMARY_DEVICE = "HTP0";
+constexpr const char * DSP_LIBRARY_PATH_ENV = "DSP_LIBRARY_PATH";
+constexpr char DSP_LIBRARY_PATH_SEPARATOR = ';';
 
 const char * dev_reg_name(ggml_backend_dev_t dev) {
     if (!dev) return "";
@@ -158,7 +166,88 @@ int pick_vulkan_device_index(int requested,
     return requested;
 }
 
+bool path_list_contains(const std::string & list, const std::string & entry) {
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(DSP_LIBRARY_PATH_SEPARATOR, start);
+        if (end == std::string::npos) end = list.size();
+        if (list.compare(start, end - start, entry) == 0) return true;
+        start = end + 1;
+    }
+    return false;
+}
+
+void prepare_dsp_library_path(const std::string & dir) {
+#if defined(__ANDROID__)
+    if (dir.empty()) return;
+    const std::string value = dsp_library_path_with(dir, std::getenv(DSP_LIBRARY_PATH_ENV));
+    ::setenv(DSP_LIBRARY_PATH_ENV, value.c_str(), /*overwrite=*/1);
+#else
+    (void) dir;
+#endif
+}
+
+ggml_backend_dev_t find_requested_device(const std::string & requested) {
+    const size_t n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev && backend_request_matches(requested, dev_reg_name(dev), ggml_backend_dev_name(dev))) {
+            return dev;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
+
+std::string dsp_library_path_with(const std::string & dir, const char * current) {
+    if (!current || !*current) return dir;
+    const std::string existing = current;
+    if (path_list_contains(existing, dir)) return existing;
+    return dir + DSP_LIBRARY_PATH_SEPARATOR + existing;
+}
+
+bool backend_request_is_auto(const std::string & requested) {
+    return requested.empty() || requested == BACKEND_REQUEST_AUTO;
+}
+
+bool backend_request_matches(const std::string & requested,
+                             const char * reg_name,
+                             const char * device_name) {
+    if (backend_request_is_auto(requested)) return false;
+    if (requested == BACKEND_REQUEST_CPU) {
+        return reg_name && std::strcmp(reg_name, CPU_BACKEND_NAME) == 0;
+    }
+    if (requested == BACKEND_REQUEST_OPENCL) return reg_name_is_opencl(reg_name);
+    if (requested == BACKEND_REQUEST_HEXAGON) {
+        return reg_name_is_hexagon(reg_name) && device_name &&
+               std::strcmp(device_name, HEXAGON_PRIMARY_DEVICE) == 0;
+    }
+    return device_name && requested == device_name;
+}
+
+ggml_backend_t init_requested_backend(const std::string & requested,
+                                      bool verbose,
+                                      const char * log_prefix) {
+    if (!log_prefix) log_prefix = "tts-cpp";
+    ensure_backends_loaded();
+    ggml_backend_dev_t dev = find_requested_device(requested);
+    if (!dev) {
+        fprintf(stderr, "%s: no ggml device matches backend '%s'\n", log_prefix, requested.c_str());
+        return nullptr;
+    }
+    ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+    if (!backend) {
+        fprintf(stderr, "%s: backend '%s' (%s) failed to initialise\n", log_prefix, requested.c_str(),
+                ggml_backend_dev_name(dev));
+        return nullptr;
+    }
+    if (verbose) {
+        fprintf(stderr, "%s: using requested backend %s (%s)\n", log_prefix, ggml_backend_dev_name(dev),
+                ggml_backend_dev_description(dev));
+    }
+    return backend;
+}
 
 bool gpu_backend_satisfies_requirement(const char * backend_name,
                                        GpuBackendRequirement requirement) {
@@ -305,6 +394,7 @@ void ensure_backends_loaded() {
             g_backends_loaded.store(true, std::memory_order_release);
         }
         if (!dir.empty()) {
+            prepare_dsp_library_path(dir);
             ggml_backend_load_all_from_path(dir.c_str());
         } else {
             ggml_backend_load_all();

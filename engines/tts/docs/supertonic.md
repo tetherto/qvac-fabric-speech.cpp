@@ -155,6 +155,45 @@ python scripts/bench-supertonic-onnx.py \
   --json-out artifacts/supertonic-onnx-bench.json
 ```
 
+## Snapdragon Hexagon NPU
+
+Supertonic 3 runs on the Snapdragon Hexagon NPU (HTP0; measured on a
+Snapdragon 8 Elite, Hexagon v79) when it is requested explicitly: `EngineOptions::backend = "hexagon"` or
+`--backend hexagon` on `supertonic-cli`, `supertonic-bench` and
+`supertonic-fit-params`. There is no fallback: construction fails when HTP0 is
+missing, and the automatic `--n-gpu-layers` walk never selects it. Weights are
+uploaded into the Hexagon repack buffer type. On Android the
+`EngineOptions::backends_dir` directory is prepended to `DSP_LIBRARY_PATH`, so
+FastRPC finds the `libggml-htp-v*.so` skeletons staged next to the ggml
+backends. It needs a `qvac-ext-ggml@speech` build with the Hexagon GELU_ERF,
+transpose and fused depthwise-convolution kernels.
+
+Galaxy S25 (Snapdragon 8 Elite, Hexagon v79), `supertonic3` `q8_0`, voice `M1`,
+5 steps, median of 5 warm runs, total ms:
+
+| Utterance | CPU (6 threads) | OpenCL (Adreno 830) | Hexagon | Hexagon vs OpenCL |
+|---|--:|--:|--:|--:|
+| 6.7 s | 1,453 | 943 | 427 | 2.2x |
+| 13.5 s | 3,659 | 1,490 | 752 | 2.0x |
+
+Per stage on Hexagon, the 6.7 s utterance spends 4 ms in duration, 13 ms in the
+text encoder, 358 ms in the vector estimator and 54 ms in the vocoder.
+
+Each stage against the CPU backend on identical inputs, run as the whole graph
+the engine computes:
+
+| Stage | cosine | relative L2 |
+|---|--:|--:|
+| duration | 0.9999999 | 5.1e-4 |
+| text encoder | 0.9999998 | 6.0e-4 |
+| vector estimator (5 steps) | 0.99995 | 9.7e-3 |
+| vocoder | 0.9999996 | 8.6e-4 |
+
+HMX multiplies in F16, so Hexagon is not bit-close to CPU the way the F32
+OpenCL path is. The rendered audio matches CPU at 0.99997 / 0.99993 log-mel
+cosine (0.20 / 0.36 dB mean difference) for the two utterances above, and the
+predicted duration differs by under 0.02%.
+
 ## Core ML vocoder sidecar
 
 `TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for

@@ -220,7 +220,8 @@ struct Engine::Impl {
                                   opts.n_gpu_layers, /*verbose=*/false,
                                   opts.f16_weights, internal_precision,
                                   opts.vulkan_device,
-                                  opts.f16_weights_deny_list)) {
+                                  opts.f16_weights_deny_list,
+                                  opts.backend)) {
             throw std::runtime_error("Supertonic Engine: failed to load GGUF: " +
                                      opts.model_gguf_path);
         }

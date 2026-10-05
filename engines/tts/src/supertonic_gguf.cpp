@@ -256,9 +256,32 @@ void convert_supertonic_tensor_data(const ggml_tensor * src,
                         /*start=*/0, /*nrows=*/1, /*n_per_row=*/n, /*imatrix=*/nullptr);
 }
 
+ggml_backend_t init_requested_supertonic_backend(const std::string & requested, bool verbose) {
+    if (ggml_backend_t b = ::tts_cpp::detail::init_requested_backend(requested, verbose, "supertonic")) {
+        return b;
+    }
+    throw std::runtime_error("supertonic: requested backend '" + requested + "' is not available");
+}
+
+ggml_backend_buffer_type_t supertonic_weight_buffer_type(ggml_backend_t backend) {
+    ggml_backend_buffer_type_t fallback = ggml_backend_get_default_buffer_type(backend);
+    if (!::tts_cpp::detail::backend_is_hexagon(backend)) return fallback;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
+                               reg, "ggml_backend_dev_get_extra_bufts")
+                         : nullptr;
+    ggml_backend_buffer_type_t * extra = get_extra ? get_extra(dev) : nullptr;
+    return extra && extra[0] ? extra[0] : fallback;
+}
+
 ggml_backend_t init_supertonic_backend(int n_gpu_layers, bool verbose, int vulkan_device = 0,
-                                       bool * out_gpu_unsupported = nullptr) {
+                                       bool * out_gpu_unsupported = nullptr,
+                                       const std::string & requested_backend = {}) {
     if (out_gpu_unsupported) *out_gpu_unsupported = false;
+    if (!::tts_cpp::detail::backend_request_is_auto(requested_backend)) {
+        return init_requested_supertonic_backend(requested_backend, verbose);
+    }
     // GPU cascade is centralised in backend_selection.cpp's
     // `init_gpu_backend` (Adreno 700+ -> OpenCL, every other GPU ->
     // Vulkan/Metal/CUDA/Mali, with Adreno 6xx OpenCL force-skipped).
@@ -2035,7 +2058,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                                       supertonic_precision precision,
                                       int vulkan_device,
                                       const std::vector<std::string> & f16_weights_deny_list,
-                                      supertonic_fit_load_measure * measure) {
+                                      supertonic_fit_load_measure * measure,
+                                      const std::string & backend) {
     model.generation_id = next_supertonic_generation_id();
     model.precision_id = static_cast<int>(precision);
     // The load path supports F32 / F16 / Q8_0 destination types.
@@ -2101,7 +2125,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
         model.languages = get_string_array(gguf_ctx, "supertonic.languages");
         model.tts_json = get_string(gguf_ctx, "supertonic.tts_json");
 
-        model.backend = init_supertonic_backend(n_gpu_layers, verbose, vulkan_device, &model.gpu_unsupported);
+        model.backend = init_supertonic_backend(n_gpu_layers, verbose, vulkan_device, &model.gpu_unsupported,
+                                                backend);
         // The graph builders below dispatch between CBLAS-backed
         // `ggml_custom_4d` fast paths (CPU only) and pure-GGML fallbacks
         // (any backend) based on this flag.  Stable for the model's
@@ -2463,10 +2488,11 @@ static bool load_supertonic_gguf_impl(const std::string & path,
 
         if (measure) {
             measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-                model.ctx_w, ggml_backend_get_default_buffer_type(model.backend));
+                model.ctx_w, supertonic_weight_buffer_type(model.backend));
             supertonic_mark_externally_allocated(model.ctx_w);
         } else {
-        model.buffer_w = ggml_backend_alloc_ctx_tensors(model.ctx_w, model.backend);
+        model.buffer_w = ggml_backend_alloc_ctx_tensors_from_buft(model.ctx_w,
+                                                                  supertonic_weight_buffer_type(model.backend));
         if (!model.buffer_w) throw std::runtime_error("ggml_backend_alloc_ctx_tensors failed");
         }
 
@@ -2874,7 +2900,7 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                 }
                 if (measure) {
                     measure->extra_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-                        model.ctx_w_extra, ggml_backend_get_default_buffer_type(model.backend));
+                        model.ctx_w_extra, supertonic_weight_buffer_type(model.backend));
                     supertonic_mark_externally_allocated(model.ctx_w_extra);
                     // Register the pointer map so the graph builders take the
                     // same pretransposed dispatch a real load enables; the
@@ -2883,8 +2909,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
                         model.pretransposed_weights[orig] = pre;
                     }
                 } else {
-                model.buffer_w_extra =
-                    ggml_backend_alloc_ctx_tensors(model.ctx_w_extra, model.backend);
+                model.buffer_w_extra = ggml_backend_alloc_ctx_tensors_from_buft(
+                    model.ctx_w_extra, supertonic_weight_buffer_type(model.backend));
                 if (!model.buffer_w_extra) {
                     throw std::runtime_error(
                         "ggml_backend_alloc_ctx_tensors ctx_w_extra failed");
@@ -2984,10 +3010,11 @@ bool load_supertonic_gguf(const std::string & path,
                           int f16_weights,
                           supertonic_precision precision,
                           int vulkan_device,
-                          const std::vector<std::string> & f16_weights_deny_list) {
+                          const std::vector<std::string> & f16_weights_deny_list,
+                          const std::string & backend) {
     return load_supertonic_gguf_impl(path, model, n_gpu_layers, verbose, f16_weights,
                                      precision, vulkan_device, f16_weights_deny_list,
-                                     /*measure=*/nullptr);
+                                     /*measure=*/nullptr, backend);
 }
 
 bool load_supertonic_gguf_metadata_only(const std::string & path,
@@ -2997,11 +3024,12 @@ bool load_supertonic_gguf_metadata_only(const std::string & path,
                                         supertonic_precision precision,
                                         int vulkan_device,
                                         const std::vector<std::string> & f16_weights_deny_list,
-                                        supertonic_fit_load_measure & out) {
+                                        supertonic_fit_load_measure & out,
+                                        const std::string & backend) {
     out = supertonic_fit_load_measure{};
     return load_supertonic_gguf_impl(path, model, n_gpu_layers, /*verbose=*/false,
                                      f16_weights, precision, vulkan_device,
-                                     f16_weights_deny_list, &out);
+                                     f16_weights_deny_list, &out, backend);
 }
 
 void free_supertonic_model(supertonic_model & model) {

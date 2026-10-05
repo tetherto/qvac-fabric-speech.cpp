@@ -43,6 +43,8 @@ void print_usage(const char * argv0) {
         "  --n-gpu-layers N      request the validated GPU backend when > 0\n"
         "                        (default 0 = CPU; support depends on graph path)\n"
         "  --vulkan-device N     Vulkan adapter index (default 0)\n"
+        "  --backend NAME        auto | cpu | opencl | hexagon | exact ggml device name,\n"
+        "                        as EngineOptions::backend (no fallback)\n"
         "  --margin-mib MIB      free-memory headroom to require (default 256)\n"
         "  --backends-dir DIR    directory scanned for dynamically-loaded ggml backends\n"
         "  --json                emit the projection as JSON on stdout\n"
@@ -124,6 +126,8 @@ extern "C" int supertonic_fit_cli_main(int argc, char ** argv) {
                 std::fprintf(stderr, "--n-gpu-layers: '%s' is not an integer\n", argv[i]);
                 return (int) tts_cpp::FitStatus::Error;
             }
+        } else if (a == "--backend" && i + 1 < argc) {
+            opts.backend = argv[++i];
         } else if (a == "--vulkan-device" && i + 1 < argc) {
             if (!parse_i32(argv[++i], opts.vulkan_device) || opts.vulkan_device < 0) {
                 std::fprintf(stderr, "--vulkan-device: '%s' is not a non-negative integer\n",

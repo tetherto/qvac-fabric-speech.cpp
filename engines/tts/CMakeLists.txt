@@ -3293,6 +3293,16 @@ if (TTS_CPP_BUILD_TESTS)
             REQUIRES "${_tcb_super3_gguf}" "${_st3_ref}/noise.npy")
     endforeach()
 
+    add_executable(test-supertonic-explicit-backend test/test_supertonic_explicit_backend.cpp)
+    target_link_libraries(test-supertonic-explicit-backend PRIVATE tts-cpp)
+    target_include_directories(test-supertonic-explicit-backend PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-supertonic-explicit-backend)
+    tts_cpp_register_test(test-supertonic-explicit-backend
+        EXE      test-supertonic-explicit-backend
+        LABEL    "fixture"
+        ARGS     "${_tcb_super3_gguf}"
+        REQUIRES "${_tcb_super3_gguf}")
+
     # Full-pipeline parity per language — old + new languages on Supertonic 3.
     foreach (_st3lang IN LISTS SUPERTONIC3_REF_LANGS)
         set(_st3_ref "${TTS_CPP_TEST_REF_DIR}/supertonic3-ref-${_st3lang}")

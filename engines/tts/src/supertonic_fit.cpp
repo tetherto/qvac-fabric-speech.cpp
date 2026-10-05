@@ -93,7 +93,8 @@ FitResult fit_params(const FitOptions & opts) {
     if (!det::load_supertonic_gguf_metadata_only(opts.model_gguf_path, m.model,
                                                  opts.n_gpu_layers, opts.f16_weights,
                                                  precision, opts.vulkan_device,
-                                                 /*f16_weights_deny_list=*/{}, load)) {
+                                                 /*f16_weights_deny_list=*/{}, load,
+                                                 opts.backend)) {
         r.reason = "model-unreadable";
         return r;
     }

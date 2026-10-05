@@ -9,6 +9,12 @@ namespace {
 
 constexpr const char * VULKAN_BACKEND = "Vulkan";
 constexpr const char * CUDA_BACKEND = "CUDA";
+constexpr const char * CPU_BACKEND = "CPU";
+constexpr const char * OPENCL_BACKEND = "OpenCL";
+constexpr const char * OPENCL_DEVICE = "GPUOpenCL";
+constexpr const char * HEXAGON_BACKEND = "HTP";
+constexpr const char * HEXAGON_DEVICE = "HTP0";
+constexpr const char * SECOND_HEXAGON_DEVICE = "HTP1";
 
 int failures = 0;
 
@@ -39,9 +45,54 @@ bool selection_rejects(const char * forced) {
     return false;
 }
 
+void check_backend_requests() {
+    using tts_cpp::detail::backend_request_is_auto;
+    using tts_cpp::detail::backend_request_matches;
+
+    check(backend_request_is_auto(""), "an empty backend request must keep the policy walk");
+    check(backend_request_is_auto("auto"), "auto must keep the policy walk");
+    check(!backend_request_is_auto("cpu"), "cpu is an explicit request");
+    check(backend_request_matches("cpu", CPU_BACKEND, CPU_BACKEND), "cpu must match the CPU registry");
+    check(!backend_request_matches("cpu", OPENCL_BACKEND, OPENCL_DEVICE), "cpu must not match OpenCL");
+    check(backend_request_matches("opencl", OPENCL_BACKEND, OPENCL_DEVICE), "opencl must match the OpenCL registry");
+    check(backend_request_matches("hexagon", HEXAGON_BACKEND, HEXAGON_DEVICE), "hexagon must match HTP0");
+    check(!backend_request_matches("hexagon", HEXAGON_BACKEND, SECOND_HEXAGON_DEVICE),
+          "hexagon must select only the primary NPU");
+    check(!backend_request_matches("hexagon", OPENCL_BACKEND, OPENCL_DEVICE), "hexagon must not match OpenCL");
+    check(backend_request_matches(SECOND_HEXAGON_DEVICE, HEXAGON_BACKEND, SECOND_HEXAGON_DEVICE),
+          "an exact device name must match that device");
+    check(!backend_request_matches("auto", CPU_BACKEND, CPU_BACKEND), "auto must not match a device");
+    check(!backend_request_matches("hexagon", nullptr, nullptr), "a request must not match an unnamed device");
+}
+
+void check_dsp_library_path() {
+    using tts_cpp::detail::dsp_library_path_with;
+
+    check(dsp_library_path_with("/apk/lib", nullptr) == "/apk/lib", "an unset path must become the directory");
+    check(dsp_library_path_with("/apk/lib", "") == "/apk/lib", "an empty path must become the directory");
+    check(dsp_library_path_with("/apk/lib", "/vendor/dsp") == "/apk/lib;/vendor/dsp",
+          "the directory must be searched before the existing entries");
+    check(dsp_library_path_with("/apk/lib", "/vendor/dsp;/apk/lib") == "/vendor/dsp;/apk/lib",
+          "a directory already on the path must not be added twice");
+}
+
+void check_requested_init() {
+    using tts_cpp::detail::init_requested_backend;
+
+    ggml_backend_t cpu = init_requested_backend("cpu", /*verbose=*/false, "test");
+    check(cpu != nullptr, "an explicit cpu request must initialise the CPU backend");
+    if (cpu) ggml_backend_free(cpu);
+    check(init_requested_backend("no-such-device", /*verbose=*/false, "test") == nullptr,
+          "a request for a missing device must return no backend");
+}
+
 }
 
 int main() {
+    check_backend_requests();
+    check_dsp_library_path();
+    check_requested_init();
+
     using tts_cpp::detail::GpuBackendRequirement;
     using tts_cpp::detail::gpu_backend_satisfies_requirement;
 

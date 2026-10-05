@@ -115,6 +115,25 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
                                 bool * out_gpu_present_but_unused = nullptr,
                                 GpuBackendRequirement requirement = GpuBackendRequirement::Any);
 
+// Explicit backend request, shared by every engine that exposes a
+// `backend` option. Empty or "auto" keeps the policy walk above. "cpu",
+// "opencl" and "hexagon" (the Snapdragon HTP0 NPU) name a backend; anything
+// else must be an exact ggml device name. An explicit request has no
+// fallback: init_requested_backend returns nullptr when no device matches or
+// the matching device fails to initialise, and the engine reports it.
+bool backend_request_is_auto(const std::string & requested);
+bool backend_request_matches(const std::string & requested,
+                             const char * reg_name,
+                             const char * device_name);
+ggml_backend_t init_requested_backend(const std::string & requested,
+                                      bool verbose,
+                                      const char * log_prefix);
+
+// Android only: the value DSP_LIBRARY_PATH should take so FastRPC finds the
+// Hexagon DSP skeletons staged in `dir`. `dir` goes first; `current` is kept
+// after it unless it already lists `dir`.
+std::string dsp_library_path_with(const std::string & dir, const char * current);
+
 // Convenience wrapper that picks up the registered CPU device and
 // returns its init handle. Mirrors parakeet-cpp's
 // `init_cpu_backend()`. Never throws; returns nullptr when the

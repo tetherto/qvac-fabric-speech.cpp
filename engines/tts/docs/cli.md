@@ -445,6 +445,11 @@ inference cost (well under real-time on any GPU backend).
 - `--n-gpu-layers N` — move layers to the GPU backend when built with
   `-DGGML_METAL=ON` / `-DGGML_CUDA=ON` / `-DGGML_VULKAN=ON`.  Pass `99`
   (or any large number) to move everything.
+- `--backend NAME` (`supertonic-cli`, `supertonic-bench`,
+  `supertonic-fit-params`) — run on one device: `cpu`, `opencl`, `hexagon`
+  (the Snapdragon HTP0 NPU) or an exact ggml device name. It overrides
+  `--n-gpu-layers` and fails instead of falling back when the device is
+  missing; the automatic walk never picks Hexagon.
 - `--reference-audio PATH` — voice cloning input (see the Custom voice
   section above).
 - `--save-voice DIR` — cache the five voice-conditioning tensors for
