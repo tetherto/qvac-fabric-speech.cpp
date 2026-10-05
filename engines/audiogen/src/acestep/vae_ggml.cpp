@@ -4,6 +4,7 @@
 #include "vae_gguf.h"
 
 #include "acestep/backend_registry.h"
+#include "dit_gguf.h"
 
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -254,7 +255,7 @@ static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t b
 
     if (measure) {
         measure->weights_alloc_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            m->weight_ctx, ggml_backend_get_default_buffer_type(backend));
+            m->weight_ctx, dit_gguf_weight_buffer_type(backend));
         m->measuring = true;
         // Mark the weights externally-allocated so graph sizing excludes them
         // (see textenc_model_load_impl). No data is read after this.
@@ -268,7 +269,7 @@ static VaeModel * vae_model_load_impl(const std::string & path, ggml_backend_t b
         return m;
     }
 
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(m->weight_ctx, backend);
+    m->weight_buf = ggml_backend_alloc_ctx_tensors_from_buft(m->weight_ctx, dit_gguf_weight_buffer_type(backend));
     if (!m->weight_buf) {
         fprintf(stderr, "[acestep-vae] failed to allocate weight buffer\n");
         ggml_free(m->weight_ctx);

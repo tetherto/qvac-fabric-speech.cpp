@@ -120,6 +120,8 @@ int main(int argc, char ** argv) {
     // apply their independent backend allowlists and generic CPU fallback.
     if (arg_flag(argc, argv, "--gpu"))   o.n_gpu_layers = 99;
     if (arg_val(argc, argv, "--threads")) o.n_threads = atoi(arg_val(argc, argv, "--threads"));
+    if (arg_val(argc, argv, "--backend")) o.backend = arg_val(argc, argv, "--backend");
+    if (arg_val(argc, argv, "--lm-backend")) o.lm_backend = arg_val(argc, argv, "--lm-backend");
     // Required wherever ggml ships its backends as dlopen'd MODULE .so files
     // (GGML_BACKEND_DL, i.e. every Android/arm64 build): without it the registry is
     // empty and even the CPU backend fails to init.
@@ -164,7 +166,8 @@ int main(int argc, char ** argv) {
                 "           [--score]  (teacher-forced LM quality score of the generated codes)\n"
                 "           [--temp 0.85] [--cfg 2.0] [--topp 0.9] [--topk 0 (off)]\n"
                 "           [--no-phase1]  (values shown are the defaults)\n"
-                "  backend: [--gpu] [--threads N] [--backends-dir <dir>]\n"
+                "  backend: [--gpu] [--backend auto|cpu|opencl|hexagon|<device>] [--lm-backend <same names>]\n"
+                "           [--threads N] [--backends-dir <dir>]\n"
                 "           [--dump-stages <existing dir>]\n");
         return 1;
     }

@@ -136,7 +136,7 @@ static CondModel * cond_model_load_impl(const std::string & path, ggml_backend_t
                 (int) has_special, (int) m->use_timbre_cls);
 
     // CPU backend: map the quantised weights straight off the mmap (no dirty RAM).
-    const bool            mapped  = ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend));
+    const bool            mapped  = dit_gguf_backend_maps_weights(backend);
     ggml_backend_buffer_t map_buf = mapped ? dit_gguf_cpu_map_buffer(g) : nullptr;
 
     const size_t n_tensors = (size_t) (m->lyric_cfg.n_layers + m->timbre_cfg.n_layers) * 11 + 16;
@@ -173,10 +173,10 @@ static CondModel * cond_model_load_impl(const std::string & path, ggml_backend_t
 
     if (measure) {
         measure->weights_alloc_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            ctx, ggml_backend_get_default_buffer_type(backend));
+            ctx, dit_gguf_weight_buffer_type(backend));
         m->measuring = true;
     } else {
-        m->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        m->weight_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, dit_gguf_weight_buffer_type(backend));
         if (!m->weight_buf) {
             fprintf(stderr, "[acestep-cond] failed to allocate weight buffer\n");
             if (map_buf) ggml_backend_buffer_free(map_buf);

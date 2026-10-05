@@ -61,6 +61,8 @@ struct FitOptions {
     int  n_threads    = 0;  // 0 = hardware concurrency (backend resolution only)
     int  n_gpu_layers = 0;  // > 0 requests the GPU stack, same fallbacks as a real load
     bool verbose      = false;
+    std::string backend = "auto";  // same semantics as EngineOptions::backend
+    std::string lm_backend = "auto";  // same semantics as EngineOptions::lm_backend
 
     // Same semantics as EngineOptions::backends_dir: directory scanned for
     // dynamically-loaded ggml backends on the first registry init.

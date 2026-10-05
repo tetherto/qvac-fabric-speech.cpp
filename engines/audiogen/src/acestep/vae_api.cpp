@@ -113,8 +113,13 @@ std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions &
 
     // Resolution shared with the engine and the memory-fit projection
     // (engine_backends.h), so all three agree by construction.
-    ggml_backend_t backend = resolve_vae_backend(opts.n_gpu_layers, opts.n_threads, opts.verbose);
-    if (!backend) throw std::runtime_error("acestep-vae: failed to init CPU backend");
+    BackendRequest request;
+    request.n_gpu_layers   = opts.n_gpu_layers;
+    request.backend        = opts.backend;
+    request.n_threads      = opts.n_threads;
+    request.verbose        = opts.verbose;
+    ggml_backend_t backend = resolve_vae_backend(request);
+    if (!backend) throw std::runtime_error("acestep-vae: failed to init backend '" + opts.backend + "'");
 
     VaeModel * model = vae_model_load(gguf_path, backend, opts.with_encoder, opts.verbose);
     if (!model) {

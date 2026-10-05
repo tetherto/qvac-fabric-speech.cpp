@@ -27,22 +27,123 @@
 //     llama.cpp uses for multi-variant CPU backends).
 
 #include "audiogen-cpp/gpu_fallback.h"
+#include "acestep/stage_placement.h"
 #include "ggml-backend.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <string>
 
 namespace tts_cpp::acestep {
 
+inline constexpr char BACKEND_REQUEST_AUTO[]    = "auto";
+inline constexpr char BACKEND_REQUEST_CPU[]     = "cpu";
+inline constexpr char BACKEND_REQUEST_OPENCL[]  = "opencl";
+inline constexpr char BACKEND_REQUEST_HEXAGON[] = "hexagon";
+
+inline constexpr char HEXAGON_PRIMARY_DEVICE[] = "HTP0";
+inline constexpr char OPENCL_REG_NAME[]        = "OpenCL";
+
+inline constexpr char DSP_LIBRARY_PATH_SEPARATOR = ';';
+inline constexpr char DSP_LIBRARY_PATH_ENV[]        = "DSP_LIBRARY_PATH";
+inline constexpr char DSP_LIBRARY_PATH_LEGACY_ENV[] = "ADSP_LIBRARY_PATH";
+
+inline std::string prepend_dsp_library_directory(const std::string & dir, const std::string & paths) {
+    if (dir.empty()) return paths;
+    const std::string sep(1, DSP_LIBRARY_PATH_SEPARATOR);
+    if ((sep + paths + sep).find(sep + dir + sep) != std::string::npos) return paths;
+    return paths.empty() ? dir : dir + sep + paths;
+}
+
+// FastRPC loads the libggml-htp-v*.so DSP skeletons through its own search
+// path, so the staged backends dir must be on it before HTP sessions open.
+inline void prepare_dsp_library_path(const std::string & dir) {
+#ifdef __ANDROID__
+    if (dir.empty()) return;
+    if (dir.find(DSP_LIBRARY_PATH_SEPARATOR) != std::string::npos) {
+        fprintf(stderr, "[acestep-engine] backends_dir contains ';'; not added to %s\n", DSP_LIBRARY_PATH_ENV);
+        return;
+    }
+    const char * prior = std::getenv(DSP_LIBRARY_PATH_ENV);
+    if (!prior) prior = std::getenv(DSP_LIBRARY_PATH_LEGACY_ENV);
+    const std::string path = prepend_dsp_library_directory(dir, prior ? prior : "");
+    if (setenv(DSP_LIBRARY_PATH_ENV, path.c_str(), 1) != 0) {
+        fprintf(stderr, "[acestep-engine] failed to set %s\n", DSP_LIBRARY_PATH_ENV);
+    }
+#else
+    (void) dir;
+#endif
+}
+
 // Load the dlopen'd ggml backend modules (CPU micro-arch variants, Vulkan,
 // OpenCL, ...) that the addon staged next to its `.bare` in `dir`. Idempotent
 // and safe to call more than once; a no-op when `dir` is empty or on
 // static-only builds where the registry is already populated at load time.
 inline void load_backends(const std::string & dir) {
-    if (!dir.empty()) ggml_backend_load_all_from_path(dir.c_str());
+    if (dir.empty()) return;
+    prepare_dsp_library_path(dir);
+    ggml_backend_load_all_from_path(dir.c_str());
+}
+
+inline bool backend_request_is_auto(const std::string & requested) {
+    return requested.empty() || requested == BACKEND_REQUEST_AUTO;
+}
+
+inline bool backend_request_matches(const std::string & requested, const char * reg_name, const char * device_name,
+                                    enum ggml_backend_dev_type type) {
+    if (backend_request_is_auto(requested)) return false;
+    if (requested == BACKEND_REQUEST_CPU) return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == BACKEND_REQUEST_OPENCL) return reg_name && std::strcmp(reg_name, OPENCL_REG_NAME) == 0;
+    if (requested == BACKEND_REQUEST_HEXAGON) {
+        return backend_name_is_hexagon(reg_name) && device_name && std::strcmp(device_name, HEXAGON_PRIMARY_DEVICE) == 0;
+    }
+    return device_name && requested == device_name;
+}
+
+inline const char * backend_dev_reg_name(ggml_backend_dev_t dev) {
+    ggml_backend_reg_t reg  = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    const char *       name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return name ? name : "";
+}
+
+inline ggml_backend_dev_t backend_requested_device(const std::string & requested) {
+    const size_t n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev && backend_request_matches(requested, backend_dev_reg_name(dev), ggml_backend_dev_name(dev),
+                                           ggml_backend_dev_type(dev))) {
+            return dev;
+        }
+    }
+    return nullptr;
+}
+
+inline ggml_backend_t backend_requested_init(const std::string & requested, GpuFallbackReason * reason = nullptr) {
+    bool         saw_device = false;
+    const size_t n_dev      = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev || !backend_request_matches(requested, backend_dev_reg_name(dev), ggml_backend_dev_name(dev),
+                                             ggml_backend_dev_type(dev))) {
+            continue;
+        }
+        saw_device = true;
+        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            if (reason) *reason = GpuFallbackReason::none;
+            return backend;
+        }
+    }
+    if (reason) *reason = saw_device ? GpuFallbackReason::init_failed : GpuFallbackReason::no_devices;
+    return nullptr;
+}
+
+inline bool backend_is_cpu_device(ggml_backend_t backend) {
+    ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr;
+    return dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
 }
 
 // CPU backend from the registry -- resolves the same on static and dlopen
@@ -124,7 +225,8 @@ inline bool backend_dev_prefers_opencl(ggml_backend_dev_t dev) {
 //   4. Validated GPU on an integrated adapter (UMA Vulkan, Apple iGPU, ...).
 //   5. Any other GPU on a discrete adapter (unvalidated backends).
 //   6. Any other GPU on an integrated adapter.
-//   7. Not a GPU / non-selectable — never picked.
+//   7. Not a GPU / non-selectable (CPU, accelerators, the Hexagon NPU, which
+//      runs only on an explicit backend request) — never picked.
 enum class GpuTier {
     AdrenoOpenCL700Plus     = 0,
     CudaDiscrete            = 1,
@@ -139,7 +241,7 @@ enum class GpuTier {
 inline GpuTier gpu_tier_for(const char *                     reg_name,
                             enum ggml_backend_dev_type       dev_type,
                             int                              adreno_version) {
-    if (!backend_device_type_is_gpu(dev_type)) return GpuTier::NotSelectable;
+    if (!backend_device_type_is_gpu(dev_type) || backend_name_is_hexagon(reg_name)) return GpuTier::NotSelectable;
     const bool integrated = (dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU);
     if (reg_name && std::strcmp(reg_name, "OpenCL") == 0 && adreno_version >= 700) {
         return GpuTier::AdrenoOpenCL700Plus;
@@ -223,6 +325,7 @@ inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
 
                 ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
                 const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
+                if (backend_name_is_hexagon(reg_name)) continue;
                 if (backend_reg_name_is_validated_gpu(reg_name) != require_validated) continue;
 
                 saw_device = true;
@@ -251,6 +354,21 @@ inline void backend_set_n_threads(ggml_backend_t backend, int n_threads) {
     auto set_n_threads =
         (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
     if (set_n_threads) set_n_threads(backend, n_threads);
+}
+
+// Backend for the per-stage smoke harnesses: an explicit --backend request with
+// no fallback, else the GPU walk for --gpu, else the CPU with `n_threads`.
+inline ggml_backend_t backend_init_for_tool(const char * requested, bool gpu, int n_threads) {
+    ggml_backend_t backend = nullptr;
+    if (requested && !backend_request_is_auto(requested)) {
+        backend = backend_requested_init(requested);
+    } else if (gpu) {
+        backend = backend_gpu_init();
+    } else {
+        backend = backend_cpu_init();
+    }
+    if (backend && backend_is_cpu_device(backend)) backend_set_n_threads(backend, n_threads);
+    return backend;
 }
 
 // Registry name of the backend implementation ("CPU", "Vulkan", "MTL", ...).

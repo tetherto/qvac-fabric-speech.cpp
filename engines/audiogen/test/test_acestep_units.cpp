@@ -31,6 +31,7 @@
 #include "cover_noise.h"
 #include "dit_ggml.h"
 #include "dit_gguf.h"
+#include "engine_backends.h"
 #include "detok_ggml.h"
 #include "fit_measure.h"
 #include "tok_ggml.h"
@@ -849,6 +850,100 @@ void test_gpu_tier_policy() {
     CHECK(gpu_tier_for("MUSA", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::OtherIntegrated);
 }
 
+// 6d. explicit backend requests ----------------------------------------------
+// "hexagon" must reach only the HTP0 NPU session and never a generic GPU, and
+// the NPU must never be picked by the automatic GPU walk.
+void test_backend_request_matching() {
+    using tts_cpp::acestep::backend_request_is_auto;
+    using tts_cpp::acestep::backend_request_matches;
+    using tts_cpp::acestep::GpuTier;
+    using tts_cpp::acestep::gpu_tier_for;
+
+    CHECK(backend_request_is_auto(""));
+    CHECK(backend_request_is_auto("auto"));
+    CHECK(!backend_request_is_auto("cpu"));
+    CHECK(!backend_request_is_auto("hexagon"));
+
+    CHECK(backend_request_matches("hexagon", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_request_matches("hexagon", "HTP", "HTP1", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_request_matches("hexagon", "OpenCL", "GPUOpenCL", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("HTP1", "HTP", "HTP1", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("opencl", "OpenCL", "GPUOpenCL", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_request_matches("opencl", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("cpu", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
+    CHECK(!backend_request_matches("cpu", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_request_matches("auto", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_request_matches("Vulkan0", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_GPU));
+
+    CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::NotSelectable);
+}
+
+void test_dsp_library_path() {
+    using tts_cpp::acestep::prepend_dsp_library_directory;
+
+    CHECK(prepend_dsp_library_directory("/app/lib", "") == "/app/lib");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/vendor/dsp") == "/app/lib;/vendor/dsp");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/app/lib;/vendor/dsp") == "/app/lib;/vendor/dsp");
+    CHECK(prepend_dsp_library_directory("/app/lib", "/vendor/dsp;/app/lib") == "/vendor/dsp;/app/lib");
+    CHECK(prepend_dsp_library_directory("", "/vendor/dsp") == "/vendor/dsp");
+}
+
+// Holds on any machine: the CPU device always answers "cpu", and a name no
+// device carries fails without falling back.
+void test_backend_requested_init() {
+    using tts_cpp::GpuFallbackReason;
+    using tts_cpp::acestep::backend_is_cpu_device;
+    using tts_cpp::acestep::backend_requested_init;
+
+    GpuFallbackReason reason = GpuFallbackReason::not_requested;
+    ggml_backend_t    cpu    = backend_requested_init("cpu", &reason);
+    CHECK(cpu != nullptr);
+    CHECK(backend_is_cpu_device(cpu));
+    CHECK(reason == GpuFallbackReason::none);
+    if (cpu) ggml_backend_free(cpu);
+
+    CHECK(backend_requested_init("no-such-device", &reason) == nullptr);
+    CHECK(reason == GpuFallbackReason::no_devices);
+}
+
+// The CPU backend keeps mapping weights off the GGUF and allocating the rest
+// in its default buffer; only Hexagon switches to uploads into its repack type.
+void test_weight_placement_on_cpu() {
+    using tts_cpp::acestep::backend_requested_init;
+    using tts_cpp::acestep::dit_gguf_backend_maps_weights;
+    using tts_cpp::acestep::dit_gguf_weight_buffer_type;
+
+    ggml_backend_t cpu = backend_requested_init("cpu");
+    CHECK(cpu != nullptr);
+    if (!cpu) return;
+    CHECK(dit_gguf_backend_maps_weights(cpu));
+    CHECK(dit_gguf_weight_buffer_type(cpu) == ggml_backend_get_default_buffer_type(cpu));
+    ggml_backend_free(cpu);
+}
+
+// An explicit LM request naming the primary device shares it instead of
+// opening a second backend, and an unknown name fails the whole resolution.
+void test_lm_backend_request() {
+    using tts_cpp::acestep::AcestepBackends;
+    using tts_cpp::acestep::BackendRequest;
+    using tts_cpp::acestep::free_acestep_backends;
+    using tts_cpp::acestep::resolve_acestep_backends;
+
+    BackendRequest req;
+    req.backend    = "cpu";
+    req.lm_backend = "cpu";
+    AcestepBackends rb;
+    CHECK(resolve_acestep_backends(req, rb));
+    CHECK(rb.lm == rb.backend);
+    CHECK(rb.lm_extra == nullptr);
+    free_acestep_backends(rb);
+
+    req.lm_backend = "no-such-device";
+    CHECK(!resolve_acestep_backends(req, rb));
+    CHECK(rb.backend == nullptr);
+}
+
 // 7. stage placement ---------------------------------------------------------
 // Which backend each stage runs on decides which numerical path the generated
 // audio takes, so the policy is locked here rather than only observed on a
@@ -938,6 +1033,20 @@ void test_stage_placement() {
     CHECK(!vulkan_device_lm_blocked("Intel(R) Arc(tm) A770 Graphics"));
     CHECK(!vulkan_device_lm_blocked(""));
     CHECK(!vulkan_device_lm_blocked(nullptr));
+
+    // -- Hexagon: the detokenizer and encoders run on the NPU, the LM on CPU ---
+    using tts_cpp::acestep::backend_name_is_hexagon;
+    CHECK(backend_name_is_hexagon("HTP"));
+    CHECK(!backend_name_is_hexagon("HTP0"));
+    CHECK(!backend_name_is_hexagon("htp"));
+    CHECK(!backend_name_is_hexagon(nullptr));
+    check_gpu_backend_keeps_lm_on_cpu("HTP", "Hexagon");
+    {
+        PlacementOverrides ov;
+        ov.lm_gpu        = true;
+        StagePlacement p = resolve_stage_placement("HTP", "Hexagon", ov);
+        CHECK(p.lm_on_gpu);
+    }
 
     // -- allowlist: Metal, OpenCL, and CUDA keep LM + detokenizer on GPU --------
     for (const char * allowed : { "MTL", "Metal", "OpenCL", "CUDA" }) {
@@ -1065,6 +1174,25 @@ void set_env(const char * key, const char * value) {
     if (value) setenv(key, value, 1);
     else       unsetenv(key);
 #endif
+}
+
+// ACESTEP_VAE_GPU=0 moves the VAE of an explicit request to the CPU; any other
+// value keeps the requested device, and "auto" keeps the n_gpu_layers path.
+void test_vae_backend_request_env() {
+    using tts_cpp::acestep::vae_backend_request_from_env;
+
+    set_env("ACESTEP_VAE_GPU", nullptr);
+    CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
+    CHECK(vae_backend_request_from_env("auto") == "auto");
+
+    set_env("ACESTEP_VAE_GPU", "0");
+    CHECK(vae_backend_request_from_env("hexagon") == "cpu");
+    CHECK(vae_backend_request_from_env("auto") == "auto");
+
+    set_env("ACESTEP_VAE_GPU", "1");
+    CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
+
+    set_env("ACESTEP_VAE_GPU", nullptr);
 }
 
 void test_placement_env() {
@@ -3040,8 +3168,14 @@ int main() {
     test_backend_device_types();
     test_gpu_fallback_reason();
     test_gpu_tier_policy();
+    test_backend_request_matching();
+    test_dsp_library_path();
+    test_backend_requested_init();
+    test_lm_backend_request();
+    test_weight_placement_on_cpu();
     test_stage_placement();
     test_placement_env();
+    test_vae_backend_request_env();
     test_parallel_rows();
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();

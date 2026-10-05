@@ -11,12 +11,20 @@ finally other discrete, then integrated GPU backends. Integrated-device
 support is required because Vulkan reports Android UMA adapters such as
 Pixel's Mali-G715 as `IGPU`.
 
+`EngineOptions::backend` (`--backend` on the CLIs) replaces that walk with an
+explicit device: `cpu`, `opencl`, `hexagon` (the Snapdragon HTP0 NPU), or an
+exact ggml device name. An explicit request has no fallback, so `create()`
+throws when the device is missing. The Hexagon NPU is never picked by the
+automatic walk; see [Hexagon NPU](#hexagon-npu).
+`EngineOptions::lm_backend` (`--lm-backend`) moves only the LM to another
+device with the same names.
+
 | Stage | Placement when a GPU is selected |
 |---|---|
-| DiT, VAE | GPU |
+| DiT, VAE | GPU (or the Hexagon NPU on request) |
 | Text encoder, condition encoder | GPU, unless `ACESTEP_ENCODERS_CPU` is present |
 | LM | GPU on Vulkan (every device except Mali), Metal, OpenCL and CUDA; CPU on Mali Vulkan devices and every unmeasured backend |
-| FSQ detokenizer | GPU on Vulkan, Metal, OpenCL, and CUDA; CPU on every unmeasured backend |
+| FSQ detokenizer | GPU on Vulkan, Metal, OpenCL, and CUDA, the NPU on Hexagon; CPU on every unmeasured backend |
 
 The LM and detokenizer are allowlisted per backend: a backend nobody has run keeps the CPU placement, so adding one cannot silently regress generated audio. Metal and OpenCL are validated for both stages; the recorded OpenCL validation used an Adreno 740. Vulkan carries both stages on every device except the ones on a per-device denylist (`vulkan_device_lm_blocked`): Mali keeps the LM on the CPU, because Mali-G715 testing showed code collapse and early termination there. A single misbehaving GPU family should cost that family the stage, not every Vulkan device, so the per-device rule denies rather than admits. CUDA needs the `snake` / `col2im_1d` VAE kernels from the `ggml-speech` fork's CUDA backend and its `GGML_PREC_F32` MUL_MAT support (the LM-shaped q4_0/q4_K strided-B `b_absmax=1e5` stress cases produced NaN before the fork routed explicit-precision matmuls to the f32 cuBLAS path); with that ggml, `test-backend-ops` on an RTX 5090 passes the full suite, the Q8_0 LM matches the F32-dequantized reference at 0.9999 logit cosine with an identical greedy trajectory where the CPU Q8_0 path sits at 0.994, and `--quantized-batch-cfg-regression` passes, so the LM runs on the GPU. The HIP/MUSA builds of the same backend register as `ROCm`/`MUSA` and stay off the allowlist until measured.
 
@@ -70,6 +78,56 @@ active backend's maximum allocation size against the real decode graph and
 shrinks the core window when needed; short inputs remain a single graph.
 `ACESTEP_VAE_WIN_CORE` can pin the core only for diagnostics. VAE encode is not
 windowed and still allocates one full graph.
+
+## Hexagon NPU
+
+`backend = "hexagon"` runs the DiT, the VAE, both encoders and the FSQ
+detokenizer on the HTP0 session of the ggml-speech Hexagon backend. The LM
+stays on the CPU by default; `lm_backend = "opencl"` puts it on the Adreno
+GPU next to the NPU, which is the fastest split measured. Requirements:
+
+- ggml-speech built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
+  skeletons staged next to the host backends. `backends_dir` is prepended to
+  FastRPC's `DSP_LIBRARY_PATH` before the HTP session opens.
+- The `q8_0` DiT (`ditVariant: 'turbo-q8'`). The HTP matmuls cover
+  `q4_0`/`q8_0`/`mxfp4` and float weights, not the K-quants of the default
+  `turbo-q4` (`Q4_K_M`) DiT.
+
+Stage weights are uploaded into the session's repack buffer type instead of
+being mapped from the GGUF (HTP computes only on its own buffers), so a stage
+load includes a one-time repack. The LM stays off the NPU: its tied
+embedding is both a `GET_ROWS` table and a head of more than 32768 rows,
+which the HTP matmul refuses.
+
+Parity on a Galaxy S25 (Snapdragon 8 Elite, Hexagon v79), cosine against the
+CPU backend with each stage fed identical inputs, OpenCL on the same phone
+for reference:
+
+| Stage | Hexagon | OpenCL (Adreno 830) |
+|---|--:|--:|
+| FSQ detokenizer | 0.99999 | 0.99991 |
+| text encoder | 0.99941 | 0.99913 |
+| condition encoder | 0.99947 | 0.99924 |
+| DiT, 8 turbo steps | 0.989 | 0.958 |
+| VAE decode, 7.2 s | 0.999992 | 0.999992 |
+
+The DiT row compounds eight flow-matching steps, so it is where every
+backend drifts furthest from the CPU; complete renders therefore differ from
+the CPU waveform on OpenCL and Hexagon alike, and the per-stage rows isolate
+each backend's own error.
+
+Stage compute on the same phone (`music-cli --dur 30`, `ACESTEP_KEEP_STAGES=1`
+so loads are excluded, `q8_0` DiT, median of two runs, milliseconds):
+
+| Placement | LM | DiT | VAE | generate |
+|---|--:|--:|--:|--:|
+| CPU (8 threads) | 21,578 | 55,213 | 64,092 | 145,988 |
+| OpenCL (Adreno 830) | 15,987 | 19,229 | 51,827 | 89,657 |
+| `hexagon` (LM on CPU) | 24,206 | 12,471 | 15,352 | 52,740 |
+| `hexagon` + `lm_backend = "opencl"` | 16,913 | 11,584 | 14,969 | 44,155 |
+
+At `--dur 8` the same four placements generate in 39,963 / 15,953 / 18,149 /
+9,793 ms.
 
 ## Core ML VAE decoder sidecar
 

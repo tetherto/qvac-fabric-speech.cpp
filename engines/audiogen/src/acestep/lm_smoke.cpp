@@ -12,7 +12,7 @@
 //
 // Usage:
 //   lm-smoke --model ace-lm.gguf [--prefill 8] [--decode 8] [--seed 1234]
-//            [--gpu] [--threads N] [--kv-sets 1]
+//            [--gpu | --backend NAME] [--threads N] [--kv-sets 1]
 //            [--dump logits.bin] [--dump-layers layers.bin]
 //            [--quantized-batch-cfg-regression]
 
@@ -93,17 +93,8 @@ int main(int argc, char ** argv) {
     // on arm64 dlopen builds too -- `ggml_backend_cpu_init` is not even linked there.
     if (const char * bd = arg_val(argc, argv, "--backends-dir")) load_backends(bd);
 
-    ggml_backend_t backend = nullptr;
-    if (gpu) {
-        backend = backend_gpu_init();
-        if (!backend) { fprintf(stderr, "[lm-smoke] no GPU backend available\n"); return 1; }
-    } else {
-        backend = backend_cpu_init();
-        if (!backend) { fprintf(stderr, "cpu backend init failed\n"); return 1; }
-        // The engine sets this; leaving the default (4) would understate the CPU path
-        // and make any CPU-vs-GPU timing meaningless.
-        backend_set_n_threads(backend, nth);
-    }
+    ggml_backend_t backend = backend_init_for_tool(arg_val(argc, argv, "--backend"), gpu, nth);
+    if (!backend) { fprintf(stderr, "[lm-smoke] requested backend unavailable\n"); return 1; }
     fprintf(stderr, "[lm-smoke] backend=%s prefill=%d decode=%d seed=%u threads=%d\n",
             ggml_backend_name(backend), P, Dn, seed, gpu ? 0 : nth);
 

@@ -7,7 +7,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | CMake project | `audiogen-cpp` v0.1.0 |
 | Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine` |
 | Output | interleaved stereo PCM, model-defined sample rate, `pcm[t * 2 + ch]` |
-| Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
+| Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA, Hexagon NPU on explicit request (`backend = "hexagon"`, validated on Snapdragon 8 Elite); optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
 | ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
 | Consumed by | the `@qvac/audiogen-ggml` addon in [QVAC](https://github.com/tetherto/qvac) |
 
@@ -15,7 +15,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 
 | Model | Task | Output | Quantization | Backends |
 |---|---|---|---|---|
-| ACE-Step v15 (base and turbo DiT variants) | text-to-music, multi-track (lego) stems, editing, LRC timestamps | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA; optional Core ML VAE-decoder sidecar |
+| ACE-Step v15 (base and turbo DiT variants) | text-to-music, multi-track (lego) stems, editing, LRC timestamps | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA, Hexagon (`q8_0` DiT); optional Core ML VAE-decoder sidecar |
 | MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal) |
 
 On Apple, `AUDIOGEN_COREML=ON` (default `OFF`) adds an optional Core ML
@@ -100,6 +100,21 @@ running on the GPU for every Vulkan device except Mali (PR #234). Output QC
 from the harness: no failures and no silent renders in 180 rounds, 10/10
 unique WAV hashes per lane, and duration error at most 1.2 s against the
 requested song length.
+
+### ACE-Step 1.5 on Snapdragon 8 Elite (2026-10)
+
+Galaxy S25 (Adreno 830, Hexagon v79), `music-cli --dur 30` with
+`ACESTEP_KEEP_STAGES=1`, `q8_0` DiT, median of two runs. `generate` is the
+`[acestep-timing]` total.
+
+| Placement | DiT | VAE | generate | Speedup vs OpenCL |
+|---|--:|--:|--:|--:|
+| CPU | 55,213 ms | 64,092 ms | 145,988 ms | 0.61x |
+| OpenCL | 19,229 ms | 51,827 ms | 89,657 ms | 1.00x |
+| `--backend hexagon` | 12,471 ms | 15,352 ms | 52,740 ms | 1.70x |
+| `--backend hexagon --lm-backend opencl` | 11,584 ms | 14,969 ms | 44,155 ms | 2.03x |
+
+Per-stage parity and setup are in [docs/backends.md](docs/backends.md#hexagon-npu).
 
 ### MiniMax-Music3 f16 on RTX 5090 (2026-09)
 

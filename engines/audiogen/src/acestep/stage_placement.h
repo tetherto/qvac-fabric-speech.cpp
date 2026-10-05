@@ -42,6 +42,11 @@ inline bool backend_name_is_cuda(const char * name) {
     return name && std::strcmp(name, "CUDA") == 0;
 }
 
+// ggml-hexagon registers as "HTP" (its devices are "HTP0", "HTP1", ...).
+inline bool backend_name_is_hexagon(const char * name) {
+    return name && std::strcmp(name, "HTP") == 0;
+}
+
 inline bool device_desc_has_marker(const char * device_desc, const char * marker) {
     return device_desc && std::strstr(device_desc, marker) != nullptr;
 }
@@ -83,6 +88,8 @@ inline StagePlacement resolve_stage_placement(const char * reg_name, const char 
 
     if (backend_name_is_vulkan(reg_name)) {
         p.lm_on_gpu = !vulkan_device_lm_blocked(device_desc);
+    } else if (backend_name_is_hexagon(reg_name)) {
+        p.lm_on_gpu = false;
     } else if (!backend_name_is_metal(reg_name) && !backend_name_is_opencl(reg_name) &&
                !backend_name_is_cuda(reg_name)) {
         p.lm_on_gpu    = false;

@@ -49,14 +49,23 @@ bool          dit_gguf_has(const DitGGUF & g, const std::string & name);
 // model's lifetime, so the caller keeps `g` (does not dit_gguf_close) until the
 // model is freed. Only valid for host-memory backends (a GPU can't read a host
 // pointer as device memory); callers gate this on
-// ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend)) — a
-// core ggml-backend predicate, unlike ggml_backend_is_cpu which lives in the
+// dit_gguf_backend_maps_weights(backend), built from core ggml-backend
+// predicates, unlike ggml_backend_is_cpu which lives in the
 // (dynamically-loaded on Android/Linux-arm64) CPU backend module.
 //
 // Usage: create one shared buffer over the whole mmap, map each verbatim weight
 // BEFORE ggml_backend_alloc_ctx_tensors (which then skips any tensor whose
 // ->data is already set), and skip the corresponding upload/copy.
 ggml_backend_buffer_t dit_gguf_cpu_map_buffer(const DitGGUF & g);
+
+// Map-in-place needs a host-memory backend that also computes on a plain CPU
+// buffer. Hexagon reports host-visible buffers but only computes on its own
+// session buffers, so its weights are uploaded instead.
+bool dit_gguf_backend_maps_weights(ggml_backend_t backend);
+
+// Buffer type for a stage's uploaded weights: the backend default, except on
+// Hexagon, whose matmuls only accept weights repacked into its extra buffer type.
+ggml_backend_buffer_type_t dit_gguf_weight_buffer_type(ggml_backend_t backend);
 
 // Point `dst` at its bytes inside the mmap and attach `map_buf`. `dst` must have
 // been created with the SAME type + shape as the GGUF tensor (create_like), so

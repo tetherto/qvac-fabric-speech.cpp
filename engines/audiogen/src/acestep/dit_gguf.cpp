@@ -1,11 +1,14 @@
 #include "dit_gguf.h"
 
+#include "backend_registry.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
 #include <stdexcept>
 
 namespace tts_cpp::acestep {
+
+static constexpr size_t ACE_PROBE_ALIGNMENT = 64;
 
 bool dit_gguf_open(DitGGUF & g, const std::string & path) {
     if (!mapped_file_open(g.file, path, "acestep-dit")) return false;
@@ -44,6 +47,28 @@ ggml_backend_buffer_t dit_gguf_cpu_map_buffer(const DitGGUF & g) {
     // is read-only in practice (weights are never written); freeing it does not
     // munmap (that is dit_gguf_close's job at model teardown).
     return ggml_backend_cpu_buffer_from_ptr((void *) g.file.data, g.file.size);
+}
+
+bool dit_gguf_backend_maps_weights(ggml_backend_t backend) {
+    if (!ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend))) return false;
+    alignas(ACE_PROBE_ALIGNMENT) uint8_t probe[ACE_PROBE_ALIGNMENT];
+    ggml_backend_buffer_t host = ggml_backend_cpu_buffer_from_ptr(probe, sizeof(probe));
+    if (!host) return false;
+    const bool computes_on_host = ggml_backend_supports_buft(backend, ggml_backend_buffer_get_type(host));
+    ggml_backend_buffer_free(host);
+    return computes_on_host;
+}
+
+ggml_backend_buffer_type_t dit_gguf_weight_buffer_type(ggml_backend_t backend) {
+    ggml_backend_buffer_type_t fallback = ggml_backend_get_default_buffer_type(backend);
+    if (!backend_name_is_hexagon(backend_reg_name(backend))) return fallback;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
+                               reg, "ggml_backend_dev_get_extra_bufts")
+                         : nullptr;
+    ggml_backend_buffer_type_t * extra = get_extra ? get_extra(dev) : nullptr;
+    return extra && extra[0] ? extra[0] : fallback;
 }
 
 // GGUF tensor data is aligned to general.alignment (default 32); ggml's CPU quant

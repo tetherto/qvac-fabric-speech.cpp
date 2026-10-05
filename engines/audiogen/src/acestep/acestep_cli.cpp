@@ -1,5 +1,7 @@
 #include "audiogen-cpp/acestep/vae.h"
+#include "acestep/stage_dump_io.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +73,21 @@ static double correlation(const float * a, const float * b, int n) {
     return (va <= 0 || vb <= 0) ? 0.0 : cov / std::sqrt(va * vb);
 }
 
+static constexpr int VAE_LATENT_CHANNELS = 64;
+
+static void synthetic_latent_channel(std::vector<float> & latent, int c, int frames) {
+    const float freq = 0.5f + 0.15f * c, phase = 0.37f * c, amp = 3.0f * expf(-c / 48.0f);
+    for (int t = 0; t < frames; ++t)
+        latent[(size_t) t * VAE_LATENT_CHANNELS + c] = amp * sinf(2.0f * (float) M_PI * freq * ((float) t / frames) + phase);
+}
+
+// Structured synthetic latent (no DiT): per-channel low-frequency sinusoids.
+static std::vector<float> synthetic_latent(int frames) {
+    std::vector<float> latent((size_t) frames * VAE_LATENT_CHANNELS);
+    for (int c = 0; c < VAE_LATENT_CHANNELS; ++c) synthetic_latent_channel(latent, c, frames);
+    return latent;
+}
+
 static const char * arg_val(int argc, char ** argv, const char * key) {
     for (int i = 1; i < argc - 1; i++) if (!strcmp(argv[i], key)) return argv[i + 1];
     return nullptr;
@@ -84,7 +101,8 @@ int main(int argc, char ** argv) {
     const char * model = arg_val(argc, argv, "--model");
     if (!model) {
         fprintf(stderr,
-            "usage: acestep-cli --model vae.gguf [--t-latent 32] [--out out.wav] [--gpu]\n"
+            "usage: acestep-cli --model vae.gguf [--t-latent 32] [--out out.wav] [--gpu | --backend NAME]\n"
+            "       acestep-cli --model vae.gguf --latent-bin 08_dit_latent.bin [--dump pcm.bin] [--backend NAME]\n"
             "       acestep-cli --model vae.gguf --roundtrip --in in.wav [--seconds 2.56] [--out out.wav] [--gpu]\n"
             "       [--backends-dir <dir>]  (required on builds with dlopen'd ggml backends)\n");
         return 1;
@@ -104,6 +122,7 @@ int main(int argc, char ** argv) {
     // in isolation from the LM and DiT, which is what makes it usable as a
     // backend-parity target under GGML_VULKAN_CHECK_RESULTS.
     opts.n_gpu_layers = arg_flag(argc, argv, "--gpu") ? 1 : 0;
+    if (arg_val(argc, argv, "--backend")) opts.backend = arg_val(argc, argv, "--backend");
 
     std::unique_ptr<tts_cpp::acestep::Vae> vae;
     try {
@@ -155,18 +174,31 @@ int main(int argc, char ** argv) {
         const int    T_latent = arg_val(argc, argv, "--t-latent") ? atoi(arg_val(argc, argv, "--t-latent")) : 32;
         const char * outp     = out_path ? out_path : "acestep_decode.wav";
 
-        // structured synthetic latent (no DiT): per-channel low-frequency sinusoids
-        std::vector<float> latent((size_t) T_latent * 64);
-        for (int c = 0; c < 64; ++c) {
-            float freq = 0.5f + 0.15f * c, phase = 0.37f * c, amp = 3.0f * expf(-c / 48.0f);
-            for (int t = 0; t < T_latent; ++t)
-                latent[(size_t) t * 64 + c] = amp * sinf(2.0f * (float) M_PI * freq * ((float) t / T_latent) + phase);
+        std::vector<float> latent;
+        int                latent_frames = T_latent;
+        if (const char * latent_path = arg_val(argc, argv, "--latent-bin")) {
+            int channels = 0;
+            if (!tts_cpp::acestep::read_stage_dump("acestep-cli", latent_path, latent, &latent_frames, &channels)) {
+                return 1;
+            }
+            if (channels != VAE_LATENT_CHANNELS) {
+                fprintf(stderr, "[acestep-cli] %s has %d channels, expected %d\n", latent_path, channels,
+                        VAE_LATENT_CHANNELS);
+                return 1;
+            }
+        } else {
+            latent = synthetic_latent(T_latent);
         }
-        std::vector<float> pcm = vae->decode(latent, T_latent);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<float> pcm = vae->decode(latent, latent_frames);
+        const double decode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (pcm.empty()) { fprintf(stderr, "decode failed\n"); return 1; }
         int T_out = (int) (pcm.size() / 2);
-        fprintf(stderr, "[acestep-cli] decoded T_latent=%d -> %d frames (%.2fs)\n",
-                T_latent, T_out, (float) T_out / 48000.0f);
+        fprintf(stderr, "[acestep-cli] decoded T_latent=%d -> %d frames (%.2fs) in %.1f ms\n",
+                latent_frames, T_out, (float) T_out / 48000.0f, decode_ms);
+        if (const char * dump = arg_val(argc, argv, "--dump")) {
+            tts_cpp::acestep::write_stage_dump("acestep-cli", dump, pcm, T_out, 2);
+        }
         wav_write(outp, pcm, T_out, 48000);
     }
     return 0;

@@ -38,6 +38,7 @@ struct VaeOptions {
     int  n_gpu_layers = 0;     // >0 = run decode/encode on a GPU backend (Metal,
                                // Vulkan, or validated Adreno 700+ OpenCL). Falls
                                // back to CPU when no GPU backend is available.
+    std::string backend = "auto";  // explicit device request; see EngineOptions::backend
     std::string backends_dir;  // dlopen'd ggml backend modules dir; see
                                // EngineOptions::backends_dir. Empty when loaded
                                // via Engine (which loads the modules once up

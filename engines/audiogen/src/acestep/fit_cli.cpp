@@ -59,6 +59,9 @@ void print_usage(const char * argv0) {
         "options:\n"
         "  --n-gpu-layers N        request the GPU stack when > 0 (default 0 = CPU),\n"
         "                          with the same fallbacks a real load applies\n"
+        "  --backend NAME          auto (default), cpu, opencl, hexagon, or a ggml device\n"
+        "                          name; explicit requests have no fallback\n"
+        "  --lm-backend NAME       put the LM on this device (same names; default auto)\n"
         "  --threads N             CPU thread count used for backend resolution\n"
         "  --margin-mib MIB        free-memory headroom to require (default 256)\n"
         "  --backends-dir DIR      directory scanned for dynamically-loaded ggml backends\n"
@@ -188,6 +191,10 @@ extern "C" int acestep_fit_cli_main(int argc, char ** argv) {
             opts.margin_bytes = margin_mib_to_bytes(mib);
         } else if (a == "--backends-dir" && i + 1 < argc) {
             opts.backends_dir = argv[++i];
+        } else if (a == "--backend" && i + 1 < argc) {
+            opts.backend = argv[++i];
+        } else if (a == "--lm-backend" && i + 1 < argc) {
+            opts.lm_backend = argv[++i];
         } else if (a == "--json") {
             json = true;
         } else if (a == "--verbose" || a == "-v") {

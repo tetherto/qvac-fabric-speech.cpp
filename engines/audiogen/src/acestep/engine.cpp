@@ -125,6 +125,7 @@ struct Engine::Impl {
     ggml_backend_t backend       = nullptr;  // primary backend (GPU or CPU) for textenc/cond/DiT
     ggml_backend_t backend_cpu   = nullptr;  // CPU backend for the stages pinned off the GPU; == backend when primary is CPU
     ggml_backend_t backend_lm    = nullptr;  // backend the LM loads on (see create)
+    ggml_backend_t backend_lm_extra = nullptr;  // owned when an explicit LM request names a third device
     ggml_backend_t backend_enc   = nullptr;  // backend for textenc + cond (see create)
     ggml_backend_t backend_detok = nullptr;  // backend the FSQ detok loads on (CPU off-GPU, GPU on Vulkan; see create)
     TextEncModel * textenc = nullptr;
@@ -161,6 +162,7 @@ struct Engine::Impl {
         free_lm();
         free_textenc();
         free_vae();
+        if (backend_lm_extra) ggml_backend_free(backend_lm_extra);
         if (backend_cpu && backend_cpu != backend) ggml_backend_free(backend_cpu);
         if (backend) ggml_backend_free(backend);
     }
@@ -269,15 +271,23 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & opts_in) {
     //   ACESTEP_DETOK_GPU=1     -> detokenizer on the GPU, whatever the backend
     //   ACESTEP_DETOK_CPU=1     -> detokenizer on the CPU, whatever the backend
     //   ACESTEP_ENCODERS_CPU=1  -> move the encoders to the CPU (trim wired mem)
+    BackendRequest request;
+    request.n_gpu_layers = opts.n_gpu_layers;
+    request.backend      = opts.backend;
+    request.lm_backend   = opts.lm_backend;
+    request.n_threads    = opts.n_threads;
+    request.verbose      = v;
     AcestepBackends rb;
-    if (!resolve_acestep_backends(opts.n_gpu_layers, opts.n_threads, v, rb)) {
-        throw std::runtime_error("acestep engine: backend init failed");
+    if (!resolve_acestep_backends(request, rb)) {
+        throw std::runtime_error("acestep engine: backend init failed (backend '" + opts.backend +
+                                 "', lm_backend '" + opts.lm_backend + "')");
     }
     m->gpu_fallback_reason = rb.gpu_fallback_reason;
     m->backend       = rb.backend;
     m->backend_cpu   = rb.backend_cpu;
     m->backend_enc   = rb.enc;
     m->backend_lm    = rb.lm;
+    m->backend_lm_extra = rb.lm_extra;
     m->backend_detok = rb.detok;  // GPU on the allowlisted backends, CPU otherwise
     m->nth           = rb.nth;
     const int nth    = rb.nth;
@@ -304,7 +314,9 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & opts_in) {
     vo.n_threads    = nth;
     // Validated on Metal, Vulkan, and Adreno OpenCL; the ACESTEP_VAE_GPU
     // override lives in engine_backends.h, shared with the fit projection.
-    vo.n_gpu_layers = vae_gpu_layers_from_env(opts.n_gpu_layers);
+    const BackendRequest vae_request = vae_backend_request(request);
+    vo.n_gpu_layers = vae_request.n_gpu_layers;
+    vo.backend      = vae_request.backend;
     m->vae_opts = vo;
 
     // Read the DiT config from GGUF metadata up front so the context-build step in

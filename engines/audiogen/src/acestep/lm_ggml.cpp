@@ -180,7 +180,7 @@ static bool lm_build_partial_head(LMModel * m, int offset, int count) {
 
     m->lm_head_partial = ggml_new_tensor_2d(m->lm_head_ctx, m->embed_tokens->type, H, count);
     ggml_set_name(m->lm_head_partial, "lm_head_partial");
-    m->lm_head_buf = ggml_backend_alloc_ctx_tensors(m->lm_head_ctx, m->backend);
+    m->lm_head_buf = ggml_backend_alloc_ctx_tensors_from_buft(m->lm_head_ctx, dit_gguf_weight_buffer_type(m->backend));
     if (!m->lm_head_buf) {
         m->lm_head_failed_offset = offset;
         m->lm_head_failed_count  = count;
@@ -211,6 +211,19 @@ static bool lm_build_partial_head(LMModel * m, int offset, int count) {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), count,
                 nbytes / 1048576.0);
     return true;
+}
+
+// The forward graphs look tokens up in the tied embedding with GET_ROWS and
+// run without a scheduler, so a backend that cannot gather rows of that
+// tensor (Hexagon repacks quantized weights) cannot host the LM at all.
+static bool lm_backend_runs_embedding_lookup(ggml_backend_t backend, ggml_tensor * embed) {
+    ggml_init_params ip{ ggml_tensor_overhead() * 2, nullptr, /*no_alloc=*/true };
+    ggml_context *   ctx = ggml_init(ip);
+    if (!ctx) return false;
+    ggml_tensor * ids       = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    const bool    supported = ggml_backend_supports_op(backend, ggml_get_rows(ctx, embed, ids));
+    ggml_free(ctx);
+    return supported;
 }
 
 // Fused-layer creation: norms and o/down as usual, q|k|v and gate|up as single
@@ -322,7 +335,7 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
     m->use_flash_attn = lm_backend_supports_flash_attn(backend, m->q3);
 
     // CPU backend: map the quantised weights straight off the mmap (no dirty RAM).
-    const bool            mapped  = ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend));
+    const bool            mapped  = dit_gguf_backend_maps_weights(backend);
     ggml_backend_buffer_t map_buf = mapped ? dit_gguf_cpu_map_buffer(g) : nullptr;
 
     // Allocate + load weights.
@@ -332,6 +345,15 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
     ggml_context * ctx = m->weight_ctx;
 
     m->embed_tokens = q3_create_like(ctx, g, "model.embed_tokens.weight", map_buf);
+    if (!m->embed_tokens || !lm_backend_runs_embedding_lookup(backend, m->embed_tokens)) {
+        fprintf(stderr, "[acestep-lm] %s cannot look up %s token embeddings; place the LM on another backend\n",
+                ggml_backend_name(backend), m->embed_tokens ? ggml_type_name(m->embed_tokens->type) : "missing");
+        if (map_buf) ggml_backend_buffer_free(map_buf);
+        ggml_free(ctx);
+        dit_gguf_close(g);
+        delete m;
+        return nullptr;
+    }
     m->final_norm   = q3_create_f32_like(ctx, g, "model.norm.weight");
     m->layers.resize(c.n_layers);
     // Fusion is Vulkan-only for now (validated there; other GPU backends keep
@@ -368,14 +390,14 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
 
     if (measure) {
         measure->weights_alloc_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            ctx, ggml_backend_get_default_buffer_type(backend));
+            ctx, dit_gguf_weight_buffer_type(backend));
         m->measuring = true;
     } else {
         // NB: ggml_backend_alloc_ctx_tensors returns NULL if EVERY tensor is already
         // allocated (i.e. all mapped). Safe to treat as failure here because each
         // stage always has F32 norms that need real allocation; revisit this guard if
         // an all-quantised stage is ever added.
-        m->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        m->weight_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, dit_gguf_weight_buffer_type(backend));
         if (!m->weight_buf) {
             fprintf(stderr, "[acestep-lm] failed to allocate weight buffer\n");
             if (map_buf) ggml_backend_buffer_free(map_buf);
@@ -522,7 +544,7 @@ size_t lm_measure_partial_head_bytes(const LMModel * m, int count) {
     if (!ctx) return 0;
     ggml_new_tensor_2d(ctx, m->embed_tokens->type, m->cfg.hidden_size, count);
     const size_t bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-        ctx, ggml_backend_get_default_buffer_type(m->backend));
+        ctx, dit_gguf_weight_buffer_type(m->backend));
     ggml_free(ctx);
     return bytes;
 }

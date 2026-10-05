@@ -179,8 +179,14 @@ FitResult fit_params(const FitOptions & opts) {
     // ── Backends: same resolution + placement as Engine::create ────────────
     load_backends(opts.backends_dir);
 
+    BackendRequest request;
+    request.n_gpu_layers = opts.n_gpu_layers;
+    request.backend      = opts.backend;
+    request.lm_backend   = opts.lm_backend;
+    request.n_threads    = opts.n_threads;
+    request.verbose      = opts.verbose;
     AcestepBackends rb;
-    if (!resolve_acestep_backends(opts.n_gpu_layers, opts.n_threads, opts.verbose, rb)) {
+    if (!resolve_acestep_backends(request, rb)) {
         r.reason = "no-backend-device";
         return r;
     }
@@ -188,8 +194,7 @@ FitResult fit_params(const FitOptions & opts) {
     // The VAE creates its own backend inside Vae::load with the same GPU
     // request (engine.cpp saves it into vae_opts; ACESTEP_VAE_GPU overrides).
     // Resolution shared with Vae::load via engine_backends.h, by construction.
-    ggml_backend_t vae_backend = resolve_vae_backend(
-        vae_gpu_layers_from_env(opts.n_gpu_layers), opts.n_threads, opts.verbose);
+    ggml_backend_t vae_backend = resolve_vae_backend(vae_backend_request(request));
 
     struct Cleanup {
         AcestepBackends * rb;

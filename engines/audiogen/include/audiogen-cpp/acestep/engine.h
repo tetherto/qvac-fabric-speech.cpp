@@ -74,6 +74,18 @@ struct EngineOptions {
     // acquiring any backend from the registry. Empty -> rely on ggml's built-in
     // search path (static-linked desktop / Apple builds need nothing here).
     std::string backends_dir;
+    // "auto" (or empty) keeps the n_gpu_layers request and runtime GPU tiering.
+    // "cpu", "opencl" and "hexagon" (the HTP0 NPU session) select a backend
+    // explicitly, as does an exact ggml device name ("HTP0", "Vulkan0", ...).
+    // An explicit request overrides n_gpu_layers and makes create() throw when
+    // the device is missing or fails to initialise. Hexagon is never chosen
+    // automatically. The stage-placement allowlist still applies on top.
+    std::string backend = "auto";
+    // "auto" keeps the stage-placement policy for the LM. Any other value uses
+    // the same names as `backend` and puts the LM on that device, which may
+    // differ from the primary one (the Hexagon NPU for the diffusion stages
+    // with the Adreno GPU for the LM, say); create() throws if it is missing.
+    std::string lm_backend = "auto";
     // When non-empty, generate() writes one .bin per pipeline stage into this
     // directory (3x int32 header [ndim, d0, d1] then float32 payload). Used to
     // localise a backend divergence to the stage that introduces it; the

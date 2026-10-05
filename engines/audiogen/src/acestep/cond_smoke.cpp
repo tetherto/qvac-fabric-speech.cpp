@@ -15,6 +15,7 @@
 
 #include "acestep/backend_registry.h"
 #include "acestep/cond_ggml.h"
+#include "acestep/stage_dump_io.h"
 
 #include "ggml-backend.h"
 
@@ -35,36 +36,6 @@ static const char * arg_val(int argc, char ** argv, const char * key) {
 static bool arg_flag(int argc, char ** argv, const char * key) {
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], key)) return true;
     return false;
-}
-
-// --dump-stages format: int32 hdr[3] = {ndim, d0, d1} then d0*d1 float32.
-static bool read_stage_dump(const char * path, std::vector<float> & out, int * d0, int * d1) {
-    FILE * f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "[cond-smoke] cannot open %s\n", path); return false; }
-    int32_t hdr[3];
-    if (fread(hdr, sizeof(int32_t), 3, f) != 3 || hdr[0] != 2 || hdr[1] <= 0 || hdr[2] <= 0) {
-        fprintf(stderr, "[cond-smoke] %s is not a rank-2 stage dump\n", path);
-        fclose(f);
-        return false;
-    }
-    const size_t n = (size_t) hdr[1] * hdr[2];
-    out.resize(n);
-    const bool ok = fread(out.data(), sizeof(float), n, f) == n;
-    fclose(f);
-    if (!ok) { fprintf(stderr, "[cond-smoke] %s is truncated\n", path); return false; }
-    *d0 = hdr[1];
-    *d1 = hdr[2];
-    return true;
-}
-
-static bool write_stage_dump(const char * path, const std::vector<float> & v, int d0, int d1) {
-    FILE * f = fopen(path, "wb");
-    if (!f) { fprintf(stderr, "[cond-smoke] cannot write %s\n", path); return false; }
-    const int32_t hdr[3] = { 2, d0, d1 };
-    fwrite(hdr, sizeof(int32_t), 3, f);
-    fwrite(v.data(), sizeof(float), v.size(), f);
-    fclose(f);
-    return true;
 }
 
 // Exponent all ones. std::isfinite can be compiled away under fast-math, so the
@@ -103,7 +74,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr,
             "usage: cond-smoke --model dit.gguf [--s-text 8] [--s-lyric 24] [--seed 1234]\n"
             "       [--lyric-bin 05_lyric_embed.bin] [--text-bin 04_text_hidden.bin]\n"
-            "       [--gpu] [--threads N] [--dump enc.bin]\n"
+            "       [--gpu | --backend NAME] [--threads N] [--dump enc.bin]\n"
             "       [--backends-dir <dir>]  (required on builds with dlopen'd ggml backends)\n");
         return 1;
     }
@@ -113,15 +84,8 @@ int main(int argc, char ** argv) {
 
     if (const char * bd = arg_val(argc, argv, "--backends-dir")) load_backends(bd);
 
-    ggml_backend_t backend = nullptr;
-    if (gpu) {
-        backend = backend_gpu_init();
-        if (!backend) { fprintf(stderr, "[cond-smoke] no GPU backend available\n"); return 1; }
-    } else {
-        backend = backend_cpu_init();
-        if (!backend) { fprintf(stderr, "cpu backend init failed\n"); return 1; }
-        backend_set_n_threads(backend, nth);
-    }
+    ggml_backend_t backend = backend_init_for_tool(arg_val(argc, argv, "--backend"), gpu, nth);
+    if (!backend) { fprintf(stderr, "[cond-smoke] requested backend unavailable\n"); return 1; }
 
     std::mt19937 rng(seed);
 
@@ -129,7 +93,7 @@ int main(int argc, char ** argv) {
     int                S_text = 0, S_lyric = 0, width = 0;
 
     if (const char * p = arg_val(argc, argv, "--lyric-bin")) {
-        if (!read_stage_dump(p, lyric_embed, &S_lyric, &width)) { ggml_backend_free(backend); return 1; }
+        if (!read_stage_dump("cond-smoke", p, lyric_embed, &S_lyric, &width)) { ggml_backend_free(backend); return 1; }
         if (width != 1024) {
             fprintf(stderr, "[cond-smoke] %s has width %d, expected 1024\n", p, width);
             ggml_backend_free(backend);
@@ -142,7 +106,7 @@ int main(int argc, char ** argv) {
     }
 
     if (const char * p = arg_val(argc, argv, "--text-bin")) {
-        if (!read_stage_dump(p, text_hidden, &S_text, &width)) { ggml_backend_free(backend); return 1; }
+        if (!read_stage_dump("cond-smoke", p, text_hidden, &S_text, &width)) { ggml_backend_free(backend); return 1; }
         if (width != 1024) {
             fprintf(stderr, "[cond-smoke] %s has width %d, expected 1024\n", p, width);
             ggml_backend_free(backend);
@@ -189,7 +153,7 @@ int main(int argc, char ** argv) {
         amax, nan, wiped);
 
     if (const char * p = arg_val(argc, argv, "--dump")) {
-        if (write_stage_dump(p, enc_hidden, enc_S, 2048))
+        if (write_stage_dump("cond-smoke", p, enc_hidden, enc_S, 2048))
             fprintf(stderr, "[cond-smoke] wrote %s [%d, 2048]\n", p, enc_S);
     }
 

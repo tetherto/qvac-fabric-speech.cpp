@@ -85,6 +85,8 @@ Part of the [audiogen engine documentation](../README.md).
 | `--edit-plan FILE` | | ordered JSON edit plan; cannot be combined with standalone edit flags |
 | `--normalize` | off for edit plans | peak-normalize edited CLI output; avoid for partial repaint when outside-region PCM must remain exact |
 | `--gpu`, `--threads N` | CPU, hardware concurrency | compute placement |
+| `--backend NAME` | `auto` | `cpu`, `opencl`, `hexagon` (the HTP0 NPU) or an exact ggml device name; overrides `--gpu` and fails instead of falling back. Hexagon is only used when requested |
+| `--lm-backend NAME` | `auto` | put the LM on this device instead of the placement policy's choice, e.g. `--backend hexagon --lm-backend opencl` |
 | `--backends-dir DIR` | | directory containing staged dynamic ggml backend modules; required by Android and Linux arm64 dynamic-backend builds |
 | `--dump-stages DIR` | | write one `.bin` per stage into an existing directory |
 | `--out PATH` | `music_out.wav` | output WAV path |
@@ -147,9 +149,10 @@ and encodes it in overlapping VAE windows for bounded memory on long inputs.
 ```sh
 ./build/audiogen/acestep-cli --model vae.gguf --t-latent 32 --out out.wav
 ./build/audiogen/acestep-cli --model vae.gguf --roundtrip --in in.wav --seconds 2.56 --out out.wav
+./build/audiogen/acestep-cli --model vae.gguf --latent-bin dump/08_dit_latent.bin --backend hexagon --dump pcm.bin
 ```
 
-The first form is the default mode: it decodes a synthetic latent, which checks that real weights load and that the decode graph (`ggml_col2im_1d` + `ggml_snake`) runs on the selected backend. `--roundtrip` encodes a real WAV and prints the per-channel reconstruction correlation, the audible end-to-end VAE check. Both forms take `--gpu`.
+The first form is the default mode: it decodes a synthetic latent, which checks that real weights load and that the decode graph (`ggml_col2im_1d` + `ggml_snake`) runs on the selected backend. `--roundtrip` encodes a real WAV and prints the per-channel reconstruction correlation, the audible end-to-end VAE check. `--latent-bin` decodes a `music-cli --dump-stages` DiT latent instead and `--dump` writes the PCM in the same format, so two backends can be compared on an identical input; the decode time is printed. Every form takes `--gpu` or `--backend NAME`. `detok-smoke`, `cond-smoke` and `lm-smoke` take `--backend NAME` too.
 
 ### acestep-fit-params
 
@@ -171,4 +174,5 @@ emits the projection for the SDK; the library entry point is
 `tts_cpp::acestep::fit_params` (`include/audiogen-cpp/acestep/fit.h`), and
 hosts can link the CLI as `acestep_fit_cli_main`. Workload knobs: `--duration`,
 `--text-tokens`, `--lyric-tokens`, `--lm-cfg`, `--guidance`,
-`--with-source-audio`, `--margin-mib`.
+`--with-source-audio`, `--margin-mib`. Placement knobs: `--n-gpu-layers`, `--backend` and
+`--lm-backend`, with the same meaning as in `music-cli`.

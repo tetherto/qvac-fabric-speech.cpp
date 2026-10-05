@@ -78,7 +78,7 @@ static TextEncModel * textenc_model_load_impl(const std::string & path, ggml_bac
     const Qwen3Config & c = m->q3;
 
     // CPU backend: map the quantised weights straight off the mmap (no dirty RAM).
-    const bool            mapped  = ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend));
+    const bool            mapped  = dit_gguf_backend_maps_weights(backend);
     ggml_backend_buffer_t map_buf = mapped ? dit_gguf_cpu_map_buffer(g) : nullptr;
 
     const size_t     n_tensors = (size_t) 2 + (size_t) c.n_layers * 11 + 8;
@@ -98,10 +98,10 @@ static TextEncModel * textenc_model_load_impl(const std::string & path, ggml_bac
         // tensors already carry data pointers into the mmap and are skipped by
         // the sweep exactly like the real allocation skips them).
         measure->weights_alloc_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            ctx, ggml_backend_get_default_buffer_type(backend));
+            ctx, dit_gguf_weight_buffer_type(backend));
         m->measuring = true;
     } else {
-        m->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        m->weight_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, dit_gguf_weight_buffer_type(backend));
         if (!m->weight_buf) {
             fprintf(stderr, "[acestep-txt] failed to allocate weight buffer\n");
             if (map_buf) ggml_backend_buffer_free(map_buf);

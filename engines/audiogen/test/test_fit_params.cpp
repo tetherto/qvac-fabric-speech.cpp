@@ -108,8 +108,10 @@ int main(int argc, char ** argv) {
     std::printf("%s", fit.report.c_str());
 
     // Backends resolved exactly as fit_params / Engine::create resolve them.
+    BackendRequest request;
+    request.n_gpu_layers = n_gpu_layers;
     AcestepBackends rb;
-    if (!resolve_acestep_backends(n_gpu_layers, 0, false, rb)) {
+    if (!resolve_acestep_backends(request, rb)) {
         fail("resolve_acestep_backends failed");
         return g_failures;
     }

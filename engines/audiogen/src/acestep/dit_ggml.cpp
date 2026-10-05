@@ -601,7 +601,7 @@ static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t b
     // verbatim weights and left null for the F32-converted / permuted tensors,
     // which are still allocated + uploaded. On a GPU backend map_buf stays null
     // and behaviour is unchanged (weights uploaded to device memory).
-    const bool            mapped  = ggml_backend_buft_is_host(ggml_backend_get_default_buffer_type(backend));
+    const bool            mapped  = dit_gguf_backend_maps_weights(backend);
     ggml_backend_buffer_t map_buf = mapped ? dit_gguf_cpu_map_buffer(g) : nullptr;
 
     // enough overhead for all descriptors
@@ -656,7 +656,7 @@ static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t b
         // lacking data, exactly like ggml_backend_alloc_ctx_tensors skips the
         // mapped ones. All uploads (including scalar_one) are skipped.
         measure->weights_alloc_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            ctx, ggml_backend_get_default_buffer_type(backend));
+            ctx, dit_gguf_weight_buffer_type(backend));
         m->measuring    = true;
         m->mapped_bytes = mapped ? dit_gguf_mapped_bytes(ctx, g) : 0;
         measure->weights_mapped_bytes = m->mapped_bytes;
@@ -679,7 +679,7 @@ static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t b
 
     // Allocates only the tensors still lacking data (the F32-converted / permuted
     // ones); every mapped weight has ->data set already and is skipped.
-    m->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    m->weight_buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, dit_gguf_weight_buffer_type(backend));
     if (!m->weight_buf) {
         fprintf(stderr, "[acestep-dit] failed to allocate weight buffer\n");
         if (map_buf) ggml_backend_buffer_free(map_buf);
