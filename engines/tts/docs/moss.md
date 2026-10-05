@@ -2,6 +2,37 @@
 
 Part of the [tts engine documentation](../README.md).
 
+## Vulkan validation
+
+All MOSS engines use the shared ggml GPU selector and GPU/CPU scheduler.
+With a Vulkan-enabled ggml install, `--gpu` can run MOSS-TTS/TTSD,
+MOSS-SoundEffect and MOSS-Speech on Vulkan. For a Vulkan-only development
+build, build ggml with `GGML_VULKAN=ON`, `GGML_METAL=OFF` and
+`GGML_CUDA=OFF`, install it, and configure the speech engine with that
+installation on `CMAKE_PREFIX_PATH`. On a build with several GPU backends,
+`TTS_CPP_GPU_BACKEND=vulkan` pins the shared selector for validation:
+
+```sh
+TTS_CPP_GPU_BACKEND=vulkan build/moss-cli --gpu --backbone moss-tts-delay-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf --text "Vulkan speech test." --out vulkan.wav
+ctest --test-dir build -R '^test-moss-vulkan$' --output-on-failure
+```
+
+The test generates small random-weight GGUFs and compares CPU and Vulkan
+outputs for Delay prefill/decode/reset, both codec halves, streaming and
+reduced-channel dialogue decoding, SoundEffect text/DiT/VAE, Speech's two
+LM heads and Whisper-VQ tokenizer. It covers F32, F16 and mixed Q8_0/F16
+weights, plus the Speech LM's BF16 export with an F16 tokenizer. It fails
+if Vulkan is unavailable instead of accepting a CPU-only run. The existing
+manual `tts CI` workflow runs it with `run_gpu=true`; no model downloads
+are required for this test.
+
+These generated-model checks pass on Apple M2 through MoltenVK. They do
+not establish full-checkpoint speech quality, performance, or Android and
+discrete-GPU compatibility. The per-model reference tests below remain the
+full-checkpoint validation path; MOSS-Speech's shared S3Gen/HiFT reply decoder
+also needs the real codec checkpoint.
+
 ## MOSS Delay
 
 [MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS) is a family of

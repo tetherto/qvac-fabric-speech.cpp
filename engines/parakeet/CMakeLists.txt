@@ -1360,6 +1360,15 @@ if (PARAKEET_BUILD_TESTS)
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
 
+    if (GGML_VULKAN)
+        add_executable(test-moss-transcribe-vulkan test/moss/test_transcribe_vulkan.cpp ${PARAKEET_MOSS_TEST_SOURCES})
+        target_link_libraries(test-moss-transcribe-vulkan PRIVATE ggml parakeet-backend-defs)
+        target_include_directories(test-moss-transcribe-vulkan PRIVATE src include ggml/include)
+        parakeet_apply_backend_defs(test-moss-transcribe-vulkan)
+        parakeet_apply_ccache(test-moss-transcribe-vulkan)
+        parakeet_register_test(test-moss-transcribe-vulkan LABEL "gpu")
+    endif()
+
     add_executable(test-moss-transcribe test/moss/test_transcribe.cpp ${PARAKEET_MOSS_TEST_SOURCES})
     target_link_libraries(test-moss-transcribe PRIVATE ggml parakeet-backend-defs)
     target_include_directories(test-moss-transcribe PRIVATE src include ggml/include)

@@ -2,6 +2,25 @@
 
 Part of the [parakeet engine documentation](../README.md).
 
+Vulkan can be selected explicitly with `--backend vulkan` (or an exact
+device such as `--backend Vulkan0`). This overrides `--gpu` and fails when
+the requested backend is unavailable; `--backend auto` retains the existing
+`--gpu`/CPU selection. The API equivalent is `TranscribeOptions::backend`.
+Build against a Vulkan-enabled ggml installation, then run:
+
+```sh
+build/moss-transcribe --model moss-transcribe-f16.gguf --audio speech.wav --backend vulkan
+ctest --test-dir build -R '^test-moss-transcribe-vulkan$' --output-on-failure
+```
+
+The Vulkan test generates random-weight GGUFs in F32, F16 and mixed Q8_0/F16
+and compares the encoder, adaptor, batched prefill and incremental decoding
+against CPU. It also checks explicit selection through the public engine and
+rejects unavailable backends. It runs in the manual `parakeet CI` GPU lane
+(`run_gpu=true`) without model downloads. These checks pass on Apple M2
+through MoltenVK; full-checkpoint transcript quality and discrete-GPU/mobile
+validation remain separate from this generated-model coverage.
+
 [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)
 transcribes speech and labels who spoke when, in one pass over the whole
 file. A Whisper-medium-shaped encoder (fine-tuned weights) turns each 30 s

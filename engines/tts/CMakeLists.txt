@@ -1429,6 +1429,14 @@ if (TTS_CPP_BUILD_TESTS)
                  "--ref" "${_tcb_cosy_ref}/tokenizer_ref.txt"
         REQUIRES "${_tcb_cosy_vocab}" "${_tcb_cosy_merges}" "${_tcb_cosy_ref}/tokenizer_ref.txt")
 
+    if (TTS_CPP_GGML_VULKAN)
+        add_executable(test-moss-vulkan test/moss/test_vulkan.cpp)
+        target_link_libraries(test-moss-vulkan PRIVATE tts-cpp)
+        target_include_directories(test-moss-vulkan PRIVATE src)
+        tts_cpp_apply_ccache(test-moss-vulkan)
+        tts_cpp_register_test(test-moss-vulkan LABEL "gpu")
+    endif()
+
     add_executable(test-moss-generation test/moss/test_generation.cpp)
     target_link_libraries(test-moss-generation PRIVATE tts-cpp)
     target_include_directories(test-moss-generation PRIVATE src)

@@ -231,7 +231,7 @@ struct TranscribeModel::Impl {
         config.text.vocab = (int) embedding->ne[1];
     }
 
-    void load(const std::string & path, bool use_gpu, int threads) {
+    void load(const std::string & path, bool use_gpu, int threads, const std::string & requested) {
         if (threads < 1 || threads > MAX_THREADS) {
             fail("threads must be 1.." + std::to_string(MAX_THREADS));
         }
@@ -246,7 +246,7 @@ struct TranscribeModel::Impl {
         }
         config = read_config(meta);
         validate_config(config);
-        backend = open_transcribe_backend(use_gpu);
+        backend = open_transcribe_backend(use_gpu, requested);
         duplicate_metadata_tensors();
         read_vocabulary_size();
         upload_weights(path);
@@ -279,8 +279,8 @@ struct TranscribeModel::Impl {
     }
 };
 
-TranscribeModel::TranscribeModel(const std::string & path, bool use_gpu, int n_threads) : impl_(new Impl) {
-    impl_->load(path, use_gpu, n_threads);
+TranscribeModel::TranscribeModel(const std::string & path, bool use_gpu, int n_threads, const std::string & backend) : impl_(new Impl) {
+    impl_->load(path, use_gpu, n_threads, backend);
 }
 
 TranscribeModel::~TranscribeModel() = default;

@@ -18,10 +18,12 @@ on:
     branches: [master]
     paths:
       - 'engines/tts/**'
+      - 'engines/test/**'
       - '.github/workflows/tts-ci.yml'
   pull_request:
     paths:
       - 'engines/tts/**'
+      - 'engines/test/**'
       - '.github/workflows/tts-ci.yml'
   workflow_dispatch:
     inputs:
@@ -476,6 +478,7 @@ jobs:
           import json, subprocess, sys
 
           EXPECTED = [
+              "test-moss-vulkan",
               "test-s3gen-cuda",
               "test-s3gen-vulkan",
               "test-chatterbox-parity-mtl-cuda",
@@ -518,4 +521,3 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           ctest --test-dir build -L gpu --output-on-failure --timeout 1200
-
