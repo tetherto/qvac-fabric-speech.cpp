@@ -17,6 +17,7 @@ public:
     SfxTokenizer & operator=(const SfxTokenizer &) = delete;
 
     std::vector<int32_t> encode(const std::string & text) const;
+    uint64_t storage_bytes() const;
 
 private:
     struct Impl;

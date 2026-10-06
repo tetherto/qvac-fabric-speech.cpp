@@ -1,5 +1,7 @@
 #pragma once
 
+#include "tts-cpp/fit.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -59,6 +61,12 @@ void require_shape(const ggml_tensor * tensor, int64_t ne0, int64_t ne1, int64_t
 void require_matrix(const ggml_tensor * tensor, int64_t ne0, int64_t ne1);
 void require_vector(const ggml_tensor * tensor, int64_t ne0, int64_t ne1);
 
+struct SfxMemory {
+    uint64_t device_bytes = 0;
+    uint64_t host_compute_bytes = 0;
+    uint64_t host_bytes = 0;
+};
+
 class SfxGraph {
 public:
     explicit SfxGraph(int max_nodes);
@@ -78,7 +86,7 @@ private:
 
 class SfxModel {
 public:
-    SfxModel(const std::string & path, bool use_gpu, int n_threads);
+    SfxModel(const std::string & path, bool use_gpu, int n_threads, bool measure_only = false);
     ~SfxModel();
     SfxModel(const SfxModel &) = delete;
     SfxModel & operator=(const SfxModel &) = delete;
@@ -91,6 +99,8 @@ public:
 
     void allocate(SfxGraph & graph);
     void compute(SfxGraph & graph);
+    SfxMemory measure(SfxGraph & graph);
+    FitResult measure_weights();
 
 private:
     struct Impl;

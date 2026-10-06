@@ -2,7 +2,7 @@
 
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
-#include "moss/sfx_prompt.h"
+#include "moss/sfx_request.h"
 #include "moss/sfx_sampler.h"
 #include "moss/sfx_tokenizer.h"
 
@@ -20,23 +20,14 @@ namespace {
 using detail::SfxDitSession;
 using detail::SfxModel;
 using detail::SfxTokenizer;
-
-constexpr int MAX_STEPS = 1000;
-constexpr float MAX_GUIDANCE = 50.0f;
-constexpr float MAX_SHIFT = 100.0f;
-constexpr int DECODE_WINDOW_FRAMES = 256;
-constexpr float UNGUIDED = 1.0f;
+using detail::ResolvedRequest;
 constexpr int TENTHS_PER_SECOND = 10;
-constexpr size_t MAX_PROMPT_BYTES = 8192;
+constexpr float UNGUIDED = 1.0f;
 
 struct PromptContexts {
     std::vector<float> positive;
     std::vector<float> negative;
 };
-
-bool is_valid_override(float value) {
-    return std::isfinite(value) && value >= 0.0f;
-}
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss sfx: " + message);
@@ -45,16 +36,6 @@ bool is_valid_override(float value) {
 double elapsed_ms(std::chrono::steady_clock::time_point since) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
 }
-
-struct ResolvedRequest {
-    std::string conditioning;
-    std::string negative_prompt;
-    int tenths = 0;
-    int steps = 0;
-    float guidance = 0.0f;
-    float shift = 0.0f;
-    uint32_t seed = 0;
-};
 
 } // namespace
 
@@ -81,62 +62,6 @@ struct SoundEffectEngine::Impl {
         detail::validate_text_encoder(*model);
         detail::validate_dit(*model);
         detail::validate_vae(*model);
-    }
-
-    ResolvedRequest resolve(const SoundEffectRequest & request) const {
-        validate_overrides(request);
-        const detail::SfxConfig & config = model->config();
-        ResolvedRequest resolved;
-        resolved.tenths = detail::seconds_in_tenths(request.seconds);
-        resolved.conditioning = detail::clean_prompt(detail::duration_prompt(request.prompt, resolved.tenths));
-        resolved.negative_prompt = detail::clean_prompt(request.negative_prompt);
-        resolved.steps = request.steps > 0 ? request.steps : config.default_steps;
-        resolved.guidance = request.guidance > 0.0f ? request.guidance : config.default_guidance;
-        resolved.shift = request.shift > 0.0f ? request.shift : config.sigma_shift;
-        resolved.seed = request.seed;
-        validate_prompt(request.prompt);
-        validate(resolved);
-        return resolved;
-    }
-
-    void validate_overrides(const SoundEffectRequest & request) const {
-        if (request.steps < 0) {
-            fail("steps must be 1.." + std::to_string(MAX_STEPS) + ", or 0 for the model default");
-        }
-        if (!is_valid_override(request.guidance)) {
-            fail("guidance must be in [1, " + std::to_string((int) MAX_GUIDANCE) + "], or 0 for the model default");
-        }
-        if (!is_valid_override(request.shift)) {
-            fail("shift must be in (0, " + std::to_string((int) MAX_SHIFT) + "], or 0 for the model default");
-        }
-        if (!std::isfinite(request.seconds)) {
-            fail("seconds must be a finite number");
-        }
-        if (request.prompt.size() > MAX_PROMPT_BYTES || request.negative_prompt.size() > MAX_PROMPT_BYTES) {
-            fail("prompts must be at most " + std::to_string(MAX_PROMPT_BYTES) + " bytes");
-        }
-    }
-
-    void validate_prompt(const std::string & prompt) const {
-        if (detail::clean_prompt(prompt).empty()) {
-            fail("prompt must not be empty");
-        }
-    }
-
-    void validate(const ResolvedRequest & request) const {
-        const float max_seconds = model->config().max_seconds;
-        if (request.tenths < 1 || (float) request.tenths > max_seconds * TENTHS_PER_SECOND) {
-            fail("seconds must be in (0, " + std::to_string(max_seconds) + "]");
-        }
-        if (request.steps > MAX_STEPS) {
-            fail("steps must be 1.." + std::to_string(MAX_STEPS));
-        }
-        if (request.guidance < UNGUIDED || request.guidance > MAX_GUIDANCE) {
-            fail("guidance must be in [1, " + std::to_string((int) MAX_GUIDANCE) + "]");
-        }
-        if (request.shift > MAX_SHIFT) {
-            fail("shift must be in (0, " + std::to_string((int) MAX_SHIFT) + "]");
-        }
     }
 
     std::vector<float> step_velocity(SfxDitSession & dit, const std::vector<float> & latents, float timestep,
@@ -198,7 +123,7 @@ struct SoundEffectEngine::Impl {
     std::vector<float> decode(const std::vector<float> & latents, int tenths) {
         const int64_t samples = output_samples(tenths);
         std::vector<float> pcm = detail::decode_latents(*model, latents, model->config().latent_frames(),
-                kept_frames(samples), DECODE_WINDOW_FRAMES,
+                kept_frames(samples), detail::SFX_DECODE_WINDOW_FRAMES,
                 [this](int, int) { return !cancel_requested.load(); });
         pcm.resize(std::min(pcm.size(), (size_t) samples));
         return pcm;
@@ -250,7 +175,7 @@ struct SoundEffectEngine::Impl {
             fail("generation already in progress on this instance");
         }
         cancel_requested = false;
-        return run(resolve(request), progress);
+        return run(detail::resolve_sfx_request(model->config(), request), progress);
     }
 };
 

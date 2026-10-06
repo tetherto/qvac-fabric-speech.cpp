@@ -147,6 +147,7 @@ not validate tensor payloads or guarantee memory remains free until loading.
 | Audio8 | `<tts-cpp/audio8/fit.h>` | `audio8::fit_params`, `audio8-fit-params` |
 | Pocket | `<tts-cpp/pocket/fit.h>` | `pocket::fit_params`, `pocket-cli --fit`; [workload guide](pocket-tts.md#native-memory-preflight) |
 | MOSS Delay / TTSD | `<tts-cpp/moss/fit.h>` | `moss::fit_params(options, workload)` |
+| MOSS-SoundEffect | `<tts-cpp/moss/sound_effect_fit.h>` | `moss::fit_params(options, request, margin_bytes)` |
 
 ### MOSS memory fit
 
@@ -190,3 +191,28 @@ The result follows `tts-cpp/fit.h`: `Success`/`fits`, `Failure`/`does-not-fit`,
 or `Error` for invalid arguments, an unreadable model, or failed measurement.
 Run `test-moss-fit` for model-free metadata, workload, streaming, reference,
 validation and runtime-regression coverage.
+
+### MOSS-SoundEffect memory preflight
+
+The sound-effect fitter uses the same GGUF metadata, tokenizer, request validation
+and text, DiT and VAE graph builders as generation. It neither uploads weights nor
+executes a graph, and accepts a GGUF containing only its metadata and tensor table.
+
+```cpp
+#include <tts-cpp/moss/sound_effect_fit.h>
+
+tts_cpp::moss::SoundEffectOptions options;
+options.model_path = "moss-sfx-v2-q8_0.gguf";
+tts_cpp::moss::SoundEffectRequest request;
+request.prompt = "Rain falling on a tin roof.";
+request.seconds = 8;
+const auto result = tts_cpp::moss::fit_params(options, request, 0);
+```
+
+`request` accepts the existing generation controls and model defaults. DiT always
+uses the model's full latent duration; requested seconds affect decoder windows
+and output storage. The shared graph allocator is priced at its peak across phases:
+`lm_compute_bytes` covers text/DiT, and `codec_compute_bytes` is any additional
+VAE demand. Their sum is the device compute peak. Host bytes include CPU fallback
+arenas, graph/scheduler descriptors, tokenizer storage, conditioning, diffusion
+vectors and decoded audio. The margin is explicit in the native API.

@@ -383,6 +383,8 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/sfx_sampler.cpp
     src/moss/sfx_tokenizer.cpp
     src/moss/sfx_engine.cpp
+    src/moss/sfx_request.cpp
+    src/moss/sfx_fit.cpp
     src/moss/gguf_metadata.cpp
     src/moss/speech_lm.cpp
     src/moss/speech_tokenizer.cpp
@@ -1490,6 +1492,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_compile_options(test-moss-sfx PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     tts_cpp_apply_ccache(test-moss-sfx)
     tts_cpp_register_test(test-moss-sfx)
+
+    add_executable(test-moss-sfx-fit test/moss/test_sfx_fit.cpp)
+    target_link_libraries(test-moss-sfx-fit PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx-fit PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-sfx-fit)
+    tts_cpp_register_test(test-moss-sfx-fit)
 
     add_executable(test-moss-speech test/moss/test_speech.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-speech PRIVATE tts-cpp)

@@ -1,4 +1,5 @@
 #include "moss/sfx_model.h"
+#include "moss/fit_measure.h"
 
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -18,6 +19,9 @@ namespace {
 
 constexpr const char * ARCH = "moss-sfx";
 constexpr int SCHED_NODES = 32768;
+constexpr int SCHED_SPLIT_INPUTS = 30;
+constexpr int SCHED_BACKEND_ID_ARRAYS = 4;
+constexpr int SCHED_COPY_DIRECTIONS = 2;
 constexpr int MAX_LAYERS = 128;
 constexpr int MAX_WIDTH = 1 << 16;
 constexpr int MAX_HEADS = 1024;
@@ -126,6 +130,8 @@ struct SfxModel::Impl {
     SfxConfig config;
     int n_threads = 1;
     const SfxGraph * allocated_graph = nullptr;
+    bool measure_only = false;
+    uint64_t measured_weights = 0;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
@@ -384,7 +390,25 @@ struct SfxModel::Impl {
         read_config();
         init_backend(use_gpu);
         duplicate_metadata_tensors();
-        upload_weights(path);
+        if (measure_only) {
+            prepare_measurement();
+        } else {
+            upload_weights(path);
+        }
+    }
+
+    void prepare_measurement() {
+        measured_weights = measure_fit_tensors(weights, backend);
+        weight_buffer = ggml_backend_buft_alloc_buffer(ggml_backend_get_default_buffer_type(backend), 0);
+        if (!weight_buffer) fail("weight measurement buffer failed");
+        ggml_backend_buffer_set_usage(weight_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        bind_measurement_weights();
+    }
+
+    void bind_measurement_weights() {
+        for (auto * tensor = ggml_get_first_tensor(weights); tensor; tensor = ggml_get_next_tensor(weights, tensor)) {
+            tensor->buffer = weight_buffer;
+        }
     }
 
     ggml_tensor * find(const std::string & name) const {
@@ -396,6 +420,7 @@ struct SfxModel::Impl {
     }
 
     void allocate(SfxGraph & graph) {
+        if (measure_only) fail("cannot allocate a metadata-only model");
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, SCHED_NODES, {weight_buffer})) {
             fail("scheduler initialization failed");
         }
@@ -407,6 +432,7 @@ struct SfxModel::Impl {
     }
 
     void compute(SfxGraph & graph) {
+        if (measure_only) fail("cannot compute a metadata-only model");
         if (allocated_graph != &graph) {
             fail("graph is no longer allocated; another graph ran on this model since");
         }
@@ -418,7 +444,8 @@ struct SfxModel::Impl {
     }
 };
 
-SfxModel::SfxModel(const std::string & path, bool use_gpu, int n_threads) : impl_(new Impl) {
+SfxModel::SfxModel(const std::string & path, bool use_gpu, int n_threads, bool measure_only) : impl_(new Impl) {
+    impl_->measure_only = measure_only;
     impl_->load(path, use_gpu, n_threads);
 }
 
@@ -438,5 +465,34 @@ std::vector<std::string> SfxModel::tokenizer_merges() const {
 
 void SfxModel::allocate(SfxGraph & graph) { impl_->allocate(graph); }
 void SfxModel::compute(SfxGraph & graph) { impl_->compute(graph); }
+
+FitResult SfxModel::measure_weights() {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    auto result = fit_device(impl_->backend);
+    result.device.weights_bytes = impl_->measured_weights;
+    result.host_bytes = fitutil::sat_add(gguf_get_meta_size(impl_->file),
+        fitutil::sat_add(ggml_get_mem_size(impl_->metadata), ggml_get_mem_size(impl_->weights)));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, impl_->config.vae.rates.capacity() * sizeof(int));
+    const uint64_t sched_nodes = uint64_t(SCHED_NODES) * (1 + SCHED_SPLIT_INPUTS * SCHED_COPY_DIRECTIONS);
+    const uint64_t descriptors = uint64_t(SCHED_NODES) * SCHED_SPLIT_INPUTS * SCHED_COPY_DIRECTIONS * sizeof(ggml_tensor);
+    result.host_bytes = fitutil::sat_add(result.host_bytes,
+        fitutil::sat_add(descriptors, sched_nodes * sizeof(int) * SCHED_BACKEND_ID_ARRAYS));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_graph_overhead_custom(SCHED_NODES, false));
+    return result;
+}
+
+SfxMemory SfxModel::measure(SfxGraph & graph) {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    SfxMemory result;
+    if (!::tts_cpp::detail::sched_fallback_ensure(impl_->sched, impl_->backend, SCHED_NODES, {impl_->weight_buffer})) {
+        fail("scheduler measurement initialization failed");
+    }
+    size_t sizes[2] = {0, 0};
+    ggml_backend_sched_reserve_size(impl_->sched.sched, graph.graph(), sizes);
+    result.device_bytes = sizes[0];
+    result.host_compute_bytes = sizes[1];
+    result.host_bytes = ggml_get_mem_size(graph.ctx());
+    return result;
+}
 
 } // namespace tts_cpp::moss::detail

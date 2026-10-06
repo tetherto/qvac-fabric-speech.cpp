@@ -61,7 +61,8 @@ Hebrew, Russian, Chinese and Hindi need external preprocessing. See
 
 Backend selection and model-specific validation are documented in
 [docs/backends.md](docs/backends.md) and [docs/testing.md](docs/testing.md).
-Memory preflight entry points, including MOSS, are indexed in
+Metadata-only memory preflight covers MOSS Delay/TTSD and MOSS-SoundEffect,
+including text/diffusion/decode workloads for sound effects. Entry points are indexed in
 [docs/api.md](docs/api.md#memory-fit-preflight).
 
 ## Performance

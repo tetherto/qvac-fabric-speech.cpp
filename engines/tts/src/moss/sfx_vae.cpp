@@ -149,14 +149,21 @@ std::vector<float> window_latents(const std::vector<float> & latents, int frames
     return slice;
 }
 
-std::vector<float> decode_window(SfxModel & model, const std::vector<float> & slice, int frames) {
+ggml_tensor * build_decode_graph(SfxModel & model, SfxGraph & graph, int frames) {
     const SfxConfig & config = model.config();
-    SfxGraph graph(VAE_GRAPH_NODES);
     VaeGraph builder{model, config.vae, graph};
     ggml_tensor * input = graph.input_f32(frames, config.vae.latent_dim);
     ggml_tensor * audio = builder.forward(input);
     ggml_set_output(audio);
     ggml_build_forward_expand(graph.graph(), audio);
+    ggml_set_name(input, "sfx_decode_input");
+    return audio;
+}
+
+std::vector<float> decode_window(SfxModel & model, const std::vector<float> & slice, int frames) {
+    SfxGraph graph(VAE_GRAPH_NODES);
+    auto * audio = build_decode_graph(model, graph, frames);
+    auto * input = ggml_get_tensor(graph.ctx(), "sfx_decode_input");
     model.allocate(graph);
     ggml_backend_tensor_set(input, slice.data(), 0, slice.size() * sizeof(float));
     model.compute(graph);
@@ -228,6 +235,26 @@ std::vector<float> decode_latents(SfxModel & model, const std::vector<float> & l
         return {};
     }
     return pcm;
+}
+
+SfxMemory measure_decode(SfxModel & model, int frames, int keep_frames, int window_frames) {
+    SfxMemory peak;
+    const auto windows = plan_windows(frames, keep_frames, window_frames);
+    std::vector<int> measured;
+    for (const auto & window : windows) {
+        if (std::find(measured.begin(), measured.end(), window.count) != measured.end()) continue;
+        measured.push_back(window.count);
+        SfxGraph graph(VAE_GRAPH_NODES);
+        build_decode_graph(model, graph, window.count);
+        const auto price = model.measure(graph);
+        peak.device_bytes = std::max(peak.device_bytes, price.device_bytes);
+        peak.host_compute_bytes = std::max(peak.host_compute_bytes, price.host_compute_bytes);
+        const uint64_t slice = (uint64_t) window.count * model.config().vae.latent_dim * sizeof(float);
+        const uint64_t audio = (uint64_t) window.count * model.config().vae.hop_length() * sizeof(float);
+        peak.host_bytes = std::max(peak.host_bytes, price.host_bytes + slice + audio);
+    }
+    peak.host_bytes += windows.capacity() * sizeof(Window);
+    return peak;
 }
 
 } // namespace tts_cpp::moss::detail

@@ -139,6 +139,28 @@ void validate_ids(const SfxModel & model, const std::vector<int32_t> & ids) {
     require_ids_in_vocabulary(ids, model.tensor("text.token_embd.weight")->ne[1]);
 }
 
+struct TextInputs {
+    ggml_tensor * ids;
+    ggml_tensor * positions;
+    ggml_tensor * mask;
+    ggml_tensor * output;
+};
+
+TextInputs build_text_graph(SfxModel & model, SfxGraph & graph, int64_t tokens) {
+    const auto & config = model.config().text;
+    TextGraph builder{model, config, graph};
+    ggml_tensor * input_ids = graph.input_i32(tokens);
+    ggml_tensor * positions = graph.input_i32(tokens);
+    ggml_tensor * mask = graph.input_f32(tokens, tokens);
+    ggml_tensor * cur = ggml_get_rows(graph.ctx(), model.tensor("text.token_embd.weight"), input_ids);
+    cur = builder.blocks(cur, tokens, positions, mask);
+    cur = builder.rms_norm(cur, model.tensor("text.output_norm.weight"));
+    ggml_set_output(cur);
+    ggml_build_forward_expand(graph.graph(), cur);
+
+    return {input_ids, positions, mask, cur};
+}
+
 } // namespace
 
 void validate_text_encoder(const SfxModel & model) {
@@ -158,25 +180,24 @@ std::vector<float> encode_text(SfxModel & model, const std::vector<int32_t> & id
     }
     const int64_t tokens = (int64_t) ids.size();
     SfxGraph graph(TEXT_GRAPH_NODES);
-    TextGraph builder{model, config, graph};
-    ggml_tensor * input_ids = graph.input_i32(tokens);
-    ggml_tensor * positions = graph.input_i32(tokens);
-    ggml_tensor * mask = graph.input_f32(tokens, tokens);
-    ggml_tensor * cur = ggml_get_rows(graph.ctx(), model.tensor("text.token_embd.weight"), input_ids);
-    cur = builder.blocks(cur, tokens, positions, mask);
-    cur = builder.rms_norm(cur, model.tensor("text.output_norm.weight"));
-    ggml_set_output(cur);
-    ggml_build_forward_expand(graph.graph(), cur);
-
+    const auto inputs = build_text_graph(model, graph, tokens);
     model.allocate(graph);
     const std::vector<int32_t> position_data = token_positions(ids.size());
     const std::vector<float> mask_data = causal_mask(ids.size());
-    ggml_backend_tensor_set(input_ids, ids.data(), 0, ids.size() * sizeof(int32_t));
-    ggml_backend_tensor_set(positions, position_data.data(), 0, position_data.size() * sizeof(int32_t));
-    ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
+    ggml_backend_tensor_set(inputs.ids, ids.data(), 0, ids.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(inputs.positions, position_data.data(), 0, position_data.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(inputs.mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
     model.compute(graph);
-    ggml_backend_tensor_get(cur, context.data(), 0, ggml_nbytes(cur));
+    ggml_backend_tensor_get(inputs.output, context.data(), 0, ggml_nbytes(inputs.output));
     return context;
+}
+
+SfxMemory measure_text(SfxModel & model, const std::vector<int32_t> & ids) {
+    validate_ids(model, ids);
+    if (ids.empty()) return {};
+    SfxGraph graph(TEXT_GRAPH_NODES);
+    build_text_graph(model, graph, (int64_t) ids.size());
+    return model.measure(graph);
 }
 
 } // namespace tts_cpp::moss::detail
