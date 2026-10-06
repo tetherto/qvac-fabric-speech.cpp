@@ -132,9 +132,9 @@ jobs:
           cmake --install ggml-src/build
           cmake -S . -B build-moss-e2e -DCMAKE_BUILD_TYPE=Release \
             -DSPEECH_BUILD_WHISPER=OFF -DSPEECH_BUILD_AUDIOGEN=OFF \
-            -DSPEECH_BUILD_TESTS=OFF -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DSPEECH_BUILD_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
-          cmake --build build-moss-e2e --target moss-cli moss-transcribe -j4
+          cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e -j4
       - name: Generate and transcribe with full checkpoints
         env:
           MODEL_CASE: ${{ matrix.model }}

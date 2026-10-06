@@ -27,6 +27,12 @@ if Vulkan is unavailable instead of accepting a CPU-only run. The existing
 manual `tts CI` workflow runs it with `run_gpu=true`; no model downloads
 are required for this test.
 
+The same workflow's `run_moss_e2e=true` lane downloads registered checkpoints
+and saves generated WAVs, transcripts, logs and model hashes. Cases run
+serially because runner services share GPU memory. Speech cases use
+`test-moss-speech-e2e` to make two replies on one engine instance, checking
+that staged model unloading also works on the next request.
+
 These generated-model checks pass on Apple M2 through MoltenVK. They do
 not establish full-checkpoint speech quality, performance, or Android and
 discrete-GPU compatibility. The per-model reference tests below remain the
@@ -353,6 +359,15 @@ vocoder at 24 kHz, conditioned on a voice prompt and a CAM++ speaker
 embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
 reuses it; the codec only changes the token-to-mel ratio and the speech
 vocabulary, which the S3Gen loader now reads from the GGUF.
+
+GPU speech replies run the LM and S3Gen decoder in separate memory phases.
+After token generation, the engine releases LM weights and KV/graph buffers
+before decoding audio, while retaining tokenizer metadata and backend identity.
+The decoder holds a matched S3Gen cache reference only for that decode; other
+cache owners retain their references. The next request reloads LM weights from
+the same GGUF, so keep the model file available. This reduces peak GPU memory
+at the cost of loading weights again between spoken replies. CPU execution
+keeps its resident LM weights.
 
 **Status — CPU and Metal, validated against the reference pipeline.** Every
 stage matches the PyTorch pipeline on a real question: the log-mel features

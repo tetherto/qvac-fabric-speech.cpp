@@ -275,7 +275,14 @@ struct SpeechEngine::Impl {
         result.reply_tokens = (int) codes.size();
         // Each request begins with a fresh prompt; the completed LM's KV and
         // prefill graph buffers are no longer needed during S3Gen/HiFT decode.
-        lm->release_generation();
+        if (options.use_gpu && !result.cancelled && !request.text_reply) {
+            // The full-precision LM and S3Gen decoder exceed smaller GPUs when
+            // resident together. Keep metadata/backend identity, but reload LM
+            // weights at the next begin() after the decoder has been released.
+            lm->release_weights();
+        } else {
+            lm->release_generation();
+        }
         if (!result.cancelled && !request.text_reply) {
             speak(result, codes, request);
         }

@@ -149,6 +149,10 @@ void speech(ggml_type precision) {
         require(gpu.context() == 0 && gpu.position() == 0, "speech release leaves no KV state");
         gpu.begin(512);
         check(expected, gpu.prefill(rows, batch));
+        gpu.release_weights();
+        vulkan(gpu.backend_name());
+        gpu.begin(512);
+        check(expected, gpu.prefill(rows, batch));
         for (int i = 0; i < 5; ++i) check(cpu.step(rows.back()), gpu.step(rows.back()));
         compare("speech audio-only", cpu.step(rows.back(), {false, true}).audio,
                 gpu.step(rows.back(), {false, true}).audio);

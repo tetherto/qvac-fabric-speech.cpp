@@ -153,15 +153,14 @@ struct SpeechLM::Impl {
     ggml_backend_buffer_t state_buffer = nullptr;
     ::tts_cpp::detail::sched_fallback sched;
     SpeechLmConfig config;
+    std::string model_path;
     int n_threads = 1;
     int n_ctx = 0;
     int pos = 0;
     std::vector<LayerCache> caches[BLOCK_COUNT];
 
     ~Impl() {
-        release_generation();
-        if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
-        if (weights) ggml_free(weights);
+        release_weights();
         if (metadata) ggml_free(metadata);
         if (file) gguf_free(file);
         if (backend) ggml_backend_free(backend);
@@ -278,6 +277,7 @@ struct SpeechLM::Impl {
             fail("threads must be 1.." + std::to_string(MAX_THREADS));
         }
         n_threads = threads;
+        model_path = path;
         file = gguf_init_from_file(path.c_str(), {true, &metadata});
         if (!file || !metadata) {
             fail("cannot read GGUF: " + path);
@@ -315,6 +315,27 @@ struct SpeechLM::Impl {
         pos = 0;
     }
 
+    void release_weights() {
+        release_generation();
+        if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
+        if (weights) ggml_free(weights);
+        weight_buffer = nullptr;
+        weights = nullptr;
+    }
+
+    void ensure_weights() {
+        if (weight_buffer) return;
+        // Clear any metadata left behind by a failed upload before retrying.
+        release_weights();
+        try {
+            duplicate_metadata_tensors();
+            upload_weights(model_path);
+        } catch (...) {
+            release_weights();
+            throw;
+        }
+    }
+
     void create_block_cache(int block) {
         caches[block].assign((size_t) block_layers(config, block), {});
         for (LayerCache & cache : caches[block]) {
@@ -334,6 +355,7 @@ struct SpeechLM::Impl {
             fail("context must be 1.." + std::to_string(config.n_ctx_train));
         }
         release_generation();
+        ensure_weights();
         n_ctx = aligned_context(context);
         const size_t layers = (size_t) config.n_shared_layers + 2 * (size_t) config.n_modality_layers;
         state = ggml_init({(2 * layers + TENSOR_SLACK) * ggml_tensor_overhead(), nullptr, true});
@@ -598,6 +620,7 @@ std::vector<int32_t> SpeechLM::tokenizer_types() const {
 
 void SpeechLM::begin(int n_ctx) { impl_->begin(n_ctx); }
 void SpeechLM::release_generation() { impl_->release_generation(); }
+void SpeechLM::release_weights() { impl_->release_weights(); }
 
 SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop) {
     return impl_->prefill(rows, batch_tokens, stop);

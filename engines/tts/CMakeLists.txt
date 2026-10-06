@@ -1492,6 +1492,14 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-speech)
     tts_cpp_register_test(test-moss-speech)
 
+    add_executable(test-moss-speech-e2e test/moss/test_speech_e2e.cpp)
+    target_link_libraries(test-moss-speech-e2e PRIVATE tts-cpp)
+    target_include_directories(test-moss-speech-e2e PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-speech-e2e)
+    # Invoked with downloaded full checkpoints by the manual Vulkan workflow.
+    tts_cpp_register_test(test-moss-speech-e2e LABEL "gpu")
+    set_property(TEST test-moss-speech-e2e PROPERTY SKIP_RETURN_CODE 77)
+
     add_executable(test-moss-sfx-parity test/moss/test_sfx_parity.cpp)
     target_link_libraries(test-moss-sfx-parity PRIVATE tts-cpp)
     target_include_directories(test-moss-sfx-parity PRIVATE src)

@@ -128,7 +128,7 @@ def run_case(case, build, models, output):
             raise
         finally:
             gpu_snapshot("after")
-        if not re.search(r"\[(?:moss-cli|moss-transcribe)\] backend: Vulkan\d*", log.read_text()):
+        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e)\] backend: Vulkan\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select Vulkan; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": "Vulkan"}
         print(f"PASS {name}: {checks[name]}", flush=True)
@@ -160,9 +160,9 @@ def run_case(case, build, models, output):
                "--out", str(output / "sound.wav")])
     elif family == "speech":
         codec = download("moss-speech-codec-f16", models, output)
-        base = [tts, "--mode", "s2s", "--model", model, "--codec", codec,
-                "--audio", str(sample), "--max-new-tokens", "256", *common]
-        invoke("reply", [*base, "--max-reply-seconds", "4", "--out", str(output / "reply.wav")])
+        invoke("reply", [str(build / "engines/tts/test-moss-speech-e2e"),
+               model, codec, str(sample), str(output)])
+        checks["reply-repeat"] = audio_stats(output / "reply-repeat.wav")
     else:
         transcript = output / "transcript.json"
         invoke("transcribe", [str(build / "engines/parakeet/moss-transcribe"),
