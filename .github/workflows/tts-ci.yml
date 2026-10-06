@@ -73,7 +73,6 @@ env:
 
 jobs:
   runner_names:
-    if: github.event.inputs.run_moss_e2e != 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/reusable-runner-names.yml
@@ -84,11 +83,9 @@ jobs:
     uses: ./.github/workflows/reusable-authorize-self-hosted.yml
 
   moss-vulkan-e2e:
-    needs: authorize
+    needs: [runner_names, authorize]
     if: github.event_name == 'workflow_dispatch' && inputs.run_moss_e2e && needs.authorize.outputs.allowed == 'true'
-    # Same Linux GPU label exported by reusable-runner-names.yml. This manual
-    # lane retains the authorization gate but needs no hosted matrix planner.
-    runs-on: qvac-ubuntu2204-x64-gpu
+    runs-on: ${{ needs.runner_names.outputs.linux_x64_gpu }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -158,6 +155,7 @@ jobs:
 
   build-test:
     needs: runner_names
+    if: github.event.inputs.run_moss_e2e != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -275,7 +273,7 @@ jobs:
   # so this lane is a separate job gated on fork-ci.
   build-test-macos:
     needs: [runner_names, authorize]
-    if: needs.authorize.outputs.allowed == 'true'
+    if: needs.authorize.outputs.allowed == 'true' && github.event.inputs.run_moss_e2e != 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
     timeout-minutes: 60
     steps:
