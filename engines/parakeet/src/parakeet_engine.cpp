@@ -757,6 +757,9 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
                                                int sample_rate,
                                                const StreamingOptions & opts,
                                                StreamingCallback on_segment) {
+    if (pimpl_->model.encoder_coreml_required) {
+        throw std::runtime_error("Core ML-only TDT model does not support streaming; use offline transcription");
+    }
     if (!samples || n_samples <= 0) {
         throw std::runtime_error("parakeet::Engine::transcribe_samples_stream: empty input");
     }
@@ -2104,6 +2107,9 @@ void StreamSession::cancel() {
 
 std::unique_ptr<StreamSession> Engine::stream_start(const StreamingOptions & opts,
                                                     StreamingCallback on_segment) {
+    if (pimpl_->model.encoder_coreml_required) {
+        throw std::runtime_error("Core ML-only TDT model does not support streaming; use offline transcription");
+    }
     if (opts.sample_rate != pimpl_->model.mel_cfg.sample_rate) {
         throw std::runtime_error(
             "Engine::stream_start: opts.sample_rate=" + std::to_string(opts.sample_rate) +

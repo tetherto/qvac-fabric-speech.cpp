@@ -23,6 +23,14 @@ def parse_args(
         help="Path to .nemo archive (tarball). Downloads from HF if missing.",
     )
     parser.add_argument(
+        "--packed-dir", type=Path,
+        help="Directory containing model.pt and architecture/ from a parakeet_affine_packed_v1 export.",
+    )
+    parser.add_argument(
+        "--encoder-coreml-only", action="store_true",
+        help="Write predictor/joint, preprocessor, tokenizer, and metadata only; requires a matching Core ML encoder sidecar at load.",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -34,14 +42,18 @@ def parse_args(
     parser.add_argument(
         "--quant",
         choices=QUANT_CHOICES,
-        default="q8_0",
+        default=None,
         help=(
             "Weight dtype for 2D projection matrices. Biases / norms / BN "
-            "stay at f32. q8_0 default (~2x smaller than f16, bit-equal "
+            "stay at f32. q8_0 is the .nemo default (~2x smaller than f16, bit-equal "
             "transcripts on clean speech across CTC/TDT/EOU/Sortformer); "
-            "pass --quant f16 for the bit-equal floating-point baseline, or "
+            "packed checkpoints default to f16. Pass --quant f16 for the floating-point baseline, or "
             "--quant bf16 for bfloat16 projection weights."
         ),
+    )
+    parser.add_argument(
+        "--allow-requantize-packed", action="store_true",
+        help="Acknowledge a second quantization of --packed-dir weights (for example q8_0 or q4_0).",
     )
     parser.add_argument(
         "--hf-repo",
@@ -59,6 +71,20 @@ def parse_args(
         ),
     )
     args = parser.parse_args(argv)
+    if args.quant is None:
+        args.quant = "f16" if args.packed_dir else "q8_0"
+    if args.packed_dir and args.quant not in ("f16", "f32") and not args.allow_requantize_packed:
+        parser.error(
+            "--packed-dir restores the checkpoint's affine weights; "
+            f"--quant {args.quant} would quantize them again. "
+            "Pass --allow-requantize-packed to opt in."
+        )
+    if args.encoder_coreml_only and (not args.packed_dir or args.quant != "f16"):
+        parser.error("--encoder-coreml-only currently requires --packed-dir and --quant f16")
     if args.out is None:
-        args.out = Path(f"models/{DEFAULT_MODEL_STEM}.{args.quant}.gguf")
+        if args.packed_dir:
+            suffix = ".coreml-only" if args.encoder_coreml_only else ""
+            args.out = args.packed_dir / f"{args.packed_dir.name}{suffix}.{args.quant}.gguf"
+        else:
+            args.out = Path(f"models/{DEFAULT_MODEL_STEM}.{args.quant}.gguf")
     return args

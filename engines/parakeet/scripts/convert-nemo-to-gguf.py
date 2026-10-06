@@ -104,6 +104,7 @@ src/parakeet_sortformer.h for the consumer structs):
 """
 
 import io
+import hashlib
 import math
 import os
 import sys
@@ -115,6 +116,7 @@ import numpy as np
 import torch
 import yaml
 from converter_args import parse_args
+from packed_tdt import load_packed
 
 
 ARCH = "parakeet-ctc"
@@ -932,7 +934,8 @@ def detect_sortformer_variant(ckpt: Path) -> str:
 
 
 def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
-               multilingual_tok: dict, quant: str, head: str = "auto"):
+               multilingual_tok: dict, quant: str, head: str = "auto",
+               encoder_coreml_only: bool = False):
     model_type = detect_model_type(cfg, head)
     if model_type == "rnnt":
         validate_rnnt_contract(cfg, sd)
@@ -1002,6 +1005,12 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     writer.add_file_type(FILE_TYPE_MAP[quant])
 
     writer.add_string("parakeet.model.type", model_type)
+    if encoder_coreml_only:
+        if model_type != "tdt":
+            raise ValueError("Core ML-only GGUF currently supports packed TDT only")
+        writer.add_string("parakeet.encoder.storage", "coreml-required")
+        with ckpt.open("rb") as source:
+            writer.add_string("parakeet.encoder.source_sha256", hashlib.file_digest(source, "sha256").hexdigest())
 
     conv_norm_type   = str(enc.get("conv_norm_type", "batch_norm"))
     conv_context_str = str(enc.get("conv_context_size", "default"))
@@ -1164,87 +1173,88 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         if key in sd:
             add_f32(name, sd[key])
 
-    add_conv("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
-    try_bias("encoder.subsampling.conv0.bias",    "encoder.pre_encode.conv.0.bias")
-    add_conv("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
-    try_bias("encoder.subsampling.conv1_dw.bias",   "encoder.pre_encode.conv.2.bias")
-    add_conv("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
-    try_bias("encoder.subsampling.conv1_pw.bias",   "encoder.pre_encode.conv.3.bias")
-    add_conv("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
-    try_bias("encoder.subsampling.conv2_dw.bias",   "encoder.pre_encode.conv.5.bias")
-    add_conv("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
-    try_bias("encoder.subsampling.conv2_pw.bias",   "encoder.pre_encode.conv.6.bias")
-    add_2d ("encoder.subsampling.out.weight",      sd["encoder.pre_encode.out.weight"])
-    try_bias("encoder.subsampling.out.bias",        "encoder.pre_encode.out.bias")
+    if not encoder_coreml_only:
+        add_conv("encoder.subsampling.conv0.weight",  sd["encoder.pre_encode.conv.0.weight"])
+        try_bias("encoder.subsampling.conv0.bias",    "encoder.pre_encode.conv.0.bias")
+        add_conv("encoder.subsampling.conv1_dw.weight", sd["encoder.pre_encode.conv.2.weight"])
+        try_bias("encoder.subsampling.conv1_dw.bias",   "encoder.pre_encode.conv.2.bias")
+        add_conv("encoder.subsampling.conv1_pw.weight", sd["encoder.pre_encode.conv.3.weight"])
+        try_bias("encoder.subsampling.conv1_pw.bias",   "encoder.pre_encode.conv.3.bias")
+        add_conv("encoder.subsampling.conv2_dw.weight", sd["encoder.pre_encode.conv.5.weight"])
+        try_bias("encoder.subsampling.conv2_dw.bias",   "encoder.pre_encode.conv.5.bias")
+        add_conv("encoder.subsampling.conv2_pw.weight", sd["encoder.pre_encode.conv.6.weight"])
+        try_bias("encoder.subsampling.conv2_pw.bias",   "encoder.pre_encode.conv.6.bias")
+        add_2d ("encoder.subsampling.out.weight",      sd["encoder.pre_encode.out.weight"])
+        try_bias("encoder.subsampling.out.bias",        "encoder.pre_encode.out.bias")
 
-    for i in range(n_layers):
-        k = f"encoder.layers.{i}"
-        p = f"encoder.blk.{i}"
+        for i in range(n_layers):
+            k = f"encoder.layers.{i}"
+            p = f"encoder.blk.{i}"
 
-        add_f32(f"{p}.norm_ff1.weight",   sd[f"{k}.norm_feed_forward1.weight"])
-        add_f32(f"{p}.norm_ff1.bias",     sd[f"{k}.norm_feed_forward1.bias"])
-        add_2d (f"{p}.ff1.linear1.weight", sd[f"{k}.feed_forward1.linear1.weight"])
-        try_bias(f"{p}.ff1.linear1.bias",  f"{k}.feed_forward1.linear1.bias")
-        add_2d (f"{p}.ff1.linear2.weight", sd[f"{k}.feed_forward1.linear2.weight"])
-        try_bias(f"{p}.ff1.linear2.bias",  f"{k}.feed_forward1.linear2.bias")
+            add_f32(f"{p}.norm_ff1.weight",   sd[f"{k}.norm_feed_forward1.weight"])
+            add_f32(f"{p}.norm_ff1.bias",     sd[f"{k}.norm_feed_forward1.bias"])
+            add_2d (f"{p}.ff1.linear1.weight", sd[f"{k}.feed_forward1.linear1.weight"])
+            try_bias(f"{p}.ff1.linear1.bias",  f"{k}.feed_forward1.linear1.bias")
+            add_2d (f"{p}.ff1.linear2.weight", sd[f"{k}.feed_forward1.linear2.weight"])
+            try_bias(f"{p}.ff1.linear2.bias",  f"{k}.feed_forward1.linear2.bias")
 
-        add_f32(f"{p}.norm_attn.weight",  sd[f"{k}.norm_self_att.weight"])
-        add_f32(f"{p}.norm_attn.bias",    sd[f"{k}.norm_self_att.bias"])
-        q_w = sd[f"{k}.self_attn.linear_q.weight"]
-        k_w = sd[f"{k}.self_attn.linear_k.weight"]
-        v_w = sd[f"{k}.self_attn.linear_v.weight"]
-        add_2d (f"{p}.attn.q.weight",     q_w)
-        try_bias(f"{p}.attn.q.bias",      f"{k}.self_attn.linear_q.bias")
-        add_2d (f"{p}.attn.k.weight",     k_w)
-        try_bias(f"{p}.attn.k.bias",      f"{k}.self_attn.linear_k.bias")
-        add_2d (f"{p}.attn.v.weight",     v_w)
-        try_bias(f"{p}.attn.v.bias",      f"{k}.self_attn.linear_v.bias")
+            add_f32(f"{p}.norm_attn.weight",  sd[f"{k}.norm_self_att.weight"])
+            add_f32(f"{p}.norm_attn.bias",    sd[f"{k}.norm_self_att.bias"])
+            q_w = sd[f"{k}.self_attn.linear_q.weight"]
+            k_w = sd[f"{k}.self_attn.linear_k.weight"]
+            v_w = sd[f"{k}.self_attn.linear_v.weight"]
+            add_2d (f"{p}.attn.q.weight",     q_w)
+            try_bias(f"{p}.attn.q.bias",      f"{k}.self_attn.linear_q.bias")
+            add_2d (f"{p}.attn.k.weight",     k_w)
+            try_bias(f"{p}.attn.k.bias",      f"{k}.self_attn.linear_k.bias")
+            add_2d (f"{p}.attn.v.weight",     v_w)
+            try_bias(f"{p}.attn.v.bias",      f"{k}.self_attn.linear_v.bias")
 
-        add_2d (f"{p}.attn.qkv.weight",   torch.cat([q_w, k_w, v_w], dim=0))
-        if use_bias:
-            q_b = sd[f"{k}.self_attn.linear_q.bias"]
-            k_b = sd[f"{k}.self_attn.linear_k.bias"]
-            v_b = sd[f"{k}.self_attn.linear_v.bias"]
-            add_f32(f"{p}.attn.qkv.bias",     torch.cat([q_b, k_b, v_b], dim=0))
-        add_2d (f"{p}.attn.out.weight",   sd[f"{k}.self_attn.linear_out.weight"])
-        try_bias(f"{p}.attn.out.bias",     f"{k}.self_attn.linear_out.bias")
-        add_2d (f"{p}.attn.pos.weight",   sd[f"{k}.self_attn.linear_pos.weight"])
-        add_f32(f"{p}.attn.pos_bias_u",   sd[f"{k}.self_attn.pos_bias_u"])
-        add_f32(f"{p}.attn.pos_bias_v",   sd[f"{k}.self_attn.pos_bias_v"])
+            add_2d (f"{p}.attn.qkv.weight",   torch.cat([q_w, k_w, v_w], dim=0))
+            if use_bias:
+                q_b = sd[f"{k}.self_attn.linear_q.bias"]
+                k_b = sd[f"{k}.self_attn.linear_k.bias"]
+                v_b = sd[f"{k}.self_attn.linear_v.bias"]
+                add_f32(f"{p}.attn.qkv.bias",     torch.cat([q_b, k_b, v_b], dim=0))
+            add_2d (f"{p}.attn.out.weight",   sd[f"{k}.self_attn.linear_out.weight"])
+            try_bias(f"{p}.attn.out.bias",     f"{k}.self_attn.linear_out.bias")
+            add_2d (f"{p}.attn.pos.weight",   sd[f"{k}.self_attn.linear_pos.weight"])
+            add_f32(f"{p}.attn.pos_bias_u",   sd[f"{k}.self_attn.pos_bias_u"])
+            add_f32(f"{p}.attn.pos_bias_v",   sd[f"{k}.self_attn.pos_bias_v"])
 
-        add_f32(f"{p}.norm_conv.weight",  sd[f"{k}.norm_conv.weight"])
-        add_f32(f"{p}.norm_conv.bias",    sd[f"{k}.norm_conv.bias"])
-        add_2d (f"{p}.conv.pw1.weight",   sd[f"{k}.conv.pointwise_conv1.weight"])
-        try_bias(f"{p}.conv.pw1.bias",    f"{k}.conv.pointwise_conv1.bias")
-        add_conv(f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
-        try_bias(f"{p}.conv.dw.bias",     f"{k}.conv.depthwise_conv.bias")
+            add_f32(f"{p}.norm_conv.weight",  sd[f"{k}.norm_conv.weight"])
+            add_f32(f"{p}.norm_conv.bias",    sd[f"{k}.norm_conv.bias"])
+            add_2d (f"{p}.conv.pw1.weight",   sd[f"{k}.conv.pointwise_conv1.weight"])
+            try_bias(f"{p}.conv.pw1.bias",    f"{k}.conv.pointwise_conv1.bias")
+            add_conv(f"{p}.conv.dw.weight",    sd[f"{k}.conv.depthwise_conv.weight"])
+            try_bias(f"{p}.conv.dw.bias",     f"{k}.conv.depthwise_conv.bias")
 
-        if conv_norm_type == "layer_norm":
-            ln_w = as_np(sd[f"{k}.conv.batch_norm.weight"], np.float32)
-            ln_b = as_np(sd[f"{k}.conv.batch_norm.bias"],   np.float32)
-            writer.add_tensor(f"{p}.conv.norm.weight", ln_w)
-            writer.add_tensor(f"{p}.conv.norm.bias",   ln_b)
-        else:
-            bn_w    = as_np(sd[f"{k}.conv.batch_norm.weight"],        np.float32)
-            bn_b    = as_np(sd[f"{k}.conv.batch_norm.bias"],          np.float32)
-            bn_mean = as_np(sd[f"{k}.conv.batch_norm.running_mean"],  np.float32)
-            bn_var  = as_np(sd[f"{k}.conv.batch_norm.running_var"],   np.float32)
-            bn_scale, bn_shift = fuse_bn(bn_w, bn_b, bn_mean, bn_var, eps=1e-5)
-            writer.add_tensor(f"{p}.conv.bn.scale", bn_scale)
-            writer.add_tensor(f"{p}.conv.bn.shift", bn_shift)
+            if conv_norm_type == "layer_norm":
+                ln_w = as_np(sd[f"{k}.conv.batch_norm.weight"], np.float32)
+                ln_b = as_np(sd[f"{k}.conv.batch_norm.bias"],   np.float32)
+                writer.add_tensor(f"{p}.conv.norm.weight", ln_w)
+                writer.add_tensor(f"{p}.conv.norm.bias",   ln_b)
+            else:
+                bn_w    = as_np(sd[f"{k}.conv.batch_norm.weight"],        np.float32)
+                bn_b    = as_np(sd[f"{k}.conv.batch_norm.bias"],          np.float32)
+                bn_mean = as_np(sd[f"{k}.conv.batch_norm.running_mean"],  np.float32)
+                bn_var  = as_np(sd[f"{k}.conv.batch_norm.running_var"],   np.float32)
+                bn_scale, bn_shift = fuse_bn(bn_w, bn_b, bn_mean, bn_var, eps=1e-5)
+                writer.add_tensor(f"{p}.conv.bn.scale", bn_scale)
+                writer.add_tensor(f"{p}.conv.bn.shift", bn_shift)
 
-        add_2d (f"{p}.conv.pw2.weight",   sd[f"{k}.conv.pointwise_conv2.weight"])
-        try_bias(f"{p}.conv.pw2.bias",    f"{k}.conv.pointwise_conv2.bias")
+            add_2d (f"{p}.conv.pw2.weight",   sd[f"{k}.conv.pointwise_conv2.weight"])
+            try_bias(f"{p}.conv.pw2.bias",    f"{k}.conv.pointwise_conv2.bias")
 
-        add_f32(f"{p}.norm_ff2.weight",   sd[f"{k}.norm_feed_forward2.weight"])
-        add_f32(f"{p}.norm_ff2.bias",     sd[f"{k}.norm_feed_forward2.bias"])
-        add_2d (f"{p}.ff2.linear1.weight", sd[f"{k}.feed_forward2.linear1.weight"])
-        try_bias(f"{p}.ff2.linear1.bias",  f"{k}.feed_forward2.linear1.bias")
-        add_2d (f"{p}.ff2.linear2.weight", sd[f"{k}.feed_forward2.linear2.weight"])
-        try_bias(f"{p}.ff2.linear2.bias",  f"{k}.feed_forward2.linear2.bias")
+            add_f32(f"{p}.norm_ff2.weight",   sd[f"{k}.norm_feed_forward2.weight"])
+            add_f32(f"{p}.norm_ff2.bias",     sd[f"{k}.norm_feed_forward2.bias"])
+            add_2d (f"{p}.ff2.linear1.weight", sd[f"{k}.feed_forward2.linear1.weight"])
+            try_bias(f"{p}.ff2.linear1.bias",  f"{k}.feed_forward2.linear1.bias")
+            add_2d (f"{p}.ff2.linear2.weight", sd[f"{k}.feed_forward2.linear2.weight"])
+            try_bias(f"{p}.ff2.linear2.bias",  f"{k}.feed_forward2.linear2.bias")
 
-        add_f32(f"{p}.norm_out.weight",   sd[f"{k}.norm_out.weight"])
-        add_f32(f"{p}.norm_out.bias",     sd[f"{k}.norm_out.bias"])
+            add_f32(f"{p}.norm_out.weight",   sd[f"{k}.norm_out.weight"])
+            add_f32(f"{p}.norm_out.bias",     sd[f"{k}.norm_out.bias"])
 
     if model_type == "ctc":
         dec_w, dec_b = resolve_ctc_head_tensors(sd)
@@ -1356,12 +1366,16 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
 
 def main():
     args = parse_args(__doc__)
-    ckpt = ensure_ckpt(args.ckpt, args.hf_repo)
-    cfg, sd, tok_bytes, multilingual_tok = load_nemo(ckpt)
+    if args.packed_dir:
+        ckpt = args.packed_dir / "model.pt"
+        cfg, sd, tok_bytes, multilingual_tok = load_packed(args.packed_dir)
+    else:
+        ckpt = ensure_ckpt(args.ckpt, args.hf_repo)
+        cfg, sd, tok_bytes, multilingual_tok = load_nemo(ckpt)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     write_gguf(
         args.out, ckpt, cfg, sd, tok_bytes, multilingual_tok, args.quant,
-        args.head,
+        args.head, args.encoder_coreml_only,
     )
 
 

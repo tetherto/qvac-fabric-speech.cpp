@@ -545,6 +545,32 @@ int64_t parakeet_coreml_fixed_mel_frames(
     return fixed_mel_frames_for(ctx, n_mels);
 }
 
+bool parakeet_coreml_validate_offline_encoder(
+        const struct parakeet_coreml_context * ctx,
+        int64_t n_mels,
+        int64_t d_model,
+        const char * source_sha256) {
+    if (!ctx || n_mels <= 0 || d_model <= 0 || !source_sha256 || !*source_sha256) return false;
+    const int64_t mel_frames = fixed_mel_frames_for(ctx, n_mels);
+    if (mel_frames <= 0) return false;
+    int64_t encoder_frames = mel_frames;
+    for (int i = 0; i < 3; ++i) encoder_frames = (encoder_frames + 1) / 2;
+    @autoreleasepool {
+        MLModel * model = (__bridge MLModel *) ctx->model;
+        NSString * expected_hash = [NSString stringWithUTF8String:source_sha256];
+        NSDictionary * creator_metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+        NSString * actual_hash = creator_metadata[@"parakeet.encoder.source_sha256"];
+        if (![actual_hash isKindOfClass:[NSString class]] ||
+            ![actual_hash isEqualToString:expected_hash]) return false;
+        NSString * name = [NSString stringWithUTF8String:ctx->output_name.c_str()];
+        MLMultiArrayConstraint * out =
+            model.modelDescription.outputDescriptionsByName[name].multiArrayConstraint;
+        if (!out) return false;
+        return parakeet::coreml_match_trailing_capacity(
+            dims_of(out.shape), encoder_frames, d_model).matched;
+    }
+}
+
 int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,
                            int64_t       n_mel_frames,
                            int64_t       n_mels,

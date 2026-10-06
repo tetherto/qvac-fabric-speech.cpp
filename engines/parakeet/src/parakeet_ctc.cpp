@@ -1743,6 +1743,9 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
                                       ParakeetCtcModel  & model,
                                       bool                verbose) {
     if (std::getenv("PARAKEET_COREML_DISABLE") != nullptr) {
+        if (model.encoder_coreml_required) {
+            throw std::runtime_error("parakeet: Core ML encoder is required but PARAKEET_COREML_DISABLE is set");
+        }
         if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder disabled via PARAKEET_COREML_DISABLE; using ggml\n");
         return;
     }
@@ -1774,6 +1777,16 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
         }
     } else if (verbose) {
         PARAKEET_LOG_INFO("parakeet: no Core ML encoder at '%s'; using ggml encoder\n", path.c_str());
+    }
+    if (model.encoder_coreml_required) {
+        if (!model.impl->ctx_coreml) {
+            throw std::runtime_error("parakeet: required Core ML encoder is missing or failed to load: " + path);
+        }
+        if (!parakeet_coreml_validate_offline_encoder(
+                model.impl->ctx_coreml, model.mel_cfg.n_mels,
+                model.encoder_cfg.d_model, model.encoder_source_sha256.c_str())) {
+            throw std::runtime_error("parakeet: required Core ML encoder has incompatible shape or checkpoint identity: " + path);
+        }
     }
 
     if (supported_sortformer) {
@@ -2217,6 +2230,25 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         throw std::runtime_error(
             "gguf: unsupported parakeet.model.type '" + mtype_str + "'");
     }
+    const std::string encoder_storage = get_str(g, "parakeet.encoder.storage", "gguf");
+    if (encoder_storage != "gguf" && encoder_storage != "coreml-required") {
+        throw std::runtime_error("gguf: unsupported parakeet.encoder.storage '" + encoder_storage + "'");
+    }
+    out_model.encoder_coreml_required = encoder_storage == "coreml-required";
+    if (out_model.encoder_coreml_required) {
+        out_model.encoder_source_sha256 = get_str(g, "parakeet.encoder.source_sha256", "");
+        if (out_model.encoder_source_sha256.size() != 64) {
+            throw std::runtime_error("gguf: coreml-required encoder is missing a source checkpoint SHA-256");
+        }
+    }
+    if (out_model.encoder_coreml_required && out_model.model_type != ParakeetModelType::TDT) {
+        throw std::runtime_error("gguf: coreml-required encoder currently supports TDT only");
+    }
+#ifndef PARAKEET_USE_COREML
+    if (out_model.encoder_coreml_required) {
+        throw std::runtime_error("gguf: this model requires a Core ML encoder; rebuild with PARAKEET_COREML=ON");
+    }
+#endif
 
     // Optional variant tag (empty for legacy GGUFs that predate the key).
     out_model.model_variant = get_str(g, "parakeet.model_variant", "");
@@ -2359,81 +2391,84 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         out_model.mel_cfg.window     = read_filterbank_to_vector(out_model.window);
     }
 
-    out_model.subsampling.conv0_w    = require_tensor(impl->ctx, "encoder.subsampling.conv0.weight");
-    out_model.subsampling.conv0_b    = maybe_tensor(impl->ctx, "encoder.subsampling.conv0.bias");
-    out_model.subsampling.conv1_dw_w = require_tensor(impl->ctx, "encoder.subsampling.conv1_dw.weight");
-    out_model.subsampling.conv1_dw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv1_dw.bias");
-    out_model.subsampling.conv1_pw_w = require_tensor(impl->ctx, "encoder.subsampling.conv1_pw.weight");
-    out_model.subsampling.conv1_pw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv1_pw.bias");
-    out_model.subsampling.conv2_dw_w = require_tensor(impl->ctx, "encoder.subsampling.conv2_dw.weight");
-    out_model.subsampling.conv2_dw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv2_dw.bias");
-    out_model.subsampling.conv2_pw_w = require_tensor(impl->ctx, "encoder.subsampling.conv2_pw.weight");
-    out_model.subsampling.conv2_pw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv2_pw.bias");
-    out_model.subsampling.out_w      = require_tensor(impl->ctx, "encoder.subsampling.out.weight");
-    out_model.subsampling.out_b      = maybe_tensor(impl->ctx, "encoder.subsampling.out.bias");
+    if (!out_model.encoder_coreml_required) {
+        out_model.subsampling.conv0_w    = require_tensor(impl->ctx, "encoder.subsampling.conv0.weight");
+        out_model.subsampling.conv0_b    = maybe_tensor(impl->ctx, "encoder.subsampling.conv0.bias");
+        out_model.subsampling.conv1_dw_w = require_tensor(impl->ctx, "encoder.subsampling.conv1_dw.weight");
+        out_model.subsampling.conv1_dw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv1_dw.bias");
+        out_model.subsampling.conv1_pw_w = require_tensor(impl->ctx, "encoder.subsampling.conv1_pw.weight");
+        out_model.subsampling.conv1_pw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv1_pw.bias");
+        out_model.subsampling.conv2_dw_w = require_tensor(impl->ctx, "encoder.subsampling.conv2_dw.weight");
+        out_model.subsampling.conv2_dw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv2_dw.bias");
+        out_model.subsampling.conv2_pw_w = require_tensor(impl->ctx, "encoder.subsampling.conv2_pw.weight");
+        out_model.subsampling.conv2_pw_b = maybe_tensor(impl->ctx, "encoder.subsampling.conv2_pw.bias");
+        out_model.subsampling.out_w      = require_tensor(impl->ctx, "encoder.subsampling.out.weight");
+        out_model.subsampling.out_b      = maybe_tensor(impl->ctx, "encoder.subsampling.out.bias");
 
-    // Use converter-pre-stacked encoder.blk.*.attn.qkv on GPU when the wide
-    // M=3*n_embd matmul helps; keep unstacked Q/K/V on CPU for cache locality.
-    // (Heuristic: stacked wins where separate matmuls under-fill the device;
-    // Metal stays unstacked here.)
-    const bool gate_qkv_stack =
-        impl->backend_active &&
-        !backend_is_cpu(impl->backend_active) &&
-        !backend_is_metal(impl->backend_active);
+        // Use converter-pre-stacked encoder.blk.*.attn.qkv on GPU when the wide
+        // M=3*n_embd matmul helps; keep unstacked Q/K/V on CPU for cache locality.
+        // (Heuristic: stacked wins where separate matmuls under-fill the device;
+        // Metal stays unstacked here.)
+        const bool gate_qkv_stack =
+            impl->backend_active &&
+            !backend_is_cpu(impl->backend_active) &&
+            !backend_is_metal(impl->backend_active);
 
-    out_model.blocks.resize(out_model.encoder_cfg.n_layers);
-    for (int i = 0; i < out_model.encoder_cfg.n_layers; ++i) {
-        BlockWeights & b = out_model.blocks[i];
-        const std::string p = "encoder.blk." + std::to_string(i) + ".";
+        out_model.blocks.resize(out_model.encoder_cfg.n_layers);
+        for (int i = 0; i < out_model.encoder_cfg.n_layers; ++i) {
+            BlockWeights & b = out_model.blocks[i];
+            const std::string p = "encoder.blk." + std::to_string(i) + ".";
 
-        b.norm_ff1_w  = require_tensor(impl->ctx, p + "norm_ff1.weight");
-        b.norm_ff1_b  = require_tensor(impl->ctx, p + "norm_ff1.bias");
-        b.ff1_l1_w    = require_tensor(impl->ctx, p + "ff1.linear1.weight");
-        b.ff1_l1_b    = maybe_tensor(impl->ctx, p + "ff1.linear1.bias");
-        b.ff1_l2_w    = require_tensor(impl->ctx, p + "ff1.linear2.weight");
-        b.ff1_l2_b    = maybe_tensor(impl->ctx, p + "ff1.linear2.bias");
+            b.norm_ff1_w  = require_tensor(impl->ctx, p + "norm_ff1.weight");
+            b.norm_ff1_b  = require_tensor(impl->ctx, p + "norm_ff1.bias");
+            b.ff1_l1_w    = require_tensor(impl->ctx, p + "ff1.linear1.weight");
+            b.ff1_l1_b    = maybe_tensor(impl->ctx, p + "ff1.linear1.bias");
+            b.ff1_l2_w    = require_tensor(impl->ctx, p + "ff1.linear2.weight");
+            b.ff1_l2_b    = maybe_tensor(impl->ctx, p + "ff1.linear2.bias");
 
-        b.norm_attn_w = require_tensor(impl->ctx, p + "norm_attn.weight");
-        b.norm_attn_b = require_tensor(impl->ctx, p + "norm_attn.bias");
-        b.attn_q_w    = require_tensor(impl->ctx, p + "attn.q.weight");
-        b.attn_q_b    = maybe_tensor(impl->ctx, p + "attn.q.bias");
-        b.attn_k_w    = require_tensor(impl->ctx, p + "attn.k.weight");
-        b.attn_k_b    = maybe_tensor(impl->ctx, p + "attn.k.bias");
-        b.attn_v_w    = require_tensor(impl->ctx, p + "attn.v.weight");
-        b.attn_v_b    = maybe_tensor(impl->ctx, p + "attn.v.bias");
-        b.attn_qkv_w  = gate_qkv_stack ? maybe_tensor(impl->ctx, p + "attn.qkv.weight") : nullptr;
-        b.attn_qkv_b  = gate_qkv_stack ? maybe_tensor(impl->ctx, p + "attn.qkv.bias")   : nullptr;
-        b.attn_out_w  = require_tensor(impl->ctx, p + "attn.out.weight");
-        b.attn_out_b  = maybe_tensor(impl->ctx, p + "attn.out.bias");
-        b.attn_pos_w  = require_tensor(impl->ctx, p + "attn.pos.weight");
-        b.pos_bias_u  = require_tensor(impl->ctx, p + "attn.pos_bias_u");
-        b.pos_bias_v  = require_tensor(impl->ctx, p + "attn.pos_bias_v");
+            b.norm_attn_w = require_tensor(impl->ctx, p + "norm_attn.weight");
+            b.norm_attn_b = require_tensor(impl->ctx, p + "norm_attn.bias");
+            b.attn_q_w    = require_tensor(impl->ctx, p + "attn.q.weight");
+            b.attn_q_b    = maybe_tensor(impl->ctx, p + "attn.q.bias");
+            b.attn_k_w    = require_tensor(impl->ctx, p + "attn.k.weight");
+            b.attn_k_b    = maybe_tensor(impl->ctx, p + "attn.k.bias");
+            b.attn_v_w    = require_tensor(impl->ctx, p + "attn.v.weight");
+            b.attn_v_b    = maybe_tensor(impl->ctx, p + "attn.v.bias");
+            b.attn_qkv_w  = gate_qkv_stack ? maybe_tensor(impl->ctx, p + "attn.qkv.weight") : nullptr;
+            b.attn_qkv_b  = gate_qkv_stack ? maybe_tensor(impl->ctx, p + "attn.qkv.bias")   : nullptr;
+            b.attn_out_w  = require_tensor(impl->ctx, p + "attn.out.weight");
+            b.attn_out_b  = maybe_tensor(impl->ctx, p + "attn.out.bias");
+            b.attn_pos_w  = require_tensor(impl->ctx, p + "attn.pos.weight");
+            b.pos_bias_u  = require_tensor(impl->ctx, p + "attn.pos_bias_u");
+            b.pos_bias_v  = require_tensor(impl->ctx, p + "attn.pos_bias_v");
 
-        b.norm_conv_w = require_tensor(impl->ctx, p + "norm_conv.weight");
-        b.norm_conv_b = require_tensor(impl->ctx, p + "norm_conv.bias");
-        b.conv_pw1_w  = require_tensor(impl->ctx, p + "conv.pw1.weight");
-        b.conv_pw1_b  = maybe_tensor(impl->ctx, p + "conv.pw1.bias");
-        b.conv_dw_w   = require_tensor(impl->ctx, p + "conv.dw.weight");
-        b.conv_dw_b   = maybe_tensor(impl->ctx, p + "conv.dw.bias");
-        if (out_model.encoder_cfg.conv_norm_type == ConvNormType::LayerNorm) {
-            b.conv_norm_w = require_tensor(impl->ctx, p + "conv.norm.weight");
-            b.conv_norm_b = require_tensor(impl->ctx, p + "conv.norm.bias");
-        } else {
-            b.conv_bn_scale = require_tensor(impl->ctx, p + "conv.bn.scale");
-            b.conv_bn_shift = require_tensor(impl->ctx, p + "conv.bn.shift");
+            b.norm_conv_w = require_tensor(impl->ctx, p + "norm_conv.weight");
+            b.norm_conv_b = require_tensor(impl->ctx, p + "norm_conv.bias");
+            b.conv_pw1_w  = require_tensor(impl->ctx, p + "conv.pw1.weight");
+            b.conv_pw1_b  = maybe_tensor(impl->ctx, p + "conv.pw1.bias");
+            b.conv_dw_w   = require_tensor(impl->ctx, p + "conv.dw.weight");
+            b.conv_dw_b   = maybe_tensor(impl->ctx, p + "conv.dw.bias");
+            if (out_model.encoder_cfg.conv_norm_type == ConvNormType::LayerNorm) {
+                b.conv_norm_w = require_tensor(impl->ctx, p + "conv.norm.weight");
+                b.conv_norm_b = require_tensor(impl->ctx, p + "conv.norm.bias");
+            } else {
+                b.conv_bn_scale = require_tensor(impl->ctx, p + "conv.bn.scale");
+                b.conv_bn_shift = require_tensor(impl->ctx, p + "conv.bn.shift");
+            }
+            b.conv_pw2_w  = require_tensor(impl->ctx, p + "conv.pw2.weight");
+            b.conv_pw2_b  = maybe_tensor(impl->ctx, p + "conv.pw2.bias");
+
+            b.norm_ff2_w  = require_tensor(impl->ctx, p + "norm_ff2.weight");
+            b.norm_ff2_b  = require_tensor(impl->ctx, p + "norm_ff2.bias");
+            b.ff2_l1_w    = require_tensor(impl->ctx, p + "ff2.linear1.weight");
+            b.ff2_l1_b    = maybe_tensor(impl->ctx, p + "ff2.linear1.bias");
+            b.ff2_l2_w    = require_tensor(impl->ctx, p + "ff2.linear2.weight");
+            b.ff2_l2_b    = maybe_tensor(impl->ctx, p + "ff2.linear2.bias");
+
+            b.norm_out_w  = require_tensor(impl->ctx, p + "norm_out.weight");
+            b.norm_out_b  = require_tensor(impl->ctx, p + "norm_out.bias");
         }
-        b.conv_pw2_w  = require_tensor(impl->ctx, p + "conv.pw2.weight");
-        b.conv_pw2_b  = maybe_tensor(impl->ctx, p + "conv.pw2.bias");
 
-        b.norm_ff2_w  = require_tensor(impl->ctx, p + "norm_ff2.weight");
-        b.norm_ff2_b  = require_tensor(impl->ctx, p + "norm_ff2.bias");
-        b.ff2_l1_w    = require_tensor(impl->ctx, p + "ff2.linear1.weight");
-        b.ff2_l1_b    = maybe_tensor(impl->ctx, p + "ff2.linear1.bias");
-        b.ff2_l2_w    = require_tensor(impl->ctx, p + "ff2.linear2.weight");
-        b.ff2_l2_b    = maybe_tensor(impl->ctx, p + "ff2.linear2.bias");
-
-        b.norm_out_w  = require_tensor(impl->ctx, p + "norm_out.weight");
-        b.norm_out_b  = require_tensor(impl->ctx, p + "norm_out.bias");
     }
 
     if (out_model.model_type == ParakeetModelType::CTC) {
@@ -4610,9 +4645,17 @@ int run_encoder(ParakeetCtcModel   & model,
                                   allow_coreml_padded)) {
         const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
         if (rc == 0) return 0;
+        if (model.encoder_coreml_required) {
+            PARAKEET_LOG_ERROR("parakeet: required Core ML encoder execution failed (rc=%d)\n", rc);
+            return rc;
+        }
         PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);
     }
 #endif
+    if (model.encoder_coreml_required) {
+        PARAKEET_LOG_ERROR("parakeet: required Core ML encoder cannot handle this input or execution mode\n");
+        return -1;
+    }
 
     auto & cache = model.impl->encoder_graphs;
     const int layers_key = (max_layers >= 0) ? max_layers : -1;

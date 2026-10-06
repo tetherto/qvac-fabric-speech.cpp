@@ -452,6 +452,9 @@ struct ParakeetCtcModel {
     std::vector<CtcLangRange> ctc_lang_ranges;
 
     bool supports_streaming = false;
+    // GGUF contains no encoder tensors; the matching Core ML sidecar is mandatory.
+    bool encoder_coreml_required = false;
+    std::string encoder_source_sha256;
 
     // EOU-specific token IDs (resolved from the GGUF's `parakeet.eou.*`
     // metadata; -1 if missing). The decoder pipeline keys on `eou_id`

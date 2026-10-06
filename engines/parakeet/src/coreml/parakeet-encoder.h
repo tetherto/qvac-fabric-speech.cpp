@@ -36,6 +36,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -57,6 +58,13 @@ void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 int64_t parakeet_coreml_fixed_mel_frames(
         const struct parakeet_coreml_context * ctx,
         int64_t n_mels);
+
+// Require a fixed input and an output matching this offline FastConformer.
+bool parakeet_coreml_validate_offline_encoder(
+        const struct parakeet_coreml_context * ctx,
+        int64_t n_mels,
+        int64_t d_model,
+        const char * source_sha256);
 
 // Run the encoder on the Apple Neural Engine.
 //
