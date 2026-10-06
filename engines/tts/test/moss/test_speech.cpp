@@ -310,6 +310,12 @@ void test_lm_batches_and_steps() {
     const SpeechLogits whole = prefill(lm, rows, (int) rows.size());
     check(whole.text.size() == (size_t) moss_fixtures::TEXT_VOCAB && whole.audio.size() == AUDIO_VOCAB,
           "prefill returns both heads");
+    lm.release_generation();
+    lm.release_generation();
+    check(lm.position() == 0 && lm.context() == 0, "released generation has no KV state");
+    expect_failure([&] { lm.step(rows.back()); }, "begin()", "decode after release requires begin()");
+    check(close(prefill(lm, rows, (int) rows.size()), whole),
+          "releasing generation retains weights and permits an identical new request");
     check(close(prefill(lm, rows, 1), whole), "token-by-token prefill matches one batch");
     check(close(prefill(lm, rows, 3), whole), "uneven batches match one batch");
     lm.begin((int) rows.size() + 1);

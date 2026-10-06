@@ -143,7 +143,12 @@ void speech(ggml_type precision) {
     };
     for (int batch : {1, 3, 4}) {
         cpu.begin(512); gpu.begin(512);
-        check(cpu.prefill(rows, batch), gpu.prefill(rows, batch));
+        const SpeechLogits expected = cpu.prefill(rows, batch);
+        check(expected, gpu.prefill(rows, batch));
+        gpu.release_generation();
+        require(gpu.context() == 0 && gpu.position() == 0, "speech release leaves no KV state");
+        gpu.begin(512);
+        check(expected, gpu.prefill(rows, batch));
         for (int i = 0; i < 5; ++i) check(cpu.step(rows.back()), gpu.step(rows.back()));
         compare("speech audio-only", cpu.step(rows.back(), {false, true}).audio,
                 gpu.step(rows.back(), {false, true}).audio);

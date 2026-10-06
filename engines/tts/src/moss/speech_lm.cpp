@@ -159,8 +159,7 @@ struct SpeechLM::Impl {
     std::vector<LayerCache> caches[BLOCK_COUNT];
 
     ~Impl() {
-        ::tts_cpp::detail::sched_fallback_free(sched);
-        release_cache();
+        release_generation();
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -307,6 +306,15 @@ struct SpeechLM::Impl {
         state = nullptr;
     }
 
+    void release_generation() {
+        // The scheduler references KV tensors, so destroy it before the cache.
+        ::tts_cpp::detail::sched_fallback_free(sched);
+        release_cache();
+        for (auto & block : caches) block.clear();
+        n_ctx = 0;
+        pos = 0;
+    }
+
     void create_block_cache(int block) {
         caches[block].assign((size_t) block_layers(config, block), {});
         for (LayerCache & cache : caches[block]) {
@@ -325,7 +333,7 @@ struct SpeechLM::Impl {
         if (!within(context, 1, config.n_ctx_train)) {
             fail("context must be 1.." + std::to_string(config.n_ctx_train));
         }
-        release_cache();
+        release_generation();
         n_ctx = aligned_context(context);
         const size_t layers = (size_t) config.n_shared_layers + 2 * (size_t) config.n_modality_layers;
         state = ggml_init({(2 * layers + TENSOR_SLACK) * ggml_tensor_overhead(), nullptr, true});
@@ -589,6 +597,7 @@ std::vector<int32_t> SpeechLM::tokenizer_types() const {
 }
 
 void SpeechLM::begin(int n_ctx) { impl_->begin(n_ctx); }
+void SpeechLM::release_generation() { impl_->release_generation(); }
 
 SpeechLogits SpeechLM::prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop) {
     return impl_->prefill(rows, batch_tokens, stop);

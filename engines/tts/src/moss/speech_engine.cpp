@@ -273,6 +273,9 @@ struct SpeechEngine::Impl {
         result.text = detail::speech_reply_text(*tokenizer, state.generated(), lm->config().tokens);
         const std::vector<int32_t> codes = detail::speech_reply_codes(state.generated(), lm->config().tokens);
         result.reply_tokens = (int) codes.size();
+        // Each request begins with a fresh prompt; the completed LM's KV and
+        // prefill graph buffers are no longer needed during S3Gen/HiFT decode.
+        lm->release_generation();
         if (!result.cancelled && !request.text_reply) {
             speak(result, codes, request);
         }

@@ -70,14 +70,14 @@ def audio_stats(path):
             "rms": math.sqrt(sum(x * x for x in samples) / len(samples)) / 32768}
 
 
-def reference(source, target, offset):
+def reference(source, target, offset, seconds=3):
     # Short real-speech excerpts, resampled to the TTS codec's required 24 kHz.
     with wave.open(str(source), "rb") as audio:
         if audio.getsampwidth() != 2 or audio.getnchannels() != 1:
             raise RuntimeError("Expected mono PCM16 reference")
         rate = audio.getframerate()
         audio.setpos(offset * rate)
-        samples = array.array("h", audio.readframes(3 * rate))
+        samples = array.array("h", audio.readframes(seconds * rate))
     if sys.byteorder != "little":
         samples.byteswap()
     resampled = array.array("h")
@@ -138,7 +138,7 @@ def run_case(case, build, models, output):
         encoder = download("moss-codec-encoder-f16", models, output)
         ref1, ref2 = output / "reference1.wav", output / "reference2.wav"
         reference(sample, ref1, 0)
-        reference(sample, ref2, 4)
+        reference(sample, ref2, 3, 5)
         base = [tts, "--backbone", model, "--decoder", decoder, "--language", "en",
                 "--max-new-tokens", "192", "--context", "4096", *common]
         if family == "tts":
@@ -150,7 +150,9 @@ def run_case(case, build, models, output):
             # Two reference slots exercise dialogue conditioning; these are
             # excerpts from the same speaker, not a voice identity quality test.
             invoke("dialogue", [*base, "--encoder", encoder, "--dialogue-ref", str(ref1),
-                   "--dialogue-ref", str(ref2), "--text", "[S1] Hello there. [S2] How are you?",
+                   "--dialogue-ref", str(ref2), "--text",
+                   "[S1] And so, my fellow Americans. [S2] Ask not what your country can do for you. "
+                   "[S1] Hello there. [S2] How are you?",
                    "--out", str(output / "dialogue.wav")])
     elif family == "sfx":
         invoke("sound", [tts, "--mode", "sfx", "--model", model, *common,
