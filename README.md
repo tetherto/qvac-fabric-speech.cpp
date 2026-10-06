@@ -165,6 +165,9 @@ Delay, MOSS-Speech, LavaSR, and MiniMax-Music3 have no Core ML sidecar and run
 on the ggml backends in their rows. Whisper's encoder sidecar (`WHISPER_COREML`) follows
 upstream whisper.cpp; see [its README](third_party/whisper.cpp/README.md).
 
+MOSS-TTS and MOSS-TTSD expose a metadata-only memory preflight through
+`tts_cpp::moss::fit_params`; see the [TTS memory-fit API](engines/tts/README.md#moss-memory-fit).
+
 ## Performance
 
 `RTF = inference_time / audio_duration`, lower is better. Each engine

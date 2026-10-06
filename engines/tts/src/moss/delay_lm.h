@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tts-cpp/fit.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -41,7 +42,7 @@ struct DelayLogits {
 
 class DelayLM {
 public:
-    DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx);
+    DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx, bool measure_only = false);
     ~DelayLM();
     DelayLM(const DelayLM &) = delete;
     DelayLM & operator=(const DelayLM &) = delete;
@@ -50,6 +51,7 @@ public:
     const char * backend_name() const;
     int position() const;
     int context() const;
+    FitResult measure(int prompt_rows, int generated_rows);
     void reset();
 
     std::vector<std::string> tokenizer_tokens() const;

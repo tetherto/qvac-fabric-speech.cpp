@@ -4,6 +4,7 @@
 #include "backend_util.h"
 #include "gguf_stream.h"
 #include "sched_dispatch.h"
+#include "moss/fit_measure.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -176,6 +177,8 @@ struct Codec::Impl {
     std::vector<BlockStream> streams;
     int stream_channels = 0;
     int64_t frames_decoded = 0;
+    bool measure_only = false;
+    uint64_t graph_host_bytes = 0;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
@@ -538,6 +541,10 @@ struct Codec::Impl {
         if (downsample <= 0) {
             fail("invalid frame geometry");
         }
+        if (measure_only) {
+            mark_fit_tensors(weights);
+            return;
+        }
         upload_weights(path);
     }
 
@@ -566,6 +573,7 @@ struct Codec::Impl {
             ggml_free(graph_ctx);
             graph_ctx = nullptr;
         }
+        graph_host_bytes = 0;
         inputs_i32.clear();
         inputs_f32.clear();
         cache_writes.clear();
@@ -579,6 +587,7 @@ struct Codec::Impl {
     ggml_tensor * input_i32(std::vector<int32_t> data) {
         ggml_tensor * tensor = ggml_new_tensor_1d(graph_ctx, GGML_TYPE_I32, (int64_t) data.size());
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_i32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -586,6 +595,7 @@ struct Codec::Impl {
     ggml_tensor * input_f32(std::vector<float> data, int64_t ne0, int64_t ne1) {
         ggml_tensor * tensor = ggml_new_tensor_2d(graph_ctx, GGML_TYPE_F32, ne0, ne1);
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_f32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -755,7 +765,8 @@ struct Codec::Impl {
         band.key_start = block.context > 0
                 ? std::max<int64_t>(0, first_query - (block.context - 1)) : 0;
         band.key_count = first_query + query_count - band.key_start;
-        band.mask = input_f32(banded_causal_mask(first_query, query_count,
+        band.mask = input_f32(measure_only ? std::vector<float>() :
+                banded_causal_mask(first_query, query_count,
                 band.key_start, band.key_count, block.context),
                 band.key_count, query_count);
         return band;
@@ -929,6 +940,7 @@ struct Codec::Impl {
         for (ggml_tensor * write : cache_writes) {
             ggml_build_forward_expand(graph, write);
         }
+        if (measure_only) return graph;
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer})) {
             fail("scheduler initialization failed");
         }
@@ -978,6 +990,10 @@ struct Codec::Impl {
             if (modules[im].is_transformer) {
                 create_block_stream(modules[im].transformer, streams[im]);
             }
+        }
+        if (measure_only) {
+            mark_fit_tensors(stream_ctx);
+            return;
         }
         stream_buffer = ggml_backend_alloc_ctx_tensors(stream_ctx, backend);
         if (!stream_buffer) {
@@ -1029,8 +1045,37 @@ struct Codec::Impl {
 
 };
 
-Codec::Codec(const std::string & path, bool use_gpu, int n_threads) : impl_(new Impl) {
+Codec::Codec(const std::string & path, bool use_gpu, int n_threads, bool measure_only) : impl_(new Impl) {
+    impl_->measure_only = measure_only;
     impl_->load(path, use_gpu, n_threads);
+}
+
+FitResult Codec::measure(int64_t length, int n_channels, bool streaming) {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    FitResult result = fit_device(impl_->backend);
+    result.device.weights_bytes = measure_fit_tensors(impl_->weights, impl_->backend);
+    if (streaming) {
+        impl_->reset_streams();
+        result.device.state_bytes = measure_fit_tensors(impl_->stream_ctx, impl_->backend);
+        for (auto & stream : impl_->streams) {
+            stream.position = stream.capacity;
+            stream.cached = stream.capacity;
+        }
+    }
+    impl_->begin_graph();
+    ggml_tensor * output = impl_->encoder
+        ? impl_->build_encode({}, align_up(length, impl_->downsample))
+        : impl_->build_decode(std::vector<int32_t>(length * n_channels), length, n_channels, streaming);
+    const auto price = measure_fit_graph(impl_->backend, impl_->finish_graph(output), GRAPH_NODES);
+    result.device.codec_compute_bytes = price.device_bytes;
+    result.host_bytes = fitutil::sat_add(price.host_bytes, impl_->graph_host_bytes);
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_nbytes(output));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, gguf_get_meta_size(impl_->file));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->metadata));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->weights));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->graph_ctx));
+    if (impl_->stream_ctx) result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->stream_ctx));
+    return result;
 }
 
 Codec::~Codec() = default;

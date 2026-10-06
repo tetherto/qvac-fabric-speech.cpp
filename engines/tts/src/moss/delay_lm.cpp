@@ -4,11 +4,13 @@
 #include "backend_util.h"
 #include "gguf_stream.h"
 #include "sched_dispatch.h"
+#include "moss/fit_measure.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -77,6 +79,9 @@ struct DelayLM::Impl {
     int n_threads = 1;
     int n_ctx = 0;
     int pos = 0;
+    bool measure_only = false;
+    uint64_t graph_host_bytes = 0;
+    ::tts_cpp::detail::fit_graph_price graph_price;
 
     ggml_tensor * tok_embd = nullptr;
     ggml_tensor * output_norm = nullptr;
@@ -320,6 +325,10 @@ struct DelayLM::Impl {
             cache_k[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim, n_ctx);
             cache_v[il] = ggml_new_tensor_2d(state, GGML_TYPE_F16, n_ctx, kv_dim);
         }
+        if (measure_only) {
+            mark_fit_tensors(state);
+            return;
+        }
         state_buffer = ggml_backend_alloc_ctx_tensors(state, backend);
         if (!state_buffer) {
             fail("KV cache allocation failed");
@@ -394,6 +403,10 @@ struct DelayLM::Impl {
         validate_tensor_shapes();
         validate_token_ids();
         allocate_cache();
+        if (measure_only) {
+            mark_fit_tensors(weights);
+            return;
+        }
         upload_weights(path);
     }
 
@@ -402,6 +415,7 @@ struct DelayLM::Impl {
             ggml_free(graph_ctx);
             graph_ctx = nullptr;
         }
+        graph_host_bytes = 0;
         inputs_i32.clear();
         inputs_f32.clear();
         const size_t buffer = (size_t) GRAPH_NODES * ggml_tensor_overhead() + ggml_graph_overhead_custom(GRAPH_NODES, false);
@@ -414,6 +428,7 @@ struct DelayLM::Impl {
     ggml_tensor * input_i32(std::vector<int32_t> data) {
         ggml_tensor * tensor = ggml_new_tensor_1d(graph_ctx, GGML_TYPE_I32, (int64_t) data.size());
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_i32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -421,6 +436,7 @@ struct DelayLM::Impl {
     ggml_tensor * input_f32(std::vector<float> data, int64_t ne0, int64_t ne1) {
         ggml_tensor * tensor = ggml_new_tensor_2d(graph_ctx, GGML_TYPE_F32, ne0, ne1);
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_f32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -511,6 +527,7 @@ struct DelayLM::Impl {
     }
 
     std::vector<float> attention_mask(int64_t n_tokens, int64_t total) const {
+        if (measure_only) return {};
         std::vector<float> mask(n_tokens * total, -std::numeric_limits<float>::infinity());
         for (int64_t iq = 0; iq < n_tokens; ++iq) {
             for (int64_t ik = 0; ik <= pos + iq; ++ik) {
@@ -598,6 +615,10 @@ struct DelayLM::Impl {
             ggml_build_forward_expand(graph, audio_logits[i]);
         }
 
+        if (measure_only) {
+            graph_price = measure_fit_graph(backend, graph, GRAPH_NODES);
+            return {};
+        }
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer, state_buffer})) {
             fail("scheduler initialization failed");
         }
@@ -624,8 +645,34 @@ struct DelayLM::Impl {
     }
 };
 
-DelayLM::DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx) : impl_(new Impl) {
+DelayLM::DelayLM(const std::string & path, bool use_gpu, int n_threads, int n_ctx, bool measure_only) : impl_(new Impl) {
+    impl_->measure_only = measure_only;
     impl_->load(path, use_gpu, n_threads, n_ctx);
+}
+
+FitResult DelayLM::measure(int prompt_rows, int generated_rows) {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    FitResult result = fit_device(impl_->backend);
+    result.device.weights_bytes = measure_fit_tensors(impl_->weights, impl_->backend);
+    result.device.state_bytes = measure_fit_tensors(impl_->state, impl_->backend);
+    DelayRow row;
+    row.audio.assign(impl_->config.n_vq, 0);
+    impl_->pos = 0;
+    impl_->forward(std::vector<DelayRow>(prompt_rows, row));
+    const auto prefill = impl_->graph_price;
+    const uint64_t prefill_host = impl_->graph_host_bytes;
+    impl_->pos = prompt_rows + generated_rows - 1;
+    impl_->forward({row});
+    result.device.lm_compute_bytes = std::max(prefill.device_bytes, impl_->graph_price.device_bytes);
+    result.host_bytes = fitutil::sat_add(
+        std::max(prefill_host, impl_->graph_host_bytes),
+        std::max(prefill.host_bytes, impl_->graph_price.host_bytes));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, gguf_get_meta_size(impl_->file));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->metadata));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->weights));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->graph_ctx));
+    if (impl_->state) result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->state));
+    return result;
 }
 
 DelayLM::~DelayLM() = default;

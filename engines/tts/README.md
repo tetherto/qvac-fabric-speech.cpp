@@ -397,3 +397,46 @@ The package code is released under the [MIT License](LICENSE). Models and
 conversion-time dependencies retain their own terms; see [NOTICE](NOTICE) for
 canonical upstream sources and license identities. This in-tree package does
 not bundle ggml.
+
+
+## MOSS memory fit
+
+`tts-cpp/moss/fit.h` provides `tts_cpp::moss::fit_params(options, workload)`
+for MOSS-TTS-v1.5 and MOSS-TTSD. Pass the same `EngineOptions` as synthesis,
+and specify all four workload fields explicitly:
+
+```cpp
+#include <tts-cpp/moss/fit.h>
+
+tts_cpp::moss::EngineOptions options;
+options.backbone_path = "moss-tts-delay-f16.gguf";
+options.decoder_path = "moss-codec-decoder-f16.gguf";
+options.use_gpu = true;
+const tts_cpp::moss::FitWorkload workload(128, 0, false, 256ull * 1024 * 1024);
+const auto result = tts_cpp::moss::fit_params(options, workload);
+```
+
+The fields are the full native prompt row count, total mono reference samples
+(0 without a reference), streaming intent, and memory headroom in bytes.
+Prompt rows must include the frontend's special tokens and any encoded speaker
+references or TTSD continuation rows. The fitter reads no reference recordings;
+the caller supplies their sample count. A positive reference count requires
+`encoder_path`. Use the TTSD backbone and include the total reference workload
+for dialogue. The existing runtime context, duration and reference validation
+also applies to the projection; generation settings remain unchanged.
+
+The projection reads GGUF metadata without reading weights, allocating device
+buffers, or running inference. Weightless GGUFs with the same tensor descriptors
+produce the same estimate. It uses the runtime LM and codec graph builders and
+size-only ggml allocators, including KV state, decoder streaming state, encoder
+work, host staging and generated PCM. Batch decoding follows the engine's
+existing windowed path for long sequences. Component peaks are summed as a
+conservative upper bound, including encoder allocations that can be released
+before synthesis. This can report `does-not-fit` for a workload whose actual
+peak is smaller. On CPU and Metal unified memory, host and device requirements
+compete for the same free memory.
+
+The result follows `tts-cpp/fit.h`: `Success`/`fits`, `Failure`/`does-not-fit`,
+or `Error` for invalid arguments, an unreadable model, or failed measurement.
+Run `test-moss-fit` for model-free metadata, workload, streaming, reference,
+validation and runtime-regression coverage.

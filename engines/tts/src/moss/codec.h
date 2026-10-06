@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tts-cpp/fit.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -9,7 +10,7 @@ namespace tts_cpp::moss::detail {
 
 class Codec {
 public:
-    Codec(const std::string & path, bool use_gpu, int n_threads);
+    Codec(const std::string & path, bool use_gpu, int n_threads, bool measure_only = false);
     ~Codec();
     Codec(const Codec &) = delete;
     Codec & operator=(const Codec &) = delete;
@@ -26,6 +27,7 @@ public:
     void begin_decode_stream(int n_channels = 0);
     std::vector<float> decode_stream(const std::vector<int32_t> & codes);
     int64_t frames_decoded() const;
+    FitResult measure(int64_t length, int n_channels, bool streaming);
 
 private:
     struct Impl;
