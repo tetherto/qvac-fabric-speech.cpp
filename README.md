@@ -122,4 +122,4 @@ and model-specific exceptions.
 | Synthesis, voice cloning, sound effects, speech-to-speech, enhancement | [TTS](engines/tts/README.md) |
 | Music generation and editing | [AudioGen](engines/audiogen/README.md) |
 | Benchmark quality diagnostics and model preparation | [Music alignment guide](scripts/benchmarks/music-alignment.md) |
-| Historical development and integration reports | [docs/HISTORY.md](docs/HISTORY.md) |
+| Historical development and integration reports | [Chatterbox](engines/tts/docs/history/chatterbox-port.md), [Supertonic](engines/tts/docs/history/supertonic-port.md), [Pocket](engines/tts/docs/history/pocket-integration.md), [Parakeet](engines/parakeet/docs/history/parakeet-port.md), [Strix Halo](engines/audiogen/docs/history/strix-halo.md) |

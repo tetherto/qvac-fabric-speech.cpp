@@ -50,7 +50,7 @@ contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar).
 
 ## Backend selection
 
-`parakeet --backend NAME` and `EngineOptions::device` select the runtime device.
+`parakeet --backend NAME` and `EngineOptions::backend` select the runtime device.
 Explicit requests fail if unavailable. Hexagon is experimental and requires
 a staged DSP library; see [docs/backends.md](docs/backends.md) for names,
 automatic placement and validation coverage.

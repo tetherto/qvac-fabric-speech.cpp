@@ -93,7 +93,7 @@ latency, build pins and reproduction steps live in
 | Backend selection | [docs/backends.md](docs/backends.md) |
 | Fixtures and static validation | [docs/testing.md](docs/testing.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| Archived port and integration reports | [../../docs/HISTORY.md](../../docs/HISTORY.md) |
+| Archived port and integration reports | [Chatterbox](docs/history/chatterbox-port.md), [Supertonic](docs/history/supertonic-port.md), [Pocket](docs/history/pocket-integration.md) |
 | Voice-clone backward passes | [docs/voiceclone-backward-gap-matrix.md](docs/voiceclone-backward-gap-matrix.md) |
 
 ## License

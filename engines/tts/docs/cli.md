@@ -31,7 +31,7 @@ generators also add the selected configuration directory.
 
 ```bash
 # Activate the Python environment from the Conversion tooling step
-. ../../chatterbox-ref/.venv/bin/activate
+. chatterbox-ref/.venv/bin/activate
 
 # --- Turbo (English, default) ---
 python scripts/convert-t3-turbo-to-gguf.py --out models/chatterbox-t3-turbo.gguf
