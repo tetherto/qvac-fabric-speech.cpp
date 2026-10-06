@@ -41,8 +41,7 @@ python scripts/convert-t3-turbo-to-gguf.py --out models/chatterbox-t3-turbo.gguf
 ```
 
 **`warning: s3gen GGUF lacks variant keys`** — you're running against a
-legacy S3Gen GGUF produced before the variant metadata was added in
-§3.19/§3.20. The defaults (`meanflow=true, n_timesteps=2, cfg_rate=0`)
+legacy S3Gen GGUF produced before variant metadata was added. The defaults (`meanflow=true, n_timesteps=2, cfg_rate=0`)
 match the historical Turbo behaviour, so legacy Turbo GGUFs continue
 to work.  For a Multilingual S3Gen GGUF, however, those defaults are
 wrong and the output will be garbage — re-run the converter:
@@ -54,7 +53,7 @@ python scripts/convert-s3gen-to-gguf.py --variant mtl --out models/chatterbox-s3
 **`error: --min-p must be in [0, 1]`** / `--cfg-weight must be >= 0` /
 `--exaggeration must be in [0, 1]` — the MTL sampling knobs reject
 out-of-range values up front instead of producing wrong-but-not-crashing
-output.  Pass values inside the documented ranges (see "Run" above).
+output.  Pass values inside the documented ranges (see [CLI sampling flags](cli.md#useful-flags)).
 
 **`--debug requires --ref-dir`** — debug mode substitutes Python-dumped
 random bits to make every intermediate tensor bit-exactly comparable.
@@ -69,6 +68,7 @@ between `std::mt19937` and `torch.rand`).
 
 **Slower than real-time** — make sure you built a Release configuration,
 requested an available backend, and selected an appropriate `--threads` value.
-Most TTS CLI and engine defaults cap automatic CPU threads at 4 because these
-graphs can regress under oversubscription; more threads are not automatically
-faster.
+Several engines cap automatic threads at four, while Supertonic selects its
+default by backend and graph path and Pocket uses separate CPU workers. See
+[per-surface defaults](api.md#defaults-that-differ-by-surface); more threads are
+not automatically faster.

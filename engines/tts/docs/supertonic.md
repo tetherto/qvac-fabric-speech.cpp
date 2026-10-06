@@ -8,14 +8,13 @@ The tree also contains a Supertonic path.  It is
 model-specific: the official Supertone ONNX files and assets are converted
 into one GGUF, then a ggml C++ runtime runs the known Supertonic stages on
 CPU or, with `--n-gpu-layers > 0`, on Metal (Apple), Vulkan, OpenCL (Adreno),
-or CUDA when that backend is compiled in.  Metal is the fastest backend
-measured so far: on an Apple M5 (10-core GPU) Supertonic 3 `q8_0` renders a
+or CUDA when that backend is compiled in.  A recorded Apple benchmark found: on an Apple M5 (10-core GPU) Supertonic 3 `q8_0` renders a
 3.1 s / 9.6 s / 16.3 s utterance in `32.5 / 52.8 / 77.0 ms` (`RTF 0.010 /
 0.005 / 0.005`, medians of 40 warm runs), 2.2x / 2.0x / 2.0x faster than the
 Metal path before the one-graph stages and kernel fusions below, measured back
 to back against it; the `f16` GGUF renders the same texts in `31.6 / 51.7 /
 75.9 ms`.  Supertonic 2 `q8_0` measured `91.4 ms` total on an M2 (see
-[`PROGRESS_SUPERTONIC.md`](../PROGRESS_SUPERTONIC.md)).
+[Supertonic port archive](history/supertonic-port.md)).
 
 There are three related upstream bundles:
 
@@ -203,7 +202,7 @@ The vocoder is the second-largest stage of a synthesis (about a fifth of a
 Metal run, more than a quarter of a CPU one) and the one Supertonic stage with
 a fixed convolutional topology and a single variable dimension; the duration
 predictor, text encoder, and vector estimator stay on ggml. The earlier
-ONNX-Runtime CoreML-EP measurement (see PROGRESS_SUPERTONIC.md) ran the whole
+ONNX-Runtime CoreML-EP measurement (see the archived Supertonic port report) ran the whole
 pipeline through shape-generic graphs and lost to ggml everywhere; the sidecar
 is a fixed-shape, float16 `jit.trace` export of the vocoder alone, which is
 the form Core ML places on the Neural Engine. Export it from the model GGUF:

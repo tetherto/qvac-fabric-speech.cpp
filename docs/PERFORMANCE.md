@@ -2,9 +2,15 @@
 
 Part of the [qvac-fabric-speech.cpp documentation](../README.md).
 
-### ASR, end-of-utterance, diarization
+These dated snapshots preserve their original workloads and build versions.
+For full campaigns and reproduction methods, see [Parakeet](../engines/parakeet/docs/performance.md),
+[TTS](../engines/tts/docs/performance.md), and [AudioGen](../engines/audiogen/docs/performance.md).
+Quality diagnostics and MiniMax benchmark preparation are documented in the
+[music alignment guide](../scripts/benchmarks/music-alignment.md).
 
-CI numbers from the published `@qvac/asr-ggml@0.1.1` addon ([run 31603189415](https://github.com/tetherto/qvac/actions/runs/31603189415), 2026-08-12), `q8_0` GGUFs, 1 warmup plus 5 timed runs, host `qvac-ubuntu2204-x64-gpu` (CPU: Intel Core i5-13500, GPU: NVIDIA RTX 4000 SFF Ada, Vulkan). Full table: [engines/parakeet/README.md](../engines/parakeet/README.md#performance).
+## ASR, end-of-utterance, diarization
+
+CI numbers from the published `@qvac/asr-ggml@0.1.1` addon ([run 31603189415](https://github.com/tetherto/qvac/actions/runs/31603189415), 2026-08-12), `q8_0` GGUFs, 1 warmup plus 5 timed runs, host `qvac-ubuntu2204-x64-gpu` (CPU: Intel Core i5-13500, GPU: NVIDIA RTX 4000 SFF Ada, Vulkan). Full table: [engines/parakeet/README.md](../engines/parakeet/docs/performance.md#asr-addon-ci-2026-08-12).
 
 | Model | CPU RTF | CPU wall | Vulkan RTF | Vulkan wall |
 |---|--:|--:|--:|--:|
@@ -16,7 +22,7 @@ CI numbers from the published `@qvac/asr-ggml@0.1.1` addon ([run 31603189415](ht
 | Whisper base | 0.035 | 699 ms | 0.0057 | 117 ms |
 | Whisper small | 0.122 | 2453 ms | 0.0098 | 200 ms |
 
-#### speech-cpp CI (2026-09-07, CPU + macOS)
+### speech-cpp CI (2026-09-07, CPU + macOS)
 
 CPU only on Linux; macOS whisper rows run on Metal (`MTL0`).
 
@@ -33,9 +39,9 @@ CPU only on Linux; macOS whisper rows run on Metal (`MTL0`).
 
 Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
-### Text-to-speech
+## Text-to-speech
 
-CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](https://github.com/tetherto/qvac/actions/runs/31603192731), 2026-08-12), `q4_0` GGUFs, same host. Full table: [engines/tts/README.md](../engines/tts/README.md#performance).
+CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](https://github.com/tetherto/qvac/actions/runs/31603192731), 2026-08-12), `q4_0` GGUFs, same host. Full table: [engines/tts/README.md](../engines/tts/docs/performance.md#ci-benchmarks-2026-08-12-linux-x86-64).
 
 | Model | CPU RTF | Vulkan RTF | Vulkan wall | Vulkan tok/s |
 |---|--:|--:|--:|--:|
@@ -45,7 +51,7 @@ CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](ht
 | Supertonic Multilingual | 0.101 | 0.013 | 84 ms | 1087 |
 | Supertonic 3 | 0.225 | 0.029 | 118 ms | 631 |
 
-#### speech-cpp CI (2026-09-07, CPU + macOS)
+### speech-cpp CI (2026-09-07, CPU + macOS)
 
 | Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
 |---|---|---|--:|--:|--:|
@@ -58,11 +64,11 @@ CI numbers from the published `@qvac/tts-ggml@0.6.2` addon ([run 31603192731](ht
 | Cosyvoice: cosyvoice3-llm-q8_0 | linux | CPU | 67695 | 18.0 | 1416 |
 | Cosyvoice: cosyvoice3-llm-q8_0 | macos | CPU | 46825 | 12.3 | 1467 |
 
-`—` RTF for chatterbox because it is text-driven variable output.
+`—` means RTF was not reported in the benchmark artifact.
 
 Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
-### Music generation & other engines (speech-cpp CI, 2026-09-07)
+## Music generation & other engines (speech-cpp CI, 2026-09-07)
 
 | Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
 |---|---|---|--:|--:|--:|
@@ -73,7 +79,7 @@ Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speec
 
 Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
-### Apple silicon
+## Apple silicon
 
 | Model | Host | Backend | Quantization | RTF | vs real-time |
 |---|---|---|---|--:|--:|
@@ -85,9 +91,9 @@ Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speec
 | Chatterbox Multilingual (`--cfm-steps 7`) | Mac Studio M3 Ultra | Metal | `q4_0` | 0.30 | 3.3x |
 | Chatterbox Multilingual | Apple M4 | Metal | `q4_0` | 1.37 | 0.73x |
 
-### Streaming latency
+## Streaming latency
 
-Chatterbox on Apple M4 Metal, 317 speech tokens (12.7 s of audio), `--stream-first-chunk-tokens 10 --stream-chunk-tokens 25 --stream-cfm-steps 1`. Full table: [engines/tts/README.md](../engines/tts/docs/performance.md#streaming-mode--low-latency-playback).
+Chatterbox on Apple M4 Metal, 317 speech tokens (12.7 s of audio), `--stream-first-chunk-tokens 10 --stream-chunk-tokens 25 --stream-cfm-steps 1`. Full table: [TTS streaming performance](../engines/tts/docs/performance.md#streaming-mode--low-latency-playback).
 
 | Metric | Value |
 |---|--:|
@@ -96,3 +102,16 @@ Chatterbox on Apple M4 Metal, 317 speech tokens (12.7 s of audio), `--stream-fir
 | overall RTF | 0.90 |
 
 On-device Android and iOS performance is tracked by the benchmark lanes in [QVAC](https://github.com/tetherto/qvac).
+
+## Brain-computer interface (2026-08-12)
+
+
+CI numbers from the published `@qvac/bci-whispercpp@0.6.0` addon ([run 31602627344](https://github.com/tetherto/qvac/actions/runs/31602627344), 2026-08-12), `ggml-bci-windowed` model. Throughput in tokens/s, higher is better.
+
+| Host | CPU tok/s | Vulkan tok/s | Vulkan wall |
+|---|--:|--:|--:|
+| Linux x86-64 (i5-13500 / RTX 4000 SFF Ada) | 27.0 | 355.6 | 42 ms |
+| Windows x64 (`qvac-win25-x64-gpu`) | 20.1 | 36.0 | 349 ms |
+| Linux arm64 (`ubuntu-24.04-arm`, CPU-only lane) | 16.8 | n/a | n/a |
+
+The macOS arm64 lane runs on the GitHub-hosted `macos-26` runner, whose virtualised Metal device is not representative (6.6 tok/s vs 398 tok/s on the previously used self-hosted M-series box), so it is omitted here.

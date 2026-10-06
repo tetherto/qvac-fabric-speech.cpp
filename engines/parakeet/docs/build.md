@@ -7,8 +7,10 @@ Part of the [parakeet engine documentation](../README.md).
 ### Standalone engine build
 
 The standalone build owns its ggml dependency. From the repository root, clone
-the pinned `qvac-ext-ggml@speech` branch into `engines/parakeet/ggml`, then
-configure the engine directly:
+`qvac-ext-ggml@speech` into `engines/parakeet/ggml`, then
+configure the engine directly. The setup script selects the branch rather
+than a fixed commit; record its revision, or fetch/check out the registry
+source REF before configuring when reproducing a packaged build:
 
 ```bash
 engines/parakeet/scripts/setup-ggml.sh
@@ -124,4 +126,4 @@ explicit OpenMP installation.
 | `scripts/` | ggml setup, conversion, Core ML, references, and package validation |
 | `ggml/` | Standalone bundled checkout of `qvac-ext-ggml@speech` |
 | `models/`, `artifacts/`, `test/samples/` | Local/runtime test fixtures |
-| `PROGRESS.md` | Detailed implementation and parity history |
+| `docs/history/parakeet-port.md` | Archived implementation and parity history |

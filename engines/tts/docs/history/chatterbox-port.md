@@ -1,5 +1,9 @@
 # Chatterbox → ggml Port: Development Journal
 
+Archived development record. Commands, layouts, status statements and open
+items describe the revisions recorded here and are not current usage guidance.
+For supported behavior, see the [engine README](../../README.md).
+
 This document tracks the port of **Chatterbox** (Resemble AI, MIT license)
 to `ggml`, from the first exploratory scoping all the way to the optimized
 end-to-end CPU/GPU binary, in the order things actually happened.  §3.1 –
@@ -18,7 +22,7 @@ S3Gen weight-quantisation pass.
 
 ---
 
-## Current status (end of journey)
+## Historical implementation snapshot
 
 Everything runs in pure C++/ggml on CPU. The main end-to-end tool is one binary:
 
@@ -2455,7 +2459,7 @@ Mirrors the shape `stable-diffusion.cpp` uses with its
 
 ### What landed here (chatterbox.cpp side)
 
-- A single 13/-2-line additive edit to the top of [`CMakeLists.txt`](CMakeLists.txt):
+- A single 13/-2-line additive edit to the top of [`CMakeLists.txt`](../../CMakeLists.txt):
 
   ```cmake
   option(TTS_CPP_USE_SYSTEM_GGML "tts-cpp: use system-installed GGML library" OFF)
@@ -2488,7 +2492,7 @@ Mirrors the shape `stable-diffusion.cpp` uses with its
 - An external `ggml` overlay port was published off ggml `master`
   (same commit `stable-diffusion-cpp` builds against) with the same
   Metal patch we ship under
-  [`patches/ggml-metal-chatterbox-ops.patch`](patches/ggml-metal-chatterbox-ops.patch)
+  `patches/ggml-metal-chatterbox-ops.patch` (historical file; no longer present)
   applied as real source commits.  The patch file itself is retained
   alongside the overlay as the source-of-truth artefact for
   re-application against future ggml syncs.
@@ -2529,7 +2533,7 @@ runtime CFM step count, MTL T3 step batching, and a faster MLP path.
 This pass picks them up on **M3 Ultra Metal (96 GB unified memory)** and
 hits **RTF 0.30** (Q4_0) / **0.32** (F16) end-to-end on the same Spanish
 prompt, seed 42, `--temp 0 --top-k 1`, voice = `jfk.wav`.  Pre-rationale
-in [`/Users/user002/.cursor/plans/mtl_metal_optimization_breadth_7807d6e0.plan.md`](.cursor/plans/mtl_metal_optimization_breadth_7807d6e0.plan.md);
+in `/Users/user002/.cursor/plans/mtl_metal_optimization_breadth_7807d6e0.plan.md` (historical file; no longer present);
 this section is the post-mortem with positive **and** negative findings.
 
 **M3 Ultra baseline (before this pass)**, prompt + seed identical to the
@@ -2752,10 +2756,10 @@ follow-up.
 
 | File | Change |
 |------|--------|
-| [src/chatterbox_t3_internal.h](src/chatterbox_t3_internal.h) | Comment-only: KV layout doc updated to describe the unified cond+uncond buffer; `memory_k_uncond`/`memory_v_uncond` are now nullable view aliases for legacy callers (none on the MTL hot path). |
-| [src/t3_mtl.cpp](src/t3_mtl.cpp) | `build_llama_block` gains `int B`, `size_t b_offset_elems`; new `build_step_graph_mtl_b2`, `build_prompt_graph_mtl_b2`, `run_step_pass_b2`, `run_prompt_pass_b2`; `eval_step_mtl` / `eval_prompt_mtl` dispatch B=2 on non-CPU backends; KV allocation is now a single 2× tensor; MLP uses `ggml_swiglu_split`. |
-| [src/chatterbox_cli.cpp](src/chatterbox_cli.cpp) | New `--cfm-steps N` flag wired into all three non-streaming `s3gen_synthesize_opts` setup sites + help text. |
-| [README.md](README.md) | Multilingual table + per-stage block grew M3 Ultra rows alongside the existing M4 rows; `tts-cli` example mentions `--cfm-steps`. |
+| [src/chatterbox_t3_internal.h](../../src/chatterbox_t3_internal.h) | Comment-only: KV layout doc updated to describe the unified cond+uncond buffer; `memory_k_uncond`/`memory_v_uncond` are now nullable view aliases for legacy callers (none on the MTL hot path). |
+| [src/t3_mtl.cpp](../../src/t3_mtl.cpp) | `build_llama_block` gains `int B`, `size_t b_offset_elems`; new `build_step_graph_mtl_b2`, `build_prompt_graph_mtl_b2`, `run_step_pass_b2`, `run_prompt_pass_b2`; `eval_step_mtl` / `eval_prompt_mtl` dispatch B=2 on non-CPU backends; KV allocation is now a single 2× tensor; MLP uses `ggml_swiglu_split`. |
+| [src/chatterbox_cli.cpp](../../src/chatterbox_cli.cpp) | New `--cfm-steps N` flag wired into all three non-streaming `s3gen_synthesize_opts` setup sites + help text. |
+| [README.md](../../README.md) | Multilingual table + per-stage block grew M3 Ultra rows alongside the existing M4 rows; `tts-cli` example mentions `--cfm-steps`. |
 | `artifacts/bench/mtl-*-m3u-*.txt` | Raw stderr per phase + cfm-sweep + final. |
 
 #### "What's next for MTL" (carried over from §3.19, with strikes)
@@ -2856,8 +2860,8 @@ demand gate above the current RTF 0.30 / 0.32 multilingual numbers.
 
 | File | Change |
 |------|--------|
-| [src/t3_mtl.cpp](src/t3_mtl.cpp) | Drop `ggml_gallocr_reserve` from `run_step_pass`, `run_prompt_pass`, `run_step_pass_b2`, `run_prompt_pass_b2`; `alloc_graph` covers the lazy-reserve case. |
-| [src/chatterbox_tts.cpp](src/chatterbox_tts.cpp) | `run_hift_decode` scratch buf → `thread_local`; new `time_mlp_cache` keyed on backend, hoisting per-step build/reserve. |
+| [src/t3_mtl.cpp](../../src/t3_mtl.cpp) | Drop `ggml_gallocr_reserve` from `run_step_pass`, `run_prompt_pass`, `run_step_pass_b2`, `run_prompt_pass_b2`; `alloc_graph` covers the lazy-reserve case. |
+| [src/chatterbox_tts.cpp](../../src/chatterbox_tts.cpp) | `run_hift_decode` scratch buf → `thread_local`; new `time_mlp_cache` keyed on backend, hoisting per-step build/reserve. |
 
 ### 3.23  T3-MTL fused Q/K/V mat-mul on Metal
 
@@ -2938,10 +2942,10 @@ across §3.22 base and post-§3.23 at five separate invocations
 
 | File | Change |
 |------|--------|
-| [src/chatterbox_t3_internal.h](src/chatterbox_t3_internal.h) | `llama_layer` gains `wqkv`; `chatterbox_model` gains `ctx_stack` + `buffer_stack`. |
-| [src/t3_mtl.cpp](src/t3_mtl.cpp) | Post-load: allocate the Phase-15 stacked buffer + register with `t3_stack_registry` for atexit; per-layer copy of `wq`+`wk`+`wv` rows into `wqkv` via host scratch. `build_llama_block`: when `l.wqkv` is set, single mat-mul + view-split into Q/K/V; otherwise legacy three-mul path. New `t3_stack_unregister()` for `free_t3()` to call on error returns. |
-| [src/t3_mtl.h](src/t3_mtl.h) | Export `t3_stack_unregister()`. |
-| [src/chatterbox_cli.cpp](src/chatterbox_cli.cpp) | `free_t3()` calls `t3_stack_unregister()` then frees `buffer_stack` / `ctx_stack`. |
+| [src/chatterbox_t3_internal.h](../../src/chatterbox_t3_internal.h) | `llama_layer` gains `wqkv`; `chatterbox_model` gains `ctx_stack` + `buffer_stack`. |
+| [src/t3_mtl.cpp](../../src/t3_mtl.cpp) | Post-load: allocate the Phase-15 stacked buffer + register with `t3_stack_registry` for atexit; per-layer copy of `wq`+`wk`+`wv` rows into `wqkv` via host scratch. `build_llama_block`: when `l.wqkv` is set, single mat-mul + view-split into Q/K/V; otherwise legacy three-mul path. New `t3_stack_unregister()` for `free_t3()` to call on error returns. |
+| [src/t3_mtl.h](../../src/t3_mtl.h) | Export `t3_stack_unregister()`. |
+| [src/chatterbox_cli.cpp](../../src/chatterbox_cli.cpp) | `free_t3()` calls `t3_stack_unregister()` then frees `buffer_stack` / `ctx_stack`. |
 
 ### 3.24  HiFT conv-kernel F16 quantisation (multilingual S3Gen)
 
@@ -3059,7 +3063,7 @@ reasons the realised win is smaller:
     is already 2-D.**  Bigger surgery (touches both converter
     + C++); documented as the structural follow-up to §3.24.
   - **F32 `mul_mm + add(bias)` shader fusion** in
-    [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch).
+    patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present).
     The existing patch fuses Q-variant `mul_mv + add(bias) +
     add(residual)` (T3 step path); extending the same
     function-constant + post-matmul `helper_mv_add_bias` pattern
@@ -3076,7 +3080,7 @@ reasons the realised win is smaller:
 
 | File | Change |
 |------|--------|
-| [scripts/requantize-gguf.py](scripts/requantize-gguf.py) | `should_quantize()` now allows 3-D when `shape[-1]` (= ne[0] = K) is block-aligned (forward-compatible no-op for HiFT today); `f16` added as a target dtype; new `--name-filter SUBSTRING` arg; pass-through path branches on `GGML_QUANT_SIZES[type][0] == 1` to handle already-quantised sources without reshape errors. |
+| [scripts/requantize-gguf.py](../../scripts/requantize-gguf.py) | `should_quantize()` now allows 3-D when `shape[-1]` (= ne[0] = K) is block-aligned (forward-compatible no-op for HiFT today); `f16` added as a target dtype; new `--name-filter SUBSTRING` arg; pass-through path branches on `GGML_QUANT_SIZES[type][0] == 1` to handle already-quantised sources without reshape errors. |
 | `models/chatterbox-s3gen-mtl-q4_0_hift_f16.gguf` | New GGUF artifact (gitignored, 754 MB).  Recipe documented in the script's docstring + this section. |
 
 
@@ -3191,7 +3195,7 @@ encoder-side optimisations are:
 
 | File | Change |
 |------|--------|
-| [src/chatterbox_tts.cpp](src/chatterbox_tts.cpp) | 10-line commentary block added to `conformer_block()` explaining why the flash-attn path is intentionally not taken, pinning the negative-finding cosine number and the speed upside that was measured, and pointing at the parakeet §15.8 counterexample. No code change to the graph itself. |
+| [src/chatterbox_tts.cpp](../../src/chatterbox_tts.cpp) | 10-line commentary block added to `conformer_block()` explaining why the flash-attn path is intentionally not taken, pinning the negative-finding cosine number and the speed upside that was measured, and pointing at the parakeet §15.8 counterexample. No code change to the graph itself. |
 
 ### 3.26  HiFT source_* F16 — unblocks the missing `kernel_mul_mv_f32_f16{,_4,_short}` Metal variants
 
@@ -3333,8 +3337,8 @@ GGUF, plus closing the last known blocker from §3.24.
 
 | File | Change |
 |------|--------|
-| [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch) | +33 lines for the three `mul_mv_f32_f16{,_4,_short}` template instantiations + comments referencing this section. Regenerated from the pinned commit `58c38058`. |
-| [scripts/requantize-gguf.py](scripts/requantize-gguf.py) | `/s` deny narrowed to `/scale`; Q-type passthrough byte-shape fix; docstring recipe updated. |
+| patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present) | +33 lines for the three `mul_mv_f32_f16{,_4,_short}` template instantiations + comments referencing this section. Regenerated from the pinned commit `58c38058`. |
+| [scripts/requantize-gguf.py](../../scripts/requantize-gguf.py) | `/s` deny narrowed to `/scale`; Q-type passthrough byte-shape fix; docstring recipe updated. |
 | `ggml/src/ggml-metal/ggml-metal.metal` | Local edit under the `ggml/` worktree; not tracked in this repo. Recipe remains: run `scripts/setup-ggml.sh` to re-apply the patch after a ggml bump. |
 
 #### What's next
@@ -3480,7 +3484,7 @@ costs ~an equal amount. Net: neutral on M3 Ultra.
 | `ggml/src/ggml-metal/ggml-metal.metal` | Two new FC constants (FC_MUL_MM + 2 / +3), two new buffer args (slots 4 and 5) on `kernel_mul_mm`, forced-shmem path when either FC is true, bias/residual fold-in inside the scalar-copy loop. Local edit under the `ggml/` worktree; not tracked in this repo. |
 | `ggml/src/ggml-metal/ggml-metal-device.{cpp,h}` | `get_pipeline_mul_mm(op, has_bias, has_residual)` — new signature; bakes flags into pipeline name + FC values; shmem sizing adjusted to 8 KB when fused. |
 | `ggml/src/ggml-metal/ggml-metal-ops.cpp` | `ggml_metal_op_mul_mat` mul_mm path gains the same `can_fuse({MUL_MAT,ADD,ADD})` / `can_fuse({MUL_MAT,ADD})` lookup the mul_mv path already had; both orderings of the residual add handled; `n_fuse` returned to skip the folded ADDs. |
-| [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch) | +262 lines. Regenerated from pinned `58c38058`. 733 → 995 lines. |
+| patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present) | +262 lines. Regenerated from pinned `58c38058`. 733 → 995 lines. |
 
 #### What's next
 
@@ -3605,7 +3609,7 @@ estimated §3.27 win.
 | `ggml/src/ggml-metal/ggml-metal.metal` | New FC `FC_MUL_MM + 4` (has_gelu_erf); gelu_erf branch in the scalar-copy loop using `erf_approx<float>`; shared early-out condition updated to include the new flag.  Local edit under `ggml/` worktree. |
 | `ggml/src/ggml-metal/ggml-metal-device.{cpp,h}` | `get_pipeline_mul_mm(op, has_bias, has_residual, has_gelu_erf)` — new fourth parameter, pipeline name extended with `_gelu=N`, shmem sizing adjusted. |
 | `ggml/src/ggml-metal/ggml-metal-ops.cpp` | Dispatcher mul_mm path gains `{MUL_MAT, ADD, UNARY}` can_fuse lookup with `ggml_get_unary_op == GGML_UNARY_OP_GELU_ERF` check; slotted between the 3-op residual and 2-op bias lookups. |
-| [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch) | Regenerated from pinned `58c38058`. 995 → 1054 lines, +59. Applies cleanly via `git apply --check`. |
+| patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present) | Regenerated from pinned `58c38058`. 995 → 1054 lines, +59. Applies cleanly via `git apply --check`. |
 
 #### What's next
 
@@ -3762,7 +3766,7 @@ coverage.
 |------|--------|
 | `ggml/src/ggml-metal/ggml-metal.metal` | Direct-store RMW block *removed*; 21-line commentary added in place explaining §3.29 attempt + failure + suspected causes for the next person to read. `_mm_use_direct` reverts to §3.28's "no fold-in allowed on direct-store path" condition. |
 | `ggml/src/ggml-metal/ggml-metal-device.cpp` | `get_pipeline_mul_mm` shmem sizing reverts to §3.28 behavior (8 KB when any of `bc_out` / `has_bias` / `has_residual` / `has_gelu_erf` is set). |
-| [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch) | Regenerated from pinned `58c38058`.  1054 → 1070 lines (+16, the inline documentation block). |
+| patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present) | Regenerated from pinned `58c38058`.  1054 → 1070 lines (+16, the inline documentation block). |
 
 #### Result
 
@@ -3898,7 +3902,7 @@ session; the harness now makes that session tractable.
 | `src/test_metal_ops.cpp` | New `test_mul_mm_fused(cpu, gpu, K, N, T, B, fuse_mode, label)` helper + 8 test invocations covering the CFM shape space.  New `#include "ggml-cpu.h"` for the CPU reference backend (via the existing include cluster). |
 | `ggml/src/ggml-metal/ggml-metal.metal` | Bias-only direct-store path: full-block write via `cT.store` / `simdgroup_store`, then `threadgroup_barrier(mem_flags::mem_device)`, then a 128-thread scan adding `bias[r0 + row_off]` to each of the 2048 elements.  Only fires when `FC_mul_mm_has_bias && !FC_mul_mm_has_residual && !FC_mul_mm_has_gelu_erf` — gated narrowly to the scope the harness validates. |
 | `ggml/src/ggml-metal/ggml-metal-device.cpp` | Shmem sizing: 8 KB when `bc_out || has_residual || has_gelu_erf`; 6 KB for bias-only-direct-store and non-fused calls. |
-| [patches/ggml-metal-chatterbox-ops.patch](patches/ggml-metal-chatterbox-ops.patch) | Regenerated from pinned `58c38058`.  1070 → 1088 lines, +18 (direct-store bias scan + shmem-sizing comment). Applies cleanly. |
+| patches/ggml-metal-chatterbox-ops.patch (historical file; no longer present) | Regenerated from pinned `58c38058`.  1070 → 1088 lines, +18 (direct-store bias scan + shmem-sizing comment). Applies cleanly. |
 
 #### Follow-up tracking
 
@@ -4032,7 +4036,7 @@ scp + run on any M4 / M3 / M2 box.
 
 | File | Change |
 |------|--------|
-| [scripts/bench-m4-validation.sh](scripts/bench-m4-validation.sh) | New 150-line bash script.  Self-contained: pins the M3 Ultra reference numbers, runs test-metal-ops, 5-invocation bench, compares, writes JSON. |
+| [scripts/bench-m4-validation.sh](../../scripts/bench-m4-validation.sh) | New 150-line bash script.  Self-contained: pins the M3 Ultra reference numbers, runs test-metal-ops, 5-invocation bench, compares, writes JSON. |
 
 #### Next
 

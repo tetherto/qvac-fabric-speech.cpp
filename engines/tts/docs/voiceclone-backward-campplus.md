@@ -1,7 +1,7 @@
 # Voice-clone backward — CAMPPlus speaker encoder (op × backend gap matrix)
 
-Scope for ticket *"GGML backward pass: CAMPPlus speaker encoder"*.
-This doc scopes the work to make the CAMPPlus speaker encoder **differentiable in
+
+This document scopes the work to make the CAMPPlus speaker encoder **differentiable in
 GGML** on the CPU path used for enrollment, and records which backward ops are
 still missing in the vendored `ggml`.
 

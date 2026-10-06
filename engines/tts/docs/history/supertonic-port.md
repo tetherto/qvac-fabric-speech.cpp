@@ -1,5 +1,9 @@
 # Supertonic → ggml Port: Development Journal
 
+Archived development record. Commands, layouts, status statements and open
+items describe the revisions recorded here and are not current usage guidance.
+For supported behavior, see the [engine README](../../README.md).
+
 This document tracks the experimental **Supertonic / Supertonic 2** GGUF +
 GGML runtime added to this repo: what was tested, what matched, what sounded
 good, which performance ideas worked, and which optimization attempts were
@@ -22,7 +26,7 @@ converted into one GGUF.
 
 ---
 
-## Current Status
+## Historical implementation snapshot
 
 The branch now contains a full Supertonic path:
 
@@ -165,7 +169,7 @@ What failed:
 - Old Supertonic 2 prefix-only wrapping:
 
 ```text
-<en>text 
+<en>text
 ```
 
 What worked:

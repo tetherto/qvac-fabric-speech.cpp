@@ -19,7 +19,7 @@ reference wav (T3 + S3Gen + HiFT, warm runs, excludes model load):
 > Rows are independent warm runs on different machines/backends, so **`RTF`** —
 > not wall time — is the comparable metric; wall time tracks each run's own
 > generated audio length. The Linux x86-64 rows are CI numbers (see the
-> [Performance](../README.md#performance) section for the full CI table + provenance).
+> [Performance](performance.md#ci-benchmarks-2026-08-12-linux-x86-64) section for the full CI table + provenance).
 
 **Multilingual** (same Spanish prompt, seed 42, built-in voice):
 
@@ -51,8 +51,8 @@ with CFG correctly applied (12 CFM steps × 2 forward calls).
 S3Gen wall-time roughly doubled, RTF went up ~2×.  Metal rows are
 unaffected (the `use_b2` branched path always carried the CFG combine).
 
-See the [full benchmark](../README.md#performance) section below for the CI benchmark
-table, or [`PROGRESS.md`](../PROGRESS.md) for the full chronological
+See the [full benchmark](performance.md#ci-benchmarks-2026-08-12-linux-x86-64) report for the CI benchmark
+table, or the [Chatterbox port archive](history/chatterbox-port.md) for the full chronological
 development journal — every numerical-parity stage and optimization pass
 (T3 Flash Attention, KV-cache layout rework, Metal kernel patches,
 CAMPPlus + VoiceEncoder + S3TokenizerV2 ported to ggml graphs, mel

@@ -1,6 +1,6 @@
-# Voice-clone backward — vocoder (QVAC-20983)
+# Voice-clone backward — vocoder
 
-Scope for ticket *"6. GGML backward pass: vocoder"*. Make the Supertonic vocoder
+Make the Supertonic vocoder
 differentiable for enrollment, with the **transposed convolution** called out as
 the main risk op. This doc records the op × backend gap for the vocoder path and
 the CPU-fallback behavior, and is committed alongside the deliverable: an

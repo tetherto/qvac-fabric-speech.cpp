@@ -37,9 +37,9 @@ backends are the follow-up to this change.
 Three GGUFs, because the halves have different lifetimes: the backbone and
 the codec decoder are needed for every synthesis, the codec encoder only for
 voice cloning. Checkpoints come from
-[OpenMOSS/MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS/MOSS-TTS-v1.5) (or a
+[OpenMOSS-Team/MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (or a
 MOSS-TTSD checkpoint with the same architecture) and
-[OpenMOSS/MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS/MOSS-Audio-Tokenizer)
+[OpenMOSS-Team/MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer)
 for the codec.
 
 ```sh
@@ -456,3 +456,12 @@ the user speech tokens, and 90 % teacher-forced agreement. The dumps come from
 `scripts/dump-moss-speech-reference.py <MOSS-Speech> <MOSS-Speech-Codec>
 <out_dir> --upstream <MOSS-Speech checkout> --user-wav question.wav --device
 mps`, which writes the `lm/` and `codec/` folders the test reads.
+
+## Licenses
+
+The [MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5),
+[MOSS-TTSD-v1.0](https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v1.0), and
+[MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer)
+model cards identify Apache-2.0 weights. The reference
+[MOSS-TTS repository](https://github.com/OpenMOSS/MOSS-TTS/blob/main/LICENSE)
+is also Apache-2.0. See [NOTICE](../NOTICE) for the other MOSS models and codec sources.

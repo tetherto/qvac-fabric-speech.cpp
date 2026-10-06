@@ -157,3 +157,21 @@ MIT or WTFPL wrapper code; IPADIC dictionary distribution terms
 Some reference scripts import the corresponding upstream model packages or
 checkpoint-provided Python modules. Those modules retain the model-project
 licenses listed above and are not copied into the C++ inference binary.
+
+=========================================================================
+Additional MOSS model and reference sources
+=========================================================================
+
+Apache License 2.0
+
+  MOSS-TTS-v1.5 and MOSS-TTSD-v1.0 (MossTTSDelay architecture)
+    Code: https://github.com/OpenMOSS/MOSS-TTS
+    Models: https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5
+            https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v1.0
+    The reference repository and model cards identify Apache-2.0 licenses.
+    Native synthesis, dialogue and cloning implement the delay-pattern path.
+
+  MOSS-Audio-Tokenizer
+    https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer
+    The model card identifies the code and weights as Apache-2.0. The native
+    codec encoder/decoder supports the MOSS Delay and TTSD pipelines.

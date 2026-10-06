@@ -488,7 +488,7 @@ through the public `Engine` with a synthetic language model.
 Roughly a second of audio per second of CPU on eight cores of a desktop x86-64,
 q8_0 weights: 16 s of speech in 19 s wall, 5.5 s of cloned speech in 10 s
 including enrolment. For measured multi-machine numbers, see
-[the Audio8 benchmark in Performance](../README.md#audio8-multi-machine-benchmark-2026-09).
+[the Audio8 benchmark in Performance](performance.md#audio8-multi-machine-benchmark-2026-09).
 
 **The codec is chunked, in both directions.**  Its convolution stacks, not the
 LM, are what made memory grow with utterance length — a 24 s decode used to

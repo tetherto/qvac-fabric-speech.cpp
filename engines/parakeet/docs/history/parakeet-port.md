@@ -1,5 +1,9 @@
 # parakeet.cpp — development journal
 
+Archived development record. Commands, layouts, status statements and open
+items describe the revisions recorded here and are not current usage guidance.
+For supported behavior, see the [engine README](../../README.md).
+
 Chronological record of each bring-up and numerical-parity milestone:
 every stage lands with a per-stage `.npy` reference dumped from NeMo
 PyTorch and a C++ harness asserting rel error below a documented
@@ -1262,7 +1266,7 @@ audio without changing accuracy.
 
 ### Phase 8.2 — C++ StreamSession (done)
 
-Landed the Mode 3 state machine in [src/parakeet_engine.cpp](src/parakeet_engine.cpp)
+Landed the Mode 3 state machine in [src/parakeet_engine.cpp](../../src/parakeet_engine.cpp)
 (`StreamSession::Impl`), backed by the existing `Engine::Impl::model`
 through a borrowed pointer. Key pieces:
 

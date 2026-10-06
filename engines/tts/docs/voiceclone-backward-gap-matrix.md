@@ -1,6 +1,6 @@
 # Voice-clone backward — op × backend gap matrix (Phase 2)
 
-Scope for ticket *"GGML backward pass: Supertonic text encoder"*. This doc
+This document
 scopes the remaining Phase-2 work to make the Supertonic text encoder
 **differentiable in GGML** on the CPU path used for enrollment, and records which
 backward ops are still missing in the vendored `ggml`.

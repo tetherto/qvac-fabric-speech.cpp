@@ -12,18 +12,21 @@ Part of the [tts engine documentation](../README.md).
 | CosyVoice3 | `<tts-cpp/cosyvoice/engine.h>` | callback is post-hoc chunking after full generation | `cosyvoice-cli` |
 | Audio8 | `<tts-cpp/audio8/engine.h>` | no | `audio8-cli` |
 | Pocket TTS | `<tts-cpp/pocket/engine.h>` | incremental FlowLM/Mimi PCM callbacks | `pocket-cli` batch WAV and memory preflight |
+| MOSS Delay / TTSD | `<tts-cpp/moss/engine.h>` | incremental codec PCM callbacks | `moss-cli` batch/streaming and dialogue |
+| MOSS-SoundEffect | `<tts-cpp/moss/sound_effect.h>` | progress callback; no incremental PCM | `moss-cli --mode sfx` |
+| MOSS-Speech | `<tts-cpp/moss/speech.h>` | progress callback; no incremental PCM | `moss-cli --mode s2s` |
 | LavaSR | `<tts-cpp/lavasr/{denoiser,enhancer}.h>` | block-oriented enhancement APIs | `lavasr-bench` |
 
 `tts-cli` is intentionally a limited metadata dispatcher: it handles
 Chatterbox, batch Supertonic, and a reduced Parler surface. Use the dedicated
-CLIs for the complete Supertonic, Parler, CosyVoice3, and Audio8 options.
+CLIs for the complete Supertonic, Parler, CosyVoice3, Audio8, Pocket and MOSS options.
 
 ### Defaults that differ by surface
 
 | Setting | `tts-cli` | Library engines and dedicated CLIs |
 |---|---|---|
-| Seed | `0` unless `--seed` is supplied | generally `42` |
-| Threads | capped at 4 by default | Chatterbox, Supertonic, Parler, and Audio8 cap automatic selection at 4; CosyVoice stage behavior is not generalized here |
+| Seed | `0` unless `--seed` is supplied | model-specific: most synthesis engines use `42`; Pocket uses `1234`; see the model header/CLI for exceptions |
+| Threads | model-specific; explicit `--threads` wins | Chatterbox, Parler and Audio8 cap automatic selection at 4. Supertonic uses 4 on GPU or CPU BLAS paths; its fused CPU path leaves an eighth of logical CPUs free. Pocket defaults to one thread per worker; CosyVoice stage defaults are model-specific |
 | Parler greedy | repaired to sampling with a warning because argmax does not terminate | same; use `seed` for reproducibility |
 | Chatterbox streaming CFM | Turbo accepts 1 or 2 steps | Multilingual standard CFM requests below the model timestep count are floored to 10 |
 
@@ -39,6 +42,10 @@ load their model once and reuse it across synthesis calls:
 | `tts_cpp::parler` | `Engine::synthesize` | 44.1 kHz PCM conditioned by a description |
 | `tts_cpp::cosyvoice` | `Engine::synthesize` | 24 kHz PCM |
 | `tts_cpp::audio8` | `Engine::synthesize` | 44.1 kHz PCM, optionally cloned from `VoicePrompt`; `Engine::codec_on_coreml()` reports whether the Core ML codec sidecar is attached (false once a failed call retires it) and `SynthesisResult::codec_synthesis_backend` where each call's codec synthesis ran (`"ggml"` or a `coreml-*` label), see the [Audio8 guide](audio8.md#core-ml-codec-sidecar) |
+| `tts_cpp::pocket` | `Engine::synthesize` / `synthesize_stream` | CPU FlowLM/Mimi, 24 kHz by default; prepared voice or encoder-enabled cloning |
+| `tts_cpp::moss` | `Engine::synthesize` / `synthesize_stream` | MOSS Delay / TTSD synthesis, cloning and dialogue |
+| `tts_cpp::moss` | `SoundEffectEngine::generate` | 48 kHz sound-effect PCM |
+| `tts_cpp::moss` | `SpeechEngine::respond` | Spoken reply PCM or text, with generation/progress metadata |
 | `tts_cpp::lavasr` | `Denoiser` / `Enhancer` | enhanced PCM |
 
 The public surface also includes Chatterbox's lower-level
@@ -48,14 +55,11 @@ namespaces used by tests, are private and hidden from shared-library consumers.
 
 ### Consumer integration
 
-Downstream projects in the QVAC speech stack consume `tts-cpp` via
-the matching `tts-cpp` vcpkg port (this in-tree subtree).  ggml comes
-from the [`ggml-speech`](https://github.com/tetherto/qvac-registry-vcpkg)
-sister port, which vendors the
-[`qvac-ext-ggml/speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech)
-branch with all Metal / OpenCL / Vulkan patches pre-applied.  Once
-both ports are installed, integration on the consumer side is one
-`find_package` call:
+Downstream projects consume this engine through `speech-cpp[tts]`, which
+depends on the shared `ggml-speech` package. The installed CMake package and
+imported target retain the `tts-cpp` name. See the
+[package guide](../../../docs/BUILD.md#consumable-packages) for features.
+Integration uses:
 
 ```cmake
 find_package(tts-cpp CONFIG REQUIRED)
@@ -78,7 +82,7 @@ The supertonic test/bench harnesses link against `tts-cpp` directly
 and use detail-namespaced symbols outside the `TTS_CPP_API` public
 surface, so the integrated port keeps the default
 `TTS_CPP_BUILD_SHARED=OFF` and `TTS_CPP_BUILD_TESTS=OFF`.  See
-[**Useful CMake options**](build.md#useful-cmake-options) below for the full
+[Useful CMake options](build.md#useful-cmake-options) for the full
 flag table. The streaming text chunker (`split_for_streaming`:
 sentence/clause/whitespace boundary priority, first-chunk latency knob,
 tiny-tail merge, CJK sentence ends) is pinned model-free by
@@ -122,4 +126,67 @@ The other synthesis pipelines are:
 | Parler | Flan-T5 description encoder → delay-pattern decoder → DAC |
 | CosyVoice3 | Qwen2.5 LM → DiT flow → CausalHiFT |
 | Audio8 | DualAR semantic/fast LM → 10-codebook codec decoder |
+| Pocket | FlowLM flow sampling → streaming Mimi codec |
+| MOSS Delay / TTSD | Qwen3 delay-pattern backbone → RVQ codec |
+| MOSS-SoundEffect | Text encoder → flow DiT → DAC decoder |
+| MOSS-Speech | Speech tokenizer → split Qwen3 text/audio branches → CosyVoice2 flow/HiFT |
 | LavaSR | optional UL-UNAS denoiser → Vocos bandwidth-extension enhancer |
+
+## Memory-fit preflight
+
+Metadata-only preflight projects model/workload memory before loading weights.
+Result statuses and reasons are declared in `<tts-cpp/fit.h>`; preflight does
+not validate tensor payloads or guarantee memory remains free until loading.
+
+| Family | Public header | Entry point / CLI |
+|---|---|---|
+| Chatterbox | `<tts-cpp/chatterbox/fit.h>` | `chatterbox::fit_params`, `chatterbox-fit-params` |
+| Supertonic | `<tts-cpp/supertonic/fit.h>` | `supertonic::fit_params`, `supertonic-fit-params` |
+| Parler | `<tts-cpp/parler/fit.h>` | `parler::fit_params`, `parler-fit-params` |
+| CosyVoice3 | `<tts-cpp/cosyvoice/fit.h>` | `cosyvoice::fit_params`, `cosyvoice-fit-params` |
+| Audio8 | `<tts-cpp/audio8/fit.h>` | `audio8::fit_params`, `audio8-fit-params` |
+| Pocket | `<tts-cpp/pocket/fit.h>` | `pocket::fit_params`, `pocket-cli --fit`; [workload guide](pocket-tts.md#native-memory-preflight) |
+| MOSS Delay / TTSD | `<tts-cpp/moss/fit.h>` | `moss::fit_params(options, workload)` |
+
+### MOSS memory fit
+
+
+`tts-cpp/moss/fit.h` provides `tts_cpp::moss::fit_params(options, workload)`
+for MOSS-TTS-v1.5 and MOSS-TTSD. Pass the same `EngineOptions` as synthesis,
+and specify all four workload fields explicitly:
+
+```cpp
+#include <tts-cpp/moss/fit.h>
+
+tts_cpp::moss::EngineOptions options;
+options.backbone_path = "moss-tts-delay-f16.gguf";
+options.decoder_path = "moss-codec-decoder-f16.gguf";
+options.use_gpu = true;
+const tts_cpp::moss::FitWorkload workload(128, 0, false, 256ull * 1024 * 1024);
+const auto result = tts_cpp::moss::fit_params(options, workload);
+```
+
+The fields are the full native prompt row count, total mono reference samples
+(0 without a reference), streaming intent, and memory headroom in bytes.
+Prompt rows must include the frontend's special tokens and any encoded speaker
+references or TTSD continuation rows. The fitter reads no reference recordings;
+the caller supplies their sample count. A positive reference count requires
+`encoder_path`. Use the TTSD backbone and include the total reference workload
+for dialogue. The existing runtime context, duration and reference validation
+also applies to the projection; generation settings remain unchanged.
+
+The projection reads GGUF metadata without reading weights, allocating device
+buffers, or running inference. Weightless GGUFs with the same tensor descriptors
+produce the same estimate. It uses the runtime LM and codec graph builders and
+size-only ggml allocators, including KV state, decoder streaming state, encoder
+work, host staging and generated PCM. Batch decoding follows the engine's
+existing windowed path for long sequences. Component peaks are summed as a
+conservative upper bound, including encoder allocations that can be released
+before synthesis. This can report `does-not-fit` for a workload whose actual
+peak is smaller. On CPU and Metal unified memory, host and device requirements
+compete for the same free memory.
+
+The result follows `tts-cpp/fit.h`: `Success`/`fits`, `Failure`/`does-not-fit`,
+or `Error` for invalid arguments, an unreadable model, or failed measurement.
+Run `test-moss-fit` for model-free metadata, workload, streaming, reference,
+validation and runtime-regression coverage.

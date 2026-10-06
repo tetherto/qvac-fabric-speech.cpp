@@ -16,7 +16,7 @@ and `moss-transcribe` CLI; see
 |---|---|---:|---|---:|---:|---|---|---|
 | `nvidia/parakeet-ctc-0.6b` | CTC | 80 | 1024 × 24 | 1024 | 600 M | 697 MiB q8_0 / 1.3 GiB f16 | 0.014–0.046 Metal | English; optional Core ML offline encoder |
 | `nvidia/parakeet-ctc-1.1b` | CTC | 80 | 1024 × 42 | 1024 | 1.1 B | 1217 MiB q8_0 | 0.026–0.074 Metal | English; optional Core ML offline encoder |
-| `ai4bharat/indic-conformer-600m-multilingual` | CTC-only hybrid export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; optional Core ML offline encoder; requires `--language` or `EngineOptions::language` |
+| `ai4bharat/indic-conformer-600m-multilingual` | CTC default; optional RNN-T export | 80 | 1024 × 24 | 5632 + blank | 600 M | ~701 MiB q8_0 / ~373 MiB q4_0 / 1.3 GiB f16 | 0.008 q8_0 Metal / 0.0019 q8_0 Vulkan | 22 Indic languages; optional Core ML offline encoder; requires `--language` or `EngineOptions::language` |
 | `nvidia/parakeet-unified-en-0.6b` | RNN-T | 128 | 1024 x 24 | 1024 | 600 M | 707 MiB q8_0 | 0.004 q8_0 Vulkan / 0.028 q8_0 Metal | English; offline full-context encoder with an optional Core ML sidecar; cache-aware streaming at 80/160/560/1040 ms chunks with 0-1040 ms right context |
 | `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization; optional Core ML offline encoder |
 | `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization; optional Core ML offline encoder |
@@ -28,276 +28,38 @@ and `moss-transcribe` CLI; see
 | `nvidia/Nemotron-3-Diarization` | Nemotron diarization + AOSC | 128 | 512 × 31 RoPE | n/a | — | 107 MB q8_0 GGUF | 0.0002 q8_0 CUDA / 0.0002 q8_0 Vulkan / 0.0006 q8_0 Metal / 0.0065 q8_0 OpenCL (Adreno 830) | Eight speakers, 10 ms probabilities, native offline and cached streaming |
 | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | Whisper-shaped encoder + Qwen3 decoder (text, speakers, timestamps) | 80 | 1024 × 24 encoder, 1024 × 28 decoder | 151936 | 0.9 B | 1.8 GB f16 / 0.98 GB q8_0 / 0.64 GB q5_0 | 0.05–0.39 f16 Metal (2 to 30 min) | Multilingual checkpoint, validated on Spanish and Chinese; English long-form skips spans, as in the reference model; per-request hotwords; separate `moss-transcribe` API and CLI |
 
-TDT 0.6B-v3 and TDT 1.1B are distinct model contracts: only 0.6B-v3 is
-multilingual and punctuation/capitalization-aware. Encoder topology, including
-causal subsampling, convolution normalization, and chunked-limited attention,
-comes from GGUF metadata.
+TDT 0.6B-v3 is multilingual with punctuation/capitalization; TDT 1.1B is
+English-only without those features. IndicConformer exports CTC by default,
+with an optional RNN-T branch; CTC requires a language selection. Use the
+[model acquisition and format guide](docs/models.md) for each family's
+download and conversion path.
 
-Unified RNN-T uses standard greedy transducer decoding. Offline inference runs
-the encoder in full-context mode, and with `PARAKEET_COREML=ON` eligible batch
-windows route through the fixed-capacity Core ML sidecar. Mode 2 and
-`StreamSession` use the native cache-aware encoder, which builds its own ggml
-graph and never uses the fixed-shape sidecar: `StreamingOptions::chunk_ms`
-selects the chunk and `right_lookahead_ms` the right context, both snapped down
-to the nearest trained value (chunks 80, 160, 560, 1040 ms; right context 0, 80,
-160, 240, 320, 560, 1040 ms; the default 1000 ms chunk runs as 560 ms); the
-encoder keeps a 5.6 s attention cache plus a 4-frame convolution cache per layer
-and only encodes `chunk + right context` new frames per step. The
-`left_context_ms` knob is ignored. GGUFs converted before the
-`parakeet.unified.*` metadata existed fall back to the published checkpoint
-contexts.
-
-Nemotron 3 Diarization loads NVIDIA's official `Nemotron-3-Diarization.q8_0.gguf`
-directly. Use it with `--model` for standalone diarization or
-`--diarization-model` with a Parakeet ASR model for speaker attribution. Its
-native output contains eight independent speaker probabilities every 10 ms.
-The streaming API uses a speaker cache and 80 ms encoder frames; its default
-chunk is 1040 ms with 0 ms left and 80 ms right context. Explicit 80 ms left
-context retains one encoder frame. Streaming uses a gain from its first window
-for the whole session; offline inference normalizes its full input. Custom chunk and context durations
-must be multiples of 80 ms. The Q8 checkpoint is covered by a numerical
-reference test against NVIDIA's C++ implementation. With `--n-gpu-layers` or
-`EngineOptions::n_gpu_layers` above zero the whole graph runs on CUDA, Vulkan,
-Metal, or OpenCL; offline inference and cached streaming pass the same
-numerical and session tests on an RTX 5090 (CUDA and Vulkan), an AMD Radeon
-RX 7600 XT (Vulkan), an Apple M3 Ultra (Metal), and the Adreno 830 of a
-Snapdragon 8 Elite (OpenCL and Vulkan). Backends without fused flash
-attention for this graph, such as ggml-opencl on Adreno, keep attention on
-the GPU with an unfused path, and Adreno GPUs run the matmuls at F32
-precision.
-`EngineOptions::prewarm` runs one offline pass and one chunk at the default
-live geometry, and `parakeet-fit-params` projects the model's memory. GPU
-timings and accuracy are in
-[docs/performance.md](docs/performance.md#nemotron-3-diarization-on-gpu).
-Offline inputs longer than 90 s (`EngineOptions::long_form_window_frames`)
-are diarized by the cached long-form path in 30 s chunks instead of one
-graph: a single graph loses speaker identity past about two minutes (DER
-28-48 % on the 160 s and 191 s `abcba`/`abcdba` fixtures against 3.7-4.4 %
-long-form), and inputs past 400 s now run instead of failing.
-
-Install `huggingface_hub` and download the pinned official GGUF into `models/`:
-
-```bash
-python -m pip install huggingface_hub
-python scripts/download_nemotron_diarization.py
-```
-
-Add `--include-source` to also download the original `.nemo` checkpoint. To
-produce a separate Q8 GGUF from that checkpoint, prepare the pinned NVIDIA
-converter checkout, install its Python requirements, and run:
-
-```bash
-python scripts/convert_nemotron_diarization.py --prepare-only
-python -m pip install -r models/sources/NeMo-Speech.cpp/requirements.txt
-python scripts/convert_nemotron_diarization.py
-```
-
-The conversion script downloads the checkpoint and checks the converter source
-revision, updating a stale checkout to the pinned revision. It writes
-`models/Nemotron-3-Diarization.converted.q8_0.gguf`
-and leaves the official GGUF intact.
-
-Nemotron 3.5 ASR offline inference uses the GGUF's default 320 ms operating point
-(`att_context_size=[56,3]`). `EngineOptions::language` accepts the locale aliases
-stored in the GGUF, and an empty value resolves to `auto`. The selected locale is
-broadcast as a 128-wide one-hot prompt, concatenated to every encoder frame, and
-projected before RNN-T decoding. The cache-aware streaming path incrementally
-converts arbitrary PCM bursts to mel frames, maintains bounded 56-frame
-attention and 8-frame convolution caches, and matches NeMo at all five supported
-operating points. Set `StreamingOptions::chunk_ms` to `80`, `160`, `320`, `560`,
-or `1120` to select the corresponding trained right-context configuration.
-Both callback streaming and live `StreamSession` input use the native caches;
-the sliding-window `left_context_ms` and `right_lookahead_ms` knobs are ignored
-for Nemotron.
+Unified RNN-T and Nemotron 3.5 ASR have native cache-aware streaming.
+[docs/api.md](docs/api.md) documents trained operating points and context
+controls. Nemotron 3 Diarization supports eight speakers and uses cached
+long-form processing for offline inputs over 90 seconds; see
+[its model guide](docs/nemotron-3-diarization-port.md).
 
 ## Core ML encoder sidecars
 
-`PARAKEET_COREML=ON` (Apple-only, default `OFF`) lets the FastConformer encoder
-run from a compiled `<model>-encoder.mlmodelc` next to the GGUF. Mel
-preprocessing and every decoder or speaker head stay on ggml. Each family
-routes inputs to the sidecar under one of three contracts:
-
-| Family | Contract | Inputs the sidecar does not take |
-|---|---|---|
-| CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
-| EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
-| Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
-| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
-| Sortformer v1, v2 | no sidecar | always ggml |
-
-Missing or incompatible sidecars and prediction failures fall back to ggml,
-and `PARAKEET_COREML_DISABLE=1` forces ggml. `Engine::encoder_on_coreml()`
-reports that a sidecar loaded; `EngineResult::encoder_used_coreml` reports
-whether every encoder invocation of a transcription ran on it. TDT and EOU
-export commands, benchmarking, and placement controls are in
-[docs/backends.md](docs/backends.md#core-ml-encoder-sidecar).
-
-The English CTC checkpoints (`parakeet-ctc-0.6b`, `parakeet-ctc-1.1b`) meet
-the same export contract as IndicConformer (offline, batch-normalized
-convolution, unbounded attention) and load through its sidecar path; among
-CTC checkpoints, the Core ML parity and CLI bench tests cover only
-IndicConformer.
-
-IndicConformer CTC uses the fixed-capacity sidecar contract shared by the
-offline TDT and Unified encoders. The FastConformer stack runs in Core ML,
-while the multilingual CTC vocabulary projection and language mask stay on
-ggml. Short inputs are padded to the compiled capacity and long inputs use the
-overlapping encoder-window plan:
-
-```bash
-python engines/parakeet/scripts/export-encoder-coreml.py \
-  --gguf engines/parakeet/models/indic-conformer-600m-multilingual.f16.gguf \
-  --n-mel-frames 1501 \
-  --palettize-bits 6 --palettize-group-size 16 \
-  --out engines/parakeet/models/indic-conformer-600m-multilingual-encoder.mlpackage \
-  --compile-dir engines/parakeet/models
-```
-
-Place the compiled directory beside any quantization as
-`indic-conformer-600m-multilingual-encoder.mlmodelc`. Missing or incompatible
-sidecars and prediction failures fall back to the complete ggml path.
-
-Unified RNN-T uses the same fixed-capacity sidecar contract as TDT. Shorter
-inputs are zero-padded to the exported capacity, and oversized inputs use the
-existing overlapping long-form window plan:
-
-```bash
-python engines/parakeet/scripts/export-encoder-coreml.py \
-  --gguf engines/parakeet/models/parakeet-unified-en-0.6b.q8_0.gguf \
-  --n-mel-frames 1501 \
-  --palettize-bits 6 --palettize-group-size 16 \
-  --out engines/parakeet/models/parakeet-unified-en-0.6b-encoder.mlpackage \
-  --compile-dir engines/parakeet/models
-```
-
-Place the compiled directory beside the GGUF as
-`parakeet-unified-en-0.6b-encoder.mlmodelc`. Missing or incompatible sidecars
-and prediction failures fall back to ggml.
-
-### Nemotron
-
-Nemotron supports a fixed-shape sidecar for offline transcription. Export the
-encoder at the intended mel length using the standard name:
-
-```bash
-python engines/parakeet/scripts/export-encoder-coreml.py \
-  --gguf engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b.f16.gguf \
-  --wav engines/parakeet/test/samples/jfk.wav \
-  --palettize-bits 6 --palettize-group-size 16 \
-  --out engines/parakeet/models/nemotron-3.5-asr-streaming-0.6b-encoder.mlpackage \
-  --compile-dir engines/parakeet/models
-```
-
-Place the compiled directory beside any quantization of the GGUF using the
-corresponding `.mlmodelc` name. Exact-shape offline encoder invocations use
-Core ML. Longer offline inputs use the native cache-aware ggml path because an
-independent exact-shape window cannot preserve the encoder's full-depth
-receptive field. Native streaming, mel subsampling, locale prompt projection,
-and RNN-T decoding also remain on ggml.
-
-### Sortformer v2.1
-
-On Apple platforms, `PARAKEET_COREML=ON` supports two optional fixed-shape
-sidecars for the tagged `sortformer-streaming-v2.1-aosc` variant. The batch
-sidecar accepts mel features and the AOSC sidecar accepts post-subsampling
-embeddings plus a validity mask. Mel preprocessing and the Sortformer
-transformer/speaker head remain on ggml.
-
-Export and compile both sidecars from the F16 GGUF:
-
-```bash
-python engines/parakeet/scripts/export-encoder-coreml.py \
-  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
-  --wav engines/parakeet/test/samples/diarization-sample-16k.wav \
-  --palettize-bits 6 --palettize-group-size 16 \
-  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder.mlpackage \
-  --compile-dir engines/parakeet/models
-
-python engines/parakeet/scripts/export-encoder-coreml.py \
-  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
-  --bypass-pre-encode --n-encoder-frames 410 \
-  --palettize-bits 6 --palettize-group-size 16 \
-  --out engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlpackage \
-  --compile-dir engines/parakeet/models
-```
-
-Place the compiled directories beside any quantization of the same GGUF as
-`diar_streaming_sortformer_4spk-v2.1-encoder.mlmodelc` and
-`diar_streaming_sortformer_4spk-v2.1-encoder-bypass-pre-encode.mlmodelc`.
-Batch routing requires the exact exported mel-frame count because that graph
-has no padding-validity mask; shorter and mismatched inputs use ggml. The AOSC
-sidecar accepts up to its masked encoder-frame capacity (410 for the default
-cache/FIFO/chunk geometry), while larger or custom geometries use ggml. Missing
-or incompatible sidecars and prediction failures fall back to ggml. A bypass
-sidecar that fails prediction is quarantined for the lifetime of the engine so
-subsequent chunks go directly to ggml.
+Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,
+TDT, EOU, Nemotron 3.5 ASR and Sortformer v2.1 encoder paths. Input routing
+is model-specific; native cache-aware ASR streaming stays on ggml. Missing or
+incompatible sidecars fall back to ggml. Export, placement and routing
+contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar).
 
 ## Backend selection
 
-`parakeet-cli --backend NAME` selects the runtime device for encoder and head
-inference. Accepted values: `auto` (default), `cpu`, `opencl`, `hexagon`
-(Snapdragon HTP0), or an exact ggml device name such as `HTP0`. The C++ API
-takes the same value via `EngineOptions::device`. Hexagon is experimental and
-currently targets Parakeet CTC 0.6B Q8_0; other Parakeet variants (TDT, EOU,
-Sortformer) also run on it. Selecting `hexagon` requires a build with the
-matching ggml Hexagon backend and DSP library staged next to the binary; see
-[docs/backends.md](docs/backends.md) for the full backend model, device
-naming, and Core ML encoder-sidecar interaction.
+`parakeet --backend NAME` and `EngineOptions::device` select the runtime device.
+Explicit requests fail if unavailable. Hexagon is experimental and requires
+a staged DSP library; see [docs/backends.md](docs/backends.md) for names,
+automatic placement and validation coverage.
 
 ## Performance
 
-`RTF = inference_time / audio_duration`; lower is faster. The latest recorded
-Linux x86-64 CI run used q8_0 registry models, one warmup, and five timed runs
-on an NVIDIA RTX 4000 SFF Ada:
-
-| Model | CPU RTF | CPU wall | Vulkan RTF | Vulkan wall |
-|---|---:|---:|---:|---:|
-| CTC | 0.112 | 2256 ms | 0.0022 | 43 ms |
-| TDT | 0.130 | 2607 ms | 0.0044 | 88 ms |
-| EOU | 0.051 | 1034 ms | 0.0034 | 68 ms |
-| Sortformer | 0.046 | 922 ms | 0.0019 | 38 ms |
-| Sortformer streaming | 0.032 | 646 ms | 0.0034 | 69 ms |
-
-The same run also covers the self-hosted Apple M4 Mac mini (Metal, q8_0):
-CTC 0.0113, TDT 0.0150, EOU 0.0097, Sortformer 0.0061, Sortformer
-streaming 0.0070.
-
-Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs/31603189415),
-12 August 2026, runner `qvac-ubuntu2204-x64-gpu`, benchmarking the published
-`@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
-2026-08-03).
-
-### Multi-machine benchmark (2026-09)
-
-Maintainer-run measurement of Parakeet TDT 0.6b v3 across four machines and
-seven device-backend lanes, timed from outside the process — the engine's own
-timer is not quoted. Compute per transcription is an external two-point
-slope, so model load, process start-up, and wav decode cancel out of the
-number. Clips are byte-identical on all machines: `jfk.wav` 11.00 s,
-`ls90.wav` 98.49 s. Build: engine `46afe7d9`, ggml `speech@157b299f`,
-`parakeet-tdt-0.6b-v3.q8_0.gguf` (715 MiB, 100 % Q8_0 body).
-
-| Device | Backend | short 11.0 s | long 98.49 s |
-|---|---|--:|--:|
-| MacBook Air M5 | Metal | 60.53 ms (RTF 0.0055) | 755.80 ms (RTF 0.0077) |
-| MacBook Air M5 | CPU | 445.44 ms (RTF 0.0405) | withheld |
-| RTX 3080 desktop | CUDA | 13.49 ms (RTF 0.0012) | 115.51 ms (RTF 0.0012) |
-| RTX 3080 desktop | Vulkan | 15.41 ms (RTF 0.0014) | 143.98 ms (RTF 0.0015) |
-| Strix Halo | Vulkan | 30.21 ms (RTF 0.0027) | 228.27 ms (RTF 0.0023) |
-| RTX 5090 box | CUDA | 8.00 ms (RTF 0.0007) | 58.46 ms (RTF 0.0006) |
-| RTX 5090 box | Vulkan | 11.56 ms (RTF 0.0011) | 69.51 ms (RTF 0.0007) |
-
-Peak GPU memory on the long clip (`nvidia-smi` per-process sampling at 5 Hz,
-warm run only; RADV and Metal expose no equivalent counter): 2008 MiB on the
-RTX 3080 under CUDA and 1748 MiB under Vulkan; 2386 MiB on the RTX 5090
-under CUDA and 1935 MiB under Vulkan.
-
-Accuracy: jfk 0.00 % and ls90 0.80 % WER (`compute-wer.py`, `english`
-normaliser) on every lane; the statement of record stays the 500-utterance
-LibriSpeech run at 2.15–2.22 % across backends and quantisation tiers.
-
-Method, caveats, CI snapshots, and the CUDA/Metal decode
-optimization history: [docs/performance.md](docs/performance.md).
+`RTF = inference_time / audio_duration`; lower is faster. Dated CI snapshots,
+multi-machine campaigns, GPU diarization, accuracy, build pins and timing
+methods live in [docs/performance.md](docs/performance.md).
 
 ## Documentation
 
@@ -314,9 +76,12 @@ optimization history: [docs/performance.md](docs/performance.md).
 
 ## License
 
-Code is Apache-2.0. CTC, RNN-T, TDT, and Sortformer weights are CC-BY-4.0 unless
-their model card says otherwise. `parakeet_realtime_eou_120m-v1` uses the
+Code is Apache-2.0. NVIDIA Parakeet CTC, Unified RNN-T, TDT and Sortformer
+weights are CC-BY-4.0. [IndicConformer](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual)
+weights are MIT; [MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)
+weights are Apache-2.0. `parakeet_realtime_eou_120m-v1` uses the
 NVIDIA Open Model License. Nemotron 3.5 ASR Streaming 0.6B and Nemotron 3
 Diarization use OpenMDW-1.1; redistribution of their weights must retain the
 license and applicable origin notices.
-No weights are shipped by this repository.
+No weights are shipped by this repository. [NOTICE](NOTICE) lists the
+reference implementations, dependencies and model-weight sources.

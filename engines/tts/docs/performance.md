@@ -2,9 +2,9 @@
 
 Part of the [tts engine documentation](../README.md).
 
-The authoritative Linux x86-64 numbers come from CI (table below); the
-Apple-silicon figures are maintainer measurements (no CI Metal runner). Shared
-setup for the Apple rows:
+The dated CI snapshots and maintainer campaigns below use different models,
+workloads and timing boundaries. Each section records its own provenance; old
+results do not describe the current branch. Shared setup for the initial Apple rows:
 
 - Text: *"Hello from native C plus plus. This audio was generated end
   to end on CPU using ggml."*
@@ -28,7 +28,8 @@ Metal (`MTL0`).
 | Cosyvoice: cosyvoice3-llm-q8_0 | linux | CPU | 67695 | 18.0 | 1416 |
 | Cosyvoice: cosyvoice3-llm-q8_0 | macos | CPU | 46825 | 12.3 | 1467 |
 
-`—` RTF for chatterbox because it is text-driven variable output.
+`—` means the benchmark artifact did not report RTF; variable output length
+does not prevent computing RTF from the generated audio duration.
 
 Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218) (2026-09-07).
 
@@ -61,7 +62,7 @@ decoder forward (`use_b2 = !ggml_backend_is_cpu(...)`), since kernel
 dispatch overhead amortises well across the bigger workload; on ggml-cpu
 the extra permute+cont ops that a batched attention block needs regress
 throughput, so CPU keeps the two-call path.  See
-[`PROGRESS.md §3.19`](../PROGRESS.md) for the measurement and a discussion
+[Chatterbox port archive §3.19](history/chatterbox-port.md) for the measurement and a discussion
 of where the MTL slowdown lives relative to Turbo.
 
 ³ Re-measured on the same M4 host after commit `6d9b42b` restored the
@@ -98,7 +99,7 @@ layer.  The new `--cfm-steps N` flag exposes the standard CFM step count
 
 Compared to the M4 multilingual numbers above, the M3 Ultra hits
 **RTF 0.30** on Q4_0 — a 4.6× speedup.  The CFG-batching alone drops T3
-by 42–45% (see PROGRESS.md §3.21 for the full bench matrix and the
+by 42–45% (see the archived Chatterbox port report §3.21 for the full bench matrix and the
 NEGATIVE results for F16 KV cache and SwiGLU on F16).
 
 ### Multilingual (M3 Ultra, post §3.24–§3.31 Metal kernel portfolio)
@@ -241,7 +242,7 @@ sampler reads logits that come out of different float-reduction orders
 per backend; per-token T3 cost is the directly-comparable figure.
 Full development history and older backend combinations (F16 vs
 Q4_0 / Q5_0 / Q8_0, plus other machines) are in
-[`PROGRESS.md §3.10 / §3.13`](../PROGRESS.md).
+[Chatterbox port archive §3.10 / §3.13](history/chatterbox-port.md).
 
 ### Streaming mode — low-latency playback
 
@@ -319,4 +320,110 @@ amortised over only 0.4 s of audio).
 
 For the full journal of how streaming got there — bit-exact CFM parity,
 `cache_source` + `trim_fade` port, `--out -` stdout wiring, per-chunk
-tuning — see [`PROGRESS.md §B1`](../PROGRESS.md).
+tuning — see [Chatterbox port archive §B1](history/chatterbox-port.md).
+
+## CI benchmarks (2026-08-12, Linux x86-64)
+
+End-to-end RTF measured in CI on the `tetherto/qvac` self-hosted runners, using
+the q4 GGUFs from the QVAC model registry, 1 warmup + 5 timed runs.
+`RTF = generation_time / audio_duration` (lower is faster; RTF is the
+backend-comparable metric, wall time is workload-specific).
+
+| Engine                  | CPU RTF | Vulkan RTF | Vulkan wall | Vulkan tok/s |
+|-------------------------|--------:|-----------:|------------:|-------------:|
+| Chatterbox (Turbo)      |    1.54 |      0.099 |      410 ms |          173 |
+| Chatterbox Multilingual |    5.81 |      0.182 |     1036 ms |           77 |
+| Supertonic              |   0.113 |      0.018 |       78 ms |          952 |
+| Supertonic Multilingual |   0.101 |      0.013 |       84 ms |         1087 |
+| Supertonic 3            |   0.225 |      0.029 |      118 ms |          631 |
+
+_Source: workflow run [#31603192731](https://github.com/tetherto/qvac/actions/runs/31603192731)
+(2026-08-12), runner `qvac-ubuntu2204-x64-gpu`, GPU **NVIDIA RTX 4000 SFF Ada
+Generation** (`backend=vulkan`), benchmarking the published
+`@qvac/tts-ggml@0.6.2` addon (released 2026-08-03, pinning `tts-cpp`
+2026-08-03#1). This run adds the previously missing Supertonic GPU lanes, so
+the Vulkan columns are now recorded for all engines._
+
+## Supertonic 3 multi-machine benchmark (2026-09)
+
+Maintainer-run measurement on four machines. `supertonic-cli` performs one
+synthesis per process (it has no repeat flag), so the number a user feels is
+the **end-to-end process wall**, model load included, timed from outside the
+process. Two text lengths, ~9.6 s and ~26.5 s of speech; f16 weights
+(`supertonic3-f16.gguf`, 197 MiB); engine `46afe7d9`, ggml
+`speech@157b299f`. Load is the two-point intercept at zero audio,
+`wall_short - slope * audio_short`.
+
+| Device | Backend | wall short / long | RTF (long) | load |
+|---|---|--:|--:|--:|
+| MacBook Air M5 | Metal | 0.66 / 0.65 s | 0.025 | 0.66 s |
+| MacBook Air M5 | CPU | 1.72 / 2.66 s | 0.101 | 1.18 s |
+| RTX 3080 desktop | CUDA | 0.71 / 0.74 s | 0.028 | 0.69 s |
+| RTX 3080 desktop | Vulkan | 0.61 / 0.62 s | 0.024 | 0.61 s |
+| Strix Halo | Vulkan | 0.61 / 0.65 s | 0.025 | 0.59 s |
+| RTX 5090 box | CUDA | 0.79 / 0.82 s | 0.031 | 0.77 s |
+| RTX 5090 box | Vulkan | 0.72 / 0.74 s | 0.028 | 0.70 s |
+
+On the GPU lanes synthesis is cheap enough that 17 s of extra speech costs
+less than the run-to-run noise on a 0.6 s process, so the compute-only slope
+over text length — `(wall_long - wall_short) / (audio_long - audio_short)` —
+is above the noise floor only on the M5 CPU (0.0561 s per audio-second), the
+RTX 3080 CUDA (0.0022), Strix Halo Vulkan (0.0022), and the RTX 5090 (CUDA
+0.0020, Vulkan 0.0014); start-up dominates the wall everywhere else. One
+caveat: `supertonic-cli` caps one batch synthesis at ~28.5 s of audio, which
+sets the long text point (3x the short text, not 8x).
+
+## Audio8 multi-machine benchmark (2026-09)
+
+Maintainer-run measurement on three machines. `audio8-cli` performs one
+synthesis per process, so the number is the **end-to-end process wall**, model
+load included, timed from outside the process. Two text lengths, ~9.6 s and
+~24 s of speech; q8_0 weights (`audio8-lm-q8_0.gguf` 800 MiB +
+`audio8-codec-decoder-q8_0.gguf` 201 MiB); engine `0f9fc817`, ggml
+`speech@157b299f`, seed 42, 16 threads on the Linux boxes and 10 on the Mac.
+Load is the two-point intercept at zero audio,
+`wall_short - slope * audio_short`.
+
+| Device | Backend | wall short / long | RTF (long) | load |
+|---|---|--:|--:|--:|
+| RTX 5090 box | CUDA | 2.12 / 4.82 s | 0.203 | 0.48 s |
+| RTX 5090 box | Vulkan | 2.22 / 5.12 s | 0.215 | 0.37 s |
+| RTX 5090 box | CPU | 8.53 / 19.96 s | 0.840 | 0.46 s |
+| Strix Halo | Vulkan | 3.87 / 9.58 s | 0.403 | 0.24 s |
+| Strix Halo | CPU | 7.93 / 18.40 s | 0.774 | 0.53 s |
+| Mac mini M4 | Metal | 6.76 / 15.43 s | 0.649 | 0.92 s |
+| Mac mini M4 | CPU | 10.82 / 26.97 s | 1.134 | ~0 s |
+
+Audio8 is autoregressive, so unlike Supertonic its compute-only slope over
+text length is well above the noise floor on every lane
+(`(wall_long - wall_short) / (audio_long - audio_short)`): 0.183 s per
+audio-second on the RTX 5090 CUDA, 0.200 on its Vulkan, 0.393 on Strix Halo
+Vulkan, 0.610 on Mac Metal, and 0.75–1.14 on the CPU lanes. Every GPU lane
+runs faster than real time; the Mac mini M4 CPU lane is the only one that does
+not (RTF 1.13). Method: 1 untimed warm-up plus 5 timed runs per cell, engines
+alternated, 3 s cooldown, worst rep-to-rep spread in any cell 3.2 % (10 %
+gate), outputs deterministic per cell and non-silent (peak amplitude
+0.47–0.89), device confirmed in every run log (`on CUDA0` / `on Vulkan0` /
+`on MTL0`). One build note: the ggml Vulkan build needs the Khronos
+SPIRV-Headers include path on hosts without a system copy.
+
+The table is the campaign as measured at engine `0f9fc817`. The RTX 5090 GPU
+lanes were re-measured after the decode-loop work and the fast-AR graph cache
+(same harness, same protocol, same box): **CUDA 1.31 / 2.67 s, RTF 0.116**,
+slope 0.096 s per audio-second, and **Vulkan 1.65 / 3.73 s, RTF 0.157**, slope
+0.144. The intercept of the wall-versus-audio fit — what a caller pays before
+the first second of speech — is 0.45 s on CUDA and 0.32 s on Vulkan. The CPU
+lane and the other machines are unchanged and are not re-stated here.
+
+## Audio8 and LavaSR CI (2026-09-07)
+
+| Engine | Runner | Backend | Median wall ms | Median RTF | Peak RSS MiB |
+|---|---|---|--:|--:|--:|
+| Audio8: audio8-lm-q8_0 | linux | (CPU) | 4906 | — | 1193 |
+| Audio8: audio8-lm-q8_0 | macos | (CPU) | 1602 | — | 1208 |
+| Lavasr: lavasr-denoiser-f16 | linux | (CPU) | 4102 | 0.684 | 155 |
+| Lavasr: lavasr-denoiser-f16 | macos | (CPU) | 2090 | 0.348 | 209 |
+
+`—` means RTF was not reported in the artifact.
+
+Source: [workflow run 34113144218](https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/34113144218).
