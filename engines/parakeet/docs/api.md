@@ -23,6 +23,7 @@ Include `<parakeet/parakeet.h>` for the complete surface or individual headers.
 | `parakeet_cli_main` | Embed the same CLI entry point exported by the library |
 | `moss::TranscribeEngine::transcribe` | MOSS transcription with speakers, timestamps and hotwords; separate API in `<parakeet/moss_transcribe.h>`, see [MOSS guide](moss-transcribe.md) |
 | `fit_params` | Memory-fit preflight: project whether a GGUF + workload fits the device without loading weights (`<parakeet/fit.h>`) |
+| `moss::fit_params` | MOSS-Transcribe metadata-only projection for an explicit audio duration and transcription request (`<parakeet/moss_transcribe_fit.h>`) |
 | `parakeet_fit_cli_main` | Embed the `parakeet-fit-params` tool entry point |
 
 Minimal one-shot transcription:

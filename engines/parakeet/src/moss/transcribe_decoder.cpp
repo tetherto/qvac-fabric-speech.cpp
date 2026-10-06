@@ -4,6 +4,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "fit_util.h"
 
 #include <algorithm>
 #include <cmath>
@@ -141,11 +142,44 @@ struct TranscribeDecoder::Impl {
             fail("KV cache context allocation failed");
         }
         create_cache_tensors();
+        if (model.measure_only()) {
+            prepare_cache_measurement();
+            return;
+        }
         state_buffer = ggml_backend_alloc_ctx_tensors(state, model.backend());
         if (!state_buffer) {
             fail("KV cache allocation failed; the audio is too long for this device");
         }
         ggml_backend_buffer_clear(state_buffer, 0);
+    }
+
+    void bind_cache_measurement() {
+        for (auto * tensor = ggml_get_first_tensor(state); tensor; tensor = ggml_get_next_tensor(state, tensor)) {
+            tensor->buffer = state_buffer;
+            tensor->data = reinterpret_cast<void *>(uintptr_t(1));
+        }
+    }
+
+    void prepare_cache_measurement() {
+        const auto buft = ggml_backend_get_default_buffer_type(model.backend());
+        state_buffer = ggml_backend_buft_alloc_buffer(buft, 0);
+        if (!state_buffer) fail("KV cache measurement buffer failed");
+        bind_cache_measurement();
+    }
+
+    void clear_cache_measurement_data() {
+        for (auto * tensor = ggml_get_first_tensor(state); tensor; tensor = ggml_get_next_tensor(state, tensor)) {
+            tensor->data = nullptr;
+        }
+    }
+
+    uint64_t measure_cache() {
+        if (!model.measure_only()) fail("measurement requires a metadata-only model");
+        clear_cache_measurement_data();
+        const auto bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
+            state, ggml_backend_get_default_buffer_type(model.backend()));
+        bind_cache_measurement();
+        return bytes;
     }
 
     ggml_tensor * weight(int layer, const char * suffix) const {
@@ -262,11 +296,11 @@ struct TranscribeDecoder::Impl {
         return ggml_mul_mat(ctx, model.tensor("text.token_embd.weight"), last);
     }
 
-    ggml_tensor * embed(TranscribeGraph & graph, const BatchPlan & plan, ggml_tensor * ids, ggml_tensor * audio,
+    ggml_tensor * embed(TranscribeGraph & graph, bool has_audio, ggml_tensor * ids, ggml_tensor * audio,
                         ggml_tensor * audio_mask, ggml_tensor * text_mask) const {
         ggml_context * ctx = graph.ctx();
         ggml_tensor * text = ggml_get_rows(ctx, model.tensor("text.token_embd.weight"), ids);
-        if (!plan.has_audio) {
+        if (!has_audio) {
             return text;
         }
         return ggml_add(ctx, ggml_mul(ctx, text, text_mask), ggml_mul(ctx, audio, audio_mask));
@@ -316,19 +350,24 @@ struct TranscribeDecoder::Impl {
         return plan;
     }
 
-    std::vector<float> forward(const BatchPlan & plan, bool want_logits) {
-        const int64_t tokens = (int64_t) plan.ids.size();
-        if (pos + tokens > n_ctx) {
-            fail("decoder context overflow");
-        }
-        TranscribeGraph graph(DECODER_GRAPH_NODES);
+    struct DecoderInputs {
+        ggml_tensor * ids;
+        ggml_tensor * positions;
+        ggml_tensor * mask;
+        ggml_tensor * audio;
+        ggml_tensor * audio_mask;
+        ggml_tensor * text_mask;
+        ggml_tensor * output;
+    };
+
+    DecoderInputs build_graph(TranscribeGraph & graph, int64_t tokens, bool has_audio, bool want_logits) {
         ggml_tensor * ids = graph.input_i32(tokens);
         ggml_tensor * positions_input = graph.input_i32(tokens);
         ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
-        ggml_tensor * audio = plan.has_audio ? graph.input_f32(config.n_embd, tokens) : nullptr;
-        ggml_tensor * audio_mask = plan.has_audio ? graph.input_f32(1, tokens) : nullptr;
-        ggml_tensor * text_mask = plan.has_audio ? graph.input_f32(1, tokens) : nullptr;
-        ggml_tensor * cur = embed(graph, plan, ids, audio, audio_mask, text_mask);
+        ggml_tensor * audio = has_audio ? graph.input_f32(config.n_embd, tokens) : nullptr;
+        ggml_tensor * audio_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
+        ggml_tensor * text_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
+        ggml_tensor * cur = embed(graph, has_audio, ids, audio, audio_mask, text_mask);
         cur = blocks(graph, cur, tokens, positions_input, mask);
         ggml_tensor * output = want_logits ? logits(graph.ctx(), cur, tokens) : nullptr;
         if (output) {
@@ -336,21 +375,37 @@ struct TranscribeDecoder::Impl {
             ggml_build_forward_expand(graph.graph(), output);
         }
 
+        return {ids, positions_input, mask, audio, audio_mask, text_mask, output};
+    }
+
+    TranscribeMemory measure_batch(int position, int tokens, bool has_audio, bool want_logits) {
+        if (!model.measure_only()) fail("measurement requires a metadata-only model");
+        pos = position;
+        TranscribeGraph graph(DECODER_GRAPH_NODES);
+        build_graph(graph, tokens, has_audio, want_logits);
+        return model.measure(graph);
+    }
+
+    std::vector<float> forward(const BatchPlan & plan, bool want_logits) {
+        const int64_t tokens = (int64_t) plan.ids.size();
+        if (pos + tokens > n_ctx) fail("decoder context overflow");
+        TranscribeGraph graph(DECODER_GRAPH_NODES);
+        const auto inputs = build_graph(graph, tokens, plan.has_audio, want_logits);
         model.allocate(graph);
         const std::vector<int32_t> position_data = positions(tokens);
-        const std::vector<float> mask_data = mask ? causal_mask(tokens) : std::vector<float>();
-        set_input(ids, plan.ids);
-        set_input(positions_input, position_data);
-        set_input(mask, mask_data);
-        set_input(audio, plan.audio);
-        set_input(audio_mask, plan.audio_mask);
-        set_input(text_mask, plan.text_mask);
+        const std::vector<float> mask_data = inputs.mask ? causal_mask(tokens) : std::vector<float>();
+        set_input(inputs.ids, plan.ids);
+        set_input(inputs.positions, position_data);
+        set_input(inputs.mask, mask_data);
+        set_input(inputs.audio, plan.audio);
+        set_input(inputs.audio_mask, plan.audio_mask);
+        set_input(inputs.text_mask, plan.text_mask);
         model.compute(graph);
         pos += (int) tokens;
         std::vector<float> values;
-        if (output) {
+        if (inputs.output) {
             values.resize((size_t) config.vocab);
-            ggml_backend_tensor_get(output, values.data(), 0, values.size() * sizeof(float));
+            ggml_backend_tensor_get(inputs.output, values.data(), 0, values.size() * sizeof(float));
         }
         return values;
     }
@@ -398,6 +453,15 @@ std::vector<float> TranscribeDecoder::prefill(const std::vector<int32_t> & ids,
 
 std::vector<float> TranscribeDecoder::step(int32_t id) {
     return impl_->step(id);
+}
+
+uint64_t TranscribeDecoder::measure_cache() const { return impl_->measure_cache(); }
+uint64_t TranscribeDecoder::host_state_bytes() const {
+    return ggml_get_mem_size(impl_->state) +
+        (impl_->cache_k.capacity() + impl_->cache_v.capacity()) * sizeof(ggml_tensor *);
+}
+TranscribeMemory TranscribeDecoder::measure_batch(int position, int tokens, bool has_audio, bool want_logits) {
+    return impl_->measure_batch(position, tokens, has_audio, want_logits);
 }
 
 int TranscribeDecoder::position() const { return impl_->pos; }

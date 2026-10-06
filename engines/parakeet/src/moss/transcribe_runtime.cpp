@@ -129,6 +129,15 @@ bool TranscribeScheduler::allocate(ggml_cgraph * graph) {
     return ggml_backend_sched_alloc_graph(sched_, graph);
 }
 
+void TranscribeScheduler::measure(ggml_cgraph * graph, size_t * sizes) {
+    ggml_backend_sched_reserve_size(sched_, graph, sizes);
+}
+
+TranscribeMemory TranscribeScheduler::allocated_memory() const {
+    return {ggml_backend_sched_get_buffer_size(sched_, backend_),
+        cpu_ ? ggml_backend_sched_get_buffer_size(sched_, cpu_) : 0, 0};
+}
+
 bool TranscribeScheduler::compute(ggml_cgraph * graph, int n_threads) {
     backend_set_n_threads(cpu_ ? cpu_ : backend_, n_threads);
     return ggml_backend_sched_graph_compute(sched_, graph) == GGML_STATUS_SUCCESS;

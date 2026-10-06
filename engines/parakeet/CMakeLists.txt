@@ -255,6 +255,7 @@ set(PARAKEET_MOSS_SOURCES
     src/moss/transcribe_encoder.cpp
     src/moss/transcribe_decoder.cpp
     src/moss/transcribe_text.cpp
+    src/moss/transcribe_fit.cpp
     src/moss/transcribe_engine.cpp
     src/moss/transcribe_cli.cpp
 )
@@ -1367,6 +1368,14 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_backend_defs(test-moss-transcribe)
     parakeet_apply_ccache(test-moss-transcribe)
     parakeet_register_test(test-moss-transcribe LABEL "unit")
+
+    add_executable(test-moss-transcribe-fit test/moss/test_transcribe_fit.cpp ${PARAKEET_MOSS_TEST_SOURCES})
+    target_link_libraries(test-moss-transcribe-fit PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-moss-transcribe-fit PRIVATE src include ggml/include)
+    target_compile_options(test-moss-transcribe-fit PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    parakeet_apply_backend_defs(test-moss-transcribe-fit)
+    parakeet_apply_ccache(test-moss-transcribe-fit)
+    parakeet_register_test(test-moss-transcribe-fit LABEL "unit")
 
     add_executable(test-moss-transcribe-parity test/moss/test_transcribe_parity.cpp ${PARAKEET_MOSS_TEST_SOURCES})
     target_link_libraries(test-moss-transcribe-parity PRIVATE ggml parakeet-backend-defs)

@@ -7,7 +7,8 @@ RNN-T, TDT, EOU, Nemotron, or Sortformer GGUFs and selects the implementation
 from GGUF metadata. MOSS-Transcribe-Diarize, a Qwen3-based model that
 transcribes and labels speakers in one pass (with optional per-request
 hotwords), ships alongside with its own `parakeet::moss::TranscribeEngine`
-and `moss-transcribe` CLI; see
+and `moss-transcribe` CLI. Its `parakeet::moss::fit_params` preflight measures
+weights, encoder/decoder graphs, KV cache and host memory using GGUF metadata only; see
 [docs/moss-transcribe.md](docs/moss-transcribe.md).
 
 ## Supported checkpoints

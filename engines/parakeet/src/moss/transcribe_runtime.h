@@ -20,6 +20,12 @@ enum class TensorUpload { InPlace, Whole, Chunked };
 
 TensorUpload plan_upload(bool host_buffer, bool quantized);
 
+struct TranscribeMemory {
+    uint64_t device_bytes = 0;
+    uint64_t host_compute_bytes = 0;
+    uint64_t host_bytes = 0;
+};
+
 class TranscribeGraph {
 public:
     explicit TranscribeGraph(int max_nodes);
@@ -45,6 +51,8 @@ public:
     TranscribeScheduler & operator=(const TranscribeScheduler &) = delete;
 
     bool allocate(ggml_cgraph * graph);
+    void measure(ggml_cgraph * graph, size_t * sizes);
+    TranscribeMemory allocated_memory() const;
     bool compute(ggml_cgraph * graph, int n_threads);
 
 private:

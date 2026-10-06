@@ -148,3 +148,42 @@ also holds `tokenizer_cases.bin` from
 on prompt-shaped strings (default, English, and hotword prompts, CJK and
 full-width punctuation, whitespace and newline runs, digits, contractions,
 emoji).
+
+## Memory-fit preflight
+
+`parakeet::moss::fit_params` in
+[`include/parakeet/moss_transcribe_fit.h`](../include/parakeet/moss_transcribe_fit.h)
+projects one batch transcription before loading weights:
+
+```cpp
+#include <parakeet/moss_transcribe_fit.h>
+
+parakeet::moss::TranscribeOptions options;
+options.model_path = "moss-transcribe-diarize-q8_0.gguf";
+options.use_gpu = true;
+parakeet::moss::TranscribeRequest request;
+request.hotwords = {"QVAC", "Tether"};
+request.max_new_tokens = 1024;
+const double audio_seconds = 90;
+const uint64_t margin_bytes = 256ull * 1024 * 1024;
+auto fit = parakeet::moss::fit_params(options, request, audio_seconds, margin_bytes);
+std::cout << fit.report;
+```
+
+Duration and margin are explicit. The request uses the same prompt, hotword and token
+rules as transcription; 0 tokens selects the GGUF default. The fitter reads metadata
+and the tensor table, accepts a metadata-only copy, and never uploads weight data,
+allocates device payloads, or computes a graph. Backend selection matches the engine.
+
+`FitResult` reports weights, the encoder allocation, aligned F16 KV cache, additional
+decoder allocation above the encoder, host memory and available device memory. Encoder
+and decoder share a scheduler: the two compute fields sum to the peak compute demand.
+Host demand includes tokenizer, audio, embeddings, mel preprocessing and decoder buffers;
+CPU and unified-memory GPU verdicts charge host memory to the same pool. Workloads past
+the model context return `Error` / `workload-too-large`; invalid requests return
+`Error` / `invalid-arguments`.
+
+`test-moss-transcribe-fit` checks weightless/full-file parity, workload scaling, invalid
+arguments, saturating margins and actual CPU allocation parity on a tiny GGUF. Set
+`MOSS_TRANSCRIBE_MODEL` for a real-model projection and `MOSS_TRANSCRIBE_GPU=1` to
+require the GPU backend.
