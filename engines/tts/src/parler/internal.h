@@ -132,10 +132,6 @@ struct parler_model {
     // (Metal's conv_transpose kernel is ~an order slower); CPU keeps the direct op,
     // or sgemm + col2im on Accelerate builds (parler_dac_accel_enabled).
     bool      on_gpu  = false;
-    // The Hexagon NPU counts as on_gpu for the decoder; its DAC fuses the
-    // snakes, lowers each transposed conv to one GEMM into columns plus
-    // col2im_1d (parler_dac_convt_columns), and multiplies F16 operands on HMX
-    // (parler_dac_uses_f16_gemm).
     bool      on_hexagon = false;
 
     // t5
@@ -209,9 +205,6 @@ struct parler_model {
 };
 
 // ---- parler_gguf.cpp ----
-// `backend` is the EngineOptions::backend request: empty or "auto" keeps the
-// n_gpu_layers policy walk, anything else selects that device with no fallback
-// (the load fails when it is missing).
 bool parler_load_gguf(const std::string & path, parler_model & model,
                       int n_gpu_layers = 0, std::string * error = nullptr,
                       const std::string & backend = {});
@@ -336,14 +329,8 @@ constexpr float PARLER_DAC_SNAKE_EPS = 1e-9f;
 // validated with.
 bool parler_dac_uses_fused_snake(const parler_model & model);
 
-// Weight types a Parler GGUF may carry to load on Hexagon: the q8_0, f16 and
-// f32 tiers.  HTP has no K-quant matmul and looks up embedding rows only from
-// F32/F16 tables, so the q6_k tier is refused instead of falling back.
 bool parler_hexagon_runs_weight_type(ggml_type type);
 
-// Rearranges a [K, OC, IC] transposed-conv kernel into the [IC, K*OC] row-major
-// matrix parler_dac_convt_columns multiplies by: row k + K*oc holds the IC
-// taps of (k, oc), the column order ggml_col2im_1d scatters from.
 void parler_dac_convt_cols_from_kernel(const float * kernel, int64_t K, int64_t OC,
                                        int64_t IC, float * cols);
 
@@ -373,10 +360,6 @@ ggml_tensor * parler_dac_conv_same(ggml_context * ctx, bool accel, ggml_tensor *
                                    ggml_tensor * b, int dilation, ggml_tensor * residual,
                                    bool f16_gemm = false);
 
-// Whether the DAC GEMMs take F16 operands at default precision: Hexagon,
-// whose HMX multiplies in F16 (about 72 dB against the F32 reference, the
-// GPU bar is 50 dB) and has no fast F32 im2col.  Every other backend keeps F32
-// columns with F32 accumulation.
 bool parler_dac_uses_f16_gemm(const parler_model & model);
 
 // Snake over x [T, C] with per-channel alpha and 1 / (alpha + eps) on vForce.
@@ -392,11 +375,6 @@ size_t parler_dac_accel_scratch_bytes(const parler_model & model, int n_threads)
 ggml_tensor * parler_dac_accel_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w);
 
 // ---- parler_dac.cpp: Hexagon transposed conv ----
-// Transposed conv1d (K = 2*stride, trimmed by stride/2 per side) of x [IL, IC]
-// as one ggml_mul_mat into columns [K*OC, IL] over w_cols [IC, K*OC] (see
-// parler_dac_convt_cols_from_kernel) plus ggml_col2im_1d; returns
-// [IL*stride, OC, 1] without bias.  `f32_precision` asks the GEMM for F32
-// accumulation; Hexagon passes false (parler_dac_uses_f16_gemm).
 ggml_tensor * parler_dac_convt_columns(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w_cols,
                                        int stride, bool f32_precision);
 

@@ -17,15 +17,12 @@ namespace {
 // residual dilations, shared by the graph builder and the receptive-field derivation
 const int dilations[3] = { 1, 3, 9 };
 
-// conv1d via im2col + mul_mat.  kernel ne=[K, IC, OC].
+// conv1d via im2col + mul_mat, F32 unless `f16_gemm` (ggml_conv_1d's F16 im2col
+// loses too much precision over the 26-conv DAC stack).  kernel ne=[K, IC, OC].
 //
-// F32 by default (ggml_conv_1d's F16 im2col loses too much precision over the
-// 26-conv DAC stack against the >120 dB reference bar).  Keeping im2col in F32
-// only helps if the matmul that consumes it stays in F32 too, so the
-// contraction asks for it explicitly: backends are free to multiply f32
-// operands in fp16 for GGML_PREC_DEFAULT, and over 26 convolutions that
-// dominates the output error.  `f16_gemm` (Hexagon) writes F16 columns for
-// HMX, which multiplies in F16 anyway; HTP has no fast F32 im2col.
+// Keeping im2col in F32 only helps if the matmul that consumes it stays in F32 too, so
+// the contraction asks for it explicitly: backends are free to multiply f32 operands in
+// fp16 for GGML_PREC_DEFAULT, and over 26 convolutions that dominates the output error.
 ggml_tensor * conv1d(ggml_context * ctx, ggml_tensor * kernel, ggml_tensor * input,
                      int stride, int padding, int dilation, bool f16_gemm) {
     ggml_tensor * im2col = ggml_im2col(ctx, kernel, input, stride, 0, padding, 0, dilation, 0,

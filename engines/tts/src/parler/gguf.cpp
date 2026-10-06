@@ -128,8 +128,6 @@ void fill_snake_inverses(const std::vector<std::pair<ggml_tensor *, ggml_tensor 
     for (const auto & slot : slots) fill_snake_inverse(slot.first, *slot.second);
 }
 
-// Row r of one input channel's [K*OC] kernel slice goes to column ic of row r
-// of the [IC, K*OC] columns matrix.
 void transpose_kernel_row(const float * src, int64_t rows, int64_t IC, float * dst) {
     for (int64_t r = 0; r < rows; ++r) dst[r * IC] = src[r];
 }
@@ -786,8 +784,6 @@ bool parler_graph_prepare(const parler_model & model, ggml_cgraph * gf,
     use_sched = ::tts_cpp::detail::sched_force_enabled() ||
                 !::tts_cpp::detail::graph_fully_supported(model.backend, gf);
     if (!use_sched) {
-        // ggml_gallocr_alloc_graph re-plans only when the graph's shapes
-        // change, so consecutive decode steps reuse one plan.
         if (!ggml_gallocr_alloc_graph(allocr, gf)) {
             fprintf(stderr, "%s: gallocr alloc failed\n", caller);
             return false;

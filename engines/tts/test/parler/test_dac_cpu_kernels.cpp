@@ -40,7 +40,6 @@ namespace {
 
 constexpr int    GRAPH_NODES       = 64;
 constexpr double REL_TOLERANCE     = 1e-5;
-// F16 im2col columns round every input to 11 significant bits.
 constexpr double F16_REL_TOLERANCE = 2e-3;
 
 struct det_rng {
@@ -311,7 +310,6 @@ void run_conv_case(ggml_backend_t backend, const conv_case & c, bool accel, int 
           "the DAC conv matches the reference");
 }
 
-// The Hexagon lowering: F16 im2col columns, default-precision GEMM.
 void test_conv_same_f16_gemm(ggml_backend_t backend) {
     const conv_case cases[] = {
         { 300, 200, 24, 7, 1, false, false },
@@ -390,7 +388,6 @@ void run_convt_columns_case(ggml_backend_t backend, const convt_case & c) {
           "the columns-GEMM transposed conv matches the reference");
 }
 
-// Every DAC stride (8, 8, 4, 2), with one and two input frames at the edges.
 void test_convt_columns(ggml_backend_t backend) {
     const convt_case cases[] = {
         { 141, 64, 24, 8 },
