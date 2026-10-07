@@ -11,7 +11,7 @@ from unittest.mock import patch
 import uuid
 import wave
 
-spec = importlib.util.spec_from_file_location("moss_e2e", Path(__file__).with_name("moss-vulkan-e2e.py"))
+spec = importlib.util.spec_from_file_location("moss_e2e", Path(__file__).with_name("moss-gpu-e2e.py"))
 e2e = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(e2e)
 
@@ -61,7 +61,7 @@ class RunnerTests(unittest.TestCase):
     def test_gpu_invocation_requires_the_selected_backend(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runner = e2e.CaseRunner(root, root, root, root / "baseline")
+            runner = e2e.CaseRunner("vulkan", root, root, root, root / "baseline")
             for reported, accepted in (("CPU", False), ("Vulkan0", True)):
                 def execute(args, **kwargs):
                     self.assertEqual(kwargs["env"]["TTS_CPP_GPU_BACKEND"], "vulkan")
@@ -83,7 +83,7 @@ class RunnerTests(unittest.TestCase):
                 output = Path(directory)
                 (output / "transcript.json").write_text(json.dumps({"segments": [
                     {"speaker": "S0", "start": 0, "end": 1, "text": "ask your country"}]}))
-                runner = e2e.CaseRunner(root, root, output, root / "baseline")
+                runner = e2e.CaseRunner("vulkan", root, root, output, root / "baseline")
                 def invoke(name, args, **kwargs):
                     runner.checks[name] = {}
                 with patch.object(runner, "invoke", side_effect=invoke) as calls, \

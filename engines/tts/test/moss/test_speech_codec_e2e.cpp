@@ -1,11 +1,13 @@
 // Real-checkpoint decoder regression, without loading the Speech LM. CPU and
-// Vulkan receive identical speech codes, short voice conditioning and CFM noise.
+// the GPU arm receive identical speech codes, short voice conditioning and CFM
+// noise.
 #include "moss/speech_codec.h"
 #include "backend_selection.h"
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
 #include "npy.h"
 #include "dr_wav.h"
 #include "../test_env_portable.h"
+#include "../../../test/moss_gpu_arm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +24,8 @@ using namespace tts_cpp::moss::detail;
 namespace fs = std::filesystem;
 
 namespace {
+
+MossGpuArm arm;
 
 // Whisper-VQ codes for a CPU-rendered "The capital of France is Paris."
 // Keeping these fixed isolates the decoder from tokenizer/LM differences.
@@ -76,7 +80,7 @@ std::vector<Result> decode(const std::string & model, const SpeechVoice & voice,
     // On GPU, cfg=0 exercises basic_tfm (B=1); cfg=0.7 exercises basic_tfm_b
     // (B=2). CPU implements CFG with two B=1 calls, independently of GPU batching.
     for (float cfg : {0.0f, 0.7f}) {
-        const std::string label = std::string("codec-") + (gpu ? "vulkan" : "cpu") +
+        const std::string label = std::string("codec-") + (gpu ? arm.request : std::string("cpu")) +
                                   (cfg == 0.0f ? "-single" : "-cfg");
         s3gen_synthesize_opts opts;
         Result result;
@@ -119,7 +123,7 @@ double rms(const std::vector<float> & pcm) {
 void compare(const Result & cpu, const Result & gpu) {
     require(cpu.mel.n_elements() > 0 && cpu.mel.shape == gpu.mel.shape, "mel shape mismatch");
     const auto stats = compare_f32(npy_as_f32(gpu.mel), npy_as_f32(cpu.mel), cpu.mel.n_elements());
-    print_compare("codec mel CPU/Vulkan", stats);
+    print_compare(("codec mel CPU/" + arm.prefix).c_str(), stats);
     require(compare_within(stats, 0.02), "non-finite/divergent decoder mel");
     require(cpu.pcm.size() == gpu.pcm.size(), "PCM length mismatch");
     // HiFT integrates f0 into phase: small mel differences can shift waveform
@@ -132,29 +136,27 @@ void compare(const Result & cpu, const Result & gpu) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s CODEC.gguf OUTPUT_DIR\n", argv[0]);
+    if (argc != 4) {
+        std::fprintf(stderr, "usage: %s cuda|vulkan CODEC.gguf OUTPUT_DIR\n", argv[0]);
         return 77;
     }
     try {
+        arm = moss_gpu_arm(argv[1]);
         // The fallback used during diagnosis must not mask a regression.
         unsetenv("GGML_VK_DISABLE_F16");
         unsetenv("CHATTERBOX_CFG_RATE");
-        setenv("TTS_CPP_GPU_BACKEND", "vulkan", 1);
-        auto backend = tts_cpp::detail::init_gpu_backend(
-            1, true, "moss-speech-codec-e2e", 0, false, nullptr,
-            tts_cpp::detail::GpuBackendRequirement::Vulkan);
-        require(backend != nullptr, "Vulkan backend required");
-        const std::string name = ggml_backend_name(backend);
-        ggml_backend_free(backend);
-        require(name.find("Vulkan") == 0, "Vulkan backend required");
+        setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
+        auto backend = tts_cpp::detail::init_gpu_backend(1, true, "moss-speech-codec-e2e");
+        const std::string name = backend ? ggml_backend_name(backend) : "";
+        if (backend) ggml_backend_free(backend);
+        arm.require(name.c_str());
         std::fprintf(stderr, "[moss-speech-codec-e2e] backend: %s\n", name.c_str());
-        const fs::path output(argv[2]);
+        const fs::path output(argv[3]);
         fs::create_directories(output);
         SpeechVoice voice;
         int ratio = 0;
         {
-            SpeechCodec codec(argv[1], false, 2);
+            SpeechCodec codec(argv[2], false, 2);
             voice = codec.default_voice();
             ratio = codec.token_mel_ratio();
         } // Release the tokenizer/CAM++ before loading the decoder.
@@ -166,10 +168,10 @@ int main(int argc, char ** argv) {
         std::mt19937 rng(0);
         std::normal_distribution<float> normal(0, 1);
         for (float & x : noise) x = normal(rng);
-        const auto cpu = decode(argv[1], voice, noise, false, output);
-        const auto gpu = decode(argv[1], voice, noise, true, output);
+        const auto cpu = decode(argv[2], voice, noise, false, output);
+        const auto gpu = decode(argv[2], voice, noise, true, output);
         for (size_t i = 0; i < cpu.size(); ++i) compare(cpu[i], gpu[i]);
-        std::puts("MOSS Speech codec CPU/Vulkan agreement: OK");
+        std::printf("MOSS Speech codec CPU/%s agreement: OK\n", arm.prefix.c_str());
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "moss speech codec e2e: %s\n", error.what());
