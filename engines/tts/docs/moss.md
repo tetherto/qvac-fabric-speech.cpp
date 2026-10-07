@@ -53,6 +53,18 @@ paths and a longer utterance. WAVs and callback timing CSVs are retained.
 Waveform agreement establishes correct chunk delivery; listening/transcription
 checks are still needed to establish that the model speaks the requested text.
 
+The TTS case also gates every expected batch/stream/reuse WAV and its CPU
+reference with the existing Whisper CPU intelligibility scorer. The reference
+model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
+the ASR executable is a separate static CPU build of the vendored Whisper/ggml
+pair so its versioned CLI dependencies are isolated from the Vulkan test pin.
+The synthesis text is never provided as an ASR prompt. Missing/unavailable
+scores, non-finite scores, or word error rate above 25% fail the case. This
+tolerates limited reference-ASR errors while rejecting the observed wrong-text
+outputs (100% WER); it is not a naturalness or speaker-similarity metric.
+Synthesis and ASR use the same prompt files. Transcripts, per-output scores
+and ASR settings are saved even when a later synthesis step fails.
+
 Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel

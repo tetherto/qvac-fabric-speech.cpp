@@ -12,6 +12,7 @@ import array
 from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 import wave
 
 
@@ -34,6 +36,59 @@ CASES = {
     "transcribe-q5_0": "moss-transcribe-diarize-q5_0",
     "transcribe-q8_0": "moss-transcribe-diarize-q8_0",
 }
+
+TTS_TEXT = "Hello, this is a test of speech synthesis."
+TTS_LONG_TEXT = (TTS_TEXT + " We are checking that every audio chunk arrives in order, "
+                 "including the final part of this sentence.")
+# Same immutable reference model as the existing TTS intelligibility benchmark.
+ASR_SPEC = {
+    "repo": "ggerganov/whisper.cpp",
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "name": "ggml-tiny.bin",
+    "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+}
+MAX_TTS_WER = 0.25
+
+
+def intelligibility_passes(score):
+    wer = score.get("wer")
+    return (score.get("status") == "ok" and isinstance(wer, (float, int)) and
+            math.isfinite(wer) and 0 <= wer <= MAX_TTS_WER and score.get("n_ref_words", 0) > 0)
+
+
+def score_tts_outputs(asr_binary, models, output):
+    benchmarks = Path(__file__).resolve().parents[1] / "benchmarks"
+    spec = importlib.util.spec_from_file_location("prepare_asr", benchmarks / "prepare-tts-asr.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    model = prepare.prepare(ASR_SPEC, models.resolve())
+    expected = {name: "short" for name in ["batch", "stream", "clone", "cpu-reference"]}
+    for chunk in (7, 25):
+        for suffix in ("batch", "stream", "after-callback-cancel", "after-explicit-cancel"):
+            expected[f"tts-c{chunk}-{suffix}"] = "short"
+    expected.update({"tts-long-batch": "long", "tts-long-stream": "long"})
+    scores = {}
+    for name, length in expected.items():
+        audio = output / f"{name}.wav"
+        if not audio.is_file():
+            scores[name] = {"status": "missing", "wer": None}
+            continue
+        score_path = output / f"{name}-intelligibility.json"
+        # The scorer uses CPU, a fresh transcript, and deterministic ASR settings.
+        # Expected text is only used for scoring; it is never an ASR prompt.
+        completed = subprocess.run([
+            sys.executable, str(benchmarks / "compute-tts-intelligibility.py"),
+            "--audio", str(audio), "--reference", str(output / f"reference-{length}.txt"),
+            "--asr-binary", str(asr_binary), "--asr-model", str(model),
+            "--json-out", str(score_path), "--transcript-out", str(output / f"{name}-transcript.txt"),
+            "--log-out", str(output / f"{name}-asr.log")], check=False, timeout=360)
+        score = json.loads(score_path.read_text()) if score_path.exists() else {"status": "error", "wer": None}
+        if completed.returncode != 0:
+            score["status"] = "error"
+        scores[name] = {key: score.get(key) for key in ("status", "wer", "n_ref_words", "n_hyp_words", "n_edits")}
+    failed = [name for name, score in scores.items() if not intelligibility_passes(score)]
+    return {"status": "failed" if failed else "passed", "max_wer": MAX_TTS_WER,
+            "asr_model": ASR_SPEC, "failed_outputs": failed, "scores": scores}
 
 
 def gpu_memory():
@@ -204,7 +259,7 @@ def run_case(case, build, models, output):
         base = [tts, "--backbone", model, "--decoder", decoder, "--language", "en",
                 "--max-new-tokens", "192", "--context", "4096", *common]
         if family == "tts":
-            base += ["--text", "Hello, this is a test of speech synthesis."]
+            base += ["--text", TTS_TEXT]
             for name, extra in [("batch", []), ("stream", ["--stream", "--stream-chunk-frames", "25"]),
                                 ("clone", ["--encoder", encoder, "--ref-audio", str(ref1)])]:
                 invoke(name, [*base, *extra, "--out", str(output / f"{name}.wav")])
@@ -213,7 +268,8 @@ def run_case(case, build, models, output):
             invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
                    ["--out", str(output / "cpu-reference.wav")], cpu=True)
             invoke("stream-agreement", [str(build / "engines/tts/test-moss-tts-stream-e2e"),
-                   model, decoder, encoder, str(ref1), str(output)], wav=False)
+                   model, decoder, encoder, str(ref1), str(output),
+                   str(output / "reference-short.txt"), str(output / "reference-long.txt")], wav=False)
         else:
             # Two reference slots exercise dialogue conditioning; these are
             # excerpts from the same speaker, not a voice identity quality test.
@@ -258,9 +314,13 @@ def main():
     parser.add_argument("--build", type=Path, default=Path("build-moss-e2e"))
     parser.add_argument("--models", type=Path, default=Path("models-moss-e2e"))
     parser.add_argument("--output", type=Path, default=Path("moss-e2e-results"))
+    parser.add_argument("--asr-binary", type=Path, default=Path("build-moss-asr/bin/whisper-cli"))
     args = parser.parse_args()
     args.models.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.case == "tts-f16":
+        (args.output / "reference-short.txt").write_text(TTS_TEXT + "\n")
+        (args.output / "reference-long.txt").write_text(TTS_LONG_TEXT + "\n")
     result = {"case": args.case, "status": "failed",
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     try:
@@ -268,9 +328,24 @@ def main():
         result["status"] = "passed"
     except Exception as error:
         result["error"] = str(error)
-        raise
+        traceback.print_exc()
     finally:
+        if args.case == "tts-f16":
+            # Still score existing audio when a later synthesis fails, preserving
+            # both the original failure and CPU/Vulkan quality evidence.
+            try:
+                result["intelligibility"] = score_tts_outputs(args.asr_binary.resolve(), args.models, args.output)
+                if result["intelligibility"]["status"] != "passed":
+                    result["status"] = "failed"
+                    print("TTS intelligibility gate failed: " +
+                          ", ".join(result["intelligibility"]["failed_outputs"]), file=sys.stderr)
+            except Exception as error:
+                result["intelligibility"] = {"status": "error", "reason": str(error)}
+                result["status"] = "failed"
+                traceback.print_exc()
         (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    if result["status"] != "passed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

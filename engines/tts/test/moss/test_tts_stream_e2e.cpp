@@ -96,8 +96,8 @@ void cancel(Engine & engine, const std::string & text, bool explicit_cancel) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    if (argc != 6) {
-        std::fprintf(stderr, "usage: %s LM.gguf DECODER.gguf ENCODER.gguf REFERENCE.wav OUTPUT_DIR\n", argv[0]);
+    if (argc != 8) {
+        std::fprintf(stderr, "usage: %s LM.gguf DECODER.gguf ENCODER.gguf REFERENCE.wav OUTPUT_DIR SHORT.txt LONG.txt\n", argv[0]);
         return 77;
     }
     try {
@@ -105,10 +105,16 @@ int main(int argc, char ** argv) {
         unsetenv("GGML_VK_DISABLE_F16");
         const fs::path output(argv[5]);
         fs::create_directories(output);
-        const std::string short_text = "Hello, this is a test of speech synthesis.";
-        const std::string long_text = "Hello, this is a test of speech synthesis. "
-                "We are checking that every audio chunk arrives in order, "
-                "including the final part of this sentence.";
+        auto read_text = [](const char * path) {
+            std::ifstream input(path);
+            require(input.good(), "cannot read test prompt");
+            std::string text((std::istreambuf_iterator<char>(input)), {});
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+            require(!text.empty(), "empty test prompt");
+            return text;
+        };
+        const std::string short_text = read_text(argv[6]);
+        const std::string long_text = read_text(argv[7]);
         for (int chunk : {7, 25}) {
             EngineOptions options;
             options.backbone_path = argv[1];

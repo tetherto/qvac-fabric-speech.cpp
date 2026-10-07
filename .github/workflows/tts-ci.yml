@@ -139,6 +139,17 @@ jobs:
             -DSPEECH_BUILD_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
           cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e test-moss-speech-codec-e2e test-moss-tts-stream-e2e -j4
+      - name: Build independent CPU reference ASR
+        if: matrix.model == 'tts-f16'
+        # This test oracle uses the vendored Whisper/ggml pair, statically
+        # linked in a separate process. Its CLI needs newer ggml quant enums
+        # than the pinned Vulkan runtime being validated above.
+        run: |
+          cmake -S third_party/whisper.cpp -B build-moss-asr -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_SKIP_INSTALL_RULES=ON -DWHISPER_USE_SYSTEM_GGML=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_PARAKEET=OFF \
+            -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_NATIVE=OFF
+          cmake --build build-moss-asr --target whisper-cli -j4
       - name: Generate and transcribe with full checkpoints
         env:
           MODEL_CASE: ${{ matrix.model }}

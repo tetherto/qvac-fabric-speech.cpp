@@ -1,4 +1,4 @@
-"""GPU admission must not mistake a busy shared runner for a model failure."""
+"""Admission and intelligibility gates must not report false passes."""
 import importlib.util
 import io
 from pathlib import Path
@@ -53,6 +53,25 @@ with open(sys.argv[1]) as lock:
                 self.assertEqual(subprocess.run([sys.executable, "-c", probe, str(path)]).returncode, 0)
         finally:
             path.unlink(missing_ok=True)
+
+
+class IntelligibilityTests(unittest.TestCase):
+    def test_wrong_or_empty_speech_fails_using_shared_word_error_scorer(self):
+        spec = importlib.util.spec_from_file_location("wer", Path(__file__).parents[1] / "benchmarks/compute-wer.py")
+        wer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wer)
+        for transcript, expected in [(e2e.TTS_TEXT, True), ("No more...", False), ("", False)]:
+            with self.subTest(transcript=transcript):
+                score = {"status": "ok", **wer.compute_wer(transcript, e2e.TTS_TEXT)}
+                self.assertEqual(e2e.intelligibility_passes(score), expected)
+
+    def test_unavailable_missing_or_nonfinite_scores_cannot_pass(self):
+        for score in [{}, {"status": "error", "wer": 0, "n_ref_words": 8},
+                      {"status": "ok", "wer": None, "n_ref_words": 8},
+                      {"status": "ok", "wer": float("nan"), "n_ref_words": 8},
+                      {"status": "ok", "wer": 0, "n_ref_words": 0}]:
+            with self.subTest(score=score):
+                self.assertFalse(e2e.intelligibility_passes(score))
 
 
 if __name__ == "__main__":
