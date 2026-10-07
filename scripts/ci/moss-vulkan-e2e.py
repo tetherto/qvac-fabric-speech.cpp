@@ -9,6 +9,8 @@ inference, not addon integration or perceptual audio quality.
 
 import argparse
 import array
+from contextlib import contextmanager, nullcontext
+import fcntl
 import hashlib
 import json
 import math
@@ -17,6 +19,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import wave
 
 
@@ -31,6 +34,63 @@ CASES = {
     "transcribe-q5_0": "moss-transcribe-diarize-q5_0",
     "transcribe-q8_0": "moss-transcribe-diarize-q8_0",
 }
+
+
+def gpu_memory():
+    row = subprocess.check_output([
+        "nvidia-smi", "--id=0", "--query-gpu=uuid,memory.total,memory.free",
+        "--format=csv,noheader,nounits"], text=True, timeout=30).strip().split(",")
+    uuid, total, free = (value.strip() for value in row)
+    if not re.fullmatch(r"GPU-[0-9a-fA-F-]+", uuid):
+        raise RuntimeError("Cannot identify physical GPU for admission control")
+    return {"uuid": uuid, "total_mib": int(total), "free_mib": int(free)}
+
+
+def wait_for_gpu(deadline, report, expected_uuid):
+    # Other repositories do not share our matrix limit or lock. Require near-idle
+    # memory twice before loading a checkpoint; never terminate foreign jobs.
+    ready = 0
+    while time.monotonic() < deadline:
+        state = gpu_memory()
+        report.write(json.dumps(state) + "\n")
+        report.flush()
+        if state["uuid"] != expected_uuid:
+            raise RuntimeError("GPU identity changed while waiting")
+        ready = ready + 1 if state["free_mib"] >= state["total_mib"] - 1024 else 0
+        if ready == 2:
+            return
+        print(f"GPU admission: {state['free_mib']}/{state['total_mib']} MiB free; "
+              "waiting for stable headroom", flush=True)
+        time.sleep(5)
+    raise RuntimeError("GPU admission timed out: shared GPU is busy; inference was not started")
+
+
+@contextmanager
+def gpu_lease(output, name):
+    state = gpu_memory()
+    path = Path("/tmp") / f"qvac-moss-e2e-{state['uuid']}.lock"
+    # Keep the inode: unlinking a lock permits two independent owners. Read-only
+    # descriptors allow runner accounts to share flock without granting writes.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.fchmod(fd, 0o644)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY)
+    deadline = time.monotonic() + 900
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("GPU admission timed out waiting for another OpenMOSS run")
+                time.sleep(5)
+        with (output / f"{name}-gpu-admission.jsonl").open("w") as report:
+            wait_for_gpu(deadline, report, state["uuid"])
+        yield
+    finally:
+        os.close(fd)
 
 
 def download(name, models, output):
@@ -101,7 +161,7 @@ def run_case(case, build, models, output):
     common = ["--gpu", "--threads", "4", "--seed", "1234"]
     checks = {}
 
-    def invoke(name, args, wav=True):
+    def invoke(name, args, wav=True, cpu=False):
         log = output / f"{name}.log"
         # Capture memory immediately around inference, not just before the
         # build/download. Include UUIDs to identify runner services sharing a GPU.
@@ -114,23 +174,25 @@ def run_case(case, build, models, output):
                     subprocess.run(["nvidia-smi", *query], stdout=stream,
                                    stderr=subprocess.STDOUT, check=False, timeout=30)
 
-        gpu_snapshot("before")
         try:
-            with log.open("w") as stream:
-                stream.write(json.dumps(args) + "\n")
-                stream.flush()
-                subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
-                               check=True, timeout=1200,
-                               env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
+            with nullcontext() if cpu else gpu_lease(output, name):
+                gpu_snapshot("before")
+                with log.open("w") as stream:
+                    stream.write(json.dumps(args) + "\n")
+                    stream.flush()
+                    subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
+                                   check=True, timeout=1200,
+                                   env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # Put the actual engine error in the job log as well as the artifact.
             print(log.read_text(errors="replace")[-12000:], file=sys.stderr, flush=True)
             raise
         finally:
             gpu_snapshot("after")
-        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e)\] backend: Vulkan\d*", log.read_text()):
-            raise RuntimeError(f"{name} did not select Vulkan; see {log}")
-        checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": "Vulkan"}
+        backend = "CPU" if cpu else "Vulkan"
+        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e)\] backend: " + backend + r"\d*", log.read_text()):
+            raise RuntimeError(f"{name} did not select {backend}; see {log}")
+        checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": backend}
         print(f"PASS {name}: {checks[name]}", flush=True)
 
     if family in {"tts", "ttsd"}:
@@ -146,6 +208,10 @@ def run_case(case, build, models, output):
             for name, extra in [("batch", []), ("stream", ["--stream", "--stream-chunk-frames", "25"]),
                                 ("clone", ["--encoder", encoder, "--ref-audio", str(ref1)])]:
                 invoke(name, [*base, *extra, "--out", str(output / f"{name}.wav")])
+            # Same checkpoint, text and seed: distinguish common prompt/model
+            # failures from backend-dependent generation drift. CI only.
+            invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
+                   ["--out", str(output / "cpu-reference.wav")], cpu=True)
         else:
             # Two reference slots exercise dialogue conditioning; these are
             # excerpts from the same speaker, not a voice identity quality test.

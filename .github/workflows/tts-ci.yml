@@ -20,12 +20,14 @@ on:
       - 'engines/tts/**'
       - 'engines/test/**'
       - 'scripts/ci/moss-vulkan-e2e.py'
+      - 'scripts/ci/test_moss_vulkan_e2e.py'
       - '.github/workflows/tts-ci.yml'
   pull_request:
     paths:
       - 'engines/tts/**'
       - 'engines/test/**'
       - 'scripts/ci/moss-vulkan-e2e.py'
+      - 'scripts/ci/test_moss_vulkan_e2e.py'
       - '.github/workflows/tts-ci.yml'
   workflow_dispatch:
     inputs:
@@ -105,6 +107,8 @@ jobs:
         shell: bash
         working-directory: .
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Test GPU admission control
+        run: python3 -m unittest discover -s scripts/ci -p test_moss_vulkan_e2e.py
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:

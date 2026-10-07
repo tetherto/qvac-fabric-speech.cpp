@@ -33,6 +33,16 @@ serially because runner services share GPU memory. Speech cases use
 `test-moss-speech-e2e` to make two replies on one engine instance, checking
 that staged model unloading also works on the next request.
 
+Each Vulkan invocation also takes a host-local lock keyed by the physical
+GPU UUID and waits for two consecutive memory readings with at most 1 GiB
+unavailable. Admission times out after 15 minutes and records the readings;
+foreign processes are never terminated. This coordinates OpenMOSS runs across
+runner accounts and avoids starting while another workload occupies the GPU.
+Other GPU workloads do not honor this lock and can still start afterward;
+before/after process snapshots remain necessary to diagnose contention.
+The TTS case also saves a CPU reference with the same checkpoint, text and
+seed to investigate backend-dependent generation quality.
+
 Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
