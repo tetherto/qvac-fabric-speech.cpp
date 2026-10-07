@@ -776,9 +776,13 @@ extern "C" {
         WHISPER_FIT_ERROR   = 2,
     };
 
+    // model_path and vad_model_path each take the file itself or its weightless
+    // description: the GGUF (no data section) qvac's registry publishes beside
+    // the file, holding its header settings, vocabulary length histogram and
+    // tensor inventory. Both project identically.
     struct whisper_fit_options {
-        const char * model_path;      // whisper ggml model to project (required)
-        const char * vad_model_path;  // optional VAD model projected alongside (NULL = no VAD)
+        const char * model_path;      // whisper ggml model (or its description) to project (required)
+        const char * vad_model_path;  // optional VAD model (or its description) projected alongside (NULL = no VAD)
 
         // same semantics as the whisper_context_params fields of the same
         // name; defaults mirror whisper_context_default_params()
@@ -858,8 +862,9 @@ extern "C" {
 
     // Project the model + workload in `opts` against the device memory
     // available right now. Reads only model metadata (headers, hparams,
-    // vocab, tensor shapes -- weight payloads are seeked past); builds and
-    // measures the real graphs but never allocates or executes them.
+    // vocab, tensor shapes -- weight payloads are seeked past, and a
+    // description carries none); builds and measures the real graphs but
+    // never allocates or executes them.
     // Returns the status (== exit-code contract above); `result` is always
     // filled when non-NULL.
     WHISPER_API int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_fit_result * result);

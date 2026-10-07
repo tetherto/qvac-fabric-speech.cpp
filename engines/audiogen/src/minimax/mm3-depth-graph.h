@@ -21,6 +21,8 @@
 
 #define MM3_DEPTH_MAX_STEPS 16
 
+#define MM3_DEPTH_SEED_POSITIONS 2
+
 struct MM3DepthStep {
     ggml_backend_sched_t sched = nullptr;
     ggml_context *       gctx  = nullptr;
@@ -167,14 +169,22 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
     return ggml_add(ctx, h, y);
 }
 
-static bool mm3_depth_alloc_kv(const MM3Model & m, MM3DepthGraph * g, int n_steps, std::string * err) {
-    const MM3DepthConfig & c   = m.synth_cfg.depth;
-    const int64_t          D   = (int64_t) c.head_dim;
-    const int64_t          Nh  = (int64_t) c.head_count;
-    const int64_t          pos = (int64_t) n_steps + 1;
-    const int              L   = (int) c.block_count;
+static void mm3_depth_add_kv_tensors(MM3DepthGraph * g, int64_t D, int64_t positions, int64_t Nh) {
+    for (size_t i = 0; i < g->kv_k.size(); i++) {
+        char nm[64];
+        g->kv_k[i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, positions, Nh, 2);
+        snprintf(nm, sizeof(nm), "mm3.depth.kv_k.%zu", i);
+        ggml_set_name(g->kv_k[i], nm);
+        g->kv_v[i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, positions, Nh, 2);
+        snprintf(nm, sizeof(nm), "mm3.depth.kv_v.%zu", i);
+        ggml_set_name(g->kv_v[i], nm);
+    }
+}
 
-    ggml_init_params ip = { (size_t) (L * 2) * ggml_tensor_overhead() + 1024, NULL, true };
+static bool mm3_depth_define_kv(const MM3DepthConfig & c, MM3DepthGraph * g, int n_steps, std::string * err) {
+    const size_t layers = (size_t) c.block_count;
+
+    ggml_init_params ip = { layers * 2 * ggml_tensor_overhead() + 1024, NULL, true };
     g->kv_ctx           = ggml_init(ip);
     if (!g->kv_ctx) {
         if (err) {
@@ -182,16 +192,15 @@ static bool mm3_depth_alloc_kv(const MM3Model & m, MM3DepthGraph * g, int n_step
         }
         return false;
     }
-    g->kv_k.assign((size_t) L, nullptr);
-    g->kv_v.assign((size_t) L, nullptr);
-    for (int i = 0; i < L; i++) {
-        char nm[64];
-        g->kv_k[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, pos, Nh, 2);
-        snprintf(nm, sizeof(nm), "mm3.depth.kv_k.%d", i);
-        ggml_set_name(g->kv_k[(size_t) i], nm);
-        g->kv_v[(size_t) i] = ggml_new_tensor_4d(g->kv_ctx, GGML_TYPE_F32, D, pos, Nh, 2);
-        snprintf(nm, sizeof(nm), "mm3.depth.kv_v.%d", i);
-        ggml_set_name(g->kv_v[(size_t) i], nm);
+    g->kv_k.assign(layers, nullptr);
+    g->kv_v.assign(layers, nullptr);
+    mm3_depth_add_kv_tensors(g, (int64_t) c.head_dim, (int64_t) n_steps + 1, (int64_t) c.head_count);
+    return true;
+}
+
+static bool mm3_depth_alloc_kv(const MM3Model & m, MM3DepthGraph * g, int n_steps, std::string * err) {
+    if (!mm3_depth_define_kv(m.synth_cfg.depth, g, n_steps, err)) {
+        return false;
     }
     g->kv_buf = ggml_backend_alloc_ctx_tensors(g->kv_ctx, g->backend);
     if (!g->kv_buf) {
@@ -205,21 +214,18 @@ static bool mm3_depth_alloc_kv(const MM3Model & m, MM3DepthGraph * g, int n_step
     return true;
 }
 
-static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, std::string * err) {
-    const MM3DepthConfig &  c  = m.synth_cfg.depth;
-    const MM3DepthWeights & w  = m.synth.depth;
-    const int64_t           H  = (int64_t) c.embedding_length;
-    const int64_t           S  = cb + 1;
-    MM3DepthStep *          s  = &g->step[cb - 1];
+static size_t mm3_depth_step_context_bytes() {
+    return ggml_tensor_overhead() * (MM3_DEPTH_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_DEPTH_MAX_NODES, false);
+}
 
-    const size_t ctx_bytes =
-        ggml_tensor_overhead() * (MM3_DEPTH_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_DEPTH_MAX_NODES, false);
+static ggml_context * mm3_depth_step_context(MM3DepthStep * s, std::string * err) {
+    const size_t ctx_bytes = mm3_depth_step_context_bytes();
     s->gbuf = (uint8_t *) malloc(ctx_bytes);
     if (!s->gbuf) {
         if (err) {
             *err = "out of host memory allocating the depth graph context";
         }
-        return false;
+        return nullptr;
     }
     ggml_init_params ip  = { ctx_bytes, s->gbuf,  true };
     ggml_context *   ctx = ggml_init(ip);
@@ -229,8 +235,17 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
         if (err) {
             *err = "ggml_init failed for the depth graph context";
         }
-        return false;
+        return nullptr;
     }
+    return ctx;
+}
+
+static ggml_cgraph * mm3_depth_step_graph(ggml_context * ctx, const MM3Model & m, const MM3DepthGraph & g,
+                                          MM3DepthStep * s, int cb) {
+    const MM3DepthConfig &  c  = m.synth_cfg.depth;
+    const MM3DepthWeights & w  = m.synth.depth;
+    const int64_t           H  = (int64_t) c.embedding_length;
+    const int64_t           S  = cb + 1;
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, MM3_DEPTH_MAX_NODES, false);
 
@@ -272,7 +287,7 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
     ggml_tensor * h = ggml_add(ctx, seq, pos);
 
     for (size_t i = 0; i < w.blk.size(); i++) {
-        h = mm3_depth_block(ctx, gf, c, w.blk[i], h, s->mask, g->kv_k[i], g->kv_v[i], s->in_rows, S);
+        h = mm3_depth_block(ctx, gf, c, w.blk[i], h, s->mask, g.kv_k[i], g.kv_v[i], s->in_rows, S);
     }
     h = mm3_depth_norm(ctx, h, w.output_norm, c.rms_eps);
 
@@ -291,8 +306,17 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
     ggml_set_name(s->out_fused, "mm3_depth_fused");
     ggml_set_output(s->out_fused);
 
-    s->graph = gf;
-    ggml_build_forward_expand(s->graph, s->out_fused);
+    ggml_build_forward_expand(gf, s->out_fused);
+    return gf;
+}
+
+static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, std::string * err) {
+    MM3DepthStep * s   = &g->step[cb - 1];
+    ggml_context * ctx = mm3_depth_step_context(s, err);
+    if (!ctx) {
+        return false;
+    }
+    s->graph = mm3_depth_step_graph(ctx, m, *g, s, cb);
 
     ggml_backend_sched_reset(s->sched);
     if (!ggml_backend_sched_alloc_graph(s->sched, s->graph)) {
@@ -307,26 +331,17 @@ static bool mm3_depth_build_step(const MM3Model & m, MM3DepthGraph * g, int cb, 
     }
 
     s->gctx          = ctx;
-    s->S             = S;
+    s->S             = cb + 1;
     s->n_nodes       = ggml_graph_n_nodes(s->graph);
     s->compute_bytes = ggml_backend_sched_get_buffer_size(s->sched, g->backend);
     return true;
 }
 
-static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string * err) {
-    if (!m.loaded) {
-        if (err) {
-            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
-        }
-        return false;
-    }
-    const void * st = (const void *) m.wctx_synth.buffer;
-    const void * lt = (const void *) m.wctx_lm.buffer;
-    if (g->synth_token == st && g->lm_token == lt && g->n_steps > 0) {
-        return true;
-    }
-    mm3_depth_free(g);
+static int mm3_depth_step_count(const MM3DepthConfig & c) {
+    return (int) c.num_codebooks - 1;
+}
 
+static bool mm3_depth_validate(const MM3Model & m, std::string * err) {
     const MM3DepthConfig & c = m.synth_cfg.depth;
     if (c.block_count == 0 || c.embedding_length == 0 || c.head_count == 0 || c.head_dim == 0) {
         if (err) {
@@ -346,7 +361,7 @@ static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string
         }
         return false;
     }
-    const int NC = (int) c.num_codebooks - 1;
+    const int NC = mm3_depth_step_count(c);
     if (NC < 1 || NC >= MM3_DEPTH_MAX_STEPS) {
         if (err) {
             *err = "mm3.depth.num_codebooks - 1 = " + std::to_string(NC) + " is outside 1.." +
@@ -373,30 +388,62 @@ static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string
         }
         return false;
     }
+    return true;
+}
+
+// Only the seeding step writes more than one position, so it is the only
+// one that needs a mask; every later step has a single query that may
+// attend to every position in its window.
+static ggml_tensor * mm3_depth_mask_tensor(WeightCtx * prep) {
+    ggml_tensor * t = ggml_new_tensor_2d(prep->ctx, GGML_TYPE_F32, MM3_DEPTH_SEED_POSITIONS, MM3_DEPTH_SEED_POSITIONS);
+    ggml_set_name(t, "mm3.depth.causal_mask");
+    return t;
+}
+
+static void mm3_depth_fill_causal_mask(float * mask, int64_t positions) {
+    for (int64_t q = 0; q < positions; q++) {
+        for (int64_t k = 0; k < positions; k++) {
+            mask[(size_t) (k + q * positions)] = k <= q ? 0.0f : -INFINITY;
+        }
+    }
+}
+
+static void mm3_depth_stage_mask(WeightCtx * prep, ggml_tensor * mask) {
+    const size_t elements = (size_t) (MM3_DEPTH_SEED_POSITIONS * MM3_DEPTH_SEED_POSITIONS);
+    auto         d        = std::make_unique<float[]>(elements);
+    mm3_depth_fill_causal_mask(d.get(), MM3_DEPTH_SEED_POSITIONS);
+    wctx_queue_copy(prep, mask, d.get(), elements * sizeof(float), 0);
+    prep->staging.push_back(std::move(d));
+}
+
+static bool mm3_depth_prepare(const MM3Model & m, MM3DepthGraph * g, std::string * err) {
+    if (!m.loaded) {
+        if (err) {
+            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
+        }
+        return false;
+    }
+    const void * st = (const void *) m.wctx_synth.buffer;
+    const void * lt = (const void *) m.wctx_lm.buffer;
+    if (g->synth_token == st && g->lm_token == lt && g->n_steps > 0) {
+        return true;
+    }
+    mm3_depth_free(g);
+
+    if (!mm3_depth_validate(m, err)) {
+        return false;
+    }
+    const MM3DepthConfig & c  = m.synth_cfg.depth;
+    const int              NC = mm3_depth_step_count(c);
 
     BackendPair bp = backend_init("MM3-Depth");
     g->backend     = bp.backend;
     g->cpu_backend = bp.cpu_backend;
     g->backend_ref = true;
 
-    // Only the seeding step writes more than one position, so it is the only
-    // one that needs a mask; every later step has a single query that may
-    // attend to every position in its window.
     wctx_init(&g->prep, 1);
-    {
-        constexpr int64_t kSeedPositions = 2;
-        auto              d = std::make_unique<float[]>((size_t) (kSeedPositions * kSeedPositions));
-        for (int64_t q = 0; q < kSeedPositions; q++) {
-            for (int64_t k = 0; k < kSeedPositions; k++) {
-                d[(size_t) (k + q * kSeedPositions)] = k <= q ? 0.0f : -INFINITY;
-            }
-        }
-        ggml_tensor * t = ggml_new_tensor_2d(g->prep.ctx, GGML_TYPE_F32, kSeedPositions, kSeedPositions);
-        ggml_set_name(t, "mm3.depth.causal_mask");
-        g->prep.pending.push_back({ t, d.get(), (size_t) (kSeedPositions * kSeedPositions) * sizeof(float), 0 });
-        g->prep.staging.push_back(std::move(d));
-        g->step[0].mask = t;
-    }
+    g->step[0].mask = mm3_depth_mask_tensor(&g->prep);
+    mm3_depth_stage_mask(&g->prep, g->step[0].mask);
     if (!wctx_alloc(&g->prep, g->backend)) {
         if (err) {
             *err = "backend buffer allocation failed for the depth causal mask";

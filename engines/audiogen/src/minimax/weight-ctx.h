@@ -37,6 +37,12 @@ static void wctx_init(WeightCtx * wctx, int n_tensors) {
     wctx->pending.reserve(n_tensors);
 }
 
+static void wctx_queue_copy(WeightCtx * wctx, ggml_tensor * tensor, const void * src, size_t nbytes, size_t offset) {
+    if (src) {
+        wctx->pending.push_back({ tensor, src, nbytes, offset });
+    }
+}
+
 static bool wctx_alloc(WeightCtx * wctx, ggml_backend_t backend) {
     wctx->buffer = ggml_backend_alloc_ctx_tensors(wctx->ctx, backend);
     if (!wctx->buffer) {

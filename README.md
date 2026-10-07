@@ -20,7 +20,7 @@ validated on it.
 
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
-| [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; `.en` checkpoints are English-only and turbo is intended for transcription |
+| [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription |
 | [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection |
 | Parakeet | Sortformer v1/v2/v2.1, Nemotron 3 Diarization | Speaker diarization and attributed ASR; Sortformer supports up to four speakers, Nemotron up to eight |
 | Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; CPU/Metal validated on Spanish/Chinese; English long-form skips spans in both native and reference runs |
@@ -30,7 +30,7 @@ validated on it.
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; metadata-only memory fit for SoundEffect; CPU/Metal generation validated, other GPU backends untested |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
-| AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU; unavailable on Android/iOS |
+| AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
 ### Apple Core ML sidecars
 

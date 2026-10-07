@@ -438,7 +438,7 @@ struct MM3Loader {
         size_t offset = 0;
         for (const std::string & part : parts) {
             const size_t nbytes = ggml_nbytes(ggml_get_tensor(gf->meta, part.c_str()));
-            wctx->pending.push_back({ dst, gf_get_data(*gf, part.c_str()), nbytes, offset });
+            wctx_queue_copy(wctx, dst, gf_get_data(*gf, part.c_str()), nbytes, offset);
             offset += nbytes;
         }
     }
@@ -501,13 +501,21 @@ struct MM3Loader {
         ggml_tensor * dst          = ggml_new_tensor_2d(wctx->ctx, src->type, h, compact_rows);
         ggml_set_name(dst, "output_compact.weight");
 
-        const uint8_t * base = (const uint8_t *) gf_get_data(*gf, name.c_str());
-        wctx->pending.push_back({ dst, base + plan[0].src_offset, plan[0].nbytes, plan[0].dst_offset });
-        wctx->pending.push_back({ dst, base + plan[1].src_offset, plan[1].nbytes, plan[1].dst_offset });
+        queue_compact_head_copies(dst, (const uint8_t *) gf_get_data(*gf, name.c_str()), plan);
         if (tmap) {
             (*tmap)["output_compact.weight"] = dst;
         }
         return dst;
+    }
+
+    void queue_compact_head_copies(ggml_tensor * dst, const uint8_t * base,
+                                   const std::array<tts_cpp::minimax::detail::CompactHeadCopy, 2> & plan) {
+        if (!base) {
+            return;
+        }
+        for (const tts_cpp::minimax::detail::CompactHeadCopy & copy : plan) {
+            wctx_queue_copy(wctx, dst, base + copy.src_offset, copy.nbytes, copy.dst_offset);
+        }
     }
 };
 
@@ -726,14 +734,17 @@ static void mm3_validate_synth_config(const MM3SynthConfig & c, std::vector<std:
         tts_cpp::minimax::detail::validate_synthesis_contract(contract), errs);
 }
 
+using MM3GgufOpen = bool (*)(GGUFModel *, const char *);
+
 static void mm3_probe_file(const std::string & path, MM3FileInfo * fi, MM3LmConfig * lm_cfg,
-                           MM3SynthConfig * synth_cfg, std::vector<std::string> * errs) {
+                           MM3SynthConfig * synth_cfg, std::vector<std::string> * errs,
+                           MM3GgufOpen open_gguf = gf_load) {
     fi->found = true;
     fi->path  = path;
     fi->name  = mm3_basename(path);
 
     GGUFModel gf = {};
-    if (!gf_load(&gf, path.c_str())) {
+    if (!open_gguf(&gf, path.c_str())) {
         fi->probe_error = "gguf header parse failed";
         if (errs && errs->size() < 24) {
             errs->push_back(fi->name + ": " + fi->probe_error);

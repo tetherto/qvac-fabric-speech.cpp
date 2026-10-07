@@ -157,6 +157,25 @@ add_test(NAME ${FIT_TEST}-gpu COMMAND ${FIT_TEST}
     gpu)
 set_tests_properties(${FIT_TEST}-gpu PROPERTIES LABELS "gpu;tiny" SKIP_RETURN_CODE 77)
 
+# Memory-fit preflight from the registry's weightless descriptions: projecting
+# a committed *.fit.gguf must equal projecting the model it describes (QVAC
+# patch, see PATCHES.md). CPU form under `unit`, GPU form under `gpu`, as above.
+set(FIT_DESCRIPTION_TEST test-whisper-fit-description)
+set(FIT_DESCRIPTION_FIXTURES
+    ${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.bin
+    ${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.fit.gguf
+    ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.bin
+    ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.fit.gguf
+    ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-bci.bin
+    ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-bci.fit.gguf)
+add_executable(${FIT_DESCRIPTION_TEST} ${FIT_DESCRIPTION_TEST}.cpp)
+target_include_directories(${FIT_DESCRIPTION_TEST} PRIVATE ../include ../ggml/include)
+target_link_libraries(${FIT_DESCRIPTION_TEST} PRIVATE whisper)
+add_test(NAME ${FIT_DESCRIPTION_TEST} COMMAND ${FIT_DESCRIPTION_TEST} ${FIT_DESCRIPTION_FIXTURES})
+set_tests_properties(${FIT_DESCRIPTION_TEST} PROPERTIES LABELS "unit;tiny;gh")
+add_test(NAME ${FIT_DESCRIPTION_TEST}-gpu COMMAND ${FIT_DESCRIPTION_TEST} ${FIT_DESCRIPTION_FIXTURES} gpu)
+set_tests_properties(${FIT_DESCRIPTION_TEST}-gpu PROPERTIES LABELS "gpu;tiny" SKIP_RETURN_CODE 77)
+
 set(BUFFER_LOADER_TEST test-whisper-buffer-loader)
 add_executable(${BUFFER_LOADER_TEST} ${BUFFER_LOADER_TEST}.cpp)
 target_include_directories(${BUFFER_LOADER_TEST} PRIVATE ../include ../ggml/include ../examples)

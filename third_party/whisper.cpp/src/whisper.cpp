@@ -6,6 +6,7 @@
 #include "ggml-cpp.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "gguf.h"
 
 #ifdef WHISPER_USE_COREML
 #include "coreml/whisper-encoder.h"
@@ -9749,6 +9750,344 @@ struct whisper_fit_file {
     }
 };
 
+// QVAC (see PATCHES.md): the registry's weightless description of a model or
+// VAD file -- a GGUF with no data section holding the file's header settings,
+// vocabulary sizes and tensor inventory -- replayed as the byte stream the
+// file itself opens with, without the tensor payloads.
+
+constexpr char        WHISPER_FIT_GGUF_MAGIC[] = { 'G', 'G', 'U', 'F' };
+constexpr uint32_t    WHISPER_FIT_DESCRIPTION_VERSION = 1;
+constexpr const char * WHISPER_FIT_ARCH_MODEL = "whisper";
+constexpr const char * WHISPER_FIT_ARCH_VAD   = "whisper_vad";
+constexpr int32_t     WHISPER_FIT_BCI_MEL_THRESHOLD = 256;
+constexpr size_t      WHISPER_FIT_VAD_VERSION_FIELDS = 3;
+constexpr size_t      WHISPER_FIT_VAD_ENCODER_LAYERS = 4;
+constexpr int32_t     WHISPER_FIT_MAX_MEL_FILTER_DIM = 4096;
+constexpr int32_t     WHISPER_FIT_MAX_VOCAB_TOKENS   = 1 << 20;
+constexpr uint64_t    WHISPER_FIT_MAX_VOCAB_BYTES    = 64ull*1024*1024;
+
+constexpr const char * WHISPER_FIT_MODEL_HPARAM_KEYS[] = {
+    "whisper.n_vocab", "whisper.n_audio_ctx", "whisper.n_audio_state", "whisper.n_audio_head",
+    "whisper.n_audio_layer", "whisper.n_text_ctx", "whisper.n_text_state", "whisper.n_text_head",
+    "whisper.n_text_layer", "whisper.n_mels", "whisper.ftype",
+};
+constexpr const char * WHISPER_FIT_BCI_HPARAM_KEYS[] = {
+    "whisper.n_audio_conv1_kernel", "whisper.n_audio_window_size", "whisper.n_audio_last_window_layer",
+};
+constexpr const char * WHISPER_FIT_VAD_WINDOW_KEYS[] = {
+    "whisper_vad.n_window", "whisper_vad.n_context",
+};
+constexpr const char * WHISPER_FIT_VAD_TAIL_KEYS[] = {
+    "whisper_vad.lstm_input_size", "whisper_vad.lstm_hidden_size",
+    "whisper_vad.final_conv_in", "whisper_vad.final_conv_out",
+};
+
+struct whisper_fit_description {
+    gguf_context * gguf = nullptr;
+    ggml_context * meta = nullptr;
+
+    ~whisper_fit_description() {
+        if (gguf) gguf_free(gguf);
+        if (meta) ggml_free(meta);
+    }
+
+    bool open(const char * path) {
+        gguf_init_params params = {};
+        params.no_alloc = true;
+        params.ctx      = &meta;
+        gguf = gguf_init_from_file(path, params);
+        uint32_t version = 0;
+        return gguf != nullptr && u32("fit_description.version", version) &&
+               version == WHISPER_FIT_DESCRIPTION_VERSION;
+    }
+
+    int64_t key(const char * name, enum gguf_type type) const {
+        const int64_t id = gguf_find_key(gguf, name);
+        return id >= 0 && gguf_get_kv_type(gguf, id) == type ? id : -1;
+    }
+
+    int64_t array_key(const char * name, enum gguf_type type) const {
+        const int64_t id = key(name, GGUF_TYPE_ARRAY);
+        return id >= 0 && gguf_get_arr_type(gguf, id) == type ? id : -1;
+    }
+
+    bool describes(const char * architecture) const {
+        std::string value;
+        return str("general.architecture", value) && value == architecture;
+    }
+
+    bool i32(const char * name, int32_t & out) const {
+        const int64_t id = key(name, GGUF_TYPE_INT32);
+        if (id < 0) return false;
+        out = gguf_get_val_i32(gguf, id);
+        return true;
+    }
+
+    bool u32(const char * name, uint32_t & out) const {
+        const int64_t id = key(name, GGUF_TYPE_UINT32);
+        if (id < 0) return false;
+        out = gguf_get_val_u32(gguf, id);
+        return true;
+    }
+
+    bool str(const char * name, std::string & out) const {
+        const int64_t id = key(name, GGUF_TYPE_STRING);
+        if (id < 0) return false;
+        out = gguf_get_val_str(gguf, id);
+        return true;
+    }
+
+    template <typename T>
+    bool array(const char * name, enum gguf_type type, std::vector<T> & out) const {
+        const int64_t id = array_key(name, type);
+        if (id < 0) return false;
+        const T * data = (const T *) gguf_get_arr_data(gguf, id);
+        out.assign(data, data + gguf_get_arr_n(gguf, id));
+        return true;
+    }
+};
+
+struct whisper_fit_replay {
+    std::vector<uint8_t> bytes;
+    size_t               pos      = 0;
+    bool                 past_end = false;
+
+    void put_u32(uint32_t value) {
+        for (size_t i = 0; i < sizeof(value); ++i) {
+            bytes.push_back((uint8_t) (value >> (8*i)));
+        }
+    }
+
+    void put_i32(int32_t value) {
+        put_u32((uint32_t) value);
+    }
+
+    void put_bytes(const void * data, size_t n) {
+        bytes.insert(bytes.end(), (const uint8_t *) data, (const uint8_t *) data + n);
+    }
+
+    void put_zeros(size_t n) {
+        bytes.resize(bytes.size() + n, 0);
+    }
+
+    size_t read(void * output, size_t read_size) {
+        const size_t n = std::min(read_size, bytes.size() - pos);
+        memcpy(output, bytes.data() + pos, n);
+        memset((uint8_t *) output + n, 0, read_size - n);
+        pos      += n;
+        past_end  = past_end || n < read_size;
+        return read_size;
+    }
+
+    whisper_model_loader loader() {
+        whisper_model_loader l = {};
+        l.context = this;
+        l.read = [](void * ctx, void * output, size_t read_size) {
+            return ((whisper_fit_replay *) ctx)->read(output, read_size);
+        };
+        l.eof = [](void * ctx) {
+            return ((whisper_fit_replay *) ctx)->past_end;
+        };
+        l.close = [](void *) {};
+        return l;
+    }
+
+    static bool skip(void *, size_t) {
+        return true;
+    }
+};
+
+using whisper_fit_replay_builder = bool (*)(const whisper_fit_description &, whisper_fit_replay &);
+
+template <size_t N>
+bool whisper_fit_replay_i32_keys(const whisper_fit_description & d, const char * const (&keys)[N], whisper_fit_replay & r) {
+    for (const char * name : keys) {
+        int32_t value = 0;
+        if (!d.i32(name, value)) return false;
+        r.put_i32(value);
+    }
+    return true;
+}
+
+bool whisper_fit_replay_mel_filters(const whisper_fit_description & d, whisper_fit_replay & r) {
+    int32_t n_mel = 0;
+    int32_t n_fft = 0;
+    if (!d.i32("whisper.mel_filters.n_mel", n_mel) || !d.i32("whisper.mel_filters.n_fft", n_fft) ||
+        n_mel < 0 || n_fft < 0 || n_mel > WHISPER_FIT_MAX_MEL_FILTER_DIM || n_fft > WHISPER_FIT_MAX_MEL_FILTER_DIM) {
+        return false;
+    }
+    r.put_i32(n_mel);
+    r.put_i32(n_fft);
+    r.put_zeros((size_t) n_mel * (size_t) n_fft * sizeof(float));
+    return true;
+}
+
+void whisper_fit_replay_tokens_of_length(uint32_t length, uint32_t count, whisper_fit_replay & r) {
+    for (uint32_t i = 0; i < count; ++i) {
+        r.put_u32(length);
+        r.put_zeros(length);
+    }
+}
+
+void whisper_fit_replay_tokens(const std::vector<uint32_t> & length_counts, whisper_fit_replay & r) {
+    for (size_t length = 0; length < length_counts.size(); ++length) {
+        whisper_fit_replay_tokens_of_length((uint32_t) length, length_counts[length], r);
+    }
+}
+
+uint64_t whisper_fit_token_count(const std::vector<uint32_t> & length_counts) {
+    uint64_t count = 0;
+    for (uint32_t tokens : length_counts) {
+        count += tokens;
+    }
+    return count;
+}
+
+uint64_t whisper_fit_token_bytes(const std::vector<uint32_t> & length_counts) {
+    uint64_t bytes = 0;
+    for (size_t length = 0; length < length_counts.size(); ++length) {
+        bytes += (uint64_t) length * length_counts[length];
+    }
+    return bytes;
+}
+
+bool whisper_fit_replay_vocab(const whisper_fit_description & d, whisper_fit_replay & r) {
+    int32_t               n_tokens = 0;
+    std::vector<uint32_t> length_counts;
+    if (!d.i32("whisper.vocab.n_tokens", n_tokens) || n_tokens < 0 || n_tokens > WHISPER_FIT_MAX_VOCAB_TOKENS ||
+        !d.array("whisper.vocab.token_length_counts", GGUF_TYPE_UINT32, length_counts) ||
+        whisper_fit_token_count(length_counts) != (uint64_t) n_tokens ||
+        whisper_fit_token_bytes(length_counts) > WHISPER_FIT_MAX_VOCAB_BYTES) {
+        return false;
+    }
+    r.put_i32(n_tokens);
+    whisper_fit_replay_tokens(length_counts, r);
+    return true;
+}
+
+bool whisper_fit_replay_tensor(const whisper_fit_description & d, int64_t index, whisper_fit_replay & r) {
+    const char *        name = gguf_get_tensor_name(d.gguf, index);
+    const ggml_tensor * t    = ggml_get_tensor(d.meta, name);
+    if (t == nullptr) return false;
+
+    const int    n_dims      = ggml_n_dims(t);
+    const size_t name_length = strlen(name);
+    r.put_i32(n_dims);
+    r.put_i32((int32_t) name_length);
+    r.put_i32((int32_t) t->type);
+    for (int i = 0; i < n_dims; ++i) {
+        if (t->ne[i] > INT32_MAX) return false;
+        r.put_i32((int32_t) t->ne[i]);
+    }
+    r.put_bytes(name, name_length);
+    return true;
+}
+
+bool whisper_fit_replay_tensors(const whisper_fit_description & d, whisper_fit_replay & r) {
+    const int64_t n_tensors = gguf_get_n_tensors(d.gguf);
+    for (int64_t i = 0; i < n_tensors; ++i) {
+        if (!whisper_fit_replay_tensor(d, i, r)) return false;
+    }
+    return true;
+}
+
+bool whisper_fit_replay_model(const whisper_fit_description & d, whisper_fit_replay & r) {
+    int32_t n_mels = 0;
+    if (!d.describes(WHISPER_FIT_ARCH_MODEL) || !d.i32("whisper.n_mels", n_mels)) return false;
+
+    r.put_u32(GGML_FILE_MAGIC);
+    return whisper_fit_replay_i32_keys(d, WHISPER_FIT_MODEL_HPARAM_KEYS, r) &&
+           (n_mels <= WHISPER_FIT_BCI_MEL_THRESHOLD || whisper_fit_replay_i32_keys(d, WHISPER_FIT_BCI_HPARAM_KEYS, r)) &&
+           whisper_fit_replay_mel_filters(d, r) &&
+           whisper_fit_replay_vocab(d, r) &&
+           whisper_fit_replay_tensors(d, r);
+}
+
+void whisper_fit_replay_vad_layers(const std::vector<int32_t> & in_channels, const std::vector<int32_t> & out_channels,
+                                   const std::vector<int32_t> & kernel_sizes, whisper_fit_replay & r) {
+    r.put_i32((int32_t) in_channels.size());
+    for (size_t i = 0; i < in_channels.size(); ++i) {
+        r.put_i32(in_channels[i]);
+        r.put_i32(out_channels[i]);
+        r.put_i32(kernel_sizes[i]);
+    }
+}
+
+void whisper_fit_replay_i32_values(const std::vector<int32_t> & values, whisper_fit_replay & r) {
+    for (int32_t value : values) {
+        r.put_i32(value);
+    }
+}
+
+bool whisper_fit_replay_vad(const whisper_fit_description & d, whisper_fit_replay & r) {
+    std::string          model_type;
+    std::vector<int32_t> version;
+    std::vector<int32_t> in_channels;
+    std::vector<int32_t> out_channels;
+    std::vector<int32_t> kernel_sizes;
+    if (!d.describes(WHISPER_FIT_ARCH_VAD) ||
+        !d.str("whisper_vad.model_type", model_type) ||
+        !d.array("whisper_vad.version", GGUF_TYPE_INT32, version) ||
+        !d.array("whisper_vad.encoder_in_channels", GGUF_TYPE_INT32, in_channels) ||
+        !d.array("whisper_vad.encoder_out_channels", GGUF_TYPE_INT32, out_channels) ||
+        !d.array("whisper_vad.encoder_kernel_size", GGUF_TYPE_INT32, kernel_sizes) ||
+        version.size() != WHISPER_FIT_VAD_VERSION_FIELDS ||
+        in_channels.size() != WHISPER_FIT_VAD_ENCODER_LAYERS ||
+        out_channels.size() != WHISPER_FIT_VAD_ENCODER_LAYERS ||
+        kernel_sizes.size() != WHISPER_FIT_VAD_ENCODER_LAYERS) {
+        return false;
+    }
+
+    r.put_u32(GGML_FILE_MAGIC);
+    r.put_i32((int32_t) model_type.size());
+    r.put_bytes(model_type.data(), model_type.size());
+    whisper_fit_replay_i32_values(version, r);
+    if (!whisper_fit_replay_i32_keys(d, WHISPER_FIT_VAD_WINDOW_KEYS, r)) return false;
+    whisper_fit_replay_vad_layers(in_channels, out_channels, kernel_sizes, r);
+    return whisper_fit_replay_i32_keys(d, WHISPER_FIT_VAD_TAIL_KEYS, r) &&
+           whisper_fit_replay_tensors(d, r);
+}
+
+bool whisper_fit_file_is_description(whisper_fit_file & file) {
+    char magic[sizeof(WHISPER_FIT_GGUF_MAGIC)] = {};
+    file.fin.read(magic, sizeof(magic));
+    const bool described = file.fin.gcount() == (std::streamsize) sizeof(magic) &&
+                           memcmp(magic, WHISPER_FIT_GGUF_MAGIC, sizeof(magic)) == 0;
+    file.fin.clear();
+    file.fin.seekg(0, std::ios::beg);
+    return described;
+}
+
+struct whisper_fit_source {
+    whisper_fit_file   file;
+    whisper_fit_replay replay;
+    bool               described = false;
+
+    bool open(const char * path, whisper_fit_replay_builder build) {
+        if (!file.open(path)) return false;
+        described = whisper_fit_file_is_description(file);
+        if (!described) return true;
+
+        file.fin.close();
+        try {
+            whisper_fit_description description;
+            return description.open(path) && build(description, replay);
+        } catch (const std::exception & e) {
+            WHISPER_LOG_ERROR("%s: exception while replaying a fit description: %s\n", __func__, e.what());
+            return false;
+        }
+    }
+
+    whisper_model_loader loader() {
+        return described ? replay.loader() : file.loader();
+    }
+
+    void bind_skip(whisper_fit_load_measure & measure) {
+        measure.skip     = described ? &whisper_fit_replay::skip : &whisper_fit_file::skip;
+        measure.skip_ctx = described ? (void *) &replay : (void *) &file.fin;
+    }
+};
+
 // true when the device's memory pool IS system RAM: the CPU backend,
 // integrated GPUs, and Apple unified memory (the Metal registry reports
 // "Metal" upstream and "MTL" in the qvac-ext-ggml pin)
@@ -10050,16 +10389,15 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
 
     // -- metadata-only model load: same parser, same tensor wiring, same
     //    buffer-type selection; weight payloads are seeked past
-    whisper_fit_file file;
-    if (!file.open(opts->model_path)) {
+    whisper_fit_source source;
+    if (!source.open(opts->model_path, &whisper_fit_replay_model)) {
         whisper_fit_set_str(result->reason, sizeof(result->reason), "model-unreadable");
         return (int) result->status;
     }
-    whisper_model_loader loader = file.loader();
+    whisper_model_loader loader = source.loader();
 
     whisper_fit_load_measure lm;
-    lm.skip     = &whisper_fit_file::skip;
-    lm.skip_ctx = &file.fin;
+    source.bind_skip(lm);
 
     // whisper_free (not plain delete): the metadata-only load still creates
     // the model's ggml contexts, which whisper_free owns
@@ -10168,16 +10506,15 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
     uint64_t vad_meta_bytes = 0;
     int      vad_n_window   = 0;
     if (opts->vad_model_path != nullptr) {
-        whisper_fit_file vfile;
-        if (!vfile.open(opts->vad_model_path)) {
+        whisper_fit_source vsource;
+        if (!vsource.open(opts->vad_model_path, &whisper_fit_replay_vad)) {
             whisper_fit_set_str(result->reason, sizeof(result->reason), "vad-model-unreadable");
             return (int) result->status;
         }
-        whisper_model_loader vloader = vfile.loader();
+        whisper_model_loader vloader = vsource.loader();
 
         whisper_fit_vad_measure vm;
-        vm.load.skip     = &whisper_fit_file::skip;
-        vm.load.skip_ctx = &vfile.fin;
+        vsource.bind_skip(vm.load);
 
         whisper_vad_context_params vparams = whisper_vad_default_context_params();
         vparams.use_gpu    = opts->use_gpu;
