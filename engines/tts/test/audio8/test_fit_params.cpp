@@ -109,11 +109,11 @@ void run_synthetic_lm_gates() {
     lm_model mm, real;
     fit_load_measure lmm;
     std::string error;
-    if (!load_lm_metadata_only(path, /*n_gpu_layers=*/0, mm, lmm, &error)) {
+    if (!load_lm_metadata_only(path, /*n_gpu_layers=*/0, /*backend=*/"", mm, lmm, &error)) {
         fail("load_lm_metadata_only failed: " + error);
         return;
     }
-    if (!load_lm(path, /*n_gpu_layers=*/0, real, &error)) {
+    if (!load_lm(path, /*n_gpu_layers=*/0, /*backend=*/"", real, &error)) {
         fail("real load_lm failed: " + error);
         free_lm(mm);
         return;
@@ -232,7 +232,7 @@ void run_synthetic_lm_gates() {
         lm_model rejected;
         fit_load_measure rejected_load;
         std::string load_error;
-        expect(!load_lm_metadata_only(absurd_path, 0, rejected, rejected_load, &load_error),
+        expect(!load_lm_metadata_only(absurd_path, 0, /*backend=*/"", rejected, rejected_load, &load_error),
                "an absurd codebook count loaded anyway");
         expect(load_error.find("codebooks") != std::string::npos,
                "the rejection does not name the codebook count: '" + load_error + "'");
@@ -284,7 +284,7 @@ void run_synthetic_lm_gates() {
         lm_model meta_only;
         fit_load_measure desc_load;
         std::string desc_error;
-        if (!load_lm_metadata_only(desc_path, /*n_gpu_layers=*/0, meta_only, desc_load,
+        if (!load_lm_metadata_only(desc_path, /*n_gpu_layers=*/0, /*backend=*/"", meta_only, desc_load,
                                    &desc_error)) {
             fail("metadata-only load refused a vocab-less description: " + desc_error);
         } else {
@@ -294,7 +294,7 @@ void run_synthetic_lm_gates() {
         free_lm(meta_only);
 
         lm_model rejected;
-        expect(!load_lm(desc_path, /*n_gpu_layers=*/0, rejected, &desc_error),
+        expect(!load_lm(desc_path, /*n_gpu_layers=*/0, /*backend=*/"", rejected, &desc_error),
                "a real load accepted a vocab-less GGUF");
         expect(desc_error.find("tokenizer.ggml.tokens") != std::string::npos,
                "the real-load rejection does not name the vocabulary: '" + desc_error + "'");
@@ -333,7 +333,7 @@ void run_fixture_gates(const std::string & lm_path, const std::string & dec_path
     {
         codec_model real;
         std::string error;
-        if (!load_codec(dec_path, n_gpu_layers, real, &error)) {
+        if (!load_codec(dec_path, n_gpu_layers, /*backend=*/"", real, &error)) {
             fail("real load_codec failed: " + error);
             return;
         }
@@ -346,7 +346,7 @@ void run_fixture_gates(const std::string & lm_path, const std::string & dec_path
         } else {
             codec_model mm;
             fit_load_measure dm;
-            if (!load_codec_metadata_only(dec_path, n_gpu_layers, mm, dm, &error)) {
+            if (!load_codec_metadata_only(dec_path, n_gpu_layers, /*backend=*/"", mm, dm, &error)) {
                 fail("load_codec_metadata_only failed: " + error);
             } else {
                 expect_eq(dm.weights_bytes, ggml_backend_buffer_get_size(real.buffer_w),

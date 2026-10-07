@@ -57,7 +57,7 @@ int n_gpu_layers() {
 bool load(const std::string & path, bool fused, loaded_lm & lm) {
     if (!fused) setenv("AUDIO8_LM_FUSION_DISABLE", "1", 1);
     std::string error;
-    lm.ok = load_lm(path, n_gpu_layers(), lm.model, &error);
+    lm.ok = load_lm(path, n_gpu_layers(), /*backend=*/"", lm.model, &error);
     unsetenv("AUDIO8_LM_FUSION_DISABLE");
     if (!lm.ok) fail("load_lm: " + error);
     return lm.ok;
@@ -219,7 +219,7 @@ bool load_refused(const std::string & path, bool fused, const std::string & want
     if (!fused) setenv("AUDIO8_LM_FUSION_DISABLE", "1", 1);
     lm_model model;
     std::string error;
-    const bool loaded = load_lm(path, n_gpu_layers(), model, &error);
+    const bool loaded = load_lm(path, n_gpu_layers(), /*backend=*/"", model, &error);
     unsetenv("AUDIO8_LM_FUSION_DISABLE");
     free_lm(model);
     if (loaded) {

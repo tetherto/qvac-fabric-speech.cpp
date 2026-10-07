@@ -136,7 +136,7 @@ int main(int argc, char ** argv) {
 
     lm_model model;
     std::string error;
-    if (!load_lm(argv[1], requested_layers(), model, &error)) {
+    if (!load_lm(argv[1], requested_layers(), /*backend=*/"", model, &error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }
@@ -154,7 +154,7 @@ int main(int argc, char ** argv) {
     free_lm(model);
 
     lm_model replayed;
-    if (!load_lm(argv[1], requested_layers(), replayed, &error)) {
+    if (!load_lm(argv[1], requested_layers(), /*backend=*/"", replayed, &error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }

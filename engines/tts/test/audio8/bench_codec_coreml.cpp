@@ -149,7 +149,7 @@ bool bench_one(const std::string & gguf, int audio_seconds, bench_row * row, boo
     setenv("AUDIO8_COREML_DISABLE", "1", 1);
     owned_codec ggml;
     std::string error;
-    const bool loaded = load_codec(gguf, GPU_LAYERS, ggml.model, &error);
+    const bool loaded = load_codec(gguf, GPU_LAYERS, /*backend=*/"", ggml.model, &error);
     unsetenv("AUDIO8_COREML_DISABLE");
     if (!loaded) {
         std::fprintf(stderr, "[bench-audio8-coreml] load: %s\n", error.c_str());
@@ -165,7 +165,7 @@ bool bench_one(const std::string & gguf, int audio_seconds, bench_row * row, boo
 
     setenv("AUDIO8_COREML_STRICT", "1", 1);
     owned_codec coreml;
-    bool ok = load_codec(gguf, GPU_LAYERS, coreml.model, &error);
+    bool ok = load_codec(gguf, GPU_LAYERS, /*backend=*/"", coreml.model, &error);
     if (ok) {
         std::vector<float> warmup;
         ok = decode_codes(coreml.model, codes.data(), n_frames, N_THREADS, nullptr, warmup, &error);

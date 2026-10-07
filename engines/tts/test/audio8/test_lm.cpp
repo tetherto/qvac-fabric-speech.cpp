@@ -248,7 +248,7 @@ int main(int argc, char ** argv) {
     lm_model model;
     std::string error;
     const int n_gpu_layers = audio8_test::is_gpu_test() ? GPU_LAYERS : 0;
-    if (!load_lm(argv[1], n_gpu_layers, model, &error)) {
+    if (!load_lm(argv[1], n_gpu_layers, /*backend=*/"", model, &error)) {
         std::fprintf(stderr, "load: %s\n", error.c_str());
         return 1;
     }
