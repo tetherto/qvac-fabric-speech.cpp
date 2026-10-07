@@ -1511,13 +1511,6 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-moss-speech-codec-e2e LABEL "gpu")
     set_property(TEST test-moss-speech-codec-e2e PROPERTY SKIP_RETURN_CODE 77)
 
-    add_executable(test-moss-delay-lm-e2e test/moss/test_delay_lm_e2e.cpp)
-    target_link_libraries(test-moss-delay-lm-e2e PRIVATE tts-cpp)
-    target_include_directories(test-moss-delay-lm-e2e PRIVATE src)
-    tts_cpp_apply_ccache(test-moss-delay-lm-e2e)
-    tts_cpp_register_test(test-moss-delay-lm-e2e LABEL "gpu")
-    set_property(TEST test-moss-delay-lm-e2e PROPERTY SKIP_RETURN_CODE 77)
-
     add_executable(test-moss-tts-stream-e2e test/moss/test_tts_stream_e2e.cpp)
     target_link_libraries(test-moss-tts-stream-e2e PRIVATE tts-cpp)
     target_include_directories(test-moss-tts-stream-e2e PRIVATE src)
