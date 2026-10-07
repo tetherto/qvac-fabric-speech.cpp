@@ -38,13 +38,21 @@ static void backend_configure_cpu(int n_threads, const std::string & modules_dir
 
 // Resolve the requested compute device: an explicit option wins, then the
 // MM3_DEVICE environment variable, then "cpu". Values: cpu | gpu | auto.
-static void backend_configure_device(const std::string & device) {
-    std::string requested = device;
-    if (requested.empty()) {
-        const char * env = std::getenv("MM3_DEVICE");
-        requested = env && *env ? env : "cpu";
+static std::string backend_resolve_device_request(const std::string & device) {
+    if (!device.empty()) {
+        return device;
     }
-    if (requested != "cpu" && requested != "gpu" && requested != "auto") {
+    const char * env = std::getenv("MM3_DEVICE");
+    return env && *env ? env : "cpu";
+}
+
+static bool backend_device_request_valid(const std::string & device) {
+    return device == "cpu" || device == "gpu" || device == "auto";
+}
+
+static void backend_configure_device(const std::string & device) {
+    const std::string requested = backend_resolve_device_request(device);
+    if (!backend_device_request_valid(requested)) {
         throw std::runtime_error("minimax engine: device must be cpu, gpu or auto, got '" + requested + "'");
     }
     if (g_backend_refs > 0 && requested != g_backend_device) {
@@ -92,43 +100,63 @@ static ggml_backend_t backend_create_cpu() {
     return backend;
 }
 
-static BackendPair backend_init(const char * tag) {
-    if (g_backend_refs > 0) {
-        ++g_backend_refs;
-        return g_backend_cache;
-    }
-    if (!g_backend_modules_dir.empty()) {
-        ggml_backend_load_all_from_path(g_backend_modules_dir.c_str());
+static void backend_load_modules(const std::string & modules_dir) {
+    if (!modules_dir.empty()) {
+        ggml_backend_load_all_from_path(modules_dir.c_str());
     } else {
         ggml_backend_load_all();
     }
+}
+
+static BackendPair backend_create_pair(const std::string & device, const char * tag,
+                                       tts_cpp::GpuFallbackReason * fallback_reason) {
     BackendPair pair;
     pair.cpu_backend = backend_create_cpu();
     pair.backend = pair.cpu_backend;
     if (!pair.cpu_backend) {
         throw std::runtime_error("minimax engine: CPU backend initialization failed");
     }
-    if (g_backend_device == "gpu" || g_backend_device == "auto") {
-        if (ggml_backend_t gpu = tts_cpp::acestep::backend_gpu_init(&g_backend_gpu_fallback_reason)) {
+    if (device == "gpu" || device == "auto") {
+        if (ggml_backend_t gpu = tts_cpp::acestep::backend_gpu_init(fallback_reason)) {
             pair.backend = gpu;
             pair.has_gpu = true;
             fprintf(stderr, "[%s] Using GPU backend %s (%s); CPU handles unsupported ops\n", tag,
                     tts_cpp::acestep::backend_reg_name(gpu), ggml_backend_name(gpu));
-        } else if (g_backend_device == "gpu") {
+        } else if (device == "gpu") {
             // An explicit GPU request must not silently degrade into a run that
             // is orders of magnitude slower; only device=auto may fall back.
-            const char * reason = tts_cpp::gpu_fallback_reason_name(g_backend_gpu_fallback_reason);
+            const char * reason = tts_cpp::gpu_fallback_reason_name(*fallback_reason);
             ggml_backend_free(pair.cpu_backend);
             throw std::runtime_error(
                 std::string("minimax engine: device=gpu but no usable GPU backend was found (") + reason +
                 "); use device=auto for CPU fallback");
         } else {
             fprintf(stderr, "[%s] device=auto found no usable GPU backend (%s); using CPU\n", tag,
-                    tts_cpp::gpu_fallback_reason_name(g_backend_gpu_fallback_reason));
+                    tts_cpp::gpu_fallback_reason_name(*fallback_reason));
         }
     } else {
-        g_backend_gpu_fallback_reason = tts_cpp::GpuFallbackReason::not_requested;
+        *fallback_reason = tts_cpp::GpuFallbackReason::not_requested;
     }
+    return pair;
+}
+
+static void backend_free_pair(BackendPair & pair) {
+    if (pair.backend && pair.backend != pair.cpu_backend) {
+        ggml_backend_free(pair.backend);
+    }
+    if (pair.cpu_backend) {
+        ggml_backend_free(pair.cpu_backend);
+    }
+    pair = {};
+}
+
+static BackendPair backend_init(const char * tag) {
+    if (g_backend_refs > 0) {
+        ++g_backend_refs;
+        return g_backend_cache;
+    }
+    backend_load_modules(g_backend_modules_dir);
+    BackendPair pair = backend_create_pair(g_backend_device, tag, &g_backend_gpu_fallback_reason);
     g_backend_cache = pair;
     g_backend_refs = 1;
     return pair;
@@ -142,12 +170,8 @@ static void backend_release(ggml_backend_t backend, ggml_backend_t cpu_backend) 
     if (g_backend_refs != 0) {
         return;
     }
-    if (backend && backend != cpu_backend) {
-        ggml_backend_free(backend);
-    }
-    if (cpu_backend) {
-        ggml_backend_free(cpu_backend);
-    }
+    BackendPair pair = { backend, cpu_backend, backend && backend != cpu_backend };
+    backend_free_pair(pair);
     g_backend_cache = {};
 }
 

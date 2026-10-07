@@ -52,7 +52,8 @@ CUDA and 0.999996 on Vulkan, RTX 5090), whose GEMM kernels depend on the
 product shape. Together these let the `q4_k_m` pair complete full generations on a
 10 GiB GPU (RTX 3080, peak 9.4 GiB alongside a desktop) and on a 16 GB
 Apple-silicon Mac over Metal (peak RSS 8.4 GiB), both of which the `q8_0`
-pair cannot fit. The flow DiT runs with flash attention by default on a GPU
+pair cannot fit. `tts_cpp::minimax::fit_params` projects this footprint from
+the GGUF metadata before a load; see [memory-fit.md](memory-fit.md). The flow DiT runs with flash attention by default on a GPU
 backend (off on CPU); set `MM3_DIT_NO_FLASH=1` to force it off. The LM runs
 flash attention by default on CUDA and Vulkan, where its teacher-forced logits
 were measured against the CPU rendering, and keeps the explicit-softmax path on

@@ -129,6 +129,7 @@ if (AUDIOGEN_BUILD_MINIMAX)
     list(APPEND AUDIOGEN_LIB_SOURCES
         src/minimax/logic.cpp
         src/minimax/engine.cpp
+        src/minimax/fit.cpp
     )
 endif()
 
@@ -364,6 +365,15 @@ if (AUDIOGEN_BUILD_TESTS)
         add_executable(test-minimax-loading-safety test/test_minimax_loading_safety.cpp)
         audiogen_link_in_tree_binary(test-minimax-loading-safety)
         audiogen_register_test(test-minimax-loading-safety LABEL "unit")
+
+        add_executable(test-minimax-fit test/test_minimax_fit.cpp)
+        audiogen_link_in_tree_binary(test-minimax-fit)
+        audiogen_register_test(test-minimax-fit LABEL "unit")
+
+        add_executable(test-minimax-fit-models test/test_minimax_fit_models.cpp)
+        audiogen_link_in_tree_binary(test-minimax-fit-models)
+        audiogen_register_test(test-minimax-fit-models LABEL "integration")
+        set_property(TEST test-minimax-fit-models PROPERTY SKIP_RETURN_CODE 77)
 
         add_executable(test-minimax-integration test/test_minimax_integration.cpp)
         target_link_libraries(test-minimax-integration PRIVATE audiogen-cpp)
