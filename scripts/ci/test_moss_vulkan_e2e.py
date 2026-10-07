@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
+import wave
 
 spec = importlib.util.spec_from_file_location("moss_e2e", Path(__file__).with_name("moss-vulkan-e2e.py"))
 e2e = importlib.util.module_from_spec(spec)
@@ -56,6 +57,37 @@ with open(sys.argv[1]) as lock:
 
 
 class IntelligibilityTests(unittest.TestCase):
+    def test_existing_quality_issue_requires_exact_upstream_audio(self):
+        bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
+            def write(name, samples):
+                with wave.open(str(output / (name + ".wav")), "wb") as wav:
+                    wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                    wav.writeframes(samples)
+            for name in ("batch", "baseline-batch", "clone", "baseline-clone"):
+                write(name, b"\x01\x00" * 20)
+            # Known unconditioned defect is exempt; cloning never is.
+            self.assertEqual(e2e.classify_tts_scores({"batch": bad, "clone": bad}, output),
+                             (["clone"], ["batch"]))
+            write("batch", b"\x02\x00" * 20)
+            self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
+            (output / "baseline-batch.wav").unlink()
+            self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
+
+    def test_unverified_baseline_or_asr_error_cannot_exempt_a_failure(self):
+        bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(e2e, "same_audio", return_value=True):
+                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
+                (output / "tts-baseline-commit.txt").write_text("wrong-commit")
+                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
+                (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
+                error = {**bad, "status": "error"}
+                self.assertEqual(e2e.classify_tts_scores({"batch": error}, output), (["batch"], []))
+
     def test_wrong_or_empty_speech_fails_using_shared_word_error_scorer(self):
         spec = importlib.util.spec_from_file_location("wer", Path(__file__).parents[1] / "benchmarks/compute-wer.py")
         wer = importlib.util.module_from_spec(spec)

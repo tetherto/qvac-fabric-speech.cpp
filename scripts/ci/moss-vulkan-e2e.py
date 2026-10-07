@@ -48,12 +48,44 @@ ASR_SPEC = {
     "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
 }
 MAX_TTS_WER = 0.25
+TTS_BASELINE_SHA = "8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c"
+UNCONDITIONED_OUTPUTS = ("batch", "stream", "cpu-reference")
 
 
 def intelligibility_passes(score):
     wer = score.get("wer")
     return (score.get("status") == "ok" and isinstance(wer, (float, int)) and
             math.isfinite(wer) and 0 <= wer <= MAX_TTS_WER and score.get("n_ref_words", 0) > 0)
+
+
+def same_audio(left, right):
+    # Compare signal data, not incidental WAV metadata. Exact agreement is
+    # deliberately required before exempting an existing wrong-text result.
+    try:
+        with wave.open(str(left), "rb") as a, wave.open(str(right), "rb") as b:
+            return (a.getparams() == b.getparams() and a.getnframes() > 0 and
+                    a.readframes(a.getnframes()) == b.readframes(b.getnframes()))
+    except (OSError, wave.Error, EOFError):
+        return False
+
+
+def classify_tts_scores(scores, output):
+    failed, existing = [], []
+    baseline = output / "tts-baseline-commit.txt"
+    verified_base = baseline.is_file() and baseline.read_text().strip() == TTS_BASELINE_SHA
+    for name, score in scores.items():
+        if intelligibility_passes(score):
+            continue
+        # A failed ASR invocation is never an existing quality limitation.
+        wer = score.get("wer")
+        valid_score = (score.get("status") == "ok" and isinstance(wer, (float, int)) and
+                       math.isfinite(wer) and wer > MAX_TTS_WER and score.get("n_ref_words", 0) > 0)
+        if (verified_base and valid_score and name in UNCONDITIONED_OUTPUTS and
+                same_audio(output / f"{name}.wav", output / f"baseline-{name}.wav")):
+            existing.append(name)
+        else:
+            failed.append(name)
+    return failed, existing
 
 
 def score_tts_outputs(asr_binary, models, output):
@@ -86,9 +118,11 @@ def score_tts_outputs(asr_binary, models, output):
         if completed.returncode != 0:
             score["status"] = "error"
         scores[name] = {key: score.get(key) for key in ("status", "wer", "n_ref_words", "n_hyp_words", "n_edits")}
-    failed = [name for name, score in scores.items() if not intelligibility_passes(score)]
+    failed, existing = classify_tts_scores(scores, output)
     return {"status": "failed" if failed else "passed", "max_wer": MAX_TTS_WER,
-            "asr_model": ASR_SPEC, "failed_outputs": failed, "scores": scores}
+            "asr_model": ASR_SPEC, "failed_outputs": failed, "scores": scores,
+            "quality_status": "failed" if failed or existing else "passed",
+            "pre_existing_quality_issues": existing, "baseline_commit": TTS_BASELINE_SHA}
 
 
 def gpu_memory():
@@ -208,7 +242,7 @@ def reference(source, target, offset, seconds=3):
         audio.writeframes(resampled.tobytes())
 
 
-def run_case(case, build, models, output):
+def run_case(case, build, models, output, baseline_binary):
     model = download(CASES[case], models, output)
     family = case.split("-")[0]
     sample = Path("engines/parakeet/test/samples/jfk.wav")
@@ -267,6 +301,16 @@ def run_case(case, build, models, output):
             # failures from backend-dependent generation drift. CI only.
             invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
                    ["--out", str(output / "cpu-reference.wav")], cpu=True)
+            # Same worker, ggml pin, checkpoint, prompt, seed and backend on
+            # the upstream base. Preserve evidence of pre-existing defects.
+            for name in UNCONDITIONED_OUTPUTS:
+                args = [str(baseline_binary), *base[1:]]
+                if name == "cpu-reference":
+                    args.remove("--gpu")
+                if name == "stream":
+                    args += ["--stream", "--stream-chunk-frames", "25"]
+                invoke(f"baseline-{name}", [*args, "--out", str(output / f"baseline-{name}.wav")],
+                       cpu=name == "cpu-reference")
             invoke("stream-agreement", [str(build / "engines/tts/test-moss-tts-stream-e2e"),
                    model, decoder, encoder, str(ref1), str(output),
                    str(output / "reference-short.txt"), str(output / "reference-long.txt")], wav=False)
@@ -315,6 +359,8 @@ def main():
     parser.add_argument("--models", type=Path, default=Path("models-moss-e2e"))
     parser.add_argument("--output", type=Path, default=Path("moss-e2e-results"))
     parser.add_argument("--asr-binary", type=Path, default=Path("build-moss-asr/bin/whisper-cli"))
+    parser.add_argument("--tts-baseline-binary", type=Path,
+                        default=Path("build-moss-baseline/engines/tts/moss-cli"))
     args = parser.parse_args()
     args.models.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -324,7 +370,8 @@ def main():
     result = {"case": args.case, "status": "failed",
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     try:
-        result["checks"] = run_case(args.case, args.build.resolve(), args.models, args.output)
+        result["checks"] = run_case(args.case, args.build.resolve(), args.models, args.output,
+                                   args.tts_baseline_binary.resolve())
         result["status"] = "passed"
     except Exception as error:
         result["error"] = str(error)
@@ -335,6 +382,10 @@ def main():
             # both the original failure and CPU/Vulkan quality evidence.
             try:
                 result["intelligibility"] = score_tts_outputs(args.asr_binary.resolve(), args.models, args.output)
+                existing = result["intelligibility"]["pre_existing_quality_issues"]
+                if existing:
+                    print("Non-blocking upstream quality failures (identical baseline audio): " +
+                          ", ".join(existing), flush=True)
                 if result["intelligibility"]["status"] != "passed":
                     result["status"] = "failed"
                     print("TTS intelligibility gate failed: " +

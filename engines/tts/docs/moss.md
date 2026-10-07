@@ -65,6 +65,18 @@ outputs (100% WER); it is not a naturalness or speaker-similarity metric.
 Synthesis and ASR use the same prompt files. Transcripts, per-output scores
 and ASR settings are saved even when a later synthesis step fails.
 
+Unconditioned TTS has a suspected pre-existing wrong-text issue. The TTS
+case also builds upstream commit `8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c`
+and runs the same CPU, Vulkan batch and Vulkan streaming requests with
+identical checkpoints, seed and ggml on the same worker. An unconditioned
+quality failure is non-blocking only when its PCM samples and audio format
+exactly match that baseline. Such failures remain visible in transcripts
+and `pre_existing_quality_issues`; they are not counted as quality passes.
+Changed audio, a missing/unverified baseline or an ASR error cannot use this
+exception. Voice-conditioned streaming and reuse retain the strict quality
+gate. This keeps existing general TTS defects outside the Vulkan PR while
+continuing to reject new regressions.
+
 Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
