@@ -128,7 +128,7 @@ def run_case(case, build, models, output):
             raise
         finally:
             gpu_snapshot("after")
-        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e)\] backend: Vulkan\d*", log.read_text()):
+        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e)\] backend: Vulkan\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select Vulkan; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": "Vulkan"}
         print(f"PASS {name}: {checks[name]}", flush=True)
@@ -160,6 +160,10 @@ def run_case(case, build, models, output):
                "--out", str(output / "sound.wav")])
     elif family == "speech":
         codec = download("moss-speech-codec-f16", models, output)
+        invoke("codec-agreement", [str(build / "engines/tts/test-moss-speech-codec-e2e"),
+               codec, str(output)], wav=False)
+        for mode in ("single", "cfg"):
+            checks[f"codec-{mode}"] = audio_stats(output / f"codec-vulkan-{mode}.wav")
         invoke("reply", [str(build / "engines/tts/test-moss-speech-e2e"),
                model, codec, str(sample), str(output)])
         checks["reply-repeat"] = audio_stats(output / "reply-repeat.wav")

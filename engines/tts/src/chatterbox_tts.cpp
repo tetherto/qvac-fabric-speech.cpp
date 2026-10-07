@@ -1248,6 +1248,10 @@ static ggml_tensor * basic_tfm(ggml_context * ctx, const basic_tfm_w & w,
                                                     /*scale=*/1.0f / std::sqrt((float)HD),
                                                     /*max_bias=*/0.0f,
                                                     /*logit_softcap=*/0.0f);
+        // CFM feeds attention back through the flow solver. Vulkan's default
+        // F16 accumulation drifts across steps and can overflow even with F32
+        // Q/K/V. Preserve accumulation precision without disabling F16 weights.
+        ggml_flash_attn_ext_set_prec(attn_fa, GGML_PREC_F32);
         // flash_attn_ext output: ne=[HD, H, T, 1] (contiguous). Reshape to (INNER, T).
         flat = ggml_reshape_2d(ctx, attn_fa, INNER, T);
     }
@@ -1351,6 +1355,8 @@ static ggml_tensor * basic_tfm_b(ggml_context * ctx, const basic_tfm_w & w,
         }
         ggml_tensor * attn_fa = ggml_flash_attn_ext(ctx, q, k, v, /*mask=*/nullptr,
                                                     1.0f / std::sqrt((float)HD), 0.0f, 0.0f);
+        // Same accumulation requirement as the single-batch CFM path above.
+        ggml_flash_attn_ext_set_prec(attn_fa, GGML_PREC_F32);
         // flash_attn_ext output ne=[HD, H, T, B].  Reshape back to (INNER, T, B).
         flat = ggml_reshape_3d(ctx, attn_fa, INNER, T, B);
     }
@@ -3110,6 +3116,10 @@ int s3gen_synthesize_to_wav(
             }
         } else {
             for (size_t i = 0; i < z.size(); ++i) z[i] = z[i] + dt * dxdt[i];
+        }
+        if (!std::all_of(z.begin(), z.end(), [](float value) { return std::isfinite(value); })) {
+            fprintf(stderr, "error: non-finite S3Gen CFM state at step %zu\n", s);
+            return 1;
         }
     }
     double prof_cfm_ms = now_ms() - cfm_t0;

@@ -33,6 +33,17 @@ serially because runner services share GPU memory. Speech cases use
 `test-moss-speech-e2e` to make two replies on one engine instance, checking
 that staged model unloading also works on the next request.
 
+Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
+This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
+identical diffusion noise and a short voice reference. It checks finite mel
+values, numerical agreement, output length and signal level for both the
+single-batch and batched CFG paths, and saves the audio and mel dumps.
+The shared S3Gen flow decoder requests F32 flash-attention accumulation:
+default F16 accumulation on MoltenVK can amplify errors across solver steps
+until the mel becomes non-finite. F16 weights and other Vulkan operations
+remain enabled; no `GGML_VK_DISABLE_F16` workaround is required. Non-finite
+flow states are reported as synthesis errors instead of decoded as audio.
+
 These generated-model checks pass on Apple M2 through MoltenVK. They do
 not establish full-checkpoint speech quality, performance, or Android and
 discrete-GPU compatibility. The per-model reference tests below remain the
