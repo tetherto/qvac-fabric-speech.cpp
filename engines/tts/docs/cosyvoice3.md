@@ -12,7 +12,8 @@ engine's backend requirement and other GPU backends fall back to CPU. On
 Android the requirement stays Metal-or-OpenCL, so Vulkan-only mobile GPUs
 (e.g. Mali, Xclipse) keep declining to CPU rather than running unvalidated.
 `--vulkan-device N` pins the Vulkan adapter on multi-GPU hosts (`-1`
-auto-picks the discrete card with the most free VRAM).
+auto-picks the discrete card with the most free VRAM). The Hexagon NPU runs
+only on explicit request (see [Snapdragon Hexagon NPU](#snapdragon-hexagon-npu)).
 
 Use `cosyvoice-cli` for end-to-end synthesis. The `cosyvoice-hift`,
 `cosyvoice-flow`, and `cosyvoice-llm` executables isolate stages, and
@@ -252,6 +253,94 @@ The reference transcript selects the mode, mirroring the upstream frontends:
 
 The bake runs once at engine construction (roughly a second of CPU for the
 tokenizer + CAM++ + mel on a short clip; the tokenizer graph rides the
-engine's GPU backend when one is selected). Instruct mode composes with a
-cloned voice: the instruction drives dialect/style while the cloned tensors
-supply the timbre.
+engine's GPU backend when one is selected, and the CPU on Hexagon). Instruct
+mode composes with a cloned voice: the instruction drives dialect/style while
+the cloned tensors supply the timbre.
+
+### Snapdragon Hexagon NPU
+
+CosyVoice3 runs on the Snapdragon Hexagon NPU (HTP0; measured on a Snapdragon
+8 Elite, Hexagon v79) when it is requested explicitly:
+`EngineOptions::backend = "hexagon"` or `--backend hexagon` on
+`cosyvoice-cli`, `cosyvoice-bench` and `cosyvoice-fit-params`. There is no
+fallback: construction fails when HTP0 is missing, and the automatic
+`--n-gpu-layers` walk never selects it. The LM (prefill and every decode
+step), the DiT and the vocoder run on the NPU; the host samples the speech
+tokens and builds the vocoder's source excitation. With a reference WAV the
+cloning tokenizer stays on the CPU, where CAM++ runs on every backend. Weights
+go into the Hexagon repack buffer type. HTP multiplies only `f32`, `f16`,
+`q8_0` and `q4_0` weights, so the `bf16` flow is refused at load. It needs a
+`qvac-ext-ggml@speech` build with the Hexagon F32 flash attention, nearest
+upscale, ELU, ABS, leaky ReLU, sin and cos kernels and the batched-matmul
+flattening.
+
+The DiT's attention runs in an F32 HVX kernel rather than the F16 HMX one.
+Several DiT layers carry attention-sink activations (|q| and |k| up to about
+1,100 under real conditioning) whose logits reach about 1.6e6 while the gaps
+that set the softmax are tens: F16 logits overflow or round them away, and F16
+queries and keys lose them. The F16 kernel would take the DiT of a 7.8 s clip
+from 12.6 to 4.4 s, but the output's log-mel cosine to the CPU falls from
+0.9893 to 0.9655. Three graph forms also differ from the other backends: the
+DiT rotates the first head inside each full row (one ROPE over the fused QKV
+view rather than split, rotate and concatenate), the vocoder's iSTFT runs as
+one GEMM into columns plus `ggml_col2im_1d` (HTP has no transposed
+convolution), and the vocoder's convolutions run over F16 im2col columns on
+HMX, which multiplies in F16 anyway; HTP has no fast F32 im2col.
+`test-cosyvoice-hexagon-graphs` pins the first two against the generic forms
+on the CPU and, with `COSYVOICE_TEST_BACKEND=hexagon`, on the NPU.
+
+Accuracy, `test-cosyvoice-xb --backend NAME` (each stage over the same
+deterministic inputs on the CPU and on the named device; the LM leg compares
+the greedy speech-token trajectory over the baked voice, the flow leg the mel,
+the HiFT leg the waveform with f0 pinned):
+
+| Check | Hexagon | OpenCL (Adreno 830) |
+|---|--:|--:|
+| LM `q8_0` (fused QKV), greedy trajectory, 800 tokens | identical | identical |
+| LM `q4_0` (separate Q/K/V) | identical | identical |
+| flow `q8_0`, mel cosine / max abs | 0.999839 / 0.584 | 0.999859 / 0.463 |
+| flow `q4_0` | 0.999229 / 0.647 | 0.999415 / 0.562 |
+| flow `f16` | 0.999889 / 0.349 | 0.999926 / 0.381 |
+| flow `f32` | 0.999941 / 0.462 | 1.000000 / 0.003 |
+| HiFT `f16`, waveform cosine / max abs | 0.999269 / 0.0082 | 0.999282 / 0.0089 |
+| HiFT `f32` | 0.999898 / 0.0029 | 1.000000 / 0.0000 |
+
+HMX multiplies in F16 wherever a matmul does not request F32 precision, so
+unlike OpenCL even the `f32` tiers are not bit-close to the CPU on Hexagon;
+every tier stays well inside the gates (flow 0.995 / 4.0, HiFT 0.999).
+
+On real text with the speech tokens pinned (the three utterances below), the
+output's log-mel cosine to the CPU's is 0.9887-0.9899 on Hexagon and
+0.9878-0.9889 on OpenCL, and whisper `base.en` transcribes the Hexagon output
+verbatim.
+
+Galaxy S25, LM `q8_0` + flow `q8_0` + HiFT `f16`, baked English voice. The
+flow and vocoder run over the speech tokens of one seeded CPU run
+(`cosyvoice-bench --tokens-in`), median of 2 warm runs, each backend started
+from thermal status 0, ms:
+
+| Audio | CPU (6 threads) | OpenCL (Adreno 830) | Hexagon | Hexagon vs OpenCL |
+|---|--:|--:|--:|--:|
+| 4.3 s (107 speech tokens) | 56,109 | 28,536 | 9,025 | 3.16x |
+| 7.8 s (195 speech tokens) | 75,746 | 37,176 | 13,726 | 2.71x |
+| 19.8 s (494 speech tokens) | 182,744 | 105,216 | 35,323 | 2.98x |
+
+The DiT is 92% of the Hexagon time: ten Euler steps over the voice prompt's
+550 mel frames plus the utterance's, at classifier-free-guidance batch 2. On
+the 7.8 s utterance the F32 attention is about three quarters of it (43 ms per
+call, 220 calls), so the weight tier barely matters: the flow and vocoder take
+13.7 s with the `q8_0` flow, 13.9 s with `q4_0`, 14.0 s with `f16` and 14.1 s
+with `f32` (and an `f32` HiFT). The recommended GPU tier (`q8_0` LM and flow,
+`f16` HiFT) holds on Hexagon too.
+
+The LM is the one stage where Hexagon trails. Its matmuls request F32
+precision (the cross-backend LM gate is exact greedy equality), which keeps
+them on HVX instead of HMX, and a decode step is short enough for the host's
+per-step work to show: prefill takes 1.4-1.8 s against 0.9-1.1 s on the CPU
+and 0.34-0.41 s on OpenCL, and a decode step 15.9-20.3 ms against 8.6-9.1 ms
+and 12.6-14.3 ms. With the LM at those rates over the same tokens, Hexagon
+renders the three utterances end to end in 12.1, 18.4 and 47.2 s: 2.2-2.5x
+faster than OpenCL and 4.0-4.8x faster than the CPU, but still 2.4-2.8x slower
+than real time. `GGML_HEXAGON_OPPOLL=1` (the host polls the DSP queue instead
+of waiting) cuts LM decoding to 12.9-18.0 ms per token, slows the flow by
+about 5% and leaves the phone at thermal status 2, for no net gain.
