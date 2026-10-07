@@ -41,6 +41,10 @@ void print_usage(const char * argv0) {
         "  --n-gpu-layers N        request the validated GPU backend when > 0\n"
         "                          (default 0 = CPU), with the same runtime\n"
         "                          fallbacks a real load applies\n"
+        "  --backend NAME          explicit backend selector, same values as\n"
+        "                          EngineOptions::backend (\"auto\", \"cpu\",\n"
+        "                          \"hexagon\", or a specific ggml device name;\n"
+        "                          default \"auto\")\n"
         "  --margin-mib MIB        free-memory headroom to require (default 256)\n"
         "  --backends-dir DIR      directory scanned for dynamically-loaded ggml backends\n"
         "  --json                  emit the projection as JSON on stdout\n"
@@ -113,6 +117,8 @@ extern "C" int audio8_fit_cli_main(int argc, char ** argv) {
                 std::fprintf(stderr, "--n-gpu-layers: '%s' is not an integer\n", argv[i]);
                 return (int) tts_cpp::FitStatus::Error;
             }
+        } else if (a == "--backend" && i + 1 < argc) {
+            opts.backend = argv[++i];
         } else if (a == "--margin-mib" && i + 1 < argc) {
             uint64_t mib = 0;
             if (!parse_u64(argv[++i], mib)) {

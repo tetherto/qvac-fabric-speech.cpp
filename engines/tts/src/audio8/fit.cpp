@@ -124,23 +124,28 @@ FitResult fit_params(const FitOptions & opts) {
     model_guard m;
     detail::fit_load_measure lm_load, dec_load, enc_load;
     std::string error;
-    // fit measurement always goes through the GPU/CPU auto path (empty
-    // backend string); the Hexagon-specific allocation shape is still being
-    // validated and preflight should keep reporting the current numbers.
-    const std::string fit_backend;
+    // Mirror the engine's backend selector so the projection measures the
+    // same device the real load will land on. An explicit name that cannot
+    // be initialised (e.g. "hexagon" on a non-HTP host) returns a distinct
+    // "backend-unavailable" reason instead of being conflated with
+    // model-unreadable; init_backend emits "failed to init a compute
+    // backend" in that case.
+    auto backend_init_failed = [](const std::string & e) {
+        return e.find("failed to init a compute backend") != std::string::npos;
+    };
     if (!detail::load_lm_metadata_only(opts.lm_gguf_path, opts.n_gpu_layers,
-                                       fit_backend, m.lm, lm_load, &error) ||
+                                       opts.backend, m.lm, lm_load, &error) ||
         !detail::load_codec_metadata_only(opts.codec_decoder_gguf_path, opts.n_gpu_layers,
-                                          fit_backend, m.decoder, dec_load, &error) ||
+                                          opts.backend, m.decoder, dec_load, &error) ||
         !m.decoder.has_decoder) {
-        r.reason = "model-unreadable";
+        r.reason = backend_init_failed(error) ? "backend-unavailable" : "model-unreadable";
         return r;
     }
     if (cloning) {
         if (!detail::load_codec_metadata_only(opts.codec_encoder_gguf_path, opts.n_gpu_layers,
-                                              fit_backend, m.encoder, enc_load, &error) ||
+                                              opts.backend, m.encoder, enc_load, &error) ||
             !m.encoder.has_encoder) {
-            r.reason = "model-unreadable";
+            r.reason = backend_init_failed(error) ? "backend-unavailable" : "model-unreadable";
             return r;
         }
     }

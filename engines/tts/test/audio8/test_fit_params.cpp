@@ -210,6 +210,21 @@ void run_synthetic_lm_gates() {
         fr = tts_cpp::audio8::fit_params(wrong);
         expect(fr.status == tts_cpp::FitStatus::Error,
                "wrong-architecture decoder was not Error");
+
+        // An explicit backend selector that cannot be initialised on this
+        // host must return a distinct "backend-unavailable" reason instead
+        // of being conflated with model-unreadable. init_backend emits
+        // "failed to init a compute backend" for an unresolved explicit
+        // name, which the fit path maps to the dedicated reason.
+        tts_cpp::audio8::FitOptions unknown_backend;
+        unknown_backend.lm_gguf_path            = path;
+        unknown_backend.codec_decoder_gguf_path = path;
+        unknown_backend.backend = "this-backend-does-not-exist";
+        fr = tts_cpp::audio8::fit_params(unknown_backend);
+        expect(fr.status == tts_cpp::FitStatus::Error,
+               "unknown backend was not Error");
+        expect(fr.reason == "backend-unavailable",
+               "unknown-backend reason was '" + fr.reason + "'");
     }
 
     // 6. A codebook count outside the supported range never reaches the

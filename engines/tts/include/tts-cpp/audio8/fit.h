@@ -46,6 +46,14 @@ struct FitOptions {
     // real load applies); 0 projects for the CPU backend.
     int n_gpu_layers = 0;
 
+    // Same semantics as EngineOptions::backend: "auto" / "" selects the
+    // tier-based GPU/CPU policy honouring n_gpu_layers, "cpu" forces CPU,
+    // and a specific name ("hexagon", an exact ggml device name, etc.)
+    // projects against that device. A projection made with the wrong
+    // backend selector can misreport whether the model will fit at
+    // synthesis time, so the fit path mirrors the engine selector.
+    std::string backend = "auto";
+
     // Same semantics as EngineOptions::backends_dir.
     std::string backends_dir;
 
