@@ -442,6 +442,21 @@ void run_fit_gates(const std::string & llm_path, const std::string & flow_path,
                "near-INT_MAX text_tokens was not workload-too-large");
     }
 
+    {
+        tts_cpp::cosyvoice::FitOptions missing = fopts;
+        missing.backend = "no-such-device";
+        const tts_cpp::FitResult fr = tts_cpp::cosyvoice::fit_params(missing);
+        expect(fr.status == tts_cpp::FitStatus::Error && fr.reason == "no-backend-device",
+               "unavailable explicit backend reason was '" + fr.reason + "'");
+    }
+    {
+        tts_cpp::cosyvoice::FitOptions cpu = fopts;
+        cpu.backend = "cpu";
+        const tts_cpp::FitResult fr = tts_cpp::cosyvoice::fit_params(cpu);
+        expect(fr.status != tts_cpp::FitStatus::Error && fr.device_is_cpu,
+               "explicit cpu backend did not project the CPU (" + fr.reason + ")");
+    }
+
     // Errors surface as Error, never Success.
     {
         tts_cpp::cosyvoice::FitOptions bad = fopts;

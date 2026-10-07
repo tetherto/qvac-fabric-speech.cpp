@@ -4,7 +4,8 @@
 //
 // Native C++/ggml implementation of Fun-CosyVoice3 on CPU or the validated
 // per-platform GPU paths: Metal (macOS / iOS), Vulkan (desktop Linux /
-// Windows), and OpenCL (Android / Adreno). It uses the same persistent
+// Windows), and OpenCL (Android / Adreno). The Hexagon NPU runs only on
+// explicit request (EngineOptions::backend). It uses the same persistent
 // Engine shape as the other synthesis families and returns 24 kHz speech.
 //
 // Pipeline:
@@ -153,6 +154,13 @@ struct EngineOptions {
     int n_gpu_layers = 0;   // 0 = CPU; >0 selects the GPU path (Metal on Apple,
                             // OpenCL/Adreno on Android, Vulkan on desktop;
                             // others fall back to CPU).
+
+    // Explicit compute device. Empty or "auto" (default) keeps the
+    // n_gpu_layers policy walk. "cpu", "opencl", "hexagon" (the Snapdragon
+    // HTP0 NPU) or an exact ggml device name select that device and override
+    // n_gpu_layers; there is no fallback, so the constructor throws when it
+    // is missing. The automatic walk never picks Hexagon.
+    std::string backend;
 
     // Vulkan adapter index, consulted only when the selection walk lands on
     // Vulkan.  0 (default) = first adapter in registry order; N > 0 = the Nth

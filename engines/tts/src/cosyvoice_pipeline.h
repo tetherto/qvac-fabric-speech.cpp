@@ -55,6 +55,13 @@ inline ::tts_cpp::detail::GpuBackendRequirement cosyvoice_gpu_requirement() {
 #endif
 }
 
+ggml_backend_t cosyvoice_init_backend(const std::string & requested, int n_gpu_layers,
+                                      int vulkan_device, bool * gpu_present_but_unused);
+
+bool cosyvoice_hexagon_runs_weight_type(ggml_type type);
+
+ggml_backend_t cosyvoice_frontend_backend(ggml_backend_t engine_backend);
+
 // ---- resident model (weights + compute backend) ----------------------------
 // Move-only: owns a sched bundle that cannot be copied.
 struct model_ctx {
@@ -228,6 +235,12 @@ ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tenso
 // exposed for test-cosyvoice-conv1d, which pins their equivalence.
 ggml_tensor * cosyvoice_conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
 ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
+
+ggml_tensor * cosyvoice_dit_rope_first_head(ggml_context * c, ggml_tensor * z, ggml_tensor * pos,
+                                            int dim_head, int NL, int B, bool rows_in_place);
+
+ggml_tensor * cosyvoice_istft_columns(ggml_context * c, ggml_tensor * kernel_cols, ggml_tensor * spec, int hop);
+std::vector<float> cosyvoice_istft_kernel_columns(const std::vector<float> & kernel, int n_fft, int n_ch);
 
 // SineGen2 NSF source excitation (host-side): sample-rate f0 [T_wav] ->
 // source [T_wav].  The per-harmonic sine tracks and the mix/tanh arithmetic

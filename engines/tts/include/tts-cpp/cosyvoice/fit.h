@@ -69,6 +69,7 @@ struct FitOptions {
     // Same semantics as the EngineOptions fields of the same name.
     int         n_gpu_layers  = 0;
     int         vulkan_device = 0;
+    std::string backend;
     std::string backends_dir;
 
     // ── Workload ──────────────────────────────────────────────────────────
