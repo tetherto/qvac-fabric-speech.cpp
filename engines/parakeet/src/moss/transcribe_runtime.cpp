@@ -129,13 +129,23 @@ bool TranscribeScheduler::allocate(ggml_cgraph * graph) {
     return ggml_backend_sched_alloc_graph(sched_, graph);
 }
 
-void TranscribeScheduler::measure(ggml_cgraph * graph, size_t * sizes) {
-    ggml_backend_sched_reserve_size(sched_, graph, sizes);
+TranscribeMemory TranscribeScheduler::measure(ggml_cgraph *graph,
+                                              int n_threads) {
+  auto *cpu = cpu_ ? cpu_ : backend_;
+  backend_set_n_threads(cpu, n_threads);
+  size_t sizes[2] = {0, 0};
+  if (!ggml_backend_sched_reserve_size(sched_, graph, sizes)) {
+    fail("scheduler measurement failed");
+  }
+  return {sizes[0], sizes[1], ggml_backend_sched_get_host_size(sched_),
+          ggml_backend_sched_get_work_size(sched_, cpu)};
 }
 
 TranscribeMemory TranscribeScheduler::allocated_memory() const {
-    return {ggml_backend_sched_get_buffer_size(sched_, backend_),
-        cpu_ ? ggml_backend_sched_get_buffer_size(sched_, cpu_) : 0, 0};
+  return {ggml_backend_sched_get_buffer_size(sched_, backend_),
+          cpu_ ? ggml_backend_sched_get_buffer_size(sched_, cpu_) : 0,
+          ggml_backend_sched_get_host_size(sched_),
+          ggml_backend_get_work_size(cpu_ ? cpu_ : backend_)};
 }
 
 bool TranscribeScheduler::compute(ggml_cgraph * graph, int n_threads) {

@@ -1,8 +1,9 @@
-#include "transcribe_fixtures.h"
-#include "parakeet/moss_transcribe_fit.h"
 #include "moss/transcribe_audio.h"
+#include "moss/transcribe_fit.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_request.h"
+#include "parakeet/moss_transcribe_fit.h"
+#include "transcribe_fixtures.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -18,6 +19,8 @@ namespace {
 constexpr uint32_t SEED = 26493;
 constexpr double SHORT_SECONDS = 0.02;
 constexpr double LONG_SECONDS = 0.8;
+constexpr int MANY_THREADS = 1024;
+constexpr uint64_t ONE_GIB = uint64_t(1) << 30;
 
 void check(bool passed, const char * message) {
     if (!passed) throw std::runtime_error(message);
@@ -106,17 +109,53 @@ void check_runtime_parity(const std::filesystem::path & path, const FitResult & 
     std::vector<float> pcm(samples, 0.0f);
     const auto encoding = encode_audio_chunk(model, mel.chunk(pcm.data(), samples), audio_tokens, false);
     check(model.allocated_memory().device_bytes == fit.device.encoder_compute_bytes, "encoder allocation differs");
+    check(model.allocated_memory().host_bytes > ONE_GIB,
+          "scheduler host allocation is undercounted");
+    check(model.allocated_memory().cpu_work_bytes > 0,
+          "encoder CPU scratch omitted");
+    check(fit.host_bytes >= model.allocated_memory().host_bytes +
+                                model.allocated_memory().cpu_work_bytes,
+          "encoder host allocation exceeds projection");
     const auto prompt = transcribe_prompt(model.config(), tokenizer, audio_tokens, "");
     TranscribeDecoder decoder(model, (int) prompt.size() + DEFAULT_MAX_NEW_TOKENS);
     auto logits = decoder.prefill(prompt, encoding.embeddings, TRANSCRIBE_PREFILL_BATCH_TOKENS);
     for (int i = 1; i < DEFAULT_MAX_NEW_TOKENS; ++i) logits = decoder.step(byte_token('a'));
     check(model.allocated_memory().device_bytes <= fit.device.encoder_compute_bytes + fit.device.decoder_compute_bytes,
         "decode allocation exceeds projection");
+    check(fit.host_bytes >= model.allocated_memory().host_bytes +
+                                model.allocated_memory().cpu_work_bytes,
+          "decoder host allocation exceeds projection");
     TranscribeModel metadata(path.string(), false, 4, true);
     TranscribeGraph graph(8);
     bool guarded = false;
     try { metadata.compute(graph); } catch (const std::runtime_error &) { guarded = true; }
     check(guarded, "metadata-only compute was allowed");
+}
+
+void check_host_budget(const FitResult &fit) {
+  auto limited = fit;
+  limited.device_free_bytes = ONE_GIB;
+  limited.device_total_bytes = ONE_GIB;
+  limited.device_shares_host_memory = true;
+  finish_transcribe_fit(limited, 0);
+  check(limited.status == FitStatus::Failure && !limited.fits &&
+            limited.reason == "does-not-fit",
+        "scheduler host allocations falsely fit within 1 GiB");
+}
+
+void check_thread_scaling(const std::filesystem::path &path) {
+  TranscribeOptions options;
+  options.model_path = path.string();
+  const auto ordinary =
+      parakeet::moss::fit_params(options, {}, LONG_SECONDS, 0);
+  options.n_threads = MANY_THREADS;
+  const auto many = parakeet::moss::fit_params(options, {}, LONG_SECONDS, 0);
+  check_projection(ordinary);
+  check_projection(many);
+  check(many.host_bytes > ordinary.host_bytes,
+        "CPU scratch does not reflect configured threads");
+  check(many.device.total_bytes == ordinary.device.total_bytes,
+        "CPU scratch charged to tensor buffers");
 }
 
 void check_real_model() {
@@ -141,6 +180,8 @@ int main() try {
     check_invalid(path);
     check_scaling(path, fit);
     check_runtime_parity(path, fit);
+    check_host_budget(fit);
+    check_thread_scaling(path);
     std::filesystem::remove(path);
     check_real_model();
     std::cout << "test-moss-transcribe-fit: all checks passed\n";

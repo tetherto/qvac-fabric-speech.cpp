@@ -348,22 +348,18 @@ FitResult TranscribeModel::measure_weights() {
     result.device.weights_bytes = impl_->measured_weights;
     result.host_bytes = fitutil::sat_add(gguf_get_meta_size(impl_->file),
         fitutil::sat_add(ggml_get_mem_size(impl_->metadata), ggml_get_mem_size(impl_->weights)));
-    constexpr uint64_t SPLIT_INPUTS = 30;
-    constexpr uint64_t COPY_DIRECTIONS = 2;
-    constexpr uint64_t BACKEND_ID_ARRAYS = 4;
-    const uint64_t descriptors = uint64_t(SCHED_NODES) * SPLIT_INPUTS * COPY_DIRECTIONS;
-    result.host_bytes = fitutil::sat_add(result.host_bytes, descriptors * sizeof(ggml_tensor));
-    result.host_bytes = fitutil::sat_add(result.host_bytes,
-        (descriptors + SCHED_NODES) * sizeof(int) * BACKEND_ID_ARRAYS);
-    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_graph_overhead_custom(SCHED_NODES, false));
+    result.host_bytes =
+        fitutil::sat_add(result.host_bytes, ggml_context_overhead() * 2);
     return result;
 }
 
 TranscribeMemory TranscribeModel::measure(TranscribeGraph & graph) {
     if (!impl_->measure_only) fail("measurement requires a metadata-only model");
-    size_t sizes[2] = {0, 0};
-    impl_->scheduler->measure(graph.graph(), sizes);
-    return {sizes[0], sizes[1], ggml_get_mem_size(graph.ctx())};
+    auto memory = impl_->scheduler->measure(graph.graph(), impl_->n_threads);
+    memory.host_bytes = fitutil::sat_add(
+        memory.host_bytes, fitutil::sat_add(ggml_get_mem_size(graph.ctx()),
+                                            ggml_context_overhead()));
+    return memory;
 }
 
 void TranscribeModel::allocate(TranscribeGraph & graph) { impl_->allocate(graph); }

@@ -1,9 +1,10 @@
-#include "parakeet/moss_transcribe_fit.h"
+#include "moss/transcribe_fit.h"
+#include "fit_util.h"
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_request.h"
+#include "parakeet/moss_transcribe_fit.h"
 #include "parakeet_ctc.h"
-#include "fit_util.h"
 
 #include <algorithm>
 #include <cmath>
@@ -31,6 +32,7 @@ void merge_memory(TranscribeMemory & peak, const TranscribeMemory & phase) {
     peak.device_bytes = std::max(peak.device_bytes, phase.device_bytes);
     peak.host_compute_bytes = std::max(peak.host_compute_bytes, phase.host_compute_bytes);
     peak.host_bytes = std::max(peak.host_bytes, phase.host_bytes);
+    peak.cpu_work_bytes = std::max(peak.cpu_work_bytes, phase.cpu_work_bytes);
 }
 
 bool resolve_workload(FitResult & result, const detail::TranscribeConfig & config,
@@ -137,29 +139,37 @@ void measure_workload(FitResult & result, detail::TranscribeModel & model,
         sat_add(decoder.host_state_bytes(), decoder_payload(config, workload, tokenizer)));
     resident = sat_add(resident, std::max(encode_host, decode_host));
     resident = sat_add(resident, std::max(encoder.host_compute_bytes, decode.host_compute_bytes));
+    resident = sat_add(resident,
+                       std::max(encoder.cpu_work_bytes, decode.cpu_work_bytes));
     result.host_bytes = sat_add(result.host_bytes, resident);
 }
 
-void finish(FitResult & result, uint64_t margin) {
-    result.device.total_bytes = sat_add(result.device.weights_bytes,
-        sat_add(result.device.decoder_state_bytes,
-            sat_add(result.device.encoder_compute_bytes, result.device.decoder_compute_bytes)));
-    uint64_t required = sat_add(result.device.total_bytes, margin);
-    if (result.device_shares_host_memory) required = sat_add(required, result.host_bytes);
-    result.fits = required != std::numeric_limits<uint64_t>::max() && required <= result.device_free_bytes;
-    result.status = result.fits ? FitStatus::Success : FitStatus::Failure;
-    result.reason = result.fits ? "fits" : "does-not-fit";
-    std::ostringstream report;
-    report << "model: moss-transcribe\ndevice: " << result.device_name
-           << "\nweights: " << result.device.weights_bytes
-           << " bytes\nencoder compute: " << result.device.encoder_compute_bytes
-           << " bytes\nKV cache: " << result.device.decoder_state_bytes
-           << " bytes\nadditional decoder compute: " << result.device.decoder_compute_bytes
-           << " bytes\nhost: " << result.host_bytes << " bytes\nmargin: " << margin
-           << " bytes\nverdict: " << result.reason << '\n';
-    result.report = report.str();
-}
+} // namespace
 
+void detail::finish_transcribe_fit(FitResult &result, uint64_t margin) {
+  result.device.total_bytes =
+      sat_add(result.device.weights_bytes,
+              sat_add(result.device.decoder_state_bytes,
+                      sat_add(result.device.encoder_compute_bytes,
+                              result.device.decoder_compute_bytes)));
+  uint64_t required = sat_add(result.device.total_bytes, margin);
+  if (result.device_shares_host_memory)
+    required = sat_add(required, result.host_bytes);
+  result.fits = required != std::numeric_limits<uint64_t>::max() &&
+                required <= result.device_free_bytes;
+  result.status = result.fits ? FitStatus::Success : FitStatus::Failure;
+  result.reason = result.fits ? "fits" : "does-not-fit";
+  std::ostringstream report;
+  report << "model: moss-transcribe\ndevice: " << result.device_name
+         << "\nweights: " << result.device.weights_bytes
+         << " bytes\nencoder compute: " << result.device.encoder_compute_bytes
+         << " bytes\nKV cache: " << result.device.decoder_state_bytes
+         << " bytes\nadditional decoder compute: "
+         << result.device.decoder_compute_bytes
+         << " bytes\nhost: " << result.host_bytes
+         << " bytes\nmargin: " << margin << " bytes\nverdict: " << result.reason
+         << '\n';
+  result.report = report.str();
 }
 
 FitResult fit_params(const TranscribeOptions & options, const TranscribeRequest & request,
@@ -189,7 +199,7 @@ FitResult fit_params(const TranscribeOptions & options, const TranscribeRequest 
         result = model.measure_weights();
         result.model_type = "moss-transcribe";
         measure_workload(result, model, tokenizer, workload);
-        finish(result, margin_bytes);
+        detail::finish_transcribe_fit(result, margin_bytes);
     } catch (const std::exception & error) {
         const std::string message = error.what();
         result.reason = message.find("no compute backend") != std::string::npos ? "no-backend-device"

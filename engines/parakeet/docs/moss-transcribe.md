@@ -178,7 +178,9 @@ allocates device payloads, or computes a graph. Backend selection matches the en
 `FitResult` reports weights, the encoder allocation, aligned F16 KV cache, additional
 decoder allocation above the encoder, host memory and available device memory. Encoder
 and decoder share a scheduler: the two compute fields sum to the peak compute demand.
-Host demand includes tokenizer, audio, embeddings, mel preprocessing and decoder buffers;
+Host demand includes tokenizer, audio, embeddings, mel preprocessing, decoder buffers,
+scheduler storage and the peak CPU execution scratch across encoder and decoder splits
+for the configured thread count, including CPU fallback when a GPU is selected;
 CPU and unified-memory GPU verdicts charge host memory to the same pool. Workloads past
 the model context return `Error` / `workload-too-large`; invalid requests return
 `Error` / `invalid-arguments`.
