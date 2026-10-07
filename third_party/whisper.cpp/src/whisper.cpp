@@ -9761,6 +9761,7 @@ constexpr const char * WHISPER_FIT_ARCH_MODEL = "whisper";
 constexpr const char * WHISPER_FIT_ARCH_VAD   = "whisper_vad";
 constexpr int32_t     WHISPER_FIT_BCI_MEL_THRESHOLD = 256;
 constexpr size_t      WHISPER_FIT_VAD_VERSION_FIELDS = 3;
+constexpr size_t      WHISPER_FIT_VAD_ENCODER_LAYERS = 4;
 constexpr int32_t     WHISPER_FIT_MAX_MEL_FILTER_DIM = 4096;
 constexpr int32_t     WHISPER_FIT_MAX_VOCAB_TOKENS   = 1 << 20;
 constexpr uint64_t    WHISPER_FIT_MAX_VOCAB_BYTES    = 64ull*1024*1024;
@@ -10030,8 +10031,10 @@ bool whisper_fit_replay_vad(const whisper_fit_description & d, whisper_fit_repla
         !d.array("whisper_vad.encoder_in_channels", GGUF_TYPE_INT32, in_channels) ||
         !d.array("whisper_vad.encoder_out_channels", GGUF_TYPE_INT32, out_channels) ||
         !d.array("whisper_vad.encoder_kernel_size", GGUF_TYPE_INT32, kernel_sizes) ||
-        version.size() != WHISPER_FIT_VAD_VERSION_FIELDS || in_channels.empty() ||
-        out_channels.size() != in_channels.size() || kernel_sizes.size() != in_channels.size()) {
+        version.size() != WHISPER_FIT_VAD_VERSION_FIELDS ||
+        in_channels.size() != WHISPER_FIT_VAD_ENCODER_LAYERS ||
+        out_channels.size() != WHISPER_FIT_VAD_ENCODER_LAYERS ||
+        kernel_sizes.size() != WHISPER_FIT_VAD_ENCODER_LAYERS) {
         return false;
     }
 

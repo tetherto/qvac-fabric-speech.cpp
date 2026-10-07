@@ -3,7 +3,8 @@
 // The committed *.fit.gguf fixtures are the descriptions qvac's registry-server
 // (packages/registry-server/lib/fit-description) writes for the committed
 // for-tests models; for-tests-ggml-bci.bin is a header-only BCI model from the
-// same package's test fixtures.
+// same package's test fixtures. A malformed VAD description is derived from the
+// committed one at run time.
 //
 // Usage: test-whisper-fit-description <vad.bin> <vad.fit.gguf>
 //            <model.bin> <model.fit.gguf> [<model.bin> <model.fit.gguf> ...] [gpu]
@@ -12,9 +13,11 @@
 #include "whisper.h"
 
 #include "ggml-backend.h"
+#include "gguf.h"
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,12 @@ constexpr int    DECODERS      = 5;
 constexpr size_t PAIR_ARGS     = 2;
 constexpr size_t MIN_PAIRS     = 2;
 constexpr const char * GPU_ARG = "gpu";
+
+constexpr size_t TRUNCATED_VAD_ENCODER_LAYERS = 3;
+constexpr const char * TRUNCATED_VAD_DESCRIPTION = "test-whisper-fit-description-three-vad-encoders.fit.gguf";
+constexpr const char * VAD_ENCODER_KEYS[] = {
+    "whisper_vad.encoder_in_channels", "whisper_vad.encoder_out_channels", "whisper_vad.encoder_kernel_size",
+};
 
 int g_failures = 0;
 
@@ -121,6 +130,40 @@ void check_wrong_kind(const fit_pair & model, const fit_pair & vad) {
            "a model description is refused as a VAD model");
 }
 
+void truncate_vad_encoder_arrays(gguf_context * gguf) {
+    for (const char * key : VAD_ENCODER_KEYS) {
+        const int32_t *            values = (const int32_t *) gguf_get_arr_data(gguf, gguf_find_key(gguf, key));
+        const std::vector<int32_t> kept(values, values + TRUNCATED_VAD_ENCODER_LAYERS);
+        gguf_set_arr_data(gguf, key, GGUF_TYPE_INT32, kept.data(), kept.size());
+    }
+}
+
+std::string write_truncated_vad_description(const std::string & description) {
+    ggml_context *   meta   = nullptr;
+    gguf_init_params params = {};
+    params.no_alloc = true;
+    params.ctx      = &meta;
+    gguf_context * gguf = gguf_init_from_file(description.c_str(), params);
+    if (gguf == nullptr) return "";
+
+    truncate_vad_encoder_arrays(gguf);
+    const std::string path    = (std::filesystem::temp_directory_path() / TRUNCATED_VAD_DESCRIPTION).string();
+    const bool        written = gguf_write_to_file(gguf, path.c_str(), /*only_meta =*/ true);
+    gguf_free(gguf);
+    ggml_free(meta);
+    return written ? path : "";
+}
+
+void check_truncated_vad_encoder(const fit_pair & model, const fit_pair & vad) {
+    const std::string truncated = write_truncated_vad_description(vad.description);
+    expect(!truncated.empty(), "the three-encoder VAD description was written");
+
+    const whisper_fit_result fit = project(model.artifact, truncated, false);
+    expect(fit.status == WHISPER_FIT_ERROR && std::strcmp(fit.reason, "vad-model-unreadable") == 0,
+           "a VAD description without four encoder layers is refused");
+    std::filesystem::remove(truncated);
+}
+
 void check_not_loadable(const fit_pair & model) {
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = false;
@@ -170,6 +213,7 @@ int main(int argc, char ** argv) {
     check_models(models, use_gpu);
     check_vad(models.front(), vad, use_gpu);
     check_wrong_kind(models.front(), vad);
+    check_truncated_vad_encoder(models.front(), vad);
     check_not_loadable(models.front());
 
     if (g_failures == 0) {
