@@ -190,7 +190,7 @@ def run_case(case, build, models, output):
         finally:
             gpu_snapshot("after")
         backend = "CPU" if cpu else "Vulkan"
-        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e)\] backend: " + backend + r"\d*", log.read_text()):
+        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e|moss-tts-stream-e2e)\] backend: " + backend + r"\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select {backend}; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": backend}
         print(f"PASS {name}: {checks[name]}", flush=True)
@@ -212,6 +212,8 @@ def run_case(case, build, models, output):
             # failures from backend-dependent generation drift. CI only.
             invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
                    ["--out", str(output / "cpu-reference.wav")], cpu=True)
+            invoke("stream-agreement", [str(build / "engines/tts/test-moss-tts-stream-e2e"),
+                   model, decoder, encoder, str(ref1), str(output)], wav=False)
         else:
             # Two reference slots exercise dialogue conditioning; these are
             # excerpts from the same speaker, not a voice identity quality test.

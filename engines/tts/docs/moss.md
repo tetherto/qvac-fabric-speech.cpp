@@ -43,6 +43,16 @@ before/after process snapshots remain necessary to diagnose contention.
 The TTS case also saves a CPU reference with the same checkpoint, text and
 seed to investigate backend-dependent generation quality.
 
+`test-moss-vulkan-stream` exercises tiny end-to-end fixtures with 1/2/5/25
+frame chunks, a 37-chunk run, final partial chunks, callback and explicit
+cancellation, and reuse after each cancellation. It checks finite output,
+sample counts and batch/stream waveform agreement with F16 Vulkan enabled.
+The full TTS CI case runs `test-moss-tts-stream-e2e` with real checkpoints
+and voice conditioning: 7/25-frame chunks, repeated requests, both cancellation
+paths and a longer utterance. WAVs and callback timing CSVs are retained.
+Waveform agreement establishes correct chunk delivery; listening/transcription
+checks are still needed to establish that the model speaks the requested text.
+
 Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
