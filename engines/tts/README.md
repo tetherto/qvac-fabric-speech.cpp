@@ -48,8 +48,8 @@ engine, not every backend ggml can compile.
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
-Supertonic 3 and Parler-TTS mini also support explicit Hexagon placement on
-Snapdragon; see their model guides for setup and validated tiers. Optional
+Supertonic 3, Parler-TTS mini and CosyVoice3 also support explicit Hexagon
+placement on Snapdragon; see their model guides for setup and validated tiers. Optional
 Apple Core ML sidecars accelerate the Supertonic vocoder and Audio8 codec.
 Export, routing, fallback, and per-call status are documented in
 [Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar) and

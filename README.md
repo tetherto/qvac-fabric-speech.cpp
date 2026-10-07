@@ -30,7 +30,7 @@ validated on it.
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; metadata-only memory fit for SoundEffect; CPU/Metal generation validated, other GPU backends untested |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
-| AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU; unavailable on Android/iOS |
+| AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
 ### Apple Core ML sidecars
 

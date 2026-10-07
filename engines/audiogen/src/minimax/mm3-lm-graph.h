@@ -208,21 +208,18 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
     return ggml_add(ctx, h, mm3_linear(ctx, w.ffn_down, gated, precision));
 }
 
-static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad,
-                              bool decode, std::string * err) {
-    const MM3LmConfig & c  = m.lm_cfg;
-    const int64_t       H  = (int64_t) c.embedding_length;
-    const int64_t       B  = MM3_LM_CFG_ROWS;
-    const int64_t       NC = (int64_t) c.num_codebooks - 1;
+static size_t mm3_lm_slot_context_bytes() {
+    return ggml_tensor_overhead() * (MM3_LM_MAX_NODES + 256) + ggml_graph_overhead_custom(MM3_LM_MAX_NODES, false);
+}
 
-    const size_t ctx_bytes =
-        ggml_tensor_overhead() * (MM3_LM_MAX_NODES + 256) + ggml_graph_overhead_custom(MM3_LM_MAX_NODES, false);
+static ggml_context * mm3_lm_slot_context(MM3LmSlot * s, std::string * err) {
+    const size_t ctx_bytes = mm3_lm_slot_context_bytes();
     s->gbuf = (uint8_t *) malloc(ctx_bytes);
     if (!s->gbuf) {
         if (err) {
             *err = "out of host memory allocating the MM3 LM graph context";
         }
-        return false;
+        return nullptr;
     }
     ggml_init_params ip  = { ctx_bytes, s->gbuf,  true };
     ggml_context *   ctx = ggml_init(ip);
@@ -232,8 +229,17 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
         if (err) {
             *err = "ggml_init failed for the MM3 LM graph context";
         }
-        return false;
+        return nullptr;
     }
+    return ctx;
+}
+
+static ggml_cgraph * mm3_lm_slot_graph(ggml_context * ctx, const MM3Model & m, const MM3LmGraph & g, MM3LmSlot * s,
+                                       int64_t T, int64_t n_kv_pad, bool decode) {
+    const MM3LmConfig & c  = m.lm_cfg;
+    const int64_t       H  = (int64_t) c.embedding_length;
+    const int64_t       B  = MM3_LM_CFG_ROWS;
+    const int64_t       NC = (int64_t) c.num_codebooks - 1;
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, MM3_LM_MAX_NODES, false);
 
@@ -283,8 +289,8 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
     }
 
     for (size_t i = 0; i < m.lm.blk.size(); i++) {
-        h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g->kv_k[i], g->kv_v[i],
-                         n_kv_pad, g->use_flash_attn, mm3_lm_linear_precision(decode));
+        h = mm3_lm_block(ctx, gf, c, m.lm.blk[i], h, s->in_pos, s->in_mask, s->in_rows, g.kv_k[i], g.kv_v[i],
+                         n_kv_pad, g.use_flash_attn, mm3_lm_linear_precision(decode));
     }
     h = mm3_lm_rms(ctx, h, m.lm.output_norm, c.rms_eps);
 
@@ -304,7 +310,16 @@ static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s,
     if (s->out_feedback) {
         ggml_build_forward_expand(gf, s->out_feedback);
     }
-    s->graph = gf;
+    return gf;
+}
+
+static bool mm3_lm_build_slot(const MM3Model & m, MM3LmGraph * g, MM3LmSlot * s, int64_t T, int64_t n_kv_pad,
+                              bool decode, std::string * err) {
+    ggml_context * ctx = mm3_lm_slot_context(s, err);
+    if (!ctx) {
+        return false;
+    }
+    s->graph = mm3_lm_slot_graph(ctx, m, *g, s, T, n_kv_pad, decode);
 
     ggml_backend_sched_reset(s->sched);
     if (!ggml_backend_sched_alloc_graph(s->sched, s->graph)) {
@@ -338,13 +353,7 @@ static bool mm3_lm_bucket_for_context(int64_t positions, int64_t context_length,
     return true;
 }
 
-static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_needed, std::string * err) {
-    if (!m.loaded) {
-        if (err) {
-            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
-        }
-        return false;
-    }
+static bool mm3_lm_validate(const MM3Model & m, std::string * err) {
     const MM3LmConfig & c = m.lm_cfg;
     if (c.block_count == 0 || c.embedding_length == 0 || c.head_count == 0 || c.key_length == 0) {
         if (err) {
@@ -364,11 +373,63 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         }
         return false;
     }
-    int64_t want = 0;
-    if (!mm3_lm_bucket_for_context(n_ctx_needed, c.context_length, &want)) {
+    return true;
+}
+
+static bool mm3_lm_kv_positions(const MM3LmConfig & c, int64_t n_ctx_needed, int64_t * positions, std::string * err) {
+    if (!mm3_lm_bucket_for_context(n_ctx_needed, c.context_length, positions)) {
         if (err) {
             *err = "requested LM KV positions exceed qwen3.context_length";
         }
+        return false;
+    }
+    return true;
+}
+
+static bool mm3_lm_use_flash_attn(const BackendPair & bp) {
+    return mm3_use_flash_attn(bp.has_gpu, mm3_lm_flash_attn_default(tts_cpp::acestep::backend_reg_name(bp.backend)),
+                              "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
+}
+
+static void mm3_lm_add_kv_tensors(MM3LmGraph * g, int64_t row_width, int64_t rows) {
+    for (size_t i = 0; i < g->kv_k.size(); i++) {
+        char nm[64];
+        g->kv_k[i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, row_width, rows);
+        snprintf(nm, sizeof(nm), "mm3.lm.kv_k.%zu", i);
+        ggml_set_name(g->kv_k[i], nm);
+        g->kv_v[i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, row_width, rows);
+        snprintf(nm, sizeof(nm), "mm3.lm.kv_v.%zu", i);
+        ggml_set_name(g->kv_v[i], nm);
+    }
+}
+
+static bool mm3_lm_define_kv(const MM3LmConfig & c, MM3LmGraph * g, int64_t positions, std::string * err) {
+    const size_t layers = (size_t) c.block_count;
+
+    ggml_init_params ip = { layers * 2 * ggml_tensor_overhead() + 1024, NULL,  true };
+    g->kv_ctx           = ggml_init(ip);
+    if (!g->kv_ctx) {
+        if (err) {
+            *err = "ggml_init failed for the MM3 LM KV cache context";
+        }
+        return false;
+    }
+    g->kv_k.assign(layers, nullptr);
+    g->kv_v.assign(layers, nullptr);
+    mm3_lm_add_kv_tensors(g, (int64_t) c.key_length * (int64_t) c.head_count_kv, positions * MM3_LM_CFG_ROWS);
+    return true;
+}
+
+static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_needed, std::string * err) {
+    if (!m.loaded) {
+        if (err) {
+            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
+        }
+        return false;
+    }
+    const MM3LmConfig & c = m.lm_cfg;
+    int64_t want = 0;
+    if (!mm3_lm_validate(m, err) || !mm3_lm_kv_positions(c, n_ctx_needed, &want, err)) {
         return false;
     }
 
@@ -385,9 +446,7 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
         g->cpu_backend = bp.cpu_backend;
         g->backend_ref = true;
 
-        g->use_flash_attn = mm3_use_flash_attn(
-            bp.has_gpu, mm3_lm_flash_attn_default(tts_cpp::acestep::backend_reg_name(bp.backend)),
-            "MM3_LM_NO_FLASH", "MM3_LM_FLASH");
+        g->use_flash_attn = mm3_lm_use_flash_attn(bp);
         g->lm_token    = lt;
         g->synth_token = st;
     }
@@ -400,28 +459,8 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
     mm3_lm_free_slot(&g->decode);
     mm3_lm_free_kv(g);
 
-    const int64_t D   = (int64_t) c.key_length;
-    const int64_t Nkv = (int64_t) c.head_count_kv;
-    const int     L   = (int) c.block_count;
-
-    ggml_init_params ip = { (size_t) (L * 2) * ggml_tensor_overhead() + 1024, NULL,  true };
-    g->kv_ctx           = ggml_init(ip);
-    if (!g->kv_ctx) {
-        if (err) {
-            *err = "ggml_init failed for the MM3 LM KV cache context";
-        }
+    if (!mm3_lm_define_kv(c, g, want, err)) {
         return false;
-    }
-    g->kv_k.assign((size_t) L, nullptr);
-    g->kv_v.assign((size_t) L, nullptr);
-    for (int i = 0; i < L; i++) {
-        char nm[64];
-        g->kv_k[(size_t) i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, D * Nkv, want * MM3_LM_CFG_ROWS);
-        snprintf(nm, sizeof(nm), "mm3.lm.kv_k.%d", i);
-        ggml_set_name(g->kv_k[(size_t) i], nm);
-        g->kv_v[(size_t) i] = ggml_new_tensor_2d(g->kv_ctx, GGML_TYPE_F16, D * Nkv, want * MM3_LM_CFG_ROWS);
-        snprintf(nm, sizeof(nm), "mm3.lm.kv_v.%d", i);
-        ggml_set_name(g->kv_v[(size_t) i], nm);
     }
     g->kv_buf = ggml_backend_alloc_ctx_tensors(g->kv_ctx, g->backend);
     if (!g->kv_buf) {
@@ -442,8 +481,8 @@ static bool mm3_lm_prepare(const MM3Model & m, MM3LmGraph * g, int64_t n_ctx_nee
     g->kv_bytes = ggml_backend_buffer_get_size(g->kv_buf);
     g->kv_pos   = 0;
 
-    fprintf(stderr, "[MM3-LM] KV cache: %lld positions x %d layers x 2 rows = %.2f GB (%.0f kB/position), flash=%s\n",
-            (long long) want, L, (double) g->kv_bytes / (1024.0 * 1024.0 * 1024.0),
+    fprintf(stderr, "[MM3-LM] KV cache: %lld positions x %u layers x 2 rows = %.2f GB (%.0f kB/position), flash=%s\n",
+            (long long) want, c.block_count, (double) g->kv_bytes / (1024.0 * 1024.0 * 1024.0),
             (double) g->kv_bytes / (double) want / 1024.0, g->use_flash_attn ? "yes" : "no");
     return true;
 }

@@ -5,7 +5,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | Property | Value |
 |---|---|
 | CMake project | `audiogen-cpp` v0.1.0 |
-| Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine` |
+| Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine`; memory-fit preflights `tts_cpp::acestep::fit_params`, `tts_cpp::minimax::fit_params` |
 | Output | interleaved stereo PCM, model-defined sample rate, `pcm[t * 2 + ch]` |
 | Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA, Hexagon NPU on explicit request (`backend = "hexagon"`, validated on Snapdragon 8 Elite); optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
 | ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
@@ -43,6 +43,7 @@ and MiniMax model preparation and transfer. Diagnostics do not gate quality.
 | Build | [docs/build.md](docs/build.md) |
 | Audio editing (repaint, FlowEdit) | [docs/editing.md](docs/editing.md) |
 | Command-line tools | [docs/cli.md](docs/cli.md) |
+| Memory-fit preflight | [docs/memory-fit.md](docs/memory-fit.md) |
 | Tests and parity | [docs/testing.md](docs/testing.md) |
 | Performance campaigns and timing methods | [docs/performance.md](docs/performance.md) |
 | Engine comparison harness | [benchmarks/comparison/README.md](benchmarks/comparison/README.md) |
