@@ -91,6 +91,7 @@ static inline size_t cosy_dit_nodes(const dit_hp & hp) {
     return (size_t)hp.depth * 192 + (size_t)hp.conv_groups * 96 + 512;
 }
 static constexpr size_t kCosyFlowFrontendNodes = 256;
+static constexpr float  kCosyDitRopeTheta      = 10000.0f;
 static constexpr size_t kCosyHiftF0Nodes       = 256;
 static constexpr size_t kCosyHiftDecodeNodes   = 2048;
 static constexpr size_t kCosyStftNodes         = 256;
@@ -177,6 +178,35 @@ static void cosy_mark_externally_allocated(ggml_context * ctx) {
     }
 }
 
+ggml_backend_t cosyvoice_init_backend(const std::string & requested, int n_gpu_layers,
+                                      int vulkan_device, bool * gpu_present_but_unused) {
+    namespace det = ::tts_cpp::detail;
+    if (!det::backend_request_is_auto(requested)) {
+        return det::init_requested_backend(requested, /*verbose=*/false, "cosyvoice");
+    }
+    ggml_backend_t backend = det::init_gpu_backend(n_gpu_layers, /*verbose=*/false, "cosyvoice",
+                                                   vulkan_device, /*allow_arm_mali=*/false,
+                                                   gpu_present_but_unused, cosyvoice_gpu_requirement());
+    return backend ? backend : det::init_cpu_backend();
+}
+
+bool cosyvoice_hexagon_runs_weight_type(ggml_type type) {
+    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_Q8_0 ||
+           type == GGML_TYPE_Q4_0 || type == GGML_TYPE_I32;
+}
+
+ggml_backend_t cosyvoice_frontend_backend(ggml_backend_t engine_backend) {
+    return ::tts_cpp::detail::backend_is_hexagon(engine_backend) ? nullptr : engine_backend;
+}
+
+static int64_t cosyvoice_first_weight_hexagon_cannot_run(const gguf_context * g) {
+    for (int64_t i = 0, n = gguf_get_n_tensors(g); i < n; ++i) {
+        if (cosyvoice_host_resident(gguf_get_tensor_name(g, i))) continue;
+        if (!cosyvoice_hexagon_runs_weight_type(gguf_get_tensor_type(g, i))) return i;
+    }
+    return -1;
+}
+
 // Shared body of cosyvoice_load_gguf and cosyvoice_load_gguf_metadata_only.
 // When `measure` is non-null the load is metadata-only: the buffers the real
 // path allocates are sized instead, and no tensor data leaves the disk.
@@ -214,6 +244,17 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
             gguf_free(g); ggml_free(tmp_ctx);
             tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: failed to init a CPU backend for " + path);
+        }
+    }
+    if (::tts_cpp::detail::backend_is_hexagon(m.backend)) {
+        const int64_t bad = cosyvoice_first_weight_hexagon_cannot_run(g);
+        if (bad >= 0) {
+            const std::string what = std::string(gguf_get_tensor_name(g, bad)) + " (" +
+                                     ggml_type_name(gguf_get_tensor_type(g, bad)) + ")";
+            gguf_free(g); ggml_free(tmp_ctx);
+            tts_cpp::cosyvoice::mapped_file_close(m.mapped);
+            throw std::runtime_error("cosyvoice: Hexagon cannot run " + what + " in " + path +
+                                     "; use a q8_0, q4_0, f16 or f32 GGUF");
         }
     }
     // Split only when the backend is not the CPU: on CPU everything is already
@@ -278,12 +319,12 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
         }
         return false;
     };
+    ggml_backend_buffer_type_t weight_buft = ::tts_cpp::detail::weight_buffer_type(m.backend);
     if (measure) {
-        measure->device_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
-            m.ctx_w, ggml_backend_get_default_buffer_type(m.backend));
+        measure->device_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(m.ctx_w, weight_buft);
         cosy_mark_externally_allocated(m.ctx_w);
     } else if (!mapping || has_unmapped(m.ctx_w)) {
-        m.buffer_w = ggml_backend_alloc_ctx_tensors(m.ctx_w, m.backend);
+        m.buffer_w = ggml_backend_alloc_ctx_tensors_from_buft(m.ctx_w, weight_buft);
     }
     if (m.ctx_h && (measure || !mapping || has_unmapped(m.ctx_h))) {
         ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -442,7 +483,7 @@ static inline ggml_tensor * G(const model_ctx & m, const std::string & n) { retu
 // ===========================================================================
 static ggml_tensor * linear(ggml_context * c, ggml_tensor * w, ggml_tensor * b, ggml_tensor * x) {
     ggml_tensor * y = ggml_mul_mat(c, w, x);
-    if (b) y = ggml_add(c, y, ggml_reshape_3d(c, b, b->ne[0], 1, 1));
+    if (b) y = ggml_add(c, y, b);
     return y;
 }
 // f32-accumulating matmul for the LM graphs.  Backends may reduce precision
@@ -534,18 +575,34 @@ ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w
 
 // Plain conv1d over time: input [Nlen, Cin, B] (ne0=time), weight [K, Cin, Cout].
 // im2col FIRST, kernel SECOND (conv1d operand order matters here).
-// Non-static: test-cosyvoice-conv1d pins the non-contiguous-input guard
-// (declared in cosyvoice_pipeline.h).
-ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tensor * x,
-                                int stride, int padding, int dilation) {
+static ggml_tensor * conv1d_columns(ggml_context * c, ggml_tensor * w, ggml_tensor * x,
+                                    int stride, int padding, int dilation, ggml_type col_type) {
     // ggml-vulkan's IM2COL supports_op requires a contiguous signal; a view
     // reaching it would demote the whole stage to the sched-fallback path.
     if (!ggml_is_contiguous(x)) x = ggml_cont(c, x);
-    ggml_tensor * im = ggml_im2col(c, w, x, stride, 0, padding, 0, dilation, 0, false, w->type == GGML_TYPE_F16 ? GGML_TYPE_F16 : GGML_TYPE_F32);
+    ggml_tensor * im = ggml_im2col(c, w, x, stride, 0, padding, 0, dilation, 0, false, col_type);
     ggml_tensor * r = ggml_mul_mat(c,
         ggml_reshape_2d(c, im, im->ne[0], im->ne[2] * im->ne[1]),
         ggml_reshape_2d(c, w, w->ne[0] * w->ne[1], w->ne[2]));
     return ggml_reshape_3d(c, r, im->ne[1], w->ne[2], im->ne[2]);
+}
+
+// Non-static: test-cosyvoice-conv1d pins the non-contiguous-input guard
+// (declared in cosyvoice_pipeline.h).
+ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tensor * x,
+                                int stride, int padding, int dilation) {
+    return conv1d_columns(c, w, x, stride, padding, dilation,
+                          w->type == GGML_TYPE_F16 ? GGML_TYPE_F16 : GGML_TYPE_F32);
+}
+
+static ggml_tensor * hift_conv1d(ggml_context * c, const model_ctx & m, ggml_tensor * w, ggml_tensor * x,
+                                 int stride, int dilation) {
+    const bool f16_cols = w->type == GGML_TYPE_F16 || ::tts_cpp::detail::backend_is_hexagon(m.backend);
+    return conv1d_columns(c, w, x, stride, 0, dilation, f16_cols ? GGML_TYPE_F16 : GGML_TYPE_F32);
+}
+
+static ggml_tensor * cont_if_strided(ggml_context * c, ggml_tensor * x) {
+    return ggml_is_contiguous(x) ? x : ggml_cont(c, x);
 }
 
 static ggml_tensor * rmsnorm(ggml_context * c, ggml_tensor * x, ggml_tensor * w, float eps) {
@@ -742,7 +799,8 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
             if (!ggml_is_contiguous(v)) v = ggml_cont(c, v);   // fused-qkv view
             ggml_tensor * dst_v = ggml_view_2d(c, cache.v[i], Lq, (int64_t)HD * NKV,
                                       cache.v[i]->nb[1], (size_t)P * cache.v[i]->nb[0]);
-            cpy_v[i] = ggml_cpy(c, ggml_transpose(c, ggml_reshape_2d(c, v, (int64_t)HD * NKV, Lq)), dst_v);
+            ggml_tensor * v_rows = ggml_transpose(c, ggml_reshape_2d(c, v, (int64_t)HD * NKV, Lq));
+            cpy_v[i] = ggml_cpy(c, cont_if_strided(c, v_rows), dst_v);
         }
         ggml_build_forward_expand(gf, cpy_k[i]);
         ggml_build_forward_expand(gf, cpy_v[i]);
@@ -992,6 +1050,33 @@ static ggml_type cosy_dit_fa_kv_type(ggml_backend_t backend) {
     return ::tts_cpp::detail::backend_is_metal(backend) ? GGML_TYPE_F16 : GGML_TYPE_F32;
 }
 
+static ggml_tensor * dit_rope(ggml_context * c, ggml_tensor * x, ggml_tensor * pos, int dim_head) {
+    return ggml_rope_ext(c, x, pos, nullptr, dim_head, GGML_ROPE_TYPE_NORMAL, 0,
+                         kCosyDitRopeTheta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+}
+
+static ggml_tensor * dit_rope_rows_in_place(ggml_context * c, ggml_tensor * z, ggml_tensor * pos,
+                                            int dim_head, int NL, int B) {
+    ggml_tensor * rows = ggml_view_4d(c, z, z->ne[0], 1, NL, B, z->nb[1], z->nb[1], z->nb[2], 0);
+    return ggml_reshape_3d(c, dit_rope(c, rows, pos, dim_head), z->ne[0], NL, B);
+}
+
+static ggml_tensor * dit_rope_head_split(ggml_context * c, ggml_tensor * z, ggml_tensor * pos,
+                                         int dim_head, int NL, int B) {
+    ggml_tensor * h0 = ggml_cont(c, ggml_view_3d(c, z, dim_head, NL, B, z->nb[1], z->nb[2], 0));
+    h0 = dit_rope(c, ggml_reshape_4d(c, h0, dim_head, 1, NL, B), pos, dim_head);
+    h0 = ggml_reshape_3d(c, h0, dim_head, NL, B);
+    ggml_tensor * rest = ggml_cont(c, ggml_view_3d(c, z, z->ne[0] - dim_head, NL, B,
+                                                   z->nb[1], z->nb[2], (size_t)dim_head * z->nb[0]));
+    return ggml_concat(c, h0, rest, 0);
+}
+
+ggml_tensor * cosyvoice_dit_rope_first_head(ggml_context * c, ggml_tensor * z, ggml_tensor * pos,
+                                            int dim_head, int NL, int B, bool rows_in_place) {
+    return rows_in_place ? dit_rope_rows_in_place(c, z, pos, dim_head, NL, B)
+                         : dit_rope_head_split(c, z, pos, dim_head, NL, B);
+}
+
 ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp,
                         ggml_tensor * x, ggml_tensor * mu, ggml_tensor * cond,
                         ggml_tensor * spks, ggml_tensor * time_sin, ggml_tensor * pos,
@@ -1035,6 +1120,7 @@ ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp
     }
 
     const float attn_scale = 1.0f / std::sqrt((float)hp.dim_head);
+    const bool rope_rows_in_place = ::tts_cpp::detail::backend_is_hexagon(m.backend);
     for (int i = 0; i < hp.depth; ++i) {
         ggml_tensor * emb = linear(c, T(m, bp(i, "attn_norm/linear/weight")),
                                       T(m, bp(i, "attn_norm/linear/bias")), silu(c, t));
@@ -1072,14 +1158,7 @@ ggml_tensor * build_dit(ggml_context * c, const model_ctx & m, const dit_hp & hp
             v = linear(c, T(m, bp(i, "attn/to_v/weight")), T(m, bp(i, "attn/to_v/bias")), norm);
         }
         auto rope_head0 = [&](ggml_tensor * z) {
-            ggml_tensor * h0 = ggml_cont(c, ggml_view_3d(c, z, hp.dim_head, NL, B, z->nb[1], z->nb[2], 0));
-            h0 = ggml_reshape_4d(c, h0, hp.dim_head, 1, NL, B);
-            h0 = ggml_rope_ext(c, h0, pos_l, nullptr, hp.dim_head, GGML_ROPE_TYPE_NORMAL, 0,
-                               10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-            h0 = ggml_reshape_3d(c, h0, hp.dim_head, NL, B);
-            ggml_tensor * rest = ggml_cont(c, ggml_view_3d(c, z, hp.dim - hp.dim_head, NL, B,
-                                          z->nb[1], z->nb[2], (size_t)hp.dim_head * z->nb[0]));
-            return ggml_concat(c, h0, rest, 0);
+            return cosyvoice_dit_rope_first_head(c, z, pos_l, hp.dim_head, NL, B, rope_rows_in_place);
         };
         q = rope_head0(q);
         k = rope_head0(k);
@@ -1447,6 +1526,18 @@ static std::vector<float> build_istft_kernel(int n_fft, const std::vector<float>
     }
     return K;
 }
+std::vector<float> cosyvoice_istft_kernel_columns(const std::vector<float> & kernel, int n_fft, int n_ch) {
+    std::vector<float> cols(kernel.size());
+    for (int ic = 0; ic < n_ch; ++ic) {
+        for (int k = 0; k < n_fft; ++k) cols[ic + (size_t)k * n_ch] = kernel[k + (size_t)ic * n_fft];
+    }
+    return cols;
+}
+ggml_tensor * cosyvoice_istft_columns(ggml_context * ctx, ggml_tensor * kernel_cols, ggml_tensor * spec, int hop) {
+    ggml_tensor * spec_t = ggml_cont(ctx, ggml_transpose(ctx, spec));
+    ggml_tensor * cols   = ggml_mul_mat(ctx, kernel_cols, spec_t);
+    return ggml_col2im_1d(ctx, cols, hop, 1, 0);
+}
 static std::vector<float> build_window_sum(int T_stft, int n_fft, int hop, const std::vector<float> & window) {
     int L = (T_stft - 1) * hop + n_fft;
     std::vector<float> ws(L, 0.0f);
@@ -1615,7 +1706,7 @@ static ggml_cgraph * build_hift_f0_graph(ggml_context * ctx, const model_ctx & m
         int pl = (i == 0) ? 0 : (K - 1);
         int pr = (i == 0) ? (K - 1) : 0;
         ggml_tensor * xp = ggml_pad_ext(ctx, x, pl, pr, 0, 0, 0, 0, 0, 0);
-        x = cosyvoice_conv1d_f32(ctx, w, xp, 1, 0, 1);
+        x = hift_conv1d(ctx, m, w, xp, 1, 1);
         x = ggml_add(ctx, x, ggml_reshape_2d(ctx, b, 1, C_out));
         x = ggml_unary(ctx, x, GGML_UNARY_OP_ELU);
     }
@@ -1719,11 +1810,11 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
             int pad2 = (k_sz - 1);
             ggml_tensor * xt = snake(ctx, x, p.a1, p.ia1);
             xt = ggml_pad_ext(ctx, xt, pad1, 0, 0, 0, 0, 0, 0, 0);
-            xt = cosyvoice_conv1d_f32(ctx, p.c1w, xt, 1, 0, dilation);
+            xt = hift_conv1d(ctx, m, p.c1w, xt, 1, dilation);
             xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, p.c1b, 1, C));
             xt = snake(ctx, xt, p.a2, p.ia2);
             xt = ggml_pad_ext(ctx, xt, pad2, 0, 0, 0, 0, 0, 0, 0);
-            xt = cosyvoice_conv1d_f32(ctx, p.c2w, xt, 1, 0, 1);
+            xt = hift_conv1d(ctx, m, p.c2w, xt, 1, 1);
             xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, p.c2b, 1, C));
             x = ggml_add(ctx, x, xt);
         }
@@ -1733,7 +1824,7 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
     ggml_tensor * cpw = T(m, "hift/conv_pre/weight");
     ggml_tensor * cpb = T(m, "hift/conv_pre/bias");
     ggml_tensor * x = ggml_pad_ext(ctx, mel_in, 0, 4, 0, 0, 0, 0, 0, 0);
-    x = cosyvoice_conv1d_f32(ctx, cpw, x, 1, 0, 1);
+    x = hift_conv1d(ctx, m, cpw, x, 1, 1);
     x = ggml_add(ctx, x, ggml_reshape_2d(ctx, cpb, 1, BASE_CH));
 
     for (int i = 0; i < 3; ++i) {
@@ -1743,7 +1834,7 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
         int64_t T_up = x->ne[0] * ups_rates[i];
         x = ggml_interpolate(ctx, x, T_up, x->ne[1], x->ne[2], x->ne[3], GGML_SCALE_MODE_NEAREST);
         x = ggml_pad_ext(ctx, x, ups_ksizes[i] - 1, 0, 0, 0, 0, 0, 0, 0);
-        x = cosyvoice_conv1d_f32(ctx, uw, x, 1, 0, 1);
+        x = hift_conv1d(ctx, m, uw, x, 1, 1);
         x = ggml_add(ctx, x, ggml_reshape_2d(ctx, ub, 1, ups_ch[i]));
         // CausalHiFTGenerator.decode: ReflectionPad1d((1,0)) at the LAST upsample,
         // AFTER the upsample conv and BEFORE the source fusion.  Omitting this
@@ -1759,7 +1850,7 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
         int sd_pad    = sd_stride - 1;
         int sd_oc     = (int)sw->ne[2];
         ggml_tensor * sin_pad = ggml_pad_ext(ctx, s_stft_in, sd_pad, 0, 0, 0, 0, 0, 0, 0);
-        ggml_tensor * si = cosyvoice_conv1d_f32(ctx, sw, sin_pad, sd_stride, 0, 1);
+        ggml_tensor * si = hift_conv1d(ctx, m, sw, sin_pad, sd_stride, 1);
         si = ggml_add(ctx, si, ggml_reshape_2d(ctx, sb, 1, sd_oc));
         auto srb = load_rb("hift/source_resblocks/" + std::to_string(i), ups_ch[i]);
         si = rb_forward(srb, si, ups_ch[i], src_rb_dilations[i], src_rb_ksizes[i]);
@@ -1780,7 +1871,7 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
     ggml_tensor * cp2w = T(m, "hift/conv_post/weight");
     ggml_tensor * cp2b = T(m, "hift/conv_post/bias");
     x = ggml_pad_ext(ctx, x, 6, 0, 0, 0, 0, 0, 0, 0);
-    x = cosyvoice_conv1d_f32(ctx, cp2w, x, 1, 0, 1);
+    x = hift_conv1d(ctx, m, cp2w, x, 1, 1);
     x = ggml_add(ctx, x, ggml_reshape_2d(ctx, cp2b, 1, NFFT2));
 
     int T_out = (int)x->ne[0];
@@ -1798,12 +1889,15 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
     auto istft_kernel = build_istft_kernel(n_fft, window);
     auto w_sum = build_window_sum(T_out, n_fft, hop, window);
 
-    ggml_tensor * istft_k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_fft, 1, 2 * F);
+    const bool istft_columns = ::tts_cpp::detail::backend_is_hexagon(m.backend);
+    ggml_tensor * istft_k = istft_columns ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 * F, n_fft)
+                                          : ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_fft, 1, 2 * F);
     ggml_set_name(istft_k, "istft_k"); ggml_set_input(istft_k);
     ggml_tensor * ws_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (int)w_sum.size(), 1);
     ggml_set_name(ws_in, "w_sum"); ggml_set_input(ws_in);
 
-    ggml_tensor * y = ggml_conv_transpose_1d(ctx, istft_k, spec, hop, 0, 1);
+    ggml_tensor * y = istft_columns ? cosyvoice_istft_columns(ctx, istft_k, spec, hop)
+                                    : ggml_conv_transpose_1d(ctx, istft_k, spec, hop, 0, 1);
     y = ggml_div(ctx, y, ws_in);
     int pad_amt = n_fft / 2;
     int L_wav = (int)w_sum.size() - n_fft;
@@ -1811,7 +1905,10 @@ static ggml_cgraph * build_hift_decode_graph(ggml_context * ctx, const model_ctx
     y_trim = ggml_clamp(ctx, y_trim, -0.99f, 0.99f);
     ggml_set_name(y_trim, "wav"); ggml_set_output(y_trim);
     ggml_build_forward_expand(gf, y_trim);
-    if (istft_kernel_out) *istft_kernel_out = std::move(istft_kernel);
+    if (istft_kernel_out) {
+        *istft_kernel_out = istft_columns ? cosyvoice_istft_kernel_columns(istft_kernel, n_fft, 2 * F)
+                                          : std::move(istft_kernel);
+    }
     if (w_sum_out)        *w_sum_out        = std::move(w_sum);
     return gf;
 }

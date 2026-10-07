@@ -43,6 +43,8 @@ void print_usage(const char * argv0) {
         "                        (default 0 = CPU), with the same runtime\n"
         "                        fallbacks a real load applies\n"
         "  --vulkan-device N     Vulkan adapter index (default 0)\n"
+        "  --backend NAME        auto | cpu | opencl | hexagon | exact ggml device\n"
+        "                        name, as EngineOptions::backend (no fallback)\n"
         "  --margin-mib MIB      free-memory headroom to require (default 256)\n"
         "  --backends-dir DIR    directory scanned for dynamically-loaded ggml backends\n"
         "  --json                emit the projection as JSON on stdout\n"
@@ -125,6 +127,8 @@ extern "C" int cosyvoice_fit_cli_main(int argc, char ** argv) {
                 return (int) tts_cpp::FitStatus::Error;
             }
             opts.margin_bytes = margin_mib_to_bytes(mib);
+        } else if (a == "--backend" && i + 1 < argc) {
+            opts.backend = argv[++i];
         } else if (a == "--backends-dir" && i + 1 < argc) {
             opts.backends_dir = argv[++i];
         } else if (a == "--json") {

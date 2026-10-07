@@ -172,17 +172,18 @@ struct Engine::Impl {
         if (!opts.backends_dir.empty())     det::set_backends_directory(opts.backends_dir);
         if (!opts.opencl_cache_dir.empty()) det::set_opencl_cache_dir(opts.opencl_cache_dir);
 
-        // Selection is constrained to the backends the CosyVoice3 graphs are
-        // parity-gated against (test-cosyvoice-{flow,llm,hift}-gpu): OpenCL
-        // on Adreno, Metal on Apple, and Vulkan on desktop hosts.  The
+        // Automatic selection is constrained to the backends the CosyVoice3
+        // graphs are parity-gated against (test-cosyvoice-{flow,llm,hift}-gpu):
+        // OpenCL on Adreno, Metal on Apple, and Vulkan on desktop hosts.  The
         // requirement filters at the device walk, so on a multi-backend host
         // an off-policy device cannot shadow an admitted one; the per-platform
         // split (Android keeps Vulkan out) lives in cosyvoice_gpu_requirement().
-        backend = det::init_gpu_backend(opts.n_gpu_layers, /*verbose=*/false, "cosyvoice",
-                                        opts.vulkan_device, /*allow_arm_mali=*/false,
-                                        &gpu_present_but_unused,
-                                        cosyvoice_gpu_requirement());
-        if (!backend) backend = det::init_cpu_backend();
+        // An explicit opts.backend skips the walk and has no fallback.
+        backend = cosyvoice_init_backend(opts.backend, opts.n_gpu_layers, opts.vulkan_device,
+                                         &gpu_present_but_unused);
+        if (!backend && !det::backend_request_is_auto(opts.backend)) {
+            throw std::runtime_error("cosyvoice: requested backend '" + opts.backend + "' is not available");
+        }
         if (!backend) throw std::runtime_error("cosyvoice: failed to init a compute backend");
 
         // ~Impl does not run when the constructor throws, so every throw
@@ -237,7 +238,7 @@ struct Engine::Impl {
             cosyvoice_prompt ref;
             std::string err;
             if (!cosyvoice_frontend_run(opts.reference_audio, s3tok_path, campplus_path,
-                                        backend, opts.n_threads, ref, err)) {
+                                        cosyvoice_frontend_backend(backend), opts.n_threads, ref, err)) {
                 throw std::runtime_error("cosyvoice: voice cloning failed: " + err);
             }
             voice_prompt_stok.assign(ref.prompt_stok.begin(), ref.prompt_stok.end());

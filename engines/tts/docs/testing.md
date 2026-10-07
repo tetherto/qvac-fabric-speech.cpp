@@ -261,6 +261,7 @@ validation harnesses:
 | `build/test-supertonic-*`     | Per-stage Supertonic parity harnesses (`preprocess`, `vocoder` ± `trace` / `pointwise`, `duration` ± `trace`, `text-encoder` ± `trace`, `vector` ± `trace`, `pipeline`); each takes `MODEL.gguf REF_DIR` |
 | `build/test-metal-ops`        | Metal-only: parity check for `diag_mask_inf`, `pad_ext`, and fast `conv_transpose_1d` (only useful when built with `-DGGML_METAL=ON`) |
 | `build/test-cosyvoice-time-emb` | Sinusoidal timestep embedding for the CosyVoice3 flow DiT: sin/cos layout, the 1000x scale, the four-decade frequency schedule, batch-row independence (no GGUF) |
+| `build/test-cosyvoice-hexagon-graphs` | CosyVoice3 graph forms Hexagon takes (iSTFT as GEMM + `col2im_1d`, first-head RoPE inside full rows) against the generic ones, the weight types it accepts, and the cloning tokenizer's backend; `COSYVOICE_TEST_BACKEND=hexagon` also runs them on the NPU (no GGUF) |
 | `build/test-lavasr-gguf-load`   | Fail-closed GGUF loading for both LavaSR stages: missing, empty, truncated, unmarked, cross-architecture, and tensorless files (no GGUF) |
 
 The test targets register with CTest. From a single-config build directory use

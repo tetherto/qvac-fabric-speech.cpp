@@ -106,6 +106,7 @@ void usage(const char * a0) {
     fprintf(stderr,
         "usage: %s --model-dir DIR [--text TEXT]\n"
         "          [--n-gpu-layers N] [--vulkan-device N] [--threads N] [--seed 42] [--greedy]\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--runs 3] [--warmup 1]\n"
         "          [--tokens-out FILE]  pin: write the LM trajectory this run used\n"
         "          [--tokens-in FILE]   pin: reuse a trajectory (skips the LM)\n"
@@ -133,7 +134,7 @@ bool parse_vulkan_device(const char * s, int & out) {
 
 int main(int argc, char ** argv) {
     std::string model_dir, text = "The quick brown fox jumps over the lazy dog.";
-    std::string tokens_out, tokens_in, wav_out, json_out, backends_dir, opencl_cache_dir;
+    std::string tokens_out, tokens_in, wav_out, json_out, backends_dir, opencl_cache_dir, backend;
     std::string reference_audio, prompt_text, s3tok_gguf, campplus_gguf;
     int seed = 42, n_gpu_layers = 0, n_threads = 0, runs = 3, warmup = 1, vulkan_device = 0;
     bool greedy = false;
@@ -151,6 +152,7 @@ int main(int argc, char ** argv) {
             }
         }
         else if ((a == "--threads" || a == "-t") && i + 1 < argc) n_threads = std::atoi(argv[++i]);
+        else if (a == "--backend" && i + 1 < argc) backend = argv[++i];
         else if (a == "--seed" && i + 1 < argc) seed = std::atoi(argv[++i]);
         else if (a == "--runs" && i + 1 < argc) runs = std::atoi(argv[++i]);
         else if (a == "--warmup" && i + 1 < argc) warmup = std::atoi(argv[++i]);
@@ -178,6 +180,7 @@ int main(int argc, char ** argv) {
     opts.seed             = seed;
     opts.greedy           = greedy;
     opts.n_gpu_layers     = n_gpu_layers;
+    opts.backend          = backend;
     opts.vulkan_device    = vulkan_device;
     opts.n_threads        = n_threads;
     if (!reference_audio.empty()) opts.reference_audio  = reference_audio;

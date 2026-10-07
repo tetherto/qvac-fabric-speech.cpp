@@ -1345,6 +1345,12 @@ if (TTS_CPP_BUILD_TESTS)
     # the built graph must stay fully supported on the selected GPU backend
     # instead of demoting to the sched-fallback path. Synthetic inputs; no
     # fixtures.
+    add_executable(test-cosyvoice-hexagon-graphs test/test_cosyvoice_hexagon_graphs.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-hexagon-graphs PRIVATE ggml)
+    target_include_directories(test-cosyvoice-hexagon-graphs PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-hexagon-graphs)
+    tts_cpp_register_test(test-cosyvoice-hexagon-graphs LABEL "unit")
+
     add_executable(test-cosyvoice-conv1d test/test_cosyvoice_conv1d.cpp ${_tcb_cosy_core_srcs})
     target_link_libraries(test-cosyvoice-conv1d PRIVATE ggml)
     target_include_directories(test-cosyvoice-conv1d PRIVATE ggml/include src)
