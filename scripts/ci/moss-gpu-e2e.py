@@ -29,7 +29,9 @@ BACKENDS = {"cuda": "CUDA", "vulkan": "Vulkan"}
 
 CASES = {
     "tts-f16": "moss-tts-delay-f16",
+    "tts-q8_0": "moss-tts-delay-f16",
     "ttsd-f16": "moss-ttsd-f16",
+    "ttsd-q8_0": "moss-ttsd-f16",
     "sfx-f16": "moss-sfx-v2-f16",
     "sfx-q8_0": "moss-sfx-v2-q8_0",
     "speech-bf16": "moss-speech-bf16",
@@ -61,6 +63,7 @@ GPU_ADMISSION_TIMEOUT_SECONDS = 900
 GPU_QUERY_TIMEOUT_SECONDS = 30
 INFERENCE_TIMEOUT_SECONDS = 1200
 DOWNLOAD_TIMEOUT_SECONDS = 1800
+QUANTIZATION_TIMEOUT_SECONDS = 1800
 ASR_TIMEOUT_SECONDS = 360
 HASH_CHUNK_BYTES = 8 * 1024 * 1024
 ERROR_LOG_TAIL_CHARS = 12000
@@ -393,8 +396,30 @@ FAMILY_RUNNERS = {"tts": run_tts, "ttsd": run_ttsd, "sfx": run_sfx,
                   "speech": run_speech, "transcribe": run_transcribe}
 
 
+def prepare_checkpoint(case, models, output):
+    source = Path(download(CASES[case], models, output))
+    if case not in {"tts-q8_0", "ttsd-q8_0"}:
+        return str(source)
+    # Keep embeddings, output heads and codecs at their source precision.
+    quantized = models / f"{CASES[case].removesuffix('-f16')}-q8_0.gguf"
+    with (output / "quantize.log").open("w") as log:
+        subprocess.run([
+            sys.executable, "engines/tts/scripts/requantize-gguf.py",
+            str(source), str(quantized), "q8_0", "--name-filter", "blk."
+        ], stdout=log, stderr=subprocess.STDOUT, check=True,
+           timeout=QUANTIZATION_TIMEOUT_SECONDS)
+    with quantized.open("rb") as model:
+        if model.read(4) != b"GGUF":
+            raise RuntimeError("Quantizer did not produce a GGUF")
+    if quantized.stat().st_size >= source.stat().st_size:
+        raise RuntimeError("Quantized backbone is not smaller than its F16 source")
+    record_model_hash(quantized, f"generated/{quantized.name}", output)
+    source.unlink()
+    return str(quantized)
+
+
 def run_case(case, backend, build, models, output, baseline_binary):
-    model = download(CASES[case], models, output)
+    model = prepare_checkpoint(case, models, output)
     runner = CaseRunner(backend, build, models, output, baseline_binary)
     FAMILY_RUNNERS[case.split("-")[0]](runner, model)
     return runner.checks

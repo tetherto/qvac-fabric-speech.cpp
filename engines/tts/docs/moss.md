@@ -36,7 +36,14 @@ The same workflow's `run_moss_e2e=true` lane downloads registered checkpoints
 and saves generated WAVs, transcripts, logs and model hashes. It runs every
 case in `moss_e2e_cases` on every backend in `moss_e2e_backends` (default
 `["cuda","vulkan"]`), building ggml with only that backend so a CLI cannot
-land on the other. Cases run
+land on the other. The default cases are `tts-q8_0`, `ttsd-q8_0`,
+`sfx-q8_0`, `speech-q8_0` and `transcribe-q5_0`, leaving memory headroom
+on the shared 20 GiB runner. The TTS/TTSD cases download the registered F16
+backbone and requantize its transformer matrices to Q8_0; embeddings,
+output heads and codec weights stay at their source precision. Artifacts
+include the quantizer log and hashes of both source and generated weights.
+Full-precision cases remain available through `moss_e2e_cases`, but can
+exhaust CUDA device memory on this runner. Cases run
 serially because runner services share GPU memory. Speech cases use
 `test-moss-speech-e2e` to make two replies on one engine instance, checking
 that staged model unloading also works on the next request.
