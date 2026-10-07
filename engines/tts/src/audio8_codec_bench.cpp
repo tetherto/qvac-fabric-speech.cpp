@@ -94,8 +94,8 @@ int main(int argc, char ** argv) {
         require(resample_padding <= 1, "unexpected input resampler length");
         pcm.resize(native_samples, 0.0f);
         owned_codec encoder, decoder;
-        require(codec::load_codec(opts.encoder, opts.gpu_layers, encoder.model, &error), error);
-        require(codec::load_codec(opts.decoder, opts.gpu_layers, decoder.model, &error), error);
+        require(codec::load_codec(opts.encoder, opts.gpu_layers, /*backend=*/"", encoder.model, &error), error);
+        require(codec::load_codec(opts.decoder, opts.gpu_layers, /*backend=*/"", decoder.model, &error), error);
         std::printf("encoder backend: %s\ndecoder backend: %s\n", ggml_backend_name(encoder.model.backend), ggml_backend_name(decoder.model.backend));
         std::vector<int32_t> codes;
         int frames = 0;
