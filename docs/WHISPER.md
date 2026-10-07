@@ -43,3 +43,24 @@ bash third_party/whisper.cpp/models/download-ggml-model.sh base.en
 
 For multi-config generators, use `build/bin/Release/whisper-cli` (with `.exe`
 on Windows) after `cmake --build build --config Release`.
+
+## Memory-fit preflight
+
+`whisper-fit-params` (the CLI over `whisper_fit_params` in
+[whisper.h](../third_party/whisper.cpp/include/whisper.h)) projects whether a
+model, an optional VAD model and a workload fit the free device memory
+without reading weight data or allocating anything. `--model` and
+`--vad-model` each take the `.bin` or its weightless description: the GGUF
+with no data section that the QVAC model registry publishes beside the file,
+holding the file's header settings, vocabulary length histogram and tensor
+inventory. Both project to the same bytes, so a fit can be answered before
+the weights are downloaded. `--verify` measures a real load and needs the
+`.bin`.
+
+```sh
+./build/bin/whisper-fit-params --model third_party/whisper.cpp/models/ggml-base.en.bin \
+  --vad-model third_party/whisper.cpp/models/ggml-silero-v6.2.0.bin --json
+./build/bin/whisper-fit-params --model ggml-base.en.fit.gguf --json
+```
+
+Run it with `--help` for the workload options.

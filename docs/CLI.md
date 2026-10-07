@@ -13,6 +13,7 @@ Standalone output paths are documented in each engine's build guide.
 | Binary | Engine | Purpose and full guide |
 |---|---|---|
 | `whisper-cli` | Whisper | ASR, translation, VAD; [model formats and example](WHISPER.md) |
+| `whisper-fit-params` | Whisper | Metadata-only memory projection from a model or its weightless description; [preflight guide](WHISPER.md#memory-fit-preflight) |
 | `parakeet` | Parakeet | ASR, diarization, EOU, streaming; [CLI guide](../engines/parakeet/docs/cli.md) |
 | `moss-transcribe` | Parakeet | MOSS transcription with speakers, timestamps and hotwords; [MOSS guide](../engines/parakeet/docs/moss-transcribe.md) |
 | `parakeet-fit-params` | Parakeet | Metadata-only memory projection; [preflight guide](../engines/parakeet/docs/cli.md#memory-fit-preflight-parakeet-fit-params) |
