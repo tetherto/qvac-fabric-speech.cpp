@@ -56,7 +56,7 @@ def intelligibility_passes(score):
             math.isfinite(wer) and 0 <= wer <= MAX_TTS_WER and score.get("n_ref_words", 0) > 0)
 
 
-def score_tts_outputs(asr_binary, models, output):
+def score_tts_outputs(asr_binary, models, output, diagnostics=False):
     benchmarks = Path(__file__).resolve().parents[1] / "benchmarks"
     spec = importlib.util.spec_from_file_location("prepare_asr", benchmarks / "prepare-tts-asr.py")
     prepare = importlib.util.module_from_spec(spec)
@@ -67,6 +67,8 @@ def score_tts_outputs(asr_binary, models, output):
         for suffix in ("batch", "stream", "after-callback-cancel", "after-explicit-cancel"):
             expected[f"tts-c{chunk}-{suffix}"] = "short"
     expected.update({"tts-long-batch": "long", "tts-long-stream": "long"})
+    if diagnostics:
+        expected["diagnostic-f32"] = "short"
     scores = {}
     for name, length in expected.items():
         audio = output / f"{name}.wav"
@@ -208,7 +210,7 @@ def reference(source, target, offset, seconds=3):
         audio.writeframes(resampled.tobytes())
 
 
-def run_case(case, build, models, output):
+def run_case(case, build, models, output, diagnostics=False):
     model = download(CASES[case], models, output)
     family = case.split("-")[0]
     sample = Path("engines/parakeet/test/samples/jfk.wav")
@@ -216,7 +218,7 @@ def run_case(case, build, models, output):
     common = ["--gpu", "--threads", "4", "--seed", "1234"]
     checks = {}
 
-    def invoke(name, args, wav=True, cpu=False):
+    def invoke(name, args, wav=True, cpu=False, extra_env=None):
         log = output / f"{name}.log"
         # Capture memory immediately around inference, not just before the
         # build/download. Include UUIDs to identify runner services sharing a GPU.
@@ -237,7 +239,7 @@ def run_case(case, build, models, output):
                     stream.flush()
                     subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
                                    check=True, timeout=1200,
-                                   env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
+                                   env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan", **(extra_env or {})})
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # Put the actual engine error in the job log as well as the artifact.
             print(log.read_text(errors="replace")[-12000:], file=sys.stderr, flush=True)
@@ -245,7 +247,7 @@ def run_case(case, build, models, output):
         finally:
             gpu_snapshot("after")
         backend = "CPU" if cpu else "Vulkan"
-        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e|moss-tts-stream-e2e)\] backend: " + backend + r"\d*", log.read_text()):
+        if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e|moss-tts-stream-e2e|moss-delay-lm-e2e)\] backend: " + backend + r"\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select {backend}; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": backend}
         print(f"PASS {name}: {checks[name]}", flush=True)
@@ -270,6 +272,22 @@ def run_case(case, build, models, output):
             invoke("stream-agreement", [str(build / "engines/tts/test-moss-tts-stream-e2e"),
                    model, decoder, encoder, str(ref1), str(output),
                    str(output / "reference-short.txt"), str(output / "reference-long.txt")], wav=False)
+            if diagnostics:
+                # Diagnostic only: standard F16-enabled outputs above must still
+                # pass. Never substitute this override for production coverage.
+                invoke("diagnostic-f32", [*base, "--out", str(output / "diagnostic-f32.wav")],
+                       extra_env={"GGML_VK_DISABLE_F16": "1"})
+                failed = []
+                for name, environment in [("lm-agreement", {}),
+                                          ("lm-agreement-f32", {"GGML_VK_DISABLE_F16": "1"})]:
+                    try:
+                        invoke(name, [str(build / "engines/tts/test-moss-delay-lm-e2e"),
+                               model, str(output / "reference-short.txt"), str(output / name)],
+                               wav=False, extra_env=environment)
+                    except subprocess.CalledProcessError:
+                        failed.append(name)
+                if failed:
+                    raise RuntimeError("Logit agreement failed: " + ", ".join(failed))
         else:
             # Two reference slots exercise dialogue conditioning; these are
             # excerpts from the same speaker, not a voice identity quality test.
@@ -315,6 +333,8 @@ def main():
     parser.add_argument("--models", type=Path, default=Path("models-moss-e2e"))
     parser.add_argument("--output", type=Path, default=Path("moss-e2e-results"))
     parser.add_argument("--asr-binary", type=Path, default=Path("build-moss-asr/bin/whisper-cli"))
+    parser.add_argument("--tts-diagnostics", action="store_true",
+                        help="Also compare full TTS logits and save an F32 diagnostic (CI hosts only)")
     args = parser.parse_args()
     args.models.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -324,7 +344,7 @@ def main():
     result = {"case": args.case, "status": "failed",
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     try:
-        result["checks"] = run_case(args.case, args.build.resolve(), args.models, args.output)
+        result["checks"] = run_case(args.case, args.build.resolve(), args.models, args.output, args.tts_diagnostics)
         result["status"] = "passed"
     except Exception as error:
         result["error"] = str(error)
@@ -334,7 +354,8 @@ def main():
             # Still score existing audio when a later synthesis fails, preserving
             # both the original failure and CPU/Vulkan quality evidence.
             try:
-                result["intelligibility"] = score_tts_outputs(args.asr_binary.resolve(), args.models, args.output)
+                result["intelligibility"] = score_tts_outputs(args.asr_binary.resolve(), args.models,
+                                                            args.output, args.tts_diagnostics)
                 if result["intelligibility"]["status"] != "passed":
                     result["status"] = "failed"
                     print("TTS intelligibility gate failed: " +

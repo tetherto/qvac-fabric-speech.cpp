@@ -43,6 +43,10 @@ on:
         description: 'JSON array of full-checkpoint cases to run'
         type: string
         default: '["tts-f16","ttsd-f16","sfx-f16","sfx-q8_0","speech-bf16","speech-q8_0","transcribe-f16","transcribe-q5_0","transcribe-q8_0"]'
+      moss_tts_diagnostics:
+        description: 'Also compare TTS CPU/Vulkan logits and an F32 diagnostic sample'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -138,7 +142,7 @@ jobs:
             -DSPEECH_BUILD_WHISPER=OFF -DSPEECH_BUILD_AUDIOGEN=OFF \
             -DSPEECH_BUILD_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
-          cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e test-moss-speech-codec-e2e test-moss-tts-stream-e2e -j4
+          cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e test-moss-speech-codec-e2e test-moss-tts-stream-e2e test-moss-delay-lm-e2e -j4
       - name: Build independent CPU reference ASR
         if: matrix.model == 'tts-f16'
         # This test oracle uses the vendored Whisper/ggml pair, statically
@@ -155,7 +159,12 @@ jobs:
           MODEL_CASE: ${{ matrix.model }}
           MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: python3 scripts/ci/moss-vulkan-e2e.py --case "$MODEL_CASE"
+          TTS_DIAGNOSTICS: ${{ inputs.moss_tts_diagnostics }}
+        run: |
+          extra=()
+          if [ "$TTS_DIAGNOSTICS" = true ]; then extra+=(--tts-diagnostics); fi
+          python3 scripts/ci/moss-vulkan-e2e.py --case "$MODEL_CASE" "${extra[@]}"
+        shell: bash
       - name: Upload generated audio, transcripts and evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

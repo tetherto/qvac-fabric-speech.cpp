@@ -65,6 +65,16 @@ outputs (100% WER); it is not a naturalness or speaker-similarity metric.
 Synthesis and ASR use the same prompt files. Transcripts, per-output scores
 and ASR settings are saved even when a later synthesis step fails.
 
+For a TTS generation regression, the manual `moss_tts_diagnostics` option
+adds a full-checkpoint CPU/Vulkan logit comparison. It replays the same
+32 CPU-generated rows on Vulkan, records errors and argmax IDs for every
+head, and releases CPU weights before loading GPU weights. It also repeats
+the comparison and saves a diagnostic WAV with F16 Vulkan kernels disabled.
+The override is confined to separate diagnostic processes: standard
+F16-enabled synthesis and intelligibility checks must still pass. Use CI
+workers for these large checkpoints; the harness can be tested locally with
+tiny generated GGUFs.
+
 Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
