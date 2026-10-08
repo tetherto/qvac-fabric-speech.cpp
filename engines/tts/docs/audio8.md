@@ -279,12 +279,11 @@ devices with the ggml-hexagon backend built in. Select it with
 `--backend hexagon` (CLI) or `EngineOptions::backend = "hexagon"` (API);
 `--n-gpu-layers` is ignored on this path.
 
-Validated configuration:
+Configuration used for the corrected October 8 baseline:
 
-- `q8_0` quantisation on the LM and both codec halves (the only tier
-  currently characterised against the F32 reference on HTP).
-- `--greedy` sampling (the DualAR fast head is deterministic and this
-  matches the trajectory the Hex kernel coverage was validated against).
+- `q8_0` quantisation on the LM and codec decoder.
+- `--greedy` decoding for repeatable output. This removes random sampling;
+  it does not establish numerical parity with CPU or OpenCL.
 
 The engine ships the Hex kernels Audio8 needs (ARGMAX among them). FastRPC
 has to find the DSP library at runtime:
@@ -294,21 +293,50 @@ export LD_LIBRARY_PATH=./native
 export ADSP_LIBRARY_PATH=./native   # path to libggml-htp-v79.so
 ```
 
-Three ggml-hexagon runtime env flags recover a measured **1.87× speedup**
-over defaults on a QRD8750 devkit (same device, five prompts, median):
+Use these flags together for full computation with polling and fusion:
 
 ```sh
 export GGML_HEXAGON_OPPOLL=1   # busy-poll DSP completion instead of blocking
-export GGML_HEXAGON_OPSTAGE=1  # op staging mode
-export GGML_HEXAGON_OPFUSION=1 # fuse consecutive ops
+export GGML_HEXAGON_OPSTAGE=3  # QUEUE (1) | COMPUTE (2); default
+export GGML_HEXAGON_OPFUSION=1 # enable supported fusion; default
 ```
 
-Do **not** set `GGML_HEXAGON_MM_SELECT=1` — it causes a ~70% regression on
-this workload. For Audio8 on Snapdragon 8 Elite, OpenCL (Adreno 830) is
-still fastest overall for the DualAR autoregressive LM (RTF ~2.3× vs
-~3.3-3.7× tuned Hex); the Hex path's remaining gap is dominated by
-FastRPC per-dispatch overhead (OPBATCH wrapper ≈ 58% of DSP time in the
-per-op profile) and is upstream-ggml-hexagon work.
+`OPSTAGE=1` is a profiling control that skips computation in kernels honoring
+that flag. The earlier 1.87× tuning claim used this setting and is invalid for
+inference, even with `--greedy`. `OPSTAGE=3` and `OPFUSION=1` are already defaults;
+polling is the change from the default configuration above.
+
+A fresh three-frame greedy check with `OPSTAGE=1` produced silent WAVs and
+repeated degenerate codes with fusion both enabled and disabled. With
+`OPSTAGE=3`, all four polling/fusion combinations produced identical code and
+WAV files. These smoke checks isolate the flag behavior; they do not validate
+speech quality or cross-backend parity.
+
+With canonical Hexagon host-buffer handling fixed in
+[ggml #115](https://github.com/tetherto/qvac-ext-ggml/pull/115), the corrected
+same-device QDC Snapdragon 8 Elite S1 baseline uses the prompt "The quick brown
+fox jumps over the lazy dog.", four threads, a 70-frame cap, three warmups and
+five timed runs per variant, interleaved:
+
+| Backend | Median inference | Inference RTF | Generated frames |
+| --- | ---: | ---: | ---: |
+| Hexagon, `OPPOLL=0` | 24.5906 s | 8.0229 | 66 |
+| Hexagon, `OPPOLL=1` | 19.4765 s | 6.3544 | 66 |
+| OpenCL | 3.3727 s | 1.0375 | 70 |
+
+Inference time excludes model loading. Polling gives **1.2626×** faster
+inference with identical code and WAV hashes across all ten timed Hexagon
+runs. OpenCL generates different codes and lengths, so these measurements
+do not establish cross-backend correctness or equal generated workloads.
+This is one prompt, not a five-prompt validation or an audio-quality gate.
+
+Current codec convolution matmuls request F32 precision and run on HVX. In a
+separate corrected S3 profile, three large codec matmul groups account for
+about 82% of leaf DSP cycles. `OPBATCH` includes operation execution; its time
+cannot be treated as pure dispatch overhead or added to leaf operation times.
+Further routing, precision, or weight-placement changes need separate
+correctness and performance validation. Reproduction and artifact provenance
+are recorded in ggml's `docs/hexagon-audio8-profile.md`.
 
 ### Core ML codec sidecar
 
@@ -688,3 +716,93 @@ handed the other arm's GPU, fails rather than passing on someone else's result.
 
 The engine test hands the cloning path a wav rather than pre-computed codes, so
 it exercises the codec encoder the way a caller would.
+
+#### Fixed-input backend parity
+
+`test-audio8-backend-parity` compares a selected `cpu`, `hexagon`, or `opencl`
+backend with the CPU reference kernels using real LM and decoder GGUF files.
+Build with `TTS_CPP_BUILD_TESTS=ON`, then:
+
+```bash
+cmake --build build --target test-audio8-backend-parity -j
+build/test-audio8-backend-parity \
+  --lm models/audio8-lm-q8_0.gguf \
+  --codec models/audio8-codec-decoder-q8_0.gguf \
+  --backend hexagon --frames 3 --threads 4 --text "The signal is clear."
+```
+
+The same target supports Android cross builds. Run it on the device with the
+matching ggml libraries and backend support files. For Hexagon, use
+`GGML_HEXAGON_OPSTAGE=3` (queue and compute); `1` only queues work and is not a
+valid correctness or performance baseline. Use `--backend cpu --frames 1` to
+compare CPU reference kernels against the default optimized CPU kernels.
+Backend selection is verified after loading; scheduler
+fallback for unsupported operations is still allowed.
+
+Slow prefill and decode consume the same tokenized prompt and CPU-selected
+codes on both models. Each fast-AR logit comparison uses the CPU's carried
+input, semantic token, and preceding codebook choices. A separate check compares
+the candidate's greedy per-position `fast_step` with its chained `fast_frame`.
+Finally, both codecs decode the same CPU codes, comparing semantic, residual,
+post, latent, and PCM outputs. LM models are released before codec loading.
+
+Each boundary reports finite checks, cosine, normalized squared error
+(`sum((test-reference)^2) / sum(reference^2)`), and maximum absolute error.
+Logits also report the top token, its margin, and the CPU winner's candidate
+rank; slow logits include EOS rank. Zero vectors match only when both are zero.
+All available stages run even after a numerical mismatch. Exit status is `0`
+only when every cosine is at least `0.9999`, normalized squared error is at most
+`0.0002`, every value is finite, all compared
+top tokens agree, and the chained codes agree with per-position greedy codes;
+otherwise it is `1`. Near-tie token disagreements remain visible even when the
+cosine gate passes. These checks cover the requested short trajectory, not
+full-utterance quality or throughput.
+
+`--precise-outputs` enables the candidate LM and codec precision flags before
+graph construction for a diagnostic ablation. It changes no production
+default. `--frames` defaults to three; `--frames 1` omits slow decode and is
+useful for quick prefill, fast-AR, and codec checks.
+CPU-selected EOS ends the trajectory early; the summary reports completed and
+requested frame counts so a passing shorter run does not imply full coverage.
+
+To locate accumulated slow-transformer error, `--slow-layers N` keeps only the
+first N slow blocks in both graphs, retaining the loaded weights and KV cache
+capacity. These are diagnostic truncated-model outputs, not normal generation.
+Try `--frames 1 --slow-layers 1 --skip-codec`, increasing the cutoff to bracket
+the divergence. `--skip-codec` also makes the decoder GGUF optional.
+
+For CTest, set `AUDIO8_PARITY_LM`, `AUDIO8_PARITY_CODEC`, and optionally
+`AUDIO8_PARITY_BACKEND` (default `cpu`), then run
+`ctest --test-dir build -R '^test-audio8-backend-parity$' --output-on-failure`.
+Missing or unreadable model files return `77`, which CTest records as skipped.
+No exported reference fixtures are needed.
+
+October 8 QDC Snapdragon 8 Elite check, using Q8_0 LM/decoder, four threads,
+three teacher-forced frames, and "The quick brown fox jumps over the lazy dog.":
+
+| Candidate vs CPU reference | Numeric boundaries passed | Top-token disagreements | Chained/per-step disagreements |
+| --- | ---: | ---: | ---: |
+| Optimized CPU | 38/38 | 0 | 0 |
+| Hexagon, default host buffers | 38/38 | 0 | 0 |
+| OpenCL | 26/38 | 3 | 0 |
+
+Hexagon used `OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`, `HOSTBUF=1` and the
+canonical host-buffer fix in ggml #115. Its lowest boundary cosine was
+`0.9999272188`, with maximum NMSE `0.0001491884`. Its PCM cosine for the fixed
+codes was `0.9999998572`. This does not contradict differing end-to-end greedy
+trajectories: the fast-AR comparisons deliberately replace the candidate's
+slow hidden state with the CPU state. Small slow-state changes can alter a
+later winner even when the continuous metrics pass.
+
+OpenCL's lowest cosine was `0.9998118975` and maximum NMSE `0.001090075`.
+Its failures mean OpenCL output alone is not an established correctness
+reference for further Hexagon tuning. A separate `HOSTBUF=0` repacking
+ablation also failed numerical and token gates; it is not an accepted tuning
+recipe. These short checks do not establish full-utterance audio quality.
+
+Device runtime source includes ggml `39b36439` and speech `0f75ca40`; the
+reviewed harness is `41e7df68`. Model identities are the same as the corrected
+S1 baseline in ggml's profiling document. Local raw evidence and the parsed
+summary are `hexagon-26397-build/results/parity-v2.log` and
+`parity-v2-summary.json`; `hexagon-26397-build/run-parity-v2.sh` records the
+device invocations. These diagnostics are not performance measurements.
