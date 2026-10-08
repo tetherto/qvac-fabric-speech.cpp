@@ -776,3 +776,33 @@ For CTest, set `AUDIO8_PARITY_LM`, `AUDIO8_PARITY_CODEC`, and optionally
 `ctest --test-dir build -R '^test-audio8-backend-parity$' --output-on-failure`.
 Missing or unreadable model files return `77`, which CTest records as skipped.
 No exported reference fixtures are needed.
+
+October 8 QDC Snapdragon 8 Elite check, using Q8_0 LM/decoder, four threads,
+three teacher-forced frames, and "The quick brown fox jumps over the lazy dog.":
+
+| Candidate vs CPU reference | Numeric boundaries passed | Top-token disagreements | Chained/per-step disagreements |
+| --- | ---: | ---: | ---: |
+| Optimized CPU | 38/38 | 0 | 0 |
+| Hexagon, default host buffers | 38/38 | 0 | 0 |
+| OpenCL | 26/38 | 3 | 0 |
+
+Hexagon used `OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`, `HOSTBUF=1` and the
+canonical host-buffer fix in ggml #115. Its lowest boundary cosine was
+`0.9999272188`, with maximum NMSE `0.0001491884`. Its PCM cosine for the fixed
+codes was `0.9999998572`. This does not contradict differing end-to-end greedy
+trajectories: the fast-AR comparisons deliberately replace the candidate's
+slow hidden state with the CPU state. Small slow-state changes can alter a
+later winner even when the continuous metrics pass.
+
+OpenCL's lowest cosine was `0.9998118975` and maximum NMSE `0.001090075`.
+Its failures mean OpenCL output alone is not an established correctness
+reference for further Hexagon tuning. A separate `HOSTBUF=0` repacking
+ablation also failed numerical and token gates; it is not an accepted tuning
+recipe. These short checks do not establish full-utterance audio quality.
+
+Device runtime source includes ggml `39b36439` and speech `0f75ca40`; the
+reviewed harness is `41e7df68`. Model identities are the same as the corrected
+S1 baseline in ggml's profiling document. Local raw evidence and the parsed
+summary are `hexagon-26397-build/results/parity-v2.log` and
+`parity-v2-summary.json`; `hexagon-26397-build/run-parity-v2.sh` records the
+device invocations. These diagnostics are not performance measurements.
