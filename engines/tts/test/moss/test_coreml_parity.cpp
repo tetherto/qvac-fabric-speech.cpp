@@ -8,6 +8,8 @@
 #include "moss/sfx_tokenizer.h"
 #include "moss/speech_tokenizer.h"
 
+#include "../test_env_portable.h"
+
 #include "tts-cpp/moss/sound_effect.h"
 #include "voice_features.h"
 

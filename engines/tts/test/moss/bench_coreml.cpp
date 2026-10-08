@@ -8,6 +8,8 @@
 #include "moss/sfx_tokenizer.h"
 #include "moss/speech_tokenizer.h"
 
+#include "../test_env_portable.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>

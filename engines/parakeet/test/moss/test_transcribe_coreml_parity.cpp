@@ -40,11 +40,19 @@ void check(bool condition, const std::string & label) {
 }
 
 void set_env(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
     setenv(name, value, 1);
+#endif
 }
 
 void clear_env(const char * name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
     unsetenv(name);
+#endif
 }
 
 double cosine(const float * a, const float * b, size_t n) {
