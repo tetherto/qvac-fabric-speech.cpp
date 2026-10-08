@@ -111,10 +111,11 @@ int main(int argc, char ** argv) {
     for (auto & v : prompt) v = tok(rng);
 
     if (batch_regression) {
-        if (!gpu || P < 1 || !lm_model_supports_batched_decode(m) || !lm_model_embeddings_quantized(m) ||
-            TOKEN_IM_END >= c.vocab_size) {
+        if (backend_is_cpu_device(backend) || P < 1 || !lm_model_supports_batched_decode(m) ||
+            !lm_model_embeddings_quantized(m) || TOKEN_IM_END >= c.vocab_size) {
             fprintf(stderr,
-                    "[lm-smoke] quantized batched-CFG regression requires a quantized LM on a GPU with batched decode\n");
+                    "[lm-smoke] quantized batched-CFG regression requires a quantized LM on an accelerator with "
+                    "batched decode\n");
             lm_model_free(m);
             ggml_backend_free(backend);
             return 1;

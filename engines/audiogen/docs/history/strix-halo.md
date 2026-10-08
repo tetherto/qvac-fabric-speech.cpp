@@ -1,5 +1,9 @@
 # AceSTEP on AMD Strix Halo — optimization campaign ledger
 
+Archived development record. Commands, layouts, status statements and open
+items describe the revisions recorded here and are not current usage guidance.
+For supported behavior, see the [engine README](../../README.md).
+
 Goal: 2x faster end-to-end generation vs baseline on the Strix Halo Vulkan backend
 (turbo-Q4_K_M and turbo-Q8_0, 30 s, warm), quality >= 98% (bit-correct preferred),
 no regressions on other backends/models. sft-Q8_0 tracked at milestones.

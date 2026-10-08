@@ -109,13 +109,10 @@ FitResult fit_params(const FitOptions & opts) {
     }
     r.device_name   = ggml_backend_name(backend);
     r.device_is_cpu = ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
-    r.device_shares_host_memory =
-        r.device_is_cpu ||
-        ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU ||
-        ::tts_cpp::detail::backend_is_metal(backend);
+    r.device_shares_host_memory = ::tts_cpp::detail::backend_shares_host_memory(backend);
     {
         size_t free_b = 0, total_b = 0;
-        ggml_backend_dev_memory(dev, &free_b, &total_b);
+        ::tts_cpp::detail::backend_memory(backend, free_b, total_b);
         r.device_free_bytes  = free_b;
         r.device_total_bytes = total_b;
     }

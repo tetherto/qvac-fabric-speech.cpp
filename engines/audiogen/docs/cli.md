@@ -29,7 +29,7 @@ Part of the [audiogen engine documentation](../README.md).
                   --dur 0 --gpu --out salsa.wav
 
 # condition generation with a 48 kHz PCM16 WAV timbre reference
-./build/music-cli --models models/acestep --ref-audio reference-48k.wav \
+./build/audiogen/music-cli --models models/acestep --ref-audio reference-48k.wav \
                   --caption "warm Latin pop with a male lead vocal" \
                   --lyrics "[Verse]\nA brand new lyric" --gpu --out referenced.wav
 

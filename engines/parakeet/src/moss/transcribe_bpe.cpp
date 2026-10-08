@@ -1,4 +1,5 @@
 #include "moss/transcribe_bpe.h"
+#include "fit_util.h"
 
 #include <algorithm>
 #include <iterator>
@@ -295,6 +296,23 @@ std::vector<int32_t> QwenByteBpe::encode(const std::string & text) const {
         append_piece(piece, ids);
     }
     return ids;
+}
+
+namespace {
+
+template <typename Map>
+uint64_t map_storage_bytes(const Map & map) {
+    uint64_t bytes = fitutil::sat_mul(map.bucket_count(), sizeof(void *));
+    for (const auto & entry : map) {
+        bytes = fitutil::sat_add(bytes, sizeof(entry) + sizeof(void *) * 2 + entry.first.capacity() + 1);
+    }
+    return bytes;
+}
+
+}
+
+uint64_t QwenByteBpe::storage_bytes() const {
+    return fitutil::sat_add(sizeof(*this), fitutil::sat_add(map_storage_bytes(vocab_), map_storage_bytes(merge_rank_)));
 }
 
 } // namespace parakeet::moss::detail

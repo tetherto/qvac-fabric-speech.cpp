@@ -81,9 +81,13 @@ bool save_transcript(const std::string & path, const TranscribeResult & result) 
 
 void report_timings(const TranscribeResult & result, size_t samples, int sample_rate) {
     std::fprintf(stderr,
-        "[%s] %.1fs audio, %d audio tokens, %d generated (encode %.0f ms, prefill %.0f ms, decode %.0f ms)\n",
+        "[%s] %.1fs audio, %d audio tokens, %d generated (encode %.0f ms on %s, prefill %.0f ms, decode %.0f ms)\n",
         PROGRAM, (double) samples / sample_rate, result.audio_tokens, result.generated_tokens,
-        result.encode_ms, result.prefill_ms, result.decode_ms);
+        result.encode_ms, result.encoder_backend.c_str(), result.prefill_ms, result.decode_ms);
+}
+
+const char * encoder_placement(const TranscribeEngine & engine) {
+    return engine.encoder_on_coreml() ? "Core ML sidecar" : "ggml";
 }
 
 int transcribe_file(const TranscribeCliArgs & args) {
@@ -94,7 +98,8 @@ int transcribe_file(const TranscribeCliArgs & args) {
         return 1;
     }
     TranscribeEngine engine(args.options);
-    std::fprintf(stderr, "[%s] backend: %s\n", PROGRAM, engine.backend_name());
+    std::fprintf(stderr, "[%s] backend: %s, audio encoder: %s\n", PROGRAM, engine.backend_name(),
+            encoder_placement(engine));
     const TranscribeResult result = engine.transcribe(pcm.data(), pcm.size(), sample_rate, args.request);
     if (result.cancelled) {
         std::fprintf(stderr, "[%s] transcription cancelled\n", PROGRAM);
@@ -173,6 +178,7 @@ std::string transcript_json(const TranscribeResult & result) {
            ",\n  \"prompt_tokens\": " + std::to_string(result.prompt_tokens) +
            ",\n  \"generated_tokens\": " + std::to_string(result.generated_tokens) +
            ",\n  \"encode_ms\": " + number(result.encode_ms) +
+           ",\n  \"encoder_backend\": " + quoted(result.encoder_backend) +
            ",\n  \"prefill_ms\": " + number(result.prefill_ms) +
            ",\n  \"decode_ms\": " + number(result.decode_ms) + "\n}";
 }

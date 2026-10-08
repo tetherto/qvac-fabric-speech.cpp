@@ -5,6 +5,9 @@
 #include "moss/transcribe_runtime.h"
 
 #include "ggml.h"
+#include "ggml-alloc.h"
+#include "backend_util.h"
+#include "fit_util.h"
 #include "ggml-backend.h"
 #include "gguf.h"
 
@@ -183,6 +186,8 @@ struct TranscribeModel::Impl {
     std::unique_ptr<TranscribeScheduler> scheduler;
     TranscribeConfig config;
     int n_threads = 1;
+    bool measure_only = false;
+    uint64_t measured_weights = 0;
     const TranscribeGraph * allocated_graph = nullptr;
 
     ~Impl() {
@@ -249,8 +254,25 @@ struct TranscribeModel::Impl {
         backend = open_transcribe_backend(use_gpu, requested);
         duplicate_metadata_tensors();
         read_vocabulary_size();
-        upload_weights(path);
+        if (measure_only) prepare_measurement();
+        else upload_weights(path);
         scheduler = std::make_unique<TranscribeScheduler>(backend, SCHED_NODES);
+    }
+
+    void bind_measurement_weights() {
+        for (auto * tensor = ggml_get_first_tensor(weights); tensor; tensor = ggml_get_next_tensor(weights, tensor)) {
+            tensor->buffer = weight_buffer;
+            tensor->data = reinterpret_cast<void *>(uintptr_t(1));
+        }
+    }
+
+    void prepare_measurement() {
+        const auto buft = ggml_backend_get_default_buffer_type(backend);
+        measured_weights = ggml_backend_alloc_ctx_tensors_from_buft_size(weights, buft);
+        weight_buffer = ggml_backend_buft_alloc_buffer(buft, 0);
+        if (!weight_buffer) fail("weight measurement buffer failed");
+        ggml_backend_buffer_set_usage(weight_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        bind_measurement_weights();
     }
 
     ggml_tensor * find(const std::string & name) const {
@@ -262,6 +284,7 @@ struct TranscribeModel::Impl {
     }
 
     void allocate(TranscribeGraph & graph) {
+        if (measure_only) fail("cannot allocate a metadata-only model");
         allocated_graph = nullptr;
         if (!scheduler->allocate(graph.graph())) {
             fail("graph allocation failed");
@@ -270,6 +293,7 @@ struct TranscribeModel::Impl {
     }
 
     void compute(TranscribeGraph & graph) {
+        if (measure_only) fail("cannot compute a metadata-only model");
         if (allocated_graph != &graph) {
             fail("graph is no longer allocated; another graph ran on this model since");
         }
@@ -279,7 +303,9 @@ struct TranscribeModel::Impl {
     }
 };
 
-TranscribeModel::TranscribeModel(const std::string & path, bool use_gpu, int n_threads, const std::string & backend) : impl_(new Impl) {
+TranscribeModel::TranscribeModel(const std::string & path, bool use_gpu, int n_threads,
+                                 const std::string & backend, bool measure_only) : impl_(new Impl) {
+    impl_->measure_only = measure_only;
     impl_->load(path, use_gpu, n_threads, backend);
 }
 
@@ -300,6 +326,41 @@ std::vector<std::string> TranscribeModel::tokenizer_merges() const {
 
 std::vector<int32_t> TranscribeModel::tokenizer_types() const {
     return GgufMetadata(impl_->file, OWNER).int_array("tokenizer.ggml.token_type", (size_t) impl_->config.text.vocab);
+}
+
+uint64_t TranscribeModel::weight_bytes() const { return ggml_backend_buffer_get_size(impl_->weight_buffer); }
+TranscribeMemory TranscribeModel::allocated_memory() const { return impl_->scheduler->allocated_memory(); }
+
+bool TranscribeModel::measure_only() const { return impl_->measure_only; }
+
+FitResult TranscribeModel::measure_weights() {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    FitResult result;
+    const auto device = ggml_backend_get_device(impl_->backend);
+    if (!device) fail("no compute backend available");
+    result.device_name = ggml_backend_name(impl_->backend);
+    result.device_is_cpu = backend_is_cpu(impl_->backend);
+    result.device_shares_host_memory = result.device_is_cpu || backend_is_metal(impl_->backend) ||
+        ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_IGPU;
+    size_t free = 0, total = 0;
+    ggml_backend_dev_memory(device, &free, &total);
+    result.device_free_bytes = free;
+    result.device_total_bytes = total;
+    result.device.weights_bytes = impl_->measured_weights;
+    result.host_bytes = fitutil::sat_add(gguf_get_meta_size(impl_->file),
+        fitutil::sat_add(ggml_get_mem_size(impl_->metadata), ggml_get_mem_size(impl_->weights)));
+    result.host_bytes =
+        fitutil::sat_add(result.host_bytes, ggml_context_overhead() * 2);
+    return result;
+}
+
+TranscribeMemory TranscribeModel::measure(TranscribeGraph & graph) {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    auto memory = impl_->scheduler->measure(graph.graph(), impl_->n_threads);
+    memory.host_bytes = fitutil::sat_add(
+        memory.host_bytes, fitutil::sat_add(ggml_get_mem_size(graph.ctx()),
+                                            ggml_context_overhead()));
+    return memory;
 }
 
 void TranscribeModel::allocate(TranscribeGraph & graph) { impl_->allocate(graph); }

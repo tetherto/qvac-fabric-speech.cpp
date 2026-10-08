@@ -7,7 +7,7 @@
 // pins what a backend-specific graph path can break:
 //
 //   llm   engine-level greedy speech-token trajectory, EXACT equality.
-//         Covers the Metal flash-attention decode step, the fused-qkv
+//         Covers the CUDA/Metal flash-attention decode step, the fused-qkv
 //         matvec, and the maskless single-token softmax against the naive
 //         masked chain.  Engine-level because only real conditioning (the
 //         baked voice prompt + tokenized text) keeps the LM's distribution
@@ -25,7 +25,7 @@
 //   test-cosyvoice-xb --model-dir DIR --llm-gguf LLM.gguf
 //                     --flow-gguf FLOW.gguf --hift-gguf HIFT.gguf
 //                     [--flow-min-cosine 0.995] [--flow-max-abs 4.0]
-//                     [--hift-min-cosine 0.999]
+//                     [--hift-min-cosine 0.999] [--backend NAME]
 //
 // Stages whose GGUF argument is omitted are skipped; the LM leg needs both
 // --model-dir (the engine resolves the voice and tokenizer around it) and
@@ -168,7 +168,7 @@ std::vector<float> run_hift(const std::string & gguf, ggml_backend_t backend) {
 }
 
 std::vector<int> run_llm(const std::string & model_dir, const std::string & llm_gguf,
-                         int n_gpu_layers) {
+                         int n_gpu_layers, const std::string & backend) {
     tts_cpp::cosyvoice::EngineOptions opts;
     opts.model_dir     = model_dir;
     // Pinned rather than discovered: resolve_component takes the first
@@ -178,6 +178,7 @@ std::vector<int> run_llm(const std::string & model_dir, const std::string & llm_
     // the fused path this test exists to cover unexercised.
     opts.llm_gguf_path = llm_gguf;
     opts.n_gpu_layers  = n_gpu_layers;
+    opts.backend       = backend;
     opts.greedy        = true;
     // The engine leaves the backend default (4 threads) at 0, which makes the
     // CPU reference leg -- a full synthesis, not just the LM -- run for tens
@@ -190,7 +191,7 @@ std::vector<int> run_llm(const std::string & model_dir, const std::string & llm_
 }
 
 struct xb_args {
-    std::string model_dir, llm_gguf, flow_gguf, hift_gguf;
+    std::string model_dir, llm_gguf, flow_gguf, hift_gguf, backend;
     double flow_min_cosine = kDefaultFlowMinCosine;
     double flow_max_abs    = kDefaultFlowMaxAbs;
     double hift_min_cosine = kDefaultHiftMinCosine;
@@ -200,7 +201,7 @@ void usage(const char * argv0) {
     fprintf(stderr,
             "usage: %s [--model-dir DIR --llm-gguf LLM.gguf] [--flow-gguf FLOW.gguf]\n"
             "          [--hift-gguf HIFT.gguf] [--flow-min-cosine C] [--flow-max-abs A]\n"
-            "          [--hift-min-cosine C]\n", argv0);
+            "          [--hift-min-cosine C] [--backend NAME]\n", argv0);
 }
 
 bool parse_args(int argc, char ** argv, xb_args & args) {
@@ -211,6 +212,7 @@ bool parse_args(int argc, char ** argv, xb_args & args) {
         else if (a == "--llm-gguf"  && i + 1 < argc) args.llm_gguf  = argv[++i];
         else if (a == "--flow-gguf" && i + 1 < argc) args.flow_gguf = argv[++i];
         else if (a == "--hift-gguf" && i + 1 < argc) args.hift_gguf = argv[++i];
+        else if (a == "--backend"   && i + 1 < argc) args.backend   = argv[++i];
         else if (a == "--flow-min-cosine" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], kCosineArgMin, kCosineArgMax, args.flow_min_cosine);
         else if (a == "--flow-max-abs"    && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], kMaxAbsArgMin, kMaxAbsArgMax, args.flow_max_abs);
         else if (a == "--hift-min-cosine" && i + 1 < argc) args_ok = parse_bounded_arg(argv[++i], kCosineArgMin, kCosineArgMax, args.hift_min_cosine);
@@ -245,8 +247,8 @@ const char * lm_attention_layout(const std::string & llm_gguf) {
 bool check_llm(const xb_args & args) {
     fprintf(stderr, "llm : %s carries %s\n", args.llm_gguf.c_str(),
             lm_attention_layout(args.llm_gguf));
-    const std::vector<int> ref = run_llm(args.model_dir, args.llm_gguf, kCpuGpuLayers);
-    const std::vector<int> got = run_llm(args.model_dir, args.llm_gguf, kGpuGpuLayers);
+    const std::vector<int> ref = run_llm(args.model_dir, args.llm_gguf, kCpuGpuLayers, "");
+    const std::vector<int> got = run_llm(args.model_dir, args.llm_gguf, kGpuGpuLayers, args.backend);
     fprintf(stderr, "llm : cpu %zu tokens, gpu %zu tokens\n", ref.size(), got.size());
     if (ref.empty() || ref != got) {
         fprintf(stderr, "FAIL: llm greedy trajectory differs between backends\n");
@@ -292,6 +294,16 @@ bool check_hift(const xb_args & args, ggml_backend_t cpu, ggml_backend_t gpu) {
     return true;
 }
 
+ggml_backend_t init_accelerated_backend(const std::string & requested) {
+    if (!::tts_cpp::detail::backend_request_is_auto(requested)) {
+        return ::tts_cpp::detail::init_requested_backend(requested, /*verbose=*/false, "test-cosyvoice-xb");
+    }
+    return ::tts_cpp::detail::init_gpu_backend(
+        kGpuGpuLayers, /*verbose=*/false, "test-cosyvoice-xb", /*vulkan_device=*/0,
+        /*allow_arm_mali=*/false, /*out_gpu_present_but_unused=*/nullptr,
+        cosyvoice_gpu_requirement());
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -300,10 +312,7 @@ int main(int argc, char ** argv) {
 
     ggml_backend_t cpu = ::tts_cpp::detail::init_cpu_backend();
     if (!cpu) { fprintf(stderr, "FAIL: no CPU backend\n"); return 1; }
-    ggml_backend_t gpu = ::tts_cpp::detail::init_gpu_backend(
-        kGpuGpuLayers, /*verbose=*/false, "test-cosyvoice-xb", /*vulkan_device=*/0,
-        /*allow_arm_mali=*/false, /*out_gpu_present_but_unused=*/nullptr,
-        cosyvoice_gpu_requirement());
+    ggml_backend_t gpu = init_accelerated_backend(args.backend);
     if (!gpu) {
         fprintf(stderr, "FAIL: no GPU backend initialized\n");
         ggml_backend_free(cpu);

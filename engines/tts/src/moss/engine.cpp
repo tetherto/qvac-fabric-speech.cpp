@@ -248,9 +248,13 @@ struct Engine::Impl {
         return deliver(std::move(pcm), progress, callback, start, result);
     }
 
+    int stream_piece_frames() const {
+        return std::max(1, options.stream_chunk_frames);
+    }
+
     bool emit_full_chunks(StreamProgress & progress, const AudioCallback & callback,
                           const std::chrono::steady_clock::time_point & start, SynthesisResult & result) {
-        const int chunk = std::max(1, options.stream_chunk_frames);
+        const int chunk = stream_piece_frames();
         while (pending_frames(progress) >= chunk) {
             if (!decode_pending(progress, chunk, callback, start, result)) {
                 return false;
@@ -274,7 +278,7 @@ struct Engine::Impl {
             return !progress.in_segment || close_segment(progress, callback, start, result);
         }
         if (!progress.in_segment) {
-            decoder->begin_decode_stream(n_vq);
+            decoder->begin_decode_stream(n_vq, stream_piece_frames());
             progress.in_segment = true;
         }
         progress.pending.insert(progress.pending.end(), frame.begin(), frame.end());
@@ -323,7 +327,13 @@ struct Engine::Impl {
             fail("text must not be empty");
         }
         cancel_requested = false;
+        decoder->begin_run();
+        SynthesisResult result = synthesize_locked(text);
+        result.codec_backend = decoder->run_backend();
+        return result;
+    }
 
+    SynthesisResult synthesize_locked(const std::string & text) {
         const std::vector<DelayRow> prompt = build_checked_prompt(text);
         std::mt19937 rng(options.seed);
         DelayState state(backbone->config(), prompt, frontend->tokens().pad,
@@ -364,7 +374,13 @@ struct Engine::Impl {
             fail("streaming synthesis needs a callback");
         }
         cancel_requested = false;
+        decoder->begin_run();
+        SynthesisResult result = stream_locked(text, callback);
+        result.codec_backend = decoder->run_backend();
+        return result;
+    }
 
+    SynthesisResult stream_locked(const std::string & text, const AudioCallback & callback) {
         const std::vector<DelayRow> prompt = build_checked_prompt(text);
         const int stream_base = delayed_stream_base(prompt);
         std::mt19937 rng(options.seed);
@@ -420,6 +436,10 @@ int Engine::sample_rate() const noexcept {
 
 const char * Engine::backend_name() const noexcept {
     return impl_->backbone->backend_name();
+}
+
+bool Engine::codec_on_coreml() const noexcept {
+    return impl_->decoder->on_coreml();
 }
 
 } // namespace tts_cpp::moss

@@ -37,6 +37,7 @@
 #include "tts-cpp/cosyvoice/fit.h"
 
 #include "cosyvoice_fit_internal.h"
+#include "test_env_portable.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -110,6 +111,14 @@ struct gguf_writer {
 };
 
 // Tiny LM: hyper-parameters carried in cosyvoice3.llm.* metadata.
+constexpr const char * kFixtureDirPrefix = "test-cosyvoice-fit-params-";
+
+fs::path make_fixture_dir() {
+    const fs::path dir = fs::temp_directory_path() / (kFixtureDirPrefix + test_process_tag());
+    fs::create_directories(dir);
+    return dir;
+}
+
 std::string write_tiny_llm(const fs::path & dir) {
     const int depth = 2, hidden = 64, n_head = 4, n_kv = 2, head_dim = 16, inter = 128;
     const int VS = 70, VOCAB = 100;
@@ -442,6 +451,21 @@ void run_fit_gates(const std::string & llm_path, const std::string & flow_path,
                "near-INT_MAX text_tokens was not workload-too-large");
     }
 
+    {
+        tts_cpp::cosyvoice::FitOptions missing = fopts;
+        missing.backend = "no-such-device";
+        const tts_cpp::FitResult fr = tts_cpp::cosyvoice::fit_params(missing);
+        expect(fr.status == tts_cpp::FitStatus::Error && fr.reason == "no-backend-device",
+               "unavailable explicit backend reason was '" + fr.reason + "'");
+    }
+    {
+        tts_cpp::cosyvoice::FitOptions cpu = fopts;
+        cpu.backend = "cpu";
+        const tts_cpp::FitResult fr = tts_cpp::cosyvoice::fit_params(cpu);
+        expect(fr.status != tts_cpp::FitStatus::Error && fr.device_is_cpu,
+               "explicit cpu backend did not project the CPU (" + fr.reason + ")");
+    }
+
     // Errors surface as Error, never Success.
     {
         tts_cpp::cosyvoice::FitOptions bad = fopts;
@@ -479,13 +503,13 @@ int main(int argc, char ** argv) {
     } else {
         const int n_gpu_layers =
             (argc >= 2 && std::string(argv[1]) == "--synthetic-gpu") ? 99 : 0;
-        const fs::path dir = fs::temp_directory_path();
+        const fs::path dir = make_fixture_dir();
         const std::string llm   = write_tiny_llm(dir);
         const std::string flow  = write_tiny_flow(dir);
         const std::string hift  = write_hift(dir);
         const std::string voice = write_tiny_voice(dir);
         run_all(llm, flow, hift, voice, n_gpu_layers, /*tiny_rand_noise=*/true);
-        fs::remove(llm); fs::remove(flow); fs::remove(hift); fs::remove(voice);
+        fs::remove_all(dir);
     }
     if (g_failures == 0) {
         std::printf("test-cosyvoice-fit-params: all checks passed\n");

@@ -55,6 +55,13 @@ inline ::tts_cpp::detail::GpuBackendRequirement cosyvoice_gpu_requirement() {
 #endif
 }
 
+ggml_backend_t cosyvoice_init_backend(const std::string & requested, int n_gpu_layers,
+                                      int vulkan_device, bool * gpu_present_but_unused);
+
+bool cosyvoice_hexagon_runs_weight_type(ggml_type type);
+
+ggml_backend_t cosyvoice_frontend_backend(ggml_backend_t engine_backend);
+
 // ---- resident model (weights + compute backend) ----------------------------
 // Move-only: owns a sched bundle that cannot be copied.
 struct model_ctx {
@@ -130,6 +137,8 @@ struct qwen_hp {
 // this instead of a default-constructed qwen_hp so the graph shape follows the
 // weights rather than hardcoded numbers.
 qwen_hp cosyvoice_qwen_hp(const model_ctx & m);
+bool cosyvoice_lm_fa_enabled(ggml_backend_t backend, const qwen_hp & hp);
+bool cosyvoice_lm_replay_enabled(ggml_backend_t backend, const qwen_hp & hp);
 struct dit_hp {
     int depth = 22, dim = 1024, heads = 16, dim_head = 64, ff_inner = 2048;
     int conv_k = 31, conv_groups = 16;
@@ -192,7 +201,7 @@ std::vector<int> cosyvoice_llm_generate(model_ctx & m, const qwen_hp & hp,
                                         const std::vector<int> & text_ids,
                                         const std::vector<int> & prompt_stok,
                                         int max_steps, bool greedy, int seed, int min_len,
-                                        cosyvoice_timings * tmg = nullptr);
+                                        cosyvoice_timings * tmg = nullptr, bool allow_replay = true);
 
 // DiT flow: (prompt_token ++ speech_tokens) -> mel.  prompt_feat is the prompt
 // mel [mel_len1][80] row-major (mel-fastest); embedding is the 192-d CAM++
@@ -228,6 +237,12 @@ ggml_tensor * cosyvoice_conv1d_f32(ggml_context * c, ggml_tensor * w, ggml_tenso
 // exposed for test-cosyvoice-conv1d, which pins their equivalence.
 ggml_tensor * cosyvoice_conv1d_grouped(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
 ggml_tensor * cosyvoice_conv1d_grouped_batched(ggml_context * c, ggml_tensor * w, ggml_tensor * x, int groups);
+
+ggml_tensor * cosyvoice_dit_rope_first_head(ggml_context * c, ggml_tensor * z, ggml_tensor * pos,
+                                            int dim_head, int NL, int B, bool rows_in_place);
+
+ggml_tensor * cosyvoice_istft_columns(ggml_context * c, ggml_tensor * kernel_cols, ggml_tensor * spec, int hop);
+std::vector<float> cosyvoice_istft_kernel_columns(const std::vector<float> & kernel, int n_fft, int n_ch);
 
 // SineGen2 NSF source excitation (host-side): sample-rate f0 [T_wav] ->
 // source [T_wav].  The per-harmonic sine tracks and the mix/tanh arithmetic

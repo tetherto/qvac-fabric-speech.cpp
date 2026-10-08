@@ -126,7 +126,7 @@ struct FitResult {
     // accepts is now modelled, Nemotron included)
     std::string reason;
 
-    std::string model_type;     // "ctc" | "rnnt" | "tdt" | "eou" | "nemotron" | "sortformer" | "nemotron-diarization"
+    std::string model_type;     // "ctc" | "rnnt" | "tdt" | "eou" | "nemotron" | "sortformer" | "nemotron-diarization" | "moss-transcribe"
     std::string model_variant;  // GGUF parakeet.model_variant, may be empty
 
     // Resolved compute device, after the same runtime tiering and fallbacks a

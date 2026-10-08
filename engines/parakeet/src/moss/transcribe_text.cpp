@@ -1,4 +1,5 @@
 #include "moss/transcribe_text.h"
+#include "fit_util.h"
 
 #include "moss/transcribe_bpe.h"
 
@@ -206,6 +207,19 @@ std::string TranscribeTokenizer::decode(const std::vector<int32_t> & ids) const 
         }
     }
     return text;
+}
+
+uint64_t TranscribeTokenizer::storage_bytes() const {
+    uint64_t bytes = fitutil::sat_add(sizeof(Impl), impl_->tokenizer.storage_bytes());
+    bytes = fitutil::sat_add(bytes, impl_->pieces.capacity() * sizeof(std::string));
+    for (const auto & piece : impl_->pieces) bytes = fitutil::sat_add(bytes, piece.capacity() + 1);
+    return bytes;
+}
+
+size_t TranscribeTokenizer::max_piece_bytes() const {
+    size_t bytes = 0;
+    for (const auto & piece : impl_->pieces) bytes = std::max(bytes, piece.size());
+    return bytes;
 }
 
 std::vector<int32_t> transcribe_audio_span(const TranscribeConfig & config, const TranscribeTokenizer & tokenizer,

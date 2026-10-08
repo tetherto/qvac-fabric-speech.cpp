@@ -18,6 +18,8 @@ struct TranscribeChunkEncoding {
     std::vector<float> embeddings;
 };
 
+TranscribeMemory measure_audio_chunk(TranscribeModel & model, int tokens);
+
 TranscribeChunkEncoding encode_audio_chunk(TranscribeModel & model, const std::vector<float> & mel, int tokens,
                                            bool keep_encoder_states);
 
@@ -28,6 +30,9 @@ public:
     TranscribeDecoder(const TranscribeDecoder &) = delete;
     TranscribeDecoder & operator=(const TranscribeDecoder &) = delete;
 
+    uint64_t measure_cache() const;
+    TranscribeMemory measure_batch(int position, int tokens, bool has_audio, bool want_logits);
+    uint64_t host_state_bytes() const;
     std::vector<float> prefill(const std::vector<int32_t> & ids, const std::vector<float> & audio_embeddings,
                                int batch_tokens);
     std::vector<float> step(int32_t id);

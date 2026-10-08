@@ -22,6 +22,8 @@ public:
 
     std::vector<int32_t> encode(const std::string & text) const;
     std::string decode(const std::vector<int32_t> & ids) const;
+    uint64_t storage_bytes() const;
+    size_t max_piece_bytes() const;
 
 private:
     struct Impl;

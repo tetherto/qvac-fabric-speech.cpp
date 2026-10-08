@@ -1,9 +1,11 @@
 #include "parakeet/moss_transcribe.h"
 
 #include "moss/transcribe_audio.h"
+#include "moss/transcribe_coreml.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
+#include "moss/transcribe_request.h"
 
 #include "parakeet_ctc.h"
 
@@ -22,8 +24,6 @@ using detail::TranscribeMel;
 using detail::TranscribeModel;
 using detail::TranscribeTokenizer;
 
-constexpr int PREFILL_BATCH_TOKENS = 256;
-constexpr size_t MAX_PROMPT_BYTES = 8192;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss transcribe: " + message);
@@ -44,6 +44,7 @@ struct TranscribeEngine::Impl {
     std::unique_ptr<TranscribeModel> model;
     std::unique_ptr<TranscribeTokenizer> tokenizer;
     std::unique_ptr<TranscribeMel> mel;
+    std::unique_ptr<detail::TranscribeAudioEncoder> audio_encoder;
     std::atomic<bool> cancel_requested{false};
     std::mutex transcription_mutex;
 
@@ -59,6 +60,13 @@ struct TranscribeEngine::Impl {
         detail::validate_transcribe_decoder(*model);
         tokenizer = std::make_unique<TranscribeTokenizer>(*model);
         mel = std::make_unique<TranscribeMel>(model->config().audio, detail::read_mel_filters(*model));
+        attach_audio_encoder();
+    }
+
+    void attach_audio_encoder() {
+        const detail::CoremlPolicy policy = detail::read_coreml_policy();
+        audio_encoder = std::make_unique<detail::TranscribeAudioEncoder>(*model,
+                detail::open_transcribe_encoder_sidecar(options.model_path, model->config(), policy), policy.strict);
     }
 
     void require_context(int prompt_tokens, int limit) const {
@@ -69,24 +77,6 @@ struct TranscribeEngine::Impl {
         }
     }
 
-    std::string resolved_prompt(const TranscribeRequest & request) const {
-        const std::vector<std::string> hotwords = detail::sanitize_hotwords(request.hotwords);
-        if (hotwords.empty()) {
-            return request.prompt;
-        }
-        if (!detail::strip_whitespace(request.prompt).empty()) {
-            fail("hotwords extend the default prompt; write them into the custom prompt instead");
-        }
-        return detail::hotword_prompt(model->config(), hotwords);
-    }
-
-    int max_new_tokens(const TranscribeRequest & request) const {
-        if (request.max_new_tokens < 0) {
-            fail("max_new_tokens must be positive, or 0 for the model default");
-        }
-        return request.max_new_tokens > 0 ? request.max_new_tokens : model->config().default_max_new_tokens;
-    }
-
     void validate(const float * pcm, size_t samples, int sample_rate, const TranscribeRequest & request) const {
         if (sample_rate != model->config().audio.sample_rate) {
             fail("audio must be sampled at " + std::to_string(model->config().audio.sample_rate) + " Hz");
@@ -94,8 +84,8 @@ struct TranscribeEngine::Impl {
         if (pcm == nullptr || samples == 0) {
             fail("audio must not be empty");
         }
-        if (request.prompt.size() > MAX_PROMPT_BYTES) {
-            fail("prompt must be at most " + std::to_string(MAX_PROMPT_BYTES) + " bytes");
+        if (request.prompt.size() > detail::TRANSCRIBE_MAX_PROMPT_BYTES) {
+            fail("prompt must be at most " + std::to_string(detail::TRANSCRIBE_MAX_PROMPT_BYTES) + " bytes");
         }
     }
 
@@ -104,7 +94,7 @@ struct TranscribeEngine::Impl {
         const size_t first = chunk * length;
         const size_t count = std::min(length, samples - first);
         const int tokens = detail::transcribe_chunk_tokens(model->config(), count);
-        return detail::encode_audio_chunk(*model, mel->chunk(pcm + first, count), tokens, false).embeddings;
+        return audio_encoder->encode(mel->chunk(pcm + first, count), tokens);
     }
 
     bool encode_audio(const float * pcm, size_t samples, std::vector<float> & embeddings) {
@@ -154,24 +144,26 @@ struct TranscribeEngine::Impl {
     TranscribeResult run(const float * pcm, size_t samples, const TranscribeRequest & request,
                          const TranscribeProgress & progress) {
         TranscribeResult result;
-        const int limit = max_new_tokens(request);
+        const int limit = detail::resolved_transcribe_limit(model->config(), request);
         result.audio_tokens = detail::transcribe_audio_tokens(model->config(), samples);
         const std::vector<int32_t> prompt = detail::transcribe_prompt(model->config(), *tokenizer,
-                result.audio_tokens, resolved_prompt(request));
+                result.audio_tokens, detail::resolved_transcribe_prompt(model->config(), request));
         result.prompt_tokens = (int) prompt.size();
         require_context(result.prompt_tokens, limit);
 
         const auto encode_start = std::chrono::steady_clock::now();
         std::vector<float> embeddings;
+        audio_encoder->begin_run();
         result.cancelled = !encode_audio(pcm, samples, embeddings);
         result.encode_ms = elapsed_ms(encode_start);
+        result.encoder_backend = audio_encoder->run_backend();
         if (result.cancelled) {
             return result;
         }
 
         const auto prefill_start = std::chrono::steady_clock::now();
         TranscribeDecoder decoder(*model, result.prompt_tokens + limit);
-        std::vector<float> logits = decoder.prefill(prompt, embeddings, PREFILL_BATCH_TOKENS);
+        std::vector<float> logits = decoder.prefill(prompt, embeddings, detail::TRANSCRIBE_PREFILL_BATCH_TOKENS);
         result.prefill_ms = elapsed_ms(prefill_start);
 
         const auto decode_start = std::chrono::steady_clock::now();
@@ -217,6 +209,10 @@ int TranscribeEngine::sample_rate() const noexcept {
 
 const char * TranscribeEngine::backend_name() const noexcept {
     return impl_->model->backend_name();
+}
+
+bool TranscribeEngine::encoder_on_coreml() const noexcept {
+    return impl_->audio_encoder->on_coreml();
 }
 
 } // namespace parakeet::moss

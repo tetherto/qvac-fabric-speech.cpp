@@ -335,7 +335,8 @@ int main(int argc, char ** argv) {
     parler_model model;
     std::string error;
     const int ngl = std::getenv("PARLER_TEST_GPU") ? 99 : 0;
-    if (!parler_load_gguf(argv[1], model, ngl, &error)) {
+    const char * backend = std::getenv("PARLER_TEST_BACKEND");
+    if (!parler_load_gguf(argv[1], model, ngl, &error, backend ? backend : "")) {
         fprintf(stderr, "parler_load_gguf failed: %s\n", error.c_str());
         return 1;
     }

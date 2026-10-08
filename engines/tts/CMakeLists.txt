@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack and the Supertonic vocoder (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder and the MOSS stages (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -373,6 +373,7 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/generation.cpp
     src/moss/frontend.cpp
     src/moss/engine.cpp
+    src/moss/fit.cpp
     src/moss/reference_wav.cpp
     src/moss/sfx_model.cpp
     src/moss/sfx_text_encoder.cpp
@@ -382,6 +383,8 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/sfx_sampler.cpp
     src/moss/sfx_tokenizer.cpp
     src/moss/sfx_engine.cpp
+    src/moss/sfx_request.cpp
+    src/moss/sfx_fit.cpp
     src/moss/gguf_metadata.cpp
     src/moss/speech_lm.cpp
     src/moss/speech_tokenizer.cpp
@@ -389,6 +392,9 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/speech_prompt.cpp
     src/moss/speech_generation.cpp
     src/moss/speech_engine.cpp
+    src/moss/coreml_sidecar.cpp
+    src/moss/sfx_coreml.cpp
+    src/moss/codec_coreml.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -450,7 +456,7 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
 
-    # Core ML sidecars (Audio8 codec + Supertonic vocoder): ARC objects fold
+    # Core ML sidecars (Audio8 codec, Supertonic vocoder, MOSS stages): ARC objects fold
     # into libtts-cpp; frameworks are PUBLIC for static consumers.
     if (TTS_CPP_COREML)
         find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
@@ -458,7 +464,8 @@ if (TTS_CPP_BUILD_LIBRARY)
 
         add_library(tts-cpp.coreml OBJECT
             src/audio8/coreml/codec-synth.mm
-            src/supertonic_coreml_vocoder.mm)
+            src/supertonic_coreml_vocoder.mm
+            src/moss/coreml/runner.mm)
         tts_cpp_apply_ccache(tts-cpp.coreml)
         target_include_directories(tts-cpp.coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         set_target_properties(tts-cpp.coreml PROPERTIES
@@ -473,7 +480,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, MOSS stages")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1010,13 +1017,9 @@ if (TTS_CPP_BUILD_TESTS)
     # deviations from the same weights. A broken tier instead collapses the
     # cosine, far past either column.
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
-        # No bf16 row: neither tinyBLAS nor ggml_vec_dot_bf16 carries an ARM
-        # path, so a bf16 tier runs its matmuls as a scalar per-element loop --
-        # 207 s against the f16 tier's 26 s on an M3 Ultra. The tier guidance in
-        # docs/cosyvoice3.md already recommends f16 over bf16 off AVX512-BF16
-        # hosts, so that time would gate a path no ARM build ships.
         set(_tcb_cosy_flow_tier_gates
             "f16|0.998|2.0"
+            "bf16|0.997|4.0"
             "q8_0|0.997|4.0"
             "q4_0|0.96|8.0")
     else()
@@ -1195,6 +1198,20 @@ if (TTS_CPP_BUILD_TESTS)
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        if (TARGET cosyvoice-bench)
+            add_test(NAME test-cosyvoice-bench-overrides
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cosyvoice_bench.py"
+                             $<TARGET_FILE:cosyvoice-bench> "${TTS_CPP_TEST_MODEL_DIR}"
+                             "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}")
+            set_tests_properties(test-cosyvoice-bench-overrides PROPERTIES
+                LABELS "fixture"
+                SKIP_RETURN_CODE 77)
+            if (WIN32)
+                set_property(TEST test-cosyvoice-bench-overrides PROPERTY ENVIRONMENT
+                    "PATH=${CMAKE_BINARY_DIR}/bin/$<CONFIG>\;${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
+            endif()
+        endif()
         add_test(NAME test-assemble-cosyvoice3-model
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_assemble_cosyvoice3_model.py")
@@ -1232,6 +1249,18 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-supertonic-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
+
+        foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
+            string(REPLACE "_" "-" _moss_exporter_test "${_moss_exporter}")
+            add_test(NAME test-moss-${_moss_exporter_test}-coreml-exporter
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_moss_${_moss_exporter}_coreml.py")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter PROPERTY LABELS "unit")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
+                         PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
+                         PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        endforeach()
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1342,6 +1371,12 @@ if (TTS_CPP_BUILD_TESTS)
     # the built graph must stay fully supported on the selected GPU backend
     # instead of demoting to the sched-fallback path. Synthetic inputs; no
     # fixtures.
+    add_executable(test-cosyvoice-hexagon-graphs test/test_cosyvoice_hexagon_graphs.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-hexagon-graphs PRIVATE ggml)
+    target_include_directories(test-cosyvoice-hexagon-graphs PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-hexagon-graphs)
+    tts_cpp_register_test(test-cosyvoice-hexagon-graphs LABEL "unit")
+
     add_executable(test-cosyvoice-conv1d test/test_cosyvoice_conv1d.cpp ${_tcb_cosy_core_srcs})
     target_link_libraries(test-cosyvoice-conv1d PRIVATE ggml)
     target_include_directories(test-cosyvoice-conv1d PRIVATE ggml/include src)
@@ -1364,11 +1399,16 @@ if (TTS_CPP_BUILD_TESTS)
         endforeach()
     endif()
 
-    # Cross-backend stage parity on deterministic synthetic inputs (no PyTorch
-    # fixtures, only the stage GGUFs): exact greedy LM trajectory, flow mel
-    # cosine + max-abs, pinned-f0 HiFT waveform cosine — CPU vs the selected
-    # GPU.  Pins the backend-specific graph paths (Metal flash-attention LM
-    # decode, DiT f16-K/V flash attention, batched grouped conv, fused snake).
+    add_executable(test-cosyvoice-lm-attention test/test_cosyvoice_lm_attention.cpp)
+    target_link_libraries(test-cosyvoice-lm-attention PRIVATE tts-cpp ggml)
+    target_include_directories(test-cosyvoice-lm-attention PRIVATE src)
+    tts_cpp_apply_ccache(test-cosyvoice-lm-attention)
+    tts_cpp_register_test(test-cosyvoice-lm-attention LABEL "unit")
+    if (TTS_CPP_GGML_CUDA AND _tts_cosy_desktop_platform)
+        tts_cpp_register_test(test-cosyvoice-lm-attention-cuda
+            EXE test-cosyvoice-lm-attention LABEL "gpu" ARGS "CUDA0")
+    endif()
+
     add_executable(test-cosyvoice-xb test/test_cosyvoice_xb.cpp)
     target_link_libraries(test-cosyvoice-xb PRIVATE tts-cpp ggml)
     target_include_directories(test-cosyvoice-xb PRIVATE ggml/include src)
@@ -1405,6 +1445,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-cosyvoice-load PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-load)
     tts_cpp_register_test(test-cosyvoice-load LABEL "unit")
+
+    add_executable(test-cosyvoice-bf16 test/test_cosyvoice_bf16.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-bf16 PRIVATE ggml)
+    target_include_directories(test-cosyvoice-bf16 PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-bf16)
+    tts_cpp_register_test(test-cosyvoice-bf16 LABEL "unit")
 
     # Sinusoidal timestep embedding for the flow DiT. Pure function on the CFM
     # step path, so it needs no GGUF.
@@ -1443,6 +1489,18 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-generation)
     tts_cpp_register_test(test-moss-generation)
 
+    add_executable(test-moss-fit-models test/moss/test_fit_models.cpp)
+    target_link_libraries(test-moss-fit-models PRIVATE tts-cpp)
+    tts_cpp_apply_ccache(test-moss-fit-models)
+    tts_cpp_register_test(test-moss-fit-models LABEL "fixture")
+    set_property(TEST test-moss-fit-models PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-moss-fit test/moss/test_fit.cpp)
+    target_link_libraries(test-moss-fit PRIVATE tts-cpp)
+    target_include_directories(test-moss-fit PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-fit)
+    tts_cpp_register_test(test-moss-fit)
+
     add_executable(test-moss-load test/moss/test_load.cpp)
     target_link_libraries(test-moss-load PRIVATE tts-cpp)
     target_include_directories(test-moss-load PRIVATE src)
@@ -1471,6 +1529,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-codec-stream)
     tts_cpp_register_test(test-moss-codec-stream)
 
+    add_executable(test-moss-codec-coreml test/moss/test_codec_coreml.cpp)
+    target_link_libraries(test-moss-codec-coreml PRIVATE tts-cpp)
+    target_include_directories(test-moss-codec-coreml PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-codec-coreml)
+    tts_cpp_register_test(test-moss-codec-coreml)
+
     add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-cli PRIVATE tts-cpp)
     target_include_directories(test-moss-cli PRIVATE src)
@@ -1489,6 +1553,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_compile_options(test-moss-sfx PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     tts_cpp_apply_ccache(test-moss-sfx)
     tts_cpp_register_test(test-moss-sfx)
+
+    add_executable(test-moss-sfx-fit test/moss/test_sfx_fit.cpp)
+    target_link_libraries(test-moss-sfx-fit PRIVATE tts-cpp)
+    target_include_directories(test-moss-sfx-fit PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-sfx-fit)
+    tts_cpp_register_test(test-moss-sfx-fit)
 
     add_executable(test-moss-speech test/moss/test_speech.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-speech PRIVATE tts-cpp)
@@ -1531,6 +1601,29 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-speech-parity)
     tts_cpp_register_test(test-moss-speech-parity LABEL "fixture")
     set_property(TEST test-moss-speech-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Self-skips (77) without TTS_CPP_COREML or a staged MOSS sidecar
+    # (MOSS_SPEECH_COREML_CODEC, MOSS_SFX_COREML_MODEL, MOSS_CODEC_COREML_DECODER).
+    add_executable(test-moss-coreml-parity test/moss/test_coreml_parity.cpp)
+    target_link_libraries(test-moss-coreml-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-coreml-parity PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-moss-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-moss-coreml-parity)
+    tts_cpp_register_test(test-moss-coreml-parity LABEL "fixture"
+        ARGS "${CMAKE_CURRENT_SOURCE_DIR}/test/reference-audio/jfk.wav")
+    set_property(TEST test-moss-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Not a test: times each staged MOSS sidecar against the ggml GPU stage
+    # (median of 5 after a warm-up) and prints a markdown table.
+    add_executable(bench-moss-coreml test/moss/bench_coreml.cpp)
+    target_link_libraries(bench-moss-coreml PRIVATE tts-cpp)
+    target_include_directories(bench-moss-coreml PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(bench-moss-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(bench-moss-coreml)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
@@ -1621,6 +1714,17 @@ if (TTS_CPP_BUILD_TESTS)
         src/backend_selection.cpp
         src/sched_dispatch.cpp
         src/log.cpp)
+
+    # Model-backed, fixed-input CPU/backend comparison; no production changes.
+    add_executable(test-audio8-backend-parity test/audio8/test_backend_parity.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/window_stream.cpp
+        ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-backend-parity PRIVATE ggml Threads::Threads)
+    target_include_directories(test-audio8-backend-parity PRIVATE include src)
+    tts_cpp_apply_ccache(test-audio8-backend-parity)
+    add_test(NAME test-audio8-backend-parity COMMAND test-audio8-backend-parity)
+    set_tests_properties(test-audio8-backend-parity PROPERTIES LABELS "fixture" SKIP_RETURN_CODE 77)
 
     # Fail-closed GGUF header reading: synthesized metadata-only files with a
     # wrong architecture and wrong-typed scalar/string keys. No fixtures.

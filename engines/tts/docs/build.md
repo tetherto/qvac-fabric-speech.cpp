@@ -11,9 +11,9 @@ checkout staged by `scripts/setup-ggml.sh` for the bundled path.
 | Path | Configure entry | ggml source | Main artifacts |
 |---|---|---|---|
 | Umbrella speech build | repository root, `-DSPEECH_BUILD_TTS=ON` | system `ggml` | `build/engines/tts/tts-cli` and sibling tools; library under `build/engines/tts/` |
-| Direct in-tree package | `engines/tts` | system `ggml`; `TTS_CPP_USE_SYSTEM_GGML=ON` is required | `engines/tts/build/tts-cli` and `engines/tts/build/libtts-cpp.*` |
+| Direct in-tree package | `engines/tts` | system `ggml` by default (`TTS_CPP_USE_SYSTEM_GGML=ON`) | `engines/tts/build/tts-cli` and `engines/tts/build/libtts-cpp.*` |
 | Bundled ggml | `engines/tts` with `TTS_CPP_USE_SYSTEM_GGML=OFF` | `engines/tts/ggml` checkout of `qvac-ext-ggml@speech`, staged by `scripts/setup-ggml.sh` | `engines/tts/build-bundled/tts-cli` and `engines/tts/build-bundled/libtts-cpp.*` |
-| vcpkg consumer | `tts-cpp` port | `ggml-speech` dependency | `<vcpkg>/installed/<triplet>/lib/` (or `debug/lib/`), headers under `include/tts-cpp/`, config under `share/tts-cpp/` |
+| vcpkg consumer | `speech-cpp[tts]` feature | `ggml-speech` dependency | `<vcpkg>/installed/<triplet>/lib/` (or `debug/lib/`), headers under `include/tts-cpp/`, config under `share/tts-cpp/` |
 
 The bundled path applies no patch overlay — the speech branch is patched at
 the commit level. `scripts/setup-ggml.sh` clones the pinned speech ref into
@@ -112,44 +112,14 @@ pip install onnx gguf huggingface_hub safetensors scipy librosa resampy
 cd -
 ```
 
-### In-tree system-ggml details
+### Shared ggml and registry features
 
-This in-tree subtree is built against the [`ggml-speech`](https://github.com/tetherto/qvac-registry-vcpkg)
-vcpkg port (which vendors the [`qvac-ext-ggml/speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech)
-branch with all patches pre-applied).  `tts-cpp` itself is consumed
-through the matching `tts-cpp` port; downstream applications in the
-QVAC speech stack add both to their `vcpkg.json` and call
-`find_package(tts-cpp CONFIG REQUIRED)`:
-
-```cmake
-find_package(tts-cpp CONFIG REQUIRED)
-target_link_libraries(my_app PRIVATE tts-cpp::tts-cpp)
-```
-
-For development in this tree (running parity harnesses, prototyping API
-changes, and inspecting CLIs), use the direct in-tree system-ggml flow:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/path/to/ggml-speech/install
-cmake --build build --target tts-cli
-```
-
-Downstream production builds normally use the vcpkg toolchain:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=<vcpkg_root>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --target tts-cpp
-```
-
-`TTS_CPP_USE_SYSTEM_GGML` defaults to `ON` for this flow, finding
-the `ggml-speech` port from qvac-registry-vcpkg (which pulls
-qvac-ext-ggml@speech with patches as commits).  GPU acceleration is
-selected at the ggml-port level — the port already carries the
-Metal / Vulkan / OpenCL backend support its consumers ask for; pass
-`--n-gpu-layers 99` at runtime to actually use the compiled GPU
-backend.
+Production consumers install `speech-cpp[tts]`, whose shared `ggml-speech`
+dependency supplies the requested backends. The installed CMake package remains
+`tts-cpp`; it does not require a separate legacy engine port. See the
+[umbrella package guide](../../../docs/BUILD.md#consumable-packages) for feature
+selection and imported targets. Development commands above use an explicit
+ggml install prefix; record that source revision when reporting results.
 
 ### Useful CMake options
 
@@ -160,11 +130,10 @@ override with `-D<flag>=...` at configure time):
 |------|---------|---------|
 | `TTS_CPP_BUILD_LIBRARY` | `ON` | Build the `tts-cpp` library target itself (linkage controlled by `TTS_CPP_BUILD_SHARED`, not `BUILD_SHARED_LIBS` — see below) |
 | `TTS_CPP_BUILD_SHARED` | `OFF` | Build `tts-cpp` as `SHARED` instead of `STATIC`. Decoupled from `BUILD_SHARED_LIBS` because ggml's own CMake declares its own `option(BUILD_SHARED_LIBS)` defaulting to `ON` on Windows non-MinGW; using a project-namespaced option keeps the two independent. The supertonic test/bench harnesses link against `tts-cpp` directly and use detail-namespaced symbols outside the `TTS_CPP_API` public surface, so `SHARED` builds hide them and disable those targets — leave OFF for development, flip ON only for downstream packaging where the test harnesses aren't built |
-| `TTS_CPP_BUILD_EXECUTABLES` | `ON` standalone / `OFF` subdir | `tts-cli`, `mel2wav`, `cosyvoice-hift`, `cosyvoice-flow`, `cosyvoice-llm`, `cosyvoice-cli`, `cosyvoice-bench`, `supertonic-cli`, `parler-cli`, `parler-bench`, `lavasr-bench`, `audio8-cli`, and `pocket-cli` |
+| `TTS_CPP_BUILD_EXECUTABLES` | `ON` standalone / `OFF` subdir | `tts-cli`, `mel2wav`, `cosyvoice-hift`, `cosyvoice-flow`, `cosyvoice-llm`, `cosyvoice-cli`, `cosyvoice-bench`, `supertonic-cli`, `parler-cli`, `parler-bench`, `lavasr-bench`, `audio8-cli`, `pocket-cli`, and `moss-cli` |
 | `TTS_CPP_BUILD_TESTS` | `ON` standalone / `OFF` subdir | `test-*` parity / unit harnesses, registered with CTest (label-filterable via `ctest -L unit` / `ctest -L fixture` / `ctest -L gpu`) |
 | `TTS_CPP_INSTALL` | `ON` | Generate `install` rules + the `tts-cpp` CMake package config so consumers can `find_package(tts-cpp CONFIG REQUIRED)` |
 | `TTS_CPP_USE_SYSTEM_GGML` | `ON` | Use `find_package(ggml CONFIG REQUIRED)` against `ggml-speech`. `OFF` uses `add_subdirectory(ggml)` and requires an `engines/tts/ggml` checkout of `qvac-ext-ggml@speech`, staged by `scripts/setup-ggml.sh`; no patch overlay — the speech branch is patched at the commit level |
-| ~~`TTS_CPP_GGML_LIB_PREFIX`~~ | n/a in this subtree | The standalone `chatterbox.cpp` repo exposes this option to rename bundled `libggml-*` to `libspeech-ggml-*`. This in-tree package does not expose the option: system builds use the filenames installed by `ggml-speech`, while bundled builds use the filenames produced by the locally staged speech-branch checkout |
 | `TTS_CPP_CCACHE` | `ON` | Use ccache as compiler launcher for `tts-cpp`'s own targets when `find_program(ccache)` succeeds. Scoped per target; ggml's independent `GGML_CCACHE` option handles the ggml subdirectory |
 | `TTS_CPP_COREML` | `OFF` | Apple-only. Compile the Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack and the Supertonic vocoder: at load each engine looks for its sidecar next to the GGUF (`audio8-codec-decoder-q8_0.gguf` → `audio8-codec-decoder.mlmodelc`; `supertonic2-q8_0.gguf` → `supertonic2-vocoder.mlmodelc`) and runs the stage on it when present, on ggml otherwise (Supertonic also keeps ggml for vocoders stored below 8 bits, such as `q4_0`). Export with `scripts/export-audio8-codec-coreml.py` / `scripts/export-supertonic-coreml.py`; see the [Audio8 guide](audio8.md#core-ml-codec-sidecar) and the [Supertonic guide](supertonic.md#core-ml-vocoder-sidecar). A non-Apple configure with this `ON` is a hard error |
 | `TTS_CPP_OPENMP` | `ON` | Link OpenMP when available. On Windows non-MinGW builds it is forced `OFF` to avoid clang-cl/MSVC and msys2 `libgomp` incompatibilities; advanced callers can explicitly set both `TTS_CPP_OPENMP_USER_OVERRIDE=ON` and `TTS_CPP_OPENMP=ON` |
@@ -271,6 +240,6 @@ engines/tts/                     multi-engine TTS and enhancement package
   models/                        generated GGUFs (not tracked)
   artifacts/                     .npy dumps for validation (not tracked)
   CMakeLists.txt                 top-level build
-  README.md                      this file
-  PROGRESS.md                    chronological development journal
+  README.md                      engine overview
+  docs/history/                  archived port and integration reports
 ```

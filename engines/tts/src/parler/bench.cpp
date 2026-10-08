@@ -14,7 +14,7 @@
 //
 // Usage:
 //   ./parler-bench --model parler-indic-q8_0.gguf --text "..." \
-//       [--description DESC] [--n-gpu-layers N] [--threads N] \
+//       [--description DESC] [--n-gpu-layers N] [--backend NAME] [--threads N] \
 //       [--max-frames N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
 
 #include "internal.h"
@@ -55,6 +55,7 @@ void usage(const char * argv0) {
         "usage: %s --model parler.gguf --text TEXT\n"
         "          [--description DESC] (default: a neutral studio caption)\n"
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--threads N] [--max-frames N] (decoder steps; ~86/s audio)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
         "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
@@ -115,7 +116,7 @@ void write_json_stage(std::ofstream & os, const Stage & s, bool comma) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string model_path, text, json_out, wav_out;
+    std::string model_path, text, json_out, wav_out, backend;
     std::string description =
         "A female speaker with a calm, clear voice, close up, studio quality "
         "with no background noise.";
@@ -137,6 +138,7 @@ int main(int argc, char ** argv) {
         else if (a == "--text")         text        = next("--text");
         else if (a == "--description")  description = next("--description");
         else if (a == "--n-gpu-layers") n_gpu_layers = std::stoi(next("--n-gpu-layers"));
+        else if (a == "--backend")      backend     = next("--backend");
         else if (a == "--threads")      n_threads   = std::stoi(next("--threads"));
         else if (a == "--max-frames")   max_frames  = std::stoi(next("--max-frames"));
         else if (a == "--seed")         seed        = std::stoi(next("--seed"));
@@ -159,7 +161,7 @@ int main(int argc, char ** argv) {
 
     parler_model model;
     std::string err;
-    if (!parler_load_gguf(model_path, model, n_gpu_layers, &err)) {
+    if (!parler_load_gguf(model_path, model, n_gpu_layers, &err, backend)) {
         fprintf(stderr, "parler-bench: load failed: %s\n", err.c_str());
         return 1;
     }

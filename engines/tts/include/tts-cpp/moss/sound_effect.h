@@ -32,6 +32,8 @@ struct SoundEffectResult {
     double text_ms = 0;
     double diffusion_ms = 0;
     double decode_ms = 0;
+    std::string dit_backend;
+    std::string vae_backend;
 };
 
 using SoundEffectProgress = std::function<bool(int step, int total)>;
@@ -47,6 +49,8 @@ public:
     int sample_rate() const noexcept;
     float max_seconds() const noexcept;
     const char * backend_name() const noexcept;
+    bool dit_on_coreml() const noexcept;
+    bool vae_on_coreml() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

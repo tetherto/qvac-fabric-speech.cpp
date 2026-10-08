@@ -52,6 +52,7 @@ struct SpeechResult {
     double prefill_ms = 0;
     double generate_ms = 0;
     double decode_ms = 0;
+    std::string tokenizer_backend;
 };
 
 using SpeechProgress = std::function<bool(int generated_tokens, int max_new_tokens)>;
@@ -67,6 +68,7 @@ public:
     int sample_rate() const noexcept;
     float tokens_per_second() const noexcept;
     const char * backend_name() const noexcept;
+    bool tokenizer_on_coreml() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -145,6 +145,30 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     return true;
 }
 
+static bool gf_load_metadata(GGUFModel * gf, const char * path) {
+    *gf = {};
+#ifndef _WIN32
+    gf->fd = -1;
+#endif
+    struct ggml_context *   meta   = NULL;
+    struct gguf_init_params params = { true, &meta };
+    gf->gguf                       = gguf_init_from_file(path, params);
+    if (!gf->gguf) {
+        fprintf(stderr, "[GGUF] Failed to parse %s\n", path);
+        return false;
+    }
+    gf->meta        = meta;
+    gf->data_offset = gguf_get_data_offset(gf->gguf);
+    return true;
+}
+
+static const uint8_t * gf_tensor_source(const GGUFModel & gf, int64_t idx) {
+    if (!gf.mapping || idx < 0) {
+        return nullptr;
+    }
+    return gf.mapping + gf.data_offset + gguf_get_tensor_offset(gf.gguf, idx);
+}
+
 static struct ggml_tensor * gf_load_tensor(WeightCtx *         wctx,
                                            const GGUFModel &   gf,
                                            const std::string & name,
@@ -180,11 +204,7 @@ static struct ggml_tensor * gf_load_tensor(WeightCtx *         wctx,
     struct ggml_tensor * tensor = ggml_new_tensor(wctx->ctx, src->type, n_dims, ne);
     ggml_set_name(tensor, name.c_str());
 
-    size_t       offset = gguf_get_tensor_offset(gf.gguf, idx);
-    const void * data   = gf.mapping + gf.data_offset + offset;
-    size_t       nbytes = ggml_nbytes(src);
-
-    wctx->pending.push_back({ tensor, data, nbytes, 0 });
+    wctx_queue_copy(wctx, tensor, gf_tensor_source(gf, idx), ggml_nbytes(src), 0);
     return tensor;
 }
 
@@ -244,12 +264,7 @@ static struct ggml_tensor * gf_load_tensor_f32(WeightCtx * wctx, const GGUFModel
 }
 
 static const void * gf_get_data(const GGUFModel & gf, const char * name) {
-    int64_t idx = gguf_find_tensor(gf.gguf, name);
-    if (idx < 0) {
-        return NULL;
-    }
-    size_t offset = gguf_get_tensor_offset(gf.gguf, idx);
-    return gf.mapping + gf.data_offset + offset;
+    return gf_tensor_source(gf, gguf_find_tensor(gf.gguf, name));
 }
 
 static struct ggml_tensor * gf_load_qkv_fused(WeightCtx *         wctx,

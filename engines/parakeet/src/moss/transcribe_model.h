@@ -1,6 +1,7 @@
 #pragma once
 
 #include "moss/transcribe_runtime.h"
+#include "parakeet/fit.h"
 
 #include <cstdint>
 #include <memory>
@@ -74,7 +75,8 @@ struct TranscribeConfig {
 
 class TranscribeModel {
 public:
-    TranscribeModel(const std::string & path, bool use_gpu, int n_threads, const std::string & backend = "auto");
+    TranscribeModel(const std::string & path, bool use_gpu, int n_threads,
+                    const std::string & backend = "auto", bool measure_only = false);
     ~TranscribeModel();
     TranscribeModel(const TranscribeModel &) = delete;
     TranscribeModel & operator=(const TranscribeModel &) = delete;
@@ -87,6 +89,11 @@ public:
     std::vector<std::string> tokenizer_merges() const;
     std::vector<int32_t> tokenizer_types() const;
 
+    FitResult measure_weights();
+    uint64_t weight_bytes() const;
+    TranscribeMemory allocated_memory() const;
+    TranscribeMemory measure(TranscribeGraph & graph);
+    bool measure_only() const;
     void allocate(TranscribeGraph & graph);
     void compute(TranscribeGraph & graph);
 

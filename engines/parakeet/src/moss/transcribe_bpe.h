@@ -14,6 +14,7 @@ public:
 
     std::vector<int32_t> encode(const std::string & text) const;
     const std::array<std::string, 256> & byte_symbols() const;
+    uint64_t storage_bytes() const;
 
 private:
     std::vector<std::string> merge_word(const std::string & piece) const;

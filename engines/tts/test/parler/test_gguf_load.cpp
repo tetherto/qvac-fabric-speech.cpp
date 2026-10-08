@@ -10,6 +10,10 @@
 // Wrong-typed metadata is asserted in process: the loader checks the stored
 // GGUF type before reading, so a mistyped key fails closed with an error
 // instead of aborting.
+//
+// An explicit backend request is checked on the same weightless GGUF: a
+// missing device fails at backend selection with no fallback, while "cpu"
+// gets past it to the tensor check.
 
 #include "parler/internal.h"
 #include "../test_env_portable.h"
@@ -129,10 +133,11 @@ void write_gguf(const std::string & path, bool with_arch, const char * skip_key,
     gguf_free(g);
 }
 
-void expect_load_fails(const std::string & path, const char * expected_error) {
+void expect_load_fails(const std::string & path, const char * expected_error,
+                       const std::string & backend = {}) {
     parler_model model;
     std::string err;
-    const bool ok = parler_load_gguf(path, model, /*n_gpu_layers=*/ 0, &err);
+    const bool ok = parler_load_gguf(path, model, /*n_gpu_layers=*/ 0, &err, backend);
     if (ok) parler_free_model(model);
     CHECK(!ok, "loading %s must fail", path.c_str());
     CHECK(err.find(expected_error) != std::string::npos,
@@ -198,6 +203,22 @@ void test_missing_tensors() {
     fs::remove(path);
 }
 
+void test_explicit_backend_request() {
+    const std::string path = fixture_path("backend-request");
+    write_gguf(path, true, nullptr, nullptr);
+    expect_load_fails(path, "requested backend 'no-such-device' is not available", "no-such-device");
+    expect_load_fails(path, "expected tensors missing", "cpu");
+    fs::remove(path);
+}
+
+void test_hexagon_weight_types() {
+    using tts_cpp::parler::detail::parler_hexagon_runs_weight_type;
+    CHECK(parler_hexagon_runs_weight_type(GGML_TYPE_Q8_0), "the q8_0 tier must load on Hexagon");
+    CHECK(parler_hexagon_runs_weight_type(GGML_TYPE_F16), "the f16 tier must load on Hexagon");
+    CHECK(parler_hexagon_runs_weight_type(GGML_TYPE_F32), "f32 tensors must load on Hexagon");
+    CHECK(!parler_hexagon_runs_weight_type(GGML_TYPE_Q6_K), "the q6_k tier must be refused on Hexagon");
+}
+
 void test_wrong_typed_metadata_fails_closed() {
     const std::string path = fixture_path("wrong-type");
     write_gguf(path, true, nullptr, "parler.t5.n_layer");
@@ -212,6 +233,8 @@ int main() {
     test_truncated_file();
     test_missing_required_metadata();
     test_missing_tensors();
+    test_explicit_backend_request();
+    test_hexagon_weight_types();
     test_wrong_typed_metadata_fails_closed();
 
     if (g_failures) {

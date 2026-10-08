@@ -387,16 +387,68 @@ constexpr int PROBE_NODES = 2;
 // never an integrated one while a discrete one is visible.
 constexpr int AUTO_VULKAN_DEVICE = -1;
 
+// Resolve a device's registry name without pulling in a shared helper
+// (dev_reg_name is Parakeet-local). Returns an empty string on nullptr
+// so string comparisons are safe either way.
+const char * audio8_dev_reg_name(ggml_backend_dev_t dev) {
+    if (!dev) return "";
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    const char * n = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return n ? n : "";
+}
+
+// Walks the ggml device registry and inits the first device whose reg +
+// device name match `requested`. Returns nullptr when no device matches or
+// init itself failed. On failure the caller emits a user-visible
+// "failed to init a compute backend" error.
+ggml_backend_t init_explicit_backend(const std::string & requested) {
+    ::tts_cpp::detail::ensure_backends_loaded();
+    const size_t n_dev = ggml_backend_dev_count();
+    for (size_t i = 0; i < n_dev; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) continue;
+        const char * reg_name  = audio8_dev_reg_name(dev);
+        const char * dev_name  = ggml_backend_dev_name(dev);
+        const enum ggml_backend_dev_type dev_type = ggml_backend_dev_type(dev);
+        if (!backend_selection_matches(requested, reg_name, dev_name, dev_type)) {
+            continue;
+        }
+        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            std::fprintf(stderr,
+                "[audio8] explicitly selected %s backend (%s)\n",
+                reg_name ? reg_name : "?", dev_name ? dev_name : "unknown");
+            return backend;
+        }
+    }
+    std::fprintf(stderr,
+        "[audio8] requested backend \"%s\" unavailable or failed initialization; "
+        "no fallback\n", requested.c_str());
+    return nullptr;
+}
+
 // Audio8's GPU path is enabled only on backends its whole graph set has been
 // validated against, stage by stage, against the F32 reference. Anything else
 // falls back to CPU rather than running unverified kernels.
-ggml_backend_t init_backend(int n_gpu_layers) {
+//
+// `backend` is EngineOptions::backend (CLI --backend): "" / "auto" takes the
+// legacy tier-based GPU path; "cpu" short-circuits to the CPU backend;
+// "hexagon" or an exact ggml device name is resolved against the ggml device
+// registry via init_explicit_backend. Explicit requests never fall back to
+// CPU on failure -- the caller sees a hard "failed to init a compute
+// backend" error instead of running on the wrong device.
+ggml_backend_t init_backend(int n_gpu_layers, const std::string & backend) {
+    if (backend == "cpu") {
+        return ::tts_cpp::detail::init_cpu_backend();
+    }
+    if (!backend.empty() && backend != "auto") {
+        return init_explicit_backend(backend);
+    }
     using ::tts_cpp::detail::GpuBackendRequirement;
-    ggml_backend_t backend = ::tts_cpp::detail::init_gpu_backend(
+    ggml_backend_t gpu = ::tts_cpp::detail::init_gpu_backend(
         n_gpu_layers, true, "audio8", AUTO_VULKAN_DEVICE, false, nullptr,
         GpuBackendRequirement::Vulkan | GpuBackendRequirement::Metal |
             GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA);
-    return backend ? backend : ::tts_cpp::detail::init_cpu_backend();
+    return gpu ? gpu : ::tts_cpp::detail::init_cpu_backend();
 }
 
 // Looks tensors up by name and remembers the first one that was missing, so a
@@ -859,11 +911,33 @@ void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
 
 }  // namespace
 
+// Registry names and exact device names are distinct in ggml. Hexagon
+// registers as "HTP" and exposes a single device "HTP0". "cpu" and "opencl"
+// select by registry; "hexagon" selects by matching BOTH; anything else is
+// treated as an exact ggml device name (e.g. "HTP0", "CUDA0"). Mirrors the
+// Parakeet matcher in engines/parakeet/src/backend_util.h so a user who
+// learned the names on one engine finds them identical on the other.
+// Declared in internal.h so tests can exercise the policy without having
+// to spin up a ggml device.
+bool backend_selection_matches(const std::string & requested,
+                               const char * reg, const char * device,
+                               enum ggml_backend_dev_type type) {
+    if (requested.empty() || requested == "auto") return false;
+    if (requested == "cpu")    return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
+    if (requested == "hexagon") {
+        return reg && std::strcmp(reg, "HTP") == 0 &&
+               device && std::strcmp(device, "HTP0") == 0;
+    }
+    return device && requested == device;
+}
+
 // Shared body of load_lm and load_lm_metadata_only. When `measure` is
 // non-null the load is metadata-only: every allocation the real path makes is
 // sized into `measure` instead of performed and no tensor data is read; see
 // the declaration comments in internal.h.
-static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & model,
+static bool load_lm_impl(const std::string & path, int n_gpu_layers,
+                         const std::string & backend, lm_model & model,
                          std::string * error, fit_load_measure * measure) {
     gguf_file file(path);
     if (!file.ok()) {
@@ -897,7 +971,7 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
         return false;
     }
 
-    model.backend = init_backend(n_gpu_layers);
+    model.backend = init_backend(n_gpu_layers, backend);
     if (!model.backend) {
         if (error) *error = "audio8: failed to init a compute backend";
         return false;
@@ -949,16 +1023,17 @@ static bool load_lm_impl(const std::string & path, int n_gpu_layers, lm_model & 
     return true;
 }
 
-bool load_lm(const std::string & path, int n_gpu_layers, lm_model & model,
+bool load_lm(const std::string & path, int n_gpu_layers,
+             const std::string & backend, lm_model & model,
              std::string * error) {
-    return load_lm_impl(path, n_gpu_layers, model, error, /*measure=*/nullptr);
+    return load_lm_impl(path, n_gpu_layers, backend, model, error, /*measure=*/nullptr);
 }
 
 bool load_lm_metadata_only(const std::string & path, int n_gpu_layers,
-                           lm_model & model, fit_load_measure & measure,
-                           std::string * error) {
+                           const std::string & backend, lm_model & model,
+                           fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
-    return load_lm_impl(path, n_gpu_layers, model, error, &measure);
+    return load_lm_impl(path, n_gpu_layers, backend, model, error, &measure);
 }
 
 void free_fast_graphs(lm_model & model) {
@@ -1000,7 +1075,8 @@ bool peek_codec_header(const std::string & path, codec_header & header,
 
 // Shared body of load_codec and load_codec_metadata_only; same measure
 // semantics as load_lm_impl.
-static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_model & model,
+static bool load_codec_impl(const std::string & path, int n_gpu_layers,
+                            const std::string & backend, codec_model & model,
                             std::string * error, fit_load_measure * measure) {
     gguf_file file(path);
     if (!file.ok()) {
@@ -1026,7 +1102,7 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_mo
         return false;
     }
 
-    model.backend = init_backend(n_gpu_layers);
+    model.backend = init_backend(n_gpu_layers, backend);
     if (!model.backend) {
         if (error) *error = "audio8: failed to init a compute backend";
         return false;
@@ -1060,16 +1136,17 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers, codec_mo
     return true;
 }
 
-bool load_codec(const std::string & path, int n_gpu_layers, codec_model & model,
+bool load_codec(const std::string & path, int n_gpu_layers,
+                const std::string & backend, codec_model & model,
                 std::string * error) {
-    return load_codec_impl(path, n_gpu_layers, model, error, /*measure=*/nullptr);
+    return load_codec_impl(path, n_gpu_layers, backend, model, error, /*measure=*/nullptr);
 }
 
 bool load_codec_metadata_only(const std::string & path, int n_gpu_layers,
-                              codec_model & model, fit_load_measure & measure,
-                              std::string * error) {
+                              const std::string & backend, codec_model & model,
+                              fit_load_measure & measure, std::string * error) {
     measure = fit_load_measure{};
-    return load_codec_impl(path, n_gpu_layers, model, error, &measure);
+    return load_codec_impl(path, n_gpu_layers, backend, model, error, &measure);
 }
 
 void free_codec(codec_model & model) {

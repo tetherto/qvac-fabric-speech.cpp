@@ -1,66 +1,49 @@
-# Architecture, pipelines, and repo layout
+# Architecture and repository layout
 
-Part of the [qvac-fabric-speech.cpp documentation](../README.md).
+Part of the [speech-stack documentation](../README.md).
 
-## Architecture
+## Shared runtime
 
-```
-+-----------------------------+  +-----------------------------+
-| third_party/whisper.cpp     |  | engines/parakeet            |
-| speech-to-text              |  | ASR + diarization + EOU     |
-+-----------------------------+  +-----------------------------+
-+-----------------------------+  +-----------------------------+
-| engines/tts                 |  | engines/audiogen            |
-| TTS + cloning + enhancement |  | text-to-music               |
-+-----------------------------+  +-----------------------------+
-                    |                     :
-                    v                     : optional encoder, vocoder,
-   ggml-speech (qvac-ext-ggml@speech)     : codec, and VAE sidecars
-                    |                     v
-                    |                Apple Core ML
-   +--------+-------+-------+---------+
-   v        v       v       v         v
-  CPU     Metal  Vulkan  OpenCL     CUDA
-                        (Adreno)
+The umbrella resolves one installed speech-branch ggml before adding the
+engines. Every enabled engine consumes that dependency; the ggml tree inside
+the Whisper subtree is not compiled by the umbrella. Direct engine builds
+may instead stage their own speech-branch checkout, as their build guides describe.
+
+```text
+Whisper          Parakeet          TTS          AudioGen
+   |                 |             |              |
+   +-----------------+-------------+--------------+
+                     |
+          ggml-speech (qvac-ext-ggml@speech)
+                     |
+       CPU / Metal / Vulkan / OpenCL / CUDA / Hexagon
+
+Selected model stages may also use optional Apple Core ML sidecars.
 ```
 
-Every component consumes one system ggml, so the whole stack shares a single ggml pin and file set. The `ggml/` tree vendored inside the whisper subtree is never compiled.
+Backend and sidecar support varies by model. The
+[root capability overview](../README.md#supported-models) links to the engine
+validation and routing contracts.
 
 ## Pipelines
 
-```
-whisper   wav  -> log-mel -> encoder -> decoder -> text            (+ Silero VAD, + Core ML encoder)
-parakeet  wav  -> log-mel -> FastConformer encoder -> CTC | RNN-T | TDT | EOU | Nemotron | Sortformer
-                                                   -> text | speaker segments | turn boundary
-                             (+ Core ML encoder)
-tts       text -> LM (T3 / Llama / Qwen2.5) -> acoustic tokens -> CFM or flow -> vocoder -> wav
-                                                   (+ LavaSR denoise -> bandwidth extension)
-                                                   (+ Core ML Supertonic vocoder, Audio8 codec)
-audiogen  caption + lyrics -> ACE-Step LM -> FSQ detokenizer -> text encoder
-                           -> condition encoder -> DiT flow matching
-                           -> Oobleck VAE -> 48 kHz stereo   (+ Core ML VAE decoder)
-          short query -> LM inspire (Simple Mode) -> caption + lyrics + metadata
-          caption + lyrics -> LM format (Query Rewriting) -> detailed request
-                           -> same ACE-Step pipeline
-          lyrics + generated audio -> DiT cross-attention probe -> DTW
-                           -> synchronized LRC timestamps
-          generated codes + request -> teacher-forced LM -> quality score
-          audio -> VAE encode -> FSQ tokenize -> LM listener
-                           -> metadata + caption + recovered codes
-          caption + lyrics -> MiniMax Qwen3 LM -> RVQ depth decoder
-                           -> condition encoder -> flow DiT -> vocoder -> stereo
-```
+| Engine | High-level flow | Details |
+|---|---|---|
+| Whisper | Audio → log-mel → encoder/decoder → text; optional VAD and encoder sidecar | [Whisper guide](../third_party/whisper.cpp/README.md) |
+| Parakeet | Audio → features → model-specific encoder/head → text, speakers or turn boundary; MOSS uses a separate transcription engine | [Public APIs](../engines/parakeet/docs/api.md), [MOSS](../engines/parakeet/docs/moss-transcribe.md) |
+| TTS | Text or speech → model-specific generation → acoustic decoder/codec → PCM; optional LavaSR enhancement | [Pipelines and APIs](../engines/tts/docs/api.md#pipelines) |
+| AudioGen | Caption/lyrics or source audio → model-specific conditioning/generation → stereo PCM | [ACE-Step and MiniMax pipelines](../engines/audiogen/docs/pipeline.md) |
 
-## Repo layout
+## Repository layout
 
-```
-CMakeLists.txt              feature-gated umbrella superbuild
-third_party/whisper.cpp/    upstream whisper.cpp, vendored as a git subtree,
-                            pinned @ v1.9.1 (f049fff9); every QVAC delta is
-                            declared in PATCHES.md and enforced by CI
-engines/
-  parakeet/                 ASR + diarization + end-of-utterance (NVIDIA Parakeet family)
-  tts/                      text-to-speech, voice cloning, speech enhancement
-  audiogen/                 music generation (ACE-Step, MiniMax-Music3)
-docs/UPSTREAM-SYNC.md       how to sync the whisper subtree
-```
+| Path | Role |
+|---|---|
+| `CMakeLists.txt` | Feature-gated umbrella superbuild |
+| `third_party/whisper.cpp/` | Upstream Whisper git subtree; release recorded in [UPSTREAM_PIN](../third_party/whisper.cpp/UPSTREAM_PIN), deliberate deltas in [PATCHES.md](../third_party/whisper.cpp/PATCHES.md) |
+| `engines/parakeet/` | Native ASR, diarization, EOU and MOSS transcription |
+| `engines/tts/` | Synthesis, cloning, sound effects, speech-to-speech and enhancement |
+| `engines/audiogen/` | ACE-Step and MiniMax music generation/editing |
+| `engines/*/docs/` | Engine build, model, API, CLI, backend and validation guides |
+| `engines/*/docs/history/` | Archived implementation and integration records |
+| `scripts/benchmarks/` | Shared performance/quality tooling and operational guides |
+| `docs/UPSTREAM-SYNC.md` | Whisper subtree synchronization procedure |

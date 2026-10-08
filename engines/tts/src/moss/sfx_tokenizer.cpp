@@ -27,6 +27,13 @@ std::vector<int32_t> truncate_ids(const std::vector<int> & ids, size_t limit) {
     return std::vector<int32_t>(ids.begin(), ids.begin() + (std::ptrdiff_t) count);
 }
 
+uint64_t map_storage(const std::unordered_map<std::string, int> & values) {
+    uint64_t bytes = values.bucket_count() * sizeof(void *) +
+        values.size() * (sizeof(std::unordered_map<std::string, int>::value_type) + sizeof(void *));
+    for (const auto & value : values) bytes += value.first.capacity() + 1;
+    return bytes;
+}
+
 } // namespace
 
 struct SfxTokenizer::Impl {
@@ -47,6 +54,10 @@ SfxTokenizer::SfxTokenizer(const SfxModel & model) : impl_(new Impl) {
 }
 
 SfxTokenizer::~SfxTokenizer() = default;
+
+uint64_t SfxTokenizer::storage_bytes() const {
+    return sizeof(Impl) + map_storage(impl_->tokenizer.vocab) + map_storage(impl_->tokenizer.merge_rank);
+}
 
 std::vector<int32_t> SfxTokenizer::encode(const std::string & text) const {
     if (text.empty()) {

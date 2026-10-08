@@ -125,6 +125,12 @@ ggml_backend_t init_requested_backend(const std::string & requested,
 
 std::string dsp_library_path_with(const std::string & dir, const char * current);
 
+ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t backend);
+
+bool backend_shares_host_memory(ggml_backend_t backend);
+
+void backend_memory(ggml_backend_t backend, size_t & free_bytes, size_t & total_bytes);
+
 // Convenience wrapper that picks up the registered CPU device and
 // returns its init handle. Mirrors parakeet-cpp's
 // `init_cpu_backend()`. Never throws; returns nullptr when the

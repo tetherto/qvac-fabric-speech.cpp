@@ -4,6 +4,7 @@
 #include "backend_util.h"
 #include "gguf_stream.h"
 #include "sched_dispatch.h"
+#include "moss/fit_measure.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -38,6 +39,9 @@ constexpr int      MAX_CONTEXT          = 1 << 16;
 
 constexpr const char * ENCODER_ARCH = "moss-tts-audio-encoder";
 constexpr const char * DECODER_ARCH = "moss-tts-audio-decoder";
+constexpr const char * OWNER = "moss codec";
+constexpr const char * SIDECAR_STAGE = "codec decoder";
+constexpr int64_t REPLAY_WINDOW_FRAMES = 750;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss codec: " + message);
@@ -176,6 +180,15 @@ struct Codec::Impl {
     std::vector<BlockStream> streams;
     int stream_channels = 0;
     int64_t frames_decoded = 0;
+    bool measure_only = false;
+    uint64_t graph_host_bytes = 0;
+
+    std::unique_ptr<CodecSidecarModel> sidecar;
+    std::unique_ptr<CodecSidecarStream> sidecar_stream;
+    bool strict = false;
+    StageBackends backends;
+    std::vector<int32_t> stream_codes;
+    bool ggml_stream_open = false;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
@@ -538,6 +551,10 @@ struct Codec::Impl {
         if (downsample <= 0) {
             fail("invalid frame geometry");
         }
+        if (measure_only) {
+            mark_fit_tensors(weights);
+            return;
+        }
         upload_weights(path);
     }
 
@@ -566,6 +583,7 @@ struct Codec::Impl {
             ggml_free(graph_ctx);
             graph_ctx = nullptr;
         }
+        graph_host_bytes = 0;
         inputs_i32.clear();
         inputs_f32.clear();
         cache_writes.clear();
@@ -579,6 +597,7 @@ struct Codec::Impl {
     ggml_tensor * input_i32(std::vector<int32_t> data) {
         ggml_tensor * tensor = ggml_new_tensor_1d(graph_ctx, GGML_TYPE_I32, (int64_t) data.size());
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_i32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -586,6 +605,7 @@ struct Codec::Impl {
     ggml_tensor * input_f32(std::vector<float> data, int64_t ne0, int64_t ne1) {
         ggml_tensor * tensor = ggml_new_tensor_2d(graph_ctx, GGML_TYPE_F32, ne0, ne1);
         ggml_set_input(tensor);
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(tensor));
         inputs_f32.push_back({tensor, std::move(data)});
         return tensor;
     }
@@ -755,7 +775,8 @@ struct Codec::Impl {
         band.key_start = block.context > 0
                 ? std::max<int64_t>(0, first_query - (block.context - 1)) : 0;
         band.key_count = first_query + query_count - band.key_start;
-        band.mask = input_f32(banded_causal_mask(first_query, query_count,
+        band.mask = input_f32(measure_only ? std::vector<float>() :
+                banded_causal_mask(first_query, query_count,
                 band.key_start, band.key_count, block.context),
                 band.key_count, query_count);
         return band;
@@ -929,6 +950,7 @@ struct Codec::Impl {
         for (ggml_tensor * write : cache_writes) {
             ggml_build_forward_expand(graph, write);
         }
+        if (measure_only) return graph;
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer})) {
             fail("scheduler initialization failed");
         }
@@ -979,6 +1001,10 @@ struct Codec::Impl {
                 create_block_stream(modules[im].transformer, streams[im]);
             }
         }
+        if (measure_only) {
+            mark_fit_tensors(stream_ctx);
+            return;
+        }
         stream_buffer = ggml_backend_alloc_ctx_tensors(stream_ctx, backend);
         if (!stream_buffer) {
             fail("stream state allocation failed");
@@ -1005,6 +1031,131 @@ struct Codec::Impl {
         return read_f32(output);
     }
 
+    CodecGeometry sidecar_geometry() const {
+        CodecGeometry geometry;
+        geometry.code_dim = quantizer.output_dim;
+        geometry.hop = (int) downsample;
+        int rate = 1;
+        for (const Module & module : modules) {
+            if (module.is_transformer) {
+                const TransformerBlock & block = module.transformer;
+                geometry.stages.push_back({rate, block.context, block.d_model / block.num_heads, block.max_period});
+            } else {
+                rate *= module.patch_size;
+            }
+        }
+        return geometry;
+    }
+
+    void attach_sidecar(std::unique_ptr<CodecSidecarModel> model, bool strict_mode) {
+        sidecar = std::move(model);
+        sidecar_stream = sidecar ? std::make_unique<CodecSidecarStream>(*sidecar, sidecar_geometry()) : nullptr;
+        strict = strict_mode;
+    }
+
+    void open_sidecar(const std::string & path) {
+        const CoremlPolicy policy = read_coreml_policy();
+        attach_sidecar(open_codec_sidecar(path, sidecar_geometry(), policy), policy.strict);
+    }
+
+    void retire_sidecar() {
+        sidecar_stream.reset();
+        sidecar.reset();
+    }
+
+    std::vector<float> quantizer_latents(const std::vector<int32_t> & codes, int n_channels) {
+        begin_graph();
+        ggml_tensor * latents = decoder_quantizer(codes, (int64_t) codes.size() / n_channels, n_channels);
+        ggml_cgraph * graph = finish_graph(latents);
+        compute(graph);
+        return read_f32(latents);
+    }
+
+    bool decode_on_sidecar(const std::vector<int32_t> & codes, int n_channels, std::vector<float> & pcm) {
+        if (!sidecar || !sidecar_stream->decode(quantizer_latents(codes, n_channels), pcm)) {
+            retire_sidecar();
+            return false;
+        }
+        frames_decoded += (int64_t) codes.size() / n_channels;
+        backends.note(sidecar->label());
+        return true;
+    }
+
+    std::vector<float> decode_batch(const std::vector<int32_t> & codes, int n_channels) {
+        require_sidecar_when_strict();
+        backends.note(GGML_STAGE_BACKEND);
+        return run_decode(codes, n_channels, false);
+    }
+
+    void require_sidecar_when_strict() const {
+        if (strict && !sidecar) {
+            fail_strict(OWNER, SIDECAR_STAGE);
+        }
+    }
+
+    bool sidecar_takes_pieces(int piece_frames) const {
+        return sidecar && piece_frames > 0 && piece_frames <= sidecar->chunk_frames();
+    }
+
+    bool begin_sidecar_stream(int piece_frames) {
+        if (!sidecar_takes_pieces(piece_frames)) {
+            return false;
+        }
+        if (sidecar_stream->begin()) {
+            return true;
+        }
+        retire_sidecar();
+        return false;
+    }
+
+    void begin_stream(int n_channels, int piece_frames) {
+        stream_channels = resolve_channels(n_channels);
+        stream_codes.clear();
+        ggml_stream_open = false;
+        if (!begin_sidecar_stream(piece_frames)) {
+            open_ggml_stream();
+        }
+    }
+
+    void open_ggml_stream() {
+        reset_streams();
+        ggml_stream_open = true;
+    }
+
+    void replay_window(const std::vector<int32_t> & history, size_t begin, size_t end) {
+        run_decode(std::vector<int32_t>(history.begin() + (std::ptrdiff_t) begin, history.begin() + (std::ptrdiff_t) end),
+                stream_channels, true);
+    }
+
+    void replay_on_ggml(const std::vector<int32_t> & history, size_t count) {
+        open_ggml_stream();
+        const int64_t counted = frames_decoded;
+        const size_t window = (size_t) REPLAY_WINDOW_FRAMES * (size_t) stream_channels;
+        for (size_t begin = 0; begin < count; begin += window) {
+            replay_window(history, begin, std::min(count, begin + window));
+        }
+        frames_decoded = counted;
+    }
+
+    std::vector<float> decode_stream_codes(const std::vector<int32_t> & codes) {
+        std::vector<float> pcm;
+        if (!ggml_stream_open && sidecar) {
+            const size_t decoded_before = stream_codes.size();
+            stream_codes.insert(stream_codes.end(), codes.begin(), codes.end());
+            if (decode_on_sidecar(codes, stream_channels, pcm)) {
+                return pcm;
+            }
+            require_sidecar_when_strict();
+            replay_on_ggml(stream_codes, decoded_before);
+        }
+        require_sidecar_when_strict();
+        if (!ggml_stream_open) {
+            open_ggml_stream();
+        }
+        backends.note(GGML_STAGE_BACKEND);
+        return run_decode(codes, stream_channels, true);
+    }
+
     int resolve_channels(int requested) const {
         const int n_channels = requested > 0 ? requested : quantizer.num_quantizers;
         if (n_channels > quantizer.num_quantizers) {
@@ -1029,8 +1180,40 @@ struct Codec::Impl {
 
 };
 
-Codec::Codec(const std::string & path, bool use_gpu, int n_threads) : impl_(new Impl) {
+Codec::Codec(const std::string & path, bool use_gpu, int n_threads, bool measure_only) : impl_(new Impl) {
+    impl_->measure_only = measure_only;
     impl_->load(path, use_gpu, n_threads);
+    if (!impl_->encoder && !measure_only) {
+        impl_->open_sidecar(path);
+    }
+}
+
+FitResult Codec::measure(int64_t length, int n_channels, bool streaming) {
+    if (!impl_->measure_only) fail("measurement requires a metadata-only model");
+    FitResult result = fit_device(impl_->backend);
+    result.device.weights_bytes = measure_fit_tensors(impl_->weights, impl_->backend);
+    if (streaming) {
+        impl_->reset_streams();
+        result.device.state_bytes = measure_fit_tensors(impl_->stream_ctx, impl_->backend);
+        for (auto & stream : impl_->streams) {
+            stream.position = stream.capacity;
+            stream.cached = stream.capacity;
+        }
+    }
+    impl_->begin_graph();
+    ggml_tensor * output = impl_->encoder
+        ? impl_->build_encode({}, align_up(length, impl_->downsample))
+        : impl_->build_decode(std::vector<int32_t>(length * n_channels), length, n_channels, streaming);
+    const auto price = measure_fit_graph(impl_->backend, impl_->finish_graph(output), GRAPH_NODES);
+    result.device.codec_compute_bytes = price.device_bytes;
+    result.host_bytes = fitutil::sat_add(price.host_bytes, impl_->graph_host_bytes);
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_nbytes(output));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, gguf_get_meta_size(impl_->file));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->metadata));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->weights));
+    result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->graph_ctx));
+    if (impl_->stream_ctx) result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->stream_ctx));
+    return result;
 }
 
 Codec::~Codec() = default;
@@ -1067,27 +1250,46 @@ std::vector<int32_t> Codec::encode(const std::vector<float> & pcm) {
 std::vector<float> Codec::decode(const std::vector<int32_t> & codes, int n_channels) {
     const int channels = impl_->resolve_channels(n_channels);
     impl_->validate_codes(codes, channels);
-    return impl_->run_decode(codes, channels, false);
+    return impl_->decode_batch(codes, channels);
 }
 
-void Codec::begin_decode_stream(int n_channels) {
+void Codec::begin_decode_stream(int n_channels, int piece_frames) {
     if (impl_->encoder) {
         fail("decode streams need a decoder checkpoint");
     }
-    impl_->stream_channels = impl_->resolve_channels(n_channels);
-    impl_->reset_streams();
+    impl_->begin_stream(n_channels, piece_frames);
 }
 
 std::vector<float> Codec::decode_stream(const std::vector<int32_t> & codes) {
-    if (impl_->stream_ctx == nullptr) {
+    if (impl_->stream_channels == 0) {
         fail("decode_stream called before begin_decode_stream");
     }
     impl_->validate_codes(codes, impl_->stream_channels);
-    return impl_->run_decode(codes, impl_->stream_channels, true);
+    return impl_->decode_stream_codes(codes);
 }
 
 int64_t Codec::frames_decoded() const {
     return impl_->frames_decoded;
+}
+
+CodecGeometry Codec::sidecar_geometry() const {
+    return impl_->sidecar_geometry();
+}
+
+void Codec::attach_sidecar(std::unique_ptr<CodecSidecarModel> sidecar, bool strict) {
+    impl_->attach_sidecar(std::move(sidecar), strict);
+}
+
+bool Codec::on_coreml() const {
+    return impl_->sidecar != nullptr;
+}
+
+void Codec::begin_run() {
+    impl_->backends.begin();
+}
+
+std::string Codec::run_backend() const {
+    return impl_->backends.summary();
 }
 
 std::vector<float> decode_segments(Codec & codec, const std::vector<std::vector<int32_t>> & segments,
@@ -1118,7 +1320,7 @@ std::vector<float> decode_in_windows(Codec & codec, const std::vector<int32_t> &
     const size_t channels = (size_t) (n_channels > 0 ? n_channels : codec.num_quantizers());
     const size_t stride = channels * (size_t) window_frames;
     std::vector<float> pcm;
-    codec.begin_decode_stream(n_channels);
+    codec.begin_decode_stream(n_channels, (int) window_frames);
     for (size_t begin = 0; begin < codes.size(); begin += stride) {
         const size_t end = std::min(codes.size(), begin + stride);
         const std::vector<float> rendered = codec.decode_stream(

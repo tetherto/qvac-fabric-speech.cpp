@@ -166,3 +166,59 @@ gate at 15 %. On the RTX 5090 a
 one-hour input takes 1.0 s. The engine feeds the long-form session in 30 s
 blocks, so its sample ring stays bounded instead of holding a copy of the
 whole input.
+
+## ASR addon CI (2026-08-12)
+
+
+`RTF = inference_time / audio_duration`; lower is faster. The recorded 2026-08-12
+Linux x86-64 CI run used q8_0 registry models, one warmup, and five timed runs
+on an NVIDIA RTX 4000 SFF Ada:
+
+| Model | CPU RTF | CPU wall | Vulkan RTF | Vulkan wall |
+|---|---:|---:|---:|---:|
+| CTC | 0.112 | 2256 ms | 0.0022 | 43 ms |
+| TDT | 0.130 | 2607 ms | 0.0044 | 88 ms |
+| EOU | 0.051 | 1034 ms | 0.0034 | 68 ms |
+| Sortformer | 0.046 | 922 ms | 0.0019 | 38 ms |
+| Sortformer streaming | 0.032 | 646 ms | 0.0034 | 69 ms |
+
+The same run also covers the self-hosted Apple M4 Mac mini (Metal, q8_0):
+CTC 0.0113, TDT 0.0150, EOU 0.0097, Sortformer 0.0061, Sortformer
+streaming 0.0070.
+
+Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs/31603189415),
+12 August 2026, runner `qvac-ubuntu2204-x64-gpu`, benchmarking the published
+`@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
+2026-08-03).
+
+## Multi-machine benchmark (2026-09)
+
+Maintainer-run measurement of Parakeet TDT 0.6b v3 across four machines and
+seven device-backend lanes, timed from outside the process — the engine's own
+timer is not quoted. Compute per transcription is an external two-point
+slope, so model load, process start-up, and wav decode cancel out of the
+number. Clips are byte-identical on all machines: `jfk.wav` 11.00 s,
+`ls90.wav` 98.49 s. Build: engine `46afe7d9`, ggml `speech@157b299f`,
+`parakeet-tdt-0.6b-v3.q8_0.gguf` (715 MiB, 100 % Q8_0 body).
+
+| Device | Backend | short 11.0 s | long 98.49 s |
+|---|---|--:|--:|
+| MacBook Air M5 | Metal | 60.53 ms (RTF 0.0055) | 755.80 ms (RTF 0.0077) |
+| MacBook Air M5 | CPU | 445.44 ms (RTF 0.0405) | withheld |
+| RTX 3080 desktop | CUDA | 13.49 ms (RTF 0.0012) | 115.51 ms (RTF 0.0012) |
+| RTX 3080 desktop | Vulkan | 15.41 ms (RTF 0.0014) | 143.98 ms (RTF 0.0015) |
+| Strix Halo | Vulkan | 30.21 ms (RTF 0.0027) | 228.27 ms (RTF 0.0023) |
+| RTX 5090 box | CUDA | 8.00 ms (RTF 0.0007) | 58.46 ms (RTF 0.0006) |
+| RTX 5090 box | Vulkan | 11.56 ms (RTF 0.0011) | 69.51 ms (RTF 0.0007) |
+
+Peak GPU memory on the long clip (`nvidia-smi` per-process sampling at 5 Hz,
+warm run only; RADV and Metal expose no equivalent counter): 2008 MiB on the
+RTX 3080 under CUDA and 1748 MiB under Vulkan; 2386 MiB on the RTX 5090
+under CUDA and 1935 MiB under Vulkan.
+
+Accuracy: jfk 0.00 % and ls90 0.80 % WER (`compute-wer.py`, `english`
+normaliser) on every lane; the statement of record stays the 500-utterance
+LibriSpeech run at 2.15–2.22 % across backends and quantisation tiers.
+
+Method, caveats, CI snapshots, and the CUDA/Metal decode
+optimization history: [docs/performance.md](performance.md).

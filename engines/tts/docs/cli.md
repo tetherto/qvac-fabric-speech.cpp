@@ -19,48 +19,13 @@ Part of the [tts engine documentation](../README.md).
 | `build/pocket-cli` | Pocket text-to-speech and metadata-only memory preflight |
 | `build/moss-cli` | MOSS Delay text-to-speech and zero-shot voice cloning; `--mode sfx` for MOSS-SoundEffect text-to-sound-effects; `--mode s2s` for MOSS-Speech speech-to-speech |
 
-`supertonic-bench` is built only by `TTS_CPP_BUILD_TESTS`; it is not in the
-executable gate. The tests also produce the following representative
-validation harnesses:
+For parity harnesses and their build/fixture gates, see
+[testing.md](testing.md#validation-harness-index). ggml acquisition and build
+paths are documented in [build.md](build.md#build-paths).
 
-| Binary | What it does |
-|--------|--------------|
-| `build/supertonic-bench` | Per-stage Supertonic benchmark harness (`--text` / `--out` / `--runs`); machine-readable RTF + per-stage timings |
-| `build/test-s3gen`            | Staged numerical validation of S3Gen encoder + CFM vs Python dumps |
-| `build/test-resample`         | Round-trip SNR of the C++ Kaiser-windowed sinc resampler + output-frequency helpers (validate / passthrough / ratio) |
-| `build/test-output-sample-rate` | `--output-sample-rate` on `chatterbox::Engine`: native/16 kHz batch, out-of-range rejection, streaming `pcm == concat(chunks)` invariant (needs the MTL GGUFs) |
-| `build/test-voice-features`   | 24 kHz 80-ch mel parity (prompt_feat) |
-| `build/test-fbank`            | 16 kHz 80-ch Kaldi fbank parity |
-| `build/test-voice-encoder`    | VoiceEncoder 256-d speaker embedding parity |
-| `build/test-campplus`         | CAMPPlus 192-d embedding parity |
-| `build/test-voice-embedding`  | wav → fbank → CAMPPlus end-to-end parity |
-| `build/test-s3tokenizer`      | S3TokenizerV2 log-mel + speech-token parity |
-| `build/test-tts-streaming`        | Per-chunk CFM + HiFT parity for the streaming pipeline (B1) |
-| `build/test-mtl-tokenizer`    | Multilingual grapheme tokenizer parity vs the HF reference |
-| `build/test-t3-mtl`           | End-to-end MTL T3 (Llama-520M) forward-pass parity |
-| `build/test-t3-mtl-stages`    | Staged MTL T3 parity (cond/text/inputs/layers/head) |
-| `build/test-cpu-caches`       | CPU-side persistent-cache validation (time_mlp / time_emb / cfm_estimator / weight_mirror caches that amortise per-synth overhead on the multilingual CPU path); no-arg invocation runs the bit-cast cache-key + initial-state checks, GGUF arg runs the warm-cache + bit-exact pipeline check |
-| `build/test-t3-caches`        | T3 step-graph cache validation (no-arg = initial-state, GGUF arg = warm-cache + bit-exact end-to-end check) |
-| `build/test-supertonic-*`     | Per-stage Supertonic parity harnesses (`preprocess`, `vocoder` ± `trace` / `pointwise`, `duration` ± `trace`, `text-encoder` ± `trace`, `vector` ± `trace`, `pipeline`); each takes `MODEL.gguf REF_DIR` |
-| `build/test-metal-ops`        | Metal-only: parity check for `diag_mask_inf`, `pad_ext`, and fast `conv_transpose_1d` (only useful when built with `-DGGML_METAL=ON`) |
-| `build/test-cosyvoice-time-emb` | Sinusoidal timestep embedding for the CosyVoice3 flow DiT: sin/cos layout, the 1000x scale, the four-decade frequency schedule, batch-row independence (no GGUF) |
-| `build/test-lavasr-gguf-load`   | Fail-closed GGUF loading for both LavaSR stages: missing, empty, truncated, unmarked, cross-architecture, and tensorless files (no GGUF) |
-
-The test targets register with CTest. From a single-config build directory use
-`ctest -L unit` or `ctest -L fixture`; with Visual Studio or another
-multi-config generator add `-C Release`.
-
-### How `TTS_CPP_USE_SYSTEM_GGML=ON` resolves ggml
-
-When the option is `ON` (the default in this in-tree subtree), the
-top-level `CMakeLists.txt` swaps `add_subdirectory(ggml)` for
-`find_package(ggml CONFIG REQUIRED)` and aliases the imported
-`ggml::ggml` target onto the plain `ggml` name that the rest of the
-build uses.  No local `./ggml/` clone is read.  The imported package
-ships the equivalent of the patches the standalone `chatterbox.cpp`
-repo applies via `patches/` - the `qvac-ext-ggml/speech` branch
-carries them pre-applied so consumers don't maintain a patch trail.
-This shape mirrors `stable-diffusion.cpp`'s `SD_USE_SYSTEM_GGML`.
+Commands below run from `engines/tts` after a direct engine build. For umbrella
+builds substitute `build/engines/tts/` from the repository root; multi-config
+generators also add the selected configuration directory.
 
 ## One-time: convert weights
 
@@ -77,7 +42,7 @@ python scripts/convert-t3-mtl-to-gguf.py            --out models/chatterbox-t3-m
 python scripts/convert-s3gen-to-gguf.py --variant mtl --out models/chatterbox-s3gen-mtl.gguf
 
 # --- Multilingual, quantised (recommended for speed) ---
-# Matches the RTF numbers in the benchmark table above.  --quant accepts
+# Used by the dated CI benchmark in docs/performance.md. --quant accepts
 # {f32,f16,q8_0,q5_0,q4_0} on convert-s3gen-to-gguf.py (default f16) and
 # {f16,q8_0,q5_0,q4_0} on convert-t3-mtl-to-gguf.py (default f16, since
 # the T3 storage baseline is already F16).  The flag controls the large
@@ -99,15 +64,14 @@ embed the full HuggingFace `tokenizers.json` blob (plus a Korean-Jamo /
 NFKD Unicode table for offline preprocessing), so in both cases you don't
 need to keep the source tokenizer files around on disk.
 
-The quantisation flag on `convert-s3gen-to-gguf.py` is new as of §3.20 —
-it's pure data-format work, so the binary needs no changes and every
-backend (CPU, Metal, Vulkan, CUDA) picks up the faster matmul kernels
-transparently.  The per-tensor decision lives in `should_quantize()`
+The quantisation flag on `convert-s3gen-to-gguf.py` changes storage
+without requiring a different runtime. CPU, Metal, Vulkan and CUDA use
+their corresponding quantized matmul kernels.  The per-tensor decision lives in `should_quantize()`
 inside `scripts/requantize-gguf.py` (single source of truth shared
 with the offline rewriter): biases, norm scales, embedding tables,
 spectral filterbanks, voice-cloning preprocessors (CAMPPlus,
 VoiceEncoder, S3TokenizerV2) and any tensor whose reduction dim isn't
-block-aligned all stay at full precision.  See `PROGRESS.md §3.20` for
+block-aligned all stay at full precision.  See the [archived Chatterbox port report](history/chatterbox-port.md) §3.20 for
 the full deny-list and resulting size / speed numbers.
 
 You should now have (either pair is usable on its own):
@@ -130,8 +94,8 @@ models/
                                     + CAMPPlus + S3TokenizerV2 + built-in voice
 
   # Optional quantised multilingual variants — numerically very close to F16 but
-  # ~1.5-2x faster on every backend (CPU/Metal/Vulkan/CUDA) due to lower weight
-  # memory bandwidth.  Recommended for production use; see benchmark table above.
+  # lower weight bandwidth. Recorded speedups and quality tradeoffs are in
+  # docs/performance.md; validate the chosen tier for your workload.
   chatterbox-t3-mtl-q4_0.gguf     (~344 MB) — Q4_0 T3 Llama-520M
   chatterbox-s3gen-mtl-q4_0.gguf  (~685 MB) — Q4_0 MTL S3Gen
 ```
@@ -149,8 +113,8 @@ python scripts/dump-s3gen-reference.py \
 Both GGUFs can be quantized to `Q8_0` (near-lossless), `Q5_0`, or
 `Q4_0` (different CFM sample but same subjective quality, smaller).
 The same machinery works on the multilingual GGUFs too — the
-benchmark numbers at the top of this README use the q4_0 variants
-shown there.  `llama-quantize` doesn't recognize the `chatterbox` /
+[dated CI benchmarks](performance.md#ci-benchmarks-2026-08-12-linux-x86-64)
+use q4_0 variants.  `llama-quantize` doesn't recognize the `chatterbox` /
 `chatterbox-s3gen` custom architectures, so we ship a small standalone
 rewriter that works on any of the four GGUFs:
 
@@ -232,8 +196,13 @@ That's equivalent to running the binary directly:
   --out         /tmp/out.wav
 ```
 
+Native language codes: `en`, `es`, `fr`, `de`, `it`, `pt`, `nl`, `pl`,
+`tr`, `sv`, `da`, `fi`, `no`, `el`, `ms`, `sw`, `ar`, `ko`. Japanese,
+Hebrew, Russian, Chinese and Hindi require external preprocessing; the
+following sections describe those paths.
+
 **Multilingual** takes the same flags plus a required `--language CODE`
-(one of the tier-1 codes listed at the top of the README) and runs all the
+(one of the native language codes listed below) and runs all the
 CFG / perceiver / 10-step-CFM machinery automatically based on the GGUF's
 `chatterbox.variant` metadata:
 
@@ -254,7 +223,7 @@ the same way on both variants.
 `--cfm-steps N` lowers the CFM Euler step count for non-streaming
 synthesis (default 10 for Multilingual's standard CFM).  N=7 saves ~22%
 of S3Gen wall time at log-mel cosine 0.995 vs the N=10 reference and is
-the recommended quality knee on M3 Ultra (see [`PROGRESS.md §3.21`](../PROGRESS.md));
+the recommended quality knee on M3 Ultra (see the [Chatterbox port archive §3.21](history/chatterbox-port.md));
 N=6 is too aggressive (cosine 0.990 right at the threshold, PCM cosine
 drops to 0.88).  Streaming chunks ignore this flag and use
 `--stream-cfm-steps` instead.
@@ -446,7 +415,9 @@ inference cost (well under real-time on any GPU backend).
   `-DGGML_METAL=ON` / `-DGGML_CUDA=ON` / `-DGGML_VULKAN=ON`.  Pass `99`
   (or any large number) to move everything.
 - `--backend NAME` (`supertonic-cli`, `supertonic-bench`,
-  `supertonic-fit-params`) — run on one device: `cpu`, `opencl`, `hexagon`
+  `supertonic-fit-params`, `parler-cli`, `parler-bench`,
+  `parler-fit-params`, `cosyvoice-cli`, `cosyvoice-bench`,
+  `cosyvoice-fit-params`) — run on one device: `cpu`, `opencl`, `hexagon`
   (the Snapdragon HTP0 NPU) or an exact ggml device name. It overrides
   `--n-gpu-layers` and fails instead of falling back when the device is
   missing; the automatic walk never picks Hexagon.

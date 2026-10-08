@@ -129,9 +129,9 @@ backends are the follow-up to this change.
 Three GGUFs, because the halves have different lifetimes: the backbone and
 the codec decoder are needed for every synthesis, the codec encoder only for
 voice cloning. Checkpoints come from
-[OpenMOSS/MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS/MOSS-TTS-v1.5) (or a
+[OpenMOSS-Team/MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (or a
 MOSS-TTSD checkpoint with the same architecture) and
-[OpenMOSS/MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS/MOSS-Audio-Tokenizer)
+[OpenMOSS-Team/MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer)
 for the codec.
 
 ```sh
@@ -262,6 +262,60 @@ feed-forward output exceeds that range; the down projection therefore runs
 on inputs scaled by a power of two and rescales its f32 result, which keeps
 CPU synthesis finite and leaves GPU results unchanged.
 
+### Core ML codec decoder
+
+On Apple builds with `TTS_CPP_COREML=ON`, the codec decoder's transformer
+stack can run as a Core ML model; the backbone, the codec encoder, and the
+quantizer that sums the residual codebooks into latents stay on ggml. The
+sidecar keeps every attention layer's keys and values in Core ML state, so it
+needs macOS 15 or iOS 18; on older systems it is not attached.
+
+```sh
+python scripts/export-moss-codec-coreml.py \
+    --gguf moss-codec-decoder-f16.gguf --compile-dir .
+```
+
+The engine looks for `<stem>.mlmodelc` beside the decoder GGUF, with any
+quantization tag dropped (`moss-codec-decoder.mlmodelc`). Each call decodes 25
+latent frames (2 s; `--chunk-frames` changes it) and carries a commit flag. A
+full chunk commits its keys and values to the state; a shorter tail is padded
+and decoded without committing, which is exact because the decoder is causal,
+and the next full chunk decodes those frames again without emitting their audio
+twice, so the streamed audio matches a single decode. The engine passes each
+call's rotary tables and band masks, computed in fp32; the exporter only
+reorders the rotary pairs. The ggml codec computes GELU with the tanh
+approximation, while upstream uses erf (the two decodes agree at cosine
+0.999998); the exporter follows ggml by default, and `--gelu erf` follows
+upstream.
+
+Only streams whose pieces fit in one sidecar call use it, which is
+`synthesize_stream` with the default `stream_chunk_frames` of 25. The ggml codec
+decodes a batch segment, or a longer streamed piece, in one pass, and that beats
+the sidecar's 25-frame calls, so batch synthesis, the 60-second windows of long
+segments, and streams with larger pieces stay on ggml. If a call fails, the
+engine retires the sidecar, replays the stream's codes so far through the ggml
+codec to rebuild its cache, and continues there without repeating audio.
+`Engine::codec_on_coreml()` says whether a sidecar is attached, and
+`SynthesisResult::codec_backend` reports where the request decoded: `ggml`, the
+Core ML placement label, or `mixed`. The CLI appends the placement to its
+summary line. `MOSS_COREML_DISABLE`, `MOSS_COREML_STRICT`, and
+`MOSS_COREML_COMPUTE_UNITS` work as for the
+[SoundEffect sidecars](#core-ml-dit-and-vae); the sidecar's state needs the GPU,
+so under `cpu_and_ane` it does not run and the codec stays on ggml.
+
+`bench-moss-coreml` streams 20 s of codes in 25-frame pieces through both codecs
+(f16 decoder, median of five after a warm-up, measured 2026-10-08):
+
+| Machine | ggml Metal | Core ML (default) |
+|---|---:|---:|
+| Mac mini M4 | 742 ms | 720 ms (1.03x) |
+| M3 Ultra | 380 ms | 337 ms (1.13x) |
+
+The audio matches the ggml codec at cosine 0.9998. The same 20 s decoded as one
+batch took 512 ms on ggml and 700 ms on the sidecar on the M4 (0.73x), and
+114 ms against 330 ms on the M3 Ultra (0.35x), which is why batch decodes stay
+on ggml. Under `all` the M4 stream took 814 ms (0.89x).
+
 ### Test
 
 The suites build with `TTS_CPP_BUILD_TESTS` and need no model downloads.
@@ -277,7 +331,18 @@ cancels it from another thread. `test-moss-cli` covers the flag surface and
 runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
 registered when an interpreter is available, skips without numpy/gguf)
 fabricates tiny checkpoints on disk, runs the converters, and validates the
-emitted GGUFs.
+emitted GGUFs. `test-moss-codec-coreml` covers the codec sidecar's routing
+without Core ML, through a causal stand-in model: the rotary tables and band
+masks, uneven streamed pieces against one causal pass, a restarted stream,
+chunk-sized streams on the sidecar, batch decodes and longer pieces on ggml, a
+failed chunk that retires it and resumes on ggml with the full history, strict
+mode, and the sidecar name rule. `test-moss-codec-coreml-exporter` (Python; skips without
+numpy or torch) decodes a tiny codec chunk by chunk through the exporter's
+cached keys and values with the engine's commit protocol and checks it against
+one pass and an independent NumPy decoder; with coremltools it also checks the
+converted program's inputs, output, and states. The on-device check is
+`test-moss-coreml-parity`, described in the
+[MOSS-Speech test notes](#moss-speech).
 
 ## MOSS-SoundEffect
 
@@ -377,6 +442,75 @@ VAE decodes only the frames that cover the requested length, in 256-frame
 windows with 32 frames of context on each side, and the output is cropped to
 the exact sample count.
 
+### Core ML DiT and VAE
+
+On Apple builds with `TTS_CPP_COREML=ON`, the DiT and the VAE decoder can each
+run as a Core ML model; the text encoder and the sampler stay on ggml. Each
+stage is a separate sidecar, so either can be deployed without the other.
+
+```sh
+python scripts/export-moss-sfx-coreml.py --gguf moss-sfx-v2-f16.gguf --stage dit --compile-dir .
+python scripts/export-moss-sfx-coreml.py --gguf moss-sfx-v2-f16.gguf --stage vae --compile-dir .
+```
+
+The engine looks for `<stem>-dit.mlmodelc` and `<stem>-vae.mlmodelc` beside
+the GGUF, with any quantization tag dropped (`moss-sfx-v2-dit.mlmodelc`,
+`moss-sfx-v2-vae.mlmodelc`). The exporter dequantizes any GGUF and writes an
+fp16 program (`--precision float32` for fp32, `--palettize 8|6|4` for
+palettized weights); `--parity-dir` checks the PyTorch rebuild against the
+dumps of `scripts/dump-moss-sfx-reference.py` before exporting. All three MOSS
+exporters use the environment in
+[`engines/parakeet/scripts/requirements-coreml.txt`](../../parakeet/scripts/requirements-coreml.txt).
+Conversion runs on Linux too; `--compile-dir` calls `xcrun coremlcompiler`.
+
+The DiT sidecar computes one velocity over the full 30-second latent, the
+same shape the ggml DiT always runs. The engine computes the timestep's
+sinusoidal embedding in fp32 and passes it in, because fp16 cannot hold the
+phase of a timestep near 1000; the exporter reorders the rotary pairs of the
+query and key rows so the attention scores are unchanged. The VAE sidecar
+decodes a fixed window of 320 latent frames (`--window` changes it): the ggml
+decoder's 256-frame window with its 32 frames of context on each side, so each
+call keeps 256 frames; windows at the ends of the latent shift inward instead
+of padding. The
+exporter rewrites the transposed convolutions as stride-phase convolutions,
+evaluates the Snake sine with a polynomial (`--snake sin` keeps Core ML's
+sine), and caps each Snake `1 / alpha` at 60000, because one released channel
+has `alpha` near 8e-6 and its inverse overflows fp16.
+
+A sidecar whose shapes do not match the model is not attached. A failed DiT
+call is retired and that step and the rest of the request run on ggml; a
+failed VAE window sends the whole decode to ggml. `SoundEffectEngine::dit_on_coreml()`
+and `vae_on_coreml()` say whether each sidecar is attached, and
+`SoundEffectResult::dit_backend` and `vae_backend` report where the request
+ran: `ggml`, the Core ML placement label (`coreml-all`, `coreml-gpu`,
+`coreml-ane`, `coreml-cpu`), or `mixed`. The CLI appends both to its summary
+line. Three environment variables apply to every MOSS sidecar in the tts
+engine: `MOSS_COREML_DISABLE` keeps all stages on ggml, `MOSS_COREML_STRICT`
+makes a missing or failed sidecar an error instead of a fallback, and
+`MOSS_COREML_COMPUTE_UNITS` (`all`, `cpu_and_gpu`, `cpu_and_ane`, or
+`cpu_only`) picks the Core ML compute units. Unset or unrecognized, it means
+`cpu_and_gpu` for every MOSS sidecar in the tts engine, unlike the Audio8 and
+Supertonic sidecars, whose default is `all`: none of these stages ran faster
+on the Neural Engine, and the reasons are below for each stage.
+
+`bench-moss-coreml` against ggml on Metal (f16 GGUF, median of five after a
+warm-up, measured 2026-10-08):
+
+| Machine | Stage | ggml Metal | Core ML (default) |
+|---|---|---:|---:|
+| Mac mini M4 | DiT, one velocity over 30 s | 1702 ms | 1379 ms (1.23x) |
+| Mac mini M4 | VAE, 30 s of audio | 2767 ms | 1624 ms (1.70x) |
+| M3 Ultra | DiT, one velocity over 30 s | 324 ms | 305 ms (1.06x) |
+| M3 Ultra | VAE, 30 s of audio | 607 ms | 335 ms (1.81x) |
+
+A 100-step clip with guidance runs the DiT 200 times, so on the M4 the DiT
+sidecar saves about a minute per clip. Velocities and audio match ggml at
+cosine 0.999997 or better. Both stages run on the GPU even under `all`; on the
+M4, `all` moved part of the VAE to the Neural Engine and made it slower, and
+`cpu_and_ane` had not finished preparing the DiT after five minutes. A
+128-frame VAE window, which keeps only 64 frames per call, ran at 0.98x on the
+M4 and 1.05x on the M3 Ultra.
+
 ### Test
 
 `test-moss-sfx` builds a tiny random-weight GGUF in-test and needs no
@@ -396,7 +530,15 @@ skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
 (`MOSS_SFX_GPU=1` runs it on the GPU). The dumps come from
 `scripts/dump-moss-sfx-reference.py <checkpoint> <out_dir> --upstream
 <MOSS-TTS checkout>`, whose defaults are the prompt, duration, and step count
-the test expects.
+the test expects. `test-moss-sfx` also covers the sidecar routing without
+Core ML: the fixed VAE window plan, sidecar and fallback decodes, retiring a
+failed DiT or VAE sidecar, strict mode, the default compute units, and the
+per-request backend report.
+`test-moss-sfx-coreml-exporter` (Python; skips without numpy or torch) checks
+the exporter's DiT and VAE rebuilds against independent NumPy references on
+tiny random weights, including the reordered rotary pairs, the stride-phase
+transposed convolution, the Snake polynomial and the capped `1 / alpha`; with
+coremltools it also checks each converted program's inputs and output.
 
 ## MOSS-Speech
 
@@ -531,6 +673,52 @@ its log-mel spectrum. The LM loader validates the geometry, the special
 tokens, and every tensor's shape before it allocates; the KV cache is sized
 from the prompt plus `max_new_tokens`, rounded up to 256 positions.
 
+### Core ML speech tokenizer
+
+On Apple builds with `TTS_CPP_COREML=ON`, the Whisper-VQ encoder that turns the
+user's speech and the voice prompt into speech tokens can run as a Core ML
+model; the vector quantizer, the LM, the flow decoder, HiFT, and CAM++ stay on
+ggml.
+
+```sh
+python scripts/export-moss-speech-tokenizer-coreml.py \
+    --gguf moss-speech-codec-f16.gguf --compile-dir .
+```
+
+The engine looks for `<stem>-tokenizer.mlmodelc` beside the codec GGUF, with
+any quantization tag dropped (`moss-speech-codec-tokenizer.mlmodelc`). The
+sidecar takes one full 30 s segment, the tokenizer's segment length, and
+returns the pooled encoder states; the nearest-code search stays on ggml. Only
+full segments go to the sidecar: the ggml encoder runs just the frames a
+shorter segment covers, which is faster than a full Core ML segment, so a
+short question, and the last part of a long turn, stay on ggml. A failed call
+retires the sidecar and the segment and the rest of the request encode on
+ggml.
+`SpeechEngine::tokenizer_on_coreml()` says whether a sidecar is attached, and
+`SpeechResult::tokenizer_backend` reports where the request's segments were
+encoded (`ggml`, the Core ML placement label, or `mixed` when segments ran on
+both); the CLI appends it to the encode time. `MOSS_COREML_DISABLE`, `MOSS_COREML_STRICT`, and
+`MOSS_COREML_COMPUTE_UNITS` work as for the
+[SoundEffect sidecars](#core-ml-dit-and-vae).
+
+Like the other tts MOSS sidecars, the tokenizer defaults to `cpu_and_gpu`. On
+the Neural Engine (`all` or `cpu_and_ane`) its fp16 states land on a
+different nearest code for 6-8 % of the tokens, below the 95 % agreement
+floor of the reference test; on the GPU 99.2-99.7 % of the codes match the
+ggml tokenizer. `bench-moss-coreml` against the ggml tokenizer on Metal,
+f16 codec, median of five after a warm-up, measured 2026-10-08:
+
+| Machine | ggml Metal | `cpu_and_gpu` (default) | `all` |
+|---|---:|---:|---:|
+| Mac mini M4 | 495 ms | 405 ms (1.24x) | 348 ms (1.42x) |
+| M3 Ultra | 105 ms | 96 ms (1.09x) | 179 ms (0.59x) |
+
+Each row is one full 30 s segment. A full Core ML segment costs the same
+whatever the audio covers, while ggml's cost follows the audio: a 5 s segment
+takes 63 ms on ggml and took 390 ms padded on the M4 sidecar, and the two
+break even only past roughly 80-90 % of a segment on both machines. That is why only full
+segments use the sidecar; typical short questions never reach it.
+
 ### Test
 
 `test-moss-speech` needs no download: it builds a tiny random-weight LM and
@@ -557,3 +745,30 @@ the user speech tokens, and 90 % teacher-forced agreement. The dumps come from
 `scripts/dump-moss-speech-reference.py <MOSS-Speech> <MOSS-Speech-Codec>
 <out_dir> --upstream <MOSS-Speech checkout> --user-wav question.wav --device
 mps`, which writes the `lm/` and `codec/` folders the test reads.
+
+`test-moss-speech` also covers the tokenizer sidecar's routing without Core
+ML: the window size, the sidecar path, full segments on the sidecar and partial
+ones on ggml, a failed sidecar that is retired, strict mode, and the backend
+report. `test-moss-speech-tokenizer-coreml-exporter`
+(Python; skips without numpy or torch) checks the exporter's causal Whisper-VQ
+rebuild against an independent NumPy encoder and its causality, and, with
+coremltools, the converted program's input and output. `test-moss-coreml-parity` is the on-device check for all four tts
+sidecars and runs on a Mac with compiled sidecars beside the GGUFs:
+`MOSS_SPEECH_COREML_CODEC`, `MOSS_SFX_COREML_MODEL`, and
+`MOSS_CODEC_COREML_DECODER` select the stages (a stage without its variable is
+skipped), and `MOSS_COREML_PARITY_GPU=1` runs the ggml side on the GPU. It
+compares each sidecar with ggml (cosine 0.999 for the DiT velocity, the VAE
+and codec audio; 95 % of the speech tokens on one and two full segments), and
+covers attachment, the tokenizer's default GPU placement and its partial
+segments on ggml, the codec's streams on the sidecar and batch decodes on ggml,
+the disable and strict switches, and an invalid sidecar. `bench-moss-coreml` takes the same
+variables and prints each stage's time on ggml and on Core ML.
+
+## Licenses
+
+The [MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5),
+[MOSS-TTSD-v1.0](https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v1.0), and
+[MOSS-Audio-Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer)
+model cards identify Apache-2.0 weights. The reference
+[MOSS-TTS repository](https://github.com/OpenMOSS/MOSS-TTS/blob/main/LICENSE)
+is also Apache-2.0. See [NOTICE](../NOTICE) for the other MOSS models and codec sources.

@@ -83,8 +83,7 @@ static void mm3_cond_free(MM3CondGraph * g) {
     }
 }
 
-static bool mm3_cond_readback_f32(const ggml_tensor * t, std::vector<float> * out, std::string * err,
-                                  const char * what) {
+static bool mm3_cond_require_f32(const ggml_tensor * t, std::string * err, const char * what) {
     if (!t) {
         if (err) {
             *err = std::string("condition-encoder tensor missing: ") + what;
@@ -98,26 +97,21 @@ static bool mm3_cond_readback_f32(const ggml_tensor * t, std::vector<float> * ou
         }
         return false;
     }
+    return true;
+}
+
+static bool mm3_cond_readback_f32(const ggml_tensor * t, std::vector<float> * out, std::string * err,
+                                  const char * what) {
+    if (!mm3_cond_require_f32(t, err, what)) {
+        return false;
+    }
     out->resize((size_t) ggml_nelements(t));
     ggml_backend_tensor_get((ggml_tensor *) t, out->data(), 0, ggml_nbytes(t));
     return true;
 }
 
-static bool mm3_cond_prepare(const MM3Model & m, MM3CondGraph * g, std::string * err) {
-    if (!m.loaded) {
-        if (err) {
-            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
-        }
-        return false;
-    }
-    const void * token = (const void *) m.wctx_synth.buffer;
-    if (g->weights_token == token && g->sched) {
-        return true;
-    }
-    mm3_cond_free(g);
-
-    const MM3CondConfig &  c = m.synth_cfg.cond;
-    const MM3CondWeights & w = m.synth.cond;
+static bool mm3_cond_validate(const MM3Model & m, std::string * err) {
+    const MM3CondConfig & c = m.synth_cfg.cond;
     if (c.num_layers == 0 || c.hidden_dim == 0 || c.out_dim == 0) {
         if (err) {
             *err = "condition-encoder config is empty — mm3.cond.* KVs missing from the synth GGUF";
@@ -143,6 +137,34 @@ static bool mm3_cond_prepare(const MM3Model & m, MM3CondGraph * g, std::string *
         }
         return false;
     }
+    return mm3_cond_require_f32(m.synth.cond.layer_logits, err, "cond.layer_logits") &&
+           mm3_cond_require_f32(m.synth.cond.layer_scale, err, "cond.layer_scale");
+}
+
+static ggml_tensor * mm3_cond_mix_tensor(WeightCtx * prep, int64_t layers) {
+    ggml_tensor * mix = ggml_new_tensor_2d(prep->ctx, GGML_TYPE_F32, layers, 1);
+    ggml_set_name(mix, "cond.layer_mix");
+    return mix;
+}
+
+static bool mm3_cond_prepare(const MM3Model & m, MM3CondGraph * g, std::string * err) {
+    if (!m.loaded) {
+        if (err) {
+            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
+        }
+        return false;
+    }
+    const void * token = (const void *) m.wctx_synth.buffer;
+    if (g->weights_token == token && g->sched) {
+        return true;
+    }
+    mm3_cond_free(g);
+
+    if (!mm3_cond_validate(m, err)) {
+        return false;
+    }
+    const MM3CondConfig &  c = m.synth_cfg.cond;
+    const MM3CondWeights & w = m.synth.cond;
 
     BackendPair bp = backend_init("MM3-Cond");
     g->backend     = bp.backend;
@@ -181,9 +203,8 @@ static bool mm3_cond_prepare(const MM3Model & m, MM3CondGraph * g, std::string *
     }
 
     wctx_init(&g->prep, 1);
-    g->mix = ggml_new_tensor_2d(g->prep.ctx, GGML_TYPE_F32, (int64_t) logits.size(), 1);
-    ggml_set_name(g->mix, "cond.layer_mix");
-    g->prep.pending.push_back({ g->mix, mix.get(), logits.size() * sizeof(float), 0 });
+    g->mix = mm3_cond_mix_tensor(&g->prep, (int64_t) logits.size());
+    wctx_queue_copy(&g->prep, g->mix, mix.get(), logits.size() * sizeof(float), 0);
     g->prep.staging.push_back(std::move(mix));
     if (!wctx_alloc(&g->prep, g->backend)) {
         if (err) {
@@ -228,23 +249,18 @@ static ggml_tensor * mm3_cond_build(ggml_context * ctx, const MM3Model & m, cons
     return ggml_get_rows(ctx, y, g.in_idx);
 }
 
-static bool mm3_cond_ensure_graph(const MM3Model & m, MM3CondGraph * g, int64_t F, std::string * err) {
-    if (g->graph && g->graph_F == F) {
-        return true;
-    }
-    mm3_cond_free_graph(g);
+static size_t mm3_cond_graph_context_bytes() {
+    return ggml_tensor_overhead() * (MM3_COND_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_COND_MAX_NODES, false);
+}
 
-    const MM3CondConfig & c = m.synth_cfg.cond;
-    const int64_t         L = mm3_cond_latent_length(c, F);
-
-    const size_t ctx_bytes =
-        ggml_tensor_overhead() * (MM3_COND_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_COND_MAX_NODES, false);
+static ggml_context * mm3_cond_graph_context(MM3CondGraph * g, std::string * err) {
+    const size_t ctx_bytes = mm3_cond_graph_context_bytes();
     g->gbuf = (uint8_t *) malloc(ctx_bytes);
     if (!g->gbuf) {
         if (err) {
             *err = "out of host memory allocating the condition-encoder graph context";
         }
-        return false;
+        return nullptr;
     }
     ggml_init_params ip  = { ctx_bytes, g->gbuf,  true };
     ggml_context *   ctx = ggml_init(ip);
@@ -254,8 +270,14 @@ static bool mm3_cond_ensure_graph(const MM3Model & m, MM3CondGraph * g, int64_t 
         if (err) {
             *err = "ggml_init failed for the condition-encoder graph context";
         }
-        return false;
+        return nullptr;
     }
+    return ctx;
+}
+
+static ggml_cgraph * mm3_cond_define_graph(ggml_context * ctx, const MM3Model & m, MM3CondGraph * g, int64_t F) {
+    const MM3CondConfig & c = m.synth_cfg.cond;
+    const int64_t         L = mm3_cond_latent_length(c, F);
 
     g->input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, (int64_t) c.hidden_dim, (int64_t) c.num_layers, F);
     ggml_set_name(g->input, "mm3_cond_in");
@@ -269,8 +291,22 @@ static bool mm3_cond_ensure_graph(const MM3Model & m, MM3CondGraph * g, int64_t 
     ggml_set_name(g->output, "mm3_cond_out");
     ggml_set_output(g->output);
 
-    g->graph = ggml_new_graph_custom(ctx, MM3_COND_MAX_NODES, false);
-    ggml_build_forward_expand(g->graph, g->output);
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, MM3_COND_MAX_NODES, false);
+    ggml_build_forward_expand(graph, g->output);
+    return graph;
+}
+
+static bool mm3_cond_ensure_graph(const MM3Model & m, MM3CondGraph * g, int64_t F, std::string * err) {
+    if (g->graph && g->graph_F == F) {
+        return true;
+    }
+    mm3_cond_free_graph(g);
+
+    ggml_context * ctx = mm3_cond_graph_context(g, err);
+    if (!ctx) {
+        return false;
+    }
+    g->graph = mm3_cond_define_graph(ctx, m, g, F);
 
     ggml_backend_sched_reset(g->sched);
     if (!ggml_backend_sched_alloc_graph(g->sched, g->graph)) {
@@ -286,11 +322,11 @@ static bool mm3_cond_ensure_graph(const MM3Model & m, MM3CondGraph * g, int64_t 
 
     g->gctx          = ctx;
     g->graph_F       = F;
-    g->graph_L       = L;
+    g->graph_L       = mm3_cond_latent_length(m.synth_cfg.cond, F);
     g->compute_bytes = ggml_backend_sched_get_buffer_size(g->sched, g->backend);
 
     fprintf(stderr, "[MM3-Cond] Graph: F=%lld -> L=%lld, %d nodes, %d splits, compute buffer %.0f MB\n", (long long) F,
-            (long long) L, ggml_graph_n_nodes(g->graph), ggml_backend_sched_get_n_splits(g->sched),
+            (long long) g->graph_L, ggml_graph_n_nodes(g->graph), ggml_backend_sched_get_n_splits(g->sched),
             (double) g->compute_bytes / (1024.0 * 1024.0));
     return true;
 }

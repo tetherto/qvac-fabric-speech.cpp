@@ -41,6 +41,7 @@ struct TranscribeResult {
     double encode_ms = 0;
     double prefill_ms = 0;
     double decode_ms = 0;
+    std::string encoder_backend;
 };
 
 using TranscribeProgress = std::function<bool(int generated_tokens, int max_new_tokens)>;
@@ -56,6 +57,7 @@ public:
     void cancel() noexcept;
     int sample_rate() const noexcept;
     const char * backend_name() const noexcept;
+    bool encoder_on_coreml() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

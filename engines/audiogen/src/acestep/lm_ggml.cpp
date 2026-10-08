@@ -1,5 +1,6 @@
 #include "lm_ggml.h"
 
+#include "bpe_tokenizer.h"
 #include "fit_measure.h"
 #include "qwen3_block.h"  // shared Qwen3 loaders + builders + DitGGUF IO
 
@@ -7,6 +8,7 @@
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -20,6 +22,13 @@
 
 namespace tts_cpp::acestep {
 
+struct LMHeadChunk {
+    ggml_tensor * weight = nullptr;
+    int           row0   = 0;
+    int           rows   = 0;
+    ggml_tensor * logits = nullptr;
+};
+
 // Reused forward graph: the key fields fully determine the graph shape, and
 // n_kv_pad moves in 256-row steps, so one graph serves ~256 decode steps.
 struct LMGraphCache {
@@ -27,7 +36,8 @@ struct LMGraphCache {
     ggml_cgraph *  gf  = nullptr;
     ggml_gallocr_t ga  = nullptr;
     ggml_tensor *  t_ids = nullptr, *positions = nullptr, *kv_rows = nullptr,
-                *  mask = nullptr, *lgt = nullptr;
+                *  mask = nullptr, *lgt = nullptr, *embd = nullptr;
+    std::vector<LMHeadChunk> head_logits;
     // key
     bool          batch    = false;
     int           S        = -1;   // tokens per stream (batch: always 1)
@@ -35,6 +45,8 @@ struct LMGraphCache {
     int           set0     = -1;   // kv set (batch: first set)
     int           n_batch  = -1;
     ggml_tensor * head     = nullptr;  // tied or compact lm head in the graph
+    int           head_lo  = -1;
+    int           head_hi  = -1;
 
     void release() {
         if (ga)  ggml_gallocr_free(ga);
@@ -61,6 +73,10 @@ struct LMModel {
     ggml_tensor *           embed_tokens = nullptr;  // [H, V] (also tied lm_head)
     ggml_tensor *           final_norm   = nullptr;  // [H] F32
     std::vector<Qwen3Layer> layers;
+
+    ggml_type                embed_type = GGML_TYPE_COUNT;
+    const uint8_t *          host_embed = nullptr;
+    std::vector<LMHeadChunk> head_chunks;
 
     // Load-time fused projections (q|k|v and gate|up rows concatenated): one
     // GEMM per group instead of three/two. Empty = unfused (CPU-mapped path,
@@ -223,6 +239,151 @@ static bool lm_backend_runs_embedding_lookup(ggml_backend_t backend, ggml_tensor
     return supported;
 }
 
+static constexpr int LM_HEAD_CHUNK_MIN_ROWS = 32;
+static constexpr int LM_LOGIT_RANGE_EDGES[] = { TOKEN_IM_END, AUDIO_CODE_BASE };
+
+static bool lm_backend_runs_head(ggml_backend_t backend, const Qwen3Config & c, ggml_type type, int rows,
+                                 int n_cols) {
+    ggml_init_params ip{ ggml_tensor_overhead() * 3, nullptr, /*no_alloc=*/true };
+    ggml_context *   ctx = ggml_init(ip);
+    if (!ctx) return false;
+    ggml_tensor * w         = ggml_new_tensor_2d(ctx, type, c.hidden_size, rows);
+    ggml_tensor * x         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, c.hidden_size, n_cols);
+    const bool    supported = ggml_backend_supports_op(backend, q3_linear(ctx, w, x, c.prec));
+    ggml_free(ctx);
+    return supported;
+}
+
+static int lm_largest_power_of_two_below(int n) {
+    int p = 1;
+    while (p * 2 < n) p *= 2;
+    return p;
+}
+
+static int lm_largest_head_chunk_rows(ggml_backend_t backend, const Qwen3Config & c, ggml_type type, int vocab,
+                                      int n_cols) {
+    if (lm_backend_runs_head(backend, c, type, vocab, n_cols)) return vocab;
+    for (int rows = lm_largest_power_of_two_below(vocab); rows >= LM_HEAD_CHUNK_MIN_ROWS; rows /= 2) {
+        if (lm_backend_runs_head(backend, c, type, rows, n_cols)) return rows;
+    }
+    return 0;
+}
+
+static void lm_append_head_chunks(int row0, int row1, int max_rows, std::vector<LMHeadChunk> & chunks) {
+    for (int r = row0; r < row1; r += max_rows) {
+        LMHeadChunk chunk;
+        chunk.row0 = r;
+        chunk.rows = std::min(max_rows, row1 - r);
+        chunks.push_back(chunk);
+    }
+}
+
+static std::vector<int> lm_head_segment_edges(int vocab) {
+    std::vector<int> edges = { 0 };
+    for (int edge : LM_LOGIT_RANGE_EDGES) {
+        if (edge > edges.back() && edge < vocab) edges.push_back(edge);
+    }
+    edges.push_back(vocab);
+    return edges;
+}
+
+static std::vector<LMHeadChunk> lm_plan_head_chunks(int vocab, int max_rows) {
+    const std::vector<int>   edges = lm_head_segment_edges(vocab);
+    std::vector<LMHeadChunk> chunks;
+    for (size_t i = 0; i + 1 < edges.size(); i++) lm_append_head_chunks(edges[i], edges[i + 1], max_rows, chunks);
+    return chunks;
+}
+
+static void lm_create_head_chunks(ggml_context * ctx, ggml_type type, int hidden, std::vector<LMHeadChunk> & chunks) {
+    for (LMHeadChunk & chunk : chunks) {
+        chunk.weight = ggml_new_tensor_2d(ctx, type, hidden, chunk.rows);
+        ggml_set_name(chunk.weight, ("lm_head_rows_" + std::to_string(chunk.row0)).c_str());
+    }
+}
+
+static void lm_load_head_chunks(const std::vector<LMHeadChunk> & chunks, const uint8_t * table, size_t row_bytes) {
+    for (const LMHeadChunk & chunk : chunks) {
+        ggml_backend_tensor_set(chunk.weight, table + (size_t) chunk.row0 * row_bytes, 0,
+                                (size_t) chunk.rows * row_bytes);
+    }
+}
+
+static void lm_dequantize_row(ggml_type type, const uint8_t * row, float * out, int n) {
+    if (type == GGML_TYPE_F32) {
+        std::memcpy(out, row, (size_t) n * sizeof(float));
+        return;
+    }
+    ggml_get_type_traits(type)->to_float(row, out, n);
+}
+
+static bool lm_lookup_embeddings(const LMModel * m, const int32_t * ids, int n, std::vector<float> & out) {
+    const int    H         = m->cfg.hidden_size;
+    const size_t row_bytes = ggml_row_size(m->embed_type, H);
+    out.resize((size_t) n * H);
+    for (int i = 0; i < n; i++) {
+        if (ids[i] < 0 || ids[i] >= m->cfg.vocab_size) return false;
+        lm_dequantize_row(m->embed_type, m->host_embed + (size_t) ids[i] * row_bytes, out.data() + (size_t) i * H, H);
+    }
+    return true;
+}
+
+static ggml_tensor * lm_new_token_input(ggml_context * ctx, const LMModel * m, int n, ggml_tensor ** ids,
+                                        ggml_tensor ** embd) {
+    if (m->embed_tokens) {
+        *ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n);
+        ggml_set_input(*ids);
+        return ggml_get_rows(ctx, m->embed_tokens, *ids);
+    }
+    *embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, m->cfg.hidden_size, n);
+    ggml_set_input(*embd);
+    return *embd;
+}
+
+static bool lm_set_token_input(const LMModel * m, ggml_tensor * ids, ggml_tensor * embd, const int32_t * token_ids,
+                               int n) {
+    if (ids) {
+        ggml_backend_tensor_set(ids, token_ids, 0, (size_t) n * sizeof(int32_t));
+        return true;
+    }
+    std::vector<float> rows;
+    if (!lm_lookup_embeddings(m, token_ids, n, rows)) {
+        fprintf(stderr, "[acestep-lm] token id outside the %d-row vocabulary\n", m->cfg.vocab_size);
+        return false;
+    }
+    ggml_backend_tensor_set(embd, rows.data(), 0, rows.size() * sizeof(float));
+    return true;
+}
+
+static std::vector<LMHeadChunk> lm_build_split_head(ggml_context * ctx, ggml_cgraph * gf, const LMModel * m,
+                                                    ggml_tensor * hidden, int lo, int hi) {
+    std::vector<LMHeadChunk> used;
+    for (const LMHeadChunk & chunk : m->head_chunks) {
+        if (chunk.row0 >= hi || chunk.row0 + chunk.rows <= lo) continue;
+        LMHeadChunk projected = chunk;
+        projected.logits      = q3_linear(ctx, chunk.weight, hidden, m->q3.prec);
+        ggml_set_output(projected.logits);
+        ggml_build_forward_expand(gf, projected.logits);
+        used.push_back(projected);
+    }
+    return used;
+}
+
+static void lm_read_chunk_logits(const LMHeadChunk & chunk, int lo, int hi, int n_cols, float * out) {
+    const int first = std::max(lo, chunk.row0);
+    const int last  = std::min(hi, chunk.row0 + chunk.rows);
+    for (int col = 0; col < n_cols; col++) {
+        ggml_backend_tensor_get(chunk.logits, out + (size_t) col * (hi - lo) + (first - lo),
+                                ((size_t) col * chunk.rows + (first - chunk.row0)) * sizeof(float),
+                                (size_t) (last - first) * sizeof(float));
+    }
+}
+
+static void lm_read_split_logits(const std::vector<LMHeadChunk> & chunks, int lo, int hi, int n_cols,
+                                 std::vector<float> & out) {
+    out.resize((size_t) (hi - lo) * n_cols);
+    for (const LMHeadChunk & chunk : chunks) lm_read_chunk_logits(chunk, lo, hi, n_cols, out.data());
+}
+
 // Fused-layer creation: norms and o/down as usual, q|k|v and gate|up as single
 // row-concatenated tensors. Returns false when the GGUF shapes/types cannot fuse.
 static bool lm_create_layer_fused(ggml_context * ctx, const DitGGUF & g, const std::string & prefix, Qwen3Layer & ly,
@@ -285,7 +446,7 @@ bool lm_load_layer_fused(const DitGGUF & g, const std::string & prefix, Qwen3Lay
 // is non-null the load is metadata-only: the weight and KV allocations are
 // sized into `measure` instead of performed and no tensor data is read.
 static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t backend, int max_seq_len, bool verbose,
-                                    int n_kv_sets, AcestepStageMeasure * measure) {
+                                    int n_kv_sets, AcestepStageMeasure * measure, int forced_head_chunk_rows = 0) {
     DitGGUF g;
     if (!dit_gguf_open(g, path)) {
         fprintf(stderr, "[acestep-lm] failed to parse %s\n", path.c_str());
@@ -330,26 +491,36 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
         return nullptr;
     }
     m->use_flash_attn = lm_backend_supports_flash_attn(backend, m->q3);
+    m->embed_type     = embed->type;
+
+    const int head_rows = forced_head_chunk_rows > 0
+                              ? forced_head_chunk_rows
+                              : lm_largest_head_chunk_rows(backend, m->q3, embed->type, c.vocab_size, m->n_sets);
+    if (head_rows <= 0) {
+        fprintf(stderr, "[acestep-lm] %s cannot project the %s LM head; place the LM on another backend\n",
+                ggml_backend_name(backend), ggml_type_name(embed->type));
+        dit_gguf_close(g);
+        delete m;
+        return nullptr;
+    }
+    const bool split_table = forced_head_chunk_rows > 0 || head_rows < c.vocab_size ||
+                             !lm_backend_runs_embedding_lookup(backend, embed);
+    if (split_table) m->head_chunks = lm_plan_head_chunks(c.vocab_size, head_rows);
 
     // CPU backend: map the quantised weights straight off the mmap (no dirty RAM).
     const bool            mapped  = dit_gguf_backend_maps_weights(backend);
     ggml_backend_buffer_t map_buf = mapped ? dit_gguf_cpu_map_buffer(g) : nullptr;
 
     // Allocate + load weights.
-    const size_t n_tensors = (size_t) 2 + (size_t) c.n_layers * 11 + 8;
+    const size_t n_tensors = (size_t) 2 + (size_t) c.n_layers * 11 + 8 + m->head_chunks.size();
     ggml_init_params ip{ ggml_tensor_overhead() * n_tensors, nullptr, /*no_alloc=*/true };
     m->weight_ctx = ggml_init(ip);
     ggml_context * ctx = m->weight_ctx;
 
-    m->embed_tokens = q3_create_like(ctx, g, "model.embed_tokens.weight", map_buf);
-    if (!m->embed_tokens || !lm_backend_runs_embedding_lookup(backend, m->embed_tokens)) {
-        fprintf(stderr, "[acestep-lm] %s cannot look up %s token embeddings; place the LM on another backend\n",
-                ggml_backend_name(backend), m->embed_tokens ? ggml_type_name(m->embed_tokens->type) : "missing");
-        if (map_buf) ggml_backend_buffer_free(map_buf);
-        ggml_free(ctx);
-        dit_gguf_close(g);
-        delete m;
-        return nullptr;
+    if (split_table) {
+        lm_create_head_chunks(ctx, embed->type, c.hidden_size, m->head_chunks);
+    } else {
+        m->embed_tokens = q3_create_like(ctx, g, "model.embed_tokens.weight", map_buf);
     }
     m->final_norm   = q3_create_f32_like(ctx, g, "model.norm.weight");
     m->layers.resize(c.n_layers);
@@ -405,6 +576,8 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
         }
 
         q3_load_raw(m->embed_tokens, g, "model.embed_tokens.weight");
+        lm_load_head_chunks(m->head_chunks, (const uint8_t *) dit_gdata(g, "model.embed_tokens.weight"),
+                            ggml_row_size(m->embed_type, c.hidden_size));
         q3_load_f32(m->final_norm, g, "model.norm.weight");
         for (int i = 0; i < c.n_layers; i++) {
             const std::string prefix = "model.layers." + std::to_string(i);
@@ -502,10 +675,16 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
                 "[acestep-lm] loaded %s: %.1f MB weights, %d layers H=%d V=%d Nh=%d/%d D=%d, KV %.1f MB (%d sets), FA=%s\n",
                 path.c_str(), lm_model_weight_bytes(m) / 1048576.0, c.n_layers, c.hidden_size, c.vocab_size, c.n_heads,
                 c.n_kv_heads, c.head_dim, kv_bytes / 1048576.0, NS, m->use_flash_attn ? "on" : "off");
+        if (split_table) {
+            fprintf(stderr, "[acestep-lm] embedding lookup on the host, LM head in %zu chunks of <= %d rows\n",
+                    m->head_chunks.size(), head_rows);
+        }
     }
 
-    if (mapped) {
-        m->mapped  = true;
+    const bool host_lookup = split_table && !measure;
+    if (host_lookup) m->host_embed = (const uint8_t *) dit_gdata(g, "model.embed_tokens.weight");
+    if (mapped || host_lookup) {
+        m->mapped  = mapped;
         m->map_buf = map_buf;
         m->gguf    = g;  // keep the mmap alive; mapped weights point into it
     } else {
@@ -523,6 +702,19 @@ LMModel * lm_model_load_metadata_only(const std::string & path, ggml_backend_t b
                                       bool verbose, int n_kv_sets, AcestepStageMeasure & measure) {
     measure = AcestepStageMeasure{};
     return lm_model_load_impl(path, backend, max_seq_len, verbose, n_kv_sets, &measure);
+}
+
+LMModel * lm_model_load_split_table(const std::string & path, ggml_backend_t backend, int max_seq_len, int n_kv_sets,
+                                    int head_chunk_rows) {
+    if (head_chunk_rows <= 0) return nullptr;
+    return lm_model_load_impl(path, backend, max_seq_len, /*verbose=*/false, n_kv_sets, /*measure=*/nullptr,
+                              head_chunk_rows);
+}
+
+std::vector<std::pair<int, int>> lm_head_chunk_ranges(int vocab, int max_rows) {
+    std::vector<std::pair<int, int>> ranges;
+    for (const LMHeadChunk & chunk : lm_plan_head_chunks(vocab, max_rows)) ranges.emplace_back(chunk.row0, chunk.rows);
+    return ranges;
 }
 
 size_t lm_model_kv_bytes(const LMModel * m) {
@@ -555,7 +747,7 @@ void lm_model_free(LMModel * m) {
     if (m->weight_buf) ggml_backend_buffer_free(m->weight_buf);
     if (m->weight_ctx) ggml_free(m->weight_ctx);
     if (m->map_buf) ggml_backend_buffer_free(m->map_buf);
-    if (m->mapped) dit_gguf_close(m->gguf);
+    if (m->mapped || m->host_embed) dit_gguf_close(m->gguf);
     delete m;
 }
 
@@ -568,7 +760,7 @@ size_t           lm_model_weight_bytes(const LMModel * m) {
 }
 int  lm_num_kv_sets(const LMModel * m) { return m->n_sets; }
 bool lm_model_embeddings_quantized(const LMModel * m) {
-    return m && m->embed_tokens && ggml_is_quantized(m->embed_tokens->type);
+    return m && ggml_is_quantized(m->embed_type);
 }
 bool lm_model_supports_batched_decode(const LMModel * m) {
     return m && m->use_flash_attn && m->n_sets > 1;
@@ -677,10 +869,13 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
     // (FSM-constrained phase 1) can never select tokens past the limit.
     // Measure mode never builds (or copies into) the real compact head; it
     // stands a same-shape descriptor into the measure graph instead (below).
-    ggml_tensor * head_w = m->embed_tokens;
-    int           out_V  = lc.vocab_size;
+    const bool    split_head = !m->head_chunks.empty();
+    ggml_tensor * head_w     = m->embed_tokens;
+    int           out_V      = lc.vocab_size;
     if (logit_limit > 0 && logit_limit < lc.vocab_size) {
-        if (measure_compute) {
+        if (split_head) {
+            out_V = logit_limit;
+        } else if (measure_compute) {
             head_w = nullptr;  // created in the graph ctx below
             out_V  = logit_limit;
         } else if (!lm_build_partial_head(m, 0, logit_limit)) {
@@ -695,12 +890,15 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
     const bool     cacheable = layer_states_out == nullptr && measure_compute == nullptr;
     LMGraphCache & gc        = m->graph_cache;
     const bool     cache_hit = cacheable && gc.ctx != nullptr && !gc.batch && gc.S == S &&
-                               gc.n_kv_pad == n_kv_pad && gc.set0 == set && gc.head == head_w;
+                               gc.n_kv_pad == n_kv_pad && gc.set0 == set && gc.head == head_w &&
+                               gc.head_lo == 0 && gc.head_hi == out_V;
 
     ggml_context * ctx = nullptr;
     ggml_cgraph *  gf  = nullptr;
     ggml_gallocr_t ga  = nullptr;
-    ggml_tensor *t_ids = nullptr, *positions = nullptr, *kv_rows = nullptr, *mask = nullptr, *lgt = nullptr;
+    ggml_tensor *t_ids = nullptr, *positions = nullptr, *kv_rows = nullptr, *mask = nullptr, *lgt = nullptr,
+                *embd = nullptr;
+    std::vector<LMHeadChunk>   head_logits;
     std::vector<ggml_tensor *> layer_states;
 
     if (cache_hit) {
@@ -708,7 +906,8 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         gf    = gc.gf;
         ga    = gc.ga;
         t_ids = gc.t_ids; positions = gc.positions; kv_rows = gc.kv_rows;
-        mask  = gc.mask;  lgt = gc.lgt;
+        mask  = gc.mask;  lgt = gc.lgt; embd = gc.embd;
+        head_logits = gc.head_logits;
     } else {
         if (cacheable) gc.release();
 
@@ -716,8 +915,6 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         ggml_init_params gp{ ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(nodes, false), nullptr, true };
         ctx = ggml_init(gp);
 
-        t_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
-        ggml_set_input(t_ids);
         positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
         ggml_set_input(positions);
         kv_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, S);
@@ -725,7 +922,7 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_kv_pad, S);
         ggml_set_input(mask);
 
-        if (measure_compute && !head_w) {
+        if (measure_compute && !head_w && !split_head) {
             // Same shape/type as the compact head lm_build_partial_head would
             // allocate; marked externally-allocated so graph sizing excludes
             // it from the compute buffer, like every other weight.
@@ -734,7 +931,7 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         }
 
         gf                   = ggml_new_graph_custom(ctx, nodes, false);
-        ggml_tensor * hidden = ggml_get_rows(ctx, m->embed_tokens, t_ids);  // [H, S]
+        ggml_tensor * hidden = lm_new_token_input(ctx, m, S, &t_ids, &embd);  // [H, S]
         for (int l = 0; l < c.n_layers; l++) {
             Qwen3Layer *  ly   = &m->layers[l];
             ggml_tensor * norm = q3_rms_norm_w(ctx, hidden, ly->input_norm, c.rms_norm_eps);
@@ -757,9 +954,13 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         if (S > 1) {
             hidden = ggml_view_1d(ctx, hidden, H, (int64_t) (S - 1) * H * sizeof(float));  // last token
         }
-        lgt = q3_linear(ctx, head_w, hidden, c.prec);  // [out_V, 1]
-        ggml_set_output(lgt);
-        ggml_build_forward_expand(gf, lgt);
+        if (split_head) {
+            head_logits = lm_build_split_head(ctx, gf, m, hidden, 0, out_V);
+        } else {
+            lgt = q3_linear(ctx, head_w, hidden, c.prec);  // [out_V, 1]
+            ggml_set_output(lgt);
+            ggml_build_forward_expand(gf, lgt);
+        }
 
         ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
         if (!ga) {
@@ -787,13 +988,20 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
             gc.gf    = gf;
             gc.ga    = ga;
             gc.t_ids = t_ids; gc.positions = positions; gc.kv_rows = kv_rows;
-            gc.mask  = mask;  gc.lgt = lgt;
+            gc.mask  = mask;  gc.lgt = lgt; gc.embd = embd;
+            gc.head_logits = head_logits;
             gc.batch = false; gc.S = S; gc.n_kv_pad = n_kv_pad; gc.set0 = set;
-            gc.n_batch = -1;  gc.head = head_w;
+            gc.n_batch = -1;  gc.head = head_w; gc.head_lo = 0; gc.head_hi = out_V;
         }
     }
 
-    ggml_backend_tensor_set(t_ids, token_ids, 0, (size_t) S * sizeof(int32_t));
+    if (!lm_set_token_input(m, t_ids, embd, token_ids, S)) {
+        if (!cacheable) {
+            ggml_gallocr_free(ga);
+            ggml_free(ctx);
+        }
+        return false;
+    }
     std::vector<int32_t> pos(S);
     std::vector<int64_t> rows(S);
     for (int i = 0; i < S; i++) { pos[i] = kv0 + i; rows[i] = (int64_t) (kv0 + i); }
@@ -818,8 +1026,12 @@ bool lm_model_forward(LMModel * m, const int32_t * token_ids, int n_tokens, std:
         return false;
     }
 
-    logits_out.resize((size_t) out_V);
-    ggml_backend_tensor_get(lgt, logits_out.data(), 0, (size_t) out_V * sizeof(float));
+    if (split_head) {
+        lm_read_split_logits(head_logits, 0, out_V, 1, logits_out);
+    } else {
+        logits_out.resize((size_t) out_V);
+        ggml_backend_tensor_get(lgt, logits_out.data(), 0, (size_t) out_V * sizeof(float));
+    }
 
     if (layer_states_out) {
         const size_t per_layer = (size_t) H * S;
@@ -855,15 +1067,16 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
     const LMConfig & lc = m->cfg;
     const int H = c.hidden_size, D = c.head_dim, Nh = c.n_heads, Nkv = c.n_kv_heads;
     const int requested_out_V = lc.vocab_size - logit_offset;
+    const bool split_head      = !m->head_chunks.empty();
     // Measure mode assumes the compact head builds (the real path only falls
     // back to the full tied head when its allocation fails, and the verdict
     // this measurement feeds exists to prevent exactly that situation); the
     // head weights themselves are priced via lm_measure_partial_head_bytes.
     const bool compact_head =
-        logit_offset > 0 &&
+        !split_head && logit_offset > 0 &&
         (measure_compute != nullptr ||
          lm_build_partial_head(m, logit_offset, m->cfg.vocab_size - logit_offset));
-    const int graph_out_V = compact_head ? requested_out_V : lc.vocab_size;
+    const int graph_out_V = (compact_head || split_head) ? requested_out_V : lc.vocab_size;
     int max_kv_len = 0;
     for (int i = 0; i < N; i++) {
         const int kv_len = m->kv_pos[sets[i]] + 1;
@@ -878,19 +1091,23 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
                                             : m->embed_tokens;
     const bool     cache_hit = !measure_compute &&
                                gc.ctx != nullptr && gc.batch && gc.n_kv_pad == n_kv_pad &&
-                               gc.set0 == s0 && gc.n_batch == N && gc.head == lm_weight;
+                               gc.set0 == s0 && gc.n_batch == N && gc.head == lm_weight &&
+                               gc.head_lo == logit_offset && gc.head_hi == lc.vocab_size;
 
     ggml_context * ctx = nullptr;
     ggml_cgraph *  gf  = nullptr;
     ggml_gallocr_t ga  = nullptr;
-    ggml_tensor *t_ids = nullptr, *positions = nullptr, *kv_rows = nullptr, *mask = nullptr, *lgt = nullptr;
+    ggml_tensor *t_ids = nullptr, *positions = nullptr, *kv_rows = nullptr, *mask = nullptr, *lgt = nullptr,
+                *embd = nullptr;
+    std::vector<LMHeadChunk> head_logits;
 
     if (cache_hit) {
         ctx   = gc.ctx;
         gf    = gc.gf;
         ga    = gc.ga;
         t_ids = gc.t_ids; positions = gc.positions; kv_rows = gc.kv_rows;
-        mask  = gc.mask;  lgt = gc.lgt;
+        mask  = gc.mask;  lgt = gc.lgt; embd = gc.embd;
+        head_logits = gc.head_logits;
     } else {
         if (!measure_compute) gc.release();
 
@@ -898,8 +1115,6 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
         ggml_init_params gp{ ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(nodes, false), nullptr, true };
         ctx = ggml_init(gp);
 
-        t_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
-        ggml_set_input(t_ids);
         positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
         ggml_set_input(positions);
         kv_rows = ggml_new_tensor_3d(ctx, GGML_TYPE_I64, 1, 1, N);
@@ -907,7 +1122,7 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
         mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, n_kv_pad, 1, 1, N);
         ggml_set_input(mask);
 
-        if (measure_compute && !lm_weight) {
+        if (measure_compute && !lm_weight && !split_head) {
             // Same shape/type as the compact head lm_build_partial_head would
             // allocate; externally-allocated so graph sizing excludes it.
             lm_weight       = ggml_new_tensor_2d(ctx, m->embed_tokens->type, H, graph_out_V);
@@ -915,7 +1130,7 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
         }
 
         gf = ggml_new_graph_custom(ctx, nodes, false);
-        ggml_tensor * hidden = ggml_get_rows(ctx, m->embed_tokens, t_ids);  // [H, N]
+        ggml_tensor * hidden = lm_new_token_input(ctx, m, N, &t_ids, &embd);  // [H, N]
 
         for (int l = 0; l < c.n_layers; l++) {
             Qwen3Layer * ly = &m->layers[l];
@@ -969,9 +1184,13 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
         }
 
         hidden = q3_rms_norm_w(ctx, hidden, m->final_norm, c.rms_norm_eps);
-        lgt = q3_linear(ctx, lm_weight, hidden, c.prec);  // [graph_out_V, N]
-        ggml_set_output(lgt);
-        ggml_build_forward_expand(gf, lgt);
+        if (split_head) {
+            head_logits = lm_build_split_head(ctx, gf, m, hidden, logit_offset, lc.vocab_size);
+        } else {
+            lgt = q3_linear(ctx, lm_weight, hidden, c.prec);  // [graph_out_V, N]
+            ggml_set_output(lgt);
+            ggml_build_forward_expand(gf, lgt);
+        }
 
         ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
         if (!ga) {
@@ -996,12 +1215,13 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
         gc.gf    = gf;
         gc.ga    = ga;
         gc.t_ids = t_ids; gc.positions = positions; gc.kv_rows = kv_rows;
-        gc.mask  = mask;  gc.lgt = lgt;
+        gc.mask  = mask;  gc.lgt = lgt; gc.embd = embd;
+        gc.head_logits = head_logits;
         gc.batch = true; gc.S = 1; gc.n_kv_pad = n_kv_pad; gc.set0 = s0;
-        gc.n_batch = N;  gc.head = lm_weight;
+        gc.n_batch = N;  gc.head = lm_weight; gc.head_lo = logit_offset; gc.head_hi = lc.vocab_size;
     }
 
-    ggml_backend_tensor_set(t_ids, token_ids, 0, (size_t) N * sizeof(int32_t));
+    if (!lm_set_token_input(m, t_ids, embd, token_ids, N)) return false;
     std::vector<int32_t> pos(N);
     std::vector<int64_t> rows(N);
     std::vector<uint16_t> md((size_t) n_kv_pad * N);
@@ -1023,7 +1243,9 @@ bool lm_model_forward_batch(LMModel * m, const int32_t * token_ids, const int * 
     }
 
     logits_out.resize((size_t) requested_out_V * N);
-    if (logit_offset == 0 || compact_head) {
+    if (split_head) {
+        lm_read_split_logits(head_logits, logit_offset, lc.vocab_size, N, logits_out);
+    } else if (logit_offset == 0 || compact_head) {
         ggml_backend_tensor_get(lgt, logits_out.data(), 0, logits_out.size() * sizeof(float));
     } else {
         // Allocation of the compact head is an optimization, not a correctness

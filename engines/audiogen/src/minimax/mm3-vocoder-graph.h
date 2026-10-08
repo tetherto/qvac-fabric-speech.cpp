@@ -119,50 +119,173 @@ static bool mm3_voc_validate_output(const ggml_tensor * output, int64_t expected
     return true;
 }
 
-static ggml_tensor * mm3_voc_stage(WeightCtx * wctx, int64_t ne0, int64_t ne1,
-                                   std::unique_ptr<float[]> data, const char * name) {
+static ggml_tensor * mm3_voc_new_prep(WeightCtx * wctx, int64_t ne0, int64_t ne1, const char * name) {
     ggml_tensor * t = ggml_new_tensor_2d(wctx->ctx, GGML_TYPE_F32, ne0, ne1);
     ggml_set_name(t, name);
-    const size_t nbytes = (size_t) ne0 * (size_t) ne1 * sizeof(float);
-    wctx->pending.push_back({ t, data.get(), nbytes, 0 });
-    wctx->staging.push_back(std::move(data));
     return t;
 }
 
-static ggml_tensor * mm3_voc_make_inv(WeightCtx * wctx, const ggml_tensor * alpha, float eps,
-                                      const char * name, std::string * err) {
-    std::vector<float> a;
-    if (!mm3_voc_readback(alpha, &a, err, name)) {
-        return nullptr;
-    }
-    const int64_t C   = (int64_t) a.size();
-    auto          inv = std::make_unique<float[]>((size_t) C);
-    for (int64_t i = 0; i < C; i++) {
-        inv[(size_t) i] = 1.0f / (a[(size_t) i] + eps);
-    }
-    return mm3_voc_stage(wctx, 1, C, std::move(inv), name);
+static ggml_tensor * mm3_voc_new_inv(WeightCtx * wctx, const ggml_tensor * alpha, const char * name) {
+    return mm3_voc_new_prep(wctx, 1, ggml_nelements(alpha), name);
 }
 
-static ggml_tensor * mm3_voc_repack_convt(WeightCtx * wctx, const ggml_tensor * w, const char * name,
-                                          std::string * err) {
-    std::vector<float> src;
-    if (!mm3_voc_readback(w, &src, err, name)) {
-        return nullptr;
-    }
-    const int64_t K  = w->ne[0];
-    const int64_t OC = w->ne[1];
-    const int64_t IC = w->ne[2];
+static ggml_tensor * mm3_voc_new_convt_gemm(WeightCtx * wctx, const ggml_tensor * w, const char * name) {
+    return mm3_voc_new_prep(wctx, w->ne[2], w->ne[0] * w->ne[1], name);
+}
 
-    auto dst = std::make_unique<float[]>((size_t) (IC * K * OC));
+static void mm3_voc_stage(WeightCtx * wctx, ggml_tensor * dst, std::unique_ptr<float[]> data) {
+    wctx_queue_copy(wctx, dst, data.get(), ggml_nbytes(dst), 0);
+    wctx->staging.push_back(std::move(data));
+}
+
+static void mm3_voc_fill_inv(const std::vector<float> & alpha, float eps, float * inv) {
+    for (size_t i = 0; i < alpha.size(); i++) {
+        inv[i] = 1.0f / (alpha[i] + eps);
+    }
+}
+
+static bool mm3_voc_stage_inv(WeightCtx * wctx, ggml_tensor * dst, const ggml_tensor * alpha, float eps,
+                              std::string * err) {
+    std::vector<float> a;
+    if (!mm3_voc_readback(alpha, &a, err, ggml_get_name(dst))) {
+        return false;
+    }
+    auto inv = std::make_unique<float[]>(a.size());
+    mm3_voc_fill_inv(a, eps, inv.get());
+    mm3_voc_stage(wctx, dst, std::move(inv));
+    return true;
+}
+
+static void mm3_voc_repack_rows(const float * src, int64_t K, int64_t OC, int64_t IC, float * dst) {
     for (int64_t ic = 0; ic < IC; ic++) {
-        const float * s = src.data() + ic * K * OC;
+        const float * s = src + ic * K * OC;
         for (int64_t oc = 0; oc < OC; oc++) {
             for (int64_t k = 0; k < K; k++) {
                 dst[(size_t) (ic + (k + oc * K) * IC)] = s[(size_t) (k + oc * K)];
             }
         }
     }
-    return mm3_voc_stage(wctx, IC, K * OC, std::move(dst), name);
+}
+
+static bool mm3_voc_stage_convt(WeightCtx * wctx, ggml_tensor * dst, const ggml_tensor * w, std::string * err) {
+    std::vector<float> src;
+    if (!mm3_voc_readback(w, &src, err, ggml_get_name(dst))) {
+        return false;
+    }
+    auto repacked = std::make_unique<float[]>(src.size());
+    mm3_voc_repack_rows(src.data(), w->ne[0], w->ne[1], w->ne[2], repacked.get());
+    mm3_voc_stage(wctx, dst, std::move(repacked));
+    return true;
+}
+
+static int mm3_voc_prep_tensor_count(const MM3VocConfig & vc) {
+    return (int) vc.upsample_rates.size() * (1 + 1 + (int) vc.res_dilations.size() * 2) + 1;
+}
+
+static void mm3_voc_define_res_prep(WeightCtx * prep, const MM3VocBlock & wb, int b, MM3VocPrepBlk & pb) {
+    char nm[96];
+    for (size_t r = 0; r < pb.res.size(); r++) {
+        snprintf(nm, sizeof(nm), "voc.blk.%d.res.%zu.snake1.inv_alpha", b, r);
+        pb.res[r].inv1 = mm3_voc_new_inv(prep, wb.res[r].snake1_alpha, nm);
+        snprintf(nm, sizeof(nm), "voc.blk.%d.res.%zu.snake2.inv_alpha", b, r);
+        pb.res[r].inv2 = mm3_voc_new_inv(prep, wb.res[r].snake2_alpha, nm);
+    }
+}
+
+static void mm3_voc_define_block_prep(WeightCtx * prep, const MM3Model & m, MM3VocGraph * g) {
+    const MM3VocConfig &  vc = m.synth_cfg.voc;
+    const MM3VocWeights & vw = m.synth.voc;
+    char                  nm[96];
+    g->blk.assign(vc.upsample_rates.size(), MM3VocPrepBlk{});
+    for (size_t b = 0; b < g->blk.size(); b++) {
+        MM3VocPrepBlk & pb = g->blk[b];
+        snprintf(nm, sizeof(nm), "voc.blk.%zu.snake.inv_alpha", b);
+        pb.inv = mm3_voc_new_inv(prep, vw.blk[b].snake_alpha, nm);
+        snprintf(nm, sizeof(nm), "voc.blk.%zu.convt.gemm", b);
+        pb.convt_w = mm3_voc_new_convt_gemm(prep, vw.blk[b].convt_w, nm);
+        pb.res.assign(vc.res_dilations.size(), MM3VocPrepRes{});
+        mm3_voc_define_res_prep(prep, vw.blk[b], (int) b, pb);
+    }
+}
+
+static void mm3_voc_define_prep(const MM3Model & m, MM3VocGraph * g) {
+    wctx_init(&g->prep, mm3_voc_prep_tensor_count(m.synth_cfg.voc));
+    mm3_voc_define_block_prep(&g->prep, m, g);
+    g->inv_out = mm3_voc_new_inv(&g->prep, m.synth.voc.snake_out_alpha, "voc.snake_out.inv_alpha");
+}
+
+static bool mm3_voc_stage_res_prep(WeightCtx * prep, const MM3VocBlock & wb, const MM3VocPrepBlk & pb, float eps,
+                                   std::string * err) {
+    for (size_t r = 0; r < pb.res.size(); r++) {
+        if (!mm3_voc_stage_inv(prep, pb.res[r].inv1, wb.res[r].snake1_alpha, eps, err) ||
+            !mm3_voc_stage_inv(prep, pb.res[r].inv2, wb.res[r].snake2_alpha, eps, err)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mm3_voc_stage_block_prep(WeightCtx * prep, const MM3VocWeights & vw, const MM3VocGraph & g, float eps,
+                                     std::string * err) {
+    for (size_t b = 0; b < g.blk.size(); b++) {
+        const MM3VocPrepBlk & pb = g.blk[b];
+        if (!mm3_voc_stage_inv(prep, pb.inv, vw.blk[b].snake_alpha, eps, err) ||
+            !mm3_voc_stage_convt(prep, pb.convt_w, vw.blk[b].convt_w, err) ||
+            !mm3_voc_stage_res_prep(prep, vw.blk[b], pb, eps, err)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static float mm3_voc_snake_eps(const MM3VocConfig & vc) {
+    return vc.snake_eps > 0.0f ? vc.snake_eps : 1e-9f;
+}
+
+static bool mm3_voc_stage_prep(const MM3Model & m, MM3VocGraph * g, std::string * err) {
+    const float eps = mm3_voc_snake_eps(m.synth_cfg.voc);
+    return mm3_voc_stage_block_prep(&g->prep, m.synth.voc, *g, eps, err) &&
+           mm3_voc_stage_inv(&g->prep, g->inv_out, m.synth.voc.snake_out_alpha, eps, err);
+}
+
+static bool mm3_voc_require_f32(const ggml_tensor * t, std::string * err) {
+    if (!t) {
+        if (err) {
+            *err = "vocoder tensor missing";
+        }
+        return false;
+    }
+    if (t->type != GGML_TYPE_F32) {
+        if (err) {
+            *err = std::string("vocoder tensor '") + ggml_get_name(t) + "' is not F32 (type " +
+                   std::to_string((int) t->type) + "); the layout contract pins the vocoder to F32";
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool mm3_voc_validate_res(const MM3VocBlock & wb, std::string * err) {
+    for (const MM3VocResUnit & ru : wb.res) {
+        if (!mm3_voc_require_f32(ru.snake1_alpha, err) || !mm3_voc_require_f32(ru.snake2_alpha, err)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mm3_voc_validate_blocks(const MM3VocWeights & vw, std::string * err) {
+    for (const MM3VocBlock & wb : vw.blk) {
+        if (!mm3_voc_require_f32(wb.snake_alpha, err) || !mm3_voc_require_f32(wb.convt_w, err) ||
+            !mm3_voc_validate_res(wb, err)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mm3_voc_validate(const MM3Model & m, std::string * err) {
+    return mm3_voc_validate_blocks(m.synth.voc, err) && mm3_voc_require_f32(m.synth.voc.snake_out_alpha, err);
 }
 
 static void mm3_vocoder_free_graph(MM3VocGraph * g) {
@@ -212,56 +335,18 @@ static bool mm3_vocoder_prepare(const MM3Model & m, MM3VocGraph * g, std::string
     }
     mm3_vocoder_free(g);
 
-    const MM3VocConfig &  vc = m.synth_cfg.voc;
-    const MM3VocWeights & vw = m.synth.voc;
-    const int             NB = (int) vc.upsample_rates.size();
-    const int             NR = (int) vc.res_dilations.size();
-    const float           eps = vc.snake_eps > 0.0f ? vc.snake_eps : 1e-9f;
+    if (!mm3_voc_validate(m, err)) {
+        return false;
+    }
 
     BackendPair bp = backend_init("MM3-Voc");
     g->backend     = bp.backend;
     g->cpu_backend = bp.cpu_backend;
     g->backend_ref = true;
 
-    const int n_prep = NB * (1 + 1 + NR * 2) + 1;
-    wctx_init(&g->prep, n_prep);
-
+    mm3_voc_define_prep(m, g);
     std::string e;
-    bool        ok = true;
-    g->blk.assign((size_t) NB, MM3VocPrepBlk{});
-    for (int b = 0; b < NB && ok; b++) {
-        char nm[96];
-        MM3VocPrepBlk & pb = g->blk[(size_t) b];
-
-        snprintf(nm, sizeof(nm), "voc.blk.%d.snake.inv_alpha", b);
-        pb.inv = mm3_voc_make_inv(&g->prep, vw.blk[(size_t) b].snake_alpha, eps, nm, &e);
-        ok     = ok && pb.inv != nullptr;
-
-        snprintf(nm, sizeof(nm), "voc.blk.%d.convt.gemm", b);
-        if (ok) {
-            pb.convt_w = mm3_voc_repack_convt(&g->prep, vw.blk[(size_t) b].convt_w, nm, &e);
-            ok         = pb.convt_w != nullptr;
-        }
-
-        pb.res.assign((size_t) NR, MM3VocPrepRes{});
-        for (int r = 0; r < NR && ok; r++) {
-            snprintf(nm, sizeof(nm), "voc.blk.%d.res.%d.snake1.inv_alpha", b, r);
-            pb.res[(size_t) r].inv1 =
-                mm3_voc_make_inv(&g->prep, vw.blk[(size_t) b].res[(size_t) r].snake1_alpha, eps, nm, &e);
-            ok = pb.res[(size_t) r].inv1 != nullptr;
-            if (!ok) {
-                break;
-            }
-            snprintf(nm, sizeof(nm), "voc.blk.%d.res.%d.snake2.inv_alpha", b, r);
-            pb.res[(size_t) r].inv2 =
-                mm3_voc_make_inv(&g->prep, vw.blk[(size_t) b].res[(size_t) r].snake2_alpha, eps, nm, &e);
-            ok = pb.res[(size_t) r].inv2 != nullptr;
-        }
-    }
-    if (ok) {
-        g->inv_out = mm3_voc_make_inv(&g->prep, vw.snake_out_alpha, eps, "voc.snake_out.inv_alpha", &e);
-        ok         = g->inv_out != nullptr;
-    }
+    bool        ok = mm3_voc_stage_prep(m, g, &e);
     if (ok) {
         ok = wctx_alloc(&g->prep, g->backend);
         if (!ok) {
@@ -280,8 +365,8 @@ static bool mm3_vocoder_prepare(const MM3Model & m, MM3VocGraph * g, std::string
     g->weights_token = token;
 
     const size_t prep_bytes = g->prep.buffer ? ggml_backend_buffer_get_size(g->prep.buffer) : 0;
-    fprintf(stderr, "[MM3-Voc] Prepared: %d derived tensors, %.1f MB (inv-alpha + repacked convT)\n", n_prep,
-            (double) prep_bytes / (1024.0 * 1024.0));
+    fprintf(stderr, "[MM3-Voc] Prepared: %d derived tensors, %.1f MB (inv-alpha + repacked convT)\n",
+            mm3_voc_prep_tensor_count(m.synth_cfg.voc), (double) prep_bytes / (1024.0 * 1024.0));
     return true;
 }
 
@@ -380,21 +465,18 @@ static ggml_tensor * mm3_voc_build(ggml_context * ctx, const MM3Model & m, const
     return x;
 }
 
-static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L, std::string * err) {
-    if (g->graph && g->graph_L == L) {
-        return true;
-    }
-    const auto rebuild_started = std::chrono::steady_clock::now();
-    mm3_vocoder_free_graph(g);
+static size_t mm3_voc_graph_context_bytes() {
+    return ggml_tensor_overhead() * (MM3_VOC_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_VOC_MAX_NODES, false);
+}
 
-    const size_t ctx_bytes =
-        ggml_tensor_overhead() * (MM3_VOC_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_VOC_MAX_NODES, false);
+static ggml_context * mm3_voc_graph_context(MM3VocGraph * g, std::string * err) {
+    const size_t ctx_bytes = mm3_voc_graph_context_bytes();
     g->gbuf = (uint8_t *) malloc(ctx_bytes);
     if (!g->gbuf) {
         if (err) {
             *err = "out of host memory allocating the vocoder graph context";
         }
-        return false;
+        return nullptr;
     }
     ggml_init_params ip = { ctx_bytes, g->gbuf,  true };
     ggml_context *   ctx = ggml_init(ip);
@@ -404,9 +486,12 @@ static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L,
         if (err) {
             *err = "ggml_init failed for the vocoder graph context";
         }
-        return false;
+        return nullptr;
     }
+    return ctx;
+}
 
+static ggml_cgraph * mm3_voc_define_graph(ggml_context * ctx, const MM3Model & m, MM3VocGraph * g, int64_t L) {
     g->input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, L, (int64_t) m.synth_cfg.voc.fold_channels);
     ggml_set_name(g->input, "mm3_voc_in");
     ggml_set_input(g->input);
@@ -415,8 +500,23 @@ static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L,
     ggml_set_name(g->output, "mm3_voc_out");
     ggml_set_output(g->output);
 
-    g->graph = ggml_new_graph_custom(ctx, MM3_VOC_MAX_NODES, false);
-    ggml_build_forward_expand(g->graph, g->output);
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, MM3_VOC_MAX_NODES, false);
+    ggml_build_forward_expand(graph, g->output);
+    return graph;
+}
+
+static bool mm3_voc_ensure_graph(const MM3Model & m, MM3VocGraph * g, int64_t L, std::string * err) {
+    if (g->graph && g->graph_L == L) {
+        return true;
+    }
+    const auto rebuild_started = std::chrono::steady_clock::now();
+    mm3_vocoder_free_graph(g);
+
+    ggml_context * ctx = mm3_voc_graph_context(g, err);
+    if (!ctx) {
+        return false;
+    }
+    g->graph = mm3_voc_define_graph(ctx, m, g, L);
 
     ggml_backend_sched_reset(g->sched);
     if (!ggml_backend_sched_alloc_graph(g->sched, g->graph)) {
@@ -474,6 +574,28 @@ static bool mm3_voc_run(const MM3Model & m, MM3VocGraph * g, const float * src, 
 
 static MM3VocGraph g_mm3_voc;
 
+struct MM3VocTile {
+    int64_t core_end = 0;
+    int64_t start    = 0;
+    int64_t end      = 0;
+};
+
+static bool mm3_voc_single_shot(int64_t L, int64_t chunk) {
+    return L <= chunk;
+}
+
+static int64_t mm3_voc_tile_core(int64_t chunk, int64_t overlap) {
+    return chunk - 2 * overlap;
+}
+
+static MM3VocTile mm3_voc_tile(int64_t core_start, int64_t L, int64_t core, int64_t overlap) {
+    MM3VocTile tile;
+    tile.core_end = core_start + core < L ? core_start + core : L;
+    tile.start    = core_start - overlap > 0 ? core_start - overlap : 0;
+    tile.end      = tile.core_end + overlap < L ? tile.core_end + overlap : L;
+    return tile;
+}
+
 static bool mm3_vocoder_decode_tiled(const MM3Model & m, const std::vector<float> & latents, int64_t L,
                                      std::vector<float> & out_stereo, int64_t chunk, int64_t overlap,
                                      std::string * err);
@@ -529,7 +651,7 @@ static bool mm3_vocoder_decode_tiled(const MM3Model & m, const std::vector<float
 
     MM3VocGraph * g = &g_mm3_voc;
 
-    if (L <= chunk) {
+    if (mm3_voc_single_shot(L, chunk)) {
         for (int ch = 0; ch < 2; ch++) {
             if (!mm3_voc_run(m, g, latents.data() + (size_t) (ch * FC * L), L,
                              out_stereo.data() + (size_t) (ch * T),
@@ -540,15 +662,14 @@ static bool mm3_vocoder_decode_tiled(const MM3Model & m, const std::vector<float
         return true;
     }
 
-    const int64_t      ov   = overlap;
-    const int64_t      core = chunk - 2 * ov;
+    const int64_t      core = mm3_voc_tile_core(chunk, overlap);
     std::vector<float> win;
     std::vector<float> tile;
     for (int64_t cs = 0; cs < L; cs += core) {
-        const int64_t ce = cs + core < L ? cs + core : L;
-        const int64_t ws = cs - ov > 0 ? cs - ov : 0;
-        const int64_t we = ce + ov < L ? ce + ov : L;
-        const int64_t wl = we - ws;
+        const MM3VocTile span = mm3_voc_tile(cs, L, core, overlap);
+        const int64_t    ce   = span.core_end;
+        const int64_t    ws   = span.start;
+        const int64_t    wl   = span.end - span.start;
 
         win.resize((size_t) (FC * wl));
         tile.resize((size_t) (wl * up));

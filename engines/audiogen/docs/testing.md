@@ -20,9 +20,14 @@ includes metadata compatibility, model-pair selection, Unicode token classes,
 frame validation, prompt assembly and the request-utils caption/lyrics
 cleanup helpers, unconditional masking, deterministic noise, flow scheduling,
 condition length, window stitching, sampler edge cases, and converter output
-transactions. Set `AUDIOGEN_TEST_MINIMAX_MODELS_DIR` to a directory containing
-the MiniMax GGUF pair to run `test-minimax-integration`, which covers model
-loading, generation output, progress, and cancellation.
+transactions. `test-minimax-fit` writes a tiny MiniMax pair and checks the
+memory-fit preflight against the buffers a real load and graph allocation of
+that pair produce, byte for byte, along with its workload limits, rejections
+and the weightless-GGUF case. Set `AUDIOGEN_TEST_MINIMAX_MODELS_DIR` to a
+directory containing the MiniMax GGUF pair to run `test-minimax-integration`,
+which covers model loading, generation output, progress, and cancellation, and
+`test-minimax-fit-models`, which repeats the preflight parity check on the real
+pair on the device `MM3_DEVICE` selects.
 On a Metal build, `ctest --test-dir build/audiogen -R
 test-minimax-metal-ops` runs the model-free CPU/Metal condition and vocoder
 parity regression. It skips with return code 77 either when Metal is

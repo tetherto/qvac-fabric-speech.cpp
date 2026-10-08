@@ -105,7 +105,9 @@ bool write_tokens(const std::string & path, const std::vector<int> & toks) {
 void usage(const char * a0) {
     fprintf(stderr,
         "usage: %s --model-dir DIR [--text TEXT]\n"
+        "          [--llm-gguf FILE] [--flow-gguf FILE] [--hift-gguf FILE]\n"
         "          [--n-gpu-layers N] [--vulkan-device N] [--threads N] [--seed 42] [--greedy]\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--runs 3] [--warmup 1]\n"
         "          [--tokens-out FILE]  pin: write the LM trajectory this run used\n"
         "          [--tokens-in FILE]   pin: reuse a trajectory (skips the LM)\n"
@@ -133,14 +135,18 @@ bool parse_vulkan_device(const char * s, int & out) {
 
 int main(int argc, char ** argv) {
     std::string model_dir, text = "The quick brown fox jumps over the lazy dog.";
-    std::string tokens_out, tokens_in, wav_out, json_out, backends_dir, opencl_cache_dir;
+    std::string tokens_out, tokens_in, wav_out, json_out, backends_dir, opencl_cache_dir, backend;
     std::string reference_audio, prompt_text, s3tok_gguf, campplus_gguf;
+    std::string llm_gguf, flow_gguf, hift_gguf;
     int seed = 42, n_gpu_layers = 0, n_threads = 0, runs = 3, warmup = 1, vulkan_device = 0;
     bool greedy = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--model-dir" && i + 1 < argc) model_dir = argv[++i];
+        else if (a == "--llm-gguf" && i + 1 < argc) llm_gguf = argv[++i];
+        else if (a == "--flow-gguf" && i + 1 < argc) flow_gguf = argv[++i];
+        else if (a == "--hift-gguf" && i + 1 < argc) hift_gguf = argv[++i];
         else if (a == "--text" && i + 1 < argc) text = argv[++i];
         else if ((a == "--n-gpu-layers" || a == "-ngl") && i + 1 < argc) n_gpu_layers = std::atoi(argv[++i]);
         else if (a == "--vulkan-device" && i + 1 < argc) {
@@ -151,6 +157,7 @@ int main(int argc, char ** argv) {
             }
         }
         else if ((a == "--threads" || a == "-t") && i + 1 < argc) n_threads = std::atoi(argv[++i]);
+        else if (a == "--backend" && i + 1 < argc) backend = argv[++i];
         else if (a == "--seed" && i + 1 < argc) seed = std::atoi(argv[++i]);
         else if (a == "--runs" && i + 1 < argc) runs = std::atoi(argv[++i]);
         else if (a == "--warmup" && i + 1 < argc) warmup = std::atoi(argv[++i]);
@@ -175,9 +182,13 @@ int main(int argc, char ** argv) {
 
     EngineOptions opts;
     opts.model_dir        = model_dir;
+    opts.llm_gguf_path     = llm_gguf;
+    opts.flow_gguf_path    = flow_gguf;
+    opts.hift_gguf_path    = hift_gguf;
     opts.seed             = seed;
     opts.greedy           = greedy;
     opts.n_gpu_layers     = n_gpu_layers;
+    opts.backend          = backend;
     opts.vulkan_device    = vulkan_device;
     opts.n_threads        = n_threads;
     if (!reference_audio.empty()) opts.reference_audio  = reference_audio;
@@ -209,6 +220,7 @@ int main(int argc, char ** argv) {
     printf("load: %.1f ms\n", load_ms);
 
     Stage st_lm_pre{"lm_prefill", {}}, st_lm_dec{"lm_decode", {}};
+    Stage st_lm_step{"lm_decode_per_token", {}};
     Stage st_fe{"flow_frontend", {}}, st_dit{"dit_euler", {}};
     Stage st_f0{"hift_f0", {}}, st_src{"hift_source", {}};
     Stage st_stft{"hift_stft", {}}, st_hdec{"hift_decode", {}};
@@ -223,6 +235,7 @@ int main(int argc, char ** argv) {
             const StageTimings & t = res.timings;
             st_lm_pre.ms.push_back(t.lm_prefill_ms);
             st_lm_dec.ms.push_back(t.lm_decode_ms);
+            if (t.n_decode_steps > 0) st_lm_step.ms.push_back(t.lm_decode_ms / t.n_decode_steps);
             st_fe.ms.push_back(t.flow_frontend_ms);
             st_dit.ms.push_back(t.dit_euler_ms);
             st_f0.ms.push_back(t.hift_f0_ms);
@@ -244,7 +257,7 @@ int main(int argc, char ** argv) {
            last.timings.tm, last.timings.mel_len, last.pcm.size(), last.duration_s);
 
     printf("\nper-stage (over %d measured runs):\n", runs);
-    for (const Stage * s : { &st_lm_pre, &st_lm_dec, &st_fe, &st_dit,
+    for (const Stage * s : { &st_lm_pre, &st_lm_dec, &st_lm_step, &st_fe, &st_dit,
                              &st_f0, &st_src, &st_stft, &st_hdec, &st_tot }) {
         print_stage(*s);
     }
@@ -276,6 +289,10 @@ int main(int argc, char ** argv) {
             os << "  \"runtime\": \"ggml-cpp\",\n";
             os << "  \"engine\": \"cosyvoice3\",\n";
             os << "  \"model_dir\": \"" << json_escape(model_dir) << "\",\n";
+            os << "  \"model_overrides\": {"
+               << "\"llm\": \"" << json_escape(llm_gguf)
+               << "\", \"flow\": \"" << json_escape(flow_gguf)
+               << "\", \"hift\": \"" << json_escape(hift_gguf) << "\"},\n";
             os << "  \"backend\": \"" << json_escape(engine.backend_name()) << "\",\n";
             os << "  \"gpu_declined\": " << (engine.gpu_unsupported() ? "true" : "false") << ",\n";
             os << "  \"n_gpu_layers\": " << n_gpu_layers << ",\n";
@@ -302,6 +319,7 @@ int main(int argc, char ** argv) {
             os << "  \"stages\": {\n";
             write_json_stage(os, st_lm_pre, true);
             write_json_stage(os, st_lm_dec, true);
+            write_json_stage(os, st_lm_step, true);
             write_json_stage(os, st_fe,     true);
             write_json_stage(os, st_dit,    true);
             write_json_stage(os, st_f0,     true);

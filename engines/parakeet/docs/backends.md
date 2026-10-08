@@ -154,8 +154,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
 Unified RNN-T, TDT, EOU, Nemotron, and tagged Sortformer v2.1 FastConformer
-encoder sidecars. Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders,
-and the Sortformer transformer/speaker head remain in the normal ggml pipeline.
+encoder sidecars, and the MOSS-Transcribe-Diarize audio encoder sidecar, whose
+export and routing are in [its guide](moss-transcribe.md#core-ml-encoder-sidecar).
+Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders, and the Sortformer
+transformer/speaker head remain in the normal ggml pipeline.
 Sortformer v1 and v2 have no sidecar. The English CTC checkpoints satisfy the
 CTC/IndicConformer export contract; among CTC checkpoints, the Core ML parity
 tests cover only IndicConformer.
@@ -369,3 +371,52 @@ Windowing bounds Core ML input shapes and memory, but full-context attention is
 then local to each overlapping window. The stitched result should therefore be
 treated as close to, rather than bit-identical with, a single full-length encode;
 validate accuracy on representative long recordings before production use.
+
+## Core ML family routing
+
+| Family | Contract | Inputs the sidecar does not take |
+|---|---|---|
+| CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
+| EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
+| Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
+| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
+| Sortformer v1, v2 | no sidecar | always ggml |
+| MOSS-Transcribe-Diarize | Whisper encoder plus adaptor per 30 s window, the same zero-padded window the ggml encoder runs; separate `MOSS_COREML_*` switches | none; the Qwen3 decoder always runs on ggml. See [MOSS-Transcribe-Diarize](moss-transcribe.md#core-ml-encoder-sidecar) |
+
+## IndicConformer and Unified Core ML export
+
+IndicConformer CTC uses the fixed-capacity sidecar contract shared by the
+offline TDT and Unified encoders. The FastConformer stack runs in Core ML,
+while the multilingual CTC vocabulary projection and language mask stay on
+ggml. Short inputs are padded to the compiled capacity and long inputs use the
+overlapping encoder-window plan:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/indic-conformer-600m-multilingual.f16.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/indic-conformer-600m-multilingual-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside any quantization as
+`indic-conformer-600m-multilingual-encoder.mlmodelc`. Missing or incompatible
+sidecars and prediction failures fall back to the complete ggml path.
+
+Unified RNN-T uses the same fixed-capacity sidecar contract as TDT. Shorter
+inputs are zero-padded to the exported capacity, and oversized inputs use the
+existing overlapping long-form window plan:
+
+```bash
+python engines/parakeet/scripts/export-encoder-coreml.py \
+  --gguf engines/parakeet/models/parakeet-unified-en-0.6b.q8_0.gguf \
+  --n-mel-frames 1501 \
+  --palettize-bits 6 --palettize-group-size 16 \
+  --out engines/parakeet/models/parakeet-unified-en-0.6b-encoder.mlpackage \
+  --compile-dir engines/parakeet/models
+```
+
+Place the compiled directory beside the GGUF as
+`parakeet-unified-en-0.6b-encoder.mlmodelc`. Missing or incompatible sidecars
+and prediction failures fall back to ggml.

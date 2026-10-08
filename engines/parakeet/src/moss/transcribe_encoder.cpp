@@ -177,6 +177,25 @@ void validate_chunk(const TranscribeModel & model, const std::vector<float> & me
     }
 }
 
+struct EncoderOutputs {
+    ggml_tensor * input;
+    ggml_tensor * states;
+    ggml_tensor * embeddings;
+};
+
+EncoderOutputs build_encoder_graph(TranscribeModel & model, TranscribeGraph & graph, int tokens) {
+    const auto & config = model.config();
+    EncoderGraph builder{model, config.encoder, graph};
+    auto * input = graph.input_f32(config.audio.chunk_frames, config.audio.n_mels);
+    auto * states = builder.encode(input);
+    auto * embeddings = builder.adapt(states, tokens);
+    ggml_set_output(states);
+    ggml_set_output(embeddings);
+    ggml_build_forward_expand(graph.graph(), states);
+    ggml_build_forward_expand(graph.graph(), embeddings);
+    return {input, states, embeddings};
+}
+
 std::vector<float> read_tensor(ggml_tensor * tensor) {
     std::vector<float> values((size_t) ggml_nelements(tensor));
     ggml_backend_tensor_get(tensor, values.data(), 0, ggml_nbytes(tensor));
@@ -195,27 +214,25 @@ std::vector<float> read_mel_filters(const TranscribeModel & model) {
     return read_tensor(model.tensor("audio.mel_filters"));
 }
 
+TranscribeMemory measure_audio_chunk(TranscribeModel & model, int tokens) {
+    TranscribeGraph graph(ENCODER_GRAPH_NODES);
+    build_encoder_graph(model, graph, tokens);
+    return model.measure(graph);
+}
+
 TranscribeChunkEncoding encode_audio_chunk(TranscribeModel & model, const std::vector<float> & mel, int tokens,
                                            bool keep_encoder_states) {
     validate_chunk(model, mel, tokens);
-    const TranscribeConfig & config = model.config();
     TranscribeGraph graph(ENCODER_GRAPH_NODES);
-    EncoderGraph builder{model, config.encoder, graph};
-    ggml_tensor * input = graph.input_f32(config.audio.chunk_frames, config.audio.n_mels);
-    ggml_tensor * states = builder.encode(input);
-    ggml_tensor * embeddings = builder.adapt(states, tokens);
-    ggml_set_output(states);
-    ggml_set_output(embeddings);
-    ggml_build_forward_expand(graph.graph(), states);
-    ggml_build_forward_expand(graph.graph(), embeddings);
+    const auto outputs = build_encoder_graph(model, graph, tokens);
 
     model.allocate(graph);
-    ggml_backend_tensor_set(input, mel.data(), 0, mel.size() * sizeof(float));
+    ggml_backend_tensor_set(outputs.input, mel.data(), 0, mel.size() * sizeof(float));
     model.compute(graph);
     TranscribeChunkEncoding encoding;
-    encoding.embeddings = read_tensor(embeddings);
+    encoding.embeddings = read_tensor(outputs.embeddings);
     if (keep_encoder_states) {
-        encoding.encoder_states = read_tensor(states);
+        encoding.encoder_states = read_tensor(outputs.states);
     }
     return encoding;
 }

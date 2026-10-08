@@ -9,7 +9,8 @@
 //
 // Pass --n-gpu-layers > 0 to select the GPU path (Metal on Apple, Vulkan on
 // desktop Linux / Windows, OpenCL on Adreno; every other GPU is declined and
-// falls back to CPU).
+// falls back to CPU), or --backend to name the device (hexagon = the
+// Snapdragon HTP0 NPU; no fallback).
 //
 // Voice cloning (needs cosyvoice3-s3tok*.gguf + cosyvoice3-campplus*.gguf in
 // the model dir, or --s3tok-gguf / --campplus-gguf):
@@ -70,7 +71,7 @@ int main(int argc, char ** argv) {
 
     std::string out = "cosyvoice_out.wav", prompt_text, voice_gguf;
     std::string reference_audio, s3tok_gguf, campplus_gguf;
-    std::string backends_dir, opencl_cache_dir;
+    std::string backends_dir, opencl_cache_dir, backend;
     VoiceControls controls;
     int seed = 42, n_gpu_layers = 0, n_threads = 0, vulkan_device = 0;
     bool greedy = false;
@@ -100,6 +101,7 @@ int main(int argc, char ** argv) {
             }
         }
         else if ((a == "--threads" || a == "-t") && i + 1 < argc) n_threads = std::atoi(argv[++i]);
+        else if (a == "--backend" && i + 1 < argc) backend = argv[++i];
         else if (a == "--backends-dir" && i + 1 < argc) backends_dir = argv[++i];
         else if (a == "--opencl-cache-dir" && i + 1 < argc) opencl_cache_dir = argv[++i];
         else if (a == "--greedy") greedy = true;
@@ -113,6 +115,8 @@ int main(int argc, char ** argv) {
                 "          [--list-emotions] [--list-paces]\n"
                 "          [--out out.wav] [--seed N] [--greedy] [--flow-cut-prompt]\n"
                 "          [--n-gpu-layers N] [--threads N]\n"
+                "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device;\n"
+                "                      overrides --n-gpu-layers, no fallback)\n"
                 "          [--vulkan-device N] [--backends-dir DIR] [--opencl-cache-dir DIR]\n"
                 "\n"
                 "Voice cloning: --reference-audio with --prompt-text (the reference's verbatim\n"
@@ -133,6 +137,7 @@ int main(int argc, char ** argv) {
     opts.greedy = greedy;
     opts.flow_cut_prompt = flow_cut_prompt;
     opts.n_gpu_layers = n_gpu_layers;
+    opts.backend = backend;
     opts.vulkan_device = vulkan_device;
     opts.n_threads = n_threads;
     opts.default_controls = controls;

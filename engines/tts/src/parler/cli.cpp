@@ -32,6 +32,8 @@ void usage(const char * argv0) {
         "          [--quality basic|high|\"very high\"]\n"
         "          [--seed 42] [--threads N]\n"
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
+        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device;\n"
+        "                      overrides --n-gpu-layers, no fallback)\n"
         "          [--greedy] (not honoured: argmax decoding never terminates\n"
         "                      for this model, so it warns and samples instead)\n"
         "          [--temperature X] [--top-k N] [--top-p X]\n"
@@ -102,6 +104,7 @@ int main(int argc, char ** argv) {
         else if (a == "--seed")           opts.seed = atoi(next());
         else if (a == "--threads")        opts.n_threads = atoi(next());
         else if (a == "--n-gpu-layers")   opts.n_gpu_layers = atoi(next());
+        else if (a == "--backend")        opts.backend = next();
         else if (a == "--greedy")         opts.greedy = true;
         else if (a == "--temperature")    opts.temperature = (float) atof(next());
         else if (a == "--top-k")          opts.top_k = atoi(next());

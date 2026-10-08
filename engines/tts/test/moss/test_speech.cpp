@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -26,6 +27,10 @@ constexpr uint32_t AUDIO_SEED = 11;
 constexpr float TOLERANCE = 1e-4f;
 constexpr float LOW = -10.0f;
 constexpr float HIGH = 10.0f;
+constexpr int NEVER_FAIL = -1;
+constexpr int CODE_STRIDE = 5;
+constexpr int CODE_OFFSET = 2;
+constexpr const char * FAKE_SIDECAR_LABEL = "coreml-fake";
 
 int failures = 0;
 
@@ -442,6 +447,162 @@ void test_tokenizer_rejections() {
     }), "a chunk whose padded segment outgrows the window");
 }
 
+class FakeTokenizerSidecar final : public SpeechTokenizerSidecar {
+public:
+    FakeTokenizerSidecar(std::vector<float> states, int fail_on_call, int * calls, std::vector<float> * seen)
+        : states_(std::move(states)), fail_on_call_(fail_on_call), calls_(calls), seen_(seen) {}
+
+    bool pooled_states(const std::vector<float> & mel, std::vector<float> & states) override {
+        *seen_ = mel;
+        if ((*calls_)++ == fail_on_call_) {
+            return false;
+        }
+        states = states_;
+        return true;
+    }
+
+    const char * label() const override {
+        return FAKE_SIDECAR_LABEL;
+    }
+
+private:
+    std::vector<float> states_;
+    int fail_on_call_;
+    int * calls_;
+    std::vector<float> * seen_;
+};
+
+std::vector<float> read_f32_tensor(const std::filesystem::path & path, const char * name) {
+    ggml_context * data = nullptr;
+    gguf_context * file = gguf_init_from_file(path.string().c_str(), {false, &data});
+    const ggml_tensor * tensor = ggml_get_tensor(data, name);
+    const float * values = (const float *) tensor->data;
+    std::vector<float> out(values, values + ggml_nelements(tensor));
+    ggml_free(data);
+    gguf_free(file);
+    return out;
+}
+
+std::vector<int32_t> planted_codes(int tokens) {
+    std::vector<int32_t> codes((size_t) tokens);
+    for (int t = 0; t < tokens; ++t) {
+        codes[(size_t) t] = (t * CODE_STRIDE + CODE_OFFSET) % VQ_CODES;
+    }
+    return codes;
+}
+
+std::vector<float> codebook_rows(const std::vector<float> & codebook, const std::vector<int32_t> & codes) {
+    std::vector<float> rows;
+    for (int32_t code : codes) {
+        rows.insert(rows.end(), codebook.begin() + (std::ptrdiff_t) code * VQ_EMBD,
+                    codebook.begin() + (std::ptrdiff_t) (code + 1) * VQ_EMBD);
+    }
+    return rows;
+}
+
+std::unique_ptr<SpeechTokenizerSidecar> planted_sidecar(const std::filesystem::path & path, int fail_on_call,
+                                                        int * calls, std::vector<float> * seen) {
+    const SpeechTokenizer probe(path.string(), false, 1);
+    const SpeechSegmentCapacity capacity = speech_segment_capacity(probe.config());
+    const std::vector<float> rows = codebook_rows(read_f32_tensor(path, "whispervq.codebook"),
+                                                  planted_codes(capacity.tokens));
+    return std::make_unique<FakeTokenizerSidecar>(rows, fail_on_call, calls, seen);
+}
+
+void test_tokenizer_capacity() {
+    const auto path = write_vq("speech-vq-capacity", WEIGHT_SEED);
+    const SpeechTokenizer tokenizer(path.string(), false, 1);
+    const SpeechSegmentCapacity capacity = speech_segment_capacity(tokenizer.config());
+    check(capacity.tokens == VQ_CHUNK / tokenizer.config().samples_per_token(),
+          "the sidecar window holds every token of a full segment");
+    check(capacity.mel_frames == VQ_CHUNK / VQ_HOP, "the sidecar window holds every mel frame of a full segment");
+    check(open_speech_tokenizer_sidecar(path.string(), tokenizer.config(), {}) == nullptr,
+          "no staged sidecar keeps the ggml tokenizer");
+    const std::filesystem::path staged = speech_tokenizer_sidecar_path(path.string());
+    std::filesystem::create_directories(staged);
+    check(open_speech_tokenizer_sidecar(path.string(), tokenizer.config(), {true, false}) == nullptr,
+          "MOSS_COREML_DISABLE skips a staged sidecar");
+    check(open_speech_tokenizer_sidecar(path.string(), tokenizer.config(), {}) == nullptr,
+          "a directory that is not a loadable model keeps the ggml tokenizer");
+    std::filesystem::remove_all(staged);
+    std::filesystem::remove(path);
+}
+
+void test_tokenizer_sidecar_routing() {
+    const auto path = write_vq("speech-vq-sidecar", WEIGHT_SEED);
+    SpeechTokenizer tokenizer(path.string(), false, 1);
+    int calls = 0;
+    std::vector<float> seen;
+    tokenizer.attach_sidecar(planted_sidecar(path, NEVER_FAIL, &calls, &seen), false);
+    tokenizer.begin_run();
+    const std::vector<float> audio = random_signal(VQ_CHUNK, AUDIO_SEED);
+    const std::vector<int32_t> codes = tokenizer.encode(audio);
+    const std::vector<int32_t> expected = planted_codes((int) codes.size());
+    check(tokenizer.on_coreml() && calls == 1, "an attached sidecar encodes a full segment");
+    check(codes.size() == speech_segment_tokens(tokenizer.config(), audio.size()) && codes == expected,
+          "the sidecar's pooled states are quantized to their nearest codes");
+    const SpeechSegmentCapacity capacity = speech_segment_capacity(tokenizer.config());
+    check(seen.size() == (size_t) VQ_MELS * capacity.mel_frames, "the sidecar sees the whole segment");
+    check(tokenizer.run_backend() == FAKE_SIDECAR_LABEL, "the run reports the sidecar label");
+    std::filesystem::remove(path);
+}
+
+void test_tokenizer_partial_segments_stay_on_ggml() {
+    const auto path = write_vq("speech-vq-partial", WEIGHT_SEED);
+    SpeechTokenizer reference(path.string(), false, 1);
+    SpeechTokenizer tokenizer(path.string(), false, 1);
+    int calls = 0;
+    std::vector<float> seen;
+    tokenizer.attach_sidecar(planted_sidecar(path, NEVER_FAIL, &calls, &seen), true);
+    tokenizer.begin_run();
+    const std::vector<float> partial = random_signal(VQ_CHUNK / 2, AUDIO_SEED);
+    check(tokenizer.encode(partial) == reference.encode(partial) && calls == 0,
+          "a partial segment runs on ggml, even under MOSS_COREML_STRICT");
+    check(tokenizer.on_coreml() && tokenizer.run_backend() == GGML_STAGE_BACKEND,
+          "the sidecar stays attached and the run reports ggml");
+    tokenizer.begin_run();
+    tokenizer.encode(random_signal(VQ_CHUNK + VQ_CHUNK / 2, AUDIO_SEED));
+    check(calls == 1 && tokenizer.run_backend() == MIXED_STAGE_BACKEND,
+          "a full segment and a partial one report mixed");
+    std::filesystem::remove(path);
+}
+
+void test_tokenizer_sidecar_fallback() {
+    const auto path = write_vq("speech-vq-fallback", WEIGHT_SEED);
+    SpeechTokenizer reference(path.string(), false, 1);
+    SpeechTokenizer tokenizer(path.string(), false, 1);
+    int calls = 0;
+    std::vector<float> seen;
+    tokenizer.attach_sidecar(planted_sidecar(path, 1, &calls, &seen), false);
+    tokenizer.begin_run();
+    const std::vector<float> audio = random_signal(VQ_CHUNK, AUDIO_SEED);
+    tokenizer.encode(audio);
+    check(tokenizer.encode(audio) == reference.encode(audio), "a failed prediction reruns the segment on ggml");
+    check(!tokenizer.on_coreml() && tokenizer.run_backend() == MIXED_STAGE_BACKEND,
+          "a failed sidecar is retired and the run reports mixed");
+    tokenizer.begin_run();
+    tokenizer.encode(audio);
+    check(calls == 2 && tokenizer.run_backend() == GGML_STAGE_BACKEND, "a retired sidecar is not tried again");
+    std::filesystem::remove(path);
+}
+
+void test_tokenizer_sidecar_strict() {
+    const auto path = write_vq("speech-vq-strict", WEIGHT_SEED);
+    SpeechTokenizer tokenizer(path.string(), false, 1);
+    int calls = 0;
+    std::vector<float> seen;
+    const std::vector<float> audio = random_signal(VQ_CHUNK, AUDIO_SEED);
+    tokenizer.attach_sidecar(planted_sidecar(path, 0, &calls, &seen), true);
+    expect_failure([&] { tokenizer.encode(audio); }, COREML_STRICT_ENV,
+                   "a failed prediction fails the segment under MOSS_COREML_STRICT");
+    tokenizer.attach_sidecar(nullptr, true);
+    expect_failure([&] { tokenizer.encode(audio); }, COREML_STRICT_ENV,
+                   "a missing sidecar fails the segment under MOSS_COREML_STRICT");
+    tokenizer.begin_run();
+    check(tokenizer.run_backend().empty(), "a run that tokenized nothing reports no backend");
+    std::filesystem::remove(path);
+}
+
 tts_cpp::moss::SpeechRequest valid_request() {
     tts_cpp::moss::SpeechRequest request;
     request.messages.push_back({tts_cpp::moss::SpeechRole::User, {}, std::vector<float>(1600, 0.1f), 16000});
@@ -540,6 +701,11 @@ int main() {
         test_tokenizer_rejections();
         test_request_validation();
         test_cli_flags();
+        test_tokenizer_capacity();
+        test_tokenizer_sidecar_routing();
+        test_tokenizer_partial_segments_stay_on_ggml();
+        test_tokenizer_sidecar_fallback();
+        test_tokenizer_sidecar_strict();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected: %s\n", e.what());
         return 1;

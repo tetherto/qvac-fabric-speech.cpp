@@ -9,7 +9,8 @@
 //
 // Pipeline: T5 encoder -> delay-pattern decoder LM (9 DAC codebooks) ->
 // DAC codec decode -> 44.1 kHz mono PCM. Validated backends are CPU, Metal,
-// Vulkan, and OpenCL; unsupported GPU backends fall back to CPU.
+// Vulkan, and OpenCL; unsupported GPU backends fall back to CPU. The Hexagon
+// NPU runs only on explicit request (EngineOptions::backend).
 //
 // Streaming: the synthesize(...on_chunk) overload emits audio in chunks by
 // re-decoding the growing DAC-code prefix, holding back a right margin for seams.
@@ -39,6 +40,13 @@ struct EngineOptions {
     // GPU layers to offload (Metal/Vulkan/...); 0 = CPU. >0 selects the best
     // available GPU and falls back to CPU when none is present.
     int n_gpu_layers = 0;
+
+    // Explicit compute device. Empty or "auto" (default) keeps the
+    // n_gpu_layers policy walk. "cpu", "opencl", "hexagon" (the Snapdragon
+    // HTP0 NPU) or an exact ggml device name select that device and override
+    // n_gpu_layers; there is no fallback, so the constructor throws when it
+    // is missing. The automatic walk never picks Hexagon.
+    std::string backend;
 
     // Sampling. Parler's HF defaults (do_sample, temperature 1.0, top_k 50)
     // are stored in the GGUF; zero values defer to them. greedy and top_k = 1

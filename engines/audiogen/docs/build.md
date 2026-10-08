@@ -26,7 +26,7 @@ cmake --build build -j
 
 Visual Studio, Xcode, and other multi-config generators add a configuration
 directory such as `Release/` beneath the executable directory. See the
-[top-level README](../../../README.md) for the shared ggml build.
+[shared build guide](../../../docs/BUILD.md) for the ggml build.
 
 | Option | Default | Effect |
 |---|---|---|

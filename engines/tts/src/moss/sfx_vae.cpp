@@ -1,5 +1,7 @@
 #include "moss/sfx_networks.h"
 
+#include "moss/sfx_coreml.h"
+
 #include "ggml.h"
 #include "ggml-backend.h"
 
@@ -15,7 +17,6 @@ constexpr int RESIDUAL_UNITS = 3;
 constexpr int RESIDUAL_DILATIONS[RESIDUAL_UNITS] = {1, 3, 9};
 constexpr int RESIDUAL_KERNEL = 7;
 constexpr int EDGE_KERNEL = 7;
-constexpr int WINDOW_CONTEXT_FRAMES = 32;
 constexpr int CHANNEL_REDUCTION = 2;
 constexpr int UPSAMPLE_KERNEL_PER_STRIDE = 2;
 
@@ -132,15 +133,8 @@ int validate_decoder_blocks(const SfxModel & model, const SfxVaeConfig & config)
     return channels;
 }
 
-struct Window {
-    int first = 0;
-    int count = 0;
-    int keep_first = 0;
-    int keep_count = 0;
-};
-
 std::vector<float> window_latents(const std::vector<float> & latents, int frames, int channels,
-                                  const Window & window) {
+                                  const SfxVaeWindow & window) {
     std::vector<float> slice((size_t) window.count * channels);
     for (int channel = 0; channel < channels; ++channel) {
         const auto source = latents.begin() + (std::ptrdiff_t) channel * frames + window.first;
@@ -149,14 +143,21 @@ std::vector<float> window_latents(const std::vector<float> & latents, int frames
     return slice;
 }
 
-std::vector<float> decode_window(SfxModel & model, const std::vector<float> & slice, int frames) {
+ggml_tensor * build_decode_graph(SfxModel & model, SfxGraph & graph, int frames) {
     const SfxConfig & config = model.config();
-    SfxGraph graph(VAE_GRAPH_NODES);
     VaeGraph builder{model, config.vae, graph};
     ggml_tensor * input = graph.input_f32(frames, config.vae.latent_dim);
     ggml_tensor * audio = builder.forward(input);
     ggml_set_output(audio);
     ggml_build_forward_expand(graph.graph(), audio);
+    ggml_set_name(input, "sfx_decode_input");
+    return audio;
+}
+
+std::vector<float> decode_window(SfxModel & model, const std::vector<float> & slice, int frames) {
+    SfxGraph graph(VAE_GRAPH_NODES);
+    auto * audio = build_decode_graph(model, graph, frames);
+    auto * input = ggml_get_tensor(graph.ctx(), "sfx_decode_input");
     model.allocate(graph);
     ggml_backend_tensor_set(input, slice.data(), 0, slice.size() * sizeof(float));
     model.compute(graph);
@@ -165,13 +166,13 @@ std::vector<float> decode_window(SfxModel & model, const std::vector<float> & sl
     return pcm;
 }
 
-std::vector<Window> plan_windows(int frames, int keep_frames, int window_frames) {
-    std::vector<Window> windows;
+std::vector<SfxVaeWindow> plan_windows(int frames, int keep_frames, int window_frames) {
+    std::vector<SfxVaeWindow> windows;
     for (int first = 0; first < keep_frames; first += window_frames) {
-        Window window;
+        SfxVaeWindow window;
         window.keep_count = std::min(window_frames, keep_frames - first);
-        window.first = std::max(0, first - WINDOW_CONTEXT_FRAMES);
-        const int last = std::min(frames, first + window.keep_count + WINDOW_CONTEXT_FRAMES);
+        window.first = std::max(0, first - SFX_VAE_CONTEXT_FRAMES);
+        const int last = std::min(frames, first + window.keep_count + SFX_VAE_CONTEXT_FRAMES);
         window.count = last - window.first;
         window.keep_first = first - window.first;
         windows.push_back(window);
@@ -179,7 +180,17 @@ std::vector<Window> plan_windows(int frames, int keep_frames, int window_frames)
     return windows;
 }
 
-void append_window(std::vector<float> & pcm, const std::vector<float> & decoded, const Window & window, int hop) {
+SfxVaeWindow fixed_window(int frames, int keep_frames, int window, int context, int first) {
+    SfxVaeWindow planned;
+    planned.keep_count = std::min(window - 2 * context, keep_frames - first);
+    planned.first = std::clamp(first - context, 0, frames - window);
+    planned.count = window;
+    planned.keep_first = first - planned.first;
+    return planned;
+}
+
+void append_window(std::vector<float> & pcm, const std::vector<float> & decoded, const SfxVaeWindow & window,
+                   int hop) {
     const auto first = decoded.begin() + (std::ptrdiff_t) window.keep_first * hop;
     pcm.insert(pcm.end(), first, first + (std::ptrdiff_t) window.keep_count * hop);
 }
@@ -193,7 +204,7 @@ void validate_request(const SfxModel & model, const std::vector<float> & latents
 }
 
 bool decode_windows(SfxModel & model, const std::vector<float> & latents, int frames,
-                    const std::vector<Window> & windows, const SfxDecodeProgress & progress,
+                    const std::vector<SfxVaeWindow> & windows, const SfxDecodeProgress & progress,
                     std::vector<float> & pcm) {
     const SfxVaeConfig & config = model.config().vae;
     for (size_t i = 0; i < windows.size(); ++i) {
@@ -206,7 +217,49 @@ bool decode_windows(SfxModel & model, const std::vector<float> & latents, int fr
     return true;
 }
 
+SidecarDecode decode_sidecar_windows(SfxVaeSidecar & sidecar, const SfxVaeConfig & config,
+                                     const std::vector<float> & latents, int frames,
+                                     const std::vector<SfxVaeWindow> & windows,
+                                     const SfxDecodeProgress & progress, std::vector<float> & pcm) {
+    std::vector<float> decoded;
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (!sidecar.decode(window_latents(latents, frames, config.latent_dim, windows[i]), decoded)) {
+            return SidecarDecode::Failed;
+        }
+        append_window(pcm, decoded, windows[i], config.hop_length());
+        if (progress && !progress((int) i + 1, (int) windows.size())) {
+            return SidecarDecode::Cancelled;
+        }
+    }
+    return SidecarDecode::Done;
+}
+
 } // namespace
+
+std::vector<SfxVaeWindow> plan_fixed_vae_windows(int frames, int keep_frames, int window, int context) {
+    std::vector<SfxVaeWindow> windows;
+    const int core = window - 2 * context;
+    if (core < 1 || window > frames || keep_frames < 1 || keep_frames > frames) {
+        return windows;
+    }
+    for (int first = 0; first < keep_frames; first += core) {
+        windows.push_back(fixed_window(frames, keep_frames, window, context, first));
+    }
+    return windows;
+}
+
+SidecarDecode decode_latents_on_sidecar(SfxVaeSidecar & sidecar, const SfxVaeConfig & config,
+                                        const std::vector<float> & latents, int frames, int keep_frames,
+                                        const SfxDecodeProgress & progress, std::vector<float> & pcm) {
+    const std::vector<SfxVaeWindow> windows =
+            plan_fixed_vae_windows(frames, keep_frames, sidecar.window(), SFX_VAE_CONTEXT_FRAMES);
+    if (windows.empty() || latents.size() != (size_t) frames * config.latent_dim) {
+        return SidecarDecode::Failed;
+    }
+    pcm.clear();
+    pcm.reserve((size_t) keep_frames * config.hop_length());
+    return decode_sidecar_windows(sidecar, config, latents, frames, windows, progress, pcm);
+}
 
 void validate_vae(const SfxModel & model) {
     const SfxVaeConfig & config = model.config().vae;
@@ -223,11 +276,31 @@ std::vector<float> decode_latents(SfxModel & model, const std::vector<float> & l
     validate_request(model, latents, frames, keep_frames, window_frames);
     std::vector<float> pcm;
     pcm.reserve((size_t) keep_frames * model.config().vae.hop_length());
-    const std::vector<Window> windows = plan_windows(frames, keep_frames, window_frames);
+    const std::vector<SfxVaeWindow> windows = plan_windows(frames, keep_frames, window_frames);
     if (!decode_windows(model, latents, frames, windows, progress, pcm)) {
         return {};
     }
     return pcm;
+}
+
+SfxMemory measure_decode(SfxModel & model, int frames, int keep_frames, int window_frames) {
+    SfxMemory peak;
+    const auto windows = plan_windows(frames, keep_frames, window_frames);
+    std::vector<int> measured;
+    for (const auto & window : windows) {
+        if (std::find(measured.begin(), measured.end(), window.count) != measured.end()) continue;
+        measured.push_back(window.count);
+        SfxGraph graph(VAE_GRAPH_NODES);
+        build_decode_graph(model, graph, window.count);
+        const auto price = model.measure(graph);
+        peak.device_bytes = std::max(peak.device_bytes, price.device_bytes);
+        peak.host_compute_bytes = std::max(peak.host_compute_bytes, price.host_compute_bytes);
+        const uint64_t slice = (uint64_t) window.count * model.config().vae.latent_dim * sizeof(float);
+        const uint64_t audio = (uint64_t) window.count * model.config().vae.hop_length() * sizeof(float);
+        peak.host_bytes = std::max(peak.host_bytes, price.host_bytes + slice + audio);
+    }
+    peak.host_bytes += windows.capacity() * sizeof(SfxVaeWindow);
+    return peak;
 }
 
 } // namespace tts_cpp::moss::detail

@@ -48,6 +48,9 @@ struct parakeet_coreml_context;
 // OS, unexpected model interface) so the caller falls back to ggml.
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc);
 
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
+                                                                     const char * units_env);
+
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 
@@ -57,6 +60,10 @@ void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 int64_t parakeet_coreml_fixed_mel_frames(
         const struct parakeet_coreml_context * ctx,
         int64_t n_mels);
+
+int64_t parakeet_coreml_fixed_output_rows(
+        const struct parakeet_coreml_context * ctx,
+        int64_t cols);
 
 // Run the encoder on the Apple Neural Engine.
 //

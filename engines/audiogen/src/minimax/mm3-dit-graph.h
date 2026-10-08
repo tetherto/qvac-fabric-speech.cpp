@@ -68,8 +68,7 @@ struct MM3FlowStats {
     size_t compute_bytes = 0;
 };
 
-static bool mm3_dit_readback_f32(const ggml_tensor * t, std::vector<float> * out, std::string * err,
-                                 const char * what) {
+static bool mm3_dit_require_f32(const ggml_tensor * t, std::string * err, const char * what) {
     if (!t) {
         if (err) {
             *err = std::string("DiT tensor missing: ") + what;
@@ -81,6 +80,14 @@ static bool mm3_dit_readback_f32(const ggml_tensor * t, std::vector<float> * out
             *err = std::string("DiT tensor '") + what + "' is not F32 (type " + std::to_string((int) t->type) +
                    "); the layout contract pins it to F32";
         }
+        return false;
+    }
+    return true;
+}
+
+static bool mm3_dit_readback_f32(const ggml_tensor * t, std::vector<float> * out, std::string * err,
+                                 const char * what) {
+    if (!mm3_dit_require_f32(t, err, what)) {
         return false;
     }
     out->resize((size_t) ggml_nelements(t));
@@ -125,19 +132,7 @@ static void mm3_dit_free(MM3DitGraph * g) {
     }
 }
 
-static bool mm3_dit_prepare(const MM3Model & m, MM3DitGraph * g, std::string * err) {
-    if (!m.loaded) {
-        if (err) {
-            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
-        }
-        return false;
-    }
-    const void * token = (const void *) m.wctx_synth.buffer;
-    if (g->weights_token == token && g->sched) {
-        return true;
-    }
-    mm3_dit_free(g);
-
+static bool mm3_dit_validate(const MM3Model & m, std::string * err) {
     const MM3DitConfig & c = m.synth_cfg.dit;
     if (c.block_count == 0 || c.embedding_length == 0 || c.head_count == 0 || c.head_dim == 0) {
         if (err) {
@@ -157,26 +152,53 @@ static bool mm3_dit_prepare(const MM3Model & m, MM3DitGraph * g, std::string * e
         }
         return false;
     }
+    const ggml_tensor * fourier = m.synth.dit.time_fourier;
+    if (!mm3_dit_require_f32(fourier, err, "dit.time_fourier.weight")) {
+        return false;
+    }
+    if (ggml_nelements(fourier) * 2 != (int64_t) c.fourier_dim) {
+        if (err) {
+            *err = "dit.time_fourier.weight has " + std::to_string(ggml_nelements(fourier)) +
+                   " elements, expected fourier_dim/2 = " + std::to_string(c.fourier_dim / 2);
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool mm3_dit_use_flash_attn(bool has_gpu) {
+    return mm3_use_flash_attn(has_gpu, /*default_on=*/true, "MM3_DIT_NO_FLASH", nullptr);
+}
+
+static bool mm3_dit_prepare(const MM3Model & m, MM3DitGraph * g, std::string * err) {
+    if (!m.loaded) {
+        if (err) {
+            *err = "MiniMax-Music3 is not warm (POST /mm3/warm first)";
+        }
+        return false;
+    }
+    const void * token = (const void *) m.wctx_synth.buffer;
+    if (g->weights_token == token && g->sched) {
+        return true;
+    }
+    mm3_dit_free(g);
+
+    if (!mm3_dit_validate(m, err)) {
+        return false;
+    }
+    const MM3DitConfig & c = m.synth_cfg.dit;
 
     BackendPair bp = backend_init("MM3-DiT");
     g->backend     = bp.backend;
     g->cpu_backend = bp.cpu_backend;
     g->backend_ref = true;
 
-    g->use_flash_attn = mm3_use_flash_attn(bp.has_gpu, /*default_on=*/true, "MM3_DIT_NO_FLASH", nullptr);
+    g->use_flash_attn = mm3_dit_use_flash_attn(bp.has_gpu);
 
     std::string e;
     if (!mm3_dit_readback_f32(m.synth.dit.time_fourier, &g->fourier_w, &e, "dit.time_fourier.weight")) {
         if (err) {
             *err = e;
-        }
-        mm3_dit_free(g);
-        return false;
-    }
-    if ((int64_t) g->fourier_w.size() * 2 != (int64_t) c.fourier_dim) {
-        if (err) {
-            *err = "dit.time_fourier.weight has " + std::to_string(g->fourier_w.size()) +
-                   " elements, expected fourier_dim/2 = " + std::to_string(c.fourier_dim / 2);
         }
         mm3_dit_free(g);
         return false;
@@ -302,23 +324,18 @@ static ggml_tensor * mm3_dit_build(ggml_context * ctx, const MM3Model & m, const
     return ggml_cont(ctx, ggml_transpose(ctx, out));
 }
 
-static bool mm3_dit_ensure_graph(const MM3Model & m, MM3DitGraph * g, int64_t L, int64_t branches,
-                                 std::string * err) {
-    if (g->graph && g->graph_L == L && g->graph_branches == branches) {
-        return true;
-    }
-    mm3_dit_free_graph(g);
+static size_t mm3_dit_graph_context_bytes() {
+    return ggml_tensor_overhead() * (MM3_DIT_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_DIT_MAX_NODES, false);
+}
 
-    const MM3DitConfig & c = m.synth_cfg.dit;
-
-    const size_t ctx_bytes =
-        ggml_tensor_overhead() * (MM3_DIT_MAX_NODES + 64) + ggml_graph_overhead_custom(MM3_DIT_MAX_NODES, false);
+static ggml_context * mm3_dit_graph_context(MM3DitGraph * g, std::string * err) {
+    const size_t ctx_bytes = mm3_dit_graph_context_bytes();
     g->gbuf = (uint8_t *) malloc(ctx_bytes);
     if (!g->gbuf) {
         if (err) {
             *err = "out of host memory allocating the DiT graph context";
         }
-        return false;
+        return nullptr;
     }
     ggml_init_params ip  = { ctx_bytes, g->gbuf,  true };
     ggml_context *   ctx = ggml_init(ip);
@@ -328,8 +345,14 @@ static bool mm3_dit_ensure_graph(const MM3Model & m, MM3DitGraph * g, int64_t L,
         if (err) {
             *err = "ggml_init failed for the DiT graph context";
         }
-        return false;
+        return nullptr;
     }
+    return ctx;
+}
+
+static ggml_cgraph * mm3_dit_define_graph(ggml_context * ctx, const MM3Model & m, MM3DitGraph * g, int64_t L,
+                                          int64_t branches) {
+    const MM3DitConfig & c = m.synth_cfg.dit;
 
     g->in_lat = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, L, (int64_t) c.in_channels);
     ggml_set_name(g->in_lat, "mm3_dit_latents");
@@ -355,8 +378,23 @@ static bool mm3_dit_ensure_graph(const MM3Model & m, MM3DitGraph * g, int64_t L,
     ggml_set_name(g->output, "mm3_dit_velocity");
     ggml_set_output(g->output);
 
-    g->graph = ggml_new_graph_custom(ctx, MM3_DIT_MAX_NODES, false);
-    ggml_build_forward_expand(g->graph, g->output);
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, MM3_DIT_MAX_NODES, false);
+    ggml_build_forward_expand(graph, g->output);
+    return graph;
+}
+
+static bool mm3_dit_ensure_graph(const MM3Model & m, MM3DitGraph * g, int64_t L, int64_t branches,
+                                 std::string * err) {
+    if (g->graph && g->graph_L == L && g->graph_branches == branches) {
+        return true;
+    }
+    mm3_dit_free_graph(g);
+
+    ggml_context * ctx = mm3_dit_graph_context(g, err);
+    if (!ctx) {
+        return false;
+    }
+    g->graph = mm3_dit_define_graph(ctx, m, g, L, branches);
 
     ggml_backend_sched_reset(g->sched);
     if (!ggml_backend_sched_alloc_graph(g->sched, g->graph)) {

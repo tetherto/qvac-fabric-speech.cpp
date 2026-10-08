@@ -253,8 +253,10 @@ set(PARAKEET_MOSS_SOURCES
     src/moss/transcribe_tensors.cpp
     src/moss/transcribe_audio.cpp
     src/moss/transcribe_encoder.cpp
+    src/moss/transcribe_coreml.cpp
     src/moss/transcribe_decoder.cpp
     src/moss/transcribe_text.cpp
+    src/moss/transcribe_fit.cpp
     src/moss/transcribe_engine.cpp
     src/moss/transcribe_cli.cpp
 )
@@ -1347,6 +1349,7 @@ if (PARAKEET_BUILD_TESTS)
 
     set(PARAKEET_MOSS_TEST_SOURCES
         ${PARAKEET_MOSS_SOURCES}
+        src/parakeet_coreml_path.cpp
         src/parakeet_ctc.cpp
         src/parakeet_engine.cpp
         src/parakeet_nemotron.cpp
@@ -1377,6 +1380,14 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-moss-transcribe)
     parakeet_register_test(test-moss-transcribe LABEL "unit")
 
+    add_executable(test-moss-transcribe-fit test/moss/test_transcribe_fit.cpp ${PARAKEET_MOSS_TEST_SOURCES})
+    target_link_libraries(test-moss-transcribe-fit PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-moss-transcribe-fit PRIVATE src include ggml/include)
+    target_compile_options(test-moss-transcribe-fit PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    parakeet_apply_backend_defs(test-moss-transcribe-fit)
+    parakeet_apply_ccache(test-moss-transcribe-fit)
+    parakeet_register_test(test-moss-transcribe-fit LABEL "unit")
+
     add_executable(test-moss-transcribe-parity test/moss/test_transcribe_parity.cpp ${PARAKEET_MOSS_TEST_SOURCES})
     target_link_libraries(test-moss-transcribe-parity PRIVATE ggml parakeet-backend-defs)
     target_include_directories(test-moss-transcribe-parity PRIVATE src include ggml/include)
@@ -1384,6 +1395,43 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-moss-transcribe-parity)
     parakeet_register_test(test-moss-transcribe-parity LABEL "fixture")
     set_property(TEST test-moss-transcribe-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Self-skips (77) without PARAKEET_COREML or MOSS_TRANSCRIBE_COREML_MODEL
+    # (a GGUF with its -encoder.mlmodelc staged beside it).
+    add_executable(test-moss-transcribe-coreml-parity test/moss/test_transcribe_coreml_parity.cpp
+        ${PARAKEET_MOSS_TEST_SOURCES} src/coreml/parakeet_coreml_shape.cpp)
+    target_link_libraries(test-moss-transcribe-coreml-parity PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(test-moss-transcribe-coreml-parity PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(test-moss-transcribe-coreml-parity)
+    parakeet_apply_ccache(test-moss-transcribe-coreml-parity)
+    if (PARAKEET_COREML)
+        find_library(PARAKEET_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        find_library(PARAKEET_COREML_FRAMEWORK     CoreML     REQUIRED)
+        target_sources(test-moss-transcribe-coreml-parity PRIVATE src/coreml/parakeet-encoder.mm)
+        set_source_files_properties(src/coreml/parakeet-encoder.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_compile_definitions(test-moss-transcribe-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        target_link_libraries(test-moss-transcribe-coreml-parity PRIVATE
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+    endif()
+    parakeet_register_test(test-moss-transcribe-coreml-parity
+        LABEL "fixture;coreml"
+        ARGS  "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav")
+    set_property(TEST test-moss-transcribe-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Not a test: times one 30 s window on the staged sidecar against the
+    # ggml GPU encoder (median of 5 after a warm-up) as a markdown row.
+    add_executable(bench-moss-transcribe-coreml test/moss/bench_transcribe_coreml.cpp
+        ${PARAKEET_MOSS_TEST_SOURCES} src/coreml/parakeet_coreml_shape.cpp)
+    target_link_libraries(bench-moss-transcribe-coreml PRIVATE ggml parakeet-backend-defs)
+    target_include_directories(bench-moss-transcribe-coreml PRIVATE src include ggml/include)
+    parakeet_apply_backend_defs(bench-moss-transcribe-coreml)
+    parakeet_apply_ccache(bench-moss-transcribe-coreml)
+    if (PARAKEET_COREML)
+        target_sources(bench-moss-transcribe-coreml PRIVATE src/coreml/parakeet-encoder.mm)
+        target_compile_definitions(bench-moss-transcribe-coreml PRIVATE PARAKEET_USE_COREML)
+        target_link_libraries(bench-moss-transcribe-coreml PRIVATE
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
@@ -1556,6 +1604,13 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_encoder_coreml.py")
         set_property(TEST test-export-encoder-coreml PROPERTY LABELS "unit")
+        add_test(
+            NAME test-export-moss-transcribe-coreml
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_moss_transcribe_coreml.py")
+        set_property(TEST test-export-moss-transcribe-coreml PROPERTY LABELS "unit")
+        set_property(TEST test-export-moss-transcribe-coreml PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        set_property(TEST test-export-moss-transcribe-coreml PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
     endif()
 
     # End-to-end transcription parity: full Engine::transcribe() with the Core ML

@@ -218,7 +218,7 @@ struct SfxDitSession::Impl {
     ggml_tensor * positions = nullptr;
     ggml_tensor * output = nullptr;
 
-    Impl(SfxModel & owner, int frame_count) : model(owner), frames(frame_count) {
+    Impl(SfxModel & owner, int frame_count, bool measure_only) : model(owner), frames(frame_count) {
         validate_dit(model);
         const SfxConfig & config = model.config();
         DitGraph builder{model, config.dit, graph};
@@ -229,7 +229,7 @@ struct SfxDitSession::Impl {
         output = builder.forward(latents, ggml_reshape_1d(graph.ctx(), timestep, 1), context, positions);
         ggml_set_output(output);
         ggml_build_forward_expand(graph.graph(), output);
-        model.allocate(graph);
+        if (!measure_only) model.allocate(graph);
     }
 
     void require_sizes(const std::vector<float> & latent_data, const std::vector<float> & context_data) const {
@@ -254,9 +254,12 @@ struct SfxDitSession::Impl {
     }
 };
 
-SfxDitSession::SfxDitSession(SfxModel & model, int frames) : impl_(new Impl(model, frames)) {}
+SfxDitSession::SfxDitSession(SfxModel & model, int frames, bool measure_only)
+    : impl_(new Impl(model, frames, measure_only)) {}
 
 SfxDitSession::~SfxDitSession() = default;
+
+SfxMemory SfxDitSession::measure() { return impl_->model.measure(impl_->graph); }
 
 std::vector<float> SfxDitSession::velocity(const std::vector<float> & latents, float timestep,
                                            const std::vector<float> & context) {

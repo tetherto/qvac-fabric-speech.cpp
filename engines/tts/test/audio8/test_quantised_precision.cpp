@@ -155,7 +155,7 @@ void tally_codec_weights(codec_model & model, ggml_prec want, prec_tally & tally
 void check_codec(const std::string & path, int n_gpu_layers, ggml_prec want) {
     codec_model model;
     std::string error;
-    if (!load_codec(path, n_gpu_layers, model, &error)) {
+    if (!load_codec(path, n_gpu_layers, /*backend=*/"", model, &error)) {
         fail("loading the codec: " + error);
         return;
     }
@@ -176,7 +176,7 @@ int main(int argc, char ** argv) {
 
     lm_model model;
     std::string error;
-    if (!load_lm(argv[1], requested_layers(), model, &error)) {
+    if (!load_lm(argv[1], requested_layers(), /*backend=*/"", model, &error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }
