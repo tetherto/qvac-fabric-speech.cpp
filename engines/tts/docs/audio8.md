@@ -379,6 +379,23 @@ decoding removes sampling randomness but does not guarantee equal CPU,
 OpenCL and Hexagon trajectories. Check generated codes and frame counts,
 then compare fixed-input numerical boundaries and waveforms.
 
+#### Codec panel tuning prototype (QVAC-26763)
+
+Companion ggml PR #115 adds a selectable F32-preserving 4x2 HVX panel for
+large codec DDR matmuls. Set `GGML_HEXAGON_F16_F32_PANEL_SHAPE=4x2` for
+candidate testing; unset it or use `2x2` for the validated default. Existing
+VTCM routing and precision guards are preserved, and previously validated
+optimizations remain enabled. Profiling reports `hvx-panel-4x2` when that
+candidate is selected; keep profiling disabled for timing comparisons.
+
+Host, Android and DSP v79 builds and the 29-case independent host oracle pass.
+Device correctness, fixed-code CPU/OpenCL parity and repeated S1–S5 timing
+remain pending, so no new performance improvement is claimed. Promotion
+requires those gates on matched baseline/candidate artifacts and the same
+device. The companion `docs/hexagon-audio8-profile.md` report contains the
+oracle, worker-count and dominant-shape benchmark commands for
+[QVAC-26763](https://app.asana.com/1/45238840754660/project/1214153063536860/task/1219313976732459).
+
 ### Core ML codec sidecar
 
 `TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for
