@@ -18,6 +18,7 @@ struct options {
     std::string out = "audio8_out.wav";
     std::string codes_out;
     std::string backends_dir;
+    std::string backend;              // "" (auto), "cpu", "hexagon", or an exact ggml device name
     int seed = 42;
     int threads = 0;
     int n_gpu_layers = 0;

@@ -48,8 +48,13 @@ engine, not every backend ggml can compile.
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
-Supertonic 3, Parler-TTS mini and CosyVoice3 also support explicit Hexagon
-placement on Snapdragon; see their model guides for setup and validated tiers. Optional
+Supertonic 3, Parler-TTS mini, CosyVoice3 and Audio8 also support explicit
+Hexagon placement on Snapdragon; see their model guides for setup and validated
+tiers. Audio8's corrected baseline uses `q8_0` quantisation with
+`--greedy` sampling under `--backend hexagon`; see
+[Audio8](docs/audio8.md#hexagon-npu-snapdragon) for the full-compute tuning
+recipe (`OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`), the corrected single-prompt
+baseline, and the remaining cross-backend correctness limits. Optional
 Apple Core ML sidecars accelerate the Supertonic vocoder, the Audio8 codec, and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
 speech tokenizer. Export, routing, fallback, and per-call status are documented in
@@ -73,6 +78,12 @@ including text/diffusion/decode workloads for sound effects. Entry points are in
 Supertonic 3 and Audio8 campaigns, Apple-silicon measurements, streaming
 latency, build pins and reproduction steps live in
 [docs/performance.md](docs/performance.md).
+
+CosyVoice3 expands bf16 flow weights to f32 when loading on ARM CPUs. This
+avoids scalar bf16 matmuls at twice the resident storage for those weights;
+memory preflight includes the expansion. Prefer an f16 flow bundle on ARM.
+Use `cosyvoice-bench --llm-gguf`, `--flow-gguf`, and `--hift-gguf` to vary
+one stage at a time; see [stage profiling](docs/cosyvoice3.md#stage-profiling).
 
 ## Documentation
 

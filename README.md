@@ -32,6 +32,11 @@ validated on it.
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
+CosyVoice3 expands bf16 flow weights to f32 on ARM CPUs to avoid scalar bf16
+matmuls; f16 remains the recommended ARM flow bundle. Its benchmark supports
+independent LM, flow and HiFT model overrides for
+[stage profiling](engines/tts/docs/cosyvoice3.md#stage-profiling).
+
 ### Apple Core ML sidecars
 
 Optional sidecars accelerate a stage while the rest of the pipeline stays on
@@ -46,6 +51,18 @@ contracts; see the engine guides before exporting or deploying one.
 | TTS | Supertonic vocoder, Audio8 codec synthesis | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar), [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | TTS | MOSS-TTS/TTSD codec decoder, MOSS-SoundEffect DiT and VAE, MOSS-Speech speech tokenizer | [MOSS](engines/tts/docs/moss.md#core-ml-codec-decoder), [SoundEffect](engines/tts/docs/moss.md#core-ml-dit-and-vae), [Speech](engines/tts/docs/moss.md#core-ml-speech-tokenizer) |
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
+
+### Hexagon NPU (Snapdragon)
+
+Selected models run end-to-end on the Hexagon HTP accelerator via
+`--backend hexagon` (CLI) or `EngineOptions::backend = "hexagon"` (API).
+Each guide names the validated quantisation tier, the runtime env flags
+that recover the measured speedup, and how the backend compares to CPU
+and OpenCL on the same device.
+
+| Engine | Models | Guide |
+|---|---|---|
+| TTS | Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8 | [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), and the matching sections in the other model guides |
 
 ## Getting started
 

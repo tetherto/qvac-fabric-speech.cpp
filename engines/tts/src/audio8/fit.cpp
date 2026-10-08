@@ -124,19 +124,28 @@ FitResult fit_params(const FitOptions & opts) {
     model_guard m;
     detail::fit_load_measure lm_load, dec_load, enc_load;
     std::string error;
+    // Mirror the engine's backend selector so the projection measures the
+    // same device the real load will land on. An explicit name that cannot
+    // be initialised (e.g. "hexagon" on a non-HTP host) returns a distinct
+    // "backend-unavailable" reason instead of being conflated with
+    // model-unreadable; init_backend emits "failed to init a compute
+    // backend" in that case.
+    auto backend_init_failed = [](const std::string & e) {
+        return e.find("failed to init a compute backend") != std::string::npos;
+    };
     if (!detail::load_lm_metadata_only(opts.lm_gguf_path, opts.n_gpu_layers,
-                                       m.lm, lm_load, &error) ||
+                                       opts.backend, m.lm, lm_load, &error) ||
         !detail::load_codec_metadata_only(opts.codec_decoder_gguf_path, opts.n_gpu_layers,
-                                          m.decoder, dec_load, &error) ||
+                                          opts.backend, m.decoder, dec_load, &error) ||
         !m.decoder.has_decoder) {
-        r.reason = "model-unreadable";
+        r.reason = backend_init_failed(error) ? "backend-unavailable" : "model-unreadable";
         return r;
     }
     if (cloning) {
         if (!detail::load_codec_metadata_only(opts.codec_encoder_gguf_path, opts.n_gpu_layers,
-                                              m.encoder, enc_load, &error) ||
+                                              opts.backend, m.encoder, enc_load, &error) ||
             !m.encoder.has_encoder) {
-            r.reason = "model-unreadable";
+            r.reason = backend_init_failed(error) ? "backend-unavailable" : "model-unreadable";
             return r;
         }
     }
@@ -164,6 +173,18 @@ FitResult fit_params(const FitOptions & opts) {
         ggml_backend_dev_memory(dev, &free_b, &total_b);
         r.device_free_bytes  = free_b;
         r.device_total_bytes = total_b;
+        // A device whose memory getter returns total == 0 has no reliable
+        // telemetry (ggml-hexagon reports zero today; see
+        // ggml_backend_hexagon_device_get_memory). Returning Failure here
+        // would compare positive required bytes against zero and verdict
+        // "does-not-fit" even on a device where synthesis works. Treat
+        // this as a distinct Error so callers can tell "verdict unknown"
+        // apart from "verdict says no" and either fall back to a
+        // device-side probe or run the engine and watch for OOM.
+        if (total_b == 0) {
+            r.reason = "device-memory-unknown";
+            return r;
+        }
     }
 
     // ── Workload → graph shapes (saturating; an unrepresentable workload

@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -109,11 +110,11 @@ void run_synthetic_lm_gates() {
     lm_model mm, real;
     fit_load_measure lmm;
     std::string error;
-    if (!load_lm_metadata_only(path, /*n_gpu_layers=*/0, mm, lmm, &error)) {
+    if (!load_lm_metadata_only(path, /*n_gpu_layers=*/0, /*backend=*/"", mm, lmm, &error)) {
         fail("load_lm_metadata_only failed: " + error);
         return;
     }
-    if (!load_lm(path, /*n_gpu_layers=*/0, real, &error)) {
+    if (!load_lm(path, /*n_gpu_layers=*/0, /*backend=*/"", real, &error)) {
         fail("real load_lm failed: " + error);
         free_lm(mm);
         return;
@@ -210,6 +211,101 @@ void run_synthetic_lm_gates() {
         fr = tts_cpp::audio8::fit_params(wrong);
         expect(fr.status == tts_cpp::FitStatus::Error,
                "wrong-architecture decoder was not Error");
+
+        // An explicit backend selector that cannot be initialised on this
+        // host must return a distinct "backend-unavailable" reason instead
+        // of being conflated with model-unreadable. init_backend emits
+        // "failed to init a compute backend" for an unresolved explicit
+        // name, which the fit path maps to the dedicated reason.
+        tts_cpp::audio8::FitOptions unknown_backend;
+        unknown_backend.lm_gguf_path            = path;
+        unknown_backend.codec_decoder_gguf_path = path;
+        unknown_backend.backend = "this-backend-does-not-exist";
+        fr = tts_cpp::audio8::fit_params(unknown_backend);
+        expect(fr.status == tts_cpp::FitStatus::Error,
+               "unknown backend was not Error");
+        expect(fr.reason == "backend-unavailable",
+               "unknown-backend reason was '" + fr.reason + "'");
+
+        // Devices without reliable memory telemetry (Hexagon reports
+        // free=total=0 today in ggml_backend_hexagon_device_get_memory)
+        // must verdict as Error "device-memory-unknown" rather than being
+        // conflated with "does-not-fit". We can't fabricate a backend from
+        // this test, but when a Hex device IS visible in the registry we
+        // can exercise the branch end to end.
+        bool hex_visible = false;
+        for (size_t i = 0, n = ggml_backend_dev_count(); i < n; ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (!dev) continue;
+            if (std::strcmp(ggml_backend_dev_name(dev), "HTP0") == 0) {
+                hex_visible = true;
+                break;
+            }
+        }
+        if (hex_visible) {
+            tts_cpp::audio8::FitOptions hex_opts;
+            hex_opts.lm_gguf_path            = path;
+            hex_opts.codec_decoder_gguf_path = path;
+            hex_opts.backend                 = "hexagon";
+            fr = tts_cpp::audio8::fit_params(hex_opts);
+            expect(fr.status == tts_cpp::FitStatus::Error,
+                   "zero-telemetry Hex backend was not Error");
+            expect(fr.reason == "device-memory-unknown",
+                   "zero-telemetry reason was '" + fr.reason + "'");
+        }
+
+        // Backend-selector policy: aliases, exact device names, "cpu" by
+        // type, "opencl" by registry, and the "auto"/"" bypass.
+        using tts_cpp::audio8::detail::backend_selection_matches;
+        expect(backend_selection_matches("hexagon", "HTP", "HTP0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'hexagon' alias did not match HTP/HTP0");
+        expect(!backend_selection_matches("hexagon", "HTP", "HTP1",
+                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'hexagon' alias matched HTP/HTP1 (only HTP0 is accepted)");
+        expect(backend_selection_matches("HTP0", "HTP", "HTP0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "exact device name 'HTP0' did not match");
+        expect(backend_selection_matches("cpu", "CPU", "CPU",
+                                         GGML_BACKEND_DEVICE_TYPE_CPU),
+               "'cpu' did not match by CPU type");
+        expect(!backend_selection_matches("cpu", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'cpu' matched a GPU device by name");
+        expect(backend_selection_matches("opencl", "OpenCL", "GPU0",
+                                         GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'opencl' did not match the OpenCL registry");
+        expect(!backend_selection_matches("auto", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'auto' matched a specific device (expected false; auto defers to tier policy)");
+        expect(!backend_selection_matches("", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "empty backend matched a specific device");
+        expect(!backend_selection_matches("CUDA0", "HTP", "HTP0",
+                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'CUDA0' matched an HTP device");
+
+        // CPU override end to end: "cpu" + positive n_gpu_layers must land
+        // on the CPU backend, not a GPU. Drives load_lm_metadata_only
+        // directly (the always-on path only has the tiny LM; fit_params
+        // needs a real codec decoder for the full projection), which runs
+        // the same init_backend the real engine uses.
+        {
+            tts_cpp::audio8::detail::lm_model cpu_lm;
+            tts_cpp::audio8::detail::fit_load_measure cpu_measure;
+            std::string cpu_error;
+            const bool ok = tts_cpp::audio8::detail::load_lm_metadata_only(
+                path, /*n_gpu_layers=*/32, /*backend=*/"cpu", cpu_lm,
+                cpu_measure, &cpu_error);
+            expect(ok, "backend='cpu' + n_gpu_layers=32 failed to load: " + cpu_error);
+            if (ok) {
+                ggml_backend_dev_t dev =
+                    cpu_lm.backend ? ggml_backend_get_device(cpu_lm.backend) : nullptr;
+                expect(dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU,
+                       "'cpu' + n_gpu_layers=32 landed on a non-CPU device");
+            }
+            free_lm(cpu_lm);
+        }
     }
 
     // 6. A codebook count outside the supported range never reaches the
@@ -232,7 +328,7 @@ void run_synthetic_lm_gates() {
         lm_model rejected;
         fit_load_measure rejected_load;
         std::string load_error;
-        expect(!load_lm_metadata_only(absurd_path, 0, rejected, rejected_load, &load_error),
+        expect(!load_lm_metadata_only(absurd_path, 0, /*backend=*/"", rejected, rejected_load, &load_error),
                "an absurd codebook count loaded anyway");
         expect(load_error.find("codebooks") != std::string::npos,
                "the rejection does not name the codebook count: '" + load_error + "'");
@@ -284,7 +380,7 @@ void run_synthetic_lm_gates() {
         lm_model meta_only;
         fit_load_measure desc_load;
         std::string desc_error;
-        if (!load_lm_metadata_only(desc_path, /*n_gpu_layers=*/0, meta_only, desc_load,
+        if (!load_lm_metadata_only(desc_path, /*n_gpu_layers=*/0, /*backend=*/"", meta_only, desc_load,
                                    &desc_error)) {
             fail("metadata-only load refused a vocab-less description: " + desc_error);
         } else {
@@ -294,7 +390,7 @@ void run_synthetic_lm_gates() {
         free_lm(meta_only);
 
         lm_model rejected;
-        expect(!load_lm(desc_path, /*n_gpu_layers=*/0, rejected, &desc_error),
+        expect(!load_lm(desc_path, /*n_gpu_layers=*/0, /*backend=*/"", rejected, &desc_error),
                "a real load accepted a vocab-less GGUF");
         expect(desc_error.find("tokenizer.ggml.tokens") != std::string::npos,
                "the real-load rejection does not name the vocabulary: '" + desc_error + "'");
@@ -333,7 +429,7 @@ void run_fixture_gates(const std::string & lm_path, const std::string & dec_path
     {
         codec_model real;
         std::string error;
-        if (!load_codec(dec_path, n_gpu_layers, real, &error)) {
+        if (!load_codec(dec_path, n_gpu_layers, /*backend=*/"", real, &error)) {
             fail("real load_codec failed: " + error);
             return;
         }
@@ -346,7 +442,7 @@ void run_fixture_gates(const std::string & lm_path, const std::string & dec_path
         } else {
             codec_model mm;
             fit_load_measure dm;
-            if (!load_codec_metadata_only(dec_path, n_gpu_layers, mm, dm, &error)) {
+            if (!load_codec_metadata_only(dec_path, n_gpu_layers, /*backend=*/"", mm, dm, &error)) {
                 fail("load_codec_metadata_only failed: " + error);
             } else {
                 expect_eq(dm.weights_bytes, ggml_backend_buffer_get_size(real.buffer_w),

@@ -422,6 +422,13 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
+    // EngineOptions::backend is threaded through load_lm / load_codec /
+    // init_backend. "" / "auto" takes the tier-based GPU selection honouring
+    // n_gpu_layers; "cpu" short-circuits to the CPU backend; "hexagon" or an
+    // exact ggml device name (e.g. "HTP0", "CUDA0") selects that device, with
+    // init_backend returning nullptr and emitting a one-line stderr note on
+    // an unresolved name so the caller sees a clean "failed to init a
+    // compute backend" error.
     require(!opts.lm_gguf_path.empty(), "lm_gguf_path is required");
     require(!opts.codec_decoder_gguf_path.empty(), "codec_decoder_gguf_path is required");
 
@@ -438,15 +445,15 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     }
 
     std::string error;
-    if (!load_lm(opts.lm_gguf_path, opts.n_gpu_layers, pimpl_->lm, &error)) {
+    if (!load_lm(opts.lm_gguf_path, opts.n_gpu_layers, opts.backend, pimpl_->lm, &error)) {
         throw std::runtime_error(error);
     }
     const lm_hparams & lm = pimpl_->lm.hp;
     check_against_lm(lm, decoder.hp, "the codec decoder");
     if (cloning) check_against_lm(lm, encoder.hp, "the codec encoder");
 
-    if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers, pimpl_->decoder,
-                    &error)) {
+    if (!load_codec(opts.codec_decoder_gguf_path, opts.n_gpu_layers, opts.backend,
+                    pimpl_->decoder, &error)) {
         throw std::runtime_error(error);
     }
     if (opts.verbose) {
@@ -455,7 +462,8 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
                                                          : ggml_backend_name(pimpl_->decoder.backend));
     }
     if (cloning) {
-        if (!load_codec(opts.codec_encoder_gguf_path, opts.n_gpu_layers, pimpl_->encoder,
+        if (!load_codec(opts.codec_encoder_gguf_path, opts.n_gpu_layers, opts.backend,
+                        pimpl_->encoder,
                         &error)) {
             throw std::runtime_error(error);
         }

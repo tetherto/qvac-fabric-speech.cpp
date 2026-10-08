@@ -583,7 +583,7 @@ int main(int argc, char ** argv) {
     codec_model decoder;
     std::string error;
     const int n_gpu_layers = is_gpu_test() ? GPU_LAYERS : 0;
-    if (!load_codec(argv[1], n_gpu_layers, decoder, &error)) {
+    if (!load_codec(argv[1], n_gpu_layers, /*backend=*/"", decoder, &error)) {
         std::fprintf(stderr, "load decoder: %s\n", error.c_str());
         return 1;
     }
@@ -596,7 +596,7 @@ int main(int argc, char ** argv) {
     free_codec(decoder);
 
     codec_model encoder;
-    if (!load_codec(argv[2], n_gpu_layers, encoder, &error)) {
+    if (!load_codec(argv[2], n_gpu_layers, /*backend=*/"", encoder, &error)) {
         std::fprintf(stderr, "load encoder: %s\n", error.c_str());
         return 1;
     }

@@ -57,8 +57,9 @@ ggml_tensor * cache_values(ggml_context * ctx, const kv_cache & cache,
                         static_cast<size_t>(shape.layer) * layer_bytes);
 }
 
-// rows: [stride, width], one position per row; a row stride wider than the
-// cache's is fine, ggml_cpy follows it.
+// rows: [stride, width], one position per row. Stacked QKV leaves a gap
+// between key rows; OpenCL CPY requires that source to be contiguous even
+// though its destination is a view into the persistent cache.
 void append_keys(ggml_context * ctx, ggml_cgraph * graph, const kv_cache & cache,
                  const attention_shape & shape, ggml_tensor * rows) {
     const size_t layer_bytes = static_cast<size_t>(cache.capacity) * cache.stride * FLOAT;
@@ -66,6 +67,7 @@ void append_keys(ggml_context * ctx, ggml_cgraph * graph, const kv_cache & cache
                           static_cast<size_t>(shape.n_past) * cache.stride * FLOAT;
     ggml_tensor * slot = ggml_view_2d(ctx, cache.k, cache.stride, shape.width,
                                       static_cast<size_t>(cache.stride) * FLOAT, offset);
+    if (!ggml_is_contiguous(rows)) rows = ggml_cont(ctx, rows);
     ggml_build_forward_expand(graph, ggml_cpy(ctx, rows, slot));
 }
 

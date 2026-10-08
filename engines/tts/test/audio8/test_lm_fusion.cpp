@@ -7,6 +7,7 @@
 // bit-exactness is the bar, not a tolerance. A model whose q, k and v differ
 // in type must keep them, and their biases, separate and still load.
 
+#include "audio8/graph.h"
 #include "audio8/internal.h"
 #include "gpu_arm.h"
 #include "test_env_portable.h"
@@ -57,7 +58,7 @@ int n_gpu_layers() {
 bool load(const std::string & path, bool fused, loaded_lm & lm) {
     if (!fused) setenv("AUDIO8_LM_FUSION_DISABLE", "1", 1);
     std::string error;
-    lm.ok = load_lm(path, n_gpu_layers(), lm.model, &error);
+    lm.ok = load_lm(path, n_gpu_layers(), /*backend=*/"", lm.model, &error);
     unsetenv("AUDIO8_LM_FUSION_DISABLE");
     if (!lm.ok) fail("load_lm: " + error);
     return lm.ok;
@@ -76,6 +77,28 @@ bool all_blocks(const std::vector<block_weights> & blocks, bool (*test)(const bl
         if (!test(block)) return false;
     }
     return true;
+}
+
+// The fused QKV prefill slices keys out of wider projected rows. A CPY into
+// persistent GPU cache storage cannot fall back to CPU on OpenCL, whose CPY
+// support requires contiguous source rows. Check the graph before allocation;
+// the sequence below also verifies that packing preserves the computed values.
+void check_key_copy_sources(lm_model & model, const std::string & tag) {
+    scratch build(AUDIO8_MAX_NODES);
+    if (!build.ok()) {
+        fail(tag + ": could not create cache-copy graph");
+        return;
+    }
+    slow_graph_outputs outputs;
+    build_slow_graph(model, build, PROMPT_WIDTH, 0, outputs);
+    size_t copies = 0;
+    for (int i = 0; i < ggml_graph_n_nodes(build.graph); ++i) {
+        ggml_tensor * node = ggml_graph_node(build.graph, i);
+        if (node->op != GGML_OP_CPY || node->src[1]->view_src != model.slow_kv.k) continue;
+        ++copies;
+        expect(ggml_is_contiguous(node->src[0]), tag + ": persistent key CPY has strided source");
+    }
+    expect(copies == model.blocks.size(), tag + ": missing persistent key copies");
 }
 
 void check_layouts(const lm_model & fused, const lm_model & split, const std::string & tag) {
@@ -181,6 +204,8 @@ void check_tier(bool q8_matrices) {
         return;
     }
     check_layouts(fused.model, split.model, tag);
+    check_key_copy_sources(fused.model, tag + " fused");
+    check_key_copy_sources(split.model, tag + " split");
     run_outputs fused_out, split_out;
     if (!run_sequence(fused.model, fused_out) || !run_sequence(split.model, split_out)) return;
     compare(fused_out, split_out, tag);
@@ -219,7 +244,7 @@ bool load_refused(const std::string & path, bool fused, const std::string & want
     if (!fused) setenv("AUDIO8_LM_FUSION_DISABLE", "1", 1);
     lm_model model;
     std::string error;
-    const bool loaded = load_lm(path, n_gpu_layers(), model, &error);
+    const bool loaded = load_lm(path, n_gpu_layers(), /*backend=*/"", model, &error);
     unsetenv("AUDIO8_LM_FUSION_DISABLE");
     free_lm(model);
     if (loaded) {

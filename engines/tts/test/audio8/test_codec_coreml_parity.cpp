@@ -118,7 +118,7 @@ struct owned_codec {
 
 bool load(const std::string & gguf, owned_codec & codec) {
     std::string error;
-    codec.loaded = load_codec(gguf, /*n_gpu_layers=*/0, codec.model, &error);
+    codec.loaded = load_codec(gguf, /*n_gpu_layers=*/0, /*backend=*/"", codec.model, &error);
     if (!codec.loaded) fail("load_codec(" + gguf + "): " + error);
     return codec.loaded;
 }
