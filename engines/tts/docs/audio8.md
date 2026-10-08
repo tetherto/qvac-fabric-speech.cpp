@@ -345,8 +345,10 @@ The subsequent validated DDR-panel comparison reduced S1 inference from
 20.346 s to 14.603 s median (1.393x), with identical 66-frame codes and passing
 waveform gates. Those are same-device panel-off/panel-on measurements from a
 separate session; they must not be combined with the table above into a new
-cross-backend comparison. The later S2–S5 sweep was cancelled; its partial
-results do not replace this S1 evidence.
+cross-backend comparison. The later three-backend S2–S5 sweep was cancelled;
+its partial results do not replace this S1 evidence. Current Hexagon-only
+dispatch measurements are documented separately in the companion ggml
+`docs/hexagon-audio8-profile.md` report under QVAC-26714.
 
 #### Dispatch profiling (QVAC-26714)
 
