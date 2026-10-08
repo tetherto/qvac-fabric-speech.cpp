@@ -716,3 +716,63 @@ handed the other arm's GPU, fails rather than passing on someone else's result.
 
 The engine test hands the cloning path a wav rather than pre-computed codes, so
 it exercises the codec encoder the way a caller would.
+
+#### Fixed-input backend parity
+
+`test-audio8-backend-parity` compares a selected `cpu`, `hexagon`, or `opencl`
+backend with the CPU reference kernels using real LM and decoder GGUF files.
+Build with `TTS_CPP_BUILD_TESTS=ON`, then:
+
+```bash
+cmake --build build --target test-audio8-backend-parity -j
+build/test-audio8-backend-parity \
+  --lm models/audio8-lm-q8_0.gguf \
+  --codec models/audio8-codec-decoder-q8_0.gguf \
+  --backend hexagon --frames 3 --threads 4 --text "The signal is clear."
+```
+
+The same target supports Android cross builds. Run it on the device with the
+matching ggml libraries and backend support files. For Hexagon, use
+`GGML_HEXAGON_OPSTAGE=3` (queue and compute); `1` only queues work and is not a
+valid correctness or performance baseline. Use `--backend cpu --frames 1` to
+compare CPU reference kernels against the default optimized CPU kernels.
+Backend selection is verified after loading; scheduler
+fallback for unsupported operations is still allowed.
+
+Slow prefill and decode consume the same tokenized prompt and CPU-selected
+codes on both models. Each fast-AR logit comparison uses the CPU's carried
+input, semantic token, and preceding codebook choices. A separate check compares
+the candidate's greedy per-position `fast_step` with its chained `fast_frame`.
+Finally, both codecs decode the same CPU codes, comparing semantic, residual,
+post, latent, and PCM outputs. LM models are released before codec loading.
+
+Each boundary reports finite checks, cosine, normalized squared error
+(`sum((test-reference)^2) / sum(reference^2)`), and maximum absolute error.
+Logits also report the top token, its margin, and the CPU winner's candidate
+rank; slow logits include EOS rank. Zero vectors match only when both are zero.
+All available stages run even after a numerical mismatch. Exit status is `0`
+only when every cosine is at least `0.9999`, normalized squared error is at most
+`0.0002`, every value is finite, all compared
+top tokens agree, and the chained codes agree with per-position greedy codes;
+otherwise it is `1`. Near-tie token disagreements remain visible even when the
+cosine gate passes. These checks cover the requested short trajectory, not
+full-utterance quality or throughput.
+
+`--precise-outputs` enables the candidate LM and codec precision flags before
+graph construction for a diagnostic ablation. It changes no production
+default. `--frames` defaults to three; `--frames 1` omits slow decode and is
+useful for quick prefill, fast-AR, and codec checks.
+CPU-selected EOS ends the trajectory early; the summary reports completed and
+requested frame counts so a passing shorter run does not imply full coverage.
+
+To locate accumulated slow-transformer error, `--slow-layers N` keeps only the
+first N slow blocks in both graphs, retaining the loaded weights and KV cache
+capacity. These are diagnostic truncated-model outputs, not normal generation.
+Try `--frames 1 --slow-layers 1 --skip-codec`, increasing the cutoff to bracket
+the divergence. `--skip-codec` also makes the decoder GGUF optional.
+
+For CTest, set `AUDIO8_PARITY_LM`, `AUDIO8_PARITY_CODEC`, and optionally
+`AUDIO8_PARITY_BACKEND` (default `cpu`), then run
+`ctest --test-dir build -R '^test-audio8-backend-parity$' --output-on-failure`.
+Missing or unreadable model files return `77`, which CTest records as skipped.
+No exported reference fixtures are needed.

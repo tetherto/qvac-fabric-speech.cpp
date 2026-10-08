@@ -1615,6 +1615,17 @@ if (TTS_CPP_BUILD_TESTS)
         src/sched_dispatch.cpp
         src/log.cpp)
 
+    # Model-backed, fixed-input CPU/backend comparison; no production changes.
+    add_executable(test-audio8-backend-parity test/audio8/test_backend_parity.cpp
+        src/audio8/lm.cpp src/audio8/tokenizer.cpp src/audio8/unicode.cpp
+        src/audio8/codec_ops.cpp src/audio8/codec_decode.cpp src/audio8/window_stream.cpp
+        ${_tcb_audio8_core_srcs})
+    target_link_libraries(test-audio8-backend-parity PRIVATE ggml Threads::Threads)
+    target_include_directories(test-audio8-backend-parity PRIVATE include src)
+    tts_cpp_apply_ccache(test-audio8-backend-parity)
+    add_test(NAME test-audio8-backend-parity COMMAND test-audio8-backend-parity)
+    set_tests_properties(test-audio8-backend-parity PROPERTIES LABELS "fixture" SKIP_RETURN_CODE 77)
+
     # Fail-closed GGUF header reading: synthesized metadata-only files with a
     # wrong architecture and wrong-typed scalar/string keys. No fixtures.
     add_executable(test-audio8-gguf-load test/audio8/test_gguf_load.cpp
