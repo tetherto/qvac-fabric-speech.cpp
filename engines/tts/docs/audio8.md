@@ -296,15 +296,18 @@ export ADSP_LIBRARY_PATH=./native   # path to libggml-htp-v79.so
 Use these flags together for full computation with polling and fusion:
 
 ```sh
-export GGML_HEXAGON_OPPOLL=1   # busy-poll DSP completion instead of blocking
+export GGML_HEXAGON_OPPOLL=1   # busy-poll DSP completion; default with ggml #115
 export GGML_HEXAGON_OPSTAGE=3  # QUEUE (1) | COMPUTE (2); default
 export GGML_HEXAGON_OPFUSION=1 # enable supported fusion; default
 ```
 
 `OPSTAGE=1` is a profiling control that skips computation in kernels honoring
 that flag. The earlier 1.87× tuning claim used this setting and is invalid for
-inference, even with `--greedy`. `OPSTAGE=3` and `OPFUSION=1` are already defaults;
-polling is the change from the default configuration above.
+inference, even with `--greedy`. Companion ggml #115 enables polling and the
+F32-preserving DDR codec panel by default, alongside `OPSTAGE=3`, fusion and
+canonical host buffers. These environment settings explicitly reproduce the
+defaults. Set `GGML_HEXAGON_OPPOLL=0` or `GGML_HEXAGON_F16_F32_PANEL=0` to opt
+out or for diagnostic comparisons; polling's effect on power has not been measured.
 
 A fresh three-frame greedy check with `OPSTAGE=1` produced silent WAVs and
 repeated degenerate codes with fusion both enabled and disabled. With
@@ -314,7 +317,7 @@ speech quality or cross-backend parity.
 
 With canonical Hexagon host-buffer handling fixed in
 [ggml #115](https://github.com/tetherto/qvac-ext-ggml/pull/115), the corrected
-same-device QDC Snapdragon 8 Elite S1 baseline uses the prompt "The quick brown
+historical same-device QDC Snapdragon 8 Elite S1 baseline uses "The quick brown
 fox jumps over the lazy dog.", four threads, a 70-frame cap, three warmups and
 five timed runs per variant, interleaved:
 
@@ -337,6 +340,42 @@ cannot be treated as pure dispatch overhead or added to leaf operation times.
 Further routing, precision, or weight-placement changes need separate
 correctness and performance validation. Reproduction and artifact provenance
 are recorded in ggml's `docs/hexagon-audio8-profile.md`.
+
+The subsequent validated DDR-panel comparison reduced S1 inference from
+20.346 s to 14.603 s median (1.393x), with identical 66-frame codes and passing
+waveform gates. Those are same-device panel-off/panel-on measurements from a
+separate session; they must not be combined with the table above into a new
+cross-backend comparison. The later S2–S5 sweep was cancelled; its partial
+results do not replace this S1 evidence.
+
+#### Dispatch profiling (QVAC-26714)
+
+Companion ggml #115 copies only the live operations into each outstanding
+batch's host metadata cache. It retains those snapshots for both profiling
+and DSP-error diagnostics, including when queue slots are reused. This change
+does not alter sampling, tensor precision, kernel routing or synchronization.
+Package the matching host library and DSP skeleton from the same build.
+
+For a diagnostic capture, use the normal greedy S1 invocation with
+`GGML_HEXAGON_PROFILE=3 GGML_HEXAGON_OPTRACE=65536` and `--verbose`, saving
+stdout and stderr. In the ggml checkout, run:
+
+```sh
+python3 scripts/hexagon-dispatch-profile.py audio8-s1-trace.log
+```
+
+The parser separates batch tensor preparation and worker wake/suspend from
+per-operation setup, execution and retirement. Setup includes cache coherence;
+execution includes nested kernel activity. Check `complete_trace` before
+interpreting stage totals: saturated buffers, missing pairs or missing
+operation indices make coverage incomplete. Nested cache-flush and worker
+spans are not additive elapsed time. Host wait includes DSP execution and
+transport, pop includes logging, and queued-batch lifetimes overlap.
+
+Use separate runs with profiling disabled for performance claims. Greedy
+decoding removes sampling randomness but does not guarantee equal CPU,
+OpenCL and Hexagon trajectories. Check generated codes and frame counts,
+then compare fixed-input numerical boundaries and waveforms.
 
 ### Core ML codec sidecar
 
