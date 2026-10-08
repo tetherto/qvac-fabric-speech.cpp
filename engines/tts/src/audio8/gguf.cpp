@@ -397,25 +397,6 @@ const char * audio8_dev_reg_name(ggml_backend_dev_t dev) {
     return n ? n : "";
 }
 
-// Registry names and exact device names are distinct in ggml. Hexagon
-// registers as "HTP" and exposes a single device "HTP0". "cpu" and "opencl"
-// select by registry; "hexagon" selects by matching BOTH; anything else is
-// treated as an exact ggml device name (e.g. "HTP0", "CUDA0"). Mirrors the
-// Parakeet matcher in engines/parakeet/src/backend_util.h so a user who
-// learned the names on one engine finds them identical on the other.
-bool backend_selection_matches(const std::string & requested,
-                               const char * reg, const char * device,
-                               enum ggml_backend_dev_type type) {
-    if (requested.empty() || requested == "auto") return false;
-    if (requested == "cpu")    return type == GGML_BACKEND_DEVICE_TYPE_CPU;
-    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
-    if (requested == "hexagon") {
-        return reg && std::strcmp(reg, "HTP") == 0 &&
-               device && std::strcmp(device, "HTP0") == 0;
-    }
-    return device && requested == device;
-}
-
 // Walks the ggml device registry and inits the first device whose reg +
 // device name match `requested`. Returns nullptr when no device matches or
 // init itself failed. On failure the caller emits a user-visible
@@ -929,6 +910,27 @@ void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
 }
 
 }  // namespace
+
+// Registry names and exact device names are distinct in ggml. Hexagon
+// registers as "HTP" and exposes a single device "HTP0". "cpu" and "opencl"
+// select by registry; "hexagon" selects by matching BOTH; anything else is
+// treated as an exact ggml device name (e.g. "HTP0", "CUDA0"). Mirrors the
+// Parakeet matcher in engines/parakeet/src/backend_util.h so a user who
+// learned the names on one engine finds them identical on the other.
+// Declared in internal.h so tests can exercise the policy without having
+// to spin up a ggml device.
+bool backend_selection_matches(const std::string & requested,
+                               const char * reg, const char * device,
+                               enum ggml_backend_dev_type type) {
+    if (requested.empty() || requested == "auto") return false;
+    if (requested == "cpu")    return type == GGML_BACKEND_DEVICE_TYPE_CPU;
+    if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
+    if (requested == "hexagon") {
+        return reg && std::strcmp(reg, "HTP") == 0 &&
+               device && std::strcmp(device, "HTP0") == 0;
+    }
+    return device && requested == device;
+}
 
 // Shared body of load_lm and load_lm_metadata_only. When `measure` is
 // non-null the load is metadata-only: every allocation the real path makes is

@@ -424,10 +424,11 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     }
     // EngineOptions::backend is threaded through load_lm / load_codec /
     // init_backend. "" / "auto" takes the tier-based GPU selection honouring
-    // n_gpu_layers; "cpu" short-circuits to the CPU backend; "hexagon" is
-    // accepted at the API boundary but the per-backend init path is still
-    // under construction (QVAC-26269 Cycle 2b) and currently reports
-    // "failed to init a compute backend" with a one-line stderr note.
+    // n_gpu_layers; "cpu" short-circuits to the CPU backend; "hexagon" or an
+    // exact ggml device name (e.g. "HTP0", "CUDA0") selects that device, with
+    // init_backend returning nullptr and emitting a one-line stderr note on
+    // an unresolved name so the caller sees a clean "failed to init a
+    // compute backend" error.
     require(!opts.lm_gguf_path.empty(), "lm_gguf_path is required");
     require(!opts.codec_decoder_gguf_path.empty(), "codec_decoder_gguf_path is required");
 

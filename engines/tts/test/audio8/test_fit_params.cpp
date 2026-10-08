@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -225,6 +226,86 @@ void run_synthetic_lm_gates() {
                "unknown backend was not Error");
         expect(fr.reason == "backend-unavailable",
                "unknown-backend reason was '" + fr.reason + "'");
+
+        // Devices without reliable memory telemetry (Hexagon reports
+        // free=total=0 today in ggml_backend_hexagon_device_get_memory)
+        // must verdict as Error "device-memory-unknown" rather than being
+        // conflated with "does-not-fit". We can't fabricate a backend from
+        // this test, but when a Hex device IS visible in the registry we
+        // can exercise the branch end to end.
+        bool hex_visible = false;
+        for (size_t i = 0, n = ggml_backend_dev_count(); i < n; ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (!dev) continue;
+            if (std::strcmp(ggml_backend_dev_name(dev), "HTP0") == 0) {
+                hex_visible = true;
+                break;
+            }
+        }
+        if (hex_visible) {
+            tts_cpp::audio8::FitOptions hex_opts;
+            hex_opts.lm_gguf_path            = path;
+            hex_opts.codec_decoder_gguf_path = path;
+            hex_opts.backend                 = "hexagon";
+            fr = tts_cpp::audio8::fit_params(hex_opts);
+            expect(fr.status == tts_cpp::FitStatus::Error,
+                   "zero-telemetry Hex backend was not Error");
+            expect(fr.reason == "device-memory-unknown",
+                   "zero-telemetry reason was '" + fr.reason + "'");
+        }
+
+        // Backend-selector policy: aliases, exact device names, "cpu" by
+        // type, "opencl" by registry, and the "auto"/"" bypass.
+        using tts_cpp::audio8::detail::backend_selection_matches;
+        expect(backend_selection_matches("hexagon", "HTP", "HTP0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'hexagon' alias did not match HTP/HTP0");
+        expect(!backend_selection_matches("hexagon", "HTP", "HTP1",
+                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'hexagon' alias matched HTP/HTP1 (only HTP0 is accepted)");
+        expect(backend_selection_matches("HTP0", "HTP", "HTP0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "exact device name 'HTP0' did not match");
+        expect(backend_selection_matches("cpu", "CPU", "CPU",
+                                         GGML_BACKEND_DEVICE_TYPE_CPU),
+               "'cpu' did not match by CPU type");
+        expect(!backend_selection_matches("cpu", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'cpu' matched a GPU device by name");
+        expect(backend_selection_matches("opencl", "OpenCL", "GPU0",
+                                         GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'opencl' did not match the OpenCL registry");
+        expect(!backend_selection_matches("auto", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "'auto' matched a specific device (expected false; auto defers to tier policy)");
+        expect(!backend_selection_matches("", "CUDA", "CUDA0",
+                                          GGML_BACKEND_DEVICE_TYPE_GPU),
+               "empty backend matched a specific device");
+        expect(!backend_selection_matches("CUDA0", "HTP", "HTP0",
+                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'CUDA0' matched an HTP device");
+
+        // CPU override end to end: "cpu" + positive n_gpu_layers must land
+        // on the CPU backend, not a GPU. Drives load_lm_metadata_only
+        // directly (the always-on path only has the tiny LM; fit_params
+        // needs a real codec decoder for the full projection), which runs
+        // the same init_backend the real engine uses.
+        {
+            tts_cpp::audio8::detail::lm_model cpu_lm;
+            tts_cpp::audio8::detail::fit_load_measure cpu_measure;
+            std::string cpu_error;
+            const bool ok = tts_cpp::audio8::detail::load_lm_metadata_only(
+                path, /*n_gpu_layers=*/32, /*backend=*/"cpu", cpu_lm,
+                cpu_measure, &cpu_error);
+            expect(ok, "backend='cpu' + n_gpu_layers=32 failed to load: " + cpu_error);
+            if (ok) {
+                ggml_backend_dev_t dev =
+                    cpu_lm.backend ? ggml_backend_get_device(cpu_lm.backend) : nullptr;
+                expect(dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU,
+                       "'cpu' + n_gpu_layers=32 landed on a non-CPU device");
+            }
+            free_lm(cpu_lm);
+        }
     }
 
     // 6. A codebook count outside the supported range never reaches the

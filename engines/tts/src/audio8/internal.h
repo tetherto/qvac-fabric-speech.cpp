@@ -352,6 +352,14 @@ bool load_lm(const std::string & path, int n_gpu_layers,
              std::string * error);
 void free_lm(lm_model & model);
 
+// Backend-selector matcher: shared with tests so the alias ("hexagon" ->
+// HTP/HTP0), exact-device ("HTP0", "CUDA0"), and policy ("auto", "cpu",
+// "opencl") rules can be covered without having to spin up a ggml device.
+// `reg` and `device` may be nullptr; nullptrs never match.
+bool backend_selection_matches(const std::string & requested,
+                               const char * reg, const char * device,
+                               enum ggml_backend_dev_type type);
+
 // ── Memory-fit measurement (include/tts-cpp/audio8/fit.h) ──────────────────
 // Metadata-only twins of load_lm / load_codec: same backend resolution, same
 // hparam reads and tensor wiring, but every allocation the real path makes is

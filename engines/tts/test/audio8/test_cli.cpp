@@ -86,6 +86,29 @@ bool check_switches() {
     return true;
 }
 
+// --backend lands as a verbatim string in options.backend and defaults to
+// empty (= EngineOptions::backend "auto" on the engine side). The flag
+// must accept any value: "cpu", "hexagon", "HTP0", "CUDA0" are all legal
+// here; validation happens inside init_backend at engine construction.
+bool check_backend_flag() {
+    for (const char * value : {"cpu", "hexagon", "HTP0", "CUDA0", "auto"}) {
+        options opts;
+        if (!parse({"--backend", value}, opts)) {
+            return fail("backend", std::string("--backend ") + value + " was rejected");
+        }
+        if (opts.backend != value) {
+            return fail("backend",
+                        std::string("--backend ") + value + " did not land in options.backend");
+        }
+    }
+    options defaulted;
+    if (!parse({}, defaulted) || !defaulted.backend.empty()) {
+        return fail("backend", "default options.backend is not empty");
+    }
+    std::printf("backend: PASS\n");
+    return true;
+}
+
 bool check_dump_codes_flag() {
     options opts;
     if (!parse({"--dump-codes", "codes.txt"}, opts)) {
@@ -147,6 +170,7 @@ int main(int argc, char ** argv) {
     bool ok = check_required_paths();
     ok &= check_gpu_layers();
     ok &= check_switches();
+    ok &= check_backend_flag();
     ok &= check_dump_codes_flag();
     ok &= check_malformed();
     ok &= check_dump_codes_format(codes_path);

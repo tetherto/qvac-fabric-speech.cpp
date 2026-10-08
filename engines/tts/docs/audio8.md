@@ -272,6 +272,44 @@ they do — codebook counts and widths, the codec's two halves against each othe
 and both against the language model — from their headers, before it reads a
 byte of weights.
 
+### Hexagon NPU (Snapdragon)
+
+Audio8 runs end-to-end on the Hexagon HTP0 accelerator on Snapdragon 8 Elite
+devices with the ggml-hexagon backend built in. Select it with
+`--backend hexagon` (CLI) or `EngineOptions::backend = "hexagon"` (API);
+`--n-gpu-layers` is ignored on this path.
+
+Validated configuration:
+
+- `q8_0` quantisation on the LM and both codec halves (the only tier
+  currently characterised against the F32 reference on HTP).
+- `--greedy` sampling (the DualAR fast head is deterministic and this
+  matches the trajectory the Hex kernel coverage was validated against).
+
+The engine ships the Hex kernels Audio8 needs (ARGMAX among them). FastRPC
+has to find the DSP library at runtime:
+
+```sh
+export LD_LIBRARY_PATH=./native
+export ADSP_LIBRARY_PATH=./native   # path to libggml-htp-v79.so
+```
+
+Three ggml-hexagon runtime env flags recover a measured **1.87× speedup**
+over defaults on a QRD8750 devkit (same device, five prompts, median):
+
+```sh
+export GGML_HEXAGON_OPPOLL=1   # busy-poll DSP completion instead of blocking
+export GGML_HEXAGON_OPSTAGE=1  # op staging mode
+export GGML_HEXAGON_OPFUSION=1 # fuse consecutive ops
+```
+
+Do **not** set `GGML_HEXAGON_MM_SELECT=1` — it causes a ~70% regression on
+this workload. For Audio8 on Snapdragon 8 Elite, OpenCL (Adreno 830) is
+still fastest overall for the DualAR autoregressive LM (RTF ~2.3× vs
+~3.3-3.7× tuned Hex); the Hex path's remaining gap is dominated by
+FastRPC per-dispatch overhead (OPBATCH wrapper ≈ 58% of DSP time in the
+per-op profile) and is upstream-ggml-hexagon work.
+
 ### Core ML codec sidecar
 
 `TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for

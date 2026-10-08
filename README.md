@@ -45,6 +45,18 @@ contracts; see the engine guides before exporting or deploying one.
 | TTS | Supertonic vocoder, Audio8 codec synthesis | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar), [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 
+### Hexagon NPU (Snapdragon)
+
+Selected models run end-to-end on the Hexagon HTP accelerator via
+`--backend hexagon` (CLI) or `EngineOptions::backend = "hexagon"` (API).
+Each guide names the validated quantisation tier, the runtime env flags
+that recover the measured speedup, and how the backend compares to CPU
+and OpenCL on the same device.
+
+| Engine | Models | Guide |
+|---|---|---|
+| TTS | Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8 | [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), and the matching sections in the other model guides |
+
 ## Getting started
 
 Install a shared speech-branch ggml using [docs/BUILD.md](docs/BUILD.md), then

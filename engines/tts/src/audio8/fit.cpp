@@ -173,6 +173,18 @@ FitResult fit_params(const FitOptions & opts) {
         ggml_backend_dev_memory(dev, &free_b, &total_b);
         r.device_free_bytes  = free_b;
         r.device_total_bytes = total_b;
+        // A device whose memory getter returns total == 0 has no reliable
+        // telemetry (ggml-hexagon reports zero today; see
+        // ggml_backend_hexagon_device_get_memory). Returning Failure here
+        // would compare positive required bytes against zero and verdict
+        // "does-not-fit" even on a device where synthesis works. Treat
+        // this as a distinct Error so callers can tell "verdict unknown"
+        // apart from "verdict says no" and either fall back to a
+        // device-side probe or run the engine and watch for OOM.
+        if (total_b == 0) {
+            r.reason = "device-memory-unknown";
+            return r;
+        }
     }
 
     // ── Workload → graph shapes (saturating; an unrepresentable workload
