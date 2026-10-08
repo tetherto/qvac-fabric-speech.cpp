@@ -32,6 +32,11 @@ validated on it.
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
+CosyVoice3 expands bf16 flow weights to f32 on ARM CPUs to avoid scalar bf16
+matmuls; f16 remains the recommended ARM flow bundle. Its benchmark supports
+independent LM, flow and HiFT model overrides for
+[stage profiling](engines/tts/docs/cosyvoice3.md#stage-profiling).
+
 ### Apple Core ML sidecars
 
 Optional sidecars accelerate a stage while the rest of the pipeline stays on

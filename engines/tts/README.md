@@ -77,6 +77,12 @@ Supertonic 3 and Audio8 campaigns, Apple-silicon measurements, streaming
 latency, build pins and reproduction steps live in
 [docs/performance.md](docs/performance.md).
 
+CosyVoice3 expands bf16 flow weights to f32 when loading on ARM CPUs. This
+avoids scalar bf16 matmuls at twice the resident storage for those weights;
+memory preflight includes the expansion. Prefer an f16 flow bundle on ARM.
+Use `cosyvoice-bench --llm-gguf`, `--flow-gguf`, and `--hift-gguf` to vary
+one stage at a time; see [stage profiling](docs/cosyvoice3.md#stage-profiling).
+
 ## Documentation
 
 | Topic | Where |

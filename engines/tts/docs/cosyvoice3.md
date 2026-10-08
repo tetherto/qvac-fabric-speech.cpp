@@ -103,7 +103,7 @@ the bounds registered in CMakeLists.txt are per-arch:
 | flow tier | x86-64 cosine / max abs | arm64 cosine / max abs |
 |---|---|---|
 | `f16`  | 0.999961 / 0.246 | 0.999855 / 0.697 |
-| `bf16` | 0.999671 / 0.989 | 0.998686 / 2.990 (not gated, see below) |
+| `bf16` | 0.999671 / 0.989 | 0.998686 / 2.990 (historical scalar path; see below) |
 | `q8_0` | 0.999829 / 0.658 | 0.999018 / 2.384 |
 | `q4_0` | 0.986591 / 4.845 | 0.971658 / 4.125 |
 
@@ -117,13 +117,17 @@ x86 column's 2.0. An x86-measured bound applied to ARM is what made
 `test-cosyvoice-flow-tier-q8_0` (2.38 against a 2.0 bound) and
 `-q4_0` (cosine 0.9717 against a 0.98 threshold) fail on Apple silicon.
 
-The `bf16` flow tier is gated on x86-64 only. Neither tinyBLAS nor
-`ggml_vec_dot_bf16` carries an ARM path — both dispatch bf16 on AVX512-BF16,
-AVX512F, AVX2, POWER MMA and RISC-V only — so on arm64 its matmuls fall back
-to a scalar per-element loop and the gate takes 207 s against the `f16`
-tier's 26 s on the M3 Ultra. The tier guidance above already recommends
-`f16` over `bf16` off AVX512-BF16 hosts, so that time would buy coverage of
-a path no ARM build ships.
+Neither tinyBLAS nor `ggml_vec_dot_bf16` in the pinned ggml has an ARM bf16
+fast path. The ARM CPU loader therefore expands `flow/` bf16 tensors to f32
+once per stage load, preserving the stored bf16 values exactly, and runs
+the f32 matmul path. Activations and accumulation follow that path's rounding,
+so synthesized output need not be identical to the former scalar bf16 path.
+The expansion doubles the resident bytes of those tensors; metadata-only
+memory preflight uses the same expanded types. Conversion streams through
+bounded scratch rather than materializing another full copy of the weights.
+GPU loads and non-ARM CPU loads retain bf16. Prefer an f16 flow bundle on
+ARM for its lower memory use and faster matmuls. The bf16 tier now also runs
+in the ARM quality gate (minimum cosine 0.997, maximum absolute error 4.0).
 
 The HiFT leg pins f0 so the gate measures weight precision rather than
 sine-phase noise; its `f16` waveform deviation is 0.999966 / 0.0012 on
@@ -141,6 +145,40 @@ past the projection output during multi-token prefill rather than fail
 loudly. Because the layout is chosen per GGUF, `test-cosyvoice-xb` reports
 which one the pinned LM carries, so a pass states whether it covered the
 fused matvec or the fallback.
+
+### Stage profiling
+
+`cosyvoice-bench` accepts `--llm-gguf`, `--flow-gguf`, and `--hift-gguf` to
+override individual components while retaining the voice and tokenizer from
+`--model-dir`. The JSON `model_overrides` object records these explicit paths;
+an empty string means the component was discovered under `model_dir`.
+
+First record a speech-token trajectory, then replay it with each flow tier:
+
+```bash
+./build/cosyvoice-bench --model-dir models/cosyvoice3 --backend cpu \
+  --text "Hello from CosyVoice3." --threads 4 --runs 3 --warmup 1 \
+  --tokens-out short.tokens --json-out baseline.json
+./build/cosyvoice-bench --model-dir models/cosyvoice3 --backend cpu \
+  --flow-gguf models/cosyvoice3-flow-f16.gguf --threads 4 \
+  --tokens-in short.tokens --runs 3 --warmup 1 --json-out flow-f16.json
+```
+
+Repeat with a longer text and a separate trajectory. Keep HiFT fixed when
+comparing flow f16, bf16, q8_0 and q4_0. Check `work` for equal speech tokens,
+mel frames and samples, then compare `flow_frontend` and `dit_euler` timing.
+Pinned runs skip LM generation and cannot measure LM speed. To compare LM
+q4_0 and q8_0, omit `--tokens-in`, vary only `--llm-gguf`, and examine prefill,
+`lm_decode_per_token` and decode-step counts. The per-token stage divides
+each measured run's decode time by its own step count before aggregation;
+it has zero observations for pinned runs. Differing generated lengths make raw
+end-to-end RTF an unreliable attribution to a particular stage.
+
+On RTX, repeat the same short/long flow trajectories with explicit backend
+selection (`--backend CUDA0` or the Vulkan device name exposed by the build).
+An unavailable explicit backend fails instead of silently using CPU. Compare
+all stage timings before selecting an optimization; do not assign a mixed
+LM/flow bundle's performance gap to either stage from end-to-end RTF alone.
 
 ### Metal graph paths
 

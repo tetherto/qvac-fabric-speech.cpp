@@ -207,6 +207,18 @@ static int64_t cosyvoice_first_weight_hexagon_cannot_run(const gguf_context * g)
     return -1;
 }
 
+static ggml_type cosyvoice_cpu_weight_type(const ggml_tensor * tensor, ggml_backend_t backend) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    constexpr const char * flow_prefix = "flow/";
+    if (tensor->type == GGML_TYPE_BF16 &&
+        std::strncmp(tensor->name, flow_prefix, std::strlen(flow_prefix)) == 0 &&
+        ::tts_cpp::detail::backend_is_cpu(backend)) return GGML_TYPE_F32;
+#else
+    (void) backend;
+#endif
+    return tensor->type;
+}
+
 // Shared body of cosyvoice_load_gguf and cosyvoice_load_gguf_metadata_only.
 // When `measure` is non-null the load is metadata-only: the buffers the real
 // path allocates are sized instead, and no tensor data leaves the disk.
@@ -305,9 +317,10 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
         ggml_tensor * src = ggml_get_tensor(tmp_ctx, name);
         const bool host_ctx = split_host && cosyvoice_host_resident(name);
         ggml_context * into = host_ctx ? m.ctx_h : m.ctx_w;
-        ggml_tensor * dst = ggml_dup_tensor(into, src);
+        const ggml_type type = cosyvoice_cpu_weight_type(src, m.backend);
+        ggml_tensor * dst = ggml_new_tensor(into, type, GGML_MAX_DIMS, src->ne);
         ggml_set_name(dst, name);
-        map_in_place(dst, i, host_ctx);
+        if (type == src->type) map_in_place(dst, i, host_ctx);
         m.tensors[name] = dst;
     }
 
@@ -355,7 +368,11 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
             if (!ctx) continue;
             for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
                 if (mapping && cur->buffer == m.map_buf) continue;
-                if (!rd.to_backend(ggml_get_name(cur), cur)) {
+                const char * name = ggml_get_name(cur);
+                const ggml_tensor * source = ggml_get_tensor(tmp_ctx, name);
+                const bool loaded = source->type == cur->type
+                    ? rd.to_backend(name, cur) : rd.bf16_to_f32(name, cur);
+                if (!loaded) {
                     gguf_free(g); ggml_free(tmp_ctx);
                     tts_cpp::cosyvoice::mapped_file_close(m.mapped);
                     throw std::runtime_error(std::string("cosyvoice: failed to stream tensor ") +

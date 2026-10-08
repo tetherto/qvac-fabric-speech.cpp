@@ -1013,13 +1013,9 @@ if (TTS_CPP_BUILD_TESTS)
     # deviations from the same weights. A broken tier instead collapses the
     # cosine, far past either column.
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
-        # No bf16 row: neither tinyBLAS nor ggml_vec_dot_bf16 carries an ARM
-        # path, so a bf16 tier runs its matmuls as a scalar per-element loop --
-        # 207 s against the f16 tier's 26 s on an M3 Ultra. The tier guidance in
-        # docs/cosyvoice3.md already recommends f16 over bf16 off AVX512-BF16
-        # hosts, so that time would gate a path no ARM build ships.
         set(_tcb_cosy_flow_tier_gates
             "f16|0.998|2.0"
+            "bf16|0.997|4.0"
             "q8_0|0.997|4.0"
             "q4_0|0.96|8.0")
     else()
@@ -1198,6 +1194,20 @@ if (TTS_CPP_BUILD_TESTS)
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        if (TARGET cosyvoice-bench)
+            add_test(NAME test-cosyvoice-bench-overrides
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cosyvoice_bench.py"
+                             $<TARGET_FILE:cosyvoice-bench> "${TTS_CPP_TEST_MODEL_DIR}"
+                             "${_tcb_cosy_llm_gguf}" "${_tcb_cosy_flow_gguf}" "${_tcb_cosy_hift_gguf}")
+            set_tests_properties(test-cosyvoice-bench-overrides PROPERTIES
+                LABELS "fixture"
+                SKIP_RETURN_CODE 77)
+            if (WIN32)
+                set_property(TEST test-cosyvoice-bench-overrides PROPERTY ENVIRONMENT
+                    "PATH=${CMAKE_BINARY_DIR}/bin/$<CONFIG>\;${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
+            endif()
+        endif()
         add_test(NAME test-assemble-cosyvoice3-model
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_assemble_cosyvoice3_model.py")
@@ -1414,6 +1424,12 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-cosyvoice-load PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-load)
     tts_cpp_register_test(test-cosyvoice-load LABEL "unit")
+
+    add_executable(test-cosyvoice-bf16 test/test_cosyvoice_bf16.cpp ${_tcb_cosy_core_srcs})
+    target_link_libraries(test-cosyvoice-bf16 PRIVATE ggml)
+    target_include_directories(test-cosyvoice-bf16 PRIVATE ggml/include src)
+    tts_cpp_apply_ccache(test-cosyvoice-bf16)
+    tts_cpp_register_test(test-cosyvoice-bf16 LABEL "unit")
 
     # Sinusoidal timestep embedding for the flow DiT. Pure function on the CFM
     # step path, so it needs no GGUF.

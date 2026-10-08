@@ -119,7 +119,30 @@ public:
         return true;
     }
 
+    bool bf16_to_f32(const char * name, ggml_tensor * dst) {
+        const int64_t id = gguf_find_tensor(g_, name);
+        if (id < 0 || gguf_get_tensor_type(g_, id) != GGML_TYPE_BF16 ||
+            dst->type != GGML_TYPE_F32) return false;
+        size_t nbytes = 0;
+        const size_t count = ggml_nelements(dst);
+        if (!locate(name, count * sizeof(ggml_bf16_t), nbytes)) return false;
+        return stream_bf16_as_f32(dst, count);
+    }
+
 private:
+    bool stream_bf16_as_f32(ggml_tensor * dst, size_t count) {
+        constexpr size_t capacity = CHUNK / (sizeof(ggml_bf16_t) + sizeof(float));
+        std::vector<ggml_bf16_t> source(std::min(count, capacity));
+        std::vector<float> converted(source.size());
+        for (size_t offset = 0; offset < count; offset += source.size()) {
+            const size_t size = std::min(source.size(), count - offset);
+            if (std::fread(source.data(), sizeof(ggml_bf16_t), size, f_) != size) return false;
+            ggml_bf16_to_fp32_row(source.data(), converted.data(), size);
+            ggml_backend_tensor_set(dst, converted.data(), offset * sizeof(float), size * sizeof(float));
+        }
+        return true;
+    }
+
     bool stream_chunks(const char * name, ggml_tensor * dst, size_t offset, size_t nbytes) {
         scratch_.resize(std::min(nbytes, (size_t) CHUNK));
         size_t done = 0;
