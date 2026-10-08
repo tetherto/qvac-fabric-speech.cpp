@@ -3,6 +3,7 @@
 #include "moss/transcribe_cli.h"
 #include "moss/transcribe_audio.h"
 #include "moss/transcribe_bpe.h"
+#include "moss/transcribe_coreml.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_runtime.h"
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <locale>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -41,6 +43,8 @@ constexpr int REFERENCE_SPAN = 1600;
 constexpr int CACHE_ALIGNMENT = 256;
 constexpr int SHORT_CONTEXT = 64;
 constexpr int OVER_CONTEXT_CHUNKS = 10;
+constexpr int NEVER_FAIL = -1;
+constexpr const char * FAKE_SIDECAR_LABEL = "coreml-fake";
 const char * const COMMA_DECIMAL_LOCALES[] = {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "de_DE",
                                               "fr_FR", "German_Germany.1252"};
 
@@ -605,6 +609,160 @@ void test_locale_independent_numbers() {
     leave_comma_decimal_locale();
 }
 
+class FakeEncoderSidecar final : public TranscribeEncoderSidecar {
+public:
+    FakeEncoderSidecar(std::vector<float> rows, int fail_on_call, int * calls)
+        : rows_(std::move(rows)), fail_on_call_(fail_on_call), calls_(calls) {}
+
+    bool encode(const std::vector<float> &, std::vector<float> & embeddings) override {
+        const int call = (*calls_)++;
+        if (call == fail_on_call_) {
+            return false;
+        }
+        embeddings = rows_;
+        return true;
+    }
+
+    const char * label() const override {
+        return FAKE_SIDECAR_LABEL;
+    }
+
+private:
+    std::vector<float> rows_;
+    int fail_on_call_;
+    int * calls_;
+};
+
+std::unique_ptr<TranscribeEncoderSidecar> fake_sidecar(std::vector<float> rows, int fail_on_call, int * calls) {
+    return std::make_unique<FakeEncoderSidecar>(std::move(rows), fail_on_call, calls);
+}
+
+std::vector<float> shifted(const std::vector<float> & values, float offset) {
+    std::vector<float> out(values);
+    std::transform(out.begin(), out.end(), out.begin(), [offset](float v) { return v + offset; });
+    return out;
+}
+
+void test_coreml_frame_major_mel() {
+    const std::vector<float> feature_major = {1, 2, 3, 4, 5, 6};
+    check(frame_major_mel(feature_major, 2, 3) == std::vector<float>({1, 4, 2, 5, 3, 6}),
+          "the Core ML input is the mel window with frames outermost");
+    expect_failure([&] { frame_major_mel(feature_major, 4, 2); }, "wrong size", "a ragged mel window is rejected");
+}
+
+void set_env(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void clear_env(const char * name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+void test_coreml_policy() {
+    clear_env(COREML_DISABLE_ENV);
+    clear_env(COREML_STRICT_ENV);
+    const CoremlPolicy defaults = read_coreml_policy();
+    check(!defaults.disabled && !defaults.strict, "the sidecar policy defaults to enabled and lenient");
+    set_env(COREML_DISABLE_ENV, "1");
+    set_env(COREML_STRICT_ENV, "1");
+    const CoremlPolicy forced = read_coreml_policy();
+    check(forced.disabled && forced.strict, "MOSS_COREML_DISABLE and MOSS_COREML_STRICT are read from the environment");
+    clear_env(COREML_DISABLE_ENV);
+    clear_env(COREML_STRICT_ENV);
+}
+
+void test_coreml_sidecar_lookup() {
+    const auto path = write_transcribe_model("transcribe-sidecar-lookup", WEIGHT_SEED);
+    TranscribeModel model(path.string(), false, 1);
+    check(transcribe_encoder_sidecar_path("models/moss-transcribe-diarize-q8_0.gguf") ==
+          "models/moss-transcribe-diarize-encoder.mlmodelc", "the sidecar name drops the quantization tag");
+    check(open_transcribe_encoder_sidecar(path.string(), model.config(), {}) == nullptr,
+          "no sidecar directory keeps the ggml encoder");
+    const std::filesystem::path sidecar = transcribe_encoder_sidecar_path(path.string());
+    std::filesystem::create_directories(sidecar);
+    check(open_transcribe_encoder_sidecar(path.string(), model.config(), {true, false}) == nullptr,
+          "MOSS_COREML_DISABLE skips a staged sidecar");
+    check(open_transcribe_encoder_sidecar(path.string(), model.config(), {}) == nullptr,
+          "a directory that is not a loadable model keeps the ggml encoder");
+    std::filesystem::remove_all(sidecar);
+    std::filesystem::remove(path);
+}
+
+void test_coreml_encoder_routing() {
+    const auto path = write_transcribe_model("transcribe-sidecar-routing", WEIGHT_SEED);
+    TranscribeModel model(path.string(), false, 1);
+    const std::vector<float> mel = tiny_mel(model, random_signal(CHUNK_SAMPLES, AUDIO_SEED));
+    const std::vector<float> ggml = encode_audio_chunk(model, mel, CHUNK_TOKENS, false).embeddings;
+    const std::vector<float> sidecar_rows = shifted(ggml, 1.0f);
+    int calls = 0;
+    TranscribeAudioEncoder encoder(model, fake_sidecar(sidecar_rows, NEVER_FAIL, &calls), false);
+    encoder.begin_run();
+    const std::vector<float> two = encoder.encode(mel, 2);
+    check(encoder.on_coreml() && calls == 1, "an attached sidecar encodes the window");
+    check(two == std::vector<float>(sidecar_rows.begin(), sidecar_rows.begin() + 2 * TEXT_EMBD),
+          "a short window keeps the sidecar's leading tokens");
+    check(encoder.run_backend() == FAKE_SIDECAR_LABEL, "the run reports the sidecar label");
+    expect_failure([&] { encoder.encode(mel, CHUNK_TOKENS + 1); }, "encoder window",
+                   "more tokens than the sidecar window are rejected");
+    std::filesystem::remove(path);
+}
+
+void test_coreml_encoder_fallback() {
+    const auto path = write_transcribe_model("transcribe-sidecar-fallback", WEIGHT_SEED);
+    TranscribeModel model(path.string(), false, 1);
+    const std::vector<float> mel = tiny_mel(model, random_signal(CHUNK_SAMPLES, AUDIO_SEED));
+    const std::vector<float> ggml = encode_audio_chunk(model, mel, CHUNK_TOKENS, false).embeddings;
+    int calls = 0;
+    TranscribeAudioEncoder encoder(model, fake_sidecar(shifted(ggml, 1.0f), 1, &calls), false);
+    encoder.begin_run();
+    encoder.encode(mel, CHUNK_TOKENS);
+    const std::vector<float> fallback = encoder.encode(mel, CHUNK_TOKENS);
+    check(max_abs_diff(fallback, ggml) == 0.0f, "a failed prediction reruns the window on ggml");
+    check(!encoder.on_coreml(), "a failed sidecar is retired");
+    check(encoder.run_backend() == MIXED_ENCODER_BACKEND, "a run that used both encoders reports mixed");
+    encoder.begin_run();
+    encoder.encode(mel, CHUNK_TOKENS);
+    check(calls == 2 && encoder.run_backend() == GGML_ENCODER_BACKEND,
+          "a retired sidecar is not tried again and later runs report ggml");
+    std::filesystem::remove(path);
+}
+
+void test_coreml_encoder_strict() {
+    const auto path = write_transcribe_model("transcribe-sidecar-strict", WEIGHT_SEED);
+    TranscribeModel model(path.string(), false, 1);
+    const std::vector<float> mel = tiny_mel(model, random_signal(CHUNK_SAMPLES, AUDIO_SEED));
+    int calls = 0;
+    TranscribeAudioEncoder failing(model, fake_sidecar({}, 0, &calls), true);
+    expect_failure([&] { failing.encode(mel, CHUNK_TOKENS); }, COREML_STRICT_ENV,
+                   "a failed prediction fails the window under MOSS_COREML_STRICT");
+    TranscribeAudioEncoder absent(model, nullptr, true);
+    expect_failure([&] { absent.encode(mel, CHUNK_TOKENS); }, COREML_STRICT_ENV,
+                   "a missing sidecar fails the window under MOSS_COREML_STRICT");
+    std::filesystem::remove(path);
+}
+
+void test_engine_reports_ggml_encoder() {
+    const auto path = write_transcribe_model("transcribe-encoder-backend", WEIGHT_SEED);
+    parakeet::moss::TranscribeEngine engine(tiny_options(path));
+    const std::vector<float> audio = random_signal(CHUNK_SAMPLES, AUDIO_SEED);
+    parakeet::moss::TranscribeRequest request;
+    request.max_new_tokens = 1;
+    const auto result = engine.transcribe(audio.data(), audio.size(), SAMPLE_RATE, request);
+    check(!engine.encoder_on_coreml(), "an engine without a sidecar encodes on ggml");
+    check(result.encoder_backend == GGML_ENCODER_BACKEND, "the result reports the ggml encoder");
+    check(parakeet::moss::cli::transcript_json(result).find("\"encoder_backend\": \"ggml\"") != std::string::npos,
+          "transcript JSON carries the encoder backend");
+    std::filesystem::remove(path);
+}
+
 void test_upload_plan() {
     check(plan_upload(true, true) == TensorUpload::InPlace && plan_upload(true, false) == TensorUpload::InPlace,
           "host buffers read tensors in place without a staging copy");
@@ -643,6 +801,13 @@ int main() {
         test_transcript_json_escapes();
         test_locale_independent_numbers();
         test_upload_plan();
+        test_coreml_frame_major_mel();
+        test_coreml_policy();
+        test_coreml_sidecar_lookup();
+        test_coreml_encoder_routing();
+        test_coreml_encoder_fallback();
+        test_coreml_encoder_strict();
+        test_engine_reports_ggml_encoder();
     } catch (const std::exception & e) {
         std::fprintf(stderr, "unexpected: %s\n", e.what());
         return 1;

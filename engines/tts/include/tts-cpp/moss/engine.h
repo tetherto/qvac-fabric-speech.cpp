@@ -40,6 +40,7 @@ struct SynthesisResult {
     double generation_ms = 0;
     double decode_ms = 0;
     double first_audio_ms = 0;
+    std::string codec_backend;
 };
 
 using AudioCallback = std::function<bool(const float *, size_t, int)>;
@@ -55,6 +56,7 @@ public:
     void cancel() noexcept;
     int sample_rate() const noexcept;
     const char * backend_name() const noexcept;
+    bool codec_on_coreml() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

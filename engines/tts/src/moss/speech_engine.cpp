@@ -286,7 +286,10 @@ struct SpeechEngine::Impl {
         }
         cancel_requested = false;
         detail::validate_speech_request(request);
-        return run(request, progress);
+        codec->tokenizer().begin_run();
+        SpeechResult result = run(request, progress);
+        result.tokenizer_backend = codec->tokenizer().run_backend();
+        return result;
     }
 };
 
@@ -315,6 +318,10 @@ float SpeechEngine::tokens_per_second() const noexcept {
 
 const char * SpeechEngine::backend_name() const noexcept {
     return impl_->lm->backend_name();
+}
+
+bool SpeechEngine::tokenizer_on_coreml() const noexcept {
+    return impl_->codec->tokenizer().on_coreml();
 }
 
 } // namespace tts_cpp::moss

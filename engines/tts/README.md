@@ -42,18 +42,20 @@ engine, not every backend ggml can compile.
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
-| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes | untested | untested | untested |
-| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes | untested | untested | untested |
-| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes | untested | untested | untested |
+| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | untested | untested | untested |
+| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | untested | untested | untested |
+| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | untested | untested | untested |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
 Supertonic 3, Parler-TTS mini and CosyVoice3 also support explicit Hexagon
 placement on Snapdragon; see their model guides for setup and validated tiers. Optional
-Apple Core ML sidecars accelerate the Supertonic vocoder and Audio8 codec.
-Export, routing, fallback, and per-call status are documented in
-[Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar) and
-[Audio8](docs/audio8.md#core-ml-codec-sidecar).
+Apple Core ML sidecars accelerate the Supertonic vocoder, the Audio8 codec, and
+the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
+speech tokenizer. Export, routing, fallback, and per-call status are documented in
+[Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar),
+[Audio8](docs/audio8.md#core-ml-codec-sidecar), and
+[MOSS](docs/backends.md#apple-core-ml-sidecars).
 
 Chatterbox Multilingual has native tokenization for 18 languages; Japanese,
 Hebrew, Russian, Chinese and Hindi need external preprocessing. See

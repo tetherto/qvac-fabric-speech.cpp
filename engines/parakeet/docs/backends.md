@@ -154,8 +154,10 @@ cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
 Unified RNN-T, TDT, EOU, Nemotron, and tagged Sortformer v2.1 FastConformer
-encoder sidecars. Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders,
-and the Sortformer transformer/speaker head remain in the normal ggml pipeline.
+encoder sidecars, and the MOSS-Transcribe-Diarize audio encoder sidecar, whose
+export and routing are in [its guide](moss-transcribe.md#core-ml-encoder-sidecar).
+Mel preprocessing, the CTC/RNN-T/TDT/EOU/Nemotron decoders, and the Sortformer
+transformer/speaker head remain in the normal ggml pipeline.
 Sortformer v1 and v2 have no sidecar. The English CTC checkpoints satisfy the
 CTC/IndicConformer export contract; among CTC checkpoints, the Core ML parity
 tests cover only IndicConformer.
@@ -379,6 +381,7 @@ validate accuracy on representative long recordings before production use.
 | Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
 | Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
 | Sortformer v1, v2 | no sidecar | always ggml |
+| MOSS-Transcribe-Diarize | Whisper encoder plus adaptor per 30 s window, the same zero-padded window the ggml encoder runs; separate `MOSS_COREML_*` switches | none; the Qwen3 decoder always runs on ggml. See [MOSS-Transcribe-Diarize](moss-transcribe.md#core-ml-encoder-sidecar) |
 
 ## IndicConformer and Unified Core ML export
 

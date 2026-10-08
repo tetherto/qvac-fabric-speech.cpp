@@ -109,6 +109,10 @@ bool has_required_flags(const CliArgs & args) {
     return !args.options.backbone_path.empty() && !args.options.decoder_path.empty();
 }
 
+std::string placement_note(const std::string & backend) {
+    return backend.empty() ? std::string() : " on " + backend;
+}
+
 int run_sound_effect(const CliArgs & args) {
     tts_cpp::moss::SoundEffectEngine engine(args.sound_options);
     std::fprintf(stderr, "[moss-cli] backend: %s\n", engine.backend_name());
@@ -129,9 +133,10 @@ int run_sound_effect(const CliArgs & args) {
         return 1;
     }
     std::fprintf(stderr,
-        "[moss-cli] wrote %s: %.2fs @ %d Hz (text %.0f ms, diffusion %.0f ms, decode %.0f ms)\n",
+        "[moss-cli] wrote %s: %.2fs @ %d Hz (text %.0f ms, diffusion %.0f ms%s, decode %.0f ms%s)\n",
         args.out_path.c_str(), (double) result.pcm.size() / result.sample_rate, result.sample_rate,
-        result.text_ms, result.diffusion_ms, result.decode_ms);
+        result.text_ms, result.diffusion_ms, placement_note(result.dit_backend).c_str(), result.decode_ms,
+        placement_note(result.vae_backend).c_str());
     return 0;
 }
 
@@ -160,12 +165,12 @@ void report_s2s(const CliArgs & args, const tts_cpp::moss::SpeechResult & result
         std::printf("%s\n", result.text.c_str());
     }
     std::fprintf(stderr,
-        "[moss-cli] reply %.2fs (%d speech tokens%s) from %d prompt tokens: encode %.0f ms, prefill %.0f ms, "
+        "[moss-cli] reply %.2fs (%d speech tokens%s) from %d prompt tokens: encode %.0f ms%s, prefill %.0f ms, "
         "generate %.0f ms, decode %.0f ms%s%s\n",
         result.sample_rate > 0 ? (double) result.pcm.size() / result.sample_rate : 0.0, result.reply_tokens,
         result.truncated ? ", context or requested generation limit reached" : "", result.prompt_tokens, result.encode_ms,
-        result.prefill_ms, result.generate_ms, result.decode_ms, result.pcm.empty() ? "" : " -> ",
-        result.pcm.empty() ? "" : args.out_path.c_str());
+        placement_note(result.tokenizer_backend).c_str(), result.prefill_ms, result.generate_ms, result.decode_ms,
+        result.pcm.empty() ? "" : " -> ", result.pcm.empty() ? "" : args.out_path.c_str());
 }
 
 int run_speech_to_speech(const CliArgs & args) {
@@ -305,9 +310,10 @@ int run(const CliArgs & args) {
             return 1;
         }
         std::fprintf(stderr,
-            "[moss-cli] wrote %s: %.2fs @ %d Hz (%d frames, generate %.0f ms, decode %.0f ms)\n",
+            "[moss-cli] wrote %s: %.2fs @ %d Hz (%d frames, generate %.0f ms, decode %.0f ms%s)\n",
             args.out_path.c_str(), (double) pcm.size() / result.sample_rate,
-            result.sample_rate, result.generated_frames, result.generation_ms, result.decode_ms);
+            result.sample_rate, result.generated_frames, result.generation_ms, result.decode_ms,
+            placement_note(result.codec_backend).c_str());
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "[moss-cli] error: %s\n", error.what());

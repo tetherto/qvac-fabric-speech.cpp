@@ -117,6 +117,66 @@ OpenCL and CPU-repacking backends rebuild their layout from the full tensor.
 Timestamps are parsed and JSON numbers written in the C locale, so a host
 application with a comma-decimal locale gets the same segments and valid JSON.
 
+## Core ML encoder sidecar
+
+On Apple builds with `PARAKEET_COREML=ON`, the audio encoder and the adaptor
+can run as a Core ML model while the decoder stays on ggml. The sidecar takes
+one 30 s window of log-mel features and returns that window's 375 adaptor
+embeddings; the engine keeps the leading rows the window needs. Every window is
+already 30 s, the last one zero-padded exactly as the reference processor
+pads it, so the sidecar computes the same function as the ggml encoder at
+every input length. Export it from any quantization of the GGUF (the encoder
+and adaptor weights are dequantized; the default program is fp16):
+
+```sh
+python engines/parakeet/scripts/export-moss-transcribe-encoder-coreml.py \
+    --gguf moss-transcribe-diarize-f16.gguf --compile-dir .
+```
+
+The export environment is the one in
+[`scripts/requirements-coreml.txt`](../scripts/requirements-coreml.txt) (see
+[backends](backends.md#core-ml-encoder-sidecar)). Conversion runs on Linux
+too; `--compile-dir` calls `xcrun coremlcompiler`, so compile on a Mac or
+compile the `.mlpackage` there later. `--palettize 8|6|4` writes palettized
+weights, `--precision float32` an fp32 program, and `--parity-dir` checks the
+PyTorch rebuild against the dumps of
+`scripts/dump-moss-transcribe-reference.py` before exporting. The engine looks
+for `<stem>-encoder.mlmodelc` beside the GGUF, where the stem drops a trailing
+quantization tag, so `moss-transcribe-diarize-q8_0.gguf` and
+`moss-transcribe-diarize-f16.gguf` both use
+`moss-transcribe-diarize-encoder.mlmodelc`.
+
+A sidecar whose input or output shapes do not match the model is not attached.
+If a prediction fails, the engine retires the sidecar, encodes that window and
+the rest of the run on ggml, and reports the run as `mixed`.
+`TranscribeEngine::encoder_on_coreml()` says whether a sidecar is attached, and
+`TranscribeResult::encoder_backend` says where this run's windows went: `ggml`,
+the Core ML placement label (`coreml-all`, `coreml-cpu-gpu`, `coreml-ane`,
+`coreml-cpu`), or `mixed`. The CLI prints the placement on stderr and writes
+`encoder_backend` to the JSON. Three environment variables control routing:
+`MOSS_COREML_DISABLE` keeps the encoder on ggml, `MOSS_COREML_STRICT` makes a
+missing sidecar or a failed prediction an error instead of a fallback, and
+`MOSS_COREML_COMPUTE_UNITS` (`all`, the default, `cpu_and_gpu`, `cpu_and_ane`,
+or `cpu_only`) picks the Core ML compute units.
+
+`bench-moss-transcribe-coreml` times one 30 s window of
+`test/samples/diarization-sample-16k.wav` with the f16 GGUF (median of five
+after a warm-up) against the ggml encoder on Metal, measured 2026-10-08:
+
+| Machine | ggml Metal | `all` (default) | `cpu_and_gpu` | `cpu_and_ane` |
+|---|---:|---:|---:|---:|
+| Mac mini M4 | 520 ms | 290 ms (1.79x) | 396 ms (1.31x) | 291 ms (1.79x) |
+| M3 Ultra | 96 ms | 169 ms (0.57x) | 86 ms (1.11x) | 307 ms (0.31x) |
+
+On the M4 the default placement runs the encoder on the Neural Engine; its
+embeddings match the ggml encoder at cosine 0.99964 (worst token 0.9948) and
+the greedy transcript is identical. On the GPU they match at 0.999999. The
+encoder is a small part of a transcription: on the M4 the 27 s sample takes
+3.51 s with the sidecar and 3.71 s without, because the decoder dominates. On
+an M3 Ultra the GPU outruns the Neural Engine, so the default placement is
+slower than ggml there; set `MOSS_COREML_COMPUTE_UNITS=cpu_and_gpu` on such
+machines, or leave the sidecar out.
+
 ## Test
 
 `test-moss-transcribe` builds a tiny random-weight GGUF in-test and needs no
@@ -148,6 +208,21 @@ also holds `tokenizer_cases.bin` from
 on prompt-shaped strings (default, English, and hotword prompts, CJK and
 full-width punctuation, whitespace and newline runs, digits, contractions,
 emoji).
+
+`test-moss-transcribe` also covers the sidecar routing without Core ML: the
+sidecar path rule, window and row selection, retiring a failed sidecar, the
+strict and disable switches, and the per-run backend report.
+`test-export-moss-transcribe-coreml` (Python; skips without `numpy` or
+`torch`) checks the exporter's PyTorch rebuild against an independent NumPy
+Whisper encoder and adaptor on tiny random weights, the sidecar name rule, and,
+with `coremltools`, the converted program's input and output.
+`test-moss-transcribe-coreml-parity` runs on a Mac with a compiled sidecar: set
+`MOSS_TRANSCRIBE_COREML_MODEL` to the GGUF and pass a 16 kHz WAV. It compares a
+full and a short window with the ggml encoder (cosine 0.999 for the window,
+0.99 for every token), checks that a transcription runs on the sidecar and
+follows the ggml transcript, and covers strict mode and an invalid sidecar.
+`bench-moss-transcribe-coreml` (same arguments) prints one window's time on
+ggml and on Core ML for the compute units in `MOSS_COREML_COMPUTE_UNITS`.
 
 ## Memory-fit preflight
 

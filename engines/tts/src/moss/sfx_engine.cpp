@@ -1,5 +1,6 @@
 #include "tts-cpp/moss/sound_effect.h"
 
+#include "moss/sfx_coreml.h"
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
 #include "moss/sfx_request.h"
@@ -17,7 +18,7 @@
 namespace tts_cpp::moss {
 namespace {
 
-using detail::SfxDitSession;
+using detail::SfxDitRunner;
 using detail::SfxModel;
 using detail::SfxTokenizer;
 using detail::ResolvedRequest;
@@ -43,6 +44,11 @@ struct SoundEffectEngine::Impl {
     SoundEffectOptions options;
     std::unique_ptr<SfxModel> model;
     std::unique_ptr<SfxTokenizer> tokenizer;
+    std::unique_ptr<detail::SfxDitSidecar> dit_sidecar;
+    std::unique_ptr<detail::SfxVaeSidecar> vae_sidecar;
+    bool strict = false;
+    detail::StageBackends dit_backends;
+    detail::StageBackends vae_backends;
     std::atomic<bool> cancel_requested{false};
     std::mutex generation_mutex;
 
@@ -56,6 +62,14 @@ struct SoundEffectEngine::Impl {
         model = std::make_unique<SfxModel>(options.model_path, options.use_gpu, options.n_threads);
         validate_networks();
         tokenizer = std::make_unique<SfxTokenizer>(*model);
+        attach_sidecars();
+    }
+
+    void attach_sidecars() {
+        const detail::CoremlPolicy policy = detail::read_coreml_policy();
+        dit_sidecar = detail::open_sfx_dit_sidecar(options.model_path, model->config(), policy);
+        vae_sidecar = detail::open_sfx_vae_sidecar(options.model_path, model->config(), policy);
+        strict = policy.strict;
     }
 
     void validate_networks() const {
@@ -64,7 +78,7 @@ struct SoundEffectEngine::Impl {
         detail::validate_vae(*model);
     }
 
-    std::vector<float> step_velocity(SfxDitSession & dit, const std::vector<float> & latents, float timestep,
+    std::vector<float> step_velocity(SfxDitRunner & dit, const std::vector<float> & latents, float timestep,
                                      const std::vector<float> & positive, const std::vector<float> & negative,
                                      float guidance) {
         std::vector<float> conditioned = dit.velocity(latents, timestep, positive);
@@ -81,7 +95,7 @@ struct SoundEffectEngine::Impl {
         return !progress || progress(step, total);
     }
 
-    void denoise_step(SfxDitSession & dit, std::vector<float> & latents, const ResolvedRequest & request,
+    void denoise_step(SfxDitRunner & dit, std::vector<float> & latents, const ResolvedRequest & request,
                       const std::vector<float> & sigmas, int step, const std::vector<float> & positive,
                       const std::vector<float> & negative) {
         const float sigma = sigmas[(size_t) step];
@@ -94,11 +108,11 @@ struct SoundEffectEngine::Impl {
     bool denoise(std::vector<float> & latents, const ResolvedRequest & request, const std::vector<float> & positive,
                  const std::vector<float> & negative, const SoundEffectProgress & progress) {
         const std::vector<float> sigmas = detail::flow_sigmas(request.steps, request.shift);
-        SfxDitSession dit(*model, model->config().latent_frames());
+        SfxDitRunner dit(*model, model->config().latent_frames(), dit_sidecar, strict, dit_backends);
         return run_steps(dit, latents, request, sigmas, positive, negative, progress);
     }
 
-    bool run_steps(SfxDitSession & dit, std::vector<float> & latents, const ResolvedRequest & request,
+    bool run_steps(SfxDitRunner & dit, std::vector<float> & latents, const ResolvedRequest & request,
                    const std::vector<float> & sigmas, const std::vector<float> & positive,
                    const std::vector<float> & negative, const SoundEffectProgress & progress) {
         for (int step = 0; step < request.steps; ++step) {
@@ -122,8 +136,8 @@ struct SoundEffectEngine::Impl {
 
     std::vector<float> decode(const std::vector<float> & latents, int tenths) {
         const int64_t samples = output_samples(tenths);
-        std::vector<float> pcm = detail::decode_latents(*model, latents, model->config().latent_frames(),
-                kept_frames(samples), detail::SFX_DECODE_WINDOW_FRAMES,
+        std::vector<float> pcm = detail::decode_sfx_latents(*model, vae_sidecar, strict, vae_backends, latents,
+                model->config().latent_frames(), kept_frames(samples), detail::SFX_DECODE_WINDOW_FRAMES,
                 [this](int, int) { return !cancel_requested.load(); });
         pcm.resize(std::min(pcm.size(), (size_t) samples));
         return pcm;
@@ -175,7 +189,13 @@ struct SoundEffectEngine::Impl {
             fail("generation already in progress on this instance");
         }
         cancel_requested = false;
-        return run(detail::resolve_sfx_request(model->config(), request), progress);
+        const ResolvedRequest resolved = detail::resolve_sfx_request(model->config(), request);
+        dit_backends.begin();
+        vae_backends.begin();
+        SoundEffectResult result = run(resolved, progress);
+        result.dit_backend = dit_backends.summary();
+        result.vae_backend = vae_backends.summary();
+        return result;
     }
 };
 
@@ -205,6 +225,14 @@ float SoundEffectEngine::max_seconds() const noexcept {
 
 const char * SoundEffectEngine::backend_name() const noexcept {
     return impl_->model->backend_name();
+}
+
+bool SoundEffectEngine::dit_on_coreml() const noexcept {
+    return impl_->dit_sidecar != nullptr;
+}
+
+bool SoundEffectEngine::vae_on_coreml() const noexcept {
+    return impl_->vae_sidecar != nullptr;
 }
 
 } // namespace tts_cpp::moss

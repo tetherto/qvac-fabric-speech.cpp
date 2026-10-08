@@ -1,6 +1,9 @@
 #include "sfx_fixtures.h"
 
+#include "../test_env_portable.h"
+
 #include "moss/cli.h"
+#include "moss/sfx_coreml.h"
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
 #include "moss/sfx_prompt.h"
@@ -8,11 +11,14 @@
 #include "moss/sfx_tokenizer.h"
 #include "tts-cpp/moss/sound_effect.h"
 
+#include "ggml-cpu.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <future>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -30,11 +36,20 @@ static_assert(sizeof("\u00e9") == UTF8_TWO_BYTE_LITERAL_SIZE,
 constexpr uint32_t WEIGHT_SEED = 20260924;
 constexpr float TOLERANCE = 1e-4f;
 constexpr int SMALL_WINDOW = 16;
+constexpr const char * UNKNOWN_UNITS = "neural_engine";
+constexpr const char * ALL_UNITS = "all";
 constexpr size_t NOISE_SAMPLES = 20000;
 constexpr int KEPT_FRAMES = 100;
 constexpr float OVERFLOW_EMBEDDING = 1.0f;
 constexpr float OVERFLOW_PROJECTION = 12.5f;
 constexpr float OVERFLOW_DOWN = 1.0f;
+constexpr int NEVER_FAIL = -1;
+constexpr int FAKE_VAE_WINDOW = 96;
+constexpr float FAKE_VELOCITY_OFFSET = 1.0f;
+constexpr float PROBE_TIMESTEP = 937.5f;
+constexpr int TIMESTEP_MAX_PERIOD = 10000;
+constexpr size_t SINUSOID_ARENA_BYTES = 1 << 20;
+constexpr const char * FAKE_SIDECAR_LABEL = "coreml-fake";
 
 int failures = 0;
 
@@ -317,6 +332,192 @@ void test_vae(SfxModel & model) {
             "keeping more frames than exist");
 }
 
+std::vector<float> ggml_sinusoid(float timestep, int dim) {
+    ggml_context * ctx = ggml_init({SINUSOID_ARENA_BYTES, nullptr, false});
+    ggml_tensor * input = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    *(float *) input->data = timestep;
+    ggml_tensor * embedding = ggml_timestep_embedding(ctx, input, dim, TIMESTEP_MAX_PERIOD);
+    ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, embedding);
+    ggml_graph_compute_with_ctx(ctx, graph, 1);
+    std::vector<float> out((const float *) embedding->data, (const float *) embedding->data + dim);
+    ggml_free(ctx);
+    return out;
+}
+
+void test_timestep_sinusoid() {
+    check(max_abs_diff(timestep_sinusoid(PROBE_TIMESTEP, FREQ_DIM), ggml_sinusoid(PROBE_TIMESTEP, FREQ_DIM)) == 0.0f,
+          "the DiT sidecar's timestep embedding is ggml's");
+}
+
+void check_fixed_plan(int frames, int keep, int window, int context) {
+    const std::string label = "fixed VAE windows " + std::to_string(frames) + "/" + std::to_string(keep) + "/" +
+                              std::to_string(window) + ": ";
+    int next = 0;
+    for (const SfxVaeWindow & w : plan_fixed_vae_windows(frames, keep, window, context)) {
+        check(w.count == window && w.first >= 0 && w.first + window <= frames, label + "every window has the width");
+        check(w.first + w.keep_first == next, label + "kept frames tile the clip");
+        check(w.keep_first >= context || w.first == 0, label + "left context or the clip start");
+        check(w.keep_first + w.keep_count + context <= window || w.first + window == frames,
+              label + "right context or the clip end");
+        next += w.keep_count;
+    }
+    check(next == keep, label + "every kept frame is covered once");
+}
+
+void test_fixed_vae_plan() {
+    check_fixed_plan(1500, 1500, 128, SFX_VAE_CONTEXT_FRAMES);
+    check_fixed_plan(1500, 1, 128, SFX_VAE_CONTEXT_FRAMES);
+    check_fixed_plan(1500, 97, 128, SFX_VAE_CONTEXT_FRAMES);
+    check_fixed_plan(FRAMES, KEPT_FRAMES, FAKE_VAE_WINDOW, SFX_VAE_CONTEXT_FRAMES);
+    check_fixed_plan(128, 128, 128, SFX_VAE_CONTEXT_FRAMES);
+    check(plan_fixed_vae_windows(100, 50, 128, SFX_VAE_CONTEXT_FRAMES).empty(), "a window wider than the clip");
+    check(plan_fixed_vae_windows(1500, 100, 64, SFX_VAE_CONTEXT_FRAMES).empty(), "a window with no room for a core");
+}
+
+class GgmlWindowVae final : public SfxVaeSidecar {
+public:
+    GgmlWindowVae(SfxModel & model, int fail_on_call, int * calls)
+        : model_(model), fail_on_call_(fail_on_call), calls_(calls) {}
+
+    int window() const override {
+        return FAKE_VAE_WINDOW;
+    }
+
+    bool decode(const std::vector<float> & latents, std::vector<float> & pcm) override {
+        if ((*calls_)++ == fail_on_call_) {
+            return false;
+        }
+        pcm = decode_latents(model_, latents, FAKE_VAE_WINDOW, FAKE_VAE_WINDOW, FAKE_VAE_WINDOW, {});
+        return true;
+    }
+
+    const char * label() const override {
+        return FAKE_SIDECAR_LABEL;
+    }
+
+private:
+    SfxModel & model_;
+    int fail_on_call_;
+    int * calls_;
+};
+
+void test_vae_sidecar_windows(SfxModel & model) {
+    const std::vector<float> latents = gaussian_noise((size_t) FRAMES * LATENT, 5);
+    const std::vector<float> whole = decode_latents(model, latents, FRAMES, KEPT_FRAMES, FRAMES, {});
+    int calls = 0;
+    std::unique_ptr<SfxVaeSidecar> sidecar = std::make_unique<GgmlWindowVae>(model, NEVER_FAIL, &calls);
+    StageBackends backends;
+    const std::vector<float> windowed = decode_sfx_latents(model, sidecar, false, backends, latents, FRAMES,
+            KEPT_FRAMES, SMALL_WINDOW, {});
+    check(max_abs_diff(windowed, whole) < TOLERANCE, "fixed sidecar windows reproduce the whole decode");
+    check(sidecar && backends.summary() == FAKE_SIDECAR_LABEL, "the decode reports the sidecar");
+    int stops = 0;
+    check(decode_sfx_latents(model, sidecar, false, backends, latents, FRAMES, KEPT_FRAMES, SMALL_WINDOW,
+            [&](int, int) { return ++stops < 2; }).empty() && sidecar, "a cancel stops the sidecar windows");
+}
+
+void test_vae_sidecar_fallback(SfxModel & model) {
+    const std::vector<float> latents = gaussian_noise((size_t) FRAMES * LATENT, 5);
+    const std::vector<float> ggml = decode_latents(model, latents, FRAMES, KEPT_FRAMES, SMALL_WINDOW, {});
+    int calls = 0;
+    std::unique_ptr<SfxVaeSidecar> sidecar = std::make_unique<GgmlWindowVae>(model, 1, &calls);
+    StageBackends backends;
+    check(decode_sfx_latents(model, sidecar, false, backends, latents, FRAMES, KEPT_FRAMES, SMALL_WINDOW, {}) ==
+          ggml, "a failed window reruns the decode on ggml");
+    check(!sidecar && backends.summary() == GGML_STAGE_BACKEND, "a failed VAE sidecar is retired");
+    int strict_calls = 0;
+    std::unique_ptr<SfxVaeSidecar> failing = std::make_unique<GgmlWindowVae>(model, 0, &strict_calls);
+    expect_failure([&] { decode_sfx_latents(model, failing, true, backends, latents, FRAMES, KEPT_FRAMES,
+            SMALL_WINDOW, {}); }, COREML_STRICT_ENV, "a failed window fails the decode under MOSS_COREML_STRICT");
+    std::unique_ptr<SfxVaeSidecar> absent;
+    expect_failure([&] { decode_sfx_latents(model, absent, true, backends, latents, FRAMES, KEPT_FRAMES,
+            SMALL_WINDOW, {}); }, COREML_STRICT_ENV, "a missing VAE sidecar fails under MOSS_COREML_STRICT");
+}
+
+class OffsetDit final : public SfxDitSidecar {
+public:
+    OffsetDit(std::vector<float> velocity, int fail_on_call, int * calls, std::vector<float> * timestep)
+        : velocity_(std::move(velocity)), fail_on_call_(fail_on_call), calls_(calls), timestep_(timestep) {}
+
+    bool velocity(const std::vector<float> &, const std::vector<float> & timestep, const std::vector<float> &,
+                  std::vector<float> & out) override {
+        *timestep_ = timestep;
+        if ((*calls_)++ == fail_on_call_) {
+            return false;
+        }
+        out = velocity_;
+        return true;
+    }
+
+    const char * label() const override {
+        return FAKE_SIDECAR_LABEL;
+    }
+
+private:
+    std::vector<float> velocity_;
+    int fail_on_call_;
+    int * calls_;
+    std::vector<float> * timestep_;
+};
+
+std::vector<float> offset(const std::vector<float> & values, float delta) {
+    std::vector<float> out(values);
+    std::transform(out.begin(), out.end(), out.begin(), [delta](float v) { return v + delta; });
+    return out;
+}
+
+void test_dit_runner(SfxModel & model) {
+    const std::vector<float> latents = gaussian_noise((size_t) FRAMES * LATENT, 3);
+    const std::vector<float> context = encode_text(model, {40, 41, 42});
+    std::vector<float> ggml;
+    {
+        SfxDitSession reference(model, FRAMES);
+        ggml = reference.velocity(latents, PROBE_TIMESTEP, context);
+    }
+    int calls = 0;
+    std::vector<float> seen_timestep;
+    std::unique_ptr<SfxDitSidecar> sidecar =
+            std::make_unique<OffsetDit>(offset(ggml, FAKE_VELOCITY_OFFSET), 1, &calls, &seen_timestep);
+    StageBackends backends;
+    SfxDitRunner runner(model, FRAMES, sidecar, false, backends);
+    check(runner.velocity(latents, PROBE_TIMESTEP, context) == offset(ggml, FAKE_VELOCITY_OFFSET),
+          "an attached DiT sidecar predicts the velocity");
+    check(seen_timestep == timestep_sinusoid(PROBE_TIMESTEP, FREQ_DIM), "the sidecar gets the timestep embedding");
+    check(max_abs_diff(runner.velocity(latents, PROBE_TIMESTEP, context), ggml) < TOLERANCE,
+          "a failed step continues on the ggml DiT");
+    check(!sidecar && backends.summary() == MIXED_STAGE_BACKEND, "a failed DiT sidecar is retired mid-run");
+    check(calls == 2 && max_abs_diff(runner.velocity(latents, PROBE_TIMESTEP, context), ggml) < TOLERANCE,
+          "later steps stay on ggml");
+    std::unique_ptr<SfxDitSidecar> absent;
+    SfxDitRunner strict(model, FRAMES, absent, true, backends);
+    expect_failure([&] { strict.velocity(latents, PROBE_TIMESTEP, context); }, COREML_STRICT_ENV,
+                   "a missing DiT sidecar fails under MOSS_COREML_STRICT");
+}
+
+void test_sidecar_lookup(const std::filesystem::path & path, const SfxModel & model) {
+    check(sfx_dit_sidecar_path("models/moss-sfx-v2-q8_0.gguf") == "models/moss-sfx-v2-dit.mlmodelc" &&
+          sfx_vae_sidecar_path("models/moss-sfx-v2-f16.gguf") == "models/moss-sfx-v2-vae.mlmodelc",
+          "the sidecar names drop the quantization tag");
+    check(!open_sfx_dit_sidecar(path.string(), model.config(), {}) && !open_sfx_vae_sidecar(path.string(),
+          model.config(), {}), "no staged sidecars keep both stages on ggml");
+    const std::filesystem::path dit = sfx_dit_sidecar_path(path.string());
+    std::filesystem::create_directories(dit);
+    check(!open_sfx_dit_sidecar(path.string(), model.config(), {true, false}), "MOSS_COREML_DISABLE skips the DiT");
+    check(!open_sfx_dit_sidecar(path.string(), model.config(), {}), "a directory that is not a model is ignored");
+    std::filesystem::remove_all(dit);
+}
+
+void test_compute_units() {
+    unsetenv(COREML_UNITS_ENV);
+    check(requested_coreml_units() == COREML_DEFAULT_UNITS, "the MOSS sidecars default to the GPU");
+    setenv(COREML_UNITS_ENV, ALL_UNITS, 1);
+    check(requested_coreml_units() == ALL_UNITS, "MOSS_COREML_COMPUTE_UNITS picks the units");
+    setenv(COREML_UNITS_ENV, UNKNOWN_UNITS, 1);
+    check(requested_coreml_units() == COREML_DEFAULT_UNITS, "an unknown value keeps the default");
+    unsetenv(COREML_UNITS_ENV);
+}
+
 tts_cpp::moss::SoundEffectRequest request(const char * prompt, double seconds, uint32_t seed) {
     tts_cpp::moss::SoundEffectRequest out;
     out.prompt = prompt;
@@ -434,8 +635,16 @@ void test_engine_validation(tts_cpp::moss::SoundEffectEngine & engine) {
     expect_failure([&] { engine.generate(too_many_steps); }, "steps", "too many steps");
 }
 
+void test_engine_placement(tts_cpp::moss::SoundEffectEngine & engine) {
+    const auto result = engine.generate(request("rain", SHORT_CLIP, 1));
+    check(!engine.dit_on_coreml() && !engine.vae_on_coreml(), "an engine without sidecars stays on ggml");
+    check(result.dit_backend == GGML_STAGE_BACKEND && result.vae_backend == GGML_STAGE_BACKEND,
+          "the result reports where the DiT and the VAE ran");
+}
+
 void test_engine(const std::filesystem::path & path) {
     tts_cpp::moss::SoundEffectEngine engine(engine_options(path));
+    test_engine_placement(engine);
     test_engine_generation(engine);
     test_engine_guidance(engine);
     test_engine_progress_cancel(engine);
@@ -499,6 +708,9 @@ int main() {
         test_rejected_tensors();
         test_rejected_metadata_bounds();
         test_feed_forward_beyond_half_precision();
+        test_timestep_sinusoid();
+        test_fixed_vae_plan();
+        test_compute_units();
         const auto path = write_sfx_model("sfx-model", WEIGHT_SEED);
         {
             SfxModel model(path.string(), false, 1);
@@ -507,6 +719,10 @@ int main() {
             test_text_encoder(model);
             test_dit(model);
             test_vae(model);
+            test_vae_sidecar_windows(model);
+            test_vae_sidecar_fallback(model);
+            test_dit_runner(model);
+            test_sidecar_lookup(path, model);
         }
         test_engine(path);
         test_cli(path);

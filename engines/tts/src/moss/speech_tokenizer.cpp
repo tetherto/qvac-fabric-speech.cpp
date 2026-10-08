@@ -143,6 +143,29 @@ std::vector<float> half_squared_norms(const std::vector<float> & codebook, size_
     return norms;
 }
 
+class CoremlSpeechTokenizer final : public SpeechTokenizerSidecar {
+public:
+    CoremlSpeechTokenizer(std::unique_ptr<CoremlModel> model, CoremlTensor mel, CoremlTensor states)
+        : model_(std::move(model)), mel_(std::move(mel)), states_(std::move(states)) {}
+
+    bool pooled_states(const std::vector<float> & mel, std::vector<float> & states) override {
+        if ((int64_t) mel.size() != tensor_elements(mel_)) {
+            return false;
+        }
+        states.assign((size_t) tensor_elements(states_), 0.0f);
+        return model_->predict({mel_}, {mel.data()}, {states_}, {states.data()});
+    }
+
+    const char * label() const override {
+        return model_->label();
+    }
+
+private:
+    std::unique_ptr<CoremlModel> model_;
+    CoremlTensor mel_;
+    CoremlTensor states_;
+};
+
 std::vector<float> causal_mask(int64_t tokens) {
     std::vector<float> mask((size_t) (tokens * tokens), -std::numeric_limits<float>::infinity());
     for (int64_t query = 0; query < tokens; ++query) {
@@ -167,6 +190,29 @@ size_t speech_padded_samples(const SpeechVqConfig & config, size_t samples) {
     return ceil_div(samples, (size_t) config.samples_per_token()) * (size_t) config.samples_per_token();
 }
 
+SpeechSegmentCapacity speech_segment_capacity(const SpeechVqConfig & config) {
+    SpeechSegmentCapacity capacity;
+    capacity.tokens = (int) speech_segment_tokens(config, speech_padded_samples(config, (size_t) config.chunk_samples));
+    capacity.mel_frames = capacity.tokens * config.pooling_kernel * CONV_DOWNSAMPLE;
+    return capacity;
+}
+
+std::unique_ptr<SpeechTokenizerSidecar> open_speech_tokenizer_sidecar(const std::string & codec_path,
+                                                                      const SpeechVqConfig & config,
+                                                                      const CoremlPolicy & policy) {
+    std::unique_ptr<CoremlModel> model = CoremlModel::open(speech_tokenizer_sidecar_path(codec_path), policy);
+    if (!model) {
+        return nullptr;
+    }
+    const SpeechSegmentCapacity capacity = speech_segment_capacity(config);
+    CoremlTensor mel{"mel", {1, config.n_mels, capacity.mel_frames}};
+    CoremlTensor states{"states", {1, capacity.tokens, config.n_embd}};
+    if (!model->declares(mel) || !model->declares(states)) {
+        return nullptr;
+    }
+    return std::make_unique<CoremlSpeechTokenizer>(std::move(model), std::move(mel), std::move(states));
+}
+
 void normalize_whisper_log_mel(std::vector<float> & mel) {
     if (mel.empty()) {
         return;
@@ -187,6 +233,9 @@ struct SpeechTokenizer::Impl {
     std::vector<float> mel_filters;
     std::vector<float> code_bias;
     int n_threads = 1;
+    std::unique_ptr<SpeechTokenizerSidecar> sidecar;
+    bool strict = false;
+    StageBackends backends;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
@@ -331,6 +380,9 @@ struct SpeechTokenizer::Impl {
         mel_filters = read_tensor(find("whispervq.mel_filters"));
         code_bias = half_squared_norms(read_tensor(find("whispervq.codebook")), (size_t) config.codebook_size,
                 (size_t) config.n_embd);
+        const CoremlPolicy policy = read_coreml_policy();
+        sidecar = open_speech_tokenizer_sidecar(path, config, policy);
+        strict = policy.strict;
     }
 
     std::vector<float> log_mel(const float * samples, size_t count) const {
@@ -403,7 +455,18 @@ struct SpeechTokenizer::Impl {
         return ggml_reshape_2d(ctx, ggml_mean(ctx, by_group), config.n_embd, groups);
     }
 
-    std::vector<int32_t> encode_frames(const std::vector<float> & mel, int64_t mel_frames) {
+    ggml_tensor * code_indices(ggml_context * ctx, ggml_tensor * pooled, ggml_tensor * bias) const {
+        ggml_tensor * scores = ggml_add(ctx, ggml_mul_mat(ctx, find("whispervq.codebook"), pooled), bias);
+        return ggml_argmax(ctx, scores);
+    }
+
+    std::vector<int32_t> read_codes(ggml_tensor * codes, int64_t tokens) const {
+        std::vector<int32_t> values((size_t) tokens);
+        ggml_backend_tensor_get(codes, values.data(), 0, values.size() * sizeof(int32_t));
+        return values;
+    }
+
+    std::vector<int32_t> encode_on_ggml(const std::vector<float> & mel, int64_t mel_frames) {
         const int64_t frames = mel_frames / CONV_DOWNSAMPLE;
         const int64_t tokens = frames / config.pooling_kernel;
         SfxGraph graph(GRAPH_NODES);
@@ -417,25 +480,68 @@ struct SpeechTokenizer::Impl {
                 find("whispervq.pos_embd")->nb[1], 0);
         cur = ggml_add(ctx, ggml_cont(ctx, ggml_transpose(ctx, cur)), positions);
         cur = average_pool(ctx, blocks(ctx, cur, frames, mask), frames);
-        ggml_tensor * scores = ggml_add(ctx, ggml_mul_mat(ctx, find("whispervq.codebook"), cur), bias);
-        ggml_tensor * codes = ggml_argmax(ctx, scores);
+        ggml_tensor * codes = code_indices(ctx, cur, bias);
         ggml_set_output(codes);
         ggml_build_forward_expand(graph.graph(), codes);
-        run(graph, input, mel, mask, causal_mask(frames), bias);
-        std::vector<int32_t> values((size_t) tokens);
-        ggml_backend_tensor_get(codes, values.data(), 0, values.size() * sizeof(int32_t));
-        return values;
+        const std::vector<float> mask_data = causal_mask(frames);
+        run(graph, {{input, &mel}, {mask, &mask_data}, {bias, &code_bias}});
+        return read_codes(codes, tokens);
     }
 
-    void run(SfxGraph & graph, ggml_tensor * input, const std::vector<float> & mel, ggml_tensor * mask,
-             const std::vector<float> & mask_data, ggml_tensor * bias) {
+    std::vector<int32_t> quantize_pooled(const std::vector<float> & pooled, int64_t tokens) {
+        SfxGraph graph(GRAPH_NODES);
+        ggml_tensor * input = graph.input_f32(config.n_embd, tokens);
+        ggml_tensor * bias = graph.input_f32(config.codebook_size, 1);
+        ggml_tensor * codes = code_indices(graph.ctx(), input, bias);
+        ggml_set_output(codes);
+        ggml_build_forward_expand(graph.graph(), codes);
+        run(graph, {{input, &pooled}, {bias, &code_bias}});
+        return read_codes(codes, tokens);
+    }
+
+    bool sidecar_takes(int64_t mel_frames) const {
+        return sidecar && mel_frames == speech_segment_capacity(config).mel_frames;
+    }
+
+    bool pooled_on_sidecar(const std::vector<float> & mel, std::vector<float> & pooled) {
+        if (!sidecar->pooled_states(mel, pooled)) {
+            sidecar.reset();
+            return false;
+        }
+        backends.note(sidecar->label());
+        return true;
+    }
+
+    std::vector<int32_t> encode_frames(const std::vector<float> & mel, int64_t mel_frames) {
+        const int64_t tokens = mel_frames / CONV_DOWNSAMPLE / config.pooling_kernel;
+        std::vector<float> pooled;
+        if (sidecar_takes(mel_frames) && pooled_on_sidecar(mel, pooled)) {
+            return quantize_pooled(pooled, tokens);
+        }
+        if (strict && !sidecar) {
+            fail_strict(OWNER, "tokenizer");
+        }
+        backends.note(GGML_STAGE_BACKEND);
+        return encode_on_ggml(mel, mel_frames);
+    }
+
+    struct GraphInput {
+        ggml_tensor * tensor;
+        const std::vector<float> * data;
+    };
+
+    void set_inputs(const std::vector<GraphInput> & inputs) const {
+        for (const GraphInput & input : inputs) {
+            ggml_backend_tensor_set(input.tensor, input.data->data(), 0, input.data->size() * sizeof(float));
+        }
+    }
+
+    void run(SfxGraph & graph, const std::vector<GraphInput> & inputs) {
         if (!::tts_cpp::detail::sched_fallback_ensure(sched, backend, GRAPH_NODES, {weight_buffer}) ||
             !::tts_cpp::detail::sched_fallback_alloc(sched, graph.graph())) {
             fail("graph allocation failed");
         }
-        ggml_backend_tensor_set(input, mel.data(), 0, mel.size() * sizeof(float));
-        ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
-        ggml_backend_tensor_set(bias, code_bias.data(), 0, code_bias.size() * sizeof(float));
+        set_inputs(inputs);
         if (::tts_cpp::detail::sched_fallback_compute(sched, backend, graph.graph(), n_threads) != GGML_STATUS_SUCCESS) {
             fail("graph compute failed");
         }
@@ -480,6 +586,23 @@ std::vector<int32_t> SpeechTokenizer::encode_segment(const float * samples, size
 
 std::vector<int32_t> SpeechTokenizer::encode(const std::vector<float> & pcm_16k, const std::function<bool()> & stop) {
     return impl_->encode(pcm_16k, stop);
+}
+
+void SpeechTokenizer::attach_sidecar(std::unique_ptr<SpeechTokenizerSidecar> sidecar, bool strict) {
+    impl_->sidecar = std::move(sidecar);
+    impl_->strict = strict;
+}
+
+bool SpeechTokenizer::on_coreml() const {
+    return impl_->sidecar != nullptr;
+}
+
+void SpeechTokenizer::begin_run() {
+    impl_->backends.begin();
+}
+
+std::string SpeechTokenizer::run_backend() const {
+    return impl_->backends.summary();
 }
 
 } // namespace tts_cpp::moss::detail

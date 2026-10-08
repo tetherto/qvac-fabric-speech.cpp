@@ -1,6 +1,7 @@
 #include "parakeet/moss_transcribe.h"
 
 #include "moss/transcribe_audio.h"
+#include "moss/transcribe_coreml.h"
 #include "moss/transcribe_model.h"
 #include "moss/transcribe_networks.h"
 #include "moss/transcribe_text.h"
@@ -43,6 +44,7 @@ struct TranscribeEngine::Impl {
     std::unique_ptr<TranscribeModel> model;
     std::unique_ptr<TranscribeTokenizer> tokenizer;
     std::unique_ptr<TranscribeMel> mel;
+    std::unique_ptr<detail::TranscribeAudioEncoder> audio_encoder;
     std::atomic<bool> cancel_requested{false};
     std::mutex transcription_mutex;
 
@@ -58,6 +60,13 @@ struct TranscribeEngine::Impl {
         detail::validate_transcribe_decoder(*model);
         tokenizer = std::make_unique<TranscribeTokenizer>(*model);
         mel = std::make_unique<TranscribeMel>(model->config().audio, detail::read_mel_filters(*model));
+        attach_audio_encoder();
+    }
+
+    void attach_audio_encoder() {
+        const detail::CoremlPolicy policy = detail::read_coreml_policy();
+        audio_encoder = std::make_unique<detail::TranscribeAudioEncoder>(*model,
+                detail::open_transcribe_encoder_sidecar(options.model_path, model->config(), policy), policy.strict);
     }
 
     void require_context(int prompt_tokens, int limit) const {
@@ -85,7 +94,7 @@ struct TranscribeEngine::Impl {
         const size_t first = chunk * length;
         const size_t count = std::min(length, samples - first);
         const int tokens = detail::transcribe_chunk_tokens(model->config(), count);
-        return detail::encode_audio_chunk(*model, mel->chunk(pcm + first, count), tokens, false).embeddings;
+        return audio_encoder->encode(mel->chunk(pcm + first, count), tokens);
     }
 
     bool encode_audio(const float * pcm, size_t samples, std::vector<float> & embeddings) {
@@ -144,8 +153,10 @@ struct TranscribeEngine::Impl {
 
         const auto encode_start = std::chrono::steady_clock::now();
         std::vector<float> embeddings;
+        audio_encoder->begin_run();
         result.cancelled = !encode_audio(pcm, samples, embeddings);
         result.encode_ms = elapsed_ms(encode_start);
+        result.encoder_backend = audio_encoder->run_backend();
         if (result.cancelled) {
             return result;
         }
@@ -198,6 +209,10 @@ int TranscribeEngine::sample_rate() const noexcept {
 
 const char * TranscribeEngine::backend_name() const noexcept {
     return impl_->model->backend_name();
+}
+
+bool TranscribeEngine::encoder_on_coreml() const noexcept {
+    return impl_->audio_encoder->on_coreml();
 }
 
 } // namespace parakeet::moss

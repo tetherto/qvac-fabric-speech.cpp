@@ -299,6 +299,7 @@ struct parakeet_coreml_context {
     std::string  output_name;
     std::string  label;
     std::vector<int64_t> declared_input_dims;
+    std::vector<int64_t> declared_output_dims;
     bool         input_shape_fixed = false;
     int64_t      cached_mel_frames = 0;
     int64_t      cached_mels       = 0;
@@ -306,6 +307,14 @@ struct parakeet_coreml_context {
     bool         input_transpose   = false;
     std::mutex   mutex;
 };
+
+static int64_t trailing_partner(const std::vector<int64_t> & dims, int64_t known) {
+    if (dims.size() < 2 || known <= 0) return 0;
+    const std::size_t n = dims.size();
+    if (dims[n - 1] == known && dims[n - 2] > 0) return dims[n - 2];
+    if (dims[n - 2] == known && dims[n - 1] > 0) return dims[n - 1];
+    return 0;
+}
 
 int64_t fixed_mel_frames_for(
     const parakeet_coreml_context * ctx,
@@ -457,8 +466,8 @@ bool prepare_cached_bypass_io(parakeet_coreml_context * ctx, MLModel * model,
     return true;
 }
 
-MLComputeUnits requested_compute_units(std::string * label) {
-    const char * env = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
+MLComputeUnits requested_compute_units(const char * units_env, std::string * label) {
+    const char * env = std::getenv(units_env);
     if (env != nullptr && std::strcmp(env, "all") == 0) {
         *label = "coreml-all";
         return MLComputeUnitsAll;
@@ -488,7 +497,12 @@ MLComputeUnits requested_compute_units(std::string * label) {
 }  // namespace
 
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc) {
-    if (path_mlmodelc == nullptr) return nullptr;
+    return parakeet_coreml_init_with_units_env(path_mlmodelc, "PARAKEET_COREML_COMPUTE_UNITS");
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
+                                                                     const char * units_env) {
+    if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
 
     @autoreleasepool {
         NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
@@ -496,7 +510,7 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
 
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         std::string label;
-        config.computeUnits = requested_compute_units(&label);
+        config.computeUnits = requested_compute_units(units_env, &label);
 
         NSError * err   = nil;
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
@@ -518,6 +532,7 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
         if (in_name == nil || out_name == nil) return nullptr;
 
         MLMultiArrayConstraint * input_constraint = model.modelDescription.inputDescriptionsByName[in_name].multiArrayConstraint;
+        MLMultiArrayConstraint * output_constraint = model.modelDescription.outputDescriptionsByName[out_name].multiArrayConstraint;
         if (input_constraint == nil) return nullptr;
 
         auto * ctx = new parakeet_coreml_context();
@@ -527,6 +542,7 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
         ctx->output_name = out_name.UTF8String;
         ctx->label       = std::move(label);
         ctx->declared_input_dims = dims_of(input_constraint.shape);
+        if (output_constraint != nil) ctx->declared_output_dims = dims_of(output_constraint.shape);
         ctx->input_shape_fixed = constraint_has_one_fixed_shape(input_constraint);
         return ctx;
     }
@@ -543,6 +559,12 @@ int64_t parakeet_coreml_fixed_mel_frames(
     const struct parakeet_coreml_context * ctx,
     int64_t n_mels) {
     return fixed_mel_frames_for(ctx, n_mels);
+}
+
+int64_t parakeet_coreml_fixed_output_rows(
+    const struct parakeet_coreml_context * ctx,
+    int64_t cols) {
+    return ctx != nullptr ? trailing_partner(ctx->declared_output_dims, cols) : 0;
 }
 
 int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,

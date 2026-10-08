@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack and the Supertonic vocoder (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder and the MOSS stages (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -392,6 +392,9 @@ set(TTS_CPP_LIB_SOURCES
     src/moss/speech_prompt.cpp
     src/moss/speech_generation.cpp
     src/moss/speech_engine.cpp
+    src/moss/coreml_sidecar.cpp
+    src/moss/sfx_coreml.cpp
+    src/moss/codec_coreml.cpp
     # Memory-fit preflight (include/tts-cpp/fit.h + the *-fit-params tools).
     src/fit_common.cpp
     src/audio8/fit.cpp
@@ -453,7 +456,7 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
 
-    # Core ML sidecars (Audio8 codec + Supertonic vocoder): ARC objects fold
+    # Core ML sidecars (Audio8 codec, Supertonic vocoder, MOSS stages): ARC objects fold
     # into libtts-cpp; frameworks are PUBLIC for static consumers.
     if (TTS_CPP_COREML)
         find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
@@ -461,7 +464,8 @@ if (TTS_CPP_BUILD_LIBRARY)
 
         add_library(tts-cpp.coreml OBJECT
             src/audio8/coreml/codec-synth.mm
-            src/supertonic_coreml_vocoder.mm)
+            src/supertonic_coreml_vocoder.mm
+            src/moss/coreml/runner.mm)
         tts_cpp_apply_ccache(tts-cpp.coreml)
         target_include_directories(tts-cpp.coreml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         set_target_properties(tts-cpp.coreml PROPERTIES
@@ -476,7 +480,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, MOSS stages")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1235,6 +1239,18 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-supertonic-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
+
+        foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
+            string(REPLACE "_" "-" _moss_exporter_test "${_moss_exporter}")
+            add_test(NAME test-moss-${_moss_exporter_test}-coreml-exporter
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_moss_${_moss_exporter}_coreml.py")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter PROPERTY LABELS "unit")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
+                         PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            set_property(TEST test-moss-${_moss_exporter_test}-coreml-exporter
+                         PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        endforeach()
     endif()
 
     # CLI-level coverage for the cloning flags: the engine harnesses bypass
@@ -1480,6 +1496,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-codec-stream)
     tts_cpp_register_test(test-moss-codec-stream)
 
+    add_executable(test-moss-codec-coreml test/moss/test_codec_coreml.cpp)
+    target_link_libraries(test-moss-codec-coreml PRIVATE tts-cpp)
+    target_include_directories(test-moss-codec-coreml PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-codec-coreml)
+    tts_cpp_register_test(test-moss-codec-coreml)
+
     add_executable(test-moss-cli test/moss/test_cli.cpp src/moss/cli.cpp)
     target_link_libraries(test-moss-cli PRIVATE tts-cpp)
     target_include_directories(test-moss-cli PRIVATE src)
@@ -1524,6 +1546,29 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-speech-parity)
     tts_cpp_register_test(test-moss-speech-parity LABEL "fixture")
     set_property(TEST test-moss-speech-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Self-skips (77) without TTS_CPP_COREML or a staged MOSS sidecar
+    # (MOSS_SPEECH_COREML_CODEC, MOSS_SFX_COREML_MODEL, MOSS_CODEC_COREML_DECODER).
+    add_executable(test-moss-coreml-parity test/moss/test_coreml_parity.cpp)
+    target_link_libraries(test-moss-coreml-parity PRIVATE tts-cpp)
+    target_include_directories(test-moss-coreml-parity PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-moss-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-moss-coreml-parity)
+    tts_cpp_register_test(test-moss-coreml-parity LABEL "fixture"
+        ARGS "${CMAKE_CURRENT_SOURCE_DIR}/test/reference-audio/jfk.wav")
+    set_property(TEST test-moss-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Not a test: times each staged MOSS sidecar against the ggml GPU stage
+    # (median of 5 after a warm-up) and prints a markdown table.
+    add_executable(bench-moss-coreml test/moss/bench_coreml.cpp)
+    target_link_libraries(bench-moss-coreml PRIVATE tts-cpp)
+    target_include_directories(bench-moss-coreml PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(bench-moss-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(bench-moss-coreml)
 
     add_executable(test-backend-selection test/test_backend_selection.cpp)
     target_link_libraries(test-backend-selection PRIVATE tts-cpp)
