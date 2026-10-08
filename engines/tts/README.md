@@ -50,11 +50,11 @@ engine, not every backend ggml can compile.
 
 Supertonic 3, Parler-TTS mini, CosyVoice3 and Audio8 also support explicit
 Hexagon placement on Snapdragon; see their model guides for setup and validated
-tiers. Audio8's validated configuration is `q8_0` quantisation with
+tiers. Audio8's corrected baseline uses `q8_0` quantisation with
 `--greedy` sampling under `--backend hexagon`; see
-[Audio8](docs/audio8.md#hexagon-npu-snapdragon) for the setup, the three
-runtime env flags that recover the measured 1.87× speedup (`GGML_HEXAGON_OPPOLL`,
-`OPSTAGE`, `OPFUSION`), and the end-to-end bench. Optional
+[Audio8](docs/audio8.md#hexagon-npu-snapdragon) for the full-compute tuning
+recipe (`OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`), the corrected single-prompt
+baseline, and the remaining cross-backend correctness limits. Optional
 Apple Core ML sidecars accelerate the Supertonic vocoder and Audio8 codec.
 Export, routing, fallback, and per-call status are documented in
 [Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar) and

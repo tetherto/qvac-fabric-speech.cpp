@@ -279,12 +279,11 @@ devices with the ggml-hexagon backend built in. Select it with
 `--backend hexagon` (CLI) or `EngineOptions::backend = "hexagon"` (API);
 `--n-gpu-layers` is ignored on this path.
 
-Validated configuration:
+Configuration used for the corrected October 8 baseline:
 
-- `q8_0` quantisation on the LM and both codec halves (the only tier
-  currently characterised against the F32 reference on HTP).
-- `--greedy` sampling (the DualAR fast head is deterministic and this
-  matches the trajectory the Hex kernel coverage was validated against).
+- `q8_0` quantisation on the LM and codec decoder.
+- `--greedy` decoding for repeatable output. This removes random sampling;
+  it does not establish numerical parity with CPU or OpenCL.
 
 The engine ships the Hex kernels Audio8 needs (ARGMAX among them). FastRPC
 has to find the DSP library at runtime:
@@ -294,21 +293,50 @@ export LD_LIBRARY_PATH=./native
 export ADSP_LIBRARY_PATH=./native   # path to libggml-htp-v79.so
 ```
 
-Three ggml-hexagon runtime env flags recover a measured **1.87× speedup**
-over defaults on a QRD8750 devkit (same device, five prompts, median):
+Use these flags together for full computation with polling and fusion:
 
 ```sh
 export GGML_HEXAGON_OPPOLL=1   # busy-poll DSP completion instead of blocking
-export GGML_HEXAGON_OPSTAGE=1  # op staging mode
-export GGML_HEXAGON_OPFUSION=1 # fuse consecutive ops
+export GGML_HEXAGON_OPSTAGE=3  # QUEUE (1) | COMPUTE (2); default
+export GGML_HEXAGON_OPFUSION=1 # enable supported fusion; default
 ```
 
-Do **not** set `GGML_HEXAGON_MM_SELECT=1` — it causes a ~70% regression on
-this workload. For Audio8 on Snapdragon 8 Elite, OpenCL (Adreno 830) is
-still fastest overall for the DualAR autoregressive LM (RTF ~2.3× vs
-~3.3-3.7× tuned Hex); the Hex path's remaining gap is dominated by
-FastRPC per-dispatch overhead (OPBATCH wrapper ≈ 58% of DSP time in the
-per-op profile) and is upstream-ggml-hexagon work.
+`OPSTAGE=1` is a profiling control that skips computation in kernels honoring
+that flag. The earlier 1.87× tuning claim used this setting and is invalid for
+inference, even with `--greedy`. `OPSTAGE=3` and `OPFUSION=1` are already defaults;
+polling is the change from the default configuration above.
+
+A fresh three-frame greedy check with `OPSTAGE=1` produced silent WAVs and
+repeated degenerate codes with fusion both enabled and disabled. With
+`OPSTAGE=3`, all four polling/fusion combinations produced identical code and
+WAV files. These smoke checks isolate the flag behavior; they do not validate
+speech quality or cross-backend parity.
+
+With canonical Hexagon host-buffer handling fixed in
+[ggml #115](https://github.com/tetherto/qvac-ext-ggml/pull/115), the corrected
+same-device QDC Snapdragon 8 Elite S1 baseline uses the prompt "The quick brown
+fox jumps over the lazy dog.", four threads, a 70-frame cap, three warmups and
+five timed runs per variant, interleaved:
+
+| Backend | Median inference | Inference RTF | Generated frames |
+| --- | ---: | ---: | ---: |
+| Hexagon, `OPPOLL=0` | 24.5906 s | 8.0229 | 66 |
+| Hexagon, `OPPOLL=1` | 19.4765 s | 6.3544 | 66 |
+| OpenCL | 3.3727 s | 1.0375 | 70 |
+
+Inference time excludes model loading. Polling gives **1.2626×** faster
+inference with identical code and WAV hashes across all ten timed Hexagon
+runs. OpenCL generates different codes and lengths, so these measurements
+do not establish cross-backend correctness or equal generated workloads.
+This is one prompt, not a five-prompt validation or an audio-quality gate.
+
+Current codec convolution matmuls request F32 precision and run on HVX. In a
+separate corrected S3 profile, three large codec matmul groups account for
+about 82% of leaf DSP cycles. `OPBATCH` includes operation execution; its time
+cannot be treated as pure dispatch overhead or added to leaf operation times.
+Further routing, precision, or weight-placement changes need separate
+correctness and performance validation. Reproduction and artifact provenance
+are recorded in ggml's `docs/hexagon-audio8-profile.md`.
 
 ### Core ML codec sidecar
 
