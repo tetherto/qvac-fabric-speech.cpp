@@ -1205,22 +1205,22 @@ void test_stage_placement() {
     CHECK(!vulkan_device_lm_blocked(""));
     CHECK(!vulkan_device_lm_blocked(nullptr));
 
-    // -- Hexagon: the detokenizer and encoders run on the NPU, the LM on CPU ---
+    // -- Hexagon: every stage runs on the NPU ---------------------------------
     using tts_cpp::acestep::backend_name_is_hexagon;
     CHECK(backend_name_is_hexagon("HTP"));
     CHECK(!backend_name_is_hexagon("HTP0"));
     CHECK(!backend_name_is_hexagon("htp"));
     CHECK(!backend_name_is_hexagon(nullptr));
-    check_gpu_backend_keeps_lm_on_cpu("HTP", "Hexagon");
     {
         PlacementOverrides ov;
-        ov.lm_gpu        = true;
+        ov.lm_cpu        = true;
         StagePlacement p = resolve_stage_placement("HTP", "Hexagon", ov);
-        CHECK(p.lm_on_gpu);
+        CHECK(!p.lm_on_gpu);
+        CHECK(p.detok_on_gpu);
     }
 
-    // -- allowlist: Metal, OpenCL, and CUDA keep LM + detokenizer on GPU --------
-    for (const char * allowed : { "MTL", "Metal", "OpenCL", "CUDA" }) {
+    // -- allowlist: Metal, OpenCL, CUDA, and Hexagon keep LM + detokenizer on GPU
+    for (const char * allowed : { "MTL", "Metal", "OpenCL", "CUDA", "HTP" }) {
         StagePlacement p = resolve_stage_placement(allowed, "", none);
         CHECK(p.lm_on_gpu);
         CHECK(p.detok_on_gpu);
@@ -1608,6 +1608,134 @@ void test_stage_dump_rejects_malformed() {
     const std::string  missing = test_temp_dir() + "/qvac-acestep-dump-missing.bin";
     std::remove(missing.c_str());
     CHECK(!tts_cpp::acestep::read_stage_dump("test", missing.c_str(), out, &d0, &d1));
+}
+
+constexpr int TINY_LM_HIDDEN     = 128;
+constexpr int TINY_LM_FFN        = 256;
+constexpr int TINY_LM_VOCAB      = 200;
+constexpr int TINY_LM_MAX_SEQ    = 64;
+constexpr int TINY_LM_CHUNK_ROWS = 32;
+constexpr int TINY_LM_PREFIX     = 150;
+
+float tiny_lm_weight(int64_t i, float scale) {
+    return std::sin(0.37f * (float) i + scale) * scale;
+}
+
+std::vector<float> tiny_lm_values(int64_t n, float scale) {
+    std::vector<float> values((size_t) n);
+    for (int64_t i = 0; i < n; ++i) values[(size_t) i] = scale == 0.0f ? 1.0f : tiny_lm_weight(i, scale);
+    return values;
+}
+
+void add_tiny_lm_tensor(ggml_context * ctx, gguf_context * gc, const std::string & name, ggml_type type, int64_t ne0,
+                        int64_t ne1, float scale) {
+    const std::vector<float> values = tiny_lm_values(ne0 * ne1, scale);
+    ggml_tensor *            t      = ggml_new_tensor_2d(ctx, type, ne0, ne1);
+    ggml_set_name(t, name.c_str());
+    if (type == GGML_TYPE_F32) {
+        std::memcpy(t->data, values.data(), values.size() * sizeof(float));
+    } else {
+        ggml_quantize_chunk(type, values.data(), t->data, 0, ne1, ne0, nullptr);
+    }
+    gguf_add_tensor(gc, t);
+}
+
+std::string write_tiny_lm_gguf() {
+    const std::string path = test_temp_dir() + "/qvac-acestep-tiny-lm-test.gguf";
+    const int         H = TINY_LM_HIDDEN, F = TINY_LM_FFN, D = 128;
+    const std::string l = "model.layers.0";
+
+    ggml_init_params ip{ 16 * 1024 * 1024, nullptr, /*no_alloc=*/false };
+    ggml_context *   ctx = ggml_init(ip);
+    gguf_context *   gc  = gguf_init_empty();
+    add_tiny_lm_tensor(ctx, gc, "model.embed_tokens.weight", GGML_TYPE_Q8_0, H, TINY_LM_VOCAB, 0.5f);
+    add_tiny_lm_tensor(ctx, gc, "model.norm.weight", GGML_TYPE_F32, H, 1, 0.0f);
+    add_tiny_lm_tensor(ctx, gc, l + ".input_layernorm.weight", GGML_TYPE_F32, H, 1, 0.0f);
+    add_tiny_lm_tensor(ctx, gc, l + ".post_attention_layernorm.weight", GGML_TYPE_F32, H, 1, 0.0f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.q_norm.weight", GGML_TYPE_F32, D, 1, 0.0f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.k_norm.weight", GGML_TYPE_F32, D, 1, 0.0f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.q_proj.weight", GGML_TYPE_Q8_0, H, D, 0.05f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.k_proj.weight", GGML_TYPE_Q8_0, H, D, 0.04f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.v_proj.weight", GGML_TYPE_Q8_0, H, D, 0.03f);
+    add_tiny_lm_tensor(ctx, gc, l + ".self_attn.o_proj.weight", GGML_TYPE_Q8_0, D, H, 0.02f);
+    add_tiny_lm_tensor(ctx, gc, l + ".mlp.gate_proj.weight", GGML_TYPE_Q8_0, H, F, 0.06f);
+    add_tiny_lm_tensor(ctx, gc, l + ".mlp.up_proj.weight", GGML_TYPE_Q8_0, H, F, 0.07f);
+    add_tiny_lm_tensor(ctx, gc, l + ".mlp.down_proj.weight", GGML_TYPE_Q8_0, F, H, 0.08f);
+    CHECK(gguf_write_to_file(gc, path.c_str(), /*only_meta=*/false));
+    gguf_free(gc);
+    ggml_free(ctx);
+    return path;
+}
+
+bool chunk_ranges_tile(const std::vector<std::pair<int, int>> & ranges, int vocab, int max_rows) {
+    int next = 0;
+    for (const auto & [row0, rows] : ranges) {
+        if (row0 != next || rows <= 0 || rows > max_rows) return false;
+        next = row0 + rows;
+    }
+    return next == vocab;
+}
+
+bool chunk_ranges_start_at(const std::vector<std::pair<int, int>> & ranges, int row) {
+    for (const auto & range : ranges) {
+        if (range.first == row) return true;
+    }
+    return false;
+}
+
+void test_lm_head_chunk_ranges() {
+    using tts_cpp::acestep::AUDIO_CODE_BASE;
+    using tts_cpp::acestep::AUDIO_CODE_COUNT;
+    using tts_cpp::acestep::lm_head_chunk_ranges;
+    using tts_cpp::acestep::TOKEN_IM_END;
+
+    const int  ace_vocab = AUDIO_CODE_BASE + AUDIO_CODE_COUNT;
+    const auto ace       = lm_head_chunk_ranges(ace_vocab, 32768);
+    CHECK(chunk_ranges_tile(ace, ace_vocab, 32768));
+    CHECK(chunk_ranges_start_at(ace, TOKEN_IM_END));
+    CHECK(chunk_ranges_start_at(ace, AUDIO_CODE_BASE));
+
+    const std::vector<std::pair<int, int>> small = { { 0, 32 }, { 32, 32 }, { 64, 32 }, { 96, 4 } };
+    CHECK(lm_head_chunk_ranges(100, 32) == small);
+    CHECK(lm_head_chunk_ranges(100, 100) == (std::vector<std::pair<int, int>>{ { 0, 100 } }));
+}
+
+void test_lm_split_table_matches_whole_table() {
+    using tts_cpp::acestep::backend_cpu_init;
+    using tts_cpp::acestep::LMModel;
+    using tts_cpp::acestep::lm_model_forward;
+    using tts_cpp::acestep::lm_model_free;
+    using tts_cpp::acestep::lm_model_load;
+    using tts_cpp::acestep::lm_model_load_split_table;
+
+    const std::string path = write_tiny_lm_gguf();
+    ggml_backend_t    cpu  = backend_cpu_init();
+    CHECK(cpu != nullptr);
+    LMModel * whole = cpu ? lm_model_load(path, cpu, TINY_LM_MAX_SEQ, /*verbose=*/false, /*n_kv_sets=*/1) : nullptr;
+    LMModel * split = cpu ? lm_model_load_split_table(path, cpu, TINY_LM_MAX_SEQ, 1, TINY_LM_CHUNK_ROWS) : nullptr;
+    CHECK(whole != nullptr);
+    CHECK(split != nullptr);
+    if (whole && split) {
+        const int32_t      prompt[] = { 0, 3, 77, 150, TINY_LM_VOCAB - 1 };
+        std::vector<float> whole_logits, split_logits;
+        CHECK(lm_model_forward(whole, prompt, 5, whole_logits));
+        CHECK(lm_model_forward(split, prompt, 5, split_logits));
+        CHECK(whole_logits.size() == (size_t) TINY_LM_VOCAB);
+        CHECK(whole_logits == split_logits);
+
+        const int32_t next = 42;
+        CHECK(lm_model_forward(whole, &next, 1, whole_logits, 0, nullptr, TINY_LM_PREFIX));
+        CHECK(lm_model_forward(split, &next, 1, split_logits, 0, nullptr, TINY_LM_PREFIX));
+        CHECK(split_logits.size() == (size_t) TINY_LM_PREFIX);
+        CHECK(whole_logits == split_logits);
+
+        const int32_t outside = TINY_LM_VOCAB;
+        CHECK(!lm_model_forward(split, &outside, 1, split_logits));
+    }
+    lm_model_free(whole);
+    lm_model_free(split);
+    if (cpu) ggml_backend_free(cpu);
+    std::remove(path.c_str());
 }
 
 // 9c. vae metadata-only measure ----------------------------------------------
@@ -3415,6 +3543,8 @@ int main() {
     test_parallel_rows();
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();
+    test_lm_head_chunk_ranges();
+    test_lm_split_table_matches_whole_table();
     test_stage_dump_round_trip();
     test_stage_dump_rejects_malformed();
     test_vae_metadata_only_measure();

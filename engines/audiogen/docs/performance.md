@@ -34,15 +34,17 @@ requested song length.
 ## ACE-Step 1.5 on Snapdragon 8 Elite (2026-10)
 
 Galaxy S25 (Adreno 830, Hexagon v79), `music-cli --dur 30` with
-`ACESTEP_KEEP_STAGES=1`, `q8_0` DiT, median of two runs. `generate` is the
+`ACESTEP_KEEP_STAGES=1`, `q8_0` LM and DiT, the run with the median total of
+three, each started from thermal status 0. `generate` is the
 `[acestep-timing]` total.
 
-| Placement | DiT | VAE | generate | Speedup vs OpenCL |
-|---|--:|--:|--:|--:|
-| CPU | 55,213 ms | 64,092 ms | 145,988 ms | 0.61x |
-| OpenCL | 19,229 ms | 51,827 ms | 89,657 ms | 1.00x |
-| `--backend hexagon` | 12,471 ms | 15,352 ms | 52,740 ms | 1.70x |
-| `--backend hexagon --lm-backend opencl` | 11,584 ms | 14,969 ms | 44,155 ms | 2.03x |
+| Placement | LM | DiT | VAE | generate | Speedup vs OpenCL |
+|---|--:|--:|--:|--:|--:|
+| CPU | 26,459 ms | 51,861 ms | 58,725 ms | 147,482 ms | 0.35x |
+| OpenCL | 10,661 ms | 10,989 ms | 28,519 ms | 51,574 ms | 1.00x |
+| `--backend hexagon --lm-backend cpu` | 23,812 ms | 1,946 ms | 12,165 ms | 38,517 ms | 1.34x |
+| `--backend hexagon --lm-backend opencl` | 10,830 ms | 1,870 ms | 13,440 ms | 26,686 ms | 1.93x |
+| `--backend hexagon` | 7,522 ms | 1,920 ms | 12,458 ms | 22,479 ms | 2.29x |
 
 Per-stage parity and setup are in [docs/backends.md](backends.md#hexagon-npu).
 

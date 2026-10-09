@@ -23,16 +23,16 @@ device with the same names.
 |---|---|
 | DiT, VAE | GPU (or the Hexagon NPU on request) |
 | Text encoder, condition encoder | GPU, unless `ACESTEP_ENCODERS_CPU` is present |
-| LM | GPU on Vulkan (every device except Mali), Metal, OpenCL and CUDA; CPU on Mali Vulkan devices and every unmeasured backend |
+| LM | GPU on Vulkan (every device except Mali), Metal, OpenCL and CUDA, the NPU on Hexagon; CPU on Mali Vulkan devices and every unmeasured backend |
 | FSQ detokenizer | GPU on Vulkan, Metal, OpenCL, and CUDA, the NPU on Hexagon; CPU on every unmeasured backend |
 
-The LM and detokenizer are allowlisted per backend: a backend nobody has run keeps the CPU placement, so adding one cannot silently regress generated audio. Metal and OpenCL are validated for both stages; the recorded OpenCL validation used an Adreno 740. Vulkan carries both stages on every device except the ones on a per-device denylist (`vulkan_device_lm_blocked`): Mali keeps the LM on the CPU, because Mali-G715 testing showed code collapse and early termination there. A single misbehaving GPU family should cost that family the stage, not every Vulkan device, so the per-device rule denies rather than admits. CUDA needs the `snake` / `col2im_1d` VAE kernels from the `ggml-speech` fork's CUDA backend and its `GGML_PREC_F32` MUL_MAT support (the LM-shaped q4_0/q4_K strided-B `b_absmax=1e5` stress cases produced NaN before the fork routed explicit-precision matmuls to the f32 cuBLAS path); with that ggml, `test-backend-ops` on an RTX 5090 passes the full suite, the Q8_0 LM matches the F32-dequantized reference at 0.9999 logit cosine with an identical greedy trajectory where the CPU Q8_0 path sits at 0.994, and `--quantized-batch-cfg-regression` passes, so the LM runs on the GPU. The HIP/MUSA builds of the same backend register as `ROCm`/`MUSA` and stay off the allowlist until measured.
+The LM and detokenizer are allowlisted per backend: a backend nobody has run keeps the CPU placement, so adding one cannot silently regress generated audio. Metal and OpenCL are validated for both stages; the recorded OpenCL validation used an Adreno 740. Vulkan carries both stages on every device except the ones on a per-device denylist (`vulkan_device_lm_blocked`): Mali keeps the LM on the CPU, because Mali-G715 testing showed code collapse and early termination there. A single misbehaving GPU family should cost that family the stage, not every Vulkan device, so the per-device rule denies rather than admits. CUDA needs the `snake` / `col2im_1d` VAE kernels from the `ggml-speech` fork's CUDA backend and its `GGML_PREC_F32` MUL_MAT support (the LM-shaped q4_0/q4_K strided-B `b_absmax=1e5` stress cases produced NaN before the fork routed explicit-precision matmuls to the f32 cuBLAS path); with that ggml, `test-backend-ops` on an RTX 5090 passes the full suite, the Q8_0 LM matches the F32-dequantized reference at 0.9999 logit cosine with an identical greedy trajectory where the CPU Q8_0 path sits at 0.994, and `--quantized-batch-cfg-regression` passes, so the LM runs on the GPU. Hexagon runs the LM on the NPU, which needs a `ggml-speech` whose HTP `q8_0` activation quantizer matches the CPU's (see [Hexagon NPU](#hexagon-npu)). The HIP/MUSA builds of the same backend register as `ROCm`/`MUSA` and stay off the allowlist until measured.
 
 Measurement is against an F32-dequantized reference (`scripts/dequant_gguf.py`), not against CPU. CPU is not automatically ground truth for a quantized model — ggml's CPU matmul quantizes activations to Q8_1 internally. On Metal the LM reproduces the F32 argmax trajectory exactly where CPU Q8_0 diverges at the first token. The RADV validation (AMD Strix Halo, Radeon 8060S) followed the same protocol: on 300-token prefills the Vulkan Q8_0 LM matches the F32 reference argmax on 3/3 probes with logit cosine >= 0.99999995, where CPU Q8_0 matches on 1/3 at cosine ~0.9998, and the GPU LM stage runs ~2x faster than the CPU path on that device. The NVIDIA Vulkan validation (GeForce RTX 3080, proprietary driver) used the same protocol on 300-token prefills: the Vulkan Q8_0 LM matches the F32 reference argmax on 3/3 seeds with logit cosine >= 0.99999998 and top-50 overlap 49.8/50, where CPU Q8_0 on the same box matches on 0/9, 5/9 and 0/9 steps at cosine ~0.9999 with logit differences up to 10.2. On Mali Vulkan, however, the LM produces repeated semantic codes and can terminate at roughly half the requested duration, while the same device produces a diverse full-length sequence with the LM on CPU — that report predates the strided-`src0` matmul binding fix in the `ggml-speech` Vulkan backend, which removed exactly that degenerate-trajectory symptom on another non-cooperative-matrix GPU, so the Mali entry is worth re-testing on device before it is trusted further.
 
 On a GPU that supports F32 flash attention, Phase 2 also decodes the conditional and unconditional CFG paths in one batched graph. This matches the reference `acestep.cpp` LM path: the same prompt, model, sampler settings, and seed produce the same semantic-code sequence. Unsupported backends keep the separate F32 manual-attention path.
 
-`lm-smoke --gpu --quantized-batch-cfg-regression --model <Q4-or-Q8-LM.gguf>` compares the compact batched head against two full-vocabulary decode streams. It requires quantized tied embeddings and fails if either stream changes argmax or drops below `0.99999` logit cosine.
+`lm-smoke --gpu --quantized-batch-cfg-regression --model <Q4-or-Q8-LM.gguf>` (or `--backend hexagon` in place of `--gpu`) compares the compact batched head against two full-vocabulary decode streams. It requires quantized tied embeddings and fails if either stream changes argmax or drops below `0.99999` logit cosine.
 
 The policy itself lives in [`src/acestep/stage_placement.h`](../src/acestep/stage_placement.h), separate from the engine, so it is unit tested without a GPU.
 
@@ -81,23 +81,31 @@ windowed and still allocates one full graph.
 
 ## Hexagon NPU
 
-`backend = "hexagon"` runs the DiT, the VAE, both encoders and the FSQ
-detokenizer on the HTP0 session of the ggml-speech Hexagon backend. The LM
-stays on the CPU by default; `lm_backend = "opencl"` puts it on the Adreno
-GPU next to the NPU, which is the fastest split measured. Requirements:
+`backend = "hexagon"` runs every stage on the HTP0 session of the
+ggml-speech Hexagon backend: the DiT, the VAE, both encoders, the FSQ
+detokenizer and the LM. `lm_backend = "cpu"` or `"opencl"` moves only the LM
+off the NPU. Requirements:
 
 - ggml-speech built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
   skeletons staged next to the host backends. `backends_dir` is prepended to
   FastRPC's `DSP_LIBRARY_PATH` before the HTP session opens.
+- A ggml-speech whose HTP `q8_0` activation quantizer matches the CPU's
+  (an F32 scale per 32 activations). Older skeletons scale 128 activations at
+  a time in F16: the LM's prompt logits then land 6x further from the F32
+  reference than CPU Q8_0, its greedy decode leaves the reference at the first
+  audio code, and activations past 65504 turn into NaN.
 - The `q8_0` DiT (`ditVariant: 'turbo-q8'`). The HTP matmuls cover
   `q4_0`/`q8_0`/`mxfp4` and float weights, not the K-quants of the default
   `turbo-q4` (`Q4_K_M`) DiT.
 
 Stage weights are uploaded into the session's repack buffer type instead of
 being mapped from the GGUF (HTP computes only on its own buffers), so a stage
-load includes a one-time repack. The LM stays off the NPU: its tied
-embedding is both a `GET_ROWS` table and a head of more than 32768 rows,
-which the HTP matmul refuses.
+load includes a one-time repack. The LM's tied embedding is both a
+`GET_ROWS` table and a 217,204-row head; HTP cannot gather rows from its
+repacked weights and refuses a `MUL_MAT` past 32,768 rows. On such a backend
+the LM looks the embeddings up on the host from the mapped GGUF and projects
+the head in row chunks, cut where the Phase-1 prefix head and the Phase-2
+compact head begin and end, so neither phase copies the table.
 
 Parity on a Galaxy S25 (Snapdragon 8 Elite, Hexagon v79), cosine against the
 CPU backend with each stage fed identical inputs, OpenCL on the same phone
@@ -116,18 +124,26 @@ backend drifts furthest from the CPU; complete renders therefore differ from
 the CPU waveform on OpenCL and Hexagon alike, and the per-stage rows isolate
 each backend's own error.
 
+The `q8_0` LM on HTP0 is as close to the F32-dequantized reference as CPU
+`q8_0`. Over a 69-token Phase-2 prompt and 48 greedy steps it keeps the
+reference's greedy trajectory, as the CPU does, with a mean audio-code logit
+KL of 1.05e-2 (CPU 1.10e-2, OpenCL 2.6e-6). `--quantized-batch-cfg-regression`
+passes with identical logits.
+
 Stage compute on the same phone (`music-cli --dur 30`, `ACESTEP_KEEP_STAGES=1`
-so loads are excluded, `q8_0` DiT, median of two runs, milliseconds):
+so loads are excluded, `q8_0` DiT, the run with the median total of three,
+milliseconds):
 
 | Placement | LM | DiT | VAE | generate |
 |---|--:|--:|--:|--:|
-| CPU (8 threads) | 21,578 | 55,213 | 64,092 | 145,988 |
-| OpenCL (Adreno 830) | 15,987 | 19,229 | 51,827 | 89,657 |
-| `hexagon` (LM on CPU) | 24,206 | 12,471 | 15,352 | 52,740 |
-| `hexagon` + `lm_backend = "opencl"` | 16,913 | 11,584 | 14,969 | 44,155 |
+| CPU (8 threads) | 26,459 | 51,861 | 58,725 | 147,482 |
+| OpenCL (Adreno 830) | 10,661 | 10,989 | 28,519 | 51,574 |
+| `hexagon` + `lm_backend = "cpu"` | 23,812 | 1,946 | 12,165 | 38,517 |
+| `hexagon` + `lm_backend = "opencl"` | 10,830 | 1,870 | 13,440 | 26,686 |
+| `hexagon` | 7,522 | 1,920 | 12,458 | 22,479 |
 
-At `--dur 8` the same four placements generate in 39,963 / 15,953 / 18,149 /
-9,793 ms.
+At `--dur 8` the same five placements generate in 45,743 / 13,412 / 16,267 /
+8,973 / 7,832 ms.
 
 ## Core ML VAE decoder sidecar
 

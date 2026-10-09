@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tts_cpp::acestep {
@@ -46,6 +47,17 @@ struct AcestepStageMeasure;  // fit_measure.h
 bool lm_load_row_block(ggml_tensor * dst, size_t & off, const DitGGUF & g, const std::string & name);
 bool lm_load_layer_fused(const DitGGUF & g, const std::string & prefix, Qwen3Layer & ly, ggml_tensor * qkv,
                          ggml_tensor * gateup);
+
+// Split tied table, exposed for unit tests. A backend that cannot look up the
+// embedding table or project the whole vocabulary in one MUL_MAT gets this
+// layout from lm_model_load: the lookup dequantizes GGUF rows on the host and
+// the tied head runs as row chunks, cut at the pipeline's logit-range edges
+// and at most `max_rows` long. lm_model_load_split_table forces it with
+// `head_chunk_rows`-row chunks on any backend; lm_head_chunk_ranges returns the
+// (first row, rows) of each chunk.
+LMModel * lm_model_load_split_table(const std::string & path, ggml_backend_t backend, int max_seq_len, int n_kv_sets,
+                                    int head_chunk_rows);
+std::vector<std::pair<int, int>> lm_head_chunk_ranges(int vocab, int max_rows);
 
 // Load ace-lm GGUF onto `backend` (borrowed). Config is derived from tensor
 // shapes (H, V, layer count, head counts). `n_kv_sets` independent KV caches are
@@ -77,7 +89,8 @@ size_t lm_model_kv_bytes(const LMModel * m);
 size_t lm_model_compute_buffer_bytes(const LMModel * m);
 
 // Bytes of the compact tied-head copy lm_build_partial_head would allocate for
-// `count` rows (same tensor shape/type, sized not allocated).
+// `count` rows (same tensor shape/type, sized not allocated); 0 for a split
+// tied table, whose row chunks serve every range without a copy.
 size_t lm_measure_partial_head_bytes(const LMModel * m, int count);
 
 // Size-only twins of the two forward paths, for the memory-fit preflight.

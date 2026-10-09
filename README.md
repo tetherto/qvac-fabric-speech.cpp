@@ -66,6 +66,7 @@ and OpenCL on the same device.
 | Engine | Models | Guide |
 |---|---|---|
 | TTS | Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8 | [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), and the matching sections in the other model guides |
+| AudioGen | ACE-Step v15 turbo (`q8_0` DiT) | [AudioGen Hexagon](engines/audiogen/docs/backends.md#hexagon-npu) |
 
 ## Getting started
 
