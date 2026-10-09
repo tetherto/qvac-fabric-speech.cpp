@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -50,6 +51,23 @@ struct Result {
     npy_array mel;
 };
 
+void reject_nonfinite_noise(const s3gen_synthesize_opts & valid, const fs::path & output,
+                            const std::string & label) {
+    for (float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity()}) {
+        auto opts = valid;
+        std::vector<float> pcm;
+        opts.pcm_out = &pcm;
+        opts.dump_mel_path.clear();
+        opts.cfm_z0_override.back() = invalid;
+        const auto wav = output / (label + (std::isnan(invalid) ? "-nan.wav" : "-inf.wav"));
+        fs::remove(wav);
+        opts.out_wav_path = wav.string();
+        require(s3gen_synthesize_to_wav(CODES, opts) != 0, "non-finite CFM noise was accepted");
+        require(pcm.empty() && !fs::exists(wav), "failed CFM synthesis emitted audio");
+    }
+}
+
 std::vector<Result> decode(const std::string & model, const SpeechVoice & voice,
                           const std::vector<float> & noise, bool gpu, const fs::path & output) {
     require(s3gen_preload(model, gpu ? 1 : 0) == 0, "decoder preload failed");
@@ -79,6 +97,9 @@ std::vector<Result> decode(const std::string & model, const SpeechVoice & voice,
         opts.append_lookahead_silence = false;
         opts.apply_trim_fade = false;
         opts.dump_mel_path = (output / (label + "-mel.npy")).string();
+        // Exercise both single and batched CFG paths on the loaded decoder.
+        // The valid request immediately afterward must recover without reload.
+        reject_nonfinite_noise(opts, output, label);
         require(s3gen_synthesize_to_wav(CODES, opts) == 0, "codec synthesis failed");
         require(!result.pcm.empty() && std::all_of(result.pcm.begin(), result.pcm.end(),
                 [](float x) { return std::isfinite(x); }), "non-finite/empty PCM");

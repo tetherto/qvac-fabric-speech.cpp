@@ -18,6 +18,10 @@ namespace fs = std::filesystem;
 using namespace tts_cpp::moss;
 
 namespace {
+constexpr int SHORT_MAX_NEW_TOKENS = 384;
+// Long prompts need their own budget; keep token-limit exhaustion a failure.
+constexpr int LONG_MAX_NEW_TOKENS = 1024;
+
 void require(bool ok, const char * message) {
     if (!ok) throw std::runtime_error(message);
 }
@@ -42,9 +46,15 @@ void write_wav(const fs::path & path, const std::vector<float> & pcm, int rate) 
 
 SynthesisResult batch(Engine & engine, const std::string & text, const fs::path & path, int limit) {
     auto result = engine.synthesize(text);
-    require(!result.cancelled && result.generated_frames < limit, "batch cancelled or hit token limit");
+    std::fprintf(stderr, "%s: generated_frames=%d limit=%d cancelled=%d samples=%zu\n",
+                 path.filename().string().c_str(), result.generated_frames, limit,
+                 result.cancelled, result.pcm.size());
+    // Retain a truncated render for diagnosis; the assertions and ASR gate
+    // still reject cancellation, exhaustion, non-finite or wrong-text audio.
+    if (!result.pcm.empty()) write_wav(path, result.pcm, result.sample_rate);
+    require(!result.cancelled, "batch cancelled");
+    require(result.generated_frames < limit, "batch hit token limit");
     valid_audio(result.pcm);
-    write_wav(path, result.pcm, result.sample_rate);
     return result;
 }
 
@@ -125,14 +135,14 @@ int main(int argc, char ** argv) {
             options.use_gpu = true;
             options.n_threads = 4;
             options.seed = 1234;
-            options.max_new_tokens = 384;
+            options.max_new_tokens = chunk == 7 ? LONG_MAX_NEW_TOKENS : SHORT_MAX_NEW_TOKENS;
             options.stream_chunk_frames = chunk;
             Engine engine(options);
             const std::string backend = engine.backend_name();
             require(backend.find("Vulkan") == 0, "Vulkan backend required");
             std::fprintf(stderr, "[moss-tts-stream-e2e] backend: %s\n", backend.c_str());
             const std::string label = "tts-c" + std::to_string(chunk);
-            const auto reference = batch(engine, short_text, output / (label + "-batch.wav"), options.max_new_tokens);
+            const auto reference = batch(engine, short_text, output / (label + "-batch.wav"), SHORT_MAX_NEW_TOKENS);
             stream(engine, short_text, reference, output / (label + "-stream"));
             cancel(engine, short_text, false);
             stream(engine, short_text, reference, output / (label + "-after-callback-cancel"));

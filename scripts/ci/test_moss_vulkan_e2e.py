@@ -1,6 +1,7 @@
 """Admission and intelligibility gates must not report false passes."""
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -54,6 +55,60 @@ with open(sys.argv[1]) as lock:
                 self.assertEqual(subprocess.run([sys.executable, "-c", probe, str(path)]).returncode, 0)
         finally:
             path.unlink(missing_ok=True)
+
+
+class RunnerTests(unittest.TestCase):
+    def test_gpu_invocation_requires_the_selected_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = e2e.CaseRunner(root, root, root, root / "baseline")
+            for reported, accepted in (("CPU", False), ("Vulkan0", True)):
+                def execute(args, **kwargs):
+                    self.assertEqual(kwargs["env"]["TTS_CPP_GPU_BACKEND"], "vulkan")
+                    kwargs["stdout"].write(f"[moss-cli] backend: {reported}\n")
+                with patch.object(e2e, "gpu_lease") as lease, \
+                     patch.object(e2e, "gpu_snapshot"), \
+                     patch.object(e2e.subprocess, "run", side_effect=execute):
+                    if accepted:
+                        runner.invoke("test", ["moss-cli"], wav=False)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "did not select"):
+                            runner.invoke("test", ["moss-cli"], wav=False)
+                    lease.assert_called_once_with(root, "test")
+
+    def test_family_flows_preserve_baselines_streaming_and_dialogue(self):
+        root = Path("/test")
+        for family in ("tts", "ttsd", "sfx", "speech", "transcribe"):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                (output / "transcript.json").write_text(json.dumps({"segments": [
+                    {"speaker": "S0", "start": 0, "end": 1, "text": "ask your country"}]}))
+                runner = e2e.CaseRunner(root, root, output, root / "baseline")
+                def invoke(name, args, **kwargs):
+                    runner.checks[name] = {}
+                with patch.object(runner, "invoke", side_effect=invoke) as calls, \
+                     patch.object(e2e, "download", side_effect=lambda name, *_: name), \
+                     patch.object(e2e, "reference"), \
+                     patch.object(e2e, "audio_stats", return_value={}):
+                    e2e.FAMILY_RUNNERS[family](runner, "model.gguf")
+                by_name = {call.args[0]: call for call in calls.call_args_list}
+                if family == "tts":
+                    self.assertEqual(set(by_name), {"batch", "stream", "clone", "cpu-reference",
+                                     "baseline-batch", "baseline-stream", "baseline-cpu-reference",
+                                     "stream-agreement"})
+                    self.assertNotIn("--gpu", by_name["cpu-reference"].args[1])
+                    self.assertTrue(by_name["cpu-reference"].kwargs["cpu"])
+                    self.assertEqual(by_name["stream-agreement"].args[1][0],
+                                     "/test/engines/tts/test-moss-tts-stream-e2e")
+                elif family == "ttsd":
+                    self.assertEqual(by_name["dialogue"].args[1].count("--dialogue-ref"), 2)
+                elif family == "speech":
+                    self.assertEqual(set(by_name), {"codec-agreement", "reply"})
+                    self.assertIn("reply-repeat", runner.checks)
+                elif family == "transcribe":
+                    self.assertEqual(runner.checks["transcribe"]["segments"], 1)
+                else:
+                    self.assertEqual(set(by_name), {"sound"})
 
 
 class IntelligibilityTests(unittest.TestCase):

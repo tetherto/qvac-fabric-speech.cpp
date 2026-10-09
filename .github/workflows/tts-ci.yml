@@ -100,7 +100,7 @@ jobs:
       matrix:
         model: ${{ fromJSON(inputs.moss_e2e_cases) }}
     env:
-      GGML_E2E_SHA: b470fbd0b14186320fabf8e2d1da8a67f8701a31
+      GGML_E2E_SHA: e16d1332bdafcaade27eb402c62418239faef632
       TTS_BASELINE_SHA: 8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c
     steps:
       - name: Manual Workspace Cleanup
@@ -140,6 +140,25 @@ jobs:
             -DSPEECH_BUILD_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
           cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e test-moss-speech-codec-e2e test-moss-tts-stream-e2e -j4
+      - name: Check Transcribe Vulkan selection and memory projection
+        if: matrix.model == 'transcribe-f16'
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: |
+          cmake --build build-moss-e2e --target test-moss-transcribe test-moss-transcribe-fit test-moss-transcribe-vulkan -j4
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import subprocess
+          spec = importlib.util.spec_from_file_location("e2e", "scripts/ci/moss-vulkan-e2e.py")
+          e2e = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(e2e)
+          output = Path("moss-e2e-results")
+          with e2e.gpu_lease(output, "transcribe-fixtures"):
+              subprocess.run(["ctest", "--test-dir", "build-moss-e2e", "--output-on-failure",
+                              "--output-log", str((output / "transcribe-fixtures.log").resolve()),
+                              "-R", "^test-moss-transcribe(-fit|-vulkan)?$"], check=True, timeout=300)
+          PY
       - name: Build upstream TTS baseline
         if: matrix.model == 'tts-f16'
         shell: bash

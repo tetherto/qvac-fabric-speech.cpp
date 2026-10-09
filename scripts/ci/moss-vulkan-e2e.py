@@ -51,6 +51,18 @@ MAX_TTS_WER = 0.25
 TTS_BASELINE_SHA = "8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c"
 UNCONDITIONED_OUTPUTS = ("batch", "stream", "cpu-reference")
 
+# Shared-worker admission policy and external-process limits, in explicit units.
+GPU_MAX_UNAVAILABLE_MIB = 1024
+GPU_READY_SAMPLES = 2
+GPU_POLL_SECONDS = 5
+GPU_ADMISSION_TIMEOUT_SECONDS = 900
+GPU_QUERY_TIMEOUT_SECONDS = 30
+INFERENCE_TIMEOUT_SECONDS = 1200
+DOWNLOAD_TIMEOUT_SECONDS = 1800
+ASR_TIMEOUT_SECONDS = 360
+HASH_CHUNK_BYTES = 8 * 1024 * 1024
+ERROR_LOG_TAIL_CHARS = 12000
+
 
 def intelligibility_passes(score):
     wer = score.get("wer")
@@ -113,7 +125,7 @@ def score_tts_outputs(asr_binary, models, output):
             "--audio", str(audio), "--reference", str(output / f"reference-{length}.txt"),
             "--asr-binary", str(asr_binary), "--asr-model", str(model),
             "--json-out", str(score_path), "--transcript-out", str(output / f"{name}-transcript.txt"),
-            "--log-out", str(output / f"{name}-asr.log")], check=False, timeout=360)
+            "--log-out", str(output / f"{name}-asr.log")], check=False, timeout=ASR_TIMEOUT_SECONDS)
         score = json.loads(score_path.read_text()) if score_path.exists() else {"status": "error", "wer": None}
         if completed.returncode != 0:
             score["status"] = "error"
@@ -128,7 +140,7 @@ def score_tts_outputs(asr_binary, models, output):
 def gpu_memory():
     row = subprocess.check_output([
         "nvidia-smi", "--id=0", "--query-gpu=uuid,memory.total,memory.free",
-        "--format=csv,noheader,nounits"], text=True, timeout=30).strip().split(",")
+        "--format=csv,noheader,nounits"], text=True, timeout=GPU_QUERY_TIMEOUT_SECONDS).strip().split(",")
     uuid, total, free = (value.strip() for value in row)
     if not re.fullmatch(r"GPU-[0-9a-fA-F-]+", uuid):
         raise RuntimeError("Cannot identify physical GPU for admission control")
@@ -145,12 +157,12 @@ def wait_for_gpu(deadline, report, expected_uuid):
         report.flush()
         if state["uuid"] != expected_uuid:
             raise RuntimeError("GPU identity changed while waiting")
-        ready = ready + 1 if state["free_mib"] >= state["total_mib"] - 1024 else 0
-        if ready == 2:
+        ready = ready + 1 if state["free_mib"] >= state["total_mib"] - GPU_MAX_UNAVAILABLE_MIB else 0
+        if ready == GPU_READY_SAMPLES:
             return
         print(f"GPU admission: {state['free_mib']}/{state['total_mib']} MiB free; "
               "waiting for stable headroom", flush=True)
-        time.sleep(5)
+        time.sleep(GPU_POLL_SECONDS)
     raise RuntimeError("GPU admission timed out: shared GPU is busy; inference was not started")
 
 
@@ -165,7 +177,7 @@ def gpu_lease(output, name):
         os.fchmod(fd, 0o644)
     except FileExistsError:
         fd = os.open(path, os.O_RDONLY)
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + GPU_ADMISSION_TIMEOUT_SECONDS
     try:
         while True:
             try:
@@ -174,7 +186,7 @@ def gpu_lease(output, name):
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise RuntimeError("GPU admission timed out waiting for another OpenMOSS run")
-                time.sleep(5)
+                time.sleep(GPU_POLL_SECONDS)
         with (output / f"{name}-gpu-admission.jsonl").open("w") as report:
             wait_for_gpu(deadline, report, state["uuid"])
         yield
@@ -191,17 +203,21 @@ def download(name, models, output):
     subprocess.run([
         "aws", "s3", "cp", "--only-show-errors",
         f"s3://{os.environ['MODEL_S3_BUCKET']}/{key}", str(target)
-    ], check=True, timeout=1800)
-    digest = hashlib.sha256()
+    ], check=True, timeout=DOWNLOAD_TIMEOUT_SECONDS)
     with target.open("rb") as source:
         if source.read(4) != b"GGUF":
             raise RuntimeError(f"Not a GGUF: {name}")
-        source.seek(0)
-        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+    record_model_hash(target, key, output)
+    return str(target)
+
+
+def record_model_hash(path, label, output):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(HASH_CHUNK_BYTES), b""):
             digest.update(block)
     with (output / "models.sha256").open("a") as report:
-        report.write(f"{digest.hexdigest()}  {key}\n")
-    return str(target)
+        report.write(f"{digest.hexdigest()}  {label}\n")
 
 
 def audio_stats(path):
@@ -242,114 +258,142 @@ def reference(source, target, offset, seconds=3):
         audio.writeframes(resampled.tobytes())
 
 
-def run_case(case, build, models, output, baseline_binary):
-    model = download(CASES[case], models, output)
-    family = case.split("-")[0]
-    sample = Path("engines/parakeet/test/samples/jfk.wav")
-    tts = str(build / "engines/tts/moss-cli")
-    common = ["--gpu", "--threads", "4", "--seed", "1234"]
-    checks = {}
+def gpu_snapshot(output, name, phase):
+    with (output / f"{name}-gpu-{phase}.txt").open("w") as stream:
+        for query in [
+            ["--query-gpu=uuid,name,memory.total,memory.used,memory.free", "--format=csv"],
+            ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv"],
+        ]:
+            subprocess.run(["nvidia-smi", *query], stdout=stream,
+                           stderr=subprocess.STDOUT, check=False, timeout=GPU_QUERY_TIMEOUT_SECONDS)
 
-    def invoke(name, args, wav=True, cpu=False):
+
+class CaseRunner:
+    def __init__(self, build, models, output, baseline_binary):
+        self.build = build
+        self.models = models
+        self.output = output
+        self.baseline_binary = baseline_binary
+        self.sample = Path("engines/parakeet/test/samples/jfk.wav")
+        self.tts = str(build / "engines/tts/moss-cli")
+        self.common = ["--gpu", "--threads", "4", "--seed", "1234"]
+        self.checks = {}
+
+    def invoke(self, name, args, wav=True, cpu=False):
+        output, checks = self.output, self.checks
         log = output / f"{name}.log"
-        # Capture memory immediately around inference, not just before the
-        # build/download. Include UUIDs to identify runner services sharing a GPU.
-        def gpu_snapshot(phase):
-            with (output / f"{name}-gpu-{phase}.txt").open("w") as stream:
-                for query in [
-                    ["--query-gpu=uuid,name,memory.total,memory.used,memory.free", "--format=csv"],
-                    ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv"],
-                ]:
-                    subprocess.run(["nvidia-smi", *query], stdout=stream,
-                                   stderr=subprocess.STDOUT, check=False, timeout=30)
 
         try:
             with nullcontext() if cpu else gpu_lease(output, name):
-                gpu_snapshot("before")
+                gpu_snapshot(output, name, "before")
                 with log.open("w") as stream:
                     stream.write(json.dumps(args) + "\n")
                     stream.flush()
                     subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
-                                   check=True, timeout=1200,
+                                   check=True, timeout=INFERENCE_TIMEOUT_SECONDS,
                                    env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # Put the actual engine error in the job log as well as the artifact.
-            print(log.read_text(errors="replace")[-12000:], file=sys.stderr, flush=True)
+            print(log.read_text(errors="replace")[-ERROR_LOG_TAIL_CHARS:], file=sys.stderr, flush=True)
             raise
         finally:
-            gpu_snapshot("after")
+            gpu_snapshot(output, name, "after")
         backend = "CPU" if cpu else "Vulkan"
         if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e|moss-tts-stream-e2e)\] backend: " + backend + r"\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select {backend}; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": backend}
         print(f"PASS {name}: {checks[name]}", flush=True)
 
-    if family in {"tts", "ttsd"}:
-        decoder = download("moss-codec-decoder-f16", models, output)
-        encoder = download("moss-codec-encoder-f16", models, output)
-        ref1, ref2 = output / "reference1.wav", output / "reference2.wav"
-        reference(sample, ref1, 0)
-        reference(sample, ref2, 3, 5)
-        base = [tts, "--backbone", model, "--decoder", decoder, "--language", "en",
-                "--max-new-tokens", "192", "--context", "4096", *common]
-        if family == "tts":
-            base += ["--text", TTS_TEXT]
-            for name, extra in [("batch", []), ("stream", ["--stream", "--stream-chunk-frames", "25"]),
-                                ("clone", ["--encoder", encoder, "--ref-audio", str(ref1)])]:
-                invoke(name, [*base, *extra, "--out", str(output / f"{name}.wav")])
-            # Same checkpoint, text and seed: distinguish common prompt/model
-            # failures from backend-dependent generation drift. CI only.
-            invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
-                   ["--out", str(output / "cpu-reference.wav")], cpu=True)
-            # Same worker, ggml pin, checkpoint, prompt, seed and backend on
-            # the upstream base. Preserve evidence of pre-existing defects.
-            for name in UNCONDITIONED_OUTPUTS:
-                args = [str(baseline_binary), *base[1:]]
-                if name == "cpu-reference":
-                    args.remove("--gpu")
-                if name == "stream":
-                    args += ["--stream", "--stream-chunk-frames", "25"]
-                invoke(f"baseline-{name}", [*args, "--out", str(output / f"baseline-{name}.wav")],
-                       cpu=name == "cpu-reference")
-            invoke("stream-agreement", [str(build / "engines/tts/test-moss-tts-stream-e2e"),
-                   model, decoder, encoder, str(ref1), str(output),
-                   str(output / "reference-short.txt"), str(output / "reference-long.txt")], wav=False)
-        else:
-            # Two reference slots exercise dialogue conditioning; these are
-            # excerpts from the same speaker, not a voice identity quality test.
-            invoke("dialogue", [*base, "--encoder", encoder, "--dialogue-ref", str(ref1),
-                   "--dialogue-ref", str(ref2), "--text",
-                   "[S1] And so, my fellow Americans. [S2] Ask not what your country can do for you. "
-                   "[S1] Hello there. [S2] How are you?",
-                   "--out", str(output / "dialogue.wav")])
-    elif family == "sfx":
-        invoke("sound", [tts, "--mode", "sfx", "--model", model, *common,
-               "--text", "Rain falling on a tin roof.", "--seconds", "3",
-               "--out", str(output / "sound.wav")])
-    elif family == "speech":
-        codec = download("moss-speech-codec-f16", models, output)
-        invoke("codec-agreement", [str(build / "engines/tts/test-moss-speech-codec-e2e"),
-               codec, str(output)], wav=False)
-        for mode in ("single", "cfg"):
-            checks[f"codec-{mode}"] = audio_stats(output / f"codec-vulkan-{mode}.wav")
-        invoke("reply", [str(build / "engines/tts/test-moss-speech-e2e"),
-               model, codec, str(sample), str(output)])
-        checks["reply-repeat"] = audio_stats(output / "reply-repeat.wav")
-    else:
-        transcript = output / "transcript.json"
-        invoke("transcribe", [str(build / "engines/parakeet/moss-transcribe"),
-               "--model", model, "--audio", str(sample), "--backend", "vulkan",
-               "--threads", "4", "--max-new-tokens", "256", "--out", str(transcript)], wav=False)
-        result = json.loads(transcript.read_text())
-        segments = result["segments"]
-        if not segments or not all(re.fullmatch(r"S\d+", s["speaker"]) and
-                                   0 <= s["start"] <= s["end"] and s["text"].strip() for s in segments):
-            raise RuntimeError("Missing or invalid speaker-labelled transcription")
-        text = " ".join(s["text"] for s in segments).lower()
-        if "country" not in text or "ask" not in text:
-            raise RuntimeError("JFK transcript missing expected words 'ask' and 'country'")
-        checks["transcribe"]["segments"] = len(segments)
-    return checks
+
+def prepare_delay(runner, model):
+    decoder = download("moss-codec-decoder-f16", runner.models, runner.output)
+    encoder = download("moss-codec-encoder-f16", runner.models, runner.output)
+    ref1, ref2 = runner.output / "reference1.wav", runner.output / "reference2.wav"
+    reference(runner.sample, ref1, 0)
+    reference(runner.sample, ref2, 3, 5)
+    base = [runner.tts, "--backbone", model, "--decoder", decoder, "--language", "en",
+            "--max-new-tokens", "192", "--context", "4096", *runner.common]
+    return base, decoder, encoder, ref1, ref2
+
+
+def run_tts(runner, model):
+    base, decoder, encoder, ref1, _ = prepare_delay(runner, model)
+    base += ["--text", TTS_TEXT]
+    for name, extra in [("batch", []), ("stream", ["--stream", "--stream-chunk-frames", "25"]),
+                        ("clone", ["--encoder", encoder, "--ref-audio", str(ref1)])]:
+        runner.invoke(name, [*base, *extra, "--out", str(runner.output / f"{name}.wav")])
+    # Same checkpoint, text and seed: distinguish common prompt/model
+    # failures from backend-dependent generation drift. CI only.
+    runner.invoke("cpu-reference", [arg for arg in base if arg != "--gpu"] +
+           ["--out", str(runner.output / "cpu-reference.wav")], cpu=True)
+    # Same worker, ggml pin, checkpoint, prompt, seed and backend on
+    # the upstream base. Preserve evidence of pre-existing defects.
+    for name in UNCONDITIONED_OUTPUTS:
+        args = [str(runner.baseline_binary), *base[1:]]
+        if name == "cpu-reference":
+            args.remove("--gpu")
+        if name == "stream":
+            args += ["--stream", "--stream-chunk-frames", "25"]
+        runner.invoke(f"baseline-{name}", [*args, "--out", str(runner.output / f"baseline-{name}.wav")],
+               cpu=name == "cpu-reference")
+    runner.invoke("stream-agreement", [str(runner.build / "engines/tts/test-moss-tts-stream-e2e"),
+           model, decoder, encoder, str(ref1), str(runner.output),
+           str(runner.output / "reference-short.txt"), str(runner.output / "reference-long.txt")], wav=False)
+
+
+def run_ttsd(runner, model):
+    base, _, encoder, ref1, ref2 = prepare_delay(runner, model)
+    # Two reference slots exercise dialogue conditioning; these are
+    # excerpts from the same speaker, not a voice identity quality test.
+    runner.invoke("dialogue", [*base, "--encoder", encoder, "--dialogue-ref", str(ref1),
+           "--dialogue-ref", str(ref2), "--text",
+           "[S1] And so, my fellow Americans. [S2] Ask not what your country can do for you. "
+           "[S1] Hello there. [S2] How are you?",
+           "--out", str(runner.output / "dialogue.wav")])
+
+
+def run_sfx(runner, model):
+    runner.invoke("sound", [runner.tts, "--mode", "sfx", "--model", model, *runner.common,
+           "--text", "Rain falling on a tin roof.", "--seconds", "3",
+           "--out", str(runner.output / "sound.wav")])
+
+
+def run_speech(runner, model):
+    codec = download("moss-speech-codec-f16", runner.models, runner.output)
+    runner.invoke("codec-agreement", [str(runner.build / "engines/tts/test-moss-speech-codec-e2e"),
+           codec, str(runner.output)], wav=False)
+    for mode in ("single", "cfg"):
+        runner.checks[f"codec-{mode}"] = audio_stats(runner.output / f"codec-vulkan-{mode}.wav")
+    runner.invoke("reply", [str(runner.build / "engines/tts/test-moss-speech-e2e"),
+           model, codec, str(runner.sample), str(runner.output)])
+    runner.checks["reply-repeat"] = audio_stats(runner.output / "reply-repeat.wav")
+
+
+def run_transcribe(runner, model):
+    transcript = runner.output / "transcript.json"
+    runner.invoke("transcribe", [str(runner.build / "engines/parakeet/moss-transcribe"),
+           "--model", model, "--audio", str(runner.sample), "--backend", "vulkan",
+           "--threads", "4", "--max-new-tokens", "256", "--out", str(transcript)], wav=False)
+    result = json.loads(transcript.read_text())
+    segments = result["segments"]
+    if not segments or not all(re.fullmatch(r"S\d+", s["speaker"]) and
+                               0 <= s["start"] <= s["end"] and s["text"].strip() for s in segments):
+        raise RuntimeError("Missing or invalid speaker-labelled transcription")
+    text = " ".join(s["text"] for s in segments).lower()
+    if "country" not in text or "ask" not in text:
+        raise RuntimeError("JFK transcript missing expected words 'ask' and 'country'")
+    runner.checks["transcribe"]["segments"] = len(segments)
+
+
+FAMILY_RUNNERS = {"tts": run_tts, "ttsd": run_ttsd, "sfx": run_sfx,
+                  "speech": run_speech, "transcribe": run_transcribe}
+
+
+def run_case(case, build, models, output, baseline_binary):
+    model = download(CASES[case], models, output)
+    runner = CaseRunner(build, models, output, baseline_binary)
+    FAMILY_RUNNERS[case.split("-")[0]](runner, model)
+    return runner.checks
 
 
 def main():
