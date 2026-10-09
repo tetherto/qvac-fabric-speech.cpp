@@ -1,4 +1,5 @@
 #include "transcribe_fixtures.h"
+#include "../../../test/moss_gpu_arm.h"
 #include "../../../test/moss_precision.h"
 #include "moss/transcribe_networks.h"
 #include "parakeet/moss_transcribe.h"
@@ -12,7 +13,9 @@ using namespace moss_transcribe_fixtures;
 using namespace parakeet::moss::detail;
 
 namespace {
-void require(bool ok, const char * message) {
+MossGpuArm arm;
+
+void require(bool ok, const std::string & message) {
     if (!ok) throw std::runtime_error(message);
 }
 
@@ -29,14 +32,14 @@ void compare(const char * stage, const std::vector<float> & cpu, const std::vect
     }
     const double relative = std::sqrt(error / std::max(norm, 1e-20));
     std::printf("%s: max_abs=%g rel_l2=%g\n", stage, worst, relative);
-    require(worst < 2e-4f || relative < 0.01, "CPU/Vulkan mismatch");
+    require(worst < 2e-4f || relative < 0.01, std::string(stage) + ": CPU/" + arm.prefix + " mismatch");
 }
 
 void test(const std::string & path) {
-    // Explicit Vulkan must win even when use_gpu is false or another GPU
-    // backend is registered first. Missing Vulkan is a failure, not a skip.
-    TranscribeModel cpu(path, false, 2), gpu(path, false, 2, "vulkan");
-    require(std::string(gpu.backend_name()).find("Vulkan") == 0, "Vulkan was not selected");
+    // The explicit backend must win even when use_gpu is false or another GPU
+    // backend is registered first. A missing backend is a failure, not a skip.
+    TranscribeModel cpu(path, false, 2), gpu(path, false, 2, arm.request);
+    arm.require(gpu.backend_name());
     std::vector<float> mel(N_MELS * CHUNK_FRAMES);
     for (size_t i = 0; i < mel.size(); ++i) mel[i] = std::sin((float) i * 0.31f);
     const auto c = encode_audio_chunk(cpu, mel, CHUNK_TOKENS, true);
@@ -61,16 +64,16 @@ void test(const std::string & path) {
 
     parakeet::moss::TranscribeOptions options;
     options.model_path = path;
-    options.backend = "vulkan";
+    options.backend = arm.request;
     parakeet::moss::TranscribeEngine engine(options);
-    require(std::string(engine.backend_name()).find("Vulkan") == 0, "engine lost backend request");
+    arm.require(engine.backend_name());
     const std::vector<float> pcm(CHUNK_SAMPLES + 17, 0.1f);
     const auto result = engine.transcribe(pcm.data(), pcm.size(), SAMPLE_RATE);
     require(!result.cancelled && result.audio_tokens > 0, "engine transcription failed");
     const auto fit = parakeet::moss::fit_params(options, {}, 0.02, 0);
     require(fit.status != parakeet::FitStatus::Error && !fit.device_is_cpu &&
-            fit.device_name.find("Vulkan") == 0 && fit.device.weights_bytes > 0,
-            "memory projection lost explicit Vulkan selection");
+            arm.selected(fit.device_name.c_str()) && fit.device.weights_bytes > 0,
+            "memory projection lost explicit GPU selection");
     options.backend = "missing-backend";
     const auto unavailable_fit = parakeet::moss::fit_params(options, {}, 0.02, 0);
     require(unavailable_fit.status == parakeet::FitStatus::Error &&
@@ -78,18 +81,23 @@ void test(const std::string & path) {
 }
 } // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    if (argc != 2) {
+        std::fprintf(stderr, "usage: %s cuda|vulkan\n", argv[0]);
+        return 2;
+    }
     std::filesystem::path path;
     int rc = 0;
     try {
+        arm = moss_gpu_arm(argv[1]);
         for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
-            path = write_transcribe_model("vulkan", 26342);
+            path = write_transcribe_model("gpu", 26342);
             moss_fixture_precision(path, type);
             std::printf("precision: %s\n", ggml_type_name(type));
             test(path.string());
             std::filesystem::remove(path);
         }
-        std::puts("MOSS Transcribe CPU/Vulkan parity: OK");
+        std::printf("MOSS Transcribe CPU/%s parity: OK\n", arm.prefix.c_str());
     } catch (const std::exception & e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what());
         rc = 1;
