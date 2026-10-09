@@ -2,6 +2,98 @@
 
 Part of the [tts engine documentation](../README.md).
 
+## Vulkan validation
+
+All MOSS engines use the shared ggml GPU selector and GPU/CPU scheduler.
+With a Vulkan-enabled ggml install, `--gpu` can run MOSS-TTS/TTSD,
+MOSS-SoundEffect and MOSS-Speech on Vulkan. For a Vulkan-only development
+build, build ggml with `GGML_VULKAN=ON`, `GGML_METAL=OFF` and
+`GGML_CUDA=OFF`, install it, and configure the speech engine with that
+installation on `CMAKE_PREFIX_PATH`. On a build with several GPU backends,
+`TTS_CPP_GPU_BACKEND=vulkan` pins the shared selector for validation:
+
+```sh
+TTS_CPP_GPU_BACKEND=vulkan build/moss-cli --gpu --backbone moss-tts-delay-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf --text "Vulkan speech test." --out vulkan.wav
+ctest --test-dir build -R '^test-moss-vulkan$' --output-on-failure
+```
+
+The test generates small random-weight GGUFs and compares CPU and Vulkan
+outputs for Delay prefill/decode/reset, both codec halves, streaming and
+reduced-channel dialogue decoding, SoundEffect text/DiT/VAE, Speech's two
+LM heads and Whisper-VQ tokenizer. It covers F32, F16 and mixed Q8_0/F16
+weights, plus the Speech LM's BF16 export with an F16 tokenizer. It fails
+if Vulkan is unavailable instead of accepting a CPU-only run. The existing
+manual `tts CI` workflow runs it with `run_gpu=true`; no model downloads
+are required for this test.
+
+The same workflow's `run_moss_e2e=true` lane downloads registered checkpoints
+and saves generated WAVs, transcripts, logs and model hashes. Cases run
+serially because runner services share GPU memory. Speech cases use
+`test-moss-speech-e2e` to make two replies on one engine instance, checking
+that staged model unloading also works on the next request.
+
+Each Vulkan invocation also takes a host-local lock keyed by the physical
+GPU UUID and waits for two consecutive memory readings with at most 1 GiB
+unavailable. Admission times out after 15 minutes and records the readings;
+foreign processes are never terminated. This coordinates OpenMOSS runs across
+runner accounts and avoids starting while another workload occupies the GPU.
+Other GPU workloads do not honor this lock and can still start afterward;
+before/after process snapshots remain necessary to diagnose contention.
+The TTS case also saves a CPU reference with the same checkpoint, text and
+seed to investigate backend-dependent generation quality.
+
+`test-moss-vulkan-stream` exercises tiny end-to-end fixtures with 1/2/5/25
+frame chunks, a 37-chunk run, final partial chunks, callback and explicit
+cancellation, and reuse after each cancellation. It checks finite output,
+sample counts and batch/stream waveform agreement with F16 Vulkan enabled.
+The full TTS CI case runs `test-moss-tts-stream-e2e` with real checkpoints
+and voice conditioning: 7/25-frame chunks, repeated requests, both cancellation
+paths and a longer utterance. WAVs and callback timing CSVs are retained.
+Waveform agreement establishes correct chunk delivery; listening/transcription
+checks are still needed to establish that the model speaks the requested text.
+
+The TTS case also gates every expected batch/stream/reuse WAV and its CPU
+reference with the existing Whisper CPU intelligibility scorer. The reference
+model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
+the ASR executable is a separate static CPU build of the vendored Whisper/ggml
+pair so its versioned CLI dependencies are isolated from the Vulkan test pin.
+The synthesis text is never provided as an ASR prompt. Missing/unavailable
+scores, non-finite scores, or word error rate above 25% fail the case. This
+tolerates limited reference-ASR errors while rejecting the observed wrong-text
+outputs (100% WER); it is not a naturalness or speaker-similarity metric.
+Synthesis and ASR use the same prompt files. Transcripts, per-output scores
+and ASR settings are saved even when a later synthesis step fails.
+
+Unconditioned TTS has a suspected pre-existing wrong-text issue. The TTS
+case also builds upstream commit `8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c`
+and runs the same CPU, Vulkan batch and Vulkan streaming requests with
+identical checkpoints, seed and ggml on the same worker. An unconditioned
+quality failure is non-blocking only when its PCM samples and audio format
+exactly match that baseline. Such failures remain visible in transcripts
+and `pre_existing_quality_issues`; they are not counted as quality passes.
+Changed audio, a missing/unverified baseline or an ASR error cannot use this
+exception. Voice-conditioned streaming and reuse retain the strict quality
+gate. This keeps existing general TTS defects outside the Vulkan PR while
+continuing to reject new regressions.
+
+Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
+This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
+identical diffusion noise and a short voice reference. It checks finite mel
+values, numerical agreement, output length and signal level for both the
+single-batch and batched CFG paths, and saves the audio and mel dumps.
+The shared S3Gen flow decoder requests F32 flash-attention accumulation:
+default F16 accumulation on MoltenVK can amplify errors across solver steps
+until the mel becomes non-finite. F16 weights and other Vulkan operations
+remain enabled; no `GGML_VK_DISABLE_F16` workaround is required. Non-finite
+flow states are reported as synthesis errors instead of decoded as audio.
+
+These generated-model checks pass on Apple M2 through MoltenVK. They do
+not establish full-checkpoint speech quality, performance, or Android and
+discrete-GPU compatibility. The per-model reference tests below remain the
+full-checkpoint validation path; MOSS-Speech's shared S3Gen/HiFT reply decoder
+also needs the real codec checkpoint.
+
 ## MOSS Delay
 
 [MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS) is a family of
@@ -464,6 +556,15 @@ vocoder at 24 kHz, conditioned on a voice prompt and a CAM++ speaker
 embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
 reuses it; the codec only changes the token-to-mel ratio and the speech
 vocabulary, which the S3Gen loader now reads from the GGUF.
+
+GPU speech replies run the LM and S3Gen decoder in separate memory phases.
+After token generation, the engine releases LM weights and KV/graph buffers
+before decoding audio, while retaining tokenizer metadata and backend identity.
+The decoder holds a matched S3Gen cache reference only for that decode; other
+cache owners retain their references. The next request reloads LM weights from
+the same GGUF, so keep the model file available. This reduces peak GPU memory
+at the cost of loading weights again between spoken replies. CPU execution
+keeps its resident LM weights.
 
 **Status — CPU and Metal, validated against the reference pipeline.** Every
 stage matches the PyTorch pipeline on a real question: the log-mel features

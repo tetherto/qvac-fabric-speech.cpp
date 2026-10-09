@@ -18,10 +18,16 @@ on:
     branches: [master]
     paths:
       - 'engines/tts/**'
+      - 'engines/test/**'
+      - 'scripts/ci/moss-vulkan-e2e.py'
+      - 'scripts/ci/test_moss_vulkan_e2e.py'
       - '.github/workflows/tts-ci.yml'
   pull_request:
     paths:
       - 'engines/tts/**'
+      - 'engines/test/**'
+      - 'scripts/ci/moss-vulkan-e2e.py'
+      - 'scripts/ci/test_moss_vulkan_e2e.py'
       - '.github/workflows/tts-ci.yml'
   workflow_dispatch:
     inputs:
@@ -29,6 +35,14 @@ on:
         description: 'Also run the GPU ctest lane (on the self-hosted NVIDIA Linux runner)'
         type: boolean
         default: false
+      run_moss_e2e:
+        description: 'Run full OpenMOSS checkpoints through Vulkan (native CLIs, S3 models, audio artifacts)'
+        type: boolean
+        default: false
+      moss_e2e_cases:
+        description: 'JSON array of full-checkpoint cases to run'
+        type: string
+        default: '["tts-f16","ttsd-f16","sfx-f16","sfx-q8_0","speech-bf16","speech-q8_0","transcribe-f16","transcribe-q5_0","transcribe-q8_0"]'
 
 permissions:
   contents: read
@@ -52,7 +66,7 @@ permissions:
 # github.event.inputs.* is a string even for a `type: boolean` input, hence
 # the explicit == 'true'.
 concurrency:
-  group: tts-ci-${{ ((github.event.inputs.run_gpu == 'true' || github.ref == 'refs/heads/master') && github.run_id) || github.ref }}
+  group: tts-ci-${{ ((github.event.inputs.run_gpu == 'true' || github.event.inputs.run_moss_e2e == 'true' || github.ref == 'refs/heads/master') && github.run_id) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -70,8 +84,125 @@ jobs:
       contents: read
     uses: ./.github/workflows/reusable-authorize-self-hosted.yml
 
+  moss-vulkan-e2e:
+    needs: [runner_names, authorize]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_moss_e2e && needs.authorize.outputs.allowed == 'true'
+    runs-on: ${{ needs.runner_names.outputs.linux_x64_gpu }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      # Multiple runner services can share one physical GPU. Full-precision
+      # models approach its 20 GiB capacity; do not load two at the same time.
+      max-parallel: 1
+      matrix:
+        model: ${{ fromJSON(inputs.moss_e2e_cases) }}
+    env:
+      GGML_E2E_SHA: e16d1332bdafcaade27eb402c62418239faef632
+      TTS_BASELINE_SHA: 8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c
+    steps:
+      - name: Manual Workspace Cleanup
+        run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
+        shell: bash
+        working-directory: .
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Test GPU admission control
+        run: python3 -m unittest discover -s scripts/ci -p test_moss_vulkan_e2e.py
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Build pinned ggml and OpenMOSS CLIs (Vulkan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p moss-e2e-results
+          git rev-parse HEAD > moss-e2e-results/speech-commit.txt
+          nvidia-smi > moss-e2e-results/gpu.txt
+          command -v aws
+          git init -q ggml-src
+          git -C ggml-src remote add origin "$GGML_REPO"
+          git -C ggml-src fetch --depth 1 origin "$GGML_E2E_SHA"
+          git -C ggml-src checkout -q FETCH_HEAD
+          git -C ggml-src rev-parse HEAD > moss-e2e-results/ggml-commit.txt
+          cmake -S ggml-src -B ggml-src/build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF \
+            -DGGML_VULKAN=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF \
+            -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
+          cmake --build ggml-src/build -j4
+          cmake --install ggml-src/build
+          cmake -S . -B build-moss-e2e -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_BUILD_WHISPER=OFF -DSPEECH_BUILD_AUDIOGEN=OFF \
+            -DSPEECH_BUILD_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+          cmake --build build-moss-e2e --target moss-cli moss-transcribe test-moss-speech-e2e test-moss-speech-codec-e2e test-moss-tts-stream-e2e -j4
+      - name: Check Transcribe Vulkan selection and memory projection
+        if: matrix.model == 'transcribe-f16'
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: |
+          cmake --build build-moss-e2e --target test-moss-transcribe test-moss-transcribe-fit test-moss-transcribe-vulkan -j4
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import subprocess
+          spec = importlib.util.spec_from_file_location("e2e", "scripts/ci/moss-vulkan-e2e.py")
+          e2e = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(e2e)
+          output = Path("moss-e2e-results")
+          with e2e.gpu_lease(output, "transcribe-fixtures"):
+              subprocess.run(["ctest", "--test-dir", "build-moss-e2e", "--output-on-failure",
+                              "--output-log", str((output / "transcribe-fixtures.log").resolve()),
+                              "-R", "^test-moss-transcribe(-fit|-vulkan)?$"], check=True, timeout=300)
+          PY
+      - name: Build upstream TTS baseline
+        if: matrix.model == 'tts-f16'
+        shell: bash
+        run: |
+          git fetch --depth 1 origin "$TTS_BASELINE_SHA"
+          git worktree add --detach moss-baseline-src "$TTS_BASELINE_SHA"
+          git -C moss-baseline-src rev-parse HEAD > moss-e2e-results/tts-baseline-commit.txt
+          cmake -S moss-baseline-src -B build-moss-baseline -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_BUILD_WHISPER=OFF -DSPEECH_BUILD_AUDIOGEN=OFF -DSPEECH_BUILD_PARAKEET=OFF \
+            -DSPEECH_BUILD_TESTS=OFF -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+          cmake --build build-moss-baseline --target moss-cli -j4
+      - name: Build independent CPU reference ASR
+        if: matrix.model == 'tts-f16'
+        # This test oracle uses the vendored Whisper/ggml pair, statically
+        # linked in a separate process. Its CLI needs newer ggml quant enums
+        # than the pinned Vulkan runtime being validated above.
+        run: |
+          cmake -S third_party/whisper.cpp -B build-moss-asr -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_SKIP_INSTALL_RULES=ON -DWHISPER_USE_SYSTEM_GGML=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_PARAKEET=OFF \
+            -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_NATIVE=OFF
+          cmake --build build-moss-asr --target whisper-cli -j4
+      - name: Generate and transcribe with full checkpoints
+        env:
+          MODEL_CASE: ${{ matrix.model }}
+          MODEL_S3_BUCKET: ${{ secrets.MODEL_S3_BUCKET }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: python3 scripts/ci/moss-vulkan-e2e.py --case "$MODEL_CASE"
+      - name: Upload generated audio, transcripts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moss-vulkan-${{ matrix.model }}
+          path: moss-e2e-results/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove downloaded checkpoint weights
+        if: always()
+        run: rm -rf models-moss-e2e
+
   build-test:
     needs: runner_names
+    if: github.event.inputs.run_moss_e2e != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -189,7 +320,7 @@ jobs:
   # so this lane is a separate job gated on fork-ci.
   build-test-macos:
     needs: [runner_names, authorize]
-    if: needs.authorize.outputs.allowed == 'true'
+    if: needs.authorize.outputs.allowed == 'true' && github.event.inputs.run_moss_e2e != 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
     timeout-minutes: 60
     steps:
@@ -476,6 +607,8 @@ jobs:
           import json, subprocess, sys
 
           EXPECTED = [
+              "test-moss-vulkan",
+              "test-moss-vulkan-stream",
               "test-s3gen-cuda",
               "test-s3gen-vulkan",
               "test-chatterbox-parity-mtl-cuda",
@@ -518,4 +651,3 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: |
           ctest --test-dir build -L gpu --output-on-failure --timeout 1200
-
