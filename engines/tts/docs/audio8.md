@@ -379,21 +379,40 @@ decoding removes sampling randomness but does not guarantee equal CPU,
 OpenCL and Hexagon trajectories. Check generated codes and frame counts,
 then compare fixed-input numerical boundaries and waveforms.
 
-#### Codec panel tuning prototype (QVAC-26763)
+#### Codec panel 4x2 default (QVAC-26763)
 
-Companion ggml PR #115 adds a selectable F32-preserving 4x2 HVX panel for
-large codec DDR matmuls. Set `GGML_HEXAGON_F16_F32_PANEL_SHAPE=4x2` for
-candidate testing; unset it or use `2x2` for the validated default. Existing
+Companion ggml PR #115 added a selectable F32-preserving 4x2 HVX panel for
+large codec DDR matmuls, and ggml PR #117 makes it the default. Builds pick it
+up with that ggml revision. Set `GGML_HEXAGON_F16_F32_PANEL_SHAPE=2x2` to
+restore the previous panel; unset it or use `4x2` for the default. Existing
 VTCM routing and precision guards are preserved, and previously validated
-optimizations remain enabled. Profiling reports `hvx-panel-4x2` when that
-candidate is selected; keep profiling disabled for timing comparisons.
+optimizations remain enabled. Profiling reports `hvx-panel-4x2` for the 4x2
+panel and `hvx-flat` for 2x2; keep profiling disabled for timing comparisons.
 
-Host, Android and DSP v79 builds and the 29-case independent host oracle pass.
-Device correctness, fixed-code CPU/OpenCL parity and repeated S1–S5 timing
-remain pending, so no new performance improvement is claimed. Promotion
-requires those gates on matched baseline/candidate artifacts and the same
-device. The companion `docs/hexagon-audio8-profile.md` report contains the
-oracle, worker-count and dominant-shape benchmark commands for
+On a Samsung Galaxy S25 (Snapdragon 8 Elite, Hexagon v79), 4x2 matched 2x2 bit
+for bit: the 29-case matmul oracle with 1, 2 and 6 HVX workers, all five
+fixed-code codec boundaries for 3 and 66 frames, and the greedy S1–S5 codes and
+WAVs. Fixed 66-frame Hexagon PCM against the CPU reference has cosine
+`0.9999966593` and NMSE `6.72e-6`; against OpenCL, `0.9999900834` and
+`1.98e-5`. Greedy decoding, seed 42, four threads, three warmups and five timed
+runs per variant, every run started at thermal status 0:
+
+| Prompt | Frames (Hexagon / OpenCL) | Inference 2x2 → 4x2 | Speedup | Codec synthesis 2x2 → 4x2 | Speedup | OpenCL inference |
+| --- | --- | --- | ---: | --- | ---: | ---: |
+| S1 | 66 / 70 | 15.265 → 14.216 s | 1.074x | 7.103 → 5.910 s | 1.202x | 3.207 s |
+| S2 | 55 / 50 | 12.418 → 11.561 s | 1.074x | 5.736 → 4.739 s | 1.211x | 2.276 s |
+| S3 | 70 / 72 | 15.986 → 14.502 s | 1.102x | 7.311 → 6.026 s | 1.213x | 3.239 s |
+| S4 | 70 / 67 | 15.804 → 14.718 s | 1.074x | 7.312 → 6.053 s | 1.208x | 3.038 s |
+| S5 | 94 / 94 | 21.299 → 19.474 s | 1.094x | 9.788 → 8.116 s | 1.206x | 4.211 s |
+
+Codec synthesis is 1.20–1.21x faster and inference 1.07–1.10x faster; the
+non-codec time is unchanged. OpenCL generates different codes and frame counts,
+so it is a timing reference rather than an equal workload, and its codec
+synthesis remains 5.1–6.0x faster than Hexagon 4x2. Reproducing these Hexagon
+trajectories requires the NDK default CPU flags for the ggml host libraries: a
+`-march=armv8.7a+fp16+dotprod+i8mm` build of the same commits produced a
+different S1 trajectory. The companion `docs/hexagon-audio8-profile.md` report
+has the commands, per-family profile and artifact hashes for
 [QVAC-26763](https://app.asana.com/1/45238840754660/project/1214153063536860/task/1219313976732459).
 
 ### Core ML codec sidecar
