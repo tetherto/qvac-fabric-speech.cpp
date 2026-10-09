@@ -187,9 +187,19 @@ supports the model's head dimensions. The KV cache stays in F32; prefill
 keeps regular attention. The same selection is used by memory-fit projection.
 Unsupported backends and dimensions retain the regular attention path.
 
+CUDA decode reuses a graph within each 128-token cache window when indexed
+F32 cache writes and masked flash attention are supported. Position inputs
+select the cache row; an F16 mask excludes unused positions. Cache values and
+attention accumulation remain F32. The mask stays allocated across replays,
+and memory-fit projection includes it. Forced scheduler execution retains
+the per-step graph path. CUDA graph capture also requires a ggml build with
+CUDA graphs enabled.
+
 `test-cosyvoice-lm-attention-cuda` needs no model files. It checks the
 capability gate and strided-cache attention against a scalar reference across
-short, unaligned, and long cache lengths. `test-cosyvoice-xb-cuda` additionally
+short, unaligned, and long cache lengths. A synthetic Qwen model also compares
+sampled trajectories with replay enabled and disabled across cache-window
+boundaries, without external model files. `test-cosyvoice-xb-cuda` additionally
 checks exact greedy-token parity against CPU when model fixtures are staged.
 Floating-point differences can change sampled trajectories, so compare
 `lm_decode_per_token` alongside end-to-end timings when profiling.

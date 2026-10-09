@@ -713,15 +713,34 @@ ggml_tensor * build_qwen(ggml_context * c, const model_ctx & m, const qwen_hp & 
     return mul_mat_f32acc(c, G(m, "lm/llm_decoder/weight"), x);
 }
 
-// Per-layer KV cache holding POST-rope K / (unroped) V, resident in a backend
-// buffer sized once to the max sequence length (rope is position-deterministic,
-// so caching after rope is correct — same as llama.cpp).  Each step appends its
-// new Lq columns in-graph (ggml_cpy into a column-offset view) and reads the
-// past as a view of the first P columns, so a step moves O(Lq) data instead of
-// round-tripping the whole O(P) cache host<->backend every step (which was
-// O(L^2) over a full decode).  Layout per layer: K [HD, NKV, max_P] (ne2=time);
-// V time-transposed [max_P, HD, NKV] (ne0=time) so the value matmul reads
-// contiguous time rows straight from the cache.
+static constexpr int kCosyLmMaskPad = 32;
+static constexpr int kCosyLmDecodeWindow = 128;
+static constexpr int kCosyLmProbeTensors = 32;
+
+static int cosy_lm_decode_window(int length, int capacity) {
+    return std::min(capacity, ((length + kCosyLmDecodeWindow - 1) / kCosyLmDecodeWindow) * kCosyLmDecodeWindow);
+}
+
+bool cosyvoice_lm_replay_enabled(ggml_backend_t backend, const qwen_hp & hp) {
+    if (!::tts_cpp::detail::backend_is_cuda(backend) ||
+        ::tts_cpp::detail::sched_force_enabled() || !cosyvoice_lm_fa_enabled(backend, hp)) return false;
+    ggml_context * c = ggml_init({kCosyLmProbeTensors * ggml_tensor_overhead(), nullptr, true});
+    if (!c) return false;
+    ggml_tensor * cache = ggml_new_tensor_2d(c, GGML_TYPE_F32, hp.head_dim * hp.n_kv, kCosyLmDecodeWindow);
+    ggml_tensor * value = ggml_new_tensor_2d(c, GGML_TYPE_F32, hp.head_dim * hp.n_kv, 1);
+    ggml_tensor * index = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
+    ggml_tensor * write = ggml_set_rows(c, cache, value, index);
+    ggml_tensor * q = ggml_new_tensor_4d(c, GGML_TYPE_F32, hp.head_dim, 1, hp.n_head, 1);
+    ggml_tensor * k = ggml_new_tensor_3d(c, GGML_TYPE_F32, hp.head_dim, hp.n_kv, kCosyLmDecodeWindow);
+    ggml_tensor * kh = ggml_view_3d(c, k, hp.head_dim, kCosyLmDecodeWindow, hp.n_kv, k->nb[2], k->nb[1], 0);
+    ggml_tensor * mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, kCosyLmDecodeWindow, kCosyLmMaskPad);
+    ggml_tensor * attention = ggml_flash_attn_ext(c, q, kh, kh, mask, 1.0f, 0, 0);
+    ggml_flash_attn_ext_set_prec(attention, GGML_PREC_F32);
+    const bool supported = ggml_backend_supports_op(backend, write) && ggml_backend_supports_op(backend, attention);
+    ggml_free(c);
+    return supported;
+}
+
 struct qwen_kvcache {
     ggml_backend_t          backend = nullptr;
     ggml_context *          ctx     = nullptr;
@@ -733,7 +752,11 @@ struct qwen_kvcache {
     // GGML_OP_FLASH_ATTN_EXT consumes directly.  The time-transposed V layout
     // above exists for the naive value matmul, which FA replaces.
     bool fa = false;
-    void init(model_ctx & m, const qwen_hp & hp, int max_tokens, bool use_fa) {
+    bool replay = false;
+    ggml_context * decode_ctx = nullptr;
+    ggml_cgraph * decode_graph = nullptr;
+    int decode_window = 0;
+    void init(model_ctx & m, const qwen_hp & hp, int max_tokens, bool use_fa, bool allow_replay = true) {
         backend = m.backend; max_P = max_tokens; P = 0; fa = use_fa;
         const int HD = hp.head_dim, NKV = hp.n_kv, depth = hp.depth;
         ggml_init_params p = { ggml_tensor_overhead() * (size_t)(2 * depth) + 64, nullptr, /*no_alloc=*/true };
@@ -745,8 +768,13 @@ struct qwen_kvcache {
                       : ggml_new_tensor_3d(ctx, GGML_TYPE_F32, max_P, HD, NKV);
         }
         buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        replay = fa && allow_replay && cosyvoice_lm_replay_enabled(backend, hp);
+        if (replay && buf) ggml_backend_buffer_clear(buf, 0);
     }
+    ~qwen_kvcache() { free(); }
     void free() {
+        if (decode_ctx) ggml_free(decode_ctx);
+        decode_ctx = nullptr; decode_graph = nullptr;
         if (buf) ggml_backend_buffer_free(buf);
         if (ctx) ggml_free(ctx);
         buf = nullptr; ctx = nullptr; P = 0; k.clear(); v.clear();
@@ -765,10 +793,10 @@ struct qwen_kvcache {
 // attention window and emits the in-graph K/V appends into the cache tensors.
 static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m,
                                            const qwen_hp & hp, int Lq, int D,
-                                           const qwen_kvcache & cache) {
+                                           const qwen_kvcache & cache, int window = 0) {
     const int HD = hp.head_dim, NH = hp.n_head, NKV = hp.n_kv, G_ = NH / NKV;
     const float scale = 1.0f / std::sqrt((float)HD);
-    const int P = cache.P, Lk = P + Lq;
+    const int P = cache.P, Lk = window ? window : P + Lq;
     // The FA cache layout drops the time-transposed V the naive value matmul
     // wants, so a multi-token pass reads this step's local K/V instead of
     // cache views -- valid only for the P == 0 prefill (the only multi-token
@@ -780,11 +808,11 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
 
     ggml_tensor * x = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, Lq); ggml_set_name(x,"x"); ggml_set_input(x);
     ggml_tensor * pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, Lq); ggml_set_name(pos,"pos"); ggml_set_input(pos);
-    // A single-token step attends over every cached position, so its mask is
-    // all zeros; soft_max_ext without a mask computes the identical result
-    // and the O(Lk) host mask build + upload per decode step disappears.
     ggml_tensor * mask = nullptr;
-    if (Lq > 1) {
+    if (window) {
+        mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, Lk, kCosyLmMaskPad);
+        ggml_set_name(mask, "mask"); ggml_set_input(mask); ggml_set_output(mask);
+    } else if (Lq > 1) {
         mask = ggml_new_tensor_2d(c, GGML_TYPE_F32, Lk, Lq); ggml_set_name(mask,"mask"); ggml_set_input(mask);
     }
 
@@ -798,26 +826,26 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
         qwen_qkv(c, m, hp, i, h, Lq, &q, &k, &v);
         q = ggml_rope_ext(c, q, pos, nullptr, HD, GGML_ROPE_TYPE_NEOX, 0, hp.theta, 1.0f,0,1,0,0);
         k = ggml_rope_ext(c, k, pos, nullptr, HD, GGML_ROPE_TYPE_NEOX, 0, hp.theta, 1.0f,0,1,0,0);
-        // Append this step's new K/V into the resident cache at columns [P,Lk),
-        // then attend against strided views of the cache itself: no concat of
-        // past K/V and no cont copies, so a decode step moves O(Lq) not O(Lk)
-        // bytes.  The V cache is stored time-transposed ([max_P, HD, NKV]) so
-        // the value matmul reads contiguous time rows without a transpose copy.
-        // The cpy nodes are expanded into the graph inside this loop, which
-        // places them before the attention nodes that read the cache views.
-        ggml_tensor * dst_k = ggml_view_3d(c, cache.k[i], HD, NKV, Lq,
-                                  cache.k[i]->nb[1], cache.k[i]->nb[2], (size_t)P * cache.k[i]->nb[2]);
-        cpy_k[i] = ggml_cpy(c, k, dst_k);
-        if (cache.fa) {
-            ggml_tensor * dst_v = ggml_view_3d(c, cache.v[i], HD, NKV, Lq,
-                                      cache.v[i]->nb[1], cache.v[i]->nb[2], (size_t)P * cache.v[i]->nb[2]);
-            cpy_v[i] = ggml_cpy(c, v, dst_v);
+        if (window) {
+            cpy_k[i] = ggml_set_rows(c, ggml_reshape_2d(c, cache.k[i], HD * NKV, cache.max_P),
+                                    ggml_reshape_2d(c, cont_if_strided(c, k), HD * NKV, 1), pos);
+            cpy_v[i] = ggml_set_rows(c, ggml_reshape_2d(c, cache.v[i], HD * NKV, cache.max_P),
+                                    ggml_reshape_2d(c, cont_if_strided(c, v), HD * NKV, 1), pos);
         } else {
-            if (!ggml_is_contiguous(v)) v = ggml_cont(c, v);   // fused-qkv view
-            ggml_tensor * dst_v = ggml_view_2d(c, cache.v[i], Lq, (int64_t)HD * NKV,
-                                      cache.v[i]->nb[1], (size_t)P * cache.v[i]->nb[0]);
-            ggml_tensor * v_rows = ggml_transpose(c, ggml_reshape_2d(c, v, (int64_t)HD * NKV, Lq));
-            cpy_v[i] = ggml_cpy(c, cont_if_strided(c, v_rows), dst_v);
+            ggml_tensor * dst_k = ggml_view_3d(c, cache.k[i], HD, NKV, Lq,
+                                      cache.k[i]->nb[1], cache.k[i]->nb[2], (size_t)P * cache.k[i]->nb[2]);
+            cpy_k[i] = ggml_cpy(c, k, dst_k);
+            if (cache.fa) {
+                ggml_tensor * dst_v = ggml_view_3d(c, cache.v[i], HD, NKV, Lq,
+                                          cache.v[i]->nb[1], cache.v[i]->nb[2], (size_t)P * cache.v[i]->nb[2]);
+                cpy_v[i] = ggml_cpy(c, v, dst_v);
+            } else {
+                if (!ggml_is_contiguous(v)) v = ggml_cont(c, v);   // fused-qkv view
+                ggml_tensor * dst_v = ggml_view_2d(c, cache.v[i], Lq, (int64_t)HD * NKV,
+                                          cache.v[i]->nb[1], (size_t)P * cache.v[i]->nb[0]);
+                ggml_tensor * v_rows = ggml_transpose(c, ggml_reshape_2d(c, v, (int64_t)HD * NKV, Lq));
+                cpy_v[i] = ggml_cpy(c, cont_if_strided(c, v_rows), dst_v);
+            }
         }
         ggml_build_forward_expand(gf, cpy_k[i]);
         ggml_build_forward_expand(gf, cpy_v[i]);
@@ -832,7 +860,7 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
                                       cache.k[i]->nb[2], cache.k[i]->nb[1], 0);
             ggml_tensor * vh = ggml_view_3d(c, cache.v[i], HD, Lk, NKV,
                                       cache.v[i]->nb[2], cache.v[i]->nb[1], 0);
-            o = ggml_flash_attn_ext(c, qf, kh, vh, nullptr, scale, 0.0f, 0.0f);
+            o = ggml_flash_attn_ext(c, qf, kh, vh, mask, scale, 0.0f, 0.0f);
             ggml_flash_attn_ext_set_prec(o, GGML_PREC_F32);
             o = ggml_reshape_2d(c, o, static_cast<int64_t>(HD) * NH, Lq);
         } else {
@@ -873,46 +901,62 @@ static ggml_cgraph * build_qwen_step_graph(ggml_context * c, const model_ctx & m
     return gf;
 }
 
+static void set_qwen_decode_mask(ggml_tensor * mask, int length, int window, bool reuse) {
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+    if (reuse) {
+        ggml_backend_tensor_set(mask, &zero, (size_t)(length - 1) * sizeof(zero), sizeof(zero));
+        return;
+    }
+    std::vector<ggml_fp16_t> values((size_t)window * kCosyLmMaskPad, ggml_fp32_to_fp16(-INFINITY));
+    std::fill_n(values.begin(), length, zero);
+    ggml_backend_tensor_set(mask, values.data(), 0, values.size() * sizeof(ggml_fp16_t));
+}
+
 static std::vector<float> qwen_step_kv(model_ctx & m, const qwen_hp & hp,
         const float * x_new, int Lq, int D, int VS,
         qwen_kvcache & cache, ggml_gallocr_t al) {
     const int P = cache.P, Lk = P + Lq;
     const size_t nmax = cosy_lm_nodes(hp);
-    ggml_init_params gp = cosy_arena(nmax);
-    ggml_context * c = ggml_init(gp);
-    ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, Lq, D, cache);
+    const int window = cache.replay && Lq == 1
+        ? cosy_lm_decode_window(Lk, cache.max_P) : 0;
+    const bool reuse = window && cache.decode_graph && cache.decode_window == window;
+    std::unique_ptr<ggml_context, decltype(&ggml_free)> owned(
+        reuse ? nullptr : ggml_init(cosy_arena(nmax)), ggml_free);
+    ggml_context * c = reuse ? cache.decode_ctx : owned.get();
+    if (!c) throw std::runtime_error("cosyvoice: LM graph context allocation failed");
+    ggml_cgraph * gf = reuse ? cache.decode_graph : build_qwen_step_graph(c, m, hp, Lq, D, cache, window);
     ggml_tensor * x      = ggml_graph_get_tensor(gf, "x");
     ggml_tensor * pos    = ggml_graph_get_tensor(gf, "pos");
     ggml_tensor * mask   = ggml_graph_get_tensor(gf, "mask");
     ggml_tensor * logits = ggml_graph_get_tensor(gf, "logits");
 
-    // `al` is owned by the caller and reused across the whole decode: creating
-    // and destroying an allocator per token means a backend buffer alloc/free
-    // per token, which on a GPU is a driver round-trip plus heap churn.
-    // ggml_gallocr_reserve only re-allocates when a chunk grows, and the
-    // prefill graph (Lq = L0) is the largest, so the buffer settles on step 0.
     bool use_sched = false;
-    if (!cosy_dispatch_prepare(m, gf, al, nmax, use_sched, "cosyvoice_lm")) {
-        ggml_free(c);
+    if (!reuse && !cosy_dispatch_prepare(m, gf, al, nmax, use_sched, "cosyvoice_lm")) {
         throw std::runtime_error("cosyvoice: LM graph dispatch failed");
     }
 
     ggml_backend_tensor_set(x, x_new, 0, (size_t)Lq * D * 4);
     { std::vector<int32_t> pv_(Lq); for (int i = 0; i < Lq; ++i) pv_[i] = P + i; ggml_backend_tensor_set(pos, pv_.data(), 0, pv_.size() * 4); }
-    if (mask) {
+    if (window) {
+        set_qwen_decode_mask(mask, Lk, window, reuse);
+    } else if (mask) {
         std::vector<float> mk((size_t)Lk * Lq); for (int j = 0; j < Lq; ++j) for (int kk = 0; kk < Lk; ++kk) mk[(size_t)j * Lk + kk] = (kk <= P + j) ? 0.f : -INFINITY;
         ggml_backend_tensor_set(mask, mk.data(), 0, mk.size() * 4);
     }
     // Appends this step's K/V into the resident cache.
     if (!cosy_dispatch_compute(m, gf, use_sched, "cosyvoice_lm")) {
-        ggml_free(c);
         throw std::runtime_error("cosyvoice: LM compute failed");
     }
 
     std::vector<float> out(VS);
     ggml_backend_tensor_get(logits, out.data(), (size_t)(Lq - 1) * VS * 4, (size_t)VS * 4);
     cache.P = Lk;
-    ggml_free(c);
+    if (window && !use_sched) {
+        if (!reuse && cache.decode_ctx) ggml_free(cache.decode_ctx);
+        cache.decode_ctx = reuse ? c : owned.release();
+        cache.decode_graph = gf;
+        cache.decode_window = window;
+    }
     return out;
 }
 
@@ -986,7 +1030,7 @@ std::vector<int> cosyvoice_llm_generate(model_ctx & m, const qwen_hp & hp,
                                         const std::vector<int> & text_ids,
                                         const std::vector<int> & prompt_stok,
                                         int max_steps, bool greedy, int seed, int min_len,
-                                        cosyvoice_timings * tmg) {
+                                        cosyvoice_timings * tmg, bool allow_replay) {
     // VS (LM output size) comes straight from the speech head's weight so the
     // graph can't disagree with the tensor; STS (speech_token_size, the EOS
     // threshold) from KV with the historical value as fallback.
@@ -1000,7 +1044,7 @@ std::vector<int> cosyvoice_llm_generate(model_ctx & m, const qwen_hp & hp,
     std::vector<int> tokens;
     std::mt19937 rng(seed);
     // Cache holds the L0 prefill positions plus up to max_steps decode positions.
-    qwen_kvcache cache; cache.init(m, hp, L0 + max_steps + 1, cosyvoice_lm_fa_enabled(m.backend, hp));
+    qwen_kvcache cache; cache.init(m, hp, L0 + max_steps + 1, cosyvoice_lm_fa_enabled(m.backend, hp), allow_replay);
     // One allocator for the entire decode (see the note in qwen_step_kv).
     ggml_gallocr_t al = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!al) { cache.free(); throw std::runtime_error("cosyvoice: gallocr alloc failed (LM)"); }
@@ -2079,6 +2123,7 @@ uint64_t cosy_fit_kv_init_measure(qwen_kvcache & cache, model_ctx & m, const qwe
                                   int max_tokens) {
     cache.backend = m.backend; cache.max_P = max_tokens; cache.P = 0;
     cache.fa = cosyvoice_lm_fa_enabled(m.backend, hp);
+    cache.replay = cosyvoice_lm_replay_enabled(m.backend, hp);
     const int HD = hp.head_dim, NKV = hp.n_kv, depth = hp.depth;
     ggml_init_params p = { ggml_tensor_overhead() * (size_t)(2 * depth) + 64, nullptr, /*no_alloc=*/true };
     cache.ctx = ggml_init(p);
@@ -2118,7 +2163,8 @@ bool cosyvoice_fit_measure_llm(model_ctx & m, const qwen_hp & hp, int L0, int ma
     if (ok) {  // deepest decode step: Lq = 1 at the last cache position
         cache.P = L0 + max_steps - 1;
         ggml_context * c = ggml_init(cosy_arena(nmax));
-        ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, 1, D, cache);
+        ggml_cgraph * gf = build_qwen_step_graph(c, m, hp, 1, D, cache,
+            cache.replay ? cosy_lm_decode_window(cache.P + 1, cache.max_P) : 0);
         ok = cosy_fit_price(m, gf, nmax, arena, error, "LM decode step");
         ggml_free(c);
     }

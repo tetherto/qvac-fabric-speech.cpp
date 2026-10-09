@@ -33,7 +33,9 @@ validated on it.
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
 CosyVoice3 uses capability-checked flash attention for single-token LM decoding
-on CUDA and Metal. Unsupported backends or head dimensions retain regular attention.
+on CUDA and Metal. Supported CUDA backends reuse decode graphs within masked
+128-token cache windows, allowing CUDA graph capture. Unsupported backends or
+head dimensions retain their existing attention path.
 
 CosyVoice3 expands bf16 flow weights to f32 on ARM CPUs to avoid scalar bf16
 matmuls; f16 remains the recommended ARM flow bundle. Its benchmark supports

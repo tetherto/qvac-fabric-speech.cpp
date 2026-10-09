@@ -80,7 +80,9 @@ latency, build pins and reproduction steps live in
 [docs/performance.md](docs/performance.md).
 
 CosyVoice3 uses capability-checked flash attention for single-token LM decoding
-on CUDA and Metal. Unsupported backends or head dimensions retain regular attention.
+on CUDA and Metal. Supported CUDA backends reuse decode graphs within masked
+128-token cache windows, allowing CUDA graph capture. Unsupported backends or
+head dimensions retain their existing attention path.
 
 CosyVoice3 expands bf16 flow weights to f32 when loading on ARM CPUs. This
 avoids scalar bf16 matmuls at twice the resident storage for those weights;
