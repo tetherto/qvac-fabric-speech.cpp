@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -59,22 +60,24 @@ with open(sys.argv[1]) as lock:
 
 class RunnerTests(unittest.TestCase):
     def test_gpu_invocation_requires_the_selected_backend(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            runner = e2e.CaseRunner("vulkan", root, root, root, root / "baseline")
-            for reported, accepted in (("CPU", False), ("Vulkan0", True)):
-                def execute(args, **kwargs):
-                    self.assertEqual(kwargs["env"]["TTS_CPP_GPU_BACKEND"], "vulkan")
-                    kwargs["stdout"].write(f"[moss-cli] backend: {reported}\n")
-                with patch.object(e2e, "gpu_lease") as lease, \
-                     patch.object(e2e, "gpu_snapshot"), \
-                     patch.object(e2e.subprocess, "run", side_effect=execute):
-                    if accepted:
-                        runner.invoke("test", ["moss-cli"], wav=False)
-                    else:
-                        with self.assertRaisesRegex(RuntimeError, "did not select"):
+        for backend, selected, other in (("cuda", "CUDA0", "Vulkan0"),
+                                         ("vulkan", "Vulkan0", "CUDA0")):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                runner = e2e.CaseRunner(backend, root, root, root, root / "baseline")
+                for reported, accepted in (("CPU", False), (other, False), (selected, True)):
+                    def execute(args, **kwargs):
+                        self.assertEqual(kwargs["env"]["TTS_CPP_GPU_BACKEND"], backend)
+                        kwargs["stdout"].write(f"[moss-cli] backend: {reported}\n")
+                    with patch.object(e2e, "gpu_lease") as lease, \
+                         patch.object(e2e, "gpu_snapshot"), \
+                         patch.object(e2e.subprocess, "run", side_effect=execute):
+                        if accepted:
                             runner.invoke("test", ["moss-cli"], wav=False)
-                    lease.assert_called_once_with(root, "test")
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "did not select"):
+                                runner.invoke("test", ["moss-cli"], wav=False)
+                        lease.assert_called_once_with(root, "test")
 
     def test_family_flows_preserve_baselines_streaming_and_dialogue(self):
         root = Path("/test")
@@ -111,7 +114,69 @@ class RunnerTests(unittest.TestCase):
                     self.assertEqual(set(by_name), {"sound"})
 
 
+class CheckpointTests(unittest.TestCase):
+    def test_quantized_checkpoint_is_hashed_before_source_removal(self):
+        for case in ("tts-q8_0", "ttsd-q8_0"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source.gguf"
+                source.write_bytes(b"GGUF" + b"source" * 100)
+                generated = b"GGUFquantized"
+                def quantize(args, **kwargs):
+                    self.assertEqual(args[-3:], ["q8_0", "--name-filter", "blk."])
+                    self.assertEqual(kwargs["timeout"], e2e.QUANTIZATION_TIMEOUT_SECONDS)
+                    Path(args[3]).write_bytes(generated)
+                with patch.object(e2e, "download", return_value=str(source)), \
+                     patch.object(e2e.subprocess, "run", side_effect=quantize):
+                    result = Path(e2e.prepare_checkpoint(case, root, root))
+                self.assertEqual(result.read_bytes(), generated)
+                self.assertFalse(source.exists())
+                self.assertEqual((root / "models.sha256").read_text(),
+                                 f"{hashlib.sha256(generated).hexdigest()}  generated/{result.name}\n")
+
+    def test_invalid_or_failed_quantization_preserves_source(self):
+        for result in (b"bad", b"GGUF" + b"x" * 100, None):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source.gguf"
+                source.write_bytes(b"GGUFsource")
+                def quantize(args, **kwargs):
+                    if result is None:
+                        raise subprocess.CalledProcessError(1, args)
+                    Path(args[3]).write_bytes(result)
+                with patch.object(e2e, "download", return_value=str(source)), \
+                     patch.object(e2e.subprocess, "run", side_effect=quantize):
+                    with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                        e2e.prepare_checkpoint("tts-q8_0", root, root)
+                self.assertEqual(source.read_bytes(), b"GGUFsource")
+                self.assertFalse((root / "models.sha256").exists())
+
+
 class IntelligibilityTests(unittest.TestCase):
+    def test_tts_quality_gate_covers_quantized_cases_on_both_backends(self):
+        for case in ("tts-f16", "tts-q8_0"):
+            for backend in ("cuda", "vulkan"):
+                with self.subTest(case=case, backend=backend), tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "output"
+                    args = ["moss-gpu-e2e.py", "--case", case, "--backend", backend,
+                            "--models", str(Path(directory) / "models"), "--output", str(output)]
+                    quality = {"status": "failed", "failed_outputs": ["clone"],
+                               "pre_existing_quality_issues": []}
+                    with patch.object(sys, "argv", args), \
+                         patch.object(e2e, "run_case", return_value={}) as run, \
+                         patch.object(e2e, "score_tts_outputs", return_value=quality) as score, \
+                         patch.object(e2e.subprocess, "check_output", return_value="commit"), \
+                         patch.object(sys, "stderr", io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            e2e.main()
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertEqual(run.call_args.args[:2], (case, backend))
+                    score.assert_called_once()
+                    self.assertEqual((output / "reference-short.txt").read_text().strip(), e2e.TTS_TEXT)
+                    result = json.loads((output / "result.json").read_text())
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(result["backend"], backend)
+
     def test_existing_quality_issue_requires_exact_upstream_audio(self):
         bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
         with tempfile.TemporaryDirectory() as directory:

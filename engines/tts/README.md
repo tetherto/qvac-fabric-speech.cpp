@@ -18,10 +18,10 @@ share another.
 Pocket TTS runs on CPU; cloning requires encoder-enabled weights. MOSS Delay
 and MOSS-TTSD are validated end to end on CPU/Metal, with numerical reference
 parity pending. MOSS-SoundEffect and MOSS-Speech have CPU/Metal stage validation;
-Vulkan adds generated-model CPU parity and full-checkpoint smoke coverage.
+CUDA and Vulkan add generated-model CPU parity and full-checkpoint smoke coverage.
 TTS streaming, cancellation/reuse and ASR intelligibility gates are described
-in [MOSS GPU validation](docs/moss.md#vulkan-validation); smoke coverage does
-not establish general speech quality. CUDA and OpenCL remain untested here. See the [API matrix](docs/api.md) for
+in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke coverage does
+not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
 streaming support and the [model guide](docs/models.md) for storage tiers.
 
 This in-tree package consumes the shared `ggml-speech` dependency. Build and
@@ -45,14 +45,15 @@ engine, not every backend ggml can compile.
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes | yes | yes | yes |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
 | Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | no | no | no | no |
-| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | untested |
-| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | untested |
-| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | untested |
+| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ |
+| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | scoped¹ |
+| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ |
 | LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
 | LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
 
-¹ MOSS Vulkan: generated-model CPU parity; full-checkpoint TTS/TTSD F16,
-SoundEffect F16/Q8 and Speech BF16/Q8 smoke cases. TTS quality gates retain
+¹ MOSS CUDA/Vulkan: generated-model CPU parity; quantized TTS/TTSD,
+SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
+F16 TTS/TTSD/SoundEffect and BF16 Speech cases. TTS quality gates retain
 known upstream limitations; see the linked MOSS guide for details.
 
 Supertonic 3, Parler-TTS mini, CosyVoice3 and Audio8 also support explicit

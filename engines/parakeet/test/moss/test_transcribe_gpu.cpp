@@ -72,8 +72,8 @@ void test(const std::string & path) {
     require(!result.cancelled && result.audio_tokens > 0, "engine transcription failed");
     const auto fit = parakeet::moss::fit_params(options, {}, 0.02, 0);
     require(fit.status != parakeet::FitStatus::Error && !fit.device_is_cpu &&
-            fit.device_name.find("Vulkan") == 0 && fit.device.weights_bytes > 0,
-            "memory projection lost explicit Vulkan selection");
+            arm.selected(fit.device_name.c_str()) && fit.device.weights_bytes > 0,
+            "memory projection lost explicit GPU selection");
     options.backend = "missing-backend";
     const auto unavailable_fit = parakeet::moss::fit_params(options, {}, 0.02, 0);
     require(unavailable_fit.status == parakeet::FitStatus::Error &&
