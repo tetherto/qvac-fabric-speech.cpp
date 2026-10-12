@@ -46,7 +46,7 @@ void write_wav(const std::string & path, const std::vector<float> & pcm, int rat
         for (int i = 0; i < width; ++i) bytes.push_back(static_cast<unsigned char>(n >> (8 * i)));
     };
     tag("RIFF"); le(36 + static_cast<uint32_t>(pcm.size() * 2), 4); tag("WAVE");
-    tag("fmt "); le(16, 4); le(1, 2); le(1, 2); le(rate, 4); le(rate * 2, 4);
+    tag("fmt "); le(16, 4); le(1, 2); le(1, 2); le(rate, 4); le(static_cast<uint32_t>(rate) * 2, 4);
     le(2, 2); le(16, 2); tag("data"); le(static_cast<uint32_t>(pcm.size() * 2), 4);
     for (float sample : pcm) {
         require(std::isfinite(sample), "codec produced nonfinite audio");
@@ -89,7 +89,7 @@ int run_decode_benchmark(const audio8_codec_bench::options & opts) {
     const auto & hp = header.hp;
     require(header.part == "decoder", "decode mode requires a decoder codec half");
     require(hp.sample_rate > 0 && hp.frame_size > 0 && hp.num_codebooks > 0 &&
-            hp.num_codebooks == hp.residual_codebooks + 1 && hp.codebook_dim > 0 && hp.latent_dim > 0,
+            hp.residual_codebooks == hp.num_codebooks - 1 && hp.codebook_dim > 0 && hp.latent_dim > 0,
             "invalid decoder codec geometry");
     require(opts.codebooks == 0 || opts.codebooks == hp.num_codebooks,
             "--codebooks does not match decoder metadata");
@@ -100,6 +100,7 @@ int run_decode_benchmark(const audio8_codec_bench::options & opts) {
                                       hp.semantic_codebook_size, hp.residual_codebook_size);
     const auto codes = audio8_codec_bench::decoder_rows(frame_codes, opts.frames, hp.num_codebooks);
     const size_t expected = static_cast<size_t>(opts.frames) * hp.frame_size;
+    require(expected <= std::numeric_limits<size_t>::max() / sizeof(float), "decoder PCM byte size overflows");
     owned_codec decoder;
     if (!codec::load_codec(opts.decoder, opts.backend == "cpu" ? 0 : 99,
                            opts.backend, decoder.model, &error)) throw std::runtime_error(error);
@@ -112,16 +113,34 @@ int run_decode_benchmark(const audio8_codec_bench::options & opts) {
     }
     std::vector<double> times;
     times.reserve(opts.repeat);
+    std::vector<float> first_pcm;
+    bool pcm_bitwise_stable = true;
+    double pcm_max_abs_diff = 0;
     for (int i = 0; i < opts.repeat; ++i) {
+        codec::decode_timing timing;
         const auto start = std::chrono::steady_clock::now();
-        const bool ok = codec::decode_codes(decoder.model, codes.data(), opts.frames, opts.threads, {}, pcm, &error);
+        const bool ok = codec::decode_codes(decoder.model, codes.data(), opts.frames, opts.threads, {}, pcm, &error,
+                                            nullptr, &timing);
         const auto end = std::chrono::steady_clock::now();
         if (!ok) throw std::runtime_error(error);
         const double ms = std::chrono::duration<double, std::milli>(end - start).count();
         require(std::isfinite(ms) && ms >= 0, "invalid decoder timing");
         times.push_back(ms);
         check_pcm(pcm, expected);
-        std::printf("decode iteration: repeat=%d decoder_ms=%.6f\n", i + 1, ms);
+        if (first_pcm.empty()) {
+            first_pcm = pcm;
+        } else if (std::memcmp(first_pcm.data(), pcm.data(), expected * sizeof(float)) != 0) {
+            pcm_bitwise_stable = false;
+            for (size_t sample = 0; sample < expected; ++sample)
+                pcm_max_abs_diff = std::max(pcm_max_abs_diff,
+                    std::abs(static_cast<double>(pcm[sample]) - first_pcm[sample]));
+        }
+        // The scheduler bundle is created only when a graph takes its route.
+        // Its presence detects that route, not the count of CPU-routed nodes.
+        std::printf("decode iteration: repeat=%d decoder_ms=%.6f synthesis_backend=%s "
+                    "scheduler_initialized=%s cpu_fallback_available=%s\n", i + 1, ms,
+                    timing.synthesis_backend.c_str(), decoder.model.sched.sched ? "true" : "false",
+                    decoder.model.sched.cpu_backend ? "true" : "false");
     }
     // The timed region is exactly decode_codes: graph construction/allocation,
     // execution and PCM readback. Loading, codes IO, checks and output IO are excluded.
@@ -143,6 +162,8 @@ int run_decode_benchmark(const audio8_codec_bench::options & opts) {
                 std::sqrt(squares / pcm.size()), opts.warmup, opts.repeat, opts.threads);
     std::printf("decoder timing: min_ms=%.6f mean_ms=%.6f median_ms=%.6f max_ms=%.6f stddev_ms=%.6f\n",
                 times.front(), mean, median, times.back(), std::sqrt(variance / times.size()));
+    std::printf("decoder repetitions: pcm_bitwise_stable=%s pcm_max_abs_diff=%.9g\n",
+                pcm_bitwise_stable ? "true" : "false", pcm_max_abs_diff);
     return 0;
 }
 }

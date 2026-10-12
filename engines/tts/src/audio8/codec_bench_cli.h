@@ -114,12 +114,27 @@ inline options parse(int argc, char ** argv) {
     return opts;
 }
 
+inline std::filesystem::path normalized_output_path(const std::filesystem::path & path) {
+    auto normalized = std::filesystem::weakly_canonical(path);
+    // weakly_canonical leaves a dangling final symlink unresolved. Its target
+    // can be another output which does not exist until the first write.
+    for (int depth = 0; depth < 40; ++depth) {
+        std::error_code ec;
+        if (!std::filesystem::is_symlink(std::filesystem::symlink_status(normalized, ec)))
+            return normalized;
+        const auto target = std::filesystem::read_symlink(normalized);
+        normalized = std::filesystem::weakly_canonical(
+            target.is_absolute() ? target : normalized.parent_path() / target);
+    }
+    throw std::runtime_error("output path contains a symlink cycle or excessive symlink depth");
+}
+
 // Compare normalized paths as well as filesystem identities (hard links).
 inline void validate_output_paths(const options & opts) {
     std::vector<std::filesystem::path> outputs;
     for (const auto & output : {opts.output, opts.output_f32}) {
         if (output.empty()) continue;
-        const auto normalized = std::filesystem::weakly_canonical(output);
+        const auto normalized = normalized_output_path(output);
         for (const auto & input : {opts.input, opts.encoder, opts.decoder, opts.codes}) {
             if (input.empty()) continue;
             std::error_code ec;

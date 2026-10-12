@@ -159,6 +159,12 @@ int main() {
     paths.output_f32 = (temp.path / "out.f32").string();
     paths.output = (temp.path / "." / "out.f32").string();
     check(rejects([&] { bench::validate_output_paths(paths); }), "normalized output aliases rejected");
+    const auto dangling = temp.path / "out.wav";
+    std::filesystem::create_symlink("out.f32", dangling, link_error);
+    if (!link_error) {
+        paths.output = dangling.string();
+        check(rejects([&] { bench::validate_output_paths(paths); }), "dangling symlink output aliases rejected");
+    }
     if (!failed) std::puts("codec benchmark CLI tests passed");
     return failed ? 1 : 0;
 }
