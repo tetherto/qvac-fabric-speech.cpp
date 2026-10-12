@@ -1251,6 +1251,9 @@ static ggml_tensor * basic_tfm(ggml_context * ctx, const basic_tfm_w & w,
         // CFM feeds attention back through the flow solver. Vulkan's default
         // F16 accumulation drifts across steps and can overflow even with F32
         // Q/K/V. Preserve accumulation precision without disabling F16 weights.
+        // At ggml e16d1332 CPU DEFAULT/F32 share the F32 implementation;
+        // Metal/CUDA flash attention do not read this flag (not a global F32
+        // arithmetic guarantee). Re-audit on ggml upgrades; see docs/moss.md.
         ggml_flash_attn_ext_set_prec(attn_fa, GGML_PREC_F32);
         // flash_attn_ext output: ne=[HD, H, T, 1] (contiguous). Reshape to (INNER, T).
         flat = ggml_reshape_2d(ctx, attn_fa, INNER, T);

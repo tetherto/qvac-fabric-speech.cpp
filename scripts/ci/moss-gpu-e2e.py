@@ -10,6 +10,7 @@ inference, not addon integration or perceptual audio quality.
 import argparse
 import array
 from contextlib import contextmanager, nullcontext
+from datetime import date, datetime, timezone
 import fcntl
 import hashlib
 import importlib.util
@@ -53,6 +54,11 @@ ASR_SPEC = {
 }
 MAX_TTS_WER = 0.25
 TTS_BASELINE_SHA = "8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c"
+# Temporary exception owned by @ogad-tether; renewal/removal requires review in
+# https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328. Never auto-bump
+# the immutable baseline to turn newly failing audio into a pre-existing issue.
+TTS_BASELINE_ISSUE = "https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328"
+TTS_BASELINE_REVIEW_BY = date(2026, 11, 12)  # expires at 00:00 UTC, fail closed
 UNCONDITIONED_OUTPUTS = ("batch", "stream", "cpu-reference")
 
 # Shared-worker admission policy and external-process limits, in explicit units.
@@ -86,10 +92,12 @@ def same_audio(left, right):
         return False
 
 
-def classify_tts_scores(scores, output):
+def classify_tts_scores(scores, output, *, today=None):
     failed, existing = [], []
     baseline = output / "tts-baseline-commit.txt"
-    verified_base = baseline.is_file() and baseline.read_text().strip() == TTS_BASELINE_SHA
+    today = today if today is not None else datetime.now(timezone.utc).date()
+    verified_base = (today < TTS_BASELINE_REVIEW_BY and baseline.is_file() and
+                     baseline.read_text().strip() == TTS_BASELINE_SHA)
     for name, score in scores.items():
         if intelligibility_passes(score):
             continue
@@ -139,7 +147,9 @@ def score_tts_outputs(asr_binary, models, output):
     return {"status": "failed" if failed else "passed", "max_wer": MAX_TTS_WER,
             "asr_model": ASR_SPEC, "failed_outputs": failed, "scores": scores,
             "quality_status": "failed" if failed or existing else "passed",
-            "pre_existing_quality_issues": existing, "baseline_commit": TTS_BASELINE_SHA}
+            "pre_existing_quality_issues": existing, "baseline_commit": TTS_BASELINE_SHA,
+            "baseline_issue": TTS_BASELINE_ISSUE,
+            "baseline_review_by_utc": TTS_BASELINE_REVIEW_BY.isoformat()}
 
 
 def gpu_memory():
@@ -155,6 +165,8 @@ def gpu_memory():
 def wait_for_gpu(deadline, report, expected_uuid):
     # Other repositories do not share our matrix limit or lock. Require near-idle
     # memory twice before loading a checkpoint; never terminate foreign jobs.
+    # Best-effort admission, not a reservation: a noncooperating workload can
+    # allocate immediately after the last sample and cause an inference OOM.
     ready = 0
     while time.monotonic() < deadline:
         state = gpu_memory()
@@ -265,6 +277,9 @@ def reference(source, target, offset, seconds=3):
 
 def gpu_snapshot(output, name, phase):
     with (output / f"{name}-gpu-{phase}.txt").open("w") as stream:
+        stream.write(f"captured_at_utc: {datetime.now(timezone.utc).isoformat()}\n")
+        stream.write("tenancy: shared; admission is best-effort, not a GPU reservation\n")
+        stream.flush()
         for query in [
             ["--query-gpu=uuid,name,memory.total,memory.used,memory.free", "--format=csv"],
             ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv"],

@@ -79,6 +79,20 @@ class RunnerTests(unittest.TestCase):
                                 runner.invoke("test", ["moss-cli"], wav=False)
                         lease.assert_called_once_with(root, "test")
 
+    def test_inference_oom_remains_failure_and_captures_after_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = e2e.CaseRunner("cuda", root, root, root, root / "baseline")
+            with patch.object(e2e, "gpu_lease"), \
+                 patch.object(e2e, "gpu_snapshot") as snapshot, \
+                 patch.object(e2e.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "moss-cli")), \
+                 patch.object(sys, "stderr", io.StringIO()):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runner.invoke("oom", ["moss-cli"], wav=False)
+                self.assertEqual([call.args for call in snapshot.call_args_list],
+                                 [(root, "oom", "before"), (root, "oom", "after")])
+                self.assertNotIn("oom", runner.checks)
+
     def test_family_flows_preserve_baselines_streaming_and_dialogue(self):
         root = Path("/test")
         for family in ("tts", "ttsd", "sfx", "speech", "transcribe"):
@@ -153,6 +167,34 @@ class CheckpointTests(unittest.TestCase):
 
 
 class IntelligibilityTests(unittest.TestCase):
+    def setUp(self):
+        # Keep ordinary quality cases independent of the wall clock. The expiry
+        # boundary itself is covered below, including improved output afterward.
+        clock = patch.object(e2e, "datetime", wraps=e2e.datetime)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+        self.clock.now.return_value = e2e.datetime(2026, 10, 12, tzinfo=e2e.timezone.utc)
+
+    def test_exemption_expires_but_improved_output_passes_without_baseline_bump(self):
+        bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
+        good = {**bad, "wer": 0.0}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
+            with patch.object(e2e, "same_audio", return_value=True):
+                before = e2e.date(2026, 11, 11)
+                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output, today=before),
+                                 ([], ["batch"]))
+                for today in (e2e.TTS_BASELINE_REVIEW_BY, e2e.date(2026, 12, 12)):
+                    self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output, today=today),
+                                     (["batch"], []))
+                self.clock.now.return_value = e2e.datetime(2026, 11, 12, tzinfo=e2e.timezone.utc)
+                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
+            with patch.object(e2e, "same_audio", return_value=False) as same:
+                self.assertEqual(e2e.classify_tts_scores({"batch": good}, output,
+                                 today=e2e.TTS_BASELINE_REVIEW_BY), ([], []))
+                same.assert_not_called()
+
     def test_tts_quality_gate_covers_quantized_cases_on_both_backends(self):
         for case in ("tts-f16", "tts-q8_0"):
             for backend in ("cuda", "vulkan"):

@@ -54,7 +54,15 @@ unavailable. Admission times out after 15 minutes and records the readings;
 foreign processes are never terminated. This coordinates OpenMOSS runs across
 runner accounts and avoids starting while another workload occupies the GPU.
 Other GPU workloads do not honor this lock and can still start afterward;
-before/after process snapshots remain necessary to diagnose contention.
+before/after process snapshots remain necessary to diagnose contention. This is
+best-effort admission, not exclusive tenancy or a VRAM reservation. The workflow
+matrix limit covers only its own jobs. Saved runner logs show `/opt/actions-runner`,
+`actions-runner-2` and `actions-runner-3` workspaces, and process snapshots include
+other applications on the same 20 GiB NVIDIA GPU. Cross-team scheduling guarantees
+are unknown; the gate cannot prevent a foreign allocation after admission or
+prove which short-lived process caused an OOM. Timestamped before/after snapshots
+and the inference error remain artifacts, and a mid-run OOM still fails the case.
+No infrastructure changes or termination of foreign processes are performed.
 The TTS case also saves a CPU reference with the same checkpoint, text and
 seed to investigate backend-dependent generation quality.
 
@@ -92,6 +100,19 @@ exception. Voice-conditioned streaming and reuse retain the strict quality
 gate. This keeps existing general TTS defects outside the GPU backend changes while
 continuing to reject new regressions.
 
+Lifecycle owner: Omar (`@ogad-tether`), tracked in
+[wrong-text issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328).
+The exception expires at **2026-11-12 00:00 UTC** and then fails closed, even for
+identical baseline PCM. The result artifact includes the issue and review date.
+Improved audio that meets the WER gate passes immediately without a baseline bump;
+changed audio that still fails WER is a blocking regression, even if its WER is
+lower than before. The baseline is never automatically advanced. Renewing the
+deadline or replacing the baseline requires an intentional reviewed change linked
+to #328 with old/new audio hashes, transcripts, scores and justification. When the
+underlying fix passes every expected unconditioned and voice-conditioned output
+on CPU/CUDA/Vulkan (including streaming and reuse), remove this exception and the
+baseline workflow build/runs together, retaining the strict quality gate.
+
 Speech cases also run `test-moss-speech-codec-e2e cuda|vulkan CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and the selected GPU on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
@@ -102,6 +123,46 @@ default F16 accumulation on MoltenVK can amplify errors across solver steps
 until the mel becomes non-finite. F16 weights and other Vulkan operations
 remain enabled; no `GGML_VK_DISABLE_F16` workaround is required. Non-finite
 flow states are reported as synthesis errors instead of decoded as audio.
+
+### S3Gen flash-attention precision audit
+
+This audit applies specifically to ggml
+[`e16d1332bdafcaade27eb402c62418239faef632`](https://github.com/tetherto/qvac-ext-ggml/tree/e16d1332bdafcaade27eb402c62418239faef632).
+The setter changes only `op_params[3]`
+([ggml.c](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml.c#L6307)).
+Both single and batched S3Gen CFM attention retain the explicit F32 request.
+
+- CPU: `ggml_compute_forward_flash_attn_ext` sends DEFAULT and F32 through
+  the same implementation, explicitly using F32 accumulators
+  ([ops.cpp](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-cpu/ops.cpp#L10807)).
+- Metal: flash-attention dispatch reads scale, max bias and softcap (slots 0–2),
+  and its pipeline selection does not consume slot 3
+  ([dispatch](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-metal/ggml-metal-ops.cpp#L4405),
+  [pipeline](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-metal/ggml-metal-device.cpp#L1803)).
+  The F32/F16 KV matrix kernels use float QK, softmax and output accumulation
+  (`FA_TYPES_F32` / `FA_TYPES`), with some half intermediates. This is not a
+  claim that all Metal arithmetic or BF16 paths use F32
+  ([kernel types](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-metal/ggml-metal.metal#L10129)).
+- CUDA: flash-attention support, allocation and kernel selection do not read the
+  precision slot; the shared launch code passes only slots 0–2. DEFAULT and F32
+  select the same kernels and arithmetic for the same tensors/device. This does
+  not imply CUDA attention is universally F32; its existing conversions and
+  architecture-specific paths remain in effect
+  ([selection](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-cuda/fattn.cu#L366),
+  [launch](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-cuda/fattn-common.cuh#L1191)).
+- Vulkan: `f32acc` explicitly reads slot 3, so the request changes accumulation
+  where the default would use F16
+  ([dispatch](https://github.com/tetherto/qvac-ext-ggml/blob/e16d1332bdafcaade27eb402c62418239faef632/src/ggml-vulkan/ggml-vulkan.cpp#L13515)).
+
+CPU/Metal/CUDA equivalence above is source-level evidence for this flag at this
+pin, not measured before/after codec latency or numerical results. Existing green
+GPU inference runs validate the F32-requesting code but are not A/B benchmarks.
+Re-audit these dispatch paths on ggml upgrades. If a backend starts honoring the
+flag differently, compare fixed-input codec-only DEFAULT/F32 builds (both CFG
+paths, identical codes/noise/voice, mel/PCM finiteness/error and warmed timings)
+before updating the pin; never weaken production precision to pass a comparison.
+Local codec comparisons must run serially with a 3 GiB process-tree RSS ceiling
+and abort on memory pressure or swap growth. Full Speech/TTS LMs are unnecessary.
 
 These generated-model checks pass on Apple M2 through MoltenVK. They do
 not establish full-checkpoint speech quality, performance, or Android and
