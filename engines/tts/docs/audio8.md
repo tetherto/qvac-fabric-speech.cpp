@@ -777,6 +777,14 @@ it exercises the codec encoder the way a caller would.
 
 #### Fixed-code decoder benchmark
 
+Both output paths must differ even under ASCII case folding; on Windows the
+check also covers Unicode case aliases. This prevents two nonexistent output
+names such as `out.wav` and `OUT.WAV` from overwriting each other on a
+case-insensitive filesystem. Existing input/model aliases, hard links and
+symlinks are also rejected. With tests and executables enabled,
+`test-audio8-codec-bench-runner` generates a tiny decoder and exercises the
+actual CLI, including repetition statistics and byte-level WAV/F32 exports.
+
 `audio8-codec-bench` can decode captured codes without running the language
 model. Build the existing benchmark target, then use the CSV produced by
 `audio8-cli --dump-codes` (one frame per line, ten comma-separated codes):

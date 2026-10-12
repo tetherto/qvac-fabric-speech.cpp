@@ -10,6 +10,13 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace audio8_codec_bench {
 struct options {
     std::string encoder, decoder, input, output;
@@ -129,7 +136,29 @@ inline std::filesystem::path normalized_output_path(const std::filesystem::path 
     throw std::runtime_error("output path contains a symlink cycle or excessive symlink depth");
 }
 
-// Compare normalized paths as well as filesystem identities (hard links).
+inline bool output_paths_case_equal(const std::filesystem::path & a,
+                                    const std::filesystem::path & b) {
+    const auto & left = a.native();
+    const auto & right = b.native();
+#ifdef _WIN32
+    if (left.size() > INT_MAX || right.size() > INT_MAX)
+        throw std::runtime_error("output path is too long");
+    return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                                right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+#else
+    if (left.size() != right.size()) return false;
+    auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+    for (size_t i = 0; i < left.size(); ++i)
+        if (fold(static_cast<unsigned char>(left[i])) != fold(static_cast<unsigned char>(right[i])))
+            return false;
+    return true;
+#endif
+}
+
+// Conservatively reject case aliases even before outputs exist. Windows uses
+// Unicode ordinal comparison; other hosts also reject ASCII case aliases so
+// the same invocation is safe on both case-sensitive and insensitive volumes.
+// Filesystem identities still catch hard links and existing Unicode aliases.
 inline void validate_output_paths(const options & opts) {
     std::vector<std::filesystem::path> outputs;
     for (const auto & output : {opts.output, opts.output_f32}) {
@@ -138,13 +167,13 @@ inline void validate_output_paths(const options & opts) {
         for (const auto & input : {opts.input, opts.encoder, opts.decoder, opts.codes}) {
             if (input.empty()) continue;
             std::error_code ec;
-            if (normalized == std::filesystem::weakly_canonical(input) ||
+            if (output_paths_case_equal(normalized, std::filesystem::weakly_canonical(input)) ||
                 std::filesystem::equivalent(input, output, ec))
                 throw std::runtime_error("output aliases an input or model file");
         }
         for (const auto & prior : outputs) {
             std::error_code ec;
-            if (normalized == prior || std::filesystem::equivalent(prior, output, ec))
+            if (output_paths_case_equal(normalized, prior) || std::filesystem::equivalent(prior, output, ec))
                 throw std::runtime_error("WAV and F32 outputs alias the same file");
         }
         outputs.push_back(normalized);

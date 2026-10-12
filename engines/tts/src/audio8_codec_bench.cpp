@@ -145,7 +145,12 @@ int run_decode_benchmark(const audio8_codec_bench::options & opts) {
     // The timed region is exactly decode_codes: graph construction/allocation,
     // execution and PCM readback. Loading, codes IO, checks and output IO are excluded.
     if (!opts.output_f32.empty()) write_f32(opts.output_f32, pcm);
-    if (!opts.output.empty()) write_wav(opts.output, pcm, hp.sample_rate);
+    if (!opts.output.empty()) {
+        // The first output now exists, so equivalent also detects aliases
+        // under filesystem-specific Unicode case/normalization rules.
+        if (!opts.output_f32.empty()) audio8_codec_bench::validate_output_paths(opts);
+        write_wav(opts.output, pcm, hp.sample_rate);
+    }
     const double mean = std::accumulate(times.begin(), times.end(), 0.0) / times.size();
     double variance = 0;
     for (double ms : times) variance += (ms - mean) * (ms - mean);

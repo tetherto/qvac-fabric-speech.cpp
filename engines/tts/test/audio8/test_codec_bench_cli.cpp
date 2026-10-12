@@ -165,6 +165,19 @@ int main() {
         paths.output = dangling.string();
         check(rejects([&] { bench::validate_output_paths(paths); }), "dangling symlink output aliases rejected");
     }
+    paths.output = (temp.path / "case.wav").string();
+    paths.output_f32 = (temp.path / "CASE.WAV").string();
+    check(!std::filesystem::exists(paths.output) && !std::filesystem::exists(paths.output_f32),
+          "case alias regression starts with nonexistent outputs");
+    check(rejects([&] { bench::validate_output_paths(paths); }), "nonexistent case aliases rejected");
+    paths.output.clear();
+    paths.output_f32 = (temp.path / "CODES.CSV").string();
+    check(rejects([&] { bench::validate_output_paths(paths); }), "case alias of input rejected");
+#ifdef _WIN32
+    check(bench::output_paths_case_equal(std::filesystem::path(L"\u00e9.wav"),
+                                       std::filesystem::path(L"\u00c9.WAV")),
+          "Windows Unicode case aliases rejected");
+#endif
     if (!failed) std::puts("codec benchmark CLI tests passed");
     return failed ? 1 : 0;
 }
