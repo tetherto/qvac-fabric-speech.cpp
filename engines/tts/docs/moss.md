@@ -2,38 +2,53 @@
 
 Part of the [tts engine documentation](../README.md).
 
-## Vulkan validation
+## GPU validation (CUDA and Vulkan)
 
 All MOSS engines use the shared ggml GPU selector and GPU/CPU scheduler.
-With a Vulkan-enabled ggml install, `--gpu` can run MOSS-TTS/TTSD,
-MOSS-SoundEffect and MOSS-Speech on Vulkan. For a Vulkan-only development
-build, build ggml with `GGML_VULKAN=ON`, `GGML_METAL=OFF` and
-`GGML_CUDA=OFF`, install it, and configure the speech engine with that
-installation on `CMAKE_PREFIX_PATH`. On a build with several GPU backends,
-`TTS_CPP_GPU_BACKEND=vulkan` pins the shared selector for validation:
+With a CUDA- or Vulkan-enabled ggml install, `--gpu` can run MOSS-TTS/TTSD,
+MOSS-SoundEffect and MOSS-Speech on that backend; the selector prefers CUDA
+when both are present. For a single-backend development build, build ggml
+with `GGML_CUDA=ON` or `GGML_VULKAN=ON` (and the other GPU backends off),
+install it, and configure the speech engine with that installation on
+`CMAKE_PREFIX_PATH`. On a build with several GPU backends,
+`TTS_CPP_GPU_BACKEND=cuda` or `TTS_CPP_GPU_BACKEND=vulkan` pins the shared
+selector for validation:
 
 ```sh
-TTS_CPP_GPU_BACKEND=vulkan build/moss-cli --gpu --backbone moss-tts-delay-f16.gguf \
-    --decoder moss-codec-decoder-f16.gguf --text "Vulkan speech test." --out vulkan.wav
-ctest --test-dir build -R '^test-moss-vulkan$' --output-on-failure
+TTS_CPP_GPU_BACKEND=cuda build/moss-cli --gpu --backbone moss-tts-delay-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf --text "CUDA speech test." --out cuda.wav
+ctest --test-dir build -R '^test-moss-(cuda|vulkan)$' --output-on-failure
 ```
 
-The test generates small random-weight GGUFs and compares CPU and Vulkan
-outputs for Delay prefill/decode/reset, both codec halves, streaming and
+`test-moss-cuda` and `test-moss-vulkan` run one binary, `test-moss-gpu`,
+with the backend as its argument; each registers only when ggml carries
+that backend. The test generates small random-weight GGUFs and compares CPU
+and GPU outputs for Delay prefill/decode/reset, both codec halves, streaming and
 reduced-channel dialogue decoding, SoundEffect text/DiT/VAE, Speech's two
 LM heads and Whisper-VQ tokenizer. It covers F32, F16 and mixed Q8_0/F16
 weights, plus the Speech LM's BF16 export with an F16 tokenizer. It fails
-if Vulkan is unavailable instead of accepting a CPU-only run. The existing
+if the named backend is unavailable instead of accepting a CPU-only run or
+the other GPU. The existing
 manual `tts CI` workflow runs it with `run_gpu=true`; no model downloads
 are required for this test.
 
 The same workflow's `run_moss_e2e=true` lane downloads registered checkpoints
-and saves generated WAVs, transcripts, logs and model hashes. Cases run
+and saves generated WAVs, transcripts, logs and model hashes. It runs every
+case in `moss_e2e_cases` on every backend in `moss_e2e_backends` (default
+`["cuda","vulkan"]`), building ggml with only that backend so a CLI cannot
+land on the other. The default cases are `tts-q8_0`, `ttsd-q8_0`,
+`sfx-q8_0`, `speech-q8_0` and `transcribe-q5_0`, leaving memory headroom
+on the shared 20 GiB runner. The TTS/TTSD cases download the registered F16
+backbone and requantize its transformer matrices to Q8_0; embeddings,
+output heads and codec weights stay at their source precision. Artifacts
+include the quantizer log and hashes of both source and generated weights.
+Full-precision cases remain available through `moss_e2e_cases`, but can
+exhaust CUDA device memory on this runner. Cases run
 serially because runner services share GPU memory. Speech cases use
 `test-moss-speech-e2e` to make two replies on one engine instance, checking
 that staged model unloading also works on the next request.
 
-Each Vulkan invocation also takes a host-local lock keyed by the physical
+Each GPU invocation also takes a host-local lock keyed by the physical
 GPU UUID and waits for two consecutive memory readings with at most 1 GiB
 unavailable. Admission times out after 15 minutes and records the readings;
 foreign processes are never terminated. This coordinates OpenMOSS runs across
@@ -57,7 +72,7 @@ The TTS case also gates every expected batch/stream/reuse WAV and its CPU
 reference with the existing Whisper CPU intelligibility scorer. The reference
 model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
 the ASR executable is a separate static CPU build of the vendored Whisper/ggml
-pair so its versioned CLI dependencies are isolated from the Vulkan test pin.
+pair so its versioned CLI dependencies are isolated from the GPU test pin.
 The synthesis text is never provided as an ASR prompt. Missing/unavailable
 scores, non-finite scores, or word error rate above 25% fail the case. This
 tolerates limited reference-ASR errors while rejecting the observed wrong-text
@@ -67,18 +82,18 @@ and ASR settings are saved even when a later synthesis step fails.
 
 Unconditioned TTS has a suspected pre-existing wrong-text issue. The TTS
 case also builds upstream commit `8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c`
-and runs the same CPU, Vulkan batch and Vulkan streaming requests with
+and runs the same CPU, GPU batch and GPU streaming requests with
 identical checkpoints, seed and ggml on the same worker. An unconditioned
 quality failure is non-blocking only when its PCM samples and audio format
 exactly match that baseline. Such failures remain visible in transcripts
 and `pre_existing_quality_issues`; they are not counted as quality passes.
 Changed audio, a missing/unverified baseline or an ASR error cannot use this
 exception. Voice-conditioned streaming and reuse retain the strict quality
-gate. This keeps existing general TTS defects outside the Vulkan PR while
+gate. This keeps existing general TTS defects outside the GPU backend changes while
 continuing to reject new regressions.
 
-Speech cases also run `test-moss-speech-codec-e2e CODEC.gguf OUTPUT_DIR`.
-This loads only the codec, comparing CPU and Vulkan on fixed speech tokens,
+Speech cases also run `test-moss-speech-codec-e2e cuda|vulkan CODEC.gguf OUTPUT_DIR`.
+This loads only the codec, comparing CPU and the selected GPU on fixed speech tokens,
 identical diffusion noise and a short voice reference. It checks finite mel
 values, numerical agreement, output length and signal level for both the
 single-batch and batched CFG paths, and saves the audio and mel dumps.

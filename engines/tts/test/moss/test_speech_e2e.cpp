@@ -1,8 +1,10 @@
-// Full-checkpoint Vulkan regression: two replies on the same engine must fit
+// Full-checkpoint GPU regression: two replies on the same engine must fit
 // without retaining the first turn's LM/decoder device allocations.
 #include "tts-cpp/moss/speech.h"
 #include "voice_features.h"
 #include "dr_wav.h"
+#include "../test_env_portable.h"
+#include "../../../test/moss_gpu_arm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -35,22 +37,24 @@ static void write_reply(const std::filesystem::path & path,
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 5) {
-        std::fprintf(stderr, "usage: %s LM.gguf CODEC.gguf INPUT.wav OUTPUT_DIR\n", argv[0]);
+    if (argc != 6) {
+        std::fprintf(stderr, "usage: %s cuda|vulkan LM.gguf CODEC.gguf INPUT.wav OUTPUT_DIR\n", argv[0]);
         return 77;
     }
     try {
+        const MossGpuArm arm = moss_gpu_arm(argv[1]);
+        setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
         tts_cpp::moss::SpeechOptions options;
-        options.model_path = argv[1];
-        options.codec_path = argv[2];
+        options.model_path = argv[2];
+        options.codec_path = argv[3];
         options.use_gpu = true;
         options.n_threads = 4;
         tts_cpp::moss::SpeechEngine engine(options);
         const std::string backend = engine.backend_name();
-        if (backend.find("Vulkan") != 0) throw std::runtime_error("Vulkan backend required");
+        arm.require(backend.c_str());
         std::fprintf(stderr, "[moss-speech-e2e] backend: %s\n", backend.c_str());
         tts_cpp::moss::SpeechMessage message;
-        if (!wav_load(argv[3], message.audio, message.sample_rate)) throw std::runtime_error("cannot read input WAV");
+        if (!wav_load(argv[4], message.audio, message.sample_rate)) throw std::runtime_error("cannot read input WAV");
         tts_cpp::moss::SpeechRequest request;
         request.messages.push_back(std::move(message));
         request.max_new_tokens = 256;
@@ -59,7 +63,7 @@ int main(int argc, char ** argv) {
         for (int turn = 0; turn < 2; ++turn) {
             const auto result = engine.respond(request);
             if (backend != engine.backend_name()) throw std::runtime_error("backend changed after reply");
-            write_reply(std::filesystem::path(argv[4]) / (turn == 0 ? "reply.wav" : "reply-repeat.wav"), result);
+            write_reply(std::filesystem::path(argv[5]) / (turn == 0 ? "reply.wav" : "reply-repeat.wav"), result);
             std::fprintf(stderr, "reply %d: %d codes, %.2f seconds, prefill %.0f ms, generate %.0f ms, decode %.0f ms\n",
                          turn + 1, result.reply_tokens, (double) result.pcm.size() / result.sample_rate,
                          result.prefill_ms, result.generate_ms, result.decode_ms);

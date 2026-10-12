@@ -40,6 +40,7 @@ inline bool backend_selection_matches(const std::string & requested,
     if (requested == "cpu") return type == GGML_BACKEND_DEVICE_TYPE_CPU;
     if (requested == "opencl") return reg && std::strcmp(reg, "OpenCL") == 0;
     if (requested == "vulkan") return reg && std::strcmp(reg, "Vulkan") == 0;
+    if (requested == "cuda") return reg && std::strcmp(reg, "CUDA") == 0;
     if (requested == "hexagon") {
         return reg && std::strcmp(reg, "HTP") == 0 && device && std::strcmp(device, "HTP0") == 0;
     }

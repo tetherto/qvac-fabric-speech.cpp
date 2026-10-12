@@ -3,6 +3,7 @@
 #include "tts-cpp/moss/engine.h"
 #include "dr_wav.h"
 #include "../test_env_portable.h"
+#include "../../../test/moss_gpu_arm.h"
 
 #include <algorithm>
 #include <chrono>
@@ -106,14 +107,15 @@ void cancel(Engine & engine, const std::string & text, bool explicit_cancel) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    if (argc != 8) {
-        std::fprintf(stderr, "usage: %s LM.gguf DECODER.gguf ENCODER.gguf REFERENCE.wav OUTPUT_DIR SHORT.txt LONG.txt\n", argv[0]);
+    if (argc != 9) {
+        std::fprintf(stderr, "usage: %s cuda|vulkan LM.gguf DECODER.gguf ENCODER.gguf REFERENCE.wav OUTPUT_DIR SHORT.txt LONG.txt\n", argv[0]);
         return 77;
     }
     try {
-        setenv("TTS_CPP_GPU_BACKEND", "vulkan", 1);
+        const MossGpuArm arm = moss_gpu_arm(argv[1]);
+        setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
         unsetenv("GGML_VK_DISABLE_F16");
-        const fs::path output(argv[5]);
+        const fs::path output(argv[6]);
         fs::create_directories(output);
         auto read_text = [](const char * path) {
             std::ifstream input(path);
@@ -123,14 +125,14 @@ int main(int argc, char ** argv) {
             require(!text.empty(), "empty test prompt");
             return text;
         };
-        const std::string short_text = read_text(argv[6]);
-        const std::string long_text = read_text(argv[7]);
+        const std::string short_text = read_text(argv[7]);
+        const std::string long_text = read_text(argv[8]);
         for (int chunk : {7, 25}) {
             EngineOptions options;
-            options.backbone_path = argv[1];
-            options.decoder_path = argv[2];
-            options.encoder_path = argv[3];
-            options.reference_audio_path = argv[4];
+            options.backbone_path = argv[2];
+            options.decoder_path = argv[3];
+            options.encoder_path = argv[4];
+            options.reference_audio_path = argv[5];
             options.language = "en";
             options.use_gpu = true;
             options.n_threads = 4;
@@ -139,7 +141,7 @@ int main(int argc, char ** argv) {
             options.stream_chunk_frames = chunk;
             Engine engine(options);
             const std::string backend = engine.backend_name();
-            require(backend.find("Vulkan") == 0, "Vulkan backend required");
+            arm.require(backend.c_str());
             std::fprintf(stderr, "[moss-tts-stream-e2e] backend: %s\n", backend.c_str());
             const std::string label = "tts-c" + std::to_string(chunk);
             const auto reference = batch(engine, short_text, output / (label + "-batch.wav"), SHORT_MAX_NEW_TOKENS);

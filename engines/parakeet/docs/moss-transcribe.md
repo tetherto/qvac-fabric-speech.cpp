@@ -2,18 +2,18 @@
 
 Part of the [parakeet engine documentation](../README.md).
 
-Vulkan can be selected explicitly with `--backend vulkan` (or an exact
-device such as `--backend Vulkan0`). This overrides `--gpu` and fails when
+CUDA or Vulkan can be selected explicitly with `--backend cuda` or
+`--backend vulkan` (or an exact device such as `--backend CUDA0`). This overrides `--gpu` and fails when
 the requested backend is unavailable; `--backend auto` retains the existing
 `--gpu`/CPU selection. The API equivalent is `TranscribeOptions::backend`.
-Build against a Vulkan-enabled ggml installation, then run:
+Build against a CUDA- or Vulkan-enabled ggml installation, then run:
 
 ```sh
-build/moss-transcribe --model moss-transcribe-f16.gguf --audio speech.wav --backend vulkan
-ctest --test-dir build -R '^test-moss-transcribe-vulkan$' --output-on-failure
+build/moss-transcribe --model moss-transcribe-f16.gguf --audio speech.wav --backend cuda
+ctest --test-dir build -R '^test-moss-transcribe-(cuda|vulkan)$' --output-on-failure
 ```
 
-The Vulkan test generates random-weight GGUFs in F32, F16 and mixed Q8_0/F16
+Each arm registers only when ggml carries its backend. The test generates random-weight GGUFs in F32, F16 and mixed Q8_0/F16
 and compares the encoder, adaptor, batched prefill and incremental decoding
 against CPU. It also checks explicit selection through the public engine and
 rejects unavailable backends. It runs in the manual `parakeet CI` GPU lane

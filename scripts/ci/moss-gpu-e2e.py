@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full-checkpoint Vulkan smoke tests; model files come from the model registry.
+"""Full-checkpoint GPU smoke tests; model files come from the model registry.
 
 Run from the repository root after building moss-cli and moss-transcribe.
 Requires AWS CLI credentials and MODEL_S3_BUCKET. Outputs contain logs, WAVs,
@@ -25,9 +25,13 @@ import traceback
 import wave
 
 
+BACKENDS = {"cuda": "CUDA", "vulkan": "Vulkan"}
+
 CASES = {
     "tts-f16": "moss-tts-delay-f16",
+    "tts-q8_0": "moss-tts-delay-f16",
     "ttsd-f16": "moss-ttsd-f16",
+    "ttsd-q8_0": "moss-ttsd-f16",
     "sfx-f16": "moss-sfx-v2-f16",
     "sfx-q8_0": "moss-sfx-v2-q8_0",
     "speech-bf16": "moss-speech-bf16",
@@ -59,6 +63,7 @@ GPU_ADMISSION_TIMEOUT_SECONDS = 900
 GPU_QUERY_TIMEOUT_SECONDS = 30
 INFERENCE_TIMEOUT_SECONDS = 1200
 DOWNLOAD_TIMEOUT_SECONDS = 1800
+QUANTIZATION_TIMEOUT_SECONDS = 1800
 ASR_TIMEOUT_SECONDS = 360
 HASH_CHUNK_BYTES = 8 * 1024 * 1024
 ERROR_LOG_TAIL_CHARS = 12000
@@ -269,7 +274,9 @@ def gpu_snapshot(output, name, phase):
 
 
 class CaseRunner:
-    def __init__(self, build, models, output, baseline_binary):
+    def __init__(self, backend, build, models, output, baseline_binary):
+        self.backend = backend
+        self.backend_prefix = BACKENDS[backend]
         self.build = build
         self.models = models
         self.output = output
@@ -291,14 +298,14 @@ class CaseRunner:
                     stream.flush()
                     subprocess.run(args, stdout=stream, stderr=subprocess.STDOUT,
                                    check=True, timeout=INFERENCE_TIMEOUT_SECONDS,
-                                   env={**os.environ, "TTS_CPP_GPU_BACKEND": "vulkan"})
+                                   env={**os.environ, "TTS_CPP_GPU_BACKEND": self.backend})
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # Put the actual engine error in the job log as well as the artifact.
             print(log.read_text(errors="replace")[-ERROR_LOG_TAIL_CHARS:], file=sys.stderr, flush=True)
             raise
         finally:
             gpu_snapshot(output, name, "after")
-        backend = "CPU" if cpu else "Vulkan"
+        backend = "CPU" if cpu else self.backend_prefix
         if not re.search(r"\[(?:moss-cli|moss-transcribe|moss-speech-e2e|moss-speech-codec-e2e|moss-tts-stream-e2e)\] backend: " + backend + r"\d*", log.read_text()):
             raise RuntimeError(f"{name} did not select {backend}; see {log}")
         checks[name] = audio_stats(output / f"{name}.wav") if wav else {"backend": backend}
@@ -337,7 +344,7 @@ def run_tts(runner, model):
         runner.invoke(f"baseline-{name}", [*args, "--out", str(runner.output / f"baseline-{name}.wav")],
                cpu=name == "cpu-reference")
     runner.invoke("stream-agreement", [str(runner.build / "engines/tts/test-moss-tts-stream-e2e"),
-           model, decoder, encoder, str(ref1), str(runner.output),
+           runner.backend, model, decoder, encoder, str(ref1), str(runner.output),
            str(runner.output / "reference-short.txt"), str(runner.output / "reference-long.txt")], wav=False)
 
 
@@ -361,18 +368,18 @@ def run_sfx(runner, model):
 def run_speech(runner, model):
     codec = download("moss-speech-codec-f16", runner.models, runner.output)
     runner.invoke("codec-agreement", [str(runner.build / "engines/tts/test-moss-speech-codec-e2e"),
-           codec, str(runner.output)], wav=False)
+           runner.backend, codec, str(runner.output)], wav=False)
     for mode in ("single", "cfg"):
-        runner.checks[f"codec-{mode}"] = audio_stats(runner.output / f"codec-vulkan-{mode}.wav")
+        runner.checks[f"codec-{mode}"] = audio_stats(runner.output / f"codec-{runner.backend}-{mode}.wav")
     runner.invoke("reply", [str(runner.build / "engines/tts/test-moss-speech-e2e"),
-           model, codec, str(runner.sample), str(runner.output)])
+           runner.backend, model, codec, str(runner.sample), str(runner.output)])
     runner.checks["reply-repeat"] = audio_stats(runner.output / "reply-repeat.wav")
 
 
 def run_transcribe(runner, model):
     transcript = runner.output / "transcript.json"
     runner.invoke("transcribe", [str(runner.build / "engines/parakeet/moss-transcribe"),
-           "--model", model, "--audio", str(runner.sample), "--backend", "vulkan",
+           "--model", model, "--audio", str(runner.sample), "--backend", runner.backend,
            "--threads", "4", "--max-new-tokens", "256", "--out", str(transcript)], wav=False)
     result = json.loads(transcript.read_text())
     segments = result["segments"]
@@ -389,9 +396,31 @@ FAMILY_RUNNERS = {"tts": run_tts, "ttsd": run_ttsd, "sfx": run_sfx,
                   "speech": run_speech, "transcribe": run_transcribe}
 
 
-def run_case(case, build, models, output, baseline_binary):
-    model = download(CASES[case], models, output)
-    runner = CaseRunner(build, models, output, baseline_binary)
+def prepare_checkpoint(case, models, output):
+    source = Path(download(CASES[case], models, output))
+    if case not in {"tts-q8_0", "ttsd-q8_0"}:
+        return str(source)
+    # Keep embeddings, output heads and codecs at their source precision.
+    quantized = models / f"{CASES[case].removesuffix('-f16')}-q8_0.gguf"
+    with (output / "quantize.log").open("w") as log:
+        subprocess.run([
+            sys.executable, "engines/tts/scripts/requantize-gguf.py",
+            str(source), str(quantized), "q8_0", "--name-filter", "blk."
+        ], stdout=log, stderr=subprocess.STDOUT, check=True,
+           timeout=QUANTIZATION_TIMEOUT_SECONDS)
+    with quantized.open("rb") as model:
+        if model.read(4) != b"GGUF":
+            raise RuntimeError("Quantizer did not produce a GGUF")
+    if quantized.stat().st_size >= source.stat().st_size:
+        raise RuntimeError("Quantized backbone is not smaller than its F16 source")
+    record_model_hash(quantized, f"generated/{quantized.name}", output)
+    source.unlink()
+    return str(quantized)
+
+
+def run_case(case, backend, build, models, output, baseline_binary):
+    model = prepare_checkpoint(case, models, output)
+    runner = CaseRunner(backend, build, models, output, baseline_binary)
     FAMILY_RUNNERS[case.split("-")[0]](runner, model)
     return runner.checks
 
@@ -399,6 +428,7 @@ def run_case(case, build, models, output, baseline_binary):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=CASES, required=True)
+    parser.add_argument("--backend", choices=BACKENDS, required=True)
     parser.add_argument("--build", type=Path, default=Path("build-moss-e2e"))
     parser.add_argument("--models", type=Path, default=Path("models-moss-e2e"))
     parser.add_argument("--output", type=Path, default=Path("moss-e2e-results"))
@@ -408,20 +438,20 @@ def main():
     args = parser.parse_args()
     args.models.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
-    if args.case == "tts-f16":
+    if args.case.startswith("tts-"):
         (args.output / "reference-short.txt").write_text(TTS_TEXT + "\n")
         (args.output / "reference-long.txt").write_text(TTS_LONG_TEXT + "\n")
-    result = {"case": args.case, "status": "failed",
+    result = {"case": args.case, "backend": args.backend, "status": "failed",
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
     try:
-        result["checks"] = run_case(args.case, args.build.resolve(), args.models, args.output,
+        result["checks"] = run_case(args.case, args.backend, args.build.resolve(), args.models, args.output,
                                    args.tts_baseline_binary.resolve())
         result["status"] = "passed"
     except Exception as error:
         result["error"] = str(error)
         traceback.print_exc()
     finally:
-        if args.case == "tts-f16":
+        if args.case.startswith("tts-"):
             # Still score existing audio when a later synthesis fails, preserving
             # both the original failure and CPU/Vulkan quality evidence.
             try:
