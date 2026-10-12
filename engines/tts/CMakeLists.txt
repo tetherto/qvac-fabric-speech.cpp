@@ -1749,6 +1749,14 @@ if (TTS_CPP_BUILD_TESTS)
     add_test(NAME test-audio8-backend-parity COMMAND test-audio8-backend-parity)
     set_tests_properties(test-audio8-backend-parity PROPERTIES LABELS "fixture" SKIP_RETURN_CODE 77)
 
+    add_executable(test-audio8-hexagon-repack test/audio8/test_hexagon_repack.cpp)
+    target_link_libraries(test-audio8-hexagon-repack PRIVATE tts-cpp ggml)
+    target_include_directories(test-audio8-hexagon-repack PRIVATE src)
+    tts_cpp_apply_ccache(test-audio8-hexagon-repack)
+    add_test(NAME test-audio8-hexagon-repack COMMAND test-audio8-hexagon-repack)
+    set_tests_properties(test-audio8-hexagon-repack PROPERTIES LABELS "fixture"
+        SKIP_RETURN_CODE 77 ENVIRONMENT "AUDIO8_LM_HEXAGON_REPACK=1;GGML_HEXAGON_HOSTBUF=1")
+
     # Fail-closed GGUF header reading: synthesized metadata-only files with a
     # wrong architecture and wrong-typed scalar/string keys. No fixtures.
     add_executable(test-audio8-gguf-load test/audio8/test_gguf_load.cpp
