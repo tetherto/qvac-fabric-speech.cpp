@@ -382,8 +382,8 @@ then compare fixed-input numerical boundaries and waveforms.
 #### Quantized LM projection repacking
 
 The Hexagon backend needs repacked Q8_0 weights to execute transformer
-projections on the DSP. Audio8 normally allocates these weights in canonical
-host buffers, which sends the projections to the scheduler's CPU fallback.
+projections on the DSP. Audio8 previously allocated these weights in canonical
+host buffers, which sent the projections to the scheduler's CPU fallback.
 The default loader path puts eligible slow and fast transformer projections in
 Hexagon repack buffers. Set the environment variable to `0` to select the
 previous canonical layout for diagnostic comparisons:
