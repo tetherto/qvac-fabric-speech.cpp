@@ -1759,7 +1759,7 @@ if (TTS_CPP_BUILD_TESTS)
     if (NOT WIN32)
         add_test(NAME test-audio8-hexagon-repack COMMAND test-audio8-hexagon-repack)
         set_tests_properties(test-audio8-hexagon-repack PROPERTIES LABELS "fixture"
-            SKIP_RETURN_CODE 77 ENVIRONMENT "AUDIO8_LM_HEXAGON_REPACK=1;GGML_HEXAGON_HOSTBUF=1")
+            SKIP_RETURN_CODE 77 ENVIRONMENT "GGML_HEXAGON_HOSTBUF=1")
     endif()
 
     # Fail-closed GGUF header reading: synthesized metadata-only files with a

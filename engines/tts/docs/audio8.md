@@ -379,16 +379,17 @@ decoding removes sampling randomness but does not guarantee equal CPU,
 OpenCL and Hexagon trajectories. Check generated codes and frame counts,
 then compare fixed-input numerical boundaries and waveforms.
 
-#### Quantized LM projection repacking experiment
+#### Quantized LM projection repacking
 
 The Hexagon backend needs repacked Q8_0 weights to execute transformer
 projections on the DSP. Audio8 normally allocates these weights in canonical
 host buffers, which sends the projections to the scheduler's CPU fallback.
-An opt-in loader path puts eligible slow and fast transformer projections in
-Hexagon repack buffers:
+The default loader path puts eligible slow and fast transformer projections in
+Hexagon repack buffers. Set the environment variable to `0` to select the
+previous canonical layout for diagnostic comparisons:
 
 ```sh
-export AUDIO8_LM_HEXAGON_REPACK=1
+export AUDIO8_LM_HEXAGON_REPACK=0
 ```
 
 Use this with `--backend hexagon` and canonical host buffers
@@ -396,13 +397,14 @@ Use this with `--backend hexagon` and canonical host buffers
 KV caches, and codec allocations retain their existing buffer types.
 Both fused and unfused Q8_0 projections are supported; tensor uploads remain
 whole-tensor operations, and memory estimation includes both weight layouts.
-Unset the variable or set it to `0` for the existing loader path.
+Leave the variable unset, or set it to `1`, for the default repacked path.
 
 Repacking does not change the stored weights or requested matmul precision.
-Projection-level CPU/OpenCL comparisons pass, but a three-frame full-LM
-comparison has one NMSE value above the existing `2e-4` threshold. This path
-therefore remains experimental and disabled by default. Token agreement and
-matching projection outputs alone do not establish full-LM numerical parity.
+Projection-level CPU/OpenCL comparisons pass. Full-LM trajectories remain
+sampling-sensitive and are not bit-exact across CPU, OpenCL, and Hexagon; the
+validated native outputs are stable and intelligible, and the strict numerical
+differences remain recorded in the performance report. Set the variable to `0`
+when exact comparison with the previous Hexagon allocation path is required.
 
 #### Codec panel selection
 

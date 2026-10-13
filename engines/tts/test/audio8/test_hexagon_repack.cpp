@@ -81,8 +81,8 @@ int main(int argc, char ** argv) {
         std::setvbuf(stdout, nullptr, _IOLBF, 0);
         const char * path = argc == 2 ? argv[1] : std::getenv("AUDIO8_PARITY_LM");
         if (!path || !std::ifstream(path).good()) {
-            std::fprintf(stderr, "usage: test-audio8-hexagon-repack LM.gguf (or AUDIO8_PARITY_LM); "
-                                 "requires AUDIO8_LM_HEXAGON_REPACK=1\n");
+            std::fprintf(stderr,
+                         "usage: test-audio8-hexagon-repack LM.gguf (or AUDIO8_PARITY_LM)\n");
             return 77;
         }
         std::string error;

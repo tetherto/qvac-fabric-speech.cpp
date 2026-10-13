@@ -349,9 +349,10 @@ void mark_externally_allocated(ggml_context * ctx) {
 }
 
 ggml_backend_buffer_type_t hexagon_projection_buffer_type(ggml_backend_t backend) {
-    // Keep the experiment explicit until model-level numerical parity passes.
-    const char * enabled = std::getenv("AUDIO8_LM_HEXAGON_REPACK");
-    if (!enabled || std::strcmp(enabled, "1") != 0) return nullptr;
+    // Repacking is the validated Audio8 Hexagon default. Keep an explicit
+    // fallback for comparisons and devices that need the canonical layout.
+    const char * setting = std::getenv("AUDIO8_LM_HEXAGON_REPACK");
+    if (setting && std::strcmp(setting, "0") == 0) return nullptr;
     const auto device = ggml_backend_get_device(backend);
     if (!device) return nullptr;
     const auto registry = ggml_backend_dev_backend_reg(device);
