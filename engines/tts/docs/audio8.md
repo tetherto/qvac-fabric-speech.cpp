@@ -406,6 +406,37 @@ validated native outputs are stable and intelligible, and the strict numerical
 differences remain recorded in the performance report. Set the variable to `0`
 when exact comparison with the previous Hexagon allocation path is required.
 
+#### F32 flash attention for Hexagon decoding
+
+Enable maskless flash attention for the slow and fast LM decoders before
+loading the model:
+
+```sh
+export AUDIO8_LM_HEXAGON_FLASH_ATTN=1
+```
+
+This option requires a Hexagon backend that supports the F32 flash-attention
+operation for the model's head dimensions. The loader checks support and
+selects the cache layout once. Leave the variable unset, or set it to `0`, to
+use separate attention operations. CPU and OpenCL retain their existing path.
+
+The enabled path stores V in position-major order, with each head's dimensions
+contiguous, like K. Single-token decoding combines QK, softmax and the value
+reduction in one F32 operation, keeping scores and accumulation in VTCM.
+Masked prefill retains causal attention and materializes a channel-major view
+of V. Cache capacity and payload size are unchanged.
+
+The companion Hexagon kernel also vectorizes short, irregular F32 softmax
+rows, including masks, reductions and normalization. This kernel is selected
+automatically when applicable; it has no Audio8 CLI switch.
+
+`test-audio8-attention-cache [CPU|HTP0]` compares the production graph with
+canonical CPU attention. It covers masked prefill, decoding, grouped query
+heads, layer offsets, cache reset and prefixes crossing a 128-key tile.
+Full LM comparisons use fixed CPU histories because changes in F32 reduction
+order can change close argmax decisions. This option is experimental and does
+not promise identical native codes across implementations.
+
 #### Codec panel selection
 
 Companion [ggml PR #119](https://github.com/tetherto/qvac-ext-ggml/pull/119)

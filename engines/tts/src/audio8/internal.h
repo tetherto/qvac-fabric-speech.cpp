@@ -128,8 +128,8 @@ struct block_weights {
     ggml_tensor * ffn_norm = nullptr;
 };
 
-// One transformer's KV slab: [head_dim * n_kv, capacity] per layer, stacked
-// layer-major in a single tensor so a step writes one view and reads one view.
+// One transformer's KV slab, stacked layer-major. K is position-major;
+// V is channel-major unless F32 flash attention selects position-major V.
 struct kv_cache {
     ggml_context * ctx = nullptr;
     ggml_backend_buffer_t buffer = nullptr;
@@ -137,6 +137,10 @@ struct kv_cache {
     ggml_tensor * v = nullptr;
     int capacity = 0;
     int stride = 0;
+    // F32 flash attention reads contiguous head dimensions from both caches.
+    // Selected once at load time; masked prefill uses ordinary attention over
+    // the same position-major values.
+    bool flash_attention = false;
 };
 
 struct lm_model {
