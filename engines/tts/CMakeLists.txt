@@ -1753,9 +1753,14 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-audio8-hexagon-repack PRIVATE tts-cpp ggml)
     target_include_directories(test-audio8-hexagon-repack PRIVATE src)
     tts_cpp_apply_ccache(test-audio8-hexagon-repack)
-    add_test(NAME test-audio8-hexagon-repack COMMAND test-audio8-hexagon-repack)
-    set_tests_properties(test-audio8-hexagon-repack PROPERTIES LABELS "fixture"
-        SKIP_RETURN_CODE 77 ENVIRONMENT "AUDIO8_LM_HEXAGON_REPACK=1;GGML_HEXAGON_HOSTBUF=1")
+    # The fixture requires Android's Hexagon and OpenCL providers. Keep the
+    # executable buildable on Windows, but do not launch a device-only binary
+    # in the host CTest lane.
+    if (NOT WIN32)
+        add_test(NAME test-audio8-hexagon-repack COMMAND test-audio8-hexagon-repack)
+        set_tests_properties(test-audio8-hexagon-repack PROPERTIES LABELS "fixture"
+            SKIP_RETURN_CODE 77 ENVIRONMENT "AUDIO8_LM_HEXAGON_REPACK=1;GGML_HEXAGON_HOSTBUF=1")
+    endif()
 
     # Fail-closed GGUF header reading: synthesized metadata-only files with a
     # wrong architecture and wrong-typed scalar/string keys. No fixtures.
