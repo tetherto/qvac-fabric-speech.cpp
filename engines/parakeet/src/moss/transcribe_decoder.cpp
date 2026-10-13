@@ -79,6 +79,16 @@ void set_input(ggml_tensor * tensor, const std::vector<T> & values) {
     }
 }
 
+void set_mask(ggml_tensor * tensor, const std::vector<float> & values) {
+    if (tensor == nullptr || tensor->type == GGML_TYPE_F32) {
+        set_input(tensor, values);
+        return;
+    }
+    std::vector<ggml_fp16_t> halves(values.size());
+    ggml_fp32_to_fp16_row(values.data(), halves.data(), (int64_t) values.size());
+    set_input(tensor, halves);
+}
+
 struct BatchPlan {
     std::vector<int32_t> ids;
     std::vector<float> audio;
@@ -91,7 +101,7 @@ struct BatchPlan {
 
 void validate_transcribe_decoder(const TranscribeModel & model) {
     const TranscribeConfig & config = model.config();
-    require_transcribe_weight(model.tensor("text.token_embd.weight"), config.text.n_embd, config.text.vocab);
+    require_transcribe_weight(model.token_table(), config.text.n_embd, config.text.vocab);
     require_transcribe_f32(model.tensor("text.output_norm.weight"), config.text.n_embd);
     validate_text_layers(model, config.text);
     validate_prompt_tokens(config);
@@ -127,12 +137,19 @@ struct TranscribeDecoder::Impl {
         return (int64_t) config.head_dim * config.n_kv_heads;
     }
 
+    // Flash attention reads values in the key layout, one row per position;
+    // the unfused graph multiplies by a transposed, one-row-per-channel cache.
+    ggml_tensor * new_value_cache() const {
+        return model.fused_attention() ? ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim(), n_ctx)
+                                       : ggml_new_tensor_2d(state, GGML_TYPE_F16, n_ctx, kv_dim());
+    }
+
     void create_cache_tensors() {
         cache_k.resize((size_t) config.n_layers);
         cache_v.resize((size_t) config.n_layers);
         for (int layer = 0; layer < config.n_layers; ++layer) {
             cache_k[(size_t) layer] = ggml_new_tensor_2d(state, GGML_TYPE_F16, kv_dim(), n_ctx);
-            cache_v[(size_t) layer] = ggml_new_tensor_2d(state, GGML_TYPE_F16, n_ctx, kv_dim());
+            cache_v[(size_t) layer] = new_value_cache();
         }
     }
 
@@ -195,9 +212,18 @@ struct TranscribeDecoder::Impl {
                 0, config.rope_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     }
 
-    ggml_tensor * key_rows(ggml_context * ctx, int layer, int64_t first, int64_t count) const {
-        ggml_tensor * cache = cache_k[(size_t) layer];
+    ggml_tensor * cache_rows(ggml_context * ctx, ggml_tensor * cache, int64_t first, int64_t count) const {
         return ggml_view_2d(ctx, cache, kv_dim(), count, cache->nb[1], first * cache->nb[1]);
+    }
+
+    ggml_tensor * key_rows(ggml_context * ctx, int layer, int64_t first, int64_t count) const {
+        return cache_rows(ctx, cache_k[(size_t) layer], first, count);
+    }
+
+    ggml_tensor * cached_heads(ggml_context * ctx, ggml_tensor * cache, int64_t total) const {
+        ggml_tensor * rows = ggml_reshape_3d(ctx, cache_rows(ctx, cache, 0, total), config.head_dim,
+                config.n_kv_heads, total);
+        return ggml_permute(ctx, rows, 0, 2, 1, 3);
     }
 
     ggml_tensor * value_columns(ggml_context * ctx, int layer, int64_t first, int64_t count) const {
@@ -216,14 +242,41 @@ struct TranscribeDecoder::Impl {
         ggml_tensor * k_rows = ggml_reshape_2d(ctx, ggml_cont(ctx, k), kv_dim(), tokens);
         ggml_tensor * v_rows = ggml_reshape_2d(ctx, ggml_cont(ctx, v), kv_dim(), tokens);
         ggml_build_forward_expand(graph.graph(), ggml_cpy(ctx, k_rows, key_rows(ctx, layer, pos, tokens)));
-        ggml_build_forward_expand(graph.graph(), ggml_cpy(ctx, ggml_transpose(ctx, v_rows),
-                value_columns(ctx, layer, pos, tokens)));
+        ggml_build_forward_expand(graph.graph(), store_values(ctx, layer, v_rows, tokens));
+    }
+
+    ggml_tensor * store_values(ggml_context * ctx, int layer, ggml_tensor * v_rows, int64_t tokens) const {
+        if (model.fused_attention()) {
+            return ggml_cpy(ctx, v_rows, cache_rows(ctx, cache_v[(size_t) layer], pos, tokens));
+        }
+        return ggml_cpy(ctx, ggml_transpose(ctx, v_rows), value_columns(ctx, layer, pos, tokens));
+    }
+
+    float attention_scale() const {
+        return 1.0f / std::sqrt((float) config.head_dim);
+    }
+
+    ggml_tensor * attend_unfused(ggml_context * ctx, int layer, ggml_tensor * q, int64_t tokens,
+                                 ggml_tensor * mask) const {
+        const int64_t total = pos + tokens;
+        ggml_tensor * keys = cached_heads(ctx, cache_k[(size_t) layer], total);
+        ggml_tensor * scores = ggml_soft_max_ext(ctx, ggml_mul_mat(ctx, keys, q), mask, attention_scale(), 0.0f);
+        ggml_tensor * attended = ggml_mul_mat(ctx, cached_values(ctx, layer, total), scores);
+        return ggml_cont_2d(ctx, ggml_permute(ctx, attended, 0, 2, 1, 3),
+                (int64_t) config.head_dim * config.n_heads, tokens);
+    }
+
+    ggml_tensor * attend_fused(ggml_context * ctx, int layer, ggml_tensor * q, int64_t tokens,
+                               ggml_tensor * mask) const {
+        const int64_t total = pos + tokens;
+        ggml_tensor * attended = ggml_flash_attn_ext(ctx, q, cached_heads(ctx, cache_k[(size_t) layer], total),
+                cached_heads(ctx, cache_v[(size_t) layer], total), mask, attention_scale(), 0.0f, 0.0f);
+        return ggml_reshape_2d(ctx, attended, (int64_t) config.head_dim * config.n_heads, tokens);
     }
 
     ggml_tensor * attention(TranscribeGraph & graph, int layer, ggml_tensor * cur, int64_t tokens, ggml_tensor * positions,
                             ggml_tensor * mask) const {
         ggml_context * ctx = graph.ctx();
-        const int64_t total = pos + tokens;
         ggml_tensor * q = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, weight(layer, "attn_q.weight"), cur),
                 config.head_dim, config.n_heads, tokens);
         ggml_tensor * k = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, weight(layer, "attn_k.weight"), cur),
@@ -233,16 +286,9 @@ struct TranscribeDecoder::Impl {
         q = rope(ctx, rms_norm(ctx, q, weight(layer, "attn_q_norm.weight")), positions);
         k = rope(ctx, rms_norm(ctx, k, weight(layer, "attn_k_norm.weight")), positions);
         store_cache(graph, layer, k, v, tokens);
-
-        ggml_tensor * keys = ggml_reshape_3d(ctx, key_rows(ctx, layer, 0, total), config.head_dim,
-                config.n_kv_heads, total);
         q = ggml_permute(ctx, q, 0, 2, 1, 3);
-        keys = ggml_permute(ctx, keys, 0, 2, 1, 3);
-        ggml_tensor * scores = ggml_soft_max_ext(ctx, ggml_mul_mat(ctx, keys, q), mask,
-                1.0f / std::sqrt((float) config.head_dim), 0.0f);
-        ggml_tensor * attended = ggml_mul_mat(ctx, cached_values(ctx, layer, total), scores);
-        attended = ggml_cont_2d(ctx, ggml_permute(ctx, attended, 0, 2, 1, 3),
-                (int64_t) config.head_dim * config.n_heads, tokens);
+        ggml_tensor * attended = model.fused_attention() ? attend_fused(ctx, layer, q, tokens, mask)
+                                                         : attend_unfused(ctx, layer, q, tokens, mask);
         return ggml_mul_mat(ctx, weight(layer, "attn_output.weight"), attended);
     }
 
@@ -290,16 +336,26 @@ struct TranscribeDecoder::Impl {
         return mask;
     }
 
-    ggml_tensor * logits(ggml_context * ctx, ggml_tensor * cur, int64_t tokens) const {
-        ggml_tensor * last = ggml_view_2d(ctx, cur, config.n_embd, 1, cur->nb[1], (size_t) (tokens - 1) * cur->nb[1]);
-        last = rms_norm(ctx, last, model.tensor("text.output_norm.weight"));
-        return ggml_mul_mat(ctx, model.tensor("text.token_embd.weight"), last);
+    std::vector<ggml_tensor *> project_head(ggml_context * ctx, ggml_tensor * last) const {
+        std::vector<ggml_tensor *> outputs;
+        for (const TranscribeHeadChunk & chunk : model.head()) {
+            outputs.push_back(ggml_mul_mat(ctx, chunk.weight, last));
+        }
+        return outputs;
     }
 
-    ggml_tensor * embed(TranscribeGraph & graph, bool has_audio, ggml_tensor * ids, ggml_tensor * audio,
+    std::vector<ggml_tensor *> logits(ggml_context * ctx, ggml_tensor * cur, int64_t tokens) const {
+        ggml_tensor * last = ggml_view_2d(ctx, cur, config.n_embd, 1, cur->nb[1], (size_t) (tokens - 1) * cur->nb[1]);
+        return project_head(ctx, rms_norm(ctx, last, model.tensor("text.output_norm.weight")));
+    }
+
+    ggml_tensor * text_embeddings(TranscribeGraph & graph, ggml_tensor * ids, ggml_tensor * host_rows) const {
+        return host_rows ? host_rows : ggml_get_rows(graph.ctx(), model.tensor("text.token_embd.weight"), ids);
+    }
+
+    ggml_tensor * embed(TranscribeGraph & graph, bool has_audio, ggml_tensor * text, ggml_tensor * audio,
                         ggml_tensor * audio_mask, ggml_tensor * text_mask) const {
         ggml_context * ctx = graph.ctx();
-        ggml_tensor * text = ggml_get_rows(ctx, model.tensor("text.token_embd.weight"), ids);
         if (!has_audio) {
             return text;
         }
@@ -350,32 +406,55 @@ struct TranscribeDecoder::Impl {
         return plan;
     }
 
+    ggml_tensor * causal_mask_input(TranscribeGraph & graph, int64_t tokens) const {
+        return model.fused_attention() ? graph.input_f16(pos + tokens, tokens) : graph.input_f32(pos + tokens, tokens);
+    }
+
     struct DecoderInputs {
         ggml_tensor * ids;
+        ggml_tensor * text;
         ggml_tensor * positions;
         ggml_tensor * mask;
         ggml_tensor * audio;
         ggml_tensor * audio_mask;
         ggml_tensor * text_mask;
-        ggml_tensor * output;
+        std::vector<ggml_tensor *> outputs;
     };
 
-    DecoderInputs build_graph(TranscribeGraph & graph, int64_t tokens, bool has_audio, bool want_logits) {
-        ggml_tensor * ids = graph.input_i32(tokens);
-        ggml_tensor * positions_input = graph.input_i32(tokens);
-        ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
-        ggml_tensor * audio = has_audio ? graph.input_f32(config.n_embd, tokens) : nullptr;
-        ggml_tensor * audio_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
-        ggml_tensor * text_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
-        ggml_tensor * cur = embed(graph, has_audio, ids, audio, audio_mask, text_mask);
-        cur = blocks(graph, cur, tokens, positions_input, mask);
-        ggml_tensor * output = want_logits ? logits(graph.ctx(), cur, tokens) : nullptr;
-        if (output) {
+    static void expand_outputs(TranscribeGraph & graph, const std::vector<ggml_tensor *> & outputs) {
+        for (ggml_tensor * output : outputs) {
             ggml_set_output(output);
             ggml_build_forward_expand(graph.graph(), output);
         }
+    }
 
-        return {ids, positions_input, mask, audio, audio_mask, text_mask, output};
+    DecoderInputs build_graph(TranscribeGraph & graph, int64_t tokens, bool has_audio, bool want_logits) {
+        const bool host_rows = model.embeds_on_host();
+        ggml_tensor * ids = host_rows ? nullptr : graph.input_i32(tokens);
+        ggml_tensor * text = host_rows ? graph.input_f32(config.n_embd, tokens) : nullptr;
+        ggml_tensor * positions_input = graph.input_i32(tokens);
+        ggml_tensor * mask = tokens > 1 ? causal_mask_input(graph, tokens) : nullptr;
+        ggml_tensor * audio = has_audio ? graph.input_f32(config.n_embd, tokens) : nullptr;
+        ggml_tensor * audio_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
+        ggml_tensor * text_mask = has_audio ? graph.input_f32(1, tokens) : nullptr;
+        ggml_tensor * cur = embed(graph, has_audio, text_embeddings(graph, ids, text), audio, audio_mask, text_mask);
+        cur = blocks(graph, cur, tokens, positions_input, mask);
+        std::vector<ggml_tensor *> outputs = want_logits ? logits(graph.ctx(), cur, tokens) : std::vector<ggml_tensor *>();
+        expand_outputs(graph, outputs);
+        return {ids, text, positions_input, mask, audio, audio_mask, text_mask, outputs};
+    }
+
+    std::vector<float> read_logits(const std::vector<ggml_tensor *> & outputs) const {
+        std::vector<float> values;
+        if (outputs.empty()) {
+            return values;
+        }
+        values.resize((size_t) config.vocab);
+        const std::vector<TranscribeHeadChunk> & head = model.head();
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            ggml_backend_tensor_get(outputs[i], values.data() + head[i].row0, 0, (size_t) head[i].rows * sizeof(float));
+        }
+        return values;
     }
 
     TranscribeMemory measure_batch(int position, int tokens, bool has_audio, bool want_logits) {
@@ -395,19 +474,15 @@ struct TranscribeDecoder::Impl {
         const std::vector<int32_t> position_data = positions(tokens);
         const std::vector<float> mask_data = inputs.mask ? causal_mask(tokens) : std::vector<float>();
         set_input(inputs.ids, plan.ids);
+        if (inputs.text) set_input(inputs.text, model.embed_tokens(plan.ids));
         set_input(inputs.positions, position_data);
-        set_input(inputs.mask, mask_data);
+        set_mask(inputs.mask, mask_data);
         set_input(inputs.audio, plan.audio);
         set_input(inputs.audio_mask, plan.audio_mask);
         set_input(inputs.text_mask, plan.text_mask);
         model.compute(graph);
         pos += (int) tokens;
-        std::vector<float> values;
-        if (inputs.output) {
-            values.resize((size_t) config.vocab);
-            ggml_backend_tensor_get(inputs.output, values.data(), 0, values.size() * sizeof(float));
-        }
-        return values;
+        return read_logits(inputs.outputs);
     }
 
     std::vector<float> prefill_batches(const std::vector<int32_t> & ids, const std::vector<float> & audio_embeddings,
