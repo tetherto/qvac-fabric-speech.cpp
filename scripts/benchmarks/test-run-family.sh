@@ -199,7 +199,7 @@ hf_bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
 [[ -z "$hf_bad" ]] || fail "huggingface families without hf_repo/hf_ref: $hf_bad"
 ok "every huggingface family pins repo and ref"
 
-# ---- new-model families (QVAC-26861) ----------------------------------------
+# ---- new-model families ------------------------------------------------------
 
 jq -e '."parakeet-ctc".bench_kind == "native" and
        ."parakeet-ctc".correctness.kind == "wer" and
@@ -1249,6 +1249,17 @@ fi
 grep -q 'rejected family: not-a-family' "$TMP/plan-bad.out.log" \
   || fail "plan must name the rejected family: $(cat "$TMP/plan-bad.out.log")"
 ok "plan: unknown families are rejected before any runner is scheduled"
+
+# A macOS-only family dispatched on linux alone leaves no cell. An empty
+# include list would pass the bench job's `matrix != ''` guard and fail at
+# matrix expansion with no hint, so the plan must refuse it and say why.
+if run_plan "$TMP/plan-empty.out" IN_FAMILIES="moss-tts" IN_RUNNERS="linux"; then
+  fail "plan accepted a selection that yields no cells"
+fi
+grep -q "no benchmark cells: families 'moss-tts' accept none of the requested runners (linux)" "$TMP/plan-empty.out.log" \
+  || fail "plan must explain the empty selection: $(cat "$TMP/plan-empty.out.log")"
+grep -qE '^matrix=' "$TMP/plan-empty.out" && fail "plan must not emit a matrix for an empty selection"
+ok "plan: a selection with no cells is rejected with a diagnostic"
 
 # Music driver, cache and pilot aggregation tests use only the standard library.
 python3 "$HERE/test-music-alignment-driver.py" || fail "music driver regressions"

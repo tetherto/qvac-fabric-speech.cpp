@@ -241,6 +241,15 @@ jobs:
             done
           done
 
+          # A selection whose families accept none of the requested runners
+          # (model_families=moss-tts with runners=linux) would emit an empty
+          # include list; the bench job's `matrix != ''` guard only catches
+          # an unset output, and GitHub rejects an empty matrix at expansion
+          # time with an opaque error. Refuse it here, naming the cause.
+          if [[ "$(echo "$cells" | jq 'length')" -eq 0 ]]; then
+            echo "no benchmark cells: families '$families' accept none of the requested runners ($IN_RUNNERS); check their 'runners' field in $FAMILIES_SPEC" >&2
+            exit 1
+          fi
           matrix="$(jq -c -n --argjson include "$cells" '{include: $include}')"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           # expected_count feeds summarize.py's absent-row check. A cell that
