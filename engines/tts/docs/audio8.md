@@ -348,9 +348,9 @@ separate session; they must not be combined with the table above into a new
 cross-backend comparison. The later three-backend S2–S5 sweep was cancelled;
 its partial results do not replace this S1 evidence. Current Hexagon-only
 dispatch measurements are documented separately in the companion ggml
-`docs/hexagon-audio8-profile.md` report under QVAC-26714.
+`docs/hexagon-audio8-profile.md` report.
 
-#### Dispatch profiling (QVAC-26714)
+#### Dispatch profiling
 
 Companion ggml #115 copies only the live operations into each outstanding
 batch's host metadata cache. It retains those snapshots for both profiling
