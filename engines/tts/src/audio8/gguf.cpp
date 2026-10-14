@@ -1244,6 +1244,25 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
         return false;
     }
     model.precise_outputs = ::tts_cpp::detail::backend_is_metal(model.backend);
+    model.synthesis_convs = {};
+    const auto device = ggml_backend_get_device(model.backend);
+    const char * tiled = std::getenv("AUDIO8_CODEC_HEXAGON_CONV_TILE");
+    const char * fp16 = std::getenv("AUDIO8_CODEC_HEXAGON_FP16");
+    const bool hexagon_decoder = model.has_decoder && device &&
+                                 std::strcmp(audio8_dev_reg_name(device), "HTP") == 0;
+    if (hexagon_decoder && fp16 && std::strcmp(fp16, "1") == 0) {
+        // Explicitly allow the backend's F16 activation/HMX path for eligible
+        // synthesis products. LM, latent transformer and small tails stay F32.
+        model.synthesis_convs.precision = GGML_PREC_DEFAULT;
+        std::fprintf(stderr, "[audio8] Hexagon codec FP16 synthesis: enabled\n");
+    } else if (hexagon_decoder && tiled && std::strcmp(tiled, "1") == 0) {
+        const auto registry = ggml_backend_dev_backend_reg(device);
+        model.synthesis_convs.backend = model.backend;
+        model.synthesis_convs.tiled = reinterpret_cast<codec_conv_options::tiled_fn>(
+            ggml_backend_reg_get_proc_address(registry, "ggml_backend_hexagon_conv_taps_f32"));
+        std::fprintf(stderr, "[audio8] Hexagon codec F32 convolution tiling: %s\n",
+                     model.synthesis_convs.tiled ? "requested" : "unavailable; using separate taps");
+    }
     if (!load_weights(file, model.backend, &model.ctx_w, &model.buffer_w, error,
                       measure ? &measure->weights_bytes : nullptr)) {
         return false;

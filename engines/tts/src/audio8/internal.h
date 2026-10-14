@@ -300,6 +300,13 @@ struct codec_hparams {
     std::vector<int> residual_dilations;
 };
 
+struct codec_conv_options {
+    using tiled_fn = ggml_tensor * (*)(ggml_context *, ggml_backend_t, ggml_tensor *, ggml_tensor *, int, int);
+    ggml_backend_t backend = nullptr;
+    tiled_fn tiled = nullptr;
+    ggml_prec precision = GGML_PREC_F32;
+};
+
 struct codec_model {
     codec_hparams hp;
     bool has_encoder = false;
@@ -310,6 +317,7 @@ struct codec_model {
     ggml_backend_buffer_t buffer_w = nullptr;
     ::tts_cpp::detail::sched_fallback sched;
     bool precise_outputs = false;
+    codec_conv_options synthesis_convs;
     // Both directions run in two graphs: one over the whole sequence at one
     // column per frame, and one over blocks of the sample-rate stack. They get
     // an arena each, because alternating them through one would resize it on

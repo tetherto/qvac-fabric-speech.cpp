@@ -460,6 +460,44 @@ the four-variant prompt sweep did not show a repeatable full-inference gain.
 The LM projection repacking experiment above controls a separate weight
 layout and retains the codec panel setting.
 
+#### Experimental codec convolution modes
+
+The companion Hexagon backend also exposes a bounded F32 convolution tile.
+Enable it before loading the decoder:
+
+```sh
+export AUDIO8_CODEC_HEXAGON_CONV_TILE=1
+```
+
+Eligible multi-tap convolutions whose ordinary products use the DDR 4x2
+panel accumulate 64 output rows per worker in VTCM, then copy the completed
+tile once. Each tap preserves the existing F32 product reduction and addition
+boundary. Efficient existing VTCM products and unsupported shapes retain the
+separate-tap graph. The optional registry procedure is
+`ggml_backend_hexagon_conv_taps_f32`; an older backend without that procedure
+also retains the separate-tap graph.
+
+A separate experiment permits FP16 activation staging through the existing
+HMX matmul kernels:
+
+```sh
+export AUDIO8_CODEC_HEXAGON_FP16=1
+```
+
+This applies only to large F16-weight matmuls in decoder synthesis: at least
+64 input and output channels, each divisible by 32. These products request
+default backend precision; the backend chooses HMX when its remaining shape
+and scratch requirements are met. Activations and HMX output tiles are F16
+internally, with F32 graph outputs. This changes numerical precision. Small
+channel tails, the latent transformer, and the LM retain their existing
+precision. CPU, OpenCL, and encoder graphs retain their existing behavior.
+
+Both modes are opt-in and are independent measurements. FP16 takes precedence
+if both variables are `1`. Leave both unset, or set them to `0`, for the
+existing F32 codec graph. LM repacking, supported flash decoding, vectorized
+softmax and the 4x2 panel retain their defaults. Keep profiling disabled for
+timing comparisons.
+
 ### Core ML codec sidecar
 
 `TTS_CPP_COREML=ON` is Apple-only. It enables an optional Core ML sidecar for
