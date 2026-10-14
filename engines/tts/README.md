@@ -56,6 +56,9 @@ SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
 F16 TTS/TTSD/SoundEffect and BF16 Speech cases. TTS quality gates retain
 known upstream limitations; see the linked MOSS guide for details.
 
+LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
+through Vulkan when GPU execution is requested.
+
 Supertonic 3, Parler-TTS mini, CosyVoice3 and Audio8 also support explicit
 Hexagon placement on Snapdragon; see their model guides for setup and validated
 tiers. Audio8's corrected baseline uses `q8_0` quantisation with
@@ -124,6 +127,7 @@ one stage at a time; see [stage profiling](docs/cosyvoice3.md#stage-profiling).
 | Build paths and repository layout | [docs/build.md](docs/build.md) |
 | CLIs, weight conversion, end-to-end runs | [docs/cli.md](docs/cli.md) |
 | Performance deep dive (Apple silicon, CI, streaming) | [docs/performance.md](docs/performance.md) |
+| Desktop benchmark coverage (Chatterbox Turbo and Multilingual, Supertonic 1/2/3, Parler mini and Indic, CosyVoice3, Audio8, LavaSR, MOSS), metrics and runner limits; the MOSS-TTS, MOSS-SoundEffect and MOSS-Speech families are macOS-only opt-ins | [Benchmark coverage](../../docs/PERFORMANCE.md#benchmark-coverage) |
 | Memory lifecycle (Supertonic and Chatterbox) | [MEMORY.md](MEMORY.md) |
 | Backend selection | [docs/backends.md](docs/backends.md) |
 | Fixtures and static validation | [docs/testing.md](docs/testing.md) |
