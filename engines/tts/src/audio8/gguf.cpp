@@ -1250,9 +1250,9 @@ static bool load_codec_impl(const std::string & path, int n_gpu_layers,
     const char * fp16 = std::getenv("AUDIO8_CODEC_HEXAGON_FP16");
     const bool hexagon_decoder = model.has_decoder && device &&
                                  std::strcmp(audio8_dev_reg_name(device), "HTP") == 0;
-    if (hexagon_decoder && fp16 && std::strcmp(fp16, "1") == 0) {
-        // Explicitly allow the backend's F16 activation/HMX path for eligible
-        // synthesis products. LM, latent transformer and small tails stay F32.
+    if (hexagon_decoder && (!fp16 || std::strcmp(fp16, "0") != 0)) {
+        // Default to the validated F16 activation/HMX path for eligible
+        // synthesis products. The explicit opt-out restores the F32 request.
         model.synthesis_convs.precision = GGML_PREC_DEFAULT;
         std::fprintf(stderr, "[audio8] Hexagon codec FP16 synthesis: enabled\n");
     } else if (hexagon_decoder && tiled && std::strcmp(tiled, "1") == 0) {

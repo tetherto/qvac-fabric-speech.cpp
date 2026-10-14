@@ -460,12 +460,14 @@ the four-variant prompt sweep did not show a repeatable full-inference gain.
 The LM projection repacking experiment above controls a separate weight
 layout and retains the codec panel setting.
 
-#### Experimental codec convolution modes
+#### Hexagon codec synthesis precision
 
-The companion Hexagon backend also exposes a bounded F32 convolution tile.
-Enable it before loading the decoder:
+The companion Hexagon backend also exposes an experimental bounded F32
+convolution tile. Disable the default FP16 mode and enable the tile before
+loading the decoder:
 
 ```sh
+export AUDIO8_CODEC_HEXAGON_FP16=0
 export AUDIO8_CODEC_HEXAGON_CONV_TILE=1
 ```
 
@@ -477,11 +479,12 @@ separate-tap graph. The optional registry procedure is
 `ggml_backend_hexagon_conv_taps_f32`; an older backend without that procedure
 also retains the separate-tap graph.
 
-A separate experiment permits FP16 activation staging through the existing
-HMX matmul kernels:
+Hexagon decoder synthesis uses FP16 activation staging through the existing
+HMX matmul kernels by default. No environment setting is required. Set this
+before loading the decoder to restore the F32 synthesis graph:
 
 ```sh
-export AUDIO8_CODEC_HEXAGON_FP16=1
+export AUDIO8_CODEC_HEXAGON_FP16=0
 ```
 
 This applies only to large F16-weight matmuls in decoder synthesis: at least
@@ -498,11 +501,14 @@ See the [codec experiment report](audio8-hexagon-codec-tracks.md) for the
 optimized-only stage measurements, focused waveform checks and saved OpenCL
 comparison.
 
-Both modes are opt-in and are independent measurements. FP16 takes precedence
-if both variables are `1`. Leave both unset, or set them to `0`, for the
-existing F32 codec graph. LM repacking, supported flash decoding, vectorized
-softmax and the 4x2 panel retain their defaults. Keep profiling disabled for
-timing comparisons.
+Leave `AUDIO8_CODEC_HEXAGON_FP16` unset, or set it to `1`, for the default HMX
+mode. F32 tiling remains opt-in and applies only when FP16 is disabled.
+To restore the original separate-tap F32 graph, set FP16 to `0` and leave
+`AUDIO8_CODEC_HEXAGON_CONV_TILE` unset or set it to `0`. LM repacking,
+supported flash decoding, vectorized softmax and the 4x2 panel retain their
+defaults. Keep profiling disabled for timing comparisons. The recorded
+Plan B measurements used explicit FP16 enablement; this default change selects
+the same synthesis graph and arithmetic.
 
 ### Core ML codec sidecar
 

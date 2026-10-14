@@ -8,7 +8,7 @@ Before each capture the runner settles for at least 50 seconds and requires thre
 
 4x2, LM repacking, supported default flash decoding and vectorized softmax remain enabled. The earlier experimental HVX blocked reuse and residual fusion switches are 0. Normal backend operation fusion remains enabled; existing HMX matmul/ADD fusion can apply in Plan B.
 
-Plan A is F32 multi-tap convolution tiling in VTCM (`AUDIO8_CODEC_HEXAGON_CONV_TILE=1`). Plan B independently permits FP16 activation/HMX synthesis products (`AUDIO8_CODEC_HEXAGON_FP16=1`); it does not enable Plan A. Both new modes are opt-in. FP16 takes precedence if both switches are 1. LM, latent transformer and small channel tails retain their existing precision.
+Plan A is opt-in F32 multi-tap convolution tiling in VTCM (`AUDIO8_CODEC_HEXAGON_FP16=0`, `AUDIO8_CODEC_HEXAGON_CONV_TILE=1`). Plan B independently permits FP16 activation/HMX synthesis products; it was measured with `AUDIO8_CODEC_HEXAGON_FP16=1` and is now the default when that variable is unset. FP16 takes precedence while enabled. LM, latent transformer and small channel tails retain their existing precision.
 
 ## Plan A result
 
@@ -27,6 +27,24 @@ Plan A showed no codec improvement against the saved previous results. All 20 ca
 The F32 kernel regression passed ordinary, dilated and transposed DDR cases at K=96, 192 and 384: full output byte equality with original Hexagon matmul/ADD and sampled independent CPU arithmetic at worker/tile boundaries. A separate fixed-code 81-frame S4 profile confirmed 11 tiled operations and an identical WAV.
 
 Plan B uses fixed identical codes and unclipped float PCM, without alignment, gain normalization or lag search. The three-frame CPU comparison passed cosine 0.999998349 and NMSE 0.00000330349 over 6,144 samples. The 81-frame S4 comparison with preceding Hexagon passed cosine 0.999999634 and NMSE 0.000000731047 over 165,888 samples. Both were finite and satisfy cosine >=0.9999 and NMSE <=0.0002. A separate profile confirmed 117 HMX matmuls. These focused codec checks do not replace the archived full LM comparisons, whose strict gates do not universally pass.
+
+## Full inference comparison
+
+Median seconds from three timed full natural-inference captures per prompt, excluding model loading and output file writing. These totals come directly from the recorded full-inference timer, not from adding independent LM and codec medians. OpenCL results reuse the saved three-run GPU batch; Hexagon results use the measured Plan B runtime, now selected by default.
+
+| Input | OpenCL GPU s | Hexagon Plan B s | Faster backend / ratio | Frames GPU/Hexagon |
+| --- | ---: | ---: | --- | ---: |
+| S1 | 3.546 | 3.057 | Hexagon 1.16x | 76/69 |
+| S2 | 2.392 | 1.972 | Hexagon 1.21x | 50/49 |
+| S3 | 3.374 | 3.497 | OpenCL 1.04x | 72/74 |
+| S4 | 3.147 | 4.116 | OpenCL 1.31x | 67/81 |
+| S5 | 4.373 | 4.209 | Hexagon 1.04x | 94/88 |
+
+Hexagon is faster in these full-inference prompt medians for S1, S2 and S5. S3 and S4 remain slower than OpenCL even though their codec stages are faster; measured LM execution accounts for the remaining stage gap. Different generated GPU trajectories/frame counts, separate batches and observed timing spread prevent an identical-workload or universal backend speedup claim.
+
+### Default revision
+
+Plan B is now the default for eligible Hexagon decoder synthesis matmuls. Leave `AUDIO8_CODEC_HEXAGON_FP16` unset, or set it to `1`, for the measured HMX path. Set it to `0` before loading the decoder to restore F32 synthesis. The default revision changes only application selection; it retains the measured graph, precision eligibility, HMX arithmetic and small-tail/latent/LM precision. No new phone timing or heavy correctness suite was run for this default-only revision.
 
 ## LM and codec comparison
 
@@ -54,7 +72,7 @@ Times are seconds, independent medians of three valid timed observations. Stage 
 
 Plan B codec medians are 2.39x–5.48x faster than the saved preceding Hexagon codec medians, and 3.56x–7.22x faster than Plan A. They are lower than saved OpenCL codec times for every prompt. These are separate batches with timing spread and different GPU trajectories; the ratios do not establish identical-workload kernel speedups. HMX selects dense matrix execution with F16 activation/output staging and existing ADD fusion. Plan A keeps HVX F32 dot products and also increased reported graph scratch. The specific cause of its regression is not established.
 
-Plan B LM arithmetic is unchanged. Its measured LM medians remain above saved OpenCL for S3/S4/S5; residual prompt-level gaps are in LM execution rather than codec. Both codec experiments remain opt-in. Prefer the measured HMX option for further codec evaluation; keep the F32 tiled prototype off by default.
+Plan B LM arithmetic is unchanged. Its measured LM medians remain above saved OpenCL for S3/S4/S5; residual prompt-level gaps are in LM execution rather than codec. The measured HMX mode is now the default for eligible Hexagon synthesis matmuls; the F32 tiled prototype remains off by default.
 
 ### Plan B ranges and waveform comparisons
 
@@ -72,7 +90,7 @@ Plan A reported scratch allocations (preceding/Plan A MB): S1 207/233, S2 147/16
 
 ### Reproduction
 
-Use matching companion host and v79 DSP libraries. For Plan A, enable only the tile switch. For Plan B:
+Use matching companion host and v79 DSP libraries. For Plan A, set `AUDIO8_CODEC_HEXAGON_FP16=0` and `AUDIO8_CODEC_HEXAGON_CONV_TILE=1`. The explicit Plan B setting below reproduces the measured default HMX path:
 
 ```sh
 AUDIO8_CODEC_HEXAGON_FP16=1 AUDIO8_CODEC_HEXAGON_CONV_TILE=0 \
