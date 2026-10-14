@@ -4,9 +4,53 @@
 
 Measured on the OnePlus CPH2723, Hexagon v79, with six HVX workers and four CPU threads. LM projection repacking and the 4x2 codec panel are enabled in both variants. Blocked codec reuse and matmul-plus-residual fusion are disabled. The baseline uses separate LM attention and the preceding short-softmax implementation. The candidate enables maskless F32 flash attention in both decoders and the final vectorized short-softmax kernel.
 
-The full S1–S5 suite has three warmups and five timed fresh-process runs per variant per prompt (80 captures). Order alternates, seed is 42, decoding is greedy and the safety cap is 512 frames. Runs finish at natural EOS; model loading is excluded. Profiling is disabled. Each capture starts with the phone asleep/dozing, thermal status 0 and HAL skin temperature at most 38.5 C; the end snapshot must also report thermal status 0. All repeat code and WAV hashes are identical within each variant/prompt. These controls do not fix DSP frequency or eliminate the observed timing spread.
+The full S1–S5 suite has three warmups and five timed fresh-process runs per variant per prompt (80 captures). Order alternates, seed is 42, decoding is greedy and the safety cap is 512 frames. Runs finish at natural EOS; model loading is excluded. Profiling is disabled. Each capture starts with the phone asleep/dozing, thermal status 0 and HAL skin temperature at most 38.5 C; the end snapshot must also report thermal status 0. All repeat code and WAV hashes are identical within each variant/prompt. Actual DSP/memory clocks are not recorded, and these controls do not eliminate the observed timing spread.
 
-## Full inference
+## Latest prompt comparison, October 14
+
+These are the latest median full inference times, excluding model loading and
+output file writing. S1/S2 retain the five timed observations from the original
+suite below. S3/S5 use three timed observations per variant from the follow-up
+batch, and S4 uses three from its separate recheck. Each follow-up variant has
+completed warmups, alternating order, six HVX workers and four CPU threads.
+Timed captures start at thermal status 0 with the screen asleep/dozing and the
+phone unplugged; start skin is at most 38.5 C. End snapshots also have thermal
+status 0 and an asleep/dozing screen. The S3/S5 recheck initially used a 38 C
+limit before returning to the original 38.5 C limit. Actual timed starts were
+37.783-38.337 C for S3/S5 and 34.567-35.220 C for S4.
+
+| Input | Baseline s | Flash + softmax s | Baseline / candidate | Frames (baseline/candidate) |
+| --- | ---: | ---: | ---: | ---: |
+| S1 | 6.474 | 5.200 | 1.25x | 71/69 |
+| S2 | 4.130 | 3.539 | 1.17x | 57/49 |
+| S3 | 6.717 | 4.931 | 1.36x | 67/74 |
+| S4 | 5.144 | 6.804 | 0.76x | 80/81 |
+| S5 | 7.103 | 6.626 | 1.07x | 91/88 |
+
+Independent LM and codec medians from those same observations:
+
+| Input | Baseline LM s | Candidate LM s | Baseline codec s | Candidate codec s |
+| --- | ---: | ---: | ---: | ---: |
+| S1 | 2.572 | 2.251 | 3.358 | 2.785 |
+| S2 | 1.967 | 1.354 | 2.081 | 1.495 |
+| S3 | 3.361 | 1.918 | 3.575 | 3.013 |
+| S4 | 2.916 | 2.502 | 1.962 | 4.302 |
+| S5 | 3.296 | 2.461 | 3.689 | 3.508 |
+
+The latest LM medians improve for all five prompts, while S4 full inference is
+slower because of codec synthesis. Its candidate codec times are 5.019, 1.743
+and 4.302 s with identical codes and WAV bytes at 81 frames. These observations
+do not establish a kernel cause for that variation. Different natural codes
+and frame counts, separate batches and unrecorded actual DSP/memory clocks
+limit causal performance claims. All follow-up outputs match the original
+output for their variant and prompt. No new heavy CPU correctness suite was
+run for the rechecks.
+
+Evidence is retained in `native-v2-summary.json`,
+`s3-s5-recheck-v1-summary.json` and `s4-recheck-v1-summary.json` in the local
+artifact directory. The original full suite remains below for comparison.
+
+## Original full inference suite
 
 Median seconds from five timed runs. Frame counts are baseline/candidate. Different generated trajectories make these prompt-level comparisons, rather than identical-workload kernel speedups.
 
@@ -104,7 +148,7 @@ Unprompted whisper.cpp Tiny English CPU recognition of one timed baseline and ca
 
 The maskless F32 decode kernel removes separate QK, softmax, value reduction and most V-layout materialization. The final vectorized softmax improves isolated short-row probes. Full prompt timings retain substantial spread and different generated workloads, so the median ratios alone do not establish a universal end-to-end speedup.
 
-The remaining gap to OpenCL requires work on LM projection execution, particularly the Q8 gated FFN and residual down-projection families identified above, alongside remaining codec execution. No fresh OpenCL timing claim is made here. The profile establishes costly operation families; cache/memory/compute mechanisms still require focused kernel profiling. The application flash-attention option stays experimental and opt-in.
+The remaining gap to OpenCL requires work on LM projection execution, particularly the Q8 gated FFN and residual down-projection families identified above, alongside remaining codec execution. No fresh OpenCL timing claim is made here. The profile establishes costly operation families; cache/memory/compute mechanisms still require focused kernel profiling. Supported Hexagon backends now use flash decode by default, with `AUDIO8_LM_HEXAGON_FLASH_ATTN=0` selecting separate attention. Vectorized short softmax is automatic for applicable shapes.
 
 ## Reproduction and runtime provenance
 
@@ -114,14 +158,14 @@ Install the companion Hexagon backend containing `hvx-f32-decode`. Set its host 
 export GGML_HEXAGON_NHVX=6 GGML_HEXAGON_HOSTBUF=1
 export GGML_HEXAGON_OPSTAGE=3 GGML_HEXAGON_OPPOLL=1 GGML_HEXAGON_OPFUSION=1
 export GGML_HEXAGON_F16_F32_PANEL=1 GGML_HEXAGON_F16_F32_BLOCKED=0 GGML_HEXAGON_F16_F32_FUSE_ADD=0
-export AUDIO8_LM_HEXAGON_REPACK=1 AUDIO8_LM_HEXAGON_FLASH_ATTN=1
-unset GGML_HEXAGON_PROFILE GGML_HEXAGON_MM_SELECT TTS_CPP_FORCE_SCHED
+export AUDIO8_LM_HEXAGON_REPACK=1
+unset AUDIO8_LM_HEXAGON_FLASH_ATTN GGML_HEXAGON_PROFILE GGML_HEXAGON_MM_SELECT TTS_CPP_FORCE_SCHED
 audio8-cli --lm lm.gguf --codec-decoder decoder.gguf --backend hexagon \
   --greedy --seed 42 --threads 4 --max-frames 512 \
   --text "Testing one, two, three, four, five." --out S4.wav
 ```
 
-For the baseline, set `AUDIO8_LM_HEXAGON_FLASH_ATTN=0` and use the preceding softmax runtime. Setting only the flag to zero on the new backend keeps vectorized softmax enabled.
+For the baseline, set `AUDIO8_LM_HEXAGON_FLASH_ATTN=0` and use the preceding softmax runtime. Setting only the flag to zero on the new backend keeps vectorized softmax enabled. The measurements above used the equivalent explicit value `1`; the default change selects the same supported graph and cache layout. The recorded CLI hash identifies the measured explicit-enable build, before the default changed.
 
 - Final v79 DSP SHA256: `b2387d338869dd6224c222fce1b8aafa7398532799c15ffd56f1922d7d93e946`.
 - Baseline v79 DSP SHA256: `1f1c122e6e274acd2fdb2b0c490df7464fb34b3888c62a8c27b83616656fa4e2`.

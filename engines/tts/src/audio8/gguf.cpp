@@ -993,8 +993,9 @@ bool backend_picks_codes(ggml_backend_t backend, const lm_hparams & hp) {
 
 bool hexagon_decode_attention(ggml_backend_t backend, int head_dim, int heads, int kv_heads,
                               int capacity) {
+    // Select supported Hexagon decode attention by default, with an explicit opt-out.
     const char * flag = std::getenv("AUDIO8_LM_HEXAGON_FLASH_ATTN");
-    if (!flag || std::strcmp(flag, "1") != 0) return false;
+    if (flag && std::strcmp(flag, "0") == 0) return false;
     const auto device = ggml_backend_get_device(backend);
     if (!device || std::strcmp(audio8_dev_reg_name(device), "HTP") != 0 ||
         head_dim < 32 || head_dim > 256 || head_dim % 32 != 0 ||

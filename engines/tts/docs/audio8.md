@@ -408,17 +408,19 @@ when exact comparison with the previous Hexagon allocation path is required.
 
 #### F32 flash attention for Hexagon decoding
 
-Enable maskless flash attention for the slow and fast LM decoders before
-loading the model:
+Maskless F32 flash attention is enabled by default for the slow and fast LM
+decoders on supported Hexagon backends. No environment setting is required.
+To use separate attention operations instead, set this before loading the model:
 
 ```sh
-export AUDIO8_LM_HEXAGON_FLASH_ATTN=1
+export AUDIO8_LM_HEXAGON_FLASH_ATTN=0
 ```
 
-This option requires a Hexagon backend that supports the F32 flash-attention
+The default path requires a Hexagon backend that supports the F32 flash-attention
 operation for the model's head dimensions. The loader checks support and
-selects the cache layout once. Leave the variable unset, or set it to `0`, to
-use separate attention operations. CPU and OpenCL retain their existing path.
+selects the cache layout once. Leave the variable unset, or set it to `1`, for
+the default flash path. Unsupported operations use separate attention.
+CPU and OpenCL retain their existing path.
 Use the companion backend with the `hvx-f32-decode` kernel for the measured
 performance; the support probe checks operation support and does not identify
 which kernel an older backend selects.
@@ -437,8 +439,8 @@ automatically when applicable; it has no Audio8 CLI switch.
 canonical CPU attention. It covers masked prefill, decoding, grouped query
 heads, layer offsets, cache reset and prefixes crossing a 128-key tile.
 Full LM comparisons use fixed CPU histories because changes in F32 reduction
-order can change close argmax decisions. This option is experimental and does
-not promise identical native codes across implementations.
+order can change close argmax decisions. The default flash path does not
+promise identical native codes across implementations.
 
 See [validation and performance](audio8-hexagon-attention.md) for the complete
 S1-S5 inference measurements, CPU comparisons and remaining execution costs.
