@@ -1658,6 +1658,15 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_encoder_coreml.py")
         set_property(TEST test-export-encoder-coreml PROPERTY LABELS "unit")
+        foreach(padding_test IN ITEMS test_coreml_padding test_coreml_padding_runtime)
+            add_test(NAME ${padding_test}
+                COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/test/${padding_test}.py")
+            set_property(TEST ${padding_test} PROPERTY LABELS "unit")
+            set_property(TEST ${padding_test} PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            set_property(TEST ${padding_test} PROPERTY SKIP_REGULAR_EXPRESSION
+                "SKIP: |requires Apple Core ML runtime and coremltools")
+        endforeach()
         add_test(
             NAME test-export-moss-transcribe-coreml
             COMMAND ${Python3_EXECUTABLE}

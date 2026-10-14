@@ -4404,18 +4404,20 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
                               const float      * mel,
                               int                n_mel_frames,
                               int                n_mels,
+                              int                mel_valid,
                               EncoderOutputs   & out) {
     const EncoderConfig & enc     = model.encoder_cfg;
     const int             d_model = enc.d_model;
-    const int             T       = coreml_encoder_out_frames(enc, n_mel_frames);
+    const bool masked = parakeet_coreml_masks_mel_padding(model.impl->ctx_coreml);
+    const int T = coreml_encoder_out_frames(enc, masked ? mel_valid : n_mel_frames);
 
     out.n_enc_frames = T;
     out.d_model      = d_model;
     out.vocab_size   = model.vocab_size;
     out.encoder_out.resize((size_t) T * d_model);
 
-    const int rc = parakeet_coreml_encode(model.impl->ctx_coreml,
-                                           n_mel_frames, n_mels, mel,
+    const int rc = parakeet_coreml_encode_valid(model.impl->ctx_coreml,
+                                           n_mel_frames, mel_valid, n_mels, mel,
                                            T, d_model, out.encoder_out.data());
     if (rc != 0) return rc;
 
@@ -4641,7 +4643,7 @@ int run_encoder(ParakeetCtcModel   & model,
     // encoder_out back to the ggml decoder or diarization head.
     if (should_use_coreml_encoder(model, n_mel_frames, all_valid, capture_intermediates,
                                   allow_coreml_padded)) {
-        const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, out);
+        const int rc = run_encoder_coreml(model, mel, n_mel_frames, n_mels, mel_valid, out);
         if (rc == 0) return 0;
         PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); falling back to ggml encoder\n", rc);
     }
