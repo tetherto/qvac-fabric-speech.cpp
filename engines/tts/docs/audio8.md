@@ -491,6 +491,12 @@ and scratch requirements are met. Activations and HMX output tiles are F16
 internally, with F32 graph outputs. This changes numerical precision. Small
 channel tails, the latent transformer, and the LM retain their existing
 precision. CPU, OpenCL, and encoder graphs retain their existing behavior.
+Existing HMX matmul/ADD fusion remains available with normal backend fusion
+enabled; the older experimental HVX reuse/residual-fusion switches are separate.
+
+See the [codec experiment report](audio8-hexagon-codec-tracks.md) for the
+optimized-only stage measurements, focused waveform checks and saved OpenCL
+comparison.
 
 Both modes are opt-in and are independent measurements. FP16 takes precedence
 if both variables are `1`. Leave both unset, or set them to `0`, for the
