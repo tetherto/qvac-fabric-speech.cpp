@@ -28,7 +28,7 @@ validated on it.
 | TTS | Pocket TTS | English synthesis and incremental CPU streaming; cloning requires encoder-enabled weights |
 | TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); numerical reference parity pending |
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; metadata-only memory fit for SoundEffect; CPU/Metal generation validated; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage |
-| TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension |
+| TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, with a metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
@@ -45,6 +45,12 @@ CosyVoice3 expands bf16 flow weights to f32 on ARM CPUs to avoid scalar bf16
 matmuls; f16 remains the recommended ARM flow bundle. Its benchmark supports
 independent LM, flow and HiFT model overrides for
 [stage profiling](engines/tts/docs/cosyvoice3.md#stage-profiling).
+
+Nemotron 3 Diarization preparation supports additional weight precisions via
+`convert_nemotron_diarization.py --outtype`. CPU/CUDA offline validation covers
+F16, BF16, Q6_K, Q5_K, Q4_K, and NVFP4; streaming quality varies by precision.
+See the [quantization measurements](engines/parakeet/docs/performance.md#nemotron-3-diarization-quantizations)
+before selecting a format. MXFP4 failed CPU quality checks.
 
 ### Apple Core ML sidecars
 
@@ -105,7 +111,9 @@ See the [fixed-code decoder benchmark](engines/tts/docs/audio8.md#fixed-code-dec
 `RTF = inference_time / audio_duration`; lower is faster. These are dated
 measurements with different workloads and timing boundaries, not universal
 speed guarantees. Full methods, build pins and limitations live in
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md) and the linked engine reports.
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) and the linked engine reports;
+[benchmark coverage](docs/PERFORMANCE.md#benchmark-coverage) lists which
+model each desktop benchmark family measures and scores.
 
 | Task | Model | Recorded measurements |
 |---|---|---|
