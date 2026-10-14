@@ -419,6 +419,9 @@ This option requires a Hexagon backend that supports the F32 flash-attention
 operation for the model's head dimensions. The loader checks support and
 selects the cache layout once. Leave the variable unset, or set it to `0`, to
 use separate attention operations. CPU and OpenCL retain their existing path.
+Use the companion backend with the `hvx-f32-decode` kernel for the measured
+performance; the support probe checks operation support and does not identify
+which kernel an older backend selects.
 
 The enabled path stores V in position-major order, with each head's dimensions
 contiguous, like K. Single-token decoding combines QK, softmax and the value
@@ -436,6 +439,9 @@ heads, layer offsets, cache reset and prefixes crossing a 128-key tile.
 Full LM comparisons use fixed CPU histories because changes in F32 reduction
 order can change close argmax decisions. This option is experimental and does
 not promise identical native codes across implementations.
+
+See [validation and performance](audio8-hexagon-attention.md) for the complete
+S1-S5 inference measurements, CPU comparisons and remaining execution costs.
 
 #### Codec panel selection
 
