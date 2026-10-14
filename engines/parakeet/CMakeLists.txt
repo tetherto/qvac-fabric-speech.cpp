@@ -1635,6 +1635,16 @@ if (PARAKEET_BUILD_TESTS)
     # frameworks -- so it runs on every CI regardless of PARAKEET_COREML and locks
     # the wrapper's variable-length behaviour (fixed verbatim / flexible rebuild /
     # features-major default).
+    add_executable(test-packed-affine test/test_packed_affine.cpp)
+    target_include_directories(test-packed-affine PRIVATE src)
+    target_link_libraries(test-packed-affine PRIVATE ggml)
+    add_test(NAME test-packed-affine-schema COMMAND test-packed-affine --self-test)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-packed-affine-python
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/test_packed_affine.py")
+        set_property(TEST test-packed-affine-python PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+    endif()
+
     add_executable(test-coreml-shapes
         test/test_coreml_shapes.cpp
         src/coreml/parakeet_coreml_shape.cpp)

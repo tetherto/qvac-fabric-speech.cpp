@@ -150,6 +150,61 @@ cmake -S engines/parakeet -B build-vulkan -DGGML_VULKAN=ON
 cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ```
 
+## Experimental packed affine TDT recipe
+
+`export-packed-affine.py` preserves an explicit per-output-channel INT4/INT8
+recipe, including FP32 minima/steps and original FP16 overrides. It does not
+apply another GGML weight quantizer. The nonstandard architecture
+`parakeet-affine-v1` makes older engines reject these files instead of treating
+carrier integers as model weights. Ordinary GGUF models retain their existing
+load and execution paths.
+
+Supply a JSON recipe with `source_archive_sha256` and a `tensors` object mapping
+NeMo encoder weight names to `4`, `8`, or `16`; unlisted tensors remain FP16:
+
+```bash
+python engines/parakeet/scripts/export-packed-affine.py \
+  --archive models/parakeet-tdt-0.6b-v3.nemo \
+  --recipe recipe.json \
+  --output models/retained.affine.gguf \
+  --dense-control models/retained.dense.gguf
+```
+
+The experimental native path stores integer codes in unit-scale Q4_0/Q8_0
+carrier blocks, with separate FP32 affine metadata. These blocks are not
+ordinary Q4_0/Q8_0 model weights. Block-scale headers add storage overhead over
+pure packed codes. The native graph reconstructs each projection transiently
+using separate FP32 multiply/add operations and rounds to FP16 before the
+existing matrix multiply. Activation-first graph ordering permits workspace
+reuse; the loader does not create a persistent dense model. This is a faithful
+storage/execution baseline, **not a fused low-bit matrix multiply or a speed
+optimization**. Reconstruction can be substantially slower than ordinary Q8.
+Unsupported encoder graph operations fail rather than silently falling back.
+Only offline TDT has been evaluated; other backend/model combinations require
+validation before use.
+
+Depthwise kernels retain the recipe's reconstructed FP16 values, as in the
+original packed-projection runtime. Selected FP16 attention weights remain
+FP16. Both packed exports and their dense controls omit duplicate fused Q/K/V
+copies, so size comparisons must account for that layout difference. The receipt
+records the exported source values, physical bytes, coverage and file hashes.
+`--expected-tensors` can require an independent SHA/shape/dtype receipt for every
+source tensor before GGUF conversion.
+
+Validate exact reconstruction before comparing transcription and timing:
+
+```bash
+python engines/parakeet/test/test_packed_affine.py
+# Build target test-packed-affine, then run on the exact requested backend:
+./build/test-packed-affine models/retained.affine.gguf MTL0
+```
+
+The native audit compares every reconstructed FP16 weight bit-for-bit with the
+saved affine arithmetic and refuses unsupported operations. Python reference
+and Core ML export scripts deliberately reject carrier files; use the matching
+`--dense-control` output when an expanded weight graph is required. A weight
+identity check does not establish transcription accuracy or a speed advantage.
+
 ## Core ML encoder sidecar
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
