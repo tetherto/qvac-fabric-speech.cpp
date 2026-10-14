@@ -1,6 +1,6 @@
 # Audio8 Hexagon codec experiments, October 14
 
-## Protocol
+## Original experiment protocol
 
 Only optimized Hexagon was measured for these experiments. Saved OpenCL measurements are reused; no fresh GPU or unoptimized Hexagon performance series was run. Each input has one warmup and three timed fresh-process captures, with medians excluding loading and output file IO. Inputs rotate across timed rounds. Decoding is greedy, seed 42, four CPU threads, six HVX workers, natural EOS, cap 512 frames, and profiling off.
 
@@ -30,23 +30,52 @@ Plan B uses fixed identical codes and unclipped float PCM, without alignment, ga
 
 ## Full inference comparison
 
-Median seconds from three timed full natural-inference captures per prompt, excluding model loading and output file writing. These totals come directly from the recorded full-inference timer, not from adding independent LM and codec medians. OpenCL results reuse the saved three-run GPU batch; Hexagon results use the measured Plan B runtime, now selected by default.
+Latest median full inference seconds, excluding model loading and output file writing. S4 uses the five timed default-path Hexagon recheck below; S1/S2/S3/S5 retain their original three-run Plan B medians. OpenCL reuses the saved three-run GPU reference for every prompt. Totals use the recorded full-inference timer, not sums of independent stage medians.
 
-| Input | OpenCL GPU s | Hexagon Plan B s | Faster backend / ratio | Frames GPU/Hexagon |
-| --- | ---: | ---: | --- | ---: |
-| S1 | 3.546 | 3.057 | Hexagon 1.16x | 76/69 |
-| S2 | 2.392 | 1.972 | Hexagon 1.21x | 50/49 |
-| S3 | 3.374 | 3.497 | OpenCL 1.04x | 72/74 |
-| S4 | 3.147 | 4.116 | OpenCL 1.31x | 67/81 |
-| S5 | 4.373 | 4.209 | Hexagon 1.04x | 94/88 |
+RTF = full inference seconds / exact generated WAV duration. Lower is better; RTF <1 is faster than real time. Each backend uses its own exact WAV duration rather than a rounded CLI duration or the other backend's audio length.
 
-Hexagon is faster in these full-inference prompt medians for S1, S2 and S5. S3 and S4 remain slower than OpenCL even though their codec stages are faster; measured LM execution accounts for the remaining stage gap. Different generated GPU trajectories/frame counts, separate batches and observed timing spread prevent an identical-workload or universal backend speedup claim.
+| Input | OpenCL GPU s | Hexagon s | OpenCL RTF | Hexagon RTF | Frames GPU/Hexagon |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| S1 | 3.546 | 3.057 | 1.005 | 0.954 | 76/69 |
+| S2 | 2.392 | 1.972 | 1.030 | 0.866 | 50/49 |
+| S3 | 3.374 | 3.497 | 1.009 | 1.017 | 72/74 |
+| S4 | 3.147 | 3.448 | 1.011 | 0.917 | 67/81 |
+| S5 | 4.373 | 4.209 | 1.002 | 1.030 | 94/88 |
+
+Hexagon has lower full-inference prompt medians for S1, S2 and S5. S3 and S4 remain slower in latency. S4 now measures 3.448 s rather than the original 4.116 s; its output is unchanged. Its NPU RTF is lower than OpenCL because the generated NPU audio is longer (3.761633 versus 3.111474 s). Different trajectories/frame counts, separate batches and timing spread prevent identical-workload or universal speedup claims.
 
 ### Default revision
 
-Plan B is now the default for eligible Hexagon decoder synthesis matmuls. Leave `AUDIO8_CODEC_HEXAGON_FP16` unset, or set it to `1`, for the measured HMX path. Set it to `0` before loading the decoder to restore F32 synthesis. The default revision changes only application selection; it retains the measured graph, precision eligibility, HMX arithmetic and small-tail/latent/LM precision. No new phone timing or heavy correctness suite was run for this default-only revision.
+Plan B is now the default for eligible Hexagon decoder synthesis matmuls. Leave `AUDIO8_CODEC_HEXAGON_FP16` unset, or set it to `1`, for the measured HMX path. Set it to `0` before loading the decoder to restore F32 synthesis. The default revision changes only application selection; it retains the measured graph, precision eligibility, HMX arithmetic and small-tail/latent/LM precision. The default selection was subsequently rechecked with the five S4 timings below. No new heavy full-LM CPU correctness suite was run.
 
-## LM and codec comparison
+## S4 default-path recheck, five timed runs
+
+Input: "Testing one, two, three, four, five." One completed warmup (2.698 s) and five accepted timed fresh-process Hexagon captures. The continuation preserved the original three timings and added two; there was no replacement or discarded valid run. Before each capture: at least 50 s settling, three ready snapshots, unplugged, asleep/dozing, thermal status 0, skin <=38.5 C. After: unplugged, asleep/dozing and thermal status 0. Profiling is off. Runtime/model/original-runner/continuation hashes and output geometry all validate.
+
+The new default-on CLI leaves `AUDIO8_CODEC_HEXAGON_FP16` unset, confirms FP16 synthesis in its log, and produces byte-identical codes and WAVs to the earlier explicit Plan B capture in all six captures. LM repacking and 4x2 are enabled, flash decode uses its default, and vectorized softmax is automatic. Normal HMX ADD fusion is enabled; the earlier HVX blocked-reuse/residual-fusion experiments and F32 convolution tile remain disabled.
+
+| Timed run | Full s | LM s | Codec s | RTF |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 3.448 | 2.203 | 1.246 | 0.917 |
+| 2 | 4.241 | 3.034 | 1.208 | 1.127 |
+| 3 | 3.122 | 2.399 | 0.723 | 0.830 |
+| 4 | 3.030 | 2.486 | 0.544 | 0.805 |
+| 5 | 3.779 | 2.711 | 1.068 | 1.005 |
+| Median | 3.448 | 2.486 | 1.068 | 0.917 |
+
+All outputs contain 81 frames, 165,888 samples at 44,100 Hz: 3.761632653 s of audio. Full inference ranges 3.030-4.241 s. Independent stage medians do not necessarily sum to the median total.
+
+The latest S4 LM median (2.486 s) remains above saved OpenCL (2.064 s), while codec (1.068 s) is close to OpenCL (1.088 s). The actual DSP/DDR clocks are unrecorded; the recheck does not establish the cause of prior variation. All five condition checks pass, with 0 rejected captures. This is output equivalence/performance validation, without a heavy new CPU suite.
+
+Evidence: `codec-default-s4-summary.json`, `codec-default-latest-comparison-rtf.csv`, full raw captures and both immutable runner manifests.
+
+Default-path recheck runtime SHA256:
+
+- `audio8-cli`: `78f5a56438d76c886723575458fef907b669db203acf1d0f06ef6c2619f5c8e3`
+- `libqvac-speech-ggml-hexagon.so`: `dc18666d9f8ad4fa4f5b32bc23a2831a5b3975964338a6dd069be95e84b5a692`
+- `libggml-htp-v79.so`: `9f6f13875ceb7db16db116f5fa25d14842a83e48f47e177638ebc034b54acbc2`
+
+## Original LM and codec comparison
 
 Times are seconds, independent medians of three valid timed observations. Stage medians need not sum to the median total. GPU figures reuse the existing three-run OpenCL reference. GPU/Hexagon natural frame counts differ; this is a prompt comparison.
 
