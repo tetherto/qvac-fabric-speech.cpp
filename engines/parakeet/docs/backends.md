@@ -199,6 +199,39 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --compile-dir engines/parakeet/models
 ```
 
+Fixed TDT exports now have two inputs: `mel` and `mel_valid_mask`. The latter
+is a vector at mel capacity, with ones for the contiguous valid prefix and zeros
+for padding. The runtime supplies this mask from the same valid-frame scan used
+by the native encoder. The graph masks every subsampling stage, attention keys,
+and intermediate Conformer states, including the GLU output before depthwise
+convolution. Only the subsampled valid prefix reaches the decoder. This requires
+both the updated exporter and runtime; an older runtime cannot load this new
+interface. Existing single-input sidecars still load in the updated runtime,
+but their padded frames remain visible to attention. Re-exporting is required
+to obtain the masking fix; updating engine code alone cannot fix old artifacts.
+Masking preserves natural-length semantics in the graph; quantization and Core
+ML precision can still affect numerical and transcript parity. Validate the
+new artifact on the intended audio before deploying it.
+
+Checkpoint-free padding regressions can be run with:
+
+```bash
+python engines/parakeet/test/test_coreml_padding.py
+# Apple + Xcode command-line tools; also converts/compiles small test models:
+python engines/parakeet/test/test_coreml_padding_runtime.py
+```
+
+The runtime test covers fixed capacity, 1501-frame inputs, short and full-capacity
+calls, integer lengths above 2048, stride boundaries, cache reuse, legacy single-input
+models, and the Sortformer bypass interface on CPU-only and default Core ML
+placement. FP32 conversions check padding semantics against the unpadded
+PyTorch reference; FP16 and FP32 native I/O are compared against predictions
+from the corresponding compiled Core ML graph. FP16-versus-PyTorch numerical
+parity is a separate artifact validation, not asserted by the I/O test.
+A tested conversion environment is Python 3.11, Torch 2.7.0,
+coremltools 9.0, and NumPy 1.26.4. These small-model checks do not establish
+full-model WER, latency, or ANE placement.
+
 IndicConformer uses the same fixed-capacity contract. Core ML runs the encoder;
 the multilingual CTC projection and `--language` token mask remain on ggml:
 
