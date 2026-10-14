@@ -110,8 +110,7 @@ uint64_t decoder_payload(const detail::TranscribeModel & model, const Workload &
                          const detail::TranscribeTokenizer & tokenizer) {
     const auto & config = model.config();
     const uint64_t batch = std::min<size_t>(detail::TRANSCRIBE_PREFILL_BATCH_TOKENS, workload.prompt.size());
-    const uint64_t mask_element = model.fused_attention() ? sizeof(ggml_fp16_t) : sizeof(float);
-    const uint64_t mask = sat_mul(sat_mul(batch, workload.prompt.size()), mask_element);
+    const uint64_t mask = detail::transcribe_mask_bytes(model, (int64_t) workload.prompt.size(), (int64_t) batch);
     const uint64_t host_rows = model.embeds_on_host() ? config.text.n_embd : 0;
     const uint64_t input = sat_mul(sat_mul(batch, config.text.n_embd + host_rows + 2), sizeof(float));
     uint64_t bytes = sat_add(sat_add(mask, input), sat_mul(batch, sizeof(int32_t) * 2));

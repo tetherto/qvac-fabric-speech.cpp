@@ -79,14 +79,13 @@ void set_input(ggml_tensor * tensor, const std::vector<T> & values) {
     }
 }
 
-void set_mask(ggml_tensor * tensor, const std::vector<float> & values) {
-    if (tensor == nullptr || tensor->type == GGML_TYPE_F32) {
-        set_input(tensor, values);
-        return;
+template <typename T>
+void fill_causal_mask(T * mask, int64_t position, int64_t tokens, T open, T blocked) {
+    const int64_t total = position + tokens;
+    std::fill(mask, mask + total * tokens, blocked);
+    for (int64_t query = 0; query < tokens; ++query) {
+        std::fill(mask + query * total, mask + query * total + position + query + 1, open);
     }
-    std::vector<ggml_fp16_t> halves(values.size());
-    ggml_fp32_to_fp16_row(values.data(), halves.data(), (int64_t) values.size());
-    set_input(tensor, halves);
 }
 
 struct BatchPlan {
@@ -98,6 +97,26 @@ struct BatchPlan {
 };
 
 } // namespace
+
+ggml_type transcribe_mask_type(const TranscribeModel & model) {
+    return model.fused_attention() ? GGML_TYPE_F16 : GGML_TYPE_F32;
+}
+
+uint64_t transcribe_mask_bytes(const TranscribeModel & model, int64_t positions, int64_t tokens) {
+    return (uint64_t) positions * (uint64_t) tokens * ggml_type_size(transcribe_mask_type(model));
+}
+
+std::vector<uint8_t> build_causal_mask(const TranscribeModel & model, int64_t position, int64_t tokens) {
+    std::vector<uint8_t> bytes(transcribe_mask_bytes(model, position + tokens, tokens));
+    const float blocked = -std::numeric_limits<float>::infinity();
+    if (transcribe_mask_type(model) == GGML_TYPE_F16) {
+        fill_causal_mask(reinterpret_cast<ggml_fp16_t *>(bytes.data()), position, tokens,
+                         ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(blocked));
+    } else {
+        fill_causal_mask(reinterpret_cast<float *>(bytes.data()), position, tokens, 0.0f, blocked);
+    }
+    return bytes;
+}
 
 void validate_transcribe_decoder(const TranscribeModel & model) {
     const TranscribeConfig & config = model.config();
@@ -326,16 +345,6 @@ struct TranscribeDecoder::Impl {
         return values;
     }
 
-    std::vector<float> causal_mask(int64_t tokens) const {
-        const int64_t total = pos + tokens;
-        std::vector<float> mask((size_t) (tokens * total), -std::numeric_limits<float>::infinity());
-        for (int64_t query = 0; query < tokens; ++query) {
-            const auto row = mask.begin() + (std::ptrdiff_t) (query * total);
-            std::fill(row, row + (std::ptrdiff_t) (pos + query + 1), 0.0f);
-        }
-        return mask;
-    }
-
     std::vector<ggml_tensor *> project_head(ggml_context * ctx, ggml_tensor * last) const {
         std::vector<ggml_tensor *> outputs;
         for (const TranscribeHeadChunk & chunk : model.head()) {
@@ -407,7 +416,8 @@ struct TranscribeDecoder::Impl {
     }
 
     ggml_tensor * causal_mask_input(TranscribeGraph & graph, int64_t tokens) const {
-        return model.fused_attention() ? graph.input_f16(pos + tokens, tokens) : graph.input_f32(pos + tokens, tokens);
+        return transcribe_mask_type(model) == GGML_TYPE_F16 ? graph.input_f16(pos + tokens, tokens)
+                                                             : graph.input_f32(pos + tokens, tokens);
     }
 
     struct DecoderInputs {
@@ -472,11 +482,12 @@ struct TranscribeDecoder::Impl {
         const auto inputs = build_graph(graph, tokens, plan.has_audio, want_logits);
         model.allocate(graph);
         const std::vector<int32_t> position_data = positions(tokens);
-        const std::vector<float> mask_data = inputs.mask ? causal_mask(tokens) : std::vector<float>();
+        const std::vector<uint8_t> mask_data = inputs.mask ? build_causal_mask(model, pos, tokens)
+                                                           : std::vector<uint8_t>();
         set_input(inputs.ids, plan.ids);
         if (inputs.text) set_input(inputs.text, model.embed_tokens(plan.ids));
         set_input(inputs.positions, position_data);
-        set_mask(inputs.mask, mask_data);
+        set_input(inputs.mask, mask_data);
         set_input(inputs.audio, plan.audio);
         set_input(inputs.audio_mask, plan.audio_mask);
         set_input(inputs.text_mask, plan.text_mask);

@@ -51,6 +51,8 @@ constexpr int SPLIT_HEAD_CHUNKS = 3;
 constexpr int SPLIT_TAIL_ROWS = TEXT_VOCAB - 2 * SPLIT_HEAD_ROWS;
 constexpr int DECODE_STEPS = 5;
 constexpr double FUSED_RELATIVE_TOLERANCE = 1e-2;
+constexpr int MASK_POSITION = 3;
+constexpr int MASK_TOKENS = 4;
 const char * const COMMA_DECIMAL_LOCALES[] = {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "de_DE",
                                               "fr_FR", "German_Germany.1252"};
 
@@ -877,6 +879,48 @@ void test_fused_attention() {
     std::filesystem::remove(path);
 }
 
+std::vector<float> mask_values(const std::vector<uint8_t> & bytes, ggml_type type) {
+    const size_t count = bytes.size() / ggml_type_size(type);
+    std::vector<float> values(count);
+    if (type == GGML_TYPE_F16) {
+        ggml_fp16_to_fp32_row(reinterpret_cast<const ggml_fp16_t *>(bytes.data()), values.data(), (int64_t) count);
+    } else {
+        std::memcpy(values.data(), bytes.data(), bytes.size());
+    }
+    return values;
+}
+
+bool mask_is_causal(const std::vector<float> & values) {
+    const int total = MASK_POSITION + MASK_TOKENS;
+    for (int query = 0; query < MASK_TOKENS; ++query) {
+        for (int key = 0; key < total; ++key) {
+            const float value = values[(size_t) query * total + key];
+            const bool visible = key <= MASK_POSITION + query;
+            if (visible ? value != 0.0f : !(std::isinf(value) && value < 0.0f)) return false;
+        }
+    }
+    return true;
+}
+
+void check_mask_projection(const TranscribeModel & model, ggml_type type, const std::string & layout) {
+    const int64_t total = MASK_POSITION + MASK_TOKENS;
+    const std::vector<uint8_t> mask = build_causal_mask(model, MASK_POSITION, MASK_TOKENS);
+    check(transcribe_mask_type(model) == type, layout + ": the mask has the attention input's type");
+    check(mask.size() == transcribe_mask_bytes(model, total, MASK_TOKENS) &&
+          mask.size() == (size_t) total * MASK_TOKENS * ggml_type_size(type),
+          layout + ": the projection counts exactly the one mask buffer the decoder uploads");
+    check(mask_is_causal(mask_values(mask, type)), layout + ": the mask hides only later positions");
+}
+
+void test_mask_projection() {
+    const auto path = write_transcribe_model("transcribe-mask", WEIGHT_SEED);
+    TranscribeModel unfused(path.string(), false, 1);
+    TranscribeModel fused(path.string(), false, 1, "auto", false, TranscribeLayout{0, TranscribeAttention::Fused});
+    check_mask_projection(unfused, GGML_TYPE_F32, "unfused");
+    check_mask_projection(fused, GGML_TYPE_F16, "fused");
+    std::filesystem::remove(path);
+}
+
 void test_upload_plan() {
     check(plan_upload(true, true) == TensorUpload::InPlace && plan_upload(true, false) == TensorUpload::InPlace,
           "host buffers read tensors in place without a staging copy");
@@ -919,6 +963,7 @@ int main() {
         test_head_plan();
         test_split_token_table();
         test_fused_attention();
+        test_mask_projection();
         test_coreml_frame_major_mel();
         test_coreml_policy();
         test_coreml_sidecar_lookup();
