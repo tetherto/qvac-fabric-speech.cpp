@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "parakeet-mosaic",
+  "version": "V2",
+  "default_recipe": "parakeet-mosaic-compact.recipe.json",
+  "exporter": "scripts/export-mosaic.py",
+  "default_output": "models/parakeet-mosaic-v2.gguf",
+  "bytes": 503670112,
+  "sha256": "612fcc711d453fd914b04022186f2d71904e094f931e5129fe64c8defd86ab93",
+  "encoder_matrix_counts": {
+    "Q4_0": 122,
+    "Q8_0": 142
+  },
+  "execution": "stock GGML Metal",
+  "sidecar": "matching masked512 FLOAT16 encoder, optional",
+  "historical_affine_model": "610.6 MB intermediate milestone; older report identifiers are preserved"
+}

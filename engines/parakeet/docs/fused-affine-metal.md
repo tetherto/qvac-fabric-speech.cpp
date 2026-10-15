@@ -222,6 +222,6 @@ The engine runtime remains experimental and opt-in; this report does not waive
 historical model-quality or size findings or establish production qualification.
 
 
-## Final Compact recipe and later affine optimization
+## Default V2 recipe and later affine optimization
 
-The final503.7MB stock-block recipe, portable exporter, new matching sidecar and separate Q8 comparisons are documented in [mosaic-compact.md](mosaic-compact.md). It does not execute this affine operation. The610.6MB affine model remains reproducible. Later affine INT4/INT8 specialization and paired-byte decode preserve effective weights and improve whole-call latency about12.5–12.7% on the32-row development screen and5.6% on the user recording versus the old compact kernel. These are separate measurements, not run027 timings. The matching GGML PR also contains the current speech merge; requalification beyond the recorded scope remains required.
+The default V2 503.7 MB stock-block recipe, portable exporter, new matching sidecar and separate Q8 comparisons are documented in [mosaic-compact.md](mosaic-compact.md). It does not execute this affine operation. The610.6MB affine model remains reproducible. Later affine INT4/INT8 specialization and paired-byte decode preserve effective weights and improve whole-call latency about12.5–12.7% on the32-row development screen and5.6% on the user recording versus the old compact kernel. These are separate measurements, not run027 timings. The matching GGML PR also contains the current speech merge; requalification beyond the recorded scope remains required.

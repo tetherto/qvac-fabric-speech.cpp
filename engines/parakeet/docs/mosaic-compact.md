@@ -1,6 +1,6 @@
-# Parakeet-Mosaic Compact
+# Parakeet-Mosaic V2
 
-Final recipe for this experiment: **503,670,112-byte GGUF**, SHA256 `612fcc711d453fd914b04022186f2d71904e094f931e5129fe64c8defd86ab93`.
+Default V2 recipe (formerly labeled Compact): **503,670,112-byte GGUF**, SHA256 `612fcc711d453fd914b04022186f2d71904e094f931e5129fe64c8defd86ab93`.
 
 The Parakeet TDT network is unchanged. 122 encoder matrices use standard Q4_0,142 use standard Q8_0, with32-weight groups. Decoder and other non-target payloads retain the historical Mosaic effective values, including quantized depthwise weights represented in FP16. This is a new effective-weight recipe relative to the610.6MB affine model; do not attribute its results to the old model or fused affine kernel. It uses ordinary GGML kernels and needs no affine opt-in.
 
@@ -9,9 +9,9 @@ The Parakeet TDT network is unchanged. 122 encoder matrices use standard Q4_0,14
 Use Python3.11, Torch2.7.0, NumPy2.2.6, gguf0.19.0, PyYAML6.0.3 and sentencepiece. Start from the original NVIDIA parakeet-tdt-0.6b-v3.nemo identified in the recipe. No company model weights are bundled here.
 
 ```sh
-python scripts/export-mosaic-compact.py \
+python scripts/export-mosaic.py \
   --archive /path/to/parakeet-tdt-0.6b-v3.nemo \
-  --output models/mosaic-compact.gguf
+  --output models/parakeet-mosaic-v2.gguf
 ```
 
 Run from engines/parakeet. The exporter verifies the source archive, historical recipe and all725 effective-tensor receipts before applying the frozen264-target block32 map. Target matrices are quantized from original FP16, not requantized affine-rounded matrices. It verifies final file size and full SHA256 against the shipped recipe. Separate Q/K/V tensors; no redundant fused-QKV payload. An existing output is never overwritten.
@@ -24,8 +24,8 @@ Export from this Compact GGUF, not the older affine recipe or a registry encoder
 
 ```sh
 python scripts/export-encoder-coreml.py \
-  --gguf models/mosaic-compact.gguf --n-mel-frames 512 --precision fp16 \
-  --out models/mosaic-compact-encoder.mlpackage --compile-dir models
+  --gguf models/parakeet-mosaic-v2.gguf --n-mel-frames 512 --precision fp16 \
+  --out models/parakeet-mosaic-v2-encoder.mlpackage --compile-dir models
 ```
 
 Use coremltools9.0 and Torch2.7.0. No additional palettization was tested for this final recipe. The graph uses mel[128,512] and mel_valid_mask[512]. Remove `PARAKEET_COREML_DISABLE` from the environment entirely to enable automatic sidecar loading: value0 still disables it because the engine checks presence. `PARAKEET_COREML_COMPUTE_UNITS=ALL` was measured; that does not prove ANE placement. The native frontend and Metal decoder stay in speechcpp.
@@ -55,3 +55,5 @@ Separate CoreML scope: ALL complete0.8–4.8second recordings within the frozen 
 Hybrid median paired latency falls22.8–24.5% versus nativeQ8. Do not generalize to full-length/long-form audio, infer a fresh Redux result, or claim superior accuracy from tiny aggregate differences. Three timing repetitions are not confidence intervals or extra accuracy samples. Repeated raw transcripts identical, no blanks/unknowns. Native process-lifetime RSS Compact0.655–0.675GB versusQ8 0.812–0.824GB; hybrid0.832–3.107GB. RSS includes startup and does not fully observe driver/ANE residency.
 
 Research evidence: parakeet-research commit a47d333, reports/plan_v3/q8_validation_002. Independent audits rescore4,608native+2,781hybrid predictions, reconstruct768audiofiles, verify12bootstrap intervals and653GGUF tensor dequantizations and compiled/source package hashes. Initial environment routing failure and failed decoder probe retained. No automatic production qualification or changes to historical failed gates.
+
+The default identity is declared in configs/parakeet-mosaic.default.json. The previous compact script and recipe filenames remain compatibility identifiers; archived experiment names and hashes are unchanged. The 610.6 MB affine model is an intermediate milestone, not the default V2.
