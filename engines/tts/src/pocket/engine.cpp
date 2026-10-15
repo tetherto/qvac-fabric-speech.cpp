@@ -6,6 +6,7 @@
 #include "pocket/generation.h"
 #include "pocket/reference_audio.h"
 #include "voice_features.h"
+#include "backend_selection.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -69,9 +70,10 @@ struct Engine::Impl {
         if (o.voice_path.empty() == o.reference_audio_path.empty()) fail("supply exactly one prepared voice or reference audio file");
         std::unique_ptr<detail::ReferenceAudio> reference;
         if (!o.reference_audio_path.empty()) reference.reset(new detail::ReferenceAudio(o.reference_audio_path));
+        if (!o.backends_dir.empty()) ::tts_cpp::detail::set_backends_directory(o.backends_dir);
         frontend.reset(new detail::Frontend(o.frontend_path));
-        lm.reset(new detail::FlowLM(o.flow_lm_path, o.context, o.n_threads));
-        mimi.reset(new detail::Mimi(o.mimi_path, o.n_threads));
+        lm.reset(new detail::FlowLM(o.flow_lm_path, o.context, o.n_threads, o.use_gpu));
+        mimi.reset(new detail::Mimi(o.mimi_path, o.n_threads, o.use_gpu));
         if (frontend->source_hash() != lm->source_hash() || mimi->source_hash() != lm->source_hash() ||
             frontend->vocab_size() != lm->config().vocab_size || lm->config().latent_dim != mimi->latent_dim()) fail("model artifacts do not belong to the same checkpoint");
         if (!o.voice_path.empty()) voice = lm->read_voice(o.voice_path);
@@ -210,6 +212,7 @@ struct Engine::Impl {
 };
 Engine::Engine(const EngineOptions & options) : impl_(new Impl(options)) {}
 Engine::~Engine() = default;
+const char * Engine::backend_name() const noexcept { return impl_->lm->backend_name(); }
 int Engine::sample_rate() const noexcept { return impl_->opts.output_sample_rate; }
 std::string Engine::model_source_sha256() const { return impl_->lm->source_hash(); }
 void Engine::cancel() noexcept { impl_->cancelled.store(true); impl_->changed.notify_all(); }

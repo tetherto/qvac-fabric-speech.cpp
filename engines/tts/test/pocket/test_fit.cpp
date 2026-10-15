@@ -58,8 +58,10 @@ void check_tail_budget(pocket::FitOptions opts) {
 }
 int main(int argc, char ** argv) {
     try {
-        check(argc == 2, "expected Pocket bundle directory");
+        check(argc == 2 || argc == 3, "expected Pocket bundle directory [--gpu]");
         pocket::FitOptions opts;
+        opts.engine.use_gpu = argc == 3 && std::string(argv[2]) == "--gpu";
+        check(argc == 2 || opts.engine.use_gpu, "unknown backend option");
         const fs::path bundle = argv[1];
         auto set_paths = [&](const fs::path & dir) {
             opts.engine.flow_lm_path = (dir/"flow-lm.gguf").string();
@@ -70,6 +72,8 @@ int main(int argc, char ** argv) {
         set_paths(bundle); check_tail_budget(opts); opts.text = "Hello! This is a Pocket memory preflight.";
         const auto result = pocket::fit_params(opts);
         check(result.status != FitStatus::Error, result.report.c_str());
+        check(result.device_is_cpu != opts.engine.use_gpu, "fit reported the wrong backend");
+        if (opts.engine.use_gpu) check(result.device_name.find("MTL") == 0 || result.device_name == "Metal", "Metal preflight did not select Metal");
         check(result.device.weights_bytes > 100*1024*1024, "expanded weights not priced");
         check(result.device.state_bytes && result.device.lm_compute_bytes && result.device.codec_compute_bytes && result.host_bytes, "missing memory components");
         std::cout << result.report;

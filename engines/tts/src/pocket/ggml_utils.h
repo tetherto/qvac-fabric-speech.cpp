@@ -4,6 +4,8 @@
 #include "ggml-cpu.h"
 #include "pocket/memory.h"
 #include "gguf_stream.h"
+#include "backend_util.h"
+#include "backend_selection.h"
 
 #include <algorithm>
 #include <cmath>
@@ -61,6 +63,11 @@ inline void price_persistent(ggml_backend_t backend, ggml_context * metadata,
                              ggml_context * weights, ggml_context * state,
                              gguf_context * file, MemoryMeasure & out) {
     const auto buft = ggml_backend_get_default_buffer_type(backend);
+    out.backend_name = ggml_backend_name(backend);
+    out.shares_host_memory = ::tts_cpp::detail::backend_shares_host_memory(backend);
+    size_t available = 0, total = 0;
+    ::tts_cpp::detail::backend_memory(backend, available, total);
+    out.device_free = available; out.device_total = total;
     out.weights = ggml_backend_alloc_ctx_tensors_from_buft_size(weights, buft);
     out.state = ggml_backend_alloc_ctx_tensors_from_buft_size(state, buft);
     out.metadata = ggml_get_mem_size(metadata) + ggml_get_mem_size(weights) +
@@ -98,7 +105,12 @@ struct SizedPocketGraph {
         // The old convolution / transformer histories must remain intact until
         // every consumer has run. Delay cache writes until after the output.
         for (auto * update : updates) ggml_build_forward_expand(graph, update);
-        if (size_only) return price_cpu_graph(backend_, allocator, graph, threads);
+        if (size_only) {
+            if (::tts_cpp::detail::backend_is_cpu(backend_)) return price_cpu_graph(backend_, allocator, graph, threads);
+            size_t arena = 0;
+            ggml_gallocr_reserve_n_size(allocator, graph, nullptr, nullptr, &arena);
+            return arena;
+        }
         if (!ggml_gallocr_alloc_graph(allocator, graph)) throw std::runtime_error("pocket: graph allocation failed");
         return 0;
     }

@@ -89,6 +89,7 @@ FitResult fit_params(const FitOptions & o) {
     try {
         validate(o);
         const auto & e = o.engine;
+        if (!e.backends_dir.empty()) ::tts_cpp::detail::set_backends_directory(e.backends_dir);
         detail::Frontend frontend(e.frontend_path);
         const auto chunks = frontend.split(o.text, e.max_tokens);
         if (chunks.empty()) throw std::invalid_argument("no text chunks");
@@ -105,7 +106,7 @@ FitResult fit_params(const FitOptions & o) {
             prefill = std::max(prefill, int(tokens));
             shapes.push_back({tokens, count}); frames = sat_add(frames, count);
         }
-        auto flow = detail::FlowLM::measure(e.flow_lm_path, e.context, prefill, e.n_threads);
+        auto flow = detail::FlowLM::measure(e.flow_lm_path, e.context, prefill, e.n_threads, e.use_gpu);
         const bool reference = !e.reference_audio_path.empty();
         uint64_t reference_host = 0;
         int voice_frames;
@@ -118,14 +119,17 @@ FitResult fit_params(const FitOptions & o) {
             voice_frames = int((samples+detail::Mimi::frame_samples()-1)/detail::Mimi::frame_samples()) + int(flow.config.bos_before_voice);
             reference_host = sat_add(sat_mul(file_bytes, 8), sat_mul(30ull*192000+samples, 8));
             if (voice_frames > prefill && voice_frames < e.context)
-                flow = detail::FlowLM::measure(e.flow_lm_path, e.context, voice_frames, e.n_threads);
+                flow = detail::FlowLM::measure(e.flow_lm_path, e.context, voice_frames, e.n_threads, e.use_gpu);
         } else {
             voice_frames = detail::FlowLM::measure_voice(e.voice_path, flow, e.context);
         }
         for (const auto & shape : shapes) if (voice_frames + shape.first + shape.second > size_t(e.context)) {
             r.reason = "workload-too-large"; r.report = "Voice, text and maximum audio frames exceed context capacity"; return r;
         }
-        const auto codec = detail::Mimi::measure(e.mimi_path, e.n_threads, reference);
+        const auto codec = detail::Mimi::measure(e.mimi_path, e.n_threads, reference, e.use_gpu);
+        r.device_name = flow.backend_name;
+        r.device_is_cpu = !e.use_gpu;
+        r.device_shares_host_memory = flow.shares_host_memory;
         if (flow.source_hash != frontend.source_hash() || flow.source_hash != codec.source_hash ||
             flow.config.vocab_size != frontend.vocab_size() || flow.config.latent_dim != detail::Mimi::latent_dim())
             throw std::invalid_argument("Pocket artifacts do not belong to the same checkpoint");
@@ -152,16 +156,22 @@ FitResult fit_params(const FitOptions & o) {
         auto load_host = sat_add(std::max(flow.load_staging, codec.load_staging), reference_host);
         load_host = sat_add(load_host, sat_mul(std::filesystem::file_size(e.frontend_path), 64));
         r.host_bytes = sat_add(persistent_host, std::max(runtime_host, load_host));
-        if (!available_memory(r.device_free_bytes, r.device_total_bytes)) {
+        uint64_t host_free = 0, host_total = 0;
+        if (!available_memory(host_free, host_total)) {
             r.reason = "memory-unavailable"; r.report = "Cannot determine currently available system memory"; return r;
         }
+        r.device_free_bytes = e.use_gpu ? flow.device_free : host_free;
+        r.device_total_bytes = e.use_gpu ? flow.device_total : host_total;
+        if (r.device_shares_host_memory) r.device_free_bytes = std::min(r.device_free_bytes, host_free);
         if (o.memory_budget_bytes) r.device_free_bytes = std::min(r.device_free_bytes, o.memory_budget_bytes);
-        const auto required = sat_add(sat_add(r.device.total_bytes, r.host_bytes), o.margin_bytes);
-        r.fits = required <= r.device_free_bytes;
+        const auto required = sat_add(sat_add(r.device.total_bytes,
+            r.device_shares_host_memory ? r.host_bytes : 0), o.margin_bytes);
+        r.fits = required <= r.device_free_bytes &&
+            (r.device_shares_host_memory || sat_add(r.host_bytes, o.margin_bytes) <= host_free);
         r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
         r.reason = r.fits ? "fits" : "does-not-fit";
         std::ostringstream report;
-        report << "Pocket CPU memory preflight (bytes)\nweights: " << r.device.weights_bytes
+        report << "Pocket " << r.device_name << " memory preflight (bytes)\nweights: " << r.device.weights_bytes
                << "\nstate: " << r.device.state_bytes << "\nFlowLM compute: " << flow.compute
                << "\nMimi compute: " << codec.compute << "\nhost extras: " << r.host_bytes
                << "\nmargin: " << o.margin_bytes << "\nrequired: " << required

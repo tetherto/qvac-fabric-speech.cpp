@@ -3,6 +3,7 @@
 
 #include "backend_selection.h"
 #include "backend_util.h"
+#include "pocket/backend.h"
 #include "gguf_stream.h"
 #include "ggml-alloc.h"
 
@@ -128,7 +129,7 @@ struct FlowLM::Impl {
         if (checked.size() != static_cast<size_t>(gguf_get_n_tensors(file))) fail("unrecognized tensors in FlowLM artifact");
     }
 
-    void load(const std::string & path, int context, int threads, MemoryMeasure * price = nullptr) {
+    void load(const std::string & path, int context, int threads, MemoryMeasure * price = nullptr, bool use_gpu = false) {
         measure = price; n_threads = threads;
         if (context < 1 || context > 8192 || threads < 1 || threads > 1024)
             fail("context must be 1..8192 and threads 1..1024");
@@ -147,9 +148,7 @@ struct FlowLM::Impl {
         if (cfg.dim % cfg.heads || (cfg.dim / cfg.heads) % 2 || cfg.flow_dim < 2 ||
             !std::isfinite(cfg.rope_base) || cfg.rope_base <= 0) fail("invalid architecture dimensions");
         validate_tensors(); // All validation precedes device allocations and graph construction.
-        backend = ::tts_cpp::detail::init_cpu_backend();
-        if (!backend) fail("CPU backend unavailable");
-        ::tts_cpp::detail::backend_set_n_threads(backend, threads);
+        backend = init_backend(use_gpu, threads);
         // This baseline always computes in F32. Expanding half storage once
         // avoids ggml CPU's F16 matmul rounding *activations* to F16, which
         // noticeably changes the EOS head on the released checkpoint.
@@ -323,13 +322,14 @@ struct FlowLM::Impl {
     }
 };
 
-FlowLM::FlowLM(const std::string & path, int context, int threads) : impl_(std::make_unique<Impl>()) {
-    impl_->load(path, context, threads);
+FlowLM::FlowLM(const std::string & path, int context, int threads, bool use_gpu) : impl_(std::make_unique<Impl>()) {
+    impl_->load(path, context, threads, nullptr, use_gpu);
 }
-FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_frames, int threads) {
+const char * FlowLM::backend_name() const noexcept { return ggml_backend_name(impl_->backend); }
+FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_frames, int threads, bool use_gpu) {
     if (prefill_frames < 1 || prefill_frames > context) fail("invalid prefill shape");
     FlowMemory out;
-    Impl model; model.load(path, context, threads, &out);
+    Impl model; model.load(path, context, threads, &out, use_gpu);
     out.config = model.cfg;
     out.source_hash = gguf_get_val_str(model.file, model.key("pocket.source_sha256", GGUF_TYPE_STRING));
     // Bound every permitted cache occupancy, including decoding at capacity.

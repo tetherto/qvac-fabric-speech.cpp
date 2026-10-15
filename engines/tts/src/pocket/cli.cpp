@@ -39,12 +39,12 @@ Arguments parse_arguments(int argc, char ** argv) {
     Arguments args;
     const std::set<std::string> accepted = {"--model-dir","--flow-lm","--mimi","--frontend","--voice","--reference-audio",
         "--text","--output","--threads","--steps","--temperature","--seed","--runs","--report","--context","--max-tokens",
-        "--frames-after-eos","--fit-budget-mib","--fit-margin-mib"};
+        "--frames-after-eos","--fit-budget-mib","--fit-margin-mib","--backends-dir"};
     for (int i = 1; i < argc; ++i) {
         const std::string key = argv[i];
         if (key == "--help") { args.values[key] = "true"; return args; }
-        if (key == "--fit") {
-            if (args.has(key)) throw std::runtime_error("duplicate option: --fit");
+        if (key == "--fit" || key == "--gpu") {
+            if (args.has(key)) throw std::runtime_error("duplicate option: "+key);
             args.values[key] = "true"; continue;
         }
         if (!accepted.count(key) || i+1 == argc || args.has(key)) throw std::runtime_error("invalid or duplicate option: "+key);
@@ -55,15 +55,19 @@ Arguments parse_arguments(int argc, char ** argv) {
 void print_help() {
     std::puts("pocket-cli --model-dir DIR --text TEXT --output FILE.wav [--voice FILE.gguf | --reference-audio FILE.wav]\n"
               "           [--threads 1 --steps 1 --temperature 0.3 --seed 1234 --runs 1 --report FILE.json]\n"
-              "           [--frames-after-eos -1] (-1 uses the checkpoint/text default; explicit range 0..100)\n"
+              "           [--gpu] [--backends-dir DIR] [--frames-after-eos -1]\n"
+              "--gpu selects Metal for FlowLM and Mimi; CPU is used when --gpu is omitted.\n"
+              "--frames-after-eos -1 uses the checkpoint/text default; explicit range 0..100.\n"
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
               "--runs greater than 1 includes one untimed warmup and records each warm run.\n"
-              "--fit estimates CPU memory without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"
+              "--fit estimates memory on the selected backend without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"
               "Fit exit status: 0 fits, 1 does not fit, 2 measurement error.");
 }
 EngineOptions engine_options(const Arguments & args) {
     const auto dir = args.get("--model-dir", ".");
     EngineOptions opts;
+    opts.use_gpu = args.has("--gpu");
+    opts.backends_dir = args.get("--backends-dir", "");
     opts.flow_lm_path = args.get("--flow-lm", dir+"/flow-lm.gguf");
     opts.mimi_path = args.get("--mimi", dir+"/mimi.gguf");
     opts.frontend_path = args.get("--frontend", dir+"/frontend.json");

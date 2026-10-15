@@ -31,9 +31,14 @@ static void compare(const char * name, const std::vector<float> & got, const std
     if (worst > tolerance) throw std::runtime_error(std::string(name)+": parity failure");
 }
 int main(int argc, char ** argv) {
-    if (argc != 3) { std::fprintf(stderr, "usage: test-pocket-mimi model.gguf reference-directory\n"); return 2; }
+    if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: test-pocket-mimi model.gguf reference-directory [--gpu]\n"); return 2; }
     try {
-        Mimi model(argv[1], 1);
+        const bool gpu = argc == 4 && std::string(argv[3]) == "--gpu";
+        if (argc == 4 && !gpu) throw std::runtime_error("unknown backend option");
+        Mimi model(argv[1], 1, gpu);
+        if (gpu && std::strncmp(model.backend_name(), "MTL", 3) != 0 && std::string(model.backend_name()) != "Metal")
+            throw std::runtime_error("Metal was requested but not selected");
+        std::printf("Mimi backend: %s\n", model.backend_name());
         const std::string dir = argv[2];
         const auto latents = load(dir+"/latents.npy"), pcm = load(dir+"/pcm.npy");
         std::vector<float> singles;
@@ -99,7 +104,7 @@ int main(int argc, char ** argv) {
                 {singles.begin(), singles.begin()+1920}, 0.000001);
         drwav_data_format format{drwav_container_riff, DR_WAVE_FORMAT_IEEE_FLOAT, 1, 24000, 32};
         drwav wav;
-        if (!drwav_init_file_write(&wav, (dir+"/pocket-native-decoder.wav").c_str(), &format, nullptr))
+        if (!drwav_init_file_write(&wav, (dir+(gpu ? "/pocket-metal-decoder.wav" : "/pocket-native-decoder.wav")).c_str(), &format, nullptr))
             throw std::runtime_error("cannot open waveform output");
         auto written = drwav_write_pcm_frames(&wav, singles.size(), singles.data()); drwav_uninit(&wav);
         if (written != singles.size()) throw std::runtime_error("incomplete waveform write");

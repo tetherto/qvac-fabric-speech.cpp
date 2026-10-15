@@ -13,7 +13,7 @@ struct FitOptions {
     uint64_t memory_budget_bytes = 0;
 };
 
-// CPU-only memory preflight. GGUF tensor metadata is read, never tensor data;
+// CPU or Metal memory preflight. GGUF tensor metadata is read, never tensor data;
 // actual runtime graphs are priced without allocating or executing their buffers.
 // Prepared voice metadata and frontend JSON are validated. Reference WAV headers
 // are inspected (uncompressed WAV, 1..64 channels, at most 64 MiB / 30 seconds).

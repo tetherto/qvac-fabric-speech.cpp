@@ -2,6 +2,7 @@
 #include "pocket/ggml_utils.h"
 #include "backend_selection.h"
 #include "backend_util.h"
+#include "pocket/backend.h"
 #include "json.hpp"
 
 #include <climits>
@@ -67,7 +68,7 @@ struct Mimi::Impl {
         conv_shape(p + ".block.1.conv", width, width / 2, 3);
         conv_shape(p + ".block.3.conv", width / 2, width, 1);
     }
-    void load(const std::string & path, int threads, MemoryMeasure * price = nullptr) {
+    void load(const std::string & path, int threads, MemoryMeasure * price = nullptr, bool use_gpu = false) {
         measure = price; n_threads = threads;
         if (threads < 1 || threads > 1024) fail("threads must be 1..1024");
         file = gguf_init_from_file(path.c_str(), {true, &metadata});
@@ -128,9 +129,7 @@ struct Mimi::Impl {
             values[enc][i] = ggml_new_tensor_3d(state, GGML_TYPE_F32, hd, heads, window-1);
         }
         if (checked.size() != static_cast<size_t>(gguf_get_n_tensors(file))) fail("unexpected codec tensors");
-        backend = ::tts_cpp::detail::init_cpu_backend();
-        if (!backend) fail("CPU backend unavailable");
-        ::tts_cpp::detail::backend_set_n_threads(backend, threads);
+        backend = init_backend(use_gpu, threads);
         weights = ggml_init({(checked.size() + 8) * ggml_tensor_overhead(), nullptr, true});
         if (!weights) fail("weight context allocation failed");
         for (auto * src = ggml_get_first_tensor(metadata); src; src = ggml_get_next_tensor(metadata, src)) {
@@ -308,10 +307,11 @@ struct Mimi::Impl {
     }
 };
 
-Mimi::Mimi(const std::string & path, int threads) : impl_(new Impl) { impl_->load(path, threads); }
-MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder) {
+Mimi::Mimi(const std::string & path, int threads, bool use_gpu) : impl_(new Impl) { impl_->load(path, threads, nullptr, use_gpu); }
+const char * Mimi::backend_name() const noexcept { return ggml_backend_name(impl_->backend); }
+MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder, bool use_gpu) {
     MemoryMeasure out;
-    Impl model; model.load(path, threads, &out);
+    Impl model; model.load(path, threads, &out, use_gpu);
     // Price the maximum supported decode batch; include a full
     // retained attention window, plus the distinct empty-history shape.
     for (int past : {0, window-1}) {

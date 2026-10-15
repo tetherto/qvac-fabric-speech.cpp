@@ -42,13 +42,20 @@ static void check_eos_tail(EngineOptions opts) {
     if (callbacks) throw std::runtime_error("context rejected after delivering PCM");
 }
 int main(int argc, char ** argv) {
-    if (argc != 3) { std::fprintf(stderr, "usage: test-pocket-engine model-directory flow-lm.gguf\n"); return 2; }
+    if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: test-pocket-engine model-directory flow-lm.gguf [--gpu]\n"); return 2; }
     try {
         const std::string dir = argv[1];
         EngineOptions opts; opts.flow_lm_path = argv[2]; opts.mimi_path = dir+"/mimi.gguf";
         opts.frontend_path = dir+"/frontend.json"; opts.voice_path = dir+"/voice.gguf";
+        opts.use_gpu = argc == 4 && std::string(argv[3]) == "--gpu";
+        if (argc == 4 && !opts.use_gpu) throw std::runtime_error("unknown backend option");
         check_eos_tail(opts);
         Engine engine(opts);
+        const auto backend = std::string(engine.backend_name());
+        if (opts.use_gpu && backend.find("MTL") != 0 && backend != "Metal")
+            throw std::runtime_error("Metal was requested but not selected");
+        if (!opts.use_gpu && backend != "CPU") throw std::runtime_error("default backend changed");
+        std::printf("Pocket engine backend: %s\n", engine.backend_name());
         const std::string text = "Hello! We can generate speech with Fabric.";
         const auto batch = engine.synthesize(text);
         if (batch.cancelled || batch.sample_rate != 24000 || batch.generated_frames <= 0 || batch.first_audio_ms <= 0) throw std::runtime_error("invalid synthesis result");

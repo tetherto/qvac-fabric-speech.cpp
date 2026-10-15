@@ -7,11 +7,12 @@
 namespace tts_cpp::pocket::detail {
 class Mimi {
 public:
-    explicit Mimi(const std::string & path, int threads = 2);
+    explicit Mimi(const std::string & path, int threads = 2, bool use_gpu = false);
     ~Mimi();
     Mimi(const Mimi &) = delete;
     Mimi & operator=(const Mimi &) = delete;
-    static MemoryMeasure measure(const std::string & path, int threads, bool include_encoder);
+    static MemoryMeasure measure(const std::string & path, int threads, bool include_encoder, bool use_gpu = false);
+    const char * backend_name() const noexcept;
     // Independent decoder/encoder histories. Decoder accepts [T,latent_dim]
     // and emits mono PCM, retaining causal state between chunks.
     void reset_decoder();
