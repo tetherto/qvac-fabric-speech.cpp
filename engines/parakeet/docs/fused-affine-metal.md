@@ -149,3 +149,35 @@ The actual packed GGUF remains 610,573,408 bytes versus 1,256,547,552 bytes for
 the matched original FP16 layout. A separate matched short-clip Core ML comparison is tracked independently;
 these native results do not establish its speed or quality.
 The full native runtime/source files are unchanged by this documentation update.
+
+
+## Reproducing the Mosaic model
+
+The portable recipe is `configs/parakeet-mosaic.recipe.json` inside this engine.
+It identifies the exact original NVIDIA `parakeet-tdt-0.6b-v3.nemo` archive by
+SHA-256 and specifies 288 source tensors: 140 INT4, 42 INT8 and 106 FP16 entries.
+Of the quantized entries, 18 INT4 and six INT8 depthwise kernels remain decoded
+FP16, leaving 122 INT4 and 36 INT8 carrier matrices. Unlisted tensors remain
+FP16. `configs/parakeet-mosaic.tensors.json` holds the validated 725 effective
+source tensor SHA/shape/dtype receipts; these match the tested native export.
+Neither file contains weights or machine-specific paths.
+
+From the repository root, with a compatible exporter environment and the
+original archive available, choose fresh output paths:
+
+```sh
+python engines/parakeet/scripts/export-packed-affine.py \
+  --archive models/parakeet-tdt-0.6b-v3.nemo \
+  --recipe engines/parakeet/configs/parakeet-mosaic.recipe.json \
+  --expected-tensors engines/parakeet/configs/parakeet-mosaic.tensors.json \
+  --output models/parakeet-mosaic.affine.gguf \
+  --dense-control models/parakeet-mosaic.dense.gguf
+```
+
+The exporter checks the original archive hash and all effective tensor receipts
+before writing GGUFs. It preserves the recipe's exact affine codes and metadata;
+no extra Q8 quantization is applied. The dense control contains the same effective
+FP16 weights and is the encoder-sidecar export source. Give that dense control to
+`export-encoder-coreml.py`; the reference loader intentionally rejects treating
+packed carrier values as actual model weights. GGUF container hashes can change
+with metadata/output naming even when the verified effective weights are equal.
