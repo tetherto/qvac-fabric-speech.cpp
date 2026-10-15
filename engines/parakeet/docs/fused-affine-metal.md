@@ -181,3 +181,42 @@ FP16 weights and is the encoder-sidecar export source. Give that dense control t
 `export-encoder-coreml.py`; the reference loader intentionally rejects treating
 packed carrier values as actual model weights. GGUF container hashes can change
 with metadata/output naming even when the verified effective weights are equal.
+
+
+## Matched Core ML comparison
+
+The same experiment also completed three fresh-process repetitions on a
+separately matched short subset: 1,025 clean, 1,360 difficult and 1,025 paired
+0 dB noisy clips, all complete 0.8–4.8-second recordings. Native controls and
+Redux were rerun on these exact files. Each model uses its own effective FP16
+masked512 encoder sidecar through speechcpp's existing Core ML path; these
+results do not cover the full native test splits.
+
+| Condition | Original + Core ML seconds / WER | Mosaic + Core ML seconds / WER | Redux seconds / WER | Median paired Mosaic + Core ML latency reduction vs Redux |
+|---|---:|---:|---:|---:|
+| Clean | 35.048 / 2.772% | 35.006 / 2.772% | 66.888 / 3.218% | 47.38% |
+| Difficult | 46.258 / 5.021% | 46.233 / 5.325% | 86.583 / 6.714% | 46.67% |
+| White noise, 0 dB | 35.212 / 13.146% | 35.575 / 14.952% | 65.955 / 15.929% | 46.16% |
+
+Times are separate three-run medians; paired reductions use per-repetition
+ratios. The sidecar speed difference between original and Mosaic is tiny and
+not established with three repetitions. All models repeat raw transcripts
+exactly. Lower observed clean WER versus Redux has a reader-cluster interval
+crossing zero; difficult/noisy intervals favor Mosaic. Equal clean aggregate
+error totals versus original do not imply identical transcripts or equivalence.
+Core ML changes individual transcripts relative to native execution; some
+regressions remain despite improved aggregate totals. Original + Core ML still
+has lower difficult/noisy WER than Mosaic + Core ML.
+
+Both compiled encoders are 1,259,381,354 bytes. Deployment GGUF + compiled
+sidecar is 1,869,954,762 bytes for Mosaic and 2,515,928,906 bytes for original.
+The full GGUF encoder remains loaded; source mlpackage files are excluded from
+shipping totals. Core ML ALL permits CPU/GPU/ANE; no all-ANE execution or
+complete external ANE memory measurement is claimed. The hybrid bypasses the
+fused native encoder, while retaining speechcpp's frontend and Metal decoder.
+
+All 72 job receipts and 124,761 scored predictions passed a separate independent
+source/input/model/environment/package/output audit, with 8,179 audio files
+reconstructed and every paired ratio and reader-cluster interval recomputed.
+The engine runtime remains experimental and opt-in; this report does not waive
+historical model-quality or size findings or establish production qualification.
