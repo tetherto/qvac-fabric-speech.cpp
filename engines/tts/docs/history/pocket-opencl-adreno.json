@@ -76,7 +76,7 @@
     "real_flow_f32_max_abs": 7.8529119e-05,
     "real_mimi_decoder_max_abs": 2.4922192e-06,
     "real_mimi_decoder_snr_db": 120.215,
-    "listening_status": "Samples delivered to device Downloads; human listening feedback pending",
+    "listening_status": "Comparison WAVs provided in Windows Downloads; user approved both outputs as equivalent",
     "ci": "https://github.com/tetherto/qvac-fabric-speech.cpp/actions/runs/38778583428"
   },
   "upstream_assets": [

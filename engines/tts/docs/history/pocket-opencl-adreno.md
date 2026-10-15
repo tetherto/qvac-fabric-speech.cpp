@@ -87,8 +87,10 @@ this metric.
 
 CPU/OpenCL waveform SNR was 80.60 dB for the reminder and 54.61 dB for news;
 correlation was 0.999999996 and 0.999998271, respectively. These are numerical
-and intelligibility checks. Samples were delivered to the phone's Downloads
-folder for human listening; subjective listening feedback remains pending.
+and intelligibility checks. The comparison samples were also provided in the
+user's Windows Downloads folder. The user approved both outputs as equivalent
+after reviewing them. This checks the two supplied samples, rather than broad
+voice or naturalness coverage.
 
 ## Timing and memory
 
