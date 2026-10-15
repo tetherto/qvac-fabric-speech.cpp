@@ -20,6 +20,7 @@ struct OpenCLScratch {
 struct MemoryMeasure {
     uint64_t weights = 0, state = 0, compute = 0;
     uint64_t metadata = 0, graph_metadata = 0, load_staging = 0;
+    uint64_t host_compute = 0; // graph-input upload staging, outside device arenas
     OpenCLScratch opencl_scratch;
     std::string source_hash;
 };

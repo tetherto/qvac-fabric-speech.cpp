@@ -92,6 +92,13 @@ Every graph checks backend operation support before allocation or execution;
 an incompatible ggml build reports the unsupported operation instead of
 executing a partial graph or falling back to CPU.
 
+FlowLM supplies an explicit causal mask to OpenCL softmax. This avoids the
+reviewed ggml-speech `DIAG_MASK_INF` vector kernel, whose lane writes corrupt
+neighboring vectors at attention widths divisible by eight. The existing
+64-position full-context/chunked-prefill regression exposed this on Adreno 830;
+CPU retains its original graph. Preflight prices both the device mask and its
+host upload staging.
+
 The ggml OpenCL backend shares kernel arguments, scratch and lifecycle state
 between handles on a device. Pocket serializes its OpenCL submissions,
 initialization and backend release across its workers and engine instances.

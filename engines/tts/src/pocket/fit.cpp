@@ -157,6 +157,7 @@ FitResult fit_params(const FitOptions & o) {
         // Conservative STL/allocator bookkeeping and CPU thread stack bounds.
         persistent_host = sat_add(persistent_host, sat_mul(8*mib, 2ull*e.n_threads+2));
         auto runtime_host = sat_mul(sat_add(flow.graph_metadata, codec.graph_metadata), 2);
+        runtime_host = sat_add(runtime_host, flow.host_compute);
         runtime_host = sat_add(runtime_host, sat_mul(uint64_t(prefill)*flow.config.dim, 16));
         runtime_host = sat_add(runtime_host, sat_mul(o.text.size()+1, 64));
         runtime_host = sat_add(runtime_host, 2*mib); // codec mask, latent queue, chunk copies
