@@ -5,9 +5,12 @@ ggml-speech `06f1b66806626a635904f31db6914ad2d0e71197`. The implementation is
 independent of Fabric PR #338. No ggml or Hexagon source changes are required.
 CPU remains the default.
 
-The [machine-readable record](pocket-opencl-adreno.json) contains each warm
+The [initial machine-readable record](pocket-opencl-adreno.json) contains each warm
 measurement, first-process measurements, PCM/transcription results, model
 hashes, build flags and the complete memory-preflight reports.
+The [expanded performance record](pocket-opencl-adreno-perf.json) contains a
+subsequent 60-request comparison. Both datasets are retained because the
+normally running phone showed substantial timing variability.
 
 ## Device and assets
 
@@ -92,7 +95,68 @@ user's Windows Downloads folder. The user approved both outputs as equivalent
 after reviewing them. This checks the two supplied samples, rather than broad
 voice or naturalness coverage.
 
-## Timing and memory
+## Expanded performance comparison
+
+A second pass used the same native binary, ggml pin, assets and synthesis
+settings. For each of three prompts, the process order was CPU, OpenCL,
+OpenCL, CPU. Each process loaded its models, performed one untimed warmup,
+then measured five requests. This gives ten warm requests per backend per
+prompt, 60 measured requests overall. Ordering was counterbalanced, but
+frequencies, background apps and thermal conditions remained uncontrolled.
+Battery temperatures observed around the processes ranged from 35.4 to 37.0 C.
+
+Generation time below excludes engine loading and warmup. All requests for a
+given prompt produced the same audio duration on both backends. Throughput
+relative to CPU is CPU median generation time / OpenCL median generation time.
+
+| Prompt | Speech duration (s) | CPU generation (s) | OpenCL generation (s) | CPU RTF | OpenCL RTF | OpenCL throughput vs CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reminder | 3.04 | 1.113 | 1.033 | 0.366 | 0.340 | 1.08x |
+| News | 6.16 | 2.368 | 1.921 | 0.384 | 0.312 | 1.23x |
+| Paragraph | 14.08 | 5.147 | 4.084 | 0.366 | 0.290 | 1.26x |
+
+The new paragraph was:
+
+> Good morning. Here is your schedule for today. The engineering meeting
+> begins at ten, followed by lunch with the team at noon. In the afternoon,
+> we will review the latest results and plan the next release. Please bring
+> your notes and leave enough time to travel between meetings.
+
+OpenCL's median throughput across the prompts was 2.94–3.45 seconds of speech
+per second of processing. Its observed median advantage over this CPU configuration
+was 8–26%. This is a device/run observation, not a consistent platform-wide
+speedup claim. The initial smaller pass below had slower OpenCL generation.
+
+| Prompt | CPU first audio, median (ms) | OpenCL first audio, median (ms) | CPU generation range (s) | OpenCL generation range (s) |
+| --- | ---: | ---: | ---: | ---: |
+| Reminder | 152.3 | 68.0 | 1.029–1.180 | 0.971–1.072 |
+| News | 255.0 | 63.4 | 2.300–2.407 | 1.546–2.408 |
+| Paragraph | 314.8 | 64.4 | 3.667–10.154 | 3.450–5.173 |
+
+First-audio timing starts after engine loading. The paragraph's large CPU
+range demonstrates the need to retain raw measurements and control device
+conditions before making stronger comparisons. OpenCL paragraph first audio
+also varied from 56.9 to 262.9 ms despite its 64.4 ms median. This run does not
+identify the cause of those outliers or isolate individual kernel costs.
+
+All 12 saved comparison WAVs were finite, non-silent 24 kHz mono and had no
+clipped samples. Independent Whisper base.en transcripts for the new CPU and
+OpenCL paragraph were identical. Both rendered `ten` as `10`, giving a raw
+word-error rate of 1/48; no other word differed from the input.
+
+The [expanded JSON record](pocket-opencl-adreno-perf.json) preserves all 60
+request measurements, backend identities, process loads, RSS, temperatures,
+asset/binary hashes and paragraph ASR results. The source binary predates
+documentation-only commit `cb4af728`; no execution code changed between the
+initial and expanded passes.
+
+To reproduce the ordering in the ADB-shell setup below, run each prompt with
+`--runs 5` in the order `cpu`, `opencl`, `opencl`, `cpu`, writing a separate
+report for each process. Retain all ten requests for each backend when
+computing the median. Keep the existing two-thread, one-step, temperature
+0.3, seed 1234 settings and prepared voice unchanged.
+
+## Initial timing and memory baseline
 
 Warm first-audio, synthesis and RTF results below are medians of three requests
 after one untimed warmup. Load time is one engine construction per process;
@@ -118,7 +182,7 @@ The empty-cache OpenCL load includes driver kernel compilation. Later OpenCL
 loads used previously cached binaries. Model files could already be in the OS
 page cache; these are not cold-storage measurements.
 
-OpenCL was slower in total synthesis time on both prompts in this baseline.
+OpenCL was slower in total synthesis time on both prompts in this initial baseline.
 The news first-audio latency improved; reminder latency varied considerably
 (71–271 ms across warm runs). No general speedup is established. Both stages
 use F32, and Pocket must serialize submissions because the pinned OpenCL
@@ -141,6 +205,22 @@ conservative. Peak RSS comes from Android `time -v`; it does not measure all
 driver-owned GPU allocations. Separate per-process GPU allocation counters
 were unavailable to the ADB shell, so no measured total GPU-memory claim is
 made.
+
+## ggml dependency and separate backend fixes
+
+The Fabric implementation and both benchmark passes use the unchanged
+registry ggml pin. Its existing OpenCL operations are sufficient for both
+FlowLM and Mimi with Fabric's explicit causal-mask workaround, so this PR
+does not require a ggml PR or a new ggml source pin.
+
+The vectorized mask defect remains in
+[ggml speech at e1fb17af](https://github.com/tetherto/qvac-ext-ggml/blob/e1fb17af921c04a3004b7850021c4b44397a37dd/src/ggml-opencl/kernels/diag_mask_inf.cl):
+`(&dst[i+1])[k]` and `(&dst[i])[k]` index whole `float4` objects instead of
+their individual lanes. A separate ggml correctness fix is warranted for
+other callers of that kernel. It is independent of this Fabric PR and was
+not applied during these measurements. Likewise, the effect of replacing
+shared backend state or optimizing kernels requires separate profiling and
+validation; these timings do not establish a specific backend bottleneck.
 
 ## Reproduction
 

@@ -276,9 +276,11 @@ PCM8/16/24/32 or float32/64 WAV, 1–64 channels, 8–192 kHz, at most 30 second
 
 The [OnePlus 13s OpenCL report](history/pocket-opencl-adreno.md) records
 CPU/OpenCL correctness, speech checks, first-use and warm timings, and memory
-preflight on Adreno 830. Both stages passed device validation; total OpenCL
-synthesis was slower than CPU on the two measured prompts. It includes the
-standalone Android build and driver setup used for reproduction.
+preflight on Adreno 830. Both stages passed device validation. It retains the
+initial timings and an expanded 60-request comparison, which observed a
+1.08–1.26x median OpenCL throughput advantage with substantial run variability.
+The report includes the standalone Android build and driver setup used for
+reproduction.
 
 The [archived integration report](history/pocket-integration.md#final-registry-build-and-release-review)
 records the September 2026 pinned-registry Apple M2 comparison: generation
