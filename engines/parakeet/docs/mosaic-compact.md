@@ -4,6 +4,26 @@ Default V2 recipe (formerly labeled Compact): **503,670,112-byte GGUF**, SHA256 
 
 The Parakeet TDT network is unchanged. 122 encoder matrices use standard Q4_0,142 use standard Q8_0, with32-weight groups. Decoder and other non-target payloads retain the historical Mosaic effective values, including quantized depthwise weights represented in FP16. This is a new effective-weight recipe relative to the610.6MB affine model; do not attribute its results to the old model or fused affine kernel. It uses ordinary GGML kernels and needs no affine opt-in.
 
+## Generate GGUF and matching Core ML sidecar together
+
+From engines/parakeet, in the validated exporter environment:
+
+```sh
+python scripts/prepare-mosaic.py \
+  --archive /path/to/parakeet-tdt-0.6b-v3.nemo \
+  --output-dir models/mosaic-v2
+```
+
+Or reuse the exact V2 GGUF and generate its matching sidecar:
+
+```sh
+python scripts/prepare-mosaic.py \
+  --gguf /path/to/parakeet-mosaic-v2.gguf \
+  --output-dir models/mosaic-v2
+```
+
+The script verifies the full GGUF hash, uses the existing company masked512 FLOAT16 exporter, compiles the sidecar and records inventories/source/environment receipts. Deploy `parakeet-mosaic-v2.gguf` together with `parakeet-mosaic-v2-encoder.mlmodelc` from that output directory. Source mlpackage is optional. A fresh output directory is required; failure receipts are retained. This builds artifacts, not a new benchmark. The fixed512 sidecar is validated here only for complete short utterances; no long-form claim.
+
 ## Reproduce
 
 Use Python3.11, Torch2.7.0, NumPy2.2.6, gguf0.19.0, PyYAML6.0.3 and sentencepiece. Start from the original NVIDIA parakeet-tdt-0.6b-v3.nemo identified in the recipe. No company model weights are bundled here.
