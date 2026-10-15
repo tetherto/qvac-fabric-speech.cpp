@@ -36,3 +36,32 @@ The earlier standalone-only prototype is preserved at speechcpp commit
 `a61e549`. Its real FFN cases were 0.35–0.88 ms fused versus 2.3–3.0 ms with
 native reconstruction; dense FP16 remained generally faster. Those are
 resident, synchronized primitive timings, not encoder or full-call latency.
+
+## Measured native implementation on M4
+
+The integrated engine was tested at speechcpp commit `994ae970` with GGML
+`5ad06152`. The exact retained mixed-precision GGUF is 610,573,408 bytes; no
+model file changes or additional sidecars are needed. On 99 complete short
+recordings per clean/noisy condition, three fresh-process repetitions gave
+median whole-transcription times of 6.048/6.140 seconds, versus
+26.122/26.076 for reconstruction, 7.093/7.163 for Redux Photon MPS, and
+4.783/4.871 for original FP16 native Metal. Eight warmups and loading/compilation
+are excluded. All 594 fused transcripts match reconstruction exactly, with
+27/189 word errors out of 940 reference words per condition. These are subset
+measurements, not confidence intervals or full-suite qualification.
+
+A compatible shared-memory-reuse variant is pinned at GGML commit
+`033f5c56d6d7476b08bfc83993138adddec6f5c6`, branch
+`feat/parakeet-fused-affine-compact`. It uses one 8 KiB allocation for operand
+staging and the subsequent output-tail phase, instead of separate 6+8 KiB
+arrays. Arithmetic and model weights are unchanged. In a separate paired
+three-repetition comparison, it achieved 5.861/5.977 seconds versus
+6.004/6.119 for the original fused binary and 4.770/4.875 for a fresh original
+FP16 control. All 594 variant transcripts match V1 exactly. Redux was not
+rerun in this second comparison; its preceding results are context only.
+The improvement over V1 is about 2.3–2.4%; original FP16 remains faster.
+
+Both versions passed 28 real-weight/synthetic-edge primitive cases, five
+regression test groups, and the CPU/invalid-input rejection checks in
+`scripts/test-affine-backend-contract.cpp`. Full prediction, file hash and
+paired-ratio audits passed. The implementation remains opt-in and experimental.
