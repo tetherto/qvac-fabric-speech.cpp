@@ -1,5 +1,6 @@
 #include "tts-cpp/pocket/fit.h"
 #include "test_workload.h"
+#include "test_backend.h"
 #include "gguf.h"
 #include "ggml.h"
 #include <chrono>
@@ -73,7 +74,7 @@ int main(int argc, char ** argv) {
         const auto result = pocket::fit_params(opts);
         check(result.status != FitStatus::Error, result.report.c_str());
         check(result.device_is_cpu != opts.engine.use_gpu, "fit reported the wrong backend");
-        if (opts.engine.use_gpu) check(result.device_name.find("MTL") == 0 || result.device_name == "Metal", "Metal preflight did not select Metal");
+        check_pocket_backend(result.device_name.c_str(), opts.engine.use_gpu);
         check(result.device.weights_bytes > 100*1024*1024, "expanded weights not priced");
         check(result.device.state_bytes && result.device.lm_compute_bytes && result.device.codec_compute_bytes && result.host_bytes, "missing memory components");
         std::cout << result.report;

@@ -56,7 +56,7 @@ void print_help() {
     std::puts("pocket-cli --model-dir DIR --text TEXT --output FILE.wav [--voice FILE.gguf | --reference-audio FILE.wav]\n"
               "           [--threads 1 --steps 1 --temperature 0.3 --seed 1234 --runs 1 --report FILE.json]\n"
               "           [--gpu] [--backends-dir DIR] [--frames-after-eos -1]\n"
-              "--gpu selects Metal for FlowLM and Mimi; CPU is used when --gpu is omitted.\n"
+              "--gpu selects Metal, CUDA or Vulkan for FlowLM and Mimi; CPU is used when --gpu is omitted.\n"
               "--frames-after-eos -1 uses the checkpoint/text default; explicit range 0..100.\n"
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
               "--runs greater than 1 includes one untimed warmup and records each warm run.\n"

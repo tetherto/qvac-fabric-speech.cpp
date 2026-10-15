@@ -36,7 +36,7 @@ struct SynthesisResult {
 };
 using AudioCallback = std::function<bool(const float *, size_t, int)>;
 
-// Persistent native CPU or Metal engine. One synthesis at a time per instance;
+// Persistent native CPU or GPU engine. One synthesis at a time per instance;
 // overlapping/reentrant calls throw. cancel() is safe from another thread.
 // Streaming callbacks run on the calling thread, with valid PCM until return.
 // Returning false cancels the request. Each new request resets the voice,

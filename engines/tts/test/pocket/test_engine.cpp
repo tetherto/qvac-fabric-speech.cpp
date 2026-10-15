@@ -1,5 +1,6 @@
 #include "tts-cpp/pocket/engine.h"
 #include "test_workload.h"
+#include "test_backend.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -51,10 +52,7 @@ int main(int argc, char ** argv) {
         if (argc == 4 && !opts.use_gpu) throw std::runtime_error("unknown backend option");
         check_eos_tail(opts);
         Engine engine(opts);
-        const auto backend = std::string(engine.backend_name());
-        if (opts.use_gpu && backend.find("MTL") != 0 && backend != "Metal")
-            throw std::runtime_error("Metal was requested but not selected");
-        if (!opts.use_gpu && backend != "CPU") throw std::runtime_error("default backend changed");
+        check_pocket_backend(engine.backend_name(), opts.use_gpu);
         std::printf("Pocket engine backend: %s\n", engine.backend_name());
         const std::string text = "Hello! We can generate speech with Fabric.";
         const auto batch = engine.synthesize(text);

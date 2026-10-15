@@ -2,7 +2,7 @@
 
 Part of the [tts documentation](../README.md).
 
-Pocket provides English text-to-speech through a persistent CPU or Metal FlowLM/Mimi
+Pocket provides English text-to-speech through a persistent CPU or GPU FlowLM/Mimi
 engine and incremental 24 kHz mono PCM callbacks. Its public API is
 `<tts-cpp/pocket/engine.h>`; `pocket-cli` uses that API. F32 arithmetic is used
 throughout. F16 is a storage option whose weights expand to F32 at load.
@@ -62,12 +62,13 @@ splitting. It matches 322 upstream corpus cases. Generate the fixture using
 The persistent engine restores the chosen voice for each text chunk and runs
 FlowLM/Mimi on separate workers with at most 16 queued latent frames.
 CPU remains the default. Set `EngineOptions::use_gpu = true` or pass `--gpu`
-to select Metal for both the language model and the codec, including their
-persistent weights and caches. A requested Metal backend must be available;
+to select Metal, CUDA, or Vulkan for both the language model and the codec,
+including their persistent weights and caches. A supported GPU backend must be available;
 the request fails explicitly otherwise. `backend_name()` and CLI JSON reports
 identify the selected backend. `backends_dir` (CLI: `--backends-dir`) locates
 dynamically loaded ggml backends using the library's existing process-wide
-loader. This Metal path does not enable CUDA or Vulkan for Pocket.
+loader. For backend-specific validation, set `TTS_CPP_GPU_BACKEND` to
+`metal`, `cuda`, or `vulkan`; the selected backend must match the request.
 The Fabric seed uses a specified Box–Muller transform. An encoder-enabled
 checkpoint can use `--reference-audio` instead of the prepared voice; the
 tested public checkpoint rejects that path.
@@ -152,7 +153,7 @@ disabled tests from executed tests. Exact test counts are revision-dependent.
 
 `tts-cpp/pocket/fit.h` exposes `pocket::fit_params(FitOptions)`. It tokenizes the
 requested text, validates voice/context capacity, and prices the actual FlowLM
-and Mimi graphs with ggml's size-only allocator on the selected CPU or Metal
+and Mimi graphs with ggml's size-only allocator on the selected CPU or GPU
 backend. CPU projections additionally include the CPU work-buffer planner.
 That planner is resolved through the CPU backend's registry, so preflight
 works when CPU variants are dynamically loaded (Linux/Android).

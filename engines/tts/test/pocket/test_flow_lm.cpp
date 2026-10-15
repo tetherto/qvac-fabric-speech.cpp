@@ -1,4 +1,5 @@
 #include "pocket/flow_lm.h"
+#include "test_backend.h"
 #include "npy.h"
 #include "gguf.h"
 
@@ -79,8 +80,7 @@ int main(int argc, char ** argv) {
         const bool gpu = argc == 5 && std::string(argv[4]) == "--gpu";
         if (argc == 5 && !gpu) throw std::runtime_error("unknown backend option");
         FlowLM lm(model, 64, 2, gpu);
-        if (gpu && std::strncmp(lm.backend_name(), "MTL", 3) != 0 && std::string(lm.backend_name()) != "Metal")
-            throw std::runtime_error("Metal was requested but not selected");
+        check_pocket_backend(lm.backend_name(), gpu);
         std::printf("FlowLM backend: %s\n", lm.backend_name());
         const auto embeddings = load(dir, "embeddings");
         const auto expected = load(dir, "prefill");
