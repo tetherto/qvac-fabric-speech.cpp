@@ -1,5 +1,6 @@
 #include "pocket/flow_lm.h"
 #include "pocket/ggml_utils.h"
+#include "pocket/backend.h"
 
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -52,7 +53,7 @@ struct FlowLM::Impl {
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
         if (file) gguf_free(file);
-        if (backend) ggml_backend_free(backend);
+        if (backend) free_backend(backend);
     }
 
     int64_t key(const std::string & name, gguf_type type) const {
@@ -128,7 +129,8 @@ struct FlowLM::Impl {
         if (checked.size() != static_cast<size_t>(gguf_get_n_tensors(file))) fail("unrecognized tensors in FlowLM artifact");
     }
 
-    void load(const std::string & path, int context, int threads, MemoryMeasure * price = nullptr) {
+    void load(const std::string & path, int context, int threads, MemoryMeasure * price = nullptr,
+              ggml_backend_dev_t device = nullptr) {
         measure = price; n_threads = threads;
         if (context < 1 || context > 8192 || threads < 1 || threads > 1024)
             fail("context must be 1..8192 and threads 1..1024");
@@ -147,8 +149,8 @@ struct FlowLM::Impl {
         if (cfg.dim % cfg.heads || (cfg.dim / cfg.heads) % 2 || cfg.flow_dim < 2 ||
             !std::isfinite(cfg.rope_base) || cfg.rope_base <= 0) fail("invalid architecture dimensions");
         validate_tensors(); // All validation precedes device allocations and graph construction.
-        backend = ::tts_cpp::detail::init_cpu_backend();
-        if (!backend) fail("CPU backend unavailable");
+        backend = init_stage_backend(device);
+        auto backend_lock = lock_backend(backend);
         ::tts_cpp::detail::backend_set_n_threads(backend, threads);
         // This baseline always computes in F32. Expanding half storage once
         // avoids ggml CPU's F16 matmul rounding *activations* to F16, which
@@ -238,7 +240,7 @@ struct FlowLM::Impl {
         }
         auto * output = norm(c, "out_norm", x, 1e-5f);
         if (measure) {
-            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads));
+            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads, &measure->opencl_scratch));
             return {};
         }
         g.prepare(output);
@@ -293,7 +295,7 @@ struct FlowLM::Impl {
         auto * modulation = linear(c, "flow_net.final_layer.adaLN_modulation.1", activated_y);
         auto * output = linear(c, "flow_net.final_layer.linear", modulate(ggml_norm(c, x, 1e-6f), modulation));
         if (measure) {
-            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads));
+            measure->compute = std::max(measure->compute, g.prepare(output, true, n_threads, &measure->opencl_scratch));
             return {};
         }
         g.prepare(output);
@@ -323,13 +325,13 @@ struct FlowLM::Impl {
     }
 };
 
-FlowLM::FlowLM(const std::string & path, int context, int threads) : impl_(std::make_unique<Impl>()) {
-    impl_->load(path, context, threads);
+FlowLM::FlowLM(const std::string & path, int context, int threads, ggml_backend_dev_t device) : impl_(std::make_unique<Impl>()) {
+    impl_->load(path, context, threads, nullptr, device);
 }
-FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_frames, int threads) {
+FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_frames, int threads, ggml_backend_dev_t device) {
     if (prefill_frames < 1 || prefill_frames > context) fail("invalid prefill shape");
     FlowMemory out;
-    Impl model; model.load(path, context, threads, &out);
+    Impl model; model.load(path, context, threads, &out, device);
     out.config = model.cfg;
     out.source_hash = gguf_get_val_str(model.file, model.key("pocket.source_sha256", GGUF_TYPE_STRING));
     // Bound every permitted cache occupancy, including decoding at capacity.
@@ -341,16 +343,17 @@ FlowMemory FlowLM::measure(const std::string & path, int context, int prefill_fr
     PocketFlowGraph projection(model.backend);
     auto * input = ggml_new_tensor_2d(projection.ctx, GGML_TYPE_F32, model.cfg.latent_dim, 1);
     ggml_set_input(input);
-    out.compute += projection.prepare(model.audio_projection(projection, input), true, threads);
+    out.compute += projection.prepare(model.audio_projection(projection, input), true, threads, &out.opencl_scratch);
     model.flow(std::vector<float>(model.cfg.dim), std::vector<float>(model.cfg.latent_dim), 1);
     PocketFlowGraph voice_projection(model.backend);
     auto * voice_input = ggml_new_tensor_2d(voice_projection.ctx, GGML_TYPE_F32, model.cfg.latent_dim, 375);
     ggml_set_input(voice_input);
-    out.compute = std::max(out.compute, voice_projection.prepare(model.voice_projection(voice_projection, voice_input), true, threads));
+    out.compute = std::max(out.compute, voice_projection.prepare(model.voice_projection(voice_projection, voice_input), true, threads, &out.opencl_scratch));
     out.graph_metadata = 2 * PocketFlowGraph::metadata_bytes();
     return out;
 }
 FlowLM::~FlowLM() = default;
+const char * FlowLM::backend_name() const noexcept { return ggml_backend_name(impl_->backend); }
 const FlowConfig & FlowLM::config() const { return impl_->cfg; }
 int FlowLM::position() const { return impl_->past; }
 void FlowLM::reset() { impl_->past = 0; }
