@@ -7,6 +7,9 @@
 #include "ggml.h"
 #include "gguf.h"
 #include <stdexcept>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 
@@ -56,6 +59,11 @@ inline PackedAffineWeights load_packed_affine(gguf_context * file, ggml_context 
     return result;
 }
 
+inline bool affine_fused_requested() {
+    const char * value = std::getenv("PARAKEET_AFFINE_FUSED");
+    return value && std::strcmp(value, "1") == 0;
+}
+
 struct PackedAffineGraphScope;
 inline thread_local PackedAffineGraphScope * current_affine_graph = nullptr;
 struct PackedAffineGraphScope {
@@ -63,9 +71,20 @@ struct PackedAffineGraphScope {
     ggml_cgraph * graph;
     const PackedAffineWeights & weights;
     PackedAffineGraphScope * previous;
-    PackedAffineGraphScope(ggml_context * c, ggml_cgraph * g, const PackedAffineWeights & w)
-        : context(c), graph(g), weights(w), previous(current_affine_graph) { current_affine_graph = this; }
-    ~PackedAffineGraphScope() { current_affine_graph = previous; }
+    bool fused_enabled;
+    size_t fused_ops = 0;
+    PackedAffineGraphScope(ggml_context * c, ggml_cgraph * g, const PackedAffineWeights & w, bool fused = false)
+        : context(c), graph(g), weights(w), previous(current_affine_graph), fused_enabled(fused) {
+#ifndef GGML_AFFINE_METAL_V1
+        if (fused) throw std::runtime_error("fused affine requires the experimental GGML Metal backend");
+#endif
+        current_affine_graph = this;
+    }
+    ~PackedAffineGraphScope() {
+        if (fused_enabled && std::getenv("PARAKEET_DEBUG_AFFINE"))
+            std::fprintf(stderr, "parakeet: encoder graph contains %zu fused affine matmuls\n", fused_ops);
+        current_affine_graph = previous;
+    }
     PackedAffineGraphScope(const PackedAffineGraphScope &) = delete;
     PackedAffineGraphScope & operator=(const PackedAffineGraphScope &) = delete;
 };
@@ -91,7 +110,29 @@ inline ggml_tensor * affine_weight(ggml_context * ctx, ggml_tensor * weight,
     ggml_format_name(restored, "%s.restored", ggml_get_name(weight));
     return restored;
 }
+// Pointwise callers inspect the weight shape before matmul; preserve the
+// carrier identity there when this graph will use the fused backend.
+inline ggml_tensor * affine_weight_for_view(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x) {
+    auto * scope = current_affine_graph;
+    if (scope && scope->context == ctx && scope->fused_enabled && scope->weights.count(weight)) return weight;
+    return affine_weight(ctx, weight, x);
+}
 inline ggml_tensor * affine_mul_mat(ggml_context * ctx, ggml_tensor * weight, ggml_tensor * x) {
+#ifdef GGML_AFFINE_METAL_V1
+    auto * scope = current_affine_graph;
+    if (scope && scope->context == ctx && scope->fused_enabled) {
+        const auto found = scope->weights.find(weight);
+        if (found != scope->weights.end()) {
+            if (x->type != GGML_TYPE_F32 || ggml_n_dims(x) > 2)
+                throw std::runtime_error("unsupported fused affine activation");
+            auto * contiguous = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
+            auto * result = ggml_mul_mat_affine_v1(ctx, weight, contiguous, found->second.step, found->second.minimum);
+            ggml_format_name(result, "%s.fused_affine", ggml_get_name(weight));
+            scope->fused_ops++;
+            return result;
+        }
+    }
+#endif
     return ggml_mul_mat(ctx, affine_weight(ctx, weight, x), x);
 }
 } // namespace parakeet

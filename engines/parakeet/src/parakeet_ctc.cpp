@@ -3491,7 +3491,7 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
     // CPU-repack weight drops the repack traits (the mul_mat would then read
     // the interleaved bytes as plain q4_0). Legacy 3D GGUFs still reshape --
     // those tensors are never placed in a repack buffer.
-    ggml_tensor * pw1_w_2d = affine_weight(ctx, W.conv_pw1_w, xn);
+    ggml_tensor * pw1_w_2d = affine_weight_for_view(ctx, W.conv_pw1_w, xn);
     if (!(ggml_n_dims(pw1_w_2d) == 2 &&
           pw1_w_2d->ne[0] == d_model && pw1_w_2d->ne[1] == 2 * d_model)) {
         pw1_w_2d = ggml_reshape_2d(ctx, pw1_w_2d, d_model, 2 * d_model);
@@ -3579,7 +3579,7 @@ ggml_tensor * conformer_conv_graph(ggml_context * ctx, ggml_tensor * xn,
     }
 
     // Same repack-traits consideration as pw1 above.
-    ggml_tensor * pw2_w_2d = affine_weight(ctx, W.conv_pw2_w, y);
+    ggml_tensor * pw2_w_2d = affine_weight_for_view(ctx, W.conv_pw2_w, y);
     if (!(ggml_n_dims(pw2_w_2d) == 2 &&
           pw2_w_2d->ne[0] == d_model && pw2_w_2d->ne[1] == d_model)) {
         pw2_w_2d = ggml_reshape_2d(ctx, pw2_w_2d, d_model, d_model);
@@ -4005,7 +4005,10 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     if (!g.graph_ctx) return -2;
     ggml_context * gctx = g.graph_ctx;
     g.cgraph = ggml_new_graph_custom(gctx, graph_slots, false);
-    PackedAffineGraphScope affine_scope(gctx, g.cgraph, model.impl->affine_weights);
+    const bool fused_affine = affine_fused_requested() && !model.impl->affine_weights.empty();
+    if (fused_affine && model_active_backend_name(model).rfind("MTL", 0) != 0)
+        throw std::runtime_error("fused affine requires the explicit Metal backend");
+    PackedAffineGraphScope affine_scope(gctx, g.cgraph, model.impl->affine_weights, fused_affine);
 
     if (bypass_pre_encode) {
         // Pre-subsampled input fed directly: (d_model, T). Subsampling block is

@@ -80,18 +80,18 @@ int main(int argc,char ** argv) {
             for(auto p:{std::make_pair(wc,codeData),std::make_pair(wd,denseData),std::make_pair(ws,stepData),std::make_pair(wm,minData),std::make_pair(xx,xData)}){
                 check(ggml_nbytes(p.first)==p.second.length,"GGML byte size mismatch");ggml_backend_tensor_set(p.first,p.second.bytes,0,p.second.length);
             }
-            ggml_context * contexts[2];ggml_cgraph * graphs[2];ggml_tensor * outputs[2];ggml_gallocr_t allocs[2];
-            for(int kind=0;kind<2;++kind){
+            ggml_context * contexts[3];ggml_cgraph * graphs[3];ggml_tensor * outputs[3];ggml_gallocr_t allocs[3];
+            for(int kind=0;kind<3;++kind){
                 ggml_init_params gp={ggml_tensor_overhead()*64+ggml_graph_overhead_custom(64,false),nullptr,true};contexts[kind]=ggml_init(gp);graphs[kind]=ggml_new_graph_custom(contexts[kind],64,false);
                 if(kind==0)outputs[kind]=ggml_mul_mat(contexts[kind],wd,xx);
-                else {parakeet::PackedAffineWeights map{{wc,{wm,ws,a.bits==4?8:128}}};parakeet::PackedAffineGraphScope scope(contexts[kind],graphs[kind],map);outputs[kind]=parakeet::affine_mul_mat(contexts[kind],wc,xx);}
+                else {parakeet::PackedAffineWeights map{{wc,{wm,ws,a.bits==4?8:128}}};parakeet::PackedAffineGraphScope scope(contexts[kind],graphs[kind],map,kind==2);outputs[kind]=parakeet::affine_mul_mat(contexts[kind],wc,xx);}
                 ggml_set_output(outputs[kind]);ggml_build_forward_expand(graphs[kind],outputs[kind]);
                 for(int n=0;n<ggml_graph_n_nodes(graphs[kind]);++n)check(ggml_backend_supports_op(backend,ggml_graph_node(graphs[kind],n)),"CPU fallback prohibited");
                 allocs[kind]=ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));check(ggml_gallocr_alloc_graph(allocs[kind],graphs[kind]),"graph alloc failed");
             }
             auto execute=[&](int kind)->std::pair<double,double>{
                 auto start=Clock::now();double gpu=0;
-                if(kind<2){check(ggml_backend_graph_compute(backend,graphs[kind])==GGML_STATUS_SUCCESS,"GGML compute failed");ggml_backend_synchronize(backend);}
+                if(kind<3){check(ggml_backend_graph_compute(backend,graphs[kind])==GGML_STATUS_SUCCESS,"GGML compute failed");ggml_backend_synchronize(backend);}
                 else {
                     auto command=[queue commandBuffer];auto e=[command computeCommandEncoder];[e setComputePipelineState:fused];
                     [e setBuffer:codes offset:0 atIndex:0];[e setBuffer:steps offset:0 atIndex:1];[e setBuffer:minima offset:0 atIndex:2];[e setBuffer:x offset:0 atIndex:3];[e setBuffer:output offset:0 atIndex:4];[e setBytes:&a length:sizeof(a) atIndex:5];
@@ -100,21 +100,22 @@ int main(int argc,char ** argv) {
                 }
                 return {std::chrono::duration<double,std::milli>(Clock::now()-start).count(),gpu};
             };
-            for(int i=0;i<5;++i)for(int kind=0;kind<3;++kind)execute(kind);
-            std::vector<double> times[3],gpu;
-            for(int rep=0;rep<20;++rep)for(int j=0;j<3;++j){int kind=(rep+j)%3;auto t=execute(kind);times[kind].push_back(t.first);if(kind==2)gpu.push_back(t.second);}
-            std::vector<float> reference(count),old(count);ggml_backend_tensor_get(outputs[0],reference.data(),0,count*4);ggml_backend_tensor_get(outputs[1],old.data(),0,count*4);
-            NSDictionary * parity=compare((const float *)output.contents,reference.data(),count);
-            NSDictionary * cpuParity=compare((const float *)output.contents,(const float *)cpuData.bytes,count);
+            for(int i=0;i<5;++i)for(int kind=0;kind<4;++kind)execute(kind);
+            std::vector<double> times[4],gpu;
+            for(int rep=0;rep<20;++rep)for(int j=0;j<4;++j){int kind=(rep+j)%4;auto t=execute(kind);times[kind].push_back(t.first);if(kind==3)gpu.push_back(t.second);}
+            std::vector<float> reference(count),old(count),native(count);ggml_backend_tensor_get(outputs[2],native.data(),0,count*4);ggml_backend_tensor_get(outputs[0],reference.data(),0,count*4);ggml_backend_tensor_get(outputs[1],old.data(),0,count*4);
+            NSDictionary * parity=compare(native.data(),reference.data(),count);
+            NSDictionary * standaloneParity=compare((const float *)output.contents,reference.data(),count);
+            NSDictionary * cpuParity=compare(native.data(),(const float *)cpuData.bytes,count);
             NSDictionary * oldParity=compare(old.data(),reference.data(),count);
-            NSMutableArray * samples=[NSMutableArray new];for(int kind=0;kind<3;++kind){NSMutableArray * v=[NSMutableArray new];for(double t:times[kind])[v addObject:@(t)];[samples addObject:v];}
+            NSMutableArray * samples=[NSMutableArray new];for(int kind=0;kind<4;++kind){NSMutableArray * v=[NSMutableArray new];for(double t:times[kind])[v addObject:@(t)];[samples addObject:v];}
             NSMutableArray * gpuSamples=[NSMutableArray new];for(double t:gpu)[gpuSamples addObject:@(t)];
-            NSMutableDictionary * record=[c mutableCopy];record[@"dense_ms"]=@(median(times[0]));record[@"current_packed_ms"]=@(median(times[1]));record[@"fused_ms"]=@(median(times[2]));record[@"fused_gpu_ms"]=@(median(gpu));record[@"wall_samples_dense_packed_fused"]=samples;record[@"fused_gpu_samples"]=gpuSamples;record[@"fused_vs_dense"]=parity;record[@"fused_vs_cpu"]=cpuParity;record[@"old_vs_dense"]=oldParity;record[@"restored_weight_bitwise_exact"]=@YES;
-            [[NSData dataWithBytes:output.contents length:count*4] writeToFile:[path stringByAppendingPathComponent:@"fused.f32"] atomically:YES];
+            NSMutableDictionary * record=[c mutableCopy];record[@"dense_ms"]=@(median(times[0]));record[@"current_packed_ms"]=@(median(times[1]));record[@"fused_ms"]=@(median(times[2]));record[@"standalone_fused_ms"]=@(median(times[3]));record[@"standalone_vs_dense"]=standaloneParity;record[@"fused_gpu_ms"]=@(median(gpu));record[@"wall_samples_dense_packed_native_fused_standalone"]=samples;record[@"fused_gpu_samples"]=gpuSamples;record[@"fused_vs_dense"]=parity;record[@"fused_vs_cpu"]=cpuParity;record[@"old_vs_dense"]=oldParity;record[@"restored_weight_bitwise_exact"]=@YES;
+            [[NSData dataWithBytes:native.data() length:count*4] writeToFile:[path stringByAppendingPathComponent:@"fused.f32"] atomically:YES];
             [results addObject:record];std::cout<<[c[@"name"] UTF8String]<<" bits="<<a.bits<<" M="<<a.M<<" dense="<<median(times[0])<<" packed="<<median(times[1])<<" fused="<<median(times[2])<<" ms"<<std::endl;
-            for(int kind=0;kind<2;++kind){ggml_gallocr_free(allocs[kind]);ggml_free(contexts[kind]);}ggml_backend_buffer_free(wb);ggml_free(weights);
+            for(int kind=0;kind<3;++kind){ggml_gallocr_free(allocs[kind]);ggml_free(contexts[kind]);}ggml_backend_buffer_free(wb);ggml_free(weights);
         }}
-        NSDictionary * report=@{@"device":metal.name,@"repeats":@20,@"warmups":@5,@"results":results,@"scope":@"Real native GGUF affine carriers with synthetic FP16-representable activations. Rotating resident primitive wall times include submit/sync; GPU timestamps separate. Dense/native reconstruction use pinned GGML MTL0; fused uses one Metal dispatch. No ASR/whole-call conclusion. Exact weight restoration and relative L2 <0.001 versus dense GGML and CPU reference required."};
+        NSDictionary * report=@{@"device":metal.name,@"repeats":@20,@"warmups":@5,@"results":results,@"scope":@"Real native GGUF affine carriers with synthetic FP16-representable activations. Rotating resident primitive wall times include submit/sync; GPU timestamps separate. Dense/native reconstruction use pinned GGML MTL0; native fused graph uses the new Metal-only GGML op; standalone fused uses one Metal dispatch. No ASR/whole-call conclusion. Exact weight restoration and relative L2 <0.001 versus dense GGML and CPU reference required."};
         check([[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:&error] writeToFile:@(argv[3]) atomically:YES],"write report failed");
         ggml_backend_free(backend);return 0;
     }catch(const std::exception & e){std::cerr<<e.what()<<std::endl;return 1;}}
