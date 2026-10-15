@@ -26,6 +26,69 @@ the callback shape but does not reduce first-audio latency.
   --text "Hello from CosyVoice3." --out out.wav
 ```
 
+### Core ML sidecars
+
+Configure with `-DTTS_CPP_COREML=ON` on Apple platforms. The default build
+keeps Core ML disabled. The engine discovers compiled models next to the
+corresponding GGUFs and keeps their handles across synthesis calls. The
+speech LM, flow frontend, DiT, F0 predictor and HiFT neural decoder can each
+use a sidecar. Tokenization, sampling, Euler integration, sine excitation,
+STFT and inverse STFT keep their native implementations.
+
+Export from the same GGUFs used by the engine with Python packages `torch`,
+`numpy`, `gguf` and `coremltools`, plus Xcode's `coremlcompiler`:
+
+```bash
+python3 scripts/export-cosyvoice3-coreml.py --stage llm \
+    --gguf models/cosyvoice3-llm-q8_0.gguf --context 2048 --output models --compile
+python3 scripts/export-cosyvoice3-coreml.py --stage flow-frontend \
+    --gguf models/cosyvoice3-flow-f32.gguf --frames 1024 --output models --compile
+python3 scripts/export-cosyvoice3-coreml.py --stage flow \
+    --gguf models/cosyvoice3-flow-f32.gguf --frames 1024 --output models --compile
+python3 scripts/export-cosyvoice3-coreml.py --stage hift-f0 \
+    --gguf models/cosyvoice3-hift-f32.gguf --frames 512 --output models --compile
+python3 scripts/export-cosyvoice3-coreml.py --stage hift \
+    --gguf models/cosyvoice3-hift-f32.gguf --frames 512 --output models --compile
+```
+
+These dimensions describe exported artifacts. They do not change generation
+limits. The LM uses Core ML only when its context can hold the entire
+existing workload; otherwise it retains ggml. Flow capacity includes the
+voice prompt's mel frames. Frontend and flow padding exclude padded tokens
+from embeddings and attention. An incompatible or too-small sidecar retains
+ggml for that stage. An execution error after a stage starts fails synthesis.
+The optional flow prompt-cut path retains ggml for the DiT.
+
+For `cosyvoice3-llm-q8_0.gguf`, the LM sidecar is
+`cosyvoice3-llm.mlmodelc`. Flow uses `cosyvoice3-flow.mlmodelc` and
+`cosyvoice3-flow-frontend.mlmodelc`; HiFT uses `cosyvoice3-hift.mlmodelc`
+and `cosyvoice3-hift-f0.mlmodelc`. The exporter strips a trailing
+quantization tag using the same naming rule as the runtime. Do not reuse a
+sidecar for different checkpoint weights.
+
+`COSYVOICE_COREML_COMPUTE_UNITS` accepts `cpu_and_ane` (default), `cpu_only`,
+`cpu_and_gpu`, `all`, or `disabled`. CPU+ANE excludes Metal from Core ML;
+Core ML decides which supported operations run on ANE. The backend label
+adds `coreml-ane` only after successful prediction. This label reports the
+requested Core ML compute policy; it does not assert that every operation
+runs on ANE. The engine's ggml backend selection remains unchanged.
+
+The LM exchanges explicit key/value arrays, initialized for each synthesis,
+so it does not depend on Core ML state operations. Artifacts target macOS
+15 / iOS 18 or later; unavailable runtimes retain ggml. First load may
+compile an ANE execution plan and take substantially longer than a warm load.
+
+Native fixture tests use `COSYVOICE_COREML_TEST_LM_GGUF` for the LM and
+`COSYVOICE_COREML_TEST_MODELS_DIR` for stage parity. The stage directory
+contains the published F32 flow/HiFT GGUFs, `voice.gguf`, compiled sidecars,
+and `parity-tokens.txt` recorded with `cosyvoice-bench --tokens-out`.
+`test-cosyvoice-coreml-lm` checks a two-position prefix from the model's SOS
+and text embeddings against the independent ggml graph, including nonzero
+RoPE, cache feedback and reset. `test-cosyvoice-coreml-stages` compares flow,
+F0 and a waveform with pinned F0 against ggml using the existing tier gates.
+Without staged fixtures these tests report a skip; they do not claim an
+inference pass.
+
 ### Convert
 
 Everything the engine loads converts from the official
