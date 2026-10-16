@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>
+#include <stdexcept>
 
 namespace {
 constexpr int mel_channels = 80;
