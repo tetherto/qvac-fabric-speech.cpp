@@ -13,6 +13,7 @@ struct SpeechOptions {
     std::string codec_path;
     int n_threads = 4;
     bool use_gpu = false;
+    std::string backend;
     std::string backends_dir;
 };
 
