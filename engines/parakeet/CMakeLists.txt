@@ -1638,6 +1638,27 @@ if (PARAKEET_BUILD_TESTS)
     # frameworks -- so it runs on every CI regardless of PARAKEET_COREML and locks
     # the wrapper's variable-length behaviour (fixed verbatim / flexible rebuild /
     # features-major default).
+    # Profiling uses internal entry points, not the shared library's public ABI.
+    add_executable(test-affine-profile
+        test/test_affine_profile.cpp
+        src/parakeet_ctc.cpp
+        src/parakeet_engine.cpp
+        src/parakeet_nemotron.cpp
+        src/parakeet_unified.cpp
+        src/parakeet_log.cpp
+        src/parakeet_tdt.cpp
+        src/parakeet_eou.cpp
+        src/parakeet_sortformer.cpp
+        src/parakeet_diarization_v3.cpp
+        src/mel_preprocess.cpp
+        src/sentencepiece_bpe.cpp
+        src/energy_vad.cpp)
+    target_include_directories(test-affine-profile PRIVATE src include ggml/include)
+    target_link_libraries(test-affine-profile PRIVATE ggml parakeet-backend-defs)
+    parakeet_apply_backend_defs(test-affine-profile)
+    parakeet_register_test(test-affine-profile LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/test-affine-profile.gguf")
+
     add_executable(test-packed-affine test/test_packed_affine.cpp)
     target_include_directories(test-packed-affine PRIVATE src)
     target_link_libraries(test-packed-affine PRIVATE ggml)

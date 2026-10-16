@@ -5041,6 +5041,13 @@ int profile_block_substages(ParakeetCtcModel & model,
                             int timed_runs,
                             BlockSubstageTimes & out) {
     if (!model.impl || !model.impl->backend_active) return -1;
+    // The isolated substage builder has no affine graph scope. Refuse packed
+    // models rather than timing raw integer carriers as ordinary weights.
+    if (!model.impl->affine_weights.empty()) {
+        PARAKEET_LOG_ERROR("[profile] packed-affine models do not support sub-stage profiling; "
+                           "use full encoder/inference measurements instead\n");
+        return -2;
+    }
     ggml_backend_t backend = model.impl->backend_active;
     const int d_model = model.encoder_cfg.d_model;
 

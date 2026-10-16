@@ -183,6 +183,9 @@ reuse; the loader does not create a persistent dense model. This is a faithful
 storage/execution baseline, **not a fused low-bit matrix multiply or a speed
 optimization**. Reconstruction can be substantially slower than ordinary Q8.
 Unsupported encoder graph operations fail rather than silently falling back.
+`--profile` does not produce isolated substage timings for packed-affine models;
+that graph builder has no affine reconstruction scope and rejects them explicitly.
+Full encoder/inference measurements retain the normal affine execution path.
 Only offline TDT has been evaluated; other backend/model combinations require
 validation before use.
 

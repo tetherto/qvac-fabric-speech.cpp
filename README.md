@@ -52,6 +52,23 @@ F16, BF16, Q6_K, Q5_K, Q4_K, and NVFP4; streaming quality varies by precision.
 See the [quantization measurements](engines/parakeet/docs/performance.md#nemotron-3-diarization-quantizations)
 before selecting a format. MXFP4 failed CPU quality checks.
 
+### Experimental Parakeet-Mosaic
+
+[Mosaic V2](engines/parakeet/docs/mosaic-compact.md) uses a frozen mixed-precision
+recipe with ordinary GGML kernels. The earlier experimental
+[`parakeet-affine-v1` format](engines/parakeet/docs/backends.md#experimental-packed-affine-tdt-recipe)
+uses integer carriers, with reconstruction by default and opt-in Metal fusion
+via `PARAKEET_AFFINE_FUSED=1`. Fusion requires the matching
+[GGML dependency](engines/parakeet/docs/fused-affine-metal.md#integration-and-pr-handoff);
+older dependencies and unsupported fused backends fail explicitly. Offline TDT
+is the evaluated scope; packed-affine substage profiling is rejected. Recipe
+receipts and measured limitations are documented in the linked guides.
+
+Fixed TDT Core ML exports now require both `mel` and `mel_valid_mask`, and need
+the updated runtime. Legacy single-input sidecars still load but must be
+re-exported for padding invariance. See the
+[sidecar compatibility contract](engines/parakeet/docs/backends.md#core-ml-encoder-sidecar).
+
 ### Apple Core ML sidecars
 
 Optional sidecars accelerate a stage while the rest of the pipeline stays on
