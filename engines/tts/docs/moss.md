@@ -582,7 +582,7 @@ the model always denoises the full 30-second latent and crops the result.
 The public API is `tts_cpp::moss::SoundEffectEngine` in
 [`include/tts-cpp/moss/sound_effect.h`](../include/tts-cpp/moss/sound_effect.h):
 construct with `SoundEffectOptions` (model path, threads, `use_gpu`,
-`backend`, `backends_dir`), call `generate(request, progress)` for a `SoundEffectResult`
+`backends_dir`, `backend`), call `generate(request, progress)` for a `SoundEffectResult`
 (mono PCM, sample rate, text, diffusion, and decode wall times), and
 `cancel()` from another thread or `false` from the progress callback to stop
 a run. A request leaves `steps`, `guidance`, and `shift` at zero to use the

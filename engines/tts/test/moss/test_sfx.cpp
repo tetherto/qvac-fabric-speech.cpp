@@ -50,6 +50,9 @@ constexpr float PROBE_TIMESTEP = 937.5f;
 constexpr int TIMESTEP_MAX_PERIOD = 10000;
 constexpr size_t SINUSOID_ARENA_BYTES = 1 << 20;
 constexpr const char * FAKE_SIDECAR_LABEL = "coreml-fake";
+constexpr const char * POSITIONAL_MODEL = "m.gguf";
+constexpr int POSITIONAL_THREADS = 2;
+constexpr const char * POSITIONAL_BACKENDS_DIR = "/plugins";
 
 int failures = 0;
 
@@ -656,6 +659,15 @@ bool parse(const std::vector<const char *> & argv, tts_cpp::moss::cli::CliArgs &
     return tts_cpp::moss::cli::parse_args((int) argv.size(), argv.data(), args);
 }
 
+void test_positional_options() {
+    const tts_cpp::moss::SoundEffectOptions options{POSITIONAL_MODEL, POSITIONAL_THREADS, true,
+                                                    POSITIONAL_BACKENDS_DIR};
+    check(options.model_path == POSITIONAL_MODEL && options.n_threads == POSITIONAL_THREADS && options.use_gpu,
+          "four-field initialization keeps the leading options");
+    check(options.backends_dir == POSITIONAL_BACKENDS_DIR && options.backend.empty(),
+          "four-field initialization sets backends_dir and leaves the backend automatic");
+}
+
 void test_cli(const std::filesystem::path & path) {
     using tts_cpp::moss::cli::CliArgs;
     using tts_cpp::moss::cli::Mode;
@@ -715,6 +727,7 @@ int main() {
         test_timestep_sinusoid();
         test_fixed_vae_plan();
         test_compute_units();
+        test_positional_options();
         const auto path = write_sfx_model("sfx-model", WEIGHT_SEED);
         {
             SfxModel model(path.string(), {}, 1);
