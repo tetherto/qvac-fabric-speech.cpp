@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <stdexcept>
 #include <thread>
 
@@ -42,6 +43,23 @@ static void check_eos_tail(EngineOptions opts) {
     });
     if (callbacks) throw std::runtime_error("context rejected after delivering PCM");
 }
+static void check_parallel_instances(EngineOptions opts) {
+    opts.eos_threshold = -1e30f; opts.frames_after_eos = 2;
+    std::vector<float> first, second;
+    std::exception_ptr first_error, second_error;
+    auto run = [&](std::vector<float> & pcm, std::exception_ptr & error) {
+        try { Engine instance(opts); pcm = instance.synthesize("Hi.").pcm; }
+        catch (...) { error = std::current_exception(); }
+    };
+    // Include construction and destruction: OpenCL handles share backend
+    // lifecycle state as well as graph scratch and mutable kernel arguments.
+    std::thread a(run, std::ref(first), std::ref(first_error));
+    std::thread b(run, std::ref(second), std::ref(second_error));
+    a.join(); b.join();
+    if (first_error) std::rethrow_exception(first_error);
+    if (second_error) std::rethrow_exception(second_error);
+    compare(first, second);
+}
 int main(int argc, char ** argv) {
     if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: test-pocket-engine model-directory flow-lm.gguf [--gpu]\n"); return 2; }
     try {
@@ -49,11 +67,17 @@ int main(int argc, char ** argv) {
         EngineOptions opts; opts.flow_lm_path = argv[2]; opts.mimi_path = dir+"/mimi.gguf";
         opts.frontend_path = dir+"/frontend.json"; opts.voice_path = dir+"/voice.gguf";
         opts.use_gpu = argc == 4 && std::string(argv[3]) == "--gpu";
-        if (argc == 4 && !opts.use_gpu) throw std::runtime_error("unknown backend option");
+        opts.backend = argc == 4 && !opts.use_gpu ? argv[3] : "";
         check_eos_tail(opts);
+        check_parallel_instances(opts);
         Engine engine(opts);
-        check_pocket_backend(engine.backend_name(), opts.use_gpu);
-        std::printf("Pocket engine backend: %s\n", engine.backend_name());
+        const auto backend = std::string(engine.backend_name());
+        if (backend != engine.flow_lm_backend_name() || backend != engine.mimi_backend_name())
+            throw std::runtime_error("stage backend reporting differs");
+        if (opts.backend == "opencl" && backend.find("OpenCL") == std::string::npos)
+            throw std::runtime_error("OpenCL test ran on another backend");
+        if (opts.backend != "opencl") check_pocket_backend(engine.backend_name(), opts.use_gpu);
+        std::printf("FlowLM: %s; Mimi: %s\n", engine.flow_lm_backend_name(), engine.mimi_backend_name());
         const std::string text = "Hello! We can generate speech with Fabric.";
         const auto batch = engine.synthesize(text);
         if (batch.cancelled || batch.sample_rate != 24000 || batch.generated_frames <= 0 || batch.first_audio_ms <= 0) throw std::runtime_error("invalid synthesis result");

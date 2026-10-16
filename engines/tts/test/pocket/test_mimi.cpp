@@ -35,9 +35,9 @@ int main(int argc, char ** argv) {
     if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: test-pocket-mimi model.gguf reference-directory [--gpu]\n"); return 2; }
     try {
         const bool gpu = argc == 4 && std::string(argv[3]) == "--gpu";
-        if (argc == 4 && !gpu) throw std::runtime_error("unknown backend option");
-        Mimi model(argv[1], 1, gpu);
-        check_pocket_backend(model.backend_name(), gpu);
+        auto backend = pocket_test_backend(argc == 4 ? argv[3] : "cpu");
+        Mimi model(argv[1], 1, ggml_backend_get_device(backend.get()));
+        if (argc != 4 || gpu) check_pocket_backend(model.backend_name(), gpu);
         std::printf("Mimi backend: %s\n", model.backend_name());
         const std::string dir = argv[2];
         const auto latents = load(dir+"/latents.npy"), pcm = load(dir+"/pcm.npy");

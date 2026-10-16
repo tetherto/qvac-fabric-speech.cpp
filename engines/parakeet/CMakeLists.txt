@@ -1404,6 +1404,12 @@ if (PARAKEET_BUILD_TESTS)
     if (GGML_VULKAN)
         list(APPEND _qvp_moss_arms vulkan)
     endif()
+    if (GGML_HEXAGON)
+        list(APPEND _qvp_moss_arms hexagon)
+    endif()
+    if (GGML_OPENCL)
+        list(APPEND _qvp_moss_arms opencl)
+    endif()
     if (_qvp_moss_arms)
         add_executable(test-moss-transcribe-gpu test/moss/test_transcribe_gpu.cpp ${PARAKEET_MOSS_TEST_SOURCES})
         target_link_libraries(test-moss-transcribe-gpu PRIVATE ggml parakeet-backend-defs)
@@ -2090,6 +2096,13 @@ if (PARAKEET_BUILD_TESTS)
         LABEL    "fixture"
         EXE      test-fit-params
         ARGS     "${_qvp_ctc_q8_gguf}"
+        REQUIRES "${_qvp_ctc_q8_gguf}")
+    # Explicit HTP0: the Hexagon session reports no memory of its own, so
+    # the verdict must use host memory. Skips on hosts without HTP0.
+    parakeet_register_test(test-fit-params-ctc-hexagon
+        LABEL    "fixture"
+        EXE      test-fit-params
+        ARGS     "${_qvp_ctc_q8_gguf}" "0" "hexagon"
         REQUIRES "${_qvp_ctc_q8_gguf}")
     parakeet_register_test(test-fit-params-tdt
         LABEL    "fixture"

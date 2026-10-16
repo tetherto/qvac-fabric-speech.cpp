@@ -1,4 +1,5 @@
 #include "pocket/mimi.h"
+#include "pocket/backend.h"
 #include "pocket/ggml_utils.h"
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -38,7 +39,7 @@ struct Mimi::Impl {
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
         if (file) gguf_free(file);
-        if (backend) ggml_backend_free(backend);
+        if (backend) free_backend(backend);
     }
     int64_t key(const char * name, gguf_type type) {
         const auto k = gguf_find_key(file, name);
@@ -68,7 +69,8 @@ struct Mimi::Impl {
         conv_shape(p + ".block.1.conv", width, width / 2, 3);
         conv_shape(p + ".block.3.conv", width / 2, width, 1);
     }
-    void load(const std::string & path, int threads, MemoryMeasure * price = nullptr, bool use_gpu = false) {
+    void load(const std::string & path, int threads, MemoryMeasure * price = nullptr,
+              ggml_backend_dev_t device = nullptr) {
         measure = price; n_threads = threads;
         if (threads < 1 || threads > 1024) fail("threads must be 1..1024");
         file = gguf_init_from_file(path.c_str(), {true, &metadata});
@@ -129,7 +131,9 @@ struct Mimi::Impl {
             values[enc][i] = ggml_new_tensor_3d(state, GGML_TYPE_F32, hd, heads, window-1);
         }
         if (checked.size() != static_cast<size_t>(gguf_get_n_tensors(file))) fail("unexpected codec tensors");
-        backend = init_backend(use_gpu, threads);
+        backend = init_stage_backend(device);
+        auto backend_lock = lock_backend(backend);
+        ::tts_cpp::detail::backend_set_n_threads(backend, threads);
         weights = ggml_init({(checked.size() + 8) * ggml_tensor_overhead(), nullptr, true});
         if (!weights) fail("weight context allocation failed");
         for (auto * src = ggml_get_first_tensor(metadata); src; src = ggml_get_next_tensor(metadata, src)) {
@@ -283,7 +287,7 @@ struct Mimi::Impl {
             x = conv(g, "decoder.model.11.conv", ggml_elu(c, x));
         }
         if (measure) {
-            measure->compute = std::max(measure->compute, g.prepare(x, true, n_threads));
+            measure->compute = std::max(measure->compute, g.prepare(x, true, n_threads, &measure->opencl_scratch));
             return {};
         }
         g.prepare(x);
@@ -307,11 +311,10 @@ struct Mimi::Impl {
     }
 };
 
-Mimi::Mimi(const std::string & path, int threads, bool use_gpu) : impl_(new Impl) { impl_->load(path, threads, nullptr, use_gpu); }
-const char * Mimi::backend_name() const noexcept { return ggml_backend_name(impl_->backend); }
-MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder, bool use_gpu) {
+Mimi::Mimi(const std::string & path, int threads, ggml_backend_dev_t device) : impl_(new Impl) { impl_->load(path, threads, nullptr, device); }
+MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_encoder, ggml_backend_dev_t device) {
     MemoryMeasure out;
-    Impl model; model.load(path, threads, &out, use_gpu);
+    Impl model; model.load(path, threads, &out, device);
     // Price the maximum supported decode batch; include a full
     // retained attention window, plus the distinct empty-history shape.
     for (int past : {0, window-1}) {
@@ -326,6 +329,7 @@ MemoryMeasure Mimi::measure(const std::string & path, int threads, bool include_
     return out;
 }
 Mimi::~Mimi() = default;
+const char * Mimi::backend_name() const noexcept { return ggml_backend_name(impl_->backend); }
 void Mimi::reset_decoder() { impl_->reset(false); }
 const std::string & Mimi::source_hash() const { return impl_->hash; }
 std::vector<float> Mimi::decode(const std::vector<float> & input) {

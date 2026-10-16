@@ -77,10 +77,10 @@ int main(int argc, char ** argv) {
         const std::string model = argv[1], dir = argv[2];
         const double tol = std::stod(argv[3]);
         if (!std::isfinite(tol) || tol <= 0) throw std::runtime_error("invalid tolerance");
-        const bool gpu = argc == 5 && std::string(argv[4]) == "--gpu";
-        if (argc == 5 && !gpu) throw std::runtime_error("unknown backend option");
-        FlowLM lm(model, 64, 2, gpu);
-        check_pocket_backend(lm.backend_name(), gpu);
+        auto backend = pocket_test_backend(argc == 5 ? argv[4] : "cpu");
+        const auto device = ggml_backend_get_device(backend.get());
+        FlowLM lm(model, 64, 2, device);
+        if (argc != 5 || std::string(argv[4]) == "--gpu") check_pocket_backend(lm.backend_name(), argc == 5);
         std::printf("FlowLM backend: %s\n", lm.backend_name());
         const auto embeddings = load(dir, "embeddings");
         const auto expected = load(dir, "prefill");
@@ -151,7 +151,7 @@ int main(int argc, char ** argv) {
         check("full context vs eight chunks", split_result, full_result, tol);
         for (float bad_value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
             CorruptModel bad(model); bad.replace("out_eos.bias", {bad_value});
-            rejects("non-finite EOS weight payload", [&] { FlowLM invalid(bad.path.string(), 64, 2, gpu); });
+            rejects("non-finite EOS weight payload", [&] { FlowLM invalid(bad.path.string(), 64, 2, device); });
         }
         {
             CorruptModel bad(model);
@@ -159,7 +159,7 @@ int main(int argc, char ** argv) {
             for (auto & w : weights) w = std::copysign(std::numeric_limits<float>::max(), w);
             if (bad.replace("out_eos.weight", weights)) {
                 bad.replace("out_eos.bias", {std::numeric_limits<float>::max()});
-                FlowLM overflow(bad.path.string(), 64, 2, gpu);
+                FlowLM overflow(bad.path.string(), 64, 2, device);
                 overflow.prefill(embeddings);
                 rejects("finite weights causing EOS overflow", [&] { overflow.advance(); });
                 if (overflow.position() != 0) throw std::runtime_error("EOS overflow did not reset state");

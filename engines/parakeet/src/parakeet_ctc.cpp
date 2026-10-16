@@ -2074,19 +2074,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         }
     }
 
-    // Hexagon uploads quantized weights in its tiled representation. Use
-    // the explicit repack buffer so the scheduler recognizes those weights
-    // as Hexagon-only and uses tensor_get for any CPU fallback. Its default
-    // host-visible buffer lets CPU kernels read tiled bytes as ordinary GGUF
-    // blocks, corrupting the Sortformer head's very first projection.
-    ggml_backend_buffer_type_t weights_buft = ggml_backend_get_default_buffer_type(impl->backend_active);
-    if (backend_is_hexagon(impl->backend_active)) {
-        ggml_backend_dev_t dev = ggml_backend_get_device(impl->backend_active);
-        auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
-            ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(dev), "ggml_backend_dev_get_extra_bufts");
-        ggml_backend_buffer_type_t * extra = get_extra_bufts ? get_extra_bufts(dev) : nullptr;
-        if (extra && extra[0]) weights_buft = extra[0];
-    }
+    // On the default Hexagon buffer, CPU kernels would read tiled bytes as
+    // GGUF blocks and corrupt the Sortformer head's very first projection.
+    ggml_backend_buffer_type_t weights_buft = weight_buffer_type(impl->backend_active);
 
     if (measure) {
         measure->weights_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(
@@ -2580,10 +2570,11 @@ int load_from_gguf_metadata_only(const std::string & gguf_path,
                                  int                 n_threads,
                                  int                 n_gpu_layers,
                                  bool                verbose,
-                                 GgufLoadMeasure   & out_measure) {
+                                 GgufLoadMeasure   & out_measure,
+                                 const std::string & backend) {
     out_measure = GgufLoadMeasure{};
     return load_from_gguf_impl(gguf_path, out_model, n_threads, n_gpu_layers,
-                               verbose, &out_measure);
+                               verbose, &out_measure, backend);
 }
 
 size_t model_weights_buffer_bytes(const ParakeetCtcModel & m) {

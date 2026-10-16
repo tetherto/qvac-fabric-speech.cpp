@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct ggml_backend_device;
+
 namespace tts_cpp::pocket::detail {
 
 struct FlowConfig {
@@ -38,14 +40,15 @@ struct VoiceState {
 // utterance; prefill and advance check capacity before changing the cache.
 class FlowLM {
 public:
-    explicit FlowLM(const std::string & gguf, int context = 2048, int threads = 2, bool use_gpu = false);
+    explicit FlowLM(const std::string & gguf, int context = 2048, int threads = 2,
+                    ggml_backend_device * device = nullptr);
     ~FlowLM();
     FlowLM(const FlowLM &) = delete;
     FlowLM & operator=(const FlowLM &) = delete;
 
     // Shares the loader and builders, without payload reads or device buffers.
     static FlowMemory measure(const std::string & path, int context,
-                                 int prefill_frames, int threads, bool use_gpu = false);
+                                 int prefill_frames, int threads, ggml_backend_device * device = nullptr);
     static int measure_voice(const std::string & path, const FlowMemory & model, int context);
     const FlowConfig & config() const;
     const char * backend_name() const noexcept;
