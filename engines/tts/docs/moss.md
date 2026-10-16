@@ -1017,8 +1017,10 @@ The file is 7.1 GB, about 4.3 GB of it on the NPU. Bound every request with
 `max_new_tokens` (`--max-new-tokens`): the default sizes the KV cache for the
 whole 40,960-position context (6.7 GB), which `begin()` refuses there with the
 sizes it needed and found. Even bounded, the LM, the tokenizer and the decoder
-leave about 0.5 GB of the phone's memory free, so the engine releases the LM
-weights before each decode and reloads them on the next request.
+held together left about 0.5 GB of the phone's memory free, so the engine
+releases the LM weights before each decode, releases the decoder after it, and
+reloads the LM on the next request: at least 3.0 GB then stays free, and the
+reload adds about 4.6 s to the next request's prefill.
 
 Against the PyTorch dumps (`test-moss-speech-parity` with
 `MOSS_SPEECH_BACKEND=hexagon`; same question as the reference, CUDA bf16 dumps):
@@ -1047,15 +1049,15 @@ default voice on the first request):
 
 | LM GGUF | LM and tokenizer | Decoder | Reply | Encode | Prefill (80 rows) | Generate | Decode |
 |---|---|---|--:|--:|--:|--:|--:|
-| transformer `q4_0` | Hexagon | CPU | 15.8 s | 0.11 s | 0.65 s | 19.9 s | 448 s |
-| transformer `q4_0` | Hexagon | OpenCL | 15.8 s | 0.11 s | 0.66 s | 19.9 s | 85 s |
+| transformer `q4_0` | Hexagon | CPU | 15.8 s | 0.11 s | 0.42 s | 19.9 s | 356 s |
+| transformer `q4_0` | Hexagon | OpenCL | 15.8 s | 0.11 s | 0.39 s | 21.0 s | 63 s |
 | all `q4_0` | CPU | OpenCL | 9.6 s | 0.73 s | 4.99 s | 13.3 s | 179 s |
 
-The NPU encodes the question 6.7x and prefills 7.6x faster than the CPU. A
+The NPU encodes the question 6.8x and prefills 12x faster than the CPU. A
 generation step costs about 100 ms on the NPU and 110 ms on the CPU: both
 stream the 4.3 GB of `q4_0` layers per step, so generation stays slower than
 real time (a step is 80 ms of audio). The decoder dominates the request: the
-S3Gen decoder took 439 s for the 15.8 s reply on the CPU and 74 s on OpenCL.
+S3Gen decoder took 350 s for the 15.8 s reply on the CPU and 56 s on OpenCL.
 The 7.1 GB transformer-`q4_0` file would not fit beside the codec on the
 phone's CPU, so the CPU row uses the all-`q4_0` file (5.1 GB, heads quantized
 too) as its baseline.
