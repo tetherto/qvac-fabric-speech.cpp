@@ -176,11 +176,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.run_mosaic && needs.mosaic_authorize.outputs.allowed == 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
     timeout-minutes: 90
-    env:
-      MOSAIC_FIXTURES: ${{ runner.temp }}/mosaic-fixtures-${{ github.run_id }}-${{ github.run_attempt }}
-      MOSAIC_PYTHON: ${{ runner.temp }}/mosaic-python-${{ github.run_id }}-${{ github.run_attempt }}/bin/python
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize isolated fixture paths
+        run: |
+          echo "MOSAIC_FIXTURES=$RUNNER_TEMP/mosaic-fixtures-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "MOSAIC_PYTHON=$RUNNER_TEMP/mosaic-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
