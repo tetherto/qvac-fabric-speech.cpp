@@ -2,8 +2,8 @@
 
 Part of the [tts documentation](../README.md).
 
-Pocket provides English text-to-speech through a persistent CPU/OpenCL/Hexagon FlowLM/Mimi
-engine and incremental 24 kHz mono PCM callbacks. Its public API is
+Pocket provides English text-to-speech through a persistent CPU, GPU or Hexagon
+FlowLM/Mimi engine and incremental 24 kHz mono PCM callbacks. Its public API is
 `<tts-cpp/pocket/engine.h>`; `pocket-cli` uses that API. F32 arithmetic is used
 throughout. F16 is a storage option whose weights expand to F32 at load.
 
@@ -41,6 +41,8 @@ cmake -S engines/tts -B build/pocket -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/pocket --target pocket-cli
 build/pocket/pocket-cli --model-dir /path/to/pocket-bundle \
   --text "Hello from Pocket TTS." --output /tmp/pocket.wav
+build/pocket/pocket-cli --model-dir /path/to/pocket-bundle --gpu \
+  --text "Hello from Pocket TTS on Metal." --output /tmp/pocket-metal.wav
 ```
 
 The bundle contains `flow-lm.gguf`, `mimi.gguf`, `frontend.json`, `voice.gguf`
@@ -59,18 +61,26 @@ splitting. It matches 322 upstream corpus cases. Generate the fixture using
 
 The persistent engine restores the chosen voice for each text chunk and runs
 FlowLM/Mimi on separate workers with at most 16 queued latent frames.
+CPU remains the default. Set `EngineOptions::use_gpu = true` or pass `--gpu`
+to select Metal, CUDA, Vulkan or OpenCL for both the language model and the codec,
+including their persistent weights and caches. A supported GPU backend must be available;
+the request fails explicitly otherwise. `backend_name()` and CLI JSON reports
+identify the selected backend. `backends_dir` (CLI: `--backends-dir`) locates
+dynamically loaded ggml backends using the library's existing process-wide
+loader. For backend-specific validation, set `TTS_CPP_GPU_BACKEND` to
+`metal`, `cuda`, `vulkan` or `opencl`; the selected backend must match the request.
 The Fabric seed uses a specified Box–Muller transform. An encoder-enabled
 checkpoint can use `--reference-audio` instead of the prepared voice; the
 tested public checkpoint rejects that path.
 
 ## OpenCL execution
 
-CPU remains the default. `EngineOptions.use_gpu = true` (CLI: `--gpu`) uses
-the existing registry selector restricted to OpenCL, including its Adreno tier
-policy. `EngineOptions.backend = "opencl"` (CLI: `--backend opencl`) explicitly
+`EngineOptions.backend = "opencl"` (CLI: `--backend opencl`) explicitly
 selects OpenCL; `"cpu"` explicitly selects CPU. Empty/`"auto"` follows `use_gpu`.
-GPU/OpenCL requests fail if OpenCL is unavailable. Hexagon is selected
-explicitly as described below; other Pocket GPU backends are rejected. Both FlowLM and Mimi use the same selected device, retaining
+Explicit OpenCL requests fail if OpenCL is unavailable. Automatic GPU selection
+also supports Metal, CUDA and Vulkan, retaining the registry's Adreno tier
+policy. Hexagon is selected explicitly as described below. Both FlowLM and Mimi
+use the same selected device, retaining
 F32 weights and persistent caches on that device. Prepared voices and small
 conditioning/output values still cross the host boundary.
 
@@ -113,8 +123,8 @@ protection itself.
 `EngineOptions.backend = "hexagon"` (CLI: `--backend hexagon`) explicitly
 selects Qualcomm Hexagon `HTP0`; `"HTP0"` is an equivalent alias. Both stages use
 the selected session's RPC buffers and execute their complete graphs on the
-DSP. CPU remains the default, and `--gpu` retains its OpenCL behavior. An
-unavailable HTP runtime or unsupported graph operation is an error with no CPU
+DSP. CPU remains the default, and `--gpu` uses the GPU selection described above.
+An unavailable HTP runtime or unsupported graph operation is an error with no CPU
 fallback. The stage backend names must both report `HTP0`.
 
 Use an Android arm64 build of the speech ggml dependency with
@@ -265,11 +275,11 @@ disabled tests from executed tests. Exact test counts are revision-dependent.
 
 `tts-cpp/pocket/fit.h` exposes `pocket::fit_params(FitOptions)`. It tokenizes the
 requested text, validates voice/context capacity, and prices the actual FlowLM
-and Mimi graphs with the selected backend's size-only allocator and, on CPU,
-the CPU work-buffer planner.
-The planner is resolved through the selected CPU backend's registry, so
-preflight works when CPU variants are dynamically loaded (Linux/Android).
-This requires the `ggml_graph_plan` registry export from
+and Mimi graphs with ggml's size-only allocator on the selected CPU or GPU
+backend. CPU projections additionally include the CPU work-buffer planner.
+That planner is resolved through the CPU backend's registry, so preflight
+works when CPU variants are dynamically loaded (Linux/Android).
+CPU projection requires the `ggml_graph_plan` registry export from
 [qvac-ext-ggml#92](https://github.com/tetherto/qvac-ext-ggml/pull/92);
 older backends report an explicit preflight error instead of omitting scratch memory.
 GGUF tensor payloads are never read and model/graph buffers are never allocated
@@ -323,6 +333,8 @@ the requested safety margin. Re-audit graph chunking when updating ggml.
 build/pocket/pocket-cli --model-dir /path/to/pocket-bundle \
   --text "Hello from Pocket TTS." --fit --fit-margin-mib 256 \
   --fit-budget-mib 1024 --report /tmp/pocket-fit.json
+build/pocket/pocket-cli --model-dir /path/to/pocket-bundle --gpu \
+  --text "Hello from Pocket TTS." --fit --report /tmp/pocket-metal-fit.json
 ```
 
 The optional budget further limits available OS memory. On iOS, the projection

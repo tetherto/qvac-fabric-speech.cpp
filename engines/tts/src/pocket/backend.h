@@ -79,6 +79,13 @@ inline HexagonRuntime hexagon_runtime(ggml_backend_t backend) {
     throw BackendUnavailable("Pocket TTS: Hexagon runtime-info v1 unavailable or invalid; update ggml-speech");
 }
 
+inline bool supported_backend(ggml_backend_t backend) {
+    namespace det = ::tts_cpp::detail;
+    return det::backend_is_cpu(backend) || det::backend_is_opencl(backend) ||
+           det::backend_is_metal(backend) || det::backend_is_cuda(backend) || det::backend_is_vulkan(backend) ||
+           det::backend_is_hexagon(backend);
+}
+
 inline Backend select_backend(bool use_gpu, const std::string & requested) {
     const auto choice = backend_request(requested);
     std::lock_guard<std::recursive_mutex> lock(accelerator_mutex());
@@ -86,16 +93,21 @@ inline Backend select_backend(bool use_gpu, const std::string & requested) {
     if (choice == "opencl" || choice == "hexagon") backend = ::tts_cpp::detail::init_requested_backend(choice, false, "pocket");
     else if (choice == "cpu" || !use_gpu) backend = ::tts_cpp::detail::init_cpu_backend();
     else backend = ::tts_cpp::detail::init_gpu_backend(1, false, "pocket", 0, false, nullptr,
-                         ::tts_cpp::detail::GpuBackendRequirement::OpenCL);
-    const bool wants_opencl = choice == "opencl" || ((choice.empty() || choice == "auto") && use_gpu);
+                         ::tts_cpp::detail::GpuBackendRequirement::OpenCL |
+                         ::tts_cpp::detail::GpuBackendRequirement::Metal |
+                         ::tts_cpp::detail::GpuBackendRequirement::CUDA |
+                         ::tts_cpp::detail::GpuBackendRequirement::Vulkan);
+    const bool wants_opencl = choice == "opencl";
     if (backend && ((wants_opencl && !::tts_cpp::detail::backend_is_opencl(backend)) ||
                     (choice == "hexagon" && !::tts_cpp::detail::backend_is_hexagon(backend)))) {
         ggml_backend_free(backend); backend = nullptr;
     }
     if (!backend) {
         if (choice == "hexagon") throw BackendUnavailable("Pocket TTS: requested Hexagon HTP0 backend unavailable; install matching ggml-hexagon and DSP runtime libraries");
-        throw BackendUnavailable(!wants_opencl ? "Pocket TTS: CPU backend unavailable" :
-            "Pocket TTS: requested OpenCL backend unavailable; install a supported ggml-opencl backend");
+        throw BackendUnavailable(choice == "cpu" || (!wants_opencl && !use_gpu)
+            ? "Pocket TTS: CPU backend unavailable"
+            : wants_opencl ? "Pocket TTS: requested OpenCL backend unavailable; install a supported ggml-opencl backend"
+                           : "Pocket TTS: Metal, CUDA, Vulkan or OpenCL backend unavailable");
     }
     Backend selected(backend);
     if (::tts_cpp::detail::backend_is_hexagon(backend)) (void)hexagon_runtime(backend);
@@ -106,10 +118,9 @@ inline ggml_backend_t init_stage_backend(ggml_backend_dev_t device) {
     std::lock_guard<std::recursive_mutex> lock(accelerator_mutex());
     auto * backend = device ? ggml_backend_dev_init(device, nullptr) : ::tts_cpp::detail::init_cpu_backend();
     if (!backend) throw BackendUnavailable("Pocket TTS: selected stage backend could not initialise");
-    if (!::tts_cpp::detail::backend_is_cpu(backend) && !::tts_cpp::detail::backend_is_opencl(backend) &&
-        !::tts_cpp::detail::backend_is_hexagon(backend)) {
+    if (!supported_backend(backend)) {
         ggml_backend_free(backend);
-        throw std::invalid_argument("Pocket TTS: only CPU, OpenCL and Hexagon stage backends are supported");
+        throw std::invalid_argument("Pocket TTS: unsupported stage backend");
     }
     Backend selected(backend);
     if (::tts_cpp::detail::backend_is_hexagon(backend)) (void)hexagon_runtime(backend);

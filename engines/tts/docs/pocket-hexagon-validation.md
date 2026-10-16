@@ -22,8 +22,10 @@ device and configuration; they do not establish performance on other phones.
 | HTP settings | Default batch 1024, queue depth 16, one session, OPSTAGE=3; PROFILE=0 for timing |
 | OpenCL reference | Qualcomm Adreno 830, OpenCL 3.0; warmed kernel cache |
 
-The dependency change adds runtime introspection, not new kernels. Neither
-Fabric PR #338 nor the ggml affine-repack PR #123 is a dependency. Model assets
+The dependency change adds runtime introspection, not new kernels. The original
+Hexagon implementation did not depend on Fabric PR #338 or the ggml
+affine-repack PR #123. PR #338 has since merged into master and is preserved by
+the merge resolution below; ggml #123 remains unnecessary. Model assets
 are the same converted checkpoint used for the preceding OpenCL validation:
 
 | Asset | SHA-256 |
@@ -155,6 +157,23 @@ allocating their payloads, unsafe 2048/3072 MiB packing limits, and safe
 
 The original performance measurements above were not rerun for this
 configuration check.
+
+## Integration with merged GPU support
+
+Master `1cf60941` includes Pocket's Metal/CUDA/Vulkan support from PR #338
+and the CosyVoice Core ML sidecars from PR #341. The conflict resolution keeps
+automatic GPU selection, backend-directory loading, device-memory telemetry,
+GPU fixture registration and explicit Hexagon selection together. OpenCL-only
+scratch accounting remains restricted to OpenCL; Hexagon retains its runtime
+queue/guard/mapping accounting and packed-buffer configuration check.
+
+All 11 Pocket host tests and the portable CosyVoice Core ML policy test passed;
+the Android arm64 Release build passed. On the OnePlus 13s, explicit Hexagon
+real FlowLM/Mimi parity, fit, engine lifecycle and packed-buffer regressions
+passed. The merged `--gpu` path, pinned to OpenCL, also passed real FlowLM
+F32/F16, Mimi, fit and the complete engine lifecycle suite. Numerical
+tolerances were unchanged. These device checks cover OpenCL and Hexagon;
+they do not constitute new Metal/CUDA/Vulkan hardware validation.
 
 ## Release handoff
 
