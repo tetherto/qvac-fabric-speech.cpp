@@ -530,11 +530,12 @@ DAC decoder turns the 128-channel latent (50 frames per second) into 48 kHz
 mono audio. It is not a speech model; it shares the MOSS CLI and the Qwen
 tokenizer with the Delay engine and nothing else.
 
-**Status — CPU and Metal, validated against the reference pipeline.** With
+**Status — CPU, Metal and the [Hexagon NPU](#hexagon-npu-generation),
+validated against the reference pipeline.** With
 the same noise, every stage matches the PyTorch fp32 pipeline: the text
 encoder, one DiT velocity for the prompt and for the empty negative prompt,
 an eight-step guided sampling loop, and the VAE decode. An f16 GGUF reaches
-cosine similarity 0.99998 or better on both backends; a q8_0 GGUF reaches
+cosine similarity 0.99998 or better on all three backends; a q8_0 GGUF reaches
 0.9995 per stage and 0.9987 after the eight sampling steps. The CPU path is
 correct but slow (about ten seconds per DiT pass on an M1 Ultra, so a
 100-step clip takes over half an hour); use `--gpu` where one is available.
@@ -573,13 +574,15 @@ this mode) override them. `--seconds` must be in (0, 30] and is rounded to
 0.1 s the way Python's `round` does. There is no streaming in this mode. On an M1 Ultra a
 100-step clip takes about two minutes on Metal whatever its length, because
 the model always denoises the full 30-second latent and crops the result.
+`--backend hexagon` runs it on a Snapdragon NPU instead of `--gpu`; see
+[Hexagon NPU generation](#hexagon-npu-generation).
 
 ### Engine notes
 
 The public API is `tts_cpp::moss::SoundEffectEngine` in
 [`include/tts-cpp/moss/sound_effect.h`](../include/tts-cpp/moss/sound_effect.h):
 construct with `SoundEffectOptions` (model path, threads, `use_gpu`,
-`backends_dir`), call `generate(request, progress)` for a `SoundEffectResult`
+`backends_dir`, `backend`), call `generate(request, progress)` for a `SoundEffectResult`
 (mono PCM, sample rate, text, diffusion, and decode wall times), and
 `cancel()` from another thread or `false` from the progress callback to stop
 a run. A request leaves `steps`, `guidance`, and `shift` at zero to use the
@@ -686,6 +689,64 @@ M4, `all` moved part of the VAE to the Neural Engine and made it slower, and
 128-frame VAE window, which keeps only 64 frames per call, ran at 0.98x on the
 M4 and 1.05x on the M3 Ultra.
 
+### Hexagon NPU generation
+
+MOSS-SoundEffect-v2 runs on the Snapdragon Hexagon NPU (HTP0; measured on a
+Galaxy S25, Snapdragon 8 Elite, Hexagon v79) when requested explicitly:
+`SoundEffectOptions::backend = "hexagon"` or `moss-cli --mode sfx --backend
+hexagon`. As for MOSS-TTS there is no fallback: construction fails when HTP0
+is missing, and `--gpu` never selects it. The text encoder, the DiT and the
+VAE decoder all run on the NPU. Only the 151,936-row token table stays on the
+host, mapped from the GGUF (read into memory when the file cannot be mapped
+or the table is not 32-byte aligned), and the host gathers the prompt's rows
+from it. The loader takes `f32`, `f16`,
+`bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
+refused at load, so both validated GGUFs run.
+
+It needs a `qvac-ext-ggml@speech` build with the Hexagon backend at `d85713da`
+or later, which carries the DSP buffer remapping fix
+([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124));
+the numbers below were measured at that commit. Without it the first DiT pass maps more 1 GiB weight
+buffers than the DSP's address space or its 16 mapping slots can hold, the
+DSP aborts and the request never returns; on the S25 the fault rebooted the
+phone.
+
+Attention runs as one `FLASH_ATTN_EXT`: the DiT's self-attention over the 1500
+latent frames and its cross-attention to the 512-row text context, and the
+text encoder's causal attention with an F16 mask. Unfused, one DiT pass took
+29.7 s on the NPU; fused, 0.89 s, with the same velocity.
+
+Against the PyTorch dumps (`test-moss-sfx-parity` with
+`MOSS_SFX_BACKEND=hexagon`), cosine similarity per stage:
+
+| GGUF | Text encoder | DiT, prompt / empty | VAE decode | Eight guided steps |
+|---|--:|--:|--:|--:|
+| `f16` | 0.999999 | 1.000000 / 1.000000 | 0.999994 | 0.999998 |
+| `q8_0` | 0.999687 | 0.999698 / 0.999656 | 0.999994 | 0.999645 |
+
+Speed on the Galaxy S25 (seed 7, 6 CPU threads, each run started at thermal
+status 0; "glass" and "rain" are the prompts of the parity dumps and of
+[Run](#run-1)):
+
+| Request | GGUF | Backend | Steps | Diffusion | VAE decode |
+|---|---|---|--:|--:|--:|
+| glass, 5 s | `f16` | Hexagon | 2 | 3.6 s | 1.3 s |
+| same | `q8_0` | Hexagon | 2 | 3.2 s | 1.1 s |
+| same | `f16` | CPU | 2 | 163.4 s | 9.6 s |
+| same | `q8_0` | CPU | 2 | 122.0 s | 7.6 s |
+| glass, 5 s | `f16` | Hexagon | 100 | 367.6 s | 2.4 s |
+| rain, 10 s | `f16` | Hexagon | 100 | 316.8 s | 4.9 s |
+| same | `q8_0` | Hexagon | 100 | 326.9 s | 4.8 s |
+| rain, 30 s | `f16` | Hexagon | 100 | 372.7 s | 14.7 s |
+
+A guided step runs the DiT twice over the full 30-second latent, so the
+diffusion cost does not depend on the requested length. From a cool start a
+pass costs 0.89 s (`f16`) or 0.79 s (`q8_0`) on the NPU against 41 s and 31 s
+on the CPU; over a 100-step clip the NPU throttles to 1.6-1.9 s per pass, so a
+default clip takes five to six minutes, where the CPU would need over two
+hours. Text encoding takes about 0.1 s. The `f16` GGUF (6.4 GB, 5.8 GB of it
+on the NPU) runs on the 12 GB phone.
+
 ### Test
 
 `test-moss-sfx` builds a tiny random-weight GGUF in-test and needs no
@@ -702,13 +763,20 @@ checks the tensor census, the folded weight norm, the f16 and q8_0 paths, and
 the `.pth` VAE checkpoint (when torch is installed). `test-moss-sfx-parity` is the reference check: it
 skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
 `MOSS_SFX_REFERENCE_DIR` at stage dumps from the PyTorch pipeline
-(`MOSS_SFX_GPU=1` runs it on the GPU). The dumps come from
+(`MOSS_SFX_GPU=1` runs it on the GPU, `MOSS_SFX_BACKEND=hexagon` on the NPU). The dumps come from
 `scripts/dump-moss-sfx-reference.py <checkpoint> <out_dir> --upstream
 <MOSS-TTS checkout>`, whose defaults are the prompt, duration, and step count
 the test expects. `test-moss-sfx` also covers the sidecar routing without
 Core ML: the fixed VAE window plan, sidecar and fallback decodes, retiring a
 failed DiT or VAE sidecar, strict mode, the default compute units, and the
-per-request backend report.
+per-request backend report. `test-moss-hexagon-layout` forces the Hexagon
+layout onto the CPU at f32, f16 and q8_0: the host token table gives the same
+text context as the device table, and fused attention in the text encoder and
+in the DiT's self- and cross-attention matches the unfused graphs; it also
+checks that a host table leaves the device weights and is priced as host
+memory. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
+VAE on HTP0 against the CPU at f32, f16 and q8_0, checks that bf16 weights are
+refused, and projects the fit against host memory.
 `test-moss-sfx-coreml-exporter` (Python; skips without numpy or torch) checks
 the exporter's DiT and VAE rebuilds against independent NumPy references on
 tiny random weights, including the reordered rotary pairs, the stride-phase
@@ -732,14 +800,16 @@ embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
 reuses it; the codec only changes the token-to-mel ratio and the speech
 vocabulary, which the S3Gen loader now reads from the GGUF.
 
-GPU speech replies run the LM and S3Gen decoder in separate memory phases.
-After token generation, the engine releases LM weights and KV/graph buffers
-before decoding audio, while retaining tokenizer metadata and backend identity.
-The decoder holds a matched S3Gen cache reference only for that decode; other
-cache owners retain their references. The next request reloads LM weights from
-the same GGUF, so keep the model file available. This reduces peak GPU memory
-at the cost of loading weights again between spoken replies. CPU execution
-keeps its resident LM weights.
+Speech replies with the LM on a GPU or on the
+[Hexagon NPU](#hexagon-npu-speech-to-speech) run the LM and S3Gen decoder in
+separate memory phases. After token generation, the engine releases LM weights
+and KV/graph buffers before decoding audio, while retaining tokenizer metadata
+and backend identity. A GPU decoder holds a matched S3Gen cache reference only
+for that decode; other cache owners retain their references. The next request
+reloads LM weights from the same GGUF, so keep the model file available. This
+reduces peak GPU memory, and on a 12 GB phone keeps the request within the
+host's memory, at the cost of loading weights again between spoken replies. An
+LM on the CPU keeps its resident weights.
 
 **Status — CPU and Metal, validated against the reference pipeline.** Every
 stage matches the PyTorch pipeline on a real question: the log-mel features
@@ -773,7 +843,10 @@ python scripts/convert-moss-speech-codec-to-gguf.py /path/to/MOSS-Speech-Codec \
 ```
 
 The LM converter writes `bf16` (18.2 GB, the default), `q8_0` (9.7 GB),
-`f16`, and `f32`; norms stay f32. The codec converter needs torch,
+`f16`, and `f32`; norms stay f32. For a 12 GB phone, quantize the transformer
+layers of the `f16` file to `q4_0` with `requantize-gguf.py` (see
+[Hexagon NPU](#hexagon-npu-speech-to-speech)); the loader takes `q4_0` weights
+on every backend. The codec converter needs torch,
 safetensors, transformers, librosa, and soundfile, and takes the CAM++
 weights from the CosyVoice3 CAM++ GGUF (the same network the CosyVoice2
 frontend runs). `--voice-wav` becomes the default reply voice, stored as mono
@@ -798,14 +871,18 @@ stdout). Sampling defaults to the upstream values: temperature 0.7, top-p
 its reply or the remaining model context is exhausted. `--max-new-tokens N`
 sets an explicit reply budget (`0`, the default, uses the remaining context),
 and `--max-reply-seconds` cuts the spoken part cleanly by forcing
-the end-of-speech code. There is no streaming in this mode.
+the end-of-speech code. There is no streaming in this mode. `--backend NAME`
+places the LM and the speech tokenizer on one device (`cpu`, `hexagon`, or an
+exact ggml device name) with no fallback; `--gpu` then places the S3Gen decoder
+on the automatic GPU, and without it the decoder runs on the CPU. Without
+`--backend`, `--gpu` places all three on the automatic GPU.
 
 ### Engine notes
 
 The public API is `tts_cpp::moss::SpeechEngine` in
 [`include/tts-cpp/moss/speech.h`](../include/tts-cpp/moss/speech.h):
 construct with `SpeechOptions` (LM and codec paths, threads, `use_gpu`,
-`backends_dir`) and call `respond(request, progress)` with a `SpeechRequest`
+`backends_dir`, `backend`) and call `respond(request, progress)` with a `SpeechRequest`
 that holds the conversation as `SpeechMessage`s. Each message carries either
 text or audio (PCM plus sample rate), roles are system, user, and assistant,
 and the last message must be the user's. The `SpeechResult` holds the reply
@@ -846,7 +923,12 @@ about 24 s to about 4 s on an M1 Ultra. The flow decoder's source noise in
 HiFT is random, so the reply waveform is compared with the reference through
 its log-mel spectrum. The LM loader validates the geometry, the special
 tokens, and every tensor's shape before it allocates; the KV cache is sized
-from the prompt plus `max_new_tokens`, rounded up to 256 positions.
+from the prompt plus `max_new_tokens`, rounded up to 256 positions. With the
+default `max_new_tokens` of 0 that is the whole 40,960-position context, 6.7 GB
+of KV cache. On a backend that shares the host's memory (CPU, integrated GPU,
+Metal, Hexagon) `begin()` refuses a cache larger than the memory the host
+reports free, naming both sizes, instead of letting the allocation exhaust the
+device; set `max_new_tokens` to bound it.
 
 ### Core ML speech tokenizer
 
@@ -894,6 +976,92 @@ takes 63 ms on ggml and took 390 ms padded on the M4 sidecar, and the two
 break even only past roughly 80-90 % of a segment on both machines. That is why only full
 segments use the sidecar; typical short questions never reach it.
 
+### Hexagon NPU speech-to-speech
+
+MOSS-Speech runs its language model and speech tokenizer on the Snapdragon
+Hexagon NPU (HTP0; measured on a Galaxy S25, Snapdragon 8 Elite, Hexagon v79)
+when requested explicitly: `SpeechOptions::backend = "hexagon"` or `moss-cli
+--mode s2s --backend hexagon`. As for MOSS-TTS there is no fallback:
+construction fails when HTP0 is missing. The reply decoder (the S3Gen flow
+decoder and HiFT shared with Chatterbox) does not run on the NPU: add `--gpu`
+(`use_gpu`) to decode on the Adreno GPU through OpenCL, otherwise it runs on the
+CPU. CAM++ always runs on the CPU. It needs a `qvac-ext-ggml@speech` build with the Hexagon
+backend; the generated-model tests also pass without the DSP buffer remapping
+fix ([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124)),
+and the full-model measurements below were taken with it.
+
+Weights go into the Hexagon repack buffer type, and HTP runs `f32`, `f16`,
+`q8_0` and `q4_0` weights. The LM refuses other types at load, including the LM
+converter's default `bf16`; the tokenizer, whose loader takes `f32`, `f16`,
+`bf16` and `q8_0`, refuses `bf16` (the codec converter writes its matrices at
+`f16`). The text embedding table, the audio
+embedding table and the text head stay on the host, mapped from the GGUF as
+for [MOSS-TTS](#hexagon-npu): at 151,680 x 4,096 the text table and head are
+1.24 GB each at `f16`, past HTP's 1 GiB buffer and its 32,768-row limit for
+quantized heads. The text head runs on the CPU only on text-channel steps;
+while the reply is spoken each step skips it. The audio head stays on the NPU.
+Attention runs as one `FLASH_ATTN_EXT`: per layer in the LM, whose value
+caches then use the key layout, with an F16 causal mask on prefill batches
+(a single decoding row attends to the whole cache without one), and per layer
+in the Whisper-VQ encoder with an F16 causal mask.
+
+The 9B LM is 18 GB at `f16`. On a 12 GB phone, quantize the transformer
+layers to `q4_0` and keep the tables and heads at `f16`:
+
+```sh
+python scripts/requantize-gguf.py moss-speech-f16.gguf \
+    moss-speech-blk-q4_0.gguf q4_0 --name-filter blk.
+```
+
+The file is 7.1 GB, about 4.3 GB of it on the NPU. Bound every request with
+`max_new_tokens` (`--max-new-tokens`): the default sizes the KV cache for the
+whole 40,960-position context (6.7 GB), which `begin()` refuses there with the
+sizes it needed and found. Even bounded, the LM, the tokenizer and the decoder
+held together left about 0.5 GB of the phone's memory free, so the engine
+releases the LM weights before each decode, releases the decoder after it, and
+reloads the LM on the next request: at least 3.0 GB then stays free, and the
+reload adds about 4.6 s to the next request's prefill.
+
+Against the PyTorch dumps (`test-moss-speech-parity` with
+`MOSS_SPEECH_BACKEND=hexagon`; same question as the reference, CUDA bf16 dumps):
+
+| Stage | `q4_0` transformer, Hexagon | same GGUF, CPU (x86) | `f16`, CPU (x86) |
+|---|--:|--:|--:|
+| user speech tokens | 52 / 53 | 53 / 53 | 53 / 53 |
+| prefill text logits (cosine) | 0.99359 | 0.99405 | 0.99995 |
+| prefill audio logits (cosine) | 0.99995 | 0.99995 | 0.999998 |
+| teacher-forced audio codes | 78.5 % | 76.8 % | 92.8 % |
+
+The voice-prompt mel and the CAM++ embedding (cosine 1.000000) and the reply
+spectrum (0.999576 on the CPU and on OpenCL) do not depend on the LM's
+backend. `q4_0` transformer layers fall below the test's 90 % teacher-forced
+floor on every backend, so the parity test reports that stage as a failure for
+this tier; the Hexagon LM follows the CPU's numbers for the same file. Sampled
+replies stay coherent: Whisper transcribes the S25 reply below as "The tallest
+mountain in the world is Mount Everest. It stands at about 10.89 kilometers
+above sea level, which is roughly 35,500 feet. ..." (the facts are the model's),
+the same with either decoder.
+
+Speed on the Galaxy S25 (the 4.2 s question "What is the tallest mountain in
+the world and roughly how tall is it?", seed 1, `--max-new-tokens 600`, 6 CPU
+threads, each run started at thermal status 0; decode includes preparing the
+default voice on the first request):
+
+| LM GGUF | LM and tokenizer | Decoder | Reply | Encode | Prefill (80 rows) | Generate | Decode |
+|---|---|---|--:|--:|--:|--:|--:|
+| transformer `q4_0` | Hexagon | CPU | 15.8 s | 0.11 s | 0.42 s | 19.9 s | 356 s |
+| transformer `q4_0` | Hexagon | OpenCL | 15.8 s | 0.11 s | 0.39 s | 21.0 s | 63 s |
+| all `q4_0` | CPU | OpenCL | 9.6 s | 0.73 s | 4.99 s | 13.3 s | 179 s |
+
+The NPU encodes the question 6.8x and prefills 12x faster than the CPU. A
+generation step costs about 100 ms on the NPU and 110 ms on the CPU: both
+stream the 4.3 GB of `q4_0` layers per step, so generation stays slower than
+real time (a step is 80 ms of audio). The decoder dominates the request: the
+S3Gen decoder took 350 s for the 15.8 s reply on the CPU and 56 s on OpenCL.
+The 7.1 GB transformer-`q4_0` file would not fit beside the codec on the
+phone's CPU, so the CPU row uses the all-`q4_0` file (5.1 GB, heads quantized
+too) as its baseline.
+
 ### Test
 
 `test-moss-speech` needs no download: it builds a tiny random-weight LM and
@@ -912,7 +1080,8 @@ Whisper-VQ, CAM++, and default-voice helpers when torch is installed.
 `MOSS_SPEECH_MODEL` and `MOSS_SPEECH_REFERENCE_DIR` point at the converted LM
 and at dumps of the PyTorch pipeline, and it adds the tokenizer and decoder
 stages when `MOSS_SPEECH_CODEC` points at the codec GGUF (`MOSS_SPEECH_GPU=1`
-runs it on the GPU, `MOSS_SPEECH_DUMP_MEL=<file>` writes the reply mel). It
+runs it on the GPU, `MOSS_SPEECH_BACKEND=hexagon` runs the LM and the tokenizer
+on the NPU, `MOSS_SPEECH_DUMP_MEL=<file>` writes the reply mel). It
 prints every number in the status paragraph above and fails below backend-safe
 floors: cosine 0.9999 for the user log-mel, 0.999 for the voice mel and the
 CAM++ embedding, 0.99 for the reply spectrum and the prefill logits, 95 % of
@@ -920,6 +1089,24 @@ the user speech tokens, and 90 % teacher-forced agreement. The dumps come from
 `scripts/dump-moss-speech-reference.py <MOSS-Speech> <MOSS-Speech-Codec>
 <out_dir> --upstream <MOSS-Speech checkout> --user-wav question.wav --device
 mps`, which writes the `lm/` and `codec/` folders the test reads.
+
+`test-moss-speech` also loads `q8_0` and `q4_0` LMs and refuses a `q5_0` one,
+and checks the KV-cache memory guard. `test-moss-hexagon-layout` forces the
+Hexagon layout onto the CPU at f32, f16 and q8_0: the host tables give the same
+heads as the device tables, before and after the weights are released and
+reloaded, fused attention in the LM matches the unfused graph in batched prefill,
+decoding and audio-only steps, the fused Whisper-VQ encoder gives the same codes,
+and `use_gpu` places the decoder on the GPU beside an explicit backend. On a
+phone, `test-moss-hexagon` runs the LM (prefill in batches, decoding, audio-only
+steps, weight eviction) and the tokenizer on HTP0 against the CPU at f32, f16,
+q8_0 and q4_0, and checks that bf16 LM and tokenizer weights are refused, the
+tokenizer's refusal without offering `q4_0`. The generated GGUFs are narrow:
+only the LM's 32-wide feed-forward down projection holds a quantization block,
+so the quantized tiers leave the tables, the other LM matrices and the whole
+tokenizer at `f16`; the full checkpoint covers `q4_0` layers on the NPU.
+`test-moss-speech-e2e hexagon` makes two replies on one engine with the LM on
+the NPU, and `test-moss-speech-parity` checks that a decoder released after its
+decode leaves no S3Gen graph cache.
 
 `test-moss-speech` also covers the tokenizer sidecar's routing without Core
 ML: the window size, the sidecar path, full segments on the sidecar and partial

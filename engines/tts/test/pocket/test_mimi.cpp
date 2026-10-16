@@ -1,4 +1,5 @@
 #include "pocket/mimi.h"
+#include "test_backend.h"
 #include "npy.h"
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
@@ -31,9 +32,13 @@ static void compare(const char * name, const std::vector<float> & got, const std
     if (worst > tolerance) throw std::runtime_error(std::string(name)+": parity failure");
 }
 int main(int argc, char ** argv) {
-    if (argc != 3) { std::fprintf(stderr, "usage: test-pocket-mimi model.gguf reference-directory\n"); return 2; }
+    if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: test-pocket-mimi model.gguf reference-directory [--gpu]\n"); return 2; }
     try {
-        Mimi model(argv[1], 1);
+        const bool gpu = argc == 4 && std::string(argv[3]) == "--gpu";
+        auto backend = pocket_test_backend(argc == 4 ? argv[3] : "cpu");
+        Mimi model(argv[1], 1, ggml_backend_get_device(backend.get()));
+        if (argc != 4 || gpu) check_pocket_backend(model.backend_name(), gpu);
+        std::printf("Mimi backend: %s\n", model.backend_name());
         const std::string dir = argv[2];
         const auto latents = load(dir+"/latents.npy"), pcm = load(dir+"/pcm.npy");
         std::vector<float> singles;
@@ -99,7 +104,9 @@ int main(int argc, char ** argv) {
                 {singles.begin(), singles.begin()+1920}, 0.000001);
         drwav_data_format format{drwav_container_riff, DR_WAVE_FORMAT_IEEE_FLOAT, 1, 24000, 32};
         drwav wav;
-        if (!drwav_init_file_write(&wav, (dir+"/pocket-native-decoder.wav").c_str(), &format, nullptr))
+        const auto tag = pocket_requested_test_backend();
+        const auto output = dir + (gpu ? "/pocket-" + (tag.empty() ? "gpu" : tag) + "-decoder.wav" : "/pocket-native-decoder.wav");
+        if (!drwav_init_file_write(&wav, output.c_str(), &format, nullptr))
             throw std::runtime_error("cannot open waveform output");
         auto written = drwav_write_pcm_frames(&wav, singles.size(), singles.data()); drwav_uninit(&wav);
         if (written != singles.size()) throw std::runtime_error("incomplete waveform write");
