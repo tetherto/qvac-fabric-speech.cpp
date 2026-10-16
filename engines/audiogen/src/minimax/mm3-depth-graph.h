@@ -129,6 +129,9 @@ static ggml_tensor * mm3_depth_block(ggml_context * ctx, ggml_cgraph * gf, const
                                      const MM3DepthLayer & w, ggml_tensor * h, ggml_tensor * mask,
                                      ggml_tensor * kcache, ggml_tensor * vcache, ggml_tensor * rows,
                                      int64_t window) {
+    if (auto * result = tts_cpp::minimax::detail::coreml_transformer_block(
+            ctx, gf, w.coreml, h, rows, mask, kcache, vcache, rows,
+            window, c.head_count, c.head_dim, false)) return result;
     const int64_t H  = (int64_t) c.embedding_length;
     const int64_t D  = (int64_t) c.head_dim;
     const int64_t Nh = (int64_t) c.head_count;
@@ -558,6 +561,7 @@ static bool mm3_depth_decode_frame(const MM3Model & m, const float * lm_hidden_c
             return false;
         }
 
+        if (!mm3_coreml_check(m.synth.depth.blk, err)) return false;
         ggml_backend_tensor_get(s->out_fused, fused_buf.data(), 0, fused_buf.size() * sizeof(float));
 
         // Offsets follow the fused layout built in mm3_depth_build_step.

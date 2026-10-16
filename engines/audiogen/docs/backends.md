@@ -210,3 +210,8 @@ appends both tables to the job summary. Measured on an M5 (macOS 26): 1.24x
 over ggml Metal at 30 s, 1.32x at 60 s. In a full `music-cli` generation the
 VAE stage drops from 2.6 s (Metal) to 2.2 s at 30 s and from 5.0 s to 4.0 s
 at 60 s, and the decode leaves the GPU entirely.
+
+## MiniMax-Music3 Core ML transformer blocks
+
+`AUDIOGEN_COREML=ON` also enables optional per-block LM, depth-decoder and DiT
+sidecars for MiniMax-Music3. See [export, placement and validation](minimax-coreml.md).

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend.h"
+#include "coreml-block.h"
 #include "gguf-weights.h"
 #include "logic.h"
 #include "weight-ctx.h"
@@ -150,6 +151,7 @@ struct MM3SynthConfig {
 // attn_qkv and ffn_gate_up hold the [q|k|v] and [gate|up] rows stacked into
 // one matrix when the parts share a type; the separate tensors stay null then.
 struct MM3LmLayer {
+    std::shared_ptr<tts_cpp::minimax::detail::CoreMLBlock> coreml;
     ggml_tensor * attn_norm   = nullptr;
     ggml_tensor * attn_qkv    = nullptr;
     ggml_tensor * attn_q      = nullptr;
@@ -174,6 +176,7 @@ struct MM3LmWeights {
 
 // Stacked the same way as MM3LmLayer.
 struct MM3DepthLayer {
+    std::shared_ptr<tts_cpp::minimax::detail::CoreMLBlock> coreml;
     ggml_tensor * attn_norm   = nullptr;
     ggml_tensor * attn_qkv    = nullptr;
     ggml_tensor * attn_q      = nullptr;
@@ -204,6 +207,7 @@ struct MM3CondWeights {
 };
 
 struct MM3DitBlock {
+    std::shared_ptr<tts_cpp::minimax::detail::CoreMLBlock> coreml;
     ggml_tensor * attn_norm_w   = nullptr;
     ggml_tensor * attn_norm_b   = nullptr;
     ggml_tensor * attn_qkv      = nullptr;
@@ -305,6 +309,25 @@ struct MM3Model {
     std::map<std::string, ggml_tensor *> tmap_lm;
     std::map<std::string, ggml_tensor *> tmap_synth;
 };
+
+template<typename Layers>
+static void mm3_coreml_clear_errors(const Layers & layers) {
+    for (const auto & layer : layers) {
+        if (layer.coreml) tts_cpp::minimax::detail::coreml_block_set_error(*layer.coreml, {});
+    }
+}
+
+template<typename Layers>
+static bool mm3_coreml_check(const Layers & layers, std::string * error) {
+    for (const auto & layer : layers) {
+        const auto message = tts_cpp::minimax::detail::coreml_block_error(layer.coreml);
+        if (!message.empty()) {
+            if (error) *error = "MiniMax Core ML prediction failed: " + message;
+            return false;
+        }
+    }
+    return true;
+}
 
 #ifdef _WIN32
 #    define MM3_SEP "\\"

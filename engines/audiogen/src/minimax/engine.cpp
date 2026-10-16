@@ -1,6 +1,7 @@
 #include "audiogen-cpp/minimax/engine.h"
 
 #include "minimax/backend.h"
+#include "minimax/coreml-models.h"
 #include "minimax/logic.h"
 #include "minimax/mm3-pipeline.h"
 #include "minimax/model-files.h"
@@ -170,6 +171,7 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & input) {
     if (!mm3_load(&engine->impl_->model, &error)) {
         throw std::runtime_error("minimax engine: " + error);
     }
+    detail::attach_coreml_blocks(engine->impl_->model);
     engine->impl_->registered = true;
     ++active_engine_count();
     return engine;
@@ -178,6 +180,9 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & input) {
 GenerateResult Engine::generate(const GenerateParams & params, const ProgressFn & progress) const {
     std::lock_guard<std::recursive_mutex> lock(engine_mutex());
     GenerationScope generation_scope(impl_->generating);
+    mm3_coreml_clear_errors(impl_->model.lm.blk);
+    mm3_coreml_clear_errors(impl_->model.synth.depth.blk);
+    mm3_coreml_clear_errors(impl_->model.synth.dit.blk);
     CancellationScope cancellation_scope(impl_->cancelled);
     AbortScope abort_scope(impl_->model.backend, impl_->model.cpu_backend, impl_->cancelled);
 
@@ -223,6 +228,7 @@ GenerateResult Engine::generate(const GenerateParams & params, const ProgressFn 
         throw std::runtime_error("minimax engine: " + error);
     }
 
+    detail::report_coreml_predictions(impl_->model);
     GenerateResult result;
     interleave_planar_stereo(generated.audio, generated.n_samples, result.pcm);
     result.sample_rate = generated.sample_rate;

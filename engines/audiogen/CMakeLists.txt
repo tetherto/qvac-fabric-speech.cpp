@@ -46,7 +46,7 @@ else()
     set(AUDIOGEN_MINIMAX_DEFAULT ON)
 endif()
 option(AUDIOGEN_BUILD_MINIMAX "audiogen-cpp: build the desktop MiniMax-Music3 engine (CPU default, GPU via EngineOptions::device)" ${AUDIOGEN_MINIMAX_DEFAULT})
-option(AUDIOGEN_COREML "audiogen-cpp: enable the Apple Core ML (Neural Engine) VAE decoder sidecar (Apple-only, additive; ACE-Step decodes on a <vae>-decoder.mlmodelc next to the VAE GGUF when present, else falls back to the ggml decode)." OFF)
+option(AUDIOGEN_COREML "audiogen-cpp: enable optional Apple Core ML sidecars for ACE-Step VAE decoding and MiniMax transformer blocks; missing or incompatible sidecars use ggml." OFF)
 if (AUDIOGEN_COREML)
     if (NOT APPLE)
         message(FATAL_ERROR "AUDIOGEN_COREML is Apple-only (requires the CoreML framework); leave it OFF on ${CMAKE_SYSTEM_NAME}.")
@@ -128,6 +128,8 @@ set(AUDIOGEN_LIB_SOURCES
 if (AUDIOGEN_BUILD_MINIMAX)
     list(APPEND AUDIOGEN_LIB_SOURCES
         src/minimax/logic.cpp
+        src/minimax/coreml-block.cpp
+        src/minimax/coreml-models.cpp
         src/minimax/engine.cpp
         src/minimax/fit.cpp
     )
@@ -135,6 +137,10 @@ endif()
 
 if (AUDIOGEN_COREML)
     list(APPEND AUDIOGEN_LIB_SOURCES src/coreml/vae-decoder.mm)
+    if (AUDIOGEN_BUILD_MINIMAX)
+        list(APPEND AUDIOGEN_LIB_SOURCES src/minimax/coreml-block.mm)
+        set_source_files_properties(src/minimax/coreml-block.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    endif()
     set_source_files_properties(src/coreml/vae-decoder.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
@@ -164,7 +170,7 @@ if (AUDIOGEN_BUILD_LIBRARY)
             ${AUDIOGEN_COREML_FRAMEWORK}
             ${AUDIOGEN_FOUNDATION_FRAMEWORK}
         )
-        message(STATUS "audiogen: Core ML VAE decoder sidecar enabled (AUDIOGEN_USE_COREML)")
+        message(STATUS "audiogen: Core ML sidecars enabled (AUDIOGEN_USE_COREML)")
     endif()
     set_target_properties(audiogen-cpp-objects PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -347,6 +353,11 @@ if (AUDIOGEN_BUILD_TESTS)
         set_property(TEST test-acestep-converter PROPERTY LABELS "unit")
         set_property(TEST test-acestep-converter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+        add_test(NAME test-minimax-coreml-exporter
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_minimax_coreml.py)
+        set_property(TEST test-minimax-coreml-exporter PROPERTY LABELS "unit")
+        set_property(TEST test-minimax-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         # Skips without torch under the system interpreter; the audiogen CI
         # macOS lane also runs it with the Core ML export venv, where torch is
         # installed and the assertions execute.
@@ -358,6 +369,18 @@ if (AUDIOGEN_BUILD_TESTS)
     endif()
 
     if (AUDIOGEN_BUILD_MINIMAX)
+        add_executable(test-minimax-coreml-units test/test_minimax_coreml_units.cpp)
+        audiogen_link_in_tree_binary(test-minimax-coreml-units)
+        audiogen_register_test(test-minimax-coreml-units LABEL "unit")
+        if (AUDIOGEN_COREML)
+            target_compile_definitions(test-minimax-coreml-units PRIVATE AUDIOGEN_USE_COREML)
+        endif()
+
+        add_executable(test-minimax-coreml test/test_minimax_coreml.cpp)
+        audiogen_link_in_tree_binary(test-minimax-coreml)
+        audiogen_register_test(test-minimax-coreml LABEL "integration")
+        set_property(TEST test-minimax-coreml PROPERTY SKIP_RETURN_CODE 77)
+
         add_executable(test-minimax-units test/test_minimax_units.cpp)
         audiogen_link_in_tree_binary(test-minimax-units)
         audiogen_register_test(test-minimax-units LABEL "unit")

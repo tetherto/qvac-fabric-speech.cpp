@@ -165,6 +165,9 @@ static ggml_tensor * mm3_lm_block(ggml_context * ctx, ggml_cgraph * gf, const MM
                                   ggml_tensor * h, ggml_tensor * positions, ggml_tensor * mask, ggml_tensor * rows,
                                   ggml_tensor * kcache, ggml_tensor * vcache, int64_t n_kv_pad, bool use_flash,
                                   ggml_prec precision) {
+    if (auto * result = tts_cpp::minimax::detail::coreml_transformer_block(
+            ctx, gf, w.coreml, h, positions, mask, kcache, vcache, rows,
+            n_kv_pad, c.head_count_kv, c.key_length, true)) return result;
     const int64_t H   = (int64_t) c.embedding_length;
     const int64_t D   = (int64_t) c.key_length;
     const int64_t Nh  = (int64_t) c.head_count;
@@ -588,6 +591,7 @@ static bool mm3_lm_prefill(const MM3Model & m, MM3LmGraph * g, const int32_t * i
         }
         return false;
     }
+    if (!mm3_coreml_check(m.lm.blk, err)) return false;
     mm3_lm_read_outputs(c, g->prefill, out_hidden, out_logits, nullptr);
     g->kv_pos = n_prompt;
     return true;
@@ -637,6 +641,7 @@ static bool mm3_lm_decode(const MM3Model & m, MM3LmGraph * g, int32_t sem_token_
         }
         return false;
     }
+    if (!mm3_coreml_check(m.lm.blk, err)) return false;
     mm3_lm_read_outputs(c, g->decode, out_hidden, out_logits, out_feedback);
     g->kv_pos++;
     return true;
