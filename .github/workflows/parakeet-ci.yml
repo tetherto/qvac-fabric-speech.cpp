@@ -182,13 +182,19 @@ jobs:
         run: |
           echo "MOSAIC_FIXTURES=$RUNNER_TEMP/mosaic-fixtures-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           echo "MOSAIC_PYTHON=$RUNNER_TEMP/mosaic-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/bin/python" >> "$GITHUB_ENV"
+      - name: Provision isolated Python 3.11
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+          python-version: '3.11'
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/mosaic-python-runtime
       - name: Create pinned export environment
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/mosaic-python-runtime
         run: |
-          # Self-hosted Apple runners provision Python through Homebrew;
-          # setup-python's hosted /Users/runner toolcache is not writable.
-          coreml_python="$(command -v python3.11)"
-          "$coreml_python" -m venv "$(dirname "$(dirname "$MOSAIC_PYTHON")")"
-          "$MOSAIC_PYTHON" -m pip install \
+          uv venv --python 3.11 "$(dirname "$(dirname "$MOSAIC_PYTHON")")"
+          uv pip install --python "$MOSAIC_PYTHON" \
             torch==2.7.0 numpy==2.2.6 gguf==0.19.0 coremltools==9.0 \
             PyYAML==6.0.3 sentencepiece==0.2.0 soundfile==0.13.1
       - name: Cache exact model, sidecar and audio fixtures
