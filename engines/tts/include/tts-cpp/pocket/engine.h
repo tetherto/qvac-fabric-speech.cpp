@@ -26,7 +26,7 @@ struct EngineOptions {
     uint32_t seed = 1234;
     // CPU is the default. GPU requests allow OpenCL only and fail if unavailable.
     bool use_gpu = false;
-    // Empty/auto follows use_gpu; cpu/opencl explicitly selects the backend.
+    // Empty/auto follows use_gpu; cpu/opencl/hexagon (HTP0) explicitly selects the backend.
     std::string backend;
 };
 struct SynthesisResult {
@@ -38,7 +38,7 @@ struct SynthesisResult {
 };
 using AudioCallback = std::function<bool(const float *, size_t, int)>;
 
-// Persistent native CPU/OpenCL engine. One synthesis at a time per instance;
+// Persistent native CPU/OpenCL/Hexagon engine. One synthesis at a time per instance;
 // overlapping/reentrant calls throw. cancel() is safe from another thread.
 // Streaming callbacks run on the calling thread, with valid PCM until return.
 // Returning false cancels the request. Each new request resets the voice,

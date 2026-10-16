@@ -101,6 +101,8 @@ FitResult fit_params(const FitOptions & o) {
         const auto device = ggml_backend_get_device(backend.get());
         r.device_name = ggml_backend_name(backend.get());
         r.device_is_cpu = ::tts_cpp::detail::backend_is_cpu(backend.get());
+        const bool is_hexagon = ::tts_cpp::detail::backend_is_hexagon(backend.get());
+        const auto hexagon = is_hexagon ? detail::hexagon_runtime(backend.get()) : detail::HexagonRuntime{};
         r.device_shares_host_memory = detail::shares_host_memory(backend.get());
         if (!r.device_is_cpu) r.device_name += std::string(" (") + ggml_backend_dev_description(device) + ')';
         detail::Frontend frontend(e.frontend_path);
@@ -145,7 +147,8 @@ FitResult fit_params(const FitOptions & o) {
             throw std::invalid_argument("Pocket artifacts do not belong to the same checkpoint");
         r.device.weights_bytes = sat_add(flow.weights, codec.weights);
         r.device.state_bytes = sat_add(flow.state, codec.state);
-        const auto backend_scratch = r.device_is_cpu ? uint64_t(0) : detail::opencl_scratch_bound(flow.opencl_scratch, codec.opencl_scratch);
+        const auto backend_scratch = is_hexagon ? hexagon.shared_bytes :
+            r.device_is_cpu ? uint64_t(0) : detail::opencl_scratch_bound(flow.opencl_scratch, codec.opencl_scratch);
         r.device.state_bytes = sat_add(r.device.state_bytes, backend_scratch);
         r.device.lm_compute_bytes = flow.compute;
         r.device.codec_compute_bytes = codec.compute;
@@ -168,8 +171,13 @@ FitResult fit_params(const FitOptions & o) {
         runtime_host = sat_add(runtime_host, sat_add(sat_mul(native_samples, 12), sat_mul(output_samples, 16)));
         auto load_host = sat_add(std::max(flow.load_staging, codec.load_staging), reference_host);
         load_host = sat_add(load_host, sat_mul(std::filesystem::file_size(e.frontend_path), 64));
-        r.host_bytes = sat_add(persistent_host, std::max(runtime_host, load_host));
-        if (r.device_is_cpu) {
+        r.host_bytes = sat_add(sat_add(persistent_host, std::max(runtime_host, load_host)), hexagon.host_bytes_bound);
+        if (is_hexagon && r.device.total_bytes > hexagon.max_batch_vmem_bytes) {
+            r.reason = "workload-too-large";
+            r.report = "Pocket Hexagon weights, state and overlapping arenas exceed the conservative session mapping budget";
+            return r;
+        }
+        if (r.device_is_cpu || is_hexagon) {
             r.device_free_bytes = host_free; r.device_total_bytes = host_total;
         } else {
             size_t free = 0, total = 0;
@@ -202,7 +210,14 @@ FitResult fit_params(const FitOptions & o) {
                << "\nshared host memory: " << (r.device_shares_host_memory ? "yes" : "no")
                << "\nhost required/available: " << host_required << '/' << host_free
                << "\nresult: " << r.reason << '\n';
-        if (!r.device_is_cpu)
+        if (is_hexagon)
+            report << "Hexagon registry session RPC queues (included in state): " << hexagon.shared_bytes
+                   << "\nHexagon registry host/graph metadata bound (included in host): " << hexagon.host_bytes_bound
+                   << "\nHexagon sessions: " << hexagon.session_count
+                   << "; RPC buffer/batch mapping limits: " << hexagon.max_buffer_bytes << '/' << hexagon.max_batch_vmem_bytes
+                   << "; VTCM: " << hexagon.vtcm_bytes
+                   << "\nShared OS available RAM is used because HTP device memory telemetry is unavailable.\n";
+        else if (!r.device_is_cpu)
             report << "OpenCL shared backend scratch bound (included in state): " << backend_scratch
                    << "\nConservative F32 backend scratch bound for reviewed ggml-speech; includes backend init and pool growth."
                    << "\nOpenCL available memory is a driver estimate/cap, limited by OS RAM on Adreno.\n";

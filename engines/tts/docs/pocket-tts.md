@@ -2,7 +2,7 @@
 
 Part of the [tts documentation](../README.md).
 
-Pocket provides English text-to-speech through a persistent CPU/OpenCL FlowLM/Mimi
+Pocket provides English text-to-speech through a persistent CPU/OpenCL/Hexagon FlowLM/Mimi
 engine and incremental 24 kHz mono PCM callbacks. Its public API is
 `<tts-cpp/pocket/engine.h>`; `pocket-cli` uses that API. F32 arithmetic is used
 throughout. F16 is a storage option whose weights expand to F32 at load.
@@ -69,8 +69,8 @@ CPU remains the default. `EngineOptions.use_gpu = true` (CLI: `--gpu`) uses
 the existing registry selector restricted to OpenCL, including its Adreno tier
 policy. `EngineOptions.backend = "opencl"` (CLI: `--backend opencl`) explicitly
 selects OpenCL; `"cpu"` explicitly selects CPU. Empty/`"auto"` follows `use_gpu`.
-GPU/OpenCL requests fail if OpenCL is unavailable. Other Pocket GPU backends
-are rejected. Both FlowLM and Mimi use the same selected device, retaining
+GPU/OpenCL requests fail if OpenCL is unavailable. Hexagon is selected
+explicitly as described below; other Pocket GPU backends are rejected. Both FlowLM and Mimi use the same selected device, retaining
 F32 weights and persistent caches on that device. Prepared voices and small
 conditioning/output values still cross the host boundary.
 
@@ -107,6 +107,53 @@ their memory can overlap. CPU workers remain concurrent. This Pocket gate
 does not cover another Fabric engine using the same ggml OpenCL context;
 applications must serialize such mixed-engine use until ggml provides that
 protection itself.
+
+## Hexagon execution
+
+`EngineOptions.backend = "hexagon"` (CLI: `--backend hexagon`) explicitly
+selects Qualcomm Hexagon `HTP0`; `"HTP0"` is an equivalent alias. Both stages use
+the selected session's RPC buffers and execute their complete graphs on the
+DSP. CPU remains the default, and `--gpu` retains its OpenCL behavior. An
+unavailable HTP runtime or unsupported graph operation is an error with no CPU
+fallback. The stage backend names must both report `HTP0`.
+
+Use an Android arm64 build of the speech ggml dependency with
+`GGML_HEXAGON=ON`, built using matching Hexagon SDK, Hexagon Tools and Android
+NDK versions. The reference toolchain is SDK 6.6.0.0, Tools 19.0.07 and NDK r28b.
+Ship `libggml-hexagon.so` with the ggml libraries and the architecture-matched
+`libggml-htp-v*.so` DSP skeletons from that same build. The loader extends
+`ADSP_LIBRARY_PATH` from the configured backend directory. Android FastRPC
+access and compatible vendor `libcdsprpc.so`/drivers are required; detecting a
+Snapdragon GPU does not establish DSP availability.
+
+```sh
+build/pocket/pocket-cli --model-dir /path/to/pocket-bundle --backend hexagon \
+  --text "Hello from Pocket TTS." --output /tmp/pocket-hexagon.wav \
+  --runs 3 --report /tmp/pocket-hexagon.json
+```
+
+The baseline retains expanded F32 weights, F32 caches and `GGML_PREC_F32`
+matmul requests, which select HVX computation. HMX/FP16 acceleration and
+quantization are separate tuning work. FlowLM uses an explicit causal mask
+because Hexagon has no `DIAG_MASK_INF` operation, and lowers `MEAN` into F32
+`SUM_ROWS` followed by division by the row width. Mimi retains its existing
+tap-wise F32 convolution graphs and explicit sliding-window mask.
+
+The HTP backend shares one queue, graph cache and mapping state per registered
+device. Pocket serializes HTP graph construction through buffer destruction,
+weight loading, tensor transfers, reset and backend release across all Pocket
+workers and instances. A recursive gate permits FlowLM's nested projection and
+attention graphs. CPU workers remain concurrent. Other Fabric engines using
+the same HTP session need application-level serialization until ggml supplies
+backend-wide protection. Different processes have separate sessions.
+
+Enable `TTS_CPP_POCKET_HEXAGON_TESTS=ON` with the three Pocket fixture directories
+to register explicit Hexagon FlowLM F32/F16, Mimi, fit and engine tests. These
+reuse the existing CPU tolerances and cover cached/chunked prefill, Mimi's
+sliding-window boundary, streaming, cancellation, reuse and parallel instances.
+Missing fixture files remain visibly disabled; an enabled hardware test fails
+if Hexagon is unavailable. Hardware validation and timing results must be
+reported separately from successful host builds.
 
 `frames_after_eos` (CLI: `--frames-after-eos`) accepts an explicit 0–100-frame
 tail, or -1 for the checkpoint/text default. Synthesis and memory preflight
@@ -242,6 +289,26 @@ Builds without those Adreno pools can therefore be overestimated. Re-audit
 these constants and F32 dispatch paths when updating ggml; driver/kernel
 compiler overhead is implementation-dependent and covered by the requested
 margin rather than an exact measurement. This is not a live allocation trace.
+
+Hexagon preflight uses the versioned ggml registry procedure
+`ggml_backend_hexagon_get_runtime_info_v1`. Older builds without this procedure
+fail explicitly for Hexagon, while CPU and OpenCL remain usable. The query
+reads retained session configuration, so changing environment variables after
+backend initialization cannot silently underprice existing queues or tracing
+buffers. A configuration that disables HTP queueing or compute is rejected.
+
+HTP RPC buffers share OS RAM; its zero-valued device telemetry is replaced by
+OS available RAM sampled before backend loading. Backend-reported bounds cover
+all initialized sessions' RPC queues and retained/prospective graph metadata.
+Model and state estimates include backend tensor alignment, a conservative RPC
+allocation count, guard pages and host page rounding. Each graph arena reserves
+16 chunks' guard/page overhead, matching the reviewed allocator, and both
+workers' arenas are counted concurrently. Individual tensors must fit the
+selected session's buffer limit; the conservative sum of live model buffers and
+arenas must fit its batch mapping limit. VTCM is reported separately and graph
+capability checks enforce the backend's available VTCM constraints. VTCM is not
+charged as ordinary OS RAM. Opaque driver/DSP heaps and app copies still require
+the requested safety margin. Re-audit graph chunking when updating ggml.
 
 ```sh
 build/pocket/pocket-cli --model-dir /path/to/pocket-bundle \

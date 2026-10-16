@@ -56,7 +56,7 @@ void print_help() {
     std::puts("pocket-cli --model-dir DIR --text TEXT --output FILE.wav [--voice FILE.gguf | --reference-audio FILE.wav]\n"
               "           [--threads 1 --steps 1 --temperature 0.3 --seed 1234 --runs 1 --report FILE.json]\n"
               "           [--frames-after-eos -1] (-1 uses the checkpoint/text default; explicit range 0..100)\n"
-              "           [--gpu | --backend cpu|opencl] (CPU default; unavailable OpenCL is an error)\n"
+              "           [--gpu | --backend cpu|opencl|hexagon|HTP0] (CPU default; unavailable backends are errors)\n"
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
               "--runs greater than 1 includes one untimed warmup and records each warm run.\n"
               "--fit estimates selected-backend memory without loading weights; optional --fit-budget-mib and --fit-margin-mib.\n"

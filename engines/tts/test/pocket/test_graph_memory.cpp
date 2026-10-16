@@ -47,6 +47,23 @@ int main() {
             if (a->data || b->data || output->data || w->data || x->data)
                 throw std::runtime_error("OpenCL scratch pricing allocated model/graph tensors");
         }
+        {
+            using namespace tts_cpp::pocket::detail;
+            HexagonRuntime runtime;
+            runtime.tensor_guard_bytes = 4096; runtime.allocation_page_bytes = 16384;
+            runtime.max_buffer_bytes = 8192;
+            if (hexagon_buffer_overhead(runtime) < 4096 + 16383)
+                throw std::runtime_error("Hexagon guard/page rounding omitted");
+            PocketGraph g(backend);
+            auto * exact = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, 2048);
+            validate_hexagon_tensor(exact, runtime);
+            auto * oversized = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, 2049);
+            bool rejected = false;
+            try { validate_hexagon_tensor(oversized, runtime); }
+            catch (const std::runtime_error &) { rejected = true; }
+            if (!rejected) throw std::runtime_error("Hexagon oversized RPC tensor accepted");
+            if (exact->data || oversized->data) throw std::runtime_error("Hexagon limit check allocated tensors");
+        }
         ggml_backend_free(backend);
         std::cout << "Pocket graph memory: metadata-only CPU scratch included\n";
         return 0;

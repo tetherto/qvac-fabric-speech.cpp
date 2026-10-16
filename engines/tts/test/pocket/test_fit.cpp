@@ -58,7 +58,7 @@ void check_tail_budget(pocket::FitOptions opts) {
 }
 int main(int argc, char ** argv) {
     try {
-        check(argc == 2 || argc == 3, "expected Pocket bundle directory [cpu|opencl]");
+        check(argc == 2 || argc == 3, "expected Pocket bundle directory [cpu|opencl|hexagon|HTP0]");
         pocket::FitOptions opts;
         opts.engine.backend = argc == 3 ? argv[2] : "cpu";
         const fs::path bundle = argv[1];
@@ -72,6 +72,11 @@ int main(int argc, char ** argv) {
         const auto result = pocket::fit_params(opts);
         check(result.status != FitStatus::Error, result.report.c_str());
         check(result.device_is_cpu == (opts.engine.backend == "cpu"), "fit selected the wrong backend");
+        if (opts.engine.backend == "hexagon" || opts.engine.backend == "HTP0") {
+            check(result.device_shares_host_memory, "Hexagon RPC memory must share OS RAM");
+            check(result.device_total_bytes > 0 && result.device_free_bytes > 0, "zero Hexagon driver telemetry treated as zero RAM");
+            check(result.report.find("Hexagon") != std::string::npos, "Hexagon memory details omitted");
+        }
         check(result.device.weights_bytes > 100*1024*1024, "expanded weights not priced");
         check(result.device.state_bytes && result.device.lm_compute_bytes && result.device.codec_compute_bytes && result.host_bytes, "missing memory components");
         std::cout << result.report;
