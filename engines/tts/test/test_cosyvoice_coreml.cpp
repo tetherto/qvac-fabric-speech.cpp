@@ -87,6 +87,44 @@ static void require_tokens(const std::vector<int> & actual, const std::vector<in
     throw std::runtime_error(message.str());
 }
 
+static void check_lm_cache_feedback(cosyvoice_coreml & model) {
+    const auto x_shape = model.dimensions("x"), cache_shape = model.dimensions("keys");
+    const auto mask_shape = model.dimensions("mask"), rotary_shape = model.dimensions("cosine");
+    if (x_shape.size() != 3 || cache_shape.size() != 5 || mask_shape.size() != 4 ||
+        rotary_shape.size() != 4 || mask_shape.back() < 2)
+        throw std::runtime_error("unexpected LM cache-feedback fixture schema");
+    size_t count = 1;
+    for (int64_t dimension : cache_shape) count *= dimension;
+    std::vector<float> x(x_shape.back(), 0.01f), keys(count), values(count);
+    std::vector<float> mask(mask_shape.back(), -1e4f), write(mask.size());
+    std::vector<float> cosine(rotary_shape.back(), 1), sine(cosine.size());
+    std::vector<float> logits(model.dimensions("logits").back());
+    const auto predict = [&] {
+        model.predict({{"x", x.data(), x_shape}, {"keys", keys.data(), cache_shape},
+                       {"values", values.data(), cache_shape}, {"mask", mask.data(), mask_shape},
+                       {"write_mask", write.data(), {1, 1, static_cast<int64_t>(write.size()), 1}},
+                       {"cosine", cosine.data(), rotary_shape}, {"sine", sine.data(), rotary_shape}},
+                      {{"logits", logits.data(), model.dimensions("logits")},
+                       {"keys_out", keys.data(), cache_shape}, {"values_out", values.data(), cache_shape}});
+    };
+    mask[0] = 0; write[0] = 1;
+    predict();
+    const auto first_keys = keys, first_values = values;
+    if (std::all_of(keys.begin(), keys.end(), [](float x) { return x == 0; }) ||
+        std::all_of(values.begin(), values.end(), [](float x) { return x == 0; }))
+        throw std::runtime_error("Core ML LM did not return its first KV cache update");
+    mask[1] = 0; write[0] = 0; write[1] = 1;
+    predict();
+    const size_t head = cache_shape.back(), stride = mask.size() * head;
+    for (size_t i = 0; i < count; ++i) {
+        if (i % stride >= head) continue;
+        if (keys[i] != first_keys[i] || values[i] != first_values[i])
+            throw std::runtime_error("Core ML LM lost a prior KV cache entry on feedback: index " +
+                std::to_string(i) + "; key " + std::to_string(first_keys[i]) + " -> " + std::to_string(keys[i]) +
+                "; value " + std::to_string(first_values[i]) + " -> " + std::to_string(values[i]));
+    }
+}
+
 static void check_lm_routing(const std::string & path) {
     auto model = cosyvoice_load_gguf(path);
     struct cleanup {
@@ -101,6 +139,7 @@ static void check_lm_routing(const std::string & path) {
     if (native.size() != short_steps) throw std::runtime_error("native LM generated the wrong token count");
     model.coreml = cosyvoice_coreml::load(path);
     if (!model.coreml) throw std::runtime_error("missing LM generation fixture");
+    check_lm_cache_feedback(*model.coreml);
     const auto first = generate_lm(model, text, short_steps);
     const auto first_predictions = model.coreml->predictions();
     require_tokens(first, native, "Core ML LM differs from native generation");
