@@ -68,6 +68,10 @@ contracts; see the engine guides before exporting or deploying one.
 | TTS | MOSS-TTS/TTSD codec decoder, MOSS-SoundEffect DiT and VAE, MOSS-Speech speech tokenizer | [MOSS](engines/tts/docs/moss.md#core-ml-codec-decoder), [SoundEffect](engines/tts/docs/moss.md#core-ml-dit-and-vae), [Speech](engines/tts/docs/moss.md#core-ml-speech-tokenizer) |
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 
+CosyVoice3 exports HiFT in FP32 to preserve waveform parity. Its memory-fit
+preflight returns `Error` with `coreml-memory-estimate-unavailable` when
+enabled sidecars are present, rather than undercounting their resident memory.
+
 ### Hexagon NPU (Snapdragon)
 
 Selected models run end-to-end on the Hexagon HTP accelerator via

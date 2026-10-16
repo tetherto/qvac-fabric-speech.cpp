@@ -95,10 +95,7 @@ def use_half_precision(op, stage):
             return False
         return "condnet__0__" not in op.inputs["weight"].name
     if stage == "hift":
-        if op.op_type != "conv":
-            return False
-        weight = op.inputs["weight"].name
-        return "conv_post_magnitude__" in weight
+        return False
     return True
 
 

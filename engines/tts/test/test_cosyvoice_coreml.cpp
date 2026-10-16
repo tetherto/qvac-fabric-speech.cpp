@@ -1,5 +1,7 @@
 #include "cosyvoice_coreml.h"
 #include "cosyvoice_pipeline.h"
+#include "coreml_sidecar_path.h"
+#include "tts-cpp/cosyvoice/fit.h"
 #include "ggml-cpu.h"
 #include "ggml-alloc.h"
 #include <cmath>
@@ -12,6 +14,100 @@
 #include <stdexcept>
 
 static bool compare(const char *, const std::vector<float> &, const std::vector<float> &, double, double);
+
+struct compute_units_guard {
+    const char * name = "COSYVOICE_COREML_COMPUTE_UNITS";
+    bool present = std::getenv(name) != nullptr;
+    std::string value = present ? std::getenv(name) : "";
+    ~compute_units_guard() {
+        if (present) setenv(name, value.c_str(), 1);
+        else unsetenv(name);
+    }
+};
+
+static void require_fit_reason(const tts_cpp::cosyvoice::FitOptions & options, const std::string & reason) {
+    const auto result = tts_cpp::cosyvoice::fit_params(options);
+    if (result.status != tts_cpp::FitStatus::Error || result.fits || result.reason != reason ||
+        result.device.total_bytes != 0)
+        throw std::runtime_error("unexpected Core ML fit result: " + result.reason);
+    if (reason == "coreml-memory-estimate-unavailable" && result.report.empty())
+        throw std::runtime_error("missing Core ML fit diagnostic");
+}
+
+static void check_coreml_fit() {
+    compute_units_guard units;
+    setenv(units.name, "cpu_and_ane", 1);
+    const auto directory = std::filesystem::path(test_tmpdir()) / ("cosyvoice-coreml-fit-" + test_process_tag());
+    std::filesystem::create_directories(directory);
+    struct cleanup {
+        std::filesystem::path path;
+        ~cleanup() { std::error_code error; std::filesystem::remove_all(path, error); }
+    } guard{directory};
+    tts_cpp::cosyvoice::FitOptions options;
+    options.llm_gguf_path = (directory / "llm-f32.gguf").string();
+    options.flow_gguf_path = (directory / "flow-f32.gguf").string();
+    options.hift_gguf_path = (directory / "hift-f32.gguf").string();
+    options.voice_gguf_path = (directory / "voice.gguf").string();
+    options.backend = "cpu";
+    require_fit_reason(options, "model-unreadable");
+    const std::pair<std::string, std::string> stages[] = {
+        {options.llm_gguf_path, ""}, {options.flow_gguf_path, ""},
+        {options.flow_gguf_path, "-frontend"}, {options.hift_gguf_path, ""},
+        {options.hift_gguf_path, "-f0"}};
+    for (const auto & stage : stages) {
+        const auto path = tts_cpp::detail::coreml_sidecar_path(stage.first, stage.second);
+        std::filesystem::create_directory(path);
+#ifdef TTS_CPP_USE_COREML
+        require_fit_reason(options, "coreml-memory-estimate-unavailable");
+#else
+        require_fit_reason(options, "model-unreadable");
+#endif
+        setenv(units.name, "disabled", 1);
+        require_fit_reason(options, "model-unreadable");
+        setenv(units.name, "cpu_and_ane", 1);
+        std::filesystem::remove(path);
+    }
+}
+
+static std::vector<int> generate_lm(model_ctx & model, const std::vector<int> & text, int steps) {
+    constexpr int seed = 42;
+    return cosyvoice_llm_generate(model, cosyvoice_qwen_hp(model), text, {2}, steps,
+                                  true, seed, steps, nullptr, false);
+}
+
+static void check_lm_routing(const std::string & path) {
+    auto model = cosyvoice_load_gguf(path);
+    struct cleanup {
+        model_ctx & model;
+        ~cleanup() { cosyvoice_free(model); }
+    } guard{model};
+    ggml_backend_cpu_set_n_threads(model.backend, 2);
+    constexpr int short_steps = 3;
+    constexpr int prefix_rows = 5;
+    const std::vector<int> text{1, 2};
+    const auto native = generate_lm(model, text, short_steps);
+    model.coreml = cosyvoice_coreml::load(path);
+    if (!model.coreml) throw std::runtime_error("missing LM generation fixture");
+    const auto first = generate_lm(model, text, short_steps);
+    const auto first_predictions = model.coreml->predictions();
+    const auto alternate = generate_lm(model, {3, 4}, short_steps);
+    const auto second = generate_lm(model, text, short_steps);
+    if (native.size() != short_steps || first != native || second != first ||
+        alternate.size() != short_steps || first_predictions != prefix_rows + short_steps ||
+        model.coreml->predictions() != first_predictions)
+        throw std::runtime_error("LM generation routing/cache reset failed");
+    const auto capacity = model.coreml->dimensions("mask").back();
+    constexpr int fixture_context = 16;
+    if (capacity != fixture_context) throw std::runtime_error("unexpected routing fixture context");
+    model.coreml->clear_predictions();
+    const auto fallback = generate_lm(model, text, fixture_context);
+    if (model.coreml->predictions() != 0)
+        throw std::runtime_error("undersized LM sidecar was selected");
+    model.coreml.reset();
+    if (fallback.size() != fixture_context || fallback != generate_lm(model, text, fixture_context))
+        throw std::runtime_error("LM fallback differs from native generation");
+    std::cout << "LM generation: Core ML selected, caches reset, undersized context retained ggml\n";
+}
 
 static void check_unavailable_stages() {
     std::vector<float> output{12.0f};
@@ -162,8 +258,15 @@ int main(int argc, char ** argv) {
     try {
 #ifndef TTS_CPP_USE_COREML
         if (argc == 2 && (std::string(argv[1]) == "--stages-fixture" ||
-                          std::string(argv[1]) == "--lm-fixture")) return 77;
+                          std::string(argv[1]) == "--lm-fixture" ||
+                          std::string(argv[1]) == "--routing-fixture")) return 77;
 #endif
+        if (argc == 2 && std::string(argv[1]) == "--routing-fixture") {
+            const char * file = std::getenv("COSYVOICE_COREML_ROUTING_GGUF");
+            if (!file || !*file) return 77;
+            check_lm_routing(file);
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--stages-fixture") {
             const char * root = std::getenv("COSYVOICE_COREML_TEST_MODELS_DIR");
             if (!root || !*root) return 77;
@@ -256,6 +359,7 @@ int main(int argc, char ** argv) {
             std::cout << model->label() << " stateful=" << model->stateful() << '\n';
             return 0;
         }
+        check_coreml_fit();
         check_unavailable_stages();
         setenv("COSYVOICE_COREML_COMPUTE_UNITS", "disabled", 1);
         if (cosyvoice_coreml::load(test_tmpdir() + "/unavailable-cosyvoice.gguf"))

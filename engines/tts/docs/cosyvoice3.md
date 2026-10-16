@@ -78,6 +78,18 @@ so it does not depend on Core ML state operations. Artifacts target macOS
 15 / iOS 18 or later; unavailable runtimes retain ggml. First load may
 compile an ANE execution plan and take substantially longer than a warm load.
 
+HiFT exports preserve FP32 throughout the spectrum decoder to meet the
+existing waveform parity gate. Under CPU+ANE this stage may execute on CPU;
+the sidecar does not guarantee ANE placement. Re-export HiFT artifacts made
+with the earlier mixed-precision policy before deployment.
+
+When Core ML is compiled in and any enabled LM, flow/frontend, HiFT or F0
+sidecar exists, `fit_params` returns `FitStatus::Error` with reason
+`coreml-memory-estimate-unavailable`. The native staged estimate cannot
+account for the resident Core ML models and prediction buffers. Detection
+is conservative and does not load or validate the sidecar. With Core ML
+disabled or not compiled in, the existing native estimate remains available.
+
 Native fixture tests use `COSYVOICE_COREML_TEST_LM_GGUF` for the LM and
 `COSYVOICE_COREML_TEST_MODELS_DIR` for stage parity. The stage directory
 contains the published F32 flow/HiFT GGUFs, `voice.gguf`, compiled sidecars,
@@ -88,6 +100,20 @@ RoPE, cache feedback and reset. `test-cosyvoice-coreml-stages` compares flow,
 F0 and a waveform with pinned F0 against ggml using the existing tier gates.
 Without staged fixtures these tests report a skip; they do not claim an
 inference pass.
+
+`test-cosyvoice-coreml-routing` runs the actual `cosyvoice_llm_generate`
+path against a tiny exported LM: Core ML selection, repeated generation
+with fresh caches, and native fallback when the artifact context is too
+small. The macOS CI prepares this fixture without model downloads:
+
+```bash
+python3 test/prepare_cosyvoice_coreml_fixture.py --out cosyvoice-coreml-fixture
+python3 scripts/export-cosyvoice3-coreml.py --stage llm --context 16 \
+    --gguf cosyvoice-coreml-fixture/cosyvoice3-llm-f32.gguf \
+    --output cosyvoice-coreml-fixture --compile
+COSYVOICE_COREML_ROUTING_GGUF="$PWD/cosyvoice-coreml-fixture/cosyvoice3-llm-f32.gguf" \
+    ./build/test-cosyvoice-coreml --routing-fixture
+```
 
 ### Convert
 

@@ -22,6 +22,7 @@ struct cosyvoice_coreml_output {
 
 class cosyvoice_coreml {
 public:
+    static bool has_sidecar(const std::string & gguf, const std::string & suffix = "");
     static std::shared_ptr<cosyvoice_coreml> load(const std::string & gguf, const std::string & suffix = "");
     std::vector<int64_t> dimensions(const char * name) const;
     bool matches(const char * name, const std::vector<int64_t> & shape) const;

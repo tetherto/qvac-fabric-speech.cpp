@@ -76,6 +76,10 @@ speech tokenizer. Export, routing, fallback, and per-call status are documented 
 [Audio8](docs/audio8.md#core-ml-codec-sidecar), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
+CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled CosyVoice3
+sidecars present, `fit_params` returns `Error` with
+`coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
+
 Chatterbox Multilingual has native tokenization for 18 languages; Japanese,
 Hebrew, Russian, Chinese and Hindi need external preprocessing. See
 [CLI setup](docs/cli.md#run--end-to-end-text--wav) for the supported paths.

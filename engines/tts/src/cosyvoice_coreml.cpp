@@ -36,6 +36,18 @@ void require_finite(const float * values, const std::vector<int64_t> & shape) {
 }
 }
 
+bool cosyvoice_coreml::has_sidecar(const std::string & gguf, const std::string & suffix) {
+#ifdef TTS_CPP_USE_COREML
+    const char * units = std::getenv("COSYVOICE_COREML_COMPUTE_UNITS");
+    if (units && std::string(units) == "disabled") return false;
+    return tts_cpp::detail::coreml_sidecar_exists(tts_cpp::detail::coreml_sidecar_path(gguf, suffix));
+#else
+    (void) gguf;
+    (void) suffix;
+    return false;
+#endif
+}
+
 std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::load(const std::string & gguf, const std::string & suffix) {
 #ifdef TTS_CPP_USE_COREML
     const char * units = std::getenv("COSYVOICE_COREML_COMPUTE_UNITS");
@@ -44,7 +56,7 @@ std::shared_ptr<cosyvoice_coreml> cosyvoice_coreml::load(const std::string & ggu
         std::string(units) != "cpu_and_gpu" && std::string(units) != "all")
         throw std::invalid_argument("cosyvoice: invalid COSYVOICE_COREML_COMPUTE_UNITS");
     const auto path = tts_cpp::detail::coreml_sidecar_path(gguf, suffix);
-    if (!tts_cpp::detail::coreml_sidecar_exists(path)) return {};
+    if (!has_sidecar(gguf, suffix)) return {};
     auto * model = moss_coreml_load(path.c_str(), units ? units : "cpu_and_ane");
     if (!model) {
         std::fprintf(stderr, "cosyvoice: Core ML model unavailable, retaining ggml: %s\n", path.c_str());

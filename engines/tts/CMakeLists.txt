@@ -1472,7 +1472,9 @@ if (TTS_CPP_BUILD_TESTS)
         EXE test-cosyvoice-coreml LABEL "fixture" ARGS "--lm-fixture")
     tts_cpp_register_test(test-cosyvoice-coreml-stages
         EXE test-cosyvoice-coreml LABEL "fixture" ARGS "--stages-fixture")
-    set_tests_properties(test-cosyvoice-coreml-lm test-cosyvoice-coreml-stages
+    tts_cpp_register_test(test-cosyvoice-coreml-routing
+        EXE test-cosyvoice-coreml LABEL "fixture" ARGS "--routing-fixture")
+    set_tests_properties(test-cosyvoice-coreml-lm test-cosyvoice-coreml-stages test-cosyvoice-coreml-routing
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test-cosyvoice-load test/test_cosyvoice_load.cpp ${_tcb_cosy_core_srcs})

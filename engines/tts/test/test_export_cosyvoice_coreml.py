@@ -4,6 +4,7 @@
 from pathlib import Path
 import importlib.util
 import sys
+from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -14,6 +15,10 @@ if HAVE_DEPS:
     import torch
     import torch.nn.functional as F
     from cosyvoice_coreml_models import F0, Flow, FlowFrontend, Qwen, QwenIO
+    EXPORT_SPEC = importlib.util.spec_from_file_location(
+        "export_cosyvoice_coreml", Path(__file__).resolve().parents[1] / "scripts/export-cosyvoice3-coreml.py")
+    EXPORTER = importlib.util.module_from_spec(EXPORT_SPEC)
+    EXPORT_SPEC.loader.exec_module(EXPORTER)
 
 GENERATOR = np.random.default_rng(14832) if HAVE_DEPS else None
 DIM = 16
@@ -74,6 +79,12 @@ class ExportTest(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(1)
         torch.manual_seed(193)
+
+    def test_hift_preserves_fp32_for_waveform_parity(self):
+        for operation in ("conv", "linear", "exp", "mul", "sin"):
+            op = SimpleNamespace(op_type=operation, inputs={
+                "weight": SimpleNamespace(name="conv_post_magnitude__weight")})
+            self.assertFalse(EXPORTER.use_half_precision(op, "hift"))
 
     def test_f0_padding_preserves_real_frames(self):
         weights = {}
