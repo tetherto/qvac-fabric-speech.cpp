@@ -703,10 +703,10 @@ from it. The loader takes `f32`, `f16`,
 `bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
 refused at load, so both validated GGUFs run.
 
-It needs a `qvac-ext-ggml@speech` build with the Hexagon backend and the DSP
-buffer remapping fix
-([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124)).
-Without it the first DiT pass maps more 1 GiB weight
+It needs a `qvac-ext-ggml@speech` build with the Hexagon backend at `d85713da`
+or later, which carries the DSP buffer remapping fix
+([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124));
+the numbers below were measured at that commit. Without it the first DiT pass maps more 1 GiB weight
 buffers than the DSP's address space or its 16 mapping slots can hold, the
 DSP aborts and the request never returns; on the S25 the fault rebooted the
 phone.
