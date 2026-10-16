@@ -171,23 +171,23 @@ void test_rejected_models() {
     const auto wrong_arch = write_sfx_model("sfx-arch", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_str(f, "general.architecture", "moss-tts-delay");
     });
-    expect_failure([&] { SfxModel model(wrong_arch.string(), false, 1); }, "architecture", "foreign architecture");
+    expect_failure([&] { SfxModel model(wrong_arch.string(), {}, 1); }, "architecture", "foreign architecture");
     const auto bad_geometry = write_sfx_model("sfx-geometry", WEIGHT_SEED, [](gguf_context * f) {
         gguf_set_val_u32(f, "moss-sfx.dit.out_channels", LATENT + 1);
     });
-    expect_failure([&] { SfxModel model(bad_geometry.string(), false, 1); }, "DiT geometry", "mismatched channels");
+    expect_failure([&] { SfxModel model(bad_geometry.string(), {}, 1); }, "DiT geometry", "mismatched channels");
     const auto bad_rates = write_sfx_model("sfx-rates", WEIGHT_SEED, [](gguf_context * f) {
         const int rates[] = {0};
         gguf_set_arr_data(f, "moss-sfx.vae.decoder_rates", GGUF_TYPE_INT32, rates, 1);
     });
-    expect_failure([&] { SfxModel model(bad_rates.string(), false, 1); }, "decoder rates", "zero decoder rate");
+    expect_failure([&] { SfxModel model(bad_rates.string(), {}, 1); }, "decoder rates", "zero decoder rate");
     std::filesystem::remove(wrong_arch);
     std::filesystem::remove(bad_geometry);
     std::filesystem::remove(bad_rates);
 }
 
 void expect_model_rejects(const std::filesystem::path & path, const std::string & needle, const std::string & label) {
-    expect_failure([&] { SfxModel model(path.string(), false, 1); }, needle, label);
+    expect_failure([&] { SfxModel model(path.string(), {}, 1); }, needle, label);
     std::filesystem::remove(path);
 }
 
@@ -220,8 +220,8 @@ void test_rejected_metadata_bounds() {
         gguf_remove_key(f, "moss-sfx.sigma_shift");
     }), "missing float metadata", "missing generation metadata");
     const auto healthy = write_sfx_model("sfx-threads", WEIGHT_SEED);
-    expect_failure([&] { SfxModel model(healthy.string(), false, 0); }, "threads", "zero threads");
-    expect_failure([&] { SfxModel model(healthy.string(), false, 1025); }, "threads", "too many threads");
+    expect_failure([&] { SfxModel model(healthy.string(), {}, 0); }, "threads", "zero threads");
+    expect_failure([&] { SfxModel model(healthy.string(), {}, 1025); }, "threads", "too many threads");
     std::filesystem::remove(healthy);
 }
 
@@ -286,7 +286,7 @@ void test_feed_forward_beyond_half_precision() {
         {"text.blk.0.ffn_down.weight", {GGML_TYPE_F16, OVERFLOW_DOWN}},
     });
     {
-        SfxModel model(path.string(), false, 1);
+        SfxModel model(path.string(), {}, 1);
         check(all_finite(encode_text(model, {40, 41})), "a feed-forward sum past the f16 range keeps the context finite");
     }
     std::filesystem::remove(path);
@@ -692,6 +692,10 @@ void test_cli(const std::filesystem::path & path) {
     check(tts_cpp::moss::cli::run(run_args) == 0, "sfx mode runs on the fixture model");
     check(std::filesystem::exists(out_wav) && std::filesystem::file_size(out_wav) == WAV_HEADER_BYTES + SHORT_CLIP_SAMPLES * PCM16_BYTES,
             "sfx mode writes the requested duration as 16-bit mono");
+    run_args.sound_options.backend = "cpu";
+    check(tts_cpp::moss::cli::run(run_args) == 0, "sfx mode runs on an explicit cpu backend");
+    run_args.sound_options.backend = "no-such-device";
+    check(tts_cpp::moss::cli::run(run_args) != 0, "sfx mode fails on an unavailable backend instead of falling back");
     std::filesystem::remove(out_wav);
 }
 
@@ -713,7 +717,7 @@ int main() {
         test_compute_units();
         const auto path = write_sfx_model("sfx-model", WEIGHT_SEED);
         {
-            SfxModel model(path.string(), false, 1);
+            SfxModel model(path.string(), {}, 1);
             test_model_config(model);
             test_tokenizer(model);
             test_text_encoder(model);
