@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 static bool compare(const char *, const std::vector<float> &, const std::vector<float> &, double, double);
@@ -75,6 +76,17 @@ static std::vector<int> generate_lm(model_ctx & model, const std::vector<int> & 
                                   true, seed, steps, nullptr, false);
 }
 
+static void require_tokens(const std::vector<int> & actual, const std::vector<int> & expected,
+                            const char * check) {
+    if (actual == expected) return;
+    std::ostringstream message;
+    message << check << ": expected";
+    for (int token : expected) message << ' ' << token;
+    message << "; actual";
+    for (int token : actual) message << ' ' << token;
+    throw std::runtime_error(message.str());
+}
+
 static void check_lm_routing(const std::string & path) {
     auto model = cosyvoice_load_gguf(path);
     struct cleanup {
@@ -86,16 +98,21 @@ static void check_lm_routing(const std::string & path) {
     constexpr int prefix_rows = 5;
     const std::vector<int> text{1, 2};
     const auto native = generate_lm(model, text, short_steps);
+    if (native.size() != short_steps) throw std::runtime_error("native LM generated the wrong token count");
     model.coreml = cosyvoice_coreml::load(path);
     if (!model.coreml) throw std::runtime_error("missing LM generation fixture");
     const auto first = generate_lm(model, text, short_steps);
     const auto first_predictions = model.coreml->predictions();
+    require_tokens(first, native, "Core ML LM differs from native generation");
+    if (first_predictions != prefix_rows + short_steps)
+        throw std::runtime_error("LM Core ML prediction count: expected " +
+            std::to_string(prefix_rows + short_steps) + "; actual " + std::to_string(first_predictions));
     const auto alternate = generate_lm(model, {3, 4}, short_steps);
     const auto second = generate_lm(model, text, short_steps);
-    if (native.size() != short_steps || first != native || second != first ||
-        alternate.size() != short_steps || first_predictions != prefix_rows + short_steps ||
-        model.coreml->predictions() != first_predictions)
-        throw std::runtime_error("LM generation routing/cache reset failed");
+    require_tokens(second, first, "LM Core ML cache reset changed generation");
+    if (alternate.size() != short_steps) throw std::runtime_error("alternate LM generated the wrong token count");
+    if (model.coreml->predictions() != first_predictions)
+        throw std::runtime_error("LM Core ML prediction count was not reset between generations");
     const auto capacity = model.coreml->dimensions("mask").back();
     constexpr int fixture_context = 16;
     if (capacity != fixture_context) throw std::runtime_error("unexpected routing fixture context");
