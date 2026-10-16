@@ -291,6 +291,395 @@ Source: [workflow run 31603189415](https://github.com/tetherto/qvac/actions/runs
 `@qvac/asr-ggml@0.1.1` addon (released 2026-08-03, pinning `parakeet-cpp`
 2026-08-03).
 
+## TranscribePsy long-form CPU windows (2026-10)
+
+[TranscribePsy-250M-EU-sub](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub-gguf)
+q8_0 on a 412.7 s recording (the three `test/samples` clips concatenated twelve
+times), x86-64 Linux, eight threads, ggml CPU encoder and decoder. The engine's
+automatic long-form window (300 s, 256 frames of context) against the 60 s /
+25 % windows the model was validated with on phones
+(`--window-sec 60 --overlap 0.25`), and the memory work that lets a windowed
+pass hold one encoder graph and release the audio and STFT scratch once the mel
+exists:
+
+| Build | Windows | Mel | Encoder | Decoder | Peak RSS |
+|---|---|--:|--:|--:|--:|
+| before this work, automatic window | 2 x 300 s | 38 ms | 19.6 s | 92 ms | 4.4 GB |
+| this work, automatic window | 2 x 300 s | 19 ms | 18.0 s | 102 ms | 2.4 GB |
+| this work, `--window-sec 60 --overlap 0.25` | 10 x 60 s | 19 ms | 10.8 s | 86 ms | 0.9 GB |
+| TranscribePsy fork (q8_0 host decoder), 60 s / 25 % default | 10 x 60 s | 141 ms | 12.8 s | 379 ms | 1.6 GB |
+
+The ggml-graph CPU decoder is 3 to 4 times faster than the fork's packed q8_0
+host decoder on the same input (92 ms against 379 ms here; 5 ms against 12 ms
+on `jfk.wav`), which is why that decoder was not brought over. The blocked STFT
+halves the mel time and bounds its scratch by a 2048-frame block instead of the
+input length. Short clips are unchanged: `jfk.wav` (11 s) encodes in 170 ms and
+decodes in 5 ms, RTF 0.016.
+
+### TranscribePsy on the Apple Neural Engine (Mac mini M4, 2026-10)
+
+The same 412.7 s recording on a Mac mini M4 (macOS 15.3, six threads), built
+with `PARAKEET_COREML=ON`, with the published
+[Core ML distribution](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub-coreml)
+(encoder-less GGUF, fixed-window Neural Engine encoder, 16-lane TDT decoder)
+against the q8_0 GGUF on the ggml CPU encoder and decoder. Engine times are
+`EngineResult` stage times from `test-transcribepsy --long-wav`; CLI times are
+the `[BENCH]` line and `/usr/bin/time -l`:
+
+| Path | Encoder | Decoder | Total | RTF | Peak RSS |
+|---|--:|--:|--:|--:|--:|
+| `Engine::transcribe`, Core ML GGUF: 34 pause-cut segments on the Neural Engine encoder, batched Neural Engine decoder | 529 ms | 420 ms | 968 ms | 0.0023 | |
+| `Engine::transcribe`, q8_0 GGUF: ggml CPU, automatic 300 s windows | 27.5 s | 202 ms | 27.7 s | 0.067 | |
+| CLI, Core ML GGUF: 34 Neural Engine encoder windows (15 s, 16 frames of context), ggml CPU decoder | 501 ms | 191 ms | 709 ms | 0.0017 | 251 MB |
+| CLI, q8_0 GGUF: ggml CPU, `--window-sec 60 --overlap 0.25` | 12.0 s | 192 ms | 12.2 s | 0.030 | 1.0 GB |
+
+`jfk.wav` (11 s): 18 ms on the Neural Engine encoder against 145 ms on the M4
+CPU; the batched decoder takes 59 ms for that single segment against 5 ms for
+the sequential CPU decoder, since one segment fills one of its 16 lanes. The
+Neural Engine decoder pays off on phones, where the prediction network is
+memory-bandwidth bound; on the M4 the CPU decoder is faster, and
+`PARAKEET_ANE_BATCH_DECODE=0` keeps the Neural Engine encoder with the
+sequential decoder.
+
+Accuracy on that recording, word error rate against the three clips' own
+single-clip transcripts repeated twelve times (the clips are concatenated
+without pauses, so every seam falls in running speech). The 15 s Neural
+Engine windows with 1.28 s of seam context are the fork's published geometry;
+the same geometry on the ggml encoder is given for reference, and the TDT
+greedy decoder's sensitivity to it is large (187 against 188 encoder frames per
+window changes the result by three points):
+
+| Path | WER |
+|---|--:|
+| CLI, q8_0 GGUF, ggml CPU, `--window-sec 60 --overlap 0.25` | 5.1 % |
+| `Engine::transcribe`, q8_0 GGUF, ggml CPU, automatic 300 s windows | 7.1 % |
+| CLI, ggml CPU at the Neural Engine geometry (187-frame windows, 16 frames of context) | 8.1 % |
+| CLI, ggml CPU, 188-frame windows, 16 frames of context | 11.2 % |
+| CLI, Core ML GGUF, Neural Engine encoder windows, ggml decoder | 10.5 % |
+| CLI, Core ML GGUF, Neural Engine encoder windows with 32 frames of context (`PARAKEET_COREML_ANE_CONTEXT_FRAMES=32`) | 8.4 % |
+| `Engine::transcribe`, Core ML GGUF, pause-cut segments and the batched Neural Engine decoder | 11.6 % |
+| The TranscribePsy fork's own CLI on the Core ML GGUF (its internal 1500-frame tiler and q8_0 host decoder) | 7.1 % |
+
+The committed frames nearest a window's right edge differ most from the
+full-context encoder (cosine 0.63 to 0.72 against 0.84 mid-window), so the
+loss comes from the short seam context, not from the Neural Engine arithmetic:
+a single 15 s window matches the ggml encoder frame for frame (cosine 0.98)
+and transcribes the sample clips identically. Long recordings where accuracy
+matters more than speed should take the 60 s / 25 % CPU windows; the Neural
+Engine paths are the fastest and lightest option and were validated by the
+fork on short utterances and pause-rich recordings.
+
+### TranscribePsy: port against the research fork (2026-10)
+
+The port on this branch (`58bf7d07`, master's parakeet engine with the ggml
+speech head) against the research fork
+[tether-ai-research/qvac-transcribepsy](https://github.com/tether-ai-research/qvac-transcribepsy)
+at `364ec36` (2026-10-15, its vendored ggml), both built Release with the same
+flags per machine (CUDA on Linux, Metal and `PARAKEET_COREML=ON` on the Macs):
+
+- Linux x86-64 (Ubuntu 25.10), AMD Ryzen 9 9950X with 10 cores exposed, RTX
+  5090 32 GB, CUDA 13.3; 8 threads, plus a 4-thread long-mix row.
+- Mac Studio M3 Ultra (20 performance and 8 efficiency cores, 96 GB), macOS
+  15.7; 8 threads, plus a 16-thread long-mix row.
+- Mac mini M4 (4 performance and 6 efficiency cores, 16 GB), macOS 15.3; 6
+  threads, plus a 4-thread long-mix row.
+
+Inputs are the three `test/samples` clips (`jfk.wav` 11 s, `sample-16k.wav`
+20 s, `fr-multipiece-16k.wav` 3.3 s), the 412.7 s long-mix recording (the
+three clips concatenated twelve times) and a 619 s recording (eighteen times);
+the long recordings have no pauses, so every window seam falls in running
+speech. Every number is the median of three timed runs after one warm-up in
+the same process: `parakeet --bench --bench-runs 3 --bench-warmup 1` for the
+CLI, and for the engine API a small driver that constructs `parakeet::Engine`
+with the same `EngineOptions` on both trees and reads the `EngineResult` stage
+times. Peak RSS is the process maximum reported by `/usr/bin/time`, so it
+covers the model load and all four runs. WER is against each clip's own
+transcript, which both trees produce identically on every short clip and
+which the long recordings repeat. The fork's 60 s / 25 % windows are its CLI
+default and the setting it validated on phones, so the port runs them as
+`--window-sec 60 --overlap 0.25` on the CLI and as 750-frame windows with 94
+frames of context through the engine API. The two short clips not shown below
+behave like `jfk.wav`.
+
+| Machine | Path, long-mix (412.7 s) | Fork: total / peak RSS / WER | Port: total / peak RSS / WER |
+|---|---|---|---|
+| Linux, Ryzen 9 9950X, RTX 5090 | CLI, ggml CPU, 8 threads, 60 s / 25 % windows (fork default; port `--window-sec 60 --overlap 0.25`) | 13.4 s / 1.8 GB / 5.3 % | 12.1 s / 1.1 GB / 5.1 % |
+|  | CLI, ggml CPU, 8 threads, port default (automatic 300 s window) | - | 20.6 s / 2.6 GB / 7.1 % |
+|  | Engine API, ggml CPU, 8 threads, default options (automatic 300 s window on both) | 19.8 s / 9.7 GB / 6.3 % | 20.6 s / 2.6 GB / 7.1 % |
+|  | Engine API, ggml CPU, 8 threads, 750-frame windows with 94 frames of context | 12.0 s / 3.2 GB / 5.8 % | 12.2 s / 1.1 GB / 5.1 % |
+|  | CLI, CUDA (`--n-gpu-layers 999`), 60 s / 25 % windows | fails (`tdt_greedy_decode` rc=6) | 207 ms / 686 MB / 5.3 % |
+|  | Engine API, CUDA, default options | fails (`tdt_greedy_decode` rc=6) | 295 ms / 704 MB / 6.9 % |
+| Mac Studio M3 Ultra | CLI, ggml CPU, 8 threads, 60 s / 25 % windows (fork default; port `--window-sec 60 --overlap 0.25`) | 8.6 s / 1.7 GB / 5.3 % | 7.6 s / 1019 MB / 5.1 % |
+|  | CLI, ggml CPU, 8 threads, port default (automatic 300 s window) | - | 17.4 s / 2.5 GB / 7.1 % |
+|  | Engine API, ggml CPU, 8 threads, default options (automatic 300 s window on both) | 12.8 s / 9.6 GB / 6.2 % | 17.3 s / 2.4 GB / 7.1 % |
+|  | Engine API, ggml CPU, 8 threads, 750-frame windows with 94 frames of context | 7.9 s / 3.0 GB / 5.8 % | 7.6 s / 1008 MB / 5.1 % |
+|  | CLI, Metal (`--n-gpu-layers 999`), 60 s / 25 % windows | fails (`tdt_greedy_decode` rc=6) | 876 ms / 495 MB / 5.1 % |
+|  | Engine API, Metal, default options | fails (`tdt_greedy_decode` rc=6) | 1.3 s / 583 MB / 6.9 % |
+|  | CLI, Core ML GGUF (Neural Engine encoder; fork: q8_0 host decoder, port: ggml decoder) | 999 ms / 209 MB / 7.1 % | 688 ms / 238 MB / 10.5 % |
+|  | Engine API, Core ML GGUF (Neural Engine encoder and batched Neural Engine decoder) | 1.1 s / 196 MB / 12.9 % | 1.1 s / 194 MB / 11.6 % |
+| Mac mini M4 | CLI, ggml CPU, 6 threads, 60 s / 25 % windows (fork default; port `--window-sec 60 --overlap 0.25`) | 13.7 s / 1.7 GB / 5.3 % | 12.3 s / 965 MB / 5.1 % |
+|  | CLI, ggml CPU, 6 threads, port default (automatic 300 s window) | - | 27.8 s / 2.4 GB / 7.1 % |
+|  | Engine API, ggml CPU, 6 threads, default options (automatic 300 s window on both) | 24.1 s / 6.9 GB / 6.2 % | 27.8 s / 2.4 GB / 7.1 % |
+|  | Engine API, ggml CPU, 6 threads, 750-frame windows with 94 frames of context | 12.5 s / 3.0 GB / 5.8 % | 12.3 s / 959 MB / 5.1 % |
+|  | CLI, Metal (`--n-gpu-layers 999`), 60 s / 25 % windows | fails (`tdt_greedy_decode` rc=6) | 2.5 s / 482 MB / 5.1 % |
+|  | Engine API, Metal, default options | fails (`tdt_greedy_decode` rc=6) | 5.7 s / 524 MB / 6.9 % |
+|  | CLI, Core ML GGUF (Neural Engine encoder; fork: q8_0 host decoder, port: ggml decoder) | 986 ms / 210 MB / 7.1 % | 700 ms / 237 MB / 10.5 % |
+|  | Engine API, Core ML GGUF (Neural Engine encoder and batched Neural Engine decoder) | 1.0 s / 205 MB / 12.9 % | 952 ms / 202 MB / 11.6 % |
+
+What the numbers say:
+
+- Short clips: the port is 20 to 30 % faster on the CPU (`jfk.wav` 154 ms
+  against 192 ms on the Ryzen, 90 against 128 ms on the M3 Ultra, 145 against
+  189 ms on the M4) and about twice as fast on CUDA and Metal (8 against 17 ms
+  on the RTX 5090, 25 against 61 ms on the M3 Ultra, 46 against 106 ms on the
+  M4). Master's encoder graph is 16 to 27 % faster than the fork's, the
+  ggml-graph TDT decoder takes 3 to 5 ms where the fork's packed q8_0 host
+  decoder takes 9 ms, and the blocked mel takes 1 ms against 4 ms.
+- Long recordings at the 60 s / 25 % windows: the port is equal or faster
+  (CLI long-mix 12.1 against 13.4 s on the Ryzen, 7.6 against 8.6 s on the M3
+  Ultra, 12.3 against 13.7 s on the M4; engine API within 2 % either way;
+  16 threads on the M3 Ultra 4.8 against 6.0 s), with about 40 % less peak
+  memory through the CLI (1.0 to 1.1 against 1.7 to 1.8 GB) and a third of the
+  fork's through the engine API (1.0 to 1.2 against 3.0 to 3.8 GB), a 2 to 3.5
+  times faster decoder (112 against 408 ms on the Ryzen) and a 7 to 11 times
+  faster mel (19 against 151 ms), at a slightly lower WER (5.1 against 5.3 %
+  CLI, 5.1 against 5.8 % engine API; 4.5 to 4.7 against 4.7 to 4.9 % on the
+  619 s recording).
+- Engine API defaults, the automatic 300 s window on both trees: the port's
+  peak memory is 2.9 to 4 times lower (2.6 against 9.7 GB on the Ryzen, 2.4
+  against 9.6 GB on the M3 Ultra, 2.4 against 6.9 GB on the M4). The fork is
+  4 % faster on the Ryzen (19.8 against 20.6 s), 15 % faster on the M4 (24.1
+  against 27.8 s) and 35 % faster on the M3 Ultra (12.8 against 17.3 s), at
+  6.2 to 6.3 % against 7.1 % WER. The difference is master's planner,
+  unchanged by this PR: it keeps every automatic window at the full 3750
+  frames by extending the boundary windows into the input, so the 412.7 s
+  recording is encoded as two 300 s windows (600 s of encoder input) where the
+  fork's planner shrinks the boundary windows and encodes 280 s plus 174 s.
+  The 60 s / 25 % windows sidestep it.
+- CLI defaults differ: the fork's CLI defaults to the 60 s / 25 % windows,
+  this branch keeps master's automatic window. With the defaults on both
+  sides the port's CLI is 1.5 to 2 times slower than the fork's on long
+  recordings (20.6 against 13.4 s on the Ryzen, 17.4 against 8.6 s on the M3
+  Ultra, 27.8 against 13.7 s on the M4), uses 2.4 to 2.6 GB against 1.7 to
+  1.8 GB and loses two WER points; with `--window-sec 60 --overlap 0.25` it is
+  ahead on every count. Short clips are unaffected either way.
+- GPU: the fork fails on both long recordings on CUDA and on Metal (CLI exit
+  code 16; the engine throws `tdt_greedy_decode failed (rc=6)` from the
+  on-device joint projection of its decoder); its short clips run. The port
+  transcribes long-mix in 207 ms on the RTX 5090 (RTF 0.0005), 876 ms on the
+  M3 Ultra and 2.5 s on the M4 with the 60 s windows.
+- Core ML distribution (Macs): the encoder sidecar is the same `.mlmodelc`,
+  so encoder times match (about 500 ms for long-mix on both Macs). The port's
+  CLI is 30 % faster end to end (688 to 700 ms against 986 to 999 ms) through
+  the ggml decoder (168 to 190 ms against 368 to 372 ms) and the mel; its
+  engine path is 7 to 8 % faster (952 ms to 1.06 s against 1.04 to 1.14 s) at
+  the same or lower WER (11.6 against 12.9 % on long-mix, 11.8 against 11.7 %
+  on the 619 s recording); `jfk.wav` takes 20 to 22 ms against 27 ms on the
+  CLI and 74 to 88 ms on both engine paths, where the batched decoder fills
+  one lane. The port's CLI is, however, three WER points behind the fork's
+  CLI on the long recordings (10.5 against 7.1 % on long-mix, 9.7 against
+  6.4 % on the 619 s recording). The geometry differs: the fork's CLI runs
+  its 60 s / 25 % planner windows and its wrapper tiles each of them into
+  1500-frame Neural Engine windows with 16 frames of leading context, while
+  this branch plans 15 s windows at the export's capacity with 16 frames of
+  context on both sides (the seam analysis is in the previous section;
+  `PARAKEET_COREML_ANE_CONTEXT_FRAMES=32` recovers to 8.4 %). Nesting the
+  Neural Engine tiles inside the CLI's long-form windows, as the fork does,
+  is the open follow-up for this path.
+
+Per-machine tables for `jfk.wav`, long-mix and the 619 s recording; the
+fork's failed GPU runs on the long recordings have no row:
+
+**Linux x86-64 (Ubuntu 25.10), AMD Ryzen 9 9950X (10 cores exposed), RTX 5090 32 GB, CUDA 13.3**
+
+CLI (`parakeet --bench`), ggml CPU, 8 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, its default 60 s / 25 % windows | 4 ms | 179 ms | 9 ms | 192 ms | 0.0175 | 764 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 1 ms | 150 ms | 3 ms | 154 ms | 0.0140 | 620 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default (automatic 300 s window) | 1 ms | 152 ms | 3 ms | 156 ms | 0.0142 | 619 MB | 0.0 % |
+| long-mix, 412.7 s | fork CLI, its default 60 s / 25 % windows | 151 ms | 12.8 s | 408 ms | 13.4 s | 0.0324 | 1.8 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 19 ms | 12.0 s | 112 ms | 12.1 s | 0.0294 | 1.1 GB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default (automatic 300 s window) | 20 ms | 20.4 s | 117 ms | 20.6 s | 0.0498 | 2.6 GB | 7.1 % |
+| long-10min, 619 s | fork CLI, its default 60 s / 25 % windows | 218 ms | 17.8 s | 576 ms | 18.6 s | 0.0300 | 1.8 GB | 4.7 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 25 ms | 16.7 s | 165 ms | 16.9 s | 0.0273 | 1.1 GB | 4.7 % |
+| long-10min, 619 s | port CLI, default (automatic 300 s window) | 27 ms | 30.0 s | 176 ms | 30.2 s | 0.0488 | 2.6 GB | 7.1 % |
+| long-mix, 412.7 s | fork CLI, default windows, 4 threads | 151 ms | 21.7 s | 400 ms | 22.3 s | 0.0540 | 1.8 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25`, 4 threads | 17 ms | 21.9 s | 169 ms | 22.1 s | 0.0536 | 1.1 GB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default, 4 threads | 18 ms | 36.9 s | 181 ms | 37.1 s | 0.0898 | 2.5 GB | 7.1 % |
+
+Engine API (`bench_engine.cpp` driver), ggml CPU, 8 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork `Engine::transcribe`, default options | 4 ms | 181 ms | 9 ms | 195 ms | 0.0177 | 764 MB | 0.0 % |
+| jfk.wav, 11 s | port `Engine::transcribe`, default options | 1 ms | 150 ms | 3 ms | 154 ms | 0.0140 | 617 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, 750-frame windows, 94 frames of context | 4 ms | 179 ms | 9 ms | 192 ms | 0.0174 | 764 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, 750-frame windows, 94 frames of context | 1 ms | 149 ms | 3 ms | 153 ms | 0.0139 | 617 MB | 0.0 % |
+| long-mix, 412.7 s | fork `Engine::transcribe`, default options | 145 ms | 19.3 s | 404 ms | 19.8 s | 0.0481 | 9.7 GB | 6.3 % |
+| long-mix, 412.7 s | port `Engine::transcribe`, default options | 15 ms | 20.4 s | 115 ms | 20.6 s | 0.0499 | 2.6 GB | 7.1 % |
+| long-mix, 412.7 s | fork engine, 750-frame windows, 94 frames of context | 145 ms | 11.4 s | 381 ms | 12.0 s | 0.0290 | 3.2 GB | 5.8 % |
+| long-mix, 412.7 s | port engine, 750-frame windows, 94 frames of context | 17 ms | 12.0 s | 112 ms | 12.2 s | 0.0295 | 1.1 GB | 5.1 % |
+| long-10min, 619 s | fork `Engine::transcribe`, default options | 235 ms | 31.7 s | 651 ms | 32.6 s | 0.0526 | 14.7 GB | 6.6 % |
+| long-10min, 619 s | port `Engine::transcribe`, default options | 32 ms | 30.1 s | 174 ms | 30.3 s | 0.0490 | 2.6 GB | 7.1 % |
+| long-10min, 619 s | fork engine, 750-frame windows, 94 frames of context | 228 ms | 17.2 s | 604 ms | 18.1 s | 0.0292 | 3.7 GB | 4.8 % |
+| long-10min, 619 s | port engine, 750-frame windows, 94 frames of context | 25 ms | 16.7 s | 166 ms | 16.9 s | 0.0273 | 1.1 GB | 4.7 % |
+
+CUDA (`--n-gpu-layers 999`), q8_0 GGUF:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, default windows | 4 ms | 10 ms | 3 ms | 17 ms | 0.0015 | 603 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 1 ms | 6 ms | 2 ms | 8 ms | 0.0007 | 619 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default | 1 ms | 6 ms | 2 ms | 8 ms | 0.0007 | 619 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, default options | 4 ms | 10 ms | 3 ms | 17 ms | 0.0015 | 604 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, default options | 1 ms | 6 ms | 2 ms | 8 ms | 0.0007 | 619 MB | 0.0 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 16 ms | 131 ms | 60 ms | 207 ms | 0.0005 | 686 MB | 5.3 % |
+| long-mix, 412.7 s | port CLI, default | 16 ms | 210 ms | 66 ms | 292 ms | 0.0007 | 716 MB | 6.9 % |
+| long-mix, 412.7 s | port engine, default options | 16 ms | 209 ms | 66 ms | 295 ms | 0.0007 | 704 MB | 6.9 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 23 ms | 181 ms | 93 ms | 297 ms | 0.0005 | 682 MB | 4.8 % |
+| long-10min, 619 s | port CLI, default | 30 ms | 309 ms | 96 ms | 436 ms | 0.0007 | 703 MB | 7.1 % |
+| long-10min, 619 s | port engine, default options | 34 ms | 309 ms | 96 ms | 445 ms | 0.0007 | 679 MB | 7.1 % |
+
+**Mac Studio M3 Ultra (20 P + 8 E cores, 96 GB), macOS 15.7**
+
+CLI (`parakeet --bench`), ggml CPU, 8 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, its default 60 s / 25 % windows | 3 ms | 116 ms | 9 ms | 128 ms | 0.0116 | 635 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 0 ms | 85 ms | 4 ms | 90 ms | 0.0081 | 468 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default (automatic 300 s window) | 1 ms | 86 ms | 5 ms | 91 ms | 0.0083 | 459 MB | 0.0 % |
+| long-mix, 412.7 s | fork CLI, its default 60 s / 25 % windows | 126 ms | 8.1 s | 374 ms | 8.6 s | 0.0209 | 1.7 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 11 ms | 7.4 s | 160 ms | 7.6 s | 0.0184 | 1019 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default (automatic 300 s window) | 10 ms | 17.2 s | 172 ms | 17.4 s | 0.0421 | 2.5 GB | 7.1 % |
+| long-10min, 619 s | fork CLI, its default 60 s / 25 % windows | 190 ms | 11.4 s | 569 ms | 12.2 s | 0.0196 | 1.7 GB | 4.9 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 14 ms | 10.4 s | 243 ms | 10.7 s | 0.0173 | 1.0 GB | 4.5 % |
+| long-10min, 619 s | port CLI, default (automatic 300 s window) | 15 ms | 25.5 s | 255 ms | 25.8 s | 0.0417 | 2.5 GB | 7.2 % |
+| long-mix, 412.7 s | fork CLI, default windows, 16 threads | 135 ms | 5.5 s | 402 ms | 6.0 s | 0.0145 | 1.7 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25`, 16 threads | 10 ms | 4.6 s | 240 ms | 4.8 s | 0.0117 | 998 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default, 16 threads | 10 ms | 10.9 s | 257 ms | 11.1 s | 0.0270 | 2.5 GB | 7.1 % |
+
+Engine API (`bench_engine.cpp` driver), ggml CPU, 8 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork `Engine::transcribe`, default options | 4 ms | 112 ms | 9 ms | 124 ms | 0.0113 | 623 MB | 0.0 % |
+| jfk.wav, 11 s | port `Engine::transcribe`, default options | 1 ms | 85 ms | 4 ms | 90 ms | 0.0082 | 461 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, 750-frame windows, 94 frames of context | 4 ms | 113 ms | 9 ms | 126 ms | 0.0114 | 627 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, 750-frame windows, 94 frames of context | 0 ms | 86 ms | 4 ms | 90 ms | 0.0082 | 456 MB | 0.0 % |
+| long-mix, 412.7 s | fork `Engine::transcribe`, default options | 126 ms | 12.2 s | 417 ms | 12.8 s | 0.0310 | 9.6 GB | 6.2 % |
+| long-mix, 412.7 s | port `Engine::transcribe`, default options | 10 ms | 17.1 s | 166 ms | 17.3 s | 0.0419 | 2.4 GB | 7.1 % |
+| long-mix, 412.7 s | fork engine, 750-frame windows, 94 frames of context | 128 ms | 7.4 s | 397 ms | 7.9 s | 0.0191 | 3.0 GB | 5.8 % |
+| long-mix, 412.7 s | port engine, 750-frame windows, 94 frames of context | 9 ms | 7.5 s | 161 ms | 7.6 s | 0.0185 | 1008 MB | 5.1 % |
+| long-10min, 619 s | fork `Engine::transcribe`, default options | 198 ms | 20.2 s | 639 ms | 21.0 s | 0.0340 | 14.6 GB | 6.6 % |
+| long-10min, 619 s | port `Engine::transcribe`, default options | 15 ms | 25.5 s | 257 ms | 25.8 s | 0.0417 | 2.5 GB | 7.2 % |
+| long-10min, 619 s | fork engine, 750-frame windows, 94 frames of context | 199 ms | 11.0 s | 605 ms | 11.8 s | 0.0190 | 3.6 GB | 4.9 % |
+| long-10min, 619 s | port engine, 750-frame windows, 94 frames of context | 14 ms | 10.3 s | 242 ms | 10.6 s | 0.0171 | 1.0 GB | 4.5 % |
+
+Metal (`--n-gpu-layers 999`), q8_0 GGUF:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, default windows | 4 ms | 40 ms | 17 ms | 61 ms | 0.0055 | 393 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 1 ms | 18 ms | 6 ms | 25 ms | 0.0023 | 372 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default | 0 ms | 19 ms | 6 ms | 25 ms | 0.0023 | 373 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, default options | 3 ms | 40 ms | 17 ms | 60 ms | 0.0055 | 394 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, default options | 1 ms | 19 ms | 6 ms | 25 ms | 0.0023 | 378 MB | 0.0 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 10 ms | 610 ms | 254 ms | 876 ms | 0.0021 | 495 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default | 10 ms | 994 ms | 273 ms | 1.3 s | 0.0031 | 541 MB | 6.9 % |
+| long-mix, 412.7 s | port engine, default options | 10 ms | 991 ms | 272 ms | 1.3 s | 0.0031 | 583 MB | 6.9 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 15 ms | 834 ms | 384 ms | 1.2 s | 0.0020 | 525 MB | 4.7 % |
+| long-10min, 619 s | port CLI, default | 15 ms | 1.4 s | 410 ms | 1.8 s | 0.0030 | 587 MB | 7.1 % |
+| long-10min, 619 s | port engine, default options | 14 ms | 1.4 s | 409 ms | 1.8 s | 0.0030 | 569 MB | 7.1 % |
+
+Core ML distribution (encoder-less GGUF, Neural Engine encoder and decoder sidecars):
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 3 ms | 15 ms | 8 ms | 27 ms | 0.0025 | 298 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 1 ms | 16 ms | 4 ms | 22 ms | 0.0020 | 140 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, Core ML GGUF | 3 ms | 15 ms | 69 ms | 88 ms | 0.0080 | 294 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 0 ms | 15 ms | 72 ms | 88 ms | 0.0080 | 270 MB | 0.0 % |
+| long-mix, 412.7 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 126 ms | 504 ms | 368 ms | 999 ms | 0.0024 | 209 MB | 7.1 % |
+| long-mix, 412.7 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 10 ms | 508 ms | 168 ms | 688 ms | 0.0017 | 238 MB | 10.5 % |
+| long-mix, 412.7 s | fork engine, Core ML GGUF | 126 ms | 534 ms | 480 ms | 1.1 s | 0.0028 | 196 MB | 12.9 % |
+| long-mix, 412.7 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 10 ms | 530 ms | 516 ms | 1.1 s | 0.0026 | 194 MB | 11.6 % |
+| long-10min, 619 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 189 ms | 747 ms | 556 ms | 1.5 s | 0.0024 | 242 MB | 6.4 % |
+| long-10min, 619 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 14 ms | 745 ms | 246 ms | 1.0 s | 0.0016 | 284 MB | 9.7 % |
+| long-10min, 619 s | fork engine, Core ML GGUF | 188 ms | 799 ms | 613 ms | 1.6 s | 0.0026 | 219 MB | 11.7 % |
+| long-10min, 619 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 16 ms | 795 ms | 632 ms | 1.4 s | 0.0023 | 226 MB | 11.8 % |
+
+**Mac mini M4 (4 P + 6 E cores, 16 GB), macOS 15.3**
+
+CLI (`parakeet --bench`), ggml CPU, 6 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, its default 60 s / 25 % windows | 4 ms | 176 ms | 9 ms | 189 ms | 0.0171 | 627 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 1 ms | 139 ms | 5 ms | 145 ms | 0.0132 | 468 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default (automatic 300 s window) | 1 ms | 139 ms | 5 ms | 145 ms | 0.0131 | 458 MB | 0.0 % |
+| long-mix, 412.7 s | fork CLI, its default 60 s / 25 % windows | 121 ms | 13.2 s | 386 ms | 13.7 s | 0.0332 | 1.7 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 18 ms | 12.1 s | 188 ms | 12.3 s | 0.0298 | 965 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default (automatic 300 s window) | 18 ms | 27.6 s | 201 ms | 27.8 s | 0.0673 | 2.4 GB | 7.1 % |
+| long-10min, 619 s | fork CLI, its default 60 s / 25 % windows | 179 ms | 18.7 s | 579 ms | 19.4 s | 0.0313 | 1.7 GB | 4.9 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 21 ms | 16.9 s | 286 ms | 17.2 s | 0.0278 | 1017 MB | 4.5 % |
+| long-10min, 619 s | port CLI, default (automatic 300 s window) | 20 ms | 41.4 s | 303 ms | 41.7 s | 0.0673 | 2.5 GB | 7.2 % |
+| long-mix, 412.7 s | fork CLI, default windows, 4 threads | 122 ms | 15.2 s | 390 ms | 15.8 s | 0.0382 | 1.7 GB | 5.3 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25`, 4 threads | 15 ms | 12.3 s | 186 ms | 12.5 s | 0.0303 | 967 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default, 4 threads | 18 ms | 31.5 s | 203 ms | 31.7 s | 0.0768 | 2.4 GB | 7.1 % |
+
+Engine API (`bench_engine.cpp` driver), ggml CPU, 6 threads:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork `Engine::transcribe`, default options | 3 ms | 169 ms | 9 ms | 182 ms | 0.0166 | 621 MB | 0.0 % |
+| jfk.wav, 11 s | port `Engine::transcribe`, default options | 0 ms | 147 ms | 5 ms | 152 ms | 0.0138 | 458 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, 750-frame windows, 94 frames of context | 3 ms | 174 ms | 9 ms | 186 ms | 0.0169 | 625 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, 750-frame windows, 94 frames of context | 0 ms | 138 ms | 5 ms | 143 ms | 0.0130 | 455 MB | 0.0 % |
+| long-mix, 412.7 s | fork `Engine::transcribe`, default options | 121 ms | 23.6 s | 429 ms | 24.1 s | 0.0585 | 6.9 GB | 6.2 % |
+| long-mix, 412.7 s | port `Engine::transcribe`, default options | 18 ms | 27.5 s | 200 ms | 27.8 s | 0.0673 | 2.4 GB | 7.1 % |
+| long-mix, 412.7 s | fork engine, 750-frame windows, 94 frames of context | 118 ms | 12.0 s | 379 ms | 12.5 s | 0.0302 | 3.0 GB | 5.8 % |
+| long-mix, 412.7 s | port engine, 750-frame windows, 94 frames of context | 18 ms | 12.1 s | 199 ms | 12.3 s | 0.0298 | 959 MB | 5.1 % |
+| long-10min, 619 s | fork `Engine::transcribe`, default options | 181 ms | 40.0 s | 629 ms | 40.9 s | 0.0660 | 7.0 GB | 6.6 % |
+| long-10min, 619 s | port `Engine::transcribe`, default options | 20 ms | 41.5 s | 307 ms | 41.9 s | 0.0676 | 2.4 GB | 7.2 % |
+| long-10min, 619 s | fork engine, 750-frame windows, 94 frames of context | 180 ms | 17.8 s | 578 ms | 18.6 s | 0.0300 | 3.6 GB | 4.9 % |
+| long-10min, 619 s | port engine, 750-frame windows, 94 frames of context | 26 ms | 16.9 s | 291 ms | 17.2 s | 0.0278 | 991 MB | 4.5 % |
+
+Metal (`--n-gpu-layers 999`), q8_0 GGUF:
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, default windows | 3 ms | 84 ms | 19 ms | 106 ms | 0.0097 | 400 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, `--window-sec 60 --overlap 0.25` | 1 ms | 37 ms | 8 ms | 46 ms | 0.0042 | 377 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, default | 1 ms | 37 ms | 8 ms | 46 ms | 0.0042 | 375 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, default options | 4 ms | 84 ms | 19 ms | 106 ms | 0.0097 | 396 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, default options | 0 ms | 37 ms | 8 ms | 46 ms | 0.0042 | 379 MB | 0.0 % |
+| long-mix, 412.7 s | port CLI, `--window-sec 60 --overlap 0.25` | 17 ms | 2.2 s | 325 ms | 2.5 s | 0.0061 | 482 MB | 5.1 % |
+| long-mix, 412.7 s | port CLI, default | 16 ms | 5.3 s | 341 ms | 5.6 s | 0.0137 | 551 MB | 6.9 % |
+| long-mix, 412.7 s | port engine, default options | 16 ms | 5.3 s | 340 ms | 5.7 s | 0.0138 | 524 MB | 6.9 % |
+| long-10min, 619 s | port CLI, `--window-sec 60 --overlap 0.25` | 27 ms | 3.0 s | 484 ms | 3.5 s | 0.0057 | 518 MB | 4.7 % |
+| long-10min, 619 s | port CLI, default | 24 ms | 7.9 s | 513 ms | 8.4 s | 0.0136 | 594 MB | 7.1 % |
+| long-10min, 619 s | port engine, default options | 26 ms | 7.9 s | 513 ms | 8.4 s | 0.0136 | 555 MB | 7.1 % |
+
+Core ML distribution (encoder-less GGUF, Neural Engine encoder and decoder sidecars):
+
+| Clip | Build and path | Mel | Encoder | Decoder | Total | RTF | Peak RSS | WER |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| jfk.wav, 11 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 3 ms | 14 ms | 9 ms | 27 ms | 0.0025 | 142 MB | 0.0 % |
+| jfk.wav, 11 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 1 ms | 14 ms | 5 ms | 20 ms | 0.0018 | 136 MB | 0.0 % |
+| jfk.wav, 11 s | fork engine, Core ML GGUF | 3 ms | 14 ms | 56 ms | 73 ms | 0.0067 | 294 MB | 0.0 % |
+| jfk.wav, 11 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 1 ms | 14 ms | 58 ms | 74 ms | 0.0067 | 270 MB | 0.0 % |
+| long-mix, 412.7 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 118 ms | 496 ms | 372 ms | 986 ms | 0.0024 | 210 MB | 7.1 % |
+| long-mix, 412.7 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 19 ms | 495 ms | 190 ms | 700 ms | 0.0017 | 237 MB | 10.5 % |
+| long-mix, 412.7 s | fork engine, Core ML GGUF | 119 ms | 522 ms | 389 ms | 1.0 s | 0.0025 | 205 MB | 12.9 % |
+| long-mix, 412.7 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 13 ms | 520 ms | 412 ms | 952 ms | 0.0023 | 202 MB | 11.6 % |
+| long-10min, 619 s | fork CLI, Core ML GGUF (its 1500-frame tiler, q8_0 host decoder) | 179 ms | 730 ms | 566 ms | 1.5 s | 0.0024 | 248 MB | 6.4 % |
+| long-10min, 619 s | port CLI, Core ML GGUF (Neural Engine windows, ggml decoder) | 26 ms | 728 ms | 272 ms | 1.0 s | 0.0017 | 282 MB | 9.7 % |
+| long-10min, 619 s | fork engine, Core ML GGUF | 178 ms | 782 ms | 498 ms | 1.5 s | 0.0024 | 232 MB | 11.7 % |
+| long-10min, 619 s | port engine, Core ML GGUF (pause-cut segments, batched Neural Engine decoder) | 26 ms | 779 ms | 517 ms | 1.3 s | 0.0021 | 231 MB | 11.8 % |
+
 ## Multi-machine benchmark (2026-09)
 
 Maintainer-run measurement of Parakeet TDT 0.6b v3 across four machines and

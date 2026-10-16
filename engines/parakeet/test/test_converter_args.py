@@ -68,6 +68,13 @@ class ConverterArgsTest(unittest.TestCase):
     def test_rnnt_head_override(self):
         self.assertEqual(parse_args(argv=["--head", "rnnt"]).head, "rnnt")
 
+    def test_description_defaults_to_none(self):
+        self.assertIsNone(parse_args(argv=[]).description)
+
+    def test_description_is_passed_through(self):
+        args = parse_args(argv=["--description", "TranscribePsy-250M-EU-sub"])
+        self.assertEqual(args.description, "TranscribePsy-250M-EU-sub")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,8 @@
 // window-size resolver, and the seam trim + append) so they can be unit-tested
 // without loading a model (see test/test_long_form_windows.cpp).
 
+#include <climits>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -142,6 +144,52 @@ inline int resolve_long_form_window_frames(int requested, int pos_emb_max_len,
         window_frames = pos_emb_max_len;
     }
     return window_frames;
+}
+
+// Converts a window length in seconds into EngineOptions::long_form_window_frames:
+//   - 0 disables windowing (-1);
+//   - otherwise round(window_sec / frame_sec), which must lie within
+//     [min_window_frames, max_window_frames] (max_window_frames <= 0: no ceiling
+//     other than INT_MAX).
+// Returns false, leaving `out` untouched, for non-finite or out-of-range input.
+inline bool long_form_window_frames_from_seconds(double window_sec, double frame_sec,
+                                                 int min_window_frames,
+                                                 int max_window_frames,
+                                                 int & out) {
+    if (!std::isfinite(window_sec) || window_sec < 0.0) {
+        return false;
+    }
+    if (window_sec == 0.0) {
+        out = -1;
+        return true;
+    }
+    if (!std::isfinite(frame_sec) || frame_sec <= 0.0) {
+        return false;
+    }
+    const double frames = std::round(window_sec / frame_sec);
+    if (frames < (double) min_window_frames || frames > (double) INT_MAX ||
+        (max_window_frames > 0 && frames > (double) max_window_frames)) {
+        return false;
+    }
+    out = (int) frames;
+    return true;
+}
+
+// Converts the fraction of a window shared with its neighbours, in [0, 0.5],
+// into EngineOptions::long_form_context_frames for a `window_frames` window:
+// round(window_frames * overlap / 2), clamped to window_frames / 4 like the
+// engine, and -1 when it rounds to 0 (0 would mean "auto" to the engine).
+// Returns false, leaving `out` untouched, for non-finite or out-of-range input.
+inline bool long_form_context_frames_from_overlap(double overlap, int window_frames, int & out) {
+    if (!std::isfinite(overlap) || overlap < 0.0 || overlap > 0.5 || window_frames <= 0) {
+        return false;
+    }
+    int context_frames = (int) std::lround((double) window_frames * overlap / 2.0);
+    if (context_frames > window_frames / 4) {
+        context_frames = window_frames / 4;
+    }
+    out = context_frames > 0 ? context_frames : -1;
+    return true;
 }
 
 // ── Long-form window policy (shared by the engine and the fit projector) ──

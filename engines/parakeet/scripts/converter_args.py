@@ -49,6 +49,16 @@ def parse_args(
         help="HF model id to download from if --ckpt is missing.",
     )
     parser.add_argument(
+        "--description",
+        default=None,
+        help=(
+            "Value for general.description. Defaults to the model family's "
+            "own text, e.g. 'NVIDIA Parakeet-TDT FastConformer ASR "
+            "(CC-BY-4.0)'. Published derivatives such as TranscribePsy set "
+            "their own so the GGUF can be reproduced byte for byte."
+        ),
+    )
+    parser.add_argument(
         "--head",
         choices=HEAD_CHOICES,
         default="auto",
