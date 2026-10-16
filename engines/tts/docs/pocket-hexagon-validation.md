@@ -129,6 +129,33 @@ reliably represented by process RSS. The HTP estimate explicitly includes those
 buffers; opaque driver/DSP heaps and allocation bookkeeping still require the
 margin. The runtime query cannot guarantee physical-memory availability.
 
+## Packed-buffer review regression
+
+After merging master `c739b8fb`, review identified that ggml's configured
+packing limit can exceed the runtime query's effective RPC payload cap.
+With `GGML_HEXAGON_MBUF=3072`, two individually valid 1.125 GiB tensors could
+be packed into one invalid 2.25 GiB buffer. The original phone preflight
+accepted that configuration. Pocket now rejects it during backend validation,
+before allocating model buffers, by comparing the retained buffer type's
+packing limit with the runtime's effective cap. Both context buffers and graph
+arenas use that buffer type; environment changes after initialization cannot
+bypass the check.
+
+The merged branch passed all 11 Pocket host tests and an Android arm64 Release
+build. A metadata-only regression covers the two 1.125 GiB tensors without
+allocating their payloads, unsafe 2048/3072 MiB packing limits, and safe
+1024/2047 MiB and exact effective-cap boundaries. On the same OnePlus 13s:
+
+- Both memory preflight and direct model loading rejected `MBUF=2048` and
+  `MBUF=3072`, identifying the packing limit and effective cap in the error.
+- `MBUF=2047` passed preflight and completed speech synthesis.
+- With the default settings, real F32 FlowLM/Mimi parity, memory fit and the
+  complete engine lifecycle suite passed with unchanged numerical tolerances.
+- The graph-memory and backend-selection unit tests also passed on-device.
+
+The original performance measurements above were not rerun for this
+configuration check.
+
 ## Release handoff
 
 Merge the ggml runtime-info dependency into `speech`, then the Fabric change;

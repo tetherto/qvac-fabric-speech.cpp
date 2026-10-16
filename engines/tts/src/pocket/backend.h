@@ -44,6 +44,15 @@ inline std::string backend_request(std::string requested) {
 
 struct BackendUnavailable : std::runtime_error { using std::runtime_error::runtime_error; };
 
+inline void validate_hexagon_packing_limit(uint64_t packing_limit, uint64_t payload_limit) {
+    // Both context allocation and graph arenas pack up to the buffer type's
+    // advertised limit. Validating each tensor cannot bound a packed buffer.
+    if (packing_limit > payload_limit)
+        throw BackendUnavailable("Pocket TTS: Hexagon packed buffer limit (" + std::to_string(packing_limit) +
+            ") exceeds the effective RPC payload cap (" + std::to_string(payload_limit) +
+            "); lower GGML_HEXAGON_MBUF before backend initialization");
+}
+
 inline HexagonRuntime hexagon_runtime(ggml_backend_t backend) {
     auto lock = lock_backend(backend);
 #if defined(GGML_HEXAGON_RUNTIME_INFO_VERSION) && GGML_HEXAGON_RUNTIME_INFO_VERSION >= 1
@@ -59,6 +68,8 @@ inline HexagonRuntime hexagon_runtime(ggml_backend_t backend) {
             info.max_batch_vmem_bytes && info.vtcm_bytes && info.session_count &&
             info.buffer_alignment && info.allocation_page_bytes &&
             !(info.allocation_page_bytes & (info.allocation_page_bytes - 1))) {
+            validate_hexagon_packing_limit(
+                ggml_backend_buft_get_max_size(ggml_backend_get_default_buffer_type(backend)), info.max_buffer_bytes);
             return {info.host_bytes_bound, info.shared_bytes, info.max_buffer_bytes, info.max_batch_vmem_bytes,
                 info.vtcm_bytes, info.tensor_guard_bytes, info.buffer_alignment, info.allocation_page_bytes,
                 info.session_count};

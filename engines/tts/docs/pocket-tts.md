@@ -147,6 +147,15 @@ attention graphs. CPU workers remain concurrent. Other Fabric engines using
 the same HTP session need application-level serialization until ggml supplies
 backend-wide protection. Different processes have separate sessions.
 
+Pocket rejects a buffer type whose packing limit exceeds the runtime's
+effective RPC payload cap, before model allocation or memory preflight. This
+also covers packed weights/state and graph arenas containing several valid
+tensors. With the current 2 GiB mapping limit and 4 KiB guard,
+`GGML_HEXAGON_MBUF=2048` or larger is incompatible; leave the 1024 MiB default
+or use at most 2047 MiB. Set this before backend initialization: the retained
+session and buffer type settings, rather than the current environment, are
+checked.
+
 Enable `TTS_CPP_POCKET_HEXAGON_TESTS=ON` with the three Pocket fixture directories
 to register explicit Hexagon FlowLM F32/F16, Mimi, fit and engine tests. These
 reuse the existing CPU tolerances and cover cached/chunked prefill, Mimi's
