@@ -882,7 +882,7 @@ on the automatic GPU, and without it the decoder runs on the CPU. Without
 The public API is `tts_cpp::moss::SpeechEngine` in
 [`include/tts-cpp/moss/speech.h`](../include/tts-cpp/moss/speech.h):
 construct with `SpeechOptions` (LM and codec paths, threads, `use_gpu`,
-`backend`, `backends_dir`) and call `respond(request, progress)` with a `SpeechRequest`
+`backends_dir`, `backend`) and call `respond(request, progress)` with a `SpeechRequest`
 that holds the conversation as `SpeechMessage`s. Each message carries either
 text or audio (PCM plus sample rate), roles are system, user, and assistant,
 and the last message must be the user's. The `SpeechResult` holds the reply

@@ -30,6 +30,10 @@ constexpr float QUANTIZED_TOLERANCE = 0.5f;
 constexpr uint64_t SMALL_CACHE_BYTES = 1024;
 constexpr uint64_t LARGE_CACHE_BYTES = 2048;
 constexpr uint64_t UNKNOWN_FREE_BYTES = 0;
+constexpr const char * OPTIONS_MODEL = "lm.gguf";
+constexpr const char * OPTIONS_CODEC = "codec.gguf";
+constexpr int OPTIONS_THREADS = 4;
+constexpr const char * OPTIONS_BACKENDS_DIR = "/plugins";
 constexpr float LOW = -10.0f;
 constexpr float HIGH = 10.0f;
 constexpr int NEVER_FAIL = -1;
@@ -414,6 +418,13 @@ void test_lm_weight_tiers() {
     std::filesystem::remove(reference_path);
 }
 
+void test_options_keep_their_field_order() {
+    const tts_cpp::moss::SpeechOptions options{OPTIONS_MODEL, OPTIONS_CODEC, OPTIONS_THREADS, false,
+                                               OPTIONS_BACKENDS_DIR};
+    check(options.backends_dir == OPTIONS_BACKENDS_DIR && options.backend.empty(),
+          "a five-field SpeechOptions initializer still sets backends_dir and leaves backend automatic");
+}
+
 void test_cache_memory_guard() {
     check_cache_memory(SMALL_CACHE_BYTES, LARGE_CACHE_BYTES);
     check_cache_memory(LARGE_CACHE_BYTES, UNKNOWN_FREE_BYTES);
@@ -746,6 +757,7 @@ int main() {
         test_lm_skips_the_text_head();
         test_lm_weight_tiers();
         test_cache_memory_guard();
+        test_options_keep_their_field_order();
         test_generation_loop();
         test_segment_arithmetic();
         test_tokenizer_encodes();
