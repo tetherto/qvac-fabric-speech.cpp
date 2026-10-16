@@ -140,6 +140,24 @@ jobs:
       - name: Build
         run: cmake --build build -j4
 
+      - name: Verify unavailable Apple runtime is reported as skipped with Torch installed
+        if: github.event_name == 'workflow_dispatch' && inputs.run_mosaic && matrix.os == 'ubuntu-24.04'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/coreml-skip-python"
+          skip_python="$RUNNER_TEMP/coreml-skip-python/bin/python"
+          "$skip_python" -m pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cpu
+          "$skip_python" -m pip install numpy==2.2.6
+          cmake -S engines/parakeet -B build -DPython3_EXECUTABLE="$skip_python"
+          ctest --test-dir build -R '^test_coreml_padding_runtime$' --verbose \
+            --no-tests=error --output-junit coreml-skip-results.xml
+          "$skip_python" - <<'PY'
+          import xml.etree.ElementTree as ET
+          tests = list(ET.parse('build/coreml-skip-results.xml').iter('testcase'))
+          if len(tests) != 1 or tests[0].find('skipped') is None:
+              raise SystemExit('Unavailable Apple runtime must be reported as skipped, never passed')
+          print('Confirmed Apple runtime coverage is skipped on Linux with Torch installed')
+          PY
+
       # Excludes gpu (no GPU on hosted runners) and perf (timing gates are
       # meaningless on shared runners). Model-dependent tests are DISABLED
       # at configure time when fixtures are absent and report as "Not Run".

@@ -1744,6 +1744,7 @@ if (PARAKEET_BUILD_TESTS)
             set_property(TEST ${padding_test} PROPERTY SKIP_REGULAR_EXPRESSION
                 "SKIP: |requires Apple Core ML runtime and coremltools")
         endforeach()
+        set_property(TEST test_coreml_padding_runtime PROPERTY SKIP_RETURN_CODE 77)
         add_test(
             NAME test-export-moss-transcribe-coreml
             COMMAND ${Python3_EXECUTABLE}

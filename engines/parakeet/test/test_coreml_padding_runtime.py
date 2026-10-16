@@ -8,6 +8,7 @@ compute-unit references, independently of FP16-versus-PyTorch numerical drift.
 import os
 import platform
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -131,4 +132,9 @@ class RuntimeTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    result = unittest.main(exit=False).result
+    # CTest must not count an unavailable Apple runtime as executed coverage.
+    # Failures take precedence if this suite grows additional cases later.
+    if not result.wasSuccessful():
+        sys.exit(1)
+    sys.exit(77 if result.testsRun == len(result.skipped) else 0)
