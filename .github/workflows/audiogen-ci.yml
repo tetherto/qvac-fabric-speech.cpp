@@ -238,6 +238,24 @@ jobs:
             exit 1
           fi
 
+      - name: Test MiniMax Core ML transformer blocks
+        run: |
+          set -euo pipefail
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-minimax-coreml
+          .venv-minimax-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-minimax-coreml/bin/python engines/audiogen/test/test_export_minimax_coreml.py
+          ./build/test-minimax-coreml --write-fixtures minimax-coreml-fixture
+          .venv-minimax-coreml/bin/python engines/audiogen/scripts/export-minimax-coreml.py \
+            --gguf minimax-coreml-fixture/mm3-lm-f16.gguf --stage lm --compile
+          .venv-minimax-coreml/bin/python engines/audiogen/scripts/export-minimax-coreml.py \
+            --gguf minimax-coreml-fixture/mm3-synth-f16.gguf --stage depth --compile
+          .venv-minimax-coreml/bin/python engines/audiogen/scripts/export-minimax-coreml.py \
+            --gguf minimax-coreml-fixture/mm3-synth-f16.gguf --stage dit --compile
+          .venv-minimax-coreml/bin/python engines/audiogen/test/prepare_minimax_coreml_fixtures.py \
+            --fixture-dir minimax-coreml-fixture
+          AUDIOGEN_TEST_MINIMAX_COREML_DIR="$PWD/minimax-coreml-fixture" ./build/test-minimax-coreml
+
       - name: Cache Core ML VAE fixture
         id: coreml-fixture-cache
         uses: actions/cache@v4

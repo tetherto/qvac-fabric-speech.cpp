@@ -1,4 +1,5 @@
 #include "minimax/backend.h"
+#include "minimax/coreml-models.h"
 #include "minimax/logic.h"
 #include "minimax/mm3-pipeline.h"
 #include "minimax/mm3-replay-io.h"
@@ -114,7 +115,9 @@ bool load_model(const CliOptions & options, MM3Model & model, std::string * erro
         *error = model.meta_errors.front();
         return false;
     }
-    return mm3_load(&model, error);
+    if (!mm3_load(&model, error)) return false;
+    tts_cpp::minimax::detail::attach_coreml_blocks(model);
+    return true;
 }
 
 struct VelocityDivergence {
@@ -291,6 +294,7 @@ int run_generation(const CliOptions & options, const MM3Model & model) {
     if (!write_ar_dumps(options, result.ar.dumps)) {
         return 1;
     }
+    tts_cpp::minimax::detail::report_coreml_predictions(model);
     report_done(result);
     return 0;
 }

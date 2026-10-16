@@ -236,6 +236,9 @@ static ggml_tensor * mm3_dit_rope(ggml_context * ctx, const MM3DitConfig & c, gg
 
 static ggml_tensor * mm3_dit_block(ggml_context * ctx, const MM3DitGraph & g, const MM3DitConfig & c,
                                    const MM3DitBlock & w, ggml_tensor * h, ggml_tensor * positions) {
+    if (auto * result = tts_cpp::minimax::detail::coreml_transformer_block(
+            ctx, nullptr, w.coreml, h, positions, nullptr, nullptr, nullptr, nullptr,
+            0, c.head_count, c.head_dim, false)) return result;
     const int64_t E  = (int64_t) c.embedding_length;
     const int64_t D  = (int64_t) c.head_dim;
     const int64_t Nh = (int64_t) c.head_count;
@@ -496,6 +499,7 @@ static bool mm3_dit_run(const MM3Model & m, MM3DitGraph * g, const float * laten
         }
         return false;
     }
+    if (!mm3_coreml_check(m.synth.dit.blk, err)) return false;
     return mm3_dit_read_branches(m, g, branches, L, err);
 }
 
