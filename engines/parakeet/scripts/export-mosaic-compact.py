@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce the default Mosaic V2 (503.7 MB) from its original archive."""
+"""Reconstruct the retained Mosaic encoder-source artifact from the original archive."""
 import argparse
 import collections
 import hashlib
@@ -29,7 +29,7 @@ def main():
     scripts=Path(__file__).resolve().parent;configs=scripts.parent/'configs'
     ap=argparse.ArgumentParser(prog="export-mosaic.py",description=__doc__)
     ap.add_argument('--archive',type=Path,required=True)
-    ap.add_argument('--output',type=Path,default=Path('models/parakeet-mosaic-v2.gguf'))
+    ap.add_argument('--output',type=Path,default=Path('models/parakeet-mosaic.encoder-source.gguf'))
     args=ap.parse_args()
     assert not args.output.exists(),'Preserve existing artifact'
     recipe_path=configs/'parakeet-mosaic-compact.recipe.json'

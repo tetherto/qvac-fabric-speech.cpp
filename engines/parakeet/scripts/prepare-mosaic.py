@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the default Mosaic V2 GGUF and matching masked Core ML sidecar."""
+"""Prepare Mosaic GGUF, optionally with a matching masked Core ML sidecar."""
 import argparse
 import hashlib
 import importlib.util
+import importlib.metadata
 import json
 from pathlib import Path
 import shutil
@@ -29,36 +30,46 @@ def save(path,value):path.write_text(json.dumps(value,indent=2)+'\n')
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     source=ap.add_mutually_exclusive_group(required=True)
-    source.add_argument('--archive',type=Path,help='Original NVIDIA .nemo; rebuild exact V2 GGUF')
-    source.add_argument('--gguf',type=Path,help='Reuse an existing exact V2 GGUF, verified by full SHA256')
-    ap.add_argument('--output-dir',type=Path,default=Path('models/mosaic-v2'))
+    source.add_argument('--archive',type=Path,help='Original NVIDIA .nemo; rebuild exact Mosaic GGUF')
+    source.add_argument('--gguf',type=Path,help='Reuse an existing exact Mosaic GGUF, verified by full SHA256')
+    ap.add_argument('--output-dir',type=Path,default=Path('models/mosaic'))
+    ap.add_argument('--coreml',action='store_true',help='Also generate the optional Apple Core ML encoder sidecar')
     args=ap.parse_args()
     if args.output_dir.exists():ap.error('Output directory exists; use a fresh directory to preserve prior artifacts')
     scripts=Path(__file__).resolve().parent
     definition=json.loads((scripts.parent/'configs/parakeet-mosaic.default.json').read_text())
     input_path=args.archive or args.gguf
     if not input_path.is_file():ap.error(f'Missing source: {input_path}')
-    if args.gguf and sha(args.gguf)!=definition['sha256']:ap.error('GGUF is not the frozen default Mosaic V2')
-    # Validate dependencies before allocating/exporting artifacts.
-    import torch
-    import numpy as np
-    import coremltools as ct
-    if torch.__version__.split('+')[0]!='2.7.0' or ct.__version__!='9.0':
-        ap.error('Use the validated exporter environment: torch==2.7.0, coremltools==9.0')
+    if args.gguf and sha(args.gguf)!=definition['sha256']:ap.error('GGUF is not the frozen default Mosaic')
+    # Native GGUF preparation works on Linux without Core ML dependencies.
+    if args.coreml:
+        if sys.platform != 'darwin':
+            ap.error('--coreml requires macOS; omit it for native GGUF deployment')
+        import torch
+        import numpy as np
+        import coremltools as ct
+        if torch.__version__.split('+')[0]!='2.7.0' or ct.__version__!='9.0':
+            ap.error('Use the validated sidecar exporter environment: torch==2.7.0, coremltools==9.0')
     out=args.output_dir;out.mkdir(parents=True,exist_ok=False)
     try:
         source_files=list(scripts.glob('*.py'))+list((scripts.parent/'configs').glob('parakeet-mosaic*json'))
-        plan={'name':'parakeet-mosaic','version':'V2','source':str(input_path.resolve()),'source_sha256':sha(input_path),
+        plan={'name':'parakeet-mosaic','version':'1','source':str(input_path.resolve()),'source_sha256':sha(input_path),
               'source_files':{str(p.relative_to(scripts.parent)):sha(p) for p in sorted(source_files)},
-              'environment':subprocess.check_output([sys.executable,'-m','pip','freeze'],text=True),
-              'graph':'Company masked512 FLOAT16 graph, no palettization; generated from exact V2 GGUF effective weights'}
+              'environment':sorted(f'{d.metadata["Name"]}=={d.version}' for d in importlib.metadata.distributions() if d.metadata.get('Name')),
+              'graph':'Optional masked512 FLOAT16 graph' if args.coreml else 'native GGML only'}
         save(out/'plan.json',plan)
-        model=out/'parakeet-mosaic-v2.gguf'
+        model=out/'parakeet-mosaic.gguf'
         if args.archive:
             with (out/'gguf-export.log').open('w') as log:
                 subprocess.run([sys.executable,str(scripts/'export-mosaic.py'),'--archive',str(args.archive),'--output',str(model)],stdout=log,stderr=subprocess.STDOUT,check=True)
         else:shutil.copy2(args.gguf,model)
         assert sha(model)==definition['sha256'] and model.stat().st_size==definition['bytes']
+        if not args.coreml:
+            save(out/'complete.json',{'returncode':0,'plan_sha256':sha(out/'plan.json'),
+                'gguf_sha256':sha(model),'shipping_bytes':model.stat().st_size,
+                'sidecar_generated':False,'scope':'Native GGUF preparation; inference validation is separate'})
+            print(f'Ready: {model}',flush=True)
+            return
         spec=importlib.util.spec_from_file_location('mosaic_coreml_exporter',scripts/'export-encoder-coreml.py')
         exporter=importlib.util.module_from_spec(spec);spec.loader.exec_module(exporter)
         ref=exporter.load_reference_encoder(scripts);weights,meta=ref.load_gguf(model)
@@ -73,9 +84,9 @@ def main():
         finally:ct.convert=original_convert
         contract={x.name:list(x.type.multiArrayType.shape) for x in mlmodel.get_spec().description.input}
         assert contract=={'mel':[128,512],'mel_valid_mask':[512]}
-        package=out/'parakeet-mosaic-v2-encoder.mlpackage';mlmodel.save(str(package))
+        package=out/'parakeet-mosaic-encoder.mlpackage';mlmodel.save(str(package))
         compiled=Path(ct.models.utils.compile_model(str(package)))
-        final=out/'parakeet-mosaic-v2-encoder.mlmodelc';shutil.move(str(compiled),final)
+        final=out/'parakeet-mosaic-encoder.mlmodelc';shutil.move(str(compiled),final)
         assert sha(package/'Data/com.apple.CoreML/weights/weight.bin')==sha(final/'weights/weight.bin')
         for name,h in plan['source_files'].items():assert sha(scripts.parent/name)==h
         save(out/'complete.json',{'returncode':0,'plan_sha256':sha(out/'plan.json'),'gguf_sha256':sha(model),

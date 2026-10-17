@@ -54,7 +54,7 @@ before selecting a format. MXFP4 failed CPU quality checks.
 
 ### Experimental Parakeet-Mosaic
 
-[Mosaic V2](engines/parakeet/docs/mosaic-compact.md) uses a frozen mixed-precision
+[Mosaic](engines/parakeet/docs/mosaic.md) uses a frozen mixed-precision
 recipe with ordinary GGML kernels. The earlier experimental
 [`parakeet-affine-v1` format](engines/parakeet/docs/backends.md#experimental-packed-affine-tdt-recipe)
 uses integer carriers, with reconstruction by default and opt-in Metal fusion

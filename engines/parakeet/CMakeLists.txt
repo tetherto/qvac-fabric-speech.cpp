@@ -577,7 +577,7 @@ if (PARAKEET_BUILD_TESTS)
     set(PARAKEET_TEST_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models"        CACHE PATH "parakeet: directory containing .gguf fixtures used by the test suite")
     set(PARAKEET_TEST_AUDIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/samples"  CACHE PATH "parakeet: directory containing .wav fixtures used by the test suite")
     set(PARAKEET_TEST_REF_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/artifacts"     CACHE PATH "parakeet: directory containing NeMo .npy reference dumps (scripts/dump-*-reference.py)")
-    set(PARAKEET_TEST_MOSAIC_DIR "${PARAKEET_TEST_MODEL_DIR}/mosaic-v2" CACHE PATH
+    set(PARAKEET_TEST_MOSAIC_DIR "${PARAKEET_TEST_MODEL_DIR}/mosaic" CACHE PATH
         "parakeet: Mosaic integration fixture root (bundle/ and audio/)")
 
     # Helper: register a built test target with CTest. Same shape as
@@ -1664,6 +1664,12 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_register_test(test-affine-profile LABEL "unit"
         ARGS "${CMAKE_CURRENT_BINARY_DIR}/test-affine-profile.gguf")
 
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-export-mosaic
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_mosaic.py")
+        set_tests_properties(test-export-mosaic PROPERTIES LABELS "unit" SKIP_REGULAR_EXPRESSION "SKIP: ")
+    endif()
+
     add_executable(test-mosaic-inference test/test_mosaic_inference.cpp)
     target_link_libraries(test-mosaic-inference PRIVATE qvac-parakeet)
     parakeet_apply_ccache(test-mosaic-inference)
@@ -1673,8 +1679,10 @@ if (PARAKEET_BUILD_TESTS)
         math(EXPR _mosaic_last "${_mosaic_count} - 1")
         foreach(_index RANGE 0 ${_mosaic_last})
             string(JSON _clip GET "${_mosaic_manifest}" clips ${_index} id)
-            foreach(_lane IN ITEMS native-cpu native-metal coreml)
+            foreach(_lane IN ITEMS native-cpu native-metal native-cuda native-hip coreml)
                 if ((_lane STREQUAL "native-metal" AND NOT APPLE) OR
+                    (_lane STREQUAL "native-cuda" AND NOT GGML_CUDA) OR
+                    (_lane STREQUAL "native-hip" AND NOT GGML_HIP) OR
                     (_lane STREQUAL "coreml" AND NOT PARAKEET_COREML))
                     continue()
                 endif()
@@ -1682,12 +1690,17 @@ if (PARAKEET_BUILD_TESTS)
                 set(_backend cpu)
                 set(_labels "fixture;mosaic;cpu")
                 set(_required
-                    "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic-v2.gguf"
+                    "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic.gguf"
                     "${PARAKEET_TEST_MOSAIC_DIR}/audio/${_clip}.wav"
                     "${PARAKEET_TEST_MOSAIC_DIR}/audio/receipt.json")
                 if (NOT _lane STREQUAL "native-cpu")
                     set(_backend MTL0)
                     set(_labels "fixture;mosaic;gpu")
+                endif()
+                if (_lane STREQUAL "native-cuda")
+                    set(_backend CUDA0)
+                elseif (_lane STREQUAL "native-hip")
+                    set(_backend ROCm0)
                 endif()
                 if (_lane STREQUAL "coreml")
                     set(_mode coreml)
@@ -1695,9 +1708,9 @@ if (PARAKEET_BUILD_TESTS)
                     list(APPEND _required
                         "${PARAKEET_TEST_MOSAIC_DIR}/bundle/complete.json"
                         "${PARAKEET_TEST_MOSAIC_DIR}/bundle/plan.json"
-                        "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic-v2-encoder.mlmodelc")
+                        "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic-encoder.mlmodelc")
                 endif()
-                set(_test "test-mosaic-v2-${_lane}-${_clip}")
+                set(_test "test-mosaic-${_lane}-${_clip}")
                 add_test(NAME ${_test} COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_mosaic_integration.py"
                     --binary "$<TARGET_FILE:test-mosaic-inference>"

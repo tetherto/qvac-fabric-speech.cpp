@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       run_mosaic:
-        description: 'Provision exact Mosaic V2 and run real CPU/Metal/Core ML integration tests'
+        description: 'Provision exact Mosaic and run real CPU/Metal/Core ML integration tests'
         type: boolean
         default: false
 
@@ -215,6 +215,8 @@ jobs:
           uv pip install --python "$MOSAIC_PYTHON" \
             torch==2.7.0 numpy==2.2.6 gguf==0.19.0 coremltools==9.0 \
             PyYAML==6.0.3 sentencepiece==0.2.0 soundfile==0.13.1 pip==25.1.1
+      - name: Check decoder export and failure guards
+        run: '"$MOSAIC_PYTHON" engines/parakeet/test/test_export_mosaic.py'
       - name: Cache exact model, sidecar and audio fixtures
         id: mosaic-cache
         uses: actions/cache@v4
@@ -222,12 +224,12 @@ jobs:
           path: |
             ${{ env.MOSAIC_FIXTURES }}/bundle
             ${{ env.MOSAIC_FIXTURES }}/audio
-          key: mosaic-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/*.py', 'engines/parakeet/configs/parakeet-mosaic*.json', 'engines/parakeet/test/mosaic-fixtures.json', 'engines/parakeet/test/prepare_mosaic_fixtures.py') }}
-      - name: Provision frozen Mosaic V2 fixtures
+          key: mosaic-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/*.py', 'engines/parakeet/configs/parakeet-mosaic*.json', 'engines/parakeet/test/mosaic-fixtures.json', 'engines/parakeet/test/prepare_mosaic_fixtures.py') }}
+      - name: Provision frozen Mosaic fixtures
         if: steps.mosaic-cache.outputs.cache-hit != 'true'
         run: |
           "$MOSAIC_PYTHON" engines/parakeet/test/prepare_mosaic_fixtures.py \
-            --fixtures "$MOSAIC_FIXTURES"
+            --fixtures "$MOSAIC_FIXTURES" --coreml
       - name: Build normal speech dependency and Mosaic harness
         run: |
           git clone --depth 1 --branch "$GGML_BRANCH" "$GGML_REPO" mosaic-ggml-src
@@ -246,7 +248,7 @@ jobs:
           cmake --build build-mosaic --target test-mosaic-inference -j4
       - name: Run all six real-model arms and reject skipped coverage
         run: |
-          ctest --test-dir build-mosaic -R '^test-mosaic-v2-' \
+          ctest --test-dir build-mosaic -R '^test-mosaic-' \
             --output-on-failure --no-tests=error --output-junit mosaic-results.xml
           "$MOSAIC_PYTHON" - <<'PY'
           import xml.etree.ElementTree as ET

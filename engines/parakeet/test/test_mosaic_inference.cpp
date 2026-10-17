@@ -33,15 +33,15 @@ static void require(bool condition, const char * message) {
 
 int main(int argc, char ** argv) {
     if (argc != 7) {
-        std::fprintf(stderr, "usage: test-mosaic-inference MODEL WAV EXPECTED SAMPLES native|coreml cpu|MTL0\n");
+        std::fprintf(stderr, "usage: test-mosaic-inference MODEL WAV EXPECTED SAMPLES native|coreml cpu|MTL0|CUDA0|ROCm0\n");
         return 1;
     }
     try {
         const std::string mode = argv[5], backend = argv[6];
         require(mode == "native" || mode == "coreml", "invalid test mode");
-        require(backend == "cpu" || backend == "MTL0", "invalid test backend");
+        require(backend == "cpu" || backend == "MTL0" || backend == "CUDA0" || backend == "ROCm0", "invalid test backend");
         const bool coreml = mode == "coreml";
-        env("PARAKEET_AFFINE_FUSED", nullptr); // Default V2 uses stock GGML blocks.
+        env("PARAKEET_AFFINE_FUSED", nullptr); // Mosaic uses stock GGML blocks.
         env("PARAKEET_COREML_DISABLE", coreml ? nullptr : "1");
         env("PARAKEET_COREML_COMPUTE_UNITS", "all");
         parakeet::EngineOptions opts;
@@ -53,7 +53,7 @@ int main(int argc, char ** argv) {
         require(engine.model_type() == "tdt", "Mosaic did not load as TDT");
         require(engine.backend_device() == (backend == "cpu" ? parakeet::BackendDevice::CPU : parakeet::BackendDevice::GPU),
                 "requested backend fell back");
-        require(backend == "cpu" ? engine.backend_name() == "CPU" : engine.backend_name().rfind("MTL", 0) == 0,
+        require(backend == "cpu" ? engine.backend_name() == "CPU" : engine.backend_name() == backend,
                 "unexpected decoder backend");
         require(engine.encoder_on_coreml() == coreml, "sidecar load/disable contract failed");
         if (coreml) require(engine.encoder_backend() == "coreml-all", "unexpected Core ML compute mode");

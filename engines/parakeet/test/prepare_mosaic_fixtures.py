@@ -23,6 +23,7 @@ def sha(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fixtures', type=Path, required=True)
+    ap.add_argument('--coreml', action='store_true', help='Also prepare the optional Apple encoder sidecar')
     args = ap.parse_args()
     root = args.fixtures.resolve()
     engine = Path(__file__).resolve().parents[1]
@@ -37,9 +38,9 @@ def main():
             target.write(block)
     if sha(archive) != expected:
         raise RuntimeError('source archive hash mismatch')
-    print('Generating exact Mosaic V2 and its matching Core ML sidecar', flush=True)
+    print('Generating exact Mosaic fixtures', flush=True)
     subprocess.run([sys.executable, str(scripts / 'prepare-mosaic.py'), '--archive', str(archive),
-                    '--output-dir', str(root / 'bundle')], check=True)
+                    '--output-dir', str(root / 'bundle')] + (['--coreml'] if args.coreml else []), check=True)
 
     import soundfile as sf
     manifest = json.loads(Path(__file__).with_name('mosaic-fixtures.json').read_text())

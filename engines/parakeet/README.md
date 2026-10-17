@@ -54,7 +54,7 @@ long-form processing for offline inputs over 90 seconds; see
 
 ## Experimental Mosaic recipes
 
-[Mosaic V2](docs/mosaic-compact.md) uses the frozen standard Q4_0/Q8_0 recipe
+[Mosaic](docs/mosaic.md) uses the frozen standard Q4_0/Q8_0 recipe
 and ordinary GGML kernels. The earlier
 [packed-affine TDT format](docs/backends.md#experimental-packed-affine-tdt-recipe)
 preserves exact integer codes and FP32 minimum/step. Reconstruction is the
