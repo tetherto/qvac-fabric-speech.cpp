@@ -48,6 +48,9 @@ def ggml_to_torch(t):
 
 def load_gguf(gguf_path):
     r = gguf.GGUFReader(str(gguf_path))
+    if "parakeet.affine.version" in r.fields:
+        raise ValueError("Packed affine carriers require the native packed engine; "
+                         "use export-packed-affine.py --dense-control for reference/Core ML export")
     tensors = {t.name: ggml_to_torch(t) for t in r.tensors}
     meta = {}
     for field in r.fields.values():

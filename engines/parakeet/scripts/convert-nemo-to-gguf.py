@@ -932,7 +932,7 @@ def detect_sortformer_variant(ckpt: Path) -> str:
 
 
 def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
-               multilingual_tok: dict, quant: str, head: str = "auto"):
+               multilingual_tok: dict, quant: str, head: str = "auto", writer_factory=None):
     model_type = detect_model_type(cfg, head)
     if model_type == "rnnt":
         validate_rnnt_contract(cfg, sd)
@@ -969,7 +969,7 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     win_length    = int(round(float(pre["window_size"]) * sample_rate))
     hop_length    = int(round(float(pre["window_stride"]) * sample_rate))
 
-    writer = gguf.GGUFWriter(str(out), arch=ARCH)
+    writer = (writer_factory or gguf.GGUFWriter)(str(out), arch=ARCH)
 
     model_name = {
         "ctc":         f"parakeet-ctc-{d_model}-{n_layers}l",

@@ -52,6 +52,19 @@ controls. Nemotron 3 Diarization supports eight speakers and uses cached
 long-form processing for offline inputs over 90 seconds; see
 [its model guide](docs/nemotron-3-diarization-port.md).
 
+## Experimental Mosaic recipes
+
+[Mosaic](docs/mosaic.md) uses the frozen standard Q4_0/Q8_0 recipe
+and ordinary GGML kernels. The earlier
+[packed-affine TDT format](docs/backends.md#experimental-packed-affine-tdt-recipe)
+preserves exact integer codes and FP32 minimum/step. Reconstruction is the
+default; `PARAKEET_AFFINE_FUSED=1` requests Metal fusion with the
+[matching GGML dependency](docs/fused-affine-metal.md#integration-and-pr-handoff).
+Unsupported fused backends and older dependency headers are rejected.
+Offline TDT is the evaluated scope; packed-affine substage profiling is not
+supported. Preserve the recipe/tensor receipts and consult the linked evidence
+before interpreting size, timing or accuracy comparisons as deployment results.
+
 ## Core ML encoder sidecars
 
 Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,
@@ -62,6 +75,11 @@ incompatible sidecars fall back to ggml. Export, placement and routing
 contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar)
 and, for MOSS-Transcribe-Diarize, in
 [docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
+
+Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
+runtime. Legacy single-input sidecars remain loadable but need re-exporting to
+isolate padding; updating runtime code alone does not fix those old artifacts.
+See the [fixed-TDT export contract](docs/backends.md#core-ml-encoder-sidecar).
 
 ## Backend selection
 

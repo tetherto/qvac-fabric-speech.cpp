@@ -12,13 +12,17 @@
 // ggml encoder on any error.
 //
 // Export contract (what the mobius `.mlmodelc` must expose so the wrapper binds):
-//   - Exactly one MLMultiArray input  = log-mel features, dims {n_mels, n_mel_frames}
+//   - Log-mel MLMultiArray input, dims {n_mels, n_mel_frames}
 //     (either order; Float16 or Float32; the wrapper adapts). This is the offline FastConformer encoder
 //     input, i.e. everything from the subsampling stack through the last Conformer
 //     block; it must NOT include a decoder joint projection. The mel time axis may be
 //     fixed or flexible. For a fixed shape, an input no longer than the declared
 //     capacity is zero-padded to that capacity. Longer inputs must be divided into
 //     windows by the caller. Flexible inputs are allocated at the requested length.
+//   - Fixed TDT exports additionally accept mel_valid_mask, a Float16/Float32
+//     vector of mel capacity: ones for the valid prefix, zeros elsewhere. The
+//     graph masks subsampling, attention keys and intermediate sequence states.
+//     Legacy single-input sidecars remain supported without padding invariance.
 //   - Exactly one MLMultiArray output = encoder hidden states, dims {n_enc_frames,
 //     d_model} (either order; Float32 or Float16). n_enc_frames is n_mel_frames put
 //     through the three stride-2 subsampling convs (matching run_encoder's sizing).
@@ -36,6 +40,9 @@
 #pragma once
 
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 #if defined(__cplusplus)
 extern "C" {
@@ -86,6 +93,19 @@ int parakeet_coreml_encode(struct parakeet_coreml_context * ctx,
                            int64_t       n_enc_frames,
                            int64_t       d_model,
                            float       * encoder_out);
+
+// Fixed TDT sidecars exported with mel_valid_mask exclude padded frames from
+// subsampling, attention and convolution. Legacy single-input sidecars return false.
+bool parakeet_coreml_masks_mel_padding(const struct parakeet_coreml_context * ctx);
+
+// valid_mel_frames is a positive contiguous prefix of the supplied mel array.
+// For mask-aware sidecars n_enc_frames must be the subsampled valid length.
+// Legacy sidecars keep their historical unmasked behavior.
+int parakeet_coreml_encode_valid(struct parakeet_coreml_context * ctx,
+                                 int64_t n_mel_frames, int64_t valid_mel_frames,
+                                 int64_t n_mels, const float * mel,
+                                 int64_t n_enc_frames, int64_t d_model,
+                                 float * encoder_out);
 
 // Sortformer v2.1 AOSC forward. `pre_encode` and `encoder_out` are both
 // row-major (n_encoder_frames, d_model). The compiled input is a fixed
