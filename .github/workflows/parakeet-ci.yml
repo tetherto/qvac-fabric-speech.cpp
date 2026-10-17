@@ -140,6 +140,19 @@ jobs:
       - name: Build
         run: cmake --build build -j4
 
+      - name: Verify bundled install and external package consumers
+        run: |
+          if [ ! -d ggml-src/.git ]; then
+            git init -q ggml-src
+            git -C ggml-src remote add origin "$GGML_REPO"
+            git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
+            git -C ggml-src checkout -q FETCH_HEAD
+          fi
+          ln -s "$PWD/ggml-src" engines/parakeet/ggml
+          PARAKEET_PKGTEST_CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_METAL=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF" \
+            bash engines/parakeet/scripts/test-package-consumption.sh \
+              --bundled --work-dir "$RUNNER_TEMP/parakeet-bundled-${{ github.run_id }}-${{ github.run_attempt }}" --keep
+
       - name: Verify unavailable Apple runtime is reported as skipped with Torch installed
         if: github.event_name == 'workflow_dispatch' && inputs.run_mosaic && matrix.os == 'ubuntu-24.04'
         run: |

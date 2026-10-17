@@ -2524,54 +2524,9 @@ if (PARAKEET_BUILD_EXAMPLES)
 endif()
 
 if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
-    # Re-install the bundled ggml targets into a `ggml-targets` export
-    # set so `install(EXPORT qvac-parakeet-targets)` can resolve the
-    # `qvac-parakeet PUBLIC ggml` link as the namespaced `ggml::ggml`.
-    # Without this, CMake refuses to generate qvac-parakeet-targets.cmake
-    # because the in-tree `ggml` target is not part of any export set.
-    # Replicates the standard
-    # `install(TARGETS ggml ggml-base EXPORT ggml-targets)` pattern
-    # that downstream ggml-based projects ship in their own CMake
-    # (e.g. llama.cpp); we add it here at the parakeet level because
-    # the upstream ggml at the pinned commit installs ggml without
-    # an EXPORT clause. The bundled ggml's hand-written
-    # ggml-config.cmake (find_library + UNKNOWN IMPORTED) still
-    # ships and is what's loaded via find_dependency(ggml) -- we
-    # don't replace it; the new ggml-targets.cmake just carries the
-    # export so CMake's cross-package reference check passes here.
-    if (NOT PARAKEET_USE_SYSTEM_GGML)
-        set(_parakeet_ggml_export_targets ggml ggml-base)
-        if (DEFINED GGML_AVAILABLE_BACKENDS)
-            list(APPEND _parakeet_ggml_export_targets ${GGML_AVAILABLE_BACKENDS})
-        endif()
-        # No PUBLIC_HEADER DESTINATION here: the bundled ggml's own
-        # `install(TARGETS ggml LIBRARY PUBLIC_HEADER)` already copies
-        # the ggml/include/*.h headers into the install tree (relative
-        # paths resolve against ggml/CMakeLists.txt's source dir). If
-        # we duplicated the PUBLIC_HEADER install here, the same
-        # relative paths would be re-resolved against the parakeet
-        # source dir and `cmake --install` would fail with
-        # "file INSTALL cannot find <root>/include/ggml.h: File exists".
-        # CMake emits a developer warning ("PUBLIC_HEADER files but no
-        # PUBLIC_HEADER DESTINATION") about the gap, which is benign
-        # here -- ggml's own rule still publishes the headers. Keep
-        # the rule minimal: we only need EXPORT + library destinations
-        # so `qvac-parakeet-targets` can resolve the namespaced
-        # `ggml::ggml` link without rebuilding the headers install.
-        install(TARGETS ${_parakeet_ggml_export_targets}
-            EXPORT ggml-targets
-            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        )
-        install(EXPORT ggml-targets
-            FILE ggml-targets.cmake
-            NAMESPACE ggml::
-            DESTINATION ${CMAKE_INSTALL_DATADIR}/ggml
-        )
-        unset(_parakeet_ggml_export_targets)
-    endif()
-
+    # Bundled qvac-ext-ggml owns ggml-targets and its ggml:: namespace.
+    # Registering those targets here as well duplicates the same export set
+    # and makes a fresh bundled build fail during CMake generation.
     # Export the parakeet target via an install(EXPORT ...) set so the
     # generated qvac-parakeet-targets.cmake carries the correct shape
     # for whatever linkage the build produced (STATIC vs SHARED, with
