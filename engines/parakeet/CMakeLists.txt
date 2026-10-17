@@ -2616,14 +2616,28 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     # imported (system) ggml we read IMPORTED_LOCATION and emit both
     # the containing -L and the real library stem; for the bundled
     # in-tree build we read OUTPUT_NAME and rely on our own ${libdir}
-    # (the re-install rule above puts ggml there). Deliberately NOT
+    # (GGML owns its install rules). Deliberately NOT
     # `Requires: ggml`: the qvac-ext-ggml@speech ggml.pc advertises an
     # unprefixed `-lggml` that no install actually produces and omits
     # ggml-base entirely, so inheriting it would under-link. Revisit
     # once that .pc is fixed upstream in the fork.
     set(_pk_pc_ggml_libs "")
     set(_pk_pc_ggml_libdirs "")
-    foreach (_pk_ggml_tgt ggml::ggml ggml::ggml-base ggml ggml-base)
+    # Static registry references require the linked backend archives too.
+    # Order wrappers before backends, and ggml-base after its dependents.
+    set(_pk_ggml_pc_targets ggml::ggml ggml)
+    foreach (_pk_backend IN LISTS GGML_AVAILABLE_BACKENDS)
+        foreach (_pk_candidate ggml::${_pk_backend} ${_pk_backend})
+            if (TARGET ${_pk_candidate})
+                get_target_property(_pk_backend_type ${_pk_candidate} TYPE)
+                if (NOT _pk_backend_type STREQUAL "MODULE_LIBRARY")
+                    list(APPEND _pk_ggml_pc_targets ${_pk_candidate})
+                endif()
+            endif()
+        endforeach()
+    endforeach()
+    list(APPEND _pk_ggml_pc_targets ggml::ggml-base ggml-base)
+    foreach (_pk_ggml_tgt IN LISTS _pk_ggml_pc_targets)
         if (NOT TARGET ${_pk_ggml_tgt})
             continue()
         endif()
@@ -2726,6 +2740,28 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
             endif()
         endforeach()
     endif()
+    # Backends may link platform frameworks (Accelerate/BLAS on Apple) or
+    # system libraries. These are not contained in the backend archive.
+    foreach (_pk_backend IN LISTS GGML_AVAILABLE_BACKENDS)
+        if (NOT TARGET ${_pk_backend})
+            continue()
+        endif()
+        get_target_property(_pk_backend_libs ${_pk_backend} LINK_LIBRARIES)
+        foreach (_pk_lib IN LISTS _pk_backend_libs)
+            if (NOT _pk_lib OR _pk_lib MATCHES "NOTFOUND$" OR
+                _pk_lib MATCHES "\\$<|::" OR TARGET "${_pk_lib}")
+                continue()
+            endif()
+            if (_pk_lib MATCHES "\\.framework$")
+                get_filename_component(_pk_framework "${_pk_lib}" NAME_WE)
+                list(APPEND _pk_pc_private "-framework ${_pk_framework}")
+            elseif (IS_ABSOLUTE "${_pk_lib}" OR _pk_lib MATCHES "^-")
+                list(APPEND _pk_pc_private "${_pk_lib}")
+            else()
+                list(APPEND _pk_pc_private "-l${_pk_lib}")
+            endif()
+        endforeach()
+    endforeach()
     if (PARAKEET_COREML)
         list(APPEND _pk_pc_private "-framework CoreML" "-framework Foundation")
     endif()
