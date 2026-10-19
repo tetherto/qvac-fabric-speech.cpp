@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder, CosyVoice3 stages and the MOSS stages (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder, CosyVoice3 stages, the Parler-TTS DAC and the MOSS stages (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -349,6 +349,7 @@ set(TTS_CPP_LIB_SOURCES
     src/parler/sampler.cpp
     src/parler/dac.cpp
     src/parler/dac_accel.cpp
+    src/parler/dac_coreml.cpp
     src/parler/engine.cpp
     # Audio8 engine (DualAR semantic LM + DAC-style codec with in-process cloning).
     src/audio8/unicode.cpp
@@ -484,7 +485,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, CosyVoice3 stages, MOSS stages")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, CosyVoice3 stages, Parler DAC, MOSS stages")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1245,6 +1246,13 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+        # Skips without torch; the TTS CI macOS lane runs it in the export venv.
+        add_test(NAME test-parler-dac-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_parler_dac_coreml.py")
+        set_property(TEST test-parler-dac-coreml-exporter PROPERTY LABELS "unit")
+        set_property(TEST test-parler-dac-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         # The GGUF helper tests (aliases, quantized counter, stem rule) need
         # only numpy; the Vocoder rebuild tests additionally need torch and
         # run in the Core ML export venv (the tts-ci macOS fixture step). A
@@ -1674,6 +1682,22 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-moss-coreml-parity LABEL "fixture"
         ARGS "${CMAKE_CURRENT_SOURCE_DIR}/test/reference-audio/jfk.wav")
     set_property(TEST test-moss-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    # Parler DAC Core ML sidecar: the retire-on-failure, strict-mode and host
+    # quantizer gates run on every build with a fake sidecar; the Core ML
+    # parity gates run when <stem>-dac.mlmodelc sits next to the model.
+    # Self-skips (77) without the model; CI drives it on the tiny fixture from
+    # test/parler/prepare_dac_coreml_fixture.py.
+    add_executable(test-parler-dac-coreml test/parler/test_dac_coreml.cpp)
+    target_link_libraries(test-parler-dac-coreml PRIVATE tts-cpp)
+    target_include_directories(test-parler-dac-coreml PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-parler-dac-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-parler-dac-coreml)
+    tts_cpp_register_test(test-parler-dac-coreml LABEL "fixture"
+        ARGS --gguf "${_tcb_parler_gguf}" --ref-dir "${_tcb_parler_ref}")
+    set_property(TEST test-parler-dac-coreml PROPERTY SKIP_RETURN_CODE 77)
 
     # Not a test: times each staged MOSS sidecar against the ggml GPU stage
     # (median of 5 after a warm-up) and prints a markdown table.
@@ -2347,14 +2371,14 @@ if (TTS_CPP_BUILD_TESTS)
     # Model-free: the DAC snake and conv routing on every build, plus the
     # Accelerate DAC kernels against naive references where they are compiled in.
     add_executable(test-parler-dac-cpu-kernels test/parler/test_dac_cpu_kernels.cpp
-        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
+        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/dac_coreml.cpp src/coreml_sidecar_path.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac-cpu-kernels PRIVATE ggml)
     target_include_directories(test-parler-dac-cpu-kernels PRIVATE ggml/include include src)
     tts_cpp_apply_ccache(test-parler-dac-cpu-kernels)
     tts_cpp_register_test(test-parler-dac-cpu-kernels LABEL "unit")
 
     add_executable(test-parler-dac test/parler/test_dac.cpp
-        src/parler/dac.cpp src/parler/dac_accel.cpp ${_tcb_parler_core_srcs})
+        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/dac_coreml.cpp src/coreml_sidecar_path.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-dac PRIVATE ggml)
     target_include_directories(test-parler-dac PRIVATE ggml/include include src)
     tts_cpp_apply_ccache(test-parler-dac)
@@ -2394,7 +2418,7 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-e2e test/parler/test_e2e.cpp
         src/parler/t5.cpp src/parler/decoder.cpp src/parler/delay.cpp
-        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
+        src/parler/dac.cpp src/parler/dac_accel.cpp src/parler/dac_coreml.cpp src/coreml_sidecar_path.cpp src/parler/sampler.cpp src/parler/tokenizer.cpp
         src/parler/bpe_tokenizer.cpp
         src/parler/text_norm.cpp src/parler/engine.cpp ${_tcb_parler_core_srcs})
     target_link_libraries(test-parler-e2e PRIVATE ggml)

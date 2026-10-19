@@ -615,6 +615,8 @@ bool parler_load_gguf_metadata_only(const std::string & path, parler_model & mod
 void parler_free_model(parler_model & model) {
     ::tts_cpp::detail::sched_fallback_free(model.sched_fb);
     if (model.dac_allocr)   { ggml_gallocr_free(model.dac_allocr); model.dac_allocr = nullptr; }
+    model.dac_sidecar.reset();
+    model.dac_rvq = {};
     if (model.buffer_dac_derived) {
         ggml_backend_buffer_free(model.buffer_dac_derived);
         model.buffer_dac_derived = nullptr;

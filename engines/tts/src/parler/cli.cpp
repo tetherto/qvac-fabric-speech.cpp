@@ -158,8 +158,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "parler-cli: backend %s\n", engine.backend_name().c_str());
         tts_cpp::parler::SynthesisResult res = engine.synthesize(text);
         write_wav(out, res.pcm, res.sample_rate);
-        fprintf(stderr, "parler-cli: wrote %s (%.2f s @ %d Hz)\n",
-                out.c_str(), res.duration_s, res.sample_rate);
+        fprintf(stderr, "parler-cli: wrote %s (%.2f s @ %d Hz, DAC on %s)\n",
+                out.c_str(), res.duration_s, res.sample_rate, res.dac_backend.c_str());
     } catch (const std::exception & e) {
         fprintf(stderr, "parler-cli: error: %s\n", e.what());
         return 1;

@@ -166,6 +166,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
     const bool is_cpu = ::tts_cpp::detail::backend_is_cpu(model.backend);
+    // the Core ML DAC sidecar next to the GGUF, as the Engine attaches it
+    // (PARLER_COREML_DISABLE=1 benchmarks the ggml DAC instead)
+    parler_attach_dac_sidecar(model, model_path);
+    std::string dac_backend = PARLER_DAC_GGML_BACKEND;
 
     parler_tokenizer tokenizer;
     if (!tokenizer.load(model.tok_pieces, model.tok_scores, model.tok_charsmap,
@@ -266,7 +270,8 @@ int main(int argc, char ** argv) {
         int n_frames = 0;
         const std::vector<int32_t> codes = st.undelay(hp.dac_codebook_size, &n_frames);
         std::vector<float> pcm;
-        if (n_frames <= 0 || !parler_dac_decode(model, codes.data(), n_frames, n_thr, pcm)) {
+        if (n_frames <= 0 || !parler_dac_decode(model, codes.data(), n_frames, n_thr, pcm,
+                                                nullptr, 0, -1, nullptr, &dac_backend)) {
             fprintf(stderr, "parler-bench: dac decode failed\n"); parler_free_model(model); return 1;
         }
         sync(); auto t4 = clk::now();
@@ -302,6 +307,7 @@ int main(int argc, char ** argv) {
     printf("  model: %s\n", model_path.c_str());
     printf("  backend: %s%s\n", ggml_backend_name(model.backend),
            is_cpu ? " (CPU)" : " (GPU)");
+    printf("  dac: %s\n", dac_backend.c_str());
     printf("  threads: %d, n_gpu_layers: %d, greedy: %s\n",
            n_thr, n_gpu_layers, greedy ? "yes" : "no");
     printf("  prompt tokens: %zu, description tokens: %zu\n",
@@ -328,6 +334,7 @@ int main(int argc, char ** argv) {
             os << "  \"model\": \"" << json_escape(model_path) << "\",\n";
             os << "  \"backend\": \"" << json_escape(ggml_backend_name(model.backend)) << "\",\n";
             os << "  \"is_cpu\": " << (is_cpu ? "true" : "false") << ",\n";
+            os << "  \"dac_backend\": \"" << json_escape(dac_backend) << "\",\n";
             os << "  \"threads\": " << n_thr << ",\n";
             os << "  \"n_gpu_layers\": " << n_gpu_layers << ",\n";
             os << "  \"greedy\": " << (greedy ? "true" : "false") << ",\n";

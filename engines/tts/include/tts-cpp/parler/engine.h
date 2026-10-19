@@ -14,6 +14,10 @@
 //
 // Streaming: the synthesize(...on_chunk) overload emits audio in chunks by
 // re-decoding the growing DAC-code prefix, holding back a right margin for seams.
+//
+// Core ML (Apple, TTS_CPP_COREML builds): when `<gguf stem>-dac.mlmodelc` sits
+// next to the GGUF, the DAC decode runs on it (the Neural Engine by default)
+// and the T5 encoder and decoder LM stay on ggml.
 
 #include "tts-cpp/backend.h"
 #include "tts-cpp/export.h"
@@ -85,6 +89,13 @@ struct SynthesisResult {
     std::vector<float> pcm;          // mono float32
     int   sample_rate = 44100;
     float duration_s  = 0.0f;
+
+    // Where this synthesis's DAC decode ran: "ggml" (on backend_name()) or the
+    // Core ML sidecar's compute label ("coreml-all", "coreml-ane", ...), or
+    // "mixed" when a streamed call's chunks ran on both. Unlike
+    // Engine::dac_on_coreml(), this is per call: a sidecar that fails is
+    // retired and the decode falls back to ggml.
+    std::string dac_backend = "ggml";
 };
 
 // Per-chunk PCM callback: consecutive float32 mono samples (engine-owned, do not
@@ -129,6 +140,11 @@ public:
     const EngineOptions & options() const;
     std::string backend_name() const;
     BackendDevice backend_device() const;
+
+    // True while the DAC decode runs on the Core ML sidecar
+    // (`<gguf stem>-dac.mlmodelc` next to the GGUF, TTS_CPP_COREML builds;
+    // see docs/parler.md). Becomes false if a failing sidecar is retired.
+    bool dac_on_coreml() const;
 
 private:
     struct Impl;

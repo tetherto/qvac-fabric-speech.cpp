@@ -165,6 +165,110 @@ Streaming is available through the `parler::Engine` callback API using
 `stream_chunk_frames` and `stream_first_chunk_frames`. Neither `parler-cli` nor
 the limited `tts-cli` Parler route exposes those controls.
 
+## Core ML DAC sidecar (Apple Neural Engine)
+
+With `TTS_CPP_COREML=ON` (Apple only), the DAC decoder can run on a Core ML
+sidecar, `<gguf stem minus quant tag>-dac.mlmodelc` next to the GGUF
+(`parler-mini-v1-q8_0.gguf` -> `parler-mini-v1-dac.mlmodelc`; one sidecar
+serves every quantization of a model, since the DAC tensors are always F32).
+The T5 encoder and the decoder LM stay on ggml (Metal or CPU); the residual
+vector quantizer runs on the host from the GGUF's codebooks. Mini and Indic
+share the DAC architecture, so one exporter serves both:
+
+```sh
+python scripts/parler/export-dac-coreml.py \
+    --gguf models/parler-mini-v1-f32.gguf --compile-dir models
+# check the rebuild first: --parity-dir artifacts/parler-ref --no-export
+```
+
+| Environment | Effect |
+|---|---|
+| `PARLER_COREML_DISABLE` | never open the sidecar (the DAC runs on ggml) |
+| `PARLER_COREML_STRICT` | a missing, unusable or failing sidecar is an error instead of a fallback |
+| `PARLER_COREML_COMPUTE_UNITS` | `all` (default), `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` |
+
+`Engine::dac_on_coreml()` reports whether the sidecar is attached;
+`SynthesisResult::dac_backend` reports where each call's DAC ran (`ggml`, the
+`coreml-*` compute label, or `mixed` across streamed chunks). `parler-cli`
+prints it after synthesis and `parler-bench` on its `dac:` line and as
+`dac_backend` in `--json-out` (the bench attaches the sidecar like the Engine;
+`PARLER_COREML_DISABLE=1` benchmarks the ggml DAC). A sidecar whose
+prediction fails is retired for the engine's lifetime and the call's whole
+range is decoded again on ggml, so no output mixes a failed call's windows;
+chunks already streamed are kept. With an enabled sidecar present,
+`parler::fit_params` returns `Error` with `coreml-memory-estimate-unavailable`
+(Core ML resident memory cannot be projected); `PARLER_COREML_DISABLE=1`
+projects the ggml DAC.
+
+How the sidecar decodes: the engine walks the utterance in fixed windows of
+the exported width (128 frames, 1.49 s, by default) with
+`parler_dac_rf_frames` (11) frames of real context on each side, exactly like
+the ggml decode, and a 0/1 frame mask marks frames past the end of the
+utterance. The exported graph zeroes the activation at masked frames after
+the input convolution, every transposed convolution and every residual sum,
+which is the zero padding a decode of the shorter sequence sees, so one
+fixed-shape graph serves short utterances and the last window. For the
+Neural Engine, sequences longer than 8192 samples are folded into rows of
+8192 (each convolution takes its halo from the neighbouring rows), every
+transposed convolution runs in its exact phase form, and each Snake computes
+`sin^2(alpha x) / alpha` as a range-reduced even polynomial with `1 / alpha`
+folded into per-channel coefficients. On the high-rate stages the Snakes,
+not the convolutions, dominate Neural Engine time: per-channel constant
+multiplies and adds fuse for free, but each tensor-by-tensor op is a full
+pass over memory (about 1 ms per 96 x 131072 fp16 activation on an M2, 1.5 ms
+for `round`), so the spelling minimises those ops. The conversions alone take
+a 256-frame window from 334 to 245 ms.
+
+Placement (`MLComputePlan`, M2, macOS 15): 491 ops on the Neural Engine, 2 on
+the CPU (0.4% of the estimated cost).
+
+Accuracy, mini `f32` GGUF, sidecar on the Neural Engine (fp16):
+
+| Check | SNR | max abs |
+|---|--:|--:|
+| random codes, 265 frames (3 windows), vs ggml CPU | 56.2 dB | 1.7e-3 |
+| random codes, 42 frames (one partial window), vs ggml CPU | 56.4 dB | 1.2e-3 |
+| `case0` greedy codes vs the HF reference waveform | 49.7 dB | 1.4e-3 |
+
+ggml's GPU DAC is held to 50 dB (or 5e-4 peak); the fp16 Neural Engine sits
+just under it, about -57 dBFS of peak error. `test-parler-dac-coreml` gates
+the sidecar at 45 dB.
+
+Speed, M2 (24 GB, macOS 15), mini `q8_0`,
+`parler-bench` greedy for 498 decoder steps (5.70 s of audio), median of 3
+warm runs, ms:
+
+| LM backend | DAC on | T5 | prefill | decode | DAC | total | RTF |
+|---|---|--:|--:|--:|--:|--:|--:|
+| Metal | ggml (Metal) | 18 | 20 | 5,052 | 1,034 | 6,126 | 1.075 |
+| Metal | Core ML (Neural Engine) | 26 | 20 | 5,048 | 639 | 5,739 | 1.007 |
+TODO_CPU_ROWS
+
+One sidecar call per window, standalone (Core ML, M2):
+
+| Window (frames) | Neural Engine | Core ML GPU |
+|--:|--:|--:|
+| 128 | 128 ms | 115 ms |
+| 192 | 194 ms | 170 ms |
+| 256 | 245 ms | 239 ms |
+| 384 | 413 ms | 340 ms |
+
+The cost is about 1 ms per window frame on either unit, so the window trades
+context overhead (22 frames per call) against the unused tail of the last
+window; 128 frames also holds a 1 s streaming chunk in one call. The Core ML
+GPU is slightly faster than the Neural Engine on an M2; `all` lets Core ML
+pick (it places the graph on the Neural Engine) and keeps the GPU free.
+TODO_STREAMING
+
+Why only the DAC: a decoder step reads about 362 M parameters (724 MB in
+fp16). A 24-layer step exported with its self-attention KV cache in an
+`MLState` landed 98% on the Neural Engine but took 13.6 ms at 64 tokens of
+context and 30.4 ms at 1024 (Core ML GPU 24.9 and 26.3 ms), against 10 ms
+for the ggml Metal `q8_0` step, and its first Neural Engine compile took
+about 45 minutes. TODO_DECODER_QUANT The T5 encoder runs once per
+description and is cached (18 ms on Metal), so a sidecar would not pay for
+its 670 MB of fp16 weights.
+
 ## Snapdragon Hexagon NPU
 
 Parler-TTS runs on the Snapdragon Hexagon NPU (HTP0; measured on a Snapdragon
