@@ -368,6 +368,18 @@ agreement against the fp32 rebuild on a 401-frame mini trace, so the faster
 6-bit probe is not a recommended quality tier. Per-channel int8 scored
 98.06%; integrated quality and speech validation remain required.
 
+A subsequent native check with 200 teacher-forced inputs on each of two mini
+cases found a quality gap in that original int8 export. With CPU f32 prefill
+and `cpu_and_ane`, live-token argmax agreement against independent HF fp32
+references was 95.80% / 96.20%, compared with 98.02% / 98.19% for q8 on CPU.
+Mean KL was 0.00238 / 0.00302, versus 0.00105 / 0.00120 for q8. There were
+no invalid distributions or repeated-call drift. This candidate fails the
+quality gate; its short-context speedup does not justify default enablement.
+These quality runs use CPU f32 prefill, distinct from the q8/Metal-prefill
+performance configuration below. See the
+[quality record](history/parler-coreml-mini-quality-20261019.json) for class
+and per-codebook metrics. Sampled speech equivalence is still unestablished.
+
 The initial per-layer-state mini export failed ANE execution-plan compilation
 with error `-14` at 13 or more decoder layers. Grouping all 24 layers into
 four state tensors lets the full graph compile and run on the ANE. Preliminary
