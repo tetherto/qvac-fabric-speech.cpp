@@ -542,16 +542,32 @@ jobs:
             decoder_status=1
           fi
           echo "::endgroup::"
-          for grouping in per-layer grouped; do
+          echo "::group::Tiny normalization execution and stability probes"
+          if ! "$py" engines/tts/test/parler/check_decoder_coreml_normalization.py \
+            --gguf parler-decoder-runtime-fixture/parler-tiny-f32.gguf \
+            --out parler-decoder-runtime-fixture/normalization; then
+            decoder_status=1
+          fi
+          echo "::endgroup::"
+          for grouping in per-layer grouped last-axis; do
             case_dir="parler-decoder-runtime-fixture/$grouping"
             mkdir -p "$case_dir"
             ln -sf ../parler-tiny-f32.gguf "$case_dir/parler-tiny-f32.gguf"
             layers_per_state=1
             if [ "$grouping" = grouped ]; then layers_per_state=0; fi
             echo "::group::Export decoder grouping=$grouping"
-            if ! "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
+            export_status=0
+            if [ "$grouping" = last-axis ]; then
+              if ! "$py" engines/tts/test/parler/check_decoder_coreml_normalization.py \
+                --gguf "$case_dir/parler-tiny-f32.gguf" --export-candidate "$case_dir"; then
+                export_status=1
+              fi
+            elif ! "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
               --gguf "$case_dir/parler-tiny-f32.gguf" --ctx 64 --cross-context 8 \
               --weights fp16 --layers-per-state "$layers_per_state" --compile-dir "$case_dir"; then
+              export_status=1
+            fi
+            if [ "$export_status" = 1 ]; then
               decoder_status=1
               echo "::endgroup::"
               continue
@@ -601,6 +617,8 @@ jobs:
             parler-decoder-runtime-fixture/parler-tiny-decoder.mlpackage
             parler-decoder-runtime-fixture/per-layer/parler-tiny-decoder.mlpackage
             parler-decoder-runtime-fixture/grouped/parler-tiny-decoder.mlpackage
+            parler-decoder-runtime-fixture/last-axis/parler-tiny-decoder.mlpackage
+            parler-decoder-runtime-fixture/normalization/*.mlpackage
           if-no-files-found: warn
 
       # Core ML Audio8 codec sidecar fixtures, converted and exported by the
