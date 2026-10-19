@@ -19,7 +19,7 @@
 //     utterances (several windows plus a partial tail, and one shorter than a
 //     window) and arbitrary sub-ranges within --min-snr of the ggml CPU decode;
 //   * with --ref-dir holding dump-reference.py's case0 fixtures, case0 against
-//     the HF wav;
+//     the HF wav (45 dB for speech; bounded absolute error for near-silence);
 //   * an Engine reports the sidecar (dac_on_coreml, dac_backend, whole and
 //     streamed) and PARLER_COREML_DISABLE keeps it on ggml;
 //   * --fallback-gguf: a sidecar whose window cannot hold its context is
@@ -89,6 +89,67 @@ double snr_db(const std::vector<float> & got, const std::vector<float> & ref, do
     }
     if (!std::isfinite(noise)) return NAN;
     return noise > 0 ? 10.0 * std::log10(sig / noise) : INFINITY;
+}
+
+// Relative SNR is ill-conditioned near silence: the Indic Hindi greedy
+// fixture is mostly DC at -78.5 dBFS. Keep speech on the relative gate and
+// bound BOTH RMS (-70 dBFS) and peak (-60 dBFS) error on quiet HF fixtures.
+// Random-code parity always uses the requested relative gate.
+struct waveform_quality {
+    double snr = NAN;
+    double peak = 0;
+    double ref_rms = 0;
+    double error_rms = 0;
+    bool quiet = false;
+    bool pass = false;
+};
+
+waveform_quality hf_quality(const std::vector<float> & pcm, const std::vector<float> & ref,
+                            double min_snr) {
+    waveform_quality q;
+    if (pcm.empty() || pcm.size() != ref.size()) return q;
+    double signal = 0, error = 0;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        if (!std::isfinite(pcm[i]) || !std::isfinite(ref[i])) return q;
+        const double d = (double) pcm[i] - ref[i];
+        signal += (double) ref[i] * ref[i];
+        error += d * d;
+        q.peak = std::max(q.peak, std::fabs(d));
+    }
+    q.ref_rms = std::sqrt(signal / ref.size());
+    q.error_rms = std::sqrt(error / ref.size());
+    q.snr = error > 0 ? 10.0 * std::log10(signal / error) : INFINITY;
+    q.quiet = q.ref_rms < 1e-3; // below -60 dBFS, based only on the reference
+    q.pass = q.quiet ? (q.error_rms <= std::pow(10.0, -70.0 / 20) && q.peak <= 1e-3)
+                     : q.snr >= min_snr;
+    return q;
+}
+
+void waveform_quality_gates() {
+    const std::vector<float> silence(100, 0.0f), speech(100, 0.1f);
+    check(hf_quality(silence, silence, 45).pass, "quiet gate: exact silence");
+    check(hf_quality(std::vector<float>(100, 1.5e-4f), silence, 45).pass,
+          "quiet gate: bounded fp16 floor");
+    check(!hf_quality(std::vector<float>(100, 4e-4f), silence, 45).pass,
+          "quiet gate: excessive RMS rejected");
+    auto spike = silence;
+    spike[0] = 2e-3f;
+    check(!hf_quality(spike, silence, 45).pass, "quiet gate: isolated peak rejected");
+    check(!hf_quality(std::vector<float>(100, 0.101f), speech, 45).pass,
+          "speech gate: relative SNR required");
+    check(hf_quality(std::vector<float>(100, 0.1001f), speech, 45).pass,
+          "speech gate: small error passes");
+    const std::vector<float> below(100, 0.000999f), above(100, 0.001001f);
+    check(hf_quality(below, below, 45).quiet && !hf_quality(above, above, 45).quiet,
+          "quiet gate: reference RMS selects the branch at -60 dBFS");
+    auto transient = silence;
+    transient[0] = 0.0079f; // low RMS, but the quiet gate must preserve this peak
+    check(!hf_quality(silence, transient, 45).pass,
+          "quiet gate: erasing a quiet reference transient fails");
+    check(!hf_quality({}, silence, 45).pass, "quiet gate: wrong length rejected");
+    spike[0] = NAN;
+    check(!hf_quality(spike, silence, 45).pass && !hf_quality(silence, spike, 45).pass,
+          "quiet gate: nonfinite PCM and reference rejected");
 }
 
 std::vector<int32_t> random_codes(const parler_hparams & hp, int n_frames, uint32_t seed) {
@@ -232,13 +293,15 @@ void coreml_gates(parler_model & model, const std::string & gguf, const std::str
         std::vector<int32_t> codes(codes_npy.n_elements());
         for (size_t i = 0; i < codes.size(); ++i) codes[i] = (int32_t) c64[i];
         std::vector<float> pcm;
-        decode(model, codes, n_frames, pcm);
+        std::string backend;
+        const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
         const float * w = npy_as_f32(wav_npy);
         const std::vector<float> want(w, w + wav_npy.n_elements());
-        double max_abs = 0;
-        const double snr = pcm.size() == want.size() ? snr_db(pcm, want, max_abs) : NAN;
-        check(snr >= min_snr, "case0 vs HF wav: SNR " + std::to_string(snr) + " dB, max_abs " +
-              std::to_string(max_abs));
+        const auto q = hf_quality(pcm, want, min_snr);
+        check(ok && backend == label && q.pass, "case0 vs HF wav (" + backend + "): SNR " + std::to_string(q.snr) +
+              " dB, max_abs " + std::to_string(q.peak) + ", ref RMS " +
+              std::to_string(q.ref_rms) + ", error RMS " + std::to_string(q.error_rms) +
+              (q.quiet ? " (quiet absolute gate)" : " (relative gate)"));
     }
 }
 
@@ -317,6 +380,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "FAIL: load %s: %s\n", gguf.c_str(), err.c_str());
         return 1;
     }
+    waveform_quality_gates();
     fake_sidecar_gates(model);
 #ifdef TTS_CPP_USE_COREML
     if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {

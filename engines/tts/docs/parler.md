@@ -176,7 +176,11 @@ vector quantizer runs on the host from the GGUF's codebooks. The sidecar is
 used whatever the `backend` option selects for the LM, as with the Audio8
 and Supertonic sidecars. The exporter reads only the GGUF's `parler.dac.*`
 geometry and `dac.*` tensors, so it applies to every Parler checkpoint; Indic
-uses the same DAC configuration as mini (TODO_INDIC):
+has the same measured DAC geometry as mini: all 116 DAC tensor shapes match,
+with latent width 1024, decoder width 1536, nine 1024-entry codebooks,
+upsampling rates `[8, 8, 4, 2]`, hop 512, 44.1 kHz output and 11 context
+frames per side. Indic speech accuracy and the quiet-waveform error floor are
+reported below:
 
 ```sh
 python scripts/parler/export-dac-coreml.py \
@@ -236,7 +240,30 @@ Accuracy, mini `f32` GGUF, sidecar on the Neural Engine (fp16):
 
 ggml's GPU DAC is held to 50 dB (or 5e-4 peak); the fp16 Neural Engine sits
 just under it, about -57 dBFS of peak error. `test-parler-dac-coreml` gates
-the sidecar at 45 dB.
+the sidecar at 45 dB for speech. For HF references below -60 dBFS RMS, it
+instead requires error RMS at or below -70 dBFS and peak error at or below
+1e-3 (-60 dBFS); both limits must pass. Random-code checks always retain
+the requested SNR gate. All waveform metrics are printed.
+
+Indic validation (M2, 24 GB, macOS 15.7.3, `f32` GGUF, fp16 sidecar,
+`CPU_AND_NE`, 128-frame windows, 2026-10-19): random-code decodes against
+ggml CPU passed at 56.16 dB (265 frames), 56.33 dB (42 frames), and
+53.35 dB (one frame); stitched sub-ranges passed at 56.16 dB. The Gujarati
+Yash greedy fixture passed against HF at 51.95 dB. Sampled Hindi Rohit speech
+(seed 42, 1.51 s, -22.8 dBFS RMS) passed at 51.34 dB in C++; sampled Gujarati
+passed at 52.23 dB in the exporter comparison.
+
+The retained Hindi greedy fixture is mostly DC plus silence (RMS 1.18e-4,
+mean 1.07e-4). It scores -1.75 dB relative SNR on the Neural Engine, with
+error RMS 1.45e-4 (-76.8 dBFS) and peak error 5.12e-4. This passes the quiet
+absolute bounds above. The error is mostly DC from fp16 rounding in the
+last Snake activation and output convolution, whose per-channel offsets
+cancel to produce silence. The same masked, windowed graph in fp32 scores
+49 dB, and ggml CPU scores 80 dB. This is a measured fp16 error floor;
+the quiet reference stays in validation alongside sampled speech. Fallback,
+strict-mode and whole/streamed Engine backend checks pass. The `cpu_only`
+override with an fp16 package scored 43.4 dB on Gujarati; it does not meet
+the 45 dB speech gate. No Indic timing results were collected.
 
 Speed, M2 (24 GB, macOS 15), mini `q8_0`,
 `parler-bench` greedy for 498 decoder steps (5.70 s of audio), median of 3
@@ -246,7 +273,9 @@ warm runs, ms:
 |---|---|--:|--:|--:|--:|--:|--:|
 | Metal | ggml (Metal) | 18 | 20 | 5,052 | 1,034 | 6,126 | 1.075 |
 | Metal | Core ML (Neural Engine) | 26 | 20 | 5,048 | 639 | 5,739 | 1.007 |
-TODO_CPU_ROWS
+
+These sidecar timing results cover the Metal LM backend; CPU LM timings
+with the sidecar were not measured.
 
 One sidecar call per window, standalone (Core ML, M2):
 
@@ -262,14 +291,22 @@ context overhead (22 frames per call) against the unused tail of the last
 window; 128 frames also holds a 1 s streaming chunk in one call. The Core ML
 GPU is slightly faster than the Neural Engine on an M2; `all` lets Core ML
 pick (it places the graph on the Neural Engine) and keeps the GPU free.
-TODO_STREAMING
+Streaming correctness is covered by the same window/range parity checks
+and whole/streamed Engine backend checks. Streaming latency was not measured.
 
 Why only the DAC: a decoder step reads about 362 M parameters (724 MB in
 fp16). A 24-layer step exported with its self-attention KV cache in an
 `MLState` landed 98% on the Neural Engine but took 13.6 ms at 64 tokens of
 context and 30.4 ms at 1024 (Core ML GPU 24.9 and 26.3 ms), against 10 ms
 for the ggml Metal `q8_0` step, and its first Neural Engine compile took
-about 45 minutes. TODO_DECODER_QUANT The T5 encoder runs once per
+about 45 minutes. A compressed-weight experiment at context 512 scored
+99.56% argmax agreement for fp16 (15.44 ms per prediction) and 96.06% for
+per-channel int8 (10.53 ms), against a teacher-forced fp32 twin. Those times
+exclude the host's whole-cache state writes and therefore underestimate
+the step cost. A 4-bit prototype took 6.26 ms at context 64 but 23.55 ms at
+1024; its quality has not been established. None of these results establishes
+a speed and quality improvement over Metal at production context lengths.
+The T5 encoder runs once per
 description and is cached (18 ms on Metal), so a sidecar would not pay for
 its 670 MB of fp16 weights.
 
