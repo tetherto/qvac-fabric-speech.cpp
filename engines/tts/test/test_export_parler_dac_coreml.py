@@ -194,6 +194,14 @@ class DacRebuildTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.exp.DacDecoder(self.t, self.hp, 32)
 
+    def test_windows_that_cannot_fold_are_rejected(self):
+        # stages of W, 2W and 8W samples against rows of 4096
+        self.exp.FOLD_ROW = 4096
+        with self.assertRaises(ValueError):
+            self.exp.DacDecoder(self.t, self.hp, 3000)   # 24000 samples: > 16384, not a row multiple
+        self.exp.DacDecoder(self.t, self.hp, 1000)       # every stage <= 16384
+        self.exp.DacDecoder(self.t, self.hp, 4096)       # every long stage folds
+
     def test_polynomial_snake_tracks_sine(self):
         latent = rand(self.rng, LATENT, 32)
         np.testing.assert_allclose(self.decode(latent, 32, mode="poly"), self.reference(latent), atol=2e-3)

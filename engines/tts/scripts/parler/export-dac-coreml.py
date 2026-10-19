@@ -67,6 +67,8 @@ HALF_SAFE_INVERSE = 6.0e4
 # max error 6.2e-5; 1 / alpha <= 8 in the Parler checkpoints)
 SIN2_POLY = (9.8672466, -32.37042703, 41.426299, -23.29808439)
 FOLD_ROW = 8192
+# Longest 1-D convolution row the Neural Engine keeps (M2, measured on Audio8)
+ANE_ROW_LIMIT = 16384
 
 
 def constant(array):
@@ -312,6 +314,12 @@ class DacDecoder(nn.Module):
             raise ValueError(f"fold rows of {FOLD_ROW} samples cannot hold a {widest}-sample convolution halo")
         self.rates = hp["rates"]
         self.window = window
+        for rate_product in np.cumprod([1] + list(self.rates)):
+            length = window * int(rate_product)
+            if FOLD_ROW and length > ANE_ROW_LIMIT and length % FOLD_ROW:
+                raise ValueError(f"a {window}-frame window leaves a {length}-sample stage that neither fits a "
+                                 f"{ANE_ROW_LIMIT}-sample row nor folds into rows of {FOLD_ROW}; use a window "
+                                 f"whose stage lengths divide by {FOLD_ROW}, e.g. a multiple of 128 frames")
         self.samples = window * hp["hop"]
         lengths = [window * int(np.prod(self.rates[:b])) for b in range(len(self.rates))]
         self.conv_in = Conv(t, "dac.dec.conv_in")

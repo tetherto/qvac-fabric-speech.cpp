@@ -173,6 +173,7 @@ struct parler_model {
     // Core ML DAC sidecar (dac_coreml.h) and the host quantizer it decodes
     // from; null on ggml. Mutable: a failing sidecar is retired mid-decode.
     mutable std::shared_ptr<parler_dac_sidecar> dac_sidecar;
+    mutable bool dac_sidecar_retired = false;  // a failure retired it (STRICT keeps failing)
     parler_dac_rvq dac_rvq;
 
     // decoder self-attention KV cache (token-major slab, one per K/V):

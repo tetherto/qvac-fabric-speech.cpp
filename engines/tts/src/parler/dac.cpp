@@ -438,13 +438,14 @@ bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_
         fprintf(stderr, "%s: Core ML DAC sidecar (%s) failed; retiring it, decoding on ggml\n",
                 __func__, model.dac_sidecar->label());
         model.dac_sidecar.reset();
-        if (parler_coreml_strict()) {
-            err = std::string("Core ML DAC sidecar failed and ") + PARLER_COREML_STRICT_ENV + " is set";
-            pcm_out.clear();
-            if (latent_out) latent_out->clear();
-            if (err_out) *err_out = err;
-            return false;
-        }
+        model.dac_sidecar_retired = true;
+    }
+    if (model.dac_sidecar_retired && parler_coreml_strict()) {
+        err = std::string("the Core ML DAC sidecar failed and ") + PARLER_COREML_STRICT_ENV + " is set";
+        pcm_out.clear();
+        if (latent_out) latent_out->clear();
+        if (err_out) *err_out = err;
+        return false;
     }
     if (backend_out) *backend_out = PARLER_DAC_GGML_BACKEND;
 

@@ -9,8 +9,8 @@
 //     and the WHOLE range is redone on ggml -- bit-identical to a ggml-only
 //     decode, nothing of the failed call's earlier windows survives -- and
 //     later calls stay on ggml;
-//   * PARLER_COREML_STRICT turns the failure into an error, and a missing
-//     sidecar into a throw at attach;
+//   * PARLER_COREML_STRICT turns the failure into an error (for later calls
+//     too), and a missing sidecar into a throw at attach;
 //   * empty ranges and out-of-range codes keep their ggml-path behaviour.
 // TTS_CPP_COREML builds with `<stem>-dac.mlmodelc` next to --gguf:
 //   * fit_params refuses the projection (coreml-memory-estimate-unavailable)
@@ -18,12 +18,16 @@
 //   * the sidecar attaches, reports a coreml-* label, and decodes whole
 //     utterances (several windows plus a partial tail, and one shorter than a
 //     window) and arbitrary sub-ranges within --min-snr of the ggml CPU decode;
-//   * with --ref-dir (dump-reference.py fixtures), case0 against the HF wav;
+//   * with --ref-dir holding dump-reference.py's case0 fixtures, case0 against
+//     the HF wav;
+//   * an Engine reports the sidecar (dac_on_coreml, dac_backend, whole and
+//     streamed) and PARLER_COREML_DISABLE keeps it on ggml;
 //   * --fallback-gguf: a sidecar whose window cannot hold its context is
 //     refused at attach (and throws under PARLER_COREML_STRICT).
 // Exit 77 (skip) without --gguf; --require-coreml fails instead of skipping
 // the Core ML gates (CI).
 
+#include "tts-cpp/parler/engine.h"
 #include "tts-cpp/parler/fit.h"
 #include "parler/internal.h"
 #include "coreml_sidecar_path.h"
@@ -154,6 +158,7 @@ void fake_sidecar_gates(parler_model & model) {
     check(!decode(model, codes, n_frames, pcm, nullptr, 0, -1, nullptr, &err) && pcm.empty() &&
           err.find(PARLER_COREML_STRICT_ENV) != std::string::npos && !model.dac_sidecar,
           "strict: sidecar failure fails the call");
+    check(!decode(model, codes, n_frames, pcm) && pcm.empty(), "strict: later calls keep failing after a retirement");
     bool threw = false;
     try {
         parler_attach_dac_sidecar(model, std::string("/nonexistent/parler-none-f32.gguf"));
@@ -162,6 +167,7 @@ void fake_sidecar_gates(parler_model & model) {
     }
     check(threw, "strict: no sidecar throws at attach");
     unsetenv(PARLER_COREML_STRICT_ENV);
+    check(decode(model, codes, n_frames, pcm) && pcm == ref, "without strict, a retired sidecar decodes on ggml");
     check(!parler_attach_dac_sidecar(model, std::string("/nonexistent/parler-none-f32.gguf")),
           "no sidecar: attach reports ggml");
 }
@@ -217,7 +223,8 @@ void coreml_gates(parler_model & model, const std::string & gguf, const std::str
     unsetenv(PARLER_COREML_DISABLE_ENV);
     check(reason != "coreml-memory-estimate-unavailable", "PARLER_COREML_DISABLE: fit projects ggml (" + reason + ")");
 
-    if (!ref_dir.empty()) {
+    if (!ref_dir.empty() && std::ifstream(ref_dir + "/case0_codes.npy").good() &&
+        std::ifstream(ref_dir + "/case0_wav_greedy.npy").good()) {
         npy_array codes_npy = npy_load(ref_dir + "/case0_codes.npy");
         npy_array wav_npy = npy_load(ref_dir + "/case0_wav_greedy.npy");
         const int n_frames = (int) codes_npy.shape[2];
@@ -232,6 +239,31 @@ void coreml_gates(parler_model & model, const std::string & gguf, const std::str
         const double snr = pcm.size() == want.size() ? snr_db(pcm, want, max_abs) : NAN;
         check(snr >= min_snr, "case0 vs HF wav: SNR " + std::to_string(snr) + " dB, max_abs " +
               std::to_string(max_abs));
+    }
+}
+
+// The public surface: an Engine on the model attaches the sidecar and reports
+// it per call, streamed or not; PARLER_COREML_DISABLE keeps it on ggml.
+void engine_gates(const std::string & gguf) {
+    fprintf(stderr, "Engine gates\n");
+    tts_cpp::parler::EngineOptions opts;
+    opts.model_gguf_path = gguf;
+    opts.default_description = "A calm voice.";
+    opts.max_frames = 40;
+    opts.stream_chunk_frames = 12;
+    for (const bool disabled : {false, true}) {
+        if (disabled) setenv(PARLER_COREML_DISABLE_ENV, "1", 1);
+        tts_cpp::parler::Engine engine(opts);
+        const auto whole = engine.synthesize("a b");
+        const auto streamed = engine.synthesize("a b", opts.default_description,
+                                                [](const float *, std::size_t, int, bool) {});
+        const std::string want = disabled ? "ggml" : "coreml-";
+        check(engine.dac_on_coreml() == !disabled &&
+              whole.dac_backend.rfind(want, 0) == 0 && streamed.dac_backend.rfind(want, 0) == 0,
+              std::string(disabled ? "disabled" : "enabled") + ": dac_on_coreml " +
+              (engine.dac_on_coreml() ? "true" : "false") + ", dac_backend " + whole.dac_backend + " / " +
+              streamed.dac_backend);
+        if (disabled) unsetenv(PARLER_COREML_DISABLE_ENV);
     }
 }
 
@@ -289,6 +321,7 @@ int main(int argc, char ** argv) {
 #ifdef TTS_CPP_USE_COREML
     if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {
         coreml_gates(model, gguf, ref_dir, min_snr);
+        engine_gates(gguf);
     } else {
         fprintf(stderr, "no sidecar next to %s: Core ML gates skipped\n", gguf.c_str());
         check(!require_coreml, "--require-coreml: sidecar present");

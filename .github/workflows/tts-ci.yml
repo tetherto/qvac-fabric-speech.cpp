@@ -450,10 +450,12 @@ jobs:
 
       # Core ML Parler DAC sidecar on a tiny random-weight Parler GGUF built
       # in place (no download): the sidecar is exported by the repo's
-      # exporter at fp32, with rows folded at 64 samples so the tiny decoder
-      # still takes the folded path, plus a second sidecar too narrow for its
-      # context that attach must refuse. --require-coreml fails the step if
-      # the Core ML gates do not run.
+      # exporter with rows folded at 64 samples so the tiny decoder still
+      # takes the folded path, plus a second sidecar too narrow for its
+      # context that attach must refuse. fp32, because untrained weights
+      # drive the Snake phase |alpha x / pi| to ~25, where fp16 resolution
+      # costs ~30 dB (the trained checkpoints stay below ~2 past the first
+      # Snake). --require-coreml fails the step if the Core ML gates skip.
       - name: Test (Core ML Parler DAC sidecar)
         if: runner.os == 'macOS'
         env:

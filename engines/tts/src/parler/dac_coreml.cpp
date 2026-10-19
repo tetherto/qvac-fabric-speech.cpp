@@ -185,6 +185,7 @@ std::shared_ptr<parler_dac_sidecar> parler_open_dac_sidecar(const std::string & 
 bool parler_attach_dac_sidecar(parler_model & model, std::shared_ptr<parler_dac_sidecar> sidecar,
                                std::string * err) {
     model.dac_sidecar.reset();
+    model.dac_sidecar_retired = false;
     if (!sidecar) return true;
     if (!parler_dac_rvq_load(model, model.dac_rvq, err)) return false;
     model.dac_sidecar = std::move(sidecar);

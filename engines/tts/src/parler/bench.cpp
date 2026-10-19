@@ -168,7 +168,13 @@ int main(int argc, char ** argv) {
     const bool is_cpu = ::tts_cpp::detail::backend_is_cpu(model.backend);
     // the Core ML DAC sidecar next to the GGUF, as the Engine attaches it
     // (PARLER_COREML_DISABLE=1 benchmarks the ggml DAC instead)
-    parler_attach_dac_sidecar(model, model_path);
+    try {
+        parler_attach_dac_sidecar(model, model_path);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "parler-bench: %s\n", e.what());
+        parler_free_model(model);
+        return 1;
+    }
     std::string dac_backend = PARLER_DAC_GGML_BACKEND;
 
     parler_tokenizer tokenizer;

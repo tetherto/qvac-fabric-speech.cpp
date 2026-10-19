@@ -172,8 +172,11 @@ sidecar, `<gguf stem minus quant tag>-dac.mlmodelc` next to the GGUF
 (`parler-mini-v1-q8_0.gguf` -> `parler-mini-v1-dac.mlmodelc`; one sidecar
 serves every quantization of a model, since the DAC tensors are always F32).
 The T5 encoder and the decoder LM stay on ggml (Metal or CPU); the residual
-vector quantizer runs on the host from the GGUF's codebooks. Mini and Indic
-share the DAC architecture, so one exporter serves both:
+vector quantizer runs on the host from the GGUF's codebooks. The sidecar is
+used whatever the `backend` option selects for the LM, as with the Audio8
+and Supertonic sidecars. The exporter reads only the GGUF's `parler.dac.*`
+geometry and `dac.*` tensors, so it applies to every Parler checkpoint; Indic
+uses the same DAC configuration as mini (TODO_INDIC):
 
 ```sh
 python scripts/parler/export-dac-coreml.py \
@@ -195,7 +198,8 @@ prints it after synthesis and `parler-bench` on its `dac:` line and as
 `PARLER_COREML_DISABLE=1` benchmarks the ggml DAC). A sidecar whose
 prediction fails is retired for the engine's lifetime and the call's whole
 range is decoded again on ggml, so no output mixes a failed call's windows;
-chunks already streamed are kept. With an enabled sidecar present,
+chunks already streamed are kept. Under `PARLER_COREML_STRICT` that call and
+every later one fail instead. With an enabled sidecar present,
 `parler::fit_params` returns `Error` with `coreml-memory-estimate-unavailable`
 (Core ML resident memory cannot be projected); `PARLER_COREML_DISABLE=1`
 projects the ggml DAC.

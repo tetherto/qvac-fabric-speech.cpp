@@ -15,9 +15,11 @@
 // Streaming: the synthesize(...on_chunk) overload emits audio in chunks by
 // re-decoding the growing DAC-code prefix, holding back a right margin for seams.
 //
-// Core ML (Apple, TTS_CPP_COREML builds): when `<gguf stem>-dac.mlmodelc` sits
-// next to the GGUF, the DAC decode runs on it (the Neural Engine by default)
-// and the T5 encoder and decoder LM stay on ggml.
+// Core ML (Apple, TTS_CPP_COREML builds): when the DAC sidecar sits next to the
+// GGUF (`parler-mini-v1-q8_0.gguf` -> `parler-mini-v1-dac.mlmodelc`, the quant
+// tag dropped), the DAC decode runs on it on the compute units Core ML picks
+// (the Neural Engine on Apple silicon), whatever the `backend` option; the T5
+// encoder and decoder LM stay on ggml.
 
 #include "tts-cpp/backend.h"
 #include "tts-cpp/export.h"
@@ -141,9 +143,9 @@ public:
     std::string backend_name() const;
     BackendDevice backend_device() const;
 
-    // True while the DAC decode runs on the Core ML sidecar
-    // (`<gguf stem>-dac.mlmodelc` next to the GGUF, TTS_CPP_COREML builds;
-    // see docs/parler.md). Becomes false if a failing sidecar is retired.
+    // True while the DAC decode runs on the Core ML sidecar (TTS_CPP_COREML
+    // builds; see the header comment and docs/parler.md). Becomes false if a
+    // failing sidecar is retired.
     bool dac_on_coreml() const;
 
 private:

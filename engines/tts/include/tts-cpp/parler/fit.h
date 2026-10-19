@@ -33,9 +33,10 @@
 // stream fallback, which bounds the fully-touched mapping from above --
 // wrong only in the strict direction.
 //
-// Core ML: when the Engine would run the DAC on its Core ML sidecar
-// (`<gguf stem>-dac.mlmodelc` next to the GGUF in a TTS_CPP_COREML build, not
-// disabled by PARLER_COREML_DISABLE), the result is Error with reason
+// Core ML: when the Engine would run the DAC on its Core ML sidecar (the
+// GGUF's name minus its quant tag plus `-dac.mlmodelc`, next to it, in a
+// TTS_CPP_COREML build, not disabled by PARLER_COREML_DISABLE), the result
+// is Error with reason
 // "coreml-memory-estimate-unavailable": resident Core ML models and their
 // prediction buffers cannot be projected by the native fitter.
 //
