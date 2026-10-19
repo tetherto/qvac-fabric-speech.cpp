@@ -412,7 +412,9 @@ def contract(model, hp, weights, gguf):
     }
 
 
-def convert_coreml(model, weights, heads_fp16, meta):
+def convert_coreml(model, weights, heads_fp16, meta, ffn_down_fp16=False):
+    if ffn_down_fp16 and weights == "fp16":
+        raise ValueError("--ffn-down-fp16 requires compressed --weights (not fp16)")
     import coremltools as ct
 
     inputs, states, outputs = io_spec(model)
@@ -430,10 +432,19 @@ def convert_coreml(model, weights, heads_fp16, meta):
         convert_to="mlprogram",
     )
     check_states_read_only(mlmodel, states)
-    mlmodel = compress(mlmodel, weights, heads_fp16, model.n_q * model.vocab)
+    down = ffn_down_projections(mlmodel, model) if ffn_down_fp16 else {}
+    if ffn_down_fp16:
+        meta = dict(meta, weights=meta["weights"] + "+fp16-ffn-down",
+                    experimental_precision={
+                        "ffn_down_fp16": True, "heads_fp16": bool(heads_fp16),
+                        "ffn_down_projections": [
+                            {"tensor": tensor, "operation": op.name, "dtype": "fp16",
+                             "shape": list(op.weight.shape)} for tensor, op in down.items()],
+                    })
+    mlmodel = compress(mlmodel, weights, heads_fp16, model.n_q * model.vocab, down)
     mlmodel.user_defined_metadata["parler.decoder.contract"] = json.dumps(meta, sort_keys=True)
     mlmodel.short_description = (f"Parler-TTS decoder step ({meta.get('variant')}), ctx {model.ctx}, "
-                                 f"cross {model.cross}, weights {weights}")
+                                 f"cross {model.cross}, weights {meta['weights'] if ffn_down_fp16 else weights}")
     return mlmodel
 
 
@@ -463,24 +474,79 @@ def head_projections(mlmodel, heads_rows):
     return heads
 
 
-def head_weight_constants(var):
+def head_weight_constants(var, option="--heads-fp16"):
     """Follow weight producers through casts, failing closed on compressed weights."""
     op = var.op
     if op is None or op.op_type.startswith("constexpr_"):
-        raise RuntimeError("--heads-fp16: head weight is constexpr quantized or has no constant producer")
+        raise RuntimeError(f"{option}: weight is constexpr quantized or has no constant producer")
     if op.op_type == "const":
         return {op.name}
     if op.op_type == "cast":
-        return head_weight_constants(op.x)
-    raise RuntimeError(f"--heads-fp16: unsupported head weight producer {op.op_type}")
+        return head_weight_constants(op.x, option)
+    raise RuntimeError(f"{option}: unsupported weight producer {op.op_type}")
 
 
-def compress(mlmodel, weights, heads_fp16, heads_rows):
+def fp16_projection_constants(op, option):
+    names = head_weight_constants(op.weight, option)
+    var = op.weight
+    while True:
+        if var.dtype.__name__ != "fp16":
+            raise RuntimeError(f"{option}: {op.name} weight/constant is not fp16")
+        if var.op.op_type == "const":
+            return names
+        var = var.op.x  # head_weight_constants already checked this cast chain
+
+
+def ffn_down_projections(mlmodel, model):
+    """Map source layers to down convs using module semantics, order and values.
+
+    MIL constant/conv names change during conversion. TorchScript module
+    scopes retain `down`; checking the fp16 source tensors in layer order
+    prevents a same-shaped unrelated projection from silently matching.
+    """
+    from coremltools.converters.mil.mil.scope import ScopeSource
+
+    convs = mlmodel._mil_program.functions["main"].find_ops(op_type="conv")
+    down = [op for op in convs
+            if op.scopes.get(ScopeSource.TORCHSCRIPT_MODULE_NAME, [])[:1] == ["down"]]
+    if len(down) != model.L or len({op.name for op in down}) != model.L:
+        raise RuntimeError(f"--ffn-down-fp16: expected exactly {model.L} unambiguous down projections, "
+                           f"found {len(down)}")
+    selected = {}
+    for layer, op in enumerate(down):
+        tensor = f"dec.blk.{layer}.ffn_down.weight"
+        source = model.layers[layer].down.weight.detach().cpu().numpy().astype(np.float16)
+        shape = (model.d, model.layers[layer].up.weight.shape[0], 1, 1)
+        scopes = op.scopes.get(ScopeSource.TORCHSCRIPT_MODULE_TYPE, [])
+        if scopes[:1] != ["Proj"] or tuple(op.weight.shape) != shape or source.shape != shape:
+            raise RuntimeError(f"--ffn-down-fp16: {tensor} has unexpected module type or shape")
+        fp16_projection_constants(op, "--ffn-down-fp16")
+        if not np.array_equal(op.weight.val, source):
+            raise RuntimeError(f"--ffn-down-fp16: {tensor} does not match its source layer")
+        selected[tensor] = op
+    return selected
+
+
+def compress(mlmodel, weights, heads_fp16, heads_rows, ffn_down=None):
+    ffn_down = ffn_down or {}
     head_names, op_names = set(), {}
     if heads_fp16:
         for head in head_projections(mlmodel, heads_rows):
             head_names.add(head.name)
             op_names.update({name: None for name in head_weight_constants(head.weight)})
+    for down in ffn_down.values():
+        op_names.update({name: None for name in fp16_projection_constants(down, "--ffn-down-fp16")})
+    if ffn_down:
+        if weights == "fp16":
+            raise ValueError("--ffn-down-fp16 requires compressed --weights (not fp16)")
+        projections = mlmodel._mil_program.functions["main"].find_ops(op_type="conv")
+        convs = {op.name: op for op in projections}
+        if len(convs) != len(projections):
+            raise RuntimeError("--ffn-down-fp16: ambiguous projection operation names")
+        selected_names = {op.name for op in ffn_down.values()}
+        retained = {name: (tuple(convs[name].weight.shape), convs[name].weight.val.copy())
+                    for name in selected_names | head_names}
+        all_head_names = {op.name for op in head_projections(mlmodel, heads_rows)}
     if weights == "fp16":
         return mlmodel
     import coremltools.optimize.coreml as cto
@@ -500,6 +566,13 @@ def compress(mlmodel, weights, heads_fp16, heads_rows):
         # uniform LUTs: seconds, where k-means on 350M weights takes hours
         op = cto.OpPalettizerConfig(mode="uniform", nbits=int(weights[3:]),
                                     granularity="per_grouped_channel", group_size=16)
+    if ffn_down:
+        # Use the compressor's own cutoff. Below-cutoff weights (including
+        # norms) stay unchanged. Heads retain their existing mode-specific
+        # behavior unless --heads-fp16 explicitly excludes them.
+        quantized_names = {name for name, projection in convs.items()
+                           if name not in (selected_names | all_head_names)
+                           and np.prod(projection.weight.shape) > op.weight_threshold}
     config = cto.OptimizationConfig(global_config=op, op_name_configs=op_names)
     if weights in ("int8", "int8-b32", "int4"):
         compressed = cto.linear_quantize_weights(mlmodel, config)
@@ -511,6 +584,24 @@ def compress(mlmodel, weights, heads_fp16, heads_rows):
             raise RuntimeError("--heads-fp16: head projection ops changed during compression")
         for head in heads:
             head_weight_constants(head.weight)
+    if ffn_down:
+        projections = compressed._mil_program.functions["main"].find_ops(op_type="conv")
+        after = {op.name: op for op in projections}
+        if len(projections) != len(convs) or set(after) != set(convs):
+            raise RuntimeError("--ffn-down-fp16: projection operations changed during compression")
+        for name in sorted(selected_names | head_names):
+            shape, value = retained[name]
+            if tuple(after[name].weight.shape) != shape:
+                raise RuntimeError(f"--ffn-down-fp16: {name} weight shape changed during compression")
+            fp16_projection_constants(after[name], "--ffn-down-fp16")
+            if not np.array_equal(after[name].weight.val, value):
+                raise RuntimeError(f"--ffn-down-fp16: {name} fp16 weight changed during compression")
+        for name in sorted(quantized_names):
+            producer = after[name].weight.op
+            while producer is not None and producer.op_type == "cast":
+                producer = producer.x.op
+            if producer is None or not producer.op_type.startswith("constexpr_"):
+                raise RuntimeError(f"--ffn-down-fp16: unselected projection {name} was not compressed")
     return compressed
 
 
@@ -622,6 +713,9 @@ def parse_args(argv=None):
                    help="weight storage: fp16, int8 per channel, experimental int8-b32 blocks, "
                         "uniform palettes (pal*), int4 blocks; block modes need placement/quality validation")
     p.add_argument("--heads-fp16", action="store_true", help="keep the nine codebook heads fp16")
+    p.add_argument("--ffn-down-fp16", action="store_true",
+                   help="experimental: keep every FFN down projection fp16 in a compressed graph; "
+                        "composes with --heads-fp16; placement, speed and quality need validation")
     p.add_argument("--layers", type=int, help="export only the first N layers (benchmarking)")
     p.add_argument("--k-layout", default="rows", choices=["rows", "cols"],
                    help="K states as [.., rows, HD]; cols is experimental and unsupported by the native runtime")
@@ -638,6 +732,10 @@ def parse_args(argv=None):
                         "(CPU_AND_NE) and the fp32 rebuild and report argmax agreement")
     p.add_argument("--no-export", action="store_true", help="only run the parity check")
     args = p.parse_args(argv)
+    if args.ffn_down_fp16 and args.weights == "fp16":
+        p.error("--ffn-down-fp16 requires compressed --weights (not fp16)")
+    if args.ffn_down_fp16 and args.no_export:
+        p.error("--ffn-down-fp16 requires export; remove --no-export")
     if args.layers is not None and args.layers <= 0:
         p.error("--layers must be positive")
     if args.layers is not None and args.parity_dir:
@@ -681,7 +779,7 @@ def main():
         f"{sidecar_stem(args.gguf)}.mlpackage")
     meta = contract(model, hp, args.weights + ("+fp16-heads" if args.heads_fp16 else ""), args.gguf)
     start = time.time()
-    mlmodel = convert_coreml(model, args.weights, args.heads_fp16, meta)
+    mlmodel = convert_coreml(model, args.weights, args.heads_fp16, meta, args.ffn_down_fp16)
     mlmodel.save(str(out))
     print(f"[export] saved {out} in {time.time() - start:.1f}s")
     if args.compile_dir:

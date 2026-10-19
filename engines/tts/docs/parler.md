@@ -395,6 +395,14 @@ to CPU q8 overall, but misses per-codebook criteria and has about three
 times the KL error of Metal q8. The unchanged strict gate fails against
 both CPU and Metal baseline pairs; default enablement is not justified.
 
+The additional experimental `--ffn-down-fp16` option retains every FFN down
+projection in fp16 and composes with `--heads-fp16`. It requires compressed
+weights, records the exact selected projections in metadata, and fails the
+export if selection or compression does not match the request. This adds
+about 96 MiB of weights for the full model; its placement, latency and
+quality require separate validation. Use a separate `--out` path when
+comparing experimental exports with an existing sidecar.
+
 An exclusive sequential mini benchmark used the same q8 GGUF, prompt,
 four threads, greedy 500-frame bound, one warmup and three measured calls.
 Every configuration produced 498 decoder steps and 5.7005 seconds of audio:

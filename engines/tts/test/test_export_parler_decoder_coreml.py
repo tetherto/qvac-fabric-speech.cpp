@@ -241,7 +241,9 @@ class DecoderStepTest(unittest.TestCase):
                    (["--layers", "-1"], "must be positive"),
                    (["--layers", "1"], "name it with --out"),
                    (["--quality-steps", "-1"], "must be nonnegative"),
-                   (["--no-export", "--parity-dir", "ref", "--quality-steps", "1"], "requires export"))
+                   (["--no-export", "--parity-dir", "ref", "--quality-steps", "1"], "requires export"),
+                   (["--ffn-down-fp16", "--weights", "fp16"], "requires compressed --weights"),
+                   (["--ffn-down-fp16", "--no-export", "--parity-dir", "ref"], "requires export"))
         for argv, message in invalid:
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()) as stderr:
                 with self.assertRaises(SystemExit) as error:
@@ -251,6 +253,19 @@ class DecoderStepTest(unittest.TestCase):
         args = self.ex.parse_args(["--gguf", "unused.gguf", "--parity-dir", "ref", "--no-export"])
         self.assertTrue(args.no_export)
 
+    def test_ffn_down_cli_composes_with_heads_for_every_compression_mode(self):
+        for weights in self.ex.WEIGHT_MODES:
+            if weights == "fp16":
+                continue
+            for heads in ([], ["--heads-fp16"]):
+                args = self.ex.parse_args(["--gguf", "unused.gguf", "--weights", weights,
+                                           "--ffn-down-fp16"] + heads)
+                self.assertTrue(args.ffn_down_fp16)
+                self.assertEqual(args.heads_fp16, bool(heads))
+        self.assertFalse(self.ex.parse_args(["--gguf", "unused.gguf"]).ffn_down_fp16)
+        with self.assertRaisesRegex(ValueError, "requires compressed --weights"):
+            self.ex.convert_coreml(None, "fp16", False, {}, ffn_down_fp16=True)
+
     def test_layers_exceeding_model_fails_before_building_decoder(self):
         args = self.ex.parse_args(["--gguf", "unused.gguf", "--layers", "3", "--out", "tiny.mlpackage"])
         with mock.patch.object(self.ex, "parse_args", return_value=args), \
@@ -259,6 +274,19 @@ class DecoderStepTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "exceeds the decoder's 2 layers"):
                 self.ex.main()
             decoder.assert_not_called()
+
+    def test_main_passes_composed_precision_options_to_conversion(self):
+        args = self.ex.parse_args(["--gguf", "unused.gguf", "--ctx", str(CTX),
+                                   "--out", "tiny.mlpackage", "--heads-fp16", "--ffn-down-fp16"])
+        with mock.patch.object(self.ex, "parse_args", return_value=args), \
+                mock.patch.object(self.ex, "read_gguf", return_value=(self.t, hparams())), \
+                mock.patch.object(self.ex, "convert_coreml") as convert, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.ex.main()
+        self.assertEqual(convert.call_args.args[1:3], ("int8", True))
+        self.assertTrue(convert.call_args.args[4])
+        self.assertEqual(convert.call_args.args[3]["weights"], "int8+fp16-heads")
+        convert.return_value.save.assert_called_once_with("tiny.mlpackage")
 
     def test_compile_failure_includes_compiler_stderr(self):
         failure = subprocess.CalledProcessError(1, ["xcrun"], stderr="specific compiler diagnostic")
@@ -375,6 +403,189 @@ class DecoderStepTest(unittest.TestCase):
             self.assertEqual(got["states"]["shapes"]["self_k_00"], [per_state, HEADS] + k_inner)
             self.assertEqual(got["states"]["shapes"]["self_v_00"], [per_state, HEADS, CTX, D // HEADS])
             self.assertEqual(got["outputs"]["new_k"], [LAYERS, HEADS, 1, D // HEADS])
+
+
+@unittest.skipUnless(HAVE_TORCH and HAVE_COREMLTOOLS, "torch/coremltools not installed")
+class FfnDownCompressionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ex = load_exporter()
+        # Every projection exceeds the compressor's 2048-element cutoff;
+        # below-threshold attention weights must not make this test vacuous.
+        tensors = tiny_tensors(np.random.default_rng(29))
+        for name, value in tensors.items():
+            repeats = (1, 2) if "lm_heads" in name else ((2, 2) if value.ndim == 2 else (2,))
+            tensors[name] = np.tile(value, repeats)
+        cls.hp = dict(hparams(), d_model=D * 2, d_ff=FF * 2)
+        cls.model = cls.ex.DecoderStep(tensors, cls.hp, CTX, CROSS, torch.float16, LAYERS).eval()
+        cls.ml = cls.ex.convert_coreml(cls.model, "fp16", False,
+                                     cls.ex.contract(cls.model, cls.hp, "fp16", None))
+
+    def convs(self, ml=None):
+        return (ml or self.ml)._mil_program.functions["main"].find_ops(op_type="conv")
+
+    def fake_model(self, convs):
+        fn = mock.Mock()
+        fn.find_ops.return_value = convs
+        return types.SimpleNamespace(_mil_program=types.SimpleNamespace(functions={"main": fn}))
+
+    def test_all_compression_modes_retain_only_requested_projections(self):
+        ex = self.ex
+        selected = ex.ffn_down_projections(self.ml, self.model)
+        self.assertEqual(list(selected), [f"dec.blk.{layer}.ffn_down.weight" for layer in range(LAYERS)])
+        self.assertEqual(len(self.convs()), LAYERS * 8 + 1)
+        for mode in ex.WEIGHT_MODES:
+            if mode == "fp16":
+                continue
+            for heads_fp16 in (False, True):
+                with self.subTest(mode=mode, heads_fp16=heads_fp16):
+                    result = ex.compress(self.ml, mode, heads_fp16, N_Q * VOCAB, selected)
+                    retained = {op.name for op in selected.values()}
+                    # The tiny head has 132 channels: palettes already leave
+                    # it uncompressed because 132 is not divisible by 16.
+                    head_retained = heads_fp16 or mode.startswith("pal")
+                    if head_retained:
+                        retained.update(op.name for op in ex.head_projections(self.ml, N_Q * VOCAB))
+                    compressed_count = 0
+                    for op in self.convs(result):
+                        self.assertEqual(op.weight.dtype.__name__, "fp16")
+                        if op.name in retained:
+                            ex.fp16_projection_constants(op, "test")
+                            original = next(c for c in self.convs() if c.name == op.name)
+                            np.testing.assert_array_equal(op.weight.val, original.weight.val)
+                        else:
+                            self.assertTrue(op.weight.op.op_type.startswith("constexpr_"), op.name)
+                            compressed_count += 1
+                    self.assertEqual(compressed_count, LAYERS * 7 + (not head_retained))
+
+    def test_default_int8_still_compresses_down_weights(self):
+        result = self.ex.compress(self.ml, "int8", True, N_Q * VOCAB)
+        for name in (op.name for op in self.ex.ffn_down_projections(self.ml, self.model).values()):
+            op = next(c for c in self.convs(result) if c.name == name)
+            self.assertTrue(op.weight.op.op_type.startswith("constexpr_"))
+        meta = json.loads(self.ml.user_defined_metadata["parler.decoder.contract"])
+        self.assertNotIn("experimental_precision", meta)
+
+    def test_selection_and_exclusions_survive_renamed_weight_producers(self):
+        # Unrelated producer names exercise source matching and exclusion by
+        # actual producers, rather than guessing layers_N_down_weight names.
+        changed = self.ex.convert_coreml(self.model, "fp16", False,
+                                        self.ex.contract(self.model, self.hp, "fp16", None))
+        selected = self.ex.ffn_down_projections(changed, self.model)
+        for index, op in enumerate(selected.values()):
+            producer = op.weight.op
+            producer.name = f"transformed_constant_{index}"
+            op.weight.name = producer.name
+        # Compression reloads the serialized spec. Re-serialize the renamed
+        # program so its spec and live MIL represent the same transformation.
+        import coremltools as ct
+        changed = ct.convert(changed._mil_program, source="milinternal", convert_to="mlprogram",
+                             minimum_deployment_target=ct.target.macOS15, skip_model_load=True)
+        selected = self.ex.ffn_down_projections(changed, self.model)
+        result = self.ex.compress(changed, "int8", True, N_Q * VOCAB, selected)
+        for op in self.convs(result):
+            if op.name in {down.name for down in selected.values()}:
+                self.assertTrue(self.ex.fp16_projection_constants(op, "test"))
+
+    def test_selection_rejects_missing_ambiguous_wrong_shape_and_wrong_layer(self):
+        ex = self.ex
+        convs = self.convs()
+        down = list(ex.ffn_down_projections(self.ml, self.model).values())
+        other = [op for op in convs if op not in down]
+        duplicate = types.SimpleNamespace(name="duplicate_down", weight=down[0].weight, scopes=down[0].scopes)
+        wrong_shape = types.SimpleNamespace(name=down[0].name, scopes=down[0].scopes,
+                                            weight=types.SimpleNamespace(shape=(D, FF, 1, 1)))
+        no_semantics = types.SimpleNamespace(name=down[0].name, scopes={}, weight=down[0].weight)
+        for projections, message in ((other + down[:1], "exactly 2"),
+                                     (convs + [duplicate], "unambiguous"),
+                                     (other + [down[0], down[0]], "unambiguous"),
+                                     (other + [no_semantics, down[1]], "exactly 2"),
+                                     (other + [wrong_shape, down[1]], "shape"),
+                                     (other + down[::-1], "source layer")):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                ex.ffn_down_projections(self.fake_model(projections), self.model)
+
+    def test_fp16_guard_checks_cast_source_constant_dtype(self):
+        from coremltools.converters.mil.mil import types as mil_types
+
+        source = types.SimpleNamespace(dtype=mil_types.fp16,
+                                       op=types.SimpleNamespace(op_type="const", name="renamed_constant"))
+        cast = types.SimpleNamespace(dtype=mil_types.fp16, op=types.SimpleNamespace(op_type="cast", x=source))
+        projection = types.SimpleNamespace(name="down_conv", weight=cast)
+        self.assertEqual(self.ex.fp16_projection_constants(projection, "--ffn-down-fp16"),
+                         {"renamed_constant"})
+        source.dtype = mil_types.fp32
+        with self.assertRaisesRegex(RuntimeError, "--ffn-down-fp16.*not fp16"):
+            self.ex.fp16_projection_constants(projection, "--ffn-down-fp16")
+
+    def test_post_compression_guards_reject_changed_precision_values_and_selection(self):
+        import coremltools.optimize.coreml as cto
+
+        ex = self.ex
+        selected = ex.ffn_down_projections(self.ml, self.model)
+        quantized = ex.compress(self.ml, "int8", False, N_Q * VOCAB)
+        # Compressing the retained down weights or skipping all compression
+        # must both fail, even if the compressor returns a valid MLModel.
+        for result, message in ((quantized, "constexpr quantized"), (self.ml, "was not compressed")):
+            with mock.patch.object(cto, "linear_quantize_weights", return_value=result), \
+                    self.assertRaisesRegex(RuntimeError, message):
+                ex.compress(self.ml, "int8", False, N_Q * VOCAB, selected)
+        duplicate = self.fake_model(self.convs(quantized) + [self.convs(quantized)[0]])
+        with mock.patch.object(cto, "linear_quantize_weights", return_value=duplicate), \
+                self.assertRaisesRegex(RuntimeError, "operations changed"):
+            ex.compress(self.ml, "int8", False, N_Q * VOCAB, selected)
+        first = next(iter(selected.values()))
+        for change, message in (({"name": "renamed_projection"}, "operations changed"),
+                                ({"shape": (1, 1, 1, 1)}, "shape changed"),
+                                ({"dtype": types.SimpleNamespace(__name__="fp32")}, "not fp16"),
+                                ({"val": first.weight.val + np.float16(1)}, "weight changed")):
+            weight = types.SimpleNamespace(shape=first.weight.shape, dtype=first.weight.dtype,
+                                           val=first.weight.val, op=first.weight.op)
+            for key, value in change.items():
+                if key != "name":
+                    setattr(weight, key, value)
+            altered = types.SimpleNamespace(name=change.get("name", first.name), weight=weight)
+            convs = [altered if op.name == first.name else op for op in self.convs(quantized)]
+            # Both retained down projections start as their original constants.
+            replacements = {op.name: op for op in selected.values() if op.name != first.name}
+            convs = [replacements.get(op.name, op) for op in convs]
+            with self.subTest(change=list(change)), \
+                    mock.patch.object(cto, "linear_quantize_weights", return_value=self.fake_model(convs)), \
+                    self.assertRaisesRegex(RuntimeError, message):
+                ex.compress(self.ml, "int8", False, N_Q * VOCAB, selected)
+
+    def test_converted_metadata_records_exact_composed_selection(self):
+        ex = self.ex
+        meta = ex.contract(self.model, self.hp, "int8+fp16-heads", "tiny-f32.gguf")
+        result = ex.convert_coreml(self.model, "int8", True, meta, ffn_down_fp16=True)
+        got = json.loads(result.user_defined_metadata["parler.decoder.contract"])
+        self.assertEqual(got["weights"], "int8+fp16-heads+fp16-ffn-down")
+        precision = got.pop("experimental_precision")
+        self.assertEqual(precision["ffn_down_fp16"], True)
+        self.assertEqual(precision["heads_fp16"], True)
+        down = precision["ffn_down_projections"]
+        self.assertEqual([p["tensor"] for p in down],
+                         [f"dec.blk.{layer}.ffn_down.weight" for layer in range(LAYERS)])
+        for layer, entry in enumerate(down):
+            op = next(c for c in self.convs(result) if c.name == entry["operation"])
+            self.assertEqual(entry["dtype"], "fp16")
+            self.assertEqual(entry["shape"], list(op.weight.shape))
+            np.testing.assert_array_equal(op.weight.val,
+                self.model.layers[layer].down.weight.detach().numpy().astype(np.float16))
+        got["weights"] = meta["weights"]
+        self.assertEqual(got, meta)  # normalization, contract, states and I/O unchanged
+        self.assertNotIn("experimental_precision", meta)  # caller metadata not mutated
+
+    def test_converted_metadata_without_head_exclusion(self):
+        ex = self.ex
+        result = ex.convert_coreml(self.model, "int8", False,
+            ex.contract(self.model, self.hp, "int8", None), ffn_down_fp16=True)
+        got = json.loads(result.user_defined_metadata["parler.decoder.contract"])
+        self.assertEqual(got["weights"], "int8+fp16-ffn-down")
+        self.assertFalse(got["experimental_precision"]["heads_fp16"])
+        self.assertEqual(len(got["experimental_precision"]["ffn_down_projections"]), LAYERS)
+        for head in ex.head_projections(result, N_Q * VOCAB):
+            self.assertTrue(head.weight.op.op_type.startswith("constexpr_"))
 
 
 if __name__ == "__main__":
