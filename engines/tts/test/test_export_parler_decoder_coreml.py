@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import pathlib
+import platform
 import subprocess
 import tempfile
 import types
@@ -162,6 +163,38 @@ class DecoderStepTest(unittest.TestCase):
     def test_grouping_must_divide_layers(self):
         with self.assertRaises(ValueError):
             self.ex.DecoderStep(self.t, hparams(), CTX, CROSS, torch.float32, 3)
+
+    @unittest.skipUnless(HAVE_COREMLTOOLS and platform.system() == "Darwin" and
+                         int(platform.mac_ver()[0].split(".")[0] or 0) >= 15,
+                         "Core ML execution requires macOS 15+")
+    def test_channel_norm_coreml_cpu_is_stable_for_random_constant_and_wide_inputs(self):
+        import coremltools as ct
+
+        rng = np.random.default_rng(813)
+        weight = (1 + rng.standard_normal(D) * 0.1).astype(np.float32)
+        bias = (rng.standard_normal(D) * 0.1).astype(np.float32)
+        norm = self.ex.ChannelNorm(weight, bias, EPS).eval()
+        traced = torch.jit.trace(norm, torch.zeros(1, D, 1, 1))
+        ml = ct.convert(traced, inputs=[ct.TensorType(name="hidden", shape=(1, D, 1, 1), dtype=np.float16)],
+                        outputs=[ct.TensorType(name="normalized", dtype=np.float16)],
+                        minimum_deployment_target=ct.target.macOS15, compute_precision=ct.precision.FLOAT16,
+                        compute_units=ct.ComputeUnit.CPU_ONLY, convert_to="mlprogram")
+        ops = ml._mil_program.functions["main"].find_ops(op_type="layer_norm")
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(list(ops[0].axes.val), [-1])
+        inputs = [(f"random-{i}", rng.standard_normal(D).astype(np.float16)) for i in range(3)]
+        inputs += [("constant-zero", np.zeros(D, np.float16)),
+                   ("constant-nonzero", np.full(D, 3.5, np.float16)),
+                   ("wide", np.tile(np.array([-1024, 1024], np.float16), D // 2))]
+        for name, value in inputs:
+            with self.subTest(input=name):
+                want = F.layer_norm(torch.from_numpy(value.astype(np.float32)), (D,),
+                                    torch.from_numpy(weight), torch.from_numpy(bias), EPS).numpy()
+                got = np.asarray(ml.predict({"hidden": value.reshape(1, D, 1, 1)})["normalized"],
+                                 dtype=np.float32).reshape(D)
+                self.assertTrue(np.isfinite(got).all())
+                np.testing.assert_allclose(got, want, atol=0.02, rtol=0)
+                print(f"Core ML CPU normalization input={name} peak={float(np.max(np.abs(got - want))):.6f}")
 
     def test_cross_kv_masks_and_refuses_overflow(self):
         ks, vs, mask = self.ex.cross_kv(self.t, hparams(), self.cross_states, CROSS)
@@ -322,13 +355,20 @@ class DecoderStepTest(unittest.TestCase):
     @unittest.skipUnless(HAVE_COREMLTOOLS, "coremltools not installed")
     def test_converted_program_reads_every_state_and_writes_none(self):
         ex = self.ex
-        for per_state, k_layout in ((1, "rows"), (LAYERS, "cols")):
+        for per_state, k_layout in ((1, "rows"), (LAYERS, "rows"), (LAYERS, "cols")):
             model = ex.DecoderStep(self.t, hparams(), CTX, CROSS, torch.float16, per_state, k_layout).eval()
             meta = ex.contract(model, hparams(), "fp16", None)
             ml = ex.convert_coreml(model, "fp16", False, meta)   # raises if a state is dropped or written
             fn = ml._mil_program.functions["main"]
             self.assertEqual(len(fn.find_ops(op_type="read_state")), 4 * LAYERS // per_state)
+            norms = fn.find_ops(op_type="layer_norm")
+            self.assertEqual(len(norms), 3 * LAYERS + 1)
+            for norm in norms:
+                self.assertEqual(list(norm.axes.val), [-1])
+                self.assertEqual(tuple(norm.x.shape), (1, 1, 1, D))
             got = json.loads(ml.user_defined_metadata["parler.decoder.contract"])
+            self.assertEqual(got["contract"], 2)
+            self.assertEqual(got["normalization"], "last-axis")
             self.assertEqual(got["states"]["layers_per_state"], per_state)
             k_inner = [CTX, D // HEADS] if k_layout == "rows" else [D // HEADS, CTX]
             self.assertEqual(got["states"]["k_layout"], k_layout)

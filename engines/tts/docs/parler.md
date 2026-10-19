@@ -318,6 +318,15 @@ GGUF. This requires a `TTS_CPP_COREML` build and macOS 15 / iOS 18. It is
 experimental: placing a decoder sidecar beside the model does not enable it
 by default. T5 description encoding and prompt prefill still run on ggml.
 
+Decoder contract 2 requires last-axis LayerNorm. Earlier experimental
+channel-axis exports collapse to their learned bias on the tested macOS 26 /
+M4 CPU path, even though the same package passes on macOS 15 / M2. Re-export
+decoder sidecars with the current script; the runtime rejects contract 1 and
+missing or incompatible normalization metadata with a re-export message.
+The last-axis recipe passes the independent tiny graph and native gates on
+both tested systems, including constant and wide-range normalization inputs.
+Full-model quality, ANE placement and speed must be rechecked after re-export.
+
 The decoder-step graph uses read-only self-attention and cross-attention
 states, optionally grouping multiple decoder layers in one state tensor with
 `--layers-per-state` (a divisor of the layer count). After ggml prefill, the runtime imports the prompt's K/V
@@ -389,7 +398,9 @@ excluding prompt/state initialization). These are decoder probe results;
 quantized speech quality remains unestablished. Keep the default ggml decoder
 for production until the quality gates are satisfied.
 
-An integrated mini benchmark on an Apple M2 with 24 GB memory used the same
+The following historical measurements use the contract 1 export on M2;
+contract 2 must be measured separately. The integrated mini benchmark used
+an Apple M2 with 24 GB memory and the same
 q8_0 GGUF, four CPU threads, greedy generation capped at 500 frames, one
 warmup and three measured runs. Every run produced 498 decoder steps and
 5.7005 seconds of audio. Median warm synthesis times, including T5, prefill,

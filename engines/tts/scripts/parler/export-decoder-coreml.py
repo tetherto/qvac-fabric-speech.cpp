@@ -77,7 +77,7 @@ import torch.nn.functional as F
 ARCH = "parler"
 QUANT_TAGS = ("f32", "f16", "bf16", "q8_0", "q5_0", "q4_0")
 SIDECAR_SUFFIX = "-decoder"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 # additive mask for switched-off rows; fp16-safe, exp(MASK_OFF - max) == 0
 MASK_OFF = -3.0e4
 DEFAULT_CTX = 1024
@@ -159,19 +159,22 @@ class Proj(nn.Module):
 
 
 class ChannelNorm(nn.Module):
-    """LayerNorm over the channel axis of [1, C, 1, 1]."""
+    """Channel LayerNorm via a stable last-axis Core ML operation."""
 
     def __init__(self, weight, bias, eps):
         super().__init__()
-        self.weight = constant(np.asarray(weight).reshape(1, -1, 1, 1))
-        self.bias = constant(np.asarray(bias).reshape(1, -1, 1, 1))
+        self.channels = int(np.asarray(weight).size)
+        self.weight = constant(np.asarray(weight).reshape(-1))
+        self.bias = constant(np.asarray(bias).reshape(-1))
         self.eps = eps
 
     def forward(self, x):
-        mean = x.mean(1, keepdim=True)
-        centred = x - mean
-        var = (centred * centred).mean(1, keepdim=True)
-        return centred * torch.rsqrt(var + self.eps) * self.weight + self.bias
+        # Batch/token dimensions are fixed at one, so these reshapes move no
+        # data. Channel-axis arithmetic is mis-fused on macOS 26; LayerNorm on
+        # the last axis also avoids overflowing an explicit fp16 variance.
+        y = F.layer_norm(x.reshape(1, 1, 1, self.channels), (self.channels,),
+                         self.weight, self.bias, self.eps)
+        return y.reshape(1, self.channels, 1, 1)
 
 
 class Layer(nn.Module):
@@ -387,6 +390,7 @@ def contract(model, hp, weights, gguf):
     return {
         "contract": CONTRACT_VERSION,
         "kind": "parler-decoder-step",
+        "normalization": "last-axis",
         "gguf": Path(gguf).name if gguf else None,
         "variant": hp.get("variant"),
         "n_layer": model.L, "d_model": model.d, "n_head": model.h, "head_dim": model.hd,

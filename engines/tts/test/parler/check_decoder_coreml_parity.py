@@ -82,14 +82,11 @@ def run_case(exporter, package, tensors, hp, units, tolerance):
     hidden_rows = [rng.standard_normal(hp["d_model"]).astype(np.float16).astype(np.float32)
                    for _ in range(3)]
     weights = {name: torch.from_numpy(value.copy()) for name, value in tensors.items()}
-    beta_logits = np.stack([tensors[f"dec.lm_heads.{q}.weight"] @ tensors["dec.output_norm.bias"]
-                            for q in range(hp["n_q"])])
     passed = True
     for repeat in range(2):
         state = model.make_state()
         host = {kind: a.copy() for kind, a in initial.items()}
         reference = {kind: torch.from_numpy(a.copy()) for kind, a in initial.items()}
-        previous = None
         for kind, a in host.items():
             for g in range(layers // group):
                 state.write_state(exporter.state_name(kind, g), a[g * group:(g + 1) * group])
@@ -107,11 +104,7 @@ def run_case(exporter, package, tensors, hp, units, tolerance):
                 errors[name] = peak
                 passed &= peak < tolerance
             print(f"{label} repeat={repeat} step={step} " +
-                  " ".join(f"{name}={value:.6f}" for name, value in errors.items()) +
-                  f" beta_logits_error={float(np.max(np.abs(actual['logits'] - beta_logits))):.6f}" +
-                  (" " + " ".join(f"{name}_change={float(np.max(np.abs(np.asarray(actual[name], np.float32) - previous[name]))):.6f}"
-                                    for name in errors) if previous is not None else ""), flush=True)
-            previous = {name: np.asarray(actual[name], np.float32).copy() for name in errors}
+                  " ".join(f"{name}={value:.6f}" for name, value in errors.items()), flush=True)
             for kind, output in (("self_k", "new_k"), ("self_v", "new_v")):
                 host[kind][:, :, past:past + 1] = actual[output]
                 # Each path advances its own fp16 cache, as the native engine does.

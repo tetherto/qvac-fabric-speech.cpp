@@ -17,8 +17,10 @@ bool parler_validate_decoder_contract(const std::string & metadata, const parler
     error.clear();
     try {
         const auto m = nlohmann::json::parse(metadata);
-        if (m.at("contract") != 1 || m.at("kind") != "parler-decoder-step") {
-            error = "unsupported decoder sidecar contract version or kind";
+        if (m.at("contract") != 2 || m.at("kind") != "parler-decoder-step") {
+            error = "unsupported decoder sidecar contract; re-export with the current exporter (contract 2 required)";
+        } else if (m.at("normalization") != "last-axis") {
+            error = "decoder sidecar requires last-axis normalization; re-export with the current exporter";
         } else if (m.at("states").at("k_layout") != "rows") {
             error = "decoder sidecar requires k_layout=rows; cols is experimental and unsupported by this runtime";
         } else if (m.at("mask_off") != -30000.0) {
@@ -33,7 +35,7 @@ bool parler_validate_decoder_contract(const std::string & metadata, const parler
             error = "decoder sidecar checkpoint variant does not match the GGUF";
         }
     } catch (const std::exception & e) {
-        error = std::string("missing or invalid parler.decoder.contract metadata: ") + e.what();
+        error = std::string("missing or invalid parler.decoder.contract metadata; re-export with the current exporter: ") + e.what();
     }
     return error.empty();
 }

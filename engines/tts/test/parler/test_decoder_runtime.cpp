@@ -66,13 +66,26 @@ int main(int argc, char ** argv) {
     auto allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
     const auto & hp = model.hparams;
     auto contract = nlohmann::json{
-        {"contract", 1}, {"kind", "parler-decoder-step"}, {"mask_off", -30000},
+        {"contract", 2}, {"kind", "parler-decoder-step"}, {"normalization", "last-axis"}, {"mask_off", -30000},
         {"variant", hp.variant}, {"n_layer", hp.dec_n_layer}, {"d_model", hp.dec_d_model},
         {"n_head", hp.dec_n_head}, {"head_dim", hp.dec_d_model / hp.dec_n_head},
         {"n_q", hp.n_codebooks}, {"vocab", hp.dec_vocab}, {"ctx", 64}, {"cross_context", 8},
         {"states", {{"k_layout", "rows"}, {"layers_per_state", 1}}}};
     check(parler_validate_decoder_contract(contract.dump(), hp, 64, 8, 1, error), "supported decoder contract");
     check(!parler_validate_decoder_contract("", hp, 64, 8, 1, error), "missing contract rejected");
+    auto legacy_contract = contract;
+    legacy_contract["contract"] = 1;
+    legacy_contract.erase("normalization");
+    check(!parler_validate_decoder_contract(legacy_contract.dump(), hp, 64, 8, 1, error) &&
+          error.find("re-export") != std::string::npos, "old channel-axis export requires re-export");
+    auto unsafe_contract = contract;
+    unsafe_contract["normalization"] = "channel-axis";
+    check(!parler_validate_decoder_contract(unsafe_contract.dump(), hp, 64, 8, 1, error) &&
+          error.find("last-axis") != std::string::npos, "unsupported normalization recipe rejected");
+    unsafe_contract.erase("normalization");
+    check(!parler_validate_decoder_contract(unsafe_contract.dump(), hp, 64, 8, 1, error) &&
+          error.find("re-export") != std::string::npos,
+          "missing normalization recipe rejected");
     for (const auto * key : {"contract", "mask_off", "n_layer", "d_model", "n_head", "head_dim", "n_q", "vocab", "ctx", "cross_context"}) {
         auto bad = contract;
         bad[key] = -7;

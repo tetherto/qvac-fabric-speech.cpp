@@ -518,56 +518,19 @@ jobs:
           "$py" engines/tts/test/test_export_parler_decoder_coreml.py
           "$py" engines/tts/test/test_validate_parler_decoder_coreml.py
           "$py" engines/tts/test/test_parler_decoder_validation_bridge.py
-          # Diagnose compiled graph inference separately from native cache
-          # import/provider/row writes. Run the whole matrix before failing so
-          # a CPU_ONLY or grouped-state failure cannot hide the other cases.
+          # Validate production exports with both supported state groupings.
+          # Run all graph/native cases before reporting any parity failure.
           decoder_status=0
-          # Preserve the original failing flat-path case before graph parity
-          # warms any package, so changing folders/symlinks cannot hide it.
-          echo "::group::Original flat-path decoder parity"
-          if "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
-            --gguf parler-decoder-runtime-fixture/parler-tiny-f32.gguf \
-            --ctx 64 --cross-context 8 --weights fp16 --compile-dir parler-decoder-runtime-fixture; then
-            for attention in fa manual; do
-              if [ "$attention" = manual ]; then export PARLER_NO_FA=1; else unset PARLER_NO_FA; fi
-              if ! PARLER_COREML_COMPUTE_UNITS=cpu_only ./build/test-parler-decoder-runtime \
-                parler-decoder-runtime-fixture/parler-tiny-f32.gguf --coreml; then
-                decoder_status=1
-                echo "FAIL original flat-path attention=$attention"
-              else
-                echo "PASS original flat-path attention=$attention"
-              fi
-            done
-          else
-            decoder_status=1
-          fi
-          echo "::endgroup::"
-          echo "::group::Tiny normalization execution and stability probes"
-          if ! "$py" engines/tts/test/parler/check_decoder_coreml_normalization.py \
-            --gguf parler-decoder-runtime-fixture/parler-tiny-f32.gguf \
-            --out parler-decoder-runtime-fixture/normalization; then
-            decoder_status=1
-          fi
-          echo "::endgroup::"
-          for grouping in per-layer grouped last-axis; do
+          for grouping in per-layer grouped; do
             case_dir="parler-decoder-runtime-fixture/$grouping"
             mkdir -p "$case_dir"
             ln -sf ../parler-tiny-f32.gguf "$case_dir/parler-tiny-f32.gguf"
             layers_per_state=1
             if [ "$grouping" = grouped ]; then layers_per_state=0; fi
             echo "::group::Export decoder grouping=$grouping"
-            export_status=0
-            if [ "$grouping" = last-axis ]; then
-              if ! "$py" engines/tts/test/parler/check_decoder_coreml_normalization.py \
-                --gguf "$case_dir/parler-tiny-f32.gguf" --export-candidate "$case_dir"; then
-                export_status=1
-              fi
-            elif ! "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
+            if ! "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
               --gguf "$case_dir/parler-tiny-f32.gguf" --ctx 64 --cross-context 8 \
               --weights fp16 --layers-per-state "$layers_per_state" --compile-dir "$case_dir"; then
-              export_status=1
-            fi
-            if [ "$export_status" = 1 ]; then
               decoder_status=1
               echo "::endgroup::"
               continue
@@ -614,11 +577,8 @@ jobs:
           name: parler-decoder-runtime-synthetic
           path: |
             parler-decoder-runtime-fixture/parler-tiny-f32.gguf
-            parler-decoder-runtime-fixture/parler-tiny-decoder.mlpackage
             parler-decoder-runtime-fixture/per-layer/parler-tiny-decoder.mlpackage
             parler-decoder-runtime-fixture/grouped/parler-tiny-decoder.mlpackage
-            parler-decoder-runtime-fixture/last-axis/parler-tiny-decoder.mlpackage
-            parler-decoder-runtime-fixture/normalization/*.mlpackage
           if-no-files-found: warn
 
       # Core ML Audio8 codec sidecar fixtures, converted and exported by the

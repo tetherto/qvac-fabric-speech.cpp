@@ -14,7 +14,8 @@ struct parler_model;
 struct parler_hparams;
 struct parler_step_logits;
 
-// Validate version, layout, mask and geometry before interpreting native state.
+// Validate contract 2, last-axis normalization, layout, mask and geometry
+// before interpreting native state. Older channel-axis exports need re-export.
 bool parler_validate_decoder_contract(const std::string & metadata, const parler_hparams & hp,
                                      int context, int cross, int per_state, std::string & error);
 
