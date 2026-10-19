@@ -7,15 +7,17 @@
 //   4. DAC codec decode -> PCM
 //
 // Reports min / median / mean / p95 / max across --runs iterations (after
-// --warmup dropped runs), plus RTF (total / audio). Greedy by default so
-// CPU vs GPU do identical, deterministic work; set --max-frames for a bounded,
-// reproducible run (greedy does not emit natural EOS). Unlike the Engine, this
-// keeps argmax: it measures throughput, and the audio it makes is degenerate.
+// --warmup dropped runs), plus RTF (total / audio). Greedy is deterministic
+// per configuration but can emit EOS, so backends may do different work.
+// For bounded throughput runs, --min-new-tokens N with --max-frames N
+// suppresses EOS until the length bound; still compare reported step/audio
+// lengths. Unlike the Engine, this keeps argmax: it measures throughput, and
+// the audio it makes is degenerate, not a speech-quality measurement.
 //
 // Usage:
 //   ./parler-bench --model parler-indic-q8_0.gguf --text "..." \
 //       [--description DESC] [--n-gpu-layers N] [--backend NAME] [--threads N] \
-//       [--max-frames N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
+//       [--max-frames N] [--min-new-tokens N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
 
 #include "internal.h"
 #include "decoder_runtime.h"
@@ -59,6 +61,8 @@ void usage(const char * argv0) {
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
         "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--threads N] [--max-frames N] (decoder steps; ~86/s audio)\n"
+        "          [--min-new-tokens N] (-1 = model default; >=0 overrides EOS suppression)\n"
+        "          For bounded throughput, use --min-new-tokens N with --max-frames N; not a quality test.\n"
         "          [--coreml-decoder] (experimental Core ML decoder steps)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
         "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
@@ -126,6 +130,7 @@ int main(int argc, char ** argv) {
     int n_gpu_layers = 0;
     int n_threads = 0;   // 0 => all hardware cores
     int max_frames = 0;  // 0 => GGUF default (~2580)
+    int min_new_tokens = -1;  // -1 => GGUF default
     int seed = 42;
     int runs = 5;
     int warmup = 1;
@@ -145,6 +150,7 @@ int main(int argc, char ** argv) {
         else if (a == "--backend")      backend     = next("--backend");
         else if (a == "--threads")      n_threads   = std::stoi(next("--threads"));
         else if (a == "--max-frames")   max_frames  = std::stoi(next("--max-frames"));
+        else if (a == "--min-new-tokens") min_new_tokens = std::stoi(next("--min-new-tokens"));
         else if (a == "--seed")         seed        = std::stoi(next("--seed"));
         else if (a == "--runs")         runs        = std::stoi(next("--runs"));
         else if (a == "--warmup")       warmup      = std::stoi(next("--warmup"));
@@ -154,6 +160,10 @@ int main(int argc, char ** argv) {
         else if (a == "--json-out")     json_out    = next("--json-out");
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+    if (min_new_tokens < -1) {
+        fprintf(stderr, "--min-new-tokens must be -1 (model default) or nonnegative\n");
+        return 2;
     }
     if (runs <= 0 || warmup < 0 || warmup > std::numeric_limits<int>::max() - runs) {
         fprintf(stderr, "--runs must be positive and --warmup nonnegative (without overflow)\n");
@@ -209,6 +219,8 @@ int main(int argc, char ** argv) {
     }
 
     const parler_hparams & hp = model.hparams;
+    const int effective_max_length = max_frames > 0 ? std::min(max_frames, hp.gen_max_length) : hp.gen_max_length;
+    const int effective_min_new_tokens = min_new_tokens >= 0 ? min_new_tokens : hp.gen_min_new_tokens;
     const std::string spoken = model.has_prompt_tok ? normalize_numbers_indic(text)
                                                      : normalize_numbers_en(text);
     const std::vector<int32_t> prompt_ids = model.has_prompt_tok
@@ -253,9 +265,8 @@ int main(int argc, char ** argv) {
         dcfg.bos_id = hp.bos_id;
         dcfg.eos_id = hp.eos_id;
         dcfg.pad_id = hp.pad_id;
-        dcfg.max_length = hp.gen_max_length;
-        if (max_frames > 0 && max_frames < dcfg.max_length) dcfg.max_length = max_frames;
-        dcfg.min_new_tokens = hp.gen_min_new_tokens;
+        dcfg.max_length = effective_max_length;
+        dcfg.min_new_tokens = effective_min_new_tokens;
         delay_state st(dcfg);
         std::mt19937 rng((uint32_t) seed);
 
@@ -339,6 +350,8 @@ int main(int argc, char ** argv) {
     printf("  decoder: %s (ggml prefill)\n", decoder_label.c_str());
     printf("  threads: %d, n_gpu_layers: %d, greedy: %s\n",
            n_thr, n_gpu_layers, greedy ? "yes" : "no");
+    printf("  effective generation: min_new_tokens=%d, max_length=%d\n",
+           effective_min_new_tokens, effective_max_length);
     printf("  prompt tokens: %zu, description tokens: %zu\n",
            prompt_ids.size(), desc_ids.size());
     printf("  audio per run: %.3fs @ %d Hz (%d decode steps)\n",
@@ -368,6 +381,8 @@ int main(int argc, char ** argv) {
             os << "  \"threads\": " << n_thr << ",\n";
             os << "  \"n_gpu_layers\": " << n_gpu_layers << ",\n";
             os << "  \"greedy\": " << (greedy ? "true" : "false") << ",\n";
+            os << "  \"min_new_tokens\": " << effective_min_new_tokens << ",\n";
+            os << "  \"max_length\": " << effective_max_length << ",\n";
             os << "  \"audio_s\": " << last_audio_s << ",\n";
             os << "  \"decode_steps\": " << last_steps << ",\n";
             os << "  \"runs\": " << runs << ",\n";
