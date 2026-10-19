@@ -325,7 +325,8 @@ decoder sidecars with the current script; the runtime rejects contract 1 and
 missing or incompatible normalization metadata with a re-export message.
 The last-axis recipe passes the independent tiny graph and native gates on
 both tested systems, including constant and wide-range normalization inputs.
-Full-model quality, ANE placement and speed must be rechecked after re-export.
+Re-exported mini and Indic models retain ANE placement in the compute plan,
+but the int8 decoder still fails the strict quality gate described below.
 
 The decoder-step graph uses read-only self-attention and cross-attention
 states, optionally grouping multiple decoder layers in one state tensor with
@@ -339,7 +340,7 @@ cached; no state is shared between Engine instances.
 ```sh
 python scripts/parler/export-decoder-coreml.py \
     --gguf models/parler-mini-v1-f32.gguf --ctx 512 --cross-context 128 \
-    --weights int8 --layers-per-state 24 --compile-dir models
+    --weights int8 --heads-fp16 --layers-per-state 24 --compile-dir models
 ./build/parler-cli --model models/parler-mini-v1-q8_0.gguf \
     --text "Hey, how are you doing today?" \
     --description "A female speaker with a calm, clear voice, close up." \
@@ -377,8 +378,58 @@ agreement against the fp32 rebuild on a 401-frame mini trace, so the faster
 6-bit probe is not a recommended quality tier. Per-channel int8 scored
 98.06%; integrated quality and speech validation remain required.
 
-A subsequent native check with 200 teacher-forced inputs on each of two mini
-cases found a quality gap in that original int8 export. With CPU f32 prefill
+The current contract 2 profile uses per-channel int8 weights with fp16
+codebook heads (`--heads-fp16`), context 512 and all 24 layers per state.
+On M2 / macOS 15, both mini and Indic have 1,211 operations assigned to the
+Neural Engine and one transpose to CPU in the compute plan under
+`CPU_AND_NE` and `ALL`. This is preferred-device planning, not an execution
+trace. Teacher-forced quality runs use CPU T5/prefill and strict
+`cpu_and_ane`, with no ggml fallback, repeat drift or invalid distributions
+across two 200-step cases per model. Both f32 and the benchmark's q8 host
+GGUF were measured; the figures below use the exact fast q8-host profile.
+
+Against independent HF fp32 references, mini live-token argmax agreement is
+98.19% / 98.02%, with mean KL 0.000963 / 0.001197. Indic agreement is
+99.83% / 98.13%, with mean KL 0.000765 / 0.001058. This is close
+to CPU q8 overall, but misses per-codebook criteria and has about three
+times the KL error of Metal q8. The unchanged strict gate fails against
+both CPU and Metal baseline pairs; default enablement is not justified.
+
+An exclusive sequential mini benchmark used the same q8 GGUF, prompt,
+four threads, greedy 500-frame bound, one warmup and three measured calls.
+Every configuration produced 498 decoder steps and 5.7005 seconds of audio:
+
+| Execution | Mean total (ms) | p95 total (ms) |
+|---|---:|---:|
+| CPU | 7,671 | 7,714 |
+| Metal | 6,278 | 6,306 |
+| CPU decoder + Core ML DAC | 5,934 | 6,110 |
+| CPU host + Core ML decoder and DAC | 5,120 | 5,126 |
+
+The CPU host with Core ML decoder and DAC has 18.4% lower mean total latency
+than Metal and 13.7% lower than CPU decoding with the Core ML DAC, the best
+measured hybrid without the Core ML decoder on this prompt. Host T5/prefill, state
+seeding, embedding, prediction, K/V row writes and logit readback are
+included; cold model loading and compilation are excluded. An initially
+noisy CPU run was repeated; both measurements are retained. Three-run p95
+is a descriptive sample percentile, not an established tail-latency estimate.
+Greedy benchmark audio is degenerate throughput output, as documented in
+`bench.cpp`; it is not a speech-quality sample. These are warm measurements
+on one M2, not a general speed or speech-quality guarantee.
+See the [contract 2 record](history/parler-coreml-contract2-20261019.json)
+for identities, per-codebook quality, failed gates and timing ranges.
+Bounded sampled checks with the q8 host regenerated all three backends:
+18 syntheses and ASR calls across mini and Indic, including three seeds for
+one mini prompt. The five scored Core ML samples (two English prompts,
+one repeated across three seeds, and one Hindi prompt) have zero normalized
+WER/CER. Gujarati scores are unavailable because the recognizer returns the
+wrong script on every backend. Three mini seeds show no consistent duration
+increase, but do not establish a distribution; EOS/cap labels are inferred
+from output length. These are ASR proxies, not listening/MOS or perceptual
+equivalence. The strict teacher-forced quality gate remains failed.
+
+Earlier contract 1 validation with 200 teacher-forced inputs on each of two
+mini cases found a quality gap in the original int8 export. With CPU f32 prefill
 and `cpu_and_ane`, live-token argmax agreement against independent HF fp32
 references was 95.80% / 96.20%, compared with 98.02% / 98.19% for q8 on CPU.
 Mean KL was 0.00238 / 0.00302, versus 0.00105 / 0.00120 for q8. There were
