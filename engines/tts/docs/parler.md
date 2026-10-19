@@ -398,10 +398,30 @@ both CPU and Metal baseline pairs; default enablement is not justified.
 The additional experimental `--ffn-down-fp16` option retains every FFN down
 projection in fp16 and composes with `--heads-fp16`. It requires compressed
 weights, records the exact selected projections in metadata, and fails the
-export if selection or compression does not match the request. This adds
-about 96 MiB of weights for the full model; its placement, latency and
-quality require separate validation. Use a separate `--out` path when
+export if selection or compression does not match the request. Full-model
+trials retain the same preferred-device plan and add 95.95 MiB (26.91%) of
+compiled storage per model. Mini mean KL improves 18% in case0 but worsens
+4% in case1; Indic improves about 29–33%. All strict gates still fail.
+The candidate stops the greedy benchmark at 209 steps, so its 2.50-second
+time is incomparable with the 498-step controls. These results do not
+justify replacing the current profile. Use a separate `--out` path when
 comparing experimental exports with an existing sidecar.
+
+A separate EOS-suppressed comparison completes 498 steps in every run:
+mean total time is 5.915 s for the FFN-down candidate, 5.177 s for the
+current profile, and 6.020 s for CPU decoding with the Core ML DAC.
+The candidate costs 14.3% more time than current, with mixed quality and
+greater storage. Its 1.7% advantage over the measured hybrid is small;
+three calls, desktop activity and one M2 do not establish a general gain.
+The original natural-stop result remains separately recorded.
+
+For a separate bounded throughput comparison, `parler-bench` accepts
+`--min-new-tokens N --max-frames N` to suppress EOS until the generation
+bound. The default still uses the checkpoint's minimum; greedy generation
+can stop early. Console and JSON report effective `min_new_tokens` and
+`max_length`. Apply the same setting to every configuration, compare actual
+step and audio lengths, and retain natural-stop measurements separately.
+This controls work length and does not measure speech quality.
 
 An exclusive sequential mini benchmark used the same q8 GGUF, prompt,
 four threads, greedy 500-frame bound, one warmup and three measured calls.
