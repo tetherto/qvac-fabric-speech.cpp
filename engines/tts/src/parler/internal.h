@@ -30,6 +30,7 @@ constexpr unsigned PARLER_DEFAULT_THREADS = 4;
 constexpr int PARLER_DAC_WINDOW_FRAMES = 128;
 
 struct parler_hparams {
+    std::string variant;  // optional checkpoint family, used to validate sidecars
     // t5 encoder
     int   t5_n_layer      = 0;
     int   t5_d_model      = 0;

@@ -1,0 +1,242 @@
+// Native generation recovery gates, runnable with the tiny DAC CI GGUF.
+// A fake sidecar leaves ggml KV stale; recovery must replay prompt and consumed
+// frames, rather than silently continue from the stale cache.
+#include "parler/decoder_runtime.h"
+#include "parler/internal.h"
+#include "tts-cpp/parler/fit.h"
+#include "../test_env_portable.h"
+#include "json.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <limits>
+#include <memory>
+
+using namespace tts_cpp::parler::detail;
+
+namespace {
+int failures = 0;
+void check(bool value, const char * text) {
+    fprintf(stderr, "[%s] %s\n", value ? "PASS" : "FAIL", text);
+    if (!value) ++failures;
+}
+
+struct fake_step final : parler_decoder_step_model {
+    int count = 0, seeds = 0, fail_at = 2;
+    bool seed_ok = true, nonfinite = false;
+    int context = 4096, cross = 4096;
+    size_t logit_count;
+    explicit fake_step(size_t n) : logit_count(n) {}
+    int context_capacity() const override { return context; }
+    int cross_capacity() const override { return cross; }
+    const char * label() const override { return "coreml-fake"; }
+    bool seed(const std::vector<float> & k, const std::vector<float> & v, int past,
+              const std::vector<float> & ck, const std::vector<float> & cv,
+              int cross, std::string &) override {
+        ++seeds;
+        count = 0;
+        return seed_ok && past > 0 && cross > 0 && !k.empty() && k.size() == v.size() &&
+               !ck.empty() && ck.size() == cv.size();
+    }
+    bool step(const std::vector<float> & hidden, int, std::vector<float> & logits,
+              std::string & error) override {
+        if (++count == fail_at) { error = "injected failure"; return false; }
+        if (hidden.empty()) return false;
+        logits.assign(logit_count, nonfinite ? std::numeric_limits<float>::quiet_NaN() : 0.0f);
+        return true;
+    }
+};
+
+bool equal(const parler_step_logits & logits, const std::vector<float> & want) {
+    if (!logits.view) return false;
+    for (size_t i = 0; i < want.size(); ++i) {
+        if (!std::isfinite(logits.view[i]) || std::fabs(logits.view[i] - want[i]) > 1e-6f) return false;
+    }
+    return true;
+}
+} // namespace
+
+int main(int argc, char ** argv) {
+    if (argc < 2 || argc > 3) { fprintf(stderr, "usage: %s MODEL.gguf\n", argv[0]); return 77; }
+    parler_model model;
+    std::string error;
+    if (!parler_load_gguf(argv[1], model, 0, &error)) { fprintf(stderr, "%s\n", error.c_str()); return 1; }
+    auto allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    const auto & hp = model.hparams;
+    auto contract = nlohmann::json{
+        {"contract", 1}, {"kind", "parler-decoder-step"}, {"mask_off", -30000},
+        {"variant", hp.variant}, {"n_layer", hp.dec_n_layer}, {"d_model", hp.dec_d_model},
+        {"n_head", hp.dec_n_head}, {"head_dim", hp.dec_d_model / hp.dec_n_head},
+        {"n_q", hp.n_codebooks}, {"vocab", hp.dec_vocab}, {"ctx", 64}, {"cross_context", 8},
+        {"states", {{"k_layout", "rows"}, {"layers_per_state", 1}}}};
+    check(parler_validate_decoder_contract(contract.dump(), hp, 64, 8, 1, error), "supported decoder contract");
+    check(!parler_validate_decoder_contract("", hp, 64, 8, 1, error), "missing contract rejected");
+    for (const auto * key : {"contract", "mask_off", "n_layer", "d_model", "n_head", "head_dim", "n_q", "vocab", "ctx", "cross_context"}) {
+        auto bad = contract;
+        bad[key] = -7;
+        check(!parler_validate_decoder_contract(bad.dump(), hp, 64, 8, 1, error), "incompatible contract field rejected");
+    }
+    auto bad_contract = contract;
+    bad_contract["states"]["k_layout"] = "cols";
+    check(!parler_validate_decoder_contract(bad_contract.dump(), hp, 64, 8, 1, error) &&
+          error.find("k_layout=rows") != std::string::npos, "unsupported key layout rejected explicitly");
+    bad_contract = contract;
+    bad_contract["states"]["layers_per_state"] = 2;
+    check(!parler_validate_decoder_contract(bad_contract.dump(), hp, 64, 8, 1, error), "inconsistent group metadata rejected");
+    auto variant_hp = hp;
+    variant_hp.variant = "expected-checkpoint";
+    check(!parler_validate_decoder_contract(contract.dump(), variant_hp, 64, 8, 1, error), "wrong checkpoint variant rejected");
+    const std::vector<int32_t> prompt{2, 3}, start(hp.n_codebooks, hp.bos_id);
+    const size_t n = (size_t) hp.n_codebooks * hp.dec_vocab;
+    std::vector<std::vector<int32_t>> frames(3, std::vector<int32_t>(hp.n_codebooks));
+    for (size_t i = 0; i < frames.size(); ++i) std::fill(frames[i].begin(), frames[i].end(), 4 + (int) i);
+    if (!parler_encode_description(model, {2, 1}, 2)) return 1;
+    parler_step_logits logits;
+    int past = 0;
+    check(parler_dec_prefill(model, prompt, start, allocator, 2, logits, past), "reference prefill");
+    std::vector<std::vector<float>> reference;
+    for (const auto & frame : frames) {
+        if (!parler_dec_step(model, frame, past++, allocator, 2, logits)) return 1;
+        reference.emplace_back(logits.view, logits.view + n);
+    }
+
+    parler_decoder_runtime runtime(model);
+    auto sidecar = std::make_unique<fake_step>(n);
+    auto * probe = sidecar.get();
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) && probe->seeds == 1,
+          "prefill seeds native caches");
+    // Destroy the ggml cache to ensure an accidental direct fallback fails.
+    ggml_backend_buffer_clear(model.buffer_kv, 0);
+    check(parler_dec_step(model, frames[1], past + 1, allocator, 2, logits) &&
+          !equal(logits, reference[1]), "fixture detects stale-cache direct fallback");
+    check(runtime.step(frames[0], past++, allocator, 2, logits) && runtime.backend() == "coreml-fake",
+          "first step uses sidecar");
+    check(runtime.step(frames[1], past++, allocator, 2, logits) && !runtime.active() &&
+          runtime.backend() == "mixed" && equal(logits, reference[1]),
+          "mid-utterance failure replays exact history into a destroyed ggml cache");
+    check(runtime.step(frames[2], past++, allocator, 2, logits) && equal(logits, reference[2]),
+          "later steps continue from the rebuilt ggml cache");
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) && runtime.backend() == "ggml",
+          "later synthesis stays on ggml after retirement");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->fail_at = 1;
+    runtime.attach(std::move(sidecar), true);
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past), "strict prefill");
+    check(!runtime.step(frames[0], past, allocator, 2, logits), "strict prediction fails call");
+    check(!runtime.prefill(prompt, start, allocator, 2, logits, past), "strict retirement fails later calls");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->nonfinite = true;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past), "nonfinite prefill");
+    ggml_backend_buffer_clear(model.buffer_kv, 0);
+    check(runtime.step(frames[0], past, allocator, 2, logits) && equal(logits, reference[0]),
+          "nonfinite sidecar logits trigger replay");
+
+    sidecar = std::make_unique<fake_step>(n);
+    probe = sidecar.get();
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.prefill(prompt, start, allocator, 2, logits, past) && probe->seeds == 2,
+          "repeated synthesis seeds fresh state for unchanged descriptions");
+    check(!runtime.step(frames[0], past + 1, allocator, 2, logits), "out-of-order position rejected");
+    check(!runtime.step(frames[0], past, allocator, 2, logits), "rejected position invalidates current call");
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.step(frames[0], past, allocator, 2, logits), "fresh prefill recovers after invalid position");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->seed_ok = false;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) && !runtime.active(),
+          "seed failure keeps successful ggml prefill");
+    check(runtime.step(frames[0], past, allocator, 2, logits) && equal(logits, reference[0]),
+          "seed failure continues on ggml");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->context = (int) prompt.size() + hp.gen_max_length - 2;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) && runtime.active() &&
+          runtime.step(frames[0], past, allocator, 2, logits) && runtime.backend() == "ggml",
+          "oversized call stays on ggml without retiring sidecar");
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past, hp.gen_max_length - 1) &&
+          runtime.step(frames[0], past, allocator, 2, logits) && runtime.backend() == "coreml-fake",
+          "later bounded call uses retained sidecar");
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->context = (int) prompt.size() + hp.gen_max_length - 2;
+    runtime.attach(std::move(sidecar), true);
+    check(!runtime.prefill(prompt, start, allocator, 2, logits, past) && runtime.active(),
+          "strict oversized call rejects request without retiring sidecar");
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past, hp.gen_max_length - 1) &&
+          runtime.step(frames[0], past, allocator, 2, logits), "strict later bounded call succeeds");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->context = (int) prompt.size() + hp.gen_max_length - 1;
+    runtime.attach(std::move(sidecar), true);
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.step(frames[0], past, allocator, 2, logits), "exact-fit generation capacity uses sidecar");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->cross = model.cross_len - 1;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) && runtime.active() &&
+          runtime.step(frames[0], past, allocator, 2, logits) && runtime.backend() == "ggml",
+          "oversized description does not retire sidecar");
+    check(parler_encode_description(model, {1}, 2) &&
+          runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.step(frames[0], past, allocator, 2, logits) && runtime.backend() == "coreml-fake",
+          "later shorter description uses retained sidecar");
+    check(parler_encode_description(model, {2, 1}, 2), "restore reference description");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->fail_at = 1;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past), "cancelled replay prefill");
+    int checks = 0;
+    runtime.set_cancel_check([&] { return ++checks >= 3; });
+    check(!runtime.step(frames[0], past, allocator, 2, logits), "cancellation interrupts replay");
+    runtime.set_cancel_check({});
+    check(!runtime.step(frames[1], past + 1, allocator, 2, logits), "cancelled replay cannot resume stale cache");
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past), "new call recovers after cancelled replay");
+
+    if (argc == 3 && std::string(argv[2]) == "--coreml") {
+        auto native = parler_open_decoder_sidecar(model, argv[1], error);
+        check(native != nullptr, "actual decoder sidecar opens");
+        if (native) {
+            runtime.attach(std::move(native), true);
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                check(runtime.prefill(prompt, start, allocator, 2, logits, past), "actual sidecar prefill/reset");
+                for (size_t i = 0; i < frames.size(); ++i) {
+                    const bool ok = runtime.step(frames[i], past++, allocator, 2, logits);
+                    float peak = 0;
+                    if (ok) for (size_t j = 0; j < n; ++j) {
+                        peak = std::max(peak, std::fabs(logits.view[j] - reference[i][j]));
+                    }
+                    check(ok && runtime.backend().find("coreml-") == 0 && peak < 0.02f,
+                          "actual sidecar seeded step matches ggml within fp16 tolerance");
+                    fprintf(stderr, "actual sidecar repeat %d step %zu peak logit error %.6f\n", repeat, i, peak);
+                }
+            }
+        } else {
+            fprintf(stderr, "%s\n", error.c_str());
+        }
+    }
+
+#ifdef TTS_CPP_USE_COREML
+    tts_cpp::parler::FitOptions fit;
+    fit.model_gguf_path = argv[1];
+    fit.coreml_decoder = true;
+    check(tts_cpp::parler::fit_params(fit).reason == "coreml-memory-estimate-unavailable",
+          "fit refuses to project requested decoder Core ML memory");
+    setenv(PARLER_COREML_DISABLE_ENV, "1", 1);
+    check(tts_cpp::parler::fit_params(fit).reason != "coreml-memory-estimate-unavailable",
+          "disabled decoder uses native fit projection");
+    unsetenv(PARLER_COREML_DISABLE_ENV);
+#endif
+
+    ggml_gallocr_free(allocator);
+    parler_free_model(model);
+    return failures ? 1 : 0;
+}

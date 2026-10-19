@@ -484,6 +484,47 @@ jobs:
             --fallback-gguf parler-coreml-fixture-fallback/parler-tiny-f32.gguf \
             --min-snr 60 --require-coreml
 
+      - name: Test (Core ML Parler decoder state and recovery)
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PARLER_REQUIRE_HF_CAPTURE: '1'
+        run: |
+          set -euo pipefail
+          py=.venv-cosyvoice-coreml/bin/python
+          if [ ! -x "$py" ]; then py=.venv-parler-coreml/bin/python; fi
+          # Reuse the Core ML venv without changing its torch/numpy pins.
+          # Parler 0.2.2's metadata requests unpinned Git audiotools and
+          # protobuf>=4, conflicting with audiotools 0.7.2's protobuf<3.20.
+          # Use the known-working release dependencies for this decoder-only
+          # capture (no checkpoint, tokenizer, or audio generation is loaded).
+          "$py" -m pip install -c engines/parakeet/scripts/requirements-coreml.txt \
+            'transformers==4.46.1' 'tokenizers==0.20.3' 'sentencepiece==0.2.2' \
+            'torchaudio==2.7.0' 'descript-audio-codec==1.0.0' \
+            'descript-audiotools==0.7.2' 'protobuf==3.19.6'
+          "$py" -m pip install --no-deps \
+            'parler-tts @ git+https://github.com/huggingface/parler-tts.git@d108732cd57788ec86bc857d99a6cabd66663d68'
+          "$py" engines/tts/test/parler/prepare_decoder_coreml_fixture.py parler-coreml-session
+          ./build/test-parler-decoder-coreml parler-coreml-session/readonly_cache.mlmodelc cpu
+          "$py" engines/tts/test/parler/prepare_dac_coreml_fixture.py \
+            --out parler-decoder-runtime-fixture --random-decoder
+          # Run all decoder Python suites with real dependencies. The bridge
+          # suite must exercise the native ABI against this synthetic GGUF.
+          export PARLER_DECODER_VALIDATION_BRIDGE="$PWD/build/libparler-decoder-validation.so"
+          export PARLER_DECODER_VALIDATION_TINY_GGUF="$PWD/parler-decoder-runtime-fixture/parler-tiny-f32.gguf"
+          test -f "$PARLER_DECODER_VALIDATION_BRIDGE"
+          test -f "$PARLER_DECODER_VALIDATION_TINY_GGUF"
+          "$py" engines/tts/test/test_export_parler_decoder_coreml.py
+          "$py" engines/tts/test/test_validate_parler_decoder_coreml.py
+          "$py" engines/tts/test/test_parler_decoder_validation_bridge.py
+          "$py" engines/tts/scripts/parler/export-decoder-coreml.py \
+            --gguf parler-decoder-runtime-fixture/parler-tiny-f32.gguf \
+            --ctx 64 --cross-context 8 --weights fp16 --compile-dir parler-decoder-runtime-fixture
+          PARLER_COREML_COMPUTE_UNITS=cpu_only ./build/test-parler-decoder-runtime \
+            parler-decoder-runtime-fixture/parler-tiny-f32.gguf --coreml
+          PARLER_NO_FA=1 PARLER_COREML_COMPUTE_UNITS=cpu_only ./build/test-parler-decoder-runtime \
+            parler-decoder-runtime-fixture/parler-tiny-f32.gguf --coreml
+
       # Core ML Audio8 codec sidecar fixtures, converted and exported by the
       # repo's own scripts: the 64-frame sidecar for parity and speed, and an
       # 8-frame one (window <= causal context) that loads but cannot serve, for

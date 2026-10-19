@@ -18,6 +18,7 @@
 //       [--max-frames N] [--seed 42] [--runs 5] [--warmup 1] [--wav-out audio.wav] [--json-out f.json]
 
 #include "internal.h"
+#include "decoder_runtime.h"
 #include "tokenizer.h"
 #include "bpe_tokenizer.h"
 #include "text_norm.h"
@@ -35,6 +36,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -57,6 +59,7 @@ void usage(const char * argv0) {
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
         "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device, no fallback)\n"
         "          [--threads N] [--max-frames N] (decoder steps; ~86/s audio)\n"
+        "          [--coreml-decoder] (experimental Core ML decoder steps)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
         "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
         argv0);
@@ -127,6 +130,7 @@ int main(int argc, char ** argv) {
     int runs = 5;
     int warmup = 1;
     bool greedy = true;
+    bool coreml_decoder = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -144,6 +148,7 @@ int main(int argc, char ** argv) {
         else if (a == "--seed")         seed        = std::stoi(next("--seed"));
         else if (a == "--runs")         runs        = std::stoi(next("--runs"));
         else if (a == "--warmup")       warmup      = std::stoi(next("--warmup"));
+        else if (a == "--coreml-decoder") coreml_decoder = true;
         else if (a == "--sampled")      greedy      = false;
         else if (a == "--wav-out")      wav_out     = next("--wav-out");
         else if (a == "--json-out")     json_out    = next("--json-out");
@@ -176,6 +181,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
     std::string dac_backend = PARLER_DAC_GGML_BACKEND;
+    parler_decoder_runtime decoder(model);
+    if (coreml_decoder && !parler_coreml_disabled()) {
+        auto sidecar = parler_open_decoder_sidecar(model, model_path, err);
+        if (!sidecar) {
+            fprintf(stderr, "parler-bench: %s\n", err.c_str());
+            if (parler_coreml_strict()) { parler_free_model(model); return 1; }
+        } else {
+            decoder.attach(std::move(sidecar), parler_coreml_strict());
+        }
+    }
 
     parler_tokenizer tokenizer;
     if (!tokenizer.load(model.tok_pieces, model.tok_scores, model.tok_charsmap,
@@ -223,6 +238,7 @@ int main(int argc, char ** argv) {
     Stage st_dac  {"dac_decode",  {}};
     Stage st_tot  {"total",       {}};
     std::vector<double> rtfs;
+    std::set<std::string> measured_decoder_backends, measured_dac_backends;
     double last_audio_s = 0.0;
     int    last_steps = 0;
 
@@ -253,7 +269,7 @@ int main(int argc, char ** argv) {
         parler_sampler_scratch scratch;
         std::vector<int32_t> frame;
         int n_past = 0;
-        if (!parler_dec_prefill(model, prompt_ids, st.input_frame(), allocr, n_thr, logits, n_past)) {
+        if (!decoder.prefill(prompt_ids, st.input_frame(), allocr, n_thr, logits, n_past, dcfg.max_length)) {
             fprintf(stderr, "parler-bench: prefill failed\n"); parler_free_model(model); return 1;
         }
         sync(); auto t2 = clk::now();
@@ -265,7 +281,7 @@ int main(int argc, char ** argv) {
                                 frame);
             st.append(frame);
             if (st.finished()) break;
-            if (!parler_dec_step(model, st.input_frame(), n_past, allocr, n_thr, logits)) {
+            if (!decoder.step(st.input_frame(), n_past, allocr, n_thr, logits)) {
                 fprintf(stderr, "parler-bench: dec step failed\n"); parler_free_model(model); return 1;
             }
             n_past++;
@@ -285,6 +301,8 @@ int main(int argc, char ** argv) {
         const double audio_s = pcm.empty() ? 0.0 : (double) pcm.size() / (double) hp.dac_sample_rate;
         const double tot_ms = ms_t(t4 - t0).count();
         if (record && audio_s > 0.0) {
+            measured_decoder_backends.insert(decoder.backend());
+            measured_dac_backends.insert(dac_backend);
             st_t5 .ms.push_back(ms_t(t1 - t0).count());
             st_pre.ms.push_back(ms_t(t2 - t1).count());
             st_dec.ms.push_back(ms_t(t3 - t2).count());
@@ -309,11 +327,16 @@ int main(int argc, char ** argv) {
         }
     }
 
+    const std::string decoder_label = measured_decoder_backends.size() == 1
+        ? *measured_decoder_backends.begin() : measured_decoder_backends.empty() ? decoder.backend() : "mixed";
+    const std::string dac_label = measured_dac_backends.size() == 1
+        ? *measured_dac_backends.begin() : measured_dac_backends.empty() ? dac_backend : "mixed";
     printf("\nParler-TTS C++ benchmark\n");
     printf("  model: %s\n", model_path.c_str());
     printf("  backend: %s%s\n", ggml_backend_name(model.backend),
            is_cpu ? " (CPU)" : " (GPU)");
-    printf("  dac: %s\n", dac_backend.c_str());
+    printf("  dac: %s\n", dac_label.c_str());
+    printf("  decoder: %s (ggml prefill)\n", decoder_label.c_str());
     printf("  threads: %d, n_gpu_layers: %d, greedy: %s\n",
            n_thr, n_gpu_layers, greedy ? "yes" : "no");
     printf("  prompt tokens: %zu, description tokens: %zu\n",
@@ -340,7 +363,8 @@ int main(int argc, char ** argv) {
             os << "  \"model\": \"" << json_escape(model_path) << "\",\n";
             os << "  \"backend\": \"" << json_escape(ggml_backend_name(model.backend)) << "\",\n";
             os << "  \"is_cpu\": " << (is_cpu ? "true" : "false") << ",\n";
-            os << "  \"dac_backend\": \"" << json_escape(dac_backend) << "\",\n";
+            os << "  \"dac_backend\": \"" << json_escape(dac_label) << "\",\n";
+            os << "  \"decoder_backend\": \"" << json_escape(decoder_label) << "\",\n";
             os << "  \"threads\": " << n_thr << ",\n";
             os << "  \"n_gpu_layers\": " << n_gpu_layers << ",\n";
             os << "  \"greedy\": " << (greedy ? "true" : "false") << ",\n";

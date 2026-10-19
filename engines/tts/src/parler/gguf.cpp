@@ -251,6 +251,12 @@ bool parler_load_gguf_impl(const std::string & path, parler_model & model,
     }
 
     parler_hparams & hp = model.hparams;
+    hp.variant.clear();
+    const int64_t variant_id = gguf_find_key(g, "parler.variant");
+    if (variant_id >= 0) {
+        if (!kv_type_is(g, variant_id, GGUF_TYPE_STRING)) return fail("GGUF key is not string: parler.variant");
+        hp.variant = gguf_get_val_str(g, variant_id);
+    }
     std::string err;
     if (!kv_u32(g, "parler.t5.n_layer", hp.t5_n_layer, &err) ||
         !kv_u32(g, "parler.t5.d_model", hp.t5_d_model, &err) ||

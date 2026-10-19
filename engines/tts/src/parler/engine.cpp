@@ -1,6 +1,7 @@
 #include "tts-cpp/parler/engine.h"
 
 #include "internal.h"
+#include "decoder_runtime.h"
 #include "tokenizer.h"
 #include "bpe_tokenizer.h"
 #include "text_norm.h"
@@ -24,6 +25,7 @@ using namespace ::tts_cpp::parler::detail;
 struct Engine::Impl {
     EngineOptions        opts;
     parler_model         model;
+    parler_decoder_runtime decoder{model};
     parler_tokenizer     tokenizer;         // descriptions (and prompts when shared)
     parler_bpe_tokenizer prompt_tokenizer;  // prompts, iff the GGUF ships one
     ggml_gallocr_t       allocr = nullptr;
@@ -114,8 +116,8 @@ struct Engine::Impl {
 
         parler_step_logits logits;
         int n_past = 0;
-        if (!parler_dec_prefill(model, prompt_ids, st.input_frame(), allocr, n_threads,
-                                logits, n_past)) {
+        if (!decoder.prefill(prompt_ids, st.input_frame(), allocr, n_threads,
+                                logits, n_past, dcfg.max_length)) {
             throw std::runtime_error("parler: decoder prefill failed");
         }
 
@@ -166,7 +168,8 @@ struct Engine::Impl {
                                 frame);
             st.append(frame);
             if (st.finished()) break;
-            if (!parler_dec_step(model, st.input_frame(), n_past, allocr, n_threads, logits)) {
+            if (!decoder.step(st.input_frame(), n_past, allocr, n_threads, logits)) {
+                check_cancel();
                 throw std::runtime_error("parler: decoder step failed");
             }
             n_past++;
@@ -176,6 +179,7 @@ struct Engine::Impl {
             }
         }
 
+        res.decoder_backend = decoder.backend();
         int n_frames = 0;
         const std::vector<int32_t> codes = st.undelay(hp.dac_codebook_size, &n_frames);
         if (n_frames <= 0) {
@@ -204,6 +208,9 @@ struct Engine::Impl {
 
 Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     pimpl_->opts = opts;
+    pimpl_->decoder.set_cancel_check([state = pimpl_.get()] {
+        return state->cancel_requested.load(std::memory_order_relaxed);
+    });
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
@@ -223,6 +230,15 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         throw std::runtime_error("parler: prompt tokenizer load failed");
     }
     parler_attach_dac_sidecar(pimpl_->model, opts.model_gguf_path);
+    if (opts.coreml_decoder && !parler_coreml_disabled()) {
+        auto sidecar = parler_open_decoder_sidecar(pimpl_->model, opts.model_gguf_path, err);
+        if (!sidecar) {
+            if (parler_coreml_strict()) throw std::runtime_error("parler: " + err);
+            fprintf(stderr, "parler: %s; decoder stays on ggml\n", err.c_str());
+        } else {
+            pimpl_->decoder.attach(std::move(sidecar), parler_coreml_strict());
+        }
+    }
     pimpl_->allocr = ggml_gallocr_new(
         ggml_backend_get_default_buffer_type(pimpl_->model.backend));
     if (!pimpl_->allocr) {
@@ -289,6 +305,8 @@ std::string Engine::backend_name() const {
 bool Engine::dac_on_coreml() const {
     return pimpl_->model.dac_sidecar != nullptr;
 }
+
+bool Engine::decoder_on_coreml() const { return pimpl_->decoder.active(); }
 
 BackendDevice Engine::backend_device() const {
     return ::tts_cpp::detail::backend_is_cpu(pimpl_->model.backend)

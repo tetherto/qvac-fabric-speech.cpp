@@ -24,7 +24,7 @@ RATES = [2, 2]
 STEM = "parler-tiny-f32"
 
 
-def write_fixture(directory, seed=0):
+def write_fixture(directory, seed=0, random_decoder=False):
     rng = np.random.default_rng(seed)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{STEM}.gguf"
@@ -61,6 +61,13 @@ def write_fixture(directory, seed=0):
         # ggml ne order in, numpy (reversed) order to gguf-py
         shape = tuple(reversed(ne))
         data = values if values is not None else np.full(shape, 0.01, dtype=np.float32)
+        if random_decoder and name.startswith("dec.") and values is None:
+            if "norm.weight" in name:
+                data = np.ones(shape, dtype=np.float32)
+            elif "norm.bias" in name:
+                data = rng.standard_normal(shape) * 0.01
+            else:
+                data = rng.standard_normal(shape) / np.sqrt(ne[0])
         w.add_tensor(name, np.ascontiguousarray(data.reshape(shape), dtype=np.float32))
 
     def kernel(taps, inp, out):
@@ -146,4 +153,7 @@ def write_fixture(directory, seed=0):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", required=True, type=Path)
-    print(write_fixture(parser.parse_args().out))
+    parser.add_argument("--random-decoder", action="store_true",
+                        help="use nondegenerate decoder weights for state/replay parity checks")
+    args = parser.parse_args()
+    print(write_fixture(args.out, random_decoder=args.random_decoder))

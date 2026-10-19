@@ -310,6 +310,100 @@ The T5 encoder runs once per
 description and is cached (18 ms on Metal), so a sidecar would not pay for
 its 670 MB of fp16 weights.
 
+## Experimental Core ML decoder steps
+
+`EngineOptions::coreml_decoder` (or `--coreml-decoder` on `parler-cli` and
+`parler-bench`) opts into a separate `<stem>-decoder.mlmodelc` next to the
+GGUF. This requires a `TTS_CPP_COREML` build and macOS 15 / iOS 18. It is
+experimental: placing a decoder sidecar beside the model does not enable it
+by default. T5 description encoding and prompt prefill still run on ggml.
+
+The decoder-step graph uses read-only self-attention and cross-attention
+states, optionally grouping multiple decoder layers in one state tensor with
+`--layers-per-state` (a divisor of the layer count). After ggml prefill, the runtime imports the prompt's K/V
+and the description's projected cross K/V once. Each prediction emits only
+the new K/V rows, which the host writes directly into Core ML's state views
+with their actual strides. It does not rewrite the whole cache each step.
+A synthesis starts with fresh zeroed state even when the description is
+cached; no state is shared between Engine instances.
+
+```sh
+python scripts/parler/export-decoder-coreml.py \
+    --gguf models/parler-mini-v1-f32.gguf --ctx 512 --cross-context 128 \
+    --weights int8 --layers-per-state 24 --compile-dir models
+./build/parler-cli --model models/parler-mini-v1-q8_0.gguf \
+    --text "Hey, how are you doing today?" \
+    --description "A female speaker with a calm, clear voice, close up." \
+    --n-gpu-layers 99 --coreml-decoder --max-frames 500 --out out.wav
+```
+
+The context must cover prompt tokens plus the intended delayed generation
+steps, and cross context must cover the complete description. The runtime
+validates the contract version, row layout, mask value, state grouping,
+geometry and checkpoint variant (when present in the GGUF), and never clips
+either sequence. The variant is a family identifier, not a weight checksum;
+keep sidecars paired with their source checkpoint. A
+missing, incompatible or failing decoder sidecar falls back to ggml. Requests
+whose full generation bound or description exceeds the exported capacity use
+ggml for that call, retaining the sidecar for later shorter requests. In
+strict mode only the oversized request fails; it does not retire the model. After
+a prediction failure it retires the sidecar and rebuilds the ggml cache by
+replaying the exact already-consumed token history, preserving sampled code
+frames and previously streamed chunks. `PARLER_COREML_STRICT` makes a
+requested sidecar failure fatal, including later calls after retirement;
+`PARLER_COREML_DISABLE` disables both Core ML stages.
+
+`Engine::decoder_on_coreml()` reports whether the step sidecar is attached.
+`SynthesisResult::decoder_backend` and benchmark JSON `decoder_backend`
+report the call's step execution: `ggml`, the `coreml-*` compute label, or
+`mixed` after successful Core ML steps followed by ggml recovery. Prefill is
+always ggml in this implementation, and the benchmark prefill stage includes
+native cache import/seeding. `FitOptions::coreml_decoder` (or the fitter's
+`--coreml-decoder`) returns `coreml-memory-estimate-unavailable` rather than
+underestimate additional Core ML model/state memory. Decoder-inclusive benchmarks must
+include embedding preparation, prediction, logit readback and cache writes.
+A successful small-model export does not establish production quality or an
+end-to-end speed advantage. Uniform 6-bit palettes scored only 93.46% token
+agreement against the fp32 rebuild on a 401-frame mini trace, so the faster
+6-bit probe is not a recommended quality tier. Per-channel int8 scored
+98.06%; integrated quality and speech validation remain required.
+
+The initial per-layer-state mini export failed ANE execution-plan compilation
+with error `-14` at 13 or more decoder layers. Grouping all 24 layers into
+four state tensors lets the full graph compile and run on the ANE. Preliminary
+native probes with 6-bit weights and fp16 heads measured 7.41 ms per step at
+context 512, 9.32 ms at 1024, and 12.40 ms at 2048 (including row updates,
+excluding prompt/state initialization). These are decoder probe results;
+quantized speech quality remains unestablished. Keep the default ggml decoder
+for production until the quality gates are satisfied.
+
+An integrated mini benchmark on an Apple M2 with 24 GB memory used the same
+q8_0 GGUF, four CPU threads, greedy generation capped at 500 frames, one
+warmup and three measured runs. Every run produced 498 decoder steps and
+5.7005 seconds of audio. Median warm synthesis times, including T5, prefill,
+state seeding, host embedding/logit copies, decoder steps and DAC, were:
+
+| Execution | Decoder loop (ms) | DAC (ms) | Total (ms) | RTF |
+|---|---:|---:|---:|---:|
+| CPU | 4,994 | 2,630 | 7,763 | 1.362 |
+| Metal | 7,040 | 1,089 | 8,153 | 1.430 |
+| Metal decoder + Core ML DAC | 7,068 | 705 | 7,847 | 1.376 |
+| Core ML int8 decoder, context 512 + Core ML DAC | 4,632 | 682 | 5,377 | 0.943 |
+| Core ML int8 decoder, context 3072 + Core ML DAC | 7,673 | 647 | 8,405 | 1.474 |
+
+T5 and prefill ran on Metal in the Core ML rows. The 512-row profile reduced
+median synthesis time by 31% versus CPU and 34% versus Metal on this trace;
+the 3072-row profile was slower than both. Attention reads the exported
+capacity on every step, so export the smallest context that covers the entire
+request. Context 512 is deliberately bounded: a larger generation request
+falls back to ggml, or fails under strict mode. Loading and cold compilation
+are excluded. Runs were sequential, Metal timings varied, and equal step
+counts do not establish equal speech quality. See the
+[measurement record](history/parler-coreml-m2-20261019.json) for the protocol,
+range and p95 values. This is evidence for a short-context speedup, not a
+general speed or quality guarantee.
+
+
 ## Snapdragon Hexagon NPU
 
 Parler-TTS runs on the Snapdragon Hexagon NPU (HTP0; measured on a Snapdragon
