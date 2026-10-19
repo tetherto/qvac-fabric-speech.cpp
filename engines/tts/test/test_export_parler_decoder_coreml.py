@@ -262,7 +262,8 @@ class DecoderStepTest(unittest.TestCase):
         fn = mock.Mock()
         fn.find_ops.return_value = [head]
         ml = types.SimpleNamespace(_mil_program=types.SimpleNamespace(functions={"main": fn}))
-        for mode, compressor in (("int8", "linear_quantize_weights"), ("int4", "linear_quantize_weights"),
+        for mode, compressor in (("int8", "linear_quantize_weights"), ("int8-b32", "linear_quantize_weights"),
+                                 ("int4", "linear_quantize_weights"),
                                  ("pal6", "palettize_weights")):
             with self.subTest(mode=mode), mock.patch.object(cto, compressor, return_value=ml) as compress:
                 self.assertIs(ex.compress(ml, mode, True, N_Q * VOCAB), ml)
@@ -295,6 +296,28 @@ class DecoderStepTest(unittest.TestCase):
             self.assertEqual(head.weight.dtype.__name__, "fp16")
         ops = ml._mil_program.functions["main"].operations
         self.assertTrue(any(op.op_type.startswith("constexpr_") for op in ops))
+
+    @unittest.skipUnless(HAVE_COREMLTOOLS, "coremltools not installed")
+    def test_int8_block32_encodes_independent_input_block_scales(self):
+        ex = self.ex
+        # A 96-wide FFN down projection must carry three scales per output
+        # row. One scale per row would silently reproduce the old tier.
+        t, hp = dict(self.t), hparams()
+        hp["d_ff"] = FF * 2
+        for layer in range(LAYERS):
+            for name, axis in (("ffn_up", 0), ("ffn_down", 1)):
+                key = f"dec.blk.{layer}.{name}.weight"
+                t[key] = np.concatenate([t[key], t[key]], axis=axis)
+        model = ex.DecoderStep(t, hp, CTX, CROSS, torch.float16, LAYERS).eval()
+        ml = ex.convert_coreml(model, "int8-b32", False, ex.contract(model, hp, "int8-b32", None))
+        block_ops = ml._mil_program.functions["main"].find_ops(op_type="constexpr_blockwise_shift_scale")
+        split_rows = [op for op in block_ops if len(op.data.shape) == 4 and op.data.shape[1] == FF * 2]
+        self.assertEqual(len(split_rows), LAYERS)
+        for op in split_rows:
+            self.assertEqual(tuple(op.scale.shape), (D, FF * 2 // 32, 1, 1))
+            self.assertEqual(op.data.val.dtype, np.dtype(np.int8))
+        meta = json.loads(ml.user_defined_metadata["parler.decoder.contract"])
+        self.assertEqual(meta["weights"], "int8-b32")
 
     @unittest.skipUnless(HAVE_COREMLTOOLS, "coremltools not installed")
     def test_converted_program_reads_every_state_and_writes_none(self):

@@ -84,7 +84,7 @@ DEFAULT_CTX = 1024
 DEFAULT_CROSS = 128
 # the generation cap (parler.gen.max_length) plus the prompt is the longest
 # context an utterance can need; the engine must not ask for more than ctx
-WEIGHT_MODES = ("fp16", "int8", "pal8", "pal6", "pal4", "int4")
+WEIGHT_MODES = ("fp16", "int8", "int8-b32", "pal8", "pal6", "pal4", "int4")
 PARITY_LOGIT_ATOL = 2e-3
 STATE_KINDS = ("self_k", "self_v", "cross_k", "cross_v")
 
@@ -481,7 +481,13 @@ def compress(mlmodel, weights, heads_fp16, heads_rows):
         return mlmodel
     import coremltools.optimize.coreml as cto
 
-    if weights == "int8":
+    if weights == "int8-b32":
+        # Match Q8_0's local weight-block size without claiming bitwise
+        # equivalence: Core ML quantizes fp16 constants and rounds differently.
+        # Placement and native quality must be measured for this separate tier.
+        op = cto.OpLinearQuantizerConfig(mode="linear_symmetric", dtype="int8",
+                                         granularity="per_block", block_size=32)
+    elif weights == "int8":
         op = cto.OpLinearQuantizerConfig(mode="linear_symmetric", granularity="per_channel")
     elif weights == "int4":
         op = cto.OpLinearQuantizerConfig(mode="linear_symmetric", dtype="int4",
@@ -491,7 +497,7 @@ def compress(mlmodel, weights, heads_fp16, heads_rows):
         op = cto.OpPalettizerConfig(mode="uniform", nbits=int(weights[3:]),
                                     granularity="per_grouped_channel", group_size=16)
     config = cto.OptimizationConfig(global_config=op, op_name_configs=op_names)
-    if weights in ("int8", "int4"):
+    if weights in ("int8", "int8-b32", "int4"):
         compressed = cto.linear_quantize_weights(mlmodel, config)
     else:
         compressed = cto.palettize_weights(mlmodel, config)
@@ -609,7 +615,8 @@ def parse_args(argv=None):
     p.add_argument("--cross-context", type=int, default=DEFAULT_CROSS,
                    help="description tokens the cross states hold (default %(default)s)")
     p.add_argument("--weights", default="int8", choices=WEIGHT_MODES,
-                   help="weight storage: fp16, int8 per channel, uniform palettes (pal*), int4 blocks")
+                   help="weight storage: fp16, int8 per channel, experimental int8-b32 blocks, "
+                        "uniform palettes (pal*), int4 blocks; block modes need placement/quality validation")
     p.add_argument("--heads-fp16", action="store_true", help="keep the nine codebook heads fp16")
     p.add_argument("--layers", type=int, help="export only the first N layers (benchmarking)")
     p.add_argument("--k-layout", default="rows", choices=["rows", "cols"],
