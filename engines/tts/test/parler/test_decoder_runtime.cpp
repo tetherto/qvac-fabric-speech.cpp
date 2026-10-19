@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 
@@ -202,6 +203,9 @@ int main(int argc, char ** argv) {
     check(runtime.prefill(prompt, start, allocator, 2, logits, past), "new call recovers after cancelled replay");
 
     if (argc == 3 && std::string(argv[2]) == "--coreml") {
+        fprintf(stderr, "native parity model=%s attention=%s kv=%s units=%s\n", argv[1],
+                model.use_fa ? "fa" : "manual", ggml_type_name(model.kv_type),
+                std::getenv(PARLER_COREML_UNITS_ENV) ? std::getenv(PARLER_COREML_UNITS_ENV) : "all");
         auto native = parler_open_decoder_sidecar(model, argv[1], error);
         check(native != nullptr, "actual decoder sidecar opens");
         if (native) {
@@ -211,12 +215,16 @@ int main(int argc, char ** argv) {
                 for (size_t i = 0; i < frames.size(); ++i) {
                     const bool ok = runtime.step(frames[i], past++, allocator, 2, logits);
                     float peak = 0;
+                    size_t peak_index = 0;
                     if (ok) for (size_t j = 0; j < n; ++j) {
-                        peak = std::max(peak, std::fabs(logits.view[j] - reference[i][j]));
+                        const float difference = std::isfinite(logits.view[j]) && std::isfinite(reference[i][j])
+                            ? std::fabs(logits.view[j] - reference[i][j]) : std::numeric_limits<float>::infinity();
+                        if (difference > peak) { peak = difference; peak_index = j; }
                     }
                     check(ok && runtime.backend().find("coreml-") == 0 && peak < 0.02f,
                           "actual sidecar seeded step matches ggml within fp16 tolerance");
-                    fprintf(stderr, "actual sidecar repeat %d step %zu peak logit error %.6f\n", repeat, i, peak);
+                    fprintf(stderr, "actual sidecar repeat %d step %zu peak logit error %.6f index %zu actual %.6f reference %.6f\n",
+                            repeat, i, peak, peak_index, ok ? logits.view[peak_index] : 0.0f, reference[i][peak_index]);
                 }
             }
         } else {
