@@ -55,7 +55,9 @@ before selecting a format. MXFP4 failed CPU quality checks.
 ### Experimental Parakeet-Mosaic
 
 [Mosaic](engines/parakeet/docs/mosaic.md) uses a frozen mixed-precision
-recipe with ordinary GGML kernels. The earlier experimental
+recipe with ordinary GGML kernels. The shared 486.7 MB Mosaic and 339.6 MB
+[Mosaic Compact](engines/parakeet/docs/mosaic.md#shared-mosaic-and-mosaic-compact-models)
+also support separate, matching optional Core ML encoder sidecars. The earlier experimental
 [`parakeet-affine-v1` format](engines/parakeet/docs/backends.md#experimental-packed-affine-tdt-recipe)
 uses integer carriers, with reconstruction by default and opt-in Metal fusion
 via `PARAKEET_AFFINE_FUSED=1`. Fusion requires the matching

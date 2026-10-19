@@ -32,6 +32,10 @@ on:
         description: 'Provision exact Mosaic and run real CPU/Metal/Core ML integration tests'
         type: boolean
         default: false
+      mosaic_compact_url:
+        description: 'Optional CI-accessible URL for the hash-pinned 339.6 MB Mosaic Compact GGUF; enables all twelve model/sidecar cases'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -229,7 +233,9 @@ jobs:
             torch==2.7.0 numpy==2.2.6 gguf==0.19.0 coremltools==9.0 \
             PyYAML==6.0.3 sentencepiece==0.2.0 soundfile==0.13.1 pip==25.1.1
       - name: Check decoder export and failure guards
-        run: '"$MOSAIC_PYTHON" engines/parakeet/test/test_export_mosaic.py'
+        run: |
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_export_mosaic.py
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_mosaic_compact.py
       - name: Cache exact model, sidecar and audio fixtures
         id: mosaic-cache
         uses: actions/cache@v4
@@ -237,12 +243,17 @@ jobs:
           path: |
             ${{ env.MOSAIC_FIXTURES }}/bundle
             ${{ env.MOSAIC_FIXTURES }}/audio
-          key: mosaic-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/*.py', 'engines/parakeet/configs/parakeet-mosaic*.json', 'engines/parakeet/test/mosaic-fixtures.json', 'engines/parakeet/test/prepare_mosaic_fixtures.py') }}
+            ${{ env.MOSAIC_FIXTURES }}/compact
+          key: mosaic-${{ inputs.mosaic_compact_url != '' && 'both' || 'standard' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/parakeet/scripts/*.py', 'engines/parakeet/configs/parakeet-mosaic*.json', 'engines/parakeet/test/mosaic-fixtures.json', 'engines/parakeet/test/prepare_mosaic_fixtures.py') }}
       - name: Provision frozen Mosaic fixtures
         if: steps.mosaic-cache.outputs.cache-hit != 'true'
+        env:
+          MOSAIC_COMPACT_URL: ${{ inputs.mosaic_compact_url }}
         run: |
+          compact_args=()
+          if [ -n "$MOSAIC_COMPACT_URL" ]; then compact_args=(--compact-url "$MOSAIC_COMPACT_URL"); fi
           "$MOSAIC_PYTHON" engines/parakeet/test/prepare_mosaic_fixtures.py \
-            --fixtures "$MOSAIC_FIXTURES" --coreml
+            --fixtures "$MOSAIC_FIXTURES" --coreml "${compact_args[@]}"
       - name: Build normal speech dependency and Mosaic harness
         run: |
           git clone --depth 1 --branch "$GGML_BRANCH" "$GGML_REPO" mosaic-ggml-src
@@ -259,16 +270,22 @@ jobs:
             -DPARAKEET_TEST_MOSAIC_DIR="$MOSAIC_FIXTURES" \
             -DCMAKE_PREFIX_PATH="$PWD/mosaic-ggml-install"
           cmake --build build-mosaic --target test-mosaic-inference -j4
-      - name: Run all six real-model arms and reject skipped coverage
+      - name: Run all requested real-model arms and reject skipped coverage
+        env:
+          INCLUDE_COMPACT: ${{ inputs.mosaic_compact_url != '' && '1' || '0' }}
         run: |
-          ctest --test-dir build-mosaic -R '^test-mosaic-' \
+          pattern='^test-mosaic-(native|coreml)'
+          if [ "$INCLUDE_COMPACT" = 1 ]; then pattern='^test-mosaic-'; fi
+          ctest --test-dir build-mosaic -R "$pattern" \
             --output-on-failure --no-tests=error --output-junit mosaic-results.xml
           "$MOSAIC_PYTHON" - <<'PY'
+          import os
           import xml.etree.ElementTree as ET
           tests = list(ET.parse('build-mosaic/mosaic-results.xml').iter('testcase'))
-          if len(tests) != 6 or any(t.find(tag) is not None for t in tests for tag in ('skipped', 'failure', 'error')):
-              raise SystemExit('Expected six executed, passing Mosaic integration tests')
-          print('All six Mosaic CPU/Metal/Core ML cases executed and passed')
+          expected = 12 if os.environ['INCLUDE_COMPACT'] == '1' else 6
+          if len(tests) != expected or any(t.find(tag) is not None for t in tests for tag in ('skipped', 'failure', 'error')):
+              raise SystemExit(f'Expected {expected} executed, passing Mosaic integration tests')
+          print(f'All {expected} requested Mosaic CPU/Metal/Core ML cases executed and passed')
           PY
       - name: Upload integration evidence
         if: always()
@@ -284,6 +301,9 @@ jobs:
             ${{ env.MOSAIC_FIXTURES }}/bundle/plan.json
             ${{ env.MOSAIC_FIXTURES }}/bundle/failure.json
             ${{ env.MOSAIC_FIXTURES }}/bundle/gguf-export.log
+            ${{ env.MOSAIC_FIXTURES }}/compact/complete.json
+            ${{ env.MOSAIC_FIXTURES }}/compact/plan.json
+            ${{ env.MOSAIC_FIXTURES }}/compact/failure.json
 
   # Non-Metal GPU lane, opt-in via run_gpu. Runner choice mirrors tts-ci.yml:
   # the generic [self-hosted, gpu] label resolves to a mixed pool — an Apple

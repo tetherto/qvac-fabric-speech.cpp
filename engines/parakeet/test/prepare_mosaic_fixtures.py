@@ -24,6 +24,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fixtures', type=Path, required=True)
     ap.add_argument('--coreml', action='store_true', help='Also prepare the optional Apple encoder sidecar')
+    ap.add_argument('--compact-url', help='CI-accessible download URL for the exact supplied Compact GGUF')
     args = ap.parse_args()
     root = args.fixtures.resolve()
     engine = Path(__file__).resolve().parents[1]
@@ -41,6 +42,19 @@ def main():
     print('Generating exact Mosaic fixtures', flush=True)
     subprocess.run([sys.executable, str(scripts / 'prepare-mosaic.py'), '--archive', str(archive),
                     '--output-dir', str(root / 'bundle')] + (['--coreml'] if args.coreml else []), check=True)
+
+    if args.compact_url:
+        compact = root / 'parakeet-mosaic-compact.gguf'
+        definition = json.loads((engine / 'configs/parakeet-mosaic-compact.default.json').read_text())
+        print('Downloading hash-pinned Mosaic Compact', flush=True)
+        with urllib.request.urlopen(args.compact_url, timeout=120) as source, compact.open('xb') as target:
+            while block := source.read(8 << 20):
+                target.write(block)
+        if compact.stat().st_size != definition['bytes'] or sha(compact) != definition['sha256']:
+            raise RuntimeError('Compact artifact identity mismatch')
+        subprocess.run([sys.executable, str(scripts / 'prepare-mosaic.py'), '--gguf', str(compact),
+                        '--variant', 'compact', '--output-dir', str(root / 'compact')] +
+                       (['--coreml'] if args.coreml else []), check=True)
 
     import soundfile as sf
     manifest = json.loads(Path(__file__).with_name('mosaic-fixtures.json').read_text())

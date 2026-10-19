@@ -55,7 +55,10 @@ long-form processing for offline inputs over 90 seconds; see
 ## Experimental Mosaic recipes
 
 [Mosaic](docs/mosaic.md) uses the frozen standard Q4_0/Q8_0 recipe
-and ordinary GGML kernels. The earlier
+and ordinary GGML kernels. The supplied 339.6 MB
+[Mosaic Compact](docs/mosaic.md#shared-mosaic-and-mosaic-compact-models) also uses
+stock Q3_K/IQ3_S blocks; each model supports its own matching optional Core ML
+encoder sidecar. The earlier
 [packed-affine TDT format](docs/backends.md#experimental-packed-affine-tdt-recipe)
 preserves exact integer codes and FP32 minimum/step. Reconstruction is the
 default; `PARAKEET_AFFINE_FUSED=1` requests Metal fusion with the

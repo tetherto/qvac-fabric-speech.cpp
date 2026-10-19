@@ -1668,6 +1668,9 @@ if (PARAKEET_BUILD_TESTS)
         add_test(NAME test-export-mosaic
             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_mosaic.py")
         set_tests_properties(test-export-mosaic PROPERTIES LABELS "unit" SKIP_REGULAR_EXPRESSION "SKIP: ")
+        add_test(NAME test-prepare-mosaic-compact
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/test_mosaic_compact.py")
+        set_tests_properties(test-prepare-mosaic-compact PROPERTIES LABELS "unit" SKIP_REGULAR_EXPRESSION "SKIP: ")
     endif()
 
     add_executable(test-mosaic-inference test/test_mosaic_inference.cpp)
@@ -1679,6 +1682,15 @@ if (PARAKEET_BUILD_TESTS)
         math(EXPR _mosaic_last "${_mosaic_count} - 1")
         foreach(_index RANGE 0 ${_mosaic_last})
             string(JSON _clip GET "${_mosaic_manifest}" clips ${_index} id)
+            foreach(_variant IN ITEMS mosaic compact)
+                set(_bundle bundle)
+                set(_stem parakeet-mosaic)
+                set(_variant_prefix "")
+                if (_variant STREQUAL "compact")
+                    set(_bundle compact)
+                    set(_stem parakeet-mosaic-compact)
+                    set(_variant_prefix "compact-")
+                endif()
             foreach(_lane IN ITEMS native-cpu native-metal native-cuda native-hip coreml)
                 if ((_lane STREQUAL "native-metal" AND NOT APPLE) OR
                     (_lane STREQUAL "native-cuda" AND NOT GGML_CUDA) OR
@@ -1690,7 +1702,7 @@ if (PARAKEET_BUILD_TESTS)
                 set(_backend cpu)
                 set(_labels "fixture;mosaic;cpu")
                 set(_required
-                    "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic.gguf"
+                    "${PARAKEET_TEST_MOSAIC_DIR}/${_bundle}/${_stem}.gguf"
                     "${PARAKEET_TEST_MOSAIC_DIR}/audio/${_clip}.wav"
                     "${PARAKEET_TEST_MOSAIC_DIR}/audio/receipt.json")
                 if (NOT _lane STREQUAL "native-cpu")
@@ -1706,16 +1718,16 @@ if (PARAKEET_BUILD_TESTS)
                     set(_mode coreml)
                     list(APPEND _labels coreml)
                     list(APPEND _required
-                        "${PARAKEET_TEST_MOSAIC_DIR}/bundle/complete.json"
-                        "${PARAKEET_TEST_MOSAIC_DIR}/bundle/plan.json"
-                        "${PARAKEET_TEST_MOSAIC_DIR}/bundle/parakeet-mosaic-encoder.mlmodelc")
+                        "${PARAKEET_TEST_MOSAIC_DIR}/${_bundle}/complete.json"
+                        "${PARAKEET_TEST_MOSAIC_DIR}/${_bundle}/plan.json"
+                        "${PARAKEET_TEST_MOSAIC_DIR}/${_bundle}/${_stem}-encoder.mlmodelc")
                 endif()
-                set(_test "test-mosaic-${_lane}-${_clip}")
+                set(_test "test-mosaic-${_variant_prefix}${_lane}-${_clip}")
                 add_test(NAME ${_test} COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_mosaic_integration.py"
                     --binary "$<TARGET_FILE:test-mosaic-inference>"
                     --fixtures "${PARAKEET_TEST_MOSAIC_DIR}" --clip "${_clip}"
-                    --mode "${_mode}" --backend "${_backend}")
+                    --mode "${_mode}" --backend "${_backend}" --variant "${_variant}")
                 set_tests_properties(${_test} PROPERTIES LABELS "${_labels}"
                     TIMEOUT 600 RUN_SERIAL TRUE)
                 foreach(_path IN LISTS _required)
@@ -1724,6 +1736,7 @@ if (PARAKEET_BUILD_TESTS)
                         message(STATUS "parakeet: ${_test} disabled (missing ${_path})")
                     endif()
                 endforeach()
+            endforeach()
             endforeach()
         endforeach()
     endif()

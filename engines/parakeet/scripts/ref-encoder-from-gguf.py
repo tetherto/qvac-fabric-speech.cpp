@@ -38,6 +38,8 @@ def ggml_to_torch(t):
         gguf.GGMLQuantizationType.Q8_0,
         gguf.GGMLQuantizationType.Q5_0,
         gguf.GGMLQuantizationType.Q4_0,
+        gguf.GGMLQuantizationType.Q3_K,
+        gguf.GGMLQuantizationType.IQ3_S,
     ):
         arr = gguf.quants.dequantize(raw, t.tensor_type)
         arr = np.asarray(arr, dtype=np.float32).reshape(tuple(reversed(t.shape)))
