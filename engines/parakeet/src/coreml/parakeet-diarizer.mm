@@ -381,6 +381,30 @@ std::vector<int> scan_capacities(const std::string & gguf_path) {
     return capacities;
 }
 
+constexpr const char * kWeightsFile = "/weights/weight.bin";
+
+uint64_t file_bytes(const std::string & path) {
+    struct stat status {};
+    return ::stat(path.c_str(), &status) == 0 ? static_cast<uint64_t>(status.st_size) : 0;
+}
+
+CoremlDiarizerBundle bundle_of(const std::string & gguf_path, int capacity) {
+    return {capacity, file_bytes(coreml_diarizer_sidecar_path(gguf_path, capacity) + kWeightsFile)};
+}
+
+}
+
+bool coreml_diarizers_disabled() {
+    return std::getenv(kCoremlDisableEnv) != nullptr ||
+           std::getenv(kCoremlDiarizerDisableEnv) != nullptr;
+}
+
+std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string & gguf_path) {
+    const std::vector<int> capacities = scan_capacities(gguf_path);
+    std::vector<CoremlDiarizerBundle> bundles(capacities.size());
+    std::transform(capacities.begin(), capacities.end(), bundles.begin(),
+                   [&](int capacity) { return bundle_of(gguf_path, capacity); });
+    return bundles;
 }
 
 CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities)

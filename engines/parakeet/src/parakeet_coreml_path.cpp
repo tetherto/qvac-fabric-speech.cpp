@@ -1,5 +1,6 @@
 #include "parakeet_coreml_path.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstddef>
@@ -97,6 +98,60 @@ int coreml_diarizer_sidecar_capacity(const std::string & gguf_path,
         prefix.size(), candidate_path.size() - prefix.size() - extension.size());
     if (!all_digits(digits) || digits.size() >= std::to_string(INT32_MAX).size()) return 0;
     return static_cast<int>(std::stol(digits, nullptr, kDecimalBase));
+}
+
+int coreml_diarizer_capacity_for(const std::vector<int> & sorted_capacities, int frames) {
+    if (frames <= 0) return 0;
+    for (int capacity : sorted_capacities) {
+        if (capacity >= frames) return capacity;
+    }
+    return 0;
+}
+
+namespace {
+
+constexpr uint64_t kAneWeightCopies = 2;
+constexpr uint64_t kCoremlRuntimeBytes = 160ull * 1024 * 1024;
+
+bool bundle_loaded(const std::vector<CoremlFrameRange> & ranges,
+                   const std::vector<int> & capacities, int capacity) {
+    return std::any_of(ranges.begin(), ranges.end(), [&](const CoremlFrameRange & range) {
+        const int first = coreml_diarizer_capacity_for(capacities, range.min_frames);
+        const int last = coreml_diarizer_capacity_for(capacities, range.max_frames);
+        return first > 0 && capacity >= first && (last == 0 || capacity <= last);
+    });
+}
+
+std::vector<int> bundle_capacities(const std::vector<CoremlDiarizerBundle> & bundles) {
+    std::vector<int> capacities(bundles.size());
+    std::transform(bundles.begin(), bundles.end(), capacities.begin(),
+                   [](const CoremlDiarizerBundle & bundle) { return bundle.capacity; });
+    return capacities;
+}
+
+struct LoadedWeights {
+    int bundles = 0;
+    uint64_t bytes = 0;
+};
+
+LoadedWeights loaded_weights(const std::vector<CoremlDiarizerBundle> & bundles,
+                             const std::vector<CoremlFrameRange> & ranges) {
+    const std::vector<int> capacities = bundle_capacities(bundles);
+    LoadedWeights loaded;
+    for (const CoremlDiarizerBundle & bundle : bundles) {
+        if (!bundle_loaded(ranges, capacities, bundle.capacity)) continue;
+        ++loaded.bundles;
+        loaded.bytes += bundle.weights_bytes;
+    }
+    return loaded;
+}
+
+}  // namespace
+
+uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
+                                        const std::vector<CoremlFrameRange> & ranges) {
+    const LoadedWeights loaded = loaded_weights(bundles, ranges);
+    return loaded.bundles == 0 ? 0 : kAneWeightCopies * loaded.bytes + kCoremlRuntimeBytes;
 }
 
 }  // namespace parakeet

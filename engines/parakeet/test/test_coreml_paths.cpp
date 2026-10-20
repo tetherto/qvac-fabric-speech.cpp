@@ -3,12 +3,15 @@
 // `<model>-encoder.mlmodelc` and `<model>-diarizer-<frames>.mlmodelc` naming. The
 // quant tag is stripped (dot- or dash-separated) so one exported sidecar serves
 // every quantisation of a model, and a dot inside a directory name is not
-// mistaken for an extension.
+// mistaken for an extension. Also covers the diarizer capacity ladder and the
+// fit projection of the bundles a workload loads.
 
 #include "parakeet_coreml_path.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -64,6 +67,43 @@ void expect_capacity(const std::string & gguf, const std::string & candidate, in
     }
 }
 
+constexpr uint64_t kMiB = 1024ull * 1024;
+constexpr uint64_t kRuntimeMiB = 160;
+const std::vector<int> kLadder = {358, 745};
+const std::vector<parakeet::CoremlDiarizerBundle> kBundles = {{358, 100 * kMiB}, {745, 120 * kMiB}};
+
+void expect_ladder(int frames, int expected) {
+    const int got = parakeet::coreml_diarizer_capacity_for(kLadder, frames);
+    const bool ok = got == expected;
+    std::printf("[%s] ladder for %-35d -> %d\n", ok ? "ok  " : "FAIL", frames, got);
+    if (!ok) {
+        std::printf("       expected: %d\n", expected);
+        ++g_failures;
+    }
+}
+
+void expect_resident(const char * label, const std::vector<parakeet::CoremlFrameRange> & ranges,
+                     uint64_t expected_mib) {
+    const uint64_t got = parakeet::coreml_diarizer_resident_bytes(kBundles, ranges);
+    const bool ok = got == expected_mib * kMiB;
+    std::printf("[%s] resident %-37s -> %llu MiB\n", ok ? "ok  " : "FAIL", label,
+                (unsigned long long) (got / kMiB));
+    if (!ok) {
+        std::printf("       expected: %llu MiB\n", (unsigned long long) expected_mib);
+        ++g_failures;
+    }
+}
+
+void expect_resident_cases() {
+    expect_resident("no calls", {}, 0);
+    expect_resident("offline in the small bundle", {{341, 341}}, 2 * 100 + kRuntimeMiB);
+    expect_resident("offline and live share a bundle", {{341, 341}, {1, 201}}, 2 * 100 + kRuntimeMiB);
+    expect_resident("offline in the large bundle", {{400, 400}}, 2 * 120 + kRuntimeMiB);
+    expect_resident("long-form blocks up to 700", {{1, 700}}, 2 * 220 + kRuntimeMiB);
+    expect_resident("long-form blocks above every bundle", {{1, 900}}, 2 * 220 + kRuntimeMiB);
+    expect_resident("offline above every bundle", {{900, 900}}, 0);
+}
+
 }  // namespace
 
 int main() {
@@ -114,6 +154,12 @@ int main() {
                     "models/Nemotron-3-Diarization-diarizer-99999999999.mlmodelc", 0);
     expect_capacity("Nemotron-3-Diarization.gguf",
                     "Nemotron-3-Diarization-diarizer-1125.mlmodelc", 1125);
+    expect_ladder(0, 0);
+    expect_ladder(1, 358);
+    expect_ladder(358, 358);
+    expect_ladder(359, 745);
+    expect_ladder(746, 0);
+    expect_resident_cases();
 
     if (g_failures == 0) {
         std::printf("[coreml-paths] PASS\n");

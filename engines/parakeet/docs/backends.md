@@ -581,8 +581,22 @@ bundle is replaced in place and Core ML then aborts with an MPSGraph
 `cannot open input file` assertion, remove
 `~/Library/Caches/<binary>/com.apple.e5rt.e5bundlecache`.
 
-`fit_params` does not count sidecar memory, which Core ML allocates outside
-ggml. Only the M4 has been measured. For the Supertonic vocoder, the Neural
+`fit_params` charges the bundles a workload can load as
+`FitResult::coreml_bytes` (`coremlBytes` in `parakeet-fit-params --json`):
+
+- Nemotron: the bundle for the offline input, or every bundle up to the 30 s
+  long-form block, plus the bundle for one default live chunk;
+- Sortformer: the bundle for the offline input.
+
+Core ML allocates this memory outside the process, and the ggml weights stay
+loaded for the fallback. On the M4, one loaded bundle raised system memory use
+(wired, anonymous and compressed pages) by 441-545 MiB, and the 358 and 745
+pair together by 799 MiB. The resident footprint of the process grew by only
+16-44 MiB. The projection therefore charges twice each weights file, plus
+160 MiB once. `PARAKEET_COREML_DISABLE` and `PARAKEET_COREML_DIARIZER_DISABLE`
+remove the charge.
+
+Only the M4 has been measured. For the Supertonic vocoder, the Neural
 Engine lost to the Metal GPU of an M3 Ultra, so measure Max and Ultra machines
 before shipping these sidecars there.
 

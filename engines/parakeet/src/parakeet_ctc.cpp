@@ -1863,7 +1863,6 @@ static bool path_is_directory(const std::string & path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-static constexpr const char * kCoremlDisableEnv = "PARAKEET_COREML_DISABLE";
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 
 
@@ -1947,8 +1946,7 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
 static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
-    if (std::getenv(kCoremlDisableEnv) != nullptr ||
-        std::getenv(kCoremlDiarizerDisableEnv) != nullptr) return;
+    if (coreml_diarizers_disabled()) return;
     model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path);
     if (model.impl->coreml_diarizers) {
         for (int capacity : model.impl->coreml_diarizers->capacities()) {

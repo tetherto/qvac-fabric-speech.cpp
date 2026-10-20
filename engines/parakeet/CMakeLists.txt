@@ -1851,6 +1851,27 @@ if (PARAKEET_BUILD_TESTS)
             LABEL    "fixture"
             ARGS     "${_qvp_sfsv21_f16_gguf}"
             REQUIRES "${_qvp_sfsv21_f16_gguf}" "${_qvp_sfsv21_coreml}")
+
+        if (PARAKEET_COREML)
+            # fit_params charges the diarizer sidecars a workload loads. Skips
+            # (77) when no `<model>-diarizer-<frames>.mlmodelc` sits beside the GGUF.
+            add_executable(test-fit-coreml-diarizers
+                test/test_fit_coreml_diarizers.cpp)
+            target_link_libraries(test-fit-coreml-diarizers PRIVATE qvac-parakeet)
+            target_include_directories(test-fit-coreml-diarizers PRIVATE include src)
+            parakeet_apply_ccache(test-fit-coreml-diarizers)
+            parakeet_register_test(test-fit-coreml-diarizers
+                LABEL    "fixture;coreml"
+                ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
+            set_property(TEST test-fit-coreml-diarizers PROPERTY SKIP_RETURN_CODE 77)
+            parakeet_register_test(test-fit-coreml-diarizers-sortformer
+                LABEL    "fixture;coreml"
+                EXE      test-fit-coreml-diarizers
+                ARGS     "${_qvp_sfsv21_f16_gguf}"
+                REQUIRES "${_qvp_sfsv21_f16_gguf}")
+            set_property(TEST test-fit-coreml-diarizers-sortformer PROPERTY SKIP_RETURN_CODE 77)
+        endif()
     endif()
 
     # CLI-level Core ML gate: --require-coreml must prove every measured encoder

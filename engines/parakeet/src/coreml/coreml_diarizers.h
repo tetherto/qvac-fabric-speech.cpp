@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coreml/parakeet-diarizer.h"
+#include "parakeet_coreml_path.h"
 
 #include <memory>
 #include <mutex>
@@ -11,6 +12,7 @@ namespace parakeet {
 
 constexpr const char * kCoremlDiarizerUnitsEnv = "PARAKEET_COREML_COMPUTE_UNITS";
 constexpr const char * kCoremlDiarizerDisableEnv = "PARAKEET_COREML_DIARIZER_DISABLE";
+constexpr const char * kCoremlDisableEnv = "PARAKEET_COREML_DISABLE";
 
 class CoremlDiarizers {
 public:
@@ -44,6 +46,10 @@ private:
     std::string label_;
     std::mutex mutex_;
 };
+
+bool coreml_diarizers_disabled();
+
+std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string & gguf_path);
 
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path);
 
