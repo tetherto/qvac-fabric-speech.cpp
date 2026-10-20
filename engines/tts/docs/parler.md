@@ -334,6 +334,10 @@ states, optionally grouping multiple decoder layers in one state tensor with
 and the description's projected cross K/V once. Each prediction emits only
 the new K/V rows, which the host writes directly into Core ML's state views
 with their actual strides. It does not rewrite the whole cache each step.
+When all layers share one state group, the host submits two whole-output
+row updates, one each for K and V. Smaller groups retain layer-selected
+updates. Both paths write the same row payload and use the same native
+stride and dtype checks.
 A synthesis starts with fresh zeroed state even when the description is
 cached; no state is shared between Engine instances.
 
@@ -377,6 +381,45 @@ end-to-end speed advantage. Uniform 6-bit palettes scored only 93.46% token
 agreement against the fp32 rebuild on a 401-frame mini trace, so the faster
 6-bit probe is not a recommended quality tier. Per-channel int8 scored
 98.06%; integrated quality and speech validation remain required.
+
+To inspect decoder-step costs, add `--profile-coreml-decoder` to a
+`parler-bench --coreml-decoder` invocation. Profiling excludes warmup,
+prefill and state seeding. Console output and the optional JSON
+`coreml_decoder_profile` report requested, successful native and unprofiled
+steps for the same measured runs accepted by the pipeline statistics.
+Failed attempts, ggml steps and recovery do not contribute native timings;
+if none qualify, JSON timing totals are `null`.
+
+The profile separates embedding, input/update preparation, prediction,
+cache row handling and logit readback. Session and step totals are inclusive;
+their reported remainders reconcile the nested intervals. Row handling
+includes output retrieval, validation and state handlers as well as copying.
+Deferred synchronization can move work between prediction, row handling and
+readback, so judge changes using inclusive step time and unprofiled pipeline
+measurements. Profiling adds no clock samples when disabled.
+
+A bounded M2 mini experiment measured prediction at 97.8% of decoder-step
+time. Two whole-output row updates reduced measured row handling from
+0.155 to 0.031 ms per step in separate profile invocations. An unprofiled
+ABBA comparison showed total-time reductions of 1.1% and 6.7% in its two
+pairs; the slower final control makes the aggregate 4.0% reduction tentative.
+All final PCM16 outputs matched, and a fresh tiny native fixture matched
+complete finite fp16 states materialized as fp32 and logits/K/V outputs
+across positions and resets. Production mini replay also matched every
+float32 logit in two 200-input cases across two resets. Six sampled pairs
+(two prompts, seeds 1/42/777) matched complete raw float PCM, sample counts
+and sample rates between the frozen baseline and candidate. Generated codes
+and explicit EOS/cap reasons were not observed. This is bounded preservation
+evidence for those mini inputs, not a universal quality guarantee. See the
+[profiling record](history/parler-coreml-profiling-20261020.json) for scope
+and individual timings. These battery-powered measurements should not be
+compared directly with earlier AC-powered absolute timings.
+
+A separate reshape-only export preserved all learned weights and removed
+97 compiled transposes. It changed 8 of 3,600 teacher-forced top-token
+choices and reduced total time by 0.7% and 1.6% in two AC-powered ABBA sets.
+Both sets missed the predeclared 3% cutoff, so the export was not adopted
+and further reference-quality and free-running checks were stopped.
 
 The current contract 2 profile uses per-channel int8 weights with fp16
 codebook heads (`--heads-fp16`), context 512 and all 24 layers per state.

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -149,7 +150,11 @@ bool parler_decoder_runtime::recover(ggml_gallocr_t allocator, int threads,
 
 bool parler_decoder_runtime::step(const std::vector<int32_t> & frame, int past,
                                  ggml_gallocr_t allocator, int threads,
-                                 parler_step_logits & logits) {
+                                 parler_step_logits & logits, parler_decoder_step_profile * profile) {
+    using clock = std::chrono::steady_clock;
+    using milliseconds = std::chrono::duration<double, std::milli>;
+    if (profile) *profile = {};
+    const auto step_start = profile ? clock::now() : clock::time_point{};
     const auto abort = [&]() { ready_ = false; return false; };
     if (!ready_ || (failed_ && strict_) || past != (int) prompt_.size() + 1 + (int) history_.size() ||
         (cancelled_ && cancelled_())) return abort();
@@ -167,12 +172,22 @@ bool parler_decoder_runtime::step(const std::vector<int32_t> & frame, int past,
     std::string error;
     auto & output = logits.copy;
     const size_t expected = (size_t) model_.hparams.n_codebooks * model_.hparams.dec_vocab;
-    bool ok = past < sidecar_->context_capacity() && embed(frame, past) &&
-              sidecar_->step(hidden_, past, output, error) && output.size() == expected;
+    parler_decoder_step_profile measured;
+    const auto embedding_start = profile ? clock::now() : clock::time_point{};
+    const bool embedded = past < sidecar_->context_capacity() && embed(frame, past);
+    const auto embedding_end = profile ? clock::now() : clock::time_point{};
+    bool ok = embedded && sidecar_->step(hidden_, past, output, error, profile ? &measured : nullptr) &&
+              output.size() == expected;
     if (ok) ok = std::all_of(output.begin(), output.end(), [](float v) { return std::isfinite(v); });
     if (ok) {
         logits.view = logits.copy.data();
         backend_ = sidecar_->label();
+        if (profile && measured.native_timing_available) {
+            measured.valid = true;
+            measured.embedding_ms = milliseconds(embedding_end - embedding_start).count();
+            measured.step_wall_ms = milliseconds(clock::now() - step_start).count();
+            *profile = measured;
+        }
         return true;
     }
     if (error.empty()) error = "invalid embedding, logits or cache capacity";

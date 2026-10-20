@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggml-alloc.h"
+#include "decoder_profile.h"
 
 #include <cstdint>
 #include <functional>
@@ -33,7 +34,8 @@ public:
                       const std::vector<float> & cross_values, int cross_length,
                       std::string & error) = 0;
     virtual bool step(const std::vector<float> & hidden, int position,
-                      std::vector<float> & logits, std::string & error) = 0;
+                      std::vector<float> & logits, std::string & error,
+                      parler_decoder_step_profile * profile = nullptr) = 0;
 };
 
 // Open a decoder sidecar next to the GGUF. Null with an error on unsupported
@@ -56,7 +58,8 @@ public:
                  ggml_gallocr_t allocator, int threads,
                  parler_step_logits & logits, int & past, int max_frames = 0);
     bool step(const std::vector<int32_t> & frame, int past,
-              ggml_gallocr_t allocator, int threads, parler_step_logits & logits);
+              ggml_gallocr_t allocator, int threads, parler_step_logits & logits,
+              parler_decoder_step_profile * profile = nullptr);
 
 private:
     const parler_model & model_;

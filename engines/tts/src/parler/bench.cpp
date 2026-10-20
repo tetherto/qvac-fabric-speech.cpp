@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -64,6 +65,7 @@ void usage(const char * argv0) {
         "          [--min-new-tokens N] (-1 = model default; >=0 overrides EOS suppression)\n"
         "          For bounded throughput, use --min-new-tokens N with --max-frames N; not a quality test.\n"
         "          [--coreml-decoder] (experimental Core ML decoder steps)\n"
+        "          [--profile-coreml-decoder] (requires --coreml-decoder; successful measured steps only)\n"
         "          [--seed 42] [--sampled] (default greedy/deterministic)\n"
         "          [--runs 5] [--warmup 1] [--wav-out FILE] [--json-out FILE]\n",
         argv0);
@@ -136,6 +138,7 @@ int main(int argc, char ** argv) {
     int warmup = 1;
     bool greedy = true;
     bool coreml_decoder = false;
+    bool profile_coreml_decoder = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -155,11 +158,16 @@ int main(int argc, char ** argv) {
         else if (a == "--runs")         runs        = std::stoi(next("--runs"));
         else if (a == "--warmup")       warmup      = std::stoi(next("--warmup"));
         else if (a == "--coreml-decoder") coreml_decoder = true;
+        else if (a == "--profile-coreml-decoder") profile_coreml_decoder = true;
         else if (a == "--sampled")      greedy      = false;
         else if (a == "--wav-out")      wav_out     = next("--wav-out");
         else if (a == "--json-out")     json_out    = next("--json-out");
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(argv[0]); return 2; }
+    }
+    if (profile_coreml_decoder && !coreml_decoder) {
+        fprintf(stderr, "--profile-coreml-decoder requires --coreml-decoder\n");
+        return 2;
     }
     if (min_new_tokens < -1) {
         fprintf(stderr, "--min-new-tokens must be -1 (model default) or nonnegative\n");
@@ -251,6 +259,7 @@ int main(int argc, char ** argv) {
     Stage st_tot  {"total",       {}};
     std::vector<double> rtfs;
     std::set<std::string> measured_decoder_backends, measured_dac_backends;
+    parler_decoder_profile_summary decoder_profile;
     double last_audio_s = 0.0;
     int    last_steps = 0;
 
@@ -259,6 +268,7 @@ int main(int argc, char ** argv) {
     const int total_runs = runs + warmup;
     for (int r = 0; r < total_runs; ++r) {
         const bool record = r >= warmup;
+        parler_decoder_profile_summary run_decoder_profile;
 
         delay_config dcfg;
         dcfg.n_codebooks = hp.n_codebooks;
@@ -292,9 +302,12 @@ int main(int argc, char ** argv) {
                                 frame);
             st.append(frame);
             if (st.finished()) break;
-            if (!decoder.step(st.input_frame(), n_past, allocr, n_thr, logits)) {
+            parler_decoder_step_profile step_profile;
+            if (!decoder.step(st.input_frame(), n_past, allocr, n_thr, logits,
+                              profile_coreml_decoder && record ? &step_profile : nullptr)) {
                 fprintf(stderr, "parler-bench: dec step failed\n"); parler_free_model(model); return 1;
             }
+            if (profile_coreml_decoder) run_decoder_profile.add(step_profile, record);
             n_past++;
             steps++;
         }
@@ -312,6 +325,7 @@ int main(int argc, char ** argv) {
         const double audio_s = pcm.empty() ? 0.0 : (double) pcm.size() / (double) hp.dac_sample_rate;
         const double tot_ms = ms_t(t4 - t0).count();
         if (record && audio_s > 0.0) {
+            if (profile_coreml_decoder) decoder_profile.merge(std::move(run_decoder_profile));
             measured_decoder_backends.insert(decoder.backend());
             measured_dac_backends.insert(dac_backend);
             st_t5 .ms.push_back(ms_t(t1 - t0).count());
@@ -362,6 +376,7 @@ int main(int argc, char ** argv) {
     print_stage(st_dec);
     print_stage(st_dac);
     print_stage(st_tot);
+    if (profile_coreml_decoder) decoder_profile.write_text(std::cout);
     if (!rtfs.empty()) {
         printf("\n  RTF (total / audio):  min=%.3f  med=%.3f  mean=%.3f  p95=%.3f  max=%.3f\n",
                minv(rtfs), median(rtfs), mean(rtfs), percentile(rtfs, 0.95), maxv(rtfs));
@@ -387,6 +402,11 @@ int main(int argc, char ** argv) {
             os << "  \"decode_steps\": " << last_steps << ",\n";
             os << "  \"runs\": " << runs << ",\n";
             os << "  \"warmup\": " << warmup << ",\n";
+            if (profile_coreml_decoder) {
+                os << "  \"coreml_decoder_profile\": ";
+                decoder_profile.write_json(os);
+                os << ",\n";
+            }
             os << "  \"rtf\": {"
                << "\"min\": " << minv(rtfs) << ", \"median\": " << median(rtfs)
                << ", \"mean\": " << mean(rtfs) << ", \"p95\": " << percentile(rtfs, 0.95)

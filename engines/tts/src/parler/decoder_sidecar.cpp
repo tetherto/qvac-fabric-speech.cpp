@@ -5,9 +5,11 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "decoder_coreml.h"
+#include "decoder_update_plan.h"
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -66,7 +68,8 @@ public:
                 int context, int cross, int per_state, std::string label)
         : session_(std::move(session)), layers_(hp.dec_n_layer), heads_(hp.dec_n_head),
           hd_(hp.dec_d_model / hp.dec_n_head), context_(context), cross_(cross), per_state_(per_state),
-          logit_count_((size_t) hp.n_codebooks * hp.dec_vocab), label_(std::move(label)) {}
+          logit_count_((size_t) hp.n_codebooks * hp.dec_vocab), label_(std::move(label)),
+          updates_(parler_decoder_update_plan(hp.dec_n_layer, per_state)) {}
 
     int context_capacity() const override { return context_; }
     int cross_capacity() const override { return cross_; }
@@ -103,30 +106,36 @@ public:
     }
 
     bool step(const std::vector<float> & hidden, int position, std::vector<float> & logits,
-              std::string & error) override {
+              std::string & error, parler_decoder_step_profile * profile) override {
+        using clock = std::chrono::steady_clock;
+        using milliseconds = std::chrono::duration<double, std::milli>;
+        if (profile) *profile = {};
+        const auto prepare_start = profile ? clock::now() : clock::time_point{};
         if (position != next_position_ || position < 0 || position >= context_) {
             error = "decoder cache position is out of order or outside capacity";
             return false;
         }
         std::fill_n(self_mask_.begin(), position, 0.0f);
-        updates_.clear();
-        for (int l = 0; l < layers_; ++l) {
-            for (int v = 0; v < 2; ++v) {
-                decoder_coreml_row_update update;
-                update.output = v ? "new_v" : "new_k";
-                update.state = state_name(v ? "self_v" : "self_k", l / per_state_);
-                update.axis = 2;
-                update.row = position;
-                update.source_layer = l;
-                update.destination_layer = l % per_state_;
-                updates_.push_back(std::move(update));
-            }
-        }
+        for (auto & update : updates_) update.row = position;
         if (!session_->set_input("hidden", hidden.data(), hidden.size(), error) ||
-            !session_->set_input("self_mask", self_mask_.data(), self_mask_.size(), error) ||
-            !session_->predict(updates_, nullptr, error)) return false;
+            !session_->set_input("self_mask", self_mask_.data(), self_mask_.size(), error)) return false;
+        const auto prepare_end = profile ? clock::now() : clock::time_point{};
+        decoder_coreml_timing timing;
+        if (!session_->predict(updates_, profile ? &timing : nullptr, error)) return false;
+        const auto readback_start = profile ? clock::now() : clock::time_point{};
         logits.resize(logit_count_);
         if (!session_->copy_output("logits", logits.data(), logits.size(), error)) return false;
+        if (profile) {
+            // Runtime publishes validity only after checking finite logits and
+            // expected output geometry; this local result is never aggregated.
+            profile->native_timing_available = true;
+            profile->input_prepare_ms = milliseconds(prepare_end - prepare_start).count();
+            profile->predict_ms = timing.predict_ms;
+            profile->row_write_ms = timing.row_write_ms;
+            profile->session_total_ms = timing.total_ms;
+            profile->row_bytes_written = timing.row_bytes_written;
+            profile->logit_readback_ms = milliseconds(clock::now() - readback_start).count();
+        }
         ++next_position_;
         return true;
     }

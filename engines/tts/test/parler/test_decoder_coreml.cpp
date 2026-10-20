@@ -3,12 +3,14 @@
 // with -std=c++17 -fobjc-arc -framework CoreML -framework Foundation.
 // Usage: test_decoder_coreml /outside/repo/readonly_cache.mlmodelc [cpu|ane|all]
 #include "../../src/parler/decoder_coreml.h"
+#include "../../src/parler/decoder_update_plan.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -87,7 +89,91 @@ void test_layout() {
         near(unpacked[((l * 2 + h) * 4 + t) * 3 + d], l == 1 && t == 2 ? h * 3.f + d + 1.f : 0.f,
              "padded source and grouped destination layer selection");
     }
+    // Whole-output updates retain both layer axes and the actual padded
+    // source/destination strides, including fp32 -> fp16 conversion.
+    for (int l = 0; l < 2; ++l) for (int h = 0; h < 2; ++h) for (int d = 0; d < 3; ++d)
+        stacked[l * 53 + h * 17 + d * 2] = l * 12.f + h * 3.f + d + 0.25f;
+    uint16_t whole_storage[300] = {};
+    auto whole_source = view(stacked, sizeof(stacked), decoder_coreml_dtype::float32,
+                             {2, 2, 1, 3}, {53, 17, 8, 2});
+    auto whole_destination = view(whole_storage, sizeof(whole_storage), decoder_coreml_dtype::float16,
+                                  {2, 2, 4, 3}, {150, 60, 13, 3});
+    check(decoder_coreml_copy_region(whole_source, whole_destination, {0, 0, 3, 0}, error), error);
+    check(decoder_coreml_copy_region(whole_destination, unpack, {0, 0, 0, 0}, error), error);
+    for (int l = 0; l < 2; ++l) for (int h = 0; h < 2; ++h) for (int t = 0; t < 4; ++t) for (int d = 0; d < 3; ++d)
+        near(unpacked[((l * 2 + h) * 4 + t) * 3 + d],
+             t == 3 ? l * 12.f + h * 3.f + d + 0.25f : 0.f, "whole padded mixed-dtype row copy");
     std::puts("PASS strided layout, fp16 conversions, bounds, overflow and alias checks");
+}
+
+void test_fullgroup_session(const std::string & path, decoder_coreml_units units) {
+    std::string error;
+    auto legacy = decoder_coreml_session::open(path, units, error);
+    check(!!legacy, error);
+    auto whole = decoder_coreml_session::open(path, units, error);
+    check(!!whole, error);
+    for (auto * session : {legacy.get(), whole.get()}) {
+        check(session->metadata("parler.test.metadata") == "readonly-fullgroup-l24-g24-v1",
+              "fresh fullgroup fixture metadata");
+        check(session->states().size() == 2, "fullgroup state count");
+        for (const auto & state : session->states())
+            check(state.shape == std::vector<int64_t>({24, 2, 8, 3}) &&
+                  state.dtype == decoder_coreml_dtype::float16, "fullgroup native fp16 geometry");
+    }
+    std::vector<decoder_coreml_row_update> legacy_rows;
+    for (int l = 0; l < 24; ++l) for (int v = 0; v < 2; ++v)
+        legacy_rows.push_back({v ? "new_v" : "new_k", v ? "self_v_00" : "self_k_00", 2, 0, l, l});
+    auto whole_rows = parler_decoder_update_plan(24, 24);
+    const auto compare = [&](bool outputs) {
+        for (const auto & state : legacy->states()) {
+            std::vector<float> a(state.elements()), b(state.elements());
+            check(legacy->read_state(state.name, a.data(), a.size(), error), error);
+            check(whole->read_state(state.name, b.data(), b.size(), error), error);
+            check(std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0,
+                  "fullgroup complete state memcmp: " + state.name);
+        }
+        if (outputs) for (const auto & output : legacy->outputs()) {
+            std::vector<float> a(output.elements()), b(output.elements());
+            check(legacy->copy_output(output.name, a.data(), a.size(), error), error);
+            check(whole->copy_output(output.name, b.data(), b.size(), error), error);
+            check(std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0,
+                  "fullgroup logits/K/V output memcmp: " + output.name);
+        }
+    };
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        for (auto * session : {legacy.get(), whole.get()}) {
+            check(session->reset(error), error);
+            float old_output[6];
+            check(!session->copy_output("logits", old_output, 6, error), "fullgroup reset retained output");
+            check(!session->predict({}, nullptr, error), "fullgroup reset retained input initialization");
+            for (int v = 0; v < 2; ++v) {
+                std::vector<float> seed(24 * 2 * 2 * 3);
+                for (size_t i = 0; i < seed.size(); ++i)
+                    seed[i] = ((int) (i % 17) - 8) * (v ? -0.125f : 0.25f);
+                check(session->write_state(v ? "self_v_00" : "self_k_00", {0, 0, 0, 0},
+                                          {24, 2, 2, 3}, seed.data(), seed.size(), error), error);
+            }
+        }
+        compare(false);
+        for (int32_t row : {2, 3, 7, 0, 6}) {
+            const float hidden[4] = {0.5f, 1.f, (float) row / 4, 0.25f};
+            const float cross[2] = {0.5f, 1.5f};
+            for (auto * session : {legacy.get(), whole.get()}) {
+                check(session->set_input("hidden", hidden, 4, error), error);
+                check(session->set_input("cross", cross, 2, error), error);
+                check(session->set_input_i32("position", &row, 1, error), error);
+            }
+            for (auto & update : legacy_rows) update.row = row;
+            for (auto & update : whole_rows) update.row = row;
+            decoder_coreml_timing a, b;
+            check(legacy->predict(legacy_rows, &a, error), error);
+            check(whole->predict(whole_rows, &b, error), error);
+            check(a.row_bytes_written == 24 * 2 * 3 * 2 * 2 && a.row_bytes_written == b.row_bytes_written,
+                  "legacy48 and whole2 write identical destination payload bytes");
+            compare(true);
+        }
+    }
+    std::puts("PASS actual fullgroup L=G=24 legacy48/whole2 complete state and logits/K/V memcmp, seeded history, positions and reset/repeat (finite fp16 state read as fp32)");
 }
 
 void test_session(const std::string & path, decoder_coreml_units units) {
@@ -431,6 +517,9 @@ int main(int argc, char ** argv) {
                              units == "ane" ? decoder_coreml_units::cpu_and_ane :
                              units == "all" ? decoder_coreml_units::all : decoder_coreml_units::cpu_only);
         test_grouped_session(path.substr(0, path.find_last_of('/') + 1) + "readonly_grouped_g2.mlmodelc",
+                             units == "ane" ? decoder_coreml_units::cpu_and_ane :
+                             units == "all" ? decoder_coreml_units::all : decoder_coreml_units::cpu_only);
+        test_fullgroup_session(path.substr(0, path.find_last_of('/') + 1) + "readonly_fullgroup_l24.mlmodelc",
                              units == "ane" ? decoder_coreml_units::cpu_and_ane :
                              units == "all" ? decoder_coreml_units::all : decoder_coreml_units::cpu_only);
         test_inference_failure(path.substr(0, path.find_last_of('/') + 1) + "inference_error.mlmodelc");

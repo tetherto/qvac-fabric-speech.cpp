@@ -1745,6 +1745,23 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
     endif()
 
+    add_executable(test-parler-decoder-update-plan test/parler/test_decoder_update_plan.cpp)
+    target_include_directories(test-parler-decoder-update-plan PRIVATE src)
+    tts_cpp_apply_ccache(test-parler-decoder-update-plan)
+    tts_cpp_register_test(test-parler-decoder-update-plan LABEL "unit")
+
+    add_executable(test-parler-decoder-profile test/parler/test_decoder_profile.cpp)
+    target_include_directories(test-parler-decoder-profile PRIVATE src)
+    tts_cpp_apply_ccache(test-parler-decoder-profile)
+    tts_cpp_register_test(test-parler-decoder-profile LABEL "unit")
+    if (Python3_Interpreter_FOUND AND TARGET parler-bench)
+        add_test(NAME test-parler-bench-profile-cli
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/parler/test_bench_profile_cli.py"
+                    "$<TARGET_FILE:parler-bench>")
+        set_tests_properties(test-parler-bench-profile-cli PROPERTIES LABELS "unit"
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
+
     add_executable(test-parler-decoder-runtime test/parler/test_decoder_runtime.cpp)
     target_link_libraries(test-parler-decoder-runtime PRIVATE tts-cpp)
     target_include_directories(test-parler-decoder-runtime PRIVATE src)

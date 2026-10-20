@@ -26,6 +26,8 @@ void check(bool value, const char * text) {
 struct fake_step final : parler_decoder_step_model {
     int count = 0, seeds = 0, fail_at = 2;
     bool seed_ok = true, nonfinite = false;
+    bool native_timing = true;
+    int profiled_calls = 0;
     int context = 4096, cross = 4096;
     size_t logit_count;
     explicit fake_step(size_t n) : logit_count(n) {}
@@ -41,7 +43,13 @@ struct fake_step final : parler_decoder_step_model {
                !ck.empty() && ck.size() == cv.size();
     }
     bool step(const std::vector<float> & hidden, int, std::vector<float> & logits,
-              std::string & error) override {
+              std::string & error, parler_decoder_step_profile * profile) override {
+        if (profile) {
+            ++profiled_calls;
+            *profile = {};
+            profile->native_timing_available = native_timing;
+            profile->row_bytes_written = 128;
+        }
         if (++count == fail_at) { error = "injected failure"; return false; }
         if (hidden.empty()) return false;
         logits.assign(logit_count, nonfinite ? std::numeric_limits<float>::quiet_NaN() : 0.0f);
@@ -127,11 +135,18 @@ int main(int argc, char ** argv) {
           !equal(logits, reference[1]), "fixture detects stale-cache direct fallback");
     check(runtime.step(frames[0], past++, allocator, 2, logits) && runtime.backend() == "coreml-fake",
           "first step uses sidecar");
-    check(runtime.step(frames[1], past++, allocator, 2, logits) && !runtime.active() &&
+    check(probe->profiled_calls == 0, "default runtime step does not request native profiling");
+    parler_decoder_step_profile profile;
+    profile.valid = true;
+    check(runtime.step(frames[1], past++, allocator, 2, logits, &profile) && !runtime.active() &&
           runtime.backend() == "mixed" && equal(logits, reference[1]),
           "mid-utterance failure replays exact history into a destroyed ggml cache");
-    check(runtime.step(frames[2], past++, allocator, 2, logits) && equal(logits, reference[2]),
+    check(!profile.valid && profile.row_bytes_written == 0,
+          "failed prediction and successful replay publish no native profile");
+    profile.valid = true;
+    check(runtime.step(frames[2], past++, allocator, 2, logits, &profile) && equal(logits, reference[2]),
           "later steps continue from the rebuilt ggml cache");
+    check(!profile.valid, "ggml steps clear stale native profile validity");
     check(runtime.prefill(prompt, start, allocator, 2, logits, past) && runtime.backend() == "ggml",
           "later synthesis stays on ggml after retirement");
 
@@ -147,8 +162,23 @@ int main(int argc, char ** argv) {
     runtime.attach(std::move(sidecar));
     check(runtime.prefill(prompt, start, allocator, 2, logits, past), "nonfinite prefill");
     ggml_backend_buffer_clear(model.buffer_kv, 0);
-    check(runtime.step(frames[0], past, allocator, 2, logits) && equal(logits, reference[0]),
+    check(runtime.step(frames[0], past, allocator, 2, logits, &profile) && equal(logits, reference[0]),
           "nonfinite sidecar logits trigger replay");
+    check(!profile.valid && profile.row_bytes_written == 0,
+          "native timings are not published when finite-logit validation fails");
+
+    sidecar = std::make_unique<fake_step>(n - 1);
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.step(frames[0], past, allocator, 2, logits, &profile) && !profile.valid,
+          "wrong native output geometry cannot publish a profile");
+
+    sidecar = std::make_unique<fake_step>(n);
+    sidecar->native_timing = false;
+    runtime.attach(std::move(sidecar));
+    check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
+          runtime.step(frames[0], past, allocator, 2, logits, &profile) && !profile.valid,
+          "unknown timing support is unavailable rather than zero-cost native");
 
     sidecar = std::make_unique<fake_step>(n);
     probe = sidecar.get();
@@ -159,7 +189,11 @@ int main(int argc, char ** argv) {
     check(!runtime.step(frames[0], past + 1, allocator, 2, logits), "out-of-order position rejected");
     check(!runtime.step(frames[0], past, allocator, 2, logits), "rejected position invalidates current call");
     check(runtime.prefill(prompt, start, allocator, 2, logits, past) &&
-          runtime.step(frames[0], past, allocator, 2, logits), "fresh prefill recovers after invalid position");
+          runtime.step(frames[0], past, allocator, 2, logits, &profile), "fresh prefill recovers after invalid position");
+    check(profile.valid && profile.native_timing_available && profile.row_bytes_written == 128 &&
+          profile.embedding_ms >= -1e-6 && profile.step_wall_ms + 1e-6 >= profile.embedding_ms &&
+          probe->profiled_calls == 1,
+          "opt-in profile published only after a successful validated native step");
 
     sidecar = std::make_unique<fake_step>(n);
     sidecar->seed_ok = false;
@@ -226,7 +260,11 @@ int main(int argc, char ** argv) {
             for (int repeat = 0; repeat < 2; ++repeat) {
                 check(runtime.prefill(prompt, start, allocator, 2, logits, past), "actual sidecar prefill/reset");
                 for (size_t i = 0; i < frames.size(); ++i) {
-                    const bool ok = runtime.step(frames[i], past++, allocator, 2, logits);
+                    const bool ok = runtime.step(frames[i], past++, allocator, 2, logits, &profile);
+                    check(ok && profile.valid && profile.row_bytes_written > 0 &&
+                          profile.session_total_ms + 1e-6 >= profile.predict_ms + profile.row_write_ms &&
+                          profile.step_other_ms() >= -1e-6,
+                          "actual native profile includes row bytes and nested timing intervals");
                     float peak = 0;
                     size_t peak_index = 0;
                     if (ok) for (size_t j = 0; j < n; ++j) {

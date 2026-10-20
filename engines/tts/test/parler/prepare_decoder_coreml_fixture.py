@@ -80,6 +80,20 @@ def main():
         return outputs(hidden, position, cross, k, v, layers=4)
 
     @mb.program(
+        input_specs=[
+            mb.TensorSpec(shape=(1, 4, 1, 1), dtype=types.fp16),
+            mb.TensorSpec(shape=(1,), dtype=types.int32),
+            mb.TensorSpec(shape=(1, 2), dtype=types.fp32),
+            mb.StateTensorSpec(shape=(24, 2, 8, 3), dtype=types.fp16),
+            mb.StateTensorSpec(shape=(24, 2, 8, 3), dtype=types.fp16),
+        ],
+        opset_version=ct.target.macOS15,
+    )
+    def fullgroup(hidden, position, cross, self_k_00, self_v_00):
+        return outputs(hidden, position, cross,
+                       mb.read_state(input=self_k_00), mb.read_state(input=self_v_00), layers=24)
+
+    @mb.program(
         input_specs=[mb.TensorSpec(shape=(4,), dtype=types.fp16),
                      mb.TensorSpec(shape=(1,), dtype=types.int32),
                      mb.StateTensorSpec(shape=(1,), dtype=types.fp16)],
@@ -96,6 +110,7 @@ def main():
         ("readonly_cache", program, {"cache_k", "cache_v"}),
         ("readonly_layers", layered, {"self_k_00", "self_k_01", "self_v_00", "self_v_01"}),
         ("readonly_grouped_g2", grouped, {"group_k_00", "group_k_01", "group_v_00", "group_v_01"}),
+        ("readonly_fullgroup_l24", fullgroup, {"self_k_00", "self_v_00"}),
         ("inference_error", failing, {"cache"}),
     ]:
         model = ct.convert(prog, minimum_deployment_target=ct.target.macOS15,
@@ -105,7 +120,8 @@ def main():
         ops = [op.type for f in spec.mlProgram.functions.values() for block in f.block_specializations.values() for op in block.operations]
         assert "read_state" in ops and not {"write_state", "coreml_update_state"}.intersection(ops), ops
         package = args.destination / (name + ".mlpackage")
-        model.user_defined_metadata["parler.test.metadata"] = "readonly-state-fixture"
+        model.user_defined_metadata["parler.test.metadata"] = (
+            "readonly-fullgroup-l24-g24-v1" if name == "readonly_fullgroup_l24" else "readonly-state-fixture")
         model.save(str(package))
         destination = args.destination / (name + ".mlmodelc")
         # compile_model uses shutil.move: an existing directory would nest the
