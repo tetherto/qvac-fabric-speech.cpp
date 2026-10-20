@@ -236,6 +236,10 @@ jobs:
         run: |
           "$MOSAIC_PYTHON" engines/parakeet/test/test_export_mosaic.py
           "$MOSAIC_PYTHON" engines/parakeet/test/test_mosaic_compact.py
+      - name: Check merged Core ML interfaces and Neural Engine exporter helpers
+        run: |
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_coreml_padding_runtime.py
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_export_coreml_ane.py
       - name: Cache exact model, sidecar and audio fixtures
         id: mosaic-cache
         uses: actions/cache@v4

@@ -34,7 +34,7 @@ int main(int argc, char ** argv) {
         if (mode == "bypass") {
             rc = parakeet_coreml_encode_embeddings(ctx, frames, dim, mel.data(), actual.data());
         } else if (mode == "legacy") {
-            rc = parakeet_coreml_encode(ctx, frames, features, mel.data(), rows, dim, actual.data());
+            rc = parakeet_coreml_encode(ctx, frames, frames, features, mel.data(), rows, dim, actual.data());
         } else {
             // Invalid lengths must fail without writing past the caller's output.
             if (parakeet_coreml_encode_valid(ctx, frames, 0, features, mel.data(), rows,
@@ -43,6 +43,17 @@ int main(int argc, char ** argv) {
                                              rows, dim, actual.data()) == 0) return 6;
             rc = parakeet_coreml_encode_valid(ctx, frames, valid, features, mel.data(),
                                                rows, dim, actual.data());
+            if (rc == 0) {
+                // The upstream entry point accepts valid lengths too, with 0
+                // meaning the full slab. It must agree with the strict API.
+                std::vector<float> compatible(actual.size(), NAN);
+                rc = parakeet_coreml_encode(ctx, frames, valid == frames ? 0 : valid,
+                                             features, mel.data(), rows, dim, compatible.data());
+                for (size_t i = 0; rc == 0 && i < actual.size(); ++i) {
+                    if (!std::isfinite(compatible[i]) ||
+                        std::abs(compatible[i] - actual[i]) > 0.008f) return 9;
+                }
+            }
         }
         if (rc != 0) { std::cerr << "encode rc=" << rc << '\n'; return 7; }
         for (size_t i = 0; i < actual.size(); ++i) {
