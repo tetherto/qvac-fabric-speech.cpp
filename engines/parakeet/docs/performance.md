@@ -150,8 +150,9 @@ of the published Q8 file. F32 is a linear-weight reference: the converter
 still stores its convolution kernel in F16. The published Q8 fixture also
 passes the existing CPU and CUDA probability and streaming regression tests.
 
-`bench-nemotron-quantization` checks finite [0, 1] probabilities and eight
-speaker channels, writes the offline probabilities, warms the full input,
+`bench-nemotron-quantization` checks finite [0, 1] probabilities and a
+consistent speaker count (eight channels for Nemotron 3 Diarization, four for
+Sortformer), writes the offline probabilities, warms the full input,
 and reports the median of five offline runs plus one streaming session.
 The input is `diarization-sample-16k.wav` (27.3 s); streaming feeds 100 ms
 blocks with the default 1040 ms chunks. Model load is excluded. Streaming
@@ -266,6 +267,61 @@ gate at 15 %. On the RTX 5090 a
 one-hour input takes 1.0 s. The engine feeds the long-form session in 30 s
 blocks, so its sample ring stays bounded instead of holding a copy of the
 whole input.
+
+### Nemotron 3 Diarization and Sortformer v2.1 on the Apple Neural Engine
+
+[Core ML diarizer sidecars](backends.md#core-ml-diarizer-sidecars) on an Apple
+M4 mac mini (10-core GPU, 16 GB, macOS 15.3.2), against ggml Metal on the same
+machine (`PARAKEET_COREML_DISABLE=1`). The Nemotron 3 Diarization rows use the
+official q8_0 GGUF with 358- and 745-frame sidecars; the Sortformer v2.1 rows
+use the f16 GGUF with a 410-frame sidecar. `bench-nemotron-quantization`
+produced the offline medians and the 27.3 s streaming sessions as described
+above. The 273 s input repeats `diarization-sample-16k.wav` ten times.
+Sortformer streams with its default 2 s chunks. Its 273 s offline input exceeds
+the sidecar capacity, so both columns run ggml. Its 273 s streaming row comes
+from a second session in the same process, because the harness's first session
+would include the sidecar load.
+
+| Model | Input | ggml Metal | Neural Engine | Speedup |
+|---|---|---:|---:|---:|
+| Nemotron 3 Diarization | offline 27.3 s | 36.9 ms | 14.1 ms | 2.6x |
+| Nemotron 3 Diarization | offline 273 s, 30 s long-form blocks | 725 ms | 331 ms | 2.2x |
+| Nemotron 3 Diarization | streaming 27.3 s | 560 ms | 327 ms | 1.7x |
+| Nemotron 3 Diarization | streaming 273 s | 8.55 s | 3.13 s | 2.7x |
+| Sortformer v2.1 | offline 27.3 s | 64.3 ms | 38.0 ms | 1.7x |
+| Sortformer v2.1 | offline 273 s | 2.09 s | 2.10 s | ggml in both |
+| Sortformer v2.1 | streaming 27.3 s | 489 ms | 352 ms | 1.4x |
+| Sortformer v2.1 | streaming 273 s | 7.49 s | 3.54 s | 2.1x |
+
+`test-nemotron-diarization-coreml-parity` and
+`test-sortformer-diarizer-coreml-parity` compare each sidecar with the ggml
+graph on the same inputs, as maximum absolute and relative L2 error of the
+probabilities. Nemotron offline: 0.0033 and 0.00041; live chunk with a full
+speaker cache: 0.0037 and 0.00030; 300-row cache plus a 342-frame block: 0.0045
+and 0.00044. Sortformer batch: 0.0023 and 0.00046; 409-row AOSC slab: 0.0022
+and 0.00048. Against the NeMo-Speech.cpp reference on the 27.3 s clip, the
+Nemotron sidecar measures 0.030 and 0.0016 and ggml Metal 0.033 and 0.0015,
+under the 0.04 and 0.003 test tolerance.
+
+Speaker-cache DER on the long-form fixtures, frame level as above:
+
+| Model | Fixture and path | ggml Metal | Neural Engine |
+|---|---|---:|---:|
+| Nemotron 3 Diarization | `abcba`, offline long-form | 3.70 % | 7.98 % |
+| Nemotron 3 Diarization | `abcdba`, offline long-form | 4.36 % | 4.35 % |
+| Nemotron 3 Diarization | `abcba`, live 1040 ms | 13.79 % | 6.72 % |
+| Nemotron 3 Diarization | `abcdba`, live 1040 ms | 12.90 % | 5.83 % |
+| Sortformer v2.1 | `abcba`, streaming 2 s | 26.13 % | 24.18 % |
+| Sortformer v2.1 | `abcdba`, streaming 2 s | 21.14 % | 21.06 % |
+
+The speaker cache feeds each chunk's probabilities into the next chunk's
+input, so a near-tie in its compression can flip a speaker for the rest of a
+recording, as the x86 CPU does on `abcdba` above. On the `abcba` long-form
+step where the Neural Engine and Metal trajectories separate, the two differ
+by a relative 0.95 % on identical inputs, while the CPU differs from them by
+2.1 % and 3.0 %. The 6.7 s of speaker confusion on that fixture is such a flip,
+not a systematic error: the Neural Engine scores better than Metal on both
+live runs.
 
 ## ASR addon CI (2026-08-12)
 

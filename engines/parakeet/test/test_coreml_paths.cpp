@@ -1,9 +1,9 @@
-// Unit test for the Core ML sidecar path derivation (coreml_encoder_sidecar_path).
-// Pure string logic -- no model, ggml, or Apple frameworks -- so it runs on every
-// platform and locks the `<model>-encoder.mlmodelc` naming. The quant tag is
-// stripped (dot- or dash-separated) so one exported encoder serves every decoder
-// quantisation of a model, and a dot inside a directory name is not mistaken for
-// an extension.
+// Unit test for the Core ML sidecar path derivation. Pure string logic -- no
+// model, ggml, or Apple frameworks -- so it runs on every platform and locks the
+// `<model>-encoder.mlmodelc` and `<model>-diarizer-<frames>.mlmodelc` naming. The
+// quant tag is stripped (dot- or dash-separated) so one exported sidecar serves
+// every quantisation of a model, and a dot inside a directory name is not
+// mistaken for an extension.
 
 #include "parakeet_coreml_path.h"
 
@@ -44,6 +44,26 @@ void expect_decoder(const std::string & gguf, const std::string & expected) {
     }
 }
 
+void expect_diarizer(const std::string & gguf, int capacity, const std::string & expected) {
+    const std::string got = parakeet::coreml_diarizer_sidecar_path(gguf, capacity);
+    const bool ok = got == expected;
+    std::printf("[%s] %-46s -> %s\n", ok ? "ok  " : "FAIL", gguf.c_str(), got.c_str());
+    if (!ok) {
+        std::printf("       expected: %s\n", expected.c_str());
+        ++g_failures;
+    }
+}
+
+void expect_capacity(const std::string & gguf, const std::string & candidate, int expected) {
+    const int got = parakeet::coreml_diarizer_sidecar_capacity(gguf, candidate);
+    const bool ok = got == expected;
+    std::printf("[%s] %-46s -> %d\n", ok ? "ok  " : "FAIL", candidate.c_str(), got);
+    if (!ok) {
+        std::printf("       expected: %d\n", expected);
+        ++g_failures;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -75,6 +95,25 @@ int main() {
                    "models/transcribepsy-250m-eu-sub-decoder.mlmodelc");
     expect_decoder("/opt/models/parakeet-tdt-0.6b-v3.gguf",
                    "/opt/models/parakeet-tdt-0.6b-v3-decoder.mlmodelc");
+    expect("models/Nemotron-3-Diarization.converted.q4_k.gguf",
+           "models/Nemotron-3-Diarization.converted-encoder.mlmodelc");
+    expect("model.nvfp4.gguf",                      "model-encoder.mlmodelc");
+    expect_diarizer("models/Nemotron-3-Diarization.q8_0.gguf", 358,
+                    "models/Nemotron-3-Diarization-diarizer-358.mlmodelc");
+    expect_capacity("models/Nemotron-3-Diarization.q6_k.gguf",
+                    "models/Nemotron-3-Diarization-diarizer-745.mlmodelc", 745);
+    expect_capacity("models/Nemotron-3-Diarization.q8_0.gguf",
+                    "models/Nemotron-3-Diarization-diarizer-.mlmodelc", 0);
+    expect_capacity("models/Nemotron-3-Diarization.q8_0.gguf",
+                    "models/Nemotron-3-Diarization-diarizer-35x.mlmodelc", 0);
+    expect_capacity("models/Nemotron-3-Diarization.q8_0.gguf",
+                    "models/Nemotron-3-Diarization-diarizer-358.mlpackage", 0);
+    expect_capacity("models/Nemotron-3-Diarization.q8_0.gguf",
+                    "other/Nemotron-3-Diarization-diarizer-358.mlmodelc", 0);
+    expect_capacity("models/Nemotron-3-Diarization.q8_0.gguf",
+                    "models/Nemotron-3-Diarization-diarizer-99999999999.mlmodelc", 0);
+    expect_capacity("Nemotron-3-Diarization.gguf",
+                    "Nemotron-3-Diarization-diarizer-1125.mlmodelc", 1125);
 
     if (g_failures == 0) {
         std::printf("[coreml-paths] PASS\n");

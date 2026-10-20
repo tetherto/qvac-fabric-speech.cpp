@@ -26,4 +26,9 @@ std::string coreml_bypass_encoder_sidecar_path(const std::string & gguf_path);
 // independent: a GGUF may have either, both, or neither next to it.
 std::string coreml_decoder_sidecar_path(const std::string & gguf_path);
 
+std::string coreml_diarizer_sidecar_path(const std::string & gguf_path, int capacity);
+
+int coreml_diarizer_sidecar_capacity(const std::string & gguf_path,
+                                     const std::string & candidate_path);
+
 }  // namespace parakeet
