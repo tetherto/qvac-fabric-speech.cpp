@@ -16,6 +16,14 @@ constexpr const char * kParakeetArchitecture = "parakeet-ctc";
 constexpr const char * kDisableEnv = "PARAKEET_COREML_DISABLE";
 constexpr int kLoadThrew = -1;
 
+void set_env(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 std::string write_gguf(const char * architecture) {
     const std::filesystem::path path = std::filesystem::temp_directory_path() /
         (std::string("parakeet-encoder-weights-") + architecture + ".gguf");
@@ -43,7 +51,7 @@ bool expect(bool condition, const char * what) {
 }
 
 int main() {
-    setenv(kDisableEnv, "1", 1);
+    set_env(kDisableEnv, "1");
     const std::string diarization = write_gguf(kDiarizationArchitecture);
     const std::string parakeet = write_gguf(kParakeetArchitecture);
     if (diarization.empty() || parakeet.empty()) {
