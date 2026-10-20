@@ -457,6 +457,9 @@ if (PARAKEET_BUILD_LIBRARY)
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
         )
+        # The diarizer wrapper logs through parakeet_log.h, which includes
+        # ggml.h; a system ggml (the vcpkg superbuild) has no ggml/ subtree.
+        target_link_libraries(parakeet.coreml PRIVATE ggml)
         set_target_properties(parakeet.coreml PROPERTIES
             POSITION_INDEPENDENT_CODE ON
             COMPILE_FLAGS "-fobjc-arc"
