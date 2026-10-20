@@ -421,6 +421,18 @@ choices and reduced total time by 0.7% and 1.6% in two AC-powered ABBA sets.
 Both sets missed the predeclared 3% cutoff, so the export was not adopted
 and further reference-quality and free-running checks were stopped.
 
+A separate decoder-only `FastPrediction` specialization-hint experiment
+preserved every float32 logit across the tested two 200-input histories
+(199 native calls each) and two resets. Two unprofiled ABBA sets found total
+time 0.14% and 0.30% slower
+with the hint (0.22% pooled; baseline drift 0.41%). Both sets missed the
+predeclared 5% improvement threshold, so the hint was not adopted. These
+CPU-host/CPU+ANE, 498-step fixed-work measurements used unchanged mini q8
+weights and decoder/DAC sidecars; they do not measure natural speech or
+genuine cold-load latency. See the
+[FastPrediction record](history/parler-coreml-fast-prediction-20261020.json)
+for controls, individual timings and limits.
+
 The current contract 2 profile uses per-channel int8 weights with fp16
 codebook heads (`--heads-fp16`), context 512 and all 24 layers per state.
 On M2 / macOS 15, both mini and Indic have 1,211 operations assigned to the
