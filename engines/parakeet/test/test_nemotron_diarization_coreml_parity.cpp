@@ -68,10 +68,26 @@ void normalize(std::vector<float> & samples) {
         [gain](float sample) { return sample * gain; });
 }
 
+void set_env(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void unset_env(const char * name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
-    if (disable_coreml) setenv(kDisableEnv, "1", 1);
+    if (disable_coreml) set_env(kDisableEnv, "1");
     const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
-    if (disable_coreml) unsetenv(kDisableEnv);
+    if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }
 

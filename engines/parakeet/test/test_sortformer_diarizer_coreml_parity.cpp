@@ -61,10 +61,26 @@ void normalize(std::vector<float> & samples) {
         [peak](float sample) { return sample / peak; });
 }
 
+void set_env(const char * name, const char * value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void unset_env(const char * name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
-    if (disable_coreml) setenv(kDisableEnv, "1", 1);
+    if (disable_coreml) set_env(kDisableEnv, "1");
     const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
-    if (disable_coreml) unsetenv(kDisableEnv);
+    if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }
 
@@ -80,10 +96,10 @@ int largest_capacity(const parakeet::ParakeetCtcModel & model) {
 }
 
 bool diarizer_env_hides_sidecars(const char * path) {
-    setenv(kDiarizerDisableEnv, "1", 1);
+    set_env(kDiarizerDisableEnv, "1");
     parakeet::ParakeetCtcModel model;
     const bool loaded = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false) == 0;
-    unsetenv(kDiarizerDisableEnv);
+    unset_env(kDiarizerDisableEnv);
     const bool hidden = loaded && largest_capacity(model) == 0;
     std::printf("[%s] diarizer-disable-env: coreml=%d\n", hidden ? "ok  " : "FAIL", hidden ? 0 : 1);
     return hidden;
