@@ -63,7 +63,7 @@ known upstream limitations; see the linked MOSS guide for details.
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested.
 
-Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
+Chatterbox Turbo and Multilingual, Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
 MOSS-TTSD, MOSS-SoundEffect-v2 and MOSS-Speech (LM and speech tokenizer) also support explicit Hexagon placement on Snapdragon; see their
 model guides for setup and validated tiers. Audio8's corrected baseline uses `q8_0` quantisation with
 `--greedy` sampling under `--backend hexagon`; see
