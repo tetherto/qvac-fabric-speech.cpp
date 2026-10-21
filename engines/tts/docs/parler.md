@@ -433,6 +433,27 @@ genuine cold-load latency. See the
 [FastPrediction record](history/parler-coreml-fast-prediction-20261020.json)
 for controls, individual timings and limits.
 
+Three further isolated M2 experiments also missed the predeclared 5%
+total-time improvement threshold. An `Infrequent` reshape hint was 0.91%
+slower overall; replacing only the terminal new-K singleton transpose with
+a reshape reduced total time by 1.47%; original-head self-QKV projection
+fusion reduced it by 1.77% (decode loop 1.92%). Each complete experiment
+used two ABBA sets, four CPU host threads, CPU+ANE decoder/DAC and 498-step
+fixed work. These are separate within-experiment comparisons; gains are
+not additive and the candidates were not compared directly. None was adopted.
+
+The tail and QKV candidates each matched all 800 float32 logit rows in the
+tested production histories and resets. QKV still failed the separate tiny
+CPU-only bitwise gate; production-history parity under CPU+ANE does not
+establish general quality equivalence. Its first timing cohort was interrupted
+by system idle sleep and excluded in full. A fresh cohort with temporary
+idle-sleep prevention completed without sleep; the assertion was then removed.
+All complete cohorts retained eight invocations and stayed within the 5%
+baseline-drift limit. No new sampled-speech or ASR evaluation followed the
+failed speed gates. See the
+[follow-up experiment record](history/parler-coreml-followup-experiments-20261021.json)
+for individual measurements, power conditions and retained failures.
+
 The current contract 2 profile uses per-channel int8 weights with fp16
 codebook heads (`--heads-fp16`), context 512 and all 24 layers per state.
 On M2 / macOS 15, both mini and Indic have 1,211 operations assigned to the
