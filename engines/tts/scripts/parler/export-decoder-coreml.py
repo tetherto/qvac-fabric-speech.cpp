@@ -703,7 +703,12 @@ def trace_len(ref, case):
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Optional post-export QKV fusion of an existing tiny/mini int8+fp16-heads rows "
+               "package: run optimize-decoder-coreml.py --help. It preserves original head math "
+               "and appends raw codes/scales (measured compiled disk size +20.2%); validate "
+               "parity and speed for your compute units. Export defaults are unchanged.")
     p.add_argument("--gguf", required=True, help="a Parler-TTS GGUF (any quantization)")
     p.add_argument("--ctx", type=int, default=DEFAULT_CTX,
                    help="self-attention cache rows: prompt tokens + generated frames (default %(default)s)")

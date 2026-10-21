@@ -440,7 +440,8 @@ a reshape reduced total time by 1.47%; original-head self-QKV projection
 fusion reduced it by 1.77% (decode loop 1.92%). Each complete experiment
 used two ABBA sets, four CPU host threads, CPU+ANE decoder/DAC and 498-step
 fixed work. These are separate within-experiment comparisons; gains are
-not additive and the candidates were not compared directly. None was adopted.
+not additive and the candidates were not compared directly. The initial study
+did not adopt a candidate under that cutoff.
 
 The tail and QKV candidates each matched all 800 float32 logit rows in the
 tested production histories and resets. QKV still failed the separate tiny
@@ -449,10 +450,43 @@ establish general quality equivalence. Its first timing cohort was interrupted
 by system idle sleep and excluded in full. A fresh cohort with temporary
 idle-sleep prevention completed without sleep; the assertion was then removed.
 All complete cohorts retained eight invocations and stayed within the 5%
-baseline-drift limit. No new sampled-speech or ASR evaluation followed the
-failed speed gates. See the
+baseline-drift limit. The initial study stopped before sampled-speech or ASR
+evaluation. See the
 [follow-up experiment record](history/parler-coreml-followup-experiments-20261021.json)
 for individual measurements, power conditions and retained failures.
+
+The QKV option was subsequently accepted for the tested mini CPU+ANE profile
+at the user's request, despite its smaller measured gain. Six paired sampled
+utterances (two prompts, seeds 1/42/777, twelve syntheses) then matched every
+raw float PCM byte, sample count and rate. This supports those inputs on the
+tested setup; the tiny CPU-only mismatch remains, and neither universal
+quality equivalence nor an Indic speed gain is established. The original
+5% experiment result remains unchanged. See the
+[QKV adoption record](history/parler-coreml-qkv-adoption-20261021.json).
+
+To opt into the same serialized transformation, first export an original
+mini package with the settings above, then run:
+
+```sh
+python scripts/parler/optimize-decoder-coreml.py \
+    --package models/parler-mini-v1-decoder.mlpackage \
+    --out models/qkv/parler-mini-v1-decoder.mlpackage \
+    --compile-dir models/qkv/compiled
+```
+
+Both output paths must be new; the package basename must stay the same.
+Place the matching GGUF and unchanged DAC sidecar beside the returned
+decoder `.mlmodelc`, and use the existing `--coreml-decoder` option. For the
+validated profile, select a four-thread CPU host and
+`PARLER_COREML_COMPUTE_UNITS=cpu_and_ane` with `PARLER_COREML_STRICT=1`.
+The optimizer supports only the reviewed mini context-512/cross-128 geometry
+(and its tiny test fixture), per-channel int8 weights, fp16 heads and all
+layers per state. It copies the package, concatenates existing raw Q/K/V
+codes and scales, and retains original head/current-token/cross-attention
+operations. It does not retrace, requantize or change default exports.
+The append-only format retains inactive original records: the tested compiled
+package grew from 373.9 to 449.5 MB (about 20.2%). Validate output parity and
+performance on other compute units before using it there.
 
 The current contract 2 profile uses per-channel int8 weights with fp16
 codebook heads (`--heads-fp16`), context 512 and all 24 layers per state.

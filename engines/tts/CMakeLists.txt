@@ -1754,6 +1754,13 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-parler-decoder-profile PRIVATE src)
     tts_cpp_apply_ccache(test-parler-decoder-profile)
     tts_cpp_register_test(test-parler-decoder-profile LABEL "unit")
+    if (Python3_Interpreter_FOUND AND UNIX)
+        add_test(NAME test-parler-optimize-decoder-coreml
+            COMMAND "${Python3_EXECUTABLE}" -I -B
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/parler/test_optimize_decoder_coreml.py")
+        set_tests_properties(test-parler-optimize-decoder-coreml PROPERTIES LABELS "unit"
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
     if (Python3_Interpreter_FOUND AND TARGET parler-bench)
         add_test(NAME test-parler-bench-profile-cli
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/parler/test_bench_profile_cli.py"
