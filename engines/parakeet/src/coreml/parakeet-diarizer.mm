@@ -111,9 +111,10 @@ bool slice_fits(int64_t row_offset, int64_t rows, int64_t columns, const Binding
 }
 
 bool fill_input(const Binding & binding, const parakeet_coreml_rows * slice) {
+    if (slice == nullptr) return false;
     float * destination = (float *) bridged(binding.array).dataPointer;
     const int64_t total = binding.rows * binding.columns;
-    if (slice == nullptr || slice->rows == 0) {
+    if (slice->rows == 0) {
         std::fill(destination, destination + total, 0.0f);
         return true;
     }
@@ -223,6 +224,14 @@ bool bind_model(parakeet_coreml_diarizer * ctx, MLModel * model) {
     return true;
 }
 
+bool inputs_bound(const parakeet_coreml_diarizer * ctx, const parakeet_coreml_rows * inputs,
+                  int count) {
+    for (int index = 0; index < count; ++index) {
+        if (find_binding(ctx->inputs, inputs[index].name) == nullptr) return false;
+    }
+    return true;
+}
+
 bool fill_inputs(parakeet_coreml_diarizer * ctx, const parakeet_coreml_rows * inputs, int count) {
     for (const Binding & binding : ctx->inputs) {
         if (!fill_input(binding, find_input(inputs, count, binding.name))) return false;
@@ -300,7 +309,8 @@ int parakeet_coreml_diarizer_run(struct parakeet_coreml_diarizer * ctx,
         n_inputs < 0 || n_outputs <= 0 || outputs == nullptr) return kBadArguments;
     @autoreleasepool {
         std::lock_guard<std::mutex> lock(ctx->mutex);
-        if (!fill_inputs(ctx, inputs, n_inputs) || !outputs_fit(ctx, outputs, n_outputs)) {
+        if (!inputs_bound(ctx, inputs, n_inputs) || !fill_inputs(ctx, inputs, n_inputs) ||
+            !outputs_fit(ctx, outputs, n_outputs)) {
             return kBadSlice;
         }
         fill_mask(ctx->mask, valid_frames);

@@ -1735,6 +1735,37 @@ if (PARAKEET_BUILD_TESTS)
         REQUIRES "${_qvp_sfsv21_f16_gguf}")
     set_property(TEST test-sortformer-diarizer-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
+    # Diarizer failure handling: a bundle that fails to load or to run is
+    # quarantined, its calls run on the next capacity or on ggml, and calls
+    # that leave a model input unsupplied are refused. Skips (77) unless both
+    # models' bundles are staged.
+    if (PARAKEET_COREML)
+        add_executable(test-coreml-diarizer-fallback
+            test/test_coreml_diarizer_fallback.cpp
+            src/parakeet_ctc.cpp
+            src/parakeet_diarization_v3.cpp
+            src/parakeet_coreml_path.cpp
+            src/coreml/parakeet_coreml_shape.cpp
+            src/parakeet_log.cpp
+            src/mel_preprocess.cpp
+            src/sentencepiece_bpe.cpp
+            ${PARAKEET_COREML_OBJC_SOURCES})
+        set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_compile_definitions(test-coreml-diarizer-fallback PRIVATE PARAKEET_USE_COREML)
+        target_link_libraries(test-coreml-diarizer-fallback PRIVATE ggml parakeet-backend-defs
+            ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+        target_include_directories(test-coreml-diarizer-fallback PRIVATE include src ggml/include)
+        parakeet_apply_backend_defs(test-coreml-diarizer-fallback)
+        parakeet_apply_ccache(test-coreml-diarizer-fallback)
+        parakeet_register_test(test-coreml-diarizer-fallback
+            LABEL    "fixture;coreml"
+            ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${_qvp_sfsv21_f16_gguf}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
+            REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}" "${_qvp_sfsv21_f16_gguf}")
+        set_property(TEST test-coreml-diarizer-fallback PROPERTY SKIP_RETURN_CODE 77)
+    endif()
+
     # Portable unit test for the Core ML sidecar path derivation. Pure string
     # logic -- no ggml, model, or Apple frameworks -- so it runs on every CI
     # regardless of PARAKEET_COREML and locks the `<model>-encoder.mlmodelc` and
@@ -1858,10 +1889,31 @@ if (PARAKEET_BUILD_TESTS)
         if (PARAKEET_COREML)
             # fit_params charges the diarizer sidecars a workload loads. Skips
             # (77) when no `<model>-diarizer-<frames>.mlmodelc` sits beside the GGUF.
+            # Built from sources, since it calls helpers the shared library hides.
             add_executable(test-fit-coreml-diarizers
-                test/test_fit_coreml_diarizers.cpp)
-            target_link_libraries(test-fit-coreml-diarizers PRIVATE qvac-parakeet)
-            target_include_directories(test-fit-coreml-diarizers PRIVATE include src)
+                test/test_fit_coreml_diarizers.cpp
+                src/fit_main.cpp
+                src/parakeet_ctc.cpp
+                src/parakeet_fit.cpp
+                src/parakeet_log.cpp
+                src/parakeet_nemotron.cpp
+                src/parakeet_unified.cpp
+                src/parakeet_tdt.cpp
+                src/parakeet_eou.cpp
+                src/parakeet_sortformer.cpp
+                src/parakeet_diarization_v3.cpp
+                src/parakeet_coreml_path.cpp
+                src/coreml/parakeet_coreml_shape.cpp
+                src/mel_preprocess.cpp
+                src/sentencepiece_bpe.cpp
+                ${PARAKEET_COREML_OBJC_SOURCES})
+            set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
+                PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+            target_compile_definitions(test-fit-coreml-diarizers PRIVATE PARAKEET_USE_COREML)
+            target_link_libraries(test-fit-coreml-diarizers PRIVATE ggml parakeet-backend-defs
+                ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
+            target_include_directories(test-fit-coreml-diarizers PRIVATE include src ggml/include)
+            parakeet_apply_backend_defs(test-fit-coreml-diarizers)
             parakeet_apply_ccache(test-fit-coreml-diarizers)
             parakeet_register_test(test-fit-coreml-diarizers
                 LABEL    "fixture;coreml"
