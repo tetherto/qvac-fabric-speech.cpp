@@ -386,6 +386,31 @@ would include the sidecar load.
 | Sortformer v2.1 | streaming 27.3 s | 489 ms | 352 ms | 1.4x |
 | Sortformer v2.1 | streaming 273 s | 7.49 s | 3.54 s | 2.1x |
 
+The same bundles and GGUFs on an Apple M3 Ultra Mac Studio (60-core GPU,
+96 GB, macOS 26.7.1), with the diarizers on CPU and Neural Engine compute
+units, the default. Each cell is the median of three runs of the harness
+above, with the host otherwise idle:
+
+| Model | Input | ggml Metal | Neural Engine | Speedup |
+|---|---|---:|---:|---:|
+| Nemotron 3 Diarization | offline 27.3 s | 15.0 ms | 13.0 ms | 1.15x |
+| Nemotron 3 Diarization | offline 273 s, 30 s long-form blocks | 226 ms | 325 ms | 0.70x |
+| Nemotron 3 Diarization | streaming 27.3 s | 295 ms | 298 ms | 0.99x |
+| Nemotron 3 Diarization | streaming 273 s | 3.37 s | 2.89 s | 1.17x |
+| Sortformer v2.1 | offline 27.3 s | 25.9 ms | 30.7 ms | 0.84x |
+| Sortformer v2.1 | offline 273 s | 431 ms | 432 ms | ggml in both |
+| Sortformer v2.1 | streaming 27.3 s | 287 ms | 352 ms | 0.82x |
+| Sortformer v2.1 | streaming 273 s | 3.38 s | 3.68 s | 0.92x |
+
+The Neural Engine takes about as long as on the M4 (13.0 against 14.1 ms for
+the 27.3 s Nemotron input); the difference is the Metal baseline, 2.5 times
+faster on the Ultra. With `PARAKEET_COREML_COMPUTE_UNITS=all`, Core ML places
+every operation of the three bundles on the GPU instead, and the same rows run
+1.4-1.8x slower than ggml Metal. The first load on this machine compiles each
+Nemotron capacity in 9.6-11.6 s and the Sortformer bundle in 17.9 s. The
+parity tests pass there with maximum errors of 0.0049 (Nemotron) and 0.0023
+(Sortformer), and relative L2 errors up to 0.00043 and 0.00051.
+
 `test-nemotron-diarization-coreml-parity` and
 `test-sortformer-diarizer-coreml-parity` compare each sidecar with the ggml
 graph on the same inputs, as maximum absolute and relative L2 error of the

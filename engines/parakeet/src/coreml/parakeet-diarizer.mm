@@ -4,6 +4,7 @@
 
 #import "coreml/parakeet-diarizer.h"
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_units.h"
 #include "parakeet_coreml_path.h"
 #include "parakeet_log.h"
 
@@ -38,31 +39,6 @@ struct Binding {
     int64_t rows = 0;
     int64_t columns = 0;
 };
-
-struct UnitsChoice {
-    MLComputeUnits units;
-    const char * label;
-};
-
-constexpr const char * kGpuUnits = "cpu_and_gpu";
-constexpr const char * kCpuUnits = "cpu_only";
-constexpr const char * kNeuralEngineUnits = "cpu_and_ane";
-
-bool env_equals(const char * value, const char * expected) {
-    return value != nullptr && std::strcmp(value, expected) == 0;
-}
-
-UnitsChoice requested_units(const char * units_env) {
-    const char * value = units_env != nullptr ? std::getenv(units_env) : nullptr;
-    if (env_equals(value, kGpuUnits)) return {MLComputeUnitsCPUAndGPU, "coreml-cpu-gpu"};
-    if (env_equals(value, kCpuUnits)) return {MLComputeUnitsCPUOnly, "coreml-cpu"};
-    if (env_equals(value, kNeuralEngineUnits)) {
-        if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)) {
-            return {MLComputeUnitsCPUAndNeuralEngine, "coreml-ane"};
-        }
-    }
-    return {MLComputeUnitsAll, "coreml-all"};
-}
 
 MLMultiArray * bridged(const void * array) {
     return (__bridge MLMultiArray *) array;
@@ -280,16 +256,17 @@ struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * pat
                                                                 const char * units_env) {
     if (path_mlmodelc == nullptr) return nullptr;
     @autoreleasepool {
-        const UnitsChoice units = requested_units(units_env);
+        std::string label;
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = units.units;
+        config.computeUnits = parakeet_coreml_requested_units(
+            units_env, /*prefer_neural_engine=*/true, &label);
         NSError * error = nil;
         NSURL * url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path_mlmodelc]];
         MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
         if (model == nil || error != nil) return nullptr;
         auto * ctx = new parakeet_coreml_diarizer();
         ctx->model = CFBridgingRetain(model);
-        ctx->label = units.label;
+        ctx->label = label;
         if (!bind_model(ctx, model)) {
             parakeet_coreml_diarizer_free(ctx);
             return nullptr;

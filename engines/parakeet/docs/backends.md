@@ -514,8 +514,13 @@ leaves the valid rows unchanged. Calls above the largest capacity run on ggml.
 A capacity loads on first use. If it fails to load or predict, it is
 quarantined for the lifetime of the engine and that call falls back to ggml.
 `PARAKEET_COREML_DISABLE=1` and `PARAKEET_COREML_COMPUTE_UNITS` apply as for
-the encoder sidecars. `PARAKEET_COREML_DIARIZER_DISABLE=1` ignores only the
-diarizer sidecars, so the older Sortformer encoder sidecars still load.
+the encoder sidecars. Like the Neural Engine encoder and TDT decoder exports,
+the diarizers load with CPU and Neural Engine compute units unless
+`PARAKEET_COREML_COMPUTE_UNITS` names others. `MLComputeUnitsAll` is only a
+preference, and on an M3 Ultra under macOS 26.7 Core ML resolves it to the GPU,
+where the program runs 1.4-1.8x slower than ggml Metal.
+`PARAKEET_COREML_DIARIZER_DISABLE=1` ignores only the diarizer sidecars, so the
+older Sortformer encoder sidecars still load.
 
 | Model | Capacity | Covers |
 |---|---:|---|
@@ -596,9 +601,14 @@ pair together by 799 MiB. The resident footprint of the process grew by only
 160 MiB once. `PARAKEET_COREML_DISABLE` and `PARAKEET_COREML_DIARIZER_DISABLE`
 remove the charge.
 
-Only the M4 has been measured. For the Supertonic vocoder, the Neural
-Engine lost to the Metal GPU of an M3 Ultra, so measure Max and Ultra machines
-before shipping these sidecars there.
+The Neural Engine costs about the same on an M3 Ultra (60-core GPU, macOS 26.7.1)
+as on the M4, but the Ultra's Metal GPU is two to three times faster. There the
+sidecars only tie with ggml Metal: they win Nemotron offline at 27.3 s and live
+at 273 s, and lose Nemotron long-form and every Sortformer path (see
+[performance.md](performance.md#nemotron-3-diarization-and-sortformer-v21-on-the-apple-neural-engine)).
+As with the Supertonic vocoder, stage them for base and Pro chips and iOS, and
+leave them out on Max and Ultra machines. The engine does not decide this;
+whether the bundles sit beside the GGUF does.
 
 ## IndicConformer and Unified Core ML export
 

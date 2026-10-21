@@ -84,8 +84,9 @@ Nemotron 3 Diarization and Sortformer v2.1 can also run their whole network,
 encoder and speaker head, on fixed-capacity diarizer sidecars named
 `<model>-diarizer-<frames>.mlmodelc`. Offline, long-form, and live calls use
 the smallest capacity that fits and fall back to ggml above it. On an Apple M4
-they run 1.4-2.7x faster than ggml Metal; see
-[the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
+they run 1.4-2.7x faster than ggml Metal. On an M3 Ultra, whose GPU is faster,
+they only tie with it (0.70-1.17x), so leave them out on Max and Ultra
+machines; see [the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
 
 ## Backend selection
 

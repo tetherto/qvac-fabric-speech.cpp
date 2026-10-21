@@ -24,6 +24,8 @@ constexpr double kMaximumRelativeError = 0.003;
 constexpr float kGainFloor = 1.0e-3f;
 constexpr const char * kDisableEnv = "PARAKEET_COREML_DISABLE";
 constexpr const char * kDiarizerDisableEnv = "PARAKEET_COREML_DIARIZER_DISABLE";
+constexpr const char * kUnitsEnv = "PARAKEET_COREML_COMPUTE_UNITS";
+constexpr const char * kNeuralEngineLabel = "coreml-ane";
 
 struct Comparison {
     double maximum_error = 0.0;
@@ -93,6 +95,24 @@ int largest_capacity(const parakeet::ParakeetCtcModel & model) {
     (void) model;
     return 0;
 #endif
+}
+
+std::string loaded_label(const parakeet::ParakeetCtcModel & model) {
+#ifdef PARAKEET_USE_COREML
+    parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    return diarizers ? diarizers->label() : std::string();
+#else
+    (void) model;
+    return std::string();
+#endif
+}
+
+bool defaults_to_neural_engine(const parakeet::ParakeetCtcModel & model) {
+    if (std::getenv(kUnitsEnv) != nullptr) return true;
+    const std::string label = loaded_label(model);
+    const bool ane = label == kNeuralEngineLabel;
+    std::printf("[%s] default-units: label=%s\n", ane ? "ok  " : "FAIL", label.c_str());
+    return ane;
 }
 
 bool diarizer_env_hides_sidecars(const char * path) {
@@ -194,6 +214,7 @@ int main(int argc, char ** argv) {
                        true, "aosc-slab") && passed;
     passed = slab_case(accelerated, reference, tile_rows(pre_encode, width, capacity + 1), capacity + 1,
                        false, "above-capacity") && passed;
+    passed = defaults_to_neural_engine(accelerated) && passed;
     passed = diarizer_env_hides_sidecars(argv[1]) && passed;
     std::printf("[sortformer-diarizer-coreml-parity] %s\n", passed ? "PASS" : "FAIL");
     return passed ? 0 : 1;
