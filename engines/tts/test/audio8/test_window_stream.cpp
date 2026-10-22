@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -255,6 +256,80 @@ void check_abandoned_stream() {
     expect(feed_frames(stream, 80, &error), "abandoned stream: advance failed");
 }
 
+void check_delivery(bool asynchronous) {
+    fake_codec codec;
+    codec.shape = shape_of(16, 4);
+    codec.shape.asynchronous = asynchronous;
+    auto hooks = hooks_for(codec);
+    std::vector<float> delivered;
+    std::atomic<int> callbacks{0};
+    hooks.emit = [&](const std::vector<float> & pcm) {
+        delivered.insert(delivered.end(), pcm.begin(), pcm.end());
+        ++callbacks;
+    };
+    window_stream stream(codec.shape, hooks);
+    std::string error;
+    expect(feed_frames(stream, 17, &error), "delivery: advance failed");
+    const auto deadline = std::chrono::steady_clock::now() + WORKER_TIMEOUT;
+    while (!callbacks.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(POLL);
+    }
+    expect(callbacks.load() == 1, "first PCM must arrive before finish");
+    expect(feed_frames(stream, 35, &error), "delivery: remaining advance failed");
+    std::vector<float> pcm;
+    expect(stream.finish(35, pcm, &error) == window_stream_status::done, "delivery finish failed");
+    expect(delivered == reference_pcm(35, 4), "callbacks must preserve exact samples without gaps or overlap");
+    expect(delivered == pcm, "callbacks and result must agree");
+    expect(codec.on_producer == !asynchronous, "synthesis ran on the wrong thread");
+}
+
+void check_callback_exception() {
+    fake_codec codec;
+    codec.shape = shape_of(16, 4);
+    auto hooks = hooks_for(codec);
+    hooks.emit = [](const std::vector<float> &) { throw std::runtime_error("callback failure"); };
+    window_stream stream(codec.shape, hooks);
+    std::vector<float> pcm;
+    std::string error;
+    try {
+        stream.finish(10, pcm, &error);
+        fail("callback exception must propagate from finish");
+    } catch (const std::runtime_error & ex) {
+        expect(std::string(ex.what()) == "callback failure", "callback exception changed");
+    }
+}
+
+void check_delivery_failure() {
+    fake_codec codec;
+    codec.shape = shape_of(16, 4);
+    codec.fail_at = 1;
+    auto hooks = hooks_for(codec);
+    int callbacks = 0;
+    hooks.emit = [&](const std::vector<float> &) { ++callbacks; };
+    window_stream stream(codec.shape, hooks);
+    std::vector<float> pcm;
+    std::string error;
+    expect(stream.finish(35, pcm, &error) == window_stream_status::unavailable, "failed synthesis must be reported");
+    expect(callbacks == 1 && stream.emitted(), "failure must retain delivery state for fallback protection");
+}
+
+void check_callback_cancellation() {
+    fake_codec codec;
+    codec.shape = shape_of(16, 4);
+    auto hooks = hooks_for(codec);
+    int callbacks = 0;
+    hooks.emit = [&](const std::vector<float> &) {
+        ++callbacks;
+        codec.cancel = true;
+    };
+    window_stream stream(codec.shape, hooks);
+    std::vector<float> pcm;
+    std::string error;
+    expect(stream.finish(35, pcm, &error) == window_stream_status::cancelled,
+           "callback cancellation must stop the remaining windows");
+    expect(callbacks == 1, "cancelled callback must not receive later PCM");
+}
+
 void check_sizes(int window, int context) {
     for (int n_frames = 1; n_frames <= 4 * window + 3; ++n_frames) {
         check_leading(n_frames, window, context);
@@ -266,6 +341,11 @@ void check_sizes(int window, int context) {
 }  // namespace
 
 int main() {
+    check_delivery(true);
+    check_delivery(false);
+    check_callback_exception();
+    check_delivery_failure();
+    check_callback_cancellation();
     check_sizes(16, 4);
     check_sizes(16, 0);
     check_sizes(64, 10);
