@@ -192,7 +192,9 @@ jobs:
           runs = [r for r in records if r.get("kind") == "run"]
           assert len(runs) == 2, records
           assert {r["phase"] for r in runs} == {"warmup", "measure"}, runs
-          assert all(r["whisper_full_rc"] == 0 and r["actual_primary_backend"] == "CPU" for r in runs), runs
+          # Whisper retains automatic host BLAS initialization on macOS.
+          # The driver permits CPU/known host BLAS, never arbitrary ACCEL.
+          assert all(r["whisper_full_rc"] == 0 and r["actual_primary_backend"] in ("CPU", "BLAS") for r in runs), runs
           assert all("ask not what your country can do for you" in r["transcript"].lower() for r in runs), runs
           PY
 

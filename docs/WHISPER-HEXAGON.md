@@ -171,7 +171,10 @@ by `whisper-cli --list-devices` (`HTP_INDEX` below):
   --warmup 1 --runs 3 --duration-seconds 300 >htp.jsonl 2>htp.log
 ```
 
-Run CPU with `--no-gpu`, and OpenCL with its listed GPU ordinal. Use a mono
+Run the CPU reference with `--no-gpu`, and OpenCL with its listed GPU ordinal.
+The driver accepts the CPU backend or the known host BLAS backend (registered
+as ACCEL on macOS), retaining the actual name in every record. Other ACCEL
+devices are not accepted as CPU references. Use a mono
 16 kHz PCM16 or float32 WAV; this driver does not resample. Loading is timed
 separately, `inference_s` times only `whisper_full`, and RTF is inference
 seconds divided by audio seconds. `*_mean_s` fields are per-invocation means

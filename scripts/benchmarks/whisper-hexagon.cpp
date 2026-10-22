@@ -46,7 +46,7 @@ void usage() {
         "usage: whisper-hexagon --model FILE --audio FILE (--device N | --no-gpu) [options]\n"
         "  --audio FILE          little-endian mono 16000 Hz PCM16/IEEE float32 WAV\n"
         "  --device N            filtered GPU/IGPU ordinal, as listed by whisper-cli\n"
-        "  --no-gpu              require a CPU primary backend\n"
+        "  --no-gpu              require a CPU/host BLAS reference backend\n"
         "  --threads N           CPU thread count (default 4)\n"
         "  --language CODE       fixed Whisper language (default en; no auto-detection)\n"
         "  --translate           translate speech into English (default transcribe)\n"
@@ -307,10 +307,18 @@ int benchmark(const options & opts) {
     const char * actual = whisper_get_primary_backend_name(ctx.get());
     const std::string actual_name = actual ? actual : "";
     ggml_backend_dev_t actual_dev = actual ? ggml_backend_dev_by_name(actual) : nullptr;
-    const bool primary_matches = opts.cpu ? actual_dev && ggml_backend_dev_type(actual_dev) == GGML_BACKEND_DEVICE_TYPE_CPU :
-                                           actual_name == requested;
+    ggml_backend_reg_t actual_reg = actual_dev ? ggml_backend_dev_backend_reg(actual_dev) : nullptr;
+    const char * actual_registry = actual_reg ? ggml_backend_reg_name(actual_reg) : nullptr;
+    const bool cpu_device = actual_dev && ggml_backend_dev_type(actual_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
+    // Host BLAS is an ACCEL backend and may be primary on macOS. Permit only
+    // that known host registry; an arbitrary ACCEL is not a CPU reference.
+    const bool host_blas = actual_dev && ggml_backend_dev_type(actual_dev) == GGML_BACKEND_DEVICE_TYPE_ACCEL &&
+                           actual_registry && std::strcmp(actual_registry, "BLAS") == 0;
+    const bool primary_matches = opts.cpu ? cpu_device || host_blas : actual_name == requested;
     emit("{\"kind\":\"load\",\"load_s\":" + number(load_seconds) + ",\"actual_primary_backend\":" +
          (actual ? quote(actual_name) : "null") + ",\"primary_backend_matches_request\":" + boolean(primary_matches) +
+         ",\"actual_primary_registry\":" + (actual_registry ? quote(actual_registry) : "null") +
+         ",\"cpu_reference_kind\":" + (cpu_device ? quote("cpu") : host_blas ? quote("host-blas") : "null") +
          ",\"backend_execution_confirmed\":false,\"peak_rss_bytes\":" + peak_rss_bytes() + "}");
     if (!primary_matches) throw failure(4, "initialized primary backend does not match request: " + actual_name + " vs " + requested);
 
