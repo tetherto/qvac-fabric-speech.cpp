@@ -75,6 +75,7 @@ private:
     bool run_job(const job & work, std::vector<float> & out);
     bool process_job(const job & work, std::vector<float> & out);
     void keep_core(const job & work, const std::vector<float> & out);
+    void rethrow_callback_error();
     void close();
     window_stream_status wait_for_worker();
     void stitch(int n_frames, std::vector<float> & pcm) const;

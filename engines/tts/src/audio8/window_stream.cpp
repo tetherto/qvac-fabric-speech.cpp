@@ -45,8 +45,10 @@ window_stream::~window_stream() {
 }
 
 bool window_stream::advance(int n_frames, std::string * error) {
+    rethrow_callback_error();
     while (leading_coreml_window(queued_, shape_.window, shape_.context).core_end < n_frames) {
         if (!queue_leading(queued_, error)) return false;
+        rethrow_callback_error();
     }
     return true;
 }
@@ -83,9 +85,11 @@ bool window_stream::queue_remaining(const std::vector<coreml_window> & plan,
 }
 
 bool window_stream::compute_post(int end, std::string * error) {
+    rethrow_callback_error();
     const auto started = std::chrono::steady_clock::now();
     const bool ok = hooks_.extend_post(end, post_, error);
     post_ms_ += elapsed_ms(started);
+    rethrow_callback_error();
     if (!ok && error && error->empty()) *error = "audio8: the streamed post pass failed";
     return ok;
 }
@@ -147,7 +151,10 @@ bool window_stream::process_job(const job & work, std::vector<float> & out) {
     try {
         keep_core(work, out);
     } catch (...) {
-        callback_error_ = std::current_exception();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback_error_ = std::current_exception();
+        }
         failed_ = true;
         return false;
     }
@@ -183,6 +190,15 @@ void window_stream::keep_core(const job & work, const std::vector<float> & out) 
     ++finished_;
 }
 
+void window_stream::rethrow_callback_error() {
+    std::exception_ptr error;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error = callback_error_;
+    }
+    if (error) std::rethrow_exception(error);
+}
+
 void window_stream::close() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -193,7 +209,7 @@ void window_stream::close() {
 
 window_stream_status window_stream::wait_for_worker() {
     if (worker_.joinable()) worker_.join();
-    if (callback_error_) std::rethrow_exception(callback_error_);
+    rethrow_callback_error();
     if (cancelled_) return window_stream_status::cancelled;
     if (failed_ || finished_ != queued_) return window_stream_status::unavailable;
     return window_stream_status::done;

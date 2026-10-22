@@ -299,6 +299,78 @@ void check_callback_exception() {
     }
 }
 
+constexpr int EXCEPTION_WINDOW = 16;
+constexpr int EXCEPTION_CONTEXT = 4;
+constexpr int EXCEPTION_FRAME_LIMIT = 100;
+constexpr const char * CALLBACK_FAILURE = "callback failure";
+
+void generate_until_callback_failure(window_stream & stream, int & generated) {
+    std::string error;
+    for (int frame = 1; frame <= EXCEPTION_FRAME_LIMIT; ++frame) {
+        ++generated;
+        if (!stream.advance(frame, &error)) throw std::runtime_error(error);
+    }
+}
+
+bool observe_callback_failure(window_stream & stream, int frames) {
+    std::string error;
+    try {
+        stream.advance(frames, &error);
+    } catch (const std::runtime_error & ex) {
+        expect(std::string(ex.what()) == CALLBACK_FAILURE, "advance changed the callback error");
+        return true;
+    }
+    return false;
+}
+
+bool await_callback_failure(window_stream & stream) {
+    const auto deadline = std::chrono::steady_clock::now() + WORKER_TIMEOUT;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (observe_callback_failure(stream, EXCEPTION_WINDOW + 1)) return true;
+        std::this_thread::sleep_for(POLL);
+    }
+    return false;
+}
+
+void check_callback_stops_generation() {
+    fake_codec codec;
+    codec.shape = shape_of(EXCEPTION_WINDOW, EXCEPTION_CONTEXT);
+    codec.shape.asynchronous = false;
+    auto hooks = hooks_for(codec);
+    hooks.emit = [](const std::vector<float> &) { throw std::runtime_error(CALLBACK_FAILURE); };
+    window_stream stream(codec.shape, hooks);
+    int generated = 0;
+    try {
+        generate_until_callback_failure(stream, generated);
+        fail("throwing PCM callback must stop generation through advance");
+    } catch (const std::runtime_error & ex) {
+        expect(std::string(ex.what()) == CALLBACK_FAILURE, "generation changed the callback error");
+    }
+    expect(generated == EXCEPTION_WINDOW + 1, "generation continued after the first callback failed");
+    expect(codec.computed == EXCEPTION_WINDOW, "post work continued after callback failure");
+    expect(codec.synthesized == 1, "synthesis continued after callback failure");
+}
+
+void check_worker_callback_stops_advance() {
+    fake_codec codec;
+    codec.shape = shape_of(EXCEPTION_WINDOW, EXCEPTION_CONTEXT);
+    auto hooks = hooks_for(codec);
+    hooks.emit = [](const std::vector<float> &) { throw std::runtime_error(CALLBACK_FAILURE); };
+    window_stream stream(codec.shape, hooks);
+    std::string error;
+    try {
+        stream.advance(EXCEPTION_WINDOW + 1, &error);
+    } catch (const std::runtime_error & ex) {
+        expect(std::string(ex.what()) == CALLBACK_FAILURE, "worker callback error changed");
+    }
+    expect(await_callback_failure(stream), "worker callback exception did not reach advance");
+    codec.fail_post = true;
+    expect(observe_callback_failure(stream, EXCEPTION_FRAME_LIMIT),
+           "a later post failure masked the callback exception");
+    expect(codec.computed == EXCEPTION_WINDOW, "worker failure allowed further post work");
+    expect(codec.synthesized == 1, "worker failure allowed further synthesis");
+}
+
 void check_delivery_failure() {
     fake_codec codec;
     codec.shape = shape_of(16, 4);
@@ -344,6 +416,8 @@ int main() {
     check_delivery(true);
     check_delivery(false);
     check_callback_exception();
+    check_callback_stops_generation();
+    check_worker_callback_stops_advance();
     check_delivery_failure();
     check_callback_cancellation();
     check_sizes(16, 4);
