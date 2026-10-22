@@ -263,6 +263,7 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
             r.reason = "model-unreadable";
             return r;
         }
+        dit_gguf_require_hexagon_weights(g, paths.dit_model_path, rb.backend, "acestep-fit");
         const bool ok = dit_gguf_read_config(g, dit_cfg);
         dit_gguf_close(g);
         if (!ok) {
