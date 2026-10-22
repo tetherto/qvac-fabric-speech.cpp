@@ -137,6 +137,13 @@ target_compile_features(${FIT_MEMORY_TEST} PRIVATE cxx_std_11)
 add_test(NAME ${FIT_MEMORY_TEST} COMMAND ${FIT_MEMORY_TEST})
 set_tests_properties(${FIT_MEMORY_TEST} PROPERTIES LABELS "unit;gh")
 
+set(FIT_GRAPH_ERROR_TEST test-whisper-fit-graph-error)
+add_executable(${FIT_GRAPH_ERROR_TEST} ${FIT_GRAPH_ERROR_TEST}.cpp)
+target_include_directories(${FIT_GRAPH_ERROR_TEST} PRIVATE ../src)
+target_link_libraries(${FIT_GRAPH_ERROR_TEST} PRIVATE ggml)
+add_test(NAME ${FIT_GRAPH_ERROR_TEST} COMMAND ${FIT_GRAPH_ERROR_TEST})
+set_tests_properties(${FIT_GRAPH_ERROR_TEST} PROPERTIES LABELS "unit;gh")
+
 # Native device selection: model-free registry/precedence contracts and real
 # frontend error/listing checks (QVAC patch, see PATCHES.md).
 set(DEVICE_SELECTION_TEST test-whisper-device-selection)

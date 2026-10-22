@@ -180,6 +180,13 @@ guarantee or a claim that all available RAM can be mapped at once. Validate
 both component byte parity and the shared-memory verdict on the real device
 after updating the producer; CPU parity alone does not establish either.
 
+`GGML_HEXAGON_HOSTBUF=0` can make a full Whisper graph unschedulable even when
+its individual matmuls pass: a preallocated non-host KV destination may need
+a copy operation unsupported by HTP. A rejected scheduler measurement is an
+Error (`measurement-failed`), with no partial compute budget accepted as a
+fit. This configuration is not a supported Whisper fallback path merely
+because its focused backend operator checks pass.
+
 ## Measure transcription time
 
 The standalone installed-library consumer in

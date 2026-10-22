@@ -600,28 +600,9 @@ static bool whisper_sched_graph_measure(struct whisper_sched & allocr, std::vect
 
     meta.resize(ggml_tensor_overhead()*WHISPER_MAX_NODES + ggml_graph_overhead());
 
-    sizes.assign(backends.size(), 0);
-    ggml_backend_sched_reserve_size(sched, get_graph(), sizes.data());
-
-    // backends that share a buffer type (e.g. BLAS and CPU) share ONE galloc
-    // pool, but reserve_size reports that pool once per backend; the real
-    // ggml_backend_sched_get_buffer_size reports duplicates as 0, so mirror
-    // that here (dedup key: the backend's default buffer type, which is what
-    // the scheduler allocates from)
-    for (size_t i = 1; i < backends.size(); ++i) {
-        for (size_t j = 0; j < i; ++j) {
-            if (ggml_backend_get_default_buffer_type(backends[i]) ==
-                ggml_backend_get_default_buffer_type(backends[j])) {
-                sizes[i] = 0;
-                break;
-            }
-        }
-    }
-
     // no reset: the caller may still query ggml_backend_sched_get_tensor_backend
     // to place this graph's outputs before the next graph is measured
-
-    return true;
+    return whisper_fit_measure_graph(sched, get_graph(), backends, sizes);
 }
 
 // medium

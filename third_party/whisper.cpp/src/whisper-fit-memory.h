@@ -5,6 +5,32 @@
 
 #include <cstdint>
 #include <limits>
+#include <algorithm>
+#include <vector>
+
+// A rejected graph has no usable projection. In particular, scheduler errors
+// for unsupported operations in preallocated buffers must not become a small
+// partial compute budget and a false FITS verdict.
+inline bool whisper_fit_measure_graph(ggml_backend_sched_t sched, ggml_cgraph * graph,
+        const std::vector<ggml_backend_t> & backends, std::vector<size_t> & sizes) {
+    sizes.assign(backends.size(), 0);
+    if (!ggml_backend_sched_reserve_size(sched, graph, sizes.data())) {
+        std::fill(sizes.begin(), sizes.end(), 0);
+        return false;
+    }
+    // Repeated buffer types share one pool. Keep compatibility with producers
+    // that report this pool per backend rather than only at its first index.
+    for (size_t i = 1; i < backends.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (ggml_backend_get_default_buffer_type(backends[i]) ==
+                ggml_backend_get_default_buffer_type(backends[j])) {
+                sizes[i] = 0;
+                break;
+            }
+        }
+    }
+    return true;
+}
 
 // A device may expose shared system RAM while having no device-specific
 // capacity query (e.g. FastRPC). Keep its tensor accounting on that device,
