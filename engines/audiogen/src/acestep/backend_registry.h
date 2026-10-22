@@ -43,6 +43,7 @@ namespace tts_cpp::acestep {
 inline constexpr char BACKEND_REQUEST_AUTO[]    = "auto";
 inline constexpr char BACKEND_REQUEST_CPU[]     = "cpu";
 inline constexpr char BACKEND_REQUEST_OPENCL[]  = "opencl";
+inline constexpr char BACKEND_REQUEST_WEBGPU[]  = "webgpu";
 inline constexpr char BACKEND_REQUEST_HEXAGON[] = "hexagon";
 
 inline constexpr char HEXAGON_PRIMARY_DEVICE[] = "HTP0";
@@ -96,6 +97,7 @@ inline bool backend_request_matches(const std::string & requested, const char * 
     if (backend_request_is_auto(requested)) return false;
     if (requested == BACKEND_REQUEST_CPU) return type == GGML_BACKEND_DEVICE_TYPE_CPU;
     if (requested == BACKEND_REQUEST_OPENCL) return reg_name && std::strcmp(reg_name, OPENCL_REG_NAME) == 0;
+    if (requested == BACKEND_REQUEST_WEBGPU) return backend_name_is_webgpu(reg_name);
     if (requested == BACKEND_REQUEST_HEXAGON) {
         return backend_name_is_hexagon(reg_name) && device_name && std::strcmp(device_name, HEXAGON_PRIMARY_DEVICE) == 0;
     }
@@ -383,7 +385,15 @@ inline ggml_backend_t backend_init_for_tool(const char * requested, bool gpu, in
 // stage-placement policies can compare it exactly. Mirrors the helper in
 // engines/tts/src/backend_util.h; duplicated so audiogen stays self-contained.
 // The policy that consumes it lives in stage_placement.h.
+// Test seam: a non-null override stands in for every registry lookup, so the
+// Hexagon-only paths run on the CPU backend in test-acestep-units.
+inline const char *& backend_reg_name_override() {
+    static const char * forced = nullptr;
+    return forced;
+}
+
 inline const char * backend_reg_name(ggml_backend_t backend) {
+    if (const char * forced = backend_reg_name_override()) return forced;
     if (!backend) return "";
     ggml_backend_dev_t dev = ggml_backend_get_device(backend);
     ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;

@@ -44,7 +44,7 @@ void print_usage(const char * argv0) {
         "                          load applies (default f32)\n"
         "  --n-gpu-layers N        request the GPU backend when > 0 (default 0 = CPU),\n"
         "                          with the same runtime fallbacks a real load applies\n"
-        "  --backend NAME          auto | cpu | opencl | hexagon | exact ggml device name;\n"
+        "  --backend NAME          auto | cpu | opencl | webgpu | hexagon | exact ggml device name;\n"
         "                          overrides --n-gpu-layers, no fallback\n"
         "  --margin-mib MIB        free-memory headroom to require (default 256)\n"
         "  --backends-dir DIR      directory scanned for dynamically-loaded ggml backends\n"

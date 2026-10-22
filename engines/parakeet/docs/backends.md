@@ -4,16 +4,17 @@ Part of the [parakeet engine documentation](../README.md).
 
 ## Backends and runtime selection
 
-Any combination of Metal, CUDA, Vulkan, and OpenCL may be built or dynamically
-loaded. Parakeet selects one primary GPU through the ggml backend registry when
+Any combination of Metal, CUDA, Vulkan, OpenCL, and WebGPU may be built or
+dynamically loaded. Parakeet selects one primary GPU through the ggml backend registry when
 `n_gpu_layers > 0`; this is not a fixed compile-time CUDA/Metal/Vulkan/OpenCL
 cascade. `n_gpu_layers` is currently a boolean offload request: positive means
 the whole encoder, not a partial layer count.
 
 Set `EngineOptions::backend` or CLI `--backend` to select a primary GGML backend
-explicitly. `auto` (the default) preserves the policy below; `cpu`, `opencl`,
-and `hexagon` override `n_gpu_layers`. `hexagon` selects the `HTP0` device from
-the `HTP` registry. An exact GGML device name such as `HTP0` is also accepted.
+explicitly. `auto` (the default) preserves the policy below; `cpu`, `cuda`,
+`vulkan`, `opencl`, `webgpu` and `hexagon` override `n_gpu_layers`. `hexagon`
+selects the `HTP0` device from the `HTP` registry. An exact GGML device name
+such as `HTP0` is also accepted.
 An unavailable or failed explicit selection fails loading instead of selecting
 another backend. The existing per-operation CPU scheduler still handles
 unsupported operations; selecting HTP0 does not claim every operation ran there.
@@ -42,8 +43,9 @@ OpenCL with `--backend cpu` and `--backend opencl` using the same model/audio.
 Runtime tiering is:
 
 1. Prefer OpenCL for Adreno 700+, where it is validated ahead of Vulkan.
-2. Otherwise choose the first registered non-OpenCL GPU, such as Vulkan,
-   Metal, CUDA, or Mali Vulkan.
+2. Otherwise choose CUDA on NVIDIA, then the first registered discrete
+   non-OpenCL GPU, such as Vulkan, Metal or WebGPU, then an integrated one
+   such as Mali Vulkan.
 3. Use non-Adreno OpenCL only when no non-OpenCL GPU can initialize.
 4. Fall back to CPU.
 
@@ -51,6 +53,17 @@ Adreno 6xx OpenCL is skipped because it produces incorrect output. Set
 `PARAKEET_ALLOW_ADRENO_6XX=1` to opt in explicitly. Mali uses Vulkan for the
 encoder and CTC/TDT/EOU computation, but the Sortformer diarization head is
 routed to CPU because that head is incorrect on Mali Vulkan.
+
+WebGPU (ggml-webgpu on Dawn, `GGML_WEBGPU=ON`) registers one discrete
+`WebGPU` device and takes the same tier as Vulkan and Metal, so it is chosen
+automatically when no CUDA device is present and explicitly with
+`--backend webgpu`. Validated on an RTX 5090 (Dawn on Vulkan, 2026-10-20) with
+the TranscribePsy 250M CTC model: the transcript is identical to the CPU run
+and the end-to-end time 2.8x shorter. The encoder keeps its unfused attention
+graph on WebGPU (`flash_attn_allowed` admits only CUDA, Metal, Vulkan and
+Hexagon) until the fused path is compared there too. The backend reports its
+maximum buffer size as device memory, so a memory-fit projection is not
+meaningful on WebGPU.
 
 TDT predictor/joint decoding uses ggml graphs on every backend, including
 ggml-cpu, where the quantised joint matmuls run about ten times faster than the
@@ -157,6 +170,64 @@ cmake -S engines/parakeet -B build-vulkan -DGGML_VULKAN=ON
 cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ```
 
+## Experimental packed affine TDT recipe
+
+`export-packed-affine.py` preserves an explicit per-output-channel INT4/INT8
+recipe, including FP32 minima/steps and original FP16 overrides. It does not
+apply another GGML weight quantizer. The nonstandard architecture
+`parakeet-affine-v1` makes older engines reject these files instead of treating
+carrier integers as model weights. Ordinary GGUF models retain their existing
+load and execution paths.
+
+Supply a JSON recipe with `source_archive_sha256` and a `tensors` object mapping
+NeMo encoder weight names to `4`, `8`, or `16`; unlisted tensors remain FP16:
+
+```bash
+python engines/parakeet/scripts/export-packed-affine.py \
+  --archive models/parakeet-tdt-0.6b-v3.nemo \
+  --recipe recipe.json \
+  --output models/retained.affine.gguf \
+  --dense-control models/retained.dense.gguf
+```
+
+The experimental native path stores integer codes in unit-scale Q4_0/Q8_0
+carrier blocks, with separate FP32 affine metadata. These blocks are not
+ordinary Q4_0/Q8_0 model weights. Block-scale headers add storage overhead over
+pure packed codes. The native graph reconstructs each projection transiently
+using separate FP32 multiply/add operations and rounds to FP16 before the
+existing matrix multiply. Activation-first graph ordering permits workspace
+reuse; the loader does not create a persistent dense model. This is a faithful
+storage/execution baseline, **not a fused low-bit matrix multiply or a speed
+optimization**. Reconstruction can be substantially slower than ordinary Q8.
+Unsupported encoder graph operations fail rather than silently falling back.
+`--profile` does not produce isolated substage timings for packed-affine models;
+that graph builder has no affine reconstruction scope and rejects them explicitly.
+Full encoder/inference measurements retain the normal affine execution path.
+Only offline TDT has been evaluated; other backend/model combinations require
+validation before use.
+
+Depthwise kernels retain the recipe's reconstructed FP16 values, as in the
+original packed-projection runtime. Selected FP16 attention weights remain
+FP16. Both packed exports and their dense controls omit duplicate fused Q/K/V
+copies, so size comparisons must account for that layout difference. The receipt
+records the exported source values, physical bytes, coverage and file hashes.
+`--expected-tensors` can require an independent SHA/shape/dtype receipt for every
+source tensor before GGUF conversion.
+
+Validate exact reconstruction before comparing transcription and timing:
+
+```bash
+python engines/parakeet/test/test_packed_affine.py
+# Build target test-packed-affine, then run on the exact requested backend:
+./build/test-packed-affine models/retained.affine.gguf MTL0
+```
+
+The native audit compares every reconstructed FP16 weight bit-for-bit with the
+saved affine arithmetic and refuses unsupported operations. Python reference
+and Core ML export scripts deliberately reject carrier files; use the matching
+`--dense-control` output when an expanded weight graph is required. A weight
+identity check does not establish transcription accuracy or a speed advantage.
+
 ## Core ML encoder sidecar
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
@@ -167,6 +238,8 @@ Mel preprocessing, the CTC/RNN-T/EOU/Nemotron decoders, and the Sortformer
 transformer/speaker head remain in the normal ggml pipeline; the TDT decoder
 can additionally run on the Neural Engine through the
 [batched decoder sidecar](#neural-engine-fixed-window-encoder-and-tdt-decoder-sidecars).
+Nemotron 3 Diarization and Sortformer v2.1 can instead run their whole network
+on [Core ML diarizer sidecars](#core-ml-diarizer-sidecars).
 Sortformer v1 and v2 have no sidecar. The English CTC checkpoints satisfy the
 CTC/IndicConformer export contract; among CTC checkpoints, the Core ML parity
 tests cover only IndicConformer.
@@ -207,6 +280,39 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
+
+Fixed TDT exports now have two inputs: `mel` and `mel_valid_mask`. The latter
+is a vector at mel capacity, with ones for the contiguous valid prefix and zeros
+for padding. The runtime supplies this mask from the same valid-frame scan used
+by the native encoder. The graph masks every subsampling stage, attention keys,
+and intermediate Conformer states, including the GLU output before depthwise
+convolution. Only the subsampled valid prefix reaches the decoder. This requires
+both the updated exporter and runtime; an older runtime cannot load this new
+interface. Existing single-input sidecars still load in the updated runtime,
+but their padded frames remain visible to attention. Re-exporting is required
+to obtain the masking fix; updating engine code alone cannot fix old artifacts.
+Masking preserves natural-length semantics in the graph; quantization and Core
+ML precision can still affect numerical and transcript parity. Validate the
+new artifact on the intended audio before deploying it.
+
+Checkpoint-free padding regressions can be run with:
+
+```bash
+python engines/parakeet/test/test_coreml_padding.py
+# Apple + Xcode command-line tools; also converts/compiles small test models:
+python engines/parakeet/test/test_coreml_padding_runtime.py
+```
+
+The runtime test covers fixed capacity, 1501-frame inputs, short and full-capacity
+calls, integer lengths above 2048, stride boundaries, cache reuse, legacy single-input
+models, and the Sortformer bypass interface on CPU-only and default Core ML
+placement. FP32 conversions check padding semantics against the unpadded
+PyTorch reference; FP16 and FP32 native I/O are compared against predictions
+from the corresponding compiled Core ML graph. FP16-versus-PyTorch numerical
+parity is a separate artifact validation, not asserted by the I/O test.
+A tested conversion environment is Python 3.11, Torch 2.7.0,
+coremltools 9.0, and NumPy 1.26.4. These small-model checks do not establish
+full-model WER, latency, or ANE placement.
 
 IndicConformer uses the same fixed-capacity contract. Core ML runs the encoder;
 the multilingual CTC projection and `--language` token mask remain on ggml:
@@ -327,7 +433,10 @@ its graph has no validity-mask input; shorter and mismatched batch inputs stay
 on ggml. The AOSC bypass sidecar masks padded keys and accepts encoder slabs up
 to its exported capacity (410 frames for the default cache/FIFO/chunk geometry);
 larger or custom geometries stay on ggml. Flexible Sortformer exports are
-rejected.
+rejected. A Sortformer v2.1 diarizer sidecar takes precedence over both for
+every call it covers. On an Apple M4, the bypass sidecar alone takes 53.6 ms
+per 410-frame slab, about as long as the whole ggml Metal AOSC step, while the
+diarizer sidecar takes 22.3 ms for the encoder and speaker head together.
 
 At runtime the sidecar lets Core ML use all compute units and reuses its input,
 feature-provider, and fixed-shape output-backing objects across predictions. The
@@ -480,9 +589,130 @@ Neural Engine path never reads, is not loaded.
 | TDT with a fixed-window Neural Engine encoder (TranscribePsy) | fixed window with padding masks: shorter inputs are padded and masked, longer offline inputs are split into overlapping windows with 16 frames of seam context, or into pause-cut independent segments when the TDT decoder sidecar is present | streaming runs on ggml; the decoder sidecar serves only the engine's offline transcribe path |
 | EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
 | Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
-| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | exact-shape batch sidecar plus a masked AOSC sidecar | batch inputs of any other length, and AOSC slabs above the masked capacity, run on ggml |
+| Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | masked whole-network diarizer sidecars for batch inputs and AOSC slabs up to their capacity; otherwise the exact-shape batch encoder sidecar plus a masked AOSC encoder sidecar | larger batch inputs and AOSC slabs, and every call without a sidecar, run on ggml |
+| Nemotron 3 Diarization | masked whole-network diarizer sidecars for offline inputs, long-form blocks, and live chunks up to their capacity | larger calls, and every call without a sidecar, run on ggml |
 | Sortformer v1, v2 | no sidecar | always ggml |
 | MOSS-Transcribe-Diarize | Whisper encoder plus adaptor per 30 s window, the same zero-padded window the ggml encoder runs; separate `MOSS_COREML_*` switches | none; the Qwen3 decoder always runs on ggml. See [MOSS-Transcribe-Diarize](moss-transcribe.md#core-ml-encoder-sidecar) |
+
+## Core ML diarizer sidecars
+
+Nemotron 3 Diarization and Sortformer v2.1 can run their whole network on the
+Apple Neural Engine. A diarizer sidecar holds everything after Nemotron's mel
+stacking or Sortformer's ggml subsampling: the encoder, the speaker head, and
+the sigmoid. Mel preprocessing, Sortformer subsampling, the speaker-cache
+(AOSC) updates, and segment thresholding stay on the host, so the cache
+semantics are unchanged.
+
+Each sidecar has one fixed capacity in 80 ms encoder frames, counting speaker
+cache, FIFO, and chunk rows together, and sits beside the GGUF as:
+
+```text
+<model-basename-with-quant-stripped>-diarizer-<frames>.mlmodelc
+```
+
+For example, `Nemotron-3-Diarization.q8_0.gguf` uses
+`Nemotron-3-Diarization-diarizer-358.mlmodelc`. Several capacities can sit side
+by side. Each call uses the smallest capacity that fits it; the unused rows are
+zero-padded and masked out of attention and the speaker-head convolution, which
+leaves the valid rows unchanged. Calls above the largest capacity run on ggml.
+A capacity loads on first use. If it fails to load or predict, it is
+quarantined for the lifetime of the engine and that call falls back to ggml.
+`PARAKEET_COREML_DISABLE=1` and `PARAKEET_COREML_COMPUTE_UNITS` apply as for
+the encoder sidecars. Like the Neural Engine encoder and TDT decoder exports,
+the diarizers load with CPU and Neural Engine compute units unless
+`PARAKEET_COREML_COMPUTE_UNITS` names others. `MLComputeUnitsAll` is only a
+preference, and on an M3 Ultra under macOS 26.7 Core ML resolves it to the GPU,
+where the program runs 1.4-1.8x slower than ggml Metal.
+`PARAKEET_COREML_DIARIZER_DISABLE=1` ignores only the diarizer sidecars, so the
+older Sortformer encoder sidecars still load.
+
+| Model | Capacity | Covers |
+|---|---:|---|
+| Nemotron 3 Diarization | 358 | the default live chunk (264 cache + 80 FIFO + 14 chunk rows) and offline inputs up to 28.6 s |
+| Nemotron 3 Diarization | 745 | the 30 s long-form block (344 + 401 rows) and offline inputs up to 59.6 s |
+| Nemotron 3 Diarization | 1125 | offline inputs up to the 90 s long-form threshold |
+| Sortformer v2.1 | 410 | the default AOSC step (188 cache + 188 FIFO + 33 chunk and context rows, 409 in all) and batch inputs up to 32.8 s |
+
+Export from the GGUF in the Core ML environment above. The exporters trace a
+Float16 program with Float32 inputs and outputs, and `--compile-dir` compiles
+it with Core ML Tools, so a host with only the Command Line Tools works:
+
+```bash
+python engines/parakeet/scripts/export-nemotron-diarization-coreml.py \
+  --gguf engines/parakeet/models/Nemotron-3-Diarization.q8_0.gguf \
+  --frames 358 745 \
+  --compile-dir engines/parakeet/models
+
+python engines/parakeet/scripts/export-sortformer-diarizer-coreml.py \
+  --gguf engines/parakeet/models/diar_streaming_sortformer_4spk-v2.1.f16.gguf \
+  --frames 410 \
+  --compile-dir engines/parakeet/models
+```
+
+Each capacity is a separate bundle of Float16 weights, about 190 MB for
+Nemotron 3 Diarization and 220 MB for Sortformer v2.1. A multifunction package
+would share the weights, but on macOS 15.3 Core ML refuses to select a function
+on the Neural Engine. 8-bit weights halve the size but cost accuracy:
+per-channel quantization raised the Nemotron maximum error against NeMo to
+0.116, and block quantization moved the program to the GPU.
+
+The graphs are written for the Neural Engine. Activations are laid out as
+`(1, channels, 1, frames)`, linear layers are 1x1 convolutions, and attention is
+split per head, which measured 1.4-1.8x faster than batched attention at 358 to
+1125 frames. The RoPE rotate-half is a grouped convolution. Sigmoids are written as
+`1 / (1 + exp(-x))`, because the Neural Engine's native sigmoid is coarse
+enough to triple the Sortformer error. Sortformer's relative-position scores
+use the angle-difference identity of its sinusoidal table, with the constant
+key-side table applied as a 1x1 convolution. A relative shift either compiled
+for more than 15 minutes or ran on the CPU at 0.8 s per call, and an
+activation-by-activation contraction over all 512 table channels lost too much
+precision on the Neural Engine.
+
+On an Apple M4 (10-core GPU, macOS 15.3.2), every operation of both programs
+runs on the Neural Engine. Single calls at full capacity, against the ggml Metal
+graph at the same size:
+
+| Model and capacity | Neural Engine | ggml Metal |
+|---|---:|---:|
+| Nemotron 3 Diarization, 358 | 12.0 ms | 35.6 ms |
+| Nemotron 3 Diarization, 745 | 31.9 ms | 76.5 ms |
+| Nemotron 3 Diarization, 1125 | 81.2 ms | 129 ms |
+| Sortformer v2.1, 410 | 22.3 ms | not measured alone |
+
+End-to-end timings are in
+[performance.md](performance.md#nemotron-3-diarization-and-sortformer-v21-on-the-apple-neural-engine).
+The first load compiles the program for the Neural Engine: about 12 s per
+Nemotron capacity and 22 s for Sortformer on the M4. macOS caches the result for
+each application binary, after which a load takes about 2.7 s and 6 s. The cache
+can evict programs, so a later process may compile again.
+`EngineOptions::prewarm` moves the Nemotron cost into engine construction. If a
+bundle is replaced in place and Core ML then aborts with an MPSGraph
+`cannot open input file` assertion, remove
+`~/Library/Caches/<binary>/com.apple.e5rt.e5bundlecache`.
+
+`fit_params` charges the bundles a workload can load as
+`FitResult::coreml_bytes` (`coremlBytes` in `parakeet-fit-params --json`):
+
+- Nemotron: the bundle for the offline input, or every bundle up to the 30 s
+  long-form block, plus the bundle for one default live chunk;
+- Sortformer: the bundle for the offline input.
+
+Core ML allocates this memory outside the process, and the ggml weights stay
+loaded for the fallback. On the M4, one loaded bundle raised system memory use
+(wired, anonymous and compressed pages) by 441-545 MiB, and the 358 and 745
+pair together by 799 MiB. The resident footprint of the process grew by only
+16-44 MiB. The projection therefore charges twice each weights file, plus
+160 MiB once. `PARAKEET_COREML_DISABLE` and `PARAKEET_COREML_DIARIZER_DISABLE`
+remove the charge.
+
+The Neural Engine costs about the same on an M3 Ultra (60-core GPU, macOS 26.7.1)
+as on the M4, but the Ultra's Metal GPU is two to three times faster. There the
+sidecars only tie with ggml Metal: they win Nemotron offline at 27.3 s and live
+at 273 s, and lose Nemotron long-form and every Sortformer path (see
+[performance.md](performance.md#nemotron-3-diarization-and-sortformer-v21-on-the-apple-neural-engine)).
+As with the Supertonic vocoder, stage them for base and Pro chips and iOS, and
+leave them out on Max and Ultra machines. The engine does not decide this;
+whether the bundles sit beside the GGUF does.
 
 ## IndicConformer and Unified Core ML export
 

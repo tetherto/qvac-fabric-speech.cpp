@@ -236,7 +236,7 @@ struct cli_params {
     int32_t n_predict      = 1000;   // matches Python's default-ish output budget for paragraph-length text
     int32_t n_ctx          = 0;
     int32_t n_gpu_layers   = 0;
-    std::string backend;             // --backend auto|cpu|opencl|hexagon|DEVICE (Chatterbox)
+    std::string backend;             // --backend auto|cpu|opencl|webgpu|hexagon|DEVICE (Chatterbox)
     std::string kv_cache_type;       // --kv-cache-type f32|f16|q8_0 (default f32)
     // Sampling defaults matched to ChatterboxTurboTTS.generate() in tts_turbo.py:
     //   temperature=0.8, top_k=1000, top_p=0.95, repetition_penalty=1.2
@@ -446,7 +446,7 @@ static void print_usage(const char * argv0) {
     fprintf(stderr, "  --n-predict N           Max speech tokens (default: 1000)\n");
     fprintf(stderr, "  --context N             Override KV context length\n");
     fprintf(stderr, "  --n-gpu-layers N        GPU backend when N > 0\n");
-    fprintf(stderr, "  --backend NAME          Chatterbox device: auto|cpu|opencl|hexagon|DEVICE;\n");
+    fprintf(stderr, "  --backend NAME          Chatterbox device: auto|cpu|opencl|webgpu|hexagon|DEVICE;\n");
     fprintf(stderr, "                          overrides --n-gpu-layers, no fallback (hexagon =\n");
     fprintf(stderr, "                          the Snapdragon HTP0 NPU)\n");
     fprintf(stderr, "  --top-k N               (default: 1000, matches Python; use 1 for greedy)\n");
@@ -659,7 +659,7 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
         else if (arg == "--threads")        { if (!parse_int  ("--threads",        params.n_threads))      return false; }
         else if (arg == "--n-predict")      { if (!parse_int  ("--n-predict",      params.n_predict))      return false; }
         else if (arg == "--context")        { if (!parse_int  ("--context",        params.n_ctx))          return false; }
-        else if (arg == "--backend")        { if (++i >= argc) { fprintf(stderr, "--backend needs a value (auto|cpu|opencl|hexagon|DEVICE)\n"); return false; } params.backend = argv[i]; }
+        else if (arg == "--backend")        { if (++i >= argc) { fprintf(stderr, "--backend needs a value (auto|cpu|opencl|webgpu|hexagon|DEVICE)\n"); return false; } params.backend = argv[i]; }
         else if (arg == "--kv-cache-type")  { if (++i >= argc) { fprintf(stderr, "--kv-cache-type needs a value (f32|f16|q8_0)\n"); return false; } params.kv_cache_type = argv[i]; }
         else if (arg == "--n-gpu-layers")   { if (!parse_int  ("--n-gpu-layers",   params.n_gpu_layers))   return false; }
         else if (arg == "--top-k")          { if (!parse_int  ("--top-k",          params.top_k))          return false; }
