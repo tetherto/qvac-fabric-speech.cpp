@@ -53,6 +53,12 @@ bash third_party/whisper.cpp/models/download-ggml-model.sh base.en
   -f third_party/whisper.cpp/samples/jfk.wav
 ```
 
+Use `whisper-cli --list-devices`, then `--device HTP0` or the exact listed
+OpenCL name to select a registered GPU backend. Numeric `--device N` remains
+supported; `--no-gpu` excludes GPU backends. `whisper-fit-params` shares the
+same selection rules. See [native Snapdragon setup and validation](WHISPER-HEXAGON.md)
+for matching host/DSP builds and execution diagnostics.
+
 ### Parakeet
 
 ```sh

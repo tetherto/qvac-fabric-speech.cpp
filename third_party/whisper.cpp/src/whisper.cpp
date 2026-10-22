@@ -29,6 +29,7 @@
 #include <climits>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -4570,6 +4571,15 @@ int whisper_n_len(struct whisper_context * ctx) {
 
 int whisper_n_vocab(struct whisper_context * ctx) {
     return ctx->vocab.n_vocab;
+}
+
+// QVAC (see PATCHES.md): distinguish explicit-device initialization from fallback.
+const char * whisper_get_primary_backend_name(struct whisper_context * ctx) {
+    if (ctx == nullptr || ctx->state == nullptr || ctx->state->backends.empty()) {
+        return nullptr;
+    }
+    ggml_backend_dev_t dev = ggml_backend_get_device(ctx->state->backends.front());
+    return dev ? ggml_backend_dev_name(dev) : nullptr;
 }
 
 int whisper_n_text_ctx(struct whisper_context * ctx) {
@@ -9657,7 +9667,12 @@ static void whisper_log_callback_default(ggml_log_level level, const char * text
     (void) user_data;
 #ifndef WHISPER_DEBUG
     if (level == GGML_LOG_LEVEL_DEBUG) {
-        return;
+        // QVAC (see PATCHES.md): expose existing GGML scheduler/HTP diagnostics
+        // in release builds only when explicitly requested. Keep timing runs off.
+        const char * debug = std::getenv("WHISPER_LOG_DEBUG");
+        if (debug == nullptr || strcmp(debug, "1") != 0) {
+            return;
+        }
     }
 #endif
     fputs(text, stderr);

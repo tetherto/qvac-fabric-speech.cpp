@@ -395,6 +395,12 @@ extern "C" {
     WHISPER_API int whisper_n_audio_ctx     (struct whisper_context * ctx);
     WHISPER_API int whisper_is_multilingual (struct whisper_context * ctx);
 
+    // QVAC (see PATCHES.md): primary initialized device of the default state.
+    // The returned name is owned by the backend; do not free it. Returns NULL
+    // for NULL contexts or contexts without a default state/backend. This is
+    // initialization metadata: unsupported graph nodes may still run on CPU.
+    WHISPER_API const char * whisper_get_primary_backend_name(struct whisper_context * ctx);
+
     WHISPER_API int whisper_model_n_vocab      (struct whisper_context * ctx);
     WHISPER_API int whisper_model_n_audio_ctx  (struct whisper_context * ctx);
     WHISPER_API int whisper_model_n_audio_state(struct whisper_context * ctx);
