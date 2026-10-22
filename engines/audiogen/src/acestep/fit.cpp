@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <initializer_list>
 #include <limits>
 #include <string>
@@ -142,7 +143,7 @@ std::string format_extra_device_peaks(const std::vector<FitDevicePool> & extras)
 
 }  // namespace
 
-FitResult fit_params(const FitOptions & opts) {
+static FitResult fit_params_unguarded(const FitOptions & opts) {
     FitResult r;
 
     if (!(opts.duration_seconds > 0.0f) || opts.text_tokens < 1 || opts.lyric_tokens < 1 ||
@@ -654,6 +655,17 @@ FitResult fit_params(const FitOptions & opts) {
     }
 
     return r;
+}
+
+FitResult fit_params(const FitOptions & opts) {
+    try {
+        return fit_params_unguarded(opts);
+    } catch (const std::exception & e) {
+        FitResult r;
+        r.reason = "measurement-failed";
+        r.report = e.what();
+        return r;
+    }
 }
 
 }  // namespace tts_cpp::acestep
