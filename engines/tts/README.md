@@ -38,30 +38,43 @@ vcpkg consumption instructions are in [docs/build.md](docs/build.md).
 Backends below are the paths validated or explicitly implemented by each
 engine, not every backend ggml can compile.
 
-| Model line | Languages | Voice source | Native rate | CPU | Metal | Vulkan | OpenCL | CUDA |
-|---|---|---|---:|:---:|:---:|:---:|:---:|:---:|
-| Chatterbox Turbo | English | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes |
-| Chatterbox Multilingual | 23 | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes |
-| Supertonic 1 | English | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
-| Supertonic 2 | `en`, `ko`, `es`, `pt`, `fr` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
-| Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
-| Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes | yes | yes | yes |
-| Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes |
-| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes |
-| Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | yes | yes | yes | yes |
-| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ |
-| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | scoped¹ |
-| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ |
-| LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes |
-| LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes |
+| Model line | Languages | Voice source | Native rate | CPU | Metal | Vulkan | OpenCL | CUDA | WebGPU |
+|---|---|---|---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Chatterbox Turbo | English | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes | untested |
+| Chatterbox Multilingual | 23 | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes | untested |
+| Supertonic 1 | English | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | untested |
+| Supertonic 2 | `en`, `ko`, `es`, `pt`, `fr` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | untested |
+| Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | yes² |
+| Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | no³ |
+| Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes | no³ |
+| Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | no³ |
+| Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | yes | yes | yes | yes | untested |
+| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
+| MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | scoped¹ | untested |
+| MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
+| LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes | untested |
+| LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes | untested |
 
 ¹ MOSS CUDA/Vulkan: generated-model CPU parity; quantized TTS/TTSD,
 SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
 F16 TTS/TTSD/SoundEffect and BF16 Speech cases. TTS quality gates retain
 known upstream limitations; see the linked MOSS guide for details.
 
+² WebGPU (Dawn on an RTX 5090, 2026-10-20): Supertonic 3 renders with a
+0.997 waveform correlation to the CPU run and the same transcript, so it is
+the one TTS model whose automatic GPU selection admits WebGPU.
+
+³ WebGPU runs the graph but the result is wrong: Parler's decoder returns NaN
+logits (reported as an error, see [backends](docs/backends.md#runtime-selection)),
+CosyVoice3 and Audio8 synthesize silence or noise. ggml's WGSL matmul
+kernels keep activations in f16, which overflows on these LM-based models;
+automatic selection skips WebGPU for them until the kernels gain f32 paths,
+and an explicit `--backend webgpu` request is honoured only so the status can
+be re-checked.
+
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
-through Vulkan when GPU execution is requested.
+through Vulkan when GPU execution is requested, and excludes WebGPU: the
+graphs run without a per-op CPU fallback and ggml-webgpu lacks `MEAN`.
 
 Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
 MOSS-TTSD, MOSS-SoundEffect-v2 and MOSS-Speech (LM and speech tokenizer) also support explicit Hexagon placement on Snapdragon; see their
@@ -71,16 +84,18 @@ model guides for setup and validated tiers. Audio8's corrected baseline uses `q8
 recipe (`OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`), the corrected single-prompt
 baseline, and the remaining cross-backend correctness limits. Optional
 Apple Core ML sidecars accelerate the CosyVoice3 speech LM, flow and HiFT neural
-stages, the Supertonic vocoder, the Audio8 codec, and
+stages, the Supertonic vocoder, the Audio8 codec, the Parler-TTS DAC decoder
+(on the Neural Engine), and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
 speech tokenizer. Export, routing, fallback, and per-call status are documented in
 [CosyVoice3](docs/cosyvoice3.md#core-ml-sidecars),
 [Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar),
-[Audio8](docs/audio8.md#core-ml-codec-sidecar), and
+[Audio8](docs/audio8.md#core-ml-codec-sidecar),
+[Parler-TTS](docs/parler.md#core-ml-dac-sidecar-apple-neural-engine), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled CosyVoice3
-sidecars present, `fit_params` returns `Error` with
+or Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).

@@ -32,7 +32,7 @@ void usage(const char * argv0) {
         "          [--quality basic|high|\"very high\"]\n"
         "          [--seed 42] [--threads N]\n"
         "          [--n-gpu-layers N] (offload to GPU: Metal/Vulkan/...; 0 = CPU)\n"
-        "          [--backend auto|cpu|opencl|hexagon|DEVICE] (explicit device;\n"
+        "          [--backend auto|cpu|opencl|webgpu|hexagon|DEVICE] (explicit device;\n"
         "                      overrides --n-gpu-layers, no fallback)\n"
         "          [--greedy] (not honoured: argmax decoding never terminates\n"
         "                      for this model, so it warns and samples instead)\n"
@@ -42,6 +42,7 @@ void usage(const char * argv0) {
         "          [--min-new-tokens N] (-1 = model default)\n"
         "          [--no-normalize-numbers] (keep raw digits in the prompt;\n"
         "                      by default digits are expanded to English words)\n"
+        "          [--coreml-decoder] (experimental Core ML decoder steps)\n"
         "          [--backends-dir DIR]\n",
         argv0);
 }
@@ -112,6 +113,7 @@ int main(int argc, char ** argv) {
         else if (a == "--max-frames")     opts.max_frames = atoi(next());
         else if (a == "--min-new-tokens") opts.min_new_tokens = atoi(next());
         else if (a == "--no-normalize-numbers") opts.normalize_numbers = false;
+        else if (a == "--coreml-decoder") opts.coreml_decoder = true;
         else if (a == "--backends-dir")   opts.backends_dir = next();
         else if (a == "--list-emotions") {
             printf("%s\n", ctl::cli::describe_emotions(k_engine).c_str());
@@ -158,8 +160,9 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "parler-cli: backend %s\n", engine.backend_name().c_str());
         tts_cpp::parler::SynthesisResult res = engine.synthesize(text);
         write_wav(out, res.pcm, res.sample_rate);
-        fprintf(stderr, "parler-cli: wrote %s (%.2f s @ %d Hz)\n",
-                out.c_str(), res.duration_s, res.sample_rate);
+        fprintf(stderr, "parler-cli: wrote %s (%.2f s @ %d Hz, DAC on %s)\n",
+                out.c_str(), res.duration_s, res.sample_rate, res.dac_backend.c_str());
+        fprintf(stderr, "parler-cli: decoder %s (ggml prefill)\n", res.decoder_backend.c_str());
     } catch (const std::exception & e) {
         fprintf(stderr, "parler-cli: error: %s\n", e.what());
         return 1;

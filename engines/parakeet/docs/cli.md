@@ -119,8 +119,9 @@ build-parakeet/parakeet-fit-params \
 ```
 
 `--backend` (`FitOptions::backend`) takes the same names as the engine's
-`--backend`: `auto` follows `--n-gpu-layers`; `cpu`, `opencl`, `hexagon` or an
-exact ggml device name projects for that backend, and an unavailable one is an
+`--backend`: `auto` follows `--n-gpu-layers`; `cpu`, `cuda`, `vulkan`, `opencl`,
+`webgpu`, `hexagon` or an exact ggml device name projects for that backend, and
+an unavailable one is an
 error with reason `no-backend-device`, as a real load fails. A Hexagon session
 allocates host memory and reports none of its own, so the verdict reads the
 CPU device's free memory and charges host buffers to the same pool.
@@ -160,6 +161,12 @@ checkpoint) is an error with reason `workload-too-large`, as it is at
 runtime. On a backend without fused flash attention the graph uses
 unfused attention, whose score matrix grows with the square of the input
 length, and the projection prices that graph.
+
+On Apple builds, Nemotron 3 Diarization and Sortformer v2.1 also charge the
+Core ML diarizer sidecars beside the GGUF that the workload can load
+(`coremlBytes`, and a `core ml sidecars` line in the report). On unified
+memory the verdict counts this charge;
+[backends.md](backends.md#core-ml-diarizer-sidecars) gives the estimate.
 
 The projection prices each graph as built. ggml-vulkan reorders graph nodes
 inside the scheduler, which can shorten tensor lifetimes: on an Adreno 830

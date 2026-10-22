@@ -41,7 +41,8 @@ void print_usage(const char * argv0) {
         "  --n-gpu-layers N        request the GPU backend when > 0 (default 0 = CPU),\n"
         "                          with the same runtime fallbacks a real load applies\n"
         "  --threads N             CPU thread count used for backend resolution\n"
-        "  --backend NAME          auto|cpu|opencl|hexagon or an exact ggml device name\n"
+        "  --backend NAME          auto|cpu|cuda|vulkan|opencl|webgpu|hexagon or an exact\n"
+        "                          ggml device name\n"
         "                          (default auto follows --n-gpu-layers; an unavailable\n"
         "                          backend is an error, as in a real load)\n"
         "  --margin-mib MIB        free-memory headroom to require (default 256)\n"
@@ -80,6 +81,7 @@ void print_json(const parakeet::FitResult & r, uint64_t margin_bytes) {
     std::printf("  \"decoderComputeBytes\": %" PRIu64 ",\n", r.device.decoder_compute_bytes);
     std::printf("  \"deviceProjectedBytes\": %" PRIu64 ",\n", r.device.total_bytes);
     std::printf("  \"hostBytes\": %" PRIu64 ",\n", r.host_bytes);
+    std::printf("  \"coremlBytes\": %" PRIu64 ",\n", r.coreml_bytes);
     std::printf("  \"marginBytes\": %" PRIu64 "\n", margin_bytes);
     std::printf("}\n");
 }

@@ -10,9 +10,16 @@ the ability to compile a ggml backend does not establish model parity.
 
 Where a build carries both CUDA and Vulkan, selection prefers CUDA on NVIDIA:
 measured on one binary on an RTX 3090, Chatterbox Turbo is 8.6x faster on CUDA
-than on that card's Vulkan adapter. Set `TTS_CPP_GPU_BACKEND` to `cuda`,
-`vulkan`, `metal` or `opencl` to pin one for a test arm or a comparison; an
-unrecognised value is rejected rather than silently dropping to the CPU.
+than on that card's Vulkan adapter. WebGPU (Dawn) ranks with Vulkan and Metal,
+so CUDA still wins on the same NVIDIA card. Set `TTS_CPP_GPU_BACKEND` to `cuda`,
+`vulkan`, `metal`, `opencl` or `webgpu` to pin one for a test arm or a
+comparison; an unrecognised value is rejected rather than silently dropping to
+the CPU. Where an engine takes an explicit backend request
+(`EngineOptions::backend`, CLI `--backend`), `webgpu` names the WebGPU device
+the same way `opencl` and `hexagon` name theirs; an unavailable explicit
+request is an error, not a CPU fallback. Each engine admits WebGPU to its
+automatic GPU selection only once validated; the model table in the
+[README](../README.md#supported-models-and-backends) records that status.
 Among several Vulkan adapters, Audio8 takes the one with the most free memory
 and never an integrated adapter while a discrete one is visible; Supertonic and
 CosyVoice3 take `EngineOptions::vulkan_device` (default: the first adapter).
@@ -29,12 +36,13 @@ Explicit Hexagon placement is supported for [Supertonic 3](supertonic.md#snapdra
 
 ## Apple Core ML sidecars
 
-`TTS_CPP_COREML=ON` enables optional Supertonic vocoder, Audio8 codec and
-MOSS sidecars on Apple. Their guides own naming, export commands, accepted
+`TTS_CPP_COREML=ON` enables optional Supertonic vocoder, Audio8 codec,
+Parler-TTS DAC and MOSS sidecars on Apple. Their guides own naming, export commands, accepted
 shapes, low-bit restrictions, placement and runtime status:
 
 - [Supertonic vocoder](supertonic.md#core-ml-vocoder-sidecar)
 - [Audio8 codec](audio8.md#core-ml-codec-sidecar)
+- [Parler-TTS DAC decoder](parler.md#core-ml-dac-sidecar-apple-neural-engine)
 - [MOSS-TTS / MOSS-TTSD codec decoder](moss.md#core-ml-codec-decoder)
 - [MOSS-SoundEffect DiT and VAE](moss.md#core-ml-dit-and-vae)
 - [MOSS-Speech speech tokenizer](moss.md#core-ml-speech-tokenizer)
