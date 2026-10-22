@@ -81,6 +81,7 @@ export ADSP_LIBRARY_PATH="$PWD/lib;/vendor/lib/rfsa/adsp;/dsp"
 chmod +x whisper-cli whisper-fit-params
 ./whisper-cli --list-devices
 ./whisper-fit-params --list-devices
+./whisper-cli -m ggml-tiny.en.bin -f jfk.wav -nt
 ./whisper-cli --device HTP0 -m ggml-tiny.en.bin -f jfk.wav -nt
 ./whisper-cli --no-gpu -m ggml-tiny.en.bin -f jfk.wav -nt
 ```
@@ -90,7 +91,18 @@ Use the exact listed OpenCL device name for the GPU comparison. Numeric
 not all registered devices. `whisper-fit-params` also retains `--gpu-device`.
 `WHISPER_ARG_DEVICE` accepts the same name/index; an explicit flag overrides
 it and `--no-gpu` ignores it. An explicit device flag combined with
-`--no-gpu` is an error. Default device priority is unchanged.
+`--no-gpu` is an error. Without a flag or environment target, both native tools
+prefer registered `HTP0`, then retain the existing GPU-index-0 default when HTP
+is absent or its name is ambiguous. Thus a Hexagon-enabled Snapdragon build with
+matching DSP libraries uses HTP automatically. Automatic initialization retains
+the existing CPU fallback; explicit HTP selection below rejects initialization
+fallback. The C API's numeric-device contract is unchanged; library callers
+choose the desired GPU ordinal themselves.
+
+`GGML_HEXAGON_NDEV` already defaults to `1`, exposing one logical HTP device,
+`HTP0`; it does not choose operators or count DSP cores. Keep the default
+`GGML_HEXAGON_HOSTBUF=1` for Whisper. The focused operator-only run with
+`NDEV=1 HOSTBUF=0` exercises another storage mode, not the full-model default.
 
 An explicit CLI target must be registered and must initialize successfully;
 initialization falling back to another primary backend is an error. The
@@ -186,6 +198,15 @@ a copy operation unsupported by HTP. A rejected scheduler measurement is an
 Error (`measurement-failed`), with no partial compute budget accepted as a
 fit. This configuration is not a supported Whisper fallback path merely
 because its focused backend operator checks pass.
+
+In the focused 73-instance operator selection, `NDEV=1 HOSTBUF=0` passes 65
+cases and reports eight unsupported cases: four F16 GELU cases (two shapes,
+each contiguous and viewed) and four F32 NORM cases with permuted rows (two
+shapes, each at epsilon `1e-6` and `1e-4`). The shared HTP unary contract accepts
+F32 input/output and rejects permuted inputs. These are unsupported type/layout
+combinations, not failed numerical comparisons; the corresponding supported
+F32 GELU and ordinary-row NORM cases pass. Report unsupported cases separately
+from actual HTP execution and CPU fallback.
 
 ## Measure transcription time
 

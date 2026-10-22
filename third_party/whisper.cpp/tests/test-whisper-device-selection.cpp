@@ -132,8 +132,8 @@ void test_environment_and_cpu_override() {
         device_env_guard env(nullptr);
         int selected = 19;
         std::string error = "stale";
-        expect(apply("", false, true, selected, error) && selected == 19 && error.empty(),
-               "no explicit/environment request preserves the default selection");
+        expect(apply("", false, true, selected, error, {}) && selected == 19 && error.empty(),
+               "without HTP or an explicit/environment request, preserve the default selection");
     }
     {
         device_env_guard env("1invalid");
@@ -170,6 +170,61 @@ void test_environment_and_cpu_override() {
                "empty environment target is invalid rather than default selection");
 #endif
     }
+}
+
+void test_automatic_htp_preference() {
+    using whisper_device_selection::apply;
+    const std::vector<device> candidates = {
+        {"CPU",    GGML_BACKEND_DEVICE_TYPE_CPU,  "host"},
+        {"Adreno", GGML_BACKEND_DEVICE_TYPE_IGPU, "OpenCL"},
+        {"CPU2",   GGML_BACKEND_DEVICE_TYPE_CPU,  "another host"},
+        {"HTP0",   GGML_BACKEND_DEVICE_TYPE_GPU,  "Hexagon"},
+    };
+    device_env_guard env(nullptr);
+    int selected = 0;
+    std::string error;
+    expect(apply("", false, true, selected, error, candidates) && selected == 1 && error.empty(),
+           "automatic HTP selection beats an earlier OpenCL device using the filtered GPU ordinal");
+    expect(apply("0", true, true, selected, error, candidates) && selected == 0 && error.empty(),
+           "explicit OpenCL ordinal overrides automatic HTP selection");
+    expect(apply("Adreno", true, true, selected, error, candidates) && selected == 0,
+           "explicit OpenCL name overrides automatic HTP selection");
+    expect(apply("HTP0", true, true, selected, error, candidates) && selected == 1,
+           "explicit HTP selection remains available");
+    selected = 0;
+    expect(apply("", false, false, selected, error, candidates) && selected == 0 && error.empty(),
+           "CPU mode does not automatically select HTP");
+
+    {
+        device_env_guard target("Adreno");
+        selected = 1;
+        expect(apply("", false, true, selected, error, candidates) && selected == 0,
+               "environment OpenCL selection overrides automatic HTP selection");
+        expect(apply("HTP0", true, true, selected, error, candidates) && selected == 1,
+               "explicit HTP overrides an OpenCL environment target");
+    }
+    {
+        device_env_guard target("missing-device");
+        selected = 0;
+        expect(!apply("", false, true, selected, error, candidates) && selected == 0 &&
+                   error.find("WHISPER_ARG_DEVICE:") != std::string::npos,
+               "invalid environment target is not hidden by automatic HTP selection");
+    }
+    const std::vector<device> no_htp = {
+        {"Adreno", GGML_BACKEND_DEVICE_TYPE_IGPU, "OpenCL"},
+        {"GPU1",   GGML_BACKEND_DEVICE_TYPE_GPU,  "other GPU"},
+    };
+    selected = 1;
+    expect(apply("", false, true, selected, error, no_htp) && selected == 1 && error.empty(),
+           "non-HTP topology preserves the caller's default device");
+    selected = 0;
+    expect(apply("", false, true, selected, error,
+                 {{"HTP0", GGML_BACKEND_DEVICE_TYPE_ACCEL, "not a selectable GPU"}}) && selected == 0,
+           "HTP-like name on a non-GPU device does not change selection");
+    expect(apply("", false, true, selected, error,
+                 {{"HTP0", GGML_BACKEND_DEVICE_TYPE_GPU, "first"},
+                  {"HTP0", GGML_BACKEND_DEVICE_TYPE_GPU, "duplicate"}}) && selected == 0 && error.empty(),
+           "ambiguous HTP name preserves the default without an explicit-selection error");
 }
 
 void test_primary_initialization() {
@@ -214,6 +269,7 @@ int main() {
     test_strict_targets();
     test_ambiguous_names();
     test_environment_and_cpu_override();
+    test_automatic_htp_preference();
     test_primary_initialization();
     if (g_failures) {
         std::fprintf(stderr, "test-whisper-device-selection: %d/%d checks failed\n", g_failures, g_checks);

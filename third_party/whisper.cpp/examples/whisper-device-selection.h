@@ -92,7 +92,7 @@ inline bool resolve(const std::string & target, int & gpu_device, std::string & 
 }
 
 inline bool apply(const std::string & requested, bool explicit_target, bool use_gpu,
-                  int & gpu_device, std::string & error) {
+                  int & gpu_device, std::string & error, const std::vector<device> & candidates) {
     error.clear();
     if (explicit_target && !use_gpu) {
         error = "--device/--gpu-device cannot be combined with --no-gpu";
@@ -102,16 +102,29 @@ inline bool apply(const std::string & requested, bool explicit_target, bool use_
         return true;
     }
     if (explicit_target) {
-        return resolve(requested, gpu_device, error);
+        return resolve(requested, candidates, gpu_device, error);
     }
     if (const char * env = std::getenv("WHISPER_ARG_DEVICE")) {
-        if (!resolve(env, gpu_device, error)) {
+        if (!resolve(env, candidates, gpu_device, error)) {
             error = "WHISPER_ARG_DEVICE: " + error;
             return false;
         }
+        return true;
     }
-    // No explicit request: preserve Whisper's existing default/fallback policy.
+    // Prefer the registered Hexagon device for automatic native CLI selection.
+    // Missing/ambiguous HTP0 leaves the caller's existing default unchanged.
+    int htp_device = 0;
+    std::string ignored;
+    if (resolve("HTP0", candidates, htp_device, ignored)) {
+        gpu_device = htp_device;
+    }
     return true;
+}
+
+inline bool apply(const std::string & requested, bool explicit_target, bool use_gpu,
+                  int & gpu_device, std::string & error) {
+    return apply(requested, explicit_target, use_gpu, gpu_device, error,
+                 use_gpu ? devices() : std::vector<device>{});
 }
 
 // Call after apply(): an explicit flag/environment request must not silently

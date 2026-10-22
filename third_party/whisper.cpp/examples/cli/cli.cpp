@@ -296,7 +296,8 @@ static void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params
     fprintf(stderr, "  -dtw MODEL --dtw MODEL            [%-7s] compute token-level timestamps\n",                 params.dtw.c_str());
     fprintf(stderr, "  -ls,       --log-score            [%-7s] log best decoder scores of tokens\n",              params.log_score?"true":"false");
     fprintf(stderr, "  -ng,       --no-gpu               [%-7s] disable GPU\n",                                    params.use_gpu ? "false" : "true");
-    fprintf(stderr, "  -dev DEV,  --device DEV           [%-7d] GPU/IGPU index or exact name; overrides WHISPER_ARG_DEVICE\n", params.gpu_device);
+    fprintf(stderr, "  -dev DEV,  --device DEV           [auto   ] GPU/IGPU index or exact name; overrides WHISPER_ARG_DEVICE\n");
+    fprintf(stderr, "                                           auto prefers HTP0 when available, otherwise GPU index 0\n");
     fprintf(stderr, "             --list-devices          list devices and exit without loading a model\n");
     fprintf(stderr, "  -fa,       --flash-attn           [%-7s] enable flash attention\n",                         params.flash_attn ? "true" : "false");
     fprintf(stderr, "  -nfa,      --no-flash-attn        [%-7s] disable flash attention\n",                        params.flash_attn ? "false" : "true");
