@@ -1559,10 +1559,13 @@ static buft_list_t make_buft_list(whisper_context_params & params) {
 static bool weight_buft_supported(const whisper_hparams & hparams, ggml_tensor * w, ggml_op op, ggml_backend_buffer_type_t buft, ggml_backend_dev_t dev) {
     bool op_supported = true;
 
-    if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU ||
-        ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU ||
+    // QVAC: GPU extras may require a specific type/shape/layout. Preserve the
+    // existing default-buffer policy, but probe extras with an attached buffer.
+    if (((ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU ||
+          ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU) &&
+         buft == ggml_backend_dev_buffer_type(dev)) ||
         (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU && buft == ggml_backend_cpu_buffer_type())) {
-        // GPU and default CPU backend support all operators
+        // GPU default and default CPU buffers retain their existing placement.
         op_supported = true;
     } else {
         switch (op) {
@@ -1596,7 +1599,7 @@ static bool weight_buft_supported(const whisper_hparams & hparams, ggml_tensor *
                 // create a temporary dummy buffer for the weight so that supports_op can check the buffer type
                 GGML_ASSERT(w->buffer == nullptr);
                 w->buffer = ggml_backend_buft_alloc_buffer(buft, 0);
-                op_supported = ggml_backend_dev_supports_op(dev, op_tensor);
+                op_supported = w->buffer && ggml_backend_dev_supports_op(dev, op_tensor);
                 ggml_backend_buffer_free(w->buffer);
                 w->buffer = nullptr;
                 break;
@@ -1616,6 +1619,23 @@ static ggml_backend_buffer_type_t select_weight_buft(const whisper_hparams & hpa
     for (const auto & p : buft_list) {
         ggml_backend_dev_t dev = p.first;
         ggml_backend_buffer_type_t buft = p.second;
+        // QVAC: only quantized projection weights opt into GPU repack storage.
+        // Keep F16/F32, GET_ROWS/tied embeddings and the shared VAD list intact.
+        const enum ggml_backend_dev_type dev_type = ggml_backend_dev_type(dev);
+        if (op == GGML_OP_MUL_MAT && ggml_is_quantized(w->type) &&
+            (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU)) {
+            ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+            auto get_extra_bufts_fn = reg ? (ggml_backend_dev_get_extra_bufts_t)
+                ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts") : nullptr;
+            if (get_extra_bufts_fn) {
+                ggml_backend_buffer_type_t * extras = get_extra_bufts_fn(dev);
+                for (; extras && *extras; ++extras) {
+                    if (*extras != buft && weight_buft_supported(hparams, w, op, *extras, dev)) {
+                        return *extras;
+                    }
+                }
+            }
+        }
         if (weight_buft_supported(hparams, w, op, buft, dev)) {
             return buft;
         }

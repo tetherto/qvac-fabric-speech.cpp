@@ -76,7 +76,7 @@ Inside the Android shell:
 
 ```sh
 cd /data/local/tmp/whisper-hexagon
-export LD_LIBRARY_PATH="$PWD/lib:/vendor/lib64:/system/lib64"
+export LD_LIBRARY_PATH="$PWD/lib:/system/lib64:/vendor/lib64"
 export ADSP_LIBRARY_PATH="$PWD/lib;/vendor/lib/rfsa/adsp;/dsp"
 chmod +x whisper-cli whisper-fit-params
 ./whisper-cli --list-devices
@@ -104,6 +104,9 @@ a GPU device in this shared dependency, so CPU mode excludes HTP.
 Missing `libcdsprpc.so`, inaccessible DSP skeletons, incompatible host/DSP
 revisions and device FastRPC restrictions must be reported as initialization
 or deployment failures. A CPU fallback is not successful HTP validation.
+Keep system libraries ahead of vendor libraries in `LD_LIBRARY_PATH`: on the
+validated Android 16 device, vendor-first lookup selects an incompatible
+Binder dependency and prevents OpenCL/Hexagon initialization.
 
 ## Confirm execution and correctness
 
@@ -144,6 +147,30 @@ gate is expected transcript fixtures passing and HTP WER no more than
 1.0 absolute percentage point above the same-model/quant CPU baseline.
 Committed weightless fixtures cover contracts, not recognition accuracy.
 Build success alone does not establish model support on a device.
+
+With the shared backend's default host buffers, canonical quantized bytes can
+be read safely by CPU fallback but are not the tiled layout required by HTP
+quantized matmul. For quantized weights used by `MUL_MAT`, Whisper now tries
+the selected GPU/IGPU's advertised extra buffers and checks type/shape support
+with that buffer attached. The existing Hexagon `HTP0-REPACK` extra is non-host;
+the normal tensor-upload API repacks those weights without changing the model
+file. Unsupported projections retain the existing canonical fallback placement.
+F16/F32 weights, quantized `GET_ROWS`/tied token embeddings, VAD and OpenCL's
+default placement are unchanged. The memory-fit preflight uses the same
+selection path as real loading; compare projected and actual bytes on HTP
+after a buffer-layout change. A primary `HTP0` label alone does not prove that
+Q8 matmul executed on the DSP: confirm it with the diagnostic run above.
+
+Memory-fit limitation observed with shared GGML revision `a6122941`: HTP0
+reports zero free/total device bytes, so the preflight reports `does-not-fit`
+even when the real model loads successfully. Its size-only accounting also
+excludes the backend's 4 KiB guard per physical allocation. Tiny/base Q8 with
+one decoder showed actual-versus-projected differences of 8 KiB for weights,
+12 KiB for KV and 16 KiB for compute. The guard discrepancy predates this
+placement change; splitting weights across host/repack buffers adds one guard.
+Preserve these `--verify` mismatches rather than treating them as byte parity.
+Exact HTP fit accounting needs physical-allocation metadata from the shared
+allocator; CPU fit verification does not establish it.
 
 ## Measure transcription time
 
