@@ -838,7 +838,8 @@ extern "C" {
         bool fits; // status == WHISPER_FIT_SUCCESS
 
         // "fits" | "does-not-fit" | "model-unreadable" | "vad-model-unreadable" |
-        // "no-backend-device" | "measurement-failed" | "invalid-arguments"
+        // "no-backend-device" | "measurement-failed" | "invalid-arguments" |
+        // "memory-capacity-unavailable" | "backend-memory-unavailable"
         char reason[64];
 
         char model_type[32];   // "tiny" | "base" | ... | "large v3"

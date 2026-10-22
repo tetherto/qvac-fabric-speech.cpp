@@ -161,16 +161,24 @@ selection path as real loading; compare projected and actual bytes on HTP
 after a buffer-layout change. A primary `HTP0` label alone does not prove that
 Q8 matmul executed on the DSP: confirm it with the diagnostic run above.
 
-Memory-fit limitation observed with shared GGML revision `a6122941`: HTP0
-reports zero free/total device bytes, so the preflight reports `does-not-fit`
-even when the real model loads successfully. Its size-only accounting also
-excludes the backend's 4 KiB guard per physical allocation. Tiny/base Q8 with
-one decoder showed actual-versus-projected differences of 8 KiB for weights,
-12 KiB for KV and 16 KiB for compute. The guard discrepancy predates this
-placement change; splitting weights across host/repack buffers adds one guard.
-Preserve these `--verify` mismatches rather than treating them as byte parity.
-Exact HTP fit accounting needs physical-allocation metadata from the shared
-allocator; CPU fit verification does not establish it.
+Memory fit requires the paired shared-GGML allocation-size callback: context
+and scheduler measurement apply it to each actual payload chunk, including
+the HTP guard without allocating tensor payloads. Repeated buffer types are
+charged once. The older `a6122941` producer excluded guards and produced
+8/12/16 KiB weight/KV/compute mismatches for tiny/base Q8; retain those logs
+as the before-fix evidence, not as a successful parity check.
+
+HTP declares `memory_unified`: FastRPC buffers and host extras compete for
+system RAM. When HTP has no separate capacity estimate, fit uses the CPU
+backend's OS available/total RAM query and compares it with the combined
+device/host requirement. Known capacity with zero available bytes remains
+memory pressure; unavailable capacity is an error. Prospective Hexagon
+metadata growth is added to the host budget, while retained session queues
+and metadata are already reflected in available RAM. The memory margin still
+covers unknown future driver/DSP heaps. This is an estimate, not an allocation
+guarantee or a claim that all available RAM can be mapped at once. Validate
+both component byte parity and the shared-memory verdict on the real device
+after updating the producer; CPU parity alone does not establish either.
 
 ## Measure transcription time
 

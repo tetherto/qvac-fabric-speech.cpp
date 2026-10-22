@@ -1,6 +1,7 @@
 #include "whisper.h"
 #include "whisper-arch.h"
 #include "whisper-logits-slice.h"
+#include "whisper-fit-memory.h"
 
 #include "ggml.h"
 #include "ggml-cpp.h"
@@ -10123,19 +10124,6 @@ struct whisper_fit_source {
     }
 };
 
-// true when the device's memory pool IS system RAM: the CPU backend,
-// integrated GPUs, and Apple unified memory (the Metal registry reports
-// "Metal" upstream and "MTL" in the qvac-ext-ggml pin)
-bool whisper_fit_dev_shares_host_memory(ggml_backend_dev_t dev) {
-    const enum ggml_backend_dev_type t = ggml_backend_dev_type(dev);
-    if (t == GGML_BACKEND_DEVICE_TYPE_CPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) {
-        return true;
-    }
-    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-    const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
-    return name && (strcmp(name, "Metal") == 0 || strcmp(name, "MTL") == 0);
-}
-
 // everything the metadata-only state measurement produces; mirrors
 // whisper_init_state's allocation set field by field
 struct whisper_fit_state_measure {
@@ -10483,12 +10471,23 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
 
     whisper_fit_set_str(result->device_name, sizeof(result->device_name), ggml_backend_dev_name(main_dev));
     result->device_is_cpu = ggml_backend_dev_type(main_dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
-    result->device_shares_host_memory = whisper_fit_dev_shares_host_memory(main_dev);
-    {
-        size_t free_b = 0, total_b = 0;
-        ggml_backend_dev_memory(main_dev, &free_b, &total_b);
-        result->device_free_bytes  = free_b;
-        result->device_total_bytes = total_b;
+    const auto memory = whisper_fit_query_memory(main_dev);
+    result->device_shares_host_memory = memory.shares_host;
+    result->device_free_bytes = memory.free_bytes;
+    result->device_total_bytes = memory.total_bytes;
+    if (memory.total_bytes == 0) {
+        whisper_free_state(state);
+        whisper_fit_set_str(result->reason, sizeof(result->reason), "memory-capacity-unavailable");
+        return (int) result->status;
+    }
+    uint64_t backend_overhead = 0;
+    for (ggml_backend_t backend : state->backends) {
+        if (ggml_backend_get_device(backend) == main_dev &&
+            !whisper_fit_query_backend_overhead(backend, WHISPER_MAX_NODES, backend_overhead)) {
+            whisper_free_state(state);
+            whisper_fit_set_str(result->reason, sizeof(result->reason), "backend-memory-unavailable");
+            return (int) result->status;
+        }
     }
 
     // -- charge each component to the device or to host RAM
@@ -10608,6 +10607,7 @@ int whisper_fit_params(const struct whisper_fit_options * opts, struct whisper_f
     host = whisper_fit_sat_add(host, sm.meta_bytes);
     host = whisper_fit_sat_add(host, ctx_overhead);
     host = whisper_fit_sat_add(host, vocab_bytes);
+    host = whisper_fit_sat_add(host, backend_overhead);
     if (is_bci) {
         host = whisper_fit_sat_add(host, (uint64_t) n_audio_ctx*n_audio_ctx*sizeof(float));  // window mask
     }

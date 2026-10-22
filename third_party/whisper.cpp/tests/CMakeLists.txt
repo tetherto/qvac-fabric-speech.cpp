@@ -128,6 +128,15 @@ target_link_libraries(${FIT_CLI_TEST} PRIVATE whisper)
 add_test(NAME ${FIT_CLI_TEST} COMMAND ${FIT_CLI_TEST})
 set_tests_properties(${FIT_CLI_TEST} PROPERTIES LABELS "unit;gh")
 
+# Public-API fake backend tests: no ggml implementation or model is linked.
+set(FIT_MEMORY_TEST test-whisper-fit-memory)
+add_executable(${FIT_MEMORY_TEST} ${FIT_MEMORY_TEST}.cpp)
+target_include_directories(${FIT_MEMORY_TEST} PRIVATE ../src
+    $<TARGET_PROPERTY:ggml,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_features(${FIT_MEMORY_TEST} PRIVATE cxx_std_11)
+add_test(NAME ${FIT_MEMORY_TEST} COMMAND ${FIT_MEMORY_TEST})
+set_tests_properties(${FIT_MEMORY_TEST} PROPERTIES LABELS "unit;gh")
+
 # Native device selection: model-free registry/precedence contracts and real
 # frontend error/listing checks (QVAC patch, see PATCHES.md).
 set(DEVICE_SELECTION_TEST test-whisper-device-selection)
