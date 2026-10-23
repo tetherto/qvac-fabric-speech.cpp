@@ -41,7 +41,7 @@ detail::SfxMemory measure_texts(detail::SfxModel & model, detail::SfxTokenizer &
 
 detail::SfxMemory measure_dit(detail::SfxModel & model, const detail::ResolvedRequest & request) {
     const auto & config = model.config();
-    detail::SfxDitSession session(model, config.latent_frames(), true);
+    detail::SfxDitSession session(model, config.latent_frames(), true, request.guidance == 1.0f ? 1 : PROMPT_CONTEXTS);
     auto result = session.measure();
     const auto latents = sat_mul(config.latent_frames(), config.dit.in_channels);
     const auto buffers = request.guidance == 1.0f ? UNGUIDED_LATENT_BUFFERS : GUIDED_LATENT_BUFFERS;

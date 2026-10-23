@@ -31,6 +31,13 @@ streaming support and the [model guide](docs/models.md) for storage tiers.
 This in-tree package consumes the shared `ggml-speech` dependency. Build and
 vcpkg consumption instructions are in [docs/build.md](docs/build.md).
 
+MOSS-SoundEffect native diffusion prepares the fixed cross-attention keys and
+values once per prompt and reuses them across steps. The request owns the cache;
+Metal also uses DiT flash attention when the backend supports both attention
+shapes. Metadata-only memory fit includes the cache and selected attention
+graphs. See the
+[SoundEffect guide](docs/moss.md#moss-soundeffect) for details.
+
 ## Capabilities
 
 ### Supported models and backends

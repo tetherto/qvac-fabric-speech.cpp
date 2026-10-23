@@ -2,6 +2,7 @@
 #include "tts-cpp/moss/sound_effect_fit.h"
 #include "moss/sfx_model.h"
 #include "moss/sfx_networks.h"
+#include "moss/sfx_dit_cache.h"
 
 #include <cmath>
 #include <cstdio>
@@ -108,6 +109,23 @@ void test_errors() {
     check(moss::fit_params(missing, request(), 0).reason == "model-unreadable", "missing model is an error outcome");
 }
 
+void test_cache_memory() {
+    Model fixture;
+    strip_weights(fixture.path);
+    moss::detail::SfxModel model(fixture.path.string(), {}, 1, true);
+    moss::detail::SfxDitCache single(model, 1, true), guided(model, 2, true);
+    const uint64_t branch = uint64_t(DIT_EMBD) * TEXT_TOKENS * 2 * sizeof(float);
+    check(single.bytes() >= branch, "single-branch cache includes full-precision keys and values");
+    check(guided.bytes() >= branch * 2, "guided cache includes both prompt branches");
+    moss::detail::SfxDitSession one(model, FRAMES, true, 1);
+    const auto first = one.measure();
+    moss::detail::SfxDitSession two(model, FRAMES, true, 2);
+    const auto second = two.measure();
+    check(first.device_bytes > single.bytes(), "cache storage is added to graph scratch");
+    check(second.device_bytes >= first.device_bytes + branch, "fit charges the second persistent branch");
+    check(second.host_bytes > first.host_bytes, "fit charges retained context copies");
+}
+
 void test_explicit_backend() {
     Model model;
     auto options = model.options();
@@ -148,6 +166,7 @@ void test_real_model() {
 int main() {
     test_weightless();
     test_workloads();
+    test_cache_memory();
     test_errors();
     test_explicit_backend();
     test_generation_after_fit();

@@ -11,6 +11,7 @@
 struct ggml_context;
 struct ggml_cgraph;
 struct ggml_tensor;
+struct ggml_backend_buffer_type;
 
 namespace tts_cpp::moss::detail {
 
@@ -104,6 +105,8 @@ public:
     const char * backend_name() const;
     bool table_on_host() const;
     bool fused_attention() const;
+    bool fused_dit_attention() const;
+    ggml_backend_buffer_type * buffer_type() const;
     ggml_tensor * tensor(const std::string & name) const;
     std::vector<std::string> tokenizer_tokens() const;
     std::vector<std::string> tokenizer_merges() const;

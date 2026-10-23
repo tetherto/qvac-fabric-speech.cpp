@@ -136,31 +136,31 @@ inline void add_linear(GgufBuilder & b, const std::string & name, int64_t in, in
     b.add1(name + ".bias", out);
 }
 
-inline void add_dit_block(GgufBuilder & b) {
-    const std::string prefix = "dit.blk.0.";
+inline void add_dit_block(GgufBuilder & b, int layer = 0, int width = DIT_EMBD) {
+    const std::string prefix = "dit.blk." + std::to_string(layer) + ".";
     for (const char * name : {"self_q", "self_k", "self_v", "self_o", "cross_q", "cross_k", "cross_v", "cross_o"}) {
-        add_linear(b, prefix + name, DIT_EMBD, DIT_EMBD);
+        add_linear(b, prefix + name, width, width);
     }
     for (const char * name : {"self_norm_q", "self_norm_k", "cross_norm_q", "cross_norm_k"}) {
-        b.add1(prefix + name + ".weight", DIT_EMBD);
+        b.add1(prefix + name + ".weight", width);
     }
-    b.add1(prefix + "cross_norm.weight", DIT_EMBD);
-    b.add1(prefix + "cross_norm.bias", DIT_EMBD);
-    add_linear(b, prefix + "ffn_up", DIT_EMBD, DIT_FF);
-    add_linear(b, prefix + "ffn_down", DIT_FF, DIT_EMBD);
-    b.add2(prefix + "modulation", DIT_EMBD, 6);
+    b.add1(prefix + "cross_norm.weight", width);
+    b.add1(prefix + "cross_norm.bias", width);
+    add_linear(b, prefix + "ffn_up", width, DIT_FF);
+    add_linear(b, prefix + "ffn_down", DIT_FF, width);
+    b.add2(prefix + "modulation", width, 6);
 }
 
-inline void add_dit_tensors(GgufBuilder & b) {
-    add_linear(b, "dit.patch_embd", LATENT, DIT_EMBD);
-    add_linear(b, "dit.text_embd_1", TEXT_EMBD, DIT_EMBD);
-    add_linear(b, "dit.text_embd_2", DIT_EMBD, DIT_EMBD);
-    add_linear(b, "dit.time_embd_1", FREQ_DIM, DIT_EMBD);
-    add_linear(b, "dit.time_embd_2", DIT_EMBD, DIT_EMBD);
-    add_linear(b, "dit.time_proj", DIT_EMBD, DIT_EMBD * 6);
-    add_linear(b, "dit.head", DIT_EMBD, LATENT);
-    b.add2("dit.head.modulation", DIT_EMBD, 2);
-    add_dit_block(b);
+inline void add_dit_tensors(GgufBuilder & b, int layers = 1, int width = DIT_EMBD) {
+    add_linear(b, "dit.patch_embd", LATENT, width);
+    add_linear(b, "dit.text_embd_1", TEXT_EMBD, width);
+    add_linear(b, "dit.text_embd_2", width, width);
+    add_linear(b, "dit.time_embd_1", FREQ_DIM, width);
+    add_linear(b, "dit.time_embd_2", width, width);
+    add_linear(b, "dit.time_proj", width, width * 6);
+    add_linear(b, "dit.head", width, LATENT);
+    b.add2("dit.head.modulation", width, 2);
+    for (int layer = 0; layer < layers; ++layer) add_dit_block(b, layer, width);
 }
 
 inline void add_snake(GgufBuilder & b, const std::string & name, int channels) {
@@ -202,16 +202,20 @@ inline void add_vae_tensors(GgufBuilder & b) {
 
 inline std::filesystem::path write_sfx_model(const char * tag, uint32_t seed,
         const std::function<void(gguf_context *)> & mutate_meta = [](gguf_context *) {},
-        const moss_fixtures::ConstantTensors & constants = {}, const moss_fixtures::TensorShapes & shapes = {}) {
+        const moss_fixtures::ConstantTensors & constants = {}, const moss_fixtures::TensorShapes & shapes = {},
+        int dit_layers = 1, int dit_width = DIT_EMBD, int dit_heads = DIT_HEADS) {
     std::mt19937 rng(seed);
     GgufBuilder b;
     b.random = &rng;
     b.constants = constants;
     b.shapes = shapes;
     add_meta(b.file);
+    gguf_set_val_u32(b.file, "moss-sfx.dit.block_count", dit_layers);
+    gguf_set_val_u32(b.file, "moss-sfx.dit.embedding_length", dit_width);
+    gguf_set_val_u32(b.file, "moss-sfx.dit.attention.head_count", dit_heads);
     mutate_meta(b.file);
     add_text_tensors(b);
-    add_dit_tensors(b);
+    add_dit_tensors(b, dit_layers, dit_width);
     add_vae_tensors(b);
     const auto path = moss_fixtures::temp_gguf(tag);
     b.write(path);
