@@ -1237,6 +1237,13 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
         set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
+        add_test(NAME test-requantize-shapes
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_requantize_shapes.py")
+        set_tests_properties(test-requantize-shapes PROPERTIES
+            LABELS "unit" SKIP_RETURN_CODE 77
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         add_test(NAME test-convert-moss
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_moss.py")

@@ -180,7 +180,9 @@ class CollectionContracts(unittest.TestCase):
         return argparse.Namespace(**values)
 
     def local_process(self, command, stdout, stderr, timeout, *, env=None):
-        self.assertEqual(str(self.driver), str(command[0]))
+        # macOS may spell the same temporary path as /var or /private/var.
+        # The collector canonicalizes paths; compare real file identities.
+        self.assertEqual(self.driver.resolve(), Path(command[0]).resolve())
         return self.real_process([sys.executable, str(self.driver), *command[1:]],
                                  stdout, stderr, timeout, env=env)
 
@@ -210,6 +212,18 @@ class CollectionContracts(unittest.TestCase):
         self.assertEqual({"fr", "es"}, {c["language"] for c in cases if c["language"] != "en"})
         self.assertTrue(all(c["family"] == "mtl" for c in cases if c["language"] != "en"))
         self.assertEqual(84, len({c["id"] for c in cases}))
+
+    def test_collection_accepts_alias_of_frozen_driver(self):
+        alias = self.root / "driver-alias.py"
+        try:
+            alias.symlink_to(self.driver)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symbolic links unavailable: " + str(exc))
+        self.driver = alias
+        result, directory, collection, cases = self.collect(driver=alias)
+        self.assertEqual("execution_validated", cases[0]["status"])
+        self.assertEqual("complete", result["status"])
+        self.assertEqual(0, cases[0]["native_exit_code"])
 
     def test_unknown_or_duplicate_case_is_refused(self):
         cases = collector.expand_cases(self.spec)
