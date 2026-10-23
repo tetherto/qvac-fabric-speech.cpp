@@ -698,9 +698,9 @@ hexagon`. As for MOSS-TTS there is no fallback: construction fails when HTP0
 is missing, and `--gpu` never selects it. The text encoder, the DiT and the
 VAE decoder all run on the NPU. Only the 151,936-row token table stays out of
 it: the table is never loaded, and each request reads its prompt's rows (at
-most 512) from the GGUF, so it takes no memory, and a model file truncated or
-replaced while the engine is loaded fails that request with an error instead
-of crashing the process. The loader takes `f32`, `f16`,
+most 512) from the GGUF, so it takes no memory, and a model file truncated
+while the engine is loaded fails that request with an error instead of
+crashing the process. The loader takes `f32`, `f16`,
 `bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
 refused at load, so both validated GGUFs run.
 

@@ -19,12 +19,14 @@ public:
 
 private:
     void locate(const gguf_context * file, const ggml_tensor * table);
-    void open(const std::string & path);
+    void open();
+    bool file_holds_table() const;
     void read_row(int32_t id, float * out);
     void convert_row(float * out) const;
     [[noreturn]] void fail(const std::string & message) const;
 
     std::string owner_;
+    std::string path_;
     std::ifstream stream_;
     uint64_t offset_ = 0;
     ggml_type type_ = GGML_TYPE_F32;

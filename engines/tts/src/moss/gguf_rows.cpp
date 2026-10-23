@@ -11,9 +11,9 @@ namespace tts_cpp::moss::detail {
 
 GgufRows::GgufRows(const std::string & path, const gguf_context * file, const ggml_tensor * table,
                    const char * owner)
-    : owner_(owner) {
+    : owner_(owner), path_(path) {
     locate(file, table);
-    open(path);
+    open();
 }
 
 void GgufRows::fail(const std::string & message) const {
@@ -35,15 +35,19 @@ void GgufRows::locate(const gguf_context * file, const ggml_tensor * table) {
     row_.resize(ggml_row_size(type_, width_));
 }
 
-void GgufRows::open(const std::string & path) {
+bool GgufRows::file_holds_table() const {
     std::error_code error;
-    const uint64_t size = std::filesystem::file_size(path, error);
-    if (error || size < offset_ || (uint64_t) rows_ * row_.size() > size - offset_) {
-        fail("the token table extends past the end of " + path);
+    const uint64_t size = std::filesystem::file_size(path_, error);
+    return !error && size >= offset_ && (uint64_t) rows_ * row_.size() <= size - offset_;
+}
+
+void GgufRows::open() {
+    if (!file_holds_table()) {
+        fail("the token table extends past the end of " + path_);
     }
-    stream_.open(path, std::ios::binary);
+    stream_.open(path_, std::ios::binary);
     if (!stream_) {
-        fail("cannot open " + path);
+        fail("cannot open " + path_);
     }
 }
 
@@ -69,6 +73,9 @@ void GgufRows::read_row(int32_t id, float * out) {
 }
 
 std::vector<float> GgufRows::gather(const std::vector<int32_t> & ids) {
+    if (!file_holds_table()) {
+        fail("cannot read token rows; the model file changed while loaded");
+    }
     std::vector<float> rows(ids.size() * (size_t) width_);
     for (size_t i = 0; i < ids.size(); ++i) {
         read_row(ids[i], rows.data() + i * (size_t) width_);
