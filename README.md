@@ -91,6 +91,12 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection (CPU + ANE; remaining stages native) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
+MiniMax also has an experimental, separately compiled [full Core ML replay
+harness](engines/audiogen/docs/minimax-coreml-validation.md). It runs the LM,
+depth decoder, conditioner, DiT and vocoder through the native Core ML API
+with `CPU_ONLY`, `CPU_AND_GPU`, `CPU_AND_NE` or `ALL`. The guide includes
+M1 Ultra/M3 Ultra measurements and the remaining numerical validation gaps.
+
 CosyVoice3 exports HiFT in FP32 to preserve waveform parity. Its memory-fit
 preflight returns `Error` with `coreml-memory-estimate-unavailable` when
 enabled sidecars are present, rather than undercounting their resident memory.
@@ -218,9 +224,13 @@ and model-specific exceptions.
 | CLI selection and examples | [docs/CLI.md](docs/CLI.md) |
 | Performance overview and reports | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | Whisper models and formats | [docs/WHISPER.md](docs/WHISPER.md) |
+| Native Whisper Snapdragon build and validation | [docs/WHISPER-HEXAGON.md](docs/WHISPER-HEXAGON.md) |
 | Whisper subtree deltas and synchronization | [PATCHES.md](third_party/whisper.cpp/PATCHES.md), [docs/UPSTREAM-SYNC.md](docs/UPSTREAM-SYNC.md) |
 | ASR, diarization, end-of-utterance | [Parakeet](engines/parakeet/README.md) |
 | Synthesis, voice cloning, sound effects, speech-to-speech, enhancement | [TTS](engines/tts/README.md) |
 | Music generation and editing | [AudioGen](engines/audiogen/README.md) |
 | Benchmark quality diagnostics and model preparation | [Music alignment guide](scripts/benchmarks/music-alignment.md) |
 | Historical development and integration reports | [Chatterbox](engines/tts/docs/history/chatterbox-port.md), [Supertonic](engines/tts/docs/history/supertonic-port.md), [Pocket](engines/tts/docs/history/pocket-integration.md), [Parakeet](engines/parakeet/docs/history/parakeet-port.md), [Strix Halo](engines/audiogen/docs/history/strix-halo.md) |
+
+Audio8 exposes incremental PCM through `Engine::synthesize_stream()`, with codec-window
+delivery on ggml and Core ML. See the [streaming API and measurement guide](engines/tts/docs/audio8.md#incremental-pcm-streaming).
