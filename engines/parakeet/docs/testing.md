@@ -72,7 +72,9 @@ including a mel computed on a worker thread, the rejection of a
 English recording (`jfk.wav` and `sample-16k.wav` six times) held to one
 percent word error with the default options and with the 60 s / 25 % windows.
 `test-transcribepsy-gpu` (`-L gpu`) runs the same binary with
-`--n-gpu-layers 999` on the GPU backend of the build, and on a Core ML build
+`--n-gpu-layers 999` on the GPU backend of the build,
+`test-transcribepsy-hexagon` runs it with `--backend hexagon` on HTP0 (see
+[Hexagon NPU tests](#hexagon-npu-tests)), and on a Core ML build
 `test-transcribepsy-coreml` (`-L coreml`) runs it on the encoder-less Core ML
 GGUF with its sidecars, so every backend meets the same accuracy bar. Two more fixture tests
 use the same GGUF: `test-encoder-graph-cache` fills the ggml encoder graph
@@ -88,6 +90,55 @@ a Core ML build with the `-encoder.mlmodelc` sidecar staged
 checks that a ggml encoder request is refused rather than reading unallocated
 weights, and checks that `PARAKEET_COREML_ONLY=1` skips the encoder weights of
 the full GGUF.
+
+### Hexagon NPU tests
+
+The Hexagon arms are registered on every build and exit with the skip code
+(ctest "Skipped") where HTP0 cannot be opened, so they run for real only on a
+Snapdragon device with the GGML Hexagon backend and its DSP library staged.
+Cross-build with `-DGGML_HEXAGON=ON` in the GGML build, push the binaries,
+`libqvac-speech-ggml*.so`, the `libggml-htp-v*.so` skeletons, `libc++_shared.so`
+and `libomp.so`, then run each binary with `LD_LIBRARY_PATH` and
+`DSP_LIBRARY_PATH` pointing at that directory:
+
+| Test | Checks |
+|---|---|
+| `test-transcribepsy-hexagon` | The `test-transcribepsy` accuracy bar with encoder and TDT decoder on HTP0 |
+| `test-encoder-backend-parity-transcribepsy` | TranscribePsy encoder on HTP0 against the CPU on `hi-16k.wav`, whose first feed-forward exceeds the F16 range; turns non-finite without the matmul headroom |
+| `test-attn-path-graph-transcribepsy-hexagon` | The loader picks the unfused attention and the 96-wide HMX head size from the model's own 80-wide heads |
+| `test-tdt-backend-graphs-hexagon` | HTP0 accepts every node of the TDT decoder graphs, including the stacked LSTM GEMV; `test-tdt-backend-graphs` runs the same check on the CPU |
+| `test-matmul-headroom-hexagon` | A q8_0 matmul whose result is 76800 comes back finite with the Hexagon headroom; `test-matmul-headroom` checks the CPU builds the plain matmul |
+| `test-streaming-tdt-hexagon`, `test-streaming-eou-hexagon`, `test-encoder-backend-parity-{ctc,tdt,eou,sortformer}`, `test-fit-params-ctc-hexagon` | The other Parakeet families on HTP0 |
+
+## Mosaic integration
+
+`test-mosaic-*` loads the exact 486,693,152-byte Mosaic GGUF and
+transcribes two complete LibriSpeech dev-clean recordings (2.245 and 3.525 s).
+The committed references are checked after case/punctuation normalization;
+tokens and raw text must repeat exactly on a second call. CPU and explicit
+Metal/CUDA/HIP lanes require native execution. The Core ML lane verifies the matching
+masked512 sidecar's provenance/inventory and requires actual per-call Core ML
+use, with the decoder on Metal; fallback fails. There are no timing gates.
+These smoke tests do not establish broader WER or ANE placement.
+
+Set `PARAKEET_TEST_MOSAIC_DIR` to a fixture root containing `bundle/` (the
+outputs of `scripts/prepare-mosaic.py`) and `audio/` (the pinned WAVs and
+`receipt.json`). The provisioner is `test/prepare_mosaic_fixtures.py`; it
+downloads the hash-pinned original archive, uses the production Mosaic
+exporter, and verifies the source FLACs before lossless PCM16 WAV conversion.
+An S3/registry mirror can supply the same verified bundle later without
+changing the inference tests. No model weights or audio are committed.
+
+Like other model tests, missing fixtures disable these registrations in
+ordinary PR CI. The opt-in Apple CI job provisions them and requires all six
+arms to execute successfully; missing/disabled/skipped coverage cannot pass:
+
+```bash
+gh workflow run parakeet-ci.yml --ref YOUR_BRANCH -f run_mosaic=true
+```
+
+The `mosaic-integration-*` workflow artifact contains CTest results, runtime
+route/transcript logs, dependency SHA and model/sidecar/audio receipts.
 
 Fixture roots are configurable with `PARAKEET_TEST_MODEL_DIR`,
 `PARAKEET_TEST_AUDIO_DIR`, and `PARAKEET_TEST_REF_DIR`. `test-gpu-vs-cpu`

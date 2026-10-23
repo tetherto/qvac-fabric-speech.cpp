@@ -21,7 +21,7 @@ validated on it.
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small validated on WebGPU |
-| [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy ships as ready-made GGUF and Core ML files for eight European languages |
+| [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy ships as ready-made GGUF and Core ML files for eight European languages and runs on the Hexagon NPU |
 | Parakeet | Sortformer v1/v2/v2.1, Nemotron 3 Diarization | Speaker diarization and attributed ASR; Sortformer supports up to four speakers, Nemotron up to eight |
 | Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; CPU/Metal validated on Spanish/Chinese; explicit CUDA/Vulkan/OpenCL/Hexagon selection with generated-model CPU parity and quantized checkpoint smoke coverage; English long-form skips spans in both native and reference runs |
 | [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3 also validated on WebGPU |
@@ -53,6 +53,25 @@ Metal and Vulkan validation; NVFP4 runs on Vulkan but falls back to CPU
 matmuls on Metal. Streaming quality varies by precision and backend.
 See the [quantization measurements](engines/parakeet/docs/performance.md#nemotron-3-diarization-quantizations)
 before selecting a format. MXFP4 failed CPU quality checks.
+
+### Experimental Parakeet-Mosaic
+
+[Mosaic](engines/parakeet/docs/mosaic.md) uses a frozen mixed-precision
+recipe with ordinary GGML kernels. The shared 486.7 MB Mosaic and 339.6 MB
+[Mosaic Compact](engines/parakeet/docs/mosaic.md#shared-mosaic-and-mosaic-compact-models)
+also support separate, matching optional Core ML encoder sidecars. The earlier experimental
+[`parakeet-affine-v1` format](engines/parakeet/docs/backends.md#experimental-packed-affine-tdt-recipe)
+uses integer carriers, with reconstruction by default and opt-in Metal fusion
+via `PARAKEET_AFFINE_FUSED=1`. Fusion requires the matching
+[GGML dependency](engines/parakeet/docs/fused-affine-metal.md#integration-and-pr-handoff);
+older dependencies and unsupported fused backends fail explicitly. Offline TDT
+is the evaluated scope; packed-affine substage profiling is rejected. Recipe
+receipts and measured limitations are documented in the linked guides.
+
+Fixed TDT Core ML exports now require both `mel` and `mel_valid_mask`, and need
+the updated runtime. Legacy single-input sidecars still load but must be
+re-exported for padding invariance. See the
+[sidecar compatibility contract](engines/parakeet/docs/backends.md#core-ml-encoder-sidecar).
 
 ### Apple Core ML sidecars
 
@@ -89,9 +108,9 @@ and OpenCL on the same device.
 
 | Engine | Models | Guide |
 |---|---|---|
-| ASR | Parakeet CTC 0.6B (`q8_0`), MOSS-Transcribe-Diarize (`q8_0`, `f16`) | [Parakeet backends](engines/parakeet/docs/backends.md#backends-and-runtime-selection), [MOSS Hexagon](engines/parakeet/docs/moss-transcribe.md#hexagon-npu) |
-| TTS | Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 / MOSS-TTSD (`q4_0` transformer), MOSS-SoundEffect-v2 (`f16` or `q8_0`), MOSS-Speech LM (`q4_0` transformer) and speech tokenizer (`f16` codec) | [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), [MOSS Hexagon](engines/tts/docs/moss.md#hexagon-npu), [MOSS-SoundEffect Hexagon](engines/tts/docs/moss.md#hexagon-npu-generation), [MOSS-Speech Hexagon](engines/tts/docs/moss.md#hexagon-npu-speech-to-speech), and the matching sections in the other model guides |
-| AudioGen | ACE-Step v15 turbo (`q8_0` DiT) | [AudioGen Hexagon](engines/audiogen/docs/backends.md#hexagon-npu) |
+| ASR | Parakeet CTC and TDT 0.6B (`q8_0`), TranscribePsy-250M-EU-sub (`q8_0`), MOSS-Transcribe-Diarize (`q8_0`, `f16`) | [Parakeet Hexagon](engines/parakeet/docs/backends.md#hexagon-npu), [MOSS Hexagon](engines/parakeet/docs/moss-transcribe.md#hexagon-npu) |
+| TTS | Chatterbox Turbo and Multilingual (`q4_0`, `q8_0`, `f16` or `f32`), Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 / MOSS-TTSD (`q4_0` transformer), MOSS-SoundEffect-v2 (`f16` or `q8_0`), MOSS-Speech LM (`q4_0` transformer) and speech tokenizer (`f16` codec) | [Chatterbox Hexagon](engines/tts/docs/chatterbox.md#snapdragon-hexagon-npu), [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), [MOSS Hexagon](engines/tts/docs/moss.md#hexagon-npu), [MOSS-SoundEffect Hexagon](engines/tts/docs/moss.md#hexagon-npu-generation), [MOSS-Speech Hexagon](engines/tts/docs/moss.md#hexagon-npu-speech-to-speech), and the matching sections in the other model guides |
+| AudioGen | ACE-Step v15 turbo (`q8_0` DiT; K-quant GGUFs are refused at load) | [AudioGen Hexagon](engines/audiogen/docs/backends.md#hexagon-npu) |
 
 ### WebGPU (Dawn)
 

@@ -926,6 +926,8 @@ struct BlockSubstageTimes {
     double block_full_ms = 0.0;
 };
 
+// Returns -2 for packed-affine models: isolated substage graphs do not support
+// their reconstruction/fusion scope. No substage timing is produced in that case.
 int profile_block_substages(ParakeetCtcModel & model,
                             int T_enc,
                             int warmup_runs,
@@ -939,5 +941,11 @@ int profile_block_substages(ParakeetCtcModel & model,
 bool flash_attn_compiled();
 bool f16_activations_compiled();
 bool encoder_graph_uses_op(const ParakeetCtcModel & model, enum ggml_op op);
+
+// Head size the unfused attention matmuls run at on `backend` for a model head
+// size `HD`; 0 when they run at `HD` itself. The second form reports what the
+// loader chose for `model`.
+int attention_matmul_head_dim(ggml_backend_t backend, int HD);
+int model_attention_matmul_head_dim(const ParakeetCtcModel & model);
 
 }

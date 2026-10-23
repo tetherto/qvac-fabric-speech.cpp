@@ -25,11 +25,13 @@ so later models can explicitly select Hexagon. If only legacy
 `ADSP_LIBRARY_PATH` is set, its entries are retained. Set `backends_dir` before
 the first Engine/loader call; registry discovery remains process-global.
 
-Hexagon is experimental and currently targets Parakeet CTC 0.6B Q8_0 and
-MOSS-Transcribe-Diarize. Build and ship the matching GGML Hexagon backend and
-DSP library. MOSS-Transcribe-Diarize's requirements, graph layout, device tests
-and measurements are in [its guide](moss-transcribe.md#hexagon-npu). For
-Parakeet CTC device validation, run
+Hexagon is experimental and currently targets Parakeet CTC and TDT 0.6B Q8_0,
+TranscribePsy-250M-EU-sub and MOSS-Transcribe-Diarize. Build and ship the
+matching GGML Hexagon backend and DSP library. How the FastConformer encoder and
+the TDT decoder run on the NPU, with TranscribePsy measurements, is in
+[Hexagon NPU](#hexagon-npu); MOSS-Transcribe-Diarize's requirements, graph
+layout, device tests and measurements are in
+[its guide](moss-transcribe.md#hexagon-npu). For Parakeet device validation, run
 `parakeet --backend hexagon --verbose --bench --bench-json result.json`, with the
 existing `--backends-dir` pointing at the installed backend libraries. The JSON
 records the actual backend (`ggml-htp0`), transcript and stage timings. Use a
@@ -60,8 +62,8 @@ automatically when no CUDA device is present and explicitly with
 `--backend webgpu`. Validated on an RTX 5090 (Dawn on Vulkan, 2026-10-20) with
 the TranscribePsy 250M CTC model: the transcript is identical to the CPU run
 and the end-to-end time 2.8x shorter. The encoder keeps its unfused attention
-graph on WebGPU (`flash_attn_allowed` admits only CUDA, Metal, Vulkan and
-Hexagon) until the fused path is compared there too. The backend reports its
+graph on WebGPU (`flash_attn_allowed` admits only CUDA, Metal and Vulkan)
+until the fused path is compared there too. The backend reports its
 maximum buffer size as device memory, so a memory-fit projection is not
 meaningful on WebGPU.
 
@@ -170,6 +172,110 @@ cmake -S engines/parakeet -B build-vulkan -DGGML_VULKAN=ON
 cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ```
 
+## Hexagon NPU
+
+With `--backend hexagon` the FastConformer encoder and the TDT predictor and
+joint graphs run on HTP0. Three things keep that numerically equal to the CPU:
+
+- **Unfused attention.** `flash_attn_allowed` leaves Hexagon out. Its HMX fused
+  attention holds the scores and the running output in F16 and drifts over
+  long windows: on a 67.5 s window (844 encoder frames) the encoder output
+  falls to cosine 0.76 against the CPU for Parakeet-TDT-0.6B and 0.81 for
+  TranscribePsy. The unfused graph runs the same three batched matmuls (`ac`,
+  `bd`, `attn·V`) on HMX in F16 with an F32 softmax: cosine 0.9996 and 0.99995
+  on that window, and faster (0.94 s against 1.60 s for TDT-0.6B). HMX takes
+  only 32-aligned reduction and row counts, so a head size that is not one
+  (TranscribePsy's 80) is zero-padded to 96 on every attention operand
+  (`attention_matmul_head_dim`); the padded columns add nothing to any score or
+  output. Unpadded, those matmuls fall back to HVX and the window takes 6.2 s;
+  padded, 0.91 s (the fused attention, on HVX for this head size, took 3.5 s).
+- **Feed-forward headroom.** HMX writes matmul results through F16, so an
+  element above 65504 reads back as inf. TranscribePsy's first block reaches
+  37k to 76k in the second feed-forward linear on ordinary speech (69.5k on
+  `hi-16k.wav`), while every other encoder matmul stays under 8.5k. On Hexagon
+  that linear takes its input divided by 16 and multiplies the F32 result back
+  (`matmul_output_headroom`, `affine_mul_mat_with_headroom`); other backends
+  build the plain matmul.
+- **Decoder weights in the repack buffer.** The TDT decoder graphs execute
+  directly on the backend, without the scheduler's CPU fallback. The stacked
+  `[w_ih | w_hh]` LSTM weight is therefore allocated in the same Hexagon repack
+  buffer as the model weights and probed before use; in HTP's default buffer
+  HTP refuses the quantized GEMV, and the graph decoded garbage.
+
+TranscribePsy q8_0 on a Galaxy S25 (Snapdragon 8 Elite, HTP v79), six CPU
+threads, default 60 s / 25 % windows, median of three runs after one warm-up;
+transcripts identical to the CPU on every clip:
+
+| Clip | CPU inference | Hexagon inference | Hexagon encoder | Hexagon decoder |
+|---|--:|--:|--:|--:|
+| `jfk.wav`, 11 s | 173 ms | 140 ms | 122 ms | 15 ms |
+| 67.5 s (two windows) | 4.29 s | 1.71 s | 1.57 s | 122 ms |
+| `abcdba.wav`, 191 s (five windows) | 14.8 s | 4.52 s | 4.13 s | 355 ms |
+
+The device tests are `test-transcribepsy-hexagon`,
+`test-encoder-backend-parity-transcribepsy`,
+`test-attn-path-graph-transcribepsy-hexagon`, `test-tdt-backend-graphs-hexagon`
+and `test-matmul-headroom-hexagon`; each exits with the skip code on a host
+without HTP0 ([testing](testing.md#hexagon-npu-tests)).
+
+## Experimental packed affine TDT recipe
+
+`export-packed-affine.py` preserves an explicit per-output-channel INT4/INT8
+recipe, including FP32 minima/steps and original FP16 overrides. It does not
+apply another GGML weight quantizer. The nonstandard architecture
+`parakeet-affine-v1` makes older engines reject these files instead of treating
+carrier integers as model weights. Ordinary GGUF models retain their existing
+load and execution paths.
+
+Supply a JSON recipe with `source_archive_sha256` and a `tensors` object mapping
+NeMo encoder weight names to `4`, `8`, or `16`; unlisted tensors remain FP16:
+
+```bash
+python engines/parakeet/scripts/export-packed-affine.py \
+  --archive models/parakeet-tdt-0.6b-v3.nemo \
+  --recipe recipe.json \
+  --output models/retained.affine.gguf \
+  --dense-control models/retained.dense.gguf
+```
+
+The experimental native path stores integer codes in unit-scale Q4_0/Q8_0
+carrier blocks, with separate FP32 affine metadata. These blocks are not
+ordinary Q4_0/Q8_0 model weights. Block-scale headers add storage overhead over
+pure packed codes. The native graph reconstructs each projection transiently
+using separate FP32 multiply/add operations and rounds to FP16 before the
+existing matrix multiply. Activation-first graph ordering permits workspace
+reuse; the loader does not create a persistent dense model. This is a faithful
+storage/execution baseline, **not a fused low-bit matrix multiply or a speed
+optimization**. Reconstruction can be substantially slower than ordinary Q8.
+Unsupported encoder graph operations fail rather than silently falling back.
+`--profile` does not produce isolated substage timings for packed-affine models;
+that graph builder has no affine reconstruction scope and rejects them explicitly.
+Full encoder/inference measurements retain the normal affine execution path.
+Only offline TDT has been evaluated; other backend/model combinations require
+validation before use.
+
+Depthwise kernels retain the recipe's reconstructed FP16 values, as in the
+original packed-projection runtime. Selected FP16 attention weights remain
+FP16. Both packed exports and their dense controls omit duplicate fused Q/K/V
+copies, so size comparisons must account for that layout difference. The receipt
+records the exported source values, physical bytes, coverage and file hashes.
+`--expected-tensors` can require an independent SHA/shape/dtype receipt for every
+source tensor before GGUF conversion.
+
+Validate exact reconstruction before comparing transcription and timing:
+
+```bash
+python engines/parakeet/test/test_packed_affine.py
+# Build target test-packed-affine, then run on the exact requested backend:
+./build/test-packed-affine models/retained.affine.gguf MTL0
+```
+
+The native audit compares every reconstructed FP16 weight bit-for-bit with the
+saved affine arithmetic and refuses unsupported operations. Python reference
+and Core ML export scripts deliberately reject carrier files; use the matching
+`--dense-control` output when an expanded weight graph is required. A weight
+identity check does not establish transcription accuracy or a speed advantage.
+
 ## Core ML encoder sidecar
 
 `PARAKEET_COREML=ON` is Apple-only. It enables optional CTC/IndicConformer,
@@ -222,6 +328,39 @@ python engines/parakeet/scripts/export-encoder-coreml.py \
   --out engines/parakeet/models/parakeet-tdt-0.6b-v3-encoder.mlpackage \
   --compile-dir engines/parakeet/models
 ```
+
+Fixed TDT exports now have two inputs: `mel` and `mel_valid_mask`. The latter
+is a vector at mel capacity, with ones for the contiguous valid prefix and zeros
+for padding. The runtime supplies this mask from the same valid-frame scan used
+by the native encoder. The graph masks every subsampling stage, attention keys,
+and intermediate Conformer states, including the GLU output before depthwise
+convolution. Only the subsampled valid prefix reaches the decoder. This requires
+both the updated exporter and runtime; an older runtime cannot load this new
+interface. Existing single-input sidecars still load in the updated runtime,
+but their padded frames remain visible to attention. Re-exporting is required
+to obtain the masking fix; updating engine code alone cannot fix old artifacts.
+Masking preserves natural-length semantics in the graph; quantization and Core
+ML precision can still affect numerical and transcript parity. Validate the
+new artifact on the intended audio before deploying it.
+
+Checkpoint-free padding regressions can be run with:
+
+```bash
+python engines/parakeet/test/test_coreml_padding.py
+# Apple + Xcode command-line tools; also converts/compiles small test models:
+python engines/parakeet/test/test_coreml_padding_runtime.py
+```
+
+The runtime test covers fixed capacity, 1501-frame inputs, short and full-capacity
+calls, integer lengths above 2048, stride boundaries, cache reuse, legacy single-input
+models, and the Sortformer bypass interface on CPU-only and default Core ML
+placement. FP32 conversions check padding semantics against the unpadded
+PyTorch reference; FP16 and FP32 native I/O are compared against predictions
+from the corresponding compiled Core ML graph. FP16-versus-PyTorch numerical
+parity is a separate artifact validation, not asserted by the I/O test.
+A tested conversion environment is Python 3.11, Torch 2.7.0,
+coremltools 9.0, and NumPy 1.26.4. These small-model checks do not establish
+full-model WER, latency, or ANE placement.
 
 IndicConformer uses the same fixed-capacity contract. Core ML runs the encoder;
 the multilingual CTC projection and `--language` token mask remain on ggml:
