@@ -76,7 +76,7 @@ LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the
 graphs run without a per-op CPU fallback and ggml-webgpu lacks `MEAN`.
 
-Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
+Chatterbox Turbo and Multilingual, Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
 MOSS-TTSD, MOSS-SoundEffect-v2 and MOSS-Speech (LM and speech tokenizer) also support explicit Hexagon placement on Snapdragon; see their
 model guides for setup and validated tiers. Audio8's corrected baseline uses `q8_0` quantisation with
 `--greedy` sampling under `--backend hexagon`; see
@@ -170,3 +170,7 @@ CC-BY-4.0, Supertonic OpenRAIL-M, and Parler/CosyVoice3/Audio8/LavaSR/MOSS
 Apache-2.0; see [NOTICE](NOTICE) for
 canonical upstream sources and license identities. This in-tree package does
 not bundle ggml.
+
+Audio8 supports codec-window PCM callbacks through `Engine::synthesize_stream()`.
+The CLI `--stream` mode measures callback first-audio latency and real-time factor;
+see [incremental PCM streaming](docs/audio8.md#incremental-pcm-streaming).

@@ -282,6 +282,8 @@ set(TTS_CPP_LIB_SOURCES
     src/voice_controls.cpp
     src/backend_selection.cpp
     src/sched_dispatch.cpp
+    src/conv_columns.cpp
+    src/attention_fallback.cpp
     src/main.cpp
     src/chatterbox_cli.cpp
     src/gpt2_bpe.cpp
@@ -1812,6 +1814,29 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-backend-selection)
     tts_cpp_register_test(test-backend-selection LABEL "unit")
 
+    # Pins the transposed-convolution columns form (the S3Gen HiFT graph on
+    # Hexagon) to ggml_conv_transpose_1d. Synthetic inputs; no fixtures.
+    add_executable(test-conv-columns test/test_conv_columns.cpp)
+    target_link_libraries(test-conv-columns PRIVATE tts-cpp)
+    target_include_directories(test-conv-columns PRIVATE src)
+    tts_cpp_apply_ccache(test-conv-columns)
+    tts_cpp_register_test(test-conv-columns LABEL "unit")
+    if (TTS_CPP_GGML_HEXAGON)
+        tts_cpp_register_test(test-conv-columns-hexagon EXE test-conv-columns LABEL "gpu" ARGS "hexagon")
+    endif()
+
+    # Pins the unfused T3 attention (taken where the backend declines
+    # FLASH_ATTN_EXT, e.g. ggml-opencl on Adreno) to ggml_flash_attn_ext.
+    # Synthetic inputs; no fixtures.
+    add_executable(test-attention-fallback test/test_attention_fallback.cpp)
+    target_link_libraries(test-attention-fallback PRIVATE tts-cpp)
+    target_include_directories(test-attention-fallback PRIVATE src)
+    tts_cpp_apply_ccache(test-attention-fallback)
+    tts_cpp_register_test(test-attention-fallback LABEL "unit")
+    if (TTS_CPP_GGML_OPENCL)
+        tts_cpp_register_test(test-attention-fallback-opencl EXE test-attention-fallback LABEL "gpu" ARGS "opencl")
+    endif()
+
     # ---- Pocket numerical core (fixtures from dump-pocket-flow-reference.py) ----
     add_executable(test-pocket-graph-memory test/pocket/test_graph_memory.cpp)
     target_include_directories(test-pocket-graph-memory PRIVATE src)
@@ -2129,6 +2154,15 @@ if (TTS_CPP_BUILD_TESTS)
                  "${_tcb_audio8_ref}/wav.npy" "${_tcb_audio8_ref_clone}/wav.npy"
                  "${_tcb_audio8_ref_wav}")
 
+    add_executable(test-audio8-streaming test/audio8/test_streaming.cpp)
+    target_link_libraries(test-audio8-streaming PRIVATE tts-cpp ggml)
+    target_include_directories(test-audio8-streaming PRIVATE include src)
+    tts_cpp_apply_ccache(test-audio8-streaming)
+    tts_cpp_register_test(test-audio8-streaming
+        LABEL "fixture"
+        ARGS "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}"
+        REQUIRES "${_tcb_audio8_lm_q8}" "${_tcb_audio8_decoder_q8}")
+
     # The three Audio8 suites again on one GPU backend, against the same torch
     # reference and the same fixtures.  Comparing the GPU to the reference rather
     # than to CPU is what makes this a correctness gate: the two arms are then
@@ -2245,6 +2279,11 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-audio8-codec-bench-cli LABEL "unit")
 
     if (Python3_Interpreter_FOUND AND TARGET audio8-codec-bench)
+        add_test(NAME test-audio8-streaming-benchmark
+            COMMAND ${Python3_EXECUTABLE} -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/test_audio8_streaming.py")
+        set_tests_properties(test-audio8-streaming-benchmark PROPERTIES LABELS "unit")
+
         add_executable(audio8-codec-bench-fixture test/audio8/codec_bench_fixture.cpp)
         target_link_libraries(audio8-codec-bench-fixture PRIVATE tts-cpp ggml)
         target_include_directories(audio8-codec-bench-fixture PRIVATE src)
@@ -2693,6 +2732,30 @@ if (TTS_CPP_BUILD_TESTS)
         tts_cpp_register_s3gen_gpu_arm(vulkan)
     endif()
 
+    # Hexagon (HTP0) arms. The automatic walk never selects Hexagon, so each
+    # arm names it with --backend instead of TTS_CPP_GPU_BACKEND. Same CPU
+    # comparisons and bounds as the GPU arms above, which likewise leave the
+    # greedy Turbo T3 out: greedy Turbo decoding misses the stop token on some
+    # sentences on every backend (docs/chatterbox.md, Hexagon).
+    if (TTS_CPP_GGML_HEXAGON)
+        tts_cpp_register_test(test-s3gen-agreement-hexagon
+            EXE      test-s3gen-backend-agreement
+            LABEL    "gpu"
+            ARGS     "${_tcb_s3gen_gguf}" "--backend" "hexagon"
+            REQUIRES "${_tcb_s3gen_gguf}")
+        tts_cpp_register_test(test-s3gen-agreement-hexagon-q4_0
+            EXE      test-s3gen-backend-agreement
+            LABEL    "gpu"
+            ARGS     "${_tcb_s3gen_q4_gguf}" "--mel-tolerance" "5e-2" "--max-rms-ratio" "0.5"
+                     "--backend" "hexagon"
+            REQUIRES "${_tcb_s3gen_q4_gguf}")
+        tts_cpp_register_test(test-chatterbox-parity-mtl-hexagon
+            EXE      test-chatterbox-backend-parity
+            LABEL    "gpu"
+            ARGS     "${_tcb_t3_mtl_gguf}" "${_tcb_s3gen_mtl_gguf}" "en" "--backend" "hexagon"
+            REQUIRES "${_tcb_t3_mtl_gguf}" "${_tcb_s3gen_mtl_gguf}")
+    endif()
+
     add_executable(test-voice-features
         test/test_voice_features.cpp
         src/voice_features.cpp
@@ -2859,6 +2922,56 @@ if (TTS_CPP_BUILD_TESTS)
         LABEL    "fixture"
         ARGS     "${_tcb_t3_mtl_gguf}" "--step-cache"
         REQUIRES "${_tcb_t3_mtl_gguf}")
+
+    # Explicit Chatterbox backend requests: cpu matches the automatic CPU path,
+    # a missing device fails at every entry point instead of falling back.
+    add_executable(test-chatterbox-explicit-backend test/test_chatterbox_explicit_backend.cpp)
+    target_link_libraries(test-chatterbox-explicit-backend PRIVATE tts-cpp ggml tts-cpp-backend-defs)
+    target_include_directories(test-chatterbox-explicit-backend PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-chatterbox-explicit-backend)
+    tts_cpp_register_test(test-chatterbox-explicit-backend
+        LABEL    "fixture"
+        ARGS     "${_tcb_t3_turbo_gguf}" "${_tcb_s3gen_q4_gguf}"
+        REQUIRES "${_tcb_t3_turbo_gguf}" "${_tcb_s3gen_q4_gguf}")
+
+    # T3 logits on an explicit backend vs the CPU over a teacher-forced token
+    # sequence (no sampling divergence). The CPU arm compares the CPU with
+    # itself and keeps the harness honest on hosts without a device.
+    add_executable(test-t3-backend-logits test/test_t3_backend_logits.cpp)
+    target_link_libraries(test-t3-backend-logits PRIVATE tts-cpp ggml tts-cpp-backend-defs)
+    target_include_directories(test-t3-backend-logits PRIVATE ggml/include src include)
+    tts_cpp_apply_ccache(test-t3-backend-logits)
+    tts_cpp_register_test(test-t3-backend-logits-turbo-cpu
+        EXE      test-t3-backend-logits
+        LABEL    "fixture"
+        ARGS     "${_tcb_t3_turbo_gguf}" "cpu" "--min-cosine" "0.999999" "--min-argmax-match" "1"
+        REQUIRES "${_tcb_t3_turbo_gguf}")
+    if (TTS_CPP_GGML_HEXAGON)
+        tts_cpp_register_test(test-t3-backend-logits-turbo-hexagon
+            EXE      test-t3-backend-logits
+            LABEL    "gpu"
+            ARGS     "${_tcb_t3_turbo_gguf}" "hexagon"
+            REQUIRES "${_tcb_t3_turbo_gguf}")
+        tts_cpp_register_test(test-t3-backend-logits-mtl-hexagon
+            EXE      test-t3-backend-logits
+            LABEL    "gpu"
+            ARGS     "${_tcb_t3_mtl_gguf}" "hexagon"
+            REQUIRES "${_tcb_t3_mtl_gguf}")
+    endif()
+    # The multilingual F32 KV cache at the GGUF's context exceeds OpenCL's
+    # 1 GB allocation limit on Adreno, so its arm caps the context.
+    if (TTS_CPP_GGML_OPENCL)
+        tts_cpp_register_test(test-t3-backend-logits-turbo-opencl
+            EXE      test-t3-backend-logits
+            LABEL    "gpu"
+            ARGS     "${_tcb_t3_turbo_gguf}" "opencl"
+            REQUIRES "${_tcb_t3_turbo_gguf}")
+        tts_cpp_register_test(test-t3-backend-logits-mtl-opencl
+            EXE      test-t3-backend-logits
+            LABEL    "gpu"
+            ARGS     "${_tcb_t3_mtl_gguf}" "opencl" "--n-ctx" "1024"
+            REQUIRES "${_tcb_t3_mtl_gguf}")
+    endif()
 
     # S3Gen dual-path dispatch equivalence: forced-sched full synth
     # (TTS_CPP_FORCE_SCHED) must be bit-identical to the direct path,
@@ -3134,6 +3247,7 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-tts-streaming
         test/test_streaming.cpp
         src/chatterbox_tts.cpp
+        src/conv_columns.cpp
         src/sched_dispatch.cpp
         src/backend_selection.cpp)
     target_link_libraries(test-tts-streaming PRIVATE ggml tts-cpp-backend-defs)
@@ -3450,6 +3564,7 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-cpu-caches
         test/test_cpu_caches.cpp
         src/chatterbox_tts.cpp
+        src/conv_columns.cpp
         src/sched_dispatch.cpp
         src/backend_selection.cpp)
     target_link_libraries(test-cpu-caches PRIVATE ggml tts-cpp-backend-defs)
