@@ -4296,6 +4296,17 @@ else()
     endif()
 endif()
 
+# Model-free measurement-driver contracts run with the native unit lane. The
+# separate consumer project also builds against an installed public library.
+# Cross builds must not execute Android binaries through the host Python.
+set(_tts_chatterbox_measurement_dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/chatterbox-hexagon")
+if(TTS_CPP_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING AND
+   EXISTS "${_tts_chatterbox_measurement_dir}/CMakeLists.txt")
+    add_subdirectory("${_tts_chatterbox_measurement_dir}"
+        "${CMAKE_CURRENT_BINARY_DIR}/chatterbox-measurement")
+endif()
+
 if (TTS_CPP_INSTALL AND TTS_CPP_BUILD_LIBRARY)
     include(CMakePackageConfigHelpers)
 

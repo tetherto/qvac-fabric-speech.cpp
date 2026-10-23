@@ -19,6 +19,10 @@ on:
     paths:
       - 'engines/tts/**'
       - 'engines/test/**'
+      - 'scripts/benchmarks/chatterbox-hexagon*'
+      - 'scripts/benchmarks/chatterbox-hexagon/**'
+      - 'scripts/benchmarks/fixtures/chatterbox-hexagon.json'
+      - 'scripts/benchmarks/test-chatterbox-hexagon-validation.py'
       - 'scripts/ci/moss-gpu-e2e.py'
       - 'scripts/ci/test_moss_gpu_e2e.py'
       - '.github/workflows/tts-ci.yml'
@@ -26,6 +30,10 @@ on:
     paths:
       - 'engines/tts/**'
       - 'engines/test/**'
+      - 'scripts/benchmarks/chatterbox-hexagon*'
+      - 'scripts/benchmarks/chatterbox-hexagon/**'
+      - 'scripts/benchmarks/fixtures/chatterbox-hexagon.json'
+      - 'scripts/benchmarks/test-chatterbox-hexagon-validation.py'
       - 'scripts/ci/moss-gpu-e2e.py'
       - 'scripts/ci/test_moss_gpu_e2e.py'
       - '.github/workflows/tts-ci.yml'
