@@ -23,6 +23,9 @@ and MOSS-SoundEffect also matches the reference pipeline on the
 [Hexagon NPU](docs/moss.md#hexagon-npu-generation), where MOSS-Speech
 [runs its LM and speech tokenizer](docs/moss.md#hexagon-npu-speech-to-speech);
 CUDA and Vulkan add generated-model CPU parity and full-checkpoint smoke coverage.
+MOSS-TTSD reuses the encoded reference for dialogue continuation when only one
+recording is supplied. Multiple recordings retain the joined-audio encoding
+needed for their continuation; all prepared codes stay cached per engine.
 TTS streaming, cancellation/reuse and ASR intelligibility gates are described
 in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke coverage does
 not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
