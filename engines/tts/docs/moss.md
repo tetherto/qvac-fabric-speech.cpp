@@ -260,7 +260,10 @@ build/moss-cli --backbone moss-ttsd-f16.gguf \
     --encoder moss-codec-encoder-f16.gguf \
     --dialogue-ref s1.wav --dialogue-ref s2.wav \
     --text "[S1] <s1 transcript> [S2] <s2 transcript> [S1] ... [S2] ..." \
-    --language en --out dialogue.wav
+    --language English --out dialogue.wav \
+    --text-temperature 1.1 --text-top-p 0.9 --text-top-k 50 \
+    --audio-temperature 1.1 --audio-top-p 0.9 --audio-top-k 50 \
+    --audio-repetition-penalty 1.1
 
 # on the GPU: same command plus --gpu
 ```
@@ -273,10 +276,78 @@ model for a target length of N codec frames (12.5 per second; 0 keeps the
 length free). A target length also needs `n_vq - 1` drain steps plus the
 `audio_end` and `im_end` rows, so the engine rejects a `duration_tokens`
 that does not fit in `max_new_tokens` together with them. Sampling
-follows the reference defaults — text temperature 1.5 / top-k 50, audio
+uses the TTS-v1.5 reference defaults — text temperature 1.5 / top-k 50, audio
 temperature 1.7 / top-p 0.8 / top-k 25, repetition penalty 1.0 over the
 audio channels, seed 1234 — and every knob is exposed as a flag
 (`--text-temperature`, `--audio-top-k`, `--audio-repetition-penalty`, ...).
+
+The dialogue example explicitly uses the TTSD-v1.0 defaults, which differ from
+TTS-v1.5. Text top-p 1.0 keeps rare stop tokens eligible and can end dialogue
+before every requested turn is spoken. A successful process exit does not
+establish that the output contains the complete dialogue.
+
+Reference audio follows the upstream processor's loudness adjustment: target
+−20 dBFS, with gain limited to ±3 dB. Each speaker clip and the concatenated
+continuation are normalized independently from their original PCM. The
+16-channel TTSD prompt includes `Scene: None`; the 32-channel TTS-v1.5 prompt
+retains its template without that field. These preprocessing matches do not
+make sampled outputs identical across runtimes or precisions.
+
+### Validated cloning
+
+For English TTSD batch cloning, `scripts/moss-validated-cloning.py` adds an
+optional transcription check and bounded retries around the existing CLIs.
+It requires Python 3.10 or later with only its standard library, `moss-cli`,
+`moss-transcribe`, and their converted model files. Run it from the repository
+root, adjusting the binary paths for your build:
+
+```bash
+python3 engines/tts/scripts/moss-validated-cloning.py \
+    --moss-cli build/engines/tts/moss-cli \
+    --asr-cli build/engines/parakeet/moss-transcribe \
+    --backbone moss-ttsd-f16.gguf \
+    --encoder moss-codec-encoder-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --asr-model moss-transcribe-q8.gguf \
+    --reference s1.wav "Exact transcript of speaker one's reference." \
+    --reference s2.wav "Exact transcript of speaker two's reference." \
+    --text-file dialogue.txt --output validated.wav \
+    --gpu --seed 5 --attempts 3
+```
+
+`dialogue.txt` contains only the requested new dialogue, with `[S1]`/`[S2]`
+tags. The runner prepends the reference transcripts itself and uses the TTSD
+sampling settings above. References must be mono 24 kHz WAVs. `--gpu` selects
+CUDA device 0 for both processes; omitting it uses CPU. The synthesis process
+exits before ASR starts, so their model allocations do not overlap.
+
+Each attempt uses the initial seed plus its zero-based attempt index. An output
+that reaches `--max-new-tokens` (default 1024) is rejected before ASR. Otherwise,
+the runner resamples the audio to 16 kHz and rejects ASR results reaching its
+1024-token limit before scoring. Missing or invalid ASR token counts stop the
+run as a tool error. It checks complete transcripts against the
+requested text and its final turn. Both error rates must be at most
+`--max-error-rate` (default 0.25). Empty transcripts and silent audio fail the
+check. Reference transcripts of at least eight words are also checked for
+unexpected recurrence at that error threshold, unless the requested text itself
+contains the phrase. Shorter references rely on the overall text check. This
+prevents a long target from masking an extra reference phrase in its overall
+error rate. The runner accepts at most ten attempts and defaults to three. Each
+subprocess has a `--timeout` in seconds, default 300.
+
+Only an accepted WAV is published to `--output`; an existing output is never
+overwritten. A sibling `*-validation-*` directory retains candidate WAVs,
+commands, transcripts, logs, and `report.json`, including rejected attempts.
+Exit codes are 0 for acceptance, 2 for exhausted quality retries, and 1 for an
+input/tool error. Tool errors, malformed ASR output, and an unrecognized
+`moss-cli` generated-frame summary stop the run instead of silently accepting
+an unchecked result.
+
+This is a batch mitigation with additional ASR and retry latency. It does not
+change the native API or model, guarantee a correct transcript, assess speaker
+identity or naturalness, or support streaming. ASR can itself make mistakes;
+retain listening checks for your intended inputs. Tiny Whisper missed complete
+speaker turns during validation, so this runner uses MOSS transcription.
 
 ### Engine notes
 
@@ -310,6 +381,13 @@ seconds and at an absolute sample count that does not depend on the model. A bac
 references are truncated to the backbone's channels and the decoder sums
 only those levels.
 
+With a single dialogue reference, the continuation reuses that recording's
+already encoded codes instead of encoding the same PCM twice. With multiple
+references, the continuation still encodes the joined PCM: concatenating
+independent code sequences changes the encoder's context and frame alignment.
+Both the speaker codes and continuation are prepared once per engine and
+reused across batch and streaming synthesis calls.
+
 `synthesize_stream(text, callback)` emits PCM chunks while generation runs:
 a frame is complete `n_vq - 1` steps after its row, completed non-pad frames
 accumulate, and every `stream_chunk_frames` of them decode incrementally: the
@@ -333,6 +411,14 @@ forces delay slots while the channels close one per step and then forces
 `audio_end`. The emitted rows are de-delayed and split into segments at
 all-pad frames; each segment decodes from a fresh codec context, in batch and
 in streaming alike, so one segment never attends to another.
+
+On Metal, the device-table layout honors those text-logit requirements: it
+projects only the two audio-control tokens while generating audio, omits the
+text head during the forced drain, and uses the full vocabulary when needed.
+Increasing control-token IDs select a strided view of the original weights;
+other layouts are copied once at model load into a head with the original
+weight type. Embedding tables stay on the device. Memory preflight includes
+any additional packed head.
 
 On ARM CPUs ggml accumulates f16 dot products in f16, and the backbone's
 feed-forward output exceeds that range; the down projection therefore runs

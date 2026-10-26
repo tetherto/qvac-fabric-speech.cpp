@@ -1211,6 +1211,12 @@ if (TTS_CPP_BUILD_TESTS)
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        if (Python3_VERSION VERSION_GREATER_EQUAL "3.10")
+            add_test(NAME test-moss-validated-cloning
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/moss/test_validated_cloning.py")
+            set_property(TEST test-moss-validated-cloning PROPERTY LABELS "unit")
+        endif()
         if (TARGET cosyvoice-bench)
             add_test(NAME test-cosyvoice-bench-overrides
                      COMMAND "${Python3_EXECUTABLE}"
@@ -1599,6 +1605,14 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-hexagon-layout PRIVATE src)
     tts_cpp_apply_ccache(test-moss-hexagon-layout)
     tts_cpp_register_test(test-moss-hexagon-layout)
+
+    if (TTS_CPP_GGML_METAL)
+        add_executable(test-moss-metal-text-projection test/moss/test_metal_text_projection.cpp)
+        target_link_libraries(test-moss-metal-text-projection PRIVATE tts-cpp)
+        target_include_directories(test-moss-metal-text-projection PRIVATE src)
+        tts_cpp_apply_ccache(test-moss-metal-text-projection)
+        tts_cpp_register_test(test-moss-metal-text-projection LABEL "gpu")
+    endif()
 
     add_executable(test-moss-stream test/moss/test_stream.cpp)
     target_link_libraries(test-moss-stream PRIVATE tts-cpp)
