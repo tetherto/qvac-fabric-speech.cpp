@@ -109,6 +109,7 @@ public:
     bool fused_dit_attention() const;
     ggml_backend_buffer_type * buffer_type() const;
     ggml_tensor * tensor(const std::string & name) const;
+    std::vector<float> token_rows(const std::vector<int32_t> & ids);
     std::vector<std::string> tokenizer_tokens() const;
     std::vector<std::string> tokenizer_merges() const;
 

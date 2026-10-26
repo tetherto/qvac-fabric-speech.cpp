@@ -1,6 +1,6 @@
 #include "moss/sfx_model.h"
 #include "moss/fit_measure.h"
-#include "moss/host_tables.h"
+#include "moss/gguf_rows.h"
 
 #include "backend_selection.h"
 #include "backend_util.h"
@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 
 namespace tts_cpp::moss::detail {
@@ -154,8 +155,7 @@ struct SfxModel::Impl {
     ggml_context * host_weights = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
-    ggml_backend_buffer_t host_measure_buffer = nullptr;
-    HostTables host_tables{OWNER};
+    std::unique_ptr<GgufRows> token_rows;
     ::tts_cpp::detail::sched_fallback sched;
     SfxConfig config;
     SfxLayout layout;
@@ -166,12 +166,10 @@ struct SfxModel::Impl {
     bool fused = false;
     bool fused_dit = false;
     uint64_t measured_weights = 0;
-    uint64_t measured_host_tables = 0;
 
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
-        if (host_measure_buffer) ggml_backend_buffer_free(host_measure_buffer);
         if (host_weights) ggml_free(host_weights);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -415,7 +413,7 @@ struct SfxModel::Impl {
             fail("cannot reopen GGUF for streaming: " + path);
         }
         if (host_weights) {
-            host_tables.place(host_weights, file, path, reader);
+            token_rows = std::make_unique<GgufRows>(path, file, find(SFX_TOKEN_TABLE), OWNER);
         }
         weight_buffer = ggml_backend_alloc_ctx_tensors_from_buft(weights,
                 ::tts_cpp::detail::weight_buffer_type(backend));
@@ -467,11 +465,6 @@ struct SfxModel::Impl {
         measured_weights = measure_fit_tensors(weights, buft);
         weight_buffer = measurement_buffer(buft);
         bind_measurement_weights(weights, weight_buffer);
-        if (host_weights) {
-            measured_host_tables = measure_fit_tensors(host_weights, ggml_backend_cpu_buffer_type());
-            host_measure_buffer = measurement_buffer(ggml_backend_cpu_buffer_type());
-            bind_measurement_weights(host_weights, host_measure_buffer);
-        }
     }
 
     static void bind_measurement_weights(ggml_context * ctx, ggml_backend_buffer_t buffer) {
@@ -481,7 +474,7 @@ struct SfxModel::Impl {
     }
 
     std::vector<ggml_backend_buffer_t> weight_buffers() const {
-        return {weight_buffer, measure_only ? host_measure_buffer : host_tables.buffer()};
+        return {weight_buffer};
     }
 
     bool ensure_scheduler() {
@@ -538,6 +531,11 @@ bool SfxModel::fused_dit_attention() const { return impl_->fused_dit; }
 ggml_backend_buffer_type * SfxModel::buffer_type() const {
     return ::tts_cpp::detail::weight_buffer_type(impl_->backend);
 }
+
+std::vector<float> SfxModel::token_rows(const std::vector<int32_t> & ids) {
+    if (!impl_->token_rows) fail("the token table is not on the host");
+    return impl_->token_rows->gather(ids);
+}
 ggml_tensor * SfxModel::tensor(const std::string & name) const { return impl_->find(name); }
 
 std::vector<std::string> SfxModel::tokenizer_tokens() const {
@@ -558,8 +556,9 @@ FitResult SfxModel::measure_weights() {
     result.host_bytes = fitutil::sat_add(gguf_get_meta_size(impl_->file),
         fitutil::sat_add(ggml_get_mem_size(impl_->metadata), ggml_get_mem_size(impl_->weights)));
     if (impl_->host_weights) {
+        const ggml_tensor * table = impl_->find(SFX_TOKEN_TABLE);
         result.host_bytes = fitutil::sat_add(result.host_bytes,
-            fitutil::sat_add(ggml_get_mem_size(impl_->host_weights), impl_->measured_host_tables));
+            fitutil::sat_add(ggml_get_mem_size(impl_->host_weights), ggml_row_size(table->type, table->ne[0])));
     }
     result.host_bytes = fitutil::sat_add(result.host_bytes, impl_->config.vae.rates.capacity() * sizeof(int));
     const uint64_t sched_nodes = uint64_t(SCHED_NODES) * (1 + SCHED_SPLIT_INPUTS * SCHED_COPY_DIRECTIONS);
