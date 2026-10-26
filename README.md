@@ -23,10 +23,10 @@ validated on it.
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small validated on WebGPU |
 | [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy ships as ready-made GGUF and Core ML files for eight European languages and runs on the Hexagon NPU |
 | Parakeet | Sortformer v1/v2/v2.1, Nemotron 3 Diarization | Speaker diarization and attributed ASR; Sortformer supports up to four speakers, Nemotron up to eight |
-| Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; CPU/Metal validated on Spanish/Chinese; explicit CUDA/Vulkan/OpenCL/Hexagon selection with generated-model CPU parity and quantized checkpoint smoke coverage; English long-form skips spans in both native and reference runs |
+| Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; fused CPU encoder attention; CPU/Metal validated on Spanish/Chinese; explicit CUDA/Vulkan/OpenCL/Hexagon selection with generated-model CPU parity and quantized checkpoint smoke coverage; English long-form skips spans in both native and reference runs |
 | [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3 also validated on WebGPU |
 | TTS | Pocket TTS | English synthesis and incremental CPU/Metal/CUDA/Vulkan/OpenCL streaming; cloning requires encoder-enabled weights |
-| TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
+| TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; selective text-control projection on Metal; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; metadata-only memory fit for SoundEffect; CPU/Metal generation validated; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage; explicit Hexagon NPU placement for SoundEffect, with reference parity, and for the Speech LM and speech tokenizer |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages and excludes WebGPU, whose kernels lack an op the graphs need |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
@@ -94,7 +94,15 @@ contracts; see the engine guides before exporting or deploying one.
 | TTS | Supertonic vocoder, Audio8 codec synthesis | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar), [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | TTS | MOSS-TTS/TTSD codec decoder, MOSS-SoundEffect DiT and VAE, MOSS-Speech speech tokenizer | [MOSS](engines/tts/docs/moss.md#core-ml-codec-decoder), [SoundEffect](engines/tts/docs/moss.md#core-ml-dit-and-vae), [Speech](engines/tts/docs/moss.md#core-ml-speech-tokenizer) |
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
-| AudioGen | MiniMax conditioner projection (CPU + ANE; remaining stages native) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
+| AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
+
+MiniMax's full Core ML route is also exposed through its public C++ engine.
+Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
+`coreml_compute_units`; the separate flag does not enable automatic ACE-Step
+sidecars. It supports `CPU_ONLY`, `CPU_AND_GPU`, `CPU_AND_NE`, and `ALL` on
+macOS 15+. See the [full Core ML guide](engines/audiogen/docs/minimax-coreml-validation.md)
+for the matching F16 compiled profile, measurements, and remaining numerical
+validation.
 
 CosyVoice3 exports HiFT in FP32 to preserve waveform parity. Its memory-fit
 preflight returns `Error` with `coreml-memory-estimate-unavailable` when
