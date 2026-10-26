@@ -323,7 +323,9 @@ exits before ASR starts, so their model allocations do not overlap.
 
 Each attempt uses the initial seed plus its zero-based attempt index. An output
 that reaches `--max-new-tokens` (default 1024) is rejected before ASR. Otherwise,
-the runner resamples the audio to 16 kHz and checks the transcript against the
+the runner resamples the audio to 16 kHz and rejects ASR results reaching its
+1024-token limit before scoring. Missing or invalid ASR token counts stop the
+run as a tool error. It checks complete transcripts against the
 requested text and its final turn. Both error rates must be at most
 `--max-error-rate` (default 0.25). Empty transcripts and silent audio fail the
 check. Reference transcripts of at least eight words are also checked for

@@ -18,6 +18,11 @@ MAX_ATTEMPTS = 10
 MAX_SEED = (1 << 32) - 1
 MAX_TEXT_CHARS = 16384
 DEFAULT_TOKEN_LIMIT = 1024
+ASR_TOKEN_LIMIT = 1024
+TTSD_TEMPERATURE = 1.1
+TTSD_TOP_P = 0.9
+TTSD_TOP_K = 50
+TTSD_AUDIO_REPETITION_PENALTY = 1.1
 DEFAULT_TIMEOUT = 300.0
 DEFAULT_ERROR_LIMIT = 0.25
 MIN_REFERENCE_WORDS = 8
@@ -85,9 +90,11 @@ def synthesis_command(args, seed, output):
                "--decoder", args.decoder, "--text", prefix + " " + args.target,
                "--language", "English", "--out", str(output), "--seed", str(seed),
                "--threads", str(args.threads), "--max-new-tokens", str(args.max_new_tokens),
-               "--text-temperature", "1.1", "--text-top-p", "0.9", "--text-top-k", "50",
-               "--audio-temperature", "1.1", "--audio-top-p", "0.9", "--audio-top-k", "50",
-               "--audio-repetition-penalty", "1.1"]
+               "--text-temperature", str(TTSD_TEMPERATURE), "--text-top-p", str(TTSD_TOP_P),
+               "--text-top-k", str(TTSD_TOP_K),
+               "--audio-temperature", str(TTSD_TEMPERATURE), "--audio-top-p", str(TTSD_TOP_P),
+               "--audio-top-k", str(TTSD_TOP_K),
+               "--audio-repetition-penalty", str(TTSD_AUDIO_REPETITION_PENALTY)]
     for audio, _ in args.reference:
         command.extend(["--dialogue-ref", audio])
     return command + (["--gpu", "--backend", "CUDA0"] if args.gpu else [])
@@ -96,7 +103,7 @@ def synthesis_command(args, seed, output):
 def asr_command(args, audio, output):
     command = [args.asr_cli, "--model", args.asr_model, "--audio", str(audio),
                "--out", str(output), "--threads", str(args.threads),
-               "--max-new-tokens", str(DEFAULT_TOKEN_LIMIT)]
+               "--max-new-tokens", str(ASR_TOKEN_LIMIT)]
     return command + (["--gpu", "--backend", "cuda"] if args.gpu else [])
 
 
@@ -162,6 +169,12 @@ def evaluate_attempt(args, directory, seed):
     payload = json.loads(transcript_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
         raise ValueError("ASR output must contain a text string")
+    generated_tokens = payload.get("generated_tokens")
+    if type(generated_tokens) is not int or generated_tokens < 0:
+        raise ValueError("ASR output must contain a nonnegative generated_tokens integer")
+    if generated_tokens >= ASR_TOKEN_LIMIT:
+        return {"status": "rejected", "reason": "asr_generation_limit",
+                "generated_frames": frames, "asr_generated_tokens": generated_tokens}
     transcript = payload["text"]
     if not words(transcript):
         return {"status": "rejected", "reason": "empty_transcript", "generated_frames": frames}

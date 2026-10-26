@@ -57,6 +57,8 @@ class ValidatedCloningTest(unittest.TestCase):
         else:
             self.asr_calls += 1
             payload = self.transcripts.get(self.seeds[-1], {"text": TRANSCRIPT})
+            if isinstance(payload, dict):
+                payload = {"generated_tokens": 100, **payload}
             (directory / "transcript.json").write_text(json.dumps(payload))
 
     def run_guard(self):
@@ -86,6 +88,30 @@ class ValidatedCloningTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(self.asr_calls, 1)
         self.assertEqual(report["attempts"][0]["reason"], "generation_limit")
+
+    def test_matching_transcript_at_asr_limit_is_rejected_before_scoring(self):
+        self.args.attempts = 1
+        self.transcripts[5] = {"text": TRANSCRIPT, "generated_tokens": 1024}
+        with patch.object(GUARD, "text_scores", side_effect=AssertionError("Must not score truncated ASR")):
+            status, report = self.run_guard()
+        self.assertEqual(status, 2)
+        self.assertEqual(report["attempts"][0]["reason"], "asr_generation_limit")
+        self.assertFalse(Path(self.args.output).exists())
+
+    def test_asr_limit_retries_next_seed(self):
+        self.transcripts[5] = {"text": TRANSCRIPT, "generated_tokens": 1025}
+        status, report = self.run_guard()
+        self.assertEqual(status, 0)
+        self.assertEqual(self.seeds, [5, 6])
+        self.assertEqual(report["attempts"][0]["reason"], "asr_generation_limit")
+
+    def test_invalid_asr_token_count_fails_closed(self):
+        for count in (None, True, -1, "100", 100.5):
+            with self.subTest(count=count):
+                self.transcripts[5] = {"text": TRANSCRIPT, "generated_tokens": count}
+                status, _ = self.run_guard()
+                self.assertEqual(status, 1)
+                self.assertFalse(Path(self.args.output).exists())
 
     def test_long_target_does_not_hide_reference_repetition(self):
         reference = "Yesterday we watched the sunset beside the quiet lake."
