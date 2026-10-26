@@ -656,8 +656,10 @@ negative conditioning have separate cache entries; guidance `1` needs only the
 positive entry. K/V stays in F32 on the selected backend, retaining the existing
 activation precision. For the released 30-layer model with 512 text positions,
 the guided cache contains 360 MiB of K/V. Metadata-only memory fit includes this
-storage and the peak preparation/denoising graph scratch. A new request prepares
-new entries, including when ggml takes over after a Core ML DiT failure.
+storage alongside the scheduler's retained peak across text encoding, preparation,
+denoising and VAE decoding. This covers a new request's cache coexisting with a
+larger VAE buffer retained from the previous request. A new request prepares new
+entries, including when ggml takes over after a Core ML DiT failure.
 
 Metal selects DiT flash attention after the backend confirms support for both
 self-attention and cross-attention. Unsupported geometries keep unfused

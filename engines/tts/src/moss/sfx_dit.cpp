@@ -1,5 +1,6 @@
 #include "moss/sfx_networks.h"
 #include "moss/sfx_dit_cache.h"
+#include "fit_util.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -364,7 +365,9 @@ struct SfxDitSession::Impl {
         auto result = model.measure(*graph);
         if (!cache) return result;
         const auto prep = model.measure(*preparation);
-        result.device_bytes = cache->bytes() + std::max(result.device_bytes, prep.device_bytes);
+        result.persistent_device_bytes = cache->bytes();
+        result.device_bytes =
+            fitutil::sat_add(result.persistent_device_bytes, std::max(result.device_bytes, prep.device_bytes));
         result.host_compute_bytes = std::max(result.host_compute_bytes, prep.host_compute_bytes);
         result.host_bytes += prep.host_bytes + cache->host_bytes();
         result.host_bytes += context_elements() * cache->contexts() * sizeof(float);

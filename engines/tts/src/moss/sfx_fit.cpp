@@ -70,9 +70,11 @@ void measure_workload(FitResult & result, detail::SfxModel & model,
     const auto text = measure_texts(model, tokenizer, request);
     const auto dit = measure_dit(model, request);
     const auto audio = measure_audio(model, request);
-    result.device.lm_compute_bytes = std::max(text.device_bytes, dit.device_bytes);
-    result.device.codec_compute_bytes = audio.device_bytes > result.device.lm_compute_bytes
-        ? audio.device_bytes - result.device.lm_compute_bytes : 0;
+    const auto text_peak = sat_add(dit.persistent_device_bytes, text.device_bytes);
+    const auto audio_peak = sat_add(dit.persistent_device_bytes, audio.device_bytes);
+    result.device.lm_compute_bytes = std::max(text_peak, dit.device_bytes);
+    result.device.codec_compute_bytes =
+        audio_peak > result.device.lm_compute_bytes ? audio_peak - result.device.lm_compute_bytes : 0;
     const uint64_t contexts = sat_mul(sat_mul(model.config().text.max_tokens, model.config().text.n_embd),
                                      sizeof(float) * PROMPT_CONTEXTS);
     const uint64_t host_compute = std::max({text.host_compute_bytes, dit.host_compute_bytes, audio.host_compute_bytes});

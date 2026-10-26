@@ -74,6 +74,7 @@ struct SfxMemory {
     uint64_t device_bytes = 0;
     uint64_t host_compute_bytes = 0;
     uint64_t host_bytes = 0;
+    uint64_t persistent_device_bytes = 0;
 };
 
 class SfxGraph {

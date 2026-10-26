@@ -187,11 +187,11 @@ inline void add_vae_block(GgufBuilder & b, int block, int in, int out) {
     }
 }
 
-inline void add_vae_tensors(GgufBuilder & b) {
+inline void add_vae_tensors(GgufBuilder & b, int decoder_dim = DECODER_DIM) {
     b.add2("vae.post_quant.weight", LATENT, LATENT);
     b.add2("vae.post_quant.bias", 1, LATENT);
-    add_conv(b, "vae.conv_in", KERNEL, LATENT, DECODER_DIM);
-    int channels = DECODER_DIM;
+    add_conv(b, "vae.conv_in", KERNEL, LATENT, decoder_dim);
+    int channels = decoder_dim;
     for (int block = 0; block < (int) RATES.size(); ++block) {
         add_vae_block(b, block, channels, channels / 2);
         channels /= 2;
@@ -200,10 +200,28 @@ inline void add_vae_tensors(GgufBuilder & b) {
     add_conv(b, "vae.conv_out", KERNEL, channels, 1);
 }
 
-inline std::filesystem::path write_sfx_model(const char * tag, uint32_t seed,
-        const std::function<void(gguf_context *)> & mutate_meta = [](gguf_context *) {},
-        const moss_fixtures::ConstantTensors & constants = {}, const moss_fixtures::TensorShapes & shapes = {},
-        int dit_layers = 1, int dit_width = DIT_EMBD, int dit_heads = DIT_HEADS) {
+inline void scale_tensor(ggml_tensor * tensor, float scale) {
+    for (int64_t i = 0; i < ggml_nelements(tensor); ++i) {
+        if (tensor->type == GGML_TYPE_F16) {
+            auto * data = static_cast<ggml_fp16_t *>(tensor->data);
+            data[i] = ggml_fp32_to_fp16(ggml_fp16_to_fp32(data[i]) * scale);
+        } else {
+            static_cast<float *>(tensor->data)[i] *= scale;
+        }
+    }
+}
+
+inline void scale_vae_tensors(GgufBuilder & b, float scale) {
+    for (auto * tensor = ggml_get_first_tensor(b.tensors); tensor; tensor = ggml_get_next_tensor(b.tensors, tensor)) {
+        if (std::string(ggml_get_name(tensor)).find("vae.") == 0) scale_tensor(tensor, scale);
+    }
+}
+
+inline std::filesystem::path write_sfx_model(
+    const char * tag, uint32_t seed, const std::function<void(gguf_context *)> & mutate_meta = [](gguf_context *) {},
+    const moss_fixtures::ConstantTensors & constants = {}, const moss_fixtures::TensorShapes & shapes = {},
+    int dit_layers = 1, int dit_width = DIT_EMBD, int dit_heads = DIT_HEADS, int decoder_dim = DECODER_DIM,
+    float vae_scale = 1.0f) {
     std::mt19937 rng(seed);
     GgufBuilder b;
     b.random = &rng;
@@ -213,10 +231,12 @@ inline std::filesystem::path write_sfx_model(const char * tag, uint32_t seed,
     gguf_set_val_u32(b.file, "moss-sfx.dit.block_count", dit_layers);
     gguf_set_val_u32(b.file, "moss-sfx.dit.embedding_length", dit_width);
     gguf_set_val_u32(b.file, "moss-sfx.dit.attention.head_count", dit_heads);
+    gguf_set_val_u32(b.file, "moss-sfx.vae.decoder_dim", decoder_dim);
     mutate_meta(b.file);
     add_text_tensors(b);
     add_dit_tensors(b, dit_layers, dit_width);
-    add_vae_tensors(b);
+    add_vae_tensors(b, decoder_dim);
+    if (vae_scale != 1.0f) scale_vae_tensors(b, vae_scale);
     const auto path = moss_fixtures::temp_gguf(tag);
     b.write(path);
     return path;
