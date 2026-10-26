@@ -153,7 +153,7 @@ Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
 renders diverge after the first differing token the way any two backends do;
 the transcripts are the check. They rely on ggml-webgpu computing the matmul
 and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
-f32 accumulation, which ggml-speech provides from 2026-10-26; with an older
+f32 accumulation, which ggml-speech provides from 2026-10-26#1; with an older
 ggml-speech their decoders overflow f16 and produce NaN logits, silence or
 noise.
 

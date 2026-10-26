@@ -79,7 +79,7 @@ their sampled tokens diverge between backends, so waveforms are not compared.
 These are the TTS models whose automatic GPU selection admits WebGPU
 (CosyVoice3 on Windows and desktop Linux, like Vulkan and CUDA). The
 LM-based ones need a ggml-speech whose WebGPU kernels honour
-`GGML_PREC_F32` (2026-10-26 or later).
+`GGML_PREC_F32` (2026-10-26#1 or later).
 
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the
