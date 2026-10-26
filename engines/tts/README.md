@@ -26,6 +26,9 @@ CUDA and Vulkan add generated-model CPU parity and full-checkpoint smoke coverag
 MOSS Delay on Metal projects only the text-control tokens needed during audio
 generation and omits text projection during the forced drain. Embedding tables
 stay on the GPU, and the control-token head preserves the model's weight type.
+MOSS-TTSD reuses the encoded reference for dialogue continuation when only one
+recording is supplied. Multiple recordings retain the joined-audio encoding
+needed for their continuation; all prepared codes stay cached per engine.
 TTS streaming, cancellation/reuse and ASR intelligibility gates are described
 in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke coverage does
 not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
@@ -35,6 +38,9 @@ MOSS reference cloning applies the upstream loudness adjustment, and TTSD uses
 its dialogue-specific prompt template. Use the explicit TTSD sampling settings
 in the [dialogue example](docs/moss.md); the CLI's shared defaults are for
 TTS-v1.5, and sampled dialogue can stop before all requested turns are spoken.
+The opt-in [validated cloning runner](docs/moss.md#validated-cloning) checks
+English dialogue with local MOSS transcription and retries rejected outputs,
+including ASR results that reach the decoding token limit.
 
 This in-tree package consumes the shared `ggml-speech` dependency. Build and
 vcpkg consumption instructions are in [docs/build.md](docs/build.md).
