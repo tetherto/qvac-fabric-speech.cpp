@@ -380,6 +380,7 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/fit.cpp
     src/pocket/reference_audio.cpp
     src/moss/backend_request.cpp
+    src/moss/gguf_rows.cpp
     src/moss/host_tables.cpp
     src/moss/codec.cpp
     src/moss/delay_lm.cpp
@@ -1214,6 +1215,12 @@ if (TTS_CPP_BUILD_TESTS)
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        if (Python3_VERSION VERSION_GREATER_EQUAL "3.10")
+            add_test(NAME test-moss-validated-cloning
+                     COMMAND "${Python3_EXECUTABLE}"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/test/moss/test_validated_cloning.py")
+            set_property(TEST test-moss-validated-cloning PROPERTY LABELS "unit")
+        endif()
         if (TARGET cosyvoice-bench)
             add_test(NAME test-cosyvoice-bench-overrides
                      COMMAND "${Python3_EXECUTABLE}"

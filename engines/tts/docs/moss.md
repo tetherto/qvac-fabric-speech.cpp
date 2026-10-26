@@ -293,6 +293,62 @@ continuation are normalized independently from their original PCM. The
 retains its template without that field. These preprocessing matches do not
 make sampled outputs identical across runtimes or precisions.
 
+### Validated cloning
+
+For English TTSD batch cloning, `scripts/moss-validated-cloning.py` adds an
+optional transcription check and bounded retries around the existing CLIs.
+It requires Python 3.10 or later with only its standard library, `moss-cli`,
+`moss-transcribe`, and their converted model files. Run it from the repository
+root, adjusting the binary paths for your build:
+
+```bash
+python3 engines/tts/scripts/moss-validated-cloning.py \
+    --moss-cli build/engines/tts/moss-cli \
+    --asr-cli build/engines/parakeet/moss-transcribe \
+    --backbone moss-ttsd-f16.gguf \
+    --encoder moss-codec-encoder-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --asr-model moss-transcribe-q8.gguf \
+    --reference s1.wav "Exact transcript of speaker one's reference." \
+    --reference s2.wav "Exact transcript of speaker two's reference." \
+    --text-file dialogue.txt --output validated.wav \
+    --gpu --seed 5 --attempts 3
+```
+
+`dialogue.txt` contains only the requested new dialogue, with `[S1]`/`[S2]`
+tags. The runner prepends the reference transcripts itself and uses the TTSD
+sampling settings above. References must be mono 24 kHz WAVs. `--gpu` selects
+CUDA device 0 for both processes; omitting it uses CPU. The synthesis process
+exits before ASR starts, so their model allocations do not overlap.
+
+Each attempt uses the initial seed plus its zero-based attempt index. An output
+that reaches `--max-new-tokens` (default 1024) is rejected before ASR. Otherwise,
+the runner resamples the audio to 16 kHz and rejects ASR results reaching its
+1024-token limit before scoring. Missing or invalid ASR token counts stop the
+run as a tool error. It checks complete transcripts against the
+requested text and its final turn. Both error rates must be at most
+`--max-error-rate` (default 0.25). Empty transcripts and silent audio fail the
+check. Reference transcripts of at least eight words are also checked for
+unexpected recurrence at that error threshold, unless the requested text itself
+contains the phrase. Shorter references rely on the overall text check. This
+prevents a long target from masking an extra reference phrase in its overall
+error rate. The runner accepts at most ten attempts and defaults to three. Each
+subprocess has a `--timeout` in seconds, default 300.
+
+Only an accepted WAV is published to `--output`; an existing output is never
+overwritten. A sibling `*-validation-*` directory retains candidate WAVs,
+commands, transcripts, logs, and `report.json`, including rejected attempts.
+Exit codes are 0 for acceptance, 2 for exhausted quality retries, and 1 for an
+input/tool error. Tool errors, malformed ASR output, and an unrecognized
+`moss-cli` generated-frame summary stop the run instead of silently accepting
+an unchecked result.
+
+This is a batch mitigation with additional ASR and retry latency. It does not
+change the native API or model, guarantee a correct transcript, assess speaker
+identity or naturalness, or support streaming. ASR can itself make mistakes;
+retain listening checks for your intended inputs. Tiny Whisper missed complete
+speaker turns during validation, so this runner uses MOSS transcription.
+
 ### Engine notes
 
 The public API is `tts_cpp::moss::Engine` in
@@ -726,10 +782,11 @@ Galaxy S25, Snapdragon 8 Elite, Hexagon v79) when requested explicitly:
 `SoundEffectOptions::backend = "hexagon"` or `moss-cli --mode sfx --backend
 hexagon`. As for MOSS-TTS there is no fallback: construction fails when HTP0
 is missing, and `--gpu` never selects it. The text encoder, the DiT and the
-VAE decoder all run on the NPU. Only the 151,936-row token table stays on the
-host, mapped from the GGUF (read into memory when the file cannot be mapped
-or the table is not 32-byte aligned), and the host gathers the prompt's rows
-from it. The loader takes `f32`, `f16`,
+VAE decoder all run on the NPU. Only the 151,936-row token table stays out of
+it: the table is never loaded, and each request reads its prompt's rows (at
+most 512) from the GGUF, so it takes no memory, and a model file truncated
+while the engine is loaded fails that request with an error instead of
+crashing the process. The loader takes `f32`, `f16`,
 `bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
 refused at load, so both validated GGUFs run.
 
@@ -800,11 +857,12 @@ the test expects. `test-moss-sfx` also covers the sidecar routing without
 Core ML: the fixed VAE window plan, sidecar and fallback decodes, retiring a
 failed DiT or VAE sidecar, strict mode, the default compute units, and the
 per-request backend report. `test-moss-hexagon-layout` forces the Hexagon
-layout onto the CPU at f32, f16 and q8_0: the host token table gives the same
-text context as the device table, and fused attention in the text encoder and
-in the DiT's self- and cross-attention matches the unfused graphs; it also
-checks that a host table leaves the device weights and is priced as host
-memory. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
+layout onto the CPU at f32, f16 and q8_0: token rows read from the file give
+the same text context as the device table, and fused attention in the text
+encoder and in the DiT's self- and cross-attention matches the unfused graphs;
+it also checks that the table leaves the device weights, that rows read at
+f32, f16 and q8_0 match ggml's dequantization, and that a file truncated under
+a loaded model fails the request with an error. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
 VAE on HTP0 against the CPU at f32, f16 and q8_0, checks that bf16 weights are
 refused, and projects the fit against host memory.
 `test-moss-sfx-coreml-exporter` (Python; skips without numpy or torch) checks
