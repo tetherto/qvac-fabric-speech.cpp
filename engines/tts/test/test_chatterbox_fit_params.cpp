@@ -35,6 +35,7 @@
 #include "chatterbox_fit_internal.h"
 #include "chatterbox_t3_internal.h"
 #include "chatterbox_tts_test_hooks.h"
+#include "t3_mtl.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -90,6 +91,11 @@ void usage(const char * executable) {
 }
 
 void free_t3(detail::chatterbox_model & m) {
+    // The real MTL GPU stack is also registered for process-exit cleanup.
+    // Remove that ownership before releasing it here.
+    if (m.buffer_stack || m.ctx_stack) {
+        detail::t3_stack_unregister(m.buffer_stack, m.ctx_stack);
+    }
     ::tts_cpp::detail::sched_fallback_free(m.sched_fb);
     detail::t3_release_caches();
     if (m.buffer_w)        ggml_backend_buffer_free(m.buffer_w);
