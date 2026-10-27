@@ -65,7 +65,7 @@ class RunnerTests(unittest.TestCase):
                                          ("webgpu", "WebGPU: WebGPU", "Vulkan0")):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                runner = e2e.CaseRunner(backend, root, root, root, root / "baseline")
+                runner = e2e.CaseRunner(backend, root, root, root)
                 for reported, accepted in (("CPU", False), (other, False), (selected, True)):
                     def execute(args, **kwargs):
                         self.assertEqual(kwargs["env"]["TTS_CPP_GPU_BACKEND"], backend)
@@ -83,7 +83,7 @@ class RunnerTests(unittest.TestCase):
     def test_inference_oom_remains_failure_and_captures_after_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runner = e2e.CaseRunner("cuda", root, root, root, root / "baseline")
+            runner = e2e.CaseRunner("cuda", root, root, root)
             with patch.object(e2e, "gpu_lease"), \
                  patch.object(e2e, "gpu_snapshot") as snapshot, \
                  patch.object(e2e.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "moss-cli")), \
@@ -94,14 +94,14 @@ class RunnerTests(unittest.TestCase):
                                  [(root, "oom", "before"), (root, "oom", "after")])
                 self.assertNotIn("oom", runner.checks)
 
-    def test_family_flows_preserve_baselines_streaming_and_dialogue(self):
+    def test_family_flows_preserve_streaming_and_dialogue(self):
         root = Path("/test")
         for family in ("tts", "ttsd", "sfx", "speech", "transcribe"):
             with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory)
                 (output / "transcript.json").write_text(json.dumps({"segments": [
                     {"speaker": "S0", "start": 0, "end": 1, "text": "ask your country"}]}))
-                runner = e2e.CaseRunner("vulkan", root, root, output, root / "baseline")
+                runner = e2e.CaseRunner("vulkan", root, root, output)
                 def invoke(name, args, **kwargs):
                     runner.checks[name] = {}
                 with patch.object(runner, "invoke", side_effect=invoke) as calls, \
@@ -112,12 +112,13 @@ class RunnerTests(unittest.TestCase):
                 by_name = {call.args[0]: call for call in calls.call_args_list}
                 if family == "tts":
                     self.assertEqual(set(by_name), {"batch", "stream", "clone", "cpu-reference",
-                                     "baseline-batch", "baseline-stream", "baseline-cpu-reference",
-                                     "stream-agreement"})
+                                     "stream-agreement", "cpu-stream-agreement"})
                     self.assertNotIn("--gpu", by_name["cpu-reference"].args[1])
                     self.assertTrue(by_name["cpu-reference"].kwargs["cpu"])
                     self.assertEqual(by_name["stream-agreement"].args[1][0],
                                      "/test/engines/tts/test-moss-tts-stream-e2e")
+                    self.assertEqual(by_name["cpu-stream-agreement"].args[1][1], "cpu")
+                    self.assertTrue(by_name["cpu-stream-agreement"].kwargs["cpu"])
                 elif family == "ttsd":
                     self.assertEqual(by_name["dialogue"].args[1].count("--dialogue-ref"), 2)
                 elif family == "speech":
@@ -168,34 +169,6 @@ class CheckpointTests(unittest.TestCase):
 
 
 class IntelligibilityTests(unittest.TestCase):
-    def setUp(self):
-        # Keep ordinary quality cases independent of the wall clock. The expiry
-        # boundary itself is covered below, including improved output afterward.
-        clock = patch.object(e2e, "datetime", wraps=e2e.datetime)
-        self.clock = clock.start()
-        self.addCleanup(clock.stop)
-        self.clock.now.return_value = e2e.datetime(2026, 10, 12, tzinfo=e2e.timezone.utc)
-
-    def test_exemption_expires_but_improved_output_passes_without_baseline_bump(self):
-        bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
-        good = {**bad, "wer": 0.0}
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory)
-            (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
-            with patch.object(e2e, "same_audio", return_value=True):
-                before = e2e.date(2026, 11, 11)
-                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output, today=before),
-                                 ([], ["batch"]))
-                for today in (e2e.TTS_BASELINE_REVIEW_BY, e2e.date(2026, 12, 12)):
-                    self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output, today=today),
-                                     (["batch"], []))
-                self.clock.now.return_value = e2e.datetime(2026, 11, 12, tzinfo=e2e.timezone.utc)
-                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
-            with patch.object(e2e, "same_audio", return_value=False) as same:
-                self.assertEqual(e2e.classify_tts_scores({"batch": good}, output,
-                                 today=e2e.TTS_BASELINE_REVIEW_BY), ([], []))
-                same.assert_not_called()
-
     def test_tts_quality_gate_covers_quantized_cases_on_both_backends(self):
         for case in ("tts-f16", "tts-q8_0"):
             for backend in ("cuda", "vulkan"):
@@ -203,8 +176,7 @@ class IntelligibilityTests(unittest.TestCase):
                     output = Path(directory) / "output"
                     args = ["moss-gpu-e2e.py", "--case", case, "--backend", backend,
                             "--models", str(Path(directory) / "models"), "--output", str(output)]
-                    quality = {"status": "failed", "failed_outputs": ["clone"],
-                               "pre_existing_quality_issues": []}
+                    quality = {"status": "failed", "failed_outputs": ["clone"]}
                     with patch.object(sys, "argv", args), \
                          patch.object(e2e, "run_case", return_value={}) as run, \
                          patch.object(e2e, "score_tts_outputs", return_value=quality) as score, \
@@ -220,36 +192,13 @@ class IntelligibilityTests(unittest.TestCase):
                     self.assertEqual(result["status"], "failed")
                     self.assertEqual(result["backend"], backend)
 
-    def test_existing_quality_issue_requires_exact_upstream_audio(self):
+    def test_wrong_text_blocks_every_output(self):
         bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory)
-            (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
-            def write(name, samples):
-                with wave.open(str(output / (name + ".wav")), "wb") as wav:
-                    wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
-                    wav.writeframes(samples)
-            for name in ("batch", "baseline-batch", "clone", "baseline-clone"):
-                write(name, b"\x01\x00" * 20)
-            # Known unconditioned defect is exempt; cloning never is.
-            self.assertEqual(e2e.classify_tts_scores({"batch": bad, "clone": bad}, output),
-                             (["clone"], ["batch"]))
-            write("batch", b"\x02\x00" * 20)
-            self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
-            (output / "baseline-batch.wav").unlink()
-            self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
-
-    def test_unverified_baseline_or_asr_error_cannot_exempt_a_failure(self):
-        bad = {"status": "ok", "wer": 1.0, "n_ref_words": 8}
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory)
-            with patch.object(e2e, "same_audio", return_value=True):
-                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
-                (output / "tts-baseline-commit.txt").write_text("wrong-commit")
-                self.assertEqual(e2e.classify_tts_scores({"batch": bad}, output), (["batch"], []))
-                (output / "tts-baseline-commit.txt").write_text(e2e.TTS_BASELINE_SHA)
-                error = {**bad, "status": "error"}
-                self.assertEqual(e2e.classify_tts_scores({"batch": error}, output), (["batch"], []))
+        scores = {name: bad for name in ("batch", "stream", "cpu-reference", "clone",
+                                         "unconditioned/tts-c7-after-callback-cancel",
+                                         "cpu/unconditioned/tts-long-stream")}
+        self.assertEqual(e2e.classify_tts_scores(scores), list(scores))
+        self.assertEqual(e2e.classify_tts_scores({"batch": {**bad, "wer": 0.0}}), [])
 
     def test_wrong_or_empty_speech_fails_using_shared_word_error_scorer(self):
         spec = importlib.util.spec_from_file_location("wer", Path(__file__).parents[1] / "benchmarks/compute-wer.py")
@@ -262,11 +211,15 @@ class IntelligibilityTests(unittest.TestCase):
 
     def test_unavailable_missing_or_nonfinite_scores_cannot_pass(self):
         for score in [{}, {"status": "error", "wer": 0, "n_ref_words": 8},
+                      {"status": "missing", "wer": None},
                       {"status": "ok", "wer": None, "n_ref_words": 8},
                       {"status": "ok", "wer": float("nan"), "n_ref_words": 8},
+                      {"status": "ok", "wer": float("inf"), "n_ref_words": 8},
+                      {"status": "ok", "wer": -0.1, "n_ref_words": 8},
                       {"status": "ok", "wer": 0, "n_ref_words": 0}]:
             with self.subTest(score=score):
                 self.assertFalse(e2e.intelligibility_passes(score))
+                self.assertEqual(e2e.classify_tts_scores({"batch": score}), ["batch"])
 
 
 if __name__ == "__main__":

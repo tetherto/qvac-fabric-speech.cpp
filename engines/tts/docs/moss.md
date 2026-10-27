@@ -88,30 +88,21 @@ outputs (100% WER); it is not a naturalness or speaker-similarity metric.
 Synthesis and ASR use the same prompt files. Transcripts, per-output scores
 and ASR settings are saved even when a later synthesis step fails.
 
-Unconditioned TTS has a suspected pre-existing wrong-text issue. The TTS
-case also builds upstream commit `8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c`
-and runs the same CPU, GPU batch and GPU streaming requests with
-identical checkpoints, seed and ggml on the same worker. An unconditioned
-quality failure is non-blocking only when its PCM samples and audio format
-exactly match that baseline. Such failures remain visible in transcripts
-and `pre_existing_quality_issues`; they are not counted as quality passes.
-Changed audio, a missing/unverified baseline or an ASR error cannot use this
-exception. Voice-conditioned streaming and reuse retain the strict quality
-gate. This keeps existing general TTS defects outside the GPU backend changes while
-continuing to reject new regressions.
+Generation prompts end at the assistant header, matching the checkpoint's
+Transformers processor. The model generates its own audio-start token; an
+explicit audio prefix is supplied only for real continuation audio. ISO language
+codes accepted by the native API and CLI are converted to the checkpoint's
+language names (`en` to `English`, `zh` to `Chinese`, and the other supported
+languages). Already spelled-out names pass through; an empty language uses
+`None`, as in the reference processor.
 
-Lifecycle owner: Omar (`@ogad-tether`), tracked in
-[wrong-text issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328).
-The exception expires at **2026-11-12 00:00 UTC** and then fails closed, even for
-identical baseline PCM. The result artifact includes the issue and review date.
-Improved audio that meets the WER gate passes immediately without a baseline bump;
-changed audio that still fails WER is a blocking regression, even if its WER is
-lower than before. The baseline is never automatically advanced. Renewing the
-deadline or replacing the baseline requires an intentional reviewed change linked
-to #328 with old/new audio hashes, transcripts, scores and justification. When the
-underlying fix passes every expected unconditioned and voice-conditioned output
-on CPU/CUDA/Vulkan (including streaming and reuse), remove this exception and the
-baseline workflow build/runs together, retaining the strict quality gate.
+The full-checkpoint harness checks both unconditioned and voice-conditioned
+batch/stream synthesis, 7/25-frame chunks, cancellation recovery, reuse and a
+longer prompt on the selected GPU and CPU. Every expected output must pass the
+same WER gate. There is no baseline-audio exemption for wrong text, and missing
+outputs or ASR errors remain blocking. This replaces the temporary exception
+tracked in [issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328)
+(QVAC-27320).
 
 Speech cases also run `test-moss-speech-codec-e2e cuda|vulkan CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and the selected GPU on fixed speech tokens,
