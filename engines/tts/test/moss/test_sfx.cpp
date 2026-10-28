@@ -10,13 +10,17 @@
 #include "moss/sfx_prompt.h"
 #include "moss/sfx_sampler.h"
 #include "moss/sfx_tokenizer.h"
+#include "backend_selection.h"
 #include "tts-cpp/moss/sound_effect.h"
+#include "tts-cpp/moss/sound_effect_fit.h"
 
+#include "ggml-backend.h"
 #include "ggml-cpu.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -57,6 +61,11 @@ constexpr const char * POSITIONAL_BACKENDS_DIR = "/plugins";
 constexpr int TIER_DIT_WIDTH = 32;
 constexpr double TIER_MIN_COSINE = 0.9;
 constexpr const char * TIER_MATRIX = "dit.blk.0.self_q.weight";
+constexpr const char * TIER_TEXT_MATRIX = "text.blk.0.ffn_down.weight";
+constexpr const char * VAE_KERNEL = "vae.conv_in.weight";
+constexpr const char * REPACK_BUFFER = "CPU_REPACK";
+constexpr double PACKING_RELATIVE_TOLERANCE = 1e-4;
+constexpr double NORM_FLOOR = 1e-30;
 
 int failures = 0;
 
@@ -301,6 +310,79 @@ void test_weight_tiers() {
         std::filesystem::remove(path);
     }
     expect_engine_rejects(write_tier_model("sfx-tier-q5", GGML_TYPE_Q5_0), "unsupported type", "q5_0 linear weights");
+}
+
+bool in_repack_buffer(const ggml_tensor * tensor) {
+    return tensor->buffer && std::strcmp(ggml_backend_buffer_name(tensor->buffer), REPACK_BUFFER) == 0;
+}
+
+bool cpu_offers_layout(const ggml_tensor * matrix) {
+    ggml_backend_t cpu = ggml_backend_cpu_init();
+    const bool offers = tts_cpp::detail::cpu_repack_runs_matmul(tts_cpp::detail::cpu_repack_buffer_type(cpu), matrix);
+    ggml_backend_free(cpu);
+    return offers;
+}
+
+double relative_l2(const std::vector<float> & expected, const std::vector<float> & actual) {
+    double error = 0.0, norm = 0.0;
+    for (size_t i = 0; i < expected.size() && i < actual.size(); ++i) {
+        error += ((double) expected[i] - actual[i]) * ((double) expected[i] - actual[i]);
+        norm += (double) expected[i] * expected[i];
+    }
+    return expected.size() == actual.size() ? std::sqrt(error / std::max(norm, NORM_FLOOR)) : INFINITY;
+}
+
+struct TierOutputs {
+    std::vector<float> context;
+    std::vector<float> velocity;
+};
+
+TierOutputs tier_outputs(SfxModel & model) {
+    TierOutputs outputs{encode_text(model, {40, 41}), {}};
+    SfxDitSession dit(model, FRAMES);
+    outputs.velocity = dit.velocity(gaussian_noise((size_t) FRAMES * LATENT, 3), PROBE_TIMESTEP, outputs.context);
+    return outputs;
+}
+
+void check_packed_placement(const SfxModel & packed, const SfxModel & plain, const std::string & label) {
+    const bool offered = cpu_offers_layout(packed.tensor(TIER_MATRIX));
+    std::printf("%s: the CPU %s a repacked layout\n", label.c_str(), offered ? "offers" : "offers no");
+    check(in_repack_buffer(packed.tensor(TIER_MATRIX)) == offered, label + ": DiT matrices take the repacked layout");
+    check(in_repack_buffer(packed.tensor(TIER_TEXT_MATRIX)) == offered, label + ": text matrices take the repacked layout");
+    check(!in_repack_buffer(packed.tensor(SFX_TOKEN_TABLE)), label + ": the token table stays readable by row");
+    check(!in_repack_buffer(packed.tensor(VAE_KERNEL)), label + ": the VAE stays in the default buffer");
+    check(!in_repack_buffer(plain.tensor(TIER_MATRIX)), label + ": plain packing keeps the default buffer");
+}
+
+void check_packed_fit(const std::filesystem::path & path, const std::string & label) {
+    tts_cpp::moss::SoundEffectOptions options;
+    options.model_path = path.string();
+    options.n_threads = 1;
+    tts_cpp::moss::SoundEffectRequest request;
+    request.prompt = "rain";
+    request.seconds = MAX_SECONDS;
+    check(tts_cpp::moss::fit_params(options, request, 0).device.weights_bytes > 0, label + ": fit measures the weights");
+}
+
+void test_weight_packing() {
+    for (ggml_type tier : {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+        const std::string label = std::string("packing ") + ggml_type_name(tier);
+        const auto path = write_tier_model("sfx-packing", tier);
+        {
+            SfxModel packed(path.string(), {}, 1);
+            SfxModel plain(path.string(), {}, 1, false,
+                           {TablePlacement::Automatic, AttentionLayout::Automatic, WeightPacking::Plain});
+            check_packed_placement(packed, plain, label);
+            const TierOutputs expected = tier_outputs(plain);
+            const TierOutputs actual = tier_outputs(packed);
+            check(relative_l2(expected.context, actual.context) < PACKING_RELATIVE_TOLERANCE,
+                  label + ": packed text context matches");
+            check(relative_l2(expected.velocity, actual.velocity) < PACKING_RELATIVE_TOLERANCE,
+                  label + ": packed DiT velocity matches");
+        }
+        check_packed_fit(path, label);
+        std::filesystem::remove(path);
+    }
 }
 
 void test_text_encoder(SfxModel & model) {
@@ -771,6 +853,7 @@ int main() {
         test_rejected_models();
         test_rejected_tensors();
         test_weight_tiers();
+        test_weight_packing();
         test_rejected_metadata_bounds();
         test_feed_forward_beyond_half_precision();
         test_timestep_sinusoid();

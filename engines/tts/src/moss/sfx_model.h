@@ -65,9 +65,15 @@ void require_shape(const ggml_tensor * tensor, int64_t ne0, int64_t ne1, int64_t
 void require_matrix(const ggml_tensor * tensor, int64_t ne0, int64_t ne1);
 void require_vector(const ggml_tensor * tensor, int64_t ne0, int64_t ne1);
 
+// Automatic stores the quantized text-encoder and DiT matrices in the CPU
+// backend's repacked layout when ggml offers one; Plain keeps every weight in
+// the backend's default buffer.
+enum class WeightPacking { Automatic, Plain };
+
 struct SfxLayout {
     TablePlacement table = TablePlacement::Automatic;
     AttentionLayout attention = AttentionLayout::Automatic;
+    WeightPacking packing = WeightPacking::Automatic;
 };
 
 struct SfxMemory {

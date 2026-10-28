@@ -50,7 +50,10 @@ values once per prompt and reuses them across steps. The request owns the cache;
 Metal also uses DiT flash attention when the backend supports both attention
 shapes. Metadata-only memory fit includes the cache alongside the scheduler's
 retained peak across text encoding, diffusion and VAE decoding, including repeated
-requests. Besides `f16` and `q8_0`, a 2.8 GB `q8_0` GGUF with `q4_0` DiT blocks
+requests. On the CPU, quantized text-encoder and DiT matrices load into
+ggml's repacked layout where one exists, which halves the diffusion time on a
+Galaxy S25 (`q8_0` and `q4_0`) and on x86 (`q4_0`).
+Besides `f16` and `q8_0`, a 2.8 GB `q8_0` GGUF with `q4_0` DiT blocks
 is validated on CPU, Metal, CUDA and the Hexagon NPU; quantizing the text
 encoder to `q4_0` as well is not recommended
 ([4-bit weights](docs/moss.md#4-bit-weights)). See the
