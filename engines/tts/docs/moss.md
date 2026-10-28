@@ -260,7 +260,10 @@ build/moss-cli --backbone moss-ttsd-f16.gguf \
     --encoder moss-codec-encoder-f16.gguf \
     --dialogue-ref s1.wav --dialogue-ref s2.wav \
     --text "[S1] <s1 transcript> [S2] <s2 transcript> [S1] ... [S2] ..." \
-    --language en --out dialogue.wav
+    --language English --out dialogue.wav \
+    --text-temperature 1.1 --text-top-p 0.9 --text-top-k 50 \
+    --audio-temperature 1.1 --audio-top-p 0.9 --audio-top-k 50 \
+    --audio-repetition-penalty 1.1
 
 # on the GPU: same command plus --gpu
 ```
@@ -273,10 +276,78 @@ model for a target length of N codec frames (12.5 per second; 0 keeps the
 length free). A target length also needs `n_vq - 1` drain steps plus the
 `audio_end` and `im_end` rows, so the engine rejects a `duration_tokens`
 that does not fit in `max_new_tokens` together with them. Sampling
-follows the reference defaults — text temperature 1.5 / top-k 50, audio
+uses the TTS-v1.5 reference defaults — text temperature 1.5 / top-k 50, audio
 temperature 1.7 / top-p 0.8 / top-k 25, repetition penalty 1.0 over the
 audio channels, seed 1234 — and every knob is exposed as a flag
 (`--text-temperature`, `--audio-top-k`, `--audio-repetition-penalty`, ...).
+
+The dialogue example explicitly uses the TTSD-v1.0 defaults, which differ from
+TTS-v1.5. Text top-p 1.0 keeps rare stop tokens eligible and can end dialogue
+before every requested turn is spoken. A successful process exit does not
+establish that the output contains the complete dialogue.
+
+Reference audio follows the upstream processor's loudness adjustment: target
+−20 dBFS, with gain limited to ±3 dB. Each speaker clip and the concatenated
+continuation are normalized independently from their original PCM. The
+16-channel TTSD prompt includes `Scene: None`; the 32-channel TTS-v1.5 prompt
+retains its template without that field. These preprocessing matches do not
+make sampled outputs identical across runtimes or precisions.
+
+### Validated cloning
+
+For English TTSD batch cloning, `scripts/moss-validated-cloning.py` adds an
+optional transcription check and bounded retries around the existing CLIs.
+It requires Python 3.10 or later with only its standard library, `moss-cli`,
+`moss-transcribe`, and their converted model files. Run it from the repository
+root, adjusting the binary paths for your build:
+
+```bash
+python3 engines/tts/scripts/moss-validated-cloning.py \
+    --moss-cli build/engines/tts/moss-cli \
+    --asr-cli build/engines/parakeet/moss-transcribe \
+    --backbone moss-ttsd-f16.gguf \
+    --encoder moss-codec-encoder-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --asr-model moss-transcribe-q8.gguf \
+    --reference s1.wav "Exact transcript of speaker one's reference." \
+    --reference s2.wav "Exact transcript of speaker two's reference." \
+    --text-file dialogue.txt --output validated.wav \
+    --gpu --seed 5 --attempts 3
+```
+
+`dialogue.txt` contains only the requested new dialogue, with `[S1]`/`[S2]`
+tags. The runner prepends the reference transcripts itself and uses the TTSD
+sampling settings above. References must be mono 24 kHz WAVs. `--gpu` selects
+CUDA device 0 for both processes; omitting it uses CPU. The synthesis process
+exits before ASR starts, so their model allocations do not overlap.
+
+Each attempt uses the initial seed plus its zero-based attempt index. An output
+that reaches `--max-new-tokens` (default 1024) is rejected before ASR. Otherwise,
+the runner resamples the audio to 16 kHz and rejects ASR results reaching its
+1024-token limit before scoring. Missing or invalid ASR token counts stop the
+run as a tool error. It checks complete transcripts against the
+requested text and its final turn. Both error rates must be at most
+`--max-error-rate` (default 0.25). Empty transcripts and silent audio fail the
+check. Reference transcripts of at least eight words are also checked for
+unexpected recurrence at that error threshold, unless the requested text itself
+contains the phrase. Shorter references rely on the overall text check. This
+prevents a long target from masking an extra reference phrase in its overall
+error rate. The runner accepts at most ten attempts and defaults to three. Each
+subprocess has a `--timeout` in seconds, default 300.
+
+Only an accepted WAV is published to `--output`; an existing output is never
+overwritten. A sibling `*-validation-*` directory retains candidate WAVs,
+commands, transcripts, logs, and `report.json`, including rejected attempts.
+Exit codes are 0 for acceptance, 2 for exhausted quality retries, and 1 for an
+input/tool error. Tool errors, malformed ASR output, and an unrecognized
+`moss-cli` generated-frame summary stop the run instead of silently accepting
+an unchecked result.
+
+This is a batch mitigation with additional ASR and retry latency. It does not
+change the native API or model, guarantee a correct transcript, assess speaker
+identity or naturalness, or support streaming. ASR can itself make mistakes;
+retain listening checks for your intended inputs. Tiny Whisper missed complete
+speaker turns during validation, so this runner uses MOSS transcription.
 
 ### Engine notes
 
@@ -310,6 +381,13 @@ seconds and at an absolute sample count that does not depend on the model. A bac
 references are truncated to the backbone's channels and the decoder sums
 only those levels.
 
+With a single dialogue reference, the continuation reuses that recording's
+already encoded codes instead of encoding the same PCM twice. With multiple
+references, the continuation still encodes the joined PCM: concatenating
+independent code sequences changes the encoder's context and frame alignment.
+Both the speaker codes and continuation are prepared once per engine and
+reused across batch and streaming synthesis calls.
+
 `synthesize_stream(text, callback)` emits PCM chunks while generation runs:
 a frame is complete `n_vq - 1` steps after its row, completed non-pad frames
 accumulate, and every `stream_chunk_frames` of them decode incrementally: the
@@ -333,6 +411,14 @@ forces delay slots while the channels close one per step and then forces
 `audio_end`. The emitted rows are de-delayed and split into segments at
 all-pad frames; each segment decodes from a fresh codec context, in batch and
 in streaming alike, so one segment never attends to another.
+
+On Metal, the device-table layout honors those text-logit requirements: it
+projects only the two audio-control tokens while generating audio, omits the
+text head during the forced drain, and uses the full vocabulary when needed.
+Increasing control-token IDs select a strided view of the original weights;
+other layouts are copied once at model load into a head with the original
+weight type. Embedding tables stay on the device. Memory preflight includes
+any additional packed head.
 
 On ARM CPUs ggml accumulates f16 dot products in f16, and the backbone's
 feed-forward output exceeds that range; the down projection therefore runs
@@ -620,6 +706,48 @@ VAE decodes only the frames that cover the requested length, in 256-frame
 windows with 32 frames of context on each side, and the output is cropped to
 the exact sample count.
 
+Native ggml diffusion computes the text projections once and caches each
+layer's fixed cross-attention keys and values for the duration of a request. Positive and
+negative conditioning have separate cache entries; guidance `1` needs only the
+positive entry. K/V stays in F32 on the selected backend, retaining the existing
+activation precision. For the released 30-layer model with 512 text positions,
+the guided cache contains 360 MiB of K/V. Metadata-only memory fit includes this
+storage alongside the scheduler's retained peak across text encoding, preparation,
+denoising and VAE decoding. This covers a new request's cache coexisting with a
+larger VAE buffer retained from the previous request. A new request prepares new
+entries, including when ggml takes over after a Core ML DiT failure.
+
+Metal selects DiT flash attention after the backend confirms support for both
+self-attention and cross-attention. Unsupported geometries keep unfused
+attention. This selection applies to the DiT; text-encoder attention keeps its
+existing layout. Explicit internal fused/unfused layouts and other backend
+defaults retain their existing behavior. K/V storage remains F32. The Metal
+flash kernel uses some half intermediates with F32 QK, softmax and output
+accumulation, so its output can differ slightly from unfused attention.
+
+On an M1 Ultra with 64 GiB, the second request on a resident Metal engine
+measured as follows (8 CPU threads, 8 seconds of output, 100 diffusion steps,
+guidance 4, shift 5, seed 1234; the Formula One race-car prompt):
+
+| Weights | Original | K/V reuse | K/V reuse + Metal flash attention | Total time reduction |
+|---|---:|---:|---:|---:|
+| F16 | 124.44 s | 116.95 s | 101.31 s | 18.6% |
+| Q8_0 | 123.86 s | 119.65 s | 103.84 s | 16.2% |
+
+Each entry is one measured warmed request after one warmup, using the same
+ggml build. K/V reuse alone produces sample-identical 48 kHz PCM16 waveforms.
+Adding Metal flash attention gives waveform cosine similarity 0.999993 (F16)
+and 0.999991 (Q8_0), with difference SNR of 48.3 dB and 47.6 dB respectively.
+These are complete request times,
+including text encoding, cache preparation, diffusion and VAE decoding;
+model loading is excluded.
+
+The scheduler trace keeps both cache preparation and all denoising operations
+on Metal. For 100 guided steps, conditioning uploads fall from 800 MiB
+(4 MiB per DiT pass) to 8 MiB per request. The remaining loop transfers are
+latent uploads/downloads, positions, timestep and the cache-entry index; K/V
+never returns to host memory between diffusion steps.
+
 ### Core ML DiT and VAE
 
 On Apple builds with `TTS_CPP_COREML=ON`, the DiT and the VAE decoder can each
@@ -696,10 +824,11 @@ Galaxy S25, Snapdragon 8 Elite, Hexagon v79) when requested explicitly:
 `SoundEffectOptions::backend = "hexagon"` or `moss-cli --mode sfx --backend
 hexagon`. As for MOSS-TTS there is no fallback: construction fails when HTP0
 is missing, and `--gpu` never selects it. The text encoder, the DiT and the
-VAE decoder all run on the NPU. Only the 151,936-row token table stays on the
-host, mapped from the GGUF (read into memory when the file cannot be mapped
-or the table is not 32-byte aligned), and the host gathers the prompt's rows
-from it. The loader takes `f32`, `f16`,
+VAE decoder all run on the NPU. Only the 151,936-row token table stays out of
+it: the table is never loaded, and each request reads its prompt's rows (at
+most 512) from the GGUF, so it takes no memory, and a model file truncated
+while the engine is loaded fails that request with an error instead of
+crashing the process. The loader takes `f32`, `f16`,
 `bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
 refused at load, so both validated GGUFs run.
 
@@ -760,7 +889,17 @@ windowed VAE decoding against a single window; engine determinism, guidance
 and request validation; and the CLI's `sfx` and `tts` modes.
 `test-convert-moss` also fabricates a tiny MOSS-SoundEffect pipeline and
 checks the tensor census, the folded weight norm, the f16 and q8_0 paths, and
-the `.pth` VAE checkpoint (when torch is installed). `test-moss-sfx-parity` is the reference check: it
+the `.pth` VAE checkpoint (when torch is installed). `test-moss-sfx-cache`
+compares cached and uncached velocities and guided diffusion on a two-layer
+fixture in F32, F16 and Q8_0, including prompt replacement and reuse after
+changing projection weights. It uses CPU by default; set
+`MOSS_SFX_CACHE_BACKEND=MTL0` to exercise the same checks on Metal. A 128-wide
+head fixture checks automatic flash routing, forced unfused reference parity,
+and cached/uncached fused velocities; the original tiny heads check the
+unsupported-geometry path. Metal builds register the same checks as
+`test-moss-sfx-cache-metal` with the `gpu` label. The GPU fixture suite also
+exercises both cached conditioning branches.
+`test-moss-sfx-parity` is the reference check: it
 skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
 `MOSS_SFX_REFERENCE_DIR` at stage dumps from the PyTorch pipeline
 (`MOSS_SFX_GPU=1` runs it on the GPU, `MOSS_SFX_BACKEND=hexagon` on the NPU). The dumps come from
@@ -770,11 +909,12 @@ the test expects. `test-moss-sfx` also covers the sidecar routing without
 Core ML: the fixed VAE window plan, sidecar and fallback decodes, retiring a
 failed DiT or VAE sidecar, strict mode, the default compute units, and the
 per-request backend report. `test-moss-hexagon-layout` forces the Hexagon
-layout onto the CPU at f32, f16 and q8_0: the host token table gives the same
-text context as the device table, and fused attention in the text encoder and
-in the DiT's self- and cross-attention matches the unfused graphs; it also
-checks that a host table leaves the device weights and is priced as host
-memory. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
+layout onto the CPU at f32, f16 and q8_0: token rows read from the file give
+the same text context as the device table, and fused attention in the text
+encoder and in the DiT's self- and cross-attention matches the unfused graphs;
+it also checks that the table leaves the device weights, that rows read at
+f32, f16 and q8_0 match ggml's dequantization, and that a file truncated under
+a loaded model fails the request with an error. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
 VAE on HTP0 against the CPU at f32, f16 and q8_0, checks that bf16 weights are
 refused, and projects the fit against host memory.
 `test-moss-sfx-coreml-exporter` (Python; skips without numpy or torch) checks

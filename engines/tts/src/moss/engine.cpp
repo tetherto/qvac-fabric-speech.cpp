@@ -138,7 +138,7 @@ struct Engine::Impl {
     }
 
     std::vector<int32_t> encode_checked(Codec & encoder, const std::vector<float> & pcm) {
-        std::vector<int32_t> codes = encoder.encode(pcm);
+        std::vector<int32_t> codes = encoder.encode(detail::normalize_reference_pcm(pcm));
         if (codes.empty()) {
             fail("reference audio is shorter than one codec frame");
         }
@@ -168,7 +168,7 @@ struct Engine::Impl {
 
     void encode_dialogue_references(Codec & encoder) {
         const std::vector<float> concatenated = read_dialogue_references(encoder);
-        prompt_audio.continuation_codes = encode_checked(encoder, concatenated);
+        prompt_audio.prepare_continuation([&] { return encode_checked(encoder, concatenated); });
         continuation_frames = (int) (prompt_audio.continuation_codes.size() /
                 (size_t) backbone->config().n_vq);
     }

@@ -23,13 +23,35 @@ and MOSS-SoundEffect also matches the reference pipeline on the
 [Hexagon NPU](docs/moss.md#hexagon-npu-generation), where MOSS-Speech
 [runs its LM and speech tokenizer](docs/moss.md#hexagon-npu-speech-to-speech);
 CUDA and Vulkan add generated-model CPU parity and full-checkpoint smoke coverage.
+MOSS Delay on Metal projects only the text-control tokens needed during audio
+generation and omits text projection during the forced drain. Embedding tables
+stay on the GPU, and the control-token head preserves the model's weight type.
+MOSS-TTSD reuses the encoded reference for dialogue continuation when only one
+recording is supplied. Multiple recordings retain the joined-audio encoding
+needed for their continuation; all prepared codes stay cached per engine.
 TTS streaming, cancellation/reuse and ASR intelligibility gates are described
 in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke coverage does
 not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
 streaming support and the [model guide](docs/models.md) for storage tiers.
 
+MOSS reference cloning applies the upstream loudness adjustment, and TTSD uses
+its dialogue-specific prompt template. Use the explicit TTSD sampling settings
+in the [dialogue example](docs/moss.md); the CLI's shared defaults are for
+TTS-v1.5, and sampled dialogue can stop before all requested turns are spoken.
+The opt-in [validated cloning runner](docs/moss.md#validated-cloning) checks
+English dialogue with local MOSS transcription and retries rejected outputs,
+including ASR results that reach the decoding token limit.
+
 This in-tree package consumes the shared `ggml-speech` dependency. Build and
 vcpkg consumption instructions are in [docs/build.md](docs/build.md).
+
+MOSS-SoundEffect native diffusion prepares the fixed cross-attention keys and
+values once per prompt and reuses them across steps. The request owns the cache;
+Metal also uses DiT flash attention when the backend supports both attention
+shapes. Metadata-only memory fit includes the cache alongside the scheduler's
+retained peak across text encoding, diffusion and VAE decoding, including repeated
+requests. See the
+[SoundEffect guide](docs/moss.md#moss-soundeffect) for details.
 
 ## Capabilities
 
@@ -52,8 +74,8 @@ engine, not every backend ggml can compile.
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
 | MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | scoped¹ | untested |
 | MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
-| LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes | yes | yes | yes | untested |
-| LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes | yes | yes | yes | untested |
+| LavaSR denoiser | language agnostic | input PCM | rate preserving | yes | yes (+ optional Core ML model) | yes | yes | yes | untested |
+| LavaSR enhancer | language agnostic | input PCM | 48 kHz | yes | yes (+ optional Core ML model) | yes | yes | yes | untested |
 
 ¹ MOSS CUDA/Vulkan: generated-model CPU parity; quantized TTS/TTSD,
 SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
@@ -75,6 +97,11 @@ be re-checked.
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the
 graphs run without a per-op CPU fallback and ggml-webgpu lacks `MEAN`.
+Both LavaSR stages also accept explicit Core ML models and one of `CPU_ONLY`,
+`CPU_AND_GPU`, `CPU_AND_NE`, or `ALL`, with `TTS_CPP_COREML=ON` on Apple.
+See [LavaSR Core ML](docs/lavasr.md#core-ml) for export and C++ examples.
+The Core ML denoiser submits independent chunks through batch prediction,
+reusing the same loaded model.
 
 Chatterbox Turbo and Multilingual, Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 /
 MOSS-TTSD, MOSS-SoundEffect-v2 and MOSS-Speech (LM and speech tokenizer) also support explicit Hexagon placement on Snapdragon; see their

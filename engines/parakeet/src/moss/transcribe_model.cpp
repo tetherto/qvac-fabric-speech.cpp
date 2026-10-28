@@ -233,6 +233,8 @@ struct TranscribeModel::Impl {
     bool measure_only = false;
     bool split_table = false;
     bool fused_attention = false;
+    bool fused_encoder_attention = false;
+    bool reused_step_graph = false;
     uint64_t measured_weights = 0;
     const TranscribeGraph * allocated_graph = nullptr;
 
@@ -356,6 +358,13 @@ struct TranscribeModel::Impl {
     void plan_attention(TranscribeAttention requested) {
         fused_attention = requested == TranscribeAttention::Fused ||
             (requested == TranscribeAttention::Auto && backend_is_hexagon(backend));
+        fused_encoder_attention = fused_attention ||
+            (requested == TranscribeAttention::Auto && backend_is_cpu(backend));
+    }
+
+    void plan_step_graph(TranscribeStepGraph requested) {
+        reused_step_graph = requested == TranscribeStepGraph::Reused ||
+            (requested == TranscribeStepGraph::Auto && backend_is_metal(backend));
     }
 
     void load(const std::string & path, bool use_gpu, int threads, const std::string & requested,
@@ -378,6 +387,7 @@ struct TranscribeModel::Impl {
         read_vocabulary_size();
         plan_token_table(layout.head_rows);
         plan_attention(layout.attention);
+        plan_step_graph(layout.step_graph);
         duplicate_metadata_tensors();
         bind_head_tensors();
         if (measure_only) prepare_measurement();
@@ -457,6 +467,8 @@ ggml_tensor * TranscribeModel::tensor(const std::string & name) const { return i
 const ggml_tensor * TranscribeModel::token_table() const { return impl_->table(); }
 bool TranscribeModel::embeds_on_host() const { return impl_->split_table; }
 bool TranscribeModel::fused_attention() const { return impl_->fused_attention; }
+bool TranscribeModel::fused_encoder_attention() const { return impl_->fused_encoder_attention; }
+bool TranscribeModel::reuses_step_graph() const { return impl_->reused_step_graph; }
 const std::vector<TranscribeHeadChunk> & TranscribeModel::head() const { return impl_->head; }
 
 std::vector<float> TranscribeModel::embed_tokens(const std::vector<int32_t> & ids) const {
@@ -516,6 +528,7 @@ TranscribeMemory TranscribeModel::measure(TranscribeGraph & graph) {
 }
 
 void TranscribeModel::allocate(TranscribeGraph & graph) { impl_->allocate(graph); }
+bool TranscribeModel::allocated(const TranscribeGraph & graph) const { return impl_->allocated_graph == &graph; }
 void TranscribeModel::compute(TranscribeGraph & graph) { impl_->compute(graph); }
 
 } // namespace parakeet::moss::detail

@@ -21,8 +21,13 @@ constexpr int GUIDED_LATENT_BUFFERS = 4;
 constexpr int UNGUIDED_LATENT_BUFFERS = 2;
 constexpr int PROMPT_CONTEXTS = 2;
 
-uint64_t text_payload(size_t tokens) {
-    return sat_add(sat_mul(tokens, sizeof(int32_t) * 2), sat_mul(sat_mul(tokens, tokens), sizeof(float)));
+uint64_t host_rows_payload(const detail::SfxModel & model, size_t tokens) {
+    return model.table_on_host() ? sat_mul(sat_mul(tokens, model.config().text.n_embd), sizeof(float)) : 0;
+}
+
+uint64_t text_payload(const detail::SfxModel & model, size_t tokens) {
+    const uint64_t indices = sat_add(sat_mul(tokens, sizeof(int32_t) * 2), sat_mul(sat_mul(tokens, tokens), sizeof(float)));
+    return sat_add(indices, host_rows_payload(model, tokens));
 }
 
 detail::SfxMemory measure_texts(detail::SfxModel & model, detail::SfxTokenizer & tokenizer,
@@ -34,14 +39,14 @@ detail::SfxMemory measure_texts(detail::SfxModel & model, detail::SfxTokenizer &
     detail::SfxMemory result;
     result.device_bytes = std::max(first.device_bytes, second.device_bytes);
     result.host_compute_bytes = std::max(first.host_compute_bytes, second.host_compute_bytes);
-    result.host_bytes = std::max(sat_add(first.host_bytes, text_payload(positive.size())),
-                                 sat_add(second.host_bytes, text_payload(negative.size())));
+    result.host_bytes = std::max(sat_add(first.host_bytes, text_payload(model, positive.size())),
+                                 sat_add(second.host_bytes, text_payload(model, negative.size())));
     return result;
 }
 
 detail::SfxMemory measure_dit(detail::SfxModel & model, const detail::ResolvedRequest & request) {
     const auto & config = model.config();
-    detail::SfxDitSession session(model, config.latent_frames(), true);
+    detail::SfxDitSession session(model, config.latent_frames(), true, request.guidance == 1.0f ? 1 : PROMPT_CONTEXTS);
     auto result = session.measure();
     const auto latents = sat_mul(config.latent_frames(), config.dit.in_channels);
     const auto buffers = request.guidance == 1.0f ? UNGUIDED_LATENT_BUFFERS : GUIDED_LATENT_BUFFERS;
@@ -70,9 +75,11 @@ void measure_workload(FitResult & result, detail::SfxModel & model,
     const auto text = measure_texts(model, tokenizer, request);
     const auto dit = measure_dit(model, request);
     const auto audio = measure_audio(model, request);
-    result.device.lm_compute_bytes = std::max(text.device_bytes, dit.device_bytes);
-    result.device.codec_compute_bytes = audio.device_bytes > result.device.lm_compute_bytes
-        ? audio.device_bytes - result.device.lm_compute_bytes : 0;
+    const auto text_peak = sat_add(dit.persistent_device_bytes, text.device_bytes);
+    const auto audio_peak = sat_add(dit.persistent_device_bytes, audio.device_bytes);
+    result.device.lm_compute_bytes = std::max(text_peak, dit.device_bytes);
+    result.device.codec_compute_bytes =
+        audio_peak > result.device.lm_compute_bytes ? audio_peak - result.device.lm_compute_bytes : 0;
     const uint64_t contexts = sat_mul(sat_mul(model.config().text.max_tokens, model.config().text.n_embd),
                                      sizeof(float) * PROMPT_CONTEXTS);
     const uint64_t host_compute = std::max({text.host_compute_bytes, dit.host_compute_bytes, audio.host_compute_bytes});
