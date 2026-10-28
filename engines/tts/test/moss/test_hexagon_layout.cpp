@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <functional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -54,6 +56,13 @@ constexpr double SPEECH_FUSED_RELATIVE_TOLERANCE = 5e-3;
 constexpr int SPEECH_STEPS = 4;
 constexpr int SPEECH_BATCHES[] = {1, 3, 4};
 constexpr int SPEECH_PCM_TAIL = 37;
+constexpr const char * DELAY_TEXT_HEAD = "output.weight";
+constexpr const char * DELAY_TABLE_PREFIX = "token_embd";
+constexpr const char * SPEECH_TEXT_HEAD = "text.output.weight";
+constexpr int FIT_EMBEDDING = 256;
+constexpr int FIT_PROMPT_ROWS = 3;
+constexpr int FIT_GENERATED_ROWS = 2;
+constexpr int SLOT_HEAD_ROWS = 2;
 constexpr float SPEECH_PCM_AMPLITUDE = 0.2f;
 constexpr float SPEECH_PCM_FREQUENCY = 0.31f;
 
@@ -336,8 +345,13 @@ std::vector<float> dequantized_rows(const ggml_tensor * table, const std::vector
     return rows;
 }
 
+std::vector<float> doubled(std::vector<float> values) {
+    std::transform(values.begin(), values.end(), values.begin(), values.begin(), std::plus<float>());
+    return values;
+}
+
 template <typename Read>
-void expect_rows_failure(Read read, const std::string & needle, const std::string & label) {
+void expect_failure(Read read, const std::string & needle, const std::string & label) {
     try {
         read();
         check(false, label + ": accepted");
@@ -364,13 +378,20 @@ void test_gguf_rows(ggml_type type) {
     GgufRows reader(rows.file.str(), rows.gguf, rows.table(), ROWS_OWNER);
     check(reader.gather(ROWS_IDS) == dequantized_rows(rows.table(), ROWS_IDS),
           tier + ": rows read from the file match ggml's dequantization");
-    expect_rows_failure([&] { reader.gather({ROWS_MISSING_ID}); }, "outside the table", tier + ": row past the table");
+    expect_failure([&] { reader.gather({ROWS_MISSING_ID}); }, "outside the table", tier + ": row past the table");
+    std::vector<float> sums = reader.gather(ROWS_IDS);
+    reader.accumulate(ROWS_IDS, sums);
+    check(sums == doubled(dequantized_rows(rows.table(), ROWS_IDS)), tier + ": accumulated rows add to the sums");
+    std::vector<float> short_sums(1);
+    expect_failure([&] { reader.accumulate(ROWS_IDS, short_sums); }, "do not match", tier + ": sums of the wrong size");
     if (!truncate_file(rows.file.path, rows_offset(rows))) {
         std::printf("%s: skipped truncation (the file cannot be resized while open)\n", tier.c_str());
         return;
     }
-    expect_rows_failure([&] { reader.gather(ROWS_IDS); }, "changed while loaded", tier + ": truncated while loaded");
-    expect_rows_failure([&] { GgufRows reopened(rows.file.str(), rows.gguf, rows.table(), ROWS_OWNER); },
+    expect_failure([&] { reader.gather(ROWS_IDS); }, "changed while loaded", tier + ": truncated while loaded");
+    expect_failure([&] { reader.accumulate(ROWS_IDS, sums); }, "changed while loaded",
+                   tier + ": accumulating truncated while loaded");
+    expect_failure([&] { GgufRows reopened(rows.file.str(), rows.gguf, rows.table(), ROWS_OWNER); },
                         "past the end", tier + ": truncated before loading");
 }
 
@@ -383,8 +404,91 @@ void test_sfx_survives_truncation() {
         std::printf("sfx: skipped truncation (the file cannot be resized while open)\n");
         return;
     }
-    expect_rows_failure([&] { encode_text(model, SFX_PROMPT); }, "changed while loaded",
+    expect_failure([&] { encode_text(model, SFX_PROMPT); }, "changed while loaded",
                         "a truncated model file fails the request instead of the process");
+}
+
+struct TensorSpan {
+    uint64_t offset = 0;
+    uint64_t bytes = 0;
+};
+
+TensorSpan tensor_span(const std::filesystem::path & path, const char * name) {
+    gguf_context * file = gguf_init_from_file(path.string().c_str(), {true, nullptr});
+    if (!file) throw std::runtime_error("cannot read " + path.string());
+    const int64_t id = gguf_find_tensor(file, name);
+    TensorSpan span;
+    if (id >= 0) {
+        span = {gguf_get_data_offset(file) + gguf_get_tensor_offset(file, id), gguf_get_tensor_size(file, id)};
+    }
+    gguf_free(file);
+    if (id < 0) throw std::runtime_error(std::string("missing tensor ") + name);
+    return span;
+}
+
+uint64_t tables_bytes(const std::filesystem::path & path, const std::string & prefix) {
+    gguf_context * file = gguf_init_from_file(path.string().c_str(), {true, nullptr});
+    if (!file) throw std::runtime_error("cannot read " + path.string());
+    uint64_t bytes = 0;
+    for (int64_t id = 0; id < gguf_get_n_tensors(file); ++id) {
+        if (std::string(gguf_get_tensor_name(file, id)).rfind(prefix, 0) == 0) {
+            bytes += gguf_get_tensor_size(file, id);
+        }
+    }
+    gguf_free(file);
+    return bytes;
+}
+
+void zero_tensor(const std::filesystem::path & path, const char * name) {
+    const TensorSpan span = tensor_span(path, name);
+    const std::vector<char> zeros((size_t) span.bytes, 0);
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp((std::streamoff) span.offset);
+    file.write(zeros.data(), (std::streamsize) zeros.size());
+    if (!file) throw std::runtime_error(std::string("cannot overwrite ") + name);
+}
+
+void test_delay_head_stays_in_memory() {
+    Fixture file{random_backbone("delay-head-memory", GGML_TYPE_F16)};
+    DelayLM model(file.str(), {}, THREADS, CONTEXT, false, {TablePlacement::Host, AttentionLayout::Unfused});
+    const std::vector<DelayRow> rows = prompt_rows();
+    const DelayLogits expected = model.prefill(rows, TextLogits::Full);
+    zero_tensor(file.path, DELAY_TEXT_HEAD);
+    model.reset();
+    check(model.prefill(rows, TextLogits::Full).text == expected.text,
+          "the host text head stays in memory when the file changes");
+}
+
+void test_delay_survives_truncation() {
+    Fixture file{random_backbone("delay-truncated", GGML_TYPE_F16)};
+    DelayLM model(file.str(), {}, THREADS, CONTEXT, false, {TablePlacement::Host, AttentionLayout::Unfused});
+    const std::vector<DelayRow> rows = prompt_rows();
+    check(!model.prefill(rows).text.empty(), "host tables decode before the file changes");
+    if (!truncate_file(file.path, 0)) {
+        std::printf("delay: skipped truncation (the file cannot be resized while open)\n");
+        return;
+    }
+    for (TextLogits text : {TextLogits::Full, TextLogits::Slots, TextLogits::None}) {
+        expect_failure([&] { model.step(rows.back(), text); }, "changed while loaded",
+                       "a truncated model file fails the delay step instead of the process");
+    }
+    check(model.position() == (int) rows.size(), "a failed delay step keeps the position");
+}
+
+void test_delay_measured_tables() {
+    Fixture file{random_backbone("delay-measured-tables", GGML_TYPE_F32, FIT_EMBEDDING)};
+    DelayLM device(file.str(), {}, THREADS, CONTEXT, true, {TablePlacement::Device, AttentionLayout::Unfused});
+    DelayLM host(file.str(), {}, THREADS, CONTEXT, true, {TablePlacement::Host, AttentionLayout::Unfused});
+    const tts_cpp::FitResult on_device = device.measure(FIT_PROMPT_ROWS, FIT_GENERATED_ROWS);
+    const tts_cpp::FitResult on_host = host.measure(FIT_PROMPT_ROWS, FIT_GENERATED_ROWS);
+    const uint64_t head = tensor_span(file.path, DELAY_TEXT_HEAD).bytes;
+    const uint64_t tables = tables_bytes(file.path, DELAY_TABLE_PREFIX);
+    const uint64_t slot_head = (uint64_t) SLOT_HEAD_ROWS * FIT_EMBEDDING * sizeof(float);
+    check(on_device.device.weights_bytes + slot_head >= on_host.device.weights_bytes + head + tables,
+          "the host head and the file tables leave the device weights");
+    check(on_host.host_bytes >= on_device.host_bytes + head, "the host text head counts as host memory");
+    check(on_host.host_bytes < on_device.host_bytes + head + tables,
+          "the embedding tables stay in the file and take no host memory");
 }
 
 void test_sfx_cpu_layout() {
@@ -439,6 +543,33 @@ void test_speech_table_placement(ggml_type precision) {
     check_speech_steps(device, host, speech_equal, tier + " host tables");
     host.release_weights();
     check(speech_equal(expected, speech_prefill(host, whole)), tier + ": host tables reload after weight eviction");
+}
+
+void test_speech_head_stays_in_memory() {
+    Fixture file{random_speech("speech-head-memory", GGML_TYPE_F16)};
+    SpeechLM lm(file.str(), {}, THREADS, {TablePlacement::Host, AttentionLayout::Unfused});
+    const int whole = (int) speech_rows().size();
+    const SpeechLogits expected = speech_prefill(lm, whole);
+    zero_tensor(file.path, SPEECH_TEXT_HEAD);
+    check(speech_prefill(lm, whole).text == expected.text, "the speech text head stays in memory when the file changes");
+}
+
+void test_speech_survives_truncation() {
+    Fixture file{random_speech("speech-truncated", GGML_TYPE_F16)};
+    SpeechLM lm(file.str(), {}, THREADS, {TablePlacement::Host, AttentionLayout::Unfused});
+    check(!speech_prefill(lm, (int) speech_rows().size()).text.empty(), "speech host tables run before the file changes");
+    if (!truncate_file(file.path, 0)) {
+        std::printf("speech: skipped truncation (the file cannot be resized while open)\n");
+        return;
+    }
+    const SpeechRow row = speech_rows().back();
+    expect_failure([&] { lm.step(row); }, "changed while loaded",
+                   "a truncated model file fails the speech step instead of the process");
+    expect_failure([&] { lm.step(row, {false, true}); }, "changed while loaded",
+                   "a truncated model file fails the audio-only step instead of the process");
+    lm.release_weights();
+    expect_failure([&] { lm.begin(SPEECH_CONTEXT); }, "failed to load tensor",
+                   "a truncated model file fails the weight reload instead of the process");
 }
 
 void test_speech_fused_attention(ggml_type precision) {
@@ -507,6 +638,11 @@ int main() {
         test_sfx_cpu_layout();
         test_sfx_measured_table();
         test_sfx_survives_truncation();
+        test_delay_head_stays_in_memory();
+        test_delay_survives_truncation();
+        test_delay_measured_tables();
+        test_speech_head_stays_in_memory();
+        test_speech_survives_truncation();
         for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
             test_gguf_rows(type);
         }

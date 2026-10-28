@@ -38,6 +38,7 @@ constexpr int FIT_PROMPT_ROWS = 8;
 constexpr int FIT_CONTEXT = 512;
 constexpr int FIT_MAX_NEW_TOKENS = 64;
 constexpr int SLOT_STEPS = 3;
+constexpr const char * TRUNCATION_FAILURE = "changed while loaded";
 
 bool hexagon_arm() {
     return arm.request == "hexagon";
@@ -51,6 +52,19 @@ std::vector<ggml_type> precisions() {
     std::vector<ggml_type> types{GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0};
     if (hexagon_arm()) types.push_back(GGML_TYPE_Q4_0);
     return types;
+}
+
+template <typename Run>
+void require_truncation_failure(const char * stage, const std::filesystem::path & path, Run run) {
+    std::filesystem::resize_file(path, 0);
+    try {
+        run();
+    } catch (const std::runtime_error & e) {
+        require(std::string(e.what()).find(TRUNCATION_FAILURE) != std::string::npos,
+                std::string(stage) + ": wrong truncation failure: " + e.what());
+        return;
+    }
+    throw std::runtime_error(std::string(stage) + ": a model file truncated under the engine was accepted");
 }
 
 bool sfx_loads(ggml_type precision) {
@@ -217,7 +231,10 @@ void delay(ggml_type precision) {
     Codec ec(encoder.str(), {}, 2), eg(encoder.str(), device_request(), 2);
     arm.require(eg.backend_name());
     require(ec.encode(signal(160)) == eg.encode(signal(160)), "codec encoder codes differ");
-    if (hexagon_arm()) fit_on_host_memory(lm_file.str(), decoder.str());
+    if (hexagon_arm()) {
+        fit_on_host_memory(lm_file.str(), decoder.str());
+        require_truncation_failure("delay", lm_file.path, [&] { gpu.step(rows.back()); });
+    }
 }
 
 void sfx(ggml_type precision) {
@@ -279,6 +296,7 @@ void speech(ggml_type precision) {
         compare("speech audio-only", cpu.step(rows.back(), {false, true}).audio,
                 gpu.step(rows.back(), {false, true}).audio);
     }
+    if (hexagon_arm()) require_truncation_failure("speech", file.path, [&] { gpu.step(rows.back()); });
     Fixture vq{write_vq("gpu-speech-vq", 26342)};
     moss_fixture_precision(vq.path, precision == GGML_TYPE_BF16 ? GGML_TYPE_F16 : precision);
     SpeechTokenizer c(vq.str(), {}, 2), g(vq.str(), device_request(), 2);
