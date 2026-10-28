@@ -103,8 +103,7 @@ batch/stream synthesis, 7/25-frame chunks, cancellation recovery, reuse and a
 longer prompt on the selected GPU and CPU. Every expected output must pass the
 same WER gate. There is no baseline-audio exemption for wrong text, and missing
 outputs or ASR errors remain blocking. This replaces the temporary exception
-tracked in [issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328)
-(QVAC-27320).
+tracked in [issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328).
 Manual full-checkpoint jobs publish `moss-quality/BACKEND/CASE` commit statuses
 so their pending/failed quality results also appear in the PR's checks.
 

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 import wave
 
@@ -166,6 +166,91 @@ class CheckpointTests(unittest.TestCase):
                         e2e.prepare_checkpoint("tts-q8_0", root, root)
                 self.assertEqual(source.read_bytes(), b"GGUFsource")
                 self.assertFalse((root / "models.sha256").exists())
+
+
+class TtsOutputScoringTests(unittest.TestCase):
+    # Explicit artifact contract, independent of the scorer's enumeration loop.
+    SHORT_OUTPUTS = (
+        "batch", "stream", "clone", "cpu-reference",
+        "tts-c7-batch", "tts-c7-stream", "tts-c7-after-callback-cancel", "tts-c7-after-explicit-cancel",
+        "tts-c25-batch", "tts-c25-stream", "tts-c25-after-callback-cancel", "tts-c25-after-explicit-cancel",
+        "unconditioned/tts-c7-batch", "unconditioned/tts-c7-stream",
+        "unconditioned/tts-c7-after-callback-cancel", "unconditioned/tts-c7-after-explicit-cancel",
+        "unconditioned/tts-c25-batch", "unconditioned/tts-c25-stream",
+        "unconditioned/tts-c25-after-callback-cancel", "unconditioned/tts-c25-after-explicit-cancel",
+        "cpu/tts-c7-batch", "cpu/tts-c7-stream",
+        "cpu/tts-c7-after-callback-cancel", "cpu/tts-c7-after-explicit-cancel",
+        "cpu/tts-c25-batch", "cpu/tts-c25-stream",
+        "cpu/tts-c25-after-callback-cancel", "cpu/tts-c25-after-explicit-cancel",
+        "cpu/unconditioned/tts-c7-batch", "cpu/unconditioned/tts-c7-stream",
+        "cpu/unconditioned/tts-c7-after-callback-cancel", "cpu/unconditioned/tts-c7-after-explicit-cancel",
+        "cpu/unconditioned/tts-c25-batch", "cpu/unconditioned/tts-c25-stream",
+        "cpu/unconditioned/tts-c25-after-callback-cancel", "cpu/unconditioned/tts-c25-after-explicit-cancel",
+    )
+    LONG_OUTPUTS = (
+        "tts-long-batch", "tts-long-stream",
+        "unconditioned/tts-long-batch", "unconditioned/tts-long-stream",
+        "cpu/tts-long-batch", "cpu/tts-long-stream",
+        "cpu/unconditioned/tts-long-batch", "cpu/unconditioned/tts-long-stream",
+    )
+
+    def score_outputs(self, output, missing=None):
+        expected = {name: "short" for name in self.SHORT_OUTPUTS}
+        expected.update({name: "long" for name in self.LONG_OUTPUTS})
+        self.assertEqual(len(expected), 44)
+        for name in expected:
+            if name != missing:
+                audio = output / f"{name}.wav"
+                audio.parent.mkdir(parents=True, exist_ok=True)
+                audio.touch()
+        for length, text in (("short", e2e.TTS_TEXT), ("long", e2e.TTS_LONG_TEXT)):
+            (output / f"reference-{length}.txt").write_text(text)
+        asr_binary, model = output / "whisper-cli", output / "asr-model.bin"
+        prepare = Mock()
+        prepare.prepare.return_value = model
+        scored = []
+
+        def score(args, **kwargs):
+            def argument(flag):
+                return Path(args[args.index(flag) + 1])
+            name = argument("--audio").relative_to(output).with_suffix("").as_posix()
+            self.assertIn(name, expected)
+            self.assertEqual(argument("--reference"), output / f"reference-{expected[name]}.txt")
+            self.assertEqual(argument("--asr-binary"), asr_binary)
+            self.assertEqual(argument("--asr-model"), model)
+            self.assertEqual(kwargs, {"check": False, "timeout": e2e.ASR_TIMEOUT_SECONDS})
+            argument("--json-out").write_text(json.dumps({
+                "status": "ok", "wer": 0.0, "n_ref_words": 8,
+            }))
+            scored.append(name)
+            return subprocess.CompletedProcess(args, 0)
+
+        # Exercise the real gate, replacing only model acquisition and ASR.
+        with patch.object(e2e.importlib.util, "spec_from_file_location"), \
+             patch.object(e2e.importlib.util, "module_from_spec", return_value=prepare), \
+             patch.object(e2e.subprocess, "run", side_effect=score):
+            result = e2e.score_tts_outputs(asr_binary, output / "models", output)
+        prepare.prepare.assert_called_once_with(e2e.ASR_SPEC, (output / "models").resolve())
+        self.assertCountEqual(scored, [name for name in expected if name != missing])
+        self.assertEqual(set(result["scores"]), set(expected))
+        return result
+
+    def test_scores_all_44_outputs_with_the_matching_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.score_outputs(Path(directory))
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["quality_status"], "passed")
+        self.assertEqual(result["failed_outputs"], [])
+
+    def test_missing_cpu_and_unconditioned_outputs_fail_the_gate(self):
+        for missing in ("cpu/tts-c7-batch", "unconditioned/tts-long-stream",
+                        "cpu/unconditioned/tts-c25-after-explicit-cancel"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                result = self.score_outputs(Path(directory), missing)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["quality_status"], "failed")
+                self.assertEqual(result["failed_outputs"], [missing])
+                self.assertEqual(result["scores"][missing], {"status": "missing", "wer": None})
 
 
 class IntelligibilityTests(unittest.TestCase):
