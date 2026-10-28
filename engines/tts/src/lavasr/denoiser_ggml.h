@@ -16,14 +16,16 @@ namespace tts_cpp::lavasr {
 
 namespace detail {
 
-// `fused` selects the fused ops (GRU / dw-conv / zero-upsample / channel-shuffle / affine-PReLU)
-// where the backend implements them; false uses the standard-op fallback.  Both are bit-identical.
+// `fused` selects the existing fused-op family. An optional GRU-only support
+// query can independently select a real GRU candidate when `fused` is false;
+// rejection keeps the standard-op recurrence and does not expand the candidate.
+using GruSupport = std::function<bool(const ggml_tensor *)>;
 
 // Batched PyTorch GRU (gate order r,z,n; zero init state) over B weight-sharing sequences.
 // x:[I,B,L], Wih:[I,3H], Whh:[H,3H], Bih/Bhh:[3H] -> y:[H,B,L]; reverse writes each step at its t.
 ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih,
                           ggml_tensor * Whh, ggml_tensor * Bih, ggml_tensor * Bhh,
-                          bool reverse, bool fused = true);
+                          bool reverse, bool fused = true, const GruSupport & gru_support = {});
 
 // Grouped/depthwise 2-D conv, causal in time, symmetric freq pad, freq stride only.
 // x:[F,T,Cin], W:[kf,kt,Cin/g,Cout] (PyTorch [Cout,Cin/g,kt,kf]) -> [Fout,T,Cout].
@@ -52,7 +54,8 @@ using WResolver = std::function<ggml_tensor *(const std::string &)>;
 // Dual-path grouped RNN bottleneck (denoiser_core.cpp dpgrnn): grouped BiGRU over freq +
 // grouped uni-GRU over time, each FC + LayerNorm-(F,C) + residual.  x:[F,T,C] -> [F,T,C].
 ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
-                     const WResolver & W, float ln_eps, bool fused = true);
+                     const WResolver & W, float ln_eps, bool fused = true,
+                     const GruSupport & gru_support = {});
 
 // Causal time-frequency attention (denoiser_core.cpp ctfa): out = at(temporal) * x * af(freq),
 // each gate a GRU/BiGRU + FC + sigmoid over an energy-mean.  x:[F,T,C] -> [F,T,C].
@@ -60,7 +63,8 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
 // multiplies come out adjacent (lets the backend fuse the pair).
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
                    const WResolver & W, int freq_comp_ratio, bool fused = true,
-                   ggml_cgraph * gf = nullptr, bool portable = false);
+                   ggml_cgraph * gf = nullptr, bool portable = false,
+                   const GruSupport & gru_support = {});
 
 } // namespace detail
 

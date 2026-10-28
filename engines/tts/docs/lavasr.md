@@ -81,7 +81,7 @@ libraries in its deployment. `--backend hexagon` pins `HTP0`. Legacy
 remain available with `--backend auto`. The existing automatic GPU preference
 is preserved; Hexagon is an explicit engine capability.
 
-For the F32 Hexagon checks, use `qvac-ext-ggml@speech` revision
+The baseline F32 Hexagon checks use `qvac-ext-ggml@speech` revision
 `380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`, including its speech kernels and
 F32-precision matmul routing. Build that revision with Hexagon enabled, use its
 installed CMake package through `CMAKE_PREFIX_PATH`, and deploy the DSP skel
@@ -93,8 +93,13 @@ Both F32 and F16 GGUF inputs are supported. On native ggml routes, the loaders e
 weights to F32, and the neural graphs retain F32 tensors and F32-precision
 matrix multiplication. On Hexagon those products use HVX rather than F16 HMX.
 An F16 filename does not indicate F16 execution. Hexagon's denoiser graph uses
-F32 im2col/matmul convolution, sum/scale means and standard recurrent operations;
-its enhancer uses direct depthwise convolution. Each graph is checked against
+F32 im2col/matmul convolution, sum/scale means and a channel shuffle that copies
+complete spatial planes. Each actual GRU node is queried independently: a
+backend reporting F32 GRU support can execute the recurrent sweep as one op;
+older runtimes, including the baseline revision above, retain the unrolled
+F32 recurrence. This does not enable the other fused-op families or change
+precision and correctness thresholds. Its enhancer uses direct depthwise
+convolution. Each graph is checked against
 the selected backend before execution. Resampling, STFT/mel features, denoiser
 log features, overlap-add, ISTFT and the FastLR merge remain host audio DSP.
 

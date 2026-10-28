@@ -88,7 +88,8 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
                                       bool reverse, bool bidir,
                                       const std::vector<float> & WihR, const std::vector<float> & WhhR,
                                       const std::vector<float> & BihR, const std::vector<float> & BhhR,
-                                      bool fused) {
+                                      bool fused, const detail::GruSupport & gru_support = {},
+                                      int * gru_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, I, B, L);
@@ -102,7 +103,7 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
     std::memcpy(tBih->data, Bih.data(), ggml_nbytes(tBih));
     std::memcpy(tBhh->data, Bhh.data(), ggml_nbytes(tBhh));
 
-    ggml_tensor * y = detail::gru_batched(ctx, tx, tWih, tWhh, tBih, tBhh, reverse, fused);
+    ggml_tensor * y = detail::gru_batched(ctx, tx, tWih, tWhh, tBih, tBhh, reverse, fused, gru_support);
     if (bidir) {
         ggml_tensor * tWihR = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, I, 3 * H);
         ggml_tensor * tWhhR = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, 3 * H);
@@ -112,12 +113,18 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
         std::memcpy(tWhhR->data, WhhR.data(), ggml_nbytes(tWhhR));
         std::memcpy(tBihR->data, BihR.data(), ggml_nbytes(tBihR));
         std::memcpy(tBhhR->data, BhhR.data(), ggml_nbytes(tBhhR));
-        ggml_tensor * yr = detail::gru_batched(ctx, tx, tWihR, tWhhR, tBihR, tBhhR, true, fused);
+        ggml_tensor * yr = detail::gru_batched(ctx, tx, tWihR, tWhhR, tBihR, tBhhR, true, fused, gru_support);
         y                = ggml_concat(ctx, y, yr, 0); // [2H, B, L]
     }
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
-    ggml_graph_compute_with_ctx(ctx, gf, 1);
+    if (gru_nodes) {
+        *gru_nodes = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+            *gru_nodes += ggml_graph_node(gf, i)->op == GGML_OP_GRU;
+    }
+    CHECK(ggml_graph_compute_with_ctx(ctx, gf, 1) == GGML_STATUS_SUCCESS,
+          "GRU graph computes successfully");
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
     ggml_free(ctx);
@@ -189,6 +196,82 @@ static void test_gru_batched() {
         }
         CHECK(m < 1e-5f, fmsg("gru_batched BiGRU concat matches scalar gru_bi", fused));
     }
+}
+
+// HTP may support a real GRU shape independently of its other fused ops. Check
+// the queried descriptor, selected graph and scalar parity for both decisions.
+static void test_gru_support_selection() {
+    struct Shape { int I, H, B, L; };
+    const Shape shapes[] = { {3, 1, 2, 4}, {2, 2, 1, 5}, {5, 3, 3, 7}, {4, 17, 2, 5},
+                             {3, 65, 3, 3}, {3, 129, 2, 3} };
+    std::mt19937 rng(20261028);
+    int accepted = 0, rejected = 0;
+    for (const Shape & s : shapes) {
+        std::vector<float> x((size_t) s.I * s.B * s.L), Wih((size_t) 3 * s.H * s.I),
+                           Whh((size_t) 3 * s.H * s.H), Bih(3 * s.H), Bhh(3 * s.H);
+        rand_fill(x, rng); rand_fill(Wih, rng); rand_fill(Whh, rng);
+        rand_fill(Bih, rng); rand_fill(Bhh, rng);
+        for (bool reverse : {false, true}) {
+            std::vector<float> reference((size_t) s.H * s.B * s.L);
+            for (int b = 0; b < s.B; ++b) {
+                std::vector<float> sequence((size_t) s.I * s.L);
+                for (int t = 0; t < s.L; ++t)
+                    for (int i = 0; i < s.I; ++i)
+                        sequence[(size_t) t * s.I + i] = x[((size_t) t * s.B + b) * s.I + i];
+                const auto expected = reverse ? ref_gru_rev(sequence, s.L, s.I, s.H, Wih, Whh, Bih, Bhh)
+                                              : ref_gru_seq(sequence, s.L, s.I, s.H, Wih, Whh, Bih, Bhh);
+                for (int t = 0; t < s.L; ++t)
+                    for (int h = 0; h < s.H; ++h)
+                        reference[((size_t) t * s.B + b) * s.H + h] = expected[(size_t) t * s.H + h];
+            }
+            auto parity = [&](const std::vector<float> & output) {
+                CHECK(output.size() == reference.size(), "GRU support selection preserves output shape");
+                float error = 0.0f;
+                for (size_t i = 0; i < std::min(output.size(), reference.size()); ++i) {
+                    CHECK(std::isfinite(output[i]), "GRU support selection preserves finite output");
+                    error = std::max(error, std::fabs(output[i] - reference[i]));
+                }
+                CHECK(error < 1e-5f, "GRU support selection retains existing scalar tolerance");
+            };
+            for (bool allow_supported : {false, true}) {
+                int queries = 0, nodes = -1;
+                detail::GruSupport support = [&](const ggml_tensor * candidate) {
+                    ++queries;
+                    CHECK(candidate->op == GGML_OP_GRU, "capability query receives the actual GRU op");
+                    CHECK(candidate->type == GGML_TYPE_F32 && candidate->ne[0] == s.H &&
+                          candidate->ne[1] == s.B && candidate->ne[2] == s.L && candidate->ne[3] == 1,
+                          "capability query receives the actual output shape and dtype");
+                    const ggml_tensor * whh = candidate->src[0], *gi = candidate->src[1], *bhh = candidate->src[2];
+                    CHECK(whh->type == GGML_TYPE_F32 && whh->ne[0] == s.H && whh->ne[1] == 3 * s.H &&
+                          gi->type == GGML_TYPE_F32 && gi->ne[0] == 3 * s.H && gi->ne[1] == s.B && gi->ne[2] == s.L &&
+                          bhh->type == GGML_TYPE_F32 && bhh->ne[0] == 3 * s.H,
+                          "capability query uses real recurrent weights, input gates and bias");
+                    CHECK(ggml_is_contiguous(whh) && ggml_is_contiguous(gi) && ggml_is_contiguous(bhh),
+                          "capability query sees actual contiguous GRU inputs");
+                    int32_t direction = -1;
+                    std::memcpy(&direction, candidate->op_params, sizeof(direction));
+                    CHECK(direction == (reverse ? 1 : 0), "capability query preserves the real reverse direction");
+                    return allow_supported && whh->ne[0] <= 128;
+                };
+                parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                                   {}, {}, {}, {}, false, support, &nodes));
+                const bool use_gru = allow_supported && s.H <= 128;
+                CHECK(queries == 1, "each real GRU candidate is queried once");
+                CHECK(nodes == (use_gru ? 1 : 0), "rejected GRU candidates never enter the fallback graph");
+                use_gru ? ++accepted : ++rejected;
+            }
+            int legacy_queries = 0, legacy_nodes = -1, fallback_nodes = -1;
+            detail::GruSupport reject = [&](const ggml_tensor *) { ++legacy_queries; return false; };
+            parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                               {}, {}, {}, {}, true, reject, &legacy_nodes));
+            CHECK(legacy_queries == 0 && legacy_nodes == 1, "existing fused routes do not consult the HTP-only query");
+            parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                               {}, {}, {}, {}, false, {}, &fallback_nodes));
+            CHECK(fallback_nodes == 0, "an absent capability query preserves the portable unrolled graph");
+        }
+    }
+    std::printf("GRU support selection: %d accepted / %d rejected actual shapes, scalar parity preserved\n",
+                accepted, rejected);
 }
 
 // Scalar conv2d — verbatim math of denoiser_core.cpp Runner::conv2d on flat
@@ -1164,6 +1247,7 @@ static void test_pipeline_batch_parity() {
 
 int main(int argc, char ** argv) {
     test_gru_batched();
+    test_gru_support_selection();
     test_conv2d();
     test_conv_transpose2d();
     test_affine_prelu();
