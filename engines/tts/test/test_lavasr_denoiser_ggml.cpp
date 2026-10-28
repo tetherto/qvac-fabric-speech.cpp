@@ -11,6 +11,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -586,6 +587,63 @@ static void test_shuffle2_portable() {
                   "portable shuffle retains all four dimensions");
             CHECK(std::memcmp(y->data, expected.data(), count * sizeof(float)) == 0,
                   "portable shuffle is bit-exact for batches, spatial positions and signed zero");
+            ggml_free(ctx);
+        }
+    }
+}
+
+static void test_channel_energy_mean() {
+    struct Shape { int F, T, C, B; };
+    const Shape shapes[] = {{1, 1, 1, 1}, {7, 5, 3, 2}, {5, 9, 12, 3},
+                            {33, 63, 24, 7}, {33, 63, 32, 7}, {65, 63, 12, 7}};
+    for (const Shape & s : shapes) {
+        for (bool strided : {false, true}) {
+            ggml_init_params params{size_t(128) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            ggml_tensor * x;
+            if (strided) {
+                ggml_tensor * storage = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F + 2, s.T + 1, s.C, s.B);
+                std::fill_n(static_cast<float *>(storage->data), ggml_nelements(storage), 37.25f);
+                x = ggml_view_4d(ctx, storage, s.F, s.T, s.C, s.B,
+                                  storage->nb[1], storage->nb[2], storage->nb[3], sizeof(float));
+            } else {
+                x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F, s.T, s.C, s.B);
+            }
+            std::vector<float> expected(size_t(s.F) * s.T * s.B, 0.0f);
+            for (int b = 0; b < s.B; ++b)
+                for (int t = 0; t < s.T; ++t)
+                    for (int f = 0; f < s.F; ++f) {
+                        float sum = 0.0f;
+                        for (int c = 0; c < s.C; ++c) {
+                            const int tag = (13 * f + 7 * t + 3 * c + 19 * b) % 113 - 56;
+                            const float value = (f == 0 && t == 0) ? -0.0f : float(tag) / 64.0f;
+                            std::memcpy(static_cast<char *>(x->data) + size_t(f) * x->nb[0] +
+                                        size_t(t) * x->nb[1] + size_t(c) * x->nb[2] + size_t(b) * x->nb[3],
+                                        &value, sizeof(value));
+                            sum += value * value;
+                        }
+                        expected[size_t(f) + size_t(s.F) * (t + s.T * b)] = sum / float(s.C);
+                    }
+            ggml_tensor * optimized = detail::channel_energy_mean(ctx, x, true);
+            ggml_tensor * standard = detail::channel_energy_mean(ctx, x, false);
+            // Preserve the former portable graph as an exact regression oracle.
+            ggml_tensor * previous = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
+            previous = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, previous)), 1.0f / float(s.C));
+            previous = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, previous, 3, 1, 0, 2)), s.F, s.T * s.B);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            for (ggml_tensor * output : {optimized, standard, previous}) ggml_build_forward_expand(graph, output);
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 2) == GGML_STATUS_SUCCESS,
+                  "channel energy graphs compute successfully");
+            CHECK(optimized->ne[0] == s.F && optimized->ne[1] == s.T * s.B &&
+                  optimized->ne[2] == 1 && optimized->ne[3] == 1, "channel energy retains frequency/time/batch order");
+            CHECK(std::memcmp(optimized->data, previous->data, ggml_nbytes(optimized)) == 0,
+                  "flattened channel energy is bit-exact with the former portable graph");
+            for (ggml_tensor * output : {optimized, standard}) {
+                const float * actual = static_cast<const float *>(output->data);
+                float error = 0.0f;
+                for (size_t i = 0; i < expected.size(); ++i) error = std::max(error, std::fabs(actual[i] - expected[i]));
+                CHECK(error < 1e-6f, "channel energy agrees with an independent scalar channel reduction");
+            }
             ggml_free(ctx);
         }
     }
@@ -1253,6 +1311,7 @@ int main(int argc, char ** argv) {
     test_affine_prelu();
     test_shuffle2();
     test_shuffle2_portable();
+    test_channel_energy_mean();
     test_dpgrnn();
     test_ctfa();
     test_e2e_synthetic();

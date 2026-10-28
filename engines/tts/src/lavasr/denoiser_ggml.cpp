@@ -247,6 +247,22 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
     return ggml_cont(ctx, ggml_permute(ctx, inter, 2, 0, 1, 3));              // back to [F, T, C, Bc]
 }
 
+ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable) {
+    const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3];
+    if (portable) {
+        // Keep p=f+F*t intact. This is a batched 2D transpose, rather than
+        // a C/T/F permutation that falls back to scalar strided copies on HTP.
+        ggml_tensor * packed = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
+        ggml_tensor * spatial = ggml_reshape_3d(ctx, packed, F * T, C, Bc);
+        ggml_tensor * channels = ggml_cont(ctx, ggml_permute(ctx, spatial, 1, 0, 2, 3));
+        ggml_tensor * energy = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, channels)), 1.0f / (float) C);
+        return ggml_reshape_2d(ctx, energy, F, T * Bc);
+    }
+    ggml_tensor * channels = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
+    ggml_tensor * energy = ggml_mean(ctx, ggml_sqr(ctx, channels));
+    return ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, energy, 3, 1, 0, 2)), F, T * Bc);
+}
+
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
                    const WResolver & W, int r, bool fused, ggml_cgraph * gf, bool portable,
                    const GruSupport & gru_support) {
@@ -269,10 +285,7 @@ ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
                                                      2, 3, 1, 0));           // [1, T, C, Bc]
 
     // ---- FA: energy-mean over chan -> fold freq by r -> BiGRU (batch=time*chunk) -> FC -> sigmoid ----
-    ggml_tensor * xcf = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));     // [C, T, F, Bc]
-    ggml_tensor * ec  = mean(ggml_sqr(ctx, xcf));                   // [1, T, F, Bc]
-    ggml_tensor * ecF = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, ec, 3, 1, 0, 2)),
-                                        F, T * Bc);                          // [F, T*Bc]
+    ggml_tensor * ecF = channel_energy_mean(ctx, x, portable);             // [F, T*Bc]
     const int     pad_len = (r - (int) (F % r)) % r;
     const int64_t Fp = F + pad_len, Hh = Fp / r;
     ggml_tensor * ecp  = ggml_pad_ext(ctx, ecF, 0, pad_len, 0, 0, 0, 0, 0, 0); // [Fp, T*Bc]

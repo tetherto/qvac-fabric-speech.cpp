@@ -21,6 +21,10 @@ namespace detail {
 // rejection keeps the standard-op recurrence and does not expand the candidate.
 using GruSupport = std::function<bool(const ggml_tensor *)>;
 
+// Mean squared energy over channels: x:[F,T,C,Bc] -> [F,T*Bc].
+// The portable layout folds spatial axes before transposing channels inward.
+ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable = false);
+
 // Batched PyTorch GRU (gate order r,z,n; zero init state) over B weight-sharing sequences.
 // x:[I,B,L], Wih:[I,3H], Whh:[H,3H], Bih/Bhh:[3H] -> y:[H,B,L]; reverse writes each step at its t.
 ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih,
