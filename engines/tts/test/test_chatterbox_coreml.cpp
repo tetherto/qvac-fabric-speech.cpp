@@ -6,31 +6,48 @@
 //                                           same tokens, one stage at a time,
 //                                           then all three; routing past the
 //                                           widest function and strict mode
+//   test-chatterbox-coreml --shape-fixture  every feature shape a sidecar
+//                                           declares is checked before
+//                                           predicting
+//   test-chatterbox-coreml --engine-fixture Engine sentence overlap against
+//                                           in-order sequential synthesis,
+//                                           cancellation, worker errors
 //
-// The fixture reads CHATTERBOX_COREML_TEST_S3GEN (an S3Gen GGUF with the
-// exported `<stem>-{encoder,cfm,hift}.mlmodelc` next to it) and reports a
-// skip (77) without it or without Core ML.
+// The stages fixture reads CHATTERBOX_COREML_TEST_S3GEN (an S3Gen GGUF with
+// the exported `<stem>-{encoder,cfm,hift}.mlmodelc` next to it); the engine
+// fixture also reads CHATTERBOX_COREML_TEST_T3 (the matching T3 GGUF); the
+// shape fixture reads CHATTERBOX_COREML_TEST_SHAPES (the directory
+// prepare_chatterbox_coreml_shape_fixture.py writes). Each reports a skip
+// (77) without its inputs or without Core ML.
 
 #include "chatterbox_coreml.h"
 #include "coreml_sidecar_path.h"
 #include "npy.h"
 #include "test_env_portable.h"
+#include "text_preprocess.h"
+#include "tts-cpp/chatterbox/engine.h"
 #include "tts-cpp/chatterbox/fit.h"
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace cb = tts_cpp::chatterbox::detail;
 namespace fs = std::filesystem;
+using tts_cpp::chatterbox::Engine;
+using tts_cpp::chatterbox::EngineOptions;
+using tts_cpp::chatterbox::SynthesisResult;
 
 namespace {
 
@@ -325,11 +342,235 @@ int stages_fixture() {
 #endif
 }
 
+// ---------------------------------------------------------- shape fixture --
+
+// The features each stage packs, as prepare_chatterbox_coreml_shape_fixture.py
+// writes them: good sidecars declare exactly these (encoder tokens_8, CFM
+// frames_16, HiFT window 32); `<stage>-<feature>` declares one of them with a
+// doubled leading dimension.
+const std::vector<std::pair<std::string, std::vector<std::string>>> SHAPE_FEATURES = {
+    {"encoder", {"embedding", "valid", "mu"}},
+    {"cfm", {"x", "mu", "cond", "spks", "t_emb", "valid", "velocity"}},
+    {"hift", {"mel", "source", "valid", "spectrum"}},
+};
+
+// One call of `stage` on inputs narrower than its function; true when served.
+bool serve(cb::s3gen_coreml & sidecars, const std::string & stage) {
+    std::mt19937 rng(3);
+    std::normal_distribution<float> noise(0.0f, 1.0f);
+    auto random = [&](size_t n) {
+        std::vector<float> v(n);
+        for (float & x : v) x = noise(rng);
+        return v;
+    };
+    if (stage == "encoder") {
+        constexpr int tokens = 6;
+        std::vector<float> mu;
+        const bool ok = sidecars.encode(random((size_t) tokens * 512), tokens, 2, mu);
+        require(!ok || mu.size() == (size_t) tokens * 2 * 80, "encoder output size");
+        return ok;
+    }
+    if (stage == "cfm") {
+        constexpr int frames = 12;
+        const auto x = random(80 * frames), mu = random(80 * frames), cond = random(80 * frames);
+        const auto spks = random(80), t_emb = random(1024);
+        std::vector<std::vector<float>> out;
+        // Like the pipeline: the CFG pair, of which a batch-1 sidecar uses the first.
+        const bool ok = sidecars.velocity(1, frames, {x.data(), x.data()}, {mu.data(), mu.data()},
+                                          {cond.data(), cond.data()}, {spks.data(), spks.data()},
+                                          {t_emb.data(), t_emb.data()}, out);
+        require(!ok || (out.size() == 1 && out[0].size() == (size_t) 80 * frames), "CFM output size");
+        return ok;
+    }
+    constexpr int frames = 40;  // two HiFT windows
+    const size_t stft = (size_t) frames * cb::HIFT_STFT_PER_FRAME + 1;
+    std::vector<float> spectrum;
+    const bool ok = sidecars.vocode(random((size_t) 80 * frames), frames, random(cb::HIFT_STFT_BINS * stft), spectrum);
+    require(!ok || spectrum.size() == cb::HIFT_STFT_BINS * stft, "HiFT output size");
+    return ok;
+}
+
+int shape_fixture() {
+#ifndef TTS_CPP_USE_COREML
+    std::puts("SKIP: built without TTS_CPP_COREML");
+    return SKIP;
+#else
+    const char * env = std::getenv("CHATTERBOX_COREML_TEST_SHAPES");
+    if (!env || !*env) {
+        std::puts("SKIP: CHATTERBOX_COREML_TEST_SHAPES is not set");
+        return SKIP;
+    }
+    const fs::path dir = env;
+    {
+        cb::s3gen_coreml good((dir / "good-s3gen.gguf").string(), "cpu_only");
+        for (const auto & [stage, features] : SHAPE_FEATURES) {
+            require(serve(good, stage), "the matching " + stage + " sidecar serves");
+        }
+    }
+    // The shared runner copies each feature by its declared shape, so every
+    // one must be rejected before predicting, not only the ones the old
+    // checks covered.
+    for (const auto & [stage, features] : SHAPE_FEATURES) {
+        for (const std::string & feature : features) {
+            const std::string stem = stage + "-" + feature + "-s3gen";
+            require(fs::exists(dir / (stem + "-" + stage + ".mlmodelc")), "fixture has " + stem);
+            cb::s3gen_coreml sidecars((dir / (stem + ".gguf")).string(), "cpu_only");
+            std::string error;
+            try {
+                serve(sidecars, stage);
+            } catch (const std::runtime_error & e) {
+                error = e.what();
+            }
+            std::printf("[%s %s] %s\n", stage.c_str(), feature.c_str(), error.c_str());
+            require(error.find("declares " + feature + " ") != std::string::npos,
+                    stage + " rejects a sidecar declaring a larger " + feature);
+        }
+    }
+    return 0;
+#endif
+}
+
+// --------------------------------------------------------- engine fixture --
+
+// Three segments at 60 bytes; with the CFM and HiFT sidecars present the
+// Engine renders each segment's S3Gen on a worker while T3 decodes the next.
+const char * OVERLAP_TEXT = "The quick brown fox jumps over the lazy dog. "
+                            "Core ML renders this sentence while the next one decodes. "
+                            "Every segment must come back in order.";
+constexpr int OVERLAP_SENTENCE_CHARS = 60;
+
+EngineOptions engine_options(const std::string & t3, const std::string & s3gen) {
+    EngineOptions opts;
+    opts.t3_gguf_path = t3;
+    opts.s3gen_gguf_path = s3gen;
+    opts.n_gpu_layers = 99;
+    opts.seed = 42;
+    opts.max_sentence_chars = OVERLAP_SENTENCE_CHARS;
+    return opts;
+}
+
+bool same_pcm(const std::vector<float> & a, const std::vector<float> & b) {
+    return a.size() == b.size() && !a.empty() && max_abs(a, b) == 0.0;
+}
+
+int engine_fixture() {
+#ifndef TTS_CPP_USE_COREML
+    std::puts("SKIP: built without TTS_CPP_COREML");
+    return SKIP;
+#else
+    const char * t3_env = std::getenv("CHATTERBOX_COREML_TEST_T3");
+    const char * s3gen_env = std::getenv("CHATTERBOX_COREML_TEST_S3GEN");
+    if (!t3_env || !*t3_env || !s3gen_env || !*s3gen_env) {
+        std::puts("SKIP: CHATTERBOX_COREML_TEST_T3 / CHATTERBOX_COREML_TEST_S3GEN are not set");
+        return SKIP;
+    }
+    const std::string t3 = t3_env, s3gen = s3gen_env;
+    for (const char * suffix : {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX}) {
+        if (!fs::exists(cb::coreml_stage_path(s3gen, suffix))) {
+            std::printf("SKIP: %s is missing\n", cb::coreml_stage_path(s3gen, suffix).c_str());
+            return SKIP;
+        }
+    }
+    env_guard units(cb::COREML_UNITS_ENV), strict(cb::COREML_STRICT_ENV), disabled(cb::COREML_DISABLE_ENV);
+    unsetenv(cb::COREML_UNITS_ENV);
+    unsetenv(cb::COREML_STRICT_ENV);
+    unsetenv(cb::COREML_DISABLE_ENV);
+    temp_dir root("engine");
+    const auto segments = tts_cpp::chatterbox::text_preprocess::split_text_for_tts(OVERLAP_TEXT,
+                                                                                   OVERLAP_SENTENCE_CHARS);
+    require(segments.size() == 3, "the overlap text splits into three segments");
+    require(cb::coreml_offloads_s3gen(s3gen, cb::resolve_coreml_policy("", std::nullopt)),
+            "the sidecars enable the sentence overlap");
+
+    // Overlapped synthesis equals the segments synthesized one call at a time
+    // (one segment never overlaps) and crossfaded in order, sample for sample:
+    // T3 and the CFM noise are seeded per segment, so only order can differ.
+    Engine engine(engine_options(t3, s3gen));
+    const SynthesisResult overlapped = engine.synthesize(OVERLAP_TEXT);
+    // Timed again once every function is compiled and loaded, so the cancel
+    // points below fall inside a warm request.
+    const auto t0 = std::chrono::steady_clock::now();
+    require(same_pcm(engine.synthesize(OVERLAP_TEXT).pcm, overlapped.pcm), "overlapped synthesis is repeatable");
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    std::vector<float> sequential;
+    std::set<std::string> backends;
+    int tokens = 0;
+    for (const std::string & segment : segments) {
+        const SynthesisResult one = engine.synthesize(segment);
+        tts_cpp::chatterbox::text_preprocess::append_pcm_crossfade(sequential, one.pcm, one.sample_rate,
+                                                                   engine.options().crossfade_ms);
+        backends.insert(one.s3gen_backend);
+        tokens += one.t3_tokens;
+    }
+    std::printf("[overlap] %zu samples in %.2f s, backend=%s, max |overlapped - sequential| = %.3e\n",
+                overlapped.pcm.size(), std::chrono::duration<double>(elapsed).count(),
+                overlapped.s3gen_backend.c_str(),
+                overlapped.pcm.size() == sequential.size() ? max_abs(overlapped.pcm, sequential) : -1.0);
+    require(backends == std::set<std::string>{"coreml-ane"} && overlapped.s3gen_backend == "coreml-ane",
+            "every segment and the aggregate report the Core ML backend");
+    require(overlapped.t3_tokens == tokens, "overlapped T3 token count matches the segments'");
+    require(same_pcm(overlapped.pcm, sequential), "overlapped PCM equals the in-order sequential PCM");
+
+    // Engine::cancel() at points across the request: each run either finishes
+    // or throws a cancellation (from T3, the S3Gen worker or the segment
+    // boundary), never anything else, and the next request is unaffected.
+    int cancelled = 0;
+    for (double fraction : {0.2, 0.45, 0.7}) {
+        std::thread canceller([&] {
+            std::this_thread::sleep_for(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed * fraction));
+            engine.cancel();
+        });
+        std::string error;
+        try {
+            engine.synthesize(OVERLAP_TEXT);
+        } catch (const std::runtime_error & e) {
+            error = e.what();
+        }
+        canceller.join();
+        std::printf("[cancel at %.0f%%] %s\n", fraction * 100, error.empty() ? "finished" : error.c_str());
+        require(error.empty() || error.find("cancelled") != std::string::npos, "a cancel surfaces as a cancellation");
+        cancelled += !error.empty();
+    }
+    require(cancelled > 0, "at least one cancel lands mid-request");
+    require(same_pcm(engine.synthesize(OVERLAP_TEXT).pcm, overlapped.pcm), "a cancelled engine synthesizes again");
+
+    // A CFM sidecar that cannot serve (here, a package without frames_*
+    // functions) still enables the overlap, so its failures surface on the
+    // worker: strict mode must rethrow the worker's error from synthesize(),
+    // and without strict the segments fall back to ggml CFM and aggregate
+    // as mixed.
+    const fs::path broken = stage_dir(root.path, s3gen, {cb::COREML_ENCODER_SUFFIX, cb::COREML_HIFT_SUFFIX}, "broken");
+    const std::string broken_gguf = (broken / fs::path(s3gen).filename()).string();
+    fs::create_directory_symlink(fs::absolute(cb::coreml_stage_path(s3gen, cb::COREML_HIFT_SUFFIX)),
+                                 cb::coreml_stage_path(broken_gguf, cb::COREML_CFM_SUFFIX));
+    EngineOptions strict_opts = engine_options(t3, broken_gguf);
+    strict_opts.coreml_strict = true;
+    std::string error;
+    try {
+        Engine(strict_opts).synthesize(OVERLAP_TEXT);
+    } catch (const std::runtime_error & e) {
+        error = e.what();
+    }
+    std::printf("[worker error] %s\n", error.c_str());
+    require(error.find("cannot serve") != std::string::npos, "the worker's strict-mode error reaches the caller");
+    EngineOptions lenient_opts = engine_options(t3, broken_gguf);
+    lenient_opts.coreml_strict = false;
+    const SynthesisResult mixed = Engine(lenient_opts).synthesize(OVERLAP_TEXT);
+    std::printf("[fallback] %zu samples, backend=%s\n", mixed.pcm.size(), mixed.s3gen_backend.c_str());
+    require(!mixed.pcm.empty() && mixed.s3gen_backend == cb::MIXED_STAGE_BACKEND,
+            "a CFM fallback on the worker aggregates as mixed");
+    s3gen_unload();
+    return 0;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--stages-fixture") return stages_fixture();
+        if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
+        if (argc > 1 && std::string(argv[1]) == "--engine-fixture") return engine_fixture();
         check_policy();
         check_naming();
         check_buckets();

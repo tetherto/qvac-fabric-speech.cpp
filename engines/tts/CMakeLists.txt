@@ -1551,7 +1551,10 @@ if (TTS_CPP_BUILD_TESTS)
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # Chatterbox S3Gen Core ML sidecars: policy/naming/windows/fit refusal
-    # always; per-stage parity against ggml with CHATTERBOX_COREML_TEST_S3GEN.
+    # always; per-stage parity against ggml with CHATTERBOX_COREML_TEST_S3GEN,
+    # the Engine sentence overlap with CHATTERBOX_COREML_TEST_T3 as well, and
+    # the feature-shape checks with CHATTERBOX_COREML_TEST_SHAPES (written by
+    # test/prepare_chatterbox_coreml_shape_fixture.py).
     add_executable(test-chatterbox-coreml test/test_chatterbox_coreml.cpp)
     target_link_libraries(test-chatterbox-coreml PRIVATE tts-cpp)
     target_include_directories(test-chatterbox-coreml PRIVATE src include)
@@ -1562,7 +1565,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-chatterbox-coreml LABEL "unit")
     tts_cpp_register_test(test-chatterbox-coreml-stages
         EXE test-chatterbox-coreml LABEL "fixture" ARGS "--stages-fixture")
-    set_tests_properties(test-chatterbox-coreml-stages PROPERTIES SKIP_RETURN_CODE 77)
+    tts_cpp_register_test(test-chatterbox-coreml-shapes
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--shape-fixture")
+    tts_cpp_register_test(test-chatterbox-coreml-engine
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--engine-fixture")
+    set_tests_properties(test-chatterbox-coreml-stages test-chatterbox-coreml-shapes test-chatterbox-coreml-engine
+        PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test-cosyvoice-load test/test_cosyvoice_load.cpp ${_tcb_cosy_core_srcs})
     target_link_libraries(test-cosyvoice-load PRIVATE ggml)

@@ -31,8 +31,56 @@ std::vector<int64_t> dims_of(moss_coreml_model * model, const char * name) {
     return std::vector<int64_t>(dims, dims + std::max(rank, 0));
 }
 
-void predict(moss_coreml_model * model, std::vector<const char *> in_names, std::vector<const float *> in_data,
-             std::vector<const char *> out_names, std::vector<float *> out_data, const char * stage) {
+std::string dims_text(const std::vector<int64_t> & dims) {
+    std::ostringstream text;
+    text << '[';
+    for (size_t i = 0; i < dims.size(); ++i) text << (i ? ", " : "") << dims[i];
+    text << ']';
+    return text.str();
+}
+
+// One prediction feature: its name, the shape this call packs it as, and a
+// buffer of exactly that many floats.
+struct input_feature {
+    const char * name;
+    std::vector<int64_t> dims;
+    const std::vector<float> * data;
+};
+struct output_feature {
+    const char * name;
+    std::vector<int64_t> dims;
+    std::vector<float> * data;
+};
+
+// The shared runner copies every feature by the shape the model declares, so
+// a sidecar declaring any other shape than the buffer packed for it would be
+// read or written out of bounds. Every feature is checked first; a mismatch
+// is an incompatible export and throws, which retires the stage (or fails a
+// strict call) before anything is copied.
+void predict(moss_coreml_model * model, const std::vector<input_feature> & inputs,
+             const std::vector<output_feature> & outputs, const char * stage) {
+    auto check = [&](const char * name, const std::vector<int64_t> & dims, size_t size) {
+        const std::vector<int64_t> declared = dims_of(model, name);
+        int64_t elements = 1;
+        for (int64_t d : dims) elements *= d;
+        if (declared != dims || (int64_t) size != elements) {
+            throw std::runtime_error(std::string("chatterbox: the Core ML ") + stage + " sidecar declares " + name +
+                                     " " + dims_text(declared) + " where this call packs " + dims_text(dims));
+        }
+    };
+    std::vector<const char *> in_names, out_names;
+    std::vector<const float *> in_data;
+    std::vector<float *> out_data;
+    for (const input_feature & f : inputs) {
+        check(f.name, f.dims, f.data->size());
+        in_names.push_back(f.name);
+        in_data.push_back(f.data->data());
+    }
+    for (const output_feature & f : outputs) {
+        check(f.name, f.dims, f.data->size());
+        out_names.push_back(f.name);
+        out_data.push_back(f.data->data());
+    }
     if (moss_coreml_predict(model, in_names.data(), in_data.data(), (int) in_names.size(), out_names.data(),
                             out_data.data(), (int) out_names.size()) != 0) {
         throw std::runtime_error(std::string("chatterbox: Core ML ") + stage + " prediction failed");
@@ -277,15 +325,14 @@ bool s3gen_coreml::encode(const std::vector<float> & embedding, int tokens, int 
     if (width < 0) return false;
     auto model = model_for(ENCODER, width);
     if (!model) return false;
-    const std::vector<int64_t> want_in = {1, width, EMBED};
-    const std::vector<int64_t> want_out = {1, (int64_t) width * ratio, MEL};
-    if (dims_of(model.get(), "embedding") != want_in || dims_of(model.get(), "mu") != want_out) return false;
     std::vector<float> padded((size_t) width * EMBED, 0.0f);
     std::copy(embedding.begin(), embedding.end(), padded.begin());
     std::vector<float> valid((size_t) width, 0.0f);
     std::fill(valid.begin(), valid.begin() + tokens, 1.0f);
     std::vector<float> out((size_t) width * ratio * MEL);
-    predict(model.get(), {"embedding", "valid"}, {padded.data(), valid.data()}, {"mu"}, {out.data()}, "encoder");
+    predict(model.get(),
+            {{"embedding", {1, width, EMBED}, &padded}, {"valid", {1, 1, width}, &valid}},
+            {{"mu", {1, (int64_t) width * ratio, MEL}, &out}}, "encoder");
     out.resize((size_t) tokens * ratio * MEL);
     require_finite(out, "encoder");
     mu = std::move(out);
@@ -304,7 +351,12 @@ bool s3gen_coreml::velocity(int batch, int frames, const std::vector<const float
                             const std::vector<const float *> & spks, const std::vector<const float *> & t_emb,
                             std::vector<std::vector<float>> & out) {
 #ifdef TTS_CPP_USE_COREML
-    if (!available(CFM) || frames <= 0 || batch <= 0) return false;
+    // Callers pass the CFG pair; a batch-1 (meanflow) sidecar uses the first.
+    const size_t planes = (size_t) std::max(batch, 0);
+    if (!available(CFM) || frames <= 0 || batch <= 0 || x.size() < planes || mu.size() < planes ||
+        cond.size() < planes || spks.size() < planes || t_emb.size() < planes) {
+        return false;
+    }
     int width = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -314,10 +366,6 @@ bool s3gen_coreml::velocity(int batch, int frames, const std::vector<const float
     auto model = model_for(CFM, width);
     if (!model) return false;
     const std::vector<int64_t> plane = {batch, MEL, width};
-    if (dims_of(model.get(), "x") != plane || dims_of(model.get(), "velocity") != plane ||
-        dims_of(model.get(), "t_emb") != std::vector<int64_t>{batch, TIME_EMBED}) {
-        return false;
-    }
     const size_t plane_size = (size_t) MEL * width;
     auto pack = [&](const std::vector<const float *> & planes) {
         std::vector<float> packed((size_t) batch * plane_size, 0.0f);
@@ -340,9 +388,10 @@ bool s3gen_coreml::velocity(int batch, int frames, const std::vector<const float
     std::vector<float> valid((size_t) width, 0.0f);
     std::fill(valid.begin(), valid.begin() + frames, 1.0f);
     std::vector<float> velocity((size_t) batch * plane_size);
-    predict(model.get(), {"x", "mu", "cond", "spks", "t_emb", "valid"},
-            {xs.data(), mus.data(), conds.data(), speakers.data(), times.data(), valid.data()}, {"velocity"},
-            {velocity.data()}, "CFM");
+    predict(model.get(),
+            {{"x", plane, &xs}, {"mu", plane, &mus}, {"cond", plane, &conds}, {"spks", {batch, MEL}, &speakers},
+             {"t_emb", {batch, TIME_EMBED}, &times}, {"valid", {1, 1, width}, &valid}},
+            {{"velocity", plane, &velocity}}, "CFM");
     out.assign(batch, std::vector<float>((size_t) MEL * frames));
     for (int b = 0; b < batch; ++b) {
         for (int m = 0; m < MEL; ++m) {
@@ -375,15 +424,16 @@ bool s3gen_coreml::vocode(const std::vector<float> & mel, int frames, const std:
     }
     auto model = model_for(HIFT, 0);
     if (!model) return false;
+    // The window is the sidecar's; predict() checks every feature against it.
     const std::vector<int64_t> mel_dims = dims_of(model.get(), "mel");
-    if (mel_dims.size() != 3 || mel_dims[0] != 1 || mel_dims[1] != MEL) return false;
-    const int window = (int) mel_dims[2];
-    const int64_t window_stft = (int64_t) window * HIFT_STFT_PER_FRAME + 1;
-    if (dims_of(model.get(), "source") != std::vector<int64_t>{1, HIFT_STFT_BINS, window_stft} ||
-        dims_of(model.get(), "spectrum") != std::vector<int64_t>{1, HIFT_STFT_BINS, window_stft} ||
-        window <= 2 * HIFT_CONTEXT_FRAMES) {
-        return false;
+    const int window = mel_dims.size() == 3 ? (int) mel_dims[2] : 0;
+    if (window <= 2 * HIFT_CONTEXT_FRAMES) {
+        throw std::runtime_error("chatterbox: the Core ML HiFT sidecar declares mel " + dims_text(mel_dims) +
+                                 ", narrower than its " + std::to_string(2 * HIFT_CONTEXT_FRAMES) +
+                                 " context frames");
     }
+    const int64_t window_stft = (int64_t) window * HIFT_STFT_PER_FRAME + 1;
+    const std::vector<int64_t> spectrum_dims = {1, HIFT_STFT_BINS, window_stft};
     std::vector<float> mel_in((size_t) MEL * window), source_in((size_t) HIFT_STFT_BINS * window_stft);
     std::vector<float> valid((size_t) window), out((size_t) HIFT_STFT_BINS * window_stft);
     std::vector<float> result((size_t) HIFT_STFT_BINS * stft, 0.0f);
@@ -403,8 +453,10 @@ bool s3gen_coreml::vocode(const std::vector<float> & mel, int frames, const std:
             std::memcpy(source_in.data() + (size_t) c * window_stft,
                         source_stft.data() + (size_t) c * stft + source_start, (size_t) source_count * sizeof(float));
         }
-        predict(model.get(), {"mel", "source", "valid"}, {mel_in.data(), source_in.data(), valid.data()},
-                {"spectrum"}, {out.data()}, "HiFT");
+        predict(model.get(),
+                {{"mel", {1, MEL, window}, &mel_in}, {"source", spectrum_dims, &source_in},
+                 {"valid", {1, 1, window}, &valid}},
+                {{"spectrum", spectrum_dims, &out}}, "HiFT");
         const int64_t keep_begin = (int64_t) (w.keep_begin - w.start) * HIFT_STFT_PER_FRAME;
         const int64_t keep_count = (int64_t) (w.keep_end - w.keep_begin) * HIFT_STFT_PER_FRAME +
                                    (w.keep_end == frames ? 1 : 0);

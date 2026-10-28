@@ -109,10 +109,12 @@ for the Parler and Audio8 sidecars.
 `CHATTERBOX_COREML_COMPUTE_UNITS` (or `EngineOptions::coreml_compute_units`)
 accepts `cpu_and_ane` (default), `all`, `cpu_and_gpu` and `cpu_only`;
 `cpu_and_ane` measured fastest for every stage and keeps the GPU for T3.
-`CHATTERBOX_COREML_DISABLE` keeps every stage on ggml. A sidecar that fails a
-prediction is retired and ggml takes over; `CHATTERBOX_COREML_STRICT` (or
-`EngineOptions::coreml_strict`) makes that, or an input past the widest
-function, an error instead. `SynthesisResult::s3gen_backend` reports `ggml`,
+`CHATTERBOX_COREML_DISABLE` keeps every stage on ggml. Before each prediction
+every input and output shape the sidecar declares is checked against what the
+call packs; a sidecar that declares another shape (an incompatible export, or
+the other variant's sidecar) or fails a prediction is retired and ggml takes
+over. `CHATTERBOX_COREML_STRICT` (or `EngineOptions::coreml_strict`) makes
+that, or an input past the widest function, an error instead. `SynthesisResult::s3gen_backend` reports `ggml`,
 the sidecar label (`coreml-ane`, ...) when every stage of the call ran on
 Core ML, or `mixed`.
 
@@ -179,9 +181,17 @@ prediction buffers. `CHATTERBOX_COREML_DISABLE=1` restores it.
 HiFT window plan and the fit refusal without models;
 `test/test_export_chatterbox_coreml.py` checks the rebuild on random weights
 (padding equivalence, the window walk against a whole decode, the respelled
-convolutions and Snake). `test-chatterbox-coreml-stages` reads
-`CHATTERBOX_COREML_TEST_S3GEN` (an S3Gen GGUF with its exported sidecars) and
-reports a skip without it.
+convolutions and Snake). `test-chatterbox-coreml-shapes` loads tiny sidecars
+from `test/prepare_chatterbox_coreml_shape_fixture.py`
+(`CHATTERBOX_COREML_TEST_SHAPES`) and checks that one declaring any feature
+larger than the runtime packs it is rejected before prediction.
+`test-chatterbox-coreml-stages` reads `CHATTERBOX_COREML_TEST_S3GEN` (an S3Gen
+GGUF with its exported sidecars); `test-chatterbox-coreml-engine` also reads
+`CHATTERBOX_COREML_TEST_T3` and checks the `Engine` sentence overlap: PCM
+identical to the segments synthesized one call at a time and crossfaded in
+order, the aggregated backend, cancellation mid-request, and a worker's
+strict-mode error reaching the caller. Each reports a skip without its inputs.
+The macOS CI lane runs the exporter and shape checks.
 
 ### Adreno OpenCL
 

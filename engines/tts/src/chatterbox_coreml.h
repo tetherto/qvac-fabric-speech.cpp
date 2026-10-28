@@ -119,8 +119,11 @@ public:
     const std::string & compute_units() const { return units_; }
 
     // Each returns false when its sidecar cannot serve the call (absent,
-    // retired, no wide-enough function, mismatched batch); the caller then
-    // runs ggml. A failing prediction throws std::runtime_error.
+    // retired, no wide-enough function); the caller then runs ggml. Every
+    // input and output shape the sidecar declares is checked against the
+    // buffers the call packs before anything is copied: a mismatch (an
+    // incompatible export, or the other variant's sidecar) throws
+    // std::runtime_error, as does a failing prediction.
 
     // embedding: [tokens, 512] row-major -> mu: [tokens * ratio, 80].
     bool encode(const std::vector<float> & embedding, int tokens, int ratio, std::vector<float> & mu);
