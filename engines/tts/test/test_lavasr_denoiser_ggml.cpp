@@ -1021,7 +1021,7 @@ static void test_gpu_e2e_synthetic() {
 }
 
 // Always-on chunk-batch consistency on the synthetic model (style of test_batch).
-static void test_batch_synthetic() {
+static void test_batch_synthetic(bool portable = false) {
     std::mt19937    rng(20260710);
     DenoiserWeights w = make_synthetic_denoiser_weights(rng);
     const int       L = w.chunk_frames, F = w.spec_bins, N = 3;
@@ -1031,7 +1031,7 @@ static void test_batch_synthetic() {
     };
     std::vector<float> re((size_t) N * L * F), im((size_t) N * L * F);
     df(re); df(im);
-    auto g = tts_cpp::lavasr::DenoiserGgml::create(w, -1);
+    auto g = tts_cpp::lavasr::DenoiserGgml::create(w, -1, false, portable);
     std::vector<float> br, bi;
     g->batch_forward(re, im, L, N, br, bi);
     float m = 0.0f;
@@ -1045,7 +1045,7 @@ static void test_batch_synthetic() {
             m = std::max(m, std::fabs(bi[(size_t) c * L * F + i] - si[i]));
         }
     }
-    std::printf("batch-consistency synthetic (N=%d): max_abs=%.3e\n", N, m);
+    std::printf("batch-consistency synthetic (N=%d, portable=%d): max_abs=%.3e\n", N, portable, m);
     CHECK(m < 1e-4f, "synthetic batch_forward matches per-chunk chunk_forward");
 }
 
@@ -1112,6 +1112,7 @@ int main(int argc, char ** argv) {
     test_e2e_synthetic(-1, true);
     test_gpu_e2e_synthetic();
     test_batch_synthetic();
+    test_batch_synthetic(true);
     test_pipeline_batch_parity();
     if (argc > 1) { test_e2e(argv[1]); test_batch(argv[1]); }
     if (g_failures == 0) {

@@ -103,7 +103,8 @@ std::unique_ptr<Enhancer> Enhancer::load(const std::string & gguf_path,
                              "backend; falling back to the scalar CPU core\n",
                              bn ? bn : "?");
             }
-            if (opts.use_gpu && std::getenv("TTS_CPP_GPU_BACKEND")) {
+            const char * forced_backend = std::getenv("TTS_CPP_GPU_BACKEND");
+            if (opts.use_gpu && forced_backend && *forced_backend) {
                 throw std::runtime_error("lavasr-enhancer: requested backend graph creation failed");
             }
         }

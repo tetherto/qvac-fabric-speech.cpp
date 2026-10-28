@@ -81,6 +81,14 @@ libraries in its deployment. `--backend hexagon` pins `HTP0`. Legacy
 remain available with `--backend auto`. The existing automatic GPU preference
 is preserved; Hexagon is an explicit engine capability.
 
+For the F32 Hexagon checks, use `qvac-ext-ggml@speech` revision
+`380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`, including its speech kernels and
+F32-precision matmul routing. Build that revision with Hexagon enabled, use its
+installed CMake package through `CMAKE_PREFIX_PATH`, and deploy the DSP skel
+from the same build. The older bundled pin in `scripts/setup-ggml.sh` is not
+the dependency used for these Hexagon checks. Record the resolved revision
+when using another shared GGML build.
+
 Both F32 and F16 GGUF inputs are supported. The current loaders expand F16
 weights to F32, and the neural graphs retain F32 tensors and F32-precision
 matrix multiplication. On Hexagon those products use HVX rather than F16 HMX.

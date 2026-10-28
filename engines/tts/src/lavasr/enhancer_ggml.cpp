@@ -529,8 +529,9 @@ std::vector<float> enhance(const EnhancerWeights & w, EnhancerGgml * gpu,
         [gpu, &w](const std::vector<float> & mel, int T, std::vector<float> & real,
                   std::vector<float> & imag) {
             if (!enhancer_ggml_spec_forward(gpu, mel, T, real, imag)) {
+                const char * forced_backend = std::getenv("TTS_CPP_GPU_BACKEND");
                 if (::tts_cpp::detail::backend_is_hexagon(gpu->backend) ||
-                    std::getenv("TTS_CPP_GPU_BACKEND")) {
+                    (forced_backend && *forced_backend)) {
                     throw std::runtime_error("lavasr enhancer: requested backend forward failed");
                 }
                 // Robustness: a runtime backend failure falls back to the
