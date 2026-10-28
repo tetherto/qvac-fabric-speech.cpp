@@ -446,6 +446,68 @@ static void test_shuffle2() {
     }
 }
 
+static void test_shuffle2_portable() {
+    struct Shape { int F, T, C, Bc; };
+    const Shape shapes[] = {{3, 5, 2, 2}, {5, 3, 6, 3}, {5, 7, 12, 3},
+                            {3, 9, 24, 2}, {7, 5, 32, 3},
+                            {65, 63, 24, 7}, {65, 63, 48, 7}};
+    for (const Shape & s : shapes) {
+        for (bool strided : {false, true}) {
+            ggml_init_params params{size_t(64) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            ggml_tensor * x;
+            if (strided) {
+                ggml_tensor * storage = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
+                    s.F + 2, s.T + 1, s.C + 2, s.Bc + 1);
+                x = ggml_view_4d(ctx, storage, s.F, s.T, s.C, s.Bc,
+                                  storage->nb[1], storage->nb[2], storage->nb[3], sizeof(float));
+            } else {
+                x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F, s.T, s.C, s.Bc);
+            }
+            const size_t count = size_t(s.F) * s.T * s.C * s.Bc;
+            std::vector<float> tagged(count), expected(count);
+            for (size_t i = 0; i < count; ++i) {
+                // Distinct exactly representable tags across all four axes,
+                // including negative zero which an arithmetic copy could lose.
+                tagged[i] = i == 0 ? -0.0f : float(i) * (i % 2 ? -1.0f : 1.0f);
+            }
+            for (int b = 0; b < s.Bc; ++b)
+                for (int c = 0; c < s.C; ++c)
+                    for (int t = 0; t < s.T; ++t)
+                        for (int f = 0; f < s.F; ++f) {
+                            const size_t i = ((size_t(b) * s.C + c) * s.T + t) * s.F + f;
+                            std::memcpy(static_cast<char *>(x->data) + size_t(f) * x->nb[0] +
+                                size_t(t) * x->nb[1] + size_t(c) * x->nb[2] + size_t(b) * x->nb[3],
+                                &tagged[i], sizeof(float));
+                            const int source_c = (c % 2) * (s.C / 2) + c / 2;
+                            expected[i] = tagged[((size_t(b) * s.C + source_c) * s.T + t) * s.F + f];
+                        }
+            ggml_tensor * y = detail::shuffle2(ctx, x, false, true);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            ggml_build_forward_expand(graph, y);
+            int copies = 0, plane_copies = 0;
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                ggml_tensor * node = ggml_graph_node(graph, i);
+                if (node->op == GGML_OP_CONT) {
+                    ++copies;
+                    if (node->src[0]->op == GGML_OP_PERMUTE && node->ne[0] == int64_t(s.F) * s.T)
+                        ++plane_copies;
+                }
+            }
+            CHECK(copies == (strided ? 2 : 1), "portable shuffle only normalizes input and copies channel planes");
+            CHECK(plane_copies == 1, "portable shuffle preserves F*T as its contiguous copy width");
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 1) == GGML_STATUS_SUCCESS,
+                  "portable shuffle graph computes successfully");
+            CHECK(ggml_nelements(y) == int64_t(count) && y->ne[0] == s.F &&
+                  y->ne[1] == s.T && y->ne[2] == s.C && y->ne[3] == s.Bc,
+                  "portable shuffle retains all four dimensions");
+            CHECK(std::memcmp(y->data, expected.data(), count * sizeof(float)) == 0,
+                  "portable shuffle is bit-exact for batches, spatial positions and signed zero");
+            ggml_free(ctx);
+        }
+    }
+}
+
 // ---- DPGRNN parity: scalar reference (denoiser_core.cpp dpgrnn) vs detail::dpgrnn ----
 #include <map>
 #include <string>
@@ -1106,6 +1168,7 @@ int main(int argc, char ** argv) {
     test_conv_transpose2d();
     test_affine_prelu();
     test_shuffle2();
+    test_shuffle2_portable();
     test_dpgrnn();
     test_ctfa();
     test_e2e_synthetic();

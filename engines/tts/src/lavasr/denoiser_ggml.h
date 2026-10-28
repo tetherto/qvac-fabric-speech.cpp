@@ -42,7 +42,9 @@ ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw
                            ggml_tensor * ab, ggml_tensor * slope, bool fused = true);
 
 // Channel shuffle (2 groups): o[2c]=x[c], o[2c+1]=x[half+c].  x:[F,T,C,Bc].
-ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused = true);
+// The portable fallback copies whole F*T planes, preserving chunk batches.
+ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused = true,
+                        bool portable = false);
 
 // Resolves a weight tensor by name; returns nullptr if absent (mirrors Runner::Wopt).
 using WResolver = std::function<ggml_tensor *(const std::string &)>;

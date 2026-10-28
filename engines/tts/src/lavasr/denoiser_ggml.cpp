@@ -334,11 +334,18 @@ ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw
     return ggml_add(ctx, affine, prelu);
 }
 
-// Channel shuffle (2 groups): o[2c]=x[c], o[2c+1]=x[half+c].  x:[F,T,C,Bc].  The
-// non-channel axes fold to one so the (group,idx) transpose fits ggml's 4D limit.
-ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused) {
+// Channel shuffle (2 groups): o[2c]=x[c], o[2c+1]=x[half+c].  x:[F,T,C,Bc].
+ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused, bool portable) {
     if (fused) return ggml_channel_shuffle(ctx, x, 2);  // one plane-copy op vs 3 permute-conts
     const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3], half = C / 2;
+    if (portable) {
+        // Channel planes already contain contiguous F*T samples. Swap only
+        // the group/channel axes, avoiding tiny-ne0 transposes on HTP.
+        ggml_tensor * r = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
+        r = ggml_reshape_4d(ctx, r, F * T, half, 2, Bc);
+        r = ggml_cont(ctx, ggml_permute(ctx, r, 0, 2, 1, 3)); // [F*T, 2, half, Bc]
+        return ggml_reshape_4d(ctx, r, F, T, C, Bc);
+    }
     const int64_t S  = T * F * Bc;
     ggml_tensor * xc = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));                 // [C, T, F, Bc]
     ggml_tensor * r  = ggml_reshape_3d(ctx, xc, half, 2, S);                             // [half, 2, T*F*Bc]
@@ -369,14 +376,14 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         h               = bn(h, base + ".ops.2");
         if (!is_last) h = ap(h, base + ".ops.3");
         h               = ctfa(ctx, h, base + ".ops.4", W, r, fused, gf, portable);
-        if (!is_last && groups == 2) h = shuffle2(ctx, h, fused);
+        if (!is_last && groups == 2) h = shuffle2(ctx, h, fused, portable);
         return h;
     }
     if (type == 1) { // XDWS: pconv(1x1) + depthwise dconv
         ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv.0.weight"), W(base + ".pconv.0.bias"), 1, 0, groups, fused, portable);
         h               = bn(h, base + ".pconv.1");
         h               = ap(h, base + ".pconv.2");
-        if (groups == 2) h = shuffle2(ctx, h, fused);
+        if (groups == 2) h = shuffle2(ctx, h, fused, portable);
         h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise (groups == channels)
         h = bn(h, base + ".dconv.2");
         if (!is_last) h = ap(h, base + ".dconv.3");
@@ -386,7 +393,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
     ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused, portable);
     h               = bn(h, base + ".pconv1.1");
     h               = ap(h, base + ".pconv1.2");
-    if (groups == 2) h = shuffle2(ctx, h, fused);
+    if (groups == 2) h = shuffle2(ctx, h, fused, portable);
     h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise
     h = bn(h, base + ".dconv.2");
     h = ap(h, base + ".dconv.3");
@@ -394,7 +401,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
     h = bn(h, base + ".pconv2.1");
     h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf, portable);
     if (h->ne[0] == x->ne[0] && h->ne[1] == x->ne[1] && h->ne[2] == x->ne[2]) h = ggml_add(ctx, h, x);
-    if (!is_last && groups == 2) h = shuffle2(ctx, h, fused);
+    if (!is_last && groups == 2) h = shuffle2(ctx, h, fused, portable);
     return h;
 }
 
