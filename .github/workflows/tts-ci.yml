@@ -489,6 +489,21 @@ jobs:
           done
           exit "$routing_status"
 
+      # Chatterbox S3Gen Core ML rebuild: padding/masking equivalence, the
+      # HiFT window walk against a whole decode, the Neural Engine conv and
+      # Snake spellings, and a Core ML conversion of a reduced encoder, all on
+      # random weights (no download). Stage parity on the real checkpoints is
+      # test-chatterbox-coreml-stages (CHATTERBOX_COREML_TEST_S3GEN).
+      - name: Test (Core ML Chatterbox S3Gen exporter)
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-chatterbox-coreml
+          .venv-chatterbox-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-chatterbox-coreml/bin/python engines/tts/test/test_export_chatterbox_coreml.py -v
+
       # Core ML Parler DAC sidecar on a tiny random-weight Parler GGUF built
       # in place (no download): the sidecar is exported by the repo's
       # exporter with rows folded at 64 samples so the tiny decoder still
