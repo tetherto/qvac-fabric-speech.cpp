@@ -1,7 +1,7 @@
 #pragma once
 
 // LavaSR enhancer — GGML compute-graph forward (GPU: Vulkan / Metal / CUDA /
-// OpenCL, and ggml-cpu).  This is the GPU-capable counterpart of the scalar
+// OpenCL / Hexagon, and ggml-cpu). This is the accelerated counterpart of the scalar
 // enhancer_core forward; the two are kept bit-comparable (within f32 tolerance)
 // so the scalar path stays as the correctness oracle and the CPU fallback.
 //
@@ -49,9 +49,9 @@ bool enhancer_ggml_spec_forward(EnhancerGgml * g,
 
 // Full enhance() pipeline routed through the GPU/GGML neural core.  Shares the
 // scalar DSP pipeline (resample -> mel -> [core] -> ISTFT -> FastLR); only the
-// backbone + spec head run on `gpu`.  Falls back to the scalar core for the
-// spec forward if the graph compute fails at runtime.  With gpu == nullptr this
-// is identical to the scalar enhance().
+// backbone + spec head run on `gpu`. Explicit backend requests and HTP fail
+// closed on runtime errors; automatic GPU selection keeps the scalar fallback.
+// With gpu == nullptr this is identical to the scalar enhance().
 std::vector<float> enhance(const EnhancerWeights & w, EnhancerGgml * gpu,
                            const std::vector<float> & pcm_in, int sr_in);
 

@@ -10,6 +10,7 @@
 #include "ggml-backend.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 
@@ -82,9 +83,10 @@ std::unique_ptr<Enhancer> Enhancer::load(const std::string & gguf_path,
     }
 
     if (backend) {
+        std::unique_ptr<ggml_backend, void (*)(ggml_backend_t)> owner(backend, ggml_backend_free);
         EnhancerGgml * graph = enhancer_ggml_create(e->impl_->weights, backend);
         if (graph) {
-            e->impl_->backend      = backend;
+            e->impl_->backend      = owner.release();
             e->impl_->graph        = graph;
             e->impl_->device       = device;
             const char * bn        = ggml_backend_name(backend);
@@ -101,7 +103,9 @@ std::unique_ptr<Enhancer> Enhancer::load(const std::string & gguf_path,
                              "backend; falling back to the scalar CPU core\n",
                              bn ? bn : "?");
             }
-            ggml_backend_free(backend);
+            if (opts.use_gpu && std::getenv("TTS_CPP_GPU_BACKEND")) {
+                throw std::runtime_error("lavasr-enhancer: requested backend graph creation failed");
+            }
         }
     }
 

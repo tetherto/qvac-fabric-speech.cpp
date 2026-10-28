@@ -5,12 +5,13 @@
 namespace tts_cpp::lavasr {
 
 // LavaSR runs its graphs directly on the selected backend, with no per-op CPU
-// fallback, so only backends that implement its whole op set may be picked:
-// WebGPU lacks MEAN and would abort the denoiser.
+// fallback. Hexagon uses F32 graph decompositions for the denoiser's fused
+// operations; WebGPU is not validated for either neural graph.
 inline ::tts_cpp::detail::GpuBackendRequirement gpu_requirement() {
     using ::tts_cpp::detail::GpuBackendRequirement;
     return GpuBackendRequirement::Vulkan | GpuBackendRequirement::Metal |
-           GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA;
+           GpuBackendRequirement::OpenCL | GpuBackendRequirement::CUDA |
+           GpuBackendRequirement::Hexagon;
 }
 
 } // namespace tts_cpp::lavasr

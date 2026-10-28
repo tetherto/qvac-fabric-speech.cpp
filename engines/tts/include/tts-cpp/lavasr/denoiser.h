@@ -24,7 +24,8 @@
 //     // ...then optionally Enhancer::enhance() bandwidth-extends to 48 kHz.
 //
 // Like Enhancer, the Denoiser is immutable after load and safe to share across
-// threads for concurrent denoise() calls (it holds only const weights).
+// threads for concurrent denoise() calls. Graph-backed calls serialize the
+// reusable allocator; the scalar path holds only const weights.
 
 #include "tts-cpp/export.h"
 

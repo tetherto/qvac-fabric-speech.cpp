@@ -28,12 +28,14 @@ ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih
 // Grouped/depthwise 2-D conv, causal in time, symmetric freq pad, freq stride only.
 // x:[F,T,Cin], W:[kf,kt,Cin/g,Cout] (PyTorch [Cout,Cin/g,kt,kf]) -> [Fout,T,Cout].
 ggml_tensor * conv2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * W,
-                     ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true);
+                     ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true,
+                     bool portable = false);
 
 // Transposed 2-D conv (decoder freq-upsampler) = zero-insert freq-upsample + causal conv2d.
 // Wc is the pre-reindexed regular-conv kernel; x:[F,T,Cin] -> [(F-1)*stride_f+kf-2*pad_f,T,Cout].
 ggml_tensor * conv_transpose2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wc,
-                               ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true);
+                               ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true,
+                               bool portable = false);
 
 // Per-(c,f) affine + per-channel PReLU.  aw,ab: ggml [F,C] (PyTorch [C,F]); slope:[C].
 ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw,
@@ -56,16 +58,19 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
 // multiplies come out adjacent (lets the backend fuse the pair).
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
                    const WResolver & W, int freq_comp_ratio, bool fused = true,
-                   ggml_cgraph * gf = nullptr);
+                   ggml_cgraph * gf = nullptr, bool portable = false);
 
 } // namespace detail
 
 class DenoiserGgml {
 public:
     // Build the backend + upload weights.  n_gpu_layers: >0 = GPU (Adreno OpenCL,
-    // CPU fallback), <0 = ggml-CPU (the CPU counterpart of the GPU graph).  Throws.
+    // CPU fallback), <0 = ggml-CPU (the CPU counterpart of the GPU graph). The
+    // portable graph uses HTP-supported F32 decompositions and is selectable on
+    // CPU for parity tests; HTP always enables it. Throws.
     static std::unique_ptr<DenoiserGgml> create(const DenoiserWeights & w,
-                                                int n_gpu_layers, bool verbose = false);
+                                                int n_gpu_layers, bool verbose = false,
+                                                bool portable_graph = false);
     ~DenoiserGgml();
     DenoiserGgml(const DenoiserGgml &)             = delete;
     DenoiserGgml & operator=(const DenoiserGgml &) = delete;

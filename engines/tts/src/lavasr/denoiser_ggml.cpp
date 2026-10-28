@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <map>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -88,16 +89,29 @@ ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih
 }
 
 ggml_tensor * conv2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * W,
-                     ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused) {
+                     ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused,
+                     bool portable) {
     const int64_t kf = W->ne[0], kt = W->ne[1], Cing = W->ne[2], Cout = W->ne[3];
     const int64_t T  = x->ne[1];
     // Fold both pads INTO the conv (bit-identical to an explicit zero-pad): symmetric freq pad,
     // causal time via symmetric p1=kt-1 then keep the first T frames.
     const int     tp = (int) (kt - 1);
+    auto convolution = [&](ggml_tensor * kernel, ggml_tensor * input) {
+        if (!portable) return ggml_conv_2d_direct(ctx, kernel, input, stride_f, 1, pad_f, tp, 1, 1);
+        // HTP has IM2COL and F32 matmul, but no direct CONV_2D. Keep the
+        // columns and product in F32, matching the direct CPU reference.
+        ggml_tensor * cols = ggml_im2col(ctx, kernel, input, stride_f, 1, pad_f, tp, 1, 1,
+                                         true, GGML_TYPE_F32);
+        ggml_tensor * product = mul_mat_f32(ctx,
+            ggml_reshape_2d(ctx, cols, cols->ne[0], cols->ne[1] * cols->ne[2] * cols->ne[3]),
+            ggml_reshape_2d(ctx, kernel, kernel->ne[0] * kernel->ne[1] * kernel->ne[2], kernel->ne[3]));
+        product = ggml_reshape_4d(ctx, product, cols->ne[1], cols->ne[2], cols->ne[3], kernel->ne[3]);
+        return ggml_cont(ctx, ggml_permute(ctx, product, 0, 1, 3, 2));
+    };
     ggml_tensor * y;
     if (groups == 1) {
-        y = ggml_conv_2d_direct(ctx, W, x, stride_f, 1, pad_f, tp, 1, 1);    // [Fout, T+tp, Cout, Bc]
-    } else if (fused && Cing == 1 && groups == Cout) {
+        y = convolution(W, x);                                         // [Fout, T+tp, Cout, Bc]
+    } else if ((fused || portable) && Cing == 1 && groups == Cout) {
         // fused depthwise: one CONV_2D_DW op replaces the C-way per-channel loop + concats.  The op's
         // whcn kernel requires a contiguous data tensor (the per-group loop's cont guaranteed this).
         ggml_tensor * xin = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
@@ -112,7 +126,7 @@ ggml_tensor * conv2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * W,
             ggml_tensor * wg = ggml_cont(ctx, ggml_view_4d(ctx, W, kf, kt, Cing, oc_g,
                                                            W->nb[1], W->nb[2], W->nb[3],
                                                            (size_t) g * oc_g * W->nb[3]));
-            ggml_tensor * yg = ggml_conv_2d_direct(ctx, wg, xg, stride_f, 1, pad_f, tp, 1, 1);
+            ggml_tensor * yg = convolution(wg, xg);
             y = y ? ggml_concat(ctx, y, yg, 2) : yg;                         // stack out chans
         }
     }
@@ -142,10 +156,11 @@ static ggml_tensor * zero_upsample_freq(ggml_context * ctx, ggml_tensor * x, int
 }
 
 ggml_tensor * conv_transpose2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wc,
-                               ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused) {
+                               ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused,
+                               bool portable) {
     const int64_t kf = Wc->ne[0];
     ggml_tensor * u  = zero_upsample_freq(ctx, x, stride_f, fused);
-    return conv2d(ctx, u, Wc, bias, 1, (int) (kf - 1 - pad_f), groups, fused);
+    return conv2d(ctx, u, Wc, bias, 1, (int) (kf - 1 - pad_f), groups, fused, portable);
 }
 
 // LayerNorm over the combined (ne0*ne1) per (ne2,ne3) column, affine g,b [ne0*ne1].
@@ -230,11 +245,15 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
 }
 
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
-                   const WResolver & W, int r, bool fused, ggml_cgraph * gf) {
+                   const WResolver & W, int r, bool fused, ggml_cgraph * gf, bool portable) {
     const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3];
 
     // ---- TA: energy-mean over freq -> GRU over time (batch=chunk) -> FC -> sigmoid ----
-    ggml_tensor * zt   = ggml_mean(ctx, ggml_sqr(ctx, x));                    // [1, T, C, Bc]
+    auto mean = [&](ggml_tensor * a) {
+        return portable ? ggml_scale(ctx, ggml_sum_rows(ctx, a), 1.0f / (float) a->ne[0])
+                        : ggml_mean(ctx, a);
+    };
+    ggml_tensor * zt   = mean(ggml_sqr(ctx, x));                    // [1, T, C, Bc]
     ggml_tensor * ztin = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_permute(ctx, zt, 3, 2, 0, 1)),
                                          C, Bc, T);                          // [C, Bc, T]
     ggml_tensor * at   = gru_batched(ctx, ztin, W(p + ".ta_gru.weight_ih_l0"),
@@ -247,7 +266,7 @@ ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
 
     // ---- FA: energy-mean over chan -> fold freq by r -> BiGRU (batch=time*chunk) -> FC -> sigmoid ----
     ggml_tensor * xcf = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));     // [C, T, F, Bc]
-    ggml_tensor * ec  = ggml_mean(ctx, ggml_sqr(ctx, xcf));                   // [1, T, F, Bc]
+    ggml_tensor * ec  = mean(ggml_sqr(ctx, xcf));                   // [1, T, F, Bc]
     ggml_tensor * ecF = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, ec, 3, 1, 0, 2)),
                                         F, T * Bc);                          // [F, T*Bc]
     const int     pad_len = (r - (int) (F % r)) % r;
@@ -332,12 +351,12 @@ ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused) {
 static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::string & base,
                                int type, int cout, int kf, int stride, int groups, bool deconv,
                                bool is_last, const WResolver & W, int r, bool fused,
-                               ggml_cgraph * gf = nullptr) {
+                               ggml_cgraph * gf = nullptr, bool portable = false) {
     (void) cout;
     const int pf = kf / 2;
     auto conv = [&](ggml_tensor * in, const std::string & wn, int st, int grp) -> ggml_tensor * {
-        return deconv ? conv_transpose2d(ctx, in, W(wn + ".ct"), W(wn + ".bias"), st, pf, grp, fused)
-                      : conv2d(ctx, in, W(wn + ".weight"), W(wn + ".bias"), st, pf, grp, fused);
+        return deconv ? conv_transpose2d(ctx, in, W(wn + ".ct"), W(wn + ".bias"), st, pf, grp, fused, portable)
+                      : conv2d(ctx, in, W(wn + ".weight"), W(wn + ".bias"), st, pf, grp, fused, portable);
     };
     auto bn = [&](ggml_tensor * h, const std::string & p) {
         return batchnorm(ctx, h, W(p + ".bn_scale"), W(p + ".bn_shift"), gf);
@@ -349,31 +368,31 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         ggml_tensor * h = conv(x, base + ".ops.1", stride, groups);
         h               = bn(h, base + ".ops.2");
         if (!is_last) h = ap(h, base + ".ops.3");
-        h               = ctfa(ctx, h, base + ".ops.4", W, r, fused, gf);
+        h               = ctfa(ctx, h, base + ".ops.4", W, r, fused, gf, portable);
         if (!is_last && groups == 2) h = shuffle2(ctx, h, fused);
         return h;
     }
     if (type == 1) { // XDWS: pconv(1x1) + depthwise dconv
-        ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv.0.weight"), W(base + ".pconv.0.bias"), 1, 0, groups, fused);
+        ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv.0.weight"), W(base + ".pconv.0.bias"), 1, 0, groups, fused, portable);
         h               = bn(h, base + ".pconv.1");
         h               = ap(h, base + ".pconv.2");
         if (groups == 2) h = shuffle2(ctx, h, fused);
         h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise (groups == channels)
         h = bn(h, base + ".dconv.2");
         if (!is_last) h = ap(h, base + ".dconv.3");
-        return ctfa(ctx, h, base + ".dconv.4", W, r, fused, gf);
+        return ctfa(ctx, h, base + ".dconv.4", W, r, fused, gf, portable);
     }
     // type == 2: XMB
-    ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused);
+    ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused, portable);
     h               = bn(h, base + ".pconv1.1");
     h               = ap(h, base + ".pconv1.2");
     if (groups == 2) h = shuffle2(ctx, h, fused);
     h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise
     h = bn(h, base + ".dconv.2");
     h = ap(h, base + ".dconv.3");
-    h = conv2d(ctx, h, W(base + ".pconv2.0.weight"), W(base + ".pconv2.0.bias"), 1, 0, groups, fused);
+    h = conv2d(ctx, h, W(base + ".pconv2.0.weight"), W(base + ".pconv2.0.bias"), 1, 0, groups, fused, portable);
     h = bn(h, base + ".pconv2.1");
-    h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf);
+    h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf, portable);
     if (h->ne[0] == x->ne[0] && h->ne[1] == x->ne[1] && h->ne[2] == x->ne[2]) h = ggml_add(ctx, h, x);
     if (!is_last && groups == 2) h = shuffle2(ctx, h, fused);
     return h;
@@ -477,7 +496,7 @@ struct DenoiserGgml::Impl {
     float bn_eps = 1e-5f, ln_eps = 1e-8f;
 
     ggml_backend_t        backend = nullptr;
-    bool                  gpu = false, opencl = false, vulkan = false;
+    bool                  gpu = false, opencl = false, vulkan = false, portable = false;
     ggml_context *        wctx   = nullptr;
     ggml_backend_buffer_t wbuf   = nullptr;
     ggml_gallocr_t        galloc = nullptr;
@@ -515,6 +534,7 @@ void DenoiserGgml::Impl::init_backend(int n_gpu_layers, bool verbose) {
     if (!backend) throw std::runtime_error("denoiser_ggml: no backend available");
     opencl = ::tts_cpp::detail::backend_is_opencl(backend);
     vulkan = ::tts_cpp::detail::backend_is_vulkan(backend);
+    portable = ::tts_cpp::detail::backend_is_hexagon(backend);
 }
 
 void DenoiserGgml::Impl::upload_weights(const std::vector<Pend> & pend) {
@@ -539,7 +559,7 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     const int F = spec_bins, r = freq_comp_ratio;
     // Fused ops where the backend implements them (OpenCL + Vulkan + CPU); Metal uses the
     // standard-op fallback, which the supports_op preflight would otherwise reject.
-    const bool fused = opencl || vulkan || !gpu;
+    const bool fused = !portable && (opencl || vulkan || !gpu);
     auto       W     = [this](const std::string & n) { return this->W(n); };
 
     // Inputs must come from the graph ctx so gallocr assigns them backing buffers.
@@ -552,7 +572,7 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     std::vector<ggml_tensor *> en;
     for (int i = 0; i < 5; i++) {
         x = detail::run_block(ctx, x, "encoder.en_convs." + std::to_string(i), kTypes[i], kChans[i],
-                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf);
+                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable);
         en.push_back(x);
     }
     x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused);
@@ -562,11 +582,11 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     for (int i = 4; i >= 1; i--, j++) {
         x = ggml_add(ctx, x, en[4 - j]);
         x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[i], kChans[i - 1],
-                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf);
+                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable);
     }
     x = ggml_add(ctx, x, en[0]);
     x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[0], 1,
-                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf);
+                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable);
 
     x                = ggml_sigmoid(ctx, x);                                        // ratio mask [129, L, 1]
     ggml_tensor * m  = detail::erb_bs(ctx, x, W("erb.ierb_fc.weight"), erb_low, erb_high); // [F, L, 1]
@@ -609,7 +629,8 @@ void DenoiserGgml::Impl::run(ggml_cgraph * gf, const GraphIO & gio, const std::v
 DenoiserGgml::DenoiserGgml() : impl_(std::make_unique<Impl>()) {}
 DenoiserGgml::~DenoiserGgml() = default;
 
-std::unique_ptr<DenoiserGgml> DenoiserGgml::create(const DenoiserWeights & w, int n_gpu_layers, bool verbose) {
+std::unique_ptr<DenoiserGgml> DenoiserGgml::create(const DenoiserWeights & w, int n_gpu_layers,
+                                                bool verbose, bool portable_graph) {
     std::unique_ptr<DenoiserGgml> e(new DenoiserGgml());
     Impl & im = *e->impl_;
     im.spec_bins = w.spec_bins; im.erb_low = w.erb_low; im.erb_high = w.erb_high;
@@ -617,6 +638,7 @@ std::unique_ptr<DenoiserGgml> DenoiserGgml::create(const DenoiserWeights & w, in
     im.bn_eps = w.bn_eps; im.ln_eps = w.ln_eps;
 
     im.init_backend(n_gpu_layers, verbose);
+    im.portable = im.portable || portable_graph;
     im.upload_weights(stage_weights(w));
     return e;
 }
@@ -630,7 +652,15 @@ void DenoiserGgml::batch_forward(const std::vector<float> & real_in, const std::
                                  int L, int Bc, std::vector<float> & real_out, std::vector<float> & imag_out) {
     Impl & im = *impl_;
 
-    std::vector<float> feat_host = compute_log_features(real_in, imag_in, (size_t) L * im.spec_bins * Bc);
+    if (L <= 0 || Bc <= 0 || im.spec_bins <= 0 ||
+        (size_t) L > std::numeric_limits<size_t>::max() / (size_t) im.spec_bins / (size_t) Bc) {
+        throw std::invalid_argument("denoiser_ggml: invalid chunk dimensions");
+    }
+    const size_t count = (size_t) L * (size_t) im.spec_bins * (size_t) Bc;
+    if (real_in.size() != count || imag_in.size() != count) {
+        throw std::invalid_argument("denoiser_ggml: input planes do not match chunk dimensions");
+    }
+    std::vector<float> feat_host = compute_log_features(real_in, imag_in, count);
 
     const size_t         buf_size = ggml_tensor_overhead() * MAX_NODES + ggml_graph_overhead_custom(MAX_NODES, false);
     std::vector<uint8_t> buf(buf_size);

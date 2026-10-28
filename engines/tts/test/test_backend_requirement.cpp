@@ -126,6 +126,13 @@ int main() {
     expect(gpu_backend_satisfies_requirement("OpenCL", lavasr), "LavaSR accepts OpenCL");
     expect(gpu_backend_satisfies_requirement("CUDA", lavasr), "LavaSR accepts CUDA");
     expect(!gpu_backend_satisfies_requirement("WebGPU", lavasr), "LavaSR rejects WebGPU");
+    expect(gpu_backend_satisfies_requirement("HTP", lavasr), "LavaSR accepts Hexagon");
+    expect(gpu_backend_satisfies_requirement("HTP", GpuBackendRequirement::Hexagon),
+           "Hexagon has an explicit requirement bit");
+    expect(!gpu_backend_satisfies_requirement("OpenCL", GpuBackendRequirement::Hexagon),
+           "Hexagon-only requirement rejects OpenCL");
+    expect(!gpu_backend_satisfies_requirement("HTP", desktop),
+           "existing desktop requirements keep excluding Hexagon");
 
     if (g_failures) {
         fprintf(stderr, "%d requirement checks failed\n", g_failures);

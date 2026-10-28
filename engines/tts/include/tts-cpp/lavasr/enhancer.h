@@ -7,7 +7,7 @@
 // enhancer (ConvNeXt backbone + ISTFT spec head), converted to a single GGUF.
 // The ConvNeXt backbone + spec head run through a ggml compute graph: on the
 // ggml-CPU backend by default, or on a GPU backend (Vulkan / Metal / CUDA /
-// OpenCL) when requested via EnhancerOptions.  A scalar CPU core is kept as the
+// OpenCL / Hexagon HTP) when requested via EnhancerOptions. A scalar CPU core is kept as the
 // correctness oracle and as the fallback if graph creation fails.
 // The companion denoiser stage (tts-cpp/lavasr/denoiser.h) runs before this and
 // has separate scalar, ggml CPU, and validated GPU execution modes.
@@ -38,7 +38,7 @@ namespace tts_cpp::lavasr {
 // the network on the ggml-CPU backend (a scalar core is kept as the fallback).
 struct EnhancerOptions {
     // Run the ConvNeXt backbone + spec head on a GPU backend (Vulkan on
-    // Windows/Linux, Metal on Apple, CUDA, OpenCL).  Falls back to the ggml-CPU
+    // Windows/Linux, Metal on Apple, CUDA, OpenCL, or Hexagon HTP). Falls back to the ggml-CPU
     // backend (then the scalar core) when no GPU backend is available.
     bool use_gpu = false;
     // Which Vulkan adapter to prefer when several are visible (see

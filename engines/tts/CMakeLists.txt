@@ -3309,6 +3309,11 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-chunker)
     tts_cpp_register_test(test-supertonic-chunker LABEL "unit")
 
+    add_executable(test-lavasr-bench-validation test/test_lavasr_bench_validation.cpp)
+    target_include_directories(test-lavasr-bench-validation PRIVATE src)
+    tts_cpp_apply_ccache(test-lavasr-bench-validation)
+    tts_cpp_register_test(test-lavasr-bench-validation LABEL "unit")
+
     # LavaSR DSP primitives: resampler, STFT/ISTFT, Slaney mel,
     # FastLR crossover merge.  Pure host math (no model / no ggml), compiled
     # straight from the lavasr/dsp sources so it always runs in CI.
@@ -3403,6 +3408,14 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-lavasr-denoiser-ggml PRIVATE include src ggml/include)
     tts_cpp_apply_ccache(test-lavasr-denoiser-ggml)
     tts_cpp_register_test(test-lavasr-denoiser-ggml LABEL "unit")
+    if (TTS_CPP_GGML_HEXAGON)
+        foreach(_lavasr_stage enhancer denoiser)
+            tts_cpp_register_test(test-lavasr-${_lavasr_stage}-hexagon
+                EXE test-lavasr-${_lavasr_stage}-ggml LABEL "gpu")
+            set_property(TEST test-lavasr-${_lavasr_stage}-hexagon APPEND PROPERTY
+                ENVIRONMENT "TTS_CPP_GPU_BACKEND=hexagon")
+        endforeach()
+    endif()
     # Same binary with the real GGUF: adds the production-weights e2e + batch parity
     # where the model fixture is present.
     tts_cpp_register_test(test-lavasr-denoiser-ggml-e2e

@@ -3,6 +3,7 @@
 
 #include "lavasr/denoiser_ggml.h"
 #include "backend_selection.h"
+#include "lavasr/backend_requirement.h"
 
 #include "lavasr/denoiser.h"      // internal: denoise_with_core / denoise_with_batch_core
 #include "lavasr/denoiser_gguf.h" // internal: load_denoiser_gguf
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using namespace tts_cpp::lavasr;
@@ -948,7 +950,7 @@ static DenoiserWeights make_synthetic_denoiser_weights(std::mt19937 & rng) {
 
 // Always-on e2e parity (no fixture): ggml chunk_forward vs the scalar
 // denoiser_net_forward on the synthetic model, same metrics as test_e2e.
-static void test_e2e_synthetic(int n_gpu_layers = -1) {
+static void test_e2e_synthetic(int n_gpu_layers = -1, bool portable = false) {
     std::mt19937    rng(20260710);
     DenoiserWeights w = make_synthetic_denoiser_weights(rng);
     const int       L = w.chunk_frames, F = w.spec_bins;
@@ -960,9 +962,9 @@ static void test_e2e_synthetic(int n_gpu_layers = -1) {
     df(re); df(im);
     std::vector<float> sr, si;
     tts_cpp::lavasr::denoiser_net_forward(w, re, im, L, sr, si);
-    auto               g = tts_cpp::lavasr::DenoiserGgml::create(w, n_gpu_layers);
+    auto               g = tts_cpp::lavasr::DenoiserGgml::create(w, n_gpu_layers, false, portable);
     if (n_gpu_layers > 0) {
-        CHECK(g->backend_name() != "CPU", "available GPU must not fall back to CPU for the denoiser");
+        CHECK(g->is_gpu(), "available GPU must not fall back to CPU for the denoiser");
     }
     std::vector<float> gr, gi;
     g->chunk_forward(re, im, L, gr, gi);
@@ -988,6 +990,19 @@ static void test_e2e_synthetic(int n_gpu_layers = -1) {
     CHECK(gr.size() == sr.size() && gi.size() == si.size(), "synthetic e2e output size matches scalar");
     CHECK(rr < 2e-3f && ri < 2e-3f, "synthetic denoiser ggml chunk_forward matches scalar");
     CHECK(omax > 1e-3f, "synthetic outputs are not all ~0 (mask not degenerate)");
+    // Reusing the allocator must preserve results and reject malformed input
+    // before reading it. This also exercises the portable HTP graph on CPU.
+    std::vector<float> repeat_r, repeat_i;
+    g->chunk_forward(re, im, L, repeat_r, repeat_i);
+    CHECK(gr == repeat_r && gi == repeat_i, "repeated forward is deterministic");
+    bool rejected = false;
+    try { g->batch_forward(re, im, 0, 1, repeat_r, repeat_i); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    CHECK(rejected, "nonpositive chunk length is rejected");
+    rejected = false;
+    try { g->batch_forward({}, im, L, 1, repeat_r, repeat_i); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    CHECK(rejected, "truncated real plane is rejected");
 }
 
 static void test_gpu_e2e_synthetic() {
@@ -995,7 +1010,8 @@ static void test_gpu_e2e_synthetic() {
     constexpr int vulkan_device = 0;
     constexpr bool allow_arm_mali = true;
     ggml_backend_t backend = tts_cpp::detail::init_gpu_backend(
-        gpu_layers, false, "lavasr-test", vulkan_device, allow_arm_mali);
+        gpu_layers, false, "lavasr-test", vulkan_device, allow_arm_mali, nullptr,
+        tts_cpp::lavasr::gpu_requirement());
     if (!backend) {
         std::printf("SKIP: LavaSR GPU parity requires an available GPU backend\n");
         return;
@@ -1093,6 +1109,7 @@ int main(int argc, char ** argv) {
     test_dpgrnn();
     test_ctfa();
     test_e2e_synthetic();
+    test_e2e_synthetic(-1, true);
     test_gpu_e2e_synthetic();
     test_batch_synthetic();
     test_pipeline_batch_parity();
