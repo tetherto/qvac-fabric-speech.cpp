@@ -29,6 +29,7 @@ using tts_cpp::lavasr::bench::Difference;
 
 struct Options {
     std::string denoiser, enhancer, input, out_dn, out_enh, json_out;
+    std::string denoiser_coreml, enhancer_coreml, coreml_compute_units;
     std::string backend = "auto", stage = "pipeline";
     int rate = 24000, runs = 5, warmup = 1, dn_layers = 0, enh_layers = 0;
     double seconds = 6.0;
@@ -36,7 +37,7 @@ struct Options {
     bool verify = false;
 };
 struct Timing { double denoiser = 0.0, enhancer = 0.0, total = 0.0; };
-struct Verification { std::string stage; Difference difference; bool passed; };
+struct Verification { std::string stage; Difference difference; bool passed; std::string reference_backend; };
 
 void usage(const char * exe) {
     std::fprintf(stderr,
@@ -45,6 +46,8 @@ void usage(const char * exe) {
         "  [--seconds 6] [--in-rate 24000] [--runs 5] [--warmup 1] [--verify]\n"
         "  [--min-seconds 0] (minimum sum of measured processing seconds)\n"
         "  [--out-denoised dn.wav] [--out-enhanced enh.wav] [--json-out result.json]\n"
+        "  Auto mode: [--denoiser-coreml DN.mlmodelc] [--enhancer-coreml ENH.mlmodelc]\n"
+        "  [--coreml-compute-units CPU_ONLY|CPU_AND_GPU|CPU_AND_NE|ALL]\n"
         "  Legacy: --dn-gpu-layers N --n-gpu-layers N (0=CPU default, >0=accelerator)\n"
         "  First call and warmups are separate from the N measured calls.\n", exe);
 }
@@ -71,6 +74,9 @@ Options parse(int argc, char ** argv) {
         else if (a == "--json-out") o.json_out = next();
         else if (a == "--backend") o.backend = next();
         else if (a == "--stage") o.stage = next();
+        else if (a == "--denoiser-coreml") o.denoiser_coreml = next();
+        else if (a == "--enhancer-coreml") o.enhancer_coreml = next();
+        else if (a == "--coreml-compute-units") o.coreml_compute_units = next();
         else if (a == "--runs") o.runs = integer(next());
         else if (a == "--warmup") o.warmup = integer(next());
         else if (a == "--in-rate") o.rate = integer(next());
@@ -98,11 +104,30 @@ Options parse(int argc, char ** argv) {
     if (o.stage != "denoiser" && o.enhancer.empty()) throw std::invalid_argument("--enhancer is required");
     if (o.stage == "enhancer" && !o.out_dn.empty()) throw std::invalid_argument("enhancer-only has no denoised output");
     if (o.stage == "denoiser" && !o.out_enh.empty()) throw std::invalid_argument("denoiser-only has no enhanced output");
+    const bool coreml = !o.denoiser_coreml.empty() || !o.enhancer_coreml.empty();
+    if (coreml && o.backend != "auto")
+        throw std::invalid_argument("Core ML options require --backend auto; explicit CPU/OpenCL/Hexagon selects the native backend");
+    if (coreml != !o.coreml_compute_units.empty())
+        throw std::invalid_argument("Core ML requires a model path and --coreml-compute-units together");
+    if (coreml && o.coreml_compute_units != "CPU_ONLY" && o.coreml_compute_units != "CPU_AND_GPU" &&
+        o.coreml_compute_units != "CPU_AND_NE" && o.coreml_compute_units != "ALL")
+        throw std::invalid_argument("invalid Core ML compute policy");
+    if ((!o.denoiser_coreml.empty() && o.stage == "enhancer") ||
+        (!o.enhancer_coreml.empty() && o.stage == "denoiser"))
+        throw std::invalid_argument("Core ML options name an unused stage");
+    if ((!o.denoiser_coreml.empty() && o.dn_layers != 0) ||
+        (!o.enhancer_coreml.empty() && o.enh_layers > 0))
+        throw std::invalid_argument("a Core ML stage cannot also request native GPU layers");
     if (o.backend != "auto") {
         o.dn_layers = o.backend == "cpu" ? -1 : 1;
         o.enh_layers = o.backend == "cpu" ? 0 : 1;
     }
     return o;
+}
+
+std::string runtime_precision(const std::string & backend) {
+    if (backend == "unused") return "unused";
+    return backend.rfind("coreml-", 0) == 0 ? "coreml-model-defined" : "f32";
 }
 
 void select_backend(const std::string & backend) {
@@ -202,8 +227,11 @@ int run(const Options & o) {
     std::unique_ptr<Enhancer> enh;
     Timing constructor;
     if (do_dn) {
+        tts_cpp::lavasr::DenoiserOptions opts;
+        opts.n_gpu_layers = o.dn_layers;
+        if (!o.denoiser_coreml.empty()) opts.coreml = {o.denoiser_coreml, o.coreml_compute_units};
         const auto t = Clock::now();
-        dn = Denoiser::load(o.denoiser, o.dn_layers);
+        dn = Denoiser::load(o.denoiser, opts);
         constructor.denoiser = Seconds(Clock::now() - t).count();
         require_backend(o.backend, dn->backend_name());
     }
@@ -211,12 +239,18 @@ int run(const Options & o) {
         tts_cpp::lavasr::EnhancerOptions opts;
         opts.use_gpu = o.enh_layers > 0;
         opts.verbose = true;
+        if (!o.enhancer_coreml.empty()) opts.coreml = {o.enhancer_coreml, o.coreml_compute_units};
         const auto t = Clock::now();
         enh = Enhancer::load(o.enhancer, opts);
         constructor.enhancer = Seconds(Clock::now() - t).count();
         require_backend(o.backend, enh->backend_name());
     }
     constructor.total = constructor.denoiser + constructor.enhancer;
+    const std::string dn_precision = runtime_precision(dn ? dn->backend_name() : "unused");
+    const std::string enh_precision = runtime_precision(enh ? enh->backend_name() : "unused");
+    const bool any_coreml = dn_precision == "coreml-model-defined" || enh_precision == "coreml-model-defined";
+    const bool any_native = dn_precision == "f32" || enh_precision == "f32";
+    const std::string precision = any_coreml ? (any_native ? "mixed" : "coreml-model-defined") : "f32";
     const int output_rate = do_enh ? enh->output_sample_rate() : rate;
     if (do_enh && output_rate != 48000) throw std::runtime_error("enhancer output rate must be 48000 Hz");
     const double output_count = std::round((double) input.size() * output_rate / rate);
@@ -248,8 +282,10 @@ int run(const Options & o) {
         std::fprintf(stderr, "[measure %d/%d] denoiser=%.6f enhancer=%.6f total=%.6f s\n",
                      i+1, o.runs, calls.back().denoiser, calls.back().enhancer, calls.back().total);
     }
-    std::printf("LavaSR %s: denoiser=%s enhancer=%s F32 graph / F32 matmul\n", o.stage.c_str(),
+    std::printf("LavaSR %s: denoiser=%s enhancer=%s\n", o.stage.c_str(),
                 dn ? dn->backend_name().c_str() : "unused", enh ? enh->backend_name().c_str() : "unused");
+    std::printf("  neural precision: denoiser=%s enhancer=%s%s\n", dn_precision.c_str(), enh_precision.c_str(),
+                any_coreml ? "; Core ML precision follows the compiled model; placement is framework-managed" : "; F32 graph / F32 matmul");
     std::printf("  constructor=%.6f s first=%.6f s warmup=%d (excluded)\n", constructor.total, first.total, o.warmup);
     if (do_dn) report("denoiser", calls, &Timing::denoiser, audio_s);
     if (do_enh) report("enhancer", calls, &Timing::enhancer, audio_s);
@@ -265,19 +301,29 @@ int run(const Options & o) {
             const bool denoiser = std::string(stage) == "denoiser";
             const bool pass = tts_cpp::lavasr::bench::passes(diff, denoiser ? 2e-3 : 5e-2,
                                                           denoiser ? 2e-3 : 1e100, 0.9999);
-            verification.push_back({stage, diff, pass});
+            const std::string reference_backend = denoiser ? "scalar" : std::string(stage) == "pipeline" ? "scalar+CPU" : "CPU";
+            verification.push_back({stage, diff, pass, reference_backend});
             std::printf("  VERIFY %s %s length=%d finite=%d max_abs=%.6g nrmse=%.6g cosine=%.9g\n",
                         stage, pass ? "PASS" : "FAIL", diff.length_ok, diff.finite,
                         diff.max_abs, diff.nrmse, diff.cosine);
         };
         std::vector<float> cpu_cleaned;
         if (do_dn) {
-            auto reference = Denoiser::load(o.denoiser, 0);
+            tts_cpp::lavasr::DenoiserOptions reference_options;
+            reference_options.n_gpu_layers = 0;
+            reference_options.coreml = {};
+            auto reference = Denoiser::load(o.denoiser, reference_options);
+            if (reference->backend_name() != "scalar") throw std::runtime_error("denoiser reference must use scalar CPU");
             cpu_cleaned = reference->denoise(input, rate);
             verify("denoiser", cleaned, cpu_cleaned);
         }
         if (do_enh) {
-            auto reference = Enhancer::load(o.enhancer, {});
+            tts_cpp::lavasr::EnhancerOptions reference_options;
+            reference_options.use_gpu = false;
+            reference_options.coreml = {};
+            auto reference = Enhancer::load(o.enhancer, reference_options);
+            if (reference->backend_name() != "CPU" || reference->backend_device() != tts_cpp::BackendDevice::CPU)
+                throw std::runtime_error("enhancer reference must use native CPU");
             const auto same_input = reference->enhance(do_dn ? cleaned : input, rate);
             verify("enhancer", enhanced, same_input);
             if (do_dn) verify("pipeline", enhanced, reference->enhance(cpu_cleaned, rate));
@@ -293,7 +339,12 @@ int run(const Options & o) {
             << ",\"requested_backend\":" << quoted(o.backend)
             << ",\"denoiser_backend\":" << quoted(dn ? dn->backend_name() : "unused")
             << ",\"enhancer_backend\":" << quoted(enh ? enh->backend_name() : "unused")
-            << ",\"graph_dtype\":\"f32\",\"matmul_precision\":\"f32\",\"host_audio_dsp\":true"
+            << ",\"graph_dtype\":" << quoted(precision) << ",\"matmul_precision\":" << quoted(precision)
+            << ",\"denoiser_runtime_precision\":" << quoted(dn_precision)
+            << ",\"enhancer_runtime_precision\":" << quoted(enh_precision)
+            << ",\"denoiser_coreml_model\":" << quoted(o.denoiser_coreml)
+            << ",\"enhancer_coreml_model\":" << quoted(o.enhancer_coreml)
+            << ",\"coreml_compute_units\":" << quoted(o.coreml_compute_units) << ",\"host_audio_dsp\":true"
             << ",\"input_samples\":" << input.size() << ",\"input_rate\":" << rate
             << ",\"denoised_samples\":" << cleaned.size() << ",\"enhanced_samples\":" << enhanced.size()
             << ",\"output_rate\":" << output_rate << ",\"audio_s\":" << audio_s
@@ -311,6 +362,7 @@ int run(const Options & o) {
             if (i) out << ',';
             const auto & v = verification[i]; const auto & d = v.difference;
             out << "{\"stage\":" << quoted(v.stage) << ",\"passed\":" << (v.passed ? "true" : "false")
+                << ",\"reference_backend\":" << quoted(v.reference_backend)
                 << ",\"length_ok\":" << (d.length_ok ? "true" : "false") << ",\"finite\":" << (d.finite ? "true" : "false")
                 << ",\"max_abs\":" << d.max_abs << ",\"nrmse\":" << d.nrmse << ",\"cosine\":" << d.cosine << '}';
         }
