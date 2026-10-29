@@ -42,6 +42,12 @@ rejected generations before
 publishing an output WAV. It supports CPU, CUDA, and Vulkan (`--gpu --backend vulkan`).
 ASR results that reach the decoding token limit are rejected.
 
+MOSS generation starts at the reference assistant header and converts ISO language
+codes such as `en` to the model's language names (`English`). The full-checkpoint
+TTS CI gate requires every expected CPU/GPU batch, streaming and reuse output to
+pass WER <= 0.25, with no baseline-audio exemption for wrong text. See
+[MOSS validation](engines/tts/docs/moss.md#gpu-validation-cuda-and-vulkan).
+
 CosyVoice3 uses capability-checked flash attention for single-token LM decoding
 on CUDA and Metal. Supported CUDA backends reuse decode graphs within masked
 128-token cache windows, allowing CUDA graph capture. Unsupported backends or
@@ -206,6 +212,20 @@ model each desktop benchmark family measures and scores.
 | TTS | Audio8 | September 2026 GPU campaign: RTF 0.20–0.65, with later RTX 5090 measurements down to 0.116; [full table and follow-up](engines/tts/docs/performance.md#audio8-multi-machine-benchmark-2026-09) |
 | Music | ACE-Step 1.5 | September 2026 CUDA/Vulkan/Metal lanes: generation 1,338–9,016 ms, RTF 0.139–0.957; [full table](engines/audiogen/docs/performance.md#ace-step-15-multi-machine-benchmark-2026-09) |
 | Music | MiniMax-Music3 f16 | September 2026 RTX 5090: two-minute song in 73.9 s CUDA / 84.2 s Vulkan, excluding model load; [full table](engines/audiogen/docs/performance.md#minimax-music3-f16-on-rtx-5090-2026-09) |
+
+## Memory fit results
+
+Every engine's memory-fit preflight reports the same device fields, so a caller
+can add up several models that share one device:
+
+- `device_name` is the ggml device name, as `ggml_backend_dev_by_name` finds it:
+  `CPU`, `CUDA0`, `Vulkan0`, `MTL0`, `GPUOpenCL`, `HTP0`. Two engines on the
+  same device report the same name.
+- `device_shares_host_memory` is true for a device that draws from host RAM: the
+  CPU, an integrated GPU, Apple Metal, Hexagon and Android's OpenCL GPUs.
+- `device_free_bytes` and `device_total_bytes` are the device's own figures. A
+  device that shares host memory and reports none of its own, such as Hexagon,
+  carries the CPU's figures.
 
 ## Use in QVAC
 
