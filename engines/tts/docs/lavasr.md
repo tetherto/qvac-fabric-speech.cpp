@@ -81,27 +81,34 @@ libraries in its deployment. `--backend hexagon` pins `HTP0`. Legacy
 remain available with `--backend auto`. The existing automatic GPU preference
 is preserved; Hexagon is an explicit engine capability.
 
-The baseline F32 Hexagon checks use `qvac-ext-ggml@speech` revision
-`380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`, including its speech kernels and
-F32-precision matmul routing. Build that revision with Hexagon enabled, use its
-installed CMake package through `CMAKE_PREFIX_PATH`, and deploy the DSP skel
-from the same build. The older bundled pin in `scripts/setup-ggml.sh` is not
-the dependency used for these Hexagon checks. Record the resolved revision
-when using another shared GGML build.
+The F32 Hexagon kernels are validated with `qvac-ext-ggml` revision
+`5eb6cb714bc84476f115ef491a534fc8b9104c8c`. Build the selected revision with
+Hexagon enabled, use its installed CMake package through `CMAKE_PREFIX_PATH`,
+and deploy the DSP skel from the same build. The original baseline revision
+`380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e` uses the fallback graphs described
+below. The older bundled pin in `scripts/setup-ggml.sh` is not the dependency
+used for these Hexagon checks. Record the resolved shared GGML revision.
 
 Both F32 and F16 GGUF inputs are supported. On native ggml routes, the loaders expand F16
 weights to F32, and the neural graphs retain F32 tensors and F32-precision
 matrix multiplication. On Hexagon those products use HVX rather than F16 HMX.
-An F16 filename does not indicate F16 execution. Hexagon's denoiser graph uses
-F32 im2col/matmul convolution, sum/scale means and a channel shuffle that copies
-complete spatial planes. Each actual GRU node is queried independently: a
-backend reporting F32 GRU support can execute the recurrent sweep as one op;
-older runtimes, including the baseline revision above, retain the unrolled
-F32 recurrence. This does not enable the other fused-op families or change
-precision and correctness thresholds. Its enhancer uses direct depthwise
-convolution. Each graph is checked against
-the selected backend before execution. Resampling, STFT/mel features, denoiser
-log features, overlap-add, ISTFT and the FastLR merge remain host audio DSP.
+An F16 filename does not indicate F16 execution. Hexagon's denoiser graph queries
+each actual F32 convolution, GRU and affine/PReLU candidate independently.
+Supported ordinary 1x1/3x3 convolutions use direct `CONV_2D`, avoiding the
+im2col buffer and final layout copy; supported GRU nodes run the recurrent sweep
+as one op, and supported affine/PReLU nodes use `AFFINE_PRELU`. Unsupported
+candidates retain the F32 im2col/matmul, unrolled recurrence or seven-op
+affine/PReLU graph respectively. The original baseline revision above follows these
+fallback routes. Precision and correctness thresholds are unchanged.
+
+The portable Hexagon graph retains sum/scale means and a channel shuffle that
+copies complete spatial planes. Its DPGRNN output copy folds frequency and time
+into one spatial dimension for a batched transpose, then reshapes back to the
+canonical `[F,T,C,Bc]` layout without changing values or batch order. These Hexagon graph
+choices preserve the CPU/OpenCL graph paths. The enhancer uses direct depthwise
+convolution. Each graph is checked against the selected backend before
+execution. Resampling, STFT/mel features, denoiser log features, overlap-add,
+ISTFT and the FastLR merge remain host audio DSP.
 
 Constructor time, the first processing call, additional warmups and measured
 calls are recorded separately. Each measured call reports denoiser, enhancer
