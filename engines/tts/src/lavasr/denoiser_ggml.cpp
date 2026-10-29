@@ -91,16 +91,19 @@ ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih
 
 ggml_tensor * conv2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * W,
                      ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused,
-                     bool portable) {
+                     bool portable, const ConvSupport & conv_support) {
     const int64_t kf = W->ne[0], kt = W->ne[1], Cing = W->ne[2], Cout = W->ne[3];
     const int64_t T  = x->ne[1];
     // Fold both pads INTO the conv (bit-identical to an explicit zero-pad): symmetric freq pad,
     // causal time via symmetric p1=kt-1 then keep the first T frames.
     const int     tp = (int) (kt - 1);
     auto convolution = [&](ggml_tensor * kernel, ggml_tensor * input) {
-        if (!portable) return ggml_conv_2d_direct(ctx, kernel, input, stride_f, 1, pad_f, tp, 1, 1);
-        // HTP has IM2COL and F32 matmul, but no direct CONV_2D. Keep the
-        // columns and product in F32, matching the direct CPU reference.
+        if (!portable || conv_support) {
+            ggml_tensor * candidate = ggml_conv_2d_direct(ctx, kernel, input, stride_f, 1, pad_f, tp, 1, 1);
+            if (!portable || conv_support(candidate)) return candidate;
+        }
+        // Older HTP runtimes and unsupported direct-convolution geometries
+        // retain F32 columns and products, matching the direct CPU reference.
         ggml_tensor * cols = ggml_im2col(ctx, kernel, input, stride_f, 1, pad_f, tp, 1, 1,
                                          true, GGML_TYPE_F32);
         ggml_tensor * product = mul_mat_f32(ctx,
@@ -158,10 +161,10 @@ static ggml_tensor * zero_upsample_freq(ggml_context * ctx, ggml_tensor * x, int
 
 ggml_tensor * conv_transpose2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wc,
                                ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused,
-                               bool portable) {
+                               bool portable, const ConvSupport & conv_support) {
     const int64_t kf = Wc->ne[0];
     ggml_tensor * u  = zero_upsample_freq(ctx, x, stride_f, fused);
-    return conv2d(ctx, u, Wc, bias, 1, (int) (kf - 1 - pad_f), groups, fused, portable);
+    return conv2d(ctx, u, Wc, bias, 1, (int) (kf - 1 - pad_f), groups, fused, portable, conv_support);
 }
 
 // LayerNorm over the combined (ne0*ne1) per (ne2,ne3) column, affine g,b [ne0*ne1].
@@ -376,12 +379,12 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
                                int type, int cout, int kf, int stride, int groups, bool deconv,
                                bool is_last, const WResolver & W, int r, bool fused,
                                ggml_cgraph * gf = nullptr, bool portable = false,
-                               const GruSupport & gru_support = {}) {
+                               const GruSupport & gru_support = {}, const ConvSupport & conv_support = {}) {
     (void) cout;
     const int pf = kf / 2;
     auto conv = [&](ggml_tensor * in, const std::string & wn, int st, int grp) -> ggml_tensor * {
-        return deconv ? conv_transpose2d(ctx, in, W(wn + ".ct"), W(wn + ".bias"), st, pf, grp, fused, portable)
-                      : conv2d(ctx, in, W(wn + ".weight"), W(wn + ".bias"), st, pf, grp, fused, portable);
+        return deconv ? conv_transpose2d(ctx, in, W(wn + ".ct"), W(wn + ".bias"), st, pf, grp, fused, portable, conv_support)
+                      : conv2d(ctx, in, W(wn + ".weight"), W(wn + ".bias"), st, pf, grp, fused, portable, conv_support);
     };
     auto bn = [&](ggml_tensor * h, const std::string & p) {
         return batchnorm(ctx, h, W(p + ".bn_scale"), W(p + ".bn_shift"), gf);
@@ -398,7 +401,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         return h;
     }
     if (type == 1) { // XDWS: pconv(1x1) + depthwise dconv
-        ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv.0.weight"), W(base + ".pconv.0.bias"), 1, 0, groups, fused, portable);
+        ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv.0.weight"), W(base + ".pconv.0.bias"), 1, 0, groups, fused, portable, conv_support);
         h               = bn(h, base + ".pconv.1");
         h               = ap(h, base + ".pconv.2");
         if (groups == 2) h = shuffle2(ctx, h, fused, portable);
@@ -408,14 +411,14 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         return ctfa(ctx, h, base + ".dconv.4", W, r, fused, gf, portable, gru_support);
     }
     // type == 2: XMB
-    ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused, portable);
+    ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused, portable, conv_support);
     h               = bn(h, base + ".pconv1.1");
     h               = ap(h, base + ".pconv1.2");
     if (groups == 2) h = shuffle2(ctx, h, fused, portable);
     h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise
     h = bn(h, base + ".dconv.2");
     h = ap(h, base + ".dconv.3");
-    h = conv2d(ctx, h, W(base + ".pconv2.0.weight"), W(base + ".pconv2.0.bias"), 1, 0, groups, fused, portable);
+    h = conv2d(ctx, h, W(base + ".pconv2.0.weight"), W(base + ".pconv2.0.bias"), 1, 0, groups, fused, portable, conv_support);
     h = bn(h, base + ".pconv2.1");
     h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf, portable, gru_support);
     if (h->ne[0] == x->ne[0] && h->ne[1] == x->ne[1] && h->ne[2] == x->ne[2]) h = ggml_add(ctx, h, x);
@@ -586,12 +589,16 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     // standard-op fallback, which the supports_op preflight would otherwise reject.
     const bool fused = !portable && (opencl || vulkan || !gpu);
     detail::GruSupport gru_support;
+    detail::ConvSupport conv_support;
     if (portable && !fused && ::tts_cpp::detail::backend_is_hexagon(backend)) {
-        // Only HTP opts into shape-specific GRU fusion. CPU portable parity
-        // retains the unrolled graph, and other fused-op decisions stay intact.
-        const ggml_backend_t gru_backend = backend;
-        gru_support = [gru_backend](const ggml_tensor * candidate) {
-            return ggml_backend_supports_op(gru_backend, candidate);
+        // HTP opts into supported GRU and direct-convolution shapes. CPU
+        // portable parity retains the standard decompositions.
+        const ggml_backend_t htp_backend = backend;
+        gru_support = [htp_backend](const ggml_tensor * candidate) {
+            return ggml_backend_supports_op(htp_backend, candidate);
+        };
+        conv_support = [htp_backend](const ggml_tensor * candidate) {
+            return ggml_backend_supports_op(htp_backend, candidate);
         };
     }
     auto       W     = [this](const std::string & n) { return this->W(n); };
@@ -606,7 +613,7 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     std::vector<ggml_tensor *> en;
     for (int i = 0; i < 5; i++) {
         x = detail::run_block(ctx, x, "encoder.en_convs." + std::to_string(i), kTypes[i], kChans[i],
-                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support);
+                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support);
         en.push_back(x);
     }
     x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused, gru_support);
@@ -616,11 +623,11 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     for (int i = 4; i >= 1; i--, j++) {
         x = ggml_add(ctx, x, en[4 - j]);
         x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[i], kChans[i - 1],
-                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support);
+                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support, conv_support);
     }
     x = ggml_add(ctx, x, en[0]);
     x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[0], 1,
-                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support);
+                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support, conv_support);
 
     x                = ggml_sigmoid(ctx, x);                                        // ratio mask [129, L, 1]
     ggml_tensor * m  = detail::erb_bs(ctx, x, W("erb.ierb_fc.weight"), erb_low, erb_high); // [F, L, 1]

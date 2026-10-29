@@ -21,6 +21,10 @@ namespace detail {
 // rejection keeps the standard-op recurrence and does not expand the candidate.
 using GruSupport = std::function<bool(const ggml_tensor *)>;
 
+// Queries the actual direct-convolution candidate. Rejection preserves the
+// portable F32 IM2COL/matmul graph for older runtimes and unsupported layouts.
+using ConvSupport = std::function<bool(const ggml_tensor *)>;
+
 // Mean squared energy over channels: x:[F,T,C,Bc] -> [F,T*Bc].
 // The portable layout folds spatial axes before transposing channels inward.
 ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable = false);
@@ -35,13 +39,13 @@ ggml_tensor * gru_batched(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wih
 // x:[F,T,Cin], W:[kf,kt,Cin/g,Cout] (PyTorch [Cout,Cin/g,kt,kf]) -> [Fout,T,Cout].
 ggml_tensor * conv2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * W,
                      ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true,
-                     bool portable = false);
+                     bool portable = false, const ConvSupport & conv_support = {});
 
 // Transposed 2-D conv (decoder freq-upsampler) = zero-insert freq-upsample + causal conv2d.
 // Wc is the pre-reindexed regular-conv kernel; x:[F,T,Cin] -> [(F-1)*stride_f+kf-2*pad_f,T,Cout].
 ggml_tensor * conv_transpose2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor * Wc,
                                ggml_tensor * bias, int stride_f, int pad_f, int groups, bool fused = true,
-                               bool portable = false);
+                               bool portable = false, const ConvSupport & conv_support = {});
 
 // Per-(c,f) affine + per-channel PReLU.  aw,ab: ggml [F,C] (PyTorch [C,F]); slope:[C].
 ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw,

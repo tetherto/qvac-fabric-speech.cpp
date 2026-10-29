@@ -314,7 +314,9 @@ static std::vector<float> ref_conv2d(const std::vector<float> & x, int Cin, int 
 
 static std::vector<float> run_conv2d(const std::vector<float> & x, int Cin, int T, int F,
                                      const std::vector<float> & W, int Cout, int Cing, int kt, int kf,
-                                     const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused) {
+                                     const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused,
+                                     bool portable = false, const detail::ConvSupport & conv_support = {},
+                                     int * direct_nodes = nullptr, int * column_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, Cin);
@@ -323,9 +325,16 @@ static std::vector<float> run_conv2d(const std::vector<float> & x, int Cin, int 
     std::memcpy(tx->data, x.data(), ggml_nbytes(tx));
     std::memcpy(tW->data, W.data(), ggml_nbytes(tW));
     std::memcpy(tb->data, bias.data(), ggml_nbytes(tb));
-    ggml_tensor * y  = detail::conv2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused);
+    ggml_tensor * y  = detail::conv2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused, portable, conv_support);
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
+    if (direct_nodes) *direct_nodes = 0;
+    if (column_nodes) *column_nodes = 0;
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        const ggml_op op = ggml_graph_node(gf, i)->op;
+        if (direct_nodes && op == GGML_OP_CONV_2D) ++*direct_nodes;
+        if (column_nodes && op == GGML_OP_IM2COL) ++*column_nodes;
+    }
     ggml_graph_compute_with_ctx(ctx, gf, 1);
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
@@ -355,6 +364,86 @@ static void test_conv2d() {
             CHECK(m < 1e-4f, fmsg(c.name, fused));
         }
     }
+}
+
+// Capability checks must use the real per-group tensors and must not insert a
+// rejected direct op into the portable graph. All routes retain the scalar gate.
+static void test_conv_support_selection() {
+    struct Shape { int Cin, Cout, kt, kf, stride, pad, groups; };
+    const Shape shapes[] = {
+        {3, 5, 1, 1, 1, 0, 1}, {6, 10, 1, 1, 1, 0, 2},
+        {2, 4, 3, 3, 2, 1, 1}, {6, 8, 3, 3, 1, 1, 2},
+        {6, 8, 3, 5, 1, 2, 2}, // unsupported geometry preserves columns
+    };
+    const int F = 9, T = 6;
+    std::mt19937 rng(20261029);
+    int selected = 0, rejected = 0;
+    for (const Shape & s : shapes) {
+        const int cing = s.Cin / s.groups, cog = s.Cout / s.groups;
+        std::vector<float> x((size_t) s.Cin * T * F), w((size_t) s.Cout * cing * s.kt * s.kf), bias(s.Cout);
+        rand_fill(x, rng); rand_fill(w, rng); rand_fill(bias, rng);
+        const auto reference = ref_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf,
+                                           &bias, s.stride, s.pad, s.groups);
+        auto parity = [&](const std::vector<float> & got) {
+            CHECK(got.size() == reference.size(), "convolution selection preserves causal output shape");
+            float error = 0.0f;
+            for (size_t i = 0; i < std::min(got.size(), reference.size()); ++i) {
+                CHECK(std::isfinite(got[i]), "convolution selection output is finite");
+                error = std::max(error, std::fabs(got[i] - reference[i]));
+            }
+            CHECK(error < 1e-4f, "convolution selection retains existing scalar tolerance");
+        };
+        for (bool allow : {false, true}) {
+            int queries = 0, direct = -1, columns = -1;
+            detail::ConvSupport support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_CONV_2D, "convolution query receives actual direct op");
+                const ggml_tensor * kernel = candidate->src[0], *input = candidate->src[1];
+                CHECK(kernel->type == GGML_TYPE_F32 && input->type == GGML_TYPE_F32 &&
+                      candidate->type == GGML_TYPE_F32, "convolution query preserves F32 arithmetic");
+                CHECK(kernel->ne[0] == s.kf && kernel->ne[1] == s.kt && kernel->ne[2] == cing &&
+                      kernel->ne[3] == cog && input->ne[0] == F && input->ne[1] == T &&
+                      input->ne[2] == cing, "convolution query sees real per-group tensors");
+                CHECK(ggml_is_contiguous(kernel) && ggml_is_contiguous(input),
+                      "grouped convolution query sees contiguous per-group inputs");
+                CHECK(candidate->ne[0] == (F + 2 * s.pad - s.kf) / s.stride + 1 &&
+                      candidate->ne[1] == T + s.kt - 1 && candidate->ne[2] == cog && candidate->ne[3] == 1,
+                      "convolution query sees full output before causal crop");
+                int32_t params[6];
+                std::memcpy(params, candidate->op_params, sizeof(params));
+                CHECK(params[0] == s.stride && params[1] == 1 && params[2] == s.pad &&
+                      params[3] == s.kt - 1 && params[4] == 1 && params[5] == 1,
+                      "convolution query preserves stride, padding and dilation");
+                return allow && s.kt == s.kf && (s.kf == 1 || s.kf == 3);
+            };
+            parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                              s.stride, s.pad, s.groups, false, true, support, &direct, &columns));
+            const bool use_direct = allow && s.kt == s.kf && (s.kf == 1 || s.kf == 3);
+            CHECK(queries == s.groups, "each actual per-group convolution queried once");
+            CHECK(direct == (use_direct ? s.groups : 0) && columns == (use_direct ? 0 : s.groups),
+                  "only accepted direct convolutions enter the graph");
+            use_direct ? ++selected : ++rejected;
+        }
+        int queries = 0, direct = -1, columns = -1;
+        detail::ConvSupport reject = [&](const ggml_tensor *) { ++queries; return false; };
+        parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                          s.stride, s.pad, s.groups, false, false, reject, &direct, &columns));
+        CHECK(queries == 0 && direct == s.groups && columns == 0,
+              "existing nonportable convolution route ignores HTP support query");
+        parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                          s.stride, s.pad, s.groups, false, true, {}, &direct, &columns));
+        CHECK(direct == 0 && columns == s.groups, "absent convolution capability preserves old-runtime graph");
+        if (s.groups == 2 && s.kf <= 3) {
+            queries = 0;
+            detail::ConvSupport mixed = [&](const ggml_tensor *) { return ++queries == 1; };
+            parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                              s.stride, s.pad, s.groups, false, true, mixed, &direct, &columns));
+            CHECK(queries == 2 && direct == 1 && columns == 1,
+                  "per-group capability decisions can mix direct and portable convolutions");
+        }
+    }
+    std::printf("Convolution support selection: %d accepted / %d rejected shapes; scalar parity preserved\n",
+                selected, rejected);
 }
 
 // Scalar transposed conv — verbatim math of denoiser_core.cpp Runner::conv_transpose2d.
@@ -418,7 +507,9 @@ static std::vector<float> reindex_ct(const std::vector<float> & Wt, int Cin, int
 
 static std::vector<float> run_conv_transpose2d(const std::vector<float> & x, int Cin, int T, int F,
                                                const std::vector<float> & Wc, int Cout, int ing, int kt, int kf,
-                                               const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused) {
+                                               const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused,
+                                               bool portable = false, const detail::ConvSupport & conv_support = {},
+                                               int * direct_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, Cin);
@@ -427,9 +518,14 @@ static std::vector<float> run_conv_transpose2d(const std::vector<float> & x, int
     std::memcpy(tx->data, x.data(), ggml_nbytes(tx));
     std::memcpy(tW->data, Wc.data(), ggml_nbytes(tW));
     std::memcpy(tb->data, bias.data(), ggml_nbytes(tb));
-    ggml_tensor * y  = detail::conv_transpose2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused);
+    ggml_tensor * y  = detail::conv_transpose2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused, portable, conv_support);
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
+    if (direct_nodes) {
+        *direct_nodes = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+            if (ggml_graph_node(gf, i)->op == GGML_OP_CONV_2D) ++*direct_nodes;
+    }
     ggml_graph_compute_with_ctx(ctx, gf, 1);
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
@@ -458,6 +554,27 @@ static void test_conv_transpose2d() {
             CHECK(got.size() == ref.size(), fmsg(c.name, fused));
             for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
             CHECK(m < 1e-4f, fmsg(c.name, fused));
+        }
+        for (bool allow : {false, true}) {
+            int queries = 0, direct_nodes = -1;
+            detail::ConvSupport support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_CONV_2D && candidate->src[1]->ne[0] == (F - 1) * c.stride + 1,
+                      "transposed convolution queries the zero-inserted regular convolution");
+                return allow;
+            };
+            const auto got = run_conv_transpose2d(x, c.Cin, T, F, Wc, Cout, ing, c.kt, c.kf, b,
+                                                   c.stride, c.pad, c.groups, false, true, support, &direct_nodes);
+            CHECK(got.size() == ref.size(), "portable transposed convolution preserves output shape");
+            float error = 0.0f;
+            for (size_t i = 0; i < std::min(got.size(), ref.size()); ++i) {
+                CHECK(std::isfinite(got[i]), "portable transposed convolution output is finite");
+                error = std::max(error, std::fabs(got[i] - ref[i]));
+            }
+            CHECK(error < 1e-4f, "portable transposed convolution retains existing tolerance");
+            const bool depthwise = ing == 1 && c.groups == Cout;
+            CHECK(queries == (depthwise ? 0 : c.groups) && direct_nodes == (depthwise || !allow ? 0 : c.groups),
+                  "transposed convolution preserves depthwise route and direct-op fallback");
         }
     }
 }
@@ -1307,6 +1424,7 @@ int main(int argc, char ** argv) {
     test_gru_batched();
     test_gru_support_selection();
     test_conv2d();
+    test_conv_support_selection();
     test_conv_transpose2d();
     test_affine_prelu();
     test_shuffle2();
