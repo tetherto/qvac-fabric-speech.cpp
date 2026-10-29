@@ -36,6 +36,10 @@ in [MOSS GPU validation](docs/moss.md#gpu-validation-cuda-and-vulkan); smoke cov
 not establish general speech quality. OpenCL remains untested here. See the [API matrix](docs/api.md) for
 streaming support and the [model guide](docs/models.md) for storage tiers.
 
+MOSS generation starts at the reference assistant header. ISO language codes
+accepted by the API/CLI are converted to the model's language names (`en` to
+`English`, `zh` to `Chinese`); spelled-out names pass through.
+
 MOSS reference cloning applies the upstream loudness adjustment, and TTSD uses
 its dialogue-specific prompt template. Use the explicit TTSD sampling settings
 in the [dialogue example](docs/moss.md); the CLI's shared defaults are for
@@ -65,8 +69,8 @@ engine, not every backend ggml can compile.
 
 | Model line | Languages | Voice source | Native rate | CPU | Metal | Vulkan | OpenCL | CUDA | WebGPU |
 |---|---|---|---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Chatterbox Turbo | English | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes | untested |
-| Chatterbox Multilingual | 23 | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes | yes | yes | yes | untested |
+| Chatterbox Turbo | English | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes | untested |
+| Chatterbox Multilingual | 23 | built-in or zero-shot reference WAV/profile | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes | untested |
 | Supertonic 1 | English | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | untested |
 | Supertonic 2 | `en`, `ko`, `es`, `pt`, `fr` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | untested |
 | Supertonic 3 | 31 languages plus `na` | preset or external style tensors/JSON | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | yes² |
@@ -82,8 +86,10 @@ engine, not every backend ggml can compile.
 
 ¹ MOSS CUDA/Vulkan: generated-model CPU parity; quantized TTS/TTSD,
 SoundEffect and Speech checkpoint smoke cases. Vulkan also covers the
-F16 TTS/TTSD/SoundEffect and BF16 Speech cases. TTS quality gates retain
-known upstream limitations; see the linked MOSS guide for details.
+F16 TTS/TTSD/SoundEffect and BF16 Speech cases. The full-checkpoint TTS quality
+gate requires every expected CPU/GPU batch, streaming and reuse WAV to pass
+WER <= 0.25. Wrong text has no baseline-audio exemption; missing outputs,
+ASR errors and non-finite scores fail the gate. See the linked MOSS guide.
 
 ² WebGPU (Dawn on an RTX 5090): Supertonic 3 renders with a 0.997 waveform
 correlation to the CPU run and the same transcript (2026-10-20). Parler mini
@@ -111,19 +117,21 @@ model guides for setup and validated tiers. Audio8's corrected baseline uses `q8
 [Audio8](docs/audio8.md#hexagon-npu-snapdragon) for the full-compute tuning
 recipe (`OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`), the corrected single-prompt
 baseline, and the remaining cross-backend correctness limits. Optional
-Apple Core ML sidecars accelerate the CosyVoice3 speech LM, flow and HiFT neural
+Apple Core ML sidecars accelerate the Chatterbox Turbo and Multilingual S3Gen
+encoder, CFM and HiFT, the CosyVoice3 speech LM, flow and HiFT neural
 stages, the Supertonic vocoder, the Audio8 codec, the Parler-TTS DAC decoder
 (on the Neural Engine), and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
 speech tokenizer. Export, routing, fallback, and per-call status are documented in
+[Chatterbox](docs/chatterbox.md#core-ml-sidecars),
 [CosyVoice3](docs/cosyvoice3.md#core-ml-sidecars),
 [Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar),
 [Audio8](docs/audio8.md#core-ml-codec-sidecar),
 [Parler-TTS](docs/parler.md#core-ml-dac-sidecar-apple-neural-engine), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
-CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled CosyVoice3
-or Parler-TTS sidecars present, `fit_params` returns `Error` with
+CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
+CosyVoice3 or Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
@@ -136,7 +144,10 @@ Backend selection and model-specific validation are documented in
 [docs/backends.md](docs/backends.md) and [docs/testing.md](docs/testing.md).
 Metadata-only memory preflight covers MOSS Delay/TTSD and MOSS-SoundEffect,
 including text/diffusion/decode workloads for sound effects. Entry points are indexed in
-[docs/api.md](docs/api.md#memory-fit-preflight).
+[docs/api.md](docs/api.md#memory-fit-preflight). Every fit result names its device
+by the ggml device name, and a device that shares host memory and reports none
+of its own carries the CPU's figures; see
+[memory fit results](../../README.md#memory-fit-results).
 
 ## Performance
 
