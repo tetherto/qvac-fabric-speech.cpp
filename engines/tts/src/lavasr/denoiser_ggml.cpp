@@ -265,6 +265,12 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
 ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable) {
     const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3];
     if (portable) {
+        // A single channel needs no channel transpose or reduction. Preserve
+        // the contiguous spatial order and square each original sample once.
+        if (C == 1) {
+            ggml_tensor * packed = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
+            return ggml_reshape_2d(ctx, ggml_sqr(ctx, packed), F, T * Bc);
+        }
         // Keep p=f+F*t intact. This is a batched 2D transpose, rather than
         // a C/T/F permutation that falls back to scalar strided copies on HTP.
         ggml_tensor * packed = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);

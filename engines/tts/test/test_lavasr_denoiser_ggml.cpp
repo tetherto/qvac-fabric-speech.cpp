@@ -777,7 +777,7 @@ static void test_shuffle2_portable() {
 
 static void test_channel_energy_mean() {
     struct Shape { int F, T, C, B; };
-    const Shape shapes[] = {{1, 1, 1, 1}, {7, 5, 3, 2}, {5, 9, 12, 3},
+    const Shape shapes[] = {{1, 1, 1, 1}, {129, 63, 1, 7}, {33, 5, 1, 2}, {7, 5, 3, 2}, {5, 9, 12, 3},
                             {33, 63, 24, 7}, {33, 63, 32, 7}, {65, 63, 12, 7}};
     for (const Shape & s : shapes) {
         for (bool strided : {false, true}) {
@@ -809,6 +809,20 @@ static void test_channel_energy_mean() {
                     }
             ggml_tensor * optimized = detail::channel_energy_mean(ctx, x, true);
             ggml_tensor * standard = detail::channel_energy_mean(ctx, x, false);
+            if (s.C == 1) {
+                ggml_cgraph * fast = ggml_new_graph(ctx);
+                ggml_build_forward_expand(fast, optimized);
+                int squares = 0, copies = 0;
+                for (int i = 0; i < ggml_graph_n_nodes(fast); ++i) {
+                    const ggml_op op = ggml_graph_node(fast, i)->op;
+                    squares += op == GGML_OP_SQR;
+                    copies += op == GGML_OP_CONT;
+                    CHECK(op != GGML_OP_SUM_ROWS && op != GGML_OP_SCALE && op != GGML_OP_MEAN,
+                          "singleton channel energy omits reduction and reciprocal scaling");
+                }
+                CHECK(squares == 1 && copies == (ggml_is_contiguous(x) ? 0 : 1),
+                      "singleton channel energy squares once with only a necessary strided-input copy");
+            }
             // Preserve the former portable graph as an exact regression oracle.
             ggml_tensor * previous = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
             previous = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, previous)), 1.0f / float(s.C));
