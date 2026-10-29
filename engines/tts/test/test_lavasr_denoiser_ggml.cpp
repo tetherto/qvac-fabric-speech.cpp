@@ -625,7 +625,12 @@ static void test_affine_support_selection() {
         const int F = 33, T = 9, C = 3, B = 2;
         ggml_tensor * x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, F, T, C, B);
         if (mode == 3) {
-            x = ggml_permute(ctx, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, T, F, C, B), 1, 0, 2, 3);
+            // ReLU's existing fallback requires contiguous rows. Row padding
+            // violates full contiguity without violating that precondition.
+            ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (F + 1) * T * C * B);
+            x = ggml_view_4d(ctx, storage, F, T, C, B, (F + 1) * sizeof(float),
+                             (F + 1) * T * sizeof(float), (F + 1) * T * C * sizeof(float), 0);
+            CHECK(ggml_is_contiguous_rows(x) && !ggml_is_contiguous(x), "affine padded-row fixture satisfies fallback preconditions");
         }
         ggml_tensor * aw = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
         ggml_tensor * ab = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
@@ -942,7 +947,7 @@ static std::vector<float> ref_dpgrnn(const std::vector<float> & x, int C, int T,
 }
 
 static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T, int F,
-                                     const WBag & bag, float eps, bool fused) {
+                                     const WBag & bag, float eps, bool fused, bool portable = false) {
     ggml_init_params p{ (size_t) 256 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, C);
@@ -961,7 +966,7 @@ static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T,
         auto it = tmap.find(n);
         return it == tmap.end() ? nullptr : it->second;
     };
-    ggml_tensor * y  = detail::dpgrnn(ctx, tx, "dp", Wr, eps, fused);
+    ggml_tensor * y  = detail::dpgrnn(ctx, tx, "dp", Wr, eps, fused, {}, portable);
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16384, false);
     ggml_build_forward_expand(gf, y);
     ggml_graph_compute_with_ctx(ctx, gf, 1);
@@ -969,6 +974,59 @@ static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T,
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
     ggml_free(ctx);
     return out;
+}
+
+static void test_dpgrnn_output_layout() {
+    struct Shape { int C, F, T, B; };
+    const Shape shapes[] = {{1, 1, 1, 1}, {1, 7, 5, 3}, {3, 5, 7, 2}, {16, 33, 63, 7},
+                            {17, 7, 19, 3}, {32, 16, 8, 2}, {33, 1, 129, 2}, {7, 129, 1, 3}};
+    for (const Shape & s : shapes) {
+        ggml_init_params params{size_t(16) * 1024 * 1024, nullptr, false};
+        ggml_context * ctx = ggml_init(params);
+        ggml_tensor * x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.C, s.F, s.T, s.B);
+        std::vector<uint32_t> input(ggml_nelements(x)), expected(input.size());
+        for (size_t i = 0; i < input.size(); ++i) {
+            input[i] = 0x3f000000u + uint32_t(i);
+            if (i % 17 == 0) input[i] = 0x80000000u; // Preserve negative zero as raw bits.
+            else if (i % 19 == 0) input[i] = 0;
+            else if (i % 3 == 0) input[i] |= 0x80000000u;
+        }
+        std::memcpy(x->data, input.data(), ggml_nbytes(x));
+        for (int b = 0; b < s.B; ++b) for (int t = 0; t < s.T; ++t)
+            for (int f = 0; f < s.F; ++f) for (int c = 0; c < s.C; ++c) {
+                const size_t source = c + size_t(s.C) * (f + s.F * (t + s.T * b));
+                const size_t target = f + size_t(s.F) * (t + s.T * (c + s.C * b));
+                expected[target] = input[source];
+            }
+        ggml_tensor * optimized = detail::dpgrnn_output_layout(ctx, x, true);
+        ggml_tensor * legacy = detail::dpgrnn_output_layout(ctx, x, false);
+        CHECK(optimized->ne[0] == s.F && optimized->ne[1] == s.T &&
+              optimized->ne[2] == s.C && optimized->ne[3] == s.B,
+              "DPGRNN output layout retains frequency/time/channel/batch dimensions");
+        CHECK(optimized->nb[0] == sizeof(float) && optimized->nb[1] == size_t(s.F) * sizeof(float) &&
+              optimized->nb[2] == size_t(s.F) * s.T * sizeof(float) &&
+              optimized->nb[3] == size_t(s.F) * s.T * s.C * sizeof(float),
+              "DPGRNN output layout has canonical contiguous strides");
+        ggml_tensor * copy = optimized->src[0];
+        CHECK(optimized->op == GGML_OP_RESHAPE && copy->op == GGML_OP_CONT &&
+              copy->src[0]->ne[0] == int64_t(s.F) * s.T && copy->src[0]->ne[1] == s.C &&
+              copy->src[0]->ne[2] == s.B && copy->src[0]->nb[1] == sizeof(float),
+              "portable DPGRNN copy exposes a batched 2-D transpose");
+        CHECK(legacy->op == GGML_OP_CONT && legacy->src[0]->op == GGML_OP_PERMUTE &&
+              legacy->src[0]->src[0] == x,
+              "nonportable DPGRNN copy keeps the original direct permutation");
+        ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, optimized);
+        ggml_build_forward_expand(graph, legacy);
+        CHECK(ggml_graph_compute_with_ctx(ctx, graph, 2) == GGML_STATUS_SUCCESS,
+              "DPGRNN output layout graphs compute successfully");
+        CHECK(std::memcmp(optimized->data, legacy->data, ggml_nbytes(optimized)) == 0,
+              "portable DPGRNN output layout is byte-exact with the original graph");
+        CHECK(std::memcmp(optimized->data, expected.data(), ggml_nbytes(optimized)) == 0,
+              "DPGRNN output layout matches independent batch/channel/frequency/time tags");
+        ggml_free(ctx);
+    }
+    std::printf("DPGRNN output layout: 8 byte-exact copy cases passed\n");
 }
 
 static void test_dpgrnn() {
@@ -1006,6 +1064,10 @@ static void test_dpgrnn() {
     std::vector<float> ref = ref_dpgrnn(x, C, T, F, "dp", bag, eps);
     for (bool fused : { true, false }) {
         std::vector<float> got = run_dpgrnn(x, C, T, F, bag, eps, fused);
+        std::vector<float> portable = run_dpgrnn(x, C, T, F, bag, eps, fused, true);
+        CHECK(got.size() == portable.size() &&
+              std::memcmp(got.data(), portable.data(), got.size() * sizeof(float)) == 0,
+              fmsg("portable DPGRNN output layout preserves numerical graph result bytes", fused));
         float m = 0.0f;
         CHECK(got.size() == ref.size(), fmsg("dpgrnn output size", fused));
         for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
@@ -1492,6 +1554,7 @@ int main(int argc, char ** argv) {
     test_shuffle2();
     test_shuffle2_portable();
     test_channel_energy_mean();
+    test_dpgrnn_output_layout();
     test_dpgrnn();
     test_ctfa();
     test_e2e_synthetic();

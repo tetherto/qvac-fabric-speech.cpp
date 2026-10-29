@@ -63,11 +63,15 @@ ggml_tensor * shuffle2(ggml_context * ctx, ggml_tensor * x, bool fused = true,
 // Resolves a weight tensor by name; returns nullptr if absent (mirrors Runner::Wopt).
 using WResolver = std::function<ggml_tensor *(const std::string &)>;
 
+// Materialize a contiguous [C,F,T,Bc] DPGRNN result as [F,T,C,Bc]. The portable
+// layout folds F*T so the existing backend can use a batched 2-D transpose.
+ggml_tensor * dpgrnn_output_layout(ggml_context * ctx, ggml_tensor * x, bool portable = false);
+
 // Dual-path grouped RNN bottleneck (denoiser_core.cpp dpgrnn): grouped BiGRU over freq +
 // grouped uni-GRU over time, each FC + LayerNorm-(F,C) + residual.  x:[F,T,C] -> [F,T,C].
 ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
                      const WResolver & W, float ln_eps, bool fused = true,
-                     const GruSupport & gru_support = {});
+                     const GruSupport & gru_support = {}, bool portable = false);
 
 // Causal time-frequency attention (denoiser_core.cpp ctfa): out = at(temporal) * x * af(freq),
 // each gate a GRU/BiGRU + FC + sigmoid over an energy-mean.  x:[F,T,C] -> [F,T,C].

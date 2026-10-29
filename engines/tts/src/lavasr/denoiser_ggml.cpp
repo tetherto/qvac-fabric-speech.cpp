@@ -218,8 +218,20 @@ static ggml_tensor * fc_hidden(ggml_context * ctx, ggml_tensor * y, ggml_tensor 
     return ggml_reshape_3d(ctx, r, Cout, B, L);                                // [Cout, B, L]
 }
 
+ggml_tensor * dpgrnn_output_layout(ggml_context * ctx, ggml_tensor * x, bool portable) {
+    if (!portable) return ggml_cont(ctx, ggml_permute(ctx, x, 2, 0, 1, 3));
+    GGML_ASSERT(ggml_is_contiguous(x));
+    const int64_t C = x->ne[0], F = x->ne[1], T = x->ne[2], Bc = x->ne[3];
+    // Preserve p=f+F*t while transposing C outward. This exposes nb[1]=4
+    // to the existing F32 transpose kernel instead of a 3-D strided copy.
+    ggml_tensor * spatial = ggml_reshape_3d(ctx, x, C, F * T, Bc);
+    ggml_tensor * output = ggml_cont(ctx, ggml_permute(ctx, spatial, 1, 0, 2, 3));
+    return ggml_reshape_4d(ctx, output, F, T, C, Bc);
+}
+
 ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
-                     const WResolver & W, float ln_eps, bool fused, const GruSupport & gru_support) {
+                     const WResolver & W, float ln_eps, bool fused, const GruSupport & gru_support,
+                     bool portable) {
     // canonical bottleneck layout xc:[C, F, T, Bc] (from FTC [F,T,C,Bc]).  The
     // chunk-batch Bc folds into each GRU's batch dim (T*Bc intra, F*Bc inter).
     ggml_tensor * xc = ggml_cont(ctx, ggml_permute(ctx, x, 1, 2, 0, 3));       // [C, F, T, Bc]
@@ -247,7 +259,7 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
     at = layernorm_fc(ctx, at, W(prefix + ".inter_ln.weight"), W(prefix + ".inter_ln.bias"), ln_eps);
     ggml_tensor * inter = ggml_add(ctx, at, intra);                           // residual, [C, F, T, Bc]
 
-    return ggml_cont(ctx, ggml_permute(ctx, inter, 2, 0, 1, 3));              // back to [F, T, C, Bc]
+    return dpgrnn_output_layout(ctx, inter, portable);                       // back to [F, T, C, Bc]
 }
 
 ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable) {
@@ -626,8 +638,8 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
                               kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
         en.push_back(x);
     }
-    x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused, gru_support);
-    x = detail::dpgrnn(ctx, x, "dpgrnn.1", W, ln_eps, fused, gru_support);
+    x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused, gru_support, portable);
+    x = detail::dpgrnn(ctx, x, "dpgrnn.1", W, ln_eps, fused, gru_support, portable);
 
     int j = 0;
     for (int i = 4; i >= 1; i--, j++) {
