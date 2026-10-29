@@ -28,9 +28,16 @@ using ConvSupport = std::function<bool(const ggml_tensor *)>;
 // The actual fused candidate is optional; older runtimes keep seven F32 ops.
 using AffineSupport = std::function<bool(const ggml_tensor *)>;
 
+// Query the actual F32 mean candidate; rejection retains SUM_ROWS + SCALE.
+using MeanSupport = std::function<bool(const ggml_tensor *)>;
+
+ggml_tensor * mean_rows(ggml_context * ctx, ggml_tensor * x, bool portable = false,
+                        const MeanSupport & mean_support = {});
+
 // Mean squared energy over channels: x:[F,T,C,Bc] -> [F,T*Bc].
 // The portable layout folds spatial axes before transposing channels inward.
-ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable = false);
+ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable = false,
+                                  const MeanSupport & mean_support = {});
 
 // Batched PyTorch GRU (gate order r,z,n; zero init state) over B weight-sharing sequences.
 // x:[I,B,L], Wih:[I,3H], Whh:[H,3H], Bih/Bhh:[3H] -> y:[H,B,L]; reverse writes each step at its t.
@@ -80,7 +87,7 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & prefix,
                    const WResolver & W, int freq_comp_ratio, bool fused = true,
                    ggml_cgraph * gf = nullptr, bool portable = false,
-                   const GruSupport & gru_support = {});
+                   const GruSupport & gru_support = {}, const MeanSupport & mean_support = {});
 
 } // namespace detail
 

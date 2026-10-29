@@ -775,6 +775,67 @@ static void test_shuffle2_portable() {
     }
 }
 
+static void test_mean_support_selection() {
+    for (int width : {1, 4, 12, 24, 32, 33, 65, 129, 513}) {
+        for (bool padded : {false, true}) for (int mode : {0, 1, 2, 3}) {
+            // Absent/rejected/accepted portable queries and unchanged nonportable mean.
+            ggml_init_params params{size_t(8) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            const int rows = 3, batches = 2;
+            ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, width, rows, batches);
+            if (padded) {
+                ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32,
+                                                          (width + 2) * rows * batches + 1);
+                std::fill_n(static_cast<float *>(storage->data), ggml_nelements(storage), 37.25f);
+                x = ggml_view_3d(ctx, storage, width, rows, batches, (width + 2) * sizeof(float),
+                                  (width + 2) * rows * sizeof(float), sizeof(float));
+            }
+            float expected[rows * batches] = {};
+            for (int b = 0; b < batches; ++b) for (int r = 0; r < rows; ++r) {
+                float sum = 0.0f;
+                for (int j = 0; j < width; ++j) {
+                    const float value = (j % 5 == 0) ? -0.0f : float((j + 13 * r + 7 * b) % 29 - 14) / 16.0f;
+                    std::memcpy(static_cast<char *>(x->data) + j * x->nb[0] + r * x->nb[1] + b * x->nb[2],
+                                &value, sizeof(value));
+                    sum += value;
+                }
+                expected[b * rows + r] = sum / float(width);
+            }
+            int queries = 0;
+            detail::MeanSupport support;
+            if (mode != 0) support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_MEAN && candidate->src[0] == x,
+                      "mean query receives the actual input and operation");
+                CHECK(candidate->type == GGML_TYPE_F32 && candidate->ne[0] == 1 &&
+                      candidate->ne[1] == rows && candidate->ne[2] == batches,
+                      "mean query preserves row and batch dimensions");
+                return mode >= 2;
+            };
+            ggml_tensor * y = detail::mean_rows(ctx, x, mode != 3, support);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            ggml_build_forward_expand(graph, y);
+            int means = 0, sums = 0, scales = 0;
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                const ggml_op op = ggml_graph_node(graph, i)->op;
+                means += op == GGML_OP_MEAN;
+                sums += op == GGML_OP_SUM_ROWS;
+                scales += op == GGML_OP_SCALE;
+            }
+            const bool selected = mode >= 2;
+            CHECK(queries == (mode == 1 || mode == 2 ? 1 : 0), "mean capability query selection");
+            CHECK(means == int(selected) && sums == int(!selected) && scales == int(!selected),
+                  "mean selected exclusively or complete legacy sum/scale fallback");
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 1) == GGML_STATUS_SUCCESS, "mean selection graph computes");
+            const float * values = static_cast<const float *>(y->data);
+            for (int i = 0; i < rows * batches; ++i)
+                CHECK(std::fabs(values[i] - expected[i]) < 1e-6f,
+                      "mean selected/fallback preserves padded rows, tails and batch order");
+            ggml_free(ctx);
+        }
+    }
+}
+
 static void test_channel_energy_mean() {
     struct Shape { int F, T, C, B; };
     const Shape shapes[] = {{1, 1, 1, 1}, {129, 63, 1, 7}, {33, 5, 1, 2}, {7, 5, 3, 2}, {5, 9, 12, 3},
@@ -823,19 +884,29 @@ static void test_channel_energy_mean() {
                 CHECK(squares == 1 && copies == (ggml_is_contiguous(x) ? 0 : 1),
                       "singleton channel energy squares once with only a necessary strided-input copy");
             }
+            int mean_queries = 0;
+            detail::MeanSupport mean_support = [&](const ggml_tensor * candidate) {
+                ++mean_queries;
+                CHECK(candidate->op == GGML_OP_MEAN && candidate->src[0]->ne[0] == s.C,
+                      "channel energy queries the actual channel mean");
+                return true;
+            };
+            ggml_tensor * selected = detail::channel_energy_mean(ctx, x, true, mean_support);
+            CHECK(mean_queries == (s.C == 1 ? 0 : 1),
+                  "channel energy queries mean support only for a non-singleton reduction");
             // Preserve the former portable graph as an exact regression oracle.
             ggml_tensor * previous = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
             previous = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, previous)), 1.0f / float(s.C));
             previous = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, previous, 3, 1, 0, 2)), s.F, s.T * s.B);
             ggml_cgraph * graph = ggml_new_graph(ctx);
-            for (ggml_tensor * output : {optimized, standard, previous}) ggml_build_forward_expand(graph, output);
+            for (ggml_tensor * output : {optimized, standard, previous, selected}) ggml_build_forward_expand(graph, output);
             CHECK(ggml_graph_compute_with_ctx(ctx, graph, 2) == GGML_STATUS_SUCCESS,
                   "channel energy graphs compute successfully");
             CHECK(optimized->ne[0] == s.F && optimized->ne[1] == s.T * s.B &&
                   optimized->ne[2] == 1 && optimized->ne[3] == 1, "channel energy retains frequency/time/batch order");
             CHECK(std::memcmp(optimized->data, previous->data, ggml_nbytes(optimized)) == 0,
                   "flattened channel energy is bit-exact with the former portable graph");
-            for (ggml_tensor * output : {optimized, standard}) {
+            for (ggml_tensor * output : {optimized, standard, selected}) {
                 const float * actual = static_cast<const float *>(output->data);
                 float error = 0.0f;
                 for (size_t i = 0; i < expected.size(); ++i) error = std::max(error, std::fabs(actual[i] - expected[i]));
@@ -1213,6 +1284,23 @@ static void test_ctfa() {
         for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
         CHECK(m < 2e-4f, fmsg("ctfa matches scalar denoiser_core ctfa", fused));
     }
+    int mean_queries = 0;
+    detail::MeanSupport support = [&](const ggml_tensor * candidate) {
+        ++mean_queries;
+        CHECK(candidate->op == GGML_OP_MEAN && candidate->type == GGML_TYPE_F32,
+              "portable ctfa queries both actual F32 mean candidates");
+        return true;
+    };
+    std::vector<float> selected = run_graph(x, F, T, C, bag,
+        [&](ggml_context * ctx, ggml_tensor * tx, const detail::WResolver & Wr) {
+            return detail::ctfa(ctx, tx, "ct", Wr, r, false, nullptr, true, {}, support);
+        });
+    CHECK(mean_queries == 2, "portable ctfa propagates mean support to TA and channel energy");
+    CHECK(selected.size() == ref.size(), "portable mean ctfa output size");
+    float error = 0.0f;
+    for (size_t i = 0; i < ref.size() && i < selected.size(); ++i)
+        error = std::max(error, std::fabs(selected[i] - ref[i]));
+    CHECK(error < 2e-4f, "portable mean ctfa retains scalar reference accuracy");
 }
 
 // End-to-end parity: DenoiserGgml::chunk_forward (ggml-CPU) vs scalar
@@ -1567,6 +1655,7 @@ int main(int argc, char ** argv) {
     test_affine_support_selection();
     test_shuffle2();
     test_shuffle2_portable();
+    test_mean_support_selection();
     test_channel_energy_mean();
     test_dpgrnn_output_layout();
     test_dpgrnn();

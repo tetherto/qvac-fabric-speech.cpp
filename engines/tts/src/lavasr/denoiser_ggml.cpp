@@ -262,7 +262,18 @@ ggml_tensor * dpgrnn(ggml_context * ctx, ggml_tensor * x, const std::string & pr
     return dpgrnn_output_layout(ctx, inter, portable);                       // back to [F, T, C, Bc]
 }
 
-ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable) {
+ggml_tensor * mean_rows(ggml_context * ctx, ggml_tensor * x, bool portable,
+                        const MeanSupport & mean_support) {
+    if (!portable) return ggml_mean(ctx, x);
+    if (mean_support) {
+        ggml_tensor * candidate = ggml_mean(ctx, x);
+        if (mean_support(candidate)) return candidate;
+    }
+    return ggml_scale(ctx, ggml_sum_rows(ctx, x), 1.0f / (float) x->ne[0]);
+}
+
+ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable,
+                                  const MeanSupport & mean_support) {
     const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3];
     if (portable) {
         // A single channel needs no channel transpose or reduction. Preserve
@@ -276,7 +287,7 @@ ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool port
         ggml_tensor * packed = ggml_is_contiguous(x) ? x : ggml_cont(ctx, x);
         ggml_tensor * spatial = ggml_reshape_3d(ctx, packed, F * T, C, Bc);
         ggml_tensor * channels = ggml_cont(ctx, ggml_permute(ctx, spatial, 1, 0, 2, 3));
-        ggml_tensor * energy = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, channels)), 1.0f / (float) C);
+        ggml_tensor * energy = mean_rows(ctx, ggml_sqr(ctx, channels), true, mean_support);
         return ggml_reshape_2d(ctx, energy, F, T * Bc);
     }
     ggml_tensor * channels = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
@@ -286,13 +297,12 @@ ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool port
 
 ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
                    const WResolver & W, int r, bool fused, ggml_cgraph * gf, bool portable,
-                   const GruSupport & gru_support) {
+                   const GruSupport & gru_support, const MeanSupport & mean_support) {
     const int64_t F = x->ne[0], T = x->ne[1], C = x->ne[2], Bc = x->ne[3];
 
     // ---- TA: energy-mean over freq -> GRU over time (batch=chunk) -> FC -> sigmoid ----
     auto mean = [&](ggml_tensor * a) {
-        return portable ? ggml_scale(ctx, ggml_sum_rows(ctx, a), 1.0f / (float) a->ne[0])
-                        : ggml_mean(ctx, a);
+        return mean_rows(ctx, a, portable, mean_support);
     };
     ggml_tensor * zt   = mean(ggml_sqr(ctx, x));                    // [1, T, C, Bc]
     ggml_tensor * ztin = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_permute(ctx, zt, 3, 2, 0, 1)),
@@ -306,7 +316,7 @@ ggml_tensor * ctfa(ggml_context * ctx, ggml_tensor * x, const std::string & p,
                                                      2, 3, 1, 0));           // [1, T, C, Bc]
 
     // ---- FA: energy-mean over chan -> fold freq by r -> BiGRU (batch=time*chunk) -> FC -> sigmoid ----
-    ggml_tensor * ecF = channel_energy_mean(ctx, x, portable);             // [F, T*Bc]
+    ggml_tensor * ecF = channel_energy_mean(ctx, x, portable, mean_support); // [F, T*Bc]
     const int     pad_len = (r - (int) (F % r)) % r;
     const int64_t Fp = F + pad_len, Hh = Fp / r;
     ggml_tensor * ecp  = ggml_pad_ext(ctx, ecF, 0, pad_len, 0, 0, 0, 0, 0, 0); // [Fp, T*Bc]
@@ -403,7 +413,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
                                bool is_last, const WResolver & W, int r, bool fused,
                                ggml_cgraph * gf = nullptr, bool portable = false,
                                const GruSupport & gru_support = {}, const ConvSupport & conv_support = {},
-                               const AffineSupport & affine_support = {}) {
+                               const AffineSupport & affine_support = {}, const MeanSupport & mean_support = {}) {
     (void) cout;
     const int pf = kf / 2;
     auto conv = [&](ggml_tensor * in, const std::string & wn, int st, int grp) -> ggml_tensor * {
@@ -420,7 +430,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         ggml_tensor * h = conv(x, base + ".ops.1", stride, groups);
         h               = bn(h, base + ".ops.2");
         if (!is_last) h = ap(h, base + ".ops.3");
-        h               = ctfa(ctx, h, base + ".ops.4", W, r, fused, gf, portable, gru_support);
+        h               = ctfa(ctx, h, base + ".ops.4", W, r, fused, gf, portable, gru_support, mean_support);
         if (!is_last && groups == 2) h = shuffle2(ctx, h, fused, portable);
         return h;
     }
@@ -432,7 +442,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         h = conv(h, base + ".dconv.1", stride, (int) h->ne[2]); // depthwise (groups == channels)
         h = bn(h, base + ".dconv.2");
         if (!is_last) h = ap(h, base + ".dconv.3");
-        return ctfa(ctx, h, base + ".dconv.4", W, r, fused, gf, portable, gru_support);
+        return ctfa(ctx, h, base + ".dconv.4", W, r, fused, gf, portable, gru_support, mean_support);
     }
     // type == 2: XMB
     ggml_tensor * h = conv2d(ctx, x, W(base + ".pconv1.0.weight"), W(base + ".pconv1.0.bias"), 1, 0, groups, fused, portable, conv_support);
@@ -444,7 +454,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
     h = ap(h, base + ".dconv.3");
     h = conv2d(ctx, h, W(base + ".pconv2.0.weight"), W(base + ".pconv2.0.bias"), 1, 0, groups, fused, portable, conv_support);
     h = bn(h, base + ".pconv2.1");
-    h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf, portable, gru_support);
+    h = ctfa(ctx, h, base + ".pconv2.2", W, r, fused, gf, portable, gru_support, mean_support);
     if (h->ne[0] == x->ne[0] && h->ne[1] == x->ne[1] && h->ne[2] == x->ne[2]) h = ggml_add(ctx, h, x);
     if (!is_last && groups == 2) h = shuffle2(ctx, h, fused, portable);
     return h;
@@ -615,8 +625,9 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     detail::GruSupport gru_support;
     detail::ConvSupport conv_support;
     detail::AffineSupport affine_support;
+    detail::MeanSupport mean_support;
     if (portable && !fused && ::tts_cpp::detail::backend_is_hexagon(backend)) {
-        // HTP opts into supported GRU, direct-convolution and affine/PReLU shapes. CPU
+        // HTP opts into supported GRU, direct-convolution, affine/PReLU and mean shapes. CPU
         // portable parity retains the standard decompositions.
         const ggml_backend_t htp_backend = backend;
         gru_support = [htp_backend](const ggml_tensor * candidate) {
@@ -626,6 +637,9 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
             return ggml_backend_supports_op(htp_backend, candidate);
         };
         affine_support = [htp_backend](const ggml_tensor * candidate) {
+            return ggml_backend_supports_op(htp_backend, candidate);
+        };
+        mean_support = [htp_backend](const ggml_tensor * candidate) {
             return ggml_backend_supports_op(htp_backend, candidate);
         };
     }
@@ -641,7 +655,7 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     std::vector<ggml_tensor *> en;
     for (int i = 0; i < 5; i++) {
         x = detail::run_block(ctx, x, "encoder.en_convs." + std::to_string(i), kTypes[i], kChans[i],
-                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
+                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support, mean_support);
         en.push_back(x);
     }
     x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused, gru_support, portable);
@@ -651,11 +665,11 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     for (int i = 4; i >= 1; i--, j++) {
         x = ggml_add(ctx, x, en[4 - j]);
         x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[i], kChans[i - 1],
-                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
+                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support, mean_support);
     }
     x = ggml_add(ctx, x, en[0]);
     x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[0], 1,
-                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
+                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support, conv_support, affine_support, mean_support);
 
     x                = ggml_sigmoid(ctx, x);                                        // ratio mask [129, L, 1]
     ggml_tensor * m  = detail::erb_bs(ctx, x, W("erb.ierb_fc.weight"), erb_low, erb_high); // [F, L, 1]
