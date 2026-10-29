@@ -3328,6 +3328,11 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-lavasr-bench-validation)
     tts_cpp_register_test(test-lavasr-bench-validation LABEL "unit")
 
+    add_executable(test-lavasr-bench-timing test/test_lavasr_bench_timing.cpp)
+    target_include_directories(test-lavasr-bench-timing PRIVATE src)
+    tts_cpp_apply_ccache(test-lavasr-bench-timing)
+    tts_cpp_register_test(test-lavasr-bench-timing LABEL "unit")
+
     # LavaSR DSP primitives: resampler, STFT/ISTFT, Slaney mel,
     # FastLR crossover merge.  Pure host math (no model / no ggml), compiled
     # straight from the lavasr/dsp sources so it always runs in CI.

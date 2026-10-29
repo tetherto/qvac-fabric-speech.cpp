@@ -3,6 +3,7 @@
 #include "tts-cpp/lavasr/denoiser.h"
 #include "tts-cpp/lavasr/enhancer.h"
 #include "bench_validation.h"
+#include "bench_timing.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,7 @@ using Seconds = std::chrono::duration<double>;
 using tts_cpp::lavasr::Denoiser;
 using tts_cpp::lavasr::Enhancer;
 using tts_cpp::lavasr::bench::Difference;
+using tts_cpp::lavasr::bench::Timing;
 
 struct Options {
     std::string denoiser, enhancer, input, out_dn, out_enh, json_out;
@@ -36,7 +38,6 @@ struct Options {
     double min_seconds = 0.0;
     bool verify = false;
 };
-struct Timing { double denoiser = 0.0, enhancer = 0.0, total = 0.0; };
 struct Verification { std::string stage; Difference difference; bool passed; std::string reference_backend; };
 
 void usage(const char * exe) {
@@ -49,7 +50,8 @@ void usage(const char * exe) {
         "  Auto mode: [--denoiser-coreml DN.mlmodelc] [--enhancer-coreml ENH.mlmodelc]\n"
         "  [--coreml-compute-units CPU_ONLY|CPU_AND_GPU|CPU_AND_NE|ALL]\n"
         "  Legacy: --dn-gpu-layers N --n-gpu-layers N (0=CPU default, >0=accelerator)\n"
-        "  First call and warmups are separate from the N measured calls.\n", exe);
+        "  --runs 1 --warmup 0 --min-seconds 0 measures the first call once.\n"
+        "  Other modes keep the first call and warmups separate from measured calls.\n", exe);
 }
 
 int integer(const std::string & s) {
@@ -270,23 +272,17 @@ int run(const Options & o) {
         if (do_enh) require_pcm(enhanced, (size_t) output_count, "enhancer");
         return t;
     };
-    const Timing first = call();
-    std::fprintf(stderr, "[first] total=%.6f s\n", first.total);
-    std::vector<Timing> warmups, calls;
-    for (int i = 0; i < o.warmup; ++i) warmups.push_back(call());
-    double measured_seconds = 0.0;
-    for (int i = 0; i < o.runs || measured_seconds < o.min_seconds; ++i) {
-        if (i >= 100000) throw std::runtime_error("measurement call limit exceeded");
-        calls.push_back(call());
-        measured_seconds += calls.back().total;
-        std::fprintf(stderr, "[measure %d/%d] denoiser=%.6f enhancer=%.6f total=%.6f s\n",
-                     i+1, o.runs, calls.back().denoiser, calls.back().enhancer, calls.back().total);
-    }
+    const auto measurements = tts_cpp::lavasr::bench::measure(o.runs, o.warmup, o.min_seconds, call);
+    const auto & first = measurements.first;
+    const auto & warmups = measurements.warmups;
+    const auto & calls = measurements.calls;
+    const double measured_seconds = measurements.measured_seconds;
     std::printf("LavaSR %s: denoiser=%s enhancer=%s\n", o.stage.c_str(),
                 dn ? dn->backend_name().c_str() : "unused", enh ? enh->backend_name().c_str() : "unused");
     std::printf("  neural precision: denoiser=%s enhancer=%s%s\n", dn_precision.c_str(), enh_precision.c_str(),
                 any_coreml ? "; Core ML precision follows the compiled model; placement is framework-managed" : "; F32 graph / F32 matmul");
-    std::printf("  constructor=%.6f s first=%.6f s warmup=%d (excluded)\n", constructor.total, first.total, o.warmup);
+    std::printf("  constructor=%.6f s first=%.6f s (%s) warmup=%d (excluded)\n",
+                constructor.total, first.total, measurements.first_call_measured ? "measured" : "excluded", o.warmup);
     if (do_dn) report("denoiser", calls, &Timing::denoiser, audio_s);
     if (do_enh) report("enhancer", calls, &Timing::enhancer, audio_s);
     report("total", calls, &Timing::total, audio_s);
@@ -350,7 +346,10 @@ int run(const Options & o) {
             << ",\"output_rate\":" << output_rate << ",\"audio_s\":" << audio_s
             << ",\"min_seconds\":" << o.min_seconds << ",\"measured_seconds\":" << measured_seconds
             << ",\"denoiser_model\":" << quoted(o.denoiser) << ",\"enhancer_model\":" << quoted(o.enhancer)
-            << ",\"timing_scope\":\"native processing including host audio DSP; excludes I/O, verification, constructor, first call and warmups\""
+            << ",\"first_call_measured\":" << (measurements.first_call_measured ? "true" : "false")
+            << ",\"timing_scope\":" << quoted(measurements.first_call_measured
+                ? "native processing including host audio DSP; excludes I/O, verification, constructor and warmups; first call included in measured calls"
+                : "native processing including host audio DSP; excludes I/O, verification, constructor, first call and warmups")
             << ",\"constructor\":"; timing_json(out, constructor);
         out << ",\"first\":"; timing_json(out, first);
         out << ",\"warmups\":[";

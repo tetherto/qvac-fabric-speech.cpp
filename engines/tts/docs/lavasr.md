@@ -111,11 +111,15 @@ execution. Resampling, STFT/mel features, denoiser log features, overlap-add,
 ISTFT and the FastLR merge remain host audio DSP.
 
 Constructor time, the first processing call, additional warmups and measured
-calls are recorded separately. Each measured call reports denoiser, enhancer
-and combined seconds. RTF is processing seconds divided by input audio seconds;
-lower is faster. Native processing includes the host audio DSP and graph
-construction/allocation. WAV I/O, reference verification, constructor/first-call
-and warmups are excluded from the steady measurements. Output WAVs use float32
+calls are recorded separately. With `--runs 1 --warmup 0 --min-seconds 0`
+(the desktop time-wrapped runner's mode), the first call is also the single
+measured sample: only one inference executes, with JSON `first_call_measured`
+set to `true`. Other modes retain a separate first call excluded from the
+measured samples. Each measured call reports denoiser, enhancer and combined
+seconds. RTF is processing seconds divided by input audio seconds; lower is
+faster. Native processing includes the host audio DSP and graph
+construction/allocation. WAV I/O, reference verification, constructor time
+and warmups are excluded from processing measurements. Output WAVs use float32
 PCM, preserving the measured samples without int16 clipping or quantization.
 
 `--verify` compares denoising against the scalar reference and enhancement
