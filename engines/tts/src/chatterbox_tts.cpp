@@ -24,6 +24,7 @@
 #include "backend_selection.h"
 #include "backend_util.h"
 #include "conv_columns.h"
+#include "chatterbox_coreml.h"
 #include "chatterbox_fit_internal.h"
 #include "fit_price.h"
 #include "fit_util.h"
@@ -56,7 +57,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -142,6 +145,9 @@ struct model_ctx {
         std::make_unique<::tts_cpp::detail::sched_fallback>();
     ggml_context * ctx_w = nullptr;
     ggml_backend_buffer_t buffer_w = nullptr;
+    // A metadata-only fit model has no buffer_w, but graph construction must
+    // still use the same weight-residency policy as the real loader.
+    ggml_backend_buffer_type_t weight_buft = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
 
     // Variant metadata read from GGUF once at load time.
@@ -327,7 +333,69 @@ static double                                g_s3gen_cache_last_load_ms = 0.0;
 // count reaches zero.  Independent of the mutex below so the unload
 // fast-path doesn't take it.
 static std::atomic<int>                      g_s3gen_cache_refcount{0};
+
+// Core ML sidecars of the cached S3Gen GGUF, keyed on (path, compute units).
+// A stage retired after a failed prediction stays retired until the cache is
+// released (s3gen_unload / process exit).
+namespace coreml = ::tts_cpp::chatterbox::detail;
+static std::mutex                            g_coreml_mu;
+static std::shared_ptr<coreml::s3gen_coreml> g_coreml;
+static std::string                           g_coreml_key;
 }  // namespace
+
+// token_mel_ratio and the built-in voice's prompt length, from GGUF metadata
+// only (cheap; the warm-up thread may run before the S3Gen weights load).
+static void s3gen_peek_coreml_metadata(const std::string & path, int & ratio, int & prompt_tokens) {
+    ratio = 2;
+    prompt_tokens = 0;
+    gguf_init_params gp = { /*no_alloc=*/true, /*ctx=*/nullptr };
+    gguf_context * g = gguf_init_from_file(path.c_str(), gp);
+    if (!g) return;
+    auto read_u32 = [&](const char * key, int & out) {
+        const int64_t k = gguf_find_key(g, key);
+        if (k >= 0 && gguf_get_kv_type(g, k) == GGUF_TYPE_UINT32) out = (int) gguf_get_val_u32(g, k);
+    };
+    read_u32("s3gen.encoder.token_mel_ratio", ratio);
+    read_u32("s3gen.builtin.prompt_token_len", prompt_tokens);
+    gguf_free(g);
+    if (ratio < 1 || ratio > MAX_TOKEN_MEL_RATIO) ratio = 2;
+}
+
+static std::shared_ptr<coreml::s3gen_coreml> s3gen_coreml_get(const std::string & path,
+                                                              const coreml::coreml_policy & policy) {
+    if (!coreml::coreml_sidecars_enabled(path, policy)) return {};
+    const std::string key = path + '\n' + policy.compute_units;
+    std::lock_guard<std::mutex> lk(g_coreml_mu);
+    if (!g_coreml || g_coreml_key != key) {
+        g_coreml.reset();
+        int ratio = 2, prompt_tokens = 0;
+        s3gen_peek_coreml_metadata(path, ratio, prompt_tokens);
+        g_coreml = std::make_shared<coreml::s3gen_coreml>(path, policy.compute_units, ratio);
+        g_coreml_key = key;
+    }
+    return g_coreml;
+}
+
+void tts_cpp::chatterbox::detail::s3gen_coreml_warm(const std::string & s3gen_gguf, const coreml_policy & policy,
+                                                     const std::vector<int> & speech_tokens, int prompt_tokens,
+                                                     const std::atomic<bool> * stop) {
+    const auto sidecars = s3gen_coreml_get(s3gen_gguf, policy);
+    if (!sidecars) return;
+    if (prompt_tokens < 0) {
+        int ratio = 2;
+        s3gen_peek_coreml_metadata(s3gen_gguf, ratio, prompt_tokens);
+    }
+    const int pre_lookahead_len = 3;  // silence tokens a whole-sentence call appends
+    std::vector<int> tokens;
+    for (int speech : speech_tokens) tokens.push_back(prompt_tokens + speech + pre_lookahead_len);
+    sidecars->warm(tokens, stop);
+}
+
+static void s3gen_coreml_release() {
+    std::lock_guard<std::mutex> lk(g_coreml_mu);
+    g_coreml.reset();
+    g_coreml_key.clear();
+}
 
 // Forward declaration: clear all per-synth caches.  The persistent
 // graph caches (cfm_estimator + time_mlp scaffolding) and the CPU
@@ -351,6 +419,8 @@ static void s3gen_model_cache_release() {
     // Vulkan/Metal/CUDA where ggml_gallocr_free against a freed
     // backend asserts.
     s3gen_release_synth_caches();
+
+    s3gen_coreml_release();
 
     std::lock_guard<std::mutex> lk(g_s3gen_cache_mu);
     // Tear down every persistent host-side cache BEFORE freeing the
@@ -479,6 +549,7 @@ static model_ctx load_s3gen_gguf(const std::string & path, int n_gpu_layers,
         m.tensors[name] = dst;
     }
     ggml_backend_buffer_type_t weight_buft = ::tts_cpp::detail::weight_buffer_type(m.backend);
+    m.weight_buft = weight_buft;
     if (measure_bytes) {
         *measure_bytes = ggml_backend_alloc_ctx_tensors_from_buft_size(m.ctx_w, weight_buft);
         // Same trick ggml's own measure paths use: mark every weight tensor
@@ -561,20 +632,24 @@ static ggml_tensor * find_tensor(const model_ctx & m, const std::string & name) 
 
 // HTP has no fast F32 im2col and HMX multiplies in F16 regardless, so a
 // Hexagon-resident kernel takes F16 columns: half the im2col traffic at the
-// same product precision.  A kernel without a buffer (a graph input, or a
-// metadata-only fit model) keeps F32 columns.
-static ggml_type conv_column_type(const ggml_tensor * kernel) {
-    const bool on_hexagon = kernel->buffer &&
-        ::tts_cpp::detail::reg_name_is_hexagon(
-            ::tts_cpp::detail::buft_reg_name(ggml_backend_buffer_get_type(kernel->buffer)));
+// same product precision. Metadata-only model weights use their planned
+// buffer type, so fit builds the same graph before device memory exists.
+// Graph-input kernels (the STFT scaffold) have neither and keep F32 columns.
+static ggml_type conv_column_type(const ggml_tensor * kernel,
+                                  ggml_backend_buffer_type_t planned_weight_buft) {
+    const ggml_backend_buffer_type_t buft = kernel->buffer
+        ? ggml_backend_buffer_get_type(kernel->buffer) : planned_weight_buft;
+    const bool on_hexagon = ::tts_cpp::detail::reg_name_is_hexagon(
+        ::tts_cpp::detail::buft_reg_name(buft));
     return on_hexagon ? GGML_TYPE_F16 : GGML_TYPE_F32;
 }
 
 // conv1d via im2col + mul_mat.  kernel ne=[K, IC, OC]
 static ggml_tensor * conv1d_f32(ggml_context * ctx, ggml_tensor * kernel, ggml_tensor * input,
-                                int stride, int padding, int dilation) {
+                                int stride, int padding, int dilation,
+                                ggml_backend_buffer_type_t planned_weight_buft = nullptr) {
     ggml_tensor * im2col = ggml_im2col(ctx, kernel, input, stride, 0, padding, 0, dilation, 0, false,
-                                       conv_column_type(kernel));
+                                       conv_column_type(kernel, planned_weight_buft));
     ggml_tensor * result = ggml_mul_mat(ctx,
         ggml_reshape_2d(ctx, im2col, im2col->ne[0], im2col->ne[2] * im2col->ne[1]),
         ggml_reshape_2d(ctx, kernel, kernel->ne[0] * kernel->ne[1], kernel->ne[2]));
@@ -1137,11 +1212,11 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
     ggml_tensor * pw2 = find_tensor(m, "flow/encoder/pre_lookahead/conv2/w");
     ggml_tensor * pb2 = find_tensor(m, "flow/encoder/pre_lookahead/conv2/b");
     xt = zero_pad_dim0(ctx, xt, 0, 3);
-    xt = conv1d_f32(ctx, pw1, xt, 1, 0, 1);
+    xt = conv1d_f32(ctx, pw1, xt, 1, 0, 1, m.weight_buft);
     xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, pb1, 1, D));
     xt = ggml_leaky_relu(ctx, xt, 0.01f, false);
     xt = zero_pad_dim0(ctx, xt, 2, 0);
-    xt = conv1d_f32(ctx, pw2, xt, 1, 0, 1);
+    xt = conv1d_f32(ctx, pw2, xt, 1, 0, 1, m.weight_buft);
     xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, pb2, 1, D));
     xt = ggml_cont(ctx, ggml_permute(ctx, xt, 1, 0, 2, 3));
     x = ggml_add(ctx, xt, residual);
@@ -1160,7 +1235,7 @@ static void build_encoder_graph_nodes(graph_cache & cache, const model_ctx & m, 
     ggml_tensor * xu_rep = repeat_along_dim0(ctx, xu_3d, ratio);
     xu = ggml_cont(ctx, ggml_reshape_2d(ctx, xu_rep, xu_3d->ne[1]*ratio, xu_3d->ne[2]));
     xu = zero_pad_dim0(ctx, xu, 2 * ratio, 0);
-    xu = conv1d_f32(ctx, up_w, xu, 1, 0, 1);
+    xu = conv1d_f32(ctx, up_w, xu, 1, 0, 1, m.weight_buft);
     xu = ggml_add(ctx, xu, ggml_reshape_2d(ctx, up_b, 1, D));
     x = ggml_cont(ctx, ggml_permute(ctx, xu, 1, 0, 2, 3));
 
@@ -1253,22 +1328,24 @@ static cfm_resnet_w load_cfm_resnet(const model_ctx & m, const std::string & pfx
 
 static ggml_tensor * cfm_causal_block(ggml_context * ctx, ggml_tensor * x,
                                       ggml_tensor * conv_w, ggml_tensor * conv_b,
-                                      ggml_tensor * ln_w, ggml_tensor * ln_b, int64_t C_out) {
+                                      ggml_tensor * ln_w, ggml_tensor * ln_b, int64_t C_out,
+                                      ggml_backend_buffer_type_t weight_buft) {
     ggml_tensor * xp = zero_pad_dim0(ctx, x, 2, 0);
-    ggml_tensor * y = conv1d_f32(ctx, conv_w, xp, 1, 0, 1);
+    ggml_tensor * y = conv1d_f32(ctx, conv_w, xp, 1, 0, 1, weight_buft);
     y = ggml_add(ctx, y, ggml_reshape_2d(ctx, conv_b, 1, C_out));
     y = layer_norm_on_channel(ctx, y, ln_w, ln_b);
     return ggml_mish_fn(ctx, y);
 }
 
 static ggml_tensor * cfm_resnet(ggml_context * ctx, const cfm_resnet_w & w,
-                                ggml_tensor * x, ggml_tensor * t_emb, int64_t C_out) {
-    ggml_tensor * h = cfm_causal_block(ctx, x, w.b1_conv_w, w.b1_conv_b, w.b1_ln_w, w.b1_ln_b, C_out);
+                                ggml_tensor * x, ggml_tensor * t_emb, int64_t C_out,
+                                ggml_backend_buffer_type_t weight_buft) {
+    ggml_tensor * h = cfm_causal_block(ctx, x, w.b1_conv_w, w.b1_conv_b, w.b1_ln_w, w.b1_ln_b, C_out, weight_buft);
     ggml_tensor * t_feat = ggml_mish_fn(ctx, t_emb);
     ggml_tensor * t_proj = ggml_add(ctx, ggml_mul_mat(ctx, w.mlp_w, t_feat), w.mlp_b);
     h = ggml_add(ctx, h, ggml_reshape_2d(ctx, t_proj, 1, C_out));
-    h = cfm_causal_block(ctx, h, w.b2_conv_w, w.b2_conv_b, w.b2_ln_w, w.b2_ln_b, C_out);
-    ggml_tensor * res = conv1d_f32(ctx, w.res_w, x, 1, 0, 1);
+    h = cfm_causal_block(ctx, h, w.b2_conv_w, w.b2_conv_b, w.b2_ln_w, w.b2_ln_b, C_out, weight_buft);
+    ggml_tensor * res = conv1d_f32(ctx, w.res_w, x, 1, 0, 1, weight_buft);
     res = ggml_add(ctx, res, ggml_reshape_2d(ctx, w.res_b, 1, C_out));
     return ggml_add(ctx, h, res);
 }
@@ -1391,9 +1468,10 @@ static ggml_tensor * apply_tfm_stack(ggml_context * ctx, const cfm_tfm_stack & s
 }
 
 static ggml_tensor * cfm_causal_k3(ggml_context * ctx, ggml_tensor * x,
-                                   ggml_tensor * w, ggml_tensor * b, int C_out) {
+                                   ggml_tensor * w, ggml_tensor * b, int C_out,
+                                   ggml_backend_buffer_type_t weight_buft) {
     ggml_tensor * xp = zero_pad_dim0(ctx, x, 2, 0);
-    ggml_tensor * y = conv1d_f32(ctx, w, xp, 1, 0, 1);
+    ggml_tensor * y = conv1d_f32(ctx, w, xp, 1, 0, 1, weight_buft);
     return ggml_add(ctx, y, ggml_reshape_2d(ctx, b, 1, C_out));
 }
 
@@ -1736,15 +1814,15 @@ static void build_cfm_graph_nodes(cfm_estimator_cache & cache, const model_ctx &
     ggml_tensor * down_conv_w = find_tensor(m, "cfm/down_blocks/0/2/weight");
     ggml_tensor * down_conv_b = find_tensor(m, "cfm/down_blocks/0/2/bias");
 
-    ggml_tensor * z = cfm_resnet(ctx, down_rn, xc, t_emb_in, CH);
+    ggml_tensor * z = cfm_resnet(ctx, down_rn, xc, t_emb_in, CH, m.weight_buft);
     z = apply_tfm_stack(ctx, down_tfms, z, T, CH, f16_kv_attn, use_unfused);
     ggml_tensor * hidden = z;
-    z = cfm_causal_k3(ctx, z, down_conv_w, down_conv_b, CH);
+    z = cfm_causal_k3(ctx, z, down_conv_w, down_conv_b, CH, m.weight_buft);
 
     for (int i = 0; i < N_MID; ++i) {
         auto rn = load_cfm_resnet(m, "cfm/mid_blocks/" + std::to_string(i) + "/0");
         auto tfms = load_tfm_stack(m, "cfm/mid_blocks/" + std::to_string(i) + "/1", N_BLOCKS);
-        z = cfm_resnet(ctx, rn, z, t_emb_in, CH);
+        z = cfm_resnet(ctx, rn, z, t_emb_in, CH, m.weight_buft);
         z = apply_tfm_stack(ctx, tfms, z, T, CH, f16_kv_attn, use_unfused);
     }
 
@@ -1753,19 +1831,19 @@ static void build_cfm_graph_nodes(cfm_estimator_cache & cache, const model_ctx &
     ggml_tensor * up_conv_w = find_tensor(m, "cfm/up_blocks/0/2/weight");
     ggml_tensor * up_conv_b = find_tensor(m, "cfm/up_blocks/0/2/bias");
     z = ggml_concat(ctx, z, hidden, 1);
-    z = cfm_resnet(ctx, up_rn, z, t_emb_in, CH);
+    z = cfm_resnet(ctx, up_rn, z, t_emb_in, CH, m.weight_buft);
     z = apply_tfm_stack(ctx, up_tfms, z, T, CH, f16_kv_attn, use_unfused);
-    z = cfm_causal_k3(ctx, z, up_conv_w, up_conv_b, CH);
+    z = cfm_causal_k3(ctx, z, up_conv_w, up_conv_b, CH, m.weight_buft);
 
     ggml_tensor * fb_conv_w = find_tensor(m, "cfm/final_block/block/0/weight");
     ggml_tensor * fb_conv_b = find_tensor(m, "cfm/final_block/block/0/bias");
     ggml_tensor * fb_ln_w   = find_tensor(m, "cfm/final_block/block/2/weight");
     ggml_tensor * fb_ln_b   = find_tensor(m, "cfm/final_block/block/2/bias");
-    z = cfm_causal_block(ctx, z, fb_conv_w, fb_conv_b, fb_ln_w, fb_ln_b, CH);
+    z = cfm_causal_block(ctx, z, fb_conv_w, fb_conv_b, fb_ln_w, fb_ln_b, CH, m.weight_buft);
 
     ggml_tensor * fp_w = find_tensor(m, "cfm/final_proj/weight");
     ggml_tensor * fp_b = find_tensor(m, "cfm/final_proj/bias");
-    ggml_tensor * out = conv1d_f32(ctx, fp_w, z, 1, 0, 1);
+    ggml_tensor * out = conv1d_f32(ctx, fp_w, z, 1, 0, 1, m.weight_buft);
     out = ggml_add(ctx, out, ggml_reshape_2d(ctx, fp_b, 1, MEL));
     ggml_set_name(out, "out"); ggml_set_output(out);
     ggml_build_forward_expand(gf, out);
@@ -2149,7 +2227,7 @@ static void build_f0_graph_nodes(graph_cache & cache, const model_ctx & m, int T
         ggml_tensor * w = find_tensor(m, pfx + "/weight");
         ggml_tensor * b = find_tensor(m, pfx + "/bias");
         int C_out = (int)w->ne[2];
-        x = conv1d_f32(ctx, w, x, 1, 1, 1);
+        x = conv1d_f32(ctx, w, x, 1, 1, 1, m.weight_buft);
         x = ggml_add(ctx, x, ggml_reshape_2d(ctx, b, 1, C_out));
         x = ggml_unary(ctx, x, GGML_UNARY_OP_ELU);
     }
@@ -2382,10 +2460,10 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
             int pad1 = (ks * d - d) / 2;
             int pad2 = (ks - 1) / 2;
             ggml_tensor * xt = snake(ctx, x, p.a1, p.ia1);
-            xt = conv1d_f32(ctx, p.c1w, xt, 1, pad1, d);
+            xt = conv1d_f32(ctx, p.c1w, xt, 1, pad1, d, m.weight_buft);
             xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, p.c1b, 1, C));
             xt = snake(ctx, xt, p.a2, p.ia2);
-            xt = conv1d_f32(ctx, p.c2w, xt, 1, pad2, 1);
+            xt = conv1d_f32(ctx, p.c2w, xt, 1, pad2, 1, m.weight_buft);
             xt = ggml_add(ctx, xt, ggml_reshape_2d(ctx, p.c2b, 1, C));
             x = ggml_add(ctx, x, xt);
         }
@@ -2394,7 +2472,7 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
 
     ggml_tensor * cpw = find_tensor(m, "hift/conv_pre/weight");
     ggml_tensor * cpb = find_tensor(m, "hift/conv_pre/bias");
-    ggml_tensor * x = conv1d_f32(ctx, cpw, mel_in, 1, 3, 1);
+    ggml_tensor * x = conv1d_f32(ctx, cpw, mel_in, 1, 3, 1, m.weight_buft);
     x = ggml_add(ctx, x, ggml_reshape_2d(ctx, cpb, 1, BASE_CH));
 
     for (int i = 0; i < 3; ++i) {
@@ -2415,7 +2493,7 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
         ggml_tensor * sb = find_tensor(m, "hift/source_downs/" + std::to_string(i) + "/bias");
         int sd_stride = (i == 0) ? 15 : (i == 1) ? 3 : 1;
         int sd_pad    = (i == 0) ? 7  : (i == 1) ? 1 : 0;
-        ggml_tensor * si = conv1d_f32(ctx, sw, s_in, sd_stride, sd_pad, 1);
+        ggml_tensor * si = conv1d_f32(ctx, sw, s_in, sd_stride, sd_pad, 1, m.weight_buft);
         si = ggml_add(ctx, si, ggml_reshape_2d(ctx, sb, 1, (int)sw->ne[2]));
         auto srb = load_rb("hift/source_resblocks/" + std::to_string(i), ups_ch[i]);
         si = rb_fwd(srb, si, ups_ch[i], src_rb_dils[i], src_rb_ksizes[i]);
@@ -2433,7 +2511,7 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
     x = ggml_leaky_relu(ctx, x, 0.01f, false);
     ggml_tensor * cp2w = find_tensor(m, "hift/conv_post/weight");
     ggml_tensor * cp2b = find_tensor(m, "hift/conv_post/bias");
-    x = conv1d_f32(ctx, cp2w, x, 1, 3, 1);
+    x = conv1d_f32(ctx, cp2w, x, 1, 3, 1, m.weight_buft);
     x = ggml_add(ctx, x, ggml_reshape_2d(ctx, cp2b, 1, NFFT2));
 
     // ISTFT
@@ -2535,6 +2613,41 @@ static std::vector<float> run_hift_decode(const model_ctx & m,
     ggml_tensor * y_trim_out = ggml_graph_get_tensor(gf, "wav");
     std::vector<float> wav(ggml_nelements(y_trim_out));
     ggml_backend_tensor_get(y_trim_out, wav.data(), 0, ggml_nbytes(y_trim_out));
+    return wav;
+}
+
+// The tail of build_hift_graph_nodes on the host, in float32, for the Core ML
+// HiFT sidecar's conv_post rows [18, T_stft] (log magnitude, then phase):
+// magnitude/phase -> spectrum -> inverse STFT -> window-sum normalisation ->
+// trim -> clamp, with the same kernel and window sum as the ggml graph.
+static std::vector<float> hift_istft_host(const std::vector<float> & conv_post, int T_stft) {
+    const int n_fft = 16, hop = 4, F = n_fft / 2 + 1;
+    const std::vector<float> & kernel = cached_istft_kernel(n_fft);
+    const std::vector<float> & window_sum = cached_window_sum(T_stft, n_fft, hop);
+    std::vector<float> frame(2 * F);
+    std::vector<float> y(window_sum.size(), 0.0f);
+    for (int t = 0; t < T_stft; ++t) {
+        for (int f = 0; f < F; ++f) {
+            const float log_mag = std::min(std::max(conv_post[(size_t) f * T_stft + t], -1e6f), 1e2f);
+            const float mag = std::exp(log_mag);
+            const float phase = std::sin(conv_post[(size_t) (F + f) * T_stft + t]);
+            frame[f] = mag * std::cos(phase);
+            frame[F + f] = mag * std::sin(phase);
+        }
+        float * out = y.data() + (size_t) t * hop;
+        for (int c = 0; c < 2 * F; ++c) {
+            const float v = frame[c];
+            const float * k = kernel.data() + (size_t) c * n_fft;
+            for (int n = 0; n < n_fft; ++n) out[n] += k[n] * v;
+        }
+    }
+    const int pad = n_fft / 2;
+    const int L_wav = (int) window_sum.size() - n_fft;
+    std::vector<float> wav((size_t) L_wav);
+    for (int i = 0; i < L_wav; ++i) {
+        const float v = y[(size_t) (i + pad)] / window_sum[(size_t) (i + pad)];
+        wav[(size_t) i] = std::min(std::max(v, -0.99f), 0.99f);
+    }
     return wav;
 }
 
@@ -2746,6 +2859,38 @@ int s3gen_synthesize_to_wav(
         }
     }
 
+    // Core ML sidecars for the encoder, CFM estimator and HiFT decoder (empty
+    // when not compiled in, disabled or absent).  `on_coreml` runs one stage
+    // on its sidecar; false means ggml runs it.  A failing prediction retires
+    // the stage for later calls, unless the policy is strict.
+    coreml::coreml_policy coreml_policy = coreml::resolve_coreml_policy(
+        opts.coreml_compute_units,
+        opts.coreml_strict < 0 ? std::nullopt : std::optional<bool>(opts.coreml_strict > 0));
+    coreml_policy.disabled = coreml_policy.disabled || opts.coreml_disabled;
+    const std::shared_ptr<coreml::s3gen_coreml> sidecars = s3gen_coreml_get(gguf_path, coreml_policy);
+    std::set<std::string> stage_backends;
+    auto on_coreml = [&](coreml::s3gen_coreml::stage stage, const char * name, auto && run) -> bool {
+        bool served = false;
+        if (sidecars && sidecars->present(stage)) {
+            if (sidecars->available(stage)) {
+                try {
+                    served = run();
+                } catch (const std::exception & e) {
+                    if (coreml_policy.strict) throw;
+                    fprintf(stderr, "s3gen: %s; retiring the Core ML %s sidecar, ggml takes over\n", e.what(), name);
+                    sidecars->retire(stage);
+                }
+            }
+            if (!served && coreml_policy.strict) {
+                throw std::runtime_error(std::string("s3gen: the Core ML ") + name +
+                                         " sidecar cannot serve this call and coreml_strict / " +
+                                         coreml::COREML_STRICT_ENV + " is set");
+            }
+        }
+        stage_backends.insert(served ? sidecars->label() : coreml::GGML_STAGE_BACKEND);
+        return served;
+    };
+
     // HiFT-side graphs (f0_predictor, STFT, hift_decode) used to need a
     // dedicated CPU copy of the S3Gen GGUF on Metal because conv_transpose_1d,
     // pad_ext and diag_mask_inf were either missing or pathologically slow in
@@ -2832,9 +2977,14 @@ int s3gen_synthesize_to_wav(
     // 3) Run encoder -> mu_T (numpy (T_mu, 80) layout, to match encoder_proj.npy)
     vlog("Running encoder (T=%d)...\n", n_total);
     double encoder_t0 = now_ms();
-    std::vector<float> mu_T = run_encoder(m, input_embed, n_total, D);
+    std::vector<float> mu_T;
+    const bool encoder_on_coreml = on_coreml(coreml::s3gen_coreml::ENCODER, "encoder", [&] {
+        return sidecars->encode(input_embed, n_total, m.token_mel_ratio, mu_T);
+    });
+    if (!encoder_on_coreml) mu_T = run_encoder(m, input_embed, n_total, D);
     double prof_encoder_ms = now_ms() - encoder_t0;
-    vlog("  [encoder] %.1f ms\n", prof_encoder_ms);
+    vlog("  [encoder] %.1f ms (%s)\n", prof_encoder_ms,
+         encoder_on_coreml ? sidecars->label().c_str() : coreml::GGML_STAGE_BACKEND);
     int T_mu = m.token_mel_ratio * n_total;
     vlog("  encoder output: (%d, 80) = %zu floats\n", T_mu, mu_T.size());
 
@@ -3022,6 +3172,12 @@ int s3gen_synthesize_to_wav(
                     z[m2 * T_mu + t] = gauss2(rng2);
         }
     }
+    if (!opts.dump_mel_path.empty()) {
+        std::string base = opts.dump_mel_path;
+        if (base.size() > 4 && base.substr(base.size() - 4) == ".npy")
+            base.resize(base.size() - 4);
+        npy_save_f32(base + "_z0.npy", {MEL, (int64_t)T_mu}, z.data());
+    }
 
     // 7) CFM loop.
     //  - meanflow:      t_span linearly spaced on [0,1], default 2 steps,
@@ -3138,7 +3294,22 @@ int s3gen_synthesize_to_wav(
         // CFG path (B=2 batched and B=1 two-call) populate dxdt_uncond
         // and require the linear `(1+cfg)*cond - cfg*uncond` mix.
         bool have_cfg_uncond = false;
-        if (use_b2) {
+        // The Core ML estimator carries the CFG pair in its batch (2 for the
+        // standard-CFM Multilingual model, 1 for meanflow Turbo).
+        const int coreml_batch = meanflow ? 1 : 2;
+        std::vector<std::vector<float>> coreml_velocity;
+        const bool step_on_coreml = on_coreml(coreml::s3gen_coreml::CFM, "CFM", [&] {
+            return sidecars->velocity(coreml_batch, T_mu, {z.data(), z.data()}, {mu.data(), zero_mu.data()},
+                                      {cond.data(), zero_cond.data()}, {spks.data(), zero_spks.data()},
+                                      {t_emb.data(), t_emb.data()}, coreml_velocity);
+        });
+        if (step_on_coreml) {
+            dxdt_cond = std::move(coreml_velocity[0]);
+            if (coreml_batch == 2 && cfg_rate != 0.0f) {
+                dxdt_uncond = std::move(coreml_velocity[1]);
+                have_cfg_uncond = true;
+            }
+        } else if (use_b2) {
             cfm_estimator_forward_b2(m, cfm_cache,
                 z, z,
                 mu, zero_mu,
@@ -3174,7 +3345,8 @@ int s3gen_synthesize_to_wav(
             }
         }
         auto & dxdt = dxdt_cond;
-        vlog("  [cfm_step%zu] %.1f ms\n", s, now_ms() - step_t0);
+        vlog("  [cfm_step%zu] %.1f ms (%s)\n", s, now_ms() - step_t0,
+             step_on_coreml ? sidecars->label().c_str() : coreml::GGML_STAGE_BACKEND);
 
         if (debug_mode && meanflow) {
             npy_array ref = npy_load(ref_dir + "/cfm_step" + std::to_string(s) + "_dxdt.npy");
@@ -3330,8 +3502,14 @@ int s3gen_synthesize_to_wav(
 
     vlog("Running HiFT decode...\n");
     t0 = now_ms();
-    auto wav = run_hift_decode(m_hift, mel, T_mel, s_stft, T_stft);
-    vlog("  [hift_decode] %.1f ms\n", now_ms() - t0);
+    std::vector<float> spectrum;
+    const bool hift_on_coreml = on_coreml(coreml::s3gen_coreml::HIFT, "HiFT", [&] {
+        return sidecars->vocode(mel, T_mel, s_stft, spectrum);
+    });
+    auto wav = hift_on_coreml ? hift_istft_host(spectrum, T_stft)
+                              : run_hift_decode(m_hift, mel, T_mel, s_stft, T_stft);
+    vlog("  [hift_decode] %.1f ms (%s)\n", now_ms() - t0,
+         hift_on_coreml ? sidecars->label().c_str() : coreml::GGML_STAGE_BACKEND);
     double prof_hift_ms = now_ms() - hift_t0;
     vlog("  [hift_total] %.1f ms\n", prof_hift_ms);
     vlog("  wav: %zu samples (%.3fs @ %d Hz)\n", wav.size(), (float)wav.size() / sr, sr);
@@ -3373,6 +3551,10 @@ int s3gen_synthesize_to_wav(
          audio_ms / pipeline_total >= 1.0 ? audio_ms / pipeline_total : pipeline_total / audio_ms,
          audio_ms >= pipeline_total ? "faster than real-time" : "slower than real-time");
 
+    if (opts.s3gen_backend_out) {
+        *opts.s3gen_backend_out = stage_backends.size() == 1 ? *stage_backends.begin()
+                                                              : std::string(coreml::MIXED_STAGE_BACKEND);
+    }
     if (opts.pcm_out) {
         *opts.pcm_out = wav;
     }

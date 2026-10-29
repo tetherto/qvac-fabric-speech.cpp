@@ -20,13 +20,13 @@ validated on it.
 
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
-| [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small validated on WebGPU |
+| [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
 | [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy ships as ready-made GGUF and Core ML files for eight European languages and runs on the Hexagon NPU |
 | Parakeet | Sortformer v1/v2/v2.1, Nemotron 3 Diarization | Speaker diarization and attributed ASR; Sortformer supports up to four speakers, Nemotron up to eight |
 | Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; fused CPU encoder attention; CPU/Metal validated on Spanish/Chinese; Metal decode reuses one graph per cache window (29-42% faster decode on M3 Ultra, identical transcripts); explicit CUDA/Vulkan/OpenCL/Metal/Hexagon selection with generated-model CPU parity and quantized checkpoint smoke coverage; English long-form skips spans in both native and reference runs |
-| [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3 also validated on WebGPU |
+| [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3, Parler mini, CosyVoice3 and Audio8 also validated on WebGPU |
 | TTS | Pocket TTS | English synthesis and incremental CPU/Metal/CUDA/Vulkan/OpenCL streaming; cloning requires encoder-enabled weights |
-| TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; single-reference dialogue avoids duplicate reference encoding; selective text-control projection on Metal; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
+| TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; single-reference dialogue avoids duplicate reference encoding; selective text-control projection on Metal; batched audio-logit readback on Vulkan; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; SoundEffect reuses fixed cross-attention K/V and selects supported Metal DiT flash attention, with the cache and retained scheduler peak included in metadata-only memory fit for repeated requests; CPU/Metal generation validated; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage; explicit Hexagon NPU placement for SoundEffect, with reference parity, and for the Speech LM and speech tokenizer |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages and excludes WebGPU, whose kernels lack an op the graphs need |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
@@ -37,8 +37,16 @@ TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)
 sets its model-specific sampling parameters explicitly; check generated speech
 for complete dialogue rather than relying on a successful exit alone.
 An optional [validated cloning runner](engines/tts/docs/moss.md#validated-cloning)
-checks English dialogue with local ASR and retries rejected generations before
-publishing an output WAV. ASR results that reach the decoding token limit are rejected.
+checks English dialogue, including each requested turn, with local ASR and retries
+rejected generations before
+publishing an output WAV. It supports CPU, CUDA, and Vulkan (`--gpu --backend vulkan`).
+ASR results that reach the decoding token limit are rejected.
+
+MOSS generation starts at the reference assistant header and converts ISO language
+codes such as `en` to the model's language names (`English`). The full-checkpoint
+TTS CI gate requires every expected CPU/GPU batch, streaming and reuse output to
+pass WER <= 0.25, with no baseline-audio exemption for wrong text. See
+[MOSS validation](engines/tts/docs/moss.md#gpu-validation-cuda-and-vulkan).
 
 CosyVoice3 uses capability-checked flash attention for single-token LM decoding
 on CUDA and Metal. Supported CUDA backends reuse decode graphs within masked
@@ -93,8 +101,10 @@ contracts; see the engine guides before exporting or deploying one.
 | Parakeet | Eligible ASR and Sortformer v2.1 encoder paths; TDT models also run a fixed-window Neural Engine encoder and a batched TDT decoder | [Backend and routing contracts](engines/parakeet/docs/backends.md#core-ml-encoder-sidecar), [Neural Engine sidecars](engines/parakeet/docs/backends.md#neural-engine-fixed-window-encoder-and-tdt-decoder-sidecars) |
 | Parakeet | Nemotron 3 Diarization and Sortformer v2.1 whole networks | [Diarizer sidecars](engines/parakeet/docs/backends.md#core-ml-diarizer-sidecars) |
 | Parakeet | MOSS-Transcribe-Diarize audio encoder | [MOSS-Transcribe-Diarize](engines/parakeet/docs/moss-transcribe.md#core-ml-encoder-sidecar) |
+| TTS | Chatterbox Turbo and Multilingual S3Gen encoder, CFM and HiFT (overlapping the next sentence's T3) | [Chatterbox Core ML](engines/tts/docs/chatterbox.md#core-ml-sidecars) |
 | TTS | CosyVoice3 speech LM, flow and HiFT neural stages | [CosyVoice3 Core ML](engines/tts/docs/cosyvoice3.md#core-ml-sidecars) |
 | TTS | Supertonic vocoder, Audio8 codec synthesis | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar), [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
+| TTS | LavaSR denoiser (batch prediction) and enhancer neural cores, with explicit model paths and compute policies | [LavaSR Core ML](engines/tts/docs/lavasr.md#core-ml) |
 | TTS | MOSS-TTS/TTSD codec decoder, MOSS-SoundEffect DiT and VAE, MOSS-Speech speech tokenizer | [MOSS](engines/tts/docs/moss.md#core-ml-codec-decoder), [SoundEffect](engines/tts/docs/moss.md#core-ml-dit-and-vae), [Speech](engines/tts/docs/moss.md#core-ml-speech-tokenizer) |
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
@@ -137,24 +147,28 @@ and Metal in every engine's automatic GPU selection (CUDA still wins on the
 same NVIDIA card), and is selected explicitly with `--backend webgpu` or
 `backend = "webgpu"`. Build and host requirements are in
 [docs/BUILD.md](docs/BUILD.md#webgpu-dawn). Validation on an RTX 5090
-(Dawn on Vulkan, 2026-10-20), each model against the same CPU run:
+(Dawn on Vulkan; 2026-10-20, the LM-based TTS models and large-v3-turbo
+2026-10-26), each model against the same CPU run:
 
 | Engine | Model | WebGPU result |
 |---|---|---|
 | Whisper | tiny.en, base, small | Validated: same transcripts; encoder 8x (base) to 33x (small) faster than CPU, a 2-minute clip 3.1x faster end to end |
+| Whisper | large-v3-turbo | Validated: same transcripts; a 2-minute clip encodes in 0.27 s against 23.4 s on the CPU, 11x faster end to end |
 | Parakeet | TranscribePsy 250M CTC | Validated: identical transcript, 2.8x faster end to end |
 | TTS | Supertonic 3 | Validated: waveform correlation 0.997 with the CPU render, identical transcript |
-| TTS | Parler-TTS mini | Not supported: the decoder returns NaN logits, which the sampler now reports as an error instead of crashing |
-| TTS | CosyVoice3, Audio8 | Not supported: synthesis completes but the audio is silence or noise |
+| TTS | Parler-TTS mini (f16, q8_0) | Validated: the same Whisper transcripts as the CPU render over four prompts; 3.5x faster end to end |
+| TTS | CosyVoice3 (q8_0 LM, f16 flow and HiFT) | Validated: the same Whisper transcripts as the CPU render over four prompts; 12x faster end to end |
+| TTS | Audio8 (q8_0 and f16 LM, f16 codec) | Validated: the same Whisper transcripts as the CPU render over four prompts; 5x faster end to end |
 | TTS | Pocket, Chatterbox, MOSS, LavaSR | Not tested |
 | AudioGen | ACE-Step, MiniMax-Music3 | Not tested; the ACE-Step LM and detokenizer keep their CPU placement on an unmeasured backend |
 
-The failing TTS models share one cause: ggml's WGSL matmul kernels convert
-activations to f16, and `test-backend-ops` on WebGPU fails exactly the
-fork's large-activation (`b_absmax=1e5`) and `GGML_PREC_F32` matmul cases
-that the CUDA backend needed f32 paths for. Until the WebGPU kernels gain
-the same paths, those engines keep WebGPU out of their automatic selection;
-an explicit request still runs so the status can be re-checked.
+Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
+renders diverge after the first differing token the way any two backends do;
+the transcripts are the check. They rely on ggml-webgpu computing the matmul
+and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
+f32 accumulation, which ggml-speech provides from 2026-10-27; with an older
+ggml-speech their decoders overflow f16 and produce NaN logits, silence or
+noise.
 
 ## Getting started
 
@@ -198,6 +212,20 @@ model each desktop benchmark family measures and scores.
 | TTS | Audio8 | September 2026 GPU campaign: RTF 0.20–0.65, with later RTX 5090 measurements down to 0.116; [full table and follow-up](engines/tts/docs/performance.md#audio8-multi-machine-benchmark-2026-09) |
 | Music | ACE-Step 1.5 | September 2026 CUDA/Vulkan/Metal lanes: generation 1,338–9,016 ms, RTF 0.139–0.957; [full table](engines/audiogen/docs/performance.md#ace-step-15-multi-machine-benchmark-2026-09) |
 | Music | MiniMax-Music3 f16 | September 2026 RTX 5090: two-minute song in 73.9 s CUDA / 84.2 s Vulkan, excluding model load; [full table](engines/audiogen/docs/performance.md#minimax-music3-f16-on-rtx-5090-2026-09) |
+
+## Memory fit results
+
+Every engine's memory-fit preflight reports the same device fields, so a caller
+can add up several models that share one device:
+
+- `device_name` is the ggml device name, as `ggml_backend_dev_by_name` finds it:
+  `CPU`, `CUDA0`, `Vulkan0`, `MTL0`, `GPUOpenCL`, `HTP0`. Two engines on the
+  same device report the same name.
+- `device_shares_host_memory` is true for a device that draws from host RAM: the
+  CPU, an integrated GPU, Apple Metal, Hexagon and Android's OpenCL GPUs.
+- `device_free_bytes` and `device_total_bytes` are the device's own figures. A
+  device that shares host memory and reports none of its own, such as Hexagon,
+  carries the CPU's figures.
 
 ## Use in QVAC
 

@@ -79,8 +79,10 @@ checks are still needed to establish that the model speaks the requested text.
 The TTS case also gates every expected batch/stream/reuse WAV and its CPU
 reference with the existing Whisper CPU intelligibility scorer. The reference
 model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
-the ASR executable is a separate static CPU build of the vendored Whisper/ggml
-pair so its versioned CLI dependencies are isolated from the GPU test pin.
+the ASR executable is a separate static CPU build of the vendored Whisper with
+ggml pinned to `380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`. This supplies the
+fork's scheduler/memory-fit APIs and isolates its CLI dependencies from the GPU
+test pin. The artifact records the ASR runtime pin in `asr-ggml-commit.txt`.
 The synthesis text is never provided as an ASR prompt. Missing/unavailable
 scores, non-finite scores, or word error rate above 25% fail the case. This
 tolerates limited reference-ASR errors while rejecting the observed wrong-text
@@ -88,30 +90,22 @@ outputs (100% WER); it is not a naturalness or speaker-similarity metric.
 Synthesis and ASR use the same prompt files. Transcripts, per-output scores
 and ASR settings are saved even when a later synthesis step fails.
 
-Unconditioned TTS has a suspected pre-existing wrong-text issue. The TTS
-case also builds upstream commit `8ae24fffce8d25fe4bfcc9b8d81f51374b29e65c`
-and runs the same CPU, GPU batch and GPU streaming requests with
-identical checkpoints, seed and ggml on the same worker. An unconditioned
-quality failure is non-blocking only when its PCM samples and audio format
-exactly match that baseline. Such failures remain visible in transcripts
-and `pre_existing_quality_issues`; they are not counted as quality passes.
-Changed audio, a missing/unverified baseline or an ASR error cannot use this
-exception. Voice-conditioned streaming and reuse retain the strict quality
-gate. This keeps existing general TTS defects outside the GPU backend changes while
-continuing to reject new regressions.
+Generation prompts end at the assistant header, matching the checkpoint's
+Transformers processor. The model generates its own audio-start token; an
+explicit audio prefix is supplied only for real continuation audio. ISO language
+codes accepted by the native API and CLI are converted to the checkpoint's
+language names (`en` to `English`, `zh` to `Chinese`, and the other supported
+languages). Already spelled-out names pass through; an empty language uses
+`None`, as in the reference processor.
 
-Lifecycle owner: Omar (`@ogad-tether`), tracked in
-[wrong-text issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328).
-The exception expires at **2026-11-12 00:00 UTC** and then fails closed, even for
-identical baseline PCM. The result artifact includes the issue and review date.
-Improved audio that meets the WER gate passes immediately without a baseline bump;
-changed audio that still fails WER is a blocking regression, even if its WER is
-lower than before. The baseline is never automatically advanced. Renewing the
-deadline or replacing the baseline requires an intentional reviewed change linked
-to #328 with old/new audio hashes, transcripts, scores and justification. When the
-underlying fix passes every expected unconditioned and voice-conditioned output
-on CPU/CUDA/Vulkan (including streaming and reuse), remove this exception and the
-baseline workflow build/runs together, retaining the strict quality gate.
+The full-checkpoint harness checks both unconditioned and voice-conditioned
+batch/stream synthesis, 7/25-frame chunks, cancellation recovery, reuse and a
+longer prompt on the selected GPU and CPU. Every expected output must pass the
+same WER gate. There is no baseline-audio exemption for wrong text, and missing
+outputs or ASR errors remain blocking. This replaces the temporary exception
+tracked in [issue #328](https://github.com/tetherto/qvac-fabric-speech.cpp/issues/328).
+Manual full-checkpoint jobs publish `moss-quality/BACKEND/CASE` commit statuses
+so their pending/failed quality results also appear in the PR's checks.
 
 Speech cases also run `test-moss-speech-codec-e2e cuda|vulkan CODEC.gguf OUTPUT_DIR`.
 This loads only the codec, comparing CPU and the selected GPU on fixed speech tokens,
@@ -199,6 +193,19 @@ its configured context window, so attention memory scales with the window
 instead of the clip length, and the banded output matches the dense
 computation on real audio. Numeric reference parity and the remaining
 backends are the follow-up to this change.
+
+### Vulkan audio-logit readback
+
+The Vulkan path concatenates the individual audio-head projections into one
+output tensor and reads it back once per forward pass. The host restores the
+per-head vectors before sampling. Projection weights, arithmetic, channel order,
+and sampling settings remain unchanged. Other backends retain separate reads.
+
+The Vulkan fixture suite compares all 32 audio heads against CPU through
+prefill, single-row decoding, and reset/reuse, in addition to the existing
+smaller-head and precision cases. End-to-end timing still depends on loading,
+prompt length, generated steps, codec work, and the GPU; generation throughput
+should be compared separately from process latency.
 
 ### Convert
 
@@ -318,7 +325,10 @@ python3 engines/tts/scripts/moss-validated-cloning.py \
 `dialogue.txt` contains only the requested new dialogue, with `[S1]`/`[S2]`
 tags. The runner prepends the reference transcripts itself and uses the TTSD
 sampling settings above. References must be mono 24 kHz WAVs. `--gpu` selects
-CUDA device 0 for both processes; omitting it uses CPU. The synthesis process
+CUDA device 0 for both processes. Add `--backend vulkan` to select Vulkan for
+both synthesis and ASR; omitting `--gpu` uses CPU. Set
+`GGML_VK_VISIBLE_DEVICES` before launching the runner when selecting a physical
+Vulkan GPU; the selected device is exposed as `Vulkan0`. The synthesis process
 exits before ASR starts, so their model allocations do not overlap.
 
 Each attempt uses the initial seed plus its zero-based attempt index. An output
@@ -326,8 +336,12 @@ that reaches `--max-new-tokens` (default 1024) is rejected before ASR. Otherwise
 the runner resamples the audio to 16 kHz and rejects ASR results reaching its
 1024-token limit before scoring. Missing or invalid ASR token counts stop the
 run as a tool error. It checks complete transcripts against the
-requested text and its final turn. Both error rates must be at most
-`--max-error-rate` (default 0.25). Empty transcripts and silent audio fail the
+requested text, its final turn, and the best matching phrase for each speaker-tagged
+turn. The overall, ending, and worst-turn error rates must all be at most
+`--max-error-rate` (default 0.25), so an omitted middle turn cannot pass solely
+because its words are a small fraction of the full dialogue. Phrase checks do
+not verify speaker identity or turn order; transcription errors can reject complete
+speech, especially in short turns. Empty transcripts and silent audio fail the
 check. Reference transcripts of at least eight words are also checked for
 unexpected recurrence at that error threshold, unless the requested text itself
 contains the phrase. Shorter references rely on the overall text check. This

@@ -13,6 +13,7 @@
 
 #include "backend_selection.h"
 #include "backend_util.h"
+#include "chatterbox_coreml.h"
 #include "chatterbox_fit_internal.h"
 #include "chatterbox_t3_internal.h"
 #include "fit_util.h"
@@ -63,6 +64,15 @@ FitResult fit_params(const FitOptions & opts) {
         return r;
     }
 
+    // Enabled S3Gen Core ML sidecars run outside ggml: their resident models
+    // and prediction buffers cannot be projected (CosyVoice's rule).
+    if (detail::coreml_sidecars_enabled(opts.s3gen_gguf_path, detail::resolve_coreml_policy())) {
+        r.reason = "coreml-memory-estimate-unavailable";
+        r.report = "The S3Gen Core ML sidecars' resident models and prediction buffers cannot be projected; "
+                   "set CHATTERBOX_COREML_DISABLE=1 to project the ggml S3Gen instead.\n";
+        return r;
+    }
+
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
@@ -100,7 +110,7 @@ FitResult fit_params(const FitOptions & opts) {
         r.reason = "no-backend-device";
         return r;
     }
-    r.device_name   = ggml_backend_name(backend);
+    r.device_name   = ggml_backend_dev_name(dev);
     r.device_is_cpu = ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
     r.device_shares_host_memory = ::tts_cpp::detail::backend_shares_host_memory(backend);
     {

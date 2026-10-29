@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable the Apple Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder, CosyVoice3 stages, the Parler-TTS DAC/optional decoder steps and the MOSS stages (Apple-only, additive; each stage runs on its .mlmodelc next to the GGUF when present, else on ggml)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -204,7 +204,7 @@ endif()
 # variants register only for backends that engine's production allowlist
 # accepts, so an off-allowlist build neither runs unvalidated backends nor
 # silently skips validated ones.
-foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon)
+foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon webgpu)
     string(TOUPPER "${_tts_ggml_backend}" _tts_ggml_backend_uc)
     set(TTS_CPP_GGML_${_tts_ggml_backend_uc} FALSE)
     if (GGML_${_tts_ggml_backend_uc} OR
@@ -212,14 +212,15 @@ foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon)
         set(TTS_CPP_GGML_${_tts_ggml_backend_uc} TRUE)
     endif()
 endforeach()
-# Parler allowlist: Metal / Vulkan / OpenCL / CUDA (parler/gguf.cpp).
+# Parler allowlist: Metal / Vulkan / OpenCL / CUDA / WebGPU
+# (parler::gpu_requirement() in parler/backend_requirement.h).
 set(TTS_CPP_PARLER_GPU FALSE)
 if (TTS_CPP_GGML_METAL OR TTS_CPP_GGML_VULKAN OR TTS_CPP_GGML_OPENCL OR
-    TTS_CPP_GGML_CUDA)
+    TTS_CPP_GGML_CUDA OR TTS_CPP_GGML_WEBGPU)
     set(TTS_CPP_PARLER_GPU TRUE)
 endif()
-# CosyVoice3 allowlist: Metal / OpenCL everywhere, Vulkan and CUDA on
-# Windows and non-Android Linux only (cosyvoice_gpu_requirement() in
+# CosyVoice3 allowlist: Metal / OpenCL everywhere, Vulkan, CUDA and WebGPU
+# on Windows and non-Android Linux only (cosyvoice_gpu_requirement() in
 # cosyvoice_pipeline.h -- keep the two conditions in lockstep). The
 # platform guard mirrors the runtime split: a build whose only GPU
 # backend the runtime requirement would refuse (Android or Apple
@@ -231,7 +232,7 @@ if (WIN32 OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID))
     set(_tts_cosy_desktop_platform TRUE)
 endif()
 if (TTS_CPP_GGML_METAL OR TTS_CPP_GGML_OPENCL OR
-    ((TTS_CPP_GGML_VULKAN OR TTS_CPP_GGML_CUDA) AND _tts_cosy_desktop_platform))
+    ((TTS_CPP_GGML_VULKAN OR TTS_CPP_GGML_CUDA OR TTS_CPP_GGML_WEBGPU) AND _tts_cosy_desktop_platform))
     set(TTS_CPP_COSYVOICE_GPU TRUE)
 endif()
 set(_tcb_cosy_arms "")
@@ -240,6 +241,9 @@ if (TTS_CPP_GGML_CUDA AND _tts_cosy_desktop_platform)
 endif()
 if (TTS_CPP_GGML_VULKAN AND _tts_cosy_desktop_platform)
     list(APPEND _tcb_cosy_arms vulkan)
+endif()
+if (TTS_CPP_GGML_WEBGPU AND _tts_cosy_desktop_platform)
+    list(APPEND _tcb_cosy_arms webgpu)
 endif()
 
 # The standalone chatterbox.cpp source carries a bundled-ggml filename-prefix
@@ -288,6 +292,7 @@ set(TTS_CPP_LIB_SOURCES
     src/chatterbox_cli.cpp
     src/gpt2_bpe.cpp
     src/chatterbox_tts.cpp
+    src/chatterbox_coreml.cpp
     src/chatterbox_engine.cpp
     src/log.cpp
     src/voice_features.cpp
@@ -321,7 +326,7 @@ set(TTS_CPP_LIB_SOURCES
     src/cosyvoice_engine.cpp
     src/mtl_tokenizer.cpp
     src/text_preprocess.cpp
-    # LavaSR neural speech enhancement — CPU/GGML post-process.
+    # LavaSR neural speech enhancement.
     src/lavasr/dsp/resampler.cpp
     src/lavasr/dsp/stft_processor.cpp
     src/lavasr/dsp/mel_filterbank.cpp
@@ -332,6 +337,7 @@ set(TTS_CPP_LIB_SOURCES
     src/lavasr/enhancer_ggml.cpp
     src/lavasr/enhancer_gguf.cpp
     src/lavasr/enhancer_api.cpp
+    src/lavasr/coreml.cpp
     # LavaSR denoiser stage (follow-up) — UL-UNAS neural denoiser
     # (runs BEFORE the enhancer, rate-preserving).  See src/lavasr/denoiser*.{h,cpp}.
     src/lavasr/denoiser_core.cpp
@@ -467,7 +473,7 @@ if (TTS_CPP_BUILD_LIBRARY)
     )
     target_compile_features(tts-cpp PUBLIC cxx_std_17)
 
-    # Core ML sidecars (Audio8 codec, Supertonic vocoder, CosyVoice3 stages, MOSS stages): ARC objects fold
+    # Core ML sidecars: ARC objects fold
     # into libtts-cpp; frameworks are PUBLIC for static consumers.
     if (TTS_CPP_COREML)
         find_library(TTS_CPP_FOUNDATION_FRAMEWORK Foundation REQUIRED)
@@ -492,7 +498,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, Chatterbox S3Gen stages, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1245,6 +1251,13 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_cosyvoice3_llm.py")
         set_property(TEST test-convert-cosyvoice3-llm PROPERTY LABELS "unit")
 
+        add_test(NAME test-requantize-shapes
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_requantize_shapes.py")
+        set_tests_properties(test-requantize-shapes PROPERTIES
+            LABELS "unit" SKIP_RETURN_CODE 77
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         add_test(NAME test-convert-moss
                  COMMAND "${Python3_EXECUTABLE}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_convert_moss.py")
@@ -1258,6 +1271,12 @@ if (TTS_CPP_BUILD_TESTS)
                          "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_audio8_codec_coreml.py")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-audio8-codec-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+        add_test(NAME test-lavasr-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_lavasr_coreml.py")
+        set_tests_properties(test-lavasr-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
 
         # Skips without torch; the TTS CI macOS lane runs it in the export venv.
         add_test(NAME test-parler-dac-coreml-exporter
@@ -1299,6 +1318,11 @@ if (TTS_CPP_BUILD_TESTS)
         add_test(NAME test-cosyvoice-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_cosyvoice_coreml.py")
         set_tests_properties(test-cosyvoice-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
+
+        add_test(NAME test-chatterbox-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_chatterbox_coreml.py")
+        set_tests_properties(test-chatterbox-coreml-exporter PROPERTIES
             LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
 
         foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
@@ -1459,6 +1483,10 @@ if (TTS_CPP_BUILD_TESTS)
         tts_cpp_register_test(test-cosyvoice-lm-attention-cuda
             EXE test-cosyvoice-lm-attention LABEL "gpu" ARGS "CUDA0")
     endif()
+    if (TTS_CPP_GGML_WEBGPU AND _tts_cosy_desktop_platform)
+        tts_cpp_register_test(test-cosyvoice-lm-attention-webgpu
+            EXE test-cosyvoice-lm-attention LABEL "gpu" ARGS "WebGPU")
+    endif()
 
     add_executable(test-cosyvoice-flow-attention test/test_cosyvoice_flow_attention.cpp)
     target_link_libraries(test-cosyvoice-flow-attention PRIVATE tts-cpp ggml)
@@ -1468,6 +1496,10 @@ if (TTS_CPP_BUILD_TESTS)
     if (TTS_CPP_GGML_VULKAN AND _tts_cosy_desktop_platform)
         tts_cpp_register_test(test-cosyvoice-flow-attention-vulkan
             EXE test-cosyvoice-flow-attention LABEL "gpu" ARGS "Vulkan0")
+    endif()
+    if (TTS_CPP_GGML_WEBGPU AND _tts_cosy_desktop_platform)
+        tts_cpp_register_test(test-cosyvoice-flow-attention-webgpu
+            EXE test-cosyvoice-flow-attention LABEL "gpu" ARGS "WebGPU")
     endif()
 
     add_executable(test-cosyvoice-xb test/test_cosyvoice_xb.cpp)
@@ -1516,6 +1548,28 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-cosyvoice-coreml-routing
         EXE test-cosyvoice-coreml LABEL "fixture" ARGS "--routing-fixture")
     set_tests_properties(test-cosyvoice-coreml-lm test-cosyvoice-coreml-stages test-cosyvoice-coreml-routing
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Chatterbox S3Gen Core ML sidecars: policy/naming/windows/fit refusal
+    # always; per-stage parity against ggml with CHATTERBOX_COREML_TEST_S3GEN,
+    # the Engine sentence overlap with CHATTERBOX_COREML_TEST_T3 as well, and
+    # the feature-shape checks with CHATTERBOX_COREML_TEST_SHAPES (written by
+    # test/prepare_chatterbox_coreml_shape_fixture.py).
+    add_executable(test-chatterbox-coreml test/test_chatterbox_coreml.cpp)
+    target_link_libraries(test-chatterbox-coreml PRIVATE tts-cpp)
+    target_include_directories(test-chatterbox-coreml PRIVATE src include)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-chatterbox-coreml PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-chatterbox-coreml)
+    tts_cpp_register_test(test-chatterbox-coreml LABEL "unit")
+    tts_cpp_register_test(test-chatterbox-coreml-stages
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--stages-fixture")
+    tts_cpp_register_test(test-chatterbox-coreml-shapes
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--shape-fixture")
+    tts_cpp_register_test(test-chatterbox-coreml-engine
+        EXE test-chatterbox-coreml LABEL "fixture" ARGS "--engine-fixture")
+    set_tests_properties(test-chatterbox-coreml-stages test-chatterbox-coreml-shapes test-chatterbox-coreml-engine
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test-cosyvoice-load test/test_cosyvoice_load.cpp ${_tcb_cosy_core_srcs})
@@ -2266,8 +2320,8 @@ if (TTS_CPP_BUILD_TESTS)
                      "TTS_CPP_GPU_BACKEND=${backend}")
     endfunction()
 
-    # Audio8 allowlist: Vulkan / Metal / OpenCL / CUDA (audio8/gguf.cpp
-    # GpuBackendRequirement::Vulkan | Metal | OpenCL | CUDA).
+    # Audio8 allowlist: Vulkan / Metal / OpenCL / CUDA / WebGPU
+    # (audio8::gpu_requirement() in audio8/backend_requirement.h).
     if (TTS_CPP_GGML_CUDA)
         tts_cpp_register_audio8_gpu_tests(cuda)
         tts_cpp_register_audio8_quantised_cli_test(cuda "on CUDA")
@@ -2281,6 +2335,10 @@ if (TTS_CPP_BUILD_TESTS)
     endif()
     if (TTS_CPP_GGML_OPENCL)
         tts_cpp_register_audio8_gpu_tests(opencl)
+    endif()
+    if (TTS_CPP_GGML_WEBGPU)
+        tts_cpp_register_audio8_gpu_tests(webgpu)
+        tts_cpp_register_audio8_quantised_cli_test(webgpu "on WebGPU")
     endif()
 
     # The per-stage breakdown the Metal work is ranked by.  Needs the models but
@@ -2585,6 +2643,9 @@ if (TTS_CPP_BUILD_TESTS)
         endif()
         if (TTS_CPP_GGML_VULKAN)
             tts_cpp_register_parler_dac_arm(vulkan)
+        endif()
+        if (TTS_CPP_GGML_WEBGPU)
+            tts_cpp_register_parler_dac_arm(webgpu)
         endif()
     endif()
 
@@ -3273,6 +3334,8 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-tts-streaming
         test/test_streaming.cpp
         src/chatterbox_tts.cpp
+        src/chatterbox_coreml.cpp
+        src/coreml_sidecar_path.cpp
         src/conv_columns.cpp
         src/sched_dispatch.cpp
         src/backend_selection.cpp)
@@ -3370,6 +3433,42 @@ if (TTS_CPP_BUILD_TESTS)
     # the numpy end-to-end golden (enhanced_48k.npy). Links ggml for GGUF I/O
     # (mirrors test-gguf-stream). DISABLED until the GGUF + fixtures exist
     # (convert-lavasr-enhancer-to-gguf.py + dump-lavasr-enhancer-fixtures.py).
+    add_executable(test-lavasr-coreml-options test/test_lavasr_coreml_options.cpp)
+    target_link_libraries(test-lavasr-coreml-options PRIVATE tts-cpp)
+    target_include_directories(test-lavasr-coreml-options PRIVATE src)
+    tts_cpp_apply_ccache(test-lavasr-coreml-options)
+    tts_cpp_register_test(test-lavasr-coreml-options LABEL "unit")
+    add_executable(test-lavasr-coreml-parity test/test_lavasr_coreml_parity.cpp)
+    target_link_libraries(test-lavasr-coreml-parity PRIVATE tts-cpp)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-lavasr-coreml-parity PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-lavasr-coreml-parity)
+    tts_cpp_register_test(test-lavasr-coreml-parity
+        LABEL "fixture"
+        ARGS "${TTS_CPP_TEST_MODEL_DIR}/lavasr-denoiser-f32.gguf"
+             "${TTS_CPP_TEST_MODEL_DIR}/lavasr-enhancer-f32.gguf"
+             "${TTS_CPP_TEST_MODEL_DIR}/denoiser-f32.mlmodelc"
+             "${TTS_CPP_TEST_MODEL_DIR}/enhancer-f32.mlmodelc"
+        REQUIRES "${TTS_CPP_TEST_MODEL_DIR}/lavasr-denoiser-f32.gguf"
+                 "${TTS_CPP_TEST_MODEL_DIR}/lavasr-enhancer-f32.gguf"
+                 "${TTS_CPP_TEST_MODEL_DIR}/denoiser-f32.mlmodelc"
+                 "${TTS_CPP_TEST_MODEL_DIR}/enhancer-f32.mlmodelc")
+    set_tests_properties(test-lavasr-coreml-parity PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(test-lavasr-coreml-batch test/test_lavasr_coreml_batch.cpp)
+    target_link_libraries(test-lavasr-coreml-batch PRIVATE tts-cpp)
+    target_include_directories(test-lavasr-coreml-batch PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-lavasr-coreml-batch PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-lavasr-coreml-batch)
+    tts_cpp_register_test(test-lavasr-coreml-batch
+        LABEL "fixture"
+        ARGS "${TTS_CPP_TEST_MODEL_DIR}/lavasr-denoiser-f32.gguf"
+             "${TTS_CPP_TEST_MODEL_DIR}/denoiser-f32.mlmodelc" "CPU_ONLY"
+        REQUIRES "${TTS_CPP_TEST_MODEL_DIR}/lavasr-denoiser-f32.gguf"
+                 "${TTS_CPP_TEST_MODEL_DIR}/denoiser-f32.mlmodelc")
+    set_tests_properties(test-lavasr-coreml-batch PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(test-lavasr-enhancer-gguf test/test_lavasr_enhancer_gguf.cpp)
     target_link_libraries(test-lavasr-enhancer-gguf PRIVATE tts-cpp ggml)
     target_include_directories(test-lavasr-enhancer-gguf PRIVATE include src ggml/include)
@@ -3590,6 +3689,8 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-cpu-caches
         test/test_cpu_caches.cpp
         src/chatterbox_tts.cpp
+        src/chatterbox_coreml.cpp
+        src/coreml_sidecar_path.cpp
         src/conv_columns.cpp
         src/sched_dispatch.cpp
         src/backend_selection.cpp)
@@ -4326,6 +4427,17 @@ else()
             endif()
         endforeach()
     endif()
+endif()
+
+# Model-free measurement-driver contracts run with the native unit lane. The
+# separate consumer project also builds against an installed public library.
+# Cross builds must not execute Android binaries through the host Python.
+set(_tts_chatterbox_measurement_dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/benchmarks/chatterbox-hexagon")
+if(TTS_CPP_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING AND
+   EXISTS "${_tts_chatterbox_measurement_dir}/CMakeLists.txt")
+    add_subdirectory("${_tts_chatterbox_measurement_dir}"
+        "${CMAKE_CURRENT_BINARY_DIR}/chatterbox-measurement")
 endif()
 
 if (TTS_CPP_INSTALL AND TTS_CPP_BUILD_LIBRARY)
