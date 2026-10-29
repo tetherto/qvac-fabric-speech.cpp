@@ -1009,7 +1009,8 @@ q8_0 and q4_0 linear weights loading as stored and following the f32 velocity,
 and q5_0 refused; on the CPU, quantized text-encoder and DiT matrices taking the
 repacked layout exactly where ggml offers one for the processor, the token
 table and the VAE keeping the default buffer, the same text context and
-velocity as the default layout, and the fit measuring packed weights;
+velocity as the default layout, and the fit counting exactly the bytes of the
+default and repacked weight buffers;
 text-encoder
 causality, zero padding, and an f16 feed-forward sum past the half-precision
 range; DiT conditioning on text and timestep and the scheduler guard;

@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -346,7 +347,7 @@ TierOutputs tier_outputs(SfxModel & model) {
 
 void check_packed_placement(const SfxModel & packed, const SfxModel & plain, const std::string & label) {
     const bool offered = cpu_offers_layout(packed.tensor(TIER_MATRIX));
-    std::printf("%s: the CPU %s a repacked layout\n", label.c_str(), offered ? "offers" : "offers no");
+    std::printf("%s: the CPU %s\n", label.c_str(), offered ? "offers a repacked layout" : "offers no repacked layout");
     check(in_repack_buffer(packed.tensor(TIER_MATRIX)) == offered, label + ": DiT matrices take the repacked layout");
     check(in_repack_buffer(packed.tensor(TIER_TEXT_MATRIX)) == offered, label + ": text matrices take the repacked layout");
     check(!in_repack_buffer(packed.tensor(SFX_TOKEN_TABLE)), label + ": the token table stays readable by row");
@@ -354,14 +355,44 @@ void check_packed_placement(const SfxModel & packed, const SfxModel & plain, con
     check(!in_repack_buffer(plain.tensor(TIER_MATRIX)), label + ": plain packing keeps the default buffer");
 }
 
-void check_packed_fit(const std::filesystem::path & path, const std::string & label) {
+std::vector<std::string> tensor_names(const std::filesystem::path & path) {
+    gguf_context * file = gguf_init_from_file(path.string().c_str(), {true, nullptr});
+    std::vector<std::string> names;
+    for (int64_t i = 0; file && i < gguf_get_n_tensors(file); ++i) {
+        names.emplace_back(gguf_get_tensor_name(file, i));
+    }
+    if (file) gguf_free(file);
+    return names;
+}
+
+std::set<ggml_backend_buffer_t> weight_buffers(const SfxModel & model, const std::vector<std::string> & names) {
+    std::set<ggml_backend_buffer_t> buffers;
+    for (const std::string & name : names) {
+        buffers.insert(model.tensor(name)->buffer);
+    }
+    return buffers;
+}
+
+uint64_t buffer_bytes(const std::set<ggml_backend_buffer_t> & buffers) {
+    uint64_t bytes = 0;
+    for (ggml_backend_buffer_t buffer : buffers) {
+        bytes += ggml_backend_buffer_get_size(buffer);
+    }
+    return bytes;
+}
+
+void check_packed_fit(const SfxModel & packed, const std::filesystem::path & path, const std::string & label) {
+    const std::set<ggml_backend_buffer_t> buffers = weight_buffers(packed, tensor_names(path));
+    const size_t expected_buffers = cpu_offers_layout(packed.tensor(TIER_MATRIX)) ? 2 : 1;
+    check(buffers.size() == expected_buffers, label + ": weights fill the default buffer and the repacked one if offered");
     tts_cpp::moss::SoundEffectOptions options;
     options.model_path = path.string();
     options.n_threads = 1;
     tts_cpp::moss::SoundEffectRequest request;
     request.prompt = "rain";
     request.seconds = MAX_SECONDS;
-    check(tts_cpp::moss::fit_params(options, request, 0).device.weights_bytes > 0, label + ": fit measures the weights");
+    check(tts_cpp::moss::fit_params(options, request, 0).device.weights_bytes == buffer_bytes(buffers),
+          label + ": fit counts the default and repacked weight buffers");
 }
 
 void test_weight_packing() {
@@ -373,6 +404,7 @@ void test_weight_packing() {
             SfxModel plain(path.string(), {}, 1, false,
                            {TablePlacement::Automatic, AttentionLayout::Automatic, WeightPacking::Plain});
             check_packed_placement(packed, plain, label);
+            check_packed_fit(packed, path, label);
             const TierOutputs expected = tier_outputs(plain);
             const TierOutputs actual = tier_outputs(packed);
             check(relative_l2(expected.context, actual.context) < PACKING_RELATIVE_TOLERANCE,
@@ -380,7 +412,6 @@ void test_weight_packing() {
             check(relative_l2(expected.velocity, actual.velocity) < PACKING_RELATIVE_TOLERANCE,
                   label + ": packed DiT velocity matches");
         }
-        check_packed_fit(path, label);
         std::filesystem::remove(path);
     }
 }
