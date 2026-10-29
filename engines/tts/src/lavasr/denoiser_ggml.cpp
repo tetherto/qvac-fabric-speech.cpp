@@ -343,8 +343,13 @@ static ggml_tensor * batchnorm(ggml_context * ctx, ggml_tensor * x, ggml_tensor 
 
 // Per-(c,f) affine + per-channel PReLU.  aw,ab: ggml [F,C] (PyTorch [C,F]); slope [C].
 ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw,
-                           ggml_tensor * ab, ggml_tensor * slope, bool fused) {
+                           ggml_tensor * ab, ggml_tensor * slope, bool fused,
+                           const AffineSupport & affine_support) {
     if (fused) return ggml_affine_prelu(ctx, x, aw, ab, slope);  // one fused op vs 7 elementwise
+    if (affine_support && ggml_is_contiguous(x)) {
+        ggml_tensor * candidate = ggml_affine_prelu(ctx, x, aw, ab, slope);
+        if (affine_support(candidate)) return candidate;
+    }
     const int64_t F = x->ne[0], C = x->ne[2];
     ggml_tensor * relu   = ggml_relu(ctx, x);
     ggml_tensor * neg    = ggml_sub(ctx, x, relu);                                       // min(x,0)
@@ -379,7 +384,8 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
                                int type, int cout, int kf, int stride, int groups, bool deconv,
                                bool is_last, const WResolver & W, int r, bool fused,
                                ggml_cgraph * gf = nullptr, bool portable = false,
-                               const GruSupport & gru_support = {}, const ConvSupport & conv_support = {}) {
+                               const GruSupport & gru_support = {}, const ConvSupport & conv_support = {},
+                               const AffineSupport & affine_support = {}) {
     (void) cout;
     const int pf = kf / 2;
     auto conv = [&](ggml_tensor * in, const std::string & wn, int st, int grp) -> ggml_tensor * {
@@ -390,7 +396,7 @@ static ggml_tensor * run_block(ggml_context * ctx, ggml_tensor * x, const std::s
         return batchnorm(ctx, h, W(p + ".bn_scale"), W(p + ".bn_shift"), gf);
     };
     auto ap = [&](ggml_tensor * h, const std::string & p) {
-        return affine_prelu(ctx, h, W(p + ".affine_weight"), W(p + ".affine_bias"), W(p + ".slope_weight"), fused);
+        return affine_prelu(ctx, h, W(p + ".affine_weight"), W(p + ".affine_bias"), W(p + ".slope_weight"), fused, affine_support);
     };
     if (type == 0) { // XConv
         ggml_tensor * h = conv(x, base + ".ops.1", stride, groups);
@@ -590,14 +596,18 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     const bool fused = !portable && (opencl || vulkan || !gpu);
     detail::GruSupport gru_support;
     detail::ConvSupport conv_support;
+    detail::AffineSupport affine_support;
     if (portable && !fused && ::tts_cpp::detail::backend_is_hexagon(backend)) {
-        // HTP opts into supported GRU and direct-convolution shapes. CPU
+        // HTP opts into supported GRU, direct-convolution and affine/PReLU shapes. CPU
         // portable parity retains the standard decompositions.
         const ggml_backend_t htp_backend = backend;
         gru_support = [htp_backend](const ggml_tensor * candidate) {
             return ggml_backend_supports_op(htp_backend, candidate);
         };
         conv_support = [htp_backend](const ggml_tensor * candidate) {
+            return ggml_backend_supports_op(htp_backend, candidate);
+        };
+        affine_support = [htp_backend](const ggml_tensor * candidate) {
             return ggml_backend_supports_op(htp_backend, candidate);
         };
     }
@@ -613,7 +623,7 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     std::vector<ggml_tensor *> en;
     for (int i = 0; i < 5; i++) {
         x = detail::run_block(ctx, x, "encoder.en_convs." + std::to_string(i), kTypes[i], kChans[i],
-                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support);
+                              kKf[i], kStrides[i], kGroups[i], false, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
         en.push_back(x);
     }
     x = detail::dpgrnn(ctx, x, "dpgrnn.0", W, ln_eps, fused, gru_support);
@@ -623,11 +633,11 @@ GraphIO DenoiserGgml::Impl::build_graph(ggml_context * ctx, ggml_cgraph * gf, in
     for (int i = 4; i >= 1; i--, j++) {
         x = ggml_add(ctx, x, en[4 - j]);
         x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[i], kChans[i - 1],
-                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support, conv_support);
+                              kKf[i], kStrides[i], kGroups[i], true, false, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
     }
     x = ggml_add(ctx, x, en[0]);
     x = detail::run_block(ctx, x, "decoder.de_convs." + std::to_string(j), kTypes[0], 1,
-                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support, conv_support);
+                          kKf[0], kStrides[0], kGroups[0], true, true, W, r, fused, gf, portable, gru_support, conv_support, affine_support);
 
     x                = ggml_sigmoid(ctx, x);                                        // ratio mask [129, L, 1]
     ggml_tensor * m  = detail::erb_bs(ctx, x, W("erb.ierb_fc.weight"), erb_low, erb_high); // [F, L, 1]

@@ -25,6 +25,9 @@ using GruSupport = std::function<bool(const ggml_tensor *)>;
 // portable F32 IM2COL/matmul graph for older runtimes and unsupported layouts.
 using ConvSupport = std::function<bool(const ggml_tensor *)>;
 
+// The actual fused candidate is optional; older runtimes keep seven F32 ops.
+using AffineSupport = std::function<bool(const ggml_tensor *)>;
+
 // Mean squared energy over channels: x:[F,T,C,Bc] -> [F,T*Bc].
 // The portable layout folds spatial axes before transposing channels inward.
 ggml_tensor * channel_energy_mean(ggml_context * ctx, ggml_tensor * x, bool portable = false);
@@ -49,7 +52,8 @@ ggml_tensor * conv_transpose2d(ggml_context * ctx, ggml_tensor * x, ggml_tensor 
 
 // Per-(c,f) affine + per-channel PReLU.  aw,ab: ggml [F,C] (PyTorch [C,F]); slope:[C].
 ggml_tensor * affine_prelu(ggml_context * ctx, ggml_tensor * x, ggml_tensor * aw,
-                           ggml_tensor * ab, ggml_tensor * slope, bool fused = true);
+                           ggml_tensor * ab, ggml_tensor * slope, bool fused = true,
+                           const AffineSupport & affine_support = {});
 
 // Channel shuffle (2 groups): o[2c]=x[c], o[2c+1]=x[half+c].  x:[F,T,C,Bc].
 // The portable fallback copies whole F*T planes, preserving chunk batches.

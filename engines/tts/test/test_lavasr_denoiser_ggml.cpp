@@ -616,6 +616,67 @@ static void test_affine_prelu() {
     }
 }
 
+// A real capability query selects only the requested affine candidate. Older
+// runtimes reject it and retain the existing seven-op F32 graph.
+static void test_affine_support_selection() {
+    for (int mode : {0, 1, 2, 3}) { // absent, rejected, accepted, non-contiguous
+        ggml_init_params params{(size_t)32 * 1024 * 1024, nullptr, false};
+        ggml_context * ctx = ggml_init(params);
+        const int F = 33, T = 9, C = 3, B = 2;
+        ggml_tensor * x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, F, T, C, B);
+        if (mode == 3) {
+            x = ggml_permute(ctx, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, T, F, C, B), 1, 0, 2, 3);
+        }
+        ggml_tensor * aw = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
+        ggml_tensor * ab = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
+        ggml_tensor * slope = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
+        int queries = 0;
+        detail::AffineSupport support;
+        if (mode != 0) {
+            support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_AFFINE_PRELU, "affine query receives actual operation");
+                CHECK(candidate->src[0] == x && candidate->src[1] == aw && candidate->src[2] == ab &&
+                      candidate->src[3] == slope, "affine query preserves actual inputs");
+                CHECK(ggml_are_same_shape(candidate, x), "affine query preserves output dimensions");
+                return mode == 2;
+            };
+        }
+        ggml_tensor * y = detail::affine_prelu(ctx, x, aw, ab, slope, false, support);
+        ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, y);
+        int affine = 0, elementwise = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            const ggml_op op = ggml_graph_node(graph, i)->op;
+            affine += op == GGML_OP_AFFINE_PRELU;
+            elementwise += op == GGML_OP_MUL || op == GGML_OP_ADD || op == GGML_OP_SUB || op == GGML_OP_UNARY;
+        }
+        CHECK(queries == (mode == 1 || mode == 2 ? 1 : 0), "affine queries absent/rejected/accepted/non-contiguous");
+        CHECK(affine == (mode == 2 ? 1 : 0) && elementwise == (mode == 2 ? 0 : 7),
+              "affine accepted candidate or unchanged seven-op fallback exclusively enters graph");
+        if (mode != 3) {
+            for (int i = 0; i < F * T * C * B; ++i) ((float *)x->data)[i] = (i % 17 - 8) * 0.125f;
+            for (int i = 0; i < F * C; ++i) {
+                ((float *)aw->data)[i] = (i % 7 - 3) * 0.25f;
+                ((float *)ab->data)[i] = (i % 9 - 4) * 0.125f;
+            }
+            for (int c = 0; c < C; ++c) ((float *)slope->data)[c] = (c - 1) * 0.5f;
+            ggml_graph_compute_with_ctx(ctx, graph, 1);
+            float max_error = 0.0f;
+            for (int b = 0; b < B; ++b) for (int c = 0; c < C; ++c)
+                for (int t = 0; t < T; ++t) for (int f = 0; f < F; ++f) {
+                    const int i = ((b * C + c) * T + t) * F + f;
+                    const float v = ((float *)x->data)[i], r = v > 0.0f ? v : 0.0f;
+                    const float prelu = r + ((float *)slope->data)[c] * (v - r);
+                    const float a = v * ((float *)aw->data)[c * F + f] + ((float *)ab->data)[c * F + f];
+                    max_error = std::max(max_error, std::fabs(((float *)y->data)[i] - (a + prelu)));
+                }
+            CHECK(max_error < 1e-5f, "affine selected/fallback graph matches scalar across batch and frequency tail");
+        }
+        ggml_free(ctx);
+    }
+}
+
 static void test_shuffle2() {
     std::mt19937 rng(5151);
     const int F = 5, T = 4, C = 6, half = C / 2;
@@ -1427,6 +1488,7 @@ int main(int argc, char ** argv) {
     test_conv_support_selection();
     test_conv_transpose2d();
     test_affine_prelu();
+    test_affine_support_selection();
     test_shuffle2();
     test_shuffle2_portable();
     test_channel_energy_mean();
