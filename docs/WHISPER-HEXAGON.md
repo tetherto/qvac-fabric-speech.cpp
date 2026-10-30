@@ -3,6 +3,9 @@
 Whisper uses the Hexagon backend from the external shared
 [`qvac-ext-ggml` speech branch](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
 Build the host backend and its DSP skeletons from one immutable revision.
+The revision below includes the paired quantized REPACK and physical-buffer
+accounting fixes validated with Whisper; earlier revisions do not provide
+those contracts.
 The `third_party/whisper.cpp/ggml` copy is not the Speech dependency and must
 remain unchanged. This guide covers native Fabric builds and validation.
 
@@ -19,7 +22,7 @@ From the Speech repository root:
 
 ```sh
 git clone --branch speech https://github.com/tetherto/qvac-ext-ggml ggml-src
-git -C ggml-src checkout a6122941d1d851833ccff7200aac205e92d481e0
+git -C ggml-src checkout d1b3e16c0c3b2da178c9c0d04685240bf69d7df5
 git -C ggml-src rev-parse HEAD
 
 cmake -S ggml-src -B build-ggml-android \
