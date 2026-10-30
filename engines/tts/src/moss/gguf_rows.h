@@ -16,11 +16,14 @@ public:
     GgufRows(const std::string & path, const gguf_context * file, const ggml_tensor * table, const char * owner);
 
     std::vector<float> gather(const std::vector<int32_t> & ids);
+    void accumulate(const std::vector<int32_t> & ids, std::vector<float> & sums);
+    int64_t width() const;
 
 private:
     void locate(const gguf_context * file, const ggml_tensor * table);
     void open();
     bool file_holds_table() const;
+    void require_table() const;
     void read_row(int32_t id, float * out);
     void convert_row(float * out) const;
     [[noreturn]] void fail(const std::string & message) const;

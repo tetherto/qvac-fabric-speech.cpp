@@ -186,8 +186,9 @@ conservative upper bound, including encoder allocations that can be released
 before synthesis. This can report `does-not-fit` for a workload whose actual
 peak is smaller. On CPU, Metal unified memory and Hexagon, host and device
 requirements compete for the same free memory. A Hexagon session reports no
-memory of its own, so its projection reads the host's, and the embedding
-tables and text head it keeps on the host count as host bytes.
+memory of its own, so its projection reads the host's. The text head it reads
+into host memory counts as host bytes; the embedding tables stay in the file,
+so only each step's rows count.
 
 The result follows `tts-cpp/fit.h`: `Success`/`fits`, `Failure`/`does-not-fit`,
 or `Error` for invalid arguments, an unreadable model, or failed measurement.

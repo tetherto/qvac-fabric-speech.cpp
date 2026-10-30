@@ -508,11 +508,14 @@ backend (measured at `6bb85ad6`).
 Weights go into the Hexagon repack buffer type. HTP multiplies `f32`, `f16`,
 `q8_0` and `q4_0` weights; the backbone and the codec refuse other types for
 the weights they place on the NPU. The text embedding table, the audio
-embedding tables and the text head stay on the host in any type, mapped from
-the GGUF rather than copied (they are read into memory instead when the file
-cannot be mapped or a table is not 32-byte aligned): at 155,648 x 4,096
-the text table and head are 1.27 GB each at `f16`, past HTP's 1 GiB buffer
-limit, and HTP cannot gather rows from a quantized table. While audio is
+embedding tables and the text head stay off the NPU in any type: at 155,648 x
+4,096 the text table and head are 1.27 GB each at `f16`, past HTP's 1 GiB
+buffer limit, and HTP cannot gather rows from a quantized table. The embedding
+tables are never loaded: each request reads its rows (one text and 32 audio
+rows per prompt row or step) from the GGUF and sums them on the host. The text
+head is read into host memory with the weights. Nothing stays mapped from the
+file, so a model file truncated while the engine is loaded fails the next
+request with an error instead of crashing the process. While audio is
 generated the text channel only chooses between the generation and delay slot
 tokens, so those two head rows run on the NPU as a small `f32` matrix; drain
 steps, whose text token is forced, project no text logits, and only steps
@@ -537,7 +540,8 @@ python scripts/requantize-gguf.py moss-tts-delay-f16.gguf \
 ```
 
 The file is 7.0 GB (MOSS-TTSD 6.7 GB). About 4.2 GB of it sits on the NPU
-besides the KV cache; the tables are paged in from the file as rows are read.
+besides the KV cache, and the 1.27 GB text head in host memory; the embedding
+tables stay in the file.
 Quantizing the heads as well (no `--name-filter`, 4.8 GB) is the only variant
 the CPU backend can hold beside the 1.8 GB codec on that phone, but it often
 fails to stop: the 4 s sentence below ran on for 20 s on both backends.
@@ -574,11 +578,34 @@ same GGUF. A step is memory-bound on both: in steady state the NPU spends about
 slower than real time (one frame is 80 ms of audio). The codec decodes 20.3 s
 of audio in 0.70 s on the NPU against 10.7 s on the CPU.
 
+The text head used to be mapped from the GGUF like the embedding tables.
+Reading it into memory and the embedding rows from the file leaves the logits
+on HTP bit for bit the same, so the requests below wrote identical audio, and
+Whisper still transcribes them verbatim. Measured on the S25 with the
+transformer-`q4_0` GGUFs, mapped against read, in alternating runs:
+
+| Request | Generate | Peak RSS | Lowest `MemAvailable` |
+|---|--:|--:|--:|
+| "The quick brown fox jumps over the lazy dog near the riverbank." | 9.3 / 8.0 s | 0.96 / 1.31 GB | 2.5 / 1.4 GB |
+| MOSS-TTSD, two voice references | 19.8 / 18.1 s | 1.52 / 1.37 GB | 2.4 / 1.1 GB |
+
+Peak RSS leaves out the weights on the NPU. The mapped head was paged in as
+it was used and could be dropped again under memory pressure; read into
+memory it stays resident while the engine is loaded, so the phone keeps about
+1.2 GB less memory available, and loading reads it, which adds about 0.8 s.
+Over four alternating runs of 20-30 steps, the median slot step took 87 ms
+(91 ms mapped), the median forced step 92 ms (106 ms) and the median step
+that projects the whole head 114 ms (115 ms); the mapped layout often fell
+into a slower mode of about 106 ms per step. Checking the file size before
+each whole-head step would keep the mapping without closing the race, and a
+`q8_0` copy of the head would take 0.66 GB at the cost of different logits.
+
 `test-moss-hexagon` (the `hexagon` arm of `test-moss-gpu`, registered when ggml
 carries Hexagon) compares HTP0 with the CPU on generated GGUFs at `f32`, `f16`,
 `q8_0` and `q4_0`: backbone prefill, decoding with slot and forced steps, both
 codec halves, streaming, dialogue channels and the memory projection; it also
-checks that `bf16` backbone and codec weights are refused. On the
+checks that `bf16` backbone and codec weights are refused and that a model file
+truncated under the loaded backbone fails the next step with an error. On the
 S25 the worst relative L2 error is 0.06% for the backbone and 0.08% for the
 codec. Whisper transcribed the Hexagon output of every request above, of
 streaming, of single-reference cloning and of MOSS-TTSD with and without
@@ -601,7 +628,11 @@ both [Hexagon](#hexagon-npu) layouts onto the CPU with f32, f16 and q8_0
 weights: host tables (whole-head, slot and forced steps against the device
 tables, also with q8_0 and q4_0 tables and head) and fused attention with the
 key-layout value cache (prefill, decoding and reset against the unfused
-attention); it also pins the weight types the Hexagon gate accepts. `test-moss-cancel` drives a real synthesis on the fixture models and
+attention). It also checks that a model file truncated under a loaded backbone
+fails every kind of step with an error, that the head keeps its values when
+the file's head bytes change, that the fit counts the head as host memory and
+the embedding tables as none, and it pins the weight types the Hexagon gate
+accepts. `test-moss-cancel` drives a real synthesis on the fixture models and
 cancels it from another thread. `test-moss-cli` covers the flag surface and
 runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
 registered when an interpreter is available, skips without numpy/gguf)
@@ -1253,10 +1284,13 @@ Weights go into the Hexagon repack buffer type, and HTP runs `f32`, `f16`,
 converter's default `bf16`; the tokenizer, whose loader takes `f32`, `f16`,
 `bf16` and `q8_0`, refuses `bf16` (the codec converter writes its matrices at
 `f16`). The text embedding table, the audio
-embedding table and the text head stay on the host, mapped from the GGUF as
-for [MOSS-TTS](#hexagon-npu): at 151,680 x 4,096 the text table and head are
+embedding table and the text head stay off the NPU as for
+[MOSS-TTS](#hexagon-npu): at 151,680 x 4,096 the text table and head are
 1.24 GB each at `f16`, past HTP's 1 GiB buffer and its 32,768-row limit for
-quantized heads. The text head runs on the CPU only on text-channel steps;
+quantized heads. Each step reads its embedding row from the GGUF, and the text
+head is read into host memory with the weights, so a model file truncated
+while the engine is loaded fails the next request with an error instead of
+crashing the process. The text head runs on the CPU only on text-channel steps;
 while the reply is spoken each step skips it. The audio head stays on the NPU.
 Attention runs as one `FLASH_ATTN_EXT`: per layer in the LM, whose value
 caches then use the key layout, with an F16 causal mask on prefill batches
@@ -1271,14 +1305,23 @@ python scripts/requantize-gguf.py moss-speech-f16.gguf \
     moss-speech-blk-q4_0.gguf q4_0 --name-filter blk.
 ```
 
-The file is 7.1 GB, about 4.3 GB of it on the NPU. Bound every request with
+The file is 7.1 GB, about 4.3 GB of it on the NPU and the 1.24 GB text head
+in host memory. Bound every request with
 `max_new_tokens` (`--max-new-tokens`): the default sizes the KV cache for the
 whole 40,960-position context (6.7 GB), which `begin()` refuses there with the
 sizes it needed and found. Even bounded, the LM, the tokenizer and the decoder
 held together left about 0.5 GB of the phone's memory free, so the engine
 releases the LM weights before each decode, releases the decoder after it, and
 reloads the LM on the next request: at least 3.0 GB then stays free, and the
-reload adds about 4.6 s to the next request's prefill.
+reload adds about 4.6 s to the next request's prefill. Reading the text head
+into memory instead of mapping it, as it used to be, adds about 0.8 s to a
+load and 1.2 s on average to a reload, and leaves the reply below bit for bit
+the same. Generation took 18.1 s against 20.1 s mapped, and the peak RSS stays
+1.90 GB, reached while decoding with the LM released; while the LM is loaded
+the phone keeps about 1.3 GB less memory available (at least 1.9 GB against
+3.2 GB in this run). Over four alternating runs of 20-30 steps the median
+text-channel step took 116 ms (115 ms mapped) and the median audio-only step
+93 ms (102 ms).
 
 Against the PyTorch dumps (`test-moss-speech-parity` with
 `MOSS_SPEECH_BACKEND=hexagon`; same question as the reference, CUDA bf16 dumps):
@@ -1354,11 +1397,15 @@ Hexagon layout onto the CPU at f32, f16 and q8_0: the host tables give the same
 heads as the device tables, before and after the weights are released and
 reloaded, fused attention in the LM matches the unfused graph in batched prefill,
 decoding and audio-only steps, the fused Whisper-VQ encoder gives the same codes,
-and `use_gpu` places the decoder on the GPU beside an explicit backend. On a
+and `use_gpu` places the decoder on the GPU beside an explicit backend. It also
+checks that a model file truncated under a loaded LM fails decoding,
+audio-only steps and the weight reload with an error, and that the text head
+keeps its values when the file's head bytes change. On a
 phone, `test-moss-hexagon` runs the LM (prefill in batches, decoding, audio-only
-steps, weight eviction) and the tokenizer on HTP0 against the CPU at f32, f16,
-q8_0 and q4_0, and checks that bf16 LM and tokenizer weights are refused, the
-tokenizer's refusal without offering `q4_0`. The generated GGUFs are narrow:
+steps, weight eviction, a model file truncated under it) and the tokenizer on
+HTP0 against the CPU at f32, f16, q8_0 and q4_0, and checks that bf16 LM and
+tokenizer weights are refused, the tokenizer's refusal without offering
+`q4_0`. The generated GGUFs are narrow:
 only the LM's 32-wide feed-forward down projection holds a quantization block,
 so the quantized tiers leave the tables, the other LM matrices and the whole
 tokenizer at `f16`; the full checkpoint covers `q4_0` layers on the NPU.
