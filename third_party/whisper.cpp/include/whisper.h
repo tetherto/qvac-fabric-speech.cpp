@@ -401,6 +401,11 @@ extern "C" {
     // initialization metadata: unsupported graph nodes may still run on CPU.
     WHISPER_API const char * whisper_get_primary_backend_name(struct whisper_context * ctx);
 
+    // True when the default state loaded a Core ML encoder. False for NULL
+    // contexts, weight-only contexts, and builds without Core ML support.
+    // This describes the encoder sidecar, independently of the ggml device.
+    WHISPER_API bool whisper_encoder_on_coreml(struct whisper_context * ctx);
+
     WHISPER_API int whisper_model_n_vocab      (struct whisper_context * ctx);
     WHISPER_API int whisper_model_n_audio_ctx  (struct whisper_context * ctx);
     WHISPER_API int whisper_model_n_audio_state(struct whisper_context * ctx);
