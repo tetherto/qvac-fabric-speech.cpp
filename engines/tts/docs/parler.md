@@ -665,7 +665,7 @@ attention over an F16 KV cache) and the DAC all run on the NPU; the host only
 samples. Weights and the fused decoder stacks go into the Hexagon repack
 buffer type. HTP has no K-quant matmul and looks up embedding rows only from
 F32/F16 tables, so a `q6_k` GGUF is refused at load: use `q8_0`, `f16` or
-`f32`. It needs a `qvac-ext-ggml@speech` build with the Hexagon fixes for
+`f32`. It needs a fabric ggml build with the Hexagon fixes for
 fused F32-precision matmuls and the tanh GELU.
 
 The Hexagon DAC runs each snake as one fused node, each transposed

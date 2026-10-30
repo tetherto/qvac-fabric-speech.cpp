@@ -49,7 +49,7 @@ English dialogue and each requested turn with local MOSS transcription, retrying
 including ASR results that reach the decoding token limit. It supports CPU and
 CUDA, plus Vulkan through `--gpu --backend vulkan`.
 
-This in-tree package consumes the shared `ggml-speech` dependency. Build and
+This in-tree package consumes the shared fabric ggml (`qvac-fabric`) dependency. Build and
 vcpkg consumption instructions are in [docs/build.md](docs/build.md).
 
 MOSS-SoundEffect native diffusion prepares the fixed cross-attention keys and
@@ -101,8 +101,8 @@ Whisper transcripts as their CPU renders over four prompts (2026-10-26);
 their sampled tokens diverge between backends, so waveforms are not compared.
 These are the TTS models whose automatic GPU selection admits WebGPU
 (CosyVoice3 on Windows and desktop Linux, like Vulkan and CUDA). The
-LM-based ones need a ggml-speech whose WebGPU kernels honour
-`GGML_PREC_F32` (2026-10-27 or later).
+LM-based ones need a fabric ggml whose WebGPU kernels honour
+`GGML_PREC_F32` (qvac-fabric-llm.cpp `be6e387b` or later).
 
 LavaSR denoiser and enhancer GPU selection includes ARM Mali/Immortalis
 through Vulkan when GPU execution is requested, and excludes WebGPU: the

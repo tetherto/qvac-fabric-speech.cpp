@@ -82,14 +82,14 @@ windowed and still allocates one full graph.
 ## Hexagon NPU
 
 `backend = "hexagon"` runs every stage on the HTP0 session of the
-ggml-speech Hexagon backend: the DiT, the VAE, both encoders, the FSQ
+fabric ggml Hexagon backend: the DiT, the VAE, both encoders, the FSQ
 detokenizer and the LM. `lm_backend = "cpu"` or `"opencl"` moves only the LM
 off the NPU. Requirements:
 
-- ggml-speech built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
+- A fabric ggml built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
   skeletons staged next to the host backends. `backends_dir` is prepended to
   FastRPC's `DSP_LIBRARY_PATH` before the HTP session opens.
-- A ggml-speech whose HTP `q8_0` activation quantizer matches the CPU's
+- A fabric ggml whose HTP `q8_0` activation quantizer matches the CPU's
   (an F32 scale per 32 activations). Older skeletons scale 128 activations at
   a time in F16: the LM's prompt logits then land 6x further from the F32
   reference than CPU Q8_0, its greedy decode leaves the reference at the first

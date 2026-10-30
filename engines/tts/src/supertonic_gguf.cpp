@@ -196,7 +196,7 @@ std::vector<float> expand_supertonic_tensor_to_f32(const ggml_tensor * src) {
     const void * data = ggml_get_data(src);
     // Use the public ggml_get_type_traits() API instead of the
     // internal ggml-quants.h helpers.  ggml-quants.h lives under
-    // ggml/src/ and isn't shipped by the ggml-speech vcpkg port,
+    // ggml/src/ and isn't shipped by the qvac-fabric vcpkg port,
     // so direct includes break system-ggml builds (the integrated
     // tts-cpp port path).  The type-traits to_float function pointer
     // is the public dequantization entry-point and covers F16, Q8_0
@@ -333,7 +333,7 @@ bool backend_supports_native_leaky_relu(ggml_backend_t backend) {
 }
 
 // Backend capability probe for the Supertonic fused custom ops
-// (GGML_OP_SUPERTONIC_*).  Builds a throwaway depthwise_1d node with the
+// (GGML_OP_CONV_1D_DW_DIRECT and friends).  Builds a throwaway depthwise_1d node with the
 // minimal valid shape (a=[L,C] F32, w=[K=3,1,C,1] F32, b=[C] F32) inside a
 // no-alloc scratch context and asks the backend whether it would accept it.
 // ggml-cpu and ggml-metal implement the supertonic ops; ggml-vulkan and
@@ -356,7 +356,7 @@ bool backend_supports_fused_supertonic_ops(ggml_backend_t backend) {
         ggml_tensor * a  = ggml_new_tensor_2d(probe_ctx, GGML_TYPE_F32, 8, 4);       // [L=8, C=4]
         ggml_tensor * w  = ggml_new_tensor_4d(probe_ctx, GGML_TYPE_F32, 3, 1, 4, 1); // [K=3,1,C=4,1]
         ggml_tensor * b  = ggml_new_tensor_1d(probe_ctx, GGML_TYPE_F32, 4);          // [C=4]
-        ggml_tensor * op = ggml_supertonic_depthwise_1d(probe_ctx, a, w, b, /*dilation=*/1);
+        ggml_tensor * op = ggml_conv_1d_dw_direct(probe_ctx, a, w, b, /*dilation=*/1);
         ok = (op != nullptr) && ggml_backend_supports_op(backend, op);
     } catch (...) {
         ok = false;
@@ -698,7 +698,7 @@ bool backend_supports_f16_src1_mul_mat_uncached(ggml_backend_t backend) {
 // DIFFERENT type, the stale entry replayed the old backend's
 // capabilities — e.g. a CPU backend's fused_supertonic_ops=true onto a
 // CUDA backend, which then aborted in ggml-cuda on the unimplemented
-// GGML_OP_SUPERTONIC_DEPTHWISE_1D (intermittent by allocator luck; hit
+// GGML_OP_CONV_1D_DW_DIRECT (intermittent by allocator luck; hit
 // on the qvac tts-ggml linux-x64 CUDA integration lane).  Test seam:
 // `supertonic_clear_capability_cache` drops every entry — used by the
 // unit test to verify the cache is hit on the second call.
@@ -733,7 +733,7 @@ struct backend_capabilities {
     // to skip ggml-vulkan's internal staging-buffer hop on the
     // per-step uploads.
     bool pinned_host_buffer;
-    // True iff the backend implements the GGML_OP_SUPERTONIC_* fused ops
+    // True iff the backend implements the fused Supertonic ops (GGML_OP_CONV_1D_DW_DIRECT etc.)
     // (ggml-cpu / ggml-metal yes; ggml-vulkan / ggml-opencl no).  Gates the
     // fused-op fast paths vs the pure-GGML decomposition in the graph builders.
     bool fused_supertonic_ops;

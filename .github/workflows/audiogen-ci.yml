@@ -2,9 +2,9 @@
 # added alongside the repo reorg QIP that moved engines under engines/).
 #
 # Scope: build the audiogen-cpp library + its unit tests against
-# system ggml (qvac-ext-ggml @ speech — mandatory here: AUDIOGEN_USE_SYSTEM_GGML
-# defaults ON and the engine needs the custom snake / col2im_1d ops that live
-# on that branch), then run the non-GPU ctest suite on both lanes and the
+# system ggml (qvac-fabric-llm.cpp ggml/ at GGML_REF — mandatory here:
+# AUDIOGEN_USE_SYSTEM_GGML defaults ON and the engine needs the custom snake /
+# col2im_1d ops that live in that tree), then run the non-GPU ctest suite on both lanes and the
 # weight-free MiniMax Metal parity test on the self-hosted Apple-silicon
 # runner. Model-dependent smoke harnesses stay downstream on-device.
 name: audiogen CI
@@ -36,8 +36,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
-  GGML_BRANCH: speech # single ggml pin shared with parakeet-ci.yml / tts-ci.yml
+  GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
+  GGML_REF: d3d019a3b9914688e28963e4a49406ee15362aed # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
 
 jobs:
   runner_names:
@@ -85,9 +85,9 @@ jobs:
         if: runner.environment == 'github-hosted' && runner.os == 'Linux'
         run: python3 -m pip install --user numpy gguf
 
-      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+      - name: Resolve ggml pin (qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         id: ggml
-        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$GGML_REF" >> "$GITHUB_OUTPUT"
 
       - name: Cache ggml install
         id: ggml-cache
@@ -106,18 +106,15 @@ jobs:
           restore-keys: ccache-audiogen-${{ matrix.os }}-
 
       # macOS builds with Metal for the parity test; Linux stays portable CPU-only.
-      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+      - name: Build ggml (system ggml, qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         if: steps.ggml-cache.outputs.cache-hit != 'true'
         run: |
-          # Fetch the exact SHA the cache key was derived from — the branch
-          # tip may have advanced since the ls-remote resolution, and a
-          # tip-only shallow clone would then silently build (and cache)
-          # a different commit than the key claims.
+          # Fetch exactly the pinned SHA the cache key was derived from.
           git init -q ggml-src
           git -C ggml-src remote add origin "$GGML_REPO"
           git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
           git -C ggml-src checkout -q FETCH_HEAD
-          cmake -S ggml-src -B ggml-src/build \
+          cmake -S ggml-src/ggml -B ggml-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
@@ -173,9 +170,9 @@ jobs:
       - name: Install ccache
         run: echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> "$GITHUB_ENV"
 
-      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+      - name: Resolve ggml pin (qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         id: ggml
-        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$GGML_REF" >> "$GITHUB_OUTPUT"
 
       - name: Cache ggml install
         id: ggml-cache
@@ -191,14 +188,14 @@ jobs:
           key: ccache-audiogen-macos-26-${{ github.sha }}
           restore-keys: ccache-audiogen-macos-26-
 
-      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+      - name: Build ggml (system ggml, qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         if: steps.ggml-cache.outputs.cache-hit != 'true'
         run: |
           git init -q ggml-src
           git -C ggml-src remote add origin "$GGML_REPO"
           git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
           git -C ggml-src checkout -q FETCH_HEAD
-          cmake -S ggml-src -B ggml-src/build \
+          cmake -S ggml-src/ggml -B ggml-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \

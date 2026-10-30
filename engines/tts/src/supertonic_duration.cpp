@@ -123,7 +123,7 @@ ggml_tensor * edge_clamp_pad_1d(ggml_context * ctx, ggml_tensor * x, int pad_lef
         x->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         ggml_is_contiguous(x)) {
-        return ggml_supertonic_edge_pad_1d(ctx, x, pad_left, pad_right);
+        return ggml_pad_replicate_1d(ctx, x, pad_left, pad_right);
     }
     const int64_t L = x->ne[0];
     const int64_t C = x->ne[1];
@@ -155,7 +155,7 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
         x->ne[2] == 1 && x->ne[3] == 1 && w->ne[1] == 1 && w->ne[3] == 1 &&
         w->ne[2] == x->ne[1] && b->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(w) && ggml_is_contiguous(b)) {
-        return ggml_supertonic_depthwise_1d(ctx, x, w, b, dilation);
+        return ggml_conv_1d_dw_direct(ctx, x, w, b, dilation);
     }
     const int pad_left = ((K - 1) * dilation) / 2;
     const int pad_right = (K - 1) * dilation - pad_left;
@@ -175,7 +175,7 @@ ggml_tensor * layer_norm_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor *
         x->ne[2] == 1 && x->ne[3] == 1 &&
         g->ne[0] == x->ne[1] && b->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(g) && ggml_is_contiguous(b)) {
-        return ggml_supertonic_layer_norm_channel(ctx, x, g, b, 1e-6f);
+        return ggml_norm_channel(ctx, x, g, b, 1e-6f);
     }
     ggml_tensor * xt = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     xt = ggml_norm(ctx, xt, 1e-6f);

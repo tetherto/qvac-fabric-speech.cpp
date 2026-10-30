@@ -1,7 +1,8 @@
 # QVAC speech superbuild: feature-gated umbrella over the vendored
 # whisper.cpp (third_party/, git subtree, see third_party/whisper.cpp/PATCHES.md)
 # and our engines (engines/). Every component consumes ONE system ggml —
-# the ggml-speech vcpkg port built from qvac-ext-ggml@speech — so the
+# the ggml tree of qvac-fabric-llm.cpp, published as the qvac-fabric vcpkg
+# port and shared with the LLM stack — so the
 # stack shares a single ggml pin and file set; the ggml/ tree vendored
 # inside the whisper subtree is never compiled.
 #
@@ -24,8 +25,8 @@ if (SPEECH_BUILD_TESTS)
     enable_testing()
 endif()
 
-# One ggml for everything. Resolved from the ggml-speech vcpkg port (or
-# any qvac-ext-ggml@speech install on CMAKE_PREFIX_PATH). Every
+# One ggml for everything. Resolved from the qvac-fabric vcpkg port (or
+# any qvac-fabric-llm.cpp ggml install on CMAKE_PREFIX_PATH). Every
 # subproject below guards its own ggml acquisition with
 # `if (NOT TARGET ggml)`, so defining the target here short-circuits
 # all of them onto this single import.

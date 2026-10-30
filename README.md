@@ -1,6 +1,6 @@
 # qvac-fabric-speech.cpp
 
-On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-ext-ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
+On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-fabric-llm.cpp/tree/master/ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
 
 | Property | Value |
 |---|---|
@@ -10,7 +10,7 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android arm64-v8a, iOS arm64; model and backend coverage varies by engine |
 | Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement or optional Apple Core ML sidecars |
-| Shared ggml | One `ggml-speech` dependency from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
+| Shared ggml | One `qvac-fabric` dependency: the `ggml/` tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp), the same ggml the LLM stack ships |
 
 ## Supported models
 
@@ -140,8 +140,7 @@ and OpenCL on the same device.
 
 ### WebGPU (Dawn)
 
-`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` / `ggml-speech`
-ports) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
+`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` port) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
 process; no browser is involved. It registers as `WebGPU`, ranks with Vulkan
 and Metal in every engine's automatic GPU selection (CUDA still wins on the
 same NVIDIA card), and is selected explicitly with `--backend webgpu` or
@@ -166,8 +165,9 @@ Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
 renders diverge after the first differing token the way any two backends do;
 the transcripts are the check. They rely on ggml-webgpu computing the matmul
 and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
-f32 accumulation, which ggml-speech provides from 2026-10-27; with an older
-ggml-speech their decoders overflow f16 and produce NaN logits, silence or
+f32 accumulation, which the fabric ggml provides from qvac-fabric-llm.cpp
+`be6e387b` (ported from ggml-speech 2026-10-27); with an older ggml their
+decoders overflow f16 and produce NaN logits, silence or
 noise.
 
 ## Getting started

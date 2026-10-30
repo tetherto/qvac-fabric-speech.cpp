@@ -106,10 +106,9 @@ C++ Dependencies
 
   ggml
     https://github.com/ggml-org/ggml
-    Consumed as a system package through the QVAC speech-stack
-    `ggml-speech` vcpkg port (the qvac-ext-ggml `speech` branch), which
-    ships the custom `ggml_snake` and `ggml_col2im_1d` ops this engine
-    requires. No ggml sources are vendored here.
+    Consumed as a system package through the `qvac-fabric` vcpkg port
+    (the ggml tree of tetherto/qvac-fabric-llm.cpp), which ships the
+    custom `ggml_snake` and `ggml_col2im_1d` ops this engine requires. No ggml sources are vendored here.
 
 --- apache-2.0-with-llvm-exception ---
 

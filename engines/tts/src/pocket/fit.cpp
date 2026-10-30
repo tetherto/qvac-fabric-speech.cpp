@@ -220,7 +220,7 @@ FitResult fit_params(const FitOptions & o) {
                    << "\nShared OS available RAM is used because HTP device memory telemetry is unavailable.\n";
         else if (opencl)
             report << "OpenCL shared backend scratch bound (included in state): " << backend_scratch
-                   << "\nConservative F32 backend scratch bound for reviewed ggml-speech; includes backend init and pool growth."
+                   << "\nConservative F32 backend scratch bound for the reviewed fabric ggml; includes backend init and pool growth."
                    << "\nOpenCL available memory is a driver estimate/cap, limited by OS RAM on Adreno.\n";
         r.report = report.str();
     } catch (const std::invalid_argument & error) {

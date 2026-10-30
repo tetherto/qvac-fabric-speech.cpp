@@ -6,11 +6,12 @@ Part of the [parakeet engine documentation](../README.md).
 
 ### Standalone engine build
 
-The standalone build owns its ggml dependency. From the repository root, clone
-`qvac-ext-ggml@speech` into `engines/parakeet/ggml`, then
-configure the engine directly. The setup script selects the branch rather
-than a fixed commit; record its revision, or fetch/check out the registry
-source REF before configuring when reproducing a packaged build:
+The standalone build owns its ggml dependency. From the repository root, stage
+the fabric ggml (the `ggml/` tree of
+[qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp)) as
+`engines/parakeet/ggml`, then configure the engine directly. The setup script
+pins the commit (`GGML_REF`, kept equal to the CI lanes' pin); check out the
+`qvac-fabric` port's tag instead when reproducing a packaged build:
 
 ```bash
 engines/parakeet/scripts/setup-ggml.sh
@@ -29,17 +30,19 @@ build-parakeet/test-*
 ```
 
 `setup-ggml.sh` does not apply local patches. Backend filename-prefix loading,
-non-Adreno OpenCL support, and the OpenCL program-binary cache now live as
-commits on [`qvac-ext-ggml@speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
+non-Adreno OpenCL support, and the OpenCL program-binary cache live as commits
+in the fabric ggml.
 
 ### Umbrella speech-stack build
 
-The repository-level build requires an installed `ggml-speech` package and
-forces `PARAKEET_USE_SYSTEM_GGML=ON`:
+The repository-level build requires an installed fabric ggml (the
+`qvac-fabric` package, or a local install as in the
+[umbrella build guide](../../../docs/BUILD.md#build)) and forces
+`PARAKEET_USE_SYSTEM_GGML=ON`:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/path/to/ggml-speech/install
+  -DCMAKE_PREFIX_PATH=/path/to/ggml-install
 cmake --build build -j
 ```
 
@@ -57,7 +60,6 @@ defaults follow `SPEECH_BUILD_EXECUTABLES` and `SPEECH_BUILD_TESTS`, and force
 | `PARAKEET_BUILD_EXAMPLES` | `ON` | `OFF` | Build `live-mic` and `live-mic-attributed` |
 | `PARAKEET_INSTALL` | `ON` | `ON` | Generate library, headers, CMake package, and pkg-config install rules |
 | `PARAKEET_USE_SYSTEM_GGML` | `OFF` | `ON` | Use `find_package(ggml)` instead of `engines/parakeet/ggml` |
-| `PARAKEET_GGML_LIB_PREFIX` | `ON` | no effect with system ggml | Name bundled libraries `speech-ggml-*` |
 | `PARAKEET_COREML` | `OFF` | `OFF` | Apple-only CTC/IndicConformer, Unified RNN-T, TDT, EOU, Nemotron, and tagged Sortformer encoder sidecars, the Neural Engine TDT decoder sidecar, and Nemotron 3 Diarization and Sortformer v2.1 diarizer sidecars |
 | `PARAKEET_OPENMP` | `ON` | `ON` | Link OpenMP when available; auto-disabled on Windows non-MinGW unless explicitly overridden |
 | `PARAKEET_FLASH_ATTN` | Metal, CUDA and Vulkan `ON`, otherwise `OFF` | same | Fused encoder attention with the rel-pos bias folded into the mask; selected per backend at load, the CPU path always keeps the unfused graph |
@@ -124,6 +126,6 @@ explicit OpenMP installation.
 | `examples/` | Microphone examples |
 | `test/consumer/` | Installed-package consumer fixture |
 | `scripts/` | ggml setup, conversion, Core ML, references, and package validation |
-| `ggml/` | Standalone bundled checkout of `qvac-ext-ggml@speech` |
+| `ggml-src/`, `ggml/` | Standalone bundled fabric ggml: the pinned qvac-fabric-llm.cpp clone and the symlink to its `ggml/` tree |
 | `models/`, `artifacts/`, `test/samples/` | Local/runtime test fixtures |
 | `docs/history/parakeet-port.md` | Archived implementation and parity history |

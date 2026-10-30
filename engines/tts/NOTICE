@@ -91,10 +91,10 @@ C++ dependencies
 
 MIT
 
-  ggml-speech
-    https://github.com/tetherto/qvac-ext-ggml/tree/speech
+  ggml (fabric)
+    https://github.com/tetherto/qvac-fabric-llm.cpp/tree/master/ggml
     The default and vcpkg paths use find_package(ggml CONFIG REQUIRED).
-    Bundled development builds may manually stage the same speech branch under
+    Bundled development builds may manually stage the same ggml tree under
     engines/tts/ggml; no ggml source or patch overlay is tracked in this
     package.
 

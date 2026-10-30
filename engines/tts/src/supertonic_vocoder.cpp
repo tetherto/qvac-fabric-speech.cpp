@@ -142,7 +142,7 @@ ggml_tensor * causal_replicate_pad_1d(ggml_context * ctx, ggml_tensor * x, int p
         x->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         ggml_is_contiguous(x)) {
-        return ggml_supertonic_edge_pad_1d(ctx, x, pad_left, 0);
+        return ggml_pad_replicate_1d(ctx, x, pad_left, 0);
     }
     const int64_t C = x->ne[1];
     ggml_tensor * first = ggml_view_2d(ctx, x, 1, C, x->nb[1], 0);
@@ -398,7 +398,7 @@ ggml_tensor * layer_norm_channel_ggml(ggml_context * ctx,
         x->ne[2] == 1 && x->ne[3] == 1 &&
         gamma->ne[0] == x->ne[1] && beta->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(gamma) && ggml_is_contiguous(beta)) {
-        return ggml_supertonic_layer_norm_channel(ctx, x, gamma, beta, eps);
+        return ggml_norm_channel(ctx, x, gamma, beta, eps);
     }
     ggml_tensor * y = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3));
     y = ggml_norm(ctx, y, eps);
@@ -459,7 +459,7 @@ ggml_tensor * convnext_block_ggml(ggml_context * ctx,
         if (y->ne[2] == 1 && y->ne[3] == 1 &&
             w.pw1_b->ne[0] == y->ne[1] &&
             ggml_is_contiguous(y) && ggml_is_contiguous(w.pw1_b)) {
-            y = ggml_supertonic_bias_gelu(ctx, y, w.pw1_b);
+            y = ggml_bias_gelu(ctx, y, w.pw1_b);
         } else {
             y = ggml_add(ctx, y, repeat_like(ctx, w.pw1_b, y));
             y = ggml_gelu_erf(ctx, y);
@@ -471,7 +471,7 @@ ggml_tensor * convnext_block_ggml(ggml_context * ctx,
     // NOTE: `gamma` is the per-channel `[C]` residual scale (same shape as the
     // vector_estimator's), broadcast over time by `repeat_like` below.  We keep
     // the unfused `mul + add` tail rather than the vector_estimator's
-    // `ggml_supertonic_pw2_residual` fused op because the win would be tiny (~10
+    // `ggml_scale_residual` fused op because the win would be tiny (~10
     // dispatches × ~40μs = 0.4 ms).
     y = conv1d_causal_ggml(ctx, y, w.pw2_w, w.pw2_b);
     y = ggml_mul(ctx, y, repeat_like(ctx, w.gamma, y));
@@ -520,10 +520,10 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
         return ggml_reshape_1d(ctx, t, n);
     };
 
-    ggml_tensor * y_ct = ggml_supertonic_depthwise_1d_causal_ct(ctx, x_ct,
+    ggml_tensor * y_ct = ggml_conv_1d_dw_direct_causal_ct(ctx, x_ct,
         w.dw_w, flatten_1d(w.dw_b), kVocoderDilations[idx]);
     if (supertonic_use_fused_layer_norm()) {
-        y_ct = ggml_supertonic_layer_norm_channel_ct(ctx, y_ct,
+        y_ct = ggml_norm_channel_ct(ctx, y_ct,
             flatten_1d(w.norm_g), flatten_1d(w.norm_b), 1e-6f);
     } else {
         // Channels are already inner-most, so the stock reduction needs no
@@ -535,7 +535,7 @@ ggml_tensor * convnext_block_ggml_ct(ggml_context * ctx,
             ggml_reshape_2d(ctx, flatten_1d(w.norm_b), y_ct->ne[0], 1));
     }
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw1_w, /*bias=*/nullptr);
-    y_ct = ggml_supertonic_bias_gelu_ct(ctx, y_ct, flatten_1d(w.pw1_b));
+    y_ct = ggml_bias_gelu_ct(ctx, y_ct, flatten_1d(w.pw1_b));
     y_ct = pointwise_matmul_ct_voc(ctx, y_ct, w.pw2_w, flatten_1d(w.pw2_b));
     // Per-channel `[C]` gamma multiply (broadcasts over time in any layout).
     y_ct = ggml_mul(ctx, y_ct, repeat_like(ctx, w.gamma, y_ct));

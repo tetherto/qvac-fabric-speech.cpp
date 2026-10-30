@@ -232,7 +232,7 @@ STFT and HiFT) run on the NPU. With a reference WAV, the S3Tokenizer and
 CAM++ stay on the CPU, as the voice encoder does on every backend. Weights go
 into the Hexagon repack buffer type; HTP multiplies only `f32`, `f16`, `q8_0`
 and `q4_0` weights, so a T3 or S3Gen GGUF holding another type is refused at
-load. It needs a `qvac-ext-ggml@speech` build with the Hexagon `COL2IM_1D`,
+load. It needs a fabric ggml build with the Hexagon `COL2IM_1D`,
 F16 `IM2COL`, flash attention (F32 and F16 keys and values), sin, cos and
 leaky ReLU kernels (measured at `a6122941`).
 

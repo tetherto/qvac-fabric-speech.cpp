@@ -20,7 +20,6 @@ option(PARAKEET_BUILD_EXAMPLES    "parakeet: build standalone examples (live-mic
 option(PARAKEET_INSTALL           "parakeet: generate install rules"                                 ON)
 option(PARAKEET_USE_SYSTEM_GGML   "parakeet: use system-installed GGML library"                      OFF)
 option(PARAKEET_CCACHE            "parakeet: use ccache as compiler launcher if available"           ON)
-option(PARAKEET_GGML_LIB_PREFIX   "parakeet: rename bundled ggml libraries to libspeech-ggml-* (filename only; CMake target names and C symbols are unchanged). Prevents shared-library filename collisions with other ggml consumers in the same host process; the `speech-` prefix is shared with the rest of the QVAC speech stack (whisper, parakeet, chatterbox, supertonic, ...) so they vendor a single ggml file set. Has no effect when PARAKEET_USE_SYSTEM_GGML=ON." ON)
 option(PARAKEET_COREML            "parakeet: enable the Apple Core ML (Neural Engine) encoder and TDT decoder sidecars (Apple-only, additive; the FastConformer encoder runs on a <model>-encoder.mlmodelc and the TDT decoder on a <model>-decoder.mlmodelc when present, else the engine falls back to ggml)." OFF)
 
 # Enable Objective-C and Objective-C++ up front (before add_subdirectory(ggml))
@@ -177,29 +176,10 @@ if (WIN32 AND NOT MINGW)
     endif()
 endif()
 
-# Bundled-ggml library filename prefix. qvac-ext-ggml's `speech` branch
-# exposes `GGML_LIB_OUTPUT_PREFIX` (commit 4cec2d3a) which handles both
-# the OUTPUT_NAME rename for every ggml target (core + per-backend
-# .so/.dll/.a) AND the runtime loader's filename prefix
-# (`GGML_BACKEND_DL_PROJECT_PREFIX` compile define on ggml-base), so
-# the renamed `libspeech-ggml-{vulkan,opencl,cpu-*}.so` files are
-# actually discovered by `ggml_backend_load_all_from_path()` at
-# runtime.
-#
-# Setting `GGML_LIB_OUTPUT_PREFIX` here (as a cache variable, before
-# `add_subdirectory(ggml)`) is the supported way to override the
-# branch default (`qvac-speech-`) on a per-consumer basis without
-# editing the ggml subtree. The `speech-` prefix is shared across the
-# QVAC speech stack (whisper, parakeet, chatterbox, supertonic, ...)
-# so they can vendor a single ggml file set side-by-side without
-# colliding with the `qvac-` prefix used by the llm fork.
-if (PARAKEET_GGML_LIB_PREFIX AND NOT PARAKEET_USE_SYSTEM_GGML)
-    if (NOT DEFINED CACHE{GGML_LIB_OUTPUT_PREFIX})
-        set(GGML_LIB_OUTPUT_PREFIX "speech-" CACHE STRING
-            "ggml: prefix for built ggml library filenames (parakeet default)" FORCE)
-    endif()
-    message(STATUS "parakeet: bundled ggml libraries will be emitted with prefix '${GGML_LIB_OUTPUT_PREFIX}' (set PARAKEET_GGML_LIB_PREFIX=OFF to use the qvac-ext-ggml@speech default, or override -DGGML_LIB_OUTPUT_PREFIX=<other>)")
-endif()
+# The fabric ggml names its runtime-loaded backend modules `qvac-ggml-*`
+# itself (the loader's compiled-in prefix), so the bundled build needs no
+# filename-prefix override; the speech stack and the LLM stack share one
+# ggml file set.
 
 if (NOT TARGET ggml)
     if (PARAKEET_USE_SYSTEM_GGML)
@@ -3031,7 +3011,7 @@ if (PARAKEET_BUILD_EXAMPLES)
 endif()
 
 if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
-    # Bundled qvac-ext-ggml owns ggml-targets and its ggml:: namespace.
+    # A bundled fabric ggml owns ggml-targets and its ggml:: namespace.
     # Registering those targets here as well duplicates the same export set
     # and makes a fresh bundled build fail during CMake generation.
     # Export the parakeet target via an install(EXPORT ...) set so the
@@ -3116,18 +3096,25 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     # pkg-config linkage.
     #
     # ggml: derived from the actual ggml targets rather than from a
-    # hardcoded name list, because every QVAC ggml build renames its
-    # libraries via GGML_LIB_OUTPUT_PREFIX (the ggml-speech vcpkg port
-    # uses `qvac-speech-`, the bundled build above sets `speech-`) and
-    # a system ggml may live in a different prefix than ours. For an
-    # imported (system) ggml we read IMPORTED_LOCATION and emit both
-    # the containing -L and the real library stem; for the bundled
-    # in-tree build we read OUTPUT_NAME and rely on our own ${libdir}
-    # (GGML owns its install rules). Deliberately NOT
-    # `Requires: ggml`: the qvac-ext-ggml@speech ggml.pc advertises an
-    # unprefixed `-lggml` that no install actually produces and omits
-    # ggml-base entirely, so inheriting it would under-link. Revisit
-    # once that .pc is fixed upstream in the fork.
+    # hardcoded name list, because a system ggml may live in a different
+    # prefix than ours. For an imported (system) ggml we read
+    # IMPORTED_LOCATION and emit both the containing -L and the real
+    # library stem; for the bundled in-tree build we read OUTPUT_NAME and
+    # rely on our own ${libdir} (GGML owns its install rules). Deliberately
+    # NOT `Requires: ggml`: the fabric ggml.pc omits the CPU backend and
+    # every other statically linked backend archive, so inheriting it
+    # would under-link a static build.
+    # An ALIAS target (the in-tree ggml::ggml) carries no OUTPUT_NAME of its
+    # own; the library name must come from the target it points at.
+    function(parakeet_resolve_alias_target target out_var)
+        get_target_property(_aliased ${target} ALIASED_TARGET)
+        if (_aliased)
+            set(${out_var} ${_aliased} PARENT_SCOPE)
+        else()
+            set(${out_var} ${target} PARENT_SCOPE)
+        endif()
+    endfunction()
+
     set(_pk_pc_ggml_libs "")
     set(_pk_pc_ggml_libdirs "")
     # Static registry references require the linked backend archives too.
@@ -3144,10 +3131,11 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
         endforeach()
     endforeach()
     list(APPEND _pk_ggml_pc_targets ggml::ggml-base ggml-base)
-    foreach (_pk_ggml_tgt IN LISTS _pk_ggml_pc_targets)
-        if (NOT TARGET ${_pk_ggml_tgt})
+    foreach (_pk_ggml_alias IN LISTS _pk_ggml_pc_targets)
+        if (NOT TARGET ${_pk_ggml_alias})
             continue()
         endif()
+        parakeet_resolve_alias_target(${_pk_ggml_alias} _pk_ggml_tgt)
         get_target_property(_pk_ggml_imported ${_pk_ggml_tgt} IMPORTED)
         set(_pk_ggml_libname "")
         if (_pk_ggml_imported)
@@ -3178,20 +3166,20 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
             endif()
         endif()
         # Namespaced and plain spellings of the same target both appear in
-        # the loop (only one exists per acquisition path, but the bundled
-        # build aliases ggml::ggml -> ggml); de-duplicate on the resolved
-        # library name so the .pc never lists a library twice.
+        # the loop (the bundled fabric build aliases ggml::ggml -> ggml);
+        # de-duplicate on the resolved library name so the .pc never lists
+        # a library twice.
         if (_pk_ggml_libname AND NOT "-l${_pk_ggml_libname}" IN_LIST _pk_pc_ggml_libs)
             list(APPEND _pk_pc_ggml_libs "-l${_pk_ggml_libname}")
         endif()
     endforeach()
     if (NOT _pk_pc_ggml_libs)
         # Nothing resolvable (e.g. a hand-rolled ggml import with no
-        # location): fall back to the prefix-derived names so the .pc is
-        # still populated rather than silently empty.
-        set(_pk_pc_ggml_libs "-l${GGML_LIB_OUTPUT_PREFIX}ggml" "-l${GGML_LIB_OUTPUT_PREFIX}ggml-base")
+        # location): fall back to the fabric ggml's own library names so
+        # the .pc is still populated rather than silently empty.
+        set(_pk_pc_ggml_libs "-lggml" "-lggml-base")
         message(WARNING "parakeet: could not resolve ggml library files for qvac-parakeet.pc; "
-                        "falling back to prefix-derived names (${_pk_pc_ggml_libs})")
+                        "falling back to the default names (${_pk_pc_ggml_libs})")
     endif()
     list(REMOVE_DUPLICATES _pk_pc_ggml_libdirs)
     string(JOIN " " PARAKEET_PC_GGML_LIBS ${_pk_pc_ggml_libdirs} ${_pk_pc_ggml_libs})

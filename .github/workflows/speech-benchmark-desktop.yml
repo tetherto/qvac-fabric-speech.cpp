@@ -88,8 +88,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GGML_REPO: https://github.com/tetherto/qvac-ext-ggml.git
-  GGML_BRANCH: speech
+  GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
+  GGML_REF: d3d019a3b9914688e28963e4a49406ee15362aed # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
   AWS_REGION: eu-central-1
   # Whitelist of every family in scripts/benchmarks/families.json, opt-in ones
   # included. The plan job derives the "all" expansion, per-family runner
@@ -469,16 +469,15 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+      - name: Resolve ggml pin (qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         id: ggml
         run: |
           set -euo pipefail
-          # ls-remote can fail silently under pipefail-less shells; validate
-          # the resolved SHA looks like 40 hex chars before it flows into the
+          # Validate the pin looks like 40 hex chars before it flows into the
           # cache key and the fetch below.
-          sha="$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)"
+          sha="$GGML_REF"
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "failed to resolve $GGML_REPO@$GGML_BRANCH (got: '$sha')" >&2
+            echo "GGML_REF is not a full commit SHA (got: '$sha')" >&2
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -520,7 +519,7 @@ jobs:
       #     `ubuntu-24.04` label is a POOL spanning CPU generations —
       #     a later cell restoring that cache on an older CPU would SIGILL.
       #     Hosted Linux stays on the portable ggml default.
-      - name: Build ggml (system ggml, qvac-ext-ggml@${{ env.GGML_BRANCH }})
+      - name: Build ggml (system ggml, qvac-fabric-llm.cpp@${{ env.GGML_REF }})
         if: steps.ggml-cache.outputs.cache-hit != 'true'
         env:
           GGML_METAL_FLAG:  ${{ runner.os == 'macOS' && 'ON' || 'OFF' }}
@@ -531,7 +530,7 @@ jobs:
           git -C ggml-src remote add origin "$GGML_REPO"
           git -C ggml-src fetch --depth 1 origin "${{ steps.ggml.outputs.sha }}"
           git -C ggml-src checkout -q FETCH_HEAD
-          cmake -S ggml-src -B ggml-src/build \
+          cmake -S ggml-src/ggml -B ggml-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE="$GGML_NATIVE_FLAG" \

@@ -184,7 +184,7 @@ inline BackendRequest vae_backend_request(const BackendRequest & engine_req) {
 
 // The requested device, or for "auto" the GPU when n_gpu_layers asks for one
 // (the two custom VAE ops have Metal/Vulkan/validated-OpenCL kernels in the
-// ggml-speech fork) with CPU fallback. CPU backends get the thread count.
+// fabric ggml) with CPU fallback. CPU backends get the thread count.
 // Returns null when an explicit request fails or no CPU backend can be
 // initialised; the returned backend is owned by the caller.
 inline ggml_backend_t resolve_vae_backend(const BackendRequest & req) {

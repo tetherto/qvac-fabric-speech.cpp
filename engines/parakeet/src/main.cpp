@@ -77,7 +77,7 @@ void print_usage(const char * argv0) {
         "                       partial layer offload is not implemented.\n"
         "                       Adreno 6xx OpenCL is skipped unless explicitly enabled\n"
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
-        "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
+        "                       are commits in the fabric ggml, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
         "                       hexagon (HTP0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
@@ -93,7 +93,7 @@ void print_usage(const char * argv0) {
         "                                     Empty => ggml's default search path.\n"
         "  --opencl-cache-dir DIR             persistent OpenCL kernel binary cache directory\n"
         "                                     (sets $GGML_OPENCL_CACHE_DIR; consumed by the\n"
-        "                                     qvac-ext-ggml@speech OpenCL backend).\n"
+        "                                     fabric ggml OpenCL backend).\n"
         "                                     Omitted or empty leaves the process environment\n"
         "                                     unchanged; without an existing variable, no\n"
         "                                     Parakeet cache directory is configured.\n"
@@ -316,7 +316,7 @@ struct ExtraCliOpts {
     // OpenCL CLI surface: ggml-opencl's runtime knobs are exposed through
     // CLI flags so bench scripts can A/B them without `env VAR=… ./binary`.
     // All four are read by ggml-opencl via getenv() and (for the cache
-    // dir) by the qvac-ext-ggml@speech OpenCL backend. Applied
+    // dir) by the fabric ggml OpenCL backend. Applied
     // via `setenv()` BEFORE any parakeet API call so the backend
     // init cascade picks them up. Empty string for any field => leave
     // the existing process-env value untouched (do not setenv).

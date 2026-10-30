@@ -123,7 +123,7 @@ for timings and accuracy.
 The graph decoder adapts to what the active backend reports through
 `ggml_backend_supports_op`, probed once at load. Where the backend runs the
 fused LSTM cell (`GGML_OP_LSTM_CELL`) and the transducer step control
-(`GGML_OP_TDT_STEP`), which ggml-speech implements for CPU, CUDA, Metal and
+(`GGML_OP_TDT_STEP`), which the fabric ggml implements for CPU, CUDA, Metal and
 Vulkan, the TDT decoder runs up to eight greedy steps per graph: the joint,
 argmax, LSTM update, duration bookkeeping and state selection stay on the
 device and the

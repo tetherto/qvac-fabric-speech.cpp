@@ -404,8 +404,8 @@ struct supertonic_model {
     // matches the historical CPU-only path.
     bool use_native_leaky_relu = true;
     // True when the resolved backend implements the Supertonic fused custom
-    // ops (GGML_OP_SUPERTONIC_DEPTHWISE_1D / LAYER_NORM_CHANNEL / EDGE_PAD_1D /
-    // BIAS_GELU / PW2_RESIDUAL).  Those are implemented in ggml-cpu and
+    // ops (GGML_OP_CONV_1D_DW_DIRECT / NORM_CHANNEL / PAD_REPLICATE_1D /
+    // BIAS_GELU / SCALE_RESIDUAL).  Those are implemented in ggml-cpu and
     // ggml-metal only — NOT ggml-vulkan / ggml-opencl.  Resolved at load time
     // via `ggml_backend_supports_op` against a synthetic depthwise_1d node
     // (the 5 ops ship as one overlay set, so one probe is representative).
@@ -1301,7 +1301,7 @@ inline void supertonic_safe_gallocr_free(ggml_gallocr_t & allocr, uint64_t gener
 // Portable LeakyReLU(x, α) = (1-α)·relu(x) + α·x.
 //
 // `ggml_leaky_relu` (GGML_OP_LEAKY_RELU) is a CPU builtin and is also
-// present on the QVAC `ggml-speech` vcpkg port via the chatterbox
+// present in the fabric ggml via the chatterbox
 // `ggml-opencl-chatterbox-ops.patch`, but baseline upstream
 // `ggml-opencl` and several other GPU backends still reject the op at
 // graph-execute time.  Routing through this helper keeps every

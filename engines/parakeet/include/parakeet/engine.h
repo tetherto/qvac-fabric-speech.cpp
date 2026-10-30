@@ -114,7 +114,7 @@ struct EngineOptions {
 
     // Sets `$GGML_OPENCL_CACHE_DIR` before the first backend init so
     // ggml-opencl persists `clCreateProgramWithBinary` blobs across
-    // process restarts (implemented by qvac-ext-ggml@speech). Strongly
+    // process restarts (implemented by the fabric ggml). Strongly
     // recommended on Android where
     // the cold `clBuildProgram` cost dominates first-utterance
     // latency; pass a writable per-app directory (typically the
@@ -144,7 +144,7 @@ struct EngineOptions {
     //   * Metal:   triggers the MSL → MTLPipelineState compile.
     //   * OpenCL:  triggers `clBuildProgram` for every kernel
     //              variant the encoder graph touches; binaries
-    //              get cached by the qvac-ext-ggml@speech backend
+    //              get cached by the fabric ggml OpenCL backend
     //              when GGML_OPENCL_CACHE_DIR is set.
     //   * Vulkan:  triggers vkCreateGraphicsPipelines.
     //   * CUDA:    triggers cuGraphInstantiate.

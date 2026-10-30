@@ -132,8 +132,8 @@ WAV is byte-exact deterministic across runs (md5
 `d8a1b22375dbcb2259c686426a7d76c5` ×5).  Parity harness
 `test-metal-ops` passes 14 gates (3 base + 3 conv_transpose_1d + 8
 fused `mul_mm`).  The 1088-line ggml-metal patch backing these
-kernel changes is shipped pre-applied by the `ggml-speech` vcpkg
-port (qvac-ext-ggml/speech branch); the standalone chatterbox.cpp
+kernel changes is shipped pre-applied by the fabric ggml (`qvac-fabric`
+vcpkg port); the standalone chatterbox.cpp
 repo carries it under `patches/ggml-metal-chatterbox-ops.patch`
 against pinned ggml `58c38058`.  All §3.24–§3.30 kernel changes
 cross-compile cleanly for iOS-arm64 (portability verified; runtime
@@ -152,7 +152,7 @@ CPU backend only (`GGML_METAL=OFF`, `GGML_NATIVE=OFF` as in the prebuilds),
 16 threads, `parler-bench` greedy for a fixed 1200 decode steps (13.83 s of
 audio) so both builds do identical work, median of 3 runs after a warm-up,
 inference only. "Before" is the previous `master`; both use the same
-`ggml-speech`.
+ggml.
 
 | Model | Decode ms/step | DAC s | Total s | RTF | Speedup |
 |---|--:|--:|--:|--:|--:|

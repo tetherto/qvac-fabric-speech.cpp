@@ -6,7 +6,7 @@
 // (ggml_gallocr_reserve_n_size); a graph it does not is priced through the
 // same [primary, CPU-last] scheduler shape the fallback path allocates with
 // (ggml_backend_sched_reserve_size). Both APIs are the size-only twins of the
-// real allocators in the QVAC ggml-speech pin -- nothing is allocated on any
+// real allocators in the fabric ggml pin -- nothing is allocated on any
 // device and nothing runs.
 //
 // Shared by the audio8 and chatterbox fit projectors.

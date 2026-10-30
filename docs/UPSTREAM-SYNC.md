@@ -50,7 +50,7 @@ syncs too while the original subtree ancestry is absent.
    changed shape; delete rows upstream made redundant.
 3. `ggml/` inside the subtree must remain byte-identical to the new upstream
    tag — **never** resolve a conflict by editing vendored ggml. ggml changes
-   go to [qvac-ext-ggml](https://github.com/tetherto/qvac-ext-ggml) `speech`.
+   go to the `ggml/` tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp).
 4. Local sanity: umbrella configure/build + `ctest -LE 'gpu|perf'` + the
    whisper-cli smoke (see `.github/workflows/whisper-ci.yml` for the exact
    commands).
@@ -71,5 +71,5 @@ syncs too while the original subtree ancestry is absent.
 - Never hand-edit `third_party/whisper.cpp` outside a sync PR or a PR that
   updates PATCHES.md in the same change.
 - Keep the QVAC delta small: prefer `engines/whisper` glue, upstream PRs, or
-  qvac-ext-ggml over growing the manifest.
+  the fabric ggml over growing the manifest.
 - One sync PR per upstream release; don't batch unrelated work into it.

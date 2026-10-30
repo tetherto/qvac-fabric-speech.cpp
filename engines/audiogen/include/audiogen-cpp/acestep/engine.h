@@ -8,7 +8,7 @@
 // @qvac/tts-ggml addon), so the addon never shells out to a binary and
 // compiles for every platform tts-cpp supports.
 //
-// Pipeline stages (all ggml graphs on the ggml-speech fork):
+// Pipeline stages (all ggml graphs on the fabric ggml):
 //     LM (acestep-lm, Qwen3 causal)   -> metadata + acoustic codes
 //     FSQ detokenizer                 -> DiT context latents
 //     text-encoder (Qwen3-Embedding)  -> prompt embeddings
@@ -21,7 +21,7 @@
 // respectively, with CPU fallback for unmeasured backends.
 //
 // Port status:
-//   [x] custom ggml ops: ggml_col2im_1d, ggml_snake (CPU) in ggml-speech
+//   [x] custom ggml ops: ggml_col2im_1d, ggml_snake (CPU) in the fabric ggml
 //   [x] VAE stage (tts_cpp::acestep::Vae) — decode/encode validated on CPU
 //   [x] DiT stage (dit_ggml) — load + forward + Euler flow-matching sampler
 //   [x] LM stage (lm_ggml + bpe_tokenizer + lm_pipeline) — Phase-2 codes
@@ -68,7 +68,7 @@ struct EngineOptions {
     bool verbose       = false;
     // Directory holding the dlopen'd ggml backend modules the addon staged next
     // to its `.bare` (the per-arch `<bare-target>/<module>` subdir). Required on
-    // arm64 (Android + Linux), where the ggml-speech port ships the CPU backend
+    // arm64 (Android + Linux), where the qvac-fabric port ships the CPU backend
     // as per-microarch MODULE .so files (GGML_BACKEND_DL) rather than static
     // archives; the engine calls `ggml_backend_load_all_from_path()` on it before
     // acquiring any backend from the registry. Empty -> rely on ggml's built-in

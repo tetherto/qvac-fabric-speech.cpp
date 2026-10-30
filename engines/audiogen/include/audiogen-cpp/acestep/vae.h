@@ -7,7 +7,7 @@
 // (produced by the DiT stage) into audio; the encoder does the inverse and is
 // used for the reconstruction roundtrip. Both run through a ggml compute graph
 // (CPU by default, or a GPU backend via VaeOptions::n_gpu_layers), using the two
-// custom ops landed in the ggml-speech fork (ggml_col2im_1d for the decoder's
+// custom ops landed in the fabric ggml (ggml_col2im_1d for the decoder's
 // transposed convs, ggml_snake for the snake activations). The pipeline runs on
 // CPU, Metal, Vulkan, and validated OpenCL on Adreno 700+.
 //

@@ -5,7 +5,7 @@
 // The prompt encoder: a standard Qwen3 backbone (RMSNorm, GQA self-attention with
 // per-head QK-norm + NEOX RoPE, SwiGLU MLP, causal). Token IDs -> hidden states
 // that feed the DiT cross-attention (via the cond-encoder). Ported from
-// acestep.cpp/src/qwen3-enc.h. Every op already exists in the ggml-speech fork —
+// acestep.cpp/src/qwen3-enc.h. Every op already exists in the fabric ggml —
 // no new custom op. On CPU, attention uses the F32 soft_max_ext path.
 //
 // Layout: hidden [H, S] == ggml ne[0]=H, ne[1]=S.

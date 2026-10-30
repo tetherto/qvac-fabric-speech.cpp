@@ -1,62 +1,48 @@
 #!/usr/bin/env bash
-# Clone qvac-ext-ggml into ./ggml on the branch this repo is pinned against.
-# Idempotent: safe to re-run.
+# Stage the fabric ggml for the standalone parakeet build. Idempotent.
 #
-# Update GGML_URL / GGML_BRANCH here whenever the pin is bumped; this file
-# is the single source of truth for which ggml fork parakeet.cpp builds
-# against.
+# The shared ggml of the QVAC speech stack is the ggml/ tree of
+# qvac-fabric-llm.cpp (the same ggml the LLM stack ships; published to vcpkg
+# as the qvac-fabric port). Backend filename-prefix loading, non-Adreno OpenCL
+# support and the OpenCL program-binary cache are commits in that tree, so no
+# local patches are applied here.
 #
-# qvac-ext-ggml's `speech` branch carries the equivalents of the patches
-# that used to live under patches/ggml-*.patch (backend-reg filename
-# prefix, opencl non-Adreno support, opencl program binary cache). The
-# script therefore does not apply local patches anymore.
+# GGML_REF is the single source of truth for which commit parakeet builds
+# against; keep it equal to GGML_REF in .github/workflows/parakeet-ci.yml.
 
 set -euo pipefail
 
-GGML_URL="https://github.com/tetherto/qvac-ext-ggml.git"
-GGML_BRANCH="speech"
+GGML_URL="https://github.com/tetherto/qvac-fabric-llm.cpp.git"
+GGML_REF="d3d019a3b9914688e28963e4a49406ee15362aed"   # qvac-fabric-llm.cpp#455: speech memory accessors, CPU graph-plan proc, CUDA PAD grid
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "parakeet.cpp: setting up ggml from ${GGML_URL} (branch: ${GGML_BRANCH})"
+echo "parakeet.cpp: setting up ggml from ${GGML_URL} @ ${GGML_REF:0:10}"
 
-if [ -e ggml ] && [ ! -d ggml/.git ]; then
-    if [ -L ggml ]; then
-        echo "  -> ggml is a symlink to '$(readlink ggml)'; leaving it alone"
-        echo "     (delete the symlink and re-run this script to clone fresh)"
-        exit 0
-    fi
-    echo "  ERROR: ./ggml exists but is not a git checkout." >&2
-    echo "         Remove it and re-run this script." >&2
+fetch_pin() {
+    git -C ggml-src fetch --depth 1 origin "${GGML_REF}"
+    git -C ggml-src checkout -q --detach FETCH_HEAD
+}
+
+if [ -d ggml-src/.git ]; then
+    echo "  -> existing clone in ggml-src; fetching the pin"
+    fetch_pin
+else
+    echo "  -> cloning into ggml-src"
+    rm -rf ggml-src
+    git init -q ggml-src
+    git -C ggml-src remote add origin "$GGML_URL"
+    fetch_pin
+fi
+
+if [ -e ggml ] && [ ! -L ggml ]; then
+    echo "  ERROR: ./ggml exists and is not a symlink; remove it and re-run this script." >&2
     exit 1
 fi
+ln -sfn ggml-src/ggml ggml
 
-if [ ! -d ggml/.git ]; then
-    echo "  -> cloning ${GGML_URL} (branch ${GGML_BRANCH})"
-    git clone --branch "$GGML_BRANCH" "$GGML_URL" ggml
-fi
-
-cd ggml
-
-# Make sure the local checkout actually has the requested branch fetched
-# (e.g. when the user previously cloned with a narrow refspec).
-if ! git rev-parse --verify --quiet "refs/heads/${GGML_BRANCH}" >/dev/null; then
-    echo "  -> fetching ${GGML_BRANCH}"
-    git fetch origin "${GGML_BRANCH}:${GGML_BRANCH}"
-fi
-
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
-if [ "$CURRENT_BRANCH" != "$GGML_BRANCH" ]; then
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        echo "  -> resetting ggml worktree to pristine before switching branches"
-        git checkout -- .
-    fi
-    echo "  -> checking out ${GGML_BRANCH}"
-    git checkout "$GGML_BRANCH"
-fi
-
-echo "  -> ok, on ${GGML_BRANCH} at $(git rev-parse --short=8 HEAD)"
+echo "  -> ok, ggml -> ggml-src/ggml at $(git -C ggml-src rev-parse --short=8 HEAD)"
 
 echo
 echo "ggml is ready. Next:"

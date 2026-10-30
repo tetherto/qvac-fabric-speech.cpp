@@ -85,7 +85,7 @@ use the same selected device, retaining
 F32 weights and persistent caches on that device. Prepared voices and small
 conditioning/output values still cross the host boundary.
 
-Use an installed ggml-speech build with `GGML_OPENCL=ON` and its OpenCL backend
+Use an installed fabric ggml build with `GGML_OPENCL=ON` and its OpenCL backend
 available to the existing registry loader. Dynamic builds must ship the
 backend libraries beside the application, or set the public backend directory
 before constructing the first engine (see `<tts-cpp/backend.h>`).
@@ -219,7 +219,7 @@ full prefixes while the native implementation uses cached decoding.
   --output /tmp/pocket-reference
 /tmp/pocket-venv/bin/python engines/tts/test/pocket/test_converter.py /tmp/pocket-reference
 
-# GGML_PREFIX must contain an installed qvac-ext-ggml speech build compatible
+# GGML_PREFIX must contain an installed fabric ggml build compatible
 # with the rest of this checkout, including the CPU registry graph-planner export.
 cmake -S engines/tts -B build/pocket -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$GGML_PREFIX" -DTTS_CPP_BUILD_EXECUTABLES=OFF \

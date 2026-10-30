@@ -120,7 +120,7 @@ struct AttnPath {
 inline bool backend_is_metal(ggml_backend_t b) {
     // Upstream ggml registered the Metal backend as "Metal" until mid-2026,
     // when the registry name changed to "MTL" (GGML_METAL_NAME). The pinned
-    // qvac-ext-ggml@speech carries the new name; accept both so the
+    // fabric ggml carries the new name; accept both so the
     // Metal-specific gates keep firing across pin bumps.
     const char * n = backend_reg_name(b);
     return std::strcmp(n, "Metal") == 0 || std::strcmp(n, "MTL") == 0;

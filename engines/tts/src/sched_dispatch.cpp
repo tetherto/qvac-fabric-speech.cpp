@@ -29,7 +29,7 @@ bool sched_force_enabled() {
     return e && e[0] && e[0] != '0';
 }
 
-// MIRRORS SCHEDULER INTERNALS — re-verify on EVERY ggml-speech sync.
+// MIRRORS SCHEDULER INTERNALS — re-verify on EVERY fabric ggml sync.
 //
 // This re-derives, outside the scheduler, the exact condition under which
 // ggml_backend_sched_backend_id_from_cur() rejects a node with
