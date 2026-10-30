@@ -23,8 +23,9 @@
 //     pcm = dn->denoise(pcm, sr);          // cleaned, SAME sample rate
 //     // ...then optionally Enhancer::enhance() bandwidth-extends to 48 kHz.
 //
-// Instances support concurrent denoise() calls; reusable neural backends
-// serialize access to their inference buffers.
+// Instances support concurrent denoise() calls. Reusable ggml and Core ML
+// backends serialize access to inference buffers; the scalar path holds only
+// const weights.
 
 #include "tts-cpp/export.h"
 #include "tts-cpp/lavasr/coreml.h"

@@ -162,7 +162,7 @@ static int parity_over_backends(const EnhancerWeights & w, const std::vector<flo
 
     ggml_backend_t gpu = tts_cpp::detail::init_gpu_backend(
         /*n_gpu_layers=*/99, /*verbose=*/true, "test-enhancer", /*vulkan_device=*/0,
-        /*allow_arm_mali=*/true);
+        /*allow_arm_mali=*/true, nullptr, tts_cpp::lavasr::gpu_requirement());
     if (gpu) {
         // f32 GPU rounding (FMA, different reductions) drifts a little more from
         // the scalar core; still far tighter than any layout bug would allow.

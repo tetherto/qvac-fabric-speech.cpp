@@ -3372,6 +3372,16 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-chunker)
     tts_cpp_register_test(test-supertonic-chunker LABEL "unit")
 
+    add_executable(test-lavasr-bench-validation test/test_lavasr_bench_validation.cpp)
+    target_include_directories(test-lavasr-bench-validation PRIVATE src)
+    tts_cpp_apply_ccache(test-lavasr-bench-validation)
+    tts_cpp_register_test(test-lavasr-bench-validation LABEL "unit")
+
+    add_executable(test-lavasr-bench-timing test/test_lavasr_bench_timing.cpp)
+    target_include_directories(test-lavasr-bench-timing PRIVATE src)
+    tts_cpp_apply_ccache(test-lavasr-bench-timing)
+    tts_cpp_register_test(test-lavasr-bench-timing LABEL "unit")
+
     # LavaSR DSP primitives: resampler, STFT/ISTFT, Slaney mel,
     # FastLR crossover merge.  Pure host math (no model / no ggml), compiled
     # straight from the lavasr/dsp sources so it always runs in CI.
@@ -3438,6 +3448,17 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-lavasr-coreml-options PRIVATE src)
     tts_cpp_apply_ccache(test-lavasr-coreml-options)
     tts_cpp_register_test(test-lavasr-coreml-options LABEL "unit")
+    if (TARGET lavasr-bench AND Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME test-lavasr-bench-coreml
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_lavasr_bench_coreml.py"
+                    "$<TARGET_FILE:lavasr-bench>")
+        set_tests_properties(test-lavasr-bench-coreml PROPERTIES LABELS "unit"
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        if (WIN32)
+            set_property(TEST test-lavasr-bench-coreml APPEND PROPERTY ENVIRONMENT
+                "PATH=${CMAKE_BINARY_DIR}/bin/$<CONFIG>\;${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
+        endif()
+    endif()
     add_executable(test-lavasr-coreml-parity test/test_lavasr_coreml_parity.cpp)
     target_link_libraries(test-lavasr-coreml-parity PRIVATE tts-cpp)
     if (TTS_CPP_COREML)
@@ -3502,6 +3523,14 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-lavasr-denoiser-ggml PRIVATE include src ggml/include)
     tts_cpp_apply_ccache(test-lavasr-denoiser-ggml)
     tts_cpp_register_test(test-lavasr-denoiser-ggml LABEL "unit")
+    if (TTS_CPP_GGML_HEXAGON)
+        foreach(_lavasr_stage enhancer denoiser)
+            tts_cpp_register_test(test-lavasr-${_lavasr_stage}-hexagon
+                EXE test-lavasr-${_lavasr_stage}-ggml LABEL "gpu")
+            set_property(TEST test-lavasr-${_lavasr_stage}-hexagon APPEND PROPERTY
+                ENVIRONMENT "TTS_CPP_GPU_BACKEND=hexagon")
+        endforeach()
+    endif()
     # Same binary with the real GGUF: adds the production-weights e2e + batch parity
     # where the model fixture is present.
     tts_cpp_register_test(test-lavasr-denoiser-ggml-e2e
