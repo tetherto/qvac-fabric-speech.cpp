@@ -15,6 +15,7 @@ COVERAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COVERAGE)
 
 MINIMUM_FIXTURE_TOOL_VERSION = (3, 21)
+FIXTURE_CONFIGURATION = "Release"
 
 
 def require_fixture_tools():
@@ -97,6 +98,8 @@ class FixtureCoverageTest(unittest.TestCase):
 
 
 class FixtureRunnerIntegrationTest(unittest.TestCase):
+    generator = None
+
     @classmethod
     def setUpClass(cls):
         require_fixture_tools()
@@ -113,12 +116,13 @@ class FixtureRunnerIntegrationTest(unittest.TestCase):
             'set_tests_properties(encoder.check unavailable PROPERTIES LABELS fixture SKIP_RETURN_CODE 3)\n',
             encoding="utf-8",
         )
-        subprocess.run(["cmake", "-S", str(source), "-B", str(cls.build)],
+        generator_options = ["-G", cls.generator] if cls.generator else []
+        subprocess.run(["cmake", "-S", str(source), "-B", str(cls.build), *generator_options],
                        capture_output=True, text=True, check=True)
 
     def run_fixture(self, required):
         arguments = types.SimpleNamespace(test_dir=self.build, label="fixture", require=required,
-                                         configuration=None, timeout=10)
+                                         configuration=FIXTURE_CONFIGURATION, timeout=10)
         COVERAGE.run_tests(arguments)
 
     def test_reads_real_ctest_results(self):
@@ -128,6 +132,11 @@ class FixtureRunnerIntegrationTest(unittest.TestCase):
     def test_rejects_real_runtime_skip(self):
         with self.assertRaisesRegex(ValueError, "did not execute successfully"):
             self.run_fixture(["unavailable"])
+
+
+@unittest.skipUnless(shutil.which("ninja"), "requires Ninja for multi-configuration coverage")
+class FixtureRunnerMultiConfigIntegrationTest(FixtureRunnerIntegrationTest):
+    generator = "Ninja Multi-Config"
 
 
 class FixtureToolVersionTest(unittest.TestCase):
