@@ -49,6 +49,93 @@ truncated, unmarked, cross-architecture, or tensorless file. The denoiser and
 enhancer GGUFs differ only by `general.architecture`, so each loader has to
 refuse the other's file.
 
+### Native CPU, OpenCL and Hexagon checks
+
+`lavasr-bench` selects the neural backend explicitly and can run either stage
+independently. `--stage pipeline` runs denoising before enhancement. An explicit
+backend request fails if the selected device is unavailable; it cannot report a
+CPU fallback as an HTP/OpenCL result.
+
+```bash
+./build/lavasr-bench --stage denoiser --backend cpu \
+    --denoiser models/lavasr-denoiser-f32.gguf --in noisy.wav \
+    --verify --runs 3 --warmup 1 --json-out denoiser-cpu.json \
+    --out-denoised denoised.wav
+
+./build/lavasr-bench --stage enhancer --backend opencl \
+    --enhancer models/lavasr-enhancer-f32.gguf --in noisy.wav \
+    --verify --runs 3 --warmup 1 --json-out enhancer-opencl.json \
+    --out-enhanced enhanced.wav
+
+GGML_HEXAGON_NDEV=1 GGML_HEXAGON_HOSTBUF=0 ./build/lavasr-bench \
+    --stage pipeline --backend hexagon \
+    --denoiser models/lavasr-denoiser-f32.gguf \
+    --enhancer models/lavasr-enhancer-f32.gguf --in noisy.wav \
+    --verify --runs 3 --warmup 1 --json-out pipeline-hexagon.json \
+    --out-denoised htp-denoised.wav --out-enhanced htp-enhanced.wav
+```
+
+The Hexagon build must include the matching DSP skel and native backend
+libraries in its deployment. `--backend hexagon` pins `HTP0`. Legacy
+`--dn-gpu-layers`/`--n-gpu-layers` flags and `TTS_CPP_GPU_BACKEND` selection
+remain available with `--backend auto`. The existing automatic GPU preference
+is preserved; Hexagon is an explicit engine capability.
+
+The F32 Hexagon kernels are validated with `qvac-ext-ggml` revision
+`5eb6cb714bc84476f115ef491a534fc8b9104c8c`. Build the selected revision with
+Hexagon enabled, use its installed CMake package through `CMAKE_PREFIX_PATH`,
+and deploy the DSP skel from the same build. The original baseline revision
+`380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e` uses the fallback graphs described
+below. The older bundled pin in `scripts/setup-ggml.sh` is not the dependency
+used for these Hexagon checks. Record the resolved shared GGML revision.
+
+Both F32 and F16 GGUF inputs are supported. On native ggml routes, the loaders expand F16
+weights to F32, and the neural graphs retain F32 tensors and F32-precision
+matrix multiplication. On Hexagon those products use HVX rather than F16 HMX.
+An F16 filename does not indicate F16 execution. Hexagon's denoiser graph queries
+each actual F32 convolution, GRU and affine/PReLU candidate independently.
+Supported ordinary 1x1/3x3 convolutions use direct `CONV_2D`, avoiding the
+im2col buffer and final layout copy; supported GRU nodes run the recurrent sweep
+as one op, and supported affine/PReLU nodes use `AFFINE_PRELU`. Unsupported
+candidates retain the F32 im2col/matmul, unrolled recurrence or seven-op
+affine/PReLU graph respectively. The original baseline revision above follows these
+fallback routes. Precision and correctness thresholds are unchanged.
+
+The portable Hexagon graph retains sum/scale means and a channel shuffle that
+copies complete spatial planes. Its DPGRNN output copy folds frequency and time
+into one spatial dimension for a batched transpose, then reshapes back to the
+canonical `[F,T,C,Bc]` layout without changing values or batch order. These Hexagon graph
+choices preserve the CPU/OpenCL graph paths. The enhancer uses direct depthwise
+convolution. Each graph is checked against the selected backend before
+execution. Resampling, STFT/mel features, denoiser log features, overlap-add,
+ISTFT and the FastLR merge remain host audio DSP.
+
+Constructor time, the first processing call, additional warmups and measured
+calls are recorded separately. With `--runs 1 --warmup 0 --min-seconds 0`
+(the desktop time-wrapped runner's mode), the first call is also the single
+measured sample: only one inference executes, with JSON `first_call_measured`
+set to `true`. Other modes retain a separate first call excluded from the
+measured samples. Each measured call reports denoiser, enhancer and combined
+seconds. RTF is processing seconds divided by input audio seconds; lower is
+faster. Native processing includes the host audio DSP and graph
+construction/allocation. WAV I/O, reference verification, constructor time
+and warmups are excluded from processing measurements. Output WAVs use float32
+PCM, preserving the measured samples without int16 clipping or quantization.
+
+`--verify` compares denoising against the scalar reference and enhancement
+against ggml CPU on the exact same input. The combined mode also compares the
+full output to an independently CPU-processed pipeline. Length mismatches,
+non-finite output and numerical failures return a nonzero status. JSON includes
+actual backend names, graph/precision policy, rates/sample counts, every timing
+sample and numerical metrics. Passing the command is correctness evidence;
+actual DSP execution still needs a returned Hexagon profile or trace.
+
+For a sustained run, `--min-seconds 300 --runs 1` continues measuring in the
+same warmed process until the sum of native processing times reaches at least
+five minutes. The final call may cross the target. The JSON records every call
+and the actual measured duration. Collect battery/thermal state separately and
+match starting conditions before comparing accelerator throughput changes.
+
 ### Core ML
 
 Build with `-DTTS_CPP_COREML=ON` on Apple to enable either or both neural cores.
@@ -128,6 +215,16 @@ stage cannot also select `use_gpu` or a nonzero `n_gpu_layers`; use the Core ML
 compute policy instead. Other stages can independently keep their original
 backend.
 
+The benchmark accepts these Core ML flags with `--backend auto`. An explicit
+`--backend cpu`, `opencl` or `hexagon` request rejects Core ML options instead
+of changing the requested device. Default options do not discover adjacent
+sidecars. CPU reference legs always use empty Core ML options and assert their
+actual scalar/CPU backend identities. JSON records per-stage backend and
+precision: native paths report F32; Core ML paths report precision defined by
+the compiled model, and combined native/Core ML runs report mixed precision.
+Requested Core ML compute units describe eligible placement, not a hardware
+execution trace.
+
 ```bash
 ./build/lavasr-bench \
     --denoiser models/lavasr-denoiser-f32.gguf \
@@ -138,8 +235,9 @@ backend.
     --out-denoised denoised.wav --out-enhanced enhanced-48k.wav
 ```
 
-Load time is reported separately from processing time. `--verify` prints
-per-stage comparisons to scalar/ggml CPU; it is diagnostic, not a quality gate.
+Load time is reported separately from processing time. `--verify` compares
+each stage to scalar/ggml CPU and enforces the same length, finite-value and
+numerical gates as the native backends; a failed comparison returns nonzero.
 `test-lavasr-coreml-parity` enforces FP32 waveform parity and output lengths for
 empty, short and multi-window inputs, repeated calls, and incompatible models:
 

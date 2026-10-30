@@ -67,7 +67,7 @@ const char * dev_reg_name(ggml_backend_dev_t dev) {
 }
 
 // Names a single registry that selection must use, from
-// TTS_CPP_GPU_BACKEND ("cuda", "vulkan", "metal", "opencl", "webgpu"); empty when
+// TTS_CPP_GPU_BACKEND ("cuda", "vulkan", "metal", "opencl", "webgpu", "hexagon"); empty when
 // unset. Selection otherwise picks on its own preference order, so a
 // per-backend test arm cannot ask for the backend it is meant to cover on a
 // host where several are compiled in. Not a production knob: an engine names
@@ -89,6 +89,7 @@ bool reg_name_is_forced(const char * reg_name, const std::string & forced) {
     if (forced == "metal")  return reg_name_is_metal(reg_name);
     if (forced == "opencl") return reg_name_is_opencl(reg_name);
     if (forced == "webgpu") return reg_name_is_webgpu(reg_name);
+    if (forced == "hexagon") return reg_name_is_hexagon(reg_name);
     // Unreachable: validate_forced_gpu_backend rejects anything else, so a
     // misspelt name cannot quietly match nothing and leave a GPU arm passing
     // on the CPU.
@@ -97,12 +98,12 @@ bool reg_name_is_forced(const char * reg_name, const std::string & forced) {
 
 void validate_forced_gpu_backend(const std::string & forced) {
     if (forced.empty() || forced == "cuda" || forced == "vulkan" ||
-        forced == "metal" || forced == "opencl" || forced == "webgpu") {
+        forced == "metal" || forced == "opencl" || forced == "webgpu" || forced == "hexagon") {
         return;
     }
     throw std::runtime_error(
         "TTS_CPP_GPU_BACKEND='" + forced +
-        "' is not one of cuda, vulkan, metal, opencl, webgpu");
+        "' is not one of cuda, vulkan, metal, opencl, webgpu, hexagon");
 }
 
 // Vulkan multi-adapter pick. Pure logic on the two
@@ -312,7 +313,8 @@ bool gpu_backend_satisfies_requirement(const char * backend_name,
            (allows(GpuBackendRequirement::Metal)  && reg_name_is_metal(backend_name))  ||
            (allows(GpuBackendRequirement::OpenCL) && reg_name_is_opencl(backend_name)) ||
            (allows(GpuBackendRequirement::CUDA)   && reg_name_is_cuda(backend_name))   ||
-           (allows(GpuBackendRequirement::WebGPU) && reg_name_is_webgpu(backend_name));
+           (allows(GpuBackendRequirement::WebGPU) && reg_name_is_webgpu(backend_name)) ||
+           (allows(GpuBackendRequirement::Hexagon) && reg_name_is_hexagon(backend_name));
 }
 
 void set_backends_directory(const std::string & dir) {
@@ -573,6 +575,7 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
     std::vector<Cand> cuda_gpu;     // CUDA, preferred over Vulkan on the same NVIDIA card
     std::vector<Cand> other_gpu;    // Vulkan / Metal / Mali / Intel / ...
     std::vector<Cand> opencl_other; // Non-Adreno OpenCL (e.g. desktop)
+    std::vector<Cand> hexagon;      // Engine-opt-in DSP; GPU preference is unchanged.
     int max_adreno_version = -1;
 
     // track every visible Vulkan adapter so we can apply
@@ -595,13 +598,19 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (!dev) continue;
         const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+        const char * reg_name = dev_reg_name(dev);
+        // Any historically means any GPU. An accelerator must be explicitly
+        // named by the engine, so adding HTP does not change other engines.
+        const bool is_hexagon = reg_name_is_hexagon(reg_name);
+        const bool allows_hexagon = requirement != GpuBackendRequirement::Any &&
+            gpu_backend_satisfies_requirement(reg_name, requirement) && is_hexagon;
         if (type != GGML_BACKEND_DEVICE_TYPE_GPU &&
-            type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            type != GGML_BACKEND_DEVICE_TYPE_IGPU &&
+            !(type == GGML_BACKEND_DEVICE_TYPE_ACCEL && is_hexagon && allows_hexagon)) {
             continue;
         }
         const char * name     = ggml_backend_dev_name(dev);
         const char * desc     = ggml_backend_dev_description(dev);
-        const char * reg_name = dev_reg_name(dev);
         const bool   is_opencl = reg_name && std::strcmp(reg_name, "OpenCL") == 0;
         const bool   is_vulkan =
             reg_name && std::strcmp(reg_name, VULKAN_BACKEND_NAME) == 0;
@@ -621,6 +630,13 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
             // Vulkan skipped, then OpenCL fails to init) as intentional.
             requirement_skipped_gpu = true;
             continue;
+        }
+
+        if (is_hexagon) {
+            if (allows_hexagon && name && std::strcmp(name, HEXAGON_PRIMARY_DEVICE) == 0) {
+                hexagon.push_back({dev, name, desc, reg_name});
+            }
+            continue; // DSP selection does not use the Android GPU-vendor policy.
         }
 
         // ARM Mali / Immortalis is engine opt-in on EVERY platform, not just
@@ -839,6 +855,7 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
         if (ggml_backend_t b = try_init(other_gpu)) return b;
     }
     if (ggml_backend_t b = try_init(opencl_other)) return b;
+    if (ggml_backend_t b = try_init(hexagon)) return b;
 
     if (verbose) {
         if (max_adreno_version >= 600 && max_adreno_version < 700) {
@@ -857,7 +874,7 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers,
     // non-empty buckets means a matching device was tried and failed to init,
     // which must not be reported as intentional.
     if (requirement_skipped_gpu && opencl_adreno_700plus.empty() &&
-        cuda_gpu.empty() && other_gpu.empty() && opencl_other.empty()) {
+        cuda_gpu.empty() && other_gpu.empty() && opencl_other.empty() && hexagon.empty()) {
         gpu_present_but_unvalidated = true;
     }
     // A named override that reached no usable device would otherwise hand back
