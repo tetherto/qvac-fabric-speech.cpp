@@ -249,7 +249,8 @@ inline ggml_tensor * pocket_mm(ggml_context * c, ggml_tensor * w, ggml_tensor * 
 }
 
 inline ggml_tensor * pocket_mean(ggml_context * c, ggml_tensor * x, ggml_backend_t backend) {
-    // HTP implements SUM_ROWS but not MEAN. Preserve F32 reduction arithmetic.
+    // Use SUM_ROWS/SCALE for compatibility with older HTP runtimes.
+    // Preserve F32 reduction arithmetic.
     return ::tts_cpp::detail::backend_is_hexagon(backend) ?
         ggml_scale(c, ggml_sum_rows(c, x), 1.0f / float(x->ne[0])) : ggml_mean(c, x);
 }
