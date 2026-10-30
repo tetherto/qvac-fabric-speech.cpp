@@ -333,13 +333,13 @@ runs. OpenCL generates different codes and lengths, so these measurements
 do not establish cross-backend correctness or equal generated workloads.
 This is one prompt, not a five-prompt validation or an audio-quality gate.
 
-Current codec convolution matmuls request F32 precision and run on HVX. In a
+That historical runtime requested F32 codec convolution matmuls on HVX. In its
 separate corrected S3 profile, three large codec matmul groups account for
 about 82% of leaf DSP cycles. `OPBATCH` includes operation execution; its time
 cannot be treated as pure dispatch overhead or added to leaf operation times.
-Further routing, precision, or weight-placement changes need separate
-correctness and performance validation. Reproduction and artifact provenance
-are recorded in ggml's `docs/hexagon-audio8-profile.md`.
+These measurements precede the eligible F16/HMX codec synthesis default
+described below. Reproduction and artifact provenance are recorded in ggml's
+`docs/hexagon-audio8-profile.md`.
 
 The subsequent validated DDR-panel comparison reduced S1 inference from
 20.346 s to 14.603 s median (1.393x), with identical 66-frame codes and passing
