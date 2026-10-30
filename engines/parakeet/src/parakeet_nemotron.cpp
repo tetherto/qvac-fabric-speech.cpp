@@ -1170,7 +1170,7 @@ int run_nemotron_stream_step(
         result.new_token_ids.end());
     append_token_pieces(
         model.vocab, result.new_token_ids, state.impl->piece_text);
-    result.text = strip_leading_spaces(state.impl->piece_text);
+    result.text = pieces_to_text(model.vocab, state.impl->piece_text);
 
     state.cache_length = std::min(
         graph.channel_frames,

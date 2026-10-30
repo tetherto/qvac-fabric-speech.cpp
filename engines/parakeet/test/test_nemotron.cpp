@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -244,6 +245,22 @@ int check_stage_parity(
     return 0;
 }
 
+std::string remove_locale_tags(const std::string & text) {
+    static const std::regex locale_tag(R"(<[A-Za-z]{2,3}-[A-Za-z0-9]{2,4}>)");
+    static const std::regex space_run(R"( {2,})");
+    const std::string without_tags = std::regex_replace(
+        std::regex_replace(text, locale_tag, ""), space_run, " ");
+    const size_t first = without_tags.find_first_not_of(' ');
+    const size_t last = without_tags.find_last_not_of(' ');
+    return first == std::string::npos
+        ? std::string()
+        : without_tags.substr(first, last - first + 1);
+}
+
+std::string load_tag_free_transcript(const std::string & reference_dir) {
+    return remove_locale_tags(load_text(reference_dir + "/transcript.txt"));
+}
+
 int check_transcript(
     const std::string & model_path,
     const std::string & wav_path,
@@ -273,7 +290,7 @@ int check_transcript(
     }
 
     const std::string expected_text =
-        load_text(reference_dir + "/transcript.txt");
+        load_tag_free_transcript(reference_dir);
     if (result.text != expected_text) {
         std::fprintf(
             stderr,
@@ -298,7 +315,7 @@ int check_public_streaming(
     streaming_options.chunk_ms = 320;
 
     const std::string expected_text =
-        load_text(reference_dir + "/transcript.txt");
+        load_tag_free_transcript(reference_dir);
 
     int callback_index = 0;
     bool callback_order_ok = true;
