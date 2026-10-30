@@ -25,8 +25,19 @@ import tarfile
 from pathlib import Path
 
 import numpy as np
-import torch
 import gguf
+
+
+# Keep the existing full-ULP F16/block-quantization bounds. BF16 uses
+# round-to-nearest-even in gguf.quants, with seven explicit mantissa bits;
+# use the same full-ULP convention as F16 instead of leaving it ungated.
+REL_GATES = {
+    gguf.GGMLQuantizationType.F16:  2 ** -10,
+    gguf.GGMLQuantizationType.BF16: 2 ** -7,
+    gguf.GGMLQuantizationType.Q8_0: 2 ** -7,
+    gguf.GGMLQuantizationType.Q5_0: 2 ** -4,
+    gguf.GGMLQuantizationType.Q4_0: 2 ** -3,
+}
 
 
 def fuse_bn(weight, bias, running_mean, running_var, eps=1e-5):
@@ -36,6 +47,8 @@ def fuse_bn(weight, bias, running_mean, running_var, eps=1e-5):
 
 
 def load_sd(nemo_path: Path):
+    import torch
+
     with tarfile.open(nemo_path, 'r') as t:
         for cand in ('./model_weights.ckpt', 'model_weights.ckpt'):
             try:
@@ -227,6 +240,40 @@ def ggml_to_numpy(t):
     raise RuntimeError(f"unexpected tensor type {t.tensor_type}")
 
 
+def compare_tensor(t, expected):
+    """Check one real tensor without accepting nonfinite or ungated errors."""
+    if t.tensor_type != gguf.GGMLQuantizationType.F32 and t.tensor_type not in REL_GATES:
+        return {'pass': False, 'error': f"unexpected tensor type {t.tensor_type}"}
+    try:
+        got = ggml_to_numpy(t)
+    except (RuntimeError, ValueError, TypeError) as error:
+        return {'pass': False, 'error': f"cannot decode tensor: {error}"}
+    exp = np.asarray(expected, dtype=np.float32)
+    if got.shape != exp.shape:
+        squeezed_got, squeezed_exp = np.squeeze(got), np.squeeze(exp)
+        if squeezed_got.shape != squeezed_exp.shape:
+            return {'pass': False, 'error': f"SHAPE got {got.shape} expected {exp.shape}"}
+        got, exp = squeezed_got, squeezed_exp
+    if not got.size or not exp.size:
+        return {'pass': False, 'error': 'empty tensor'}
+    if not np.isfinite(got).all() or not np.isfinite(exp).all():
+        return {'pass': False, 'error': 'nonfinite tensor or reference'}
+    # F64 arithmetic prevents finite F32 extrema from overflowing subtraction
+    # or reduction before the unchanged relative-error gate is evaluated.
+    got64, exp64 = got.astype(np.float64), exp.astype(np.float64)
+    max_abs = float(np.abs(got64 - exp64).max())
+    denom = float(np.abs(exp64).max())
+    rel = max_abs / denom if denom > 0 else max_abs
+    if t.tensor_type == gguf.GGMLQuantizationType.F32:
+        passed = max_abs == 0.0
+        error = None if passed else f"F32 NOT bit-exact: max_abs={max_abs:.3e}"
+    else:
+        gate = REL_GATES[t.tensor_type]
+        passed = rel <= gate
+        error = None if passed else f"{t.tensor_type.name} OUT OF GATE: rel={rel:.3e} > {gate:.3e}"
+    return {'pass': passed, 'error': error, 'relative_error': rel}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", type=Path, default=Path("models/parakeet-ctc-0.6b.gguf"))
@@ -281,13 +328,6 @@ def main():
     if extra:
         print(f"[verify] UNEXPECTED extras in GGUF (ignoring): {sorted(extra)[:5]}")
 
-    rel_gate = {
-        gguf.GGMLQuantizationType.F16:  2 ** -10,
-        gguf.GGMLQuantizationType.Q8_0: 2 ** -7,
-        gguf.GGMLQuantizationType.Q5_0: 2 ** -4,
-        gguf.GGMLQuantizationType.Q4_0: 2 ** -3,
-    }
-
     f32_fail = 0
     f32_count = 0
     quant_count = 0
@@ -296,37 +336,19 @@ def main():
     worst_name = ""
     for name, exp in expected.items():
         t = gg[name]
-        got = ggml_to_numpy(t)
-        if got.shape != exp.shape:
-            squeezed_got = np.squeeze(got)
-            squeezed_exp = np.squeeze(exp)
-            if squeezed_got.shape == squeezed_exp.shape:
-                got = squeezed_got
-                exp_cmp = squeezed_exp
-            else:
-                print(f"[verify] SHAPE {name}: got {got.shape} expected {exp.shape}")
-                f32_fail += 1
-                continue
-        else:
-            exp_cmp = exp
-        diff = got.astype(np.float32) - exp_cmp.astype(np.float32)
-        max_abs = float(np.abs(diff).max()) if diff.size else 0.0
-        denom = float(np.abs(exp_cmp).max()) if exp_cmp.size else 0.0
-        rel = max_abs / denom if denom > 0 else max_abs
+        result = compare_tensor(t, exp)
         if t.tensor_type == gguf.GGMLQuantizationType.F32:
             f32_count += 1
-            if max_abs != 0.0:
-                f32_fail += 1
-                print(f"[verify] F32 NOT bit-exact: {name}  max_abs={max_abs:.3e}")
+            f32_fail += not result['pass']
         else:
             quant_count += 1
-            gate = rel_gate.get(t.tensor_type)
-            if gate is not None and rel > gate:
-                quant_fail += 1
-                print(f"[verify] {t.tensor_type.name} OUT OF GATE: {name}  rel={rel:.3e} > {gate:.3e}")
+            quant_fail += not result['pass']
+            rel = result.get('relative_error', 0.0)
             if rel > worst_rel:
                 worst_rel = rel
                 worst_name = name
+        if not result['pass']:
+            print(f"[verify] {name}: {result['error']}")
 
     print(f"[verify] f32 tensors: {f32_count} bit-exact: {f32_count - f32_fail}/{f32_count}",
           file=sys.stderr)

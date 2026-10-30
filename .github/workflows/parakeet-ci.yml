@@ -98,6 +98,17 @@ jobs:
       - name: Test converter arguments
         run: python3 -m unittest engines/parakeet/test/test_converter_args.py
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test GGUF round-trip verification
+        run: |
+          qvac_roundtrip_venv="$RUNNER_TEMP/parakeet-gguf-roundtrip"
+          python -m venv "$qvac_roundtrip_venv"
+          "$qvac_roundtrip_venv/bin/python" -m pip install 'numpy==1.26.4' 'gguf==0.19.0'
+          "$qvac_roundtrip_venv/bin/python" -B engines/parakeet/test/test_verify_gguf_roundtrip.py
+
       - name: Install ccache
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then brew install ccache; else sudo apt-get update -q && sudo apt-get install -y ccache; fi

@@ -18,7 +18,7 @@
 
 # GitHub-hosted (pinned images)
 ubuntu_2404: ubuntu-24.04 # Ubuntu 24.04 hosted x64
-macos_14: macos-14 # macOS 14 hosted (Apple silicon, Paravirtual GPU)
+macos_14: macos-15 # macOS 15 hosted (legacy macos_14 logical lane key)
 windows_2022: windows-2022 # Windows Server 2022 hosted x64
 
 # Self-hosted
