@@ -8,6 +8,7 @@
 #include "parakeet_ctc.h"
 #include "parakeet_sortformer.h"
 #include "mel_preprocess.h"
+#include "parity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,26 +52,14 @@ int load_npy_f32(const std::string & path,
     for (auto d : out_shape) n *= (size_t) d;
     out_data.resize(n);
     f.read((char*)out_data.data(), n * sizeof(float));
-    return 0;
+    return f ? 0 : 1;
 }
 
-void parity(const std::vector<float> & a, const std::vector<float> & b,
-            double & out_max_abs, double & out_rel) {
-    double max_abs = 0.0, ref_sq = 0.0, diff_sq = 0.0;
-    const size_t n = std::min(a.size(), b.size());
-    for (size_t i = 0; i < n; ++i) {
-        const double d = (double) a[i] - (double) b[i];
-        if (std::abs(d) > max_abs) max_abs = std::abs(d);
-        diff_sq += d * d;
-        ref_sq += (double) b[i] * b[i];
-    }
-    out_max_abs = max_abs;
-    out_rel = ref_sq > 0 ? std::sqrt(diff_sq / ref_sq) : std::sqrt(diff_sq);
-}
+using parakeet_test::compute_parity;
 
 }
 
-int main(int argc, char ** argv) {
+int sortformer_parity_main(int argc, char ** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
             "usage: %s <sortformer.gguf> <wav> <ref-dir> [--enc-rel-tol R] [--probs-abs-tol R]\n"
@@ -98,7 +87,7 @@ int main(int argc, char ** argv) {
     ParakeetCtcModel model;
     // Force CPU encoder: this harness gates operator parity vs NeMo's FP32
     // reference; backend-induced drift (CPU<->GPU) is gated separately by
-    // test-vk-vs-cpu and would otherwise mask real encoder regressions here.
+    // test-gpu-vs-cpu and would otherwise mask real encoder regressions here.
     if (int rc = load_from_gguf(gguf_path, model, 0, 0, false); rc != 0) return 3;
     if (model.model_type != ParakeetModelType::SORTFORMER) {
         std::fprintf(stderr, "  error: expected Sortformer model\n");
@@ -123,15 +112,24 @@ int main(int argc, char ** argv) {
     if (int rc = compute_log_mel(samples.data(), (int) samples.size(),
                                  model.mel_cfg, mel_cpp, n_mel_frames_cpp); rc != 0) return 5;
 
+    std::vector<float> mel_ref_tf;
+    int reference_frames = 0;
     {
         std::vector<float> mel_ref;
         std::vector<int64_t> shape;
         if (load_npy_f32(ref_dir + "/mel.npy", mel_ref, shape) != 0) {
-            std::fprintf(stderr, "[sf-parity] WARN: %s/mel.npy missing, skipping\n", ref_dir.c_str());
+            std::fprintf(stderr, "[sf-parity] missing or truncated %s/mel.npy\n", ref_dir.c_str());
+            return 1;
         } else {
+            if (shape.size() != 2 ||
+                !parakeet_test::matches_matrix(mel_ref, shape, model.mel_cfg.n_mels, shape[1])) {
+                std::fprintf(stderr, "[sf-parity] invalid mel reference shape\n");
+                return 1;
+            }
             const int n_mels = (int) shape[0];
             const int T_ref  = (int) shape[1];
-            std::vector<float> mel_ref_tf((size_t) T_ref * n_mels);
+            reference_frames = T_ref;
+            mel_ref_tf.resize((size_t) T_ref * n_mels);
             for (int t = 0; t < T_ref; ++t)
                 for (int m = 0; m < n_mels; ++m)
                     mel_ref_tf[(size_t) t * n_mels + m] = mel_ref[(size_t) m * T_ref + t];
@@ -139,14 +137,15 @@ int main(int argc, char ** argv) {
             std::vector<float> a(mel_cpp.begin(), mel_cpp.begin() + common);
             std::vector<float> b(mel_ref_tf.begin(), mel_ref_tf.begin() + common);
             double max_abs = 0, rel = 0;
-            parity(a, b, max_abs, rel);
-            std::fprintf(stderr, "[sf-parity] mel  : max_abs=%.4e rel=%.4e  (%s)\n",
-                         max_abs, rel, rel < 5e-3 ? "PASS" : "FAIL");
+            compute_parity(a, b, max_abs, rel);
+            std::fprintf(stderr, "[sf-parity] mel: max_abs=%.4e rel=%.4e (diagnostic; trailing-frame padding differs)\n",
+                         max_abs, rel);
         }
     }
 
     EncoderOutputs enc_out;
-    if (int rc = run_encoder(model, mel_cpp.data(), n_mel_frames_cpp, model.mel_cfg.n_mels, enc_out); rc != 0) return 6;
+    // Use the reference mel so trailing-frame preprocessing differences cannot hide encoder shape regressions.
+    if (int rc = run_encoder(model, mel_ref_tf.data(), reference_frames, model.mel_cfg.n_mels, enc_out); rc != 0) return 6;
     std::fprintf(stderr, "[sf-parity] encoder: cpp frames=%d d_model=%d\n",
                  enc_out.n_enc_frames, enc_out.d_model);
 
@@ -156,15 +155,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[sf-parity] missing %s/encoder_out.npy\n", ref_dir.c_str());
         return 7;
     }
-    const int T_ref = (int) shape[0];
-    const int D_ref = (int) shape[1];
-    std::fprintf(stderr, "[sf-parity] encoder ref: (%d, %d)\n", T_ref, D_ref);
-
-    const size_t common = (size_t) std::min(enc_out.n_enc_frames, T_ref) * enc_out.d_model;
-    std::vector<float> a(enc_out.encoder_out.begin(), enc_out.encoder_out.begin() + common);
-    std::vector<float> b(enc_ref.begin(), enc_ref.begin() + common);
+    if (!parakeet_test::matches_matrix(enc_ref, shape, enc_out.n_enc_frames, enc_out.d_model)) {
+        std::fprintf(stderr, "[sf-parity] encoder reference shape mismatch\n");
+        return 1;
+    }
     double max_abs_enc = 0, rel_enc = 0;
-    parity(a, b, max_abs_enc, rel_enc);
+    compute_parity(enc_out.encoder_out, enc_ref, max_abs_enc, rel_enc);
     const bool enc_pass = rel_enc < enc_rel_tol;
     std::fprintf(stderr, "[sf-parity] enc  : max_abs=%.4e rel=%.4e  (%s, rel tol=%.1e)\n",
                  max_abs_enc, rel_enc, enc_pass ? "PASS" : "FAIL", enc_rel_tol);
@@ -181,12 +177,14 @@ int main(int argc, char ** argv) {
     {
         std::vector<float> probs_ref;
         std::vector<int64_t> sshape;
-        if (load_npy_f32(ref_dir + "/speaker_probs.npy", probs_ref, sshape) == 0) {
-            const size_t n = std::min(dres.speaker_probs.size(), probs_ref.size());
-            std::vector<float> aa(dres.speaker_probs.begin(), dres.speaker_probs.begin() + n);
-            std::vector<float> bb(probs_ref.begin(), probs_ref.begin() + n);
+        if (load_npy_f32(ref_dir + "/speaker_probs.npy", probs_ref, sshape) != 0 ||
+            !parakeet_test::matches_matrix(probs_ref, sshape, dres.n_frames, dres.num_spks)) {
+            std::fprintf(stderr, "[sf-parity] missing, truncated or mismatched speaker probability reference\n");
+            return 1;
+        }
+        {
             double max_abs = 0, rel = 0;
-            parity(aa, bb, max_abs, rel);
+            compute_parity(dres.speaker_probs, probs_ref, max_abs, rel);
             const bool ok = max_abs < probs_abs_tol;
             std::fprintf(stderr, "[sf-parity] probs: max_abs=%.4e rel=%.4e  (%s, max_abs tol=%.1e)\n",
                          max_abs, rel, ok ? "PASS" : "FAIL", probs_abs_tol);
@@ -217,3 +215,9 @@ int main(int argc, char ** argv) {
 
     return (enc_pass && worst == 0) ? 0 : 1;
 }
+
+#ifndef PARAKEET_PARITY_TEST
+int main(int argc, char ** argv) {
+    return sortformer_parity_main(argc, argv);
+}
+#endif

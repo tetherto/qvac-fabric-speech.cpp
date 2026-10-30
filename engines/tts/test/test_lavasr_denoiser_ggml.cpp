@@ -3,6 +3,7 @@
 
 #include "lavasr/denoiser_ggml.h"
 #include "backend_selection.h"
+#include "lavasr/backend_requirement.h"
 
 #include "lavasr/denoiser.h"      // internal: denoise_with_core / denoise_with_batch_core
 #include "lavasr/denoiser_gguf.h" // internal: load_denoiser_gguf
@@ -10,10 +11,12 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using namespace tts_cpp::lavasr;
@@ -86,7 +89,8 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
                                       bool reverse, bool bidir,
                                       const std::vector<float> & WihR, const std::vector<float> & WhhR,
                                       const std::vector<float> & BihR, const std::vector<float> & BhhR,
-                                      bool fused) {
+                                      bool fused, const detail::GruSupport & gru_support = {},
+                                      int * gru_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, I, B, L);
@@ -100,7 +104,7 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
     std::memcpy(tBih->data, Bih.data(), ggml_nbytes(tBih));
     std::memcpy(tBhh->data, Bhh.data(), ggml_nbytes(tBhh));
 
-    ggml_tensor * y = detail::gru_batched(ctx, tx, tWih, tWhh, tBih, tBhh, reverse, fused);
+    ggml_tensor * y = detail::gru_batched(ctx, tx, tWih, tWhh, tBih, tBhh, reverse, fused, gru_support);
     if (bidir) {
         ggml_tensor * tWihR = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, I, 3 * H);
         ggml_tensor * tWhhR = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, 3 * H);
@@ -110,12 +114,18 @@ static std::vector<float> run_batched(const std::vector<float> & x, int I, int B
         std::memcpy(tWhhR->data, WhhR.data(), ggml_nbytes(tWhhR));
         std::memcpy(tBihR->data, BihR.data(), ggml_nbytes(tBihR));
         std::memcpy(tBhhR->data, BhhR.data(), ggml_nbytes(tBhhR));
-        ggml_tensor * yr = detail::gru_batched(ctx, tx, tWihR, tWhhR, tBihR, tBhhR, true, fused);
+        ggml_tensor * yr = detail::gru_batched(ctx, tx, tWihR, tWhhR, tBihR, tBhhR, true, fused, gru_support);
         y                = ggml_concat(ctx, y, yr, 0); // [2H, B, L]
     }
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
-    ggml_graph_compute_with_ctx(ctx, gf, 1);
+    if (gru_nodes) {
+        *gru_nodes = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+            *gru_nodes += ggml_graph_node(gf, i)->op == GGML_OP_GRU;
+    }
+    CHECK(ggml_graph_compute_with_ctx(ctx, gf, 1) == GGML_STATUS_SUCCESS,
+          "GRU graph computes successfully");
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
     ggml_free(ctx);
@@ -189,6 +199,82 @@ static void test_gru_batched() {
     }
 }
 
+// HTP may support a real GRU shape independently of its other fused ops. Check
+// the queried descriptor, selected graph and scalar parity for both decisions.
+static void test_gru_support_selection() {
+    struct Shape { int I, H, B, L; };
+    const Shape shapes[] = { {3, 1, 2, 4}, {2, 2, 1, 5}, {5, 3, 3, 7}, {4, 17, 2, 5},
+                             {3, 65, 3, 3}, {3, 129, 2, 3} };
+    std::mt19937 rng(20261028);
+    int accepted = 0, rejected = 0;
+    for (const Shape & s : shapes) {
+        std::vector<float> x((size_t) s.I * s.B * s.L), Wih((size_t) 3 * s.H * s.I),
+                           Whh((size_t) 3 * s.H * s.H), Bih(3 * s.H), Bhh(3 * s.H);
+        rand_fill(x, rng); rand_fill(Wih, rng); rand_fill(Whh, rng);
+        rand_fill(Bih, rng); rand_fill(Bhh, rng);
+        for (bool reverse : {false, true}) {
+            std::vector<float> reference((size_t) s.H * s.B * s.L);
+            for (int b = 0; b < s.B; ++b) {
+                std::vector<float> sequence((size_t) s.I * s.L);
+                for (int t = 0; t < s.L; ++t)
+                    for (int i = 0; i < s.I; ++i)
+                        sequence[(size_t) t * s.I + i] = x[((size_t) t * s.B + b) * s.I + i];
+                const auto expected = reverse ? ref_gru_rev(sequence, s.L, s.I, s.H, Wih, Whh, Bih, Bhh)
+                                              : ref_gru_seq(sequence, s.L, s.I, s.H, Wih, Whh, Bih, Bhh);
+                for (int t = 0; t < s.L; ++t)
+                    for (int h = 0; h < s.H; ++h)
+                        reference[((size_t) t * s.B + b) * s.H + h] = expected[(size_t) t * s.H + h];
+            }
+            auto parity = [&](const std::vector<float> & output) {
+                CHECK(output.size() == reference.size(), "GRU support selection preserves output shape");
+                float error = 0.0f;
+                for (size_t i = 0; i < std::min(output.size(), reference.size()); ++i) {
+                    CHECK(std::isfinite(output[i]), "GRU support selection preserves finite output");
+                    error = std::max(error, std::fabs(output[i] - reference[i]));
+                }
+                CHECK(error < 1e-5f, "GRU support selection retains existing scalar tolerance");
+            };
+            for (bool allow_supported : {false, true}) {
+                int queries = 0, nodes = -1;
+                detail::GruSupport support = [&](const ggml_tensor * candidate) {
+                    ++queries;
+                    CHECK(candidate->op == GGML_OP_GRU, "capability query receives the actual GRU op");
+                    CHECK(candidate->type == GGML_TYPE_F32 && candidate->ne[0] == s.H &&
+                          candidate->ne[1] == s.B && candidate->ne[2] == s.L && candidate->ne[3] == 1,
+                          "capability query receives the actual output shape and dtype");
+                    const ggml_tensor * whh = candidate->src[0], *gi = candidate->src[1], *bhh = candidate->src[2];
+                    CHECK(whh->type == GGML_TYPE_F32 && whh->ne[0] == s.H && whh->ne[1] == 3 * s.H &&
+                          gi->type == GGML_TYPE_F32 && gi->ne[0] == 3 * s.H && gi->ne[1] == s.B && gi->ne[2] == s.L &&
+                          bhh->type == GGML_TYPE_F32 && bhh->ne[0] == 3 * s.H,
+                          "capability query uses real recurrent weights, input gates and bias");
+                    CHECK(ggml_is_contiguous(whh) && ggml_is_contiguous(gi) && ggml_is_contiguous(bhh),
+                          "capability query sees actual contiguous GRU inputs");
+                    int32_t direction = -1;
+                    std::memcpy(&direction, candidate->op_params, sizeof(direction));
+                    CHECK(direction == (reverse ? 1 : 0), "capability query preserves the real reverse direction");
+                    return allow_supported && whh->ne[0] <= 128;
+                };
+                parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                                   {}, {}, {}, {}, false, support, &nodes));
+                const bool use_gru = allow_supported && s.H <= 128;
+                CHECK(queries == 1, "each real GRU candidate is queried once");
+                CHECK(nodes == (use_gru ? 1 : 0), "rejected GRU candidates never enter the fallback graph");
+                use_gru ? ++accepted : ++rejected;
+            }
+            int legacy_queries = 0, legacy_nodes = -1, fallback_nodes = -1;
+            detail::GruSupport reject = [&](const ggml_tensor *) { ++legacy_queries; return false; };
+            parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                               {}, {}, {}, {}, true, reject, &legacy_nodes));
+            CHECK(legacy_queries == 0 && legacy_nodes == 1, "existing fused routes do not consult the HTP-only query");
+            parity(run_batched(x, s.I, s.B, s.L, s.H, Wih, Whh, Bih, Bhh, reverse, false,
+                               {}, {}, {}, {}, false, {}, &fallback_nodes));
+            CHECK(fallback_nodes == 0, "an absent capability query preserves the portable unrolled graph");
+        }
+    }
+    std::printf("GRU support selection: %d accepted / %d rejected actual shapes, scalar parity preserved\n",
+                accepted, rejected);
+}
+
 // Scalar conv2d — verbatim math of denoiser_core.cpp Runner::conv2d on flat
 // [C][T][F] buffers (which are byte-identical to ggml [F,T,C]).  W:[Cout,Cin/g,kt,kf].
 static std::vector<float> ref_conv2d(const std::vector<float> & x, int Cin, int T, int F,
@@ -228,7 +314,9 @@ static std::vector<float> ref_conv2d(const std::vector<float> & x, int Cin, int 
 
 static std::vector<float> run_conv2d(const std::vector<float> & x, int Cin, int T, int F,
                                      const std::vector<float> & W, int Cout, int Cing, int kt, int kf,
-                                     const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused) {
+                                     const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused,
+                                     bool portable = false, const detail::ConvSupport & conv_support = {},
+                                     int * direct_nodes = nullptr, int * column_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, Cin);
@@ -237,9 +325,16 @@ static std::vector<float> run_conv2d(const std::vector<float> & x, int Cin, int 
     std::memcpy(tx->data, x.data(), ggml_nbytes(tx));
     std::memcpy(tW->data, W.data(), ggml_nbytes(tW));
     std::memcpy(tb->data, bias.data(), ggml_nbytes(tb));
-    ggml_tensor * y  = detail::conv2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused);
+    ggml_tensor * y  = detail::conv2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused, portable, conv_support);
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
+    if (direct_nodes) *direct_nodes = 0;
+    if (column_nodes) *column_nodes = 0;
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        const ggml_op op = ggml_graph_node(gf, i)->op;
+        if (direct_nodes && op == GGML_OP_CONV_2D) ++*direct_nodes;
+        if (column_nodes && op == GGML_OP_IM2COL) ++*column_nodes;
+    }
     ggml_graph_compute_with_ctx(ctx, gf, 1);
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
@@ -269,6 +364,86 @@ static void test_conv2d() {
             CHECK(m < 1e-4f, fmsg(c.name, fused));
         }
     }
+}
+
+// Capability checks must use the real per-group tensors and must not insert a
+// rejected direct op into the portable graph. All routes retain the scalar gate.
+static void test_conv_support_selection() {
+    struct Shape { int Cin, Cout, kt, kf, stride, pad, groups; };
+    const Shape shapes[] = {
+        {3, 5, 1, 1, 1, 0, 1}, {6, 10, 1, 1, 1, 0, 2},
+        {2, 4, 3, 3, 2, 1, 1}, {6, 8, 3, 3, 1, 1, 2},
+        {6, 8, 3, 5, 1, 2, 2}, // unsupported geometry preserves columns
+    };
+    const int F = 9, T = 6;
+    std::mt19937 rng(20261029);
+    int selected = 0, rejected = 0;
+    for (const Shape & s : shapes) {
+        const int cing = s.Cin / s.groups, cog = s.Cout / s.groups;
+        std::vector<float> x((size_t) s.Cin * T * F), w((size_t) s.Cout * cing * s.kt * s.kf), bias(s.Cout);
+        rand_fill(x, rng); rand_fill(w, rng); rand_fill(bias, rng);
+        const auto reference = ref_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf,
+                                           &bias, s.stride, s.pad, s.groups);
+        auto parity = [&](const std::vector<float> & got) {
+            CHECK(got.size() == reference.size(), "convolution selection preserves causal output shape");
+            float error = 0.0f;
+            for (size_t i = 0; i < std::min(got.size(), reference.size()); ++i) {
+                CHECK(std::isfinite(got[i]), "convolution selection output is finite");
+                error = std::max(error, std::fabs(got[i] - reference[i]));
+            }
+            CHECK(error < 1e-4f, "convolution selection retains existing scalar tolerance");
+        };
+        for (bool allow : {false, true}) {
+            int queries = 0, direct = -1, columns = -1;
+            detail::ConvSupport support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_CONV_2D, "convolution query receives actual direct op");
+                const ggml_tensor * kernel = candidate->src[0], *input = candidate->src[1];
+                CHECK(kernel->type == GGML_TYPE_F32 && input->type == GGML_TYPE_F32 &&
+                      candidate->type == GGML_TYPE_F32, "convolution query preserves F32 arithmetic");
+                CHECK(kernel->ne[0] == s.kf && kernel->ne[1] == s.kt && kernel->ne[2] == cing &&
+                      kernel->ne[3] == cog && input->ne[0] == F && input->ne[1] == T &&
+                      input->ne[2] == cing, "convolution query sees real per-group tensors");
+                CHECK(ggml_is_contiguous(kernel) && ggml_is_contiguous(input),
+                      "grouped convolution query sees contiguous per-group inputs");
+                CHECK(candidate->ne[0] == (F + 2 * s.pad - s.kf) / s.stride + 1 &&
+                      candidate->ne[1] == T + s.kt - 1 && candidate->ne[2] == cog && candidate->ne[3] == 1,
+                      "convolution query sees full output before causal crop");
+                int32_t params[6];
+                std::memcpy(params, candidate->op_params, sizeof(params));
+                CHECK(params[0] == s.stride && params[1] == 1 && params[2] == s.pad &&
+                      params[3] == s.kt - 1 && params[4] == 1 && params[5] == 1,
+                      "convolution query preserves stride, padding and dilation");
+                return allow && s.kt == s.kf && (s.kf == 1 || s.kf == 3);
+            };
+            parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                              s.stride, s.pad, s.groups, false, true, support, &direct, &columns));
+            const bool use_direct = allow && s.kt == s.kf && (s.kf == 1 || s.kf == 3);
+            CHECK(queries == s.groups, "each actual per-group convolution queried once");
+            CHECK(direct == (use_direct ? s.groups : 0) && columns == (use_direct ? 0 : s.groups),
+                  "only accepted direct convolutions enter the graph");
+            use_direct ? ++selected : ++rejected;
+        }
+        int queries = 0, direct = -1, columns = -1;
+        detail::ConvSupport reject = [&](const ggml_tensor *) { ++queries; return false; };
+        parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                          s.stride, s.pad, s.groups, false, false, reject, &direct, &columns));
+        CHECK(queries == 0 && direct == s.groups && columns == 0,
+              "existing nonportable convolution route ignores HTP support query");
+        parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                          s.stride, s.pad, s.groups, false, true, {}, &direct, &columns));
+        CHECK(direct == 0 && columns == s.groups, "absent convolution capability preserves old-runtime graph");
+        if (s.groups == 2 && s.kf <= 3) {
+            queries = 0;
+            detail::ConvSupport mixed = [&](const ggml_tensor *) { return ++queries == 1; };
+            parity(run_conv2d(x, s.Cin, T, F, w, s.Cout, cing, s.kt, s.kf, bias,
+                              s.stride, s.pad, s.groups, false, true, mixed, &direct, &columns));
+            CHECK(queries == 2 && direct == 1 && columns == 1,
+                  "per-group capability decisions can mix direct and portable convolutions");
+        }
+    }
+    std::printf("Convolution support selection: %d accepted / %d rejected shapes; scalar parity preserved\n",
+                selected, rejected);
 }
 
 // Scalar transposed conv — verbatim math of denoiser_core.cpp Runner::conv_transpose2d.
@@ -332,7 +507,9 @@ static std::vector<float> reindex_ct(const std::vector<float> & Wt, int Cin, int
 
 static std::vector<float> run_conv_transpose2d(const std::vector<float> & x, int Cin, int T, int F,
                                                const std::vector<float> & Wc, int Cout, int ing, int kt, int kf,
-                                               const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused) {
+                                               const std::vector<float> & bias, int stride_f, int pad_f, int groups, bool fused,
+                                               bool portable = false, const detail::ConvSupport & conv_support = {},
+                                               int * direct_nodes = nullptr) {
     ggml_init_params p{ (size_t) 128 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, Cin);
@@ -341,9 +518,14 @@ static std::vector<float> run_conv_transpose2d(const std::vector<float> & x, int
     std::memcpy(tx->data, x.data(), ggml_nbytes(tx));
     std::memcpy(tW->data, Wc.data(), ggml_nbytes(tW));
     std::memcpy(tb->data, bias.data(), ggml_nbytes(tb));
-    ggml_tensor * y  = detail::conv_transpose2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused);
+    ggml_tensor * y  = detail::conv_transpose2d(ctx, tx, tW, tb, stride_f, pad_f, groups, fused, portable, conv_support);
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, y);
+    if (direct_nodes) {
+        *direct_nodes = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+            if (ggml_graph_node(gf, i)->op == GGML_OP_CONV_2D) ++*direct_nodes;
+    }
     ggml_graph_compute_with_ctx(ctx, gf, 1);
     std::vector<float> out((size_t) ggml_nelements(y));
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
@@ -372,6 +554,27 @@ static void test_conv_transpose2d() {
             CHECK(got.size() == ref.size(), fmsg(c.name, fused));
             for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
             CHECK(m < 1e-4f, fmsg(c.name, fused));
+        }
+        for (bool allow : {false, true}) {
+            int queries = 0, direct_nodes = -1;
+            detail::ConvSupport support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_CONV_2D && candidate->src[1]->ne[0] == (F - 1) * c.stride + 1,
+                      "transposed convolution queries the zero-inserted regular convolution");
+                return allow;
+            };
+            const auto got = run_conv_transpose2d(x, c.Cin, T, F, Wc, Cout, ing, c.kt, c.kf, b,
+                                                   c.stride, c.pad, c.groups, false, true, support, &direct_nodes);
+            CHECK(got.size() == ref.size(), "portable transposed convolution preserves output shape");
+            float error = 0.0f;
+            for (size_t i = 0; i < std::min(got.size(), ref.size()); ++i) {
+                CHECK(std::isfinite(got[i]), "portable transposed convolution output is finite");
+                error = std::max(error, std::fabs(got[i] - ref[i]));
+            }
+            CHECK(error < 1e-4f, "portable transposed convolution retains existing tolerance");
+            const bool depthwise = ing == 1 && c.groups == Cout;
+            CHECK(queries == (depthwise ? 0 : c.groups) && direct_nodes == (depthwise || !allow ? 0 : c.groups),
+                  "transposed convolution preserves depthwise route and direct-op fallback");
         }
     }
 }
@@ -413,6 +616,72 @@ static void test_affine_prelu() {
     }
 }
 
+// A real capability query selects only the requested affine candidate. Older
+// runtimes reject it and retain the existing seven-op F32 graph.
+static void test_affine_support_selection() {
+    for (int mode : {0, 1, 2, 3}) { // absent, rejected, accepted, non-contiguous
+        ggml_init_params params{(size_t)32 * 1024 * 1024, nullptr, false};
+        ggml_context * ctx = ggml_init(params);
+        const int F = 33, T = 9, C = 3, B = 2;
+        ggml_tensor * x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, F, T, C, B);
+        if (mode == 3) {
+            // ReLU's existing fallback requires contiguous rows. Row padding
+            // violates full contiguity without violating that precondition.
+            ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (F + 1) * T * C * B);
+            x = ggml_view_4d(ctx, storage, F, T, C, B, (F + 1) * sizeof(float),
+                             (F + 1) * T * sizeof(float), (F + 1) * T * C * sizeof(float), 0);
+            CHECK(ggml_is_contiguous_rows(x) && !ggml_is_contiguous(x), "affine padded-row fixture satisfies fallback preconditions");
+        }
+        ggml_tensor * aw = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
+        ggml_tensor * ab = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, F, C);
+        ggml_tensor * slope = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
+        int queries = 0;
+        detail::AffineSupport support;
+        if (mode != 0) {
+            support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_AFFINE_PRELU, "affine query receives actual operation");
+                CHECK(candidate->src[0] == x && candidate->src[1] == aw && candidate->src[2] == ab &&
+                      candidate->src[3] == slope, "affine query preserves actual inputs");
+                CHECK(ggml_are_same_shape(candidate, x), "affine query preserves output dimensions");
+                return mode == 2;
+            };
+        }
+        ggml_tensor * y = detail::affine_prelu(ctx, x, aw, ab, slope, false, support);
+        ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, y);
+        int affine = 0, elementwise = 0;
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            const ggml_op op = ggml_graph_node(graph, i)->op;
+            affine += op == GGML_OP_AFFINE_PRELU;
+            elementwise += op == GGML_OP_MUL || op == GGML_OP_ADD || op == GGML_OP_SUB || op == GGML_OP_UNARY;
+        }
+        CHECK(queries == (mode == 1 || mode == 2 ? 1 : 0), "affine queries absent/rejected/accepted/non-contiguous");
+        CHECK(affine == (mode == 2 ? 1 : 0) && elementwise == (mode == 2 ? 0 : 7),
+              "affine accepted candidate or unchanged seven-op fallback exclusively enters graph");
+        if (mode != 3) {
+            for (int i = 0; i < F * T * C * B; ++i) ((float *)x->data)[i] = (i % 17 - 8) * 0.125f;
+            for (int i = 0; i < F * C; ++i) {
+                ((float *)aw->data)[i] = (i % 7 - 3) * 0.25f;
+                ((float *)ab->data)[i] = (i % 9 - 4) * 0.125f;
+            }
+            for (int c = 0; c < C; ++c) ((float *)slope->data)[c] = (c - 1) * 0.5f;
+            ggml_graph_compute_with_ctx(ctx, graph, 1);
+            float max_error = 0.0f;
+            for (int b = 0; b < B; ++b) for (int c = 0; c < C; ++c)
+                for (int t = 0; t < T; ++t) for (int f = 0; f < F; ++f) {
+                    const int i = ((b * C + c) * T + t) * F + f;
+                    const float v = ((float *)x->data)[i], r = v > 0.0f ? v : 0.0f;
+                    const float prelu = r + ((float *)slope->data)[c] * (v - r);
+                    const float a = v * ((float *)aw->data)[c * F + f] + ((float *)ab->data)[c * F + f];
+                    max_error = std::max(max_error, std::fabs(((float *)y->data)[i] - (a + prelu)));
+                }
+            CHECK(max_error < 1e-5f, "affine selected/fallback graph matches scalar across batch and frequency tail");
+        }
+        ggml_free(ctx);
+    }
+}
+
 static void test_shuffle2() {
     std::mt19937 rng(5151);
     const int F = 5, T = 4, C = 6, half = C / 2;
@@ -441,6 +710,210 @@ static void test_shuffle2() {
         for (size_t i = 0; i < ref.size(); i++) m = std::max(m, std::fabs(out[i] - ref[i]));
         CHECK(m == 0.0f, fmsg("shuffle2 is an exact channel interleave", fused));
         ggml_free(ctx);
+    }
+}
+
+static void test_shuffle2_portable() {
+    struct Shape { int F, T, C, Bc; };
+    const Shape shapes[] = {{3, 5, 2, 2}, {5, 3, 6, 3}, {5, 7, 12, 3},
+                            {3, 9, 24, 2}, {7, 5, 32, 3},
+                            {65, 63, 24, 7}, {65, 63, 48, 7}};
+    for (const Shape & s : shapes) {
+        for (bool strided : {false, true}) {
+            ggml_init_params params{size_t(64) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            ggml_tensor * x;
+            if (strided) {
+                ggml_tensor * storage = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
+                    s.F + 2, s.T + 1, s.C + 2, s.Bc + 1);
+                x = ggml_view_4d(ctx, storage, s.F, s.T, s.C, s.Bc,
+                                  storage->nb[1], storage->nb[2], storage->nb[3], sizeof(float));
+            } else {
+                x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F, s.T, s.C, s.Bc);
+            }
+            const size_t count = size_t(s.F) * s.T * s.C * s.Bc;
+            std::vector<float> tagged(count), expected(count);
+            for (size_t i = 0; i < count; ++i) {
+                // Distinct exactly representable tags across all four axes,
+                // including negative zero which an arithmetic copy could lose.
+                tagged[i] = i == 0 ? -0.0f : float(i) * (i % 2 ? -1.0f : 1.0f);
+            }
+            for (int b = 0; b < s.Bc; ++b)
+                for (int c = 0; c < s.C; ++c)
+                    for (int t = 0; t < s.T; ++t)
+                        for (int f = 0; f < s.F; ++f) {
+                            const size_t i = ((size_t(b) * s.C + c) * s.T + t) * s.F + f;
+                            std::memcpy(static_cast<char *>(x->data) + size_t(f) * x->nb[0] +
+                                size_t(t) * x->nb[1] + size_t(c) * x->nb[2] + size_t(b) * x->nb[3],
+                                &tagged[i], sizeof(float));
+                            const int source_c = (c % 2) * (s.C / 2) + c / 2;
+                            expected[i] = tagged[((size_t(b) * s.C + source_c) * s.T + t) * s.F + f];
+                        }
+            ggml_tensor * y = detail::shuffle2(ctx, x, false, true);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            ggml_build_forward_expand(graph, y);
+            int copies = 0, plane_copies = 0;
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                ggml_tensor * node = ggml_graph_node(graph, i);
+                if (node->op == GGML_OP_CONT) {
+                    ++copies;
+                    if (node->src[0]->op == GGML_OP_PERMUTE && node->ne[0] == int64_t(s.F) * s.T)
+                        ++plane_copies;
+                }
+            }
+            CHECK(copies == (strided ? 2 : 1), "portable shuffle only normalizes input and copies channel planes");
+            CHECK(plane_copies == 1, "portable shuffle preserves F*T as its contiguous copy width");
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 1) == GGML_STATUS_SUCCESS,
+                  "portable shuffle graph computes successfully");
+            CHECK(ggml_nelements(y) == int64_t(count) && y->ne[0] == s.F &&
+                  y->ne[1] == s.T && y->ne[2] == s.C && y->ne[3] == s.Bc,
+                  "portable shuffle retains all four dimensions");
+            CHECK(std::memcmp(y->data, expected.data(), count * sizeof(float)) == 0,
+                  "portable shuffle is bit-exact for batches, spatial positions and signed zero");
+            ggml_free(ctx);
+        }
+    }
+}
+
+static void test_mean_support_selection() {
+    for (int width : {1, 4, 12, 24, 32, 33, 65, 129, 513}) {
+        for (bool padded : {false, true}) for (int mode : {0, 1, 2, 3}) {
+            // Absent/rejected/accepted portable queries and unchanged nonportable mean.
+            ggml_init_params params{size_t(8) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            const int rows = 3, batches = 2;
+            ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, width, rows, batches);
+            if (padded) {
+                ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32,
+                                                          (width + 2) * rows * batches + 1);
+                std::fill_n(static_cast<float *>(storage->data), ggml_nelements(storage), 37.25f);
+                x = ggml_view_3d(ctx, storage, width, rows, batches, (width + 2) * sizeof(float),
+                                  (width + 2) * rows * sizeof(float), sizeof(float));
+            }
+            float expected[rows * batches] = {};
+            for (int b = 0; b < batches; ++b) for (int r = 0; r < rows; ++r) {
+                float sum = 0.0f;
+                for (int j = 0; j < width; ++j) {
+                    const float value = (j % 5 == 0) ? -0.0f : float((j + 13 * r + 7 * b) % 29 - 14) / 16.0f;
+                    std::memcpy(static_cast<char *>(x->data) + j * x->nb[0] + r * x->nb[1] + b * x->nb[2],
+                                &value, sizeof(value));
+                    sum += value;
+                }
+                expected[b * rows + r] = sum / float(width);
+            }
+            int queries = 0;
+            detail::MeanSupport support;
+            if (mode != 0) support = [&](const ggml_tensor * candidate) {
+                ++queries;
+                CHECK(candidate->op == GGML_OP_MEAN && candidate->src[0] == x,
+                      "mean query receives the actual input and operation");
+                CHECK(candidate->type == GGML_TYPE_F32 && candidate->ne[0] == 1 &&
+                      candidate->ne[1] == rows && candidate->ne[2] == batches,
+                      "mean query preserves row and batch dimensions");
+                return mode >= 2;
+            };
+            ggml_tensor * y = detail::mean_rows(ctx, x, mode != 3, support);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            ggml_build_forward_expand(graph, y);
+            int means = 0, sums = 0, scales = 0;
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                const ggml_op op = ggml_graph_node(graph, i)->op;
+                means += op == GGML_OP_MEAN;
+                sums += op == GGML_OP_SUM_ROWS;
+                scales += op == GGML_OP_SCALE;
+            }
+            const bool selected = mode >= 2;
+            CHECK(queries == (mode == 1 || mode == 2 ? 1 : 0), "mean capability query selection");
+            CHECK(means == int(selected) && sums == int(!selected) && scales == int(!selected),
+                  "mean selected exclusively or complete legacy sum/scale fallback");
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 1) == GGML_STATUS_SUCCESS, "mean selection graph computes");
+            const float * values = static_cast<const float *>(y->data);
+            for (int i = 0; i < rows * batches; ++i)
+                CHECK(std::fabs(values[i] - expected[i]) < 1e-6f,
+                      "mean selected/fallback preserves padded rows, tails and batch order");
+            ggml_free(ctx);
+        }
+    }
+}
+
+static void test_channel_energy_mean() {
+    struct Shape { int F, T, C, B; };
+    const Shape shapes[] = {{1, 1, 1, 1}, {129, 63, 1, 7}, {33, 5, 1, 2}, {7, 5, 3, 2}, {5, 9, 12, 3},
+                            {33, 63, 24, 7}, {33, 63, 32, 7}, {65, 63, 12, 7}};
+    for (const Shape & s : shapes) {
+        for (bool strided : {false, true}) {
+            ggml_init_params params{size_t(128) * 1024 * 1024, nullptr, false};
+            ggml_context * ctx = ggml_init(params);
+            ggml_tensor * x;
+            if (strided) {
+                ggml_tensor * storage = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F + 2, s.T + 1, s.C, s.B);
+                std::fill_n(static_cast<float *>(storage->data), ggml_nelements(storage), 37.25f);
+                x = ggml_view_4d(ctx, storage, s.F, s.T, s.C, s.B,
+                                  storage->nb[1], storage->nb[2], storage->nb[3], sizeof(float));
+            } else {
+                x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.F, s.T, s.C, s.B);
+            }
+            std::vector<float> expected(size_t(s.F) * s.T * s.B, 0.0f);
+            for (int b = 0; b < s.B; ++b)
+                for (int t = 0; t < s.T; ++t)
+                    for (int f = 0; f < s.F; ++f) {
+                        float sum = 0.0f;
+                        for (int c = 0; c < s.C; ++c) {
+                            const int tag = (13 * f + 7 * t + 3 * c + 19 * b) % 113 - 56;
+                            const float value = (f == 0 && t == 0) ? -0.0f : float(tag) / 64.0f;
+                            std::memcpy(static_cast<char *>(x->data) + size_t(f) * x->nb[0] +
+                                        size_t(t) * x->nb[1] + size_t(c) * x->nb[2] + size_t(b) * x->nb[3],
+                                        &value, sizeof(value));
+                            sum += value * value;
+                        }
+                        expected[size_t(f) + size_t(s.F) * (t + s.T * b)] = sum / float(s.C);
+                    }
+            ggml_tensor * optimized = detail::channel_energy_mean(ctx, x, true);
+            ggml_tensor * standard = detail::channel_energy_mean(ctx, x, false);
+            if (s.C == 1) {
+                ggml_cgraph * fast = ggml_new_graph(ctx);
+                ggml_build_forward_expand(fast, optimized);
+                int squares = 0, copies = 0;
+                for (int i = 0; i < ggml_graph_n_nodes(fast); ++i) {
+                    const ggml_op op = ggml_graph_node(fast, i)->op;
+                    squares += op == GGML_OP_SQR;
+                    copies += op == GGML_OP_CONT;
+                    CHECK(op != GGML_OP_SUM_ROWS && op != GGML_OP_SCALE && op != GGML_OP_MEAN,
+                          "singleton channel energy omits reduction and reciprocal scaling");
+                }
+                CHECK(squares == 1 && copies == (ggml_is_contiguous(x) ? 0 : 1),
+                      "singleton channel energy squares once with only a necessary strided-input copy");
+            }
+            int mean_queries = 0;
+            detail::MeanSupport mean_support = [&](const ggml_tensor * candidate) {
+                ++mean_queries;
+                CHECK(candidate->op == GGML_OP_MEAN && candidate->src[0]->ne[0] == s.C,
+                      "channel energy queries the actual channel mean");
+                return true;
+            };
+            ggml_tensor * selected = detail::channel_energy_mean(ctx, x, true, mean_support);
+            CHECK(mean_queries == (s.C == 1 ? 0 : 1),
+                  "channel energy queries mean support only for a non-singleton reduction");
+            // Preserve the former portable graph as an exact regression oracle.
+            ggml_tensor * previous = ggml_cont(ctx, ggml_permute(ctx, x, 2, 1, 0, 3));
+            previous = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_sqr(ctx, previous)), 1.0f / float(s.C));
+            previous = ggml_reshape_2d(ctx, ggml_cont(ctx, ggml_permute(ctx, previous, 3, 1, 0, 2)), s.F, s.T * s.B);
+            ggml_cgraph * graph = ggml_new_graph(ctx);
+            for (ggml_tensor * output : {optimized, standard, previous, selected}) ggml_build_forward_expand(graph, output);
+            CHECK(ggml_graph_compute_with_ctx(ctx, graph, 2) == GGML_STATUS_SUCCESS,
+                  "channel energy graphs compute successfully");
+            CHECK(optimized->ne[0] == s.F && optimized->ne[1] == s.T * s.B &&
+                  optimized->ne[2] == 1 && optimized->ne[3] == 1, "channel energy retains frequency/time/batch order");
+            CHECK(std::memcmp(optimized->data, previous->data, ggml_nbytes(optimized)) == 0,
+                  "flattened channel energy is bit-exact with the former portable graph");
+            for (ggml_tensor * output : {optimized, standard, selected}) {
+                const float * actual = static_cast<const float *>(output->data);
+                float error = 0.0f;
+                for (size_t i = 0; i < expected.size(); ++i) error = std::max(error, std::fabs(actual[i] - expected[i]));
+                CHECK(error < 1e-6f, "channel energy agrees with an independent scalar channel reduction");
+            }
+            ggml_free(ctx);
+        }
     }
 }
 
@@ -559,7 +1032,7 @@ static std::vector<float> ref_dpgrnn(const std::vector<float> & x, int C, int T,
 }
 
 static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T, int F,
-                                     const WBag & bag, float eps, bool fused) {
+                                     const WBag & bag, float eps, bool fused, bool portable = false) {
     ggml_init_params p{ (size_t) 256 * 1024 * 1024, nullptr, false };
     ggml_context *   ctx = ggml_init(p);
     ggml_tensor *    tx  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, F, T, C);
@@ -578,7 +1051,7 @@ static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T,
         auto it = tmap.find(n);
         return it == tmap.end() ? nullptr : it->second;
     };
-    ggml_tensor * y  = detail::dpgrnn(ctx, tx, "dp", Wr, eps, fused);
+    ggml_tensor * y  = detail::dpgrnn(ctx, tx, "dp", Wr, eps, fused, {}, portable);
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16384, false);
     ggml_build_forward_expand(gf, y);
     ggml_graph_compute_with_ctx(ctx, gf, 1);
@@ -586,6 +1059,59 @@ static std::vector<float> run_dpgrnn(const std::vector<float> & x, int C, int T,
     std::memcpy(out.data(), y->data, ggml_nbytes(y));
     ggml_free(ctx);
     return out;
+}
+
+static void test_dpgrnn_output_layout() {
+    struct Shape { int C, F, T, B; };
+    const Shape shapes[] = {{1, 1, 1, 1}, {1, 7, 5, 3}, {3, 5, 7, 2}, {16, 33, 63, 7},
+                            {17, 7, 19, 3}, {32, 16, 8, 2}, {33, 1, 129, 2}, {7, 129, 1, 3}};
+    for (const Shape & s : shapes) {
+        ggml_init_params params{size_t(16) * 1024 * 1024, nullptr, false};
+        ggml_context * ctx = ggml_init(params);
+        ggml_tensor * x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, s.C, s.F, s.T, s.B);
+        std::vector<uint32_t> input(ggml_nelements(x)), expected(input.size());
+        for (size_t i = 0; i < input.size(); ++i) {
+            input[i] = 0x3f000000u + uint32_t(i);
+            if (i % 17 == 0) input[i] = 0x80000000u; // Preserve negative zero as raw bits.
+            else if (i % 19 == 0) input[i] = 0;
+            else if (i % 3 == 0) input[i] |= 0x80000000u;
+        }
+        std::memcpy(x->data, input.data(), ggml_nbytes(x));
+        for (int b = 0; b < s.B; ++b) for (int t = 0; t < s.T; ++t)
+            for (int f = 0; f < s.F; ++f) for (int c = 0; c < s.C; ++c) {
+                const size_t source = c + size_t(s.C) * (f + s.F * (t + s.T * b));
+                const size_t target = f + size_t(s.F) * (t + s.T * (c + s.C * b));
+                expected[target] = input[source];
+            }
+        ggml_tensor * optimized = detail::dpgrnn_output_layout(ctx, x, true);
+        ggml_tensor * legacy = detail::dpgrnn_output_layout(ctx, x, false);
+        CHECK(optimized->ne[0] == s.F && optimized->ne[1] == s.T &&
+              optimized->ne[2] == s.C && optimized->ne[3] == s.B,
+              "DPGRNN output layout retains frequency/time/channel/batch dimensions");
+        CHECK(optimized->nb[0] == sizeof(float) && optimized->nb[1] == size_t(s.F) * sizeof(float) &&
+              optimized->nb[2] == size_t(s.F) * s.T * sizeof(float) &&
+              optimized->nb[3] == size_t(s.F) * s.T * s.C * sizeof(float),
+              "DPGRNN output layout has canonical contiguous strides");
+        ggml_tensor * copy = optimized->src[0];
+        CHECK(optimized->op == GGML_OP_RESHAPE && copy->op == GGML_OP_CONT &&
+              copy->src[0]->ne[0] == int64_t(s.F) * s.T && copy->src[0]->ne[1] == s.C &&
+              copy->src[0]->ne[2] == s.B && copy->src[0]->nb[1] == sizeof(float),
+              "portable DPGRNN copy exposes a batched 2-D transpose");
+        CHECK(legacy->op == GGML_OP_CONT && legacy->src[0]->op == GGML_OP_PERMUTE &&
+              legacy->src[0]->src[0] == x,
+              "nonportable DPGRNN copy keeps the original direct permutation");
+        ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, optimized);
+        ggml_build_forward_expand(graph, legacy);
+        CHECK(ggml_graph_compute_with_ctx(ctx, graph, 2) == GGML_STATUS_SUCCESS,
+              "DPGRNN output layout graphs compute successfully");
+        CHECK(std::memcmp(optimized->data, legacy->data, ggml_nbytes(optimized)) == 0,
+              "portable DPGRNN output layout is byte-exact with the original graph");
+        CHECK(std::memcmp(optimized->data, expected.data(), ggml_nbytes(optimized)) == 0,
+              "DPGRNN output layout matches independent batch/channel/frequency/time tags");
+        ggml_free(ctx);
+    }
+    std::printf("DPGRNN output layout: 8 byte-exact copy cases passed\n");
 }
 
 static void test_dpgrnn() {
@@ -623,6 +1149,10 @@ static void test_dpgrnn() {
     std::vector<float> ref = ref_dpgrnn(x, C, T, F, "dp", bag, eps);
     for (bool fused : { true, false }) {
         std::vector<float> got = run_dpgrnn(x, C, T, F, bag, eps, fused);
+        std::vector<float> portable = run_dpgrnn(x, C, T, F, bag, eps, fused, true);
+        CHECK(got.size() == portable.size() &&
+              std::memcmp(got.data(), portable.data(), got.size() * sizeof(float)) == 0,
+              fmsg("portable DPGRNN output layout preserves numerical graph result bytes", fused));
         float m = 0.0f;
         CHECK(got.size() == ref.size(), fmsg("dpgrnn output size", fused));
         for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
@@ -754,6 +1284,23 @@ static void test_ctfa() {
         for (size_t i = 0; i < ref.size() && i < got.size(); i++) m = std::max(m, std::fabs(got[i] - ref[i]));
         CHECK(m < 2e-4f, fmsg("ctfa matches scalar denoiser_core ctfa", fused));
     }
+    int mean_queries = 0;
+    detail::MeanSupport support = [&](const ggml_tensor * candidate) {
+        ++mean_queries;
+        CHECK(candidate->op == GGML_OP_MEAN && candidate->type == GGML_TYPE_F32,
+              "portable ctfa queries both actual F32 mean candidates");
+        return true;
+    };
+    std::vector<float> selected = run_graph(x, F, T, C, bag,
+        [&](ggml_context * ctx, ggml_tensor * tx, const detail::WResolver & Wr) {
+            return detail::ctfa(ctx, tx, "ct", Wr, r, false, nullptr, true, {}, support);
+        });
+    CHECK(mean_queries == 2, "portable ctfa propagates mean support to TA and channel energy");
+    CHECK(selected.size() == ref.size(), "portable mean ctfa output size");
+    float error = 0.0f;
+    for (size_t i = 0; i < ref.size() && i < selected.size(); ++i)
+        error = std::max(error, std::fabs(selected[i] - ref[i]));
+    CHECK(error < 2e-4f, "portable mean ctfa retains scalar reference accuracy");
 }
 
 // End-to-end parity: DenoiserGgml::chunk_forward (ggml-CPU) vs scalar
@@ -948,7 +1495,7 @@ static DenoiserWeights make_synthetic_denoiser_weights(std::mt19937 & rng) {
 
 // Always-on e2e parity (no fixture): ggml chunk_forward vs the scalar
 // denoiser_net_forward on the synthetic model, same metrics as test_e2e.
-static void test_e2e_synthetic(int n_gpu_layers = -1) {
+static void test_e2e_synthetic(int n_gpu_layers = -1, bool portable = false) {
     std::mt19937    rng(20260710);
     DenoiserWeights w = make_synthetic_denoiser_weights(rng);
     const int       L = w.chunk_frames, F = w.spec_bins;
@@ -960,9 +1507,9 @@ static void test_e2e_synthetic(int n_gpu_layers = -1) {
     df(re); df(im);
     std::vector<float> sr, si;
     tts_cpp::lavasr::denoiser_net_forward(w, re, im, L, sr, si);
-    auto               g = tts_cpp::lavasr::DenoiserGgml::create(w, n_gpu_layers);
+    auto               g = tts_cpp::lavasr::DenoiserGgml::create(w, n_gpu_layers, false, portable);
     if (n_gpu_layers > 0) {
-        CHECK(g->backend_name() != "CPU", "available GPU must not fall back to CPU for the denoiser");
+        CHECK(g->is_gpu(), "available GPU must not fall back to CPU for the denoiser");
     }
     std::vector<float> gr, gi;
     g->chunk_forward(re, im, L, gr, gi);
@@ -988,6 +1535,19 @@ static void test_e2e_synthetic(int n_gpu_layers = -1) {
     CHECK(gr.size() == sr.size() && gi.size() == si.size(), "synthetic e2e output size matches scalar");
     CHECK(rr < 2e-3f && ri < 2e-3f, "synthetic denoiser ggml chunk_forward matches scalar");
     CHECK(omax > 1e-3f, "synthetic outputs are not all ~0 (mask not degenerate)");
+    // Reusing the allocator must preserve results and reject malformed input
+    // before reading it. This also exercises the portable HTP graph on CPU.
+    std::vector<float> repeat_r, repeat_i;
+    g->chunk_forward(re, im, L, repeat_r, repeat_i);
+    CHECK(gr == repeat_r && gi == repeat_i, "repeated forward is deterministic");
+    bool rejected = false;
+    try { g->batch_forward(re, im, 0, 1, repeat_r, repeat_i); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    CHECK(rejected, "nonpositive chunk length is rejected");
+    rejected = false;
+    try { g->batch_forward({}, im, L, 1, repeat_r, repeat_i); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    CHECK(rejected, "truncated real plane is rejected");
 }
 
 static void test_gpu_e2e_synthetic() {
@@ -995,7 +1555,8 @@ static void test_gpu_e2e_synthetic() {
     constexpr int vulkan_device = 0;
     constexpr bool allow_arm_mali = true;
     ggml_backend_t backend = tts_cpp::detail::init_gpu_backend(
-        gpu_layers, false, "lavasr-test", vulkan_device, allow_arm_mali);
+        gpu_layers, false, "lavasr-test", vulkan_device, allow_arm_mali, nullptr,
+        tts_cpp::lavasr::gpu_requirement());
     if (!backend) {
         std::printf("SKIP: LavaSR GPU parity requires an available GPU backend\n");
         return;
@@ -1005,7 +1566,7 @@ static void test_gpu_e2e_synthetic() {
 }
 
 // Always-on chunk-batch consistency on the synthetic model (style of test_batch).
-static void test_batch_synthetic() {
+static void test_batch_synthetic(bool portable = false) {
     std::mt19937    rng(20260710);
     DenoiserWeights w = make_synthetic_denoiser_weights(rng);
     const int       L = w.chunk_frames, F = w.spec_bins, N = 3;
@@ -1015,7 +1576,7 @@ static void test_batch_synthetic() {
     };
     std::vector<float> re((size_t) N * L * F), im((size_t) N * L * F);
     df(re); df(im);
-    auto g = tts_cpp::lavasr::DenoiserGgml::create(w, -1);
+    auto g = tts_cpp::lavasr::DenoiserGgml::create(w, -1, false, portable);
     std::vector<float> br, bi;
     g->batch_forward(re, im, L, N, br, bi);
     float m = 0.0f;
@@ -1029,7 +1590,7 @@ static void test_batch_synthetic() {
             m = std::max(m, std::fabs(bi[(size_t) c * L * F + i] - si[i]));
         }
     }
-    std::printf("batch-consistency synthetic (N=%d): max_abs=%.3e\n", N, m);
+    std::printf("batch-consistency synthetic (N=%d, portable=%d): max_abs=%.3e\n", N, portable, m);
     CHECK(m < 1e-4f, "synthetic batch_forward matches per-chunk chunk_forward");
 }
 
@@ -1086,15 +1647,24 @@ static void test_pipeline_batch_parity() {
 
 int main(int argc, char ** argv) {
     test_gru_batched();
+    test_gru_support_selection();
     test_conv2d();
+    test_conv_support_selection();
     test_conv_transpose2d();
     test_affine_prelu();
+    test_affine_support_selection();
     test_shuffle2();
+    test_shuffle2_portable();
+    test_mean_support_selection();
+    test_channel_energy_mean();
+    test_dpgrnn_output_layout();
     test_dpgrnn();
     test_ctfa();
     test_e2e_synthetic();
+    test_e2e_synthetic(-1, true);
     test_gpu_e2e_synthetic();
     test_batch_synthetic();
+    test_batch_synthetic(true);
     test_pipeline_batch_parity();
     if (argc > 1) { test_e2e(argv[1]); test_batch(argv[1]); }
     if (g_failures == 0) {
