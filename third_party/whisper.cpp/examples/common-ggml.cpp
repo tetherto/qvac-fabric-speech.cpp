@@ -143,6 +143,13 @@ bool ggml_common_quantize_0(
         quantize &= (n_dims == 2);
 
         if (quantize) {
+            // QVAC: K-quants require aligned rows, not just an aligned total.
+            const int64_t block_size = ggml_blck_size(qtype);
+            if (ne[0] <= 0 || ne[0] % block_size != 0) {
+                fprintf(stderr, "%s: tensor '%s' row size %d is not a multiple of %s block size %lld\n",
+                        __func__, name.c_str(), ne[0], ggml_type_name(qtype), (long long) block_size);
+                return false;
+            }
             if (ttype != GGML_TYPE_F32 && ttype != GGML_TYPE_F16) {
                 fprintf(stderr, "%s: unsupported ttype %d (%s) for integer quantization\n", __func__, ttype, ggml_type_name((ggml_type) ttype));
                 return false;
