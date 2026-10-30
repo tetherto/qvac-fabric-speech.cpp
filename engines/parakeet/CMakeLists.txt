@@ -3075,6 +3075,17 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     # NOT `Requires: ggml`: the fabric ggml.pc omits the CPU backend and
     # every other statically linked backend archive, so inheriting it
     # would under-link a static build.
+    # An ALIAS target (the in-tree ggml::ggml) carries no OUTPUT_NAME of its
+    # own; the library name must come from the target it points at.
+    function(parakeet_resolve_alias_target target out_var)
+        get_target_property(_aliased ${target} ALIASED_TARGET)
+        if (_aliased)
+            set(${out_var} ${_aliased} PARENT_SCOPE)
+        else()
+            set(${out_var} ${target} PARENT_SCOPE)
+        endif()
+    endfunction()
+
     set(_pk_pc_ggml_libs "")
     set(_pk_pc_ggml_libdirs "")
     # Static registry references require the linked backend archives too.
@@ -3091,10 +3102,11 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
         endforeach()
     endforeach()
     list(APPEND _pk_ggml_pc_targets ggml::ggml-base ggml-base)
-    foreach (_pk_ggml_tgt IN LISTS _pk_ggml_pc_targets)
-        if (NOT TARGET ${_pk_ggml_tgt})
+    foreach (_pk_ggml_alias IN LISTS _pk_ggml_pc_targets)
+        if (NOT TARGET ${_pk_ggml_alias})
             continue()
         endif()
+        parakeet_resolve_alias_target(${_pk_ggml_alias} _pk_ggml_tgt)
         get_target_property(_pk_ggml_imported ${_pk_ggml_tgt} IMPORTED)
         set(_pk_ggml_libname "")
         if (_pk_ggml_imported)
@@ -3125,9 +3137,9 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
             endif()
         endif()
         # Namespaced and plain spellings of the same target both appear in
-        # the loop (only one exists per acquisition path, but the bundled
-        # build aliases ggml::ggml -> ggml); de-duplicate on the resolved
-        # library name so the .pc never lists a library twice.
+        # the loop (the bundled fabric build aliases ggml::ggml -> ggml);
+        # de-duplicate on the resolved library name so the .pc never lists
+        # a library twice.
         if (_pk_ggml_libname AND NOT "-l${_pk_ggml_libname}" IN_LIST _pk_pc_ggml_libs)
             list(APPEND _pk_pc_ggml_libs "-l${_pk_ggml_libname}")
         endif()
