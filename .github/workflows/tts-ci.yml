@@ -83,7 +83,7 @@ concurrency:
 
 env:
   GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
-  GGML_REF: be6e387b9f2fda9a6fa0ca59f9607f2b6bb21db2 # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
+  GGML_REF: d3d019a3b9914688e28963e4a49406ee15362aed # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
 
 jobs:
   runner_names:
@@ -114,13 +114,7 @@ jobs:
         backend: ${{ fromJSON(inputs.moss_e2e_backends) }}
         model: ${{ fromJSON(inputs.moss_e2e_cases) }}
     env:
-      GGML_E2E_SHA: be6e387b9f2fda9a6fa0ca59f9607f2b6bb21db2
-      # The ASR oracle needs the current Whisper fork's scheduler/memory API,
-      # which GGML_REF does not carry yet (qvac-fabric-llm.cpp PR 454), so it
-      # stays on ggml-speech. Keep its CPU-only runtime independent of the GPU
-      # runtime under test.
-      GGML_ASR_REPO: https://github.com/tetherto/qvac-ext-ggml.git
-      GGML_ASR_SHA: 380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e
+      GGML_E2E_SHA: d3d019a3b9914688e28963e4a49406ee15362aed
       MOSS_QUALITY_CONTEXT: moss-quality/${{ matrix.backend }}/${{ matrix.model }}
     steps:
       # workflow_dispatch check suites are not included in the PR check rollup.
@@ -224,16 +218,11 @@ jobs:
           PY
       - name: Build independent CPU reference ASR
         if: startsWith(matrix.model, 'tts-')
-        # The vendored ggml lacks APIs used by this fork's Whisper memory-fit
-        # code. Build a compatible pinned CPU ggml, then statically link the
-        # oracle in its own process so it cannot load the GPU test runtime.
+        # Same pinned fabric ggml as the run under test, built CPU-only and
+        # statically linked into the oracle's own process so it cannot load
+        # the GPU test runtime.
         run: |
-          git init -q ggml-asr-src
-          git -C ggml-asr-src remote add origin "$GGML_ASR_REPO"
-          git -C ggml-asr-src fetch --depth 1 origin "$GGML_ASR_SHA"
-          git -C ggml-asr-src checkout -q FETCH_HEAD
-          git -C ggml-asr-src rev-parse HEAD > moss-e2e-results/asr-ggml-commit.txt
-          cmake -S ggml-asr-src -B build-ggml-asr -DCMAKE_BUILD_TYPE=Release \
+          cmake -S ggml-src/ggml -B build-ggml-asr -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
             -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_OPENCL=OFF \
             -DGGML_WEBGPU=OFF -DGGML_HEXAGON=OFF -DGGML_BLAS=OFF \

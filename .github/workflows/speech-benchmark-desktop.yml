@@ -89,7 +89,7 @@ concurrency:
 
 env:
   GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
-  GGML_REF: be6e387b9f2fda9a6fa0ca59f9607f2b6bb21db2 # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
+  GGML_REF: d3d019a3b9914688e28963e4a49406ee15362aed # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
   AWS_REGION: eu-central-1
   # Whitelist of every family in scripts/benchmarks/families.json, opt-in ones
   # included. The plan job derives the "all" expansion, per-family runner

@@ -13,7 +13,7 @@
 set -euo pipefail
 
 GGML_URL="https://github.com/tetherto/qvac-fabric-llm.cpp.git"
-GGML_REF="be6e387b9f2fda9a6fa0ca59f9607f2b6bb21db2"   # qvac-fabric-llm.cpp#445: remaining speech backend fixes ported
+GGML_REF="d3d019a3b9914688e28963e4a49406ee15362aed"   # qvac-fabric-llm.cpp#455: speech memory accessors, CPU graph-plan proc, CUDA PAD grid
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"

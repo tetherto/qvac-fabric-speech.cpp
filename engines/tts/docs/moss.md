@@ -79,10 +79,9 @@ checks are still needed to establish that the model speaks the requested text.
 The TTS case also gates every expected batch/stream/reuse WAV and its CPU
 reference with the existing Whisper CPU intelligibility scorer. The reference
 model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
-the ASR executable is a separate static CPU build of the vendored Whisper with
-ggml pinned to `380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`. This supplies the
-fork's scheduler/memory-fit APIs and isolates its CLI dependencies from the GPU
-test pin. The artifact records the ASR runtime pin in `asr-ggml-commit.txt`.
+the ASR executable is a separate static CPU build of the vendored Whisper
+against the same pinned fabric ggml as the run under test (`ggml-commit.txt`
+in the artifact), so it cannot load the GPU runtime being tested.
 The synthesis text is never provided as an ASR prompt. Missing/unavailable
 scores, non-finite scores, or word error rate above 25% fail the case. This
 tolerates limited reference-ASR errors while rejecting the observed wrong-text
