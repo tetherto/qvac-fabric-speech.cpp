@@ -160,7 +160,7 @@ class NemotronDiarizationExporterTest(unittest.TestCase):
             "models/plain.gguf": "models/plain-diarizer-358.mlpackage",
         }
         for gguf_path, expected in cases.items():
-            self.assertEqual(str(EXPORTER.sidecar_package(gguf_path, 358)), expected)
+            self.assertEqual(EXPORTER.sidecar_package(gguf_path, 358), Path(expected))
 
     def test_rotation_matrix_rotates_half(self):
         values = torch.arange(CONFIG["head_width"], dtype=torch.float32)

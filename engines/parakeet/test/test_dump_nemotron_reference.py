@@ -1,11 +1,17 @@
+import sys
 import argparse
 import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
-import torch
+try:
+    import numpy as np
+    import torch
+except ModuleNotFoundError as error:
+    print(f"SKIP: {error.name} is not installed")
+    sys.exit(77)
+
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -15,7 +21,11 @@ SPEC = importlib.util.spec_from_file_location(
     SCRIPT,
 )
 DUMPER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(DUMPER)
+try:
+    SPEC.loader.exec_module(DUMPER)
+except ModuleNotFoundError as error:
+    print(f"SKIP: {error.name} is not installed")
+    sys.exit(77)
 
 
 class Hypothesis:
