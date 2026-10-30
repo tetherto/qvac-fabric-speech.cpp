@@ -731,9 +731,11 @@ passes this file and fails the other three 4-bit layouts. Quantizing the text
 encoder too saves another 0.7 GB without a measurable loss in prompt match,
 but its context misses that bound and its clips drift further from `f16`,
 the worst nearly as far as an unrelated sample; it is not recommended.
-`q4_0` throughout is not recommended: the prompt match drops. Four-bit weights
-save memory but not time: a 100-step clip on an RTX 5090 takes 9.1 s at `f16`
-and at either 4-bit layout (9.3 s at `q8_0`); see
+`q4_0` throughout is not recommended: the prompt match drops. On an RTX 5090
+four-bit weights save memory but not time: a 100-step clip takes 9.1 s at `f16`
+and at either 4-bit layout (9.3 s at `q8_0`). On an x86 CPU they also make the
+DiT 2.4 times faster, because ggml repacks `q4_0` there but not `q8_0`
+([Engine notes](#engine-notes-1)); see
 [Hexagon NPU generation](#hexagon-npu-generation) for the phone.
 
 ### Run
@@ -838,6 +840,31 @@ on Metal. For 100 guided steps, conditioning uploads fall from 800 MiB
 (4 MiB per DiT pass) to 8 MiB per request. The remaining loop transfers are
 latent uploads/downloads, positions, timestep and the cache-entry index; K/V
 never returns to host memory between diffusion steps.
+
+On the CPU, the quantized text-encoder and DiT matrices load into ggml-cpu's
+repacked layout (the `CPU_REPACK` buffer) where ggml has one for the type and
+the processor: `q4_0` with AVX2 or with ARM dotprod or i8mm, `q8_0` with ARM
+dotprod or i8mm. The loader asks the CPU device whether it runs each product
+from that buffer, and keeps in the default buffer every matrix it cannot
+repack, the token table (read by row), the VAE, and every unquantized tensor.
+The fit counts the same bytes, and the stages match the reference as before
+(Galaxy S25 CPU, `q8_0` with `q4_0` DiT blocks: DiT 0.99908 / 0.99897, eight
+steps 0.99749). The audio differs from the default layout by summation order,
+about as much as a CUDA render of the same request does (waveform cosine 0.88
+against 0.87 on a two-step clip). Diffusion for the two-step glass request,
+two rounds in opposite orders:
+
+| Machine | GGUF | Default layout | Repacked |
+|---|---|--:|--:|
+| Galaxy S25, 6 threads | `q8_0` | 137.8-140.7 s | 70.8-72.8 s |
+| same | `q8_0`, DiT blocks `q4_0` | 145.8-146.2 s | 71.1-72.0 s |
+| Ryzen 9 9950X3D, 8 threads | `q8_0`, DiT blocks `q4_0` | 30.6-30.9 s | 12.6-13.0 s |
+| same | `q4_0` | 30.3-30.9 s | 12.6-12.9 s |
+
+ggml has no x86 layout for `q8_0`, so a `q8_0` file runs as before there. The
+MOSS-TTS and MOSS-Speech language models keep the default layout: they decode
+one row at a time, and on the S25 the repacked kernels ran a single-row
+product 1.3 to 2.4 times slower.
 
 ### Core ML DiT and VAE
 
@@ -958,8 +985,8 @@ status 0; "glass" and "rain" are the prompts of the parity dumps and of
 | same | `q8_0` | Hexagon | 2 | 3.2 s | 1.1 s |
 | same | `q8_0`, DiT `q4_0` | Hexagon | 2 | 3.2 s | 1.1 s |
 | same | `f16` | CPU | 2 | 163.4 s | 9.6 s |
-| same | `q8_0` | CPU | 2 | 122.0 s | 7.6 s |
-| same | `q8_0`, DiT `q4_0` | CPU | 2 | 136.7 s | 9.6 s |
+| same | `q8_0` | CPU | 2 | 70.8 s | 9.6 s |
+| same | `q8_0`, DiT `q4_0` | CPU | 2 | 71.1 s | 9.6 s |
 | glass, 5 s | `f16` | Hexagon | 100 | 367.6 s | 2.4 s |
 | rain, 10 s | `f16` | Hexagon | 100 | 316.8 s | 4.9 s |
 | same | `q8_0` | Hexagon | 100 | 326.9 s | 4.8 s |
@@ -968,9 +995,9 @@ status 0; "glass" and "rain" are the prompts of the parity dumps and of
 
 A guided step runs the DiT twice over the full 30-second latent, so the
 diffusion cost does not depend on the requested length. From a cool start a
-pass costs 0.89 s (`f16`) or 0.79 s (`q8_0`) on the NPU against 41 s and 31 s
+pass costs 0.89 s (`f16`) or 0.79 s (`q8_0`) on the NPU against 41 s and 18 s
 on the CPU; over a 100-step clip the NPU throttles to 1.6-1.9 s per pass, so a
-default clip takes five to six minutes, where the CPU would need over two
+default clip takes five to six minutes, where the CPU would need one to two
 hours. Text encoding takes about 0.1 s. The `f16` GGUF (6.4 GB, 5.8 GB of it
 on the NPU) runs on the 12 GB phone.
 
@@ -980,11 +1007,9 @@ glass request ran on the NPU, the phone's available memory fell by 6.1 GB with
 with the text encoder at `q4_0` too). The NPU is compute-bound on the DiT, so a
 cold pass costs the same 0.81 s with `q4_0` DiT blocks as with `q8_0` in the
 same session (0.93 s with `f16`); the 100-step rows above differ by heat, and
-`q8_0` took 290.4 s for the same clip right after the 4-bit run. The phone's
-CPU is not faster either: its `q4_0` weights go through ggml's plain dot
-product, as the engine does not use the repacked layout ggml offers for ARM
-CPUs. Two rounds in opposite orders took 116 and 144 s with `q8_0`, 137 and
-150 s with `q4_0` DiT blocks, and 148 s both times with `q4_0` throughout; the
+`q8_0` took 290.4 s for the same clip right after the 4-bit run. On the
+phone's CPU both files run from ggml's repacked layout
+([Engine notes](#engine-notes-1)) at the same speed, about 18 s per pass; the
 CPU process peaked at 4.0 GB resident with `q8_0` and 3.3 GB with `q4_0` DiT
 blocks.
 
@@ -995,7 +1020,12 @@ download: the schedule, Euler step, guidance, prompt cleaning against
 upstream outputs, Python-compatible rounding, and noise; the load-time
 rejections for metadata bounds, tensor shapes, and tensor types; f16, bf16,
 q8_0 and q4_0 linear weights loading as stored and following the f32 velocity,
-and q5_0 refused; text-encoder
+and q5_0 refused; on the CPU, quantized text-encoder and DiT matrices taking the
+repacked layout exactly where ggml offers one for the processor, the token
+table and the VAE keeping the default buffer, the same text context and
+velocity as the default layout, and the fit counting exactly the bytes of the
+default and repacked weight buffers;
+text-encoder
 causality, zero padding, and an f16 feed-forward sum past the half-precision
 range; DiT conditioning on text and timestep and the scheduler guard;
 windowed VAE decoding against a single window; engine determinism, guidance
