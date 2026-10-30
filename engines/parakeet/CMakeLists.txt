@@ -1614,7 +1614,7 @@ if (PARAKEET_BUILD_TESTS)
     if (Python3_Interpreter_FOUND)
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint
-                                test_fixture_coverage)
+                                test_fixture_coverage test_verify_gguf_roundtrip)
             add_test(NAME ${script}
                 COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/${script}.py")
             set_tests_properties(${script} PROPERTIES LABELS "unit"
@@ -2369,6 +2369,14 @@ if (PARAKEET_BUILD_TESTS)
     target_include_directories(test-lstm-input-concat PRIVATE src ggml/include)
     parakeet_apply_ccache(test-lstm-input-concat)
     parakeet_register_test(test-lstm-input-concat LABEL "unit")
+
+    # The production buffer/probe helper with fake public backend interfaces:
+    # no model, backend library, RPC payload or device is needed.
+    add_executable(test-lstm-concat-buffer test/test_lstm_concat_buffer.cpp)
+    target_include_directories(test-lstm-concat-buffer PRIVATE src
+        $<TARGET_PROPERTY:ggml,INTERFACE_INCLUDE_DIRECTORIES>)
+    parakeet_apply_ccache(test-lstm-concat-buffer)
+    parakeet_register_test(test-lstm-concat-buffer LABEL "unit")
 
     # Fused attention is a build option; only CUDA and Metal take it, and the
     # encoder graph built on CPU must never contain the fused node.

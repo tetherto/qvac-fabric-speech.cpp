@@ -120,17 +120,6 @@ constexpr int kLongFormDisabled = -1;
 constexpr int kBoundaryWindowFrames = 100;
 constexpr float kBoundarySeconds = 8.0f;
 constexpr size_t kGraphInputAlignmentSlack = 1024;
-// ggml-hexagon pads every buffer it allocates with a guard page that no ggml
-// API reports, so a projection is short by one page per Hexagon buffer: the
-// weights buffer, and the encoder's graph and positional-encoding buffers.
-constexpr size_t kHexagonGuardPageBytes = 4 * 1024;
-constexpr size_t kHexagonWeightBuffers = 1;
-constexpr size_t kHexagonEncoderBuffers = 2;
-
-bool allocation_matches(size_t projected, size_t allocated, const std::string & backend, size_t buffers) {
-    const size_t guard = backend == "hexagon" ? kHexagonGuardPageBytes * buffers : 0;
-    return allocated >= projected && allocated - projected <= guard;
-}
 
 long long workload_samples(const parakeet::ParakeetCtcModel & model, float audio_seconds) {
     return (long long) std::ceil((double) audio_seconds * model.mel_cfg.sample_rate);
@@ -365,7 +354,7 @@ int main(int argc, char ** argv) {
         }
 
         const size_t real_weights = parakeet::model_weights_buffer_bytes(model);
-        expect(allocation_matches(fit.device.weights_bytes, real_weights, backend, kHexagonWeightBuffers),
+        expect(fit.device.weights_bytes == real_weights,
                "weights parity: projected " + std::to_string(fit.device.weights_bytes) +
                " != allocated " + std::to_string(real_weights));
 
@@ -385,8 +374,7 @@ int main(int argc, char ** argv) {
         }
         const size_t real_compute = parakeet::model_encoder_compute_buffer_bytes(model);
         if (fit.model_type != "nemotron") {
-            expect(allocation_matches(fit.device.encoder_compute_bytes, real_compute, backend,
-                                      kHexagonEncoderBuffers),
+            expect(fit.device.encoder_compute_bytes == real_compute,
                    "encoder compute parity: projected " +
                    std::to_string(fit.device.encoder_compute_bytes) +
                    " != reserved " + std::to_string(real_compute));
