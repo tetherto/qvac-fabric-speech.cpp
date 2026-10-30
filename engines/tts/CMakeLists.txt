@@ -2093,6 +2093,14 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-audio8-attention-cache)
     tts_cpp_register_test(test-audio8-attention-cache LABEL "unit")
 
+    # Standalone fake public backend: exercise the real REPACK chunk pricing
+    # without loading a model or a Hexagon driver.
+    add_executable(test-audio8-repack-measure test/audio8/test_repack_measure.cpp)
+    target_include_directories(test-audio8-repack-measure PRIVATE src
+        $<TARGET_PROPERTY:ggml,INTERFACE_INCLUDE_DIRECTORIES>)
+    tts_cpp_apply_ccache(test-audio8-repack-measure)
+    tts_cpp_register_test(test-audio8-repack-measure LABEL "unit")
+
     add_executable(test-audio8-hexagon-repack test/audio8/test_hexagon_repack.cpp)
     target_link_libraries(test-audio8-hexagon-repack PRIVATE tts-cpp ggml)
     target_include_directories(test-audio8-hexagon-repack PRIVATE src)

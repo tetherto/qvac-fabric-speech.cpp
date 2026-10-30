@@ -19,9 +19,10 @@ independently, by `verify_rope_layout`, which re-derives attention scores from
 the reference rotation; the codec still wants the same treatment.
 
 An f32 conversion is expected to be exact; f16 and quantised builds are checked
-against the tolerance implied by their storage format. RoPE tables are only
+against the tolerance implied by their storage format. RoPE values are only
 compared when the GGUF says it baked them at the reference's own bfloat16
-rounding, since an f32 build is deliberately a different table.
+rounding, since an f32 build is deliberately a different table. Their names,
+shapes, F32 storage and finite values are checked in either case.
 
     python3 verify-audio8-conversion.py \\
         --model-dir models/Audio8-TTS-Preview-0.6b \\
@@ -40,14 +41,19 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audio8_reference import (  # noqa: E402
+    BLOCK,
     CODEC_KV,
+    DENSE,
+    EXACT,
     FUSED_ATTENTION_SUFFIX,
     HEAD_DIM,
     LM_KV,
     codec_head_counts,
+    codec_tensor_role,
     expand_fused,
     load_codec_module,
     load_config,
+    lm_tensor_role,
     rename_codec_key,
     select_part,
     split_qkv,
@@ -62,6 +68,11 @@ ABSOLUTE_FLOOR = 1e-8
 # is asymmetric, so its worst case is a whole step rather than half of one.
 RELATIVE_TOLERANCE = {"F32": 1e-6, "F16": 1e-3, "Q8_0": 1.0 / 127.0, "Q4_0": 1.0 / 8.0}
 DEFAULT_RELATIVE_TOLERANCE = 1.0 / 8.0
+ALLOWED_STORAGE = {
+    EXACT: frozenset(("F32",)),
+    DENSE: frozenset(("F32", "F16")),
+    BLOCK: frozenset(RELATIVE_TOLERANCE),
+}
 
 
 def tolerance_for(tensor_type_name, reference):
@@ -150,6 +161,27 @@ def rope_plane_expectations(prefix, table):
     }
 
 
+def rope_shape_expectations(prefix, length, head_dim):
+    """Shape-only placeholders for tables whose values intentionally differ.
+
+    A zero-stride view avoids allocating a second table. compare still checks
+    the actual table's shape, storage and finite values before excluding its
+    numerical comparison.
+    """
+    plane = np.broadcast_to(np.float32(0), (length, head_dim // 2))
+    return {f"{prefix}_{name}": plane for name in ("cos", "sin")}
+
+
+def lm_rope_shape_expectations(config):
+    expected = rope_shape_expectations(
+        "lm/rope", int(config["max_seq_len"]), int(config["head_dim"])
+    )
+    expected.update(rope_shape_expectations(
+        "fast/rope", int(config["num_codebooks"]), int(config["fast_head_dim"])
+    ))
+    return expected
+
+
 def lm_rope_expectations(model_dir, config):
     theta = float(config["rope_base"])
     expectations = rope_plane_expectations("lm/rope", reference_rope(
@@ -228,7 +260,7 @@ def group_of(name):
     return re.sub(r"/\d+", "/N", name)
 
 
-def compare(actual, expected, label):
+def compare(actual, expected, label, role_of=lm_tensor_role, value_exclusions=()):
     worst = defaultdict(float)
     counts = defaultdict(int)
     failures = []
@@ -241,6 +273,25 @@ def compare(actual, expected, label):
             failures.append(
                 f"{label}: {name} shape {array.shape} != reference {reference.shape}"
             )
+            continue
+        if type_name not in RELATIVE_TOLERANCE:
+            failures.append(f"{label}: {name} has unsupported storage type {type_name}")
+            continue
+        role = role_of(name, reference)
+        if type_name not in ALLOWED_STORAGE[role]:
+            failures.append(
+                f"{label}: {name} uses {type_name} storage for {role} data "
+                f"(allowed: {', '.join(sorted(ALLOWED_STORAGE[role]))})"
+            )
+            continue
+        # NaN > tolerance is false, and Inf can make both the deviation and
+        # tolerance infinite. Reject either side before taking a maximum.
+        if not np.all(np.isfinite(array)) or not np.all(np.isfinite(reference)):
+            failures.append(f"{label}: {name} contains nonfinite actual or reference values")
+            continue
+        # Intentional non-reference RoPE tables still obey every structural
+        # check above, but must not appear as zero-deviation numeric passes.
+        if name in value_exclusions:
             continue
         deviation = float(np.max(np.abs(array - reference))) if array.size else 0.0
         group = group_of(name)
@@ -354,21 +405,20 @@ def bakes_reference_rope(fields, namespace):
     return fields.get(f"{namespace}.rope_precision") == "bf16"
 
 
-def drop_lm_rope(tensors):
-    return {n: v for n, v in tensors.items() if n not in LM_ROPE_TENSORS}
-
-
 def verify_lm(model_dir, path):
     fields, tensors = read_gguf(path)
     config = load_config(model_dir)
     state = load_lm_state(model_dir)
     expected = lm_expectations(config, state)
+    value_exclusions = ()
     if bakes_reference_rope(fields, LM_KV):
         expected.update(lm_rope_expectations(model_dir, config))
     else:
-        print(f"  note: {path} bakes non-reference RoPE tables; skipping their check")
-        tensors = drop_lm_rope(tensors)
-    worst, counts, failures = compare(tensors, expected, "lm")
+        print(f"  note: {path} bakes non-reference RoPE tables; skipping only their value comparison")
+        shapes = lm_rope_shape_expectations(config)
+        expected.update(shapes)
+        value_exclusions = shapes
+    worst, counts, failures = compare(tensors, expected, "lm", lm_tensor_role, value_exclusions)
     report(f"lm ({path})", worst, counts)
     failures += missing_from_gguf(tensors, expected, "lm")
     return failures + verify_rope_layout(model_dir, state, tensors, config)
@@ -416,8 +466,15 @@ def codec_rope_expectations(model_dir, fields):
     return expectations
 
 
-def drop_rope(tensors):
-    return {n: v for n, v in tensors.items() if not n.startswith("rope/")}
+def codec_rope_shape_expectations(fields):
+    frames = int(fields[f"{CODEC_KV}.max_frames"])
+    expectations = {}
+    for transformer in declared_transformers(fields):
+        expectations.update(rope_shape_expectations(
+            f"rope/{transformer}", frames,
+            int(fields[f"{CODEC_KV}.{transformer}.head_dim"]),
+        ))
+    return expectations
 
 
 def verify_codec(model_dir, path, part, checkpoint, fields, tensors):
@@ -430,12 +487,15 @@ def verify_codec(model_dir, path, part, checkpoint, fields, tensors):
     # RoPE tables are the one thing the checkpoint does not hold, so their
     # names are required even in a build whose values cannot be compared.
     required = set(expected) | rope_plane_names(fields)
+    value_exclusions = ()
     if bakes_reference_rope(fields, CODEC_KV):
         expected.update(codec_rope_expectations(model_dir, fields))
     else:
-        print(f"  note: {path} bakes non-reference RoPE tables; skipping their check")
-        tensors = drop_rope(tensors)
-    worst, counts, failures = compare(tensors, expected, label)
+        print(f"  note: {path} bakes non-reference RoPE tables; skipping only their value comparison")
+        shapes = codec_rope_shape_expectations(fields)
+        expected.update(shapes)
+        value_exclusions = shapes
+    worst, counts, failures = compare(tensors, expected, label, codec_tensor_role, value_exclusions)
     report(f"{label} ({path})", worst, counts)
     return failures + missing_from_gguf(emitted, required, label)
 

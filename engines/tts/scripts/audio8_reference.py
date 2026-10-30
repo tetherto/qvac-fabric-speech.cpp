@@ -80,6 +80,28 @@ BLOCK = "block"
 DENSE = "dense"
 
 
+def lm_tensor_role(name, array):
+    """LM body projections may use block storage; sampling/phase data stay F32."""
+    if (array.ndim == 2 and "/blk/" in name
+            and not name.endswith(("_norm", "_b"))
+            and array.shape[1] % QUANT_BLOCK == 0):
+        return BLOCK
+    if name in ("lm/tok_emb", "lm/codebook_emb", "fast/emb"):
+        return DENSE
+    return EXACT
+
+
+def codec_tensor_role(name, array):
+    """Codec tables/elementwise data stay F32; dense kernels stop at F16."""
+    if (array.ndim == 2 and "/blk/" in name
+            and not name.endswith(("_norm", "_scale"))
+            and array.shape[1] % QUANT_BLOCK == 0):
+        return BLOCK
+    if is_shared(name) or name.startswith("rope/"):
+        return EXACT
+    return DENSE if array.ndim >= 2 and DEPTHWISE_MARKER not in name else EXACT
+
+
 def storage_encoding(dtype, role):
     if dtype == "f32" or role == EXACT:
         return "f32"
