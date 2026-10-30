@@ -81,7 +81,10 @@ libraries in its deployment. `--backend hexagon` pins `HTP0`. Legacy
 remain available with `--backend auto`. The existing automatic GPU preference
 is preserved; Hexagon is an explicit engine capability.
 
-The F32 Hexagon kernels are validated with `qvac-ext-ggml` revision
+The optimized F32 Hexagon kernels, including source-layout energy fusion, were
+device-validated on CPH2723 (SM8750, Android 16, HTP v79) with `qvac-ext-ggml` revision
+`f36a6a2721b9530e05f8f36177b760d81daae13f`, merged into `speech` as
+`ab1630bfba9083fd776b81b7b2e8a4ebb9213e6c`. Earlier validation used
 `5eb6cb714bc84476f115ef491a534fc8b9104c8c`. Build the selected revision with
 Hexagon enabled, use its installed CMake package through `CMAKE_PREFIX_PATH`,
 and deploy the DSP skel from the same build. The original baseline revision
@@ -101,10 +104,14 @@ candidates retain the F32 im2col/matmul, unrolled recurrence or seven-op
 affine/PReLU graph respectively. The original baseline revision above follows these
 fallback routes. Precision and correctness thresholds are unchanged.
 
-The portable Hexagon graph retains sum/scale means and a channel shuffle that
-copies complete spatial planes. Its DPGRNN output copy folds frequency and time
-into one spatial dimension for a batched transpose, then reshapes back to the
-canonical `[F,T,C,Bc]` layout without changing values or batch order. These Hexagon graph
+The Hexagon graph selects `MEAN` for supported F32 reduction shapes and retains
+sum/scale means when the runtime rejects the candidate. Single-channel energy
+omits the channel transpose and reduction; multi-channel energy exposes a
+`CONT`/`SQR`/`MEAN` chain that the matching runtime can fuse directly from the
+source layout. The channel shuffle copies complete spatial planes. The DPGRNN
+output copy folds frequency and time into one spatial dimension for a batched
+transpose, then reshapes back to the canonical `[F,T,C,Bc]` layout without changing
+values or batch order. These Hexagon graph
 choices preserve the CPU/OpenCL graph paths. The enhancer uses direct depthwise
 convolution. Each graph is checked against the selected backend before
 execution. Resampling, STFT/mel features, denoiser log features, overlap-add,
