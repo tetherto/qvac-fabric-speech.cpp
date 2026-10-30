@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -6,11 +7,27 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "run-fixture-tests.py"
 SPEC = importlib.util.spec_from_file_location("fixture_coverage", SCRIPT)
 COVERAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COVERAGE)
+
+MINIMUM_FIXTURE_TOOL_VERSION = (3, 21)
+
+
+def require_fixture_tools():
+    for tool in ("cmake", "ctest"):
+        if not shutil.which(tool):
+            raise unittest.SkipTest(f"requires {tool} 3.21 or newer")
+        try:
+            result = subprocess.run([tool, "--version"], capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise unittest.SkipTest(f"cannot determine {tool} version: {error}") from error
+        version = re.search(r"\bversion (\d+)\.(\d+)", result.stdout)
+        if version is None or tuple(map(int, version.groups())) < MINIMUM_FIXTURE_TOOL_VERSION:
+            raise unittest.SkipTest(f"requires {tool} 3.21 or newer")
 
 
 def registration(name, disabled=False, label="fixture"):
@@ -79,10 +96,10 @@ class FixtureCoverageTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
 
 
-@unittest.skipUnless(shutil.which("cmake") and shutil.which("ctest"), "requires CMake and CTest")
 class FixtureRunnerIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        require_fixture_tools()
         cls.temporary = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temporary.cleanup)
         source = Path(cls.temporary.name)
@@ -111,6 +128,35 @@ class FixtureRunnerIntegrationTest(unittest.TestCase):
     def test_rejects_real_runtime_skip(self):
         with self.assertRaisesRegex(ValueError, "did not execute successfully"):
             self.run_fixture(["unavailable"])
+
+
+class FixtureToolVersionTest(unittest.TestCase):
+    def test_old_tool_skips_integration_before_creating_project(self):
+        for versions in (("3.20.6", "3.21.0"), ("3.21.0", "3.20.6")):
+            results = [types.SimpleNamespace(stdout=f"{tool} version {version}\n")
+                       for tool, version in zip(("cmake", "ctest"), versions)]
+            with self.subTest(versions=versions), \
+                    patch.object(shutil, "which", return_value="tool"), \
+                    patch.object(subprocess, "run", side_effect=results), \
+                    patch.object(tempfile, "TemporaryDirectory") as temporary:
+                with self.assertRaises(unittest.SkipTest):
+                    FixtureRunnerIntegrationTest.setUpClass()
+                temporary.assert_not_called()
+
+    def test_accepts_minimum_and_newer_versions(self):
+        for version in ("3.21.0", "3.31.6", "4.0.0-rc1"):
+            with self.subTest(version=version), \
+                    patch.object(shutil, "which", return_value="tool"), \
+                    patch.object(subprocess, "run", return_value=types.SimpleNamespace(
+                        stdout=f"tool version {version}\n")):
+                require_fixture_tools()
+
+    def test_missing_tool_skips_integration(self):
+        with patch.object(shutil, "which", side_effect=["cmake", None]), \
+                patch.object(subprocess, "run", return_value=types.SimpleNamespace(
+                    stdout="cmake version 3.21.0\n")):
+            with self.assertRaisesRegex(unittest.SkipTest, "ctest"):
+                require_fixture_tools()
 
 
 if __name__ == "__main__":
