@@ -12,6 +12,7 @@
 #include "gguf.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -40,6 +41,7 @@ constexpr float MAX_SECONDS_LIMIT = 600.0f;
 constexpr int64_t MAX_HOP = 1 << 16;
 constexpr int64_t MAX_LATENT_FRAMES = 1 << 14;
 constexpr int ATTENTION_PROBE_NODES = 16;
+constexpr std::array<const char *, 2> PACKED_PREFIXES = {"text.blk.", "dit."};
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss sfx: " + message);
@@ -47,6 +49,19 @@ constexpr int ATTENTION_PROBE_NODES = 16;
 
 bool within(int value, int low, int high) {
     return value >= low && value <= high;
+}
+
+bool has_packed_prefix(const std::string & name) {
+    return std::any_of(PACKED_PREFIXES.begin(), PACKED_PREFIXES.end(),
+                       [&](const char * prefix) { return name.rfind(prefix, 0) == 0; });
+}
+
+ggml_tensor * find_in(const std::vector<ggml_context *> & contexts, const std::string & name) {
+    for (ggml_context * ctx : contexts) {
+        ggml_tensor * tensor = ctx ? ggml_get_tensor(ctx, name.c_str()) : nullptr;
+        if (tensor) return tensor;
+    }
+    return nullptr;
 }
 
 bool is_matrix_type(ggml_type type) {
@@ -154,8 +169,11 @@ struct SfxModel::Impl {
     ggml_context * metadata = nullptr;
     ggml_context * weights = nullptr;
     ggml_context * host_weights = nullptr;
+    ggml_context * packed_weights = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
+    ggml_backend_buffer_t packed_buffer = nullptr;
+    ggml_backend_buffer_type_t packed_buft = nullptr;
     std::unique_ptr<GgufRows> token_rows;
     ::tts_cpp::detail::sched_fallback sched;
     SfxConfig config;
@@ -171,6 +189,8 @@ struct SfxModel::Impl {
     ~Impl() {
         ::tts_cpp::detail::sched_fallback_free(sched);
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
+        if (packed_buffer) ggml_backend_buffer_free(packed_buffer);
+        if (packed_weights) ggml_free(packed_weights);
         if (host_weights) ggml_free(host_weights);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -363,13 +383,19 @@ struct SfxModel::Impl {
         return count;
     }
 
-    ggml_context * context_for(const char * name) const {
-        return host_weights && std::strcmp(name, SFX_TOKEN_TABLE) == 0 ? host_weights : weights;
+    bool packs(const ggml_tensor * src) const {
+        return packed_weights && has_packed_prefix(ggml_get_name(src)) &&
+               ::tts_cpp::detail::cpu_repack_runs_matmul(packed_buft, src);
+    }
+
+    ggml_context * context_for(const ggml_tensor * src) const {
+        if (host_weights && std::strcmp(ggml_get_name(src), SFX_TOKEN_TABLE) == 0) return host_weights;
+        return packs(src) ? packed_weights : weights;
     }
 
     void mirror_metadata_tensors() {
         for (auto * src = ggml_get_first_tensor(metadata); src; src = ggml_get_next_tensor(metadata, src)) {
-            ggml_tensor * dst = ggml_new_tensor(context_for(ggml_get_name(src)), src->type, GGML_MAX_DIMS, src->ne);
+            ggml_tensor * dst = ggml_new_tensor(context_for(src), src->type, GGML_MAX_DIMS, src->ne);
             ggml_set_name(dst, ggml_get_name(src));
         }
     }
@@ -388,6 +414,9 @@ struct SfxModel::Impl {
         if (table_on_host) {
             host_weights = new_weight_context();
         }
+        if (packed_buft) {
+            packed_weights = new_weight_context();
+        }
         mirror_metadata_tensors();
     }
 
@@ -400,11 +429,28 @@ struct SfxModel::Impl {
         }
     }
 
-    void stream_tensors(::tts_cpp::detail::gguf_stream_reader & reader) {
-        for (auto * dst = ggml_get_first_tensor(weights); dst; dst = ggml_get_next_tensor(weights, dst)) {
+    static void stream_context(::tts_cpp::detail::gguf_stream_reader & reader, ggml_context * ctx) {
+        for (auto * dst = ggml_get_first_tensor(ctx); dst; dst = ggml_get_next_tensor(ctx, dst)) {
             if (!reader.to_backend(ggml_get_name(dst), dst)) {
                 fail(std::string("failed to load tensor: ") + ggml_get_name(dst));
             }
+        }
+    }
+
+    void stream_tensors(::tts_cpp::detail::gguf_stream_reader & reader) {
+        stream_context(reader, weights);
+        if (has_packed_tensors()) stream_context(reader, packed_weights);
+    }
+
+    bool has_packed_tensors() const {
+        return packed_weights && ggml_get_first_tensor(packed_weights);
+    }
+
+    void allocate_packed_weights() {
+        if (!has_packed_tensors()) return;
+        packed_buffer = ggml_backend_alloc_ctx_tensors_from_buft(packed_weights, packed_buft);
+        if (!packed_buffer) {
+            fail("packed weight allocation failed");
         }
     }
 
@@ -421,6 +467,7 @@ struct SfxModel::Impl {
         if (!weight_buffer) {
             fail("weight allocation failed");
         }
+        allocate_packed_weights();
         stream_tensors(reader);
     }
 
@@ -429,6 +476,8 @@ struct SfxModel::Impl {
         table_on_host = places_tables_on_host(layout.table, backend);
         fused = fuses_attention(layout.attention, backend);
         fused_dit = fuses_dit_attention(layout, backend, config);
+        packed_buft = layout.packing == WeightPacking::Automatic ? ::tts_cpp::detail::cpu_repack_buffer_type(backend)
+                                                                  : nullptr;
     }
 
     void load(const std::string & path, const BackendRequest & request, int threads) {
@@ -466,6 +515,14 @@ struct SfxModel::Impl {
         measured_weights = measure_fit_tensors(weights, buft);
         weight_buffer = measurement_buffer(buft);
         bind_measurement_weights(weights, weight_buffer);
+        prepare_packed_measurement();
+    }
+
+    void prepare_packed_measurement() {
+        if (!has_packed_tensors()) return;
+        measured_weights = fitutil::sat_add(measured_weights, measure_fit_tensors(packed_weights, packed_buft));
+        packed_buffer = measurement_buffer(packed_buft);
+        bind_measurement_weights(packed_weights, packed_buffer);
     }
 
     static void bind_measurement_weights(ggml_context * ctx, ggml_backend_buffer_t buffer) {
@@ -475,7 +532,7 @@ struct SfxModel::Impl {
     }
 
     std::vector<ggml_backend_buffer_t> weight_buffers() const {
-        return {weight_buffer};
+        return {weight_buffer, packed_buffer};
     }
 
     bool ensure_scheduler() {
@@ -483,7 +540,7 @@ struct SfxModel::Impl {
     }
 
     ggml_tensor * find(const std::string & name) const {
-        ggml_tensor * tensor = ggml_get_tensor(context_for(name.c_str()), name.c_str());
+        ggml_tensor * tensor = find_in({weights, packed_weights, host_weights}, name);
         if (tensor == nullptr) {
             fail("missing tensor: " + name);
         }
@@ -556,6 +613,9 @@ FitResult SfxModel::measure_weights() {
     result.device.weights_bytes = impl_->measured_weights;
     result.host_bytes = fitutil::sat_add(gguf_get_meta_size(impl_->file),
         fitutil::sat_add(ggml_get_mem_size(impl_->metadata), ggml_get_mem_size(impl_->weights)));
+    if (impl_->packed_weights) {
+        result.host_bytes = fitutil::sat_add(result.host_bytes, ggml_get_mem_size(impl_->packed_weights));
+    }
     if (impl_->host_weights) {
         const ggml_tensor * table = impl_->find(SFX_TOKEN_TABLE);
         result.host_bytes = fitutil::sat_add(result.host_bytes,

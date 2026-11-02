@@ -59,6 +59,8 @@ constexpr const char * BACKEND_REQUEST_HEXAGON = "hexagon";
 constexpr const char * HEXAGON_PRIMARY_DEVICE = "HTP0";
 constexpr const char * DSP_LIBRARY_PATH_ENV = "DSP_LIBRARY_PATH";
 constexpr char DSP_LIBRARY_PATH_SEPARATOR = ';';
+constexpr const char * CPU_REPACK_BUFFER_TYPE = "CPU_REPACK";
+constexpr size_t REPACK_PROBE_TENSORS = 3;
 
 const char * dev_reg_name(ggml_backend_dev_t dev) {
     if (!dev) return "";
@@ -202,6 +204,22 @@ ggml_backend_dev_t find_requested_device(const std::string & requested) {
     return nullptr;
 }
 
+ggml_backend_buffer_type_t * extra_buffer_types(ggml_backend_t backend) {
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
+                               reg, "ggml_backend_dev_get_extra_bufts")
+                         : nullptr;
+    return get_extra ? get_extra(dev) : nullptr;
+}
+
+ggml_backend_buffer_type_t find_buffer_type(ggml_backend_buffer_type_t * types, const char * name) {
+    for (; types && *types; ++types) {
+        if (std::strcmp(ggml_backend_buft_name(*types), name) == 0) return *types;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 std::string dsp_library_path_with(const std::string & dir, const char * current) {
@@ -234,13 +252,26 @@ bool backend_request_matches(const std::string & requested,
 ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t backend) {
     ggml_backend_buffer_type_t fallback = ggml_backend_get_default_buffer_type(backend);
     if (!backend_is_hexagon(backend)) return fallback;
-    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
-    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
-    auto get_extra = reg ? (ggml_backend_dev_get_extra_bufts_t) ggml_backend_reg_get_proc_address(
-                               reg, "ggml_backend_dev_get_extra_bufts")
-                         : nullptr;
-    ggml_backend_buffer_type_t * extra = get_extra ? get_extra(dev) : nullptr;
+    ggml_backend_buffer_type_t * extra = extra_buffer_types(backend);
     return extra && extra[0] ? extra[0] : fallback;
+}
+
+ggml_backend_buffer_type_t cpu_repack_buffer_type(ggml_backend_t backend) {
+    return backend_is_cpu(backend) ? find_buffer_type(extra_buffer_types(backend), CPU_REPACK_BUFFER_TYPE) : nullptr;
+}
+
+bool cpu_repack_runs_matmul(ggml_backend_buffer_type_t repack, const ggml_tensor * weight) {
+    if (!repack || !ggml_is_quantized(weight->type) || ggml_n_dims(weight) != 2) return false;
+    ggml_context * ctx = ggml_init({REPACK_PROBE_TENSORS * ggml_tensor_overhead(), nullptr, true});
+    if (!ctx) return false;
+    ggml_tensor * probe = ggml_new_tensor_2d(ctx, weight->type, weight->ne[0], weight->ne[1]);
+    ggml_tensor * product = ggml_mul_mat(ctx, probe, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, weight->ne[0]));
+    ggml_backend_buffer_t candidate = ggml_backend_buft_alloc_buffer(repack, 0);
+    probe->buffer = candidate;
+    const bool runs = candidate && ggml_backend_dev_supports_op(ggml_backend_buft_get_device(repack), product);
+    if (candidate) ggml_backend_buffer_free(candidate);
+    ggml_free(ctx);
+    return runs;
 }
 
 bool hexagon_runs_weight_type(ggml_type type) {
