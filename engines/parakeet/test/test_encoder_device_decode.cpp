@@ -3,6 +3,7 @@
 #include "parakeet/engine.h"
 #include "ggml-backend.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -16,6 +17,10 @@ constexpr int kThreads = 8;
 constexpr int kRepeatedRuns = 3;
 constexpr int kInjectedError = -73;
 constexpr int kBypassFrames = 16;
+constexpr int kValidMelFrames = 1001;
+constexpr int kPaddingMelFrames = 1;
+constexpr int kValidEncoderFrames = 126;
+constexpr int kPaddedEncoderFrames = 127;
 
 void require(bool condition, const char * message) {
     if (!condition) throw std::runtime_error(message);
@@ -140,6 +145,47 @@ void check_bypass_reuse(ParakeetCtcModel & model) {
     require(!output.encoder_consumed && !output.encoder_out.empty(), "Bypass retained consumed state");
 }
 
+std::vector<float> padded_mel(const ParakeetCtcModel & model, const std::vector<float> & mel) {
+    const int width = model.mel_cfg.n_mels;
+    const size_t valid_values = static_cast<size_t>(kValidMelFrames) * width;
+    require(mel.size() >= valid_values, "Audio is too short for padded regression");
+    std::vector<float> padded(static_cast<size_t>(kValidMelFrames + kPaddingMelFrames) * width, 0.0f);
+    std::copy_n(mel.begin(), valid_values, padded.begin());
+    require(std::any_of(padded.begin() + valid_values - width, padded.begin() + valid_values,
+        [](float value) { return value != 0.0f; }), "Last valid mel frame is empty");
+    return padded;
+}
+
+void check_padded_handoff(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
+                          const std::vector<float> & mel) {
+    if (model.model_type != ParakeetModelType::NEMOTRON) return;
+    const auto padded = padded_mel(model, mel);
+    const int frames = kValidMelFrames + kPaddingMelFrames;
+    EncoderOutputs reference;
+    require(run_encoder(model, padded.data(), frames, model.mel_cfg.n_mels,
+        reference, -1, false) == 0, "Padded reference encode failed");
+    require(reference.n_enc_frames == kValidEncoderFrames && reference.encoder_out.size() ==
+        static_cast<size_t>(kPaddedEncoderFrames) * reference.d_model, "Expected padded encoder geometry");
+    const auto expected = decode_host(model, runtime, reference);
+    TdtDecodeResult decoded;
+    double elapsed = 0;
+    const auto decode = make_device_encoder_consumer(model, runtime, prompt_id(model),
+        decode_options(model), decoded, elapsed);
+    int calls = 0;
+    const EncoderOutputConsumer consumer = [&](ggml_tensor * input, ggml_backend_t backend) {
+        ++calls;
+        return decode(input, backend);
+    };
+    EncoderOutputs output;
+    require(run_encoder(model, padded.data(), frames, model.mel_cfg.n_mels, output,
+        -1, false, false, consumer) == 0, "Padded consumer encode failed");
+    require(calls == 0 && !output.encoder_consumed, "Consumer received padded encoder frames");
+    require(output.n_enc_frames == kValidEncoderFrames && output.encoder_out == reference.encoder_out,
+        "Padded fallback did not preserve host output");
+    require(decode_host(model, runtime, output).token_ids == expected.token_ids,
+        "Padded fallback tokens differ from host");
+}
+
 void run_test(const std::string & path, const std::string & wav, const std::string & backend) {
     ParakeetCtcModel model;
     require(load_from_gguf(path, model, kThreads, 0, false, backend) == 0, "Model load failed");
@@ -158,6 +204,7 @@ void run_test(const std::string & path, const std::string & wav, const std::stri
     check_callbacks(model, mel, frames, reference);
     check_prompt_reuse(model, reference);
     check_bypass_reuse(model);
+    check_padded_handoff(model, runtime, mel);
 
     EngineOptions options;
     options.model_gguf_path = path;

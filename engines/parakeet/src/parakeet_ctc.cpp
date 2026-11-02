@@ -5245,7 +5245,8 @@ int run_encoder(ParakeetCtcModel   & model,
         out.block_0_attn_softmax.clear();
         out.block_0_attn_out.clear();
     }
-    if (consumer && !capture_intermediates && g.encoder_out_node) {
+    if (consumer && !capture_intermediates && g.encoder_out_node &&
+        g.encoder_out_node->ne[1] == out.n_enc_frames) {
         const int consumed = consumer(g.encoder_out_node, backend);
         if (consumed < 0) return consumed;
         out.encoder_consumed = consumed == kEncoderOutputConsumed;

@@ -19,7 +19,8 @@ requirements. An available ggml backend does not imply every model has been
 validated on it.
 
 Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
-through decoding, including Nemotron's locale-prompt projection. See the
+through decoding, including Nemotron's locale-prompt projection. Encoder tensors
+with extra padding frames retain host routing. See the
 [device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
 for routing, fallback and validation coverage.
 

@@ -797,6 +797,7 @@ struct EncoderOutputs {
 // Called synchronously while the cached encoder output is valid. Return zero
 // for host fallback, one after consuming it, or a negative error code. The
 // consumer must not retain the tensor. Diagnostic captures keep host output.
+// Encoder tensors with frames beyond n_enc_frames also keep host output.
 using EncoderOutputConsumer = std::function<int(ggml_tensor *, ggml_backend_t)>;
 constexpr int kEncoderOutputHost = 0;
 constexpr int kEncoderOutputConsumed = 1;
