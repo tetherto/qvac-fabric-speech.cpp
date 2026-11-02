@@ -144,6 +144,37 @@ target_link_libraries(${FIT_GRAPH_ERROR_TEST} PRIVATE ggml)
 add_test(NAME ${FIT_GRAPH_ERROR_TEST} COMMAND ${FIT_GRAPH_ERROR_TEST})
 set_tests_properties(${FIT_GRAPH_ERROR_TEST} PROPERTIES LABELS "unit;gh")
 
+# GNU linker interposition must reach calls inside whisper itself. Shared
+# libraries bind those calls before the test can wrap them, so keep this
+# regression on Linux static builds. Non-glibc hosts report an explicit skip.
+get_target_property(WHISPER_TEST_LIBRARY_TYPE whisper TYPE)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+        WHISPER_TEST_LIBRARY_TYPE STREQUAL "STATIC_LIBRARY" AND
+        CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(FIT_INIT_ERROR_TEST test-whisper-fit-init-error)
+    add_executable(${FIT_INIT_ERROR_TEST} ${FIT_INIT_ERROR_TEST}.cpp)
+    target_include_directories(${FIT_INIT_ERROR_TEST} PRIVATE ../include)
+    target_link_libraries(${FIT_INIT_ERROR_TEST} PRIVATE whisper)
+    target_link_options(${FIT_INIT_ERROR_TEST} PRIVATE
+        "LINKER:--wrap=ggml_backend_init_by_type" "LINKER:--wrap=free")
+    add_test(NAME ${FIT_INIT_ERROR_TEST} COMMAND ${FIT_INIT_ERROR_TEST}
+        ${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.bin)
+    set_tests_properties(${FIT_INIT_ERROR_TEST} PROPERTIES
+        LABELS "unit;tiny;gh" SKIP_RETURN_CODE 77 TIMEOUT 180)
+endif()
+
+# Tests are configured before the example targets, so gate on the option
+# that creates whisper-quantize rather than TARGET existence at this point.
+if (WHISPER_BUILD_EXAMPLES)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-whisper-quantize
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test-whisper-quantize.py"
+                --quantizer $<TARGET_FILE:whisper-quantize>)
+        set_tests_properties(test-whisper-quantize PROPERTIES LABELS "unit;gh" TIMEOUT 180)
+    endif()
+endif()
+
 # Native device selection: model-free registry/precedence contracts and real
 # frontend error/listing checks (QVAC patch, see PATCHES.md).
 set(DEVICE_SELECTION_TEST test-whisper-device-selection)
