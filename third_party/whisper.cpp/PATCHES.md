@@ -22,6 +22,7 @@ exists, so the manifest is meaningful without access to any tracker.
 
 | File | Change | Why |
 |---|---|---|
+| `README.md` | document encoder-state reporting | explain the actual Core ML encoder-state getter, its distinction from the ggml primary device, and optional-sidecar fallback so callers can interpret the new API correctly |
 | `models/convert-pt-to-ggml.py`, `models/convert-h5-to-ggml.py`, `tests/test-whisper-model-conversion.py` | serialize the declared tensor dtype directly from the checkpoint values | an FP32 PyTorch checkpoint otherwise writes FP32 payloads under FP16 headers, and the Hugging Face converter rounds even FP32 outputs through FP16. Lightweight tests execute both serializers and independently check shapes, types, values and file boundaries |
 | `examples/common-ggml.cpp`, `tests/test-whisper-quantize.py` | reject quantization when a tensor row is not divisible by the selected block size | Tiny's 384-value rows cannot use 256-value K-quant blocks; the tool previously returned success with an unreadable Q3_K/Q4_K model. Native CLI regressions check aligned outputs and explicit rejection without changing formats or backend support |
 | `src/whisper.cpp`, `tests/test-whisper-fit-init-error.cpp`, `tests/CMakeLists.txt` | initialize the state's batch before early failure cleanup | failed backend initialization or KV setup can free the state before batch allocation; zero initialization makes that cleanup safe. A Linux static-library regression checks the fit error and recovery through the real public API |
