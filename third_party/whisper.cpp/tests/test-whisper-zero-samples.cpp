@@ -8,6 +8,10 @@
 #endif
 #include <cassert>
 
+#ifdef WHISPER_TEST_COREML
+void testWhisperCoremlState(const char * model_path);
+#endif
+
 int main() {
     ggml_backend_load_all();
 
@@ -15,12 +19,14 @@ int main() {
     // evidence of graph execution or transcript accuracy. Reuse this existing
     // fixture load instead of allocating another full model state.
     assert(whisper_get_primary_backend_name(nullptr) == nullptr);
+    assert(!whisper_encoder_on_coreml(nullptr));
 
     struct whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = false;
 
     struct whisper_context * ctx = whisper_init_from_file_with_params(WHISPER_MODEL_PATH, cparams);
     assert(ctx != nullptr);
+    assert(!whisper_encoder_on_coreml(ctx));
 
     ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     assert(cpu != nullptr);
@@ -60,7 +66,12 @@ int main() {
     ctx = whisper_init_from_file_with_params_no_state(WHISPER_MODEL_PATH, cparams);
     assert(ctx != nullptr);
     assert(whisper_get_primary_backend_name(ctx) == nullptr);
+    assert(!whisper_encoder_on_coreml(ctx));
     whisper_free(ctx);
+
+#ifdef WHISPER_TEST_COREML
+    testWhisperCoremlState(WHISPER_MODEL_PATH);
+#endif
 
     printf("test-whisper-zero-samples: OK\n");
     return 0;
