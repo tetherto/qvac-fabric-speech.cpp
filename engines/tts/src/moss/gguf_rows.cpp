@@ -2,8 +2,10 @@
 
 #include "gguf.h"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <stdexcept>
 #include <system_error>
 
@@ -72,15 +74,31 @@ void GgufRows::read_row(int32_t id, float * out) {
     convert_row(out);
 }
 
-std::vector<float> GgufRows::gather(const std::vector<int32_t> & ids) {
+void GgufRows::require_table() const {
     if (!file_holds_table()) {
         fail("cannot read token rows; the model file changed while loaded");
     }
+}
+
+std::vector<float> GgufRows::gather(const std::vector<int32_t> & ids) {
+    require_table();
     std::vector<float> rows(ids.size() * (size_t) width_);
     for (size_t i = 0; i < ids.size(); ++i) {
         read_row(ids[i], rows.data() + i * (size_t) width_);
     }
     return rows;
+}
+
+void GgufRows::accumulate(const std::vector<int32_t> & ids, std::vector<float> & sums) {
+    if (sums.size() != ids.size() * (size_t) width_) {
+        fail("row sums do not match the requested rows");
+    }
+    const std::vector<float> rows = gather(ids);
+    std::transform(sums.begin(), sums.end(), rows.begin(), sums.begin(), std::plus<float>());
+}
+
+int64_t GgufRows::width() const {
+    return width_;
 }
 
 } // namespace tts_cpp::moss::detail

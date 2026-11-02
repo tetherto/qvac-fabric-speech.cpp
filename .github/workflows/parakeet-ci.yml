@@ -28,6 +28,18 @@ on:
         description: 'Also run the GPU ctest lane (on the self-hosted NVIDIA Linux runner)'
         type: boolean
         default: false
+      fixture_root:
+        description: 'Pre-staged fixture root on runners, containing models/, audio/ and references/'
+        type: string
+        default: ''
+      required_fixture_tests:
+        description: 'Space-separated CPU fixture test names that must execute successfully'
+        type: string
+        default: ''
+      required_gpu_tests:
+        description: 'Space-separated GPU test names that must execute successfully when run_gpu is enabled'
+        type: string
+        default: ''
       run_mosaic:
         description: 'Provision exact Mosaic and run real CPU/Metal/Core ML integration tests'
         type: boolean
@@ -134,12 +146,20 @@ jobs:
           cmake --install ggml-src/build
 
       - name: Configure
+        env:
+          FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
+          fixture_options=()
+          if [ -n "$FIXTURE_ROOT" ]; then
+            fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
+                              "-DPARAKEET_TEST_AUDIO_DIR=$FIXTURE_ROOT/audio"
+                              "-DPARAKEET_TEST_REF_DIR=$FIXTURE_ROOT/references")
+          fi
           cmake -S engines/parakeet -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DPARAKEET_USE_SYSTEM_GGML=ON \
             -DPARAKEET_BUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install" "${fixture_options[@]}"
 
       - name: Build
         run: cmake --build build -j4
@@ -186,6 +206,20 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: ctest --test-dir build -LE 'gpu|perf' --output-on-failure --timeout 600
+
+      - name: Require requested CPU fixture coverage
+        if: inputs.required_fixture_tests != ''
+        env:
+          REQUIRED_TESTS: ${{ inputs.required_fixture_tests }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: |
+          read -r -a required_tests <<< "$REQUIRED_TESTS"
+          required_options=()
+          for test_name in "${required_tests[@]}"; do
+            required_options+=(--require "$test_name")
+          done
+          python3 engines/parakeet/scripts/run-fixture-tests.py \
+            --test-dir build --label fixture "${required_options[@]}"
 
       # Guards the *installed* artifact contract, which no in-tree ctest
       # can see: the qvac-parakeet package/target names, a static-only
@@ -341,6 +375,8 @@ jobs:
       # requesting it without one fails the configure outright. A CPU-only
       # ggml would skip or falsely pass the GPU suites.
       - name: Build ggml + engine (native backends)
+        env:
+          FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
           git clone --depth 1 --branch "$GGML_BRANCH" "$GGML_REPO" ggml-src
           CUDA_OPTION=""
@@ -362,50 +398,25 @@ jobs:
             -DGGML_BUILD_EXAMPLES=OFF \
             -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
           cmake --build ggml-src/build -j && cmake --install ggml-src/build
+          fixture_options=()
+          if [ -n "$FIXTURE_ROOT" ]; then
+            fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
+                              "-DPARAKEET_TEST_AUDIO_DIR=$FIXTURE_ROOT/audio"
+                              "-DPARAKEET_TEST_REF_DIR=$FIXTURE_ROOT/references")
+          fi
           cmake -S engines/parakeet -B build -DCMAKE_BUILD_TYPE=Release \
             -DPARAKEET_USE_SYSTEM_GGML=ON -DPARAKEET_BUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install" "${fixture_options[@]}"
           cmake --build build -j
-      # `ctest -L gpu` is green when every arm is DISABLED (missing model or
-      # reference fixtures), so a bare pass cannot be told apart from "nothing
-      # executed" — same reason tts-ci.yml carries this step. Reported rather
-      # than enforced, matching tts-ci: no engine's fixtures are hosted in CI
-      # today, so hosting them is a change for the whole repo to make, not for
-      # this lane to block on. Unlike tts-ci's fixed list, the arms are read
-      # from ctest's own listing: parakeet has a dozen fixture-gated gpu arms
-      # and the set changes as decoders are added.
-      - name: Report which GPU arms are runnable
-        run: |
-          python3 - <<'CHECK'
-          import json, subprocess, sys
-
-          listing = subprocess.run(
-              ["ctest", "--test-dir", "build", "-N", "--show-only=json-v1"],
-              capture_output=True, text=True, check=True).stdout
-          tests = json.loads(listing)["tests"]
-
-          arms = []
-          for test in tests:
-              properties = {p["name"]: p["value"] for p in test.get("properties", [])}
-              if "gpu" in (properties.get("LABELS") or []):
-                  arms.append((test["name"], bool(properties.get("DISABLED"))))
-
-          disabled = [name for name, off in arms if off]
-          runnable = [name for name, off in arms if not off]
-          for name in disabled:
-              print("::warning::%s is disabled (its model or reference fixture is missing)" % name)
-          if not arms:
-              print("::warning::no gpu-labeled tests are registered in this build")
-          elif not runnable:
-              print("::warning::all %d GPU arms are disabled — the ctest step below will execute nothing, so its pass proves nothing" % len(arms))
-          else:
-              print("%d of %d GPU arms are runnable" % (len(runnable), len(arms)))
-          sys.exit(0)
-          CHECK
-      # LD_LIBRARY_PATH: libqvac-speech-ggml.so resolves its ggml-cpu/base
-      # siblings transitively, and Linux RUNPATH doesn't apply to transitive
-      # loads, so the loader needs the directory explicitly.
-      - name: Run the GPU suites
+      - name: Run GPU suites and require executed coverage
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -L gpu --output-on-failure --timeout 1200
+          REQUIRED_TESTS: ${{ inputs.required_gpu_tests }}
+        run: |
+          read -r -a required_tests <<< "$REQUIRED_TESTS"
+          required_options=()
+          for test_name in "${required_tests[@]}"; do
+            required_options+=(--require "$test_name")
+          done
+          python3 engines/parakeet/scripts/run-fixture-tests.py \
+            --test-dir build --label gpu "${required_options[@]}"

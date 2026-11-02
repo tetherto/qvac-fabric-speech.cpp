@@ -1,14 +1,24 @@
+import sys
 import importlib.util
 import unittest
 from pathlib import Path
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError as error:
+    print(f"SKIP: {error.name} is not installed")
+    sys.exit(77)
+
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS_DIR / "dump-unified-reference.py"
 SPEC = importlib.util.spec_from_file_location("dump_unified_reference", SCRIPT)
 DUMPER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(DUMPER)
+try:
+    SPEC.loader.exec_module(DUMPER)
+except ModuleNotFoundError as error:
+    print(f"SKIP: {error.name} is not installed")
+    sys.exit(77)
 
 SAMPLES_PER_FRAME = DUMPER.SAMPLES_PER_FRAME
 

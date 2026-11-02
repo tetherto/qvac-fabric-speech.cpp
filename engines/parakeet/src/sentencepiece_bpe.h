@@ -20,6 +20,8 @@ struct BpeVocab {
     int32_t bos_id   = -1;
     int32_t eos_id   = -1;
     int32_t pad_id   = -1;
+
+    std::vector<int32_t> locale_tag_ids;
 };
 
 std::string detokenize(const BpeVocab & vocab,
@@ -31,6 +33,17 @@ void append_token_pieces(const BpeVocab & vocab,
 
 std::string strip_leading_spaces(const std::string & text);
 
+std::string collapse_spaces(const std::string & text);
+
+std::string pieces_to_text(const BpeVocab & vocab, const std::string & pieces);
+
+bool piece_is_locale_tag(const std::string & piece);
+
+std::vector<int32_t> find_locale_tag_ids(const BpeVocab & vocab);
+
+bool tokens_start_word(const BpeVocab & vocab,
+                       const std::vector<int32_t> & token_ids);
+
 // True when the token's piece (in `vocab.pieces`) begins with the
 // SentencePiece word-boundary marker `▁` (U+2581, encoded as the 3-byte
 // sequence 0xE2 0x96 0x81 in UTF-8). Used by the streaming sessions to
@@ -39,7 +52,7 @@ std::string strip_leading_spaces(const std::string & text);
 // a fresh word ("if" after "see") without re-implementing the BPE
 // detokenizer rules.
 //
-// Returns false for out-of-range, blank/bos/eos/pad ids, and pieces
+// Returns false for out-of-range, blank/bos/eos/pad and locale tag ids, and pieces
 // whose first byte does not start the U+2581 marker (e.g. punctuation
 // pieces like ",", "." that should still be glued onto the previous
 // word without an inserted space).
