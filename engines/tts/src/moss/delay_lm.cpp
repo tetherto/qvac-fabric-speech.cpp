@@ -5,6 +5,7 @@
 #include "gguf_stream.h"
 #include "sched_dispatch.h"
 #include "moss/fit_measure.h"
+#include "moss/gguf_rows.h"
 #include "moss/host_tables.h"
 
 #include "ggml.h"
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 namespace tts_cpp::moss::detail {
@@ -50,9 +52,12 @@ bool starts_with(const char * text, const char * prefix) {
     return std::strncmp(text, prefix, std::strlen(prefix)) == 0;
 }
 
-bool host_table(const char * name) {
-    return std::strcmp(name, TEXT_TABLE) == 0 || std::strcmp(name, TEXT_HEAD) == 0 ||
-           starts_with(name, AUDIO_TABLE_PREFIX);
+bool row_table(const char * name) {
+    return std::strcmp(name, TEXT_TABLE) == 0 || starts_with(name, AUDIO_TABLE_PREFIX);
+}
+
+bool host_head(const char * name) {
+    return std::strcmp(name, TEXT_HEAD) == 0;
 }
 
 struct Layer {
@@ -90,7 +95,10 @@ struct DelayLM::Impl {
     ggml_backend_buffer_t weight_buffer = nullptr;
     ggml_backend_buffer_t state_buffer = nullptr;
     ggml_context * host_weights = nullptr;
+    ggml_context * row_tables = nullptr;
     HostTables host_tables{OWNER};
+    std::unique_ptr<GgufRows> text_rows;
+    std::vector<std::unique_ptr<GgufRows>> audio_rows;
     ::tts_cpp::detail::sched_fallback sched;
 
     DelayConfig config;
@@ -125,6 +133,7 @@ struct DelayLM::Impl {
         if (state_buffer) ggml_backend_buffer_free(state_buffer);
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
         if (state) ggml_free(state);
+        if (row_tables) ggml_free(row_tables);
         if (host_weights) ggml_free(host_weights);
         if (weights) ggml_free(weights);
         if (metadata) ggml_free(metadata);
@@ -189,8 +198,13 @@ struct DelayLM::Impl {
         if (!weights) {
             return ggml_get_tensor(metadata, name.c_str());
         }
-        ggml_tensor * tensor = ggml_get_tensor(weights, name.c_str());
-        return tensor || !host_weights ? tensor : ggml_get_tensor(host_weights, name.c_str());
+        for (ggml_context * ctx : {weights, host_weights, row_tables}) {
+            ggml_tensor * tensor = ctx ? ggml_get_tensor(ctx, name.c_str()) : nullptr;
+            if (tensor) {
+                return tensor;
+            }
+        }
+        return nullptr;
     }
 
     ggml_tensor * require_tensor(const std::string & name) const {
@@ -382,7 +396,13 @@ struct DelayLM::Impl {
     }
 
     ggml_context * context_for(const char * name) const {
-        return host_weights && host_table(name) ? host_weights : weights;
+        if (!tables_on_host) {
+            return weights;
+        }
+        if (host_head(name)) {
+            return host_weights;
+        }
+        return row_table(name) ? row_tables : weights;
     }
 
     void duplicate_metadata_tensors() {
@@ -390,6 +410,7 @@ struct DelayLM::Impl {
         weights = new_weight_context(count);
         if (tables_on_host) {
             host_weights = new_weight_context(count);
+            row_tables = new_weight_context(count);
         }
         for (auto * src = ggml_get_first_tensor(metadata); src; src = ggml_get_next_tensor(metadata, src)) {
             auto * dst = ggml_new_tensor(context_for(ggml_get_name(src)), src->type, GGML_MAX_DIMS, src->ne);
@@ -468,13 +489,22 @@ struct DelayLM::Impl {
         ggml_backend_tensor_set(slot_head, rows.data(), 0, rows.size() * sizeof(float));
     }
 
+    void open_row_tables(const std::string & path) {
+        text_rows = std::make_unique<GgufRows>(path, file, tok_embd, OWNER);
+        audio_rows.clear();
+        for (ggml_tensor * table : tok_embd_audio) {
+            audio_rows.push_back(std::make_unique<GgufRows>(path, file, table, OWNER));
+        }
+    }
+
     void upload_weights(const std::string & path) {
         ::tts_cpp::detail::gguf_stream_reader reader(file, path);
         if (!reader.ok()) {
             fail("cannot reopen GGUF for streaming: " + path);
         }
-        if (host_weights) {
-            host_tables.place(host_weights, file, path, reader);
+        if (tables_on_host) {
+            host_tables.read(host_weights, reader);
+            open_row_tables(path);
         }
         weight_buffer = ggml_backend_alloc_ctx_tensors_from_buft(weights,
                 ::tts_cpp::detail::weight_buffer_type(backend));
@@ -674,23 +704,61 @@ struct DelayLM::Impl {
         return mask;
     }
 
-    ggml_tensor * embed_rows(const std::vector<DelayRow> & rows) {
-        const int64_t n_tokens = (int64_t) rows.size();
-        std::vector<int32_t> text_ids(n_tokens);
-        for (int64_t i = 0; i < n_tokens; ++i) {
-            text_ids[i] = rows[i].text;
+    static std::vector<int32_t> text_ids(const std::vector<DelayRow> & rows) {
+        std::vector<int32_t> ids(rows.size());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            ids[i] = rows[i].text;
         }
-        ggml_tensor * cur = ggml_get_rows(graph_ctx, tok_embd, input_i32(std::move(text_ids)));
+        return ids;
+    }
+
+    static std::vector<int32_t> channel_ids(const std::vector<DelayRow> & rows, int channel) {
+        std::vector<int32_t> ids(rows.size());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            ids[i] = rows[i].audio[channel];
+        }
+        return ids;
+    }
+
+    ggml_tensor * embed_on_device(const std::vector<DelayRow> & rows) {
+        ggml_tensor * cur = ggml_get_rows(graph_ctx, tok_embd, input_i32(text_ids(rows)));
         for (int channel = 0; channel < config.n_vq; ++channel) {
-            std::vector<int32_t> channel_ids(n_tokens);
-            for (int64_t i = 0; i < n_tokens; ++i) {
-                channel_ids[i] = rows[i].audio[channel];
-            }
             ggml_tensor * embedded = ggml_get_rows(graph_ctx, tok_embd_audio[channel],
-                    input_i32(std::move(channel_ids)));
+                    input_i32(channel_ids(rows, channel)));
             cur = ggml_add(graph_ctx, cur, embedded);
         }
         return cur;
+    }
+
+    std::vector<float> sum_file_rows(const std::vector<DelayRow> & rows) {
+        std::vector<float> sums = text_rows->gather(text_ids(rows));
+        for (int channel = 0; channel < config.n_vq; ++channel) {
+            audio_rows[(size_t) channel]->accumulate(channel_ids(rows, channel), sums);
+        }
+        return sums;
+    }
+
+    void price_row_gather(const ggml_tensor * embedded) {
+        graph_host_bytes = fitutil::sat_add(graph_host_bytes, ggml_nbytes(embedded));
+    }
+
+    ggml_tensor * embed_from_file(const std::vector<DelayRow> & rows) {
+        ggml_tensor * embedded = input_f32(measure_only ? std::vector<float>() : sum_file_rows(rows),
+                config.n_embd, (int64_t) rows.size());
+        price_row_gather(embedded);
+        return embedded;
+    }
+
+    ggml_tensor * embed_rows(const std::vector<DelayRow> & rows) {
+        return tables_on_host ? embed_from_file(rows) : embed_on_device(rows);
+    }
+
+    uint64_t row_reader_bytes() const {
+        uint64_t bytes = ggml_get_mem_size(row_tables);
+        for (auto * t = ggml_get_first_tensor(row_tables); t; t = ggml_get_next_tensor(row_tables, t)) {
+            bytes = fitutil::sat_add(bytes, ggml_row_size(t->type, t->ne[0]));
+        }
+        return bytes;
     }
 
     void validate_rows(const std::vector<DelayRow> & rows) const {
@@ -892,6 +960,7 @@ FitResult DelayLM::measure(int prompt_rows, int generated_rows) {
     if (impl_->host_weights) {
         result.host_bytes = fitutil::sat_add(result.host_bytes,
                 measure_fit_tensors(impl_->host_weights, ggml_backend_cpu_buffer_type()));
+        result.host_bytes = fitutil::sat_add(result.host_bytes, impl_->row_reader_bytes());
     }
     return result;
 }
