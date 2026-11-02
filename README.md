@@ -18,6 +18,12 @@ The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
 validated on it.
 
+Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
+through decoding, including Nemotron's locale-prompt projection. Encoder tensors
+with extra padding frames retain host routing. See the
+[device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
+for routing, fallback and validation coverage.
+
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
