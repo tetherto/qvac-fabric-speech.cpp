@@ -106,11 +106,11 @@ int main(int argc, char ** argv) {
         size_t allocated = 0;
         for (auto buffer : weight_buffers)
             allocated += ggml_backend_buffer_get_size(buffer);
-        require(allocated == measured.weights_bytes + 4096 * weight_buffers.size(),
-                "metadata weight size does not match allocation plus guard pages");
+        require(allocated == measured.weights_bytes,
+                "metadata weight size does not match physical buffer allocation");
         std::printf(
-            "memory buffers=%zu payload_bytes=%zu allocated_bytes=%zu guard_bytes=%zu PASS\n",
-            weight_buffers.size(), measured.weights_bytes, allocated, 4096 * weight_buffers.size());
+            "memory buffers=%zu measured_bytes=%zu allocated_bytes=%zu PASS\n",
+            weight_buffers.size(), measured.weights_bytes, allocated);
         std::set<std::string> expected_projections;
         for (const auto * branch : {&cpu.model.blocks, &cpu.model.fast_blocks}) {
             for (const auto & block : *branch) {

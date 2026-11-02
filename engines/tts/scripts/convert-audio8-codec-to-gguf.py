@@ -35,23 +35,18 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audio8_reference import (  # noqa: E402
-    BLOCK,
     CODEC_ARCH as ARCH,
     CODEC_KV as KV,
     CODEC_PARTS,
-    DENSE,
-    DEPTHWISE_MARKER,
-    EXACT,
     FUSED_ATTENTION_SUFFIX,
     HEAD_DIM,
-    QUANT_BLOCK,
     ROPE_PRECISIONS,
     STORAGE_TYPES,
     codec_head_counts,
+    codec_tensor_role as role_of,
     expand_fused,
     flush,
     format_tally,
-    is_shared,
     load_config,
     raw_codec_state,
     rename_codec_key,
@@ -235,34 +230,6 @@ def write_codebook_metadata(writer, named):
         f"{KV}.residual_codebooks",
         sum(1 for n in named if re.fullmatch(r"q/res/\d+/codebook/weight", n)),
     )
-
-
-def is_body_matmul(name, array):
-    return (
-        array.ndim == 2
-        and "/blk/" in name
-        and not name.endswith(("_norm", "_scale"))
-        and array.shape[1] % QUANT_BLOCK == 0
-    )
-
-
-def is_matmul_operand(name, array):
-    """A depthwise kernel is one scalar per channel per tap, so the engine
-    applies it element-wise rather than contracting with it, and f16 would have
-    to be widened at every use."""
-    return array.ndim >= 2 and DEPTHWISE_MARKER not in name
-
-
-def role_of(name, array):
-    """The codebooks stay exact even though they are read like a table: the
-    encoder picks codes by nearest neighbour, so rounding them moves the
-    argmin. The same goes for the RoPE tables and every parameter the engine
-    reads element-wise, the snake alphas among them, which sit inside a sine."""
-    if is_body_matmul(name, array):
-        return BLOCK
-    if is_shared(name) or name.startswith("rope/"):
-        return EXACT
-    return DENSE if is_matmul_operand(name, array) else EXACT
 
 
 def part_specs(config, part):

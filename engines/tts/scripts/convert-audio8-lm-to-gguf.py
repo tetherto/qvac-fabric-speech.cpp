@@ -51,24 +51,18 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audio8_reference import (  # noqa: E402
-    BLOCK,
-    DENSE,
-    EXACT,
     LM_ARCH as ARCH,
     LM_KV as KV,
-    QUANT_BLOCK,
     ROPE_PRECISIONS,
     STORAGE_TYPES,
     expand_fused,
     flush,
     format_tally,
     load_config,
+    lm_tensor_role as role_of,
     rope_planes,
     write_tensors,
 )
-
-EMBEDDING_TABLES = ("lm/tok_emb", "lm/codebook_emb", "fast/emb")
-
 
 @dataclass(frozen=True)
 class Hyperparams:
@@ -284,26 +278,6 @@ def write_tokenizer(writer, model_dir, hp):
     writer.add_array("tokenizer.ggml.added_token_ids", added_token_ids(tokenizer))
     writer.add_eos_token_id(hp.eos)
     writer.add_pad_token_id(hp.pad)
-
-
-def is_body_matmul(name, array):
-    return (
-        array.ndim == 2
-        and "/blk/" in name
-        and not name.endswith(("_norm", "_b"))
-        and array.shape[1] % QUANT_BLOCK == 0
-    )
-
-
-def role_of(name, array):
-    """Everything outside the body and the embedding tables stays exact: that
-    leaves the RoPE tables, the two sampling heads and the norms, which between
-    them decide every greedy choice and add up to a few megabytes."""
-    if is_body_matmul(name, array):
-        return BLOCK
-    if name in EMBEDDING_TABLES:
-        return DENSE
-    return EXACT
 
 
 def parse_args():
