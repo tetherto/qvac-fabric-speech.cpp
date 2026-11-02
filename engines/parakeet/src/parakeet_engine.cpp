@@ -20,6 +20,7 @@
 #include "parakeet_log.h"
 #include "sortformer_finalize.h"
 #include "backend_util.h"
+#include "encoder_device_decode.h"
 #include "ggml-backend.h"
 
 #ifdef PARAKEET_USE_COREML
@@ -1030,6 +1031,14 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
 #endif
 
     double encoder_ms = 0.0;
+    double device_decode_ms = 0.0;
+    TdtDecodeResult device_result;
+    TdtDecodeOptions device_options = transducer_decode_options(pimpl_->model);
+    if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
+        device_options.max_symbols_per_step = pimpl_->model.nemotron_cfg.max_symbols_per_step;
+    }
+    const auto device_consumer = make_device_encoder_consumer(pimpl_->model,
+        pimpl_->transducer_rt, pimpl_->nemotron_prompt_id, device_options, device_result, device_decode_ms);
     EncoderOutputs enc_out;
     const LongFormPlan lf =
         resolve_long_form_plan(pimpl_->model, pimpl_->opts, n_mel_frames);
@@ -1103,11 +1112,11 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                  pimpl_->model.mel_cfg.n_mels, enc_out,
                                  /*max_layers=*/-1,
                                  /*capture_intermediates=*/false,
-                                 /*allow_coreml_padded=*/true); rc != 0) {
+                                 /*allow_coreml_padded=*/true, device_consumer); rc != 0) {
             throw std::runtime_error("parakeet::Engine::transcribe_samples: run_encoder failed (rc=" +
                                      std::to_string(rc) + ")");
         }
-        encoder_ms = ms_since(t_enc);
+        encoder_ms = ms_since(t_enc) - device_decode_ms;
     }
 
     // A cancel() during the windowed encoder loop can leave no committed
@@ -1130,7 +1139,10 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     std::string text;
     std::vector<float> conditioned_encoder;
     const float * decoder_input = enc_out.encoder_out.data();
-    if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
+    if (enc_out.encoder_consumed) {
+        ids = std::move(device_result.token_ids);
+        text = std::move(device_result.text);
+    } else if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
         if (int rc = run_nemotron_prompt_projection(
                 pimpl_->model,
                 enc_out.encoder_out.data(),
@@ -1196,7 +1208,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                  &dopts);
         text = detokenize(pimpl_->model.vocab, ids);
     }
-    const double decode_ms = ms_since(t_dec);
+    const double decode_ms = enc_out.encoder_consumed ? device_decode_ms : ms_since(t_dec);
 
     EngineResult result;
     result.text           = std::move(text);

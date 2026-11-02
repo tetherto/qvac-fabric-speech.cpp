@@ -160,6 +160,8 @@ struct NemotronPromptGraph {
     ggml_cgraph * graph = nullptr;
     ggml_gallocr_t allocator = nullptr;
     ggml_tensor * input = nullptr;
+    ggml_tensor * prompt = nullptr;
+    int32_t prompt_id = -1;
     ggml_tensor * output = nullptr;
     int n_frames = 0;
 
@@ -174,6 +176,8 @@ struct NemotronPromptGraph {
         }
         graph = nullptr;
         input = nullptr;
+        prompt = nullptr;
+        prompt_id = -1;
         output = nullptr;
         n_frames = 0;
     }
@@ -4865,8 +4869,6 @@ static int build_nemotron_prompt_graph(
     NemotronPromptGraph & out,
     size_t * measure_bytes = nullptr) {
     out.clear();
-    const int input_width = model.nemotron_cfg.prompt_input_width;
-
     constexpr size_t graph_size = 64;
     const size_t graph_memory =
         ggml_tensor_overhead() * graph_size +
@@ -4882,10 +4884,15 @@ static int build_nemotron_prompt_graph(
     }
 
     out.input = ggml_new_tensor_2d(
-        out.context, GGML_TYPE_F32, input_width, n_frames);
+        out.context, GGML_TYPE_F32, model.encoder_cfg.d_model, n_frames);
+    out.prompt = ggml_new_tensor_2d(
+        out.context, GGML_TYPE_F32, model.nemotron_cfg.prompt_width, n_frames);
     ggml_set_input(out.input);
+    ggml_set_input(out.prompt);
+    ggml_set_output(out.prompt);
+    ggml_tensor * conditioned = ggml_concat(out.context, out.input, out.prompt, 0);
     ggml_tensor * hidden = affine_mul_mat(
-        out.context, model.nemotron.prompt.proj_0_w, out.input);
+        out.context, model.nemotron.prompt.proj_0_w, conditioned);
     hidden = ggml_add(
         out.context, hidden, model.nemotron.prompt.proj_0_b);
     hidden = ggml_relu(out.context, hidden);
@@ -4940,6 +4947,52 @@ size_t model_nemotron_prompt_buffer_bytes(const ParakeetCtcModel & m) {
     return g.allocator ? ggml_gallocr_get_buffer_size(g.allocator, 0) : 0;
 }
 
+static int prepare_nemotron_prompt(ParakeetCtcModel & model, int n_frames, int32_t prompt_id) {
+    if (n_frames <= 0 || prompt_id < 0 || prompt_id >= model.nemotron_cfg.num_prompts ||
+        model.nemotron_cfg.prompt_width != model.nemotron_cfg.num_prompts ||
+        model.nemotron_cfg.prompt_input_width != model.encoder_cfg.d_model + model.nemotron_cfg.prompt_width) {
+        return -2;
+    }
+    auto & cached = model.impl->nemotron_prompt_graph;
+    if (!cached || cached->n_frames != n_frames) {
+        cached = std::make_unique<NemotronPromptGraph>();
+        if (int rc = build_nemotron_prompt_graph(model, n_frames, *cached); rc != 0) {
+            cached.reset();
+            return rc;
+        }
+    }
+    NemotronPromptGraph & graph = *cached;
+    if (!ggml_gallocr_alloc_graph(graph.allocator, graph.graph)) return -4;
+    if (graph.prompt_id != prompt_id) {
+        const int width = model.nemotron_cfg.prompt_width;
+        std::vector<float> prompt(static_cast<size_t>(width) * n_frames, 0.0f);
+        for (int frame = 0; frame < n_frames; ++frame) {
+            prompt[static_cast<size_t>(frame) * width + prompt_id] = 1.0f;
+        }
+        ggml_backend_tensor_set(graph.prompt, prompt.data(), 0, prompt.size() * sizeof(float));
+        graph.prompt_id = prompt_id;
+    }
+    return 0;
+}
+
+int run_nemotron_prompt_projection_device(ParakeetCtcModel & model,
+    ggml_tensor * encoder_out, int32_t prompt_id, ggml_tensor * & projected) {
+    projected = nullptr;
+    if (model.model_type != ParakeetModelType::NEMOTRON || !model.impl || !model.impl->backend_active || !encoder_out ||
+        encoder_out->type != GGML_TYPE_F32 || !ggml_is_contiguous(encoder_out) ||
+        encoder_out->ne[0] != model.encoder_cfg.d_model || encoder_out->ne[1] <= 0 ||
+        encoder_out->ne[1] > std::numeric_limits<int>::max() ||
+        encoder_out->ne[2] != 1 || encoder_out->ne[3] != 1 || !encoder_out->buffer ||
+        prompt_id < 0 || prompt_id >= model.nemotron_cfg.num_prompts) return -1;
+    if (int rc = prepare_nemotron_prompt(model, (int) encoder_out->ne[1], prompt_id); rc != 0) return rc;
+    NemotronPromptGraph & graph = *model.impl->nemotron_prompt_graph;
+    ggml_backend_tensor_copy_async(model.impl->backend_active, model.impl->backend_active,
+        encoder_out, graph.input);
+    if (ggml_backend_graph_compute(model.impl->backend_active, graph.graph) != GGML_STATUS_SUCCESS) return -5;
+    projected = graph.output;
+    return 0;
+}
+
 int run_nemotron_prompt_projection(
     ParakeetCtcModel & model,
     const float * encoder_out,
@@ -4966,36 +5019,13 @@ int run_nemotron_prompt_projection(
         return -2;
     }
 
-    std::vector<float> conditioned_input(
-        static_cast<size_t>(input_width) * n_frames, 0.0f);
-    for (int frame = 0; frame < n_frames; ++frame) {
-        float * destination =
-            conditioned_input.data() + static_cast<size_t>(frame) * input_width;
-        const float * source =
-            encoder_out + static_cast<size_t>(frame) * d_model;
-        std::copy(source, source + d_model, destination);
-        destination[d_model + prompt_id] = 1.0f;
-    }
-
-    auto & cached = model.impl->nemotron_prompt_graph;
-    if (!cached || cached->n_frames != n_frames) {
-        cached = std::make_unique<NemotronPromptGraph>();
-        if (int rc = build_nemotron_prompt_graph(model, n_frames, *cached);
-            rc != 0) {
-            cached.reset();
-            return rc;
-        }
-    }
-
-    NemotronPromptGraph & graph = *cached;
-    if (!ggml_gallocr_alloc_graph(graph.allocator, graph.graph)) {
-        return -4;
-    }
+    if (int rc = prepare_nemotron_prompt(model, n_frames, prompt_id); rc != 0) return rc;
+    NemotronPromptGraph & graph = *model.impl->nemotron_prompt_graph;
     ggml_backend_tensor_set(
         graph.input,
-        conditioned_input.data(),
+        encoder_out,
         0,
-        conditioned_input.size() * sizeof(float));
+        static_cast<size_t>(d_model) * n_frames * sizeof(float));
     if (ggml_backend_graph_compute(
             model.impl->backend_active, graph.graph) != GGML_STATUS_SUCCESS) {
         return -5;
@@ -5038,10 +5068,12 @@ int run_encoder(ParakeetCtcModel   & model,
                 EncoderOutputs     & out,
                 int                  max_layers,
                 bool                 capture_intermediates,
-                bool                 allow_coreml_padded) {
+                bool                 allow_coreml_padded,
+                const EncoderOutputConsumer & consumer) {
     // Set pessimistically on every invocation. Only a successful Core ML
     // prediction may change this to true.
     out.used_coreml = false;
+    out.encoder_consumed = false;
     if (!model.impl || !model.impl->backend_active) return -1;
 
     ggml_backend_t backend = model.impl->backend_active;
@@ -5213,7 +5245,16 @@ int run_encoder(ParakeetCtcModel   & model,
         out.block_0_attn_softmax.clear();
         out.block_0_attn_out.clear();
     }
-    copy_tensor(g.encoder_out_node,     out.encoder_out);
+    if (consumer && !capture_intermediates && g.encoder_out_node) {
+        const int consumed = consumer(g.encoder_out_node, backend);
+        if (consumed < 0) return consumed;
+        out.encoder_consumed = consumed == kEncoderOutputConsumed;
+    }
+    if (out.encoder_consumed) {
+        out.encoder_out.clear();
+    } else {
+        copy_tensor(g.encoder_out_node, out.encoder_out);
+    }
     copy_tensor(g.logits_node,          out.logits);
 
     return 0;
@@ -5242,6 +5283,7 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                                   EncoderOutputs   & out,
                                   int                max_layers) {
     out.used_coreml = false;
+    out.encoder_consumed = false;
     if (!model.impl || !model.impl->backend_active) return -1;
     if (!pre_encode_in || n_pre_encode_frames <= 0) return -1;
 
