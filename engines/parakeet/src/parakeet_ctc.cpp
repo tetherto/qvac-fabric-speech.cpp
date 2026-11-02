@@ -218,7 +218,7 @@ constexpr bool k_flash_attn_compiled = true;
 constexpr bool k_flash_attn_compiled = false;
 #endif
 
-// `PARAKEET_F16_ACTIVATIONS` (build flag, default OFF) lets the encoder cast
+// `PARAKEET_F16_ACTIVATIONS` (build flag, default ON) lets the encoder cast
 // specific tensors to F16 so the Hexagon HMX v79 path (F16-only) can accept
 // them. The encoder residual stream stays F32 because Hexagon's quantized MM
 // kernels only carry a `quantize_f32_q8_0_*` activation quantizer
