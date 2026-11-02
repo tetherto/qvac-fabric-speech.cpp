@@ -4575,6 +4575,15 @@ int whisper_n_vocab(struct whisper_context * ctx) {
     return ctx->vocab.n_vocab;
 }
 
+bool whisper_encoder_on_coreml(struct whisper_context * ctx) {
+#ifdef WHISPER_USE_COREML
+    return ctx != nullptr && ctx->state != nullptr && ctx->state->ctx_coreml != nullptr;
+#else
+    GGML_UNUSED(ctx);
+    return false;
+#endif
+}
+
 // QVAC (see PATCHES.md): distinguish explicit-device initialization from fallback.
 const char * whisper_get_primary_backend_name(struct whisper_context * ctx) {
     if (ctx == nullptr || ctx->state == nullptr || ctx->state->backends.empty()) {

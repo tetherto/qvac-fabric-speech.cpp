@@ -91,6 +91,9 @@ re-exported for padding invariance. See the
 
 ### Apple Core ML sidecars
 
+Whisper exposes `whisper_encoder_on_coreml(ctx)` for the loaded encoder state,
+independently of the ggml primary device.
+
 Optional sidecars accelerate a stage while the rest of the pipeline stays on
 ggml. They default to disabled and have model-specific input and fallback
 contracts; see the engine guides before exporting or deploying one.
