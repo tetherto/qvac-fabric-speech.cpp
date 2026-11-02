@@ -175,7 +175,6 @@ for name in list_vars.keys():
 
     print(src, ' -> ', name)
     data = list_vars[src].squeeze().numpy()
-    data = data.astype(np.float16)
 
     # reshape conv bias from [n] to [n, 1]
     if name in ["encoder.conv1.bias", "encoder.conv2.bias"]:
@@ -198,6 +197,8 @@ for name in list_vars.keys():
             print("  Converting to float32")
             data = data.astype(np.float32)
             ftype = 0
+        else:
+            data = data.astype(np.float16)
     else:
         data = data.astype(np.float32)
         ftype = 0

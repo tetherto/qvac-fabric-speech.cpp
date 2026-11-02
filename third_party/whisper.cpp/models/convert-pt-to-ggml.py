@@ -316,6 +316,8 @@ for name in list_vars.keys():
             print("  Converting to float32")
             data = data.astype(np.float32)
             ftype = 0
+        else:
+            data = data.astype(np.float16)
     else:
         data = data.astype(np.float32)
         ftype = 0

@@ -636,6 +636,18 @@ if (PARAKEET_BUILD_TESTS)
         endif()
     endfunction()
 
+    add_executable(test-parity test/test_parity.cpp)
+    parakeet_register_test(test-parity LABEL "unit")
+
+    add_executable(test-parity-harness
+        test/test_parity_harness.cpp test/test_encoder.cpp
+        test/test_tdt_encoder_parity.cpp test/test_sortformer_parity.cpp)
+    target_compile_definitions(test-parity-harness PRIVATE PARAKEET_PARITY_TEST)
+    target_include_directories(test-parity-harness PRIVATE src include)
+    target_link_libraries(test-parity-harness PRIVATE ggml)
+    parakeet_register_test(test-parity-harness LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/parity-harness-fixtures")
+
     # Helper: keep PARAKEET_EXPERIMENTAL_FLASH_ATTN consistent across the
     # parakeet library and any test executable that recompiles
     # parakeet_ctc.cpp from source. Backend selection itself goes
@@ -751,7 +763,11 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_register_test(test-encoder
         LABEL    "fixture"
         ARGS     "${_qvp_ctc_f16_gguf}" "${_qvp_ctc_ref}"
-        REQUIRES "${_qvp_ctc_f16_gguf}" "${_qvp_ctc_ref}/mel.npy" "${_qvp_ctc_ref}/encoder_out.npy")
+        REQUIRES "${_qvp_ctc_f16_gguf}" "${_qvp_ctc_ref}/mel.npy" "${_qvp_ctc_ref}/encoder_out.npy"
+                 "${_qvp_ctc_ref}/subsampling_out.npy" "${_qvp_ctc_ref}/block_0_post_ff1.npy"
+                 "${_qvp_ctc_ref}/block_0_post_attn.npy" "${_qvp_ctc_ref}/block_0_post_conv.npy"
+                 "${_qvp_ctc_ref}/block_0_post_ff2.npy" "${_qvp_ctc_ref}/block_0_out.npy"
+                 "${_qvp_ctc_ref}/block_last_out.npy" "${_qvp_ctc_ref}/logits.npy")
 
     add_executable(test-ctc
         test/test_ctc.cpp
@@ -1596,6 +1612,18 @@ if (PARAKEET_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
+                                test_dump_unified_reference test_inspect_nemotron_checkpoint
+                                test_fixture_coverage test_verify_gguf_roundtrip)
+            add_test(NAME ${script}
+                COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/${script}.py")
+            set_tests_properties(${script} PROPERTIES LABELS "unit"
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_RETURN_CODE 77)
+        endforeach()
+        add_test(NAME test-nemotron-diarization-scripts
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_nemotron_diarization_scripts.py")
+        set_tests_properties(test-nemotron-diarization-scripts PROPERTIES LABELS "unit"
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         add_test(
             NAME test-converter-rnnt
             COMMAND ${Python3_EXECUTABLE}
@@ -1940,11 +1968,11 @@ if (PARAKEET_BUILD_TESTS)
     add_executable(test-packed-affine test/test_packed_affine.cpp)
     target_include_directories(test-packed-affine PRIVATE src)
     target_link_libraries(test-packed-affine PRIVATE ggml)
-    add_test(NAME test-packed-affine-schema COMMAND test-packed-affine --self-test)
+    parakeet_register_test(test-packed-affine-schema EXE test-packed-affine LABEL "unit" ARGS --self-test)
     if (Python3_Interpreter_FOUND)
         add_test(NAME test-packed-affine-python
             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/test_packed_affine.py")
-        set_property(TEST test-packed-affine-python PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        set_tests_properties(test-packed-affine-python PROPERTIES LABELS "unit" SKIP_REGULAR_EXPRESSION "SKIP: ")
     endif()
 
     add_executable(test-coreml-shapes
@@ -2278,7 +2306,7 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_register_test(test-tdt-encoder-parity
         LABEL    "fixture"
         ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_ref}"
-        REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_ref}/encoder_out.npy")
+        REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_ref}/encoder_out.npy" "${_qvp_tdt_ref}/mel.npy")
 
     add_executable(test-tdt-decoder-parity
         test/test_tdt_decoder_parity.cpp
@@ -2341,6 +2369,14 @@ if (PARAKEET_BUILD_TESTS)
     target_include_directories(test-lstm-input-concat PRIVATE src ggml/include)
     parakeet_apply_ccache(test-lstm-input-concat)
     parakeet_register_test(test-lstm-input-concat LABEL "unit")
+
+    # The production buffer/probe helper with fake public backend interfaces:
+    # no model, backend library, RPC payload or device is needed.
+    add_executable(test-lstm-concat-buffer test/test_lstm_concat_buffer.cpp)
+    target_include_directories(test-lstm-concat-buffer PRIVATE src
+        $<TARGET_PROPERTY:ggml,INTERFACE_INCLUDE_DIRECTORIES>)
+    parakeet_apply_ccache(test-lstm-concat-buffer)
+    parakeet_register_test(test-lstm-concat-buffer LABEL "unit")
 
     # Fused attention is a build option; only CUDA and Metal take it, and the
     # encoder graph built on CPU must never contain the fused node.
@@ -2666,7 +2702,8 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_register_test(test-sortformer-parity
         LABEL    "fixture"
         ARGS     "${_qvp_sf_f16_gguf}" "${_qvp_diar_wav}" "${_qvp_sf_ref}"
-        REQUIRES "${_qvp_sf_f16_gguf}" "${_qvp_diar_wav}" "${_qvp_sf_ref}/encoder_out.npy")
+        REQUIRES "${_qvp_sf_f16_gguf}" "${_qvp_diar_wav}" "${_qvp_sf_ref}/encoder_out.npy"
+                 "${_qvp_sf_ref}/mel.npy" "${_qvp_sf_ref}/speaker_probs.npy")
 
     # Decoder determinism gate. Runs each decoder N times
     # against the same encoder output and asserts byte-equal results

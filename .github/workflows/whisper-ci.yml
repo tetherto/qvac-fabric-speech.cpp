@@ -67,6 +67,20 @@ jobs:
       contents: read
     uses: ./.github/workflows/reusable-runner-names.yml
 
+  model-conversion:
+    needs: runner_names
+    runs-on: ${{ needs.runner_names.outputs.ubuntu_2404 }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install serializer test dependency
+        run: python -m pip install numpy==1.26.4
+      - name: Check checkpoint conversion shapes, dtypes and values
+        run: python third_party/whisper.cpp/tests/test-whisper-model-conversion.py -v
+
   umbrella:
     needs: runner_names
     strategy:
@@ -151,6 +165,24 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
         run: ctest --test-dir build -LE 'gpu|perf|medium|large' -E '^test-vad-full$' --output-on-failure --timeout 600
+
+      # GNU --wrap observes calls in the static Whisper library. This separate
+      # target exercises cleanup after failed backend initialization without
+      # changing the umbrella's existing shared-library coverage.
+      - name: Check failed-initialization cleanup (Linux static Whisper)
+        if: runner.os == 'Linux'
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
+        run: |
+          cmake -S . -B build-init-error \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install" \
+            -DSPEECH_BUILD_PARAKEET=OFF -DSPEECH_BUILD_TTS=OFF \
+            -DSPEECH_BUILD_AUDIOGEN=OFF -DSPEECH_BUILD_TESTS=ON \
+            -DSPEECH_BUILD_WHISPER_TESTS=ON -DSPEECH_BUILD_EXECUTABLES=ON \
+            -DWHISPER_BUILD_SERVER=OFF
+          cmake --build build-init-error --target test-whisper-fit-init-error -j4
+          ctest --test-dir build-init-error -R '^test-whisper-fit-init-error$' --output-on-failure
 
       - name: Cache whisper tiny model
         id: model-cache
