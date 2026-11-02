@@ -8,6 +8,10 @@
 #endif
 #include <cassert>
 
+#ifdef WHISPER_TEST_COREML
+void testWhisperCoremlState(const char * model_path);
+#endif
+
 int main() {
     ggml_backend_load_all();
 
@@ -64,6 +68,10 @@ int main() {
     assert(whisper_get_primary_backend_name(ctx) == nullptr);
     assert(!whisper_encoder_on_coreml(ctx));
     whisper_free(ctx);
+
+#ifdef WHISPER_TEST_COREML
+    testWhisperCoremlState(WHISPER_MODEL_PATH);
+#endif
 
     printf("test-whisper-zero-samples: OK\n");
     return 0;
