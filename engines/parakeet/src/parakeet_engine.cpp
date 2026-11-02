@@ -2153,9 +2153,7 @@ void StreamSession::Impl::emit_native_segment(int64_t start_frame,
     segment.end_s = static_cast<double>(end_frame) * frame_stride_s;
     segment.chunk_index = chunk_index - 1;
     segment.is_final = true;
-    segment.starts_word = new_token_ids.empty()
-        ? true
-        : token_is_word_start(model.vocab, new_token_ids.front());
+    segment.starts_word = tokens_start_word(model.vocab, new_token_ids);
     segment.encoder_ms = encoder_ms;
     segment.decode_ms = 0.0;
     on_segment(segment);

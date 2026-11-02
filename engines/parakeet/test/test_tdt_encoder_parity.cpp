@@ -7,6 +7,7 @@
 
 #include "parakeet_ctc.h"
 #include "mel_preprocess.h"
+#include "parity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -69,26 +70,14 @@ int load_npy_f32(const std::string & path,
     for (int64_t d : out_shape) n *= static_cast<size_t>(d);
     out_data.resize(n);
     f.read(reinterpret_cast<char*>(out_data.data()), n * sizeof(float));
-    return 0;
+    return f ? 0 : 1;
 }
 
-void compute_parity(const std::vector<float> & a, const std::vector<float> & b,
-                    double & out_max_abs, double & out_rel) {
-    double max_abs = 0.0, ref_sq = 0.0, diff_sq = 0.0;
-    const size_t n = std::min(a.size(), b.size());
-    for (size_t i = 0; i < n; ++i) {
-        const double d = static_cast<double>(a[i]) - static_cast<double>(b[i]);
-        max_abs = std::max(max_abs, std::abs(d));
-        diff_sq += d * d;
-        ref_sq  += static_cast<double>(b[i]) * static_cast<double>(b[i]);
-    }
-    out_max_abs = max_abs;
-    out_rel = (ref_sq > 0) ? std::sqrt(diff_sq / ref_sq) : std::sqrt(diff_sq);
-}
+using parakeet_test::compute_parity;
 
 }
 
-int main(int argc, char ** argv) {
+int tdt_encoder_parity_main(int argc, char ** argv) {
     if (argc < 4) {
         std::fprintf(stderr,
             "usage: %s <parakeet-tdt.gguf> <wav> <ref-dir>\n"
@@ -111,7 +100,7 @@ int main(int argc, char ** argv) {
     ParakeetCtcModel model;
     // Force CPU encoder: this harness gates operator parity vs NeMo's FP32
     // reference; backend-induced drift (CPU<->GPU) is gated separately by
-    // test-vk-vs-cpu and would otherwise mask real encoder regressions here.
+    // test-gpu-vs-cpu and would otherwise mask real encoder regressions here.
     if (int rc = load_from_gguf(gguf_path, model, 0, 0, false); rc != 0) {
         std::fprintf(stderr, "  load_from_gguf failed rc=%d\n", rc);
         return 3;
@@ -142,6 +131,10 @@ int main(int argc, char ** argv) {
     if (load_npy_f32(ref_dir + "/mel.npy", mel_ref, mel_shape) != 0 || mel_shape.size() != 2) {
         std::fprintf(stderr, "  failed to load %s/mel.npy\n", ref_dir.c_str());
         return 5;
+    }
+    if (!parakeet_test::matches_matrix(mel_ref, mel_shape, model.mel_cfg.n_mels, mel_shape[1])) {
+        std::fprintf(stderr, "[tdt-parity] invalid mel reference shape\n");
+        return 1;
     }
     const int n_mels_ref      = static_cast<int>(mel_shape[0]);
     const int n_frames_ref    = static_cast<int>(mel_shape[1]);
@@ -187,15 +180,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "  failed to load %s/encoder_out.npy\n", ref_dir.c_str());
         return 7;
     }
-    const int T_ref = static_cast<int>(shape[0]);
-    const int D_ref = static_cast<int>(shape[1]);
-    std::fprintf(stderr, "[tdt-parity] encoder ref: (%d, %d)\n", T_ref, D_ref);
-
-    const size_t common = static_cast<size_t>(std::min(enc_out.n_enc_frames, T_ref)) * enc_out.d_model;
-    std::vector<float> a(enc_out.encoder_out.begin(), enc_out.encoder_out.begin() + common);
-    std::vector<float> b(enc_ref.begin(), enc_ref.begin() + common);
+    if (!parakeet_test::matches_matrix(enc_ref, shape, enc_out.n_enc_frames, enc_out.d_model)) {
+        std::fprintf(stderr, "[tdt-parity] encoder reference shape mismatch\n");
+        return 1;
+    }
     double max_abs = 0, rel = 0;
-    compute_parity(a, b, max_abs, rel);
+    compute_parity(enc_out.encoder_out, enc_ref, max_abs, rel);
     std::fprintf(stderr, "[tdt-parity] enc  : max_abs=%.4e rel=%.4e  (%s)\n",
                  max_abs, rel, rel < 5e-3 ? "PASS" : "FAIL");
 
@@ -206,3 +196,9 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr, "[tdt-parity] FAIL: encoder parity rel=%.4e > 5e-3\n", rel);
     return 1;
 }
+
+#ifndef PARAKEET_PARITY_TEST
+int main(int argc, char ** argv) {
+    return tdt_encoder_parity_main(argc, argv);
+}
+#endif

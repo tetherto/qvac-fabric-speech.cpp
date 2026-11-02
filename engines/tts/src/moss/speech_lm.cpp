@@ -1,6 +1,7 @@
 #include "moss/speech_lm.h"
 
 #include "moss/gguf_metadata.h"
+#include "moss/gguf_rows.h"
 #include "moss/host_tables.h"
 #include "moss/sfx_model.h"
 
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 namespace tts_cpp::moss::detail {
@@ -40,7 +42,9 @@ constexpr int TEXT_BLOCK = 1;
 constexpr int AUDIO_BLOCK = 2;
 constexpr int BLOCK_COUNT = 3;
 const char * const BLOCK_PREFIXES[BLOCK_COUNT] = {"blk.", "text.blk.", "audio.blk."};
-const char * const HOST_TABLES[] = {"text.token_embd.weight", "audio.token_embd.weight", "text.output.weight"};
+constexpr const char * TEXT_TABLE = "text.token_embd.weight";
+constexpr const char * AUDIO_TABLE = "audio.token_embd.weight";
+constexpr const char * TEXT_HEAD = "text.output.weight";
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(std::string(OWNER) + ": " + message);
@@ -116,13 +120,12 @@ void require_weight(const ggml_tensor * tensor, int64_t ne0, int64_t ne1) {
     }
 }
 
-bool host_table(const char * name) {
-    for (const char * table : HOST_TABLES) {
-        if (std::strcmp(name, table) == 0) {
-            return true;
-        }
-    }
-    return false;
+bool row_table(const char * name) {
+    return std::strcmp(name, TEXT_TABLE) == 0 || std::strcmp(name, AUDIO_TABLE) == 0;
+}
+
+bool host_head(const char * name) {
+    return std::strcmp(name, TEXT_HEAD) == 0;
 }
 
 bool in_vocab(int32_t id, int vocab) {
@@ -159,6 +162,39 @@ struct BatchInputs {
     std::vector<float> audio_select;
 };
 
+struct EmbeddingInputs {
+    ggml_tensor * text_ids = nullptr;
+    ggml_tensor * audio_ids = nullptr;
+    ggml_tensor * text_select = nullptr;
+    ggml_tensor * audio_select = nullptr;
+    ggml_tensor * rows = nullptr;
+};
+
+struct SelectedRows {
+    std::vector<int32_t> ids;
+    std::vector<size_t> slots;
+};
+
+SelectedRows selected_rows(const std::vector<int32_t> & ids, const std::vector<float> & select) {
+    SelectedRows rows;
+    for (size_t slot = 0; slot < ids.size(); ++slot) {
+        if (select[slot] != 0.0f) {
+            rows.ids.push_back(ids[slot]);
+            rows.slots.push_back(slot);
+        }
+    }
+    return rows;
+}
+
+void place_file_rows(GgufRows & table, const SelectedRows & rows, std::vector<float> & embedded) {
+    const std::vector<float> values = table.gather(rows.ids);
+    const auto width = (size_t) table.width();
+    for (size_t i = 0; i < rows.slots.size(); ++i) {
+        std::copy_n(values.begin() + (std::ptrdiff_t) (i * width), width,
+                    embedded.begin() + (std::ptrdiff_t) (rows.slots[i] * width));
+    }
+}
+
 template <typename T>
 void set_input(ggml_tensor * tensor, const std::vector<T> & values) {
     if (tensor != nullptr && tensor->buffer != nullptr) {
@@ -180,11 +216,14 @@ struct SpeechLM::Impl {
     ggml_context * metadata = nullptr;
     ggml_context * weights = nullptr;
     ggml_context * host_weights = nullptr;
+    ggml_context * row_tables = nullptr;
     ggml_context * state = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
     ggml_backend_buffer_t state_buffer = nullptr;
     HostTables host_tables{OWNER};
+    std::unique_ptr<GgufRows> text_rows;
+    std::unique_ptr<GgufRows> audio_rows;
     ::tts_cpp::detail::sched_fallback sched;
     SpeechLmConfig config;
     SpeechLayout layout;
@@ -204,7 +243,13 @@ struct SpeechLM::Impl {
     }
 
     ggml_context * context_for(const char * name) const {
-        return host_weights && host_table(name) ? host_weights : weights;
+        if (!tables_on_host) {
+            return weights;
+        }
+        if (host_head(name)) {
+            return host_weights;
+        }
+        return row_table(name) ? row_tables : weights;
     }
 
     ggml_tensor * find(const std::string & name) const {
@@ -247,6 +292,7 @@ struct SpeechLM::Impl {
         weights = new_weight_context();
         if (tables_on_host) {
             host_weights = new_weight_context();
+            row_tables = new_weight_context();
         }
         mirror_metadata_tensors();
     }
@@ -268,13 +314,19 @@ struct SpeechLM::Impl {
         }
     }
 
+    void open_row_tables(const std::string & path) {
+        text_rows = std::make_unique<GgufRows>(path, file, find(TEXT_TABLE), OWNER);
+        audio_rows = std::make_unique<GgufRows>(path, file, find(AUDIO_TABLE), OWNER);
+    }
+
     void upload_weights(const std::string & path) {
         ::tts_cpp::detail::gguf_stream_reader reader(file, path);
         if (!reader.ok()) {
             fail("cannot reopen GGUF for streaming: " + path);
         }
-        if (host_weights) {
-            host_tables.place(host_weights, file, path, reader);
+        if (tables_on_host) {
+            host_tables.read(host_weights, reader);
+            open_row_tables(path);
         }
         weight_buffer = ggml_backend_alloc_ctx_tensors_from_buft(weights,
                 ::tts_cpp::detail::weight_buffer_type(backend));
@@ -313,11 +365,11 @@ struct SpeechLM::Impl {
     }
 
     void validate_heads() const {
-        require_weight(find("text.token_embd.weight"), config.n_embd, config.text_vocab);
-        require_weight(find("audio.token_embd.weight"), config.n_embd, config.audio_vocab);
+        require_weight(find(TEXT_TABLE), config.n_embd, config.text_vocab);
+        require_weight(find(AUDIO_TABLE), config.n_embd, config.audio_vocab);
         require_vector(find("text.output_norm.weight"), config.n_embd, 1);
         require_vector(find("audio.output_norm.weight"), config.n_embd, 1);
-        require_weight(find("text.output.weight"), config.n_embd, config.text_vocab);
+        require_weight(find(TEXT_HEAD), config.n_embd, config.text_vocab);
         require_weight(find("audio.output.weight"), config.n_embd, config.audio_vocab);
     }
 
@@ -375,10 +427,14 @@ struct SpeechLM::Impl {
     void release_weights() {
         release_generation();
         host_tables.release();
+        text_rows.reset();
+        audio_rows.reset();
         if (weight_buffer) ggml_backend_buffer_free(weight_buffer);
+        if (row_tables) ggml_free(row_tables);
         if (host_weights) ggml_free(host_weights);
         if (weights) ggml_free(weights);
         weight_buffer = nullptr;
+        row_tables = nullptr;
         host_weights = nullptr;
         weights = nullptr;
     }
@@ -576,12 +632,41 @@ struct SpeechLM::Impl {
         return ggml_mul_mat(ctx, find(std::string(head) + ".output.weight"), last);
     }
 
-    ggml_tensor * embed(SfxGraph & graph, ggml_tensor * text_ids, ggml_tensor * audio_ids, ggml_tensor * text_select,
-                        ggml_tensor * audio_select) const {
+    ggml_tensor * embed_on_device(SfxGraph & graph, int64_t tokens, EmbeddingInputs & inputs) const {
         ggml_context * ctx = graph.ctx();
-        ggml_tensor * text = ggml_get_rows(ctx, find("text.token_embd.weight"), text_ids);
-        ggml_tensor * audio = ggml_get_rows(ctx, find("audio.token_embd.weight"), audio_ids);
-        return ggml_add(ctx, ggml_mul(ctx, text, text_select), ggml_mul(ctx, audio, audio_select));
+        inputs.text_ids = graph.input_i32(tokens);
+        inputs.audio_ids = graph.input_i32(tokens);
+        inputs.text_select = graph.input_f32(1, tokens);
+        inputs.audio_select = graph.input_f32(1, tokens);
+        ggml_tensor * text = ggml_get_rows(ctx, find(TEXT_TABLE), inputs.text_ids);
+        ggml_tensor * audio = ggml_get_rows(ctx, find(AUDIO_TABLE), inputs.audio_ids);
+        return ggml_add(ctx, ggml_mul(ctx, text, inputs.text_select), ggml_mul(ctx, audio, inputs.audio_select));
+    }
+
+    ggml_tensor * embed(SfxGraph & graph, int64_t tokens, EmbeddingInputs & inputs) const {
+        if (!tables_on_host) {
+            return embed_on_device(graph, tokens, inputs);
+        }
+        inputs.rows = graph.input_f32(config.n_embd, tokens);
+        return inputs.rows;
+    }
+
+    std::vector<float> file_rows(const BatchInputs & batch) {
+        std::vector<float> embedded(batch.text_ids.size() * (size_t) config.n_embd);
+        place_file_rows(*text_rows, selected_rows(batch.text_ids, batch.text_select), embedded);
+        place_file_rows(*audio_rows, selected_rows(batch.audio_ids, batch.audio_select), embedded);
+        return embedded;
+    }
+
+    void set_embedding_inputs(const EmbeddingInputs & inputs, const BatchInputs & batch) {
+        if (inputs.rows) {
+            set_input(inputs.rows, file_rows(batch));
+            return;
+        }
+        set_input(inputs.text_ids, batch.text_ids);
+        set_input(inputs.audio_ids, batch.audio_ids);
+        set_input(inputs.text_select, batch.text_select);
+        set_input(inputs.audio_select, batch.audio_select);
     }
 
     void place_row(BatchInputs & inputs, size_t slot, const SpeechRow & row) const {
@@ -665,25 +750,19 @@ struct SpeechLM::Impl {
             fail("context overflow");
         }
         SfxGraph graph(GRAPH_NODES);
-        ggml_tensor * text_ids = graph.input_i32(tokens);
-        ggml_tensor * audio_ids = graph.input_i32(tokens);
-        ggml_tensor * text_select = graph.input_f32(1, tokens);
-        ggml_tensor * audio_select = graph.input_f32(1, tokens);
+        EmbeddingInputs embedding;
+        ggml_tensor * embedded = embed(graph, tokens, embedding);
         ggml_tensor * positions_input = graph.input_i32(tokens);
         ggml_tensor * mask = tokens > 1 ? graph.input_f32(pos + tokens, tokens) : nullptr;
         ggml_tensor * attention_mask = mask && fused ? ggml_cast(graph.ctx(), mask, GGML_TYPE_F16) : mask;
-        ggml_tensor * shared = block_forward(graph, SHARED_BLOCK, embed(graph, text_ids, audio_ids, text_select,
-                audio_select), tokens, positions_input, attention_mask);
+        ggml_tensor * shared = block_forward(graph, SHARED_BLOCK, embedded, tokens, positions_input, attention_mask);
         ggml_tensor * text_logits = request_output(graph, branch_logits(graph, TEXT_BLOCK, "text", shared, tokens,
                 positions_input, attention_mask), heads.text);
         ggml_tensor * audio_logits = request_output(graph, branch_logits(graph, AUDIO_BLOCK, "audio", shared, tokens,
                 positions_input, attention_mask), heads.audio);
 
         allocate(graph);
-        set_input(text_ids, inputs.text_ids);
-        set_input(audio_ids, inputs.audio_ids);
-        set_input(text_select, inputs.text_select);
-        set_input(audio_select, inputs.audio_select);
+        set_embedding_inputs(embedding, inputs);
         set_input(positions_input, positions(tokens));
         if (mask) {
             set_input(mask, causal_mask(tokens));

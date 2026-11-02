@@ -53,6 +53,49 @@ For the non-GPU, non-performance suite, including enabled fixture tests:
 ctest --test-dir build-parakeet -LE 'gpu|perf' --output-on-failure
 ```
 
+CTC, TDT and Sortformer encoder parity requires matching tensor shapes and
+nonempty, finite output. CTC stage and logits references, TDT mel and encoder
+references, and Sortformer mel, encoder and speaker-probability references must
+all exist at configure time. Removing or truncating a required reference after
+configuration fails the harness. Mel comparisons that intentionally allow
+trailing-frame padding differences remain diagnostic.
+All three encoder gates consume the reference mel, keeping preprocessing padding
+differences separate from encoder shape validation.
+
+`test-parity` covers numerical and shape validation; `test-parity-harness` runs
+the actual three parity entry points with synthetic model outputs, including
+missing, truncated and mismatched reference cases. Both are model-free unit tests.
+The converter arguments, reference generators, checkpoint inspector, Nemotron
+preparation scripts and packed-affine checks are also registered under `unit`.
+Reference-generator tests report a skip when their Python dependencies are absent.
+
+### Require executed fixture coverage
+
+A successful ordinary CTest run can contain disabled or skipped model tests.
+Use the fixture runner (Python and CTest 3.21+) when checking model coverage:
+
+```bash
+python engines/parakeet/scripts/run-fixture-tests.py --test-dir build-parakeet \
+  --label fixture --require test-encoder --require test-tdt-encoder-parity \
+  --require test-sortformer-parity
+```
+
+With `--require`, only the named tests within the selected label run, and every
+one must execute successfully. Missing, disabled, skipped or failed required tests
+fail the command. Without `--require`, all enabled tests with the label run and
+at least one must execute successfully; optional backend skips are allowed.
+The JUnit report is saved as `fixture-results.xml` in the build directory.
+Use `--configuration Release` for a multi-configuration build.
+
+The `parakeet-ci.yml` dispatch accepts `fixture_root`, a pre-staged directory on
+each participating runner containing `models/`, `audio/` and `references/`.
+It does not download fixtures. `required_fixture_tests` is a space-separated list
+of CPU fixture test names required by the build-test jobs. With `run_gpu=true`,
+the GPU job always requires executed coverage; `required_gpu_tests` optionally
+selects the exact GPU test names that must run. Keep the fixture root outside the
+checkout because the GPU job cleans its workspace. Ordinary PR CI remains usable
+without model downloads.
+
 `test-rnnt-decoder-parity` is enabled when the hybrid RNN-T GGUF, its WAV, and
 the NeMo `token_ids.npy` dump are available. It requires bit-exact token IDs
 between the reference and the current shared RNN-T/TDT decoder.

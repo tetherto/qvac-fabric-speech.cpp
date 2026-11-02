@@ -2825,6 +2825,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     if (out_model.model_type == ParakeetModelType::NEMOTRON) {
         validate_nemotron_model(out_model);
+        out_model.vocab.locale_tag_ids = find_locale_tag_ids(out_model.vocab);
     }
 
     if (impl->backend_blas) {
