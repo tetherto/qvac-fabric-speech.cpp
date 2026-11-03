@@ -10,8 +10,8 @@ Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmark
 under the installing user's own account: it updates the engine `master` and ggml `speech` heads, provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
-machine is involved in the measurement. The results page, the weekly artifact linked from the team channel's canvas, is where
-everyone reads the numbers. This skill is the Claude side: on-demand runs, collecting the summaries, building the
+machine is involved in the measurement. The dashboards behind the weekly landing page, linked from the team channel's canvas,
+are where everyone reads the numbers. This skill is the Claude side: on-demand runs, collecting the summaries, building the
 results page from them and publishing it, and the rules that keep two automated benches and twenty-odd people from
 disturbing each other on the same hardware.
 
@@ -21,7 +21,9 @@ disturbing each other on the same hardware.
 | `scripts/benchmarks/desktop-weekly/weekly.sh` | the entry point cron runs; `--quick`, `--families`, `--backends`, `--no-update`, `--no-mail`, `--label` |
 | `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 20 families with their driver spec, iteration counts, timeouts and model provisioning |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
-| `scripts/benchmarks/desktop-weekly/build-artifact.py` | a folder of `summary.json` files -> the single HTML results page (latest run per machine, history, pins, problems) |
+| `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files -> the JSON files the task dashboards read (latest result per lane, every result, campaign rows, runs) |
+| `scripts/benchmarks/desktop-weekly/build-landing.py` | a folder of `summary.json` files -> the landing page (dashboard links, every machine's newest run, how to read it) |
+| `scripts/benchmarks/desktop-weekly/dashboard/index.html`, `dashboards.json` | the page every task dashboard runs, and the links of the landing page and the three dashboards |
 | `scripts/benchmarks/desktop-weekly/install.sh` | deploys the tools to `~/speech-bench/tools` and installs the crontab line |
 
 ## Machines, schedule and coordination
@@ -77,33 +79,48 @@ for run in $(ssh $H 'cd ~/speech-bench/runs && for d in */; do [ -e "$d/DONE" ] 
 done
 ```
 
-The history folder is the input of `build-artifact.py`. Keep it; a run pruned on the machine (the bench keeps
+The history folder is the input of `build-dashboard-data.py` and `build-landing.py`. Keep it; a run pruned on the machine (the bench keeps
 12) stays in the page's history only through this folder. Also copy `report.md` of the newest run when the user
 wants to read it.
 
 ### publish
 
-Build the page and update the artifact in place:
+Build the dashboards' data files and the landing page from the history folder:
 
 ```sh
 HISTORY=${SPEECH_BENCH_HISTORY:-$HOME/speech-bench-history}
-python3 scripts/benchmarks/desktop-weekly/build-artifact.py $HISTORY/summaries -o $HISTORY/speech-weekly-bench.html
+D=scripts/benchmarks/desktop-weekly
+python3 $D/build-dashboard-data.py $HISTORY/summaries -o $HISTORY/dashboard-data
+python3 $D/build-landing.py $HISTORY/summaries -o $HISTORY/speech-weekly-landing.html
 ```
 
-Then publish that file with the Artifact tool to the existing page, never as a new artifact:
-`url: https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY` (read it first in a fresh session, then publish
-with the same `url`). The page has one table per task (ASR, TTS, TTS cloning, Music) with a row per model and
-quantization and a column per machine and GPU backend from each machine's newest run (speed in seconds of audio
-per second of wall clock, wall median, peak RSS, GPU memory rise, WER or TTS WER), the CPU lanes collapsed under
-it, and the "Other engines" table from `comparisons.json`: the rows of the QVAC speech engines campaign (October 2026,
-Gustavo Araujo) for the weekly models, with qvac's RTF and the competitor-over-qvac time ratio per lane (transcribe.cpp,
-audio.cpp and LocalAI parakeet.cpp for Parakeet TDT; audio.cpp for Supertonic 3 and Audio8; acestep.cpp for ACE-Step).
-Below the tasks,
-one block per machine with the speed of every family across the stored runs (moves over 5% marked), the engine,
-ggml and model pins, and the problem list. Tell the user what changed since the previous week: failed cells,
-moves over 5%, and which pins moved. To refresh a comparison, re-run the campaign's measurement for that model and
-lane and replace the row (`qvac_rtf`, `ratio`, versions, `measured`, `source`) in `comparisons.json`; TranscribePsy,
-Nemotron and MOSS-TTS have no campaign rows yet.
+The links are in `$D/dashboards.json`: `landing` (the page linked from the canvas) and one dashboard per task,
+`asr`, `tts` and `music`. Each dashboard is a Dashboard-type artifact whose page reads four attached files, the
+datasets `latest`, `weekly`, `campaign` and `runs`. Refresh them in place, never as new artifacts:
+
+1. For each task, upload the four files of `$HISTORY/dashboard-data/<task>/` (`runs.json` lives one level up and
+   is the same for every task) with the Artifact tool: `url` = that dashboard, `asset: true`, `file_path` = the
+   file. Each upload answers with a `/_blob/<id>` url.
+2. Point the datasets at the new files with the ArtifactData tool: read `datasets/<id>` (for its `version`), then
+   `update` it with `if_version`, `source.url` = the new blob url, `source.name` = the file name,
+   `updated: {at: <UTC ISO>, by: "Claude (<run date>)"}` and `edit: {via: "claude", at: <UTC ISO>}`. The
+   `campaign` dataset is `fixed: true`; upload it only when `comparisons.json` changed.
+3. Only when `$D/dashboard/index.html` changed: read `files/index.html` and `set` it to
+   `{"text": <the file>, "edit": {...}}` with `if_version`, on all three dashboards.
+4. Read the landing artifact (`landing` in `dashboards.json`) with the Artifact tool, then publish
+   `$HISTORY/speech-weekly-landing.html` with the same `url` (no icon). If the publish is refused because a newer
+   version is live, publish again: the page is rebuilt from the history folder and contains everything.
+
+Each dashboard shows, for one task, a card per machine and backend with the newest result of every model (speed in
+seconds of audio per second of wall clock, wall time, peak RSS or WER by the metric buttons; GPU lanes first, the
+lane buttons switch to CPU), the campaign comparison against other engines coloured per engine (transcribe.cpp,
+audio.cpp and LocalAI parakeet.cpp for Parakeet TDT; audio.cpp for Supertonic 3 and Audio8; acestep.cpp for
+ACE-Step), the week-over-week line per lane for a chosen model, and the run log; the Sources panel shows every
+file and row behind a number. Tell the user what changed since the previous week: failed cells, moves over 5%,
+and which pins moved. To refresh a comparison, re-run the campaign's measurement for that model and lane and
+replace the row (`qvac_rtf`, `ratio`, versions, `measured`, `source`) in `comparisons.json`; TranscribePsy,
+Nemotron and MOSS-TTS have no campaign rows yet. `build-artifact.py` still writes a single self-contained HTML
+report from the same folder for reading offline.
 
 ### run
 

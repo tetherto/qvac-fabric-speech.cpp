@@ -332,6 +332,26 @@ check_fetch_models_reprovisions_on_origin_change() {
   ok "files are re-provisioned when their recorded origin differs or is missing"
 }
 
+check_fetch_registry_discards_partial() {
+  command -v node > /dev/null || { ok "fetch-registry.js partial check skipped without node"; return 0; }
+  mkdir -p "$TMP/registry-stub" "$TMP/registry-store"
+  cat > "$TMP/registry-stub/index.js" <<'STUB'
+class QVACRegistryClient {
+  async ready () {}
+  async close () {}
+  async downloadModel (key, source, options) { require('fs').writeFileSync(options.outputFile, `fresh ${key}`) }
+}
+module.exports = { QVACRegistryClient }
+STUB
+  echo stale > "$TMP/registry-store/model.gguf.part"
+  REGISTRY_CLIENT="$TMP/registry-stub/index.js" node "$HERE/fetch-registry.js" "$TMP/registry-store" acestep/2026-07-22/model.gguf > "$TMP/registry.log" 2>&1 || fail "fetch-registry.js failed: $(cat "$TMP/registry.log")"
+  grep -q "discard stale" "$TMP/registry.log" || fail "a stale .part was not discarded"
+  [ ! -e "$TMP/registry-store/model.gguf.part" ] || fail "the .part file survived the download"
+  grep -q "fresh qvac_models_compiled/ggml/acestep/2026-07-22/model.gguf" "$TMP/registry-store/model.gguf" || fail "the model was not downloaded afresh"
+  REGISTRY_CLIENT="$TMP/registry-stub/index.js" node "$HERE/fetch-registry.js" "$TMP/registry-store" acestep/2026-07-22/model.gguf | grep -q "^present" || fail "a present model was fetched again"
+  ok "fetch-registry.js discards a stale partial download and keeps a present model"
+}
+
 check_weekly_helpers() {
   (
     . "$HERE/weekly.sh"
@@ -441,6 +461,7 @@ main() {
   check_nvcc_release
   check_input_validation
   check_entry_points
+  check_fetch_registry_discards_partial
   check_python_tests
   echo "all $PASS checks passed"
 }

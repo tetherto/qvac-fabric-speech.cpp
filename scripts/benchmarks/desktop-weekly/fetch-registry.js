@@ -11,12 +11,26 @@ function targetPath (outDir, key) {
   return path.join(outDir, path.basename(key))
 }
 
+function partialPath (dest) {
+  const shared = dest + PARTIAL_SUFFIX
+  if (!fs.existsSync(shared)) return shared
+  try {
+    fs.rmSync(shared, { force: true })
+    console.log(`discard stale ${shared}`)
+    return shared
+  } catch (err) {
+    console.log(`cannot remove stale ${shared} (${err.code}); downloading beside it`)
+    return `${shared}-${process.pid}`
+  }
+}
+
 async function fetchKey (client, outDir, key) {
   const dest = targetPath(outDir, key)
   if (fs.existsSync(dest)) return console.log(`present ${dest}`)
+  const partial = partialPath(dest)
   console.log(`fetch ${REGISTRY_PREFIX}/${key}`)
-  await client.downloadModel(`${REGISTRY_PREFIX}/${key}`, 's3', { outputFile: dest + PARTIAL_SUFFIX, timeout: DOWNLOAD_TIMEOUT_MS })
-  fs.renameSync(dest + PARTIAL_SUFFIX, dest)
+  await client.downloadModel(`${REGISTRY_PREFIX}/${key}`, 's3', { outputFile: partial, timeout: DOWNLOAD_TIMEOUT_MS })
+  fs.renameSync(partial, dest)
   console.log(`done ${dest} ${fs.statSync(dest).size}`)
 }
 
