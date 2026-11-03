@@ -48,6 +48,7 @@ struct SortformerDiarizationResult {
     std::vector<float> speaker_probs;
     std::vector<SortformerSegment> segments;
     double decode_ms = 0.0;
+    bool used_coreml = false;
 };
 
 // AOSC compression policy + cache geometry, ported from NeMo's

@@ -2152,6 +2152,19 @@ if (PARAKEET_BUILD_TESTS)
                 ARGS     "${_qvp_sfsv21_f16_gguf}"
                 REQUIRES "${_qvp_sfsv21_f16_gguf}")
             set_property(TEST test-fit-coreml-diarizers-sortformer PROPERTY SKIP_RETURN_CODE 77)
+
+            # DiarizationResult::encoder_used_coreml through the public Engine:
+            # true only when every pass of a call ran on a diarizer sidecar.
+            # Skips (77) without `<model>-diarizer-358.mlmodelc` beside the GGUF.
+            add_executable(test-diarize-coreml-routing test/test_diarize_coreml_routing.cpp)
+            target_link_libraries(test-diarize-coreml-routing PRIVATE qvac-parakeet)
+            target_include_directories(test-diarize-coreml-routing PRIVATE include)
+            parakeet_apply_ccache(test-diarize-coreml-routing)
+            parakeet_register_test(test-diarize-coreml-routing
+                LABEL    "fixture;coreml"
+                ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
+            set_property(TEST test-diarize-coreml-routing PROPERTY SKIP_RETURN_CODE 77)
         endif()
     endif()
 

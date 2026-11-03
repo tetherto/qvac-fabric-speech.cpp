@@ -438,11 +438,12 @@ int run_nemotron_diarization_chunk(
 
 int run_nemotron_diarization(
     const ParakeetCtcModel & model, const float * mel, int mel_frames,
-    std::vector<float> & probabilities, NemotronAttention attention) {
+    std::vector<float> & probabilities, NemotronAttention attention, bool * used_coreml) {
     NemotronDiarizationChunk chunk;
     const int result = run_nemotron_diarization_chunk(
         model, mel, mel_frames, nullptr, 0, chunk, attention);
     if (result != 0) return result;
+    if (used_coreml) *used_coreml = chunk.used_coreml;
     probabilities = std::move(chunk.probabilities);
     probabilities.resize(static_cast<size_t>(mel_frames) *
         model.nemotron_diarization_cfg.speakers);
