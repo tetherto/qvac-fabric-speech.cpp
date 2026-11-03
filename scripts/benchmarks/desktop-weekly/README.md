@@ -8,12 +8,15 @@ machine and toolchain versions and the sha256 of every model file.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
-| Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 06:00 machine time (UTC) |
-| Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 06:00 machine time (CET) |
+| Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
+| Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 18:00 CET |
 
-The fabric-llm engine bench holds the same `/tmp/gpu-bench.lock` on the Mac from Saturday 00:00 Zurich; this run
-waits for the lock (up to `LOCK_WAIT_HOURS`, 12 by default) and for every other GPU job to end before it starts,
-then holds the lock itself until the report is written.
+The two weekly benches on the shared machines run on different days so that neither disturbs the other: the
+fabric-llm engine bench on Saturday from 18:00 CET, the speech bench on Sunday from 18:00 CET (a full run takes
+about 6 to 7 hours). Both also hold the same `/tmp/gpu-bench.lock` on the Mac; this run waits for the lock (up to
+`LOCK_WAIT_HOURS`, 12 by default) and for every other GPU job to end before it starts, then holds the lock while it
+benchmarks. See [`skills/speech-bench/SKILL.md`](../../../skills/speech-bench/SKILL.md) for the coordination rules
+and the weekly artifact.
 
 ## What is measured
 
@@ -54,6 +57,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `machine-info.sh`, `collect-pins.sh` | `machine.json` (hardware, OS, driver, toolchain) and `pins.json` (engine and ggml commits, model sha256 and origins) |
 | `summarize.py` | run directory -> `summary.json` |
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
+| `build-artifact.py` | a folder of `summary.json` files -> the single HTML results page the speech-bench skill publishes as the weekly artifact |
 | `narrate.py` | optional: asks Claude for a ten-line narrative placed above the report in the e-mail |
 | `send-report.py` | SMTP delivery with `report.md` and `summary.json` attached |
 | `install.sh`, `config.example.env` | deployment and the per-machine configuration |
@@ -88,11 +92,11 @@ On each machine, as your own user (nothing needs root):
 
 ```sh
 scp -r scripts/benchmarks/desktop-weekly <host>:speech-bench-src
-ssh <host> 'bash speech-bench-src/install.sh --hour 6'
+ssh <host> 'bash speech-bench-src/install.sh --hour 18'   # --hour 17 on the UTC Linux box
 ```
 
 `install.sh` copies the tools to `~/speech-bench/tools`, seeds `~/speech-bench/config.env` and installs the cron
-line (Sunday 06:00 machine time by default; `--weekday`, `--hour`, `--minute` change it, `--no-cron` skips it).
+line (Sunday 18:00 machine time by default; `--weekday`, `--hour`, `--minute` change it, `--no-cron` skips it).
 Then edit `config.env`: `MODELS_DIR`, `MAIL_TO` and the SMTP settings, optionally `ANTHROPIC_API_KEY_FILE`. The
 secrets live in files with mode 0600 that the config points at, never in `config.env` itself.
 

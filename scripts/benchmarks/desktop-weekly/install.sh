@@ -4,7 +4,7 @@ set -uo pipefail
 readonly SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly CRON_TAG="# speech-bench-weekly"
 readonly DEFAULT_WEEKDAY=0
-readonly DEFAULT_HOUR=6
+readonly DEFAULT_HOUR=18
 readonly DEFAULT_MINUTE=0
 readonly MAX_WEEKDAY=6
 readonly MAX_HOUR=23
@@ -21,7 +21,8 @@ usage() {
   cat <<USAGE >&2
 usage: install.sh [--bench-home DIR] [--weekday 0-6] [--hour H] [--minute M] [--no-cron]
 Copies this directory to <bench home>/tools, seeds <bench home>/config.env from config.example.env when it is
-missing, and installs a crontab line that runs weekly.sh on the given weekday (0 = Sunday) at the given local time.
+missing, and installs a crontab line that runs weekly.sh on the given weekday (0 = Sunday) at the given machine-local time
+(default Sunday 18:00; pass --hour 17 on a UTC machine for 18:00 CET).
 USAGE
 }
 
