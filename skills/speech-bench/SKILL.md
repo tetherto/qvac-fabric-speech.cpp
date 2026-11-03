@@ -94,12 +94,15 @@ Then publish that file with the Artifact tool to the existing page, never as a n
 with the same `url`). The page has one table per task (ASR, TTS, TTS cloning, Music) with a row per model and
 quantization and a column per machine and GPU backend from each machine's newest run (speed in seconds of audio
 per second of wall clock, wall median, peak RSS, GPU memory rise, WER or TTS WER), the CPU lanes collapsed under
-it, and the "Other engines" table from `comparisons.json`: paired harness runs that measured qvac and another
-engine the same way (today the ACE-Step rows from `engines/audiogen/benchmarks/comparison`). Below the tasks,
+it, and the "Other engines" table from `comparisons.json`: the rows of the QVAC speech engines campaign (October 2026,
+Gustavo Araujo) for the weekly models, with qvac's RTF and the competitor-over-qvac time ratio per lane (transcribe.cpp,
+audio.cpp and LocalAI parakeet.cpp for Parakeet TDT; audio.cpp for Supertonic 3 and Audio8; acestep.cpp for ACE-Step).
+Below the tasks,
 one block per machine with the speed of every family across the stored runs (moves over 5% marked), the engine,
 ggml and model pins, and the problem list. Tell the user what changed since the previous week: failed cells,
-moves over 5%, and which pins moved. To add a comparison, run the harness that measures both engines, then add
-one row per engine and lane to `comparisons.json` with the same `source` and `measured` date.
+moves over 5%, and which pins moved. To refresh a comparison, re-run the campaign's measurement for that model and
+lane and replace the row (`qvac_rtf`, `ratio`, versions, `measured`, `source`) in `comparisons.json`; TranscribePsy,
+Nemotron and MOSS-TTS have no campaign rows yet.
 
 ### run
 

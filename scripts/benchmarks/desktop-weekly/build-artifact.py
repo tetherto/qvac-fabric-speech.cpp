@@ -18,6 +18,7 @@ import html
 import json
 import math
 import pathlib
+import re
 
 STATUS_OK = "ok"
 PERCENT = 100.0
@@ -204,25 +205,44 @@ def lane_table(hosts, families, meta, lane_list, css):
     return f'<div class="scroll"><table class="{css}"><thead><tr><th>model</th>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
+RATIO_TIE_LOW = 0.95
+RATIO_TIE_HIGH = 1.05
+
+
+def ratio_tone(ratio_text):
+    match = re.match(r"\s*([0-9.]+)", ratio_text or "")
+    if not match:
+        return ""
+    first = float(match.group(1))
+    if first > RATIO_TIE_HIGH:
+        return "good"
+    return "warn" if first < RATIO_TIE_LOW else ""
+
+
 def comparison_row(row):
-    lane = f"{machine_label(row.get('host', '?'))} · {row.get('backend', '?')}"
-    rtf = f"{row['rtf']:.3f}" if row.get("rtf") is not None else "-"
-    return [esc(row.get("engine", "?")), esc(row.get("model", "")), esc(lane), fmt_ms(row.get("gen_ms")), fmt_ms(row.get("e2e_ms")),
-            rtf, esc(row.get("quality", "")), esc(row.get("measured", "")), f'<code>{esc(row.get("source", ""))}</code>']
+    lane = f"{row.get('device') or machine_label(row.get('host', '?'))} · {row.get('backend', '?')}"
+    return [esc(row.get("engine", "?")), f'{esc(row.get("model", ""))}<span class="sub">{esc(row.get("quantization", ""))}</span>', esc(lane),
+            f'<span class="num">{esc(row.get("qvac_rtf", "-"))}</span>',
+            f'<span class="num {ratio_tone(row.get("ratio", ""))}">{esc(row.get("ratio", "-"))}</span>',
+            esc(row.get("measured", "")), f'<span class="sub">{esc(row.get("engine_version", ""))}</span>']
+
+
+def comparison_sort_key(row):
+    return (row.get("model", ""), row.get("quantization", ""), host_rank(row.get("host", "")), row.get("backend", ""), row.get("engine", ""))
 
 
 def comparisons_table(rows):
     if not rows:
         return ('<p class="note">No paired measurement against another engine is recorded for this task yet. Add rows to '
-                '<code>comparisons.json</code> from a harness run that measured both engines the same way.</p>')
-    harness = sorted({row.get("harness", "") for row in rows if row.get("harness")})
-    head = "".join(f"<th>{column}</th>" for column in ("engine", "model", "lane", "generation", "end to end", "RTF", "quality", "measured", "source"))
-    body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in comparison_row(row)) + "</tr>"
-                   for row in sorted(rows, key=lambda r: (host_rank(r.get("host", "")), r.get("backend", ""), r.get("engine", ""))))
-    notes = "".join(f'<p class="note">{esc(text)}</p>' for text in harness)
+                '<code>comparisons.json</code> from a campaign that measured both engines the same way.</p>')
+    sources = sorted({f"{row.get('source', '')} (qvac {row.get('qvac_version', '?')})" for row in rows})
+    head = "".join(f"<th>{column}</th>" for column in ("engine", "model", "lane", "qvac RTF short / long", "competitor time \u00f7 qvac time", "measured", "competitor build"))
+    body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in comparison_row(row)) + "</tr>" for row in sorted(rows, key=comparison_sort_key))
+    notes = "".join(f'<p class="note">Source: {esc(text)}</p>' for text in sources)
     return (f'{notes}<div class="scroll"><table class="compare"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
-            '<p class="note">Rows from one source share models, prompts, seeds and protocol; they are older than the weekly '
-            'numbers above and use their own prompt lengths, so compare engines within a source, not against the weekly table.</p>')
+            '<p class="note">A ratio above 1\u00d7 means qvac was faster than the competitor on that lane (end-to-end process wall, '
+            'short / long input). These campaign rows are dated and keep their own prompts, so compare engines within a row, '
+            'not against the weekly table.</p>')
 
 
 def task_section(hosts, task, comparisons):
@@ -474,7 +494,8 @@ transcript; TTS WER transcribes the last generated clip with pinned Whisper tiny
 cell with unchanged pins usually means another user loaded the machine during the run; a changed pin names the engine, ggml or model cut
 to look at. Two rows differ from the desktop target set because the registry has no such cut: ACE-Step Base runs at Q4_K_M, and MOSS-TTS
 Q8_0 is the F16 backbone with its transformer blocks requantized on the machine. The "Other engines" tables are paired harness runs
-recorded in <code>comparisons.json</code>; they compare engines under one protocol and are not on the weekly clock.</p></section>"""
+recorded in <code>comparisons.json</code> (currently the October 2026 QVAC speech engines campaign); they compare engines under one
+protocol and are not on the weekly clock.</p></section>"""
 
 
 def render(summaries, threshold, comparisons):

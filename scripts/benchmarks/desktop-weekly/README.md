@@ -60,7 +60,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `machine-info.sh`, `collect-pins.sh` | `machine.json` (hardware, OS, driver, toolchain) and `pins.json` (engine and ggml commits, model sha256 and origins) |
 | `summarize.py` | run directory -> `summary.json` |
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
-| `build-artifact.py`, `comparisons.json` | a folder of `summary.json` files -> the single HTML results page the speech-bench skill publishes as the weekly artifact, with the paired engine comparisons |
+| `build-artifact.py`, `comparisons.json` | a folder of `summary.json` files -> the single HTML results page the speech-bench skill publishes as the weekly artifact; `comparisons.json` holds the dated competitor rows (qvac RTF and competitor-over-qvac time ratio per lane) shown under each task |
 | `nsdate`, `scheduler.sh` | nanosecond clock shim for macOS before 26, and the user-space scheduler for hosts without cron |
 | `narrate.py` | optional: asks Claude for a ten-line narrative placed above the report in the e-mail |
 | `send-report.py` | SMTP delivery with `report.md` and `summary.json` attached |

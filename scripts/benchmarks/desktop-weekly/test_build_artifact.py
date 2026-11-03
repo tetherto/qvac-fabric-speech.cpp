@@ -38,8 +38,9 @@ def summary(name, started, speeds, os_name="Linux", backends=("cpu", "cuda"), ho
             "counts": {"expected": len(results), "ok": len(results), "failed": 0}, "build_failures": [], "problems": []}
 
 
-COMPARISON = {"task": "Music", "engine": "other.cpp", "model": "M Q8_0", "host": "qvac-dev-linux-x64", "backend": "cuda", "gen_ms": 2000,
-              "e2e_ms": 2100, "rtf": 0.3, "quality": "CLAP 0.3", "measured": "2026-08-24", "harness": "harness text", "source": "reports/x.md"}
+COMPARISON = {"task": "Music", "engine": "other.cpp", "model": "M", "quantization": "Q8_0", "host": "qvac-dev-linux-x64", "device": "RTX 5090 box",
+              "backend": "cuda", "qvac_rtf": "0.139 single set", "ratio": "1.91\u00d7 single set", "measured": "2026-09-14", "source": "campaign x",
+              "qvac_version": "46afe7d9", "engine_version": "daf7644d", "harness": "harness text"}
 
 
 class BuildArtifactTest(unittest.TestCase):
@@ -92,12 +93,16 @@ class BuildArtifactTest(unittest.TestCase):
         hosts = build.runs_by_host(build.load_summaries(self.root))
         text = build.task_section(hosts, "Music", [COMPARISON])
         self.assertIn("other.cpp", text)
-        self.assertIn("RTX 5090 · cuda", text)
-        self.assertIn("2,000 ms", text)
-        self.assertIn("0.300", text)
-        self.assertIn("harness text", text)
+        self.assertIn("RTX 5090 box · cuda", text)
+        self.assertIn('<span class="num good">1.91\u00d7 single set</span>', text)
+        self.assertIn("Source: campaign x (qvac 46afe7d9)", text)
+        self.assertEqual(build.ratio_tone("0.87\u00d7 / 1.23\u00d7"), "warn")
+        self.assertEqual(build.ratio_tone("1.00\u00d7 / 0.92\u00d7"), "")
+        self.assertEqual(build.ratio_tone("n/a"), "")
         self.assertEqual(build.load_comparisons(None), [])
-        self.assertTrue(build.load_comparisons(build.DEFAULT_COMPARISONS))
+        rows = build.load_comparisons(build.DEFAULT_COMPARISONS)
+        self.assertTrue(all(row["ratio"] and row["qvac_rtf"] for row in rows))
+        self.assertEqual({row["task"] for row in rows}, {"ASR", "TTS", "Music"})
 
     def test_results_cells_and_failed_rows(self):
         data = summary("2026-11-15", "2026-11-15T17:00:00Z", {"a": 10.0})
