@@ -18,6 +18,12 @@ The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
 validated on it.
 
+Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
+through decoding, including Nemotron's locale-prompt projection. Encoder tensors
+with extra padding frames retain host routing. See the
+[device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
+for routing, fallback and validation coverage.
+
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
@@ -90,6 +96,9 @@ re-exported for padding invariance. See the
 [sidecar compatibility contract](engines/parakeet/docs/backends.md#core-ml-encoder-sidecar).
 
 ### Apple Core ML sidecars
+
+Whisper exposes `whisper_encoder_on_coreml(ctx)` for the loaded encoder state,
+independently of the ggml primary device.
 
 Optional sidecars accelerate a stage while the rest of the pipeline stays on
 ggml. They default to disabled and have model-specific input and fallback
@@ -273,6 +282,8 @@ uses this gate.
 | Synthesis, voice cloning, sound effects, speech-to-speech, enhancement | [TTS](engines/tts/README.md) |
 | Music generation and editing | [AudioGen](engines/audiogen/README.md) |
 | Benchmark quality diagnostics and model preparation | [Music alignment guide](scripts/benchmarks/music-alignment.md) |
+| Weekly desktop benchmark on the shared Tailscale machines | [desktop-weekly](scripts/benchmarks/desktop-weekly/README.md) |
+| Running, collecting and publishing that benchmark from Claude | [speech-bench skill](skills/speech-bench/SKILL.md) |
 | Historical development and integration reports | [Chatterbox](engines/tts/docs/history/chatterbox-port.md), [Supertonic](engines/tts/docs/history/supertonic-port.md), [Pocket](engines/tts/docs/history/pocket-integration.md), [Parakeet](engines/parakeet/docs/history/parakeet-port.md), [Strix Halo](engines/audiogen/docs/history/strix-halo.md) |
 
 Audio8 exposes incremental PCM through `Engine::synthesize_stream()`, with codec-window

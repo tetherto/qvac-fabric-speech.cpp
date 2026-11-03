@@ -32,6 +32,10 @@ endif()
 find_package(ggml CONFIG REQUIRED)
 add_library(ggml ALIAS ggml::ggml)
 
+if (APPLE AND (WHISPER_COREML OR PARAKEET_COREML))
+    enable_language(OBJC OBJCXX)
+endif()
+
 if (SPEECH_BUILD_WHISPER)
     # CACHE FORCE throughout this block: whisper's cmake_minimum_required(3.5)
     # leaves CMP0077 OLD in its scope, so its option() defaults would clobber
