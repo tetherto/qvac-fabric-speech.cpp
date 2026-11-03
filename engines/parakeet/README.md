@@ -1,8 +1,9 @@
 # parakeet.cpp
 
-Parakeet is a pure C++/ggml implementation of NVIDIA FastConformer ASR,
-end-of-turn detection, and Sortformer speaker diarization. Inference requires no
-Python, PyTorch, NeMo, or ONNX Runtime. A single `parakeet::Engine` loads CTC,
+Parakeet is a C++/ggml implementation of NVIDIA FastConformer ASR,
+end-of-turn detection, and Sortformer speaker diarization. Native GGUF inference
+runs directly in C++; an optional AMD Ryzen AI encoder uses ONNX Runtime/VitisAI.
+A single `parakeet::Engine` loads CTC,
 RNN-T, TDT, EOU, Nemotron, or Sortformer GGUFs and selects the implementation
 from GGUF metadata. MOSS-Transcribe-Diarize, a Qwen3-based model that
 transcribes and labels speakers in one pass (with optional per-request
@@ -82,6 +83,14 @@ Unsupported fused backends and older dependency headers are rejected.
 Offline TDT is the evaluated scope; packed-affine substage profiling is not
 supported. Preserve the recipe/tensor receipts and consult the linked evidence
 before interpreting size, timing or accuracy comparisons as deployment results.
+
+## AMD Ryzen AI encoder
+
+Build with `PARAKEET_RYZENAI=ON` and select a matching ONNX encoder through
+`EngineOptions::npu_encoder` or CLI `--npu-encoder`. The existing GGUF supplies
+preprocessing and decoder weights. Provider configuration, model preparation,
+runtime setup, and hardware verification are in
+[AMD Ryzen AI NPU encoder](docs/backends.md#amd-ryzen-ai-npu-encoder).
 
 ## Core ML sidecars
 

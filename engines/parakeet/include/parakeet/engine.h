@@ -70,6 +70,7 @@
 #include "export.h"
 #include "streaming.h"
 #include "diarization.h"
+#include "npu.h"
 
 #include <cstdint>
 #include <memory>
@@ -221,6 +222,7 @@ struct EngineOptions {
     // fails construction if unavailable or initialization fails. Individual
     // unsupported operations can still use the existing CPU scheduler.
     std::string backend = "auto";
+    NpuEncoderOptions npu_encoder;
 };
 
 // Resolved compute device the Engine is actually running on, after
@@ -369,9 +371,9 @@ public:
     // the lifetime of the Engine.
     std::string backend_name() const;
 
-    // Reports whether an Apple Core ML encoder or diarizer sidecar loaded for
-    // this model. Returns the sidecar's compute label (for example
-    // "coreml-all") when loaded; otherwise identical to backend_name().
+    // Returns "VitisAI" for the selected AMD encoder, or an Apple Core ML
+    // sidecar's compute label (for example "coreml-all") when loaded;
+    // otherwise identical to backend_name().
     // Encoder sidecars cover CTC/IndicConformer, Unified RNN-T, TDT, EOU,
     // Nemotron, and Sortformer v2.1; their decoders, and the Sortformer speaker
     // head without a diarizer sidecar, run on the ggml backend reported by

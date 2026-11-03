@@ -31,6 +31,152 @@ host/device parity, prompt changes and
 the public Engine API. CUDA and Metal variants register when those backends are
 built; this change has been measured on the Radeon RX 7600 XT with Vulkan.
 
+## AMD Ryzen AI NPU encoder
+
+The optional ONNX/VitisAI encoder accepts a matching FastConformer export while
+the existing GGUF supplies mel preprocessing, vocabulary, and decoder weights.
+The encoder is selected explicitly; `--backend cpu` can therefore run the
+decoder on CPU while `--npu-encoder` sends the encoder through VitisAI.
+Native cache-aware streaming and partial-layer diagnostic captures retain their
+ggml paths. Hardware validation covers Parakeet TDT 0.6B-v3;
+other exports require their own model and runtime validation.
+
+### Build and runtime
+
+Install the [AMD Ryzen AI Linux runtime](https://ryzenai.docs.amd.com/en/latest/linux.html)
+and its supported XRT/amdxdna stack. The C++ runtime can be extracted into a
+user directory. `ONNXRuntime_ROOT` points at its `onnxruntime` directory, which
+contains `include/onnxruntime` and `lib`:
+
+```bash
+cmake -S engines/parakeet -B build-parakeet-npu \
+  -DCMAKE_BUILD_TYPE=Release -DPARAKEET_USE_SYSTEM_GGML=ON \
+  -DCMAKE_PREFIX_PATH=/path/to/ggml-install -DPARAKEET_RYZENAI=ON \
+  -DONNXRuntime_ROOT=/path/to/ryzenai/onnxruntime
+cmake --build build-parakeet-npu -j4
+```
+
+Use AMD's VitisAI-enabled ONNX Runtime for NPU execution. A regular CPU ONNX
+Runtime SDK can build and test the tensor adapter but cannot provide the NPU
+execution provider. Static CMake and pkg-config consumers retain the ONNX
+Runtime link dependency when this option is enabled. Shared-library CMake
+consumers do not need the ONNX SDK headers. The AMD runtime libraries are
+supplied separately for execution.
+
+Before launching on Linux, activate XRT and make the matching AMD libraries
+available to the loader:
+
+```bash
+source /opt/xilinx/xrt/setup.sh
+export RYZEN_AI_INSTALLATION_PATH=/path/to/ryzenai
+export LD_LIBRARY_PATH="$RYZEN_AI_INSTALLATION_PATH/onnxruntime/lib:$LD_LIBRARY_PATH"
+```
+
+AMD's BF16 runtime also links `libpython3.12.so.1.0`. When Python 3.12 is
+installed in an isolated directory, include its `lib` directory in
+`LD_LIBRARY_PATH` as well. Model execution remains in the C++ API.
+
+### Encoder artifact
+
+Supply an ONNX encoder from the same checkpoint as the GGUF. The loader checks
+tensor names, types, and geometry against the GGUF; matching dimensions alone do
+not establish matching weights. The required tensors are:
+
+| Tensor | Type | Layout |
+|---|---|---|
+| `audio_signal` | float32 | `[1, mel_bins, mel_frames]` |
+| `length` | int64 | `[1]`, valid mel frames |
+| `outputs` | float32 | `[1, encoder_dimension, encoder_frames]` |
+| `encoded_lengths` | int64 | `[1]`, valid encoder frames |
+
+Tensor declaration order is immaterial. Fixed input capacity comes from the
+artifact. Shorter inputs are padded and retain their valid length; only valid
+output frames reach the native decoder. Longer offline inputs use the existing
+overlapping-window planner within the artifact's capacity. An explicitly
+disabled window plan leaves an oversized input as an error. A requested NPU
+encoder that cannot load or execute fails explicitly. Leaving `model_path`
+empty retains the native paths.
+
+AMD's [Parakeet preprocessing reference](https://github.com/amd/RyzenAI-SW/tree/main/Demos/ASR/Parakeet-TDT)
+provides static-shape conversion and compiler-specific Pad/mask rewrites for
+the TDT 0.6B-v3 ONNX export. Its `convert_encoder` function can prepare only the
+encoder, with an explicit capacity; for example, from that demo's directory:
+
+```bash
+python -c 'from preprocess_for_npu import convert_encoder; convert_encoder("/models/encoder-model.onnx", "/models/encoder-model.fp32.static.npu.onnx", 1498, npu_optimize=True)'
+```
+
+Keep the generated `.onnx.data` file beside its ONNX file. The capacity in this
+example is an artifact preparation choice, rather than an engine-wide audio
+limit. Use the matching compiler configuration for the installed AMD release.
+
+### Select the encoder
+
+```bash
+build-parakeet-npu/parakeet --model /models/parakeet-tdt-0.6b-v3.q8_0.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav --backend cpu --threads 4 \
+  --npu-encoder /models/encoder-model.fp32.static.npu.onnx \
+  --npu-option config_file=/models/vai_ep_config.json \
+  --npu-option cache_dir=/writable/parakeet-cache \
+  --npu-option enable_cache_file_io_in_mem=0 --bench
+```
+
+The C++ equivalent sets `EngineOptions::npu_encoder.model_path` and its
+`provider_options` map. `Engine::encoder_backend()` reports `VitisAI`;
+`backend_name()` continues to report the native ggml device. VitisAI partitions
+supported operations onto the NPU and may retain operations on CPU. Confirm
+hardware execution using AMD's operator assignment report, rather than the
+provider label alone. Set `XLNX_ONNX_EP_REPORT_FILE` and
+`enable_cache_file_io_in_mem=0` as described in
+[AMD's report documentation](https://ryzenai.docs.amd.com/en/latest/modelrun.html#operator-assignment-report).
+
+The native GGUF encoder weights remain resident. GGUF memory-fit projections
+do not include the external ONNX Runtime, compiler, or NPU-session allocations.
+
+### Tests
+
+`test-npu-encoder` checks the disabled build and, when ONNX Runtime is enabled,
+input/output layouts, padding, encoded lengths, provider initialization,
+geometry mismatches, and invalid input. `test-npu-cli` exercises public option
+parsing. The hardware transcription harness compares native CPU tokens and
+text across repeated calls and recreated VitisAI engines using the public API:
+
+```bash
+ctest --test-dir build-parakeet-npu -R '^test-npu-' --output-on-failure
+build-parakeet-npu/test-npu-transcription \
+  /models/parakeet-tdt-0.6b-v3.q8_0.gguf engines/parakeet/test/samples/jfk.wav \
+  /models/encoder-model.fp32.static.npu.onnx /models/vai_ep_config.json \
+  /writable/parakeet-cache
+```
+
+### Hardware validation
+
+Validated on an AMD Ryzen AI MAX+ 395 (Strix Halo), Ubuntu 25.10,
+kernel 6.17.0-41, Ryzen AI 1.9.0 / ONNX Runtime 1.30.0, and XRT 2.25.0.
+The encoder artifact used a 1498-mel-frame capacity, the AMD preprocessing
+reference at `09a18d01bd14ea95bd66a4647590436f9c1ae8c3`, and the same
+Parakeet TDT 0.6B-v3 checkpoint as the Q8_0 GGUF. The operator report assigned
+1440 nodes to VAIML and 20 to CPU, with one hardware AIE partition.
+
+The 11-second JFK sample matched all 38 native CPU token IDs and its text
+across repeated calls and recreated engines. An 11-second silence input
+also matched the native token IDs and text. A 33-second repeated JFK input
+exercised the window planner and matched its text, token count (114), and
+encoder frame count (413).
+
+With four CPU threads, one warmup and three timed runs of the 11-second
+sample, median times were:
+
+| Stage | Native CPU | VitisAI encoder with native CPU decoder |
+|---|---:|---:|
+| Encoder | 600.9 ms | 477.0 ms |
+| Full inference | 608.3 ms | 488.4 ms |
+
+These measurements exclude model loading and compilation. The first VitisAI
+compilation takes minutes and subsequent loads reuse its cache. They establish
+performance and token agreement for these fixtures, rather than general
+accuracy equivalence between the BF16 NPU and native encoder.
+
 ## Backends and runtime selection
 
 Any combination of Metal, CUDA, Vulkan, OpenCL, and WebGPU may be built or

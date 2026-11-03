@@ -5,11 +5,11 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 | Property | Value |
 |---|---|
 | Build | Feature-gated CMake superbuild over Whisper and three native engines |
-| Runtime | No Python, PyTorch, NeMo, or ONNX Runtime at inference time |
-| Model formats | Whisper/Silero GGML `.bin`; Parakeet, TTS, and AudioGen GGUF |
+| Runtime | Native C++ inference; the optional Parakeet AMD NPU encoder uses ONNX Runtime/VitisAI |
+| Model formats | Whisper/Silero GGML `.bin`; Parakeet, TTS, and AudioGen GGUF; optional Parakeet ONNX encoder |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android arm64-v8a, iOS arm64; model and backend coverage varies by engine |
-| Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement or optional Apple Core ML sidecars |
+| Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement, optional Apple Core ML sidecars, or a [Parakeet AMD NPU encoder](engines/parakeet/docs/backends.md#amd-ryzen-ai-npu-encoder) |
 | Shared ggml | One `ggml-speech` dependency from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 
 ## Supported models

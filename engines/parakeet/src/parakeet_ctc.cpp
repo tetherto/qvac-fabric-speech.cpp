@@ -1,6 +1,7 @@
 // FastConformer encoder ggml graph, GGUF load, CTC head, and encoder execution.
 
 #include "parakeet_ctc.h"
+#include "parakeet_npu.h"
 #include "long_form.h"
 #include "parakeet_log.h"
 #include "backend_util.h"
@@ -2518,6 +2519,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                 ggml_backend_free(impl->backend_blas);
                 impl->backend_blas = nullptr;
             }
+            out_model.npu_encoder.reset();
             out_model.impl = impl;
 #ifdef PARAKEET_USE_COREML
             if (!measure) maybe_init_coreml_diarizers(gguf_path, out_model, verbose);
@@ -2837,6 +2839,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         impl->backend_blas = nullptr;
     }
 
+    out_model.npu_encoder.reset();
     out_model.impl = impl;
 
 #ifdef PARAKEET_USE_COREML
@@ -3058,6 +3061,7 @@ int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 }
 
 std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
+    if (m.npu_encoder) return m.npu_encoder->backend_name();
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->ctx_coreml) {
         return parakeet_coreml_backend_label(m.impl->ctx_coreml);
@@ -4754,7 +4758,9 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_context_right >= 0;
 }
 
-static int run_coreml_ctc_head(ParakeetCtcModel & model,
+#endif
+
+static int run_sidecar_ctc_head(ParakeetCtcModel & model,
                                const std::vector<float> & encoder_out,
                                int n_frames,
                                std::vector<float> & logits) {
@@ -4810,6 +4816,7 @@ static int run_coreml_ctc_head(ParakeetCtcModel & model,
     return 0;
 }
 
+#ifdef PARAKEET_USE_COREML
 // Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
 // on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
 // caller fall back to the complete native encoder graph.
@@ -4835,7 +4842,7 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     if (rc != 0) return rc;
 
     if (model.model_type == ParakeetModelType::CTC) {
-        const int head_rc = run_coreml_ctc_head(
+        const int head_rc = run_sidecar_ctc_head(
             model, out.encoder_out, T, out.logits);
         if (head_rc != 0) return 100 - head_rc;
     } else {
@@ -5073,6 +5080,7 @@ int run_encoder(ParakeetCtcModel   & model,
     // Set pessimistically on every invocation. Only a successful Core ML
     // prediction may change this to true.
     out.used_coreml = false;
+    out.used_npu = false;
     out.encoder_consumed = false;
     if (!model.impl || !model.impl->backend_active) return -1;
 
@@ -5098,6 +5106,23 @@ int run_encoder(ParakeetCtcModel   & model,
     }
     if (mel_valid == 0) mel_valid = n_mel_frames;
     const bool all_valid = (mel_valid == n_mel_frames);
+
+    if (model.npu_encoder && max_layers < 0 && !capture_intermediates) {
+        try {
+            model.npu_encoder->encode(mel, n_mel_frames, mel_valid, n_mels, out);
+        } catch (const std::exception & error) {
+            PARAKEET_LOG_ERROR("parakeet: NPU encoder failed: %s\n", error.what());
+            constexpr int npu_encoder_failure = -7;
+            return npu_encoder_failure;
+        }
+        out.vocab_size = model.vocab_size;
+        if (model.model_type == ParakeetModelType::CTC) {
+            const int rc = run_sidecar_ctc_head(model, out.encoder_out, out.n_enc_frames, out.logits);
+            if (rc != 0) return rc;
+        }
+        out.used_npu = true;
+        return 0;
+    }
 
 #ifdef PARAKEET_USE_COREML
     // Apple Core ML sidecar: run a validated CTC/IndicConformer, Unified RNN-T,

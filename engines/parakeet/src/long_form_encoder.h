@@ -11,6 +11,7 @@ namespace parakeet {
 struct WindowedEncoderStats {
     double encoder_ms = 0.0;
     int coreml_windows = 0;
+    int npu_windows = 0;
     int ggml_windows = 0;
 };
 
