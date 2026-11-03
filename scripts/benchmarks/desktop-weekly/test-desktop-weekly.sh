@@ -137,7 +137,11 @@ check_lib_lock() {
   grep -q "speech weekly bench" "$GPU_LOCK" || fail "lock content"
   release_gpu_lock
   [ ! -e "$GPU_LOCK" ] || fail "release_gpu_lock left the file"
-  [ -z "$(trap -p EXIT)" ] || fail "release_gpu_lock left the EXIT trap armed"
+  [ "$GPU_LOCK_HELD" = 0 ] || fail "release_gpu_lock left the held flag set"
+  echo "theirs" > "$GPU_LOCK"
+  release_gpu_lock
+  [ "$(cat "$GPU_LOCK")" = "theirs" ] || fail "release_gpu_lock removed a lock this run does not hold"
+  rm -f "$GPU_LOCK"
   mkfifo "$GPU_LOCK"
   [ -z "$(lock_holder)" ] || fail "lock_holder read a FIFO"
   rm -f "$GPU_LOCK"
@@ -147,6 +151,49 @@ check_lib_lock() {
   GPU_LOCK="$TMP/lock"
   trap 'rm -rf "$TMP"' EXIT
   ok "lock is taken atomically, released once, read only from regular files, and acquisition is bounded"
+}
+
+check_run_lock() {
+  take_run_lock || fail "take_run_lock on a free bench home"
+  [ -f "$BENCH_HOME/run.lock/owner" ] || fail "run lock owner file missing"
+  if take_run_lock; then fail "take_run_lock succeeded while this process holds it"; fi
+  release_run_lock
+  [ ! -e "$BENCH_HOME/run.lock" ] || fail "release_run_lock left the lock"
+  mkdir "$BENCH_HOME/run.lock"
+  echo "99999999 stale" > "$BENCH_HOME/run.lock/owner"
+  take_run_lock || fail "take_run_lock did not reclaim a stale lock"
+  release_run_lock
+  mkdir "$BENCH_HOME/run.lock"
+  echo "$$ live" > "$BENCH_HOME/run.lock/owner"
+  local status=0
+  bash "$HERE/weekly.sh" --no-update --no-mail --label concurrent > /dev/null 2>&1 || status=$?
+  [ "$status" = 1 ] || fail "a second weekly.sh did not fail fast (exit $status)"
+  grep -q "another weekly.sh run holds" "$BENCH_HOME/runs/$(date +%F)-concurrent/FAILED" || fail "second run did not name the run lock"
+  [ "$(cat "$BENCH_HOME/run.lock/owner")" = "$$ live" ] || fail "second run touched the live lock"
+  rm -rf "${BENCH_HOME:?}/run.lock" "${BENCH_HOME:?}/runs/$(date +%F)-concurrent"
+  trap 'rm -rf "$TMP"' EXIT
+  ok "a second weekly.sh on the same bench home fails fast; stale run locks are reclaimed"
+}
+
+check_cell_signature() {
+  local results="$TMP/cells/results/cpu" spec="$TMP/families-cell.json"
+  mkdir -p "$results" "$BUILDS_DIR/cpu"
+  cp "$TMP/families-test.json" "$spec"
+  FAMILIES_JSON="$spec"
+  run_family_driver() { echo '{"status":"ok","backend":"CPU","wall_ms_median":1}' > "$3"; }
+  run_family clone-test cpu "$results" > "$TMP/cell1.log" 2>&1
+  [ -f "$results/clone-test.json.sig" ] || fail "no cell signature written"
+  run_family clone-test cpu "$results" > "$TMP/cell2.log" 2>&1
+  grep -q "skip clone-test on cpu" "$TMP/cell2.log" || fail "unchanged inputs were not reused"
+  jq '."clone-test".args = ["--changed"]' "$spec" > "$spec.new" && mv "$spec.new" "$spec"
+  run_family clone-test cpu "$results" > "$TMP/cell3.log" 2>&1
+  grep -q "rerun clone-test on cpu (inputs changed)" "$TMP/cell3.log" || fail "changed args did not trigger a rerun"
+  echo "0000" > "$BENCH_HOME/models/store/jfk.wav.sha256"
+  run_family clone-test cpu "$results" > "$TMP/cell4.log" 2>&1
+  grep -q "rerun clone-test on cpu (inputs changed)" "$TMP/cell4.log" || fail "a changed model hash did not trigger a rerun"
+  unset -f run_family_driver
+  FAMILIES_JSON="$HERE/families.json"
+  ok "a cell is reused only when build, iterations, spec and model hashes match"
 }
 
 check_lib_deadline() {
@@ -334,12 +381,14 @@ main() {
   check_lib_iterations
   check_lib_targets
   check_lib_lock
+  check_run_lock
   check_lib_deadline
   check_failed_result
   check_previous_and_prune
   check_build_marker
   check_fetch_models_offline
   check_fetch_models_reprovisions_on_origin_change
+  check_cell_signature
   check_weekly_helpers
   check_info_scripts
   check_nvcc_release

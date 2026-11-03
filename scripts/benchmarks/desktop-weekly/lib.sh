@@ -140,9 +140,44 @@ wait_for_gpu() {
   done
 }
 
+GPU_LOCK_HELD=0
+RUN_LOCK_HELD=0
+
 release_gpu_lock() {
-  trap - EXIT
-  rm -f "${GPU_LOCK:?}"
+  if [ "$GPU_LOCK_HELD" = 1 ]; then rm -f "${GPU_LOCK:?}"; GPU_LOCK_HELD=0; fi
+}
+
+run_lock_dir() { echo "${BENCH_HOME:?}/run.lock"; }
+
+run_lock_holder() { cat "$(run_lock_dir)/owner" 2>/dev/null; }
+
+release_run_lock() {
+  if [ "$RUN_LOCK_HELD" = 1 ]; then rm -rf "${BENCH_HOME:?}/run.lock"; RUN_LOCK_HELD=0; fi
+}
+
+release_locks() {
+  release_gpu_lock
+  release_run_lock
+}
+
+run_lock_is_stale() {
+  local pid
+  pid="$(run_lock_holder | cut -d' ' -f1)"
+  [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null
+}
+
+try_take_run_lock() {
+  mkdir "$(run_lock_dir)" 2>/dev/null && echo "$$ $(utc_now)" > "$(run_lock_dir)/owner"
+}
+
+take_run_lock() {
+  if ! try_take_run_lock; then
+    run_lock_is_stale || return 1
+    rm -rf "${BENCH_HOME:?}/run.lock"
+    try_take_run_lock || return 1
+  fi
+  RUN_LOCK_HELD=1
+  trap release_locks EXIT
 }
 
 current_user() { echo "${USER:-${LOGNAME:-$(id -un)}}"; }
@@ -153,7 +188,8 @@ try_take_gpu_lock() {
 
 take_gpu_lock() {
   try_take_gpu_lock || return 1
-  trap release_gpu_lock EXIT
+  GPU_LOCK_HELD=1
+  trap release_locks EXIT
 }
 
 acquire_gpu_lock() {
@@ -320,9 +356,39 @@ run_family_driver() {
       --models-root "$MODELS_DIR/families" --runner "$(hostname -s)-$backend" --out "$out" )
 }
 
+family_spec_signature() {
+  jq -c --arg f "$1" '.[$f] | {binary, args, models, provision, correctness, audio_duration_seconds}' "$FAMILIES_JSON"
+}
+
+family_model_signature() {
+  local link target
+  for link in "$MODELS_DIR/families/$1"/*; do
+    [ -e "$link" ] || continue
+    target="$(readlink "$link" || echo "$link")"
+    echo "$(basename "$link")=$(cat "$target.sha256" 2>/dev/null || echo unknown)"
+  done | tr '\n' ' '
+}
+
+cell_signature() {
+  local family="$1" backend="$2"
+  echo "$(build_signature "$backend") runs=$(family_runs "$family" "$backend")/$(family_warmup "$family" "$backend") spec=$(family_spec_signature "$family") models=$(family_model_signature "$family")"
+}
+
+cell_is_reusable() {
+  local out="$1" signature="$2"
+  [ -e "$out" ] && [ -f "$out.sig" ] && [ "$(cat "$out.sig")" = "$signature" ]
+}
+
+discard_cell() {
+  local out="$1"
+  rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv"
+}
+
 run_family() {
-  local family="$1" backend="$2" results="$3" out="$3/$1.json" status
-  if [ -e "$out" ]; then log "skip $family on $backend (result present)"; return 0; fi
+  local family="$1" backend="$2" results="$3" out="$3/$1.json" status signature
+  signature="$(cell_signature "$family" "$backend")"
+  if cell_is_reusable "$out" "$signature"; then log "skip $family on $backend (result present with the same inputs)"; return 0; fi
+  if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
   log "run $family on $backend"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1
@@ -330,6 +396,7 @@ run_family() {
   stop_gpu_sampler
   if [ "$status" -eq "$DEADLINE_EXIT_CODE" ]; then write_failed_result "$family" "$backend" "timeout" "$out"; fi
   if [ ! -e "$out" ]; then write_failed_result "$family" "$backend" "driver-failed" "$out"; fi
+  echo "$signature" > "$out.sig"
   log "done $family on $backend: $(jq -r '[.status, .backend, .wall_ms_median] | map(tostring) | join(" ")' "$out")"
 }
 
@@ -359,7 +426,7 @@ discard_failed_results() {
   local result
   for result in "${1:?}"/results/*/*.json; do
     [ -f "$result" ] || continue
-    if result_failed "$result"; then rm -f "${result%.json}".json "${result%.json}".log "${result%.json}".gpu.csv; fi
+    if result_failed "$result"; then discard_cell "$result"; fi
   done
 }
 

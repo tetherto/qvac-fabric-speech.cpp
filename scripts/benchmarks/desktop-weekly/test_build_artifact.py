@@ -85,6 +85,10 @@ class BuildArtifactTest(unittest.TestCase):
         self.assertIn('class="bar cuda"', chart)
         self.assertIn("log scale", chart)
 
+    def test_pins_list_sizes_in_gib(self):
+        text = build.pins_list(summary("x", "", {"a": 1.0}))
+        self.assertIn("<code>m.gguf</code> 1.0 GiB", text)
+
     def test_primary_backend_by_os(self):
         self.assertEqual(build.primary_backend(summary("x", "", {"a": 1.0})), "cuda")
         self.assertEqual(build.primary_backend(summary("x", "", {"a": 1.0}, os_name="Darwin", backends=("cpu", "metal"))), "metal")

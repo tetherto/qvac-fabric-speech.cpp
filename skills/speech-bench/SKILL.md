@@ -65,9 +65,10 @@ Copy every finished run's summary into the local history folder, one file per ru
 
 ```sh
 H=qvac-dev-linux-x64   # and qvac-dev-mac-arm64
-mkdir -p /data/repos/tether/tmp/QVAC-27853/summaries/$H
+HISTORY=${SPEECH_BENCH_HISTORY:-$HOME/speech-bench-history}
+mkdir -p $HISTORY/summaries/$H
 for run in $(ssh $H 'cd ~/speech-bench/runs && for d in */; do [ -e "$d/DONE" ] && echo "${d%/}"; done'); do
-  scp -q $H:speech-bench/runs/$run/summary.json /data/repos/tether/tmp/QVAC-27853/summaries/$H/$run.json
+  scp -q $H:speech-bench/runs/$run/summary.json $HISTORY/summaries/$H/$run.json
 done
 ```
 
@@ -80,8 +81,8 @@ wants to read it.
 Build the page and update the artifact in place:
 
 ```sh
-python3 scripts/benchmarks/desktop-weekly/build-artifact.py /data/repos/tether/tmp/QVAC-27853/summaries \
-  -o /data/repos/tether/tmp/QVAC-27853/speech-weekly-bench.html
+HISTORY=${SPEECH_BENCH_HISTORY:-$HOME/speech-bench-history}
+python3 scripts/benchmarks/desktop-weekly/build-artifact.py $HISTORY/summaries -o $HISTORY/speech-weekly-bench.html
 ```
 
 Then publish that file with the Artifact tool to the existing page, never as a new artifact:

@@ -130,6 +130,7 @@ main() {
   prepare_run_dir
   STARTED="$(utc_now)"
   log "start $(run_name) backends=$(resolve_backends)"
+  take_run_lock || fail "another weekly.sh run holds $(run_lock_dir) ($(run_lock_holder))"
   keep_awake
   if [ "$UPDATE" = 1 ]; then update_sources || fail "source update failed"; fi
   [ -d "$ENGINE_SRC/.git" ] || fail "no engine checkout at $ENGINE_SRC"
@@ -141,6 +142,7 @@ main() {
   bench_all_backends "$FAMILIES" "$RUN_DIR"
   release_gpu_lock
   bash "$TOOLS_DIR/collect-pins.sh" "$FAMILIES" > "$RUN_DIR/pins.json"
+  release_run_lock
   build_report
   write_narrative
   compose_mail_body > "$RUN_DIR/mail-body.md"

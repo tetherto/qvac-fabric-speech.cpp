@@ -42,7 +42,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| Model b | Q8_0 | **timeout** | - | - | - | - | - | CUDA | 10 |", text)
         self.assertIn("| Model a | Q8_0 | 11x | 2.20x |", text)
         self.assertIn("| Model b | Q8_0 | timeout | 1.80x |", text)
-        self.assertIn("`0123456789ab`", text)
+        self.assertIn("| m.gguf | 1.0 GiB | `0123456789ab` | registry x |", text)
         self.assertIn("- b on cuda timeout", text)
         self.assertIn("- no previous run to compare with", text)
 

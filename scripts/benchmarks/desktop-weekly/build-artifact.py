@@ -20,6 +20,7 @@ import pathlib
 STATUS_OK = "ok"
 PERCENT = 100.0
 MIB_PER_GIB = 1024.0
+BYTES_PER_MIB = 1024.0 * 1024.0
 MS_PER_SECOND = 1000.0
 SLOW_MS_LIMIT = 10000.0
 FAST_SPEED_LIMIT = 10.0
@@ -282,7 +283,7 @@ def pins_list(summary):
         repo = pins.get(label) or {}
         items.append(f"<li><b>{label}</b> {esc(repo.get('branch', '?'))} <code>{esc(repo.get('sha', '?'))}</code> ({esc(repo.get('commit_date', '?'))})</li>")
     for model in pins.get("models", []):
-        size = fmt_gib(model["bytes"] / MIB_PER_GIB) if model.get("present") else "missing"
+        size = fmt_gib(model["bytes"] / BYTES_PER_MIB) if model.get("present") else "missing"
         items.append(f"<li><code>{esc(model['name'])}</code> {size} <code>{esc((model.get('sha256') or '')[:SHA_SHORT])}</code> "
                      f"<span class=\"sub\">{esc(model.get('source', ''))}</span></li>")
     return "<ul class=\"pins\">" + "".join(items) + "</ul>"

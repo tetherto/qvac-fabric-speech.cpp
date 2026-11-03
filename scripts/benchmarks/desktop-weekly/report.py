@@ -16,6 +16,7 @@ import sys
 STATUS_OK = "ok"
 MS_PER_SECOND = 1000.0
 MIB_PER_GIB = 1024.0
+BYTES_PER_MIB = 1024.0 * 1024.0
 SLOW_MS_LIMIT = 10000.0
 FAST_SPEED_LIMIT = 10.0
 PERCENT = 100.0
@@ -121,7 +122,7 @@ def repo_line(label, repo):
 
 
 def model_rows(models):
-    return [[model["name"], fmt_gib(model["bytes"] / MIB_PER_GIB / MIB_PER_GIB) if model.get("present") else "missing",
+    return [[model["name"], fmt_gib(model["bytes"] / BYTES_PER_MIB) if model.get("present") else "missing",
              f"`{model.get('sha256', '')[:SHA_SHORT]}`" if model.get("present") else "-", model.get("source", "")]
             for model in models]
 
