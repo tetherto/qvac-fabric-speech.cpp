@@ -5,7 +5,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | Property | Value |
 |---|---|
 | CMake project | `audiogen-cpp` v0.1.0 |
-| Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine`; memory-fit preflights `tts_cpp::acestep::fit_params`, `tts_cpp::minimax::fit_params`, whose results name devices by their ggml device name and give a device that reports no memory of its own the CPU's figures ([memory fit results](../../README.md#memory-fit-results)) |
+| Public API | `tts_cpp::acestep::Engine`, `tts_cpp::minimax::Engine`; [memory-fit preflights](docs/memory-fit.md) `tts_cpp::acestep::fit_params`, `tts_cpp::minimax::fit_params` |
 | Output | interleaved stereo PCM, model-defined sample rate, `pcm[t * 2 + ch]` |
 | Backends | CPU, Vulkan (including Android Mali iGPUs), Metal, OpenCL (validated on Adreno 700+), CUDA, Hexagon NPU on explicit request (`backend = "hexagon"`, every ACE-Step stage including the LM, validated on Snapdragon 8 Elite); WebGPU (Dawn) is selectable with `backend = "webgpu"` but unmeasured, so the LM and detokenizer stay on the CPU there; optional Core ML VAE-decoder sidecar on Apple (`AUDIOGEN_COREML`) |
 | ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
@@ -15,7 +15,7 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 
 | Model | Task | Output | Quantization | Backends |
 |---|---|---|---|---|
-| ACE-Step v15 turbo / sft / base | text-to-music, editing, LRC timestamps; base-only lego stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0`; turbo also `q4_k_m` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA, Hexagon (turbo `q8_0` DiT; K-quant GGUFs are refused at load); optional Core ML VAE-decoder sidecar |
+| ACE-Step v15 turbo / sft / base | text-to-music, source-conditioned covers, editing, LRC timestamps; base-only lego stems | 48 kHz stereo | `f32`, `f16`, `bf16`, `q8_0`; turbo also `q4_k_m` | CPU, Vulkan, Metal, OpenCL (Adreno 700+), CUDA, Hexagon (turbo `q8_0` DiT; K-quant GGUFs are refused at load); optional Core ML VAE-decoder sidecar |
 | MiniMax-Music3 | text-to-music | 44.1 kHz stereo | `f16`, `q8_0`; LM, DiT and depth decoder also `q4_k_m` | desktop CPU + GPU (CUDA, Vulkan, Metal); optional conditioner or full-network Core ML on Apple |
 
 Apple builds can optionally use a Core ML sidecar for the ACE-Step VAE decoder.
@@ -49,7 +49,7 @@ and MiniMax model preparation and transfer. Diagnostics do not gate quality.
 |---|---|
 | Pipeline, model stages, model setup | [docs/pipeline.md](docs/pipeline.md) |
 | Backends, environment overrides, Core ML VAE sidecar | [docs/backends.md](docs/backends.md) |
-| Build | [docs/build.md](docs/build.md) |
+| Build and C++ usage | [docs/build.md](docs/build.md) |
 | Audio editing (repaint, FlowEdit) | [docs/editing.md](docs/editing.md) |
 | Command-line tools | [docs/cli.md](docs/cli.md) |
 | Memory-fit preflight | [docs/memory-fit.md](docs/memory-fit.md) |
