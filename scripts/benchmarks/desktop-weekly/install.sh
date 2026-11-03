@@ -90,11 +90,19 @@ start_scheduler() {
   echo "scheduler: no cron on this host; scheduler.sh (pid $!) runs weekly.sh on weekday $WEEKDAY at $HOUR:$MINUTE and does not survive a reboot"
 }
 
+crontab_holds_line() {
+  crontab -l 2>/dev/null | grep -q -F "$CRON_TAG"
+}
+
+write_crontab() {
+  { other_cron_lines; cron_line; } | crontab - 2>/dev/null && crontab_holds_line
+}
+
 install_cron() {
   [ "$CRON" = 1 ] || return 0
-  if ! command -v crontab > /dev/null; then start_scheduler; return 0; fi
-  { other_cron_lines; cron_line; } | crontab -
-  echo "crontab: $(cron_line)"
+  if command -v crontab > /dev/null && write_crontab; then echo "crontab: $(cron_line)"; return 0; fi
+  echo "crontab is missing or refused the write on this host"
+  start_scheduler
 }
 
 main() {
