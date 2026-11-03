@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+readonly SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly CRON_TAG="# speech-bench-weekly"
+readonly DEFAULT_WEEKDAY=0
+readonly DEFAULT_HOUR=6
+readonly DEFAULT_MINUTE=0
+readonly MAX_WEEKDAY=6
+readonly MAX_HOUR=23
+readonly MAX_MINUTE=59
+readonly CONFIG_MODE=600
+
+BENCH_HOME="${BENCH_HOME:-$HOME/speech-bench}"
+WEEKDAY="$DEFAULT_WEEKDAY"
+HOUR="$DEFAULT_HOUR"
+MINUTE="$DEFAULT_MINUTE"
+CRON=1
+
+usage() {
+  cat <<USAGE >&2
+usage: install.sh [--bench-home DIR] [--weekday 0-6] [--hour H] [--minute M] [--no-cron]
+Copies this directory to <bench home>/tools, seeds <bench home>/config.env from config.example.env when it is
+missing, and installs a crontab line that runs weekly.sh on the given weekday (0 = Sunday) at the given local time.
+USAGE
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bench-home) BENCH_HOME="$2"; shift 2 ;;
+      --weekday) WEEKDAY="$2"; shift 2 ;;
+      --hour) HOUR="$2"; shift 2 ;;
+      --minute) MINUTE="$2"; shift 2 ;;
+      --no-cron) CRON=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage; exit 2 ;;
+    esac
+  done
+}
+
+integer_within() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -le "$2" ]; }
+
+validate_schedule() {
+  integer_within "$WEEKDAY" "$MAX_WEEKDAY" || { echo "weekday must be 0-6" >&2; exit 2; }
+  integer_within "$HOUR" "$MAX_HOUR" || { echo "hour must be 0-23" >&2; exit 2; }
+  integer_within "$MINUTE" "$MAX_MINUTE" || { echo "minute must be 0-59" >&2; exit 2; }
+  [[ "$BENCH_HOME" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "bench home may only contain letters, digits, / . _ -" >&2; exit 2; }
+}
+
+install_tools() {
+  mkdir -p "$BENCH_HOME/tools" "$BENCH_HOME/runs"
+  find "$SOURCE_DIR" -maxdepth 1 -type f -exec cp {} "$BENCH_HOME/tools/" \;
+  chmod +x "$BENCH_HOME"/tools/*.sh
+}
+
+seed_config() {
+  [ -f "$BENCH_HOME/config.env" ] || cp "$SOURCE_DIR/config.example.env" "$BENCH_HOME/config.env"
+  chmod "$CONFIG_MODE" "$BENCH_HOME/config.env"
+}
+
+cron_line() {
+  echo "$MINUTE $HOUR * * $WEEKDAY BENCH_HOME=$BENCH_HOME /bin/bash $BENCH_HOME/tools/weekly.sh >> $BENCH_HOME/cron.log 2>&1 $CRON_TAG"
+}
+
+other_cron_lines() {
+  crontab -l 2>/dev/null | grep -v -F "$CRON_TAG" || true
+}
+
+install_cron() {
+  [ "$CRON" = 1 ] || return 0
+  { other_cron_lines; cron_line; } | crontab -
+  echo "crontab: $(cron_line)"
+}
+
+main() {
+  parse_args "$@"
+  validate_schedule
+  install_tools
+  seed_config
+  install_cron
+  echo "installed in $BENCH_HOME (edit $BENCH_HOME/config.env, then try: $BENCH_HOME/tools/weekly.sh --quick --no-mail)"
+}
+
+main "$@"
