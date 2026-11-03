@@ -515,7 +515,7 @@ struct CliOpts {
 
 }
 
-extern "C" int parakeet_cli_main(int argc, char ** argv) {
+extern "C" int parakeet_cli_main(int argc, char ** argv) try {
     CliOpts      opts;
     ExtraCliOpts extra;
 
@@ -665,13 +665,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         PARAKEET_LOG_ERROR("error: failed to load %s (rc=%d)\n", opts.model_gguf_path.c_str(), rc);
         return 3;
     }
-    try {
-        configure_npu_encoder(model, opts.npu_encoder, opts.n_threads);
-    } catch (const std::exception & error) {
-        PARAKEET_LOG_ERROR("error: %s\n", error.what());
-        return 3;
-    }
-    const double load_ms = ms_since(t_load);
+    double load_ms = ms_since(t_load);
 
     if (extra.require_coreml) {
         if (!extra.bench) {
@@ -1443,6 +1437,10 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         return 0;
     }
 
+    const auto t_npu_load = clock::now();
+    configure_npu_encoder(model, opts.npu_encoder, opts.n_threads);
+    load_ms += ms_since(t_npu_load);
+
     if (!extra.bench) {
         RunTimes times;
         if (int rc = run_once(text, ids, n_frames, times); rc != 0) return 6 + rc;
@@ -1619,4 +1617,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     }
 
     return 0;
+} catch (const std::exception & error) {
+    PARAKEET_LOG_ERROR("error: %s\n", error.what());
+    return 3;
 }

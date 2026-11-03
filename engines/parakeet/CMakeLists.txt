@@ -1642,6 +1642,10 @@ if (PARAKEET_BUILD_TESTS)
                 COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_npu_cli.py"
                     $<TARGET_FILE:parakeet-cli>)
             set_tests_properties(test-npu-cli PROPERTIES LABELS "unit")
+            add_test(NAME test-npu-cli-dispatch
+                COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_npu_cli_dispatch.py"
+                    $<TARGET_FILE:parakeet-cli> "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
+            set_tests_properties(test-npu-cli-dispatch PROPERTIES LABELS "fixture" SKIP_RETURN_CODE 77)
         endif()
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint

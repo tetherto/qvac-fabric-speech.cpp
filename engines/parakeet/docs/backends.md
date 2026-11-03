@@ -41,6 +41,18 @@ Native cache-aware streaming and partial-layer diagnostic captures retain their
 ggml paths. Hardware validation covers Parakeet TDT 0.6B-v3;
 other exports require their own model and runtime validation.
 
+This adapter uses AMD's [ONNX Runtime/VitisAI deployment interface](https://ryzenai.docs.amd.com/en/latest/modelrun.html)
+to compile and execute the encoder on the Ryzen AI NPU. The ggml revision used
+by this engine has no AMD XDNA NPU backend; its AMD GPU backends do not target
+the NPU. The GGUF remains required for the native components, and the matching
+ONNX encoder is an additional artifact. A GGUF-only NPU path would require a
+compatible ggml backend, which this adapter does not implement. ONNX Runtime
+is an optional build dependency when `PARAKEET_RYZENAI=ON`.
+
+The CLI creates the local NPU encoder only for offline transcription and
+benchmarking. Streaming and attributed transcription initialize their encoder
+through their own `Engine`; native layer profiling creates no NPU session.
+
 ### Build and runtime
 
 Install the [AMD Ryzen AI Linux runtime](https://ryzenai.docs.amd.com/en/latest/linux.html)
