@@ -1576,6 +1576,13 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-cosyvoice-load PRIVATE ggml)
     target_include_directories(test-cosyvoice-load PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-load)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_definitions(test-cosyvoice-load PRIVATE TTS_CPP_COSYVOICE_TRACK_ALLOCATIONS)
+        foreach(_cosy_load_symbol ggml_init ggml_free ggml_backend_cpu_buffer_from_ptr
+                ggml_backend_alloc_ctx_tensors_from_buft ggml_backend_buffer_free ggml_backend_free)
+            target_link_options(test-cosyvoice-load PRIVATE "LINKER:--wrap=${_cosy_load_symbol}")
+        endforeach()
+    endif()
     tts_cpp_register_test(test-cosyvoice-load LABEL "unit")
 
     add_executable(test-cosyvoice-bf16 test/test_cosyvoice_bf16.cpp ${_tcb_cosy_core_srcs})
