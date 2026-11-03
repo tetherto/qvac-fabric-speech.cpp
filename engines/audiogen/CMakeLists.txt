@@ -369,6 +369,12 @@ if (AUDIOGEN_BUILD_TESTS)
         set_property(TEST test-acestep-converter PROPERTY LABELS "unit")
         set_property(TEST test-acestep-converter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+        add_test(NAME test-acestep-stage-cos
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_stage_cos.py
+        )
+        set_property(TEST test-acestep-stage-cos PROPERTY LABELS "unit")
+        set_property(TEST test-acestep-stage-cos PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         # Skips without torch under the system interpreter; the audiogen CI
         # macOS lane also runs it with the Core ML export venv, where torch is
         # installed and the assertions execute.
