@@ -34,6 +34,7 @@ BACKEND_ORDER = ("cpu", "cuda", "vulkan", "metal")
 PRIMARY_BACKEND = {"Linux": "cuda", "Darwin": "metal"}
 TASK_ORDER = ("ASR", "TTS", "TTS cloning", "Music")
 MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-0": "Strix Halo",
+                  "qvac-dev-strix-1": "Strix Halo (1)", "qvac-dev-linux-arm64": "Jetson Orin Nano",
                   "qvac-dev-mac-arm64": "Mac Studio M3 Ultra", "mac-mini-m4-gpu": "Mac mini M4"}
 CHART_MIN_SPEED = 1.0
 CHART_MAX_SPEED_FLOOR = 10.0

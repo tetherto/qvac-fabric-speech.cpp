@@ -79,6 +79,7 @@ class BuildArtifactTest(unittest.TestCase):
                                                                backends=("cpu", "metal"), host="qvac-dev-mac-arm64", tasks={"m": "Music"}))
         hosts = build.runs_by_host(build.load_summaries(self.root))
         self.assertEqual(list(hosts), ["qvac-dev-mac-arm64", "box"])
+        self.assertEqual(build.machine_label("qvac-dev-linux-arm64"), "Jetson Orin Nano")
         self.assertEqual(build.lanes(hosts, build.GPU_BACKENDS), [("qvac-dev-mac-arm64", "metal"), ("box", "cuda")])
         self.assertEqual(build.task_families(hosts, "Music"), ["m"])
         text = build.task_section(hosts, "ASR", [])
