@@ -16,6 +16,7 @@ bool dit_gguf_open(DitGGUF & g, const std::string & path) {
     g.ctx                     = gguf_init_from_file(path.c_str(), p);
     if (!g.ctx) {
         fprintf(stderr, "[acestep-dit] failed to parse %s\n", path.c_str());
+        dit_gguf_close(g);
         return false;
     }
     g.data_off = gguf_get_data_offset(g.ctx);
