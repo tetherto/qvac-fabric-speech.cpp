@@ -4,6 +4,7 @@
 #include "moss/transcribe_text.h"
 
 #include "parakeet/moss_transcribe.h"
+#include "transcribe_reference_io.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,9 @@
 #include <vector>
 
 using namespace parakeet::moss::detail;
+using moss_transcribe_reference_io::read_bin;
+using moss_transcribe_reference_io::read_tokenizer_cases;
+using moss_transcribe_reference_io::TokenizerCase;
 
 namespace {
 
@@ -33,19 +37,6 @@ void check(bool condition, const std::string & label) {
         std::fprintf(stderr, "FAIL: %s\n", label.c_str());
         failures++;
     }
-}
-
-template <typename T>
-std::vector<T> read_bin(const std::filesystem::path & path) {
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input) {
-        throw std::runtime_error("cannot read " + path.string());
-    }
-    const std::streamsize bytes = input.tellg();
-    input.seekg(0);
-    std::vector<T> data((size_t) bytes / sizeof(T));
-    input.read(reinterpret_cast<char *>(data.data()), bytes);
-    return data;
 }
 
 std::string read_text(const std::filesystem::path & path) {
@@ -105,40 +96,8 @@ void test_encoder(const Fixture & fixture) {
     report("encoder chunk 0", cosine(encoding.encoder_states, read_bin<float>(fixture.dir / "encoder_chunk0.bin")),
            STAGE_COSINE);
     const std::vector<float> embeddings = read_bin<float>(fixture.dir / "audio_embeddings.bin");
-    const std::vector<float> head(embeddings.begin(), embeddings.begin() + (std::ptrdiff_t) encoding.embeddings.size());
+    const auto head = moss_transcribe_reference_io::prefix(embeddings, encoding.embeddings.size());
     report("adaptor chunk 0", cosine(encoding.embeddings, head), STAGE_COSINE);
-}
-
-struct TokenizerCase {
-    std::string text;
-    std::vector<int32_t> ids;
-};
-
-uint32_t read_u32(std::ifstream & input) {
-    uint32_t value = 0;
-    input.read(reinterpret_cast<char *>(&value), sizeof(value));
-    return value;
-}
-
-bool read_case(std::ifstream & input, TokenizerCase & item) {
-    const uint32_t bytes = read_u32(input);
-    if (!input) {
-        return false;
-    }
-    item.text.assign(bytes, '\0');
-    input.read(item.text.data(), bytes);
-    item.ids.assign(read_u32(input), 0);
-    input.read(reinterpret_cast<char *>(item.ids.data()), (std::streamsize) (item.ids.size() * sizeof(int32_t)));
-    return (bool) input;
-}
-
-std::vector<TokenizerCase> read_tokenizer_cases(const std::filesystem::path & path) {
-    std::ifstream input(path, std::ios::binary);
-    std::vector<TokenizerCase> cases;
-    for (TokenizerCase item; read_case(input, item);) {
-        cases.push_back(item);
-    }
-    return cases;
 }
 
 void check_tokenizer_case(const TranscribeTokenizer & tokenizer, const TokenizerCase & item) {

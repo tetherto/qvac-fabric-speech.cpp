@@ -81,6 +81,11 @@ struct TranscribeHeadChunk {
 
 std::vector<TranscribeHeadChunk> plan_transcribe_head(int vocab, int max_rows);
 
+// Query the head with the same weight buffer type that loading will use.
+// The callback lets model-free tests inspect that allocation contract.
+bool transcribe_backend_projects(ggml_backend_t backend, const ggml_tensor * table, int rows,
+                                 CopySupport supports = ggml_backend_supports_op);
+
 enum class TranscribeAttention { Auto, Unfused, Fused };
 enum class TranscribeStepGraph { Auto, Rebuilt, Reused };
 
