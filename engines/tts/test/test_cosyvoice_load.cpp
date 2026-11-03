@@ -21,6 +21,10 @@
 #include <string>
 #include <vector>
 
+#ifdef TTS_CPP_COSYVOICE_TRACK_ALLOCATIONS
+#include <set>
+#endif
+
 static int g_failures = 0;
 
 #define CHECK(cond, ...) do {                                  \
@@ -31,6 +35,85 @@ static int g_failures = 0;
         ++g_failures;                                          \
     }                                                          \
 } while (0)
+
+#ifdef TTS_CPP_COSYVOICE_TRACK_ALLOCATIONS
+static bool g_track_load = false;
+static bool g_borrowed_freed = false;
+static ggml_backend_t g_borrowed_backend = nullptr;
+static std::set<ggml_context *> g_load_contexts;
+static std::set<ggml_backend_buffer_t> g_load_buffers;
+
+extern "C" ggml_context * __real_ggml_init(ggml_init_params);
+extern "C" void __real_ggml_free(ggml_context *);
+extern "C" ggml_backend_buffer_t __real_ggml_backend_cpu_buffer_from_ptr(void *, size_t);
+extern "C" ggml_backend_buffer_t __real_ggml_backend_alloc_ctx_tensors_from_buft(ggml_context *, ggml_backend_buffer_type_t);
+extern "C" void __real_ggml_backend_buffer_free(ggml_backend_buffer_t);
+extern "C" void __real_ggml_backend_free(ggml_backend_t);
+
+extern "C" ggml_context * __wrap_ggml_init(ggml_init_params p) {
+    ggml_context * ctx = __real_ggml_init(p);
+    if (g_track_load && ctx) g_load_contexts.insert(ctx);
+    return ctx;
+}
+
+extern "C" void __wrap_ggml_free(ggml_context * ctx) {
+    g_load_contexts.erase(ctx);
+    __real_ggml_free(ctx);
+}
+
+extern "C" ggml_backend_buffer_t __wrap_ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size) {
+    ggml_backend_buffer_t buffer = __real_ggml_backend_cpu_buffer_from_ptr(ptr, size);
+    if (g_track_load && buffer) g_load_buffers.insert(buffer);
+    return buffer;
+}
+
+extern "C" ggml_backend_buffer_t __wrap_ggml_backend_alloc_ctx_tensors_from_buft(ggml_context * ctx, ggml_backend_buffer_type_t buft) {
+    ggml_backend_buffer_t buffer = __real_ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+    if (g_track_load && buffer) g_load_buffers.insert(buffer);
+    return buffer;
+}
+
+extern "C" void __wrap_ggml_backend_buffer_free(ggml_backend_buffer_t buffer) {
+    g_load_buffers.erase(buffer);
+    __real_ggml_backend_buffer_free(buffer);
+}
+
+extern "C" void __wrap_ggml_backend_free(ggml_backend_t backend) {
+    if (g_track_load && backend == g_borrowed_backend) g_borrowed_freed = true;
+    __real_ggml_backend_free(backend);
+}
+
+static void check_load_ownership(const std::string & valid, const std::string & truncated) {
+    g_borrowed_backend = tts_cpp::detail::init_cpu_backend();
+    CHECK(g_borrowed_backend, "failed to init borrowed CPU backend");
+    if (!g_borrowed_backend) return;
+    const std::string paths[] = { valid, truncated, truncated, truncated, valid };
+    for (int i = 0; i < 5; ++i) {
+        g_track_load = true;
+        g_borrowed_freed = false;
+        bool threw = false;
+        try {
+            model_ctx model = cosyvoice_load_gguf(paths[i], g_borrowed_backend);
+            cosyvoice_free(model);
+        } catch (const std::exception &) {
+            threw = true;
+        }
+        g_track_load = false;
+        CHECK(threw == (i > 0 && i < 4), "unexpected load disposition in ownership case %d", i);
+        CHECK(g_load_contexts.empty(), "load case %d retained %zu contexts", i, g_load_contexts.size());
+        CHECK(g_load_buffers.empty(), "load case %d retained %zu buffers", i, g_load_buffers.size());
+        CHECK(!g_borrowed_freed, "load case %d freed a borrowed backend", i);
+        // Release observed leaks after recording failures so the regression stays bounded.
+        for (ggml_backend_buffer_t buffer : g_load_buffers) __real_ggml_backend_buffer_free(buffer);
+        for (ggml_context * ctx : g_load_contexts) __real_ggml_free(ctx);
+        g_load_buffers.clear();
+        g_load_contexts.clear();
+        if (g_borrowed_freed) { g_borrowed_backend = nullptr; break; }
+    }
+    ggml_backend_free(g_borrowed_backend);
+    g_borrowed_backend = nullptr;
+}
+#endif
 
 struct spec { const char * name; ggml_type type; int64_t ne0; int64_t ne1; };
 static const spec SPECS[] = {
@@ -207,6 +290,9 @@ int main() {
         threw = true;
     }
     CHECK(threw, "loading a truncated GGUF must throw, not read past the mapping");
+#ifdef TTS_CPP_COSYVOICE_TRACK_ALLOCATIONS
+    check_load_ownership(path, trunc);
+#endif
 
     // A fused qkv_proj shorter than n_head/n_kv/head_dim imply must be refused
     // rather than sliced: the Q/K/V views carry a custom token stride, so the

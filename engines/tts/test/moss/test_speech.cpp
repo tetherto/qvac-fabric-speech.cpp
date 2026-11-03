@@ -66,6 +66,7 @@ float max_abs_diff(const std::vector<float> & a, const std::vector<float> & b) {
     }
     float worst = 0.0f;
     for (size_t i = 0; i < a.size(); ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) return INFINITY;
         worst = std::max(worst, std::fabs(a[i] - b[i]));
     }
     return worst;
@@ -315,6 +316,35 @@ SpeechLogits prefill(SpeechLM & lm, const std::vector<SpeechRow> & rows, int bat
 
 bool close(const SpeechLogits & a, const SpeechLogits & b) {
     return max_abs_diff(a.text, b.text) < TOLERANCE && max_abs_diff(a.audio, b.audio) < TOLERANCE;
+}
+
+void test_logit_comparison_rejects_nonfinite() {
+    const SpeechLogits expected{{1.0f, 2.0f}, {3.0f, 4.0f}};
+    check(close(expected, expected), "equal finite speech logits pass comparison");
+    SpeechLogits finite = expected;
+    finite.audio[0] += 0.00005f;
+    check(close(expected, finite), "near finite speech logits pass comparison");
+    finite.audio[0] += 0.01f;
+    check(!close(expected, finite), "divergent finite speech logits fail comparison");
+    for (float value : {std::numeric_limits<float>::quiet_NaN(),
+                        std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()}) {
+        SpeechLogits text = expected;
+        text.text[0] = value;
+        check(!close(expected, text), "nonfinite candidate text logits fail comparison");
+        check(!close(text, expected), "nonfinite reference text logits fail comparison");
+        check(!close(text, text), "matching nonfinite text logits fail comparison");
+        SpeechLogits audio = expected;
+        audio.audio[1] = value;
+        check(!close(expected, audio), "nonfinite candidate audio logits fail comparison");
+        check(!close(audio, expected), "nonfinite reference audio logits fail comparison");
+        check(!close(audio, audio), "matching nonfinite audio logits fail comparison");
+    }
+    SpeechLogits fewer = expected;
+    fewer.text.pop_back();
+    check(!close(expected, fewer), "speech text logit count mismatch fails comparison");
+    fewer = expected;
+    fewer.audio.pop_back();
+    check(!close(expected, fewer), "speech audio logit count mismatch fails comparison");
 }
 
 void test_lm_batches_and_steps() {
@@ -743,6 +773,7 @@ void test_cli_flags() {
 
 int main() {
     try {
+        test_logit_comparison_rejects_nonfinite();
         test_generation_switches_channels();
         test_generation_constraints();
         test_generation_limits();
