@@ -53,6 +53,16 @@ Supported models without a benchmark family, and why:
 - ACE-Step sft and base: only the turbo checkpoint is registered under the benchmark's prefix.
 - MOSS-SoundEffect and MOSS-Speech outputs are timed but not scored: no sound-effect or spoken-reply reference exists in the harness.
 
+### Weekly desktop benchmark on the shared machines
+
+[`scripts/benchmarks/desktop-weekly/`](../scripts/benchmarks/desktop-weekly/README.md) runs a second,
+GPU-focused matrix every Sunday morning from cron on the shared Tailscale machines (`qvac-dev-linux-x64` on CPU,
+CUDA and Vulkan; `qvac-dev-mac-arm64` on CPU and Metal), independent of any developer machine. It covers the
+desktop target quantizations of Parakeet TDT, Parakeet Unified, TranscribePsy, Nemotron 3.5 ASR, Supertonic 3,
+the Audio8 LM x codec grid with and without voice cloning, MOSS-TTS v1.5 F16 and Q8_0 with cloning, and the
+ACE-Step 1.5 Turbo, SFT and Base DiT cuts, and e-mails a report with wall-clock, memory, machine, toolchain and
+model pins plus the changes over 5% since the previous run.
+
 ## ASR, end-of-utterance, diarization
 
 CI numbers from the published `@qvac/asr-ggml@0.1.1` addon ([run 31603189415](https://github.com/tetherto/qvac/actions/runs/31603189415), 2026-08-12), `q8_0` GGUFs, 1 warmup plus 5 timed runs, host `qvac-ubuntu2204-x64-gpu` (CPU: Intel Core i5-13500, GPU: NVIDIA RTX 4000 SFF Ada, Vulkan). Full table: [engines/parakeet/README.md](../engines/parakeet/docs/performance.md#asr-addon-ci-2026-08-12).
