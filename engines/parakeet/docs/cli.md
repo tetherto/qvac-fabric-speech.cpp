@@ -12,13 +12,9 @@ parakeet --model <model.gguf> (--wav <16-kHz-mono.wav> |
 ```
 
 Useful groups include `--threads`, `--n-gpu-layers`, `--backend`, `--backends-dir`,
-`--language`, `--npu-encoder`, `--npu-option`, `--stream`, `--stream-duplex`, context/chunk options,
+`--language`, `--stream`, `--stream-duplex`, context/chunk options,
 `--diarization-model`, OpenCL environment controls, `--bench`, `--profile`,
 and `--dump-mel`. Run `parakeet --help` for the complete list.
-`--npu-encoder PATH` selects a matching ONNX encoder using VitisAI. Repeat
-`--npu-option KEY=VALUE` to pass provider configuration, including `config_file`
-and `cache_dir`. `--backend` continues to select the native ggml backend used
-by the decoder. See [AMD runtime setup](backends.md#amd-ryzen-ai-npu-encoder).
 `--require-coreml` (with `--bench`, CTC/IndicConformer, Unified RNN-T, TDT,
 EOU, and Nemotron only) fails unless every timed encoder invocation ran on the
 [Core ML sidecar](backends.md#core-ml-encoder-sidecar). `--bench`
@@ -124,7 +120,7 @@ build-parakeet/parakeet-fit-params \
 
 `--backend` (`FitOptions::backend`) takes the same names as the engine's
 `--backend`: `auto` follows `--n-gpu-layers`; `cpu`, `cuda`, `vulkan`, `opencl`,
-`webgpu`, `hexagon` or an exact ggml device name projects for that backend, and
+`webgpu`, `hexagon`, `xdna` or an exact ggml device name projects for that backend, and
 an unavailable one is an
 error with reason `no-backend-device`, as a real load fails. A Hexagon session
 allocates host memory and reports none of its own, so the verdict reads the

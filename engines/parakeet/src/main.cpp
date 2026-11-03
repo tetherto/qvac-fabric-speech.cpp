@@ -16,7 +16,6 @@
 #include "encoder_device_decode.h"
 
 #include "ggml-backend.h"
-#include "parakeet_npu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -81,11 +80,9 @@ void print_usage(const char * argv0) {
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
         "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
-        "                       hexagon (HTP0), or exact ggml device name. Explicit\n"
+        "                       hexagon (HTP0), xdna (XDNA0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
         "                       unavailable.\n"
-        "  --npu-encoder PATH   matching ONNX encoder for the AMD NPU (PARAKEET_RYZENAI=ON)\n"
-        "  --npu-option K=V     VitisAI provider option; may be repeated\n"
         "  --backends-dir DIR                 directory to scan for dynamically-loaded\n"
         "                                     ggml backend .so/.dll/.dylib files\n"
         "                                     (e.g. libspeech-ggml-vulkan.so,\n"
@@ -376,7 +373,6 @@ struct RunTimes {
     int    tokens         = 0;
     int    encoder_frames = 0;
     bool   encoder_coreml = false;
-    bool   encoder_npu = false;
 };
 
 struct AggStats {
@@ -503,7 +499,6 @@ void log_cli_long_form(const parakeet::ParakeetCtcModel & model, const parakeet:
 // loaded engine; the CLI happens to want both in one bag during arg
 // parsing so we keep a tiny local struct.
 struct CliOpts {
-    parakeet::NpuEncoderOptions npu_encoder;
     std::string model_gguf_path;
     std::string wav_path;
     std::string language;
@@ -515,7 +510,7 @@ struct CliOpts {
 
 }
 
-extern "C" int parakeet_cli_main(int argc, char ** argv) try {
+extern "C" int parakeet_cli_main(int argc, char ** argv) {
     CliOpts      opts;
     ExtraCliOpts extra;
 
@@ -542,16 +537,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
             opts.n_gpu_layers = std::atoi(argv[++i]);
         } else if (a == "--backend" && i + 1 < argc) {
             opts.backend = argv[++i];
-        } else if (a == "--npu-encoder" && i + 1 < argc) {
-            opts.npu_encoder.model_path = argv[++i];
-        } else if (a == "--npu-option" && i + 1 < argc) {
-            const std::string option = argv[++i];
-            const auto separator = option.find('=');
-            if (separator == std::string::npos || separator == 0) {
-                PARAKEET_LOG_ERROR("error: --npu-option requires KEY=VALUE\n");
-                return 2;
-            }
-            opts.npu_encoder.provider_options[option.substr(0, separator)] = option.substr(separator + 1);
         } else if (a == "--opencl-cache-dir" && i + 1 < argc) {
             extra.opencl_cache_dir = argv[++i];
         } else if (a == "--backends-dir" && i + 1 < argc) {
@@ -665,7 +650,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         PARAKEET_LOG_ERROR("error: failed to load %s (rc=%d)\n", opts.model_gguf_path.c_str(), rc);
         return 3;
     }
-    double load_ms = ms_since(t_load);
+    const double load_ms = ms_since(t_load);
 
     if (extra.require_coreml) {
         if (!extra.bench) {
@@ -767,7 +752,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         asr_opts.model_gguf_path = opts.model_gguf_path;
         asr_opts.n_gpu_layers    = opts.n_gpu_layers;
         asr_opts.backend         = opts.backend;
-        asr_opts.npu_encoder     = opts.npu_encoder;
         asr_opts.n_threads       = opts.n_threads;
         asr_opts.verbose         = opts.verbose;
         asr_opts.language        = opts.language;
@@ -822,7 +806,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         eopts.model_gguf_path = opts.model_gguf_path;
         eopts.n_gpu_layers    = opts.n_gpu_layers;
         eopts.backend         = opts.backend;
-        eopts.npu_encoder     = opts.npu_encoder;
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
@@ -1048,7 +1031,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         }
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
-        times.encoder_npu = enc_out.used_npu;
 
         if (extra.require_coreml && !times.encoder_coreml) {
             PARAKEET_LOG_ERROR(
@@ -1367,7 +1349,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         eopts.model_gguf_path = opts.model_gguf_path;
         eopts.n_gpu_layers    = opts.n_gpu_layers;
         eopts.backend         = opts.backend;
-        eopts.npu_encoder     = opts.npu_encoder;
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
@@ -1437,10 +1418,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         return 0;
     }
 
-    const auto t_npu_load = clock::now();
-    configure_npu_encoder(model, opts.npu_encoder, opts.n_threads);
-    load_ms += ms_since(t_npu_load);
-
     if (!extra.bench) {
         RunTimes times;
         if (int rc = run_once(text, ids, n_frames, times); rc != 0) return 6 + rc;
@@ -1481,7 +1458,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
     inf_v.reserve(extra.bench_runs);
     bool any_coreml = false;
     bool all_coreml = true;
-    bool all_npu = true;
 
     int enc_frames_last = 0;
     for (int r = 0; r < extra.bench_runs; ++r) {
@@ -1494,7 +1470,6 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
         enc_frames_last = t.encoder_frames;
         any_coreml = any_coreml || t.encoder_coreml;
         all_coreml = all_coreml && t.encoder_coreml;
-        all_npu = all_npu && t.encoder_npu;
         PARAKEET_LOG_INFO("[bench] run %d/%d    mel=%.1fms enc=%.1fms dec=%.1fms inference=%.1fms  RTF=%.3f\n",
                      r + 1, extra.bench_runs, t.mel_ms, t.enc_ms, t.dec_ms,
                      t.inference_ms, t.inference_ms / audio_ms);
@@ -1511,7 +1486,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
     const double   rtf_mean   = s_inf.mean   / audio_ms;
     const bool     noisy      = s_inf.stdev > 0.2 * s_inf.mean;
     const std::string encoder_backend =
-        all_coreml || all_npu
+        all_coreml
             ? model_encoder_backend_name(model)
             : (any_coreml ? std::string("mixed")
                           : model_active_backend_name(model));
@@ -1617,7 +1592,4 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) try {
     }
 
     return 0;
-} catch (const std::exception & error) {
-    PARAKEET_LOG_ERROR("error: %s\n", error.what());
-    return 3;
 }

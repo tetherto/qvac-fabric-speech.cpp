@@ -70,7 +70,6 @@
 #include "export.h"
 #include "streaming.h"
 #include "diarization.h"
-#include "npu.h"
 
 #include <cstdint>
 #include <memory>
@@ -216,13 +215,12 @@ struct EngineOptions {
     std::string language;
 
     // "auto" (or empty) preserves n_gpu_layers and runtime GPU tiering.
-    // "cpu", "cuda", "vulkan", "opencl", "webgpu", "metal" and "hexagon" explicitly
-    // select a backend; "hexagon" selects HTP0. An exact ggml device name (e.g. HTP0)
+    // "cpu", "cuda", "vulkan", "opencl", "webgpu", "metal", "hexagon" and "xdna" explicitly
+    // select a backend; "hexagon" selects HTP0 and "xdna" selects XDNA0. An exact ggml device name (e.g. HTP0)
     // is also accepted. Explicit selection overrides n_gpu_layers and
     // fails construction if unavailable or initialization fails. Individual
     // unsupported operations can still use the existing CPU scheduler.
     std::string backend = "auto";
-    NpuEncoderOptions npu_encoder;
 };
 
 // Resolved compute device the Engine is actually running on, after
@@ -371,9 +369,9 @@ public:
     // the lifetime of the Engine.
     std::string backend_name() const;
 
-    // Returns "VitisAI" for the selected AMD encoder, or an Apple Core ML
-    // sidecar's compute label (for example "coreml-all") when loaded;
-    // otherwise identical to backend_name().
+    // Reports whether an Apple Core ML encoder or diarizer sidecar loaded for
+    // this model. Returns the sidecar's compute label (for example
+    // "coreml-all") when loaded; otherwise identical to backend_name().
     // Encoder sidecars cover CTC/IndicConformer, Unified RNN-T, TDT, EOU,
     // Nemotron, and Sortformer v2.1; their decoders, and the Sortformer speaker
     // head without a diarizer sidecar, run on the ggml backend reported by

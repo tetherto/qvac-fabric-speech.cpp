@@ -5,11 +5,11 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 | Property | Value |
 |---|---|
 | Build | Feature-gated CMake superbuild over Whisper and three native engines |
-| Runtime | Native C++ inference; the optional Parakeet AMD NPU encoder uses ONNX Runtime/VitisAI |
-| Model formats | Whisper/Silero GGML `.bin`; Parakeet, TTS, and AudioGen GGUF; optional Parakeet ONNX encoder |
+| Runtime | No Python, PyTorch, NeMo, or ONNX Runtime at inference time |
+| Model formats | Whisper/Silero GGML `.bin`; Parakeet, TTS, and AudioGen GGUF |
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android arm64-v8a, iOS arm64; model and backend coverage varies by engine |
-| Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement, optional Apple Core ML sidecars, or a [Parakeet AMD NPU encoder](engines/parakeet/docs/backends.md#amd-ryzen-ai-npu-encoder) |
+| Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement or optional Apple Core ML sidecars |
 | Shared ggml | One `ggml-speech` dependency from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
 
 ## Supported models
@@ -37,6 +37,11 @@ for routing, fallback and validation coverage.
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages and excludes WebGPU, whose kernels lack an op the graphs need |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, optional [Core ML conditioner projection](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner), and metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
+
+Parakeet also accepts explicit [AMD XDNA](engines/parakeet/docs/backends.md#amd-xdna-npu)
+selection through Fabric LLM's native GGML backend. It uses the existing GGUF,
+requires matching XDNA runtime artifacts, and schedules unsupported operations
+on CPU. Q8_0 matrices stay on the host; use F16 for NPU validation.
 
 MOSS cloning matches upstream reference loudness preprocessing and uses the
 TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)

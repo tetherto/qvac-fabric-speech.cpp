@@ -7,12 +7,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-option(PARAKEET_RYZENAI "parakeet: enable the optional ONNX/VitisAI AMD NPU encoder" OFF)
-if (PARAKEET_RYZENAI)
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-    find_package(ONNXRuntime REQUIRED)
-endif()
-
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(PARAKEET_STANDALONE_DEFAULT ON)
 else()
@@ -275,7 +269,6 @@ set_source_files_properties(${PARAKEET_MOSS_SOURCES} PROPERTIES
     COMPILE_OPTIONS "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fno-fast-math>")
 
 set(PARAKEET_LIB_SOURCES
-    src/parakeet_npu.cpp
     ${PARAKEET_MOSS_SOURCES}
     src/parakeet_ctc.cpp
     src/parakeet_coreml_path.cpp
@@ -324,10 +317,6 @@ if (PARAKEET_BUILD_LIBRARY)
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
     )
     target_link_libraries(qvac-parakeet PUBLIC ggml)
-    if (PARAKEET_RYZENAI)
-        target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_USE_RYZENAI)
-        target_link_libraries(qvac-parakeet PRIVATE ONNXRuntime::ONNXRuntime)
-    endif()
 
     # Export the language requirement so it reaches consumers through the
     # installed target. The public headers use C++11 constructs (defaulted
@@ -826,19 +815,18 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-parakeet-backend-request)
     parakeet_register_test(test-parakeet-backend-request LABEL "unit")
 
-    add_executable(test-npu-encoder test/test_npu_encoder.cpp src/parakeet_npu.cpp)
-    target_include_directories(test-npu-encoder PRIVATE src include)
-    target_link_libraries(test-npu-encoder PRIVATE ggml)
-    if (PARAKEET_RYZENAI)
-        target_compile_definitions(test-npu-encoder PRIVATE PARAKEET_USE_RYZENAI)
-        target_link_libraries(test-npu-encoder PRIVATE ONNXRuntime::ONNXRuntime)
-    endif()
-    parakeet_register_test(test-npu-encoder LABEL "unit"
-        ARGS "${CMAKE_CURRENT_SOURCE_DIR}/test/npu-encoder-identity.onnx")
-    if (PARAKEET_RYZENAI)
-        add_executable(test-npu-transcription test/test_npu_transcription.cpp)
-        target_link_libraries(test-npu-transcription PRIVATE qvac-parakeet)
-    endif()
+    add_executable(test-encoder-graph-allocator test/test_encoder_graph_allocator.cpp)
+    target_include_directories(test-encoder-graph-allocator PRIVATE src)
+    target_link_libraries(test-encoder-graph-allocator PRIVATE ggml)
+    parakeet_register_test(test-encoder-graph-allocator LABEL "unit")
+
+    add_executable(test-xdna-transcription test/test_xdna_transcription.cpp)
+    target_link_libraries(test-xdna-transcription PRIVATE qvac-parakeet ggml)
+    parakeet_apply_ccache(test-xdna-transcription)
+    parakeet_register_test(test-xdna-transcription
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
 
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
@@ -1637,16 +1625,6 @@ if (PARAKEET_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
-        if (TARGET parakeet-cli)
-            add_test(NAME test-npu-cli
-                COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_npu_cli.py"
-                    $<TARGET_FILE:parakeet-cli>)
-            set_tests_properties(test-npu-cli PROPERTIES LABELS "unit")
-            add_test(NAME test-npu-cli-dispatch
-                COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_SOURCE_DIR}/test/test_npu_cli_dispatch.py"
-                    $<TARGET_FILE:parakeet-cli> "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}")
-            set_tests_properties(test-npu-cli-dispatch PROPERTIES LABELS "fixture" SKIP_RETURN_CODE 77)
-        endif()
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint
                                 test_fixture_coverage test_verify_gguf_roundtrip)
@@ -3168,12 +3146,6 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
         set(QVAC_PARAKEET_WITH_OPENMP FALSE)
     endif()
 
-    get_target_property(_qvp_library_type qvac-parakeet TYPE)
-    set(QVAC_PARAKEET_NEEDS_ONNXRUNTIME FALSE)
-    if (PARAKEET_RYZENAI AND _qvp_library_type STREQUAL "STATIC_LIBRARY")
-        set(QVAC_PARAKEET_NEEDS_ONNXRUNTIME TRUE)
-    endif()
-
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/qvac-parakeet-config.cmake.in
         ${CMAKE_CURRENT_BINARY_DIR}/qvac-parakeet-config.cmake
@@ -3187,7 +3159,6 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     )
 
     install(FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindONNXRuntime.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/qvac-parakeet-config.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/qvac-parakeet-config-version.cmake
         DESTINATION ${PARAKEET_CONFIG_INSTALL_DIR}
@@ -3311,10 +3282,6 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     # is what pulls them in. Harmless for shared consumption (the .so
     # already carries its own dependencies).
     set(_pk_pc_private "")
-    if (PARAKEET_RYZENAI)
-        get_filename_component(_pk_ort_lib_dir "${ONNXRuntime_LIBRARY}" DIRECTORY)
-        list(APPEND _pk_pc_private "-L${_pk_ort_lib_dir}" "-lonnxruntime")
-    endif()
     if (OpenMP_CXX_FOUND)
         # OpenMP_CXX_FLAGS carries the compile/link driver flag (-fopenmp,
         # or `-Xclang -fopenmp` on AppleClang, which needs the explicit

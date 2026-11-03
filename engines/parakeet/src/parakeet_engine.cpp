@@ -6,7 +6,6 @@
 #include "parakeet/attributed.h"
 
 #include "parakeet_ctc.h"
-#include "parakeet_npu.h"
 #include "parakeet_tdt.h"
 #include "parakeet_unified.h"
 #include "parakeet_eou.h"
@@ -209,16 +208,6 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    if (model.npu_encoder) {
-        const auto npu = resolve_coreml_fixed_shape_plan(
-            model.npu_encoder->fixed_mel_frames(), opts.long_form_context_frames,
-            model.encoder_cfg.subsampling_factor, n_mel_frames);
-        if (npu.enabled && (!normal.enabled || npu.window_frames < normal.window_frames)) {
-            return npu;
-        }
-        return normal;
-    }
-
     // A sidecar validated with its own seam context (the fixed-window Neural
     // Engine export) supplies it when the caller left the context automatic.
     const int sidecar_context = model_coreml_seam_context_frames(model);
@@ -340,8 +329,6 @@ int run_encoder_windowed(ParakeetCtcModel & model,
             stats.encoder_ms += ms_since(t_enc);
             if (win_out.used_coreml) {
                 ++stats.coreml_windows;
-            } else if (win_out.used_npu) {
-                ++stats.npu_windows;
             } else {
                 ++stats.ggml_windows;
             }
@@ -373,11 +360,10 @@ int run_encoder_windowed(ParakeetCtcModel & model,
         out.n_enc_frames += trim.center_cnt;
     }
 
-    out.used_coreml = stats.coreml_windows > 0 && stats.ggml_windows == 0 && stats.npu_windows == 0;
-    out.used_npu = stats.npu_windows > 0 && stats.ggml_windows == 0 && stats.coreml_windows == 0;
+    out.used_coreml = stats.coreml_windows > 0 && stats.ggml_windows == 0;
     PARAKEET_LOG_INFO(
-        "parakeet: long-form encoder windows=%zu coreml=%d npu=%d ggml=%d\n",
-        windows.size(), stats.coreml_windows, stats.npu_windows, stats.ggml_windows);
+        "parakeet: long-form encoder windows=%zu coreml=%d ggml=%d\n",
+        windows.size(), stats.coreml_windows, stats.ggml_windows);
 
     return 0;
 }
@@ -797,8 +783,6 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
                                  "' with backend '" + opts.backend + "' (rc=" + std::to_string(rc) + ")");
     }
 
-    configure_npu_encoder(pimpl_->model, opts.npu_encoder, opts.n_threads);
-
     if (pimpl_->model.model_type == ParakeetModelType::NEMOTRON) {
         pimpl_->nemotron_prompt_id = resolve_nemotron_prompt_id(
             pimpl_->model, opts.language);
@@ -853,7 +837,8 @@ bool Engine::is_transcription_model() const {
 }
 
 BackendDevice Engine::backend_device() const {
-    if (backend_is_hexagon(pimpl_->model.backend_active())) return BackendDevice::NPU;
+    const auto backend = pimpl_->model.backend_active();
+    if (backend_is_hexagon(backend) || backend_is_xdna(backend)) return BackendDevice::NPU;
     return model_has_gpu_backend(pimpl_->model) ? BackendDevice::GPU
                                                 : BackendDevice::CPU;
 }

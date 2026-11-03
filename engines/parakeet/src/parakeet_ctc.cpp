@@ -1,10 +1,10 @@
 // FastConformer encoder ggml graph, GGUF load, CTC head, and encoder execution.
 
 #include "parakeet_ctc.h"
-#include "parakeet_npu.h"
 #include "long_form.h"
 #include "parakeet_log.h"
 #include "backend_util.h"
+#include "encoder_graph_allocator.h"
 #include "packed_affine.h"
 
 #include "ggml.h"
@@ -92,25 +92,9 @@ struct EncoderGraph {
     ggml_tensor * block_0_attn_softmax_node  = nullptr;
     ggml_tensor * block_0_attn_out_node      = nullptr;
 
-    // Pristine snapshot of every compute node's source pointers, captured once
-    // when the graph is built and reused across runs. ggml_backend_sched rewrites
-    // node->src[j] in place when a per-op CPU fallback inserts a cross-backend
-    // copy (the copy tensor lives in the scheduler's per-run context, which is
-    // freed at the head of the next allocation); restoring the originals before
-    // each run's allocation keeps this cached graph reusable. Keyed by node
-    // pointer, not array index, because some backends (Metal, Vulkan) reorder
-    // cgraph->nodes[] in place during graph optimization. See run_encoder.
     std::vector<std::pair<ggml_tensor *, std::array<ggml_tensor *, GGML_MAX_SRC>>> src_backup;
 
-    // Persistent per-graph allocator. The cached encoder graph is allocated and
-    // computed directly on the active backend through this gallocr, not the shared
-    // ggml_backend_sched: reusing a cached graph through the scheduler corrupts its
-    // output on Adreno OpenCL/Vulkan (first use correct, every reuse garbage), while
-    // a persistent gallocr reuses byte-identically on every backend. The encoder is
-    // fully supported everywhere (1 split / 0 copies) so it never needs the sched's
-    // per-op CPU fallback; run_subsampling and the Sortformer head still use the
-    // shared sched (they build a fresh graph each call and are unaffected).
-    ggml_gallocr_t alloc = nullptr;
+    EncoderGraphAllocator allocator;
 
     // Per-layer positional projections, computed once per graph size (see build_pos_proj_cache).
     ggml_context         * pos_ctx = nullptr;
@@ -124,7 +108,7 @@ struct EncoderGraph {
     }
 
     void free_() {
-        if (alloc) { ggml_gallocr_free(alloc); alloc = nullptr; }
+        allocator.release();
         release_pos_proj();
         if (graph_ctx) { ggml_free(graph_ctx);     graph_ctx = nullptr; }
         cgraph = nullptr;
@@ -149,7 +133,7 @@ struct EncoderGraph {
         src_backup.clear();
     }
 
-    // Own the gallocr + graph context via RAII so a build_encoder_graph_cached
+    // Own the allocator + graph context via RAII so a build_encoder_graph_cached
     // failure (which destroys a half-built cache entry with cache.pop_back())
     // cannot leak them. free_() is idempotent, so the explicit free_() calls in
     // ~Impl / cache eviction stay safe (double free_() is a no-op).
@@ -706,6 +690,7 @@ ggml_backend_t init_gpu_backend(int n_gpu_layers, bool verbose,
         const char * name     = ggml_backend_dev_name(dev);
         const char * desc     = ggml_backend_dev_description(dev);
         const char * reg_name = dev_reg_name(dev);
+        if (reg_name && std::strcmp(reg_name, "XDNA") == 0) continue;
         const bool   is_opencl = std::strcmp(reg_name, "OpenCL") == 0;
         const bool   is_cuda   = std::strcmp(reg_name, "CUDA")   == 0;
         const bool   is_integrated = (type == GGML_BACKEND_DEVICE_TYPE_IGPU);
@@ -2519,7 +2504,6 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                 ggml_backend_free(impl->backend_blas);
                 impl->backend_blas = nullptr;
             }
-            out_model.npu_encoder.reset();
             out_model.impl = impl;
 #ifdef PARAKEET_USE_COREML
             if (!measure) maybe_init_coreml_diarizers(gguf_path, out_model, verbose);
@@ -2839,7 +2823,6 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         impl->backend_blas = nullptr;
     }
 
-    out_model.npu_encoder.reset();
     out_model.impl = impl;
 
 #ifdef PARAKEET_USE_COREML
@@ -2944,7 +2927,7 @@ size_t model_weights_buffer_bytes(const ParakeetCtcModel & m) {
 size_t model_encoder_compute_buffer_bytes(const ParakeetCtcModel & m) {
     if (!m.impl || m.impl->encoder_graphs.empty()) return 0;
     const EncoderGraph & g = *m.impl->encoder_graphs.back();
-    const size_t compute = g.alloc ? ggml_gallocr_get_buffer_size(g.alloc, 0) : 0;
+    const size_t compute = g.allocator.bytes();
     return compute + (g.pos_buf ? ggml_backend_buffer_get_size(g.pos_buf) : 0);
 }
 
@@ -3061,7 +3044,6 @@ int model_coreml_bypass_fixed_frames(const ParakeetCtcModel & m) {
 }
 
 std::string model_encoder_backend_name(const ParakeetCtcModel & m) {
-    if (m.npu_encoder) return m.npu_encoder->backend_name();
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->ctx_coreml) {
         return parakeet_coreml_backend_label(m.impl->ctx_coreml);
@@ -4322,7 +4304,7 @@ void build_pos_proj_cache(const ParakeetCtcModel & model, EncoderGraph & g, ggml
 
 // `measure_compute` (fit projection): when non-null the graph is built
 // normally but its compute buffer is only *sized* into `*measure_compute`
-// (ggml_gallocr_reserve_n_size) instead of reserved; `g.alloc` stays null and
+// instead of reserved; no compute buffer is allocated and
 // the returned graph must be discarded, never run. Requires the model's
 // weight tensors to be marked externally-allocated (metadata-only load), or
 // the measurement would count the weights as graph-owned leafs.
@@ -4653,32 +4635,17 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
             }
         }
     }
-    // Snapshot the pristine source pointers now, so a run can restore them if the
-    // graph is ever mutated in place. Dormant on the current encoder path (the
-    // gallocr below never splits), kept defensively.
     snapshot_encoder_graph_srcs(g);
 
-    if (measure_compute) {
-        ggml_gallocr_t pricer =
-            ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!pricer) {
-            return -3;
-        }
-        *measure_compute = 0;
-        ggml_gallocr_reserve_n_size(pricer, g.cgraph, nullptr, nullptr, measure_compute);
-        ggml_gallocr_free(pricer);
-        g.T_mel = bypass_pre_encode ? 0 : n_mel_frames;
-        g.T_enc = T;
-        g.all_valid = all_valid;
-        g.bypass_pre_encode = bypass_pre_encode;
-        return 0;
-    }
-
-    // Persistent per-graph allocator (see EncoderGraph::alloc). Reserve once here so
-    // every reuse just re-runs ggml_gallocr_alloc_graph with stable offsets.
-    g.alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!g.alloc || !ggml_gallocr_reserve(g.alloc, g.cgraph)) {
+    if (!g.allocator.initialize(backend, model.impl->backend_cpu, graph_slots, backend_is_xdna(backend)) ||
+        !g.allocator.reserve(g.cgraph, measure_compute)) {
         return -3;
+    }
+    if (measure_compute && g.allocator.scheduler() && g.pos_ctx) {
+        const size_t positional = ggml_backend_alloc_ctx_tensors_from_buft_size(
+            g.pos_ctx, ggml_backend_get_default_buffer_type(backend));
+        if (positional > std::numeric_limits<size_t>::max() - *measure_compute) return -3;
+        *measure_compute += positional;
     }
 
     g.T_mel = bypass_pre_encode ? 0 : n_mel_frames;
@@ -4758,9 +4725,7 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_context_right >= 0;
 }
 
-#endif
-
-static int run_sidecar_ctc_head(ParakeetCtcModel & model,
+static int run_coreml_ctc_head(ParakeetCtcModel & model,
                                const std::vector<float> & encoder_out,
                                int n_frames,
                                std::vector<float> & logits) {
@@ -4816,7 +4781,6 @@ static int run_sidecar_ctc_head(ParakeetCtcModel & model,
     return 0;
 }
 
-#ifdef PARAKEET_USE_COREML
 // Fills out.encoder_out from the Core ML sidecar, then runs the CTC projection
 // on ggml when required. Returns 0 when handled on Core ML; non-zero lets the
 // caller fall back to the complete native encoder graph.
@@ -4842,7 +4806,7 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     if (rc != 0) return rc;
 
     if (model.model_type == ParakeetModelType::CTC) {
-        const int head_rc = run_sidecar_ctc_head(
+        const int head_rc = run_coreml_ctc_head(
             model, out.encoder_out, T, out.logits);
         if (head_rc != 0) return 100 - head_rc;
     } else {
@@ -5080,7 +5044,6 @@ int run_encoder(ParakeetCtcModel   & model,
     // Set pessimistically on every invocation. Only a successful Core ML
     // prediction may change this to true.
     out.used_coreml = false;
-    out.used_npu = false;
     out.encoder_consumed = false;
     if (!model.impl || !model.impl->backend_active) return -1;
 
@@ -5106,23 +5069,6 @@ int run_encoder(ParakeetCtcModel   & model,
     }
     if (mel_valid == 0) mel_valid = n_mel_frames;
     const bool all_valid = (mel_valid == n_mel_frames);
-
-    if (model.npu_encoder && max_layers < 0 && !capture_intermediates) {
-        try {
-            model.npu_encoder->encode(mel, n_mel_frames, mel_valid, n_mels, out);
-        } catch (const std::exception & error) {
-            PARAKEET_LOG_ERROR("parakeet: NPU encoder failed: %s\n", error.what());
-            constexpr int npu_encoder_failure = -7;
-            return npu_encoder_failure;
-        }
-        out.vocab_size = model.vocab_size;
-        if (model.model_type == ParakeetModelType::CTC) {
-            const int rc = run_sidecar_ctc_head(model, out.encoder_out, out.n_enc_frames, out.logits);
-            if (rc != 0) return rc;
-        }
-        out.used_npu = true;
-        return 0;
-    }
 
 #ifdef PARAKEET_USE_COREML
     // Apple Core ML sidecar: run a validated CTC/IndicConformer, Unified RNN-T,
@@ -5189,14 +5135,8 @@ int run_encoder(ParakeetCtcModel   & model,
     const int T = L3;
     const int vocab_size = model.vocab_size;
 
-    // Restore the pristine source pointers before allocation (dormant on this path,
-    // kept defensively): only a scheduler split rewrites node->src[j] in place, and
-    // the encoder no longer runs through the shared sched.
-    restore_encoder_graph_srcs(g);
-    // Allocate the cached graph on the active backend via its persistent gallocr
-    // (see EncoderGraph::alloc) -- not the shared sched, whose cached-graph reuse
-    // corrupts on Adreno OpenCL/Vulkan.
-    if (!ggml_gallocr_alloc_graph(g.alloc, g.cgraph)) {
+    if (!g.allocator.scheduler()) restore_encoder_graph_srcs(g);
+    if (!g.allocator.allocate(g.cgraph)) {
         return -3;
     }
 
@@ -5210,7 +5150,7 @@ int run_encoder(ParakeetCtcModel   & model,
                  g.att_mask_host.size() * sizeof(float));
     }
 
-    if (ggml_backend_graph_compute(backend, g.cgraph) != GGML_STATUS_SUCCESS) {
+    if (g.allocator.compute(g.cgraph) != GGML_STATUS_SUCCESS) {
         return -4;
     }
 
@@ -5292,7 +5232,7 @@ int measure_encoder_compute(ParakeetCtcModel & model,
                             size_t           & out_bytes) {
     if (!model.impl || !model.impl->backend_active) return -1;
     out_bytes = 0;
-    EncoderGraph tmp;  // RAII: destructor frees the graph ctx (no gallocr is created)
+    EncoderGraph tmp;
     return build_encoder_graph_cached(model, tmp, n_mel_frames, /*mel_valid=*/n_mel_frames, n_mels,
                                       /*n_run_layers_override=*/-1,
                                       /*all_valid=*/true,
@@ -5396,13 +5336,8 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
     }
     EncoderGraph & g = *g_ptr;
 
-    // Restore pristine source pointers before allocation (dormant here, kept
-    // defensively; see run_encoder): the encoder graph no longer runs through the
-    // shared sched, so nothing rewrites node->src[j] in place.
-    restore_encoder_graph_srcs(g);
-    // Allocate + compute the cached graph on the active backend via its persistent
-    // gallocr, not the shared sched (whose cached-graph reuse corrupts on Adreno).
-    if (!ggml_gallocr_alloc_graph(g.alloc, g.cgraph)) {
+    if (!g.allocator.scheduler()) restore_encoder_graph_srcs(g);
+    if (!g.allocator.allocate(g.cgraph)) {
         return -3;
     }
 
@@ -5417,7 +5352,7 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                  g.att_mask_host.size() * sizeof(float));
     }
 
-    if (ggml_backend_graph_compute(backend, g.cgraph) != GGML_STATUS_SUCCESS) {
+    if (g.allocator.compute(g.cgraph) != GGML_STATUS_SUCCESS) {
         return -4;
     }
 

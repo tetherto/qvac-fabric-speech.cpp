@@ -30,8 +30,6 @@ struct parakeet_coreml_decoder;
 
 namespace parakeet {
 
-class NpuEncoder;
-
 // Encoder + per-engine head hyperparameters loaded from GGUF metadata.
 //
 // Field naming convention:
@@ -502,7 +500,6 @@ struct ParakeetCtcModel {
 
     struct Impl;
     std::shared_ptr<Impl> impl;
-    std::shared_ptr<NpuEncoder> npu_encoder;
 
     // Accessors for callers that build their own ggml graphs against the
     // GGUF-resident tensors (e.g. parakeet_tdt's per-step LSTM/joint graphs).
@@ -760,7 +757,6 @@ struct EncoderOutputs {
     std::vector<float> logits;
 
     bool encoder_consumed = false;
-    bool used_npu = false;
 
     // Diagnostic: fine-grained snapshots inside block 0's
     // relative-position multi-head attention. Populated only when
