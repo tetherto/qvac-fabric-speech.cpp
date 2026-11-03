@@ -10,6 +10,38 @@ memory available right now, before any weight is read.
 | ACE-Step | `tts_cpp::acestep::fit_params` in `audiogen-cpp/acestep/fit.h` | [`acestep-fit-params`](cli.md#acestep-fit-params) |
 | MiniMax-Music3 | `tts_cpp::minimax::fit_params` in `audiogen-cpp/minimax/fit.h` | none |
 
+## ACE-Step
+
+```cpp
+#include <audiogen-cpp/acestep/fit.h>
+
+tts_cpp::acestep::FitOptions options;
+options.models_dir = "models/acestep";
+options.n_gpu_layers = 99;
+options.duration_seconds = 60.0f;
+options.with_source_audio = true; // include VAE encoding for source/reference audio
+
+const auto fit = tts_cpp::acestep::fit_params(options);
+```
+
+`FitOptions` combines model paths, placement, and workload settings. Use the
+same paths, `backend`, `lm_backend`, and residency policy as the intended engine.
+`text_tokens` and `lyric_tokens` budget prompt lengths; `lm_cfg_scale` and
+`guidance_scale` should match the request. `with_source_audio` includes the
+windowed VAE encoder phase needed for cover, lego, repaint, or timbre reference.
+
+By default, the projection follows `ACESTEP_KEEP_STAGES`: lazy loading prices
+the largest phase in each memory pool, including the text/condition encoder
+overlap. Set `keep_stages = 1` to project retained stages, or `0` for lazy
+loading. `margin_bytes` defaults to 256 MiB. `FitStatus::Success` means the
+workload fits, `Failure` is a valid does-not-fit result, and `Error` means no
+projection could be made. Inspect `fits`, `reason`, and `report` before loading.
+Device naming and shared-memory semantics follow the
+[repository contract](../../../README.md#memory-fit-results).
+
+The [CLI reference](cli.md#acestep-fit-params) documents equivalent flags,
+JSON output, and exit codes.
+
 ## MiniMax-Music3
 
 ```cpp
@@ -32,11 +64,12 @@ same `device` semantics (`cpu`, `gpu` or `auto`; empty defers to
 `MM3_DEVICE`, then `cpu`) and the same `backends_dir`. `device = "gpu"` without
 a usable GPU is an error, as it is for a load.
 
-When `coreml_conditioner_path` is set, the preflight returns `Error` with
+When `coreml_conditioner_path`, `coreml_profile_dir`, or
+`coreml_compute_units` is set, the preflight returns `Error` with
 reason `coreml-memory-estimate-unavailable`. It cannot project Core ML's
 resident model and prediction allocations, so it does not report the native
-estimate as a hybrid fit verdict. This does not prevent `Engine::create` or
-`generate` from using the Core ML conditioner.
+estimate as a Core ML fit verdict. This does not prevent `Engine::create` or
+`generate` from using the explicitly configured Core ML route.
 
 | `FitWorkload` field | Default | Meaning |
 |---|---|---|
