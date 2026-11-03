@@ -311,6 +311,8 @@ check_entry_points() {
   [ -x "$TMP/install/tools/weekly.sh" ] || fail "install.sh did not copy the tools"
   [ -f "$TMP/install/config.env" ] || fail "install.sh did not seed config.env"
   [ "$(ls -l "$TMP/install/config.env" | cut -c5-10)" = "------" ] || fail "config.env is not private"
+  BENCH_HOME="$TMP/install" bash "$TMP/install/tools/install.sh" --no-cron > "$TMP/reinstall.log" 2>&1 || fail "install.sh from the installed tools failed"
+  ! grep -q "identical" "$TMP/reinstall.log" || fail "install.sh copied the tools onto themselves"
   ok "entry points answer --help and install.sh deploys without cron"
 }
 

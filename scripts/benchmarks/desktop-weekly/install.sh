@@ -49,9 +49,14 @@ validate_schedule() {
   [[ "$BENCH_HOME" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "bench home may only contain letters, digits, / . _ -" >&2; exit 2; }
 }
 
+installing_in_place() {
+  mkdir -p "$BENCH_HOME/tools"
+  [ "$(cd "$BENCH_HOME/tools" && pwd -P)" = "$(cd "$SOURCE_DIR" && pwd -P)" ]
+}
+
 install_tools() {
   mkdir -p "$BENCH_HOME/tools" "$BENCH_HOME/runs"
-  find "$SOURCE_DIR" -maxdepth 1 -type f -exec cp {} "$BENCH_HOME/tools/" \;
+  if ! installing_in_place; then find "$SOURCE_DIR" -maxdepth 1 -type f -exec cp {} "$BENCH_HOME/tools/" \; ; fi
   chmod +x "$BENCH_HOME"/tools/*.sh
 }
 
