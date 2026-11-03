@@ -401,6 +401,12 @@ int tdt_greedy_decode(const ParakeetCtcModel & model,
                       const TdtDecodeOptions & opts,
                       TdtDecodeResult & result);
 
+bool tdt_accepts_device_input(const TdtRuntimeWeights & weights,
+                              const ggml_tensor * input, ggml_backend_t source_backend);
+int tdt_greedy_decode_device(const ParakeetCtcModel & model,
+                             TdtRuntimeWeights & weights, ggml_tensor * input,
+                             const TdtDecodeOptions & options, TdtDecodeResult & result);
+
 int rnnt_decode_window(const ParakeetCtcModel & model,
                        RnntRuntimeWeights & weights,
                        const float * encoder_out_window,

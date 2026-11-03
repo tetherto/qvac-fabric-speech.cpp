@@ -253,6 +253,16 @@ target_include_directories(${ZERO_SAMPLES_TEST} PRIVATE ../include ../examples)
 target_link_libraries(${ZERO_SAMPLES_TEST} PRIVATE common whisper)
 target_compile_definitions(${ZERO_SAMPLES_TEST} PRIVATE
     WHISPER_MODEL_PATH="${PROJECT_SOURCE_DIR}/models/for-tests-ggml-tiny.bin")
+if (WHISPER_COREML)
+    target_sources(${ZERO_SAMPLES_TEST} PRIVATE test-whisper-coreml-state.mm)
+    set_source_files_properties(test-whisper-coreml-state.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_compile_definitions(${ZERO_SAMPLES_TEST} PRIVATE
+        WHISPER_TEST_COREML
+        WHISPER_COREML_TEST_MODEL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test-whisper-encoder.mlmodel")
+    target_link_libraries(${ZERO_SAMPLES_TEST} PRIVATE
+        ${FOUNDATION_FRAMEWORK} ${COREML_FRAMEWORK})
+endif()
 add_test(NAME ${ZERO_SAMPLES_TEST} COMMAND ${ZERO_SAMPLES_TEST})
 set_tests_properties(${ZERO_SAMPLES_TEST} PROPERTIES LABELS "tiny;gh")
 

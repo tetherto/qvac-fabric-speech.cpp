@@ -2810,6 +2810,37 @@ if (PARAKEET_BUILD_TESTS)
         ARGS     "--model" "${_qvp_transcribepsy_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
 
+    if (PARAKEET_BUILD_LIBRARY)
+        add_executable(test-encoder-device-decode test/test_encoder_device_decode.cpp)
+        target_link_libraries(test-encoder-device-decode PRIVATE qvac-parakeet)
+        target_include_directories(test-encoder-device-decode PRIVATE src)
+        set(_device_decode_backends cpu)
+        if (GGML_VULKAN)
+            list(APPEND _device_decode_backends vulkan)
+        endif()
+        if (GGML_CUDA)
+            list(APPEND _device_decode_backends cuda)
+        endif()
+        if (GGML_METAL)
+            list(APPEND _device_decode_backends metal)
+        endif()
+        foreach(_device_decode_model parakeet-tdt-0.6b-v3 parakeet-unified-en-0.6b nemotron-3.5-asr-streaming-0.6b)
+            set(_device_decode_gguf "${PARAKEET_TEST_MODEL_DIR}/${_device_decode_model}.q8_0.gguf")
+            foreach(_device_decode_backend IN LISTS _device_decode_backends)
+                set(_device_decode_label "fixture")
+                set(_device_decode_suffix "cpu")
+                if (NOT _device_decode_backend STREQUAL "cpu")
+                    set(_device_decode_label "gpu")
+                    set(_device_decode_suffix "${_device_decode_backend}-gpu")
+                endif()
+                parakeet_register_test("test-encoder-device-decode-${_device_decode_model}-${_device_decode_suffix}"
+                    EXE test-encoder-device-decode LABEL "${_device_decode_label}"
+                    ARGS "${_device_decode_gguf}" "${_qvp_jfk_wav}" "${_device_decode_backend}"
+                    REQUIRES "${_device_decode_gguf}" "${_qvp_jfk_wav}")
+            endforeach()
+        endforeach()
+    endif()
+
     # The CPU-resident TDT decoder copies an OpenCL load builds: byte-equal to
     # the originals on the CPU backend, and the decoder reports that backend.
     add_executable(test-tdt-cpu-copies

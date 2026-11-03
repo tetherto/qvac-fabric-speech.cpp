@@ -1859,7 +1859,8 @@ static int decode_bounded_window(const ParakeetCtcModel & model,
                                  const TdtDecodeOptions & opts,
                                  TdtDecodeState & state,
                                  std::vector<int32_t> & out_tokens,
-                                 int & out_steps) {
+                                 int & out_steps,
+                                 bool projection_ready = false) {
     const int H_pred  = W.H_pred;
     const int V_p1    = W.V_plus_1;
     const int D_n     = W.num_durations;
@@ -1875,7 +1876,7 @@ static int decode_bounded_window(const ParakeetCtcModel & model,
     // joint reads can ggml_get_rows directly. The host fallback keeps the
     // per-step gemv inside host_joint_step (better cache locality).
     if (W.use_graphs) {
-        if (!run_enc_proj(W, encoder_out_window, n_frames)) return 6;
+        if (!projection_ready && !run_enc_proj(W, encoder_out_window, n_frames)) return 6;
         ensure_unroll_graph(W, blank, opts.max_symbols_per_step);
     }
 
@@ -2310,6 +2311,37 @@ int tdt_greedy_decode(const ParakeetCtcModel & model,
     result.text = detokenize(model.vocab, result.token_ids);
     const auto t1 = std::chrono::steady_clock::now();
     result.decode_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+    return 0;
+}
+
+bool tdt_accepts_device_input(const TdtRuntimeWeights & weights,
+                              const ggml_tensor * input, ggml_backend_t source_backend) {
+    return input && input->buffer && source_backend && weights.backend == source_backend &&
+        !backend_is_cpu(source_backend) && weights.use_graphs && weights.persist_buffer &&
+        input->type == GGML_TYPE_F32 && ggml_is_contiguous(input) &&
+        input->ne[0] == weights.D_enc && input->ne[1] > 0 &&
+        input->ne[1] <= weights.enc_proj_T_max && input->ne[2] == 1 && input->ne[3] == 1;
+}
+
+int tdt_greedy_decode_device(const ParakeetCtcModel & model,
+                             TdtRuntimeWeights & weights, ggml_tensor * input,
+                             const TdtDecodeOptions & options, TdtDecodeResult & result) {
+    if (!tdt_accepts_device_input(weights, input, weights.backend)) return 1;
+    const auto started = std::chrono::steady_clock::now();
+    const int frames = (int) input->ne[1];
+    result = TdtDecodeResult{};
+    TdtDecodeState state;
+    tdt_init_state(weights, (int) model.blank_id, state);
+    const auto * projection = get_enc_proj_graph(weights, frames);
+    if (!projection || !projection->alloc) return 6;
+    ggml_backend_tensor_copy_async(weights.backend, weights.backend, input, projection->enc_in);
+    if (!compute_graph(weights, projection->cg)) return 6;
+
+    if (int rc = decode_bounded_window(model, weights, nullptr, frames, weights.D_enc,
+            options, state, result.token_ids, result.steps, true); rc != 0) return rc;
+    result.text = detokenize(model.vocab, result.token_ids);
+    result.decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
     return 0;
 }
 

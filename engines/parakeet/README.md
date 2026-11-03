@@ -135,6 +135,13 @@ MOSS-Transcribe-Diarize on the NPU.
 
 ## Performance
 
+Eligible offline TDT, Unified RNN-T and Nemotron ASR calls consume encoder output
+on the GPU, avoiding its download and re-upload for decoding. Nemotron's locale
+projection also stays on the GPU. The handoff uses ordinary ggml backend APIs
+and falls back to host output where needed, including encoder tensors with
+extra padding frames; see
+[device encoder handoff](docs/backends.md#device-encoder-handoff).
+
 `RTF = inference_time / audio_duration`; lower is faster. Dated CI snapshots,
 multi-machine campaigns, GPU diarization, accuracy, build pins and timing
 methods live in [docs/performance.md](docs/performance.md).

@@ -1729,6 +1729,14 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-moss-sfx-fit)
     tts_cpp_register_test(test-moss-sfx-fit)
 
+    add_executable(test-moss-header-includes
+        test/moss/test_header_includes.cpp
+        test/moss/header_includes_gguf_metadata.cpp)
+    target_link_libraries(test-moss-header-includes PRIVATE tts-cpp)
+    target_include_directories(test-moss-header-includes PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-header-includes)
+    tts_cpp_register_test(test-moss-header-includes)
+
     add_executable(test-moss-sfx-cache test/moss/test_sfx_cache.cpp)
     target_link_libraries(test-moss-sfx-cache PRIVATE tts-cpp)
     target_include_directories(test-moss-sfx-cache PRIVATE src)
