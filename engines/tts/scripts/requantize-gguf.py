@@ -369,8 +369,12 @@ def main() -> int:
 
     writer = gguf.GGUFWriter(args.dst, arch_name or "chatterbox-s3gen")
 
-    # Copy all metadata (KV fields) verbatim.  Skip the ones the writer
-    # sets itself to avoid duplicates.
+    # Keep prior pointwise restores when another filtered pass quantizes a
+    # different stage. Emit their stable union with new names once below.
+    pwconv_squeezed_names: list[str] = []
+
+    # Copy metadata, except writer-owned fields and the Supertonic roster
+    # collected above/below for a single combined emission.
     _SKIP_KEYS = {
         "GGUF.version",
         "GGUF.tensor_count",
@@ -388,6 +392,9 @@ def main() -> int:
             sub_type = field.types[1] if len(field.types) > 1 else None
             if sub_type == gguf.GGUFValueType.STRING:
                 values = [bytes(p).decode("utf-8") for p in parts]
+                if allow_pointwise_squeeze and key == "supertonic.pwconv_squeezed":
+                    pwconv_squeezed_names = list(dict.fromkeys(values))
+                    continue
                 writer.add_array(key, values)
             else:
                 arr = np.concatenate([np.asarray(p) for p in parts]).tolist()
@@ -409,10 +416,8 @@ def main() -> int:
     kept_count = 0
     src_bytes = 0
     dst_bytes = 0
-    # Storage names of pointwise (K=1) convs we squeezed 3-D [1,IC,OC] -> 2-D
-    # [IC,OC] before quantizing.  The C++ loader re-expands these to 3-D at
-    # load so the conv/matmul call sites see the original shape.
-    pwconv_squeezed_names: list[str] = []
+    # Diagnostics count this pass's conversions, excluding inherited restores.
+    newly_squeezed_count = 0
 
     for t in src.tensors:
         # GGUFReader returns shape in numpy-style reversed order.
@@ -449,7 +454,9 @@ def main() -> int:
             qdata = gguf.quants.quantize(arr, qtype)
             writer.add_tensor(t.name, qdata, raw_shape=qdata.shape, raw_dtype=qtype)
             if squeezed_pwconv:
-                pwconv_squeezed_names.append(t.name)
+                if t.name not in pwconv_squeezed_names:
+                    pwconv_squeezed_names.append(t.name)
+                newly_squeezed_count += 1
             quantized_count += 1
             dst_bytes += qdata.nbytes
         else:
@@ -480,9 +487,8 @@ def main() -> int:
             kept_count += 1
             dst_bytes += data.nbytes
 
-    # Emit the pointwise-conv re-expansion roster so the C++ loader restores
-    # the original 3-D [1,IC,OC] shape for these squeezed-2-D quantized
-    # tensors.  Only present when we actually squeezed something.
+    # Preserve restores for packed pass-through tensors as well as new
+    # squeezes; the C++ loader needs every name to recover 3-D [1,IC,OC].
     if pwconv_squeezed_names:
         writer.add_array("supertonic.pwconv_squeezed", pwconv_squeezed_names)
 
@@ -493,8 +499,8 @@ def main() -> int:
 
     print(f"arch: {arch_name!r}")
     print(f"quantized: {quantized_count} tensors to {args.dtype.upper()}")
-    if pwconv_squeezed_names:
-        print(f"           ({len(pwconv_squeezed_names)} of them pointwise K=1 convs "
+    if newly_squeezed_count:
+        print(f"           ({newly_squeezed_count} of them pointwise K=1 convs "
               f"squeezed 3D->2D; loader re-expands via supertonic.pwconv_squeezed)")
     print(f"kept:      {kept_count} tensors as source dtype")
     if keep_f32_storage:
