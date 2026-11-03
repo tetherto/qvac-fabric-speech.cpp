@@ -1,5 +1,7 @@
 #include "transcribe_fixtures.h"
+#include "transcribe_reference_io.h"
 #include "../../../test/moss_precision.h"
+#include "backend_util.h"
 
 #include "moss/transcribe_cli.h"
 #include "moss/transcribe_audio.h"
@@ -98,9 +100,124 @@ float max_abs_diff(const std::vector<float> & a, const std::vector<float> & b) {
     }
     float worst = 0.0f;
     for (size_t i = 0; i < a.size(); ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) return INFINITY;
         worst = std::max(worst, std::fabs(a[i] - b[i]));
     }
     return worst;
+}
+
+void test_max_abs_diff_nonfinite() {
+    check(max_abs_diff({1, 2}, {1, 2}) == 0.0f, "finite equal values compare exactly");
+    check(max_abs_diff({1, 2}, {1, 3}) == 1.0f, "finite differences are preserved");
+    check(max_abs_diff({}, {}) == 0.0f, "empty equal vectors preserve the existing result");
+    check(std::isinf(max_abs_diff({1}, {1, 2})), "different shapes cannot compare equal");
+    for (const float value : {NAN, INFINITY, -INFINITY}) {
+        check(std::isinf(max_abs_diff({value, 2}, {1, 2})), "nonfinite reference is rejected");
+        check(std::isinf(max_abs_diff({1, 2}, {value, 2})), "nonfinite candidate is rejected");
+        check(std::isinf(max_abs_diff({value, 2}, {value, 2})), "equal nonfinite values are rejected");
+    }
+}
+
+void write_reference_fixture(const std::filesystem::path & path, const std::string & bytes) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        throw std::runtime_error("cannot write reference regression fixture");
+    }
+}
+
+void test_reference_binary_reads(const std::filesystem::path & path) {
+    using namespace moss_transcribe_reference_io;
+    const std::vector<float> values{1, 2};
+    const std::string payload(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(float));
+    write_reference_fixture(path, payload);
+    check(read_bin<float>(path) == values, "aligned float reference payload is read exactly");
+    write_reference_fixture(path, "");
+    check(read_bin<float>(path).empty(), "an empty binary payload stays empty");
+    for (const size_t count : {1u, 3u, 5u, 7u}) {
+        write_reference_fixture(path, payload.substr(0, count));
+        expect_failure([&] { read_bin<float>(path); }, "reference fixture", "a partial float is rejected");
+    }
+    check(prefix(values, 2) == values, "an exact adaptor prefix preserves values");
+    check(prefix(values, 0).empty(), "an empty adaptor prefix is bounded");
+    expect_failure([&] { prefix(values, 3); }, "shorter", "a short adaptor reference is rejected");
+    std::filesystem::remove(path);
+    expect_failure([&] { read_bin<float>(path); }, "cannot read", "a missing binary fixture is rejected");
+}
+
+std::string tokenizer_reference_record() {
+    const uint32_t one = 1;
+    const int32_t id = 7;
+    std::string record(reinterpret_cast<const char *>(&one), sizeof(one));
+    record += 'a';
+    record.append(reinterpret_cast<const char *>(&one), sizeof(one));
+    record.append(reinterpret_cast<const char *>(&id), sizeof(id));
+    return record;
+}
+
+void test_reference_tokenizer_reads(const std::filesystem::path & path) {
+    using namespace moss_transcribe_reference_io;
+    const std::string record = tokenizer_reference_record();
+    write_reference_fixture(path, record);
+    const auto cases = read_tokenizer_cases(path);
+    check(cases.size() == 1 && cases[0].text == "a" && cases[0].ids == std::vector<int32_t>{7},
+          "a complete tokenizer record preserves text and ids");
+    write_reference_fixture(path, record + std::string(2 * sizeof(uint32_t), '\0'));
+    const auto empty = read_tokenizer_cases(path);
+    check(empty.size() == 2 && empty[1].text.empty() && empty[1].ids.empty(), "an empty text/id case is valid");
+    for (const size_t count : {0u, 1u, 2u, 3u, 4u, 5u, 12u}) {
+        write_reference_fixture(path, record.substr(0, count));
+        expect_failure([&] { read_tokenizer_cases(path); }, "reference", "a truncated tokenizer record is rejected");
+    }
+    const uint32_t huge = UINT32_MAX;
+    const std::string length(reinterpret_cast<const char *>(&huge), sizeof(huge));
+    for (const auto & bytes : {length, std::string(sizeof(uint32_t), '\0') + length, record + "x"}) {
+        write_reference_fixture(path, bytes);
+        expect_failure([&] { read_tokenizer_cases(path); }, "reference", "record lengths are bounded by the file");
+    }
+    std::filesystem::remove(path);
+    expect_failure([&] { read_tokenizer_cases(path); }, "cannot read", "a missing tokenizer fixture is rejected");
+}
+
+void test_reference_fixture_reads() {
+    const auto path = temp_gguf("reference-io");
+    test_reference_binary_reads(path);
+    test_reference_tokenizer_reads(path);
+}
+
+int head_contract_calls = 0;
+int head_contract_buffers = 0;
+
+bool head_probe_contract(ggml_backend_t backend, const ggml_tensor * op) {
+    ++head_contract_calls;
+    const auto * weight = op->src[0];
+    if (op->op != GGML_OP_MUL_MAT || !weight->buffer ||
+        ggml_backend_buffer_get_type(weight->buffer) != parakeet::weight_buffer_type(backend)) return false;
+    ++head_contract_buffers;
+    return weight->type == GGML_TYPE_F16 || (weight->type == GGML_TYPE_Q8_0 && weight->ne[1] <= 32768);
+}
+
+void test_head_probe_buffer_contract() {
+    const std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)> backend(
+        open_transcribe_backend(false, "cpu"), ggml_backend_free);
+    const std::unique_ptr<ggml_context, decltype(&ggml_free)> ctx(
+        ggml_init({3 * ggml_tensor_overhead(), nullptr, true}), ggml_free);
+    head_contract_calls = head_contract_buffers = 0;
+    for (const ggml_type type : {GGML_TYPE_Q8_0, GGML_TYPE_Q5_0, GGML_TYPE_F16}) {
+        auto * table = ggml_new_tensor_2d(ctx.get(), type, 128, 151936);
+        for (const int rows : {32768, 32769}) {
+            const bool expected = type == GGML_TYPE_F16 || (type == GGML_TYPE_Q8_0 && rows <= 32768);
+            check(transcribe_backend_projects(backend.get(), table, rows, head_probe_contract) == expected,
+                  "a head probe preserves the type and row-cap contract");
+        }
+        check(table->buffer == nullptr, "head probes leave source table metadata untouched");
+    }
+    check(head_contract_calls == 6, "each valid head probe reaches the support query");
+    check(head_contract_buffers == 6, "support queries see the intended allocation type");
+    auto * table = ggml_get_first_tensor(ctx.get());
+    check(!transcribe_backend_projects(nullptr, table, 1), "a head probe requires a backend");
+    check(!transcribe_backend_projects(backend.get(), nullptr, 1), "a head probe requires a table");
+    check(!transcribe_backend_projects(backend.get(), table, 0), "a head probe requires positive rows");
+    check(!transcribe_backend_projects(backend.get(), table, 1, nullptr), "a head probe requires a query callback");
 }
 
 std::vector<float> random_signal(size_t count, uint32_t seed) {
@@ -1203,6 +1320,9 @@ void test_upload_plan() {
 
 int main() {
     try {
+        test_max_abs_diff_nonfinite();
+        test_reference_fixture_reads();
+        test_head_probe_buffer_contract();
         test_fft_matches_dft();
         test_log_mel_normalization();
         test_chunk_arithmetic();
