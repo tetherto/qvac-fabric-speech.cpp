@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Build the weekly results page from a folder of summary.json files.
 
-usage: build-artifact.py <summaries dir> -o page.html [--threshold 5]
+usage: build-artifact.py <summaries dir> -o page.html [--threshold 5] [--comparisons comparisons.json]
 
 The folder holds one file per run, <host>/<run>.json, as written by summarize.py and collected by the speech-bench
-skill. The page shows the newest run of every host with one column per backend, the speed of every family across
-the stored runs with moves over the threshold marked, the engine, ggml and model pins, and the problem list. It is a
-self-contained HTML body (no document skeleton) in the shape the Artifact tool publishes.
+skill. The page is organized by task (ASR, TTS, TTS cloning, Music): for every task one table with a row per model
+and quantization and a column per GPU lane (machine and backend) of the newest run of each machine, the CPU lanes
+in a collapsed table, and the paired measurements against other engines from comparisons.json. Below that, one
+block per machine with its history across the stored runs (moves over the threshold marked), pins and problems. It
+is a self-contained HTML body (no document skeleton) in the shape the Artifact tool publishes.
 """
 from __future__ import annotations
 
@@ -29,6 +31,9 @@ SHA_SHORT = 10
 GPU_BACKENDS = ("cuda", "vulkan", "metal")
 BACKEND_ORDER = ("cpu", "cuda", "vulkan", "metal")
 PRIMARY_BACKEND = {"Linux": "cuda", "Darwin": "metal"}
+TASK_ORDER = ("ASR", "TTS", "TTS cloning", "Music")
+MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-0": "Strix Halo",
+                  "qvac-dev-mac-arm64": "Mac Studio M3 Ultra", "mac-mini-m4-gpu": "Mac mini M4"}
 CHART_MIN_SPEED = 1.0
 CHART_MAX_SPEED_FLOOR = 10.0
 CHART_TICKS = (1.0, 10.0, 100.0, 1000.0)
@@ -39,6 +44,7 @@ CHART_GROUP_GAP = 10
 CHART_TOP = 24
 CHART_BAR_HEIGHT = 12
 PAGE_TITLE = "Speech Fabric Weekly Bench"
+DEFAULT_COMPARISONS = pathlib.Path(__file__).resolve().parent / "comparisons.json"
 
 
 def load_summaries(folder):
@@ -51,19 +57,35 @@ def load_summaries(folder):
     return found
 
 
+def load_comparisons(path):
+    if not path or not pathlib.Path(path).is_file():
+        return []
+    with open(path) as handle:
+        return json.load(handle).get("rows", [])
+
+
 def started_at(summary):
     return summary.get("run", {}).get("started") or ""
+
+
+def host_rank(host):
+    known = list(MACHINE_LABELS)
+    return (known.index(host), host) if host in known else (len(known), host)
 
 
 def runs_by_host(summaries):
     hosts = {}
     for summary in summaries:
         hosts.setdefault(summary["_host"], []).append(summary)
-    return {host: sorted(runs, key=started_at) for host, runs in sorted(hosts.items())}
+    return {host: sorted(hosts[host], key=started_at) for host in sorted(hosts, key=host_rank)}
 
 
 def latest_run(runs):
     return runs[-1]
+
+
+def machine_label(host):
+    return MACHINE_LABELS.get(host, host)
 
 
 def ordered_backends(summary):
@@ -141,18 +163,78 @@ def cell_html(row):
             f'<span class="sub">{esc(fmt_quality(row))}</span></td>')
 
 
-def results_table(summary):
-    backends = ordered_backends(summary)
-    rows = family_rows(summary)
-    meta = family_meta(summary)
-    head = "".join(f"<th>{esc(backend)}</th>" for backend in backends)
+def lanes(hosts, backends):
+    found = []
+    for host, runs in hosts.items():
+        latest = latest_run(runs)
+        found += [(host, backend) for backend in ordered_backends(latest) if backend in backends]
+    return found
+
+
+def lane_header(host, backend):
+    return f'<th>{esc(machine_label(host))}<span class="sub">{esc(backend)}</span></th>'
+
+
+def task_families(hosts, task):
+    found = []
+    for runs in hosts.values():
+        latest = latest_run(runs)
+        meta = family_meta(latest)
+        found += [family for family in latest.get("families", []) if meta.get(family, ("", "", ""))[2] == task and family not in found]
+    return found
+
+
+def task_meta(hosts):
+    meta = {}
+    for runs in hosts.values():
+        meta.update(family_meta(latest_run(runs)))
+    return meta
+
+
+def lane_table(hosts, families, meta, lane_list, css):
+    if not lane_list or not families:
+        return '<p class="note">no lane of this kind in the stored runs</p>'
+    latest = {host: family_rows(latest_run(runs)) for host, runs in hosts.items()}
+    head = "".join(lane_header(host, backend) for host, backend in lane_list)
     body = []
-    for family in summary.get("families", []):
-        label, weights, task = meta.get(family, (family, "", ""))
-        cells = "".join(cell_html(rows.get(family, {}).get(backend)) for backend in backends)
-        body.append(f'<tr><th scope="row"><span class="model">{esc(label)}</span><span class="sub">{esc(task)} · {esc(weights)}</span></th>{cells}</tr>')
-    return (f'<div class="scroll"><table class="results"><thead><tr><th>model</th>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    for family in families:
+        label, weights, _ = meta.get(family, (family, "", ""))
+        cells = "".join(cell_html(latest[host].get(family, {}).get(backend)) for host, backend in lane_list)
+        body.append(f'<tr><th scope="row"><span class="model">{esc(label)}</span><span class="sub">{esc(weights)}</span></th>{cells}</tr>')
+    return f'<div class="scroll"><table class="{css}"><thead><tr><th>model</th>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+
+
+def comparison_row(row):
+    lane = f"{machine_label(row.get('host', '?'))} · {row.get('backend', '?')}"
+    rtf = f"{row['rtf']:.3f}" if row.get("rtf") is not None else "-"
+    return [esc(row.get("engine", "?")), esc(row.get("model", "")), esc(lane), fmt_ms(row.get("gen_ms")), fmt_ms(row.get("e2e_ms")),
+            rtf, esc(row.get("quality", "")), esc(row.get("measured", "")), f'<code>{esc(row.get("source", ""))}</code>']
+
+
+def comparisons_table(rows):
+    if not rows:
+        return ('<p class="note">No paired measurement against another engine is recorded for this task yet. Add rows to '
+                '<code>comparisons.json</code> from a harness run that measured both engines the same way.</p>')
+    harness = sorted({row.get("harness", "") for row in rows if row.get("harness")})
+    head = "".join(f"<th>{column}</th>" for column in ("engine", "model", "lane", "generation", "end to end", "RTF", "quality", "measured", "source"))
+    body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in comparison_row(row)) + "</tr>"
+                   for row in sorted(rows, key=lambda r: (host_rank(r.get("host", "")), r.get("backend", ""), r.get("engine", ""))))
+    notes = "".join(f'<p class="note">{esc(text)}</p>' for text in harness)
+    return (f'{notes}<div class="scroll"><table class="compare"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+            '<p class="note">Rows from one source share models, prompts, seeds and protocol; they are older than the weekly '
+            'numbers above and use their own prompt lengths, so compare engines within a source, not against the weekly table.</p>')
+
+
+def task_section(hosts, task, comparisons):
+    families = task_families(hosts, task)
+    meta = task_meta(hosts)
+    gpu = lane_table(hosts, families, meta, lanes(hosts, GPU_BACKENDS), "results")
+    cpu = lane_table(hosts, families, meta, lanes(hosts, ("cpu",)), "results")
+    paired = [row for row in comparisons if row.get("task") == task]
+    return (f'<section id="{esc(task.lower().replace(" ", "-"))}"><h2>{esc(task)}</h2>'
+            f'<h3>GPU lanes, newest run per machine</h3>{gpu}'
+            f'<details><summary>CPU lanes</summary>{cpu}</details>'
+            f'<h3>Other engines</h3>{comparisons_table(paired)}</section>')
 
 
 def chart_scale_max(summary):
@@ -179,7 +261,7 @@ def chart_bar(row, y, scale_max, backend):
             f'<title>{esc(backend)}: {fmt_speed(row["speed_x"])}, {fmt_ms(row.get("wall_ms_median"))}</title></rect>')
 
 
-def chart_group(family, meta, rows, backends, y, scale_max):
+def chart_group(meta, rows, backends, y, scale_max):
     label, weights, _ = meta
     parts = [f'<text x="{CHART_LABEL_WIDTH - 8}" y="{y + CHART_BAR_HEIGHT}" text-anchor="end" class="chart-label">{esc(label)}</text>',
              f'<text x="{CHART_LABEL_WIDTH - 8}" y="{y + CHART_BAR_HEIGHT + 12}" text-anchor="end" class="chart-sub">{esc(weights[:40])}</text>']
@@ -205,8 +287,8 @@ def speed_chart(summary):
     group_height = len(backends) * CHART_ROW_HEIGHT + CHART_GROUP_GAP
     families = summary.get("families", [])
     height = CHART_TOP + len(families) * group_height
-    groups = [chart_group(family, meta.get(family, (family, "", "")), rows.get(family, {}), backends,
-                          CHART_TOP + index * group_height, scale_max) for index, family in enumerate(families)]
+    groups = [chart_group(meta.get(family, (family, "", "")), rows.get(family, {}), backends, CHART_TOP + index * group_height, scale_max)
+              for index, family in enumerate(families)]
     legend = "".join(f'<span class="legend-item"><i class="swatch {esc(b)}"></i>{esc(b)}</span>' for b in backends)
     width = CHART_LABEL_WIDTH + CHART_PLOT_WIDTH + 40
     return (f'<div class="legend">{legend}<span class="legend-note">seconds of audio per second of wall clock, log scale</span></div>'
@@ -215,7 +297,8 @@ def speed_chart(summary):
 
 
 def primary_backend(summary):
-    return PRIMARY_BACKEND.get(summary.get("machine", {}).get("os", ""), ordered_backends(summary)[-1] if ordered_backends(summary) else "")
+    backends = ordered_backends(summary)
+    return PRIMARY_BACKEND.get(summary.get("machine", {}).get("os", ""), backends[-1] if backends else "")
 
 
 def history_cells(runs, family, backend, threshold):
@@ -261,7 +344,7 @@ def status_tile(summary):
     tone = {"ok": "good", "partial": "warn"}.get(status, "bad")
     engine = (pins.get("engine") or {}).get("sha", "")[:SHA_SHORT]
     ggml = (pins.get("ggml") or {}).get("sha", "")[:SHA_SHORT]
-    return (f'<div class="tile"><span class="tile-host">{esc(summary["_host"])}</span>'
+    return (f'<div class="tile"><span class="tile-host">{esc(machine_label(summary["_host"]))}<span class="sub">{esc(summary["_host"])}</span></span>'
             f'<span class="tile-status {tone}">{esc(status)}</span>'
             f'<span class="tile-big num">{counts.get("ok", 0)}<small>/{counts.get("expected", 0)} cells ok</small></span>'
             f'<span class="sub">{esc(run.get("name", "?"))} · engine <code>{esc(engine)}</code> · ggml <code>{esc(ggml)}</code></span></div>')
@@ -299,11 +382,11 @@ def problems_list(summary):
 def machine_section(host, runs, threshold):
     latest = latest_run(runs)
     run = latest.get("run", {})
-    return (f'<section id="{esc(host)}"><h2>{esc(host)}</h2><p class="note">{esc(machine_line(latest))}</p>'
+    return (f'<section id="{esc(host)}"><h2>{esc(machine_label(host))} <span class="sub">{esc(host)}</span></h2>'
+            f'<p class="note">{esc(machine_line(latest))}</p>'
             f'<p class="note">Newest run <b>{esc(run.get("name", "?"))}</b>, {esc(run.get("started", "?"))} to {esc(run.get("finished", "?"))} UTC; '
             f'{len(runs)} stored run{"s" if len(runs) != 1 else ""}.</p>'
-            f'<h3>Latest results</h3>{results_table(latest)}<h3>Speed</h3>{speed_chart(latest)}'
-            f'<h3>History</h3>{history_table(runs, threshold)}'
+            f'<h3>Speed</h3>{speed_chart(latest)}<h3>History</h3>{history_table(runs, threshold)}'
             f'<details><summary>Pins</summary>{pins_list(latest)}</details>'
             f'<h3>Problems</h3>{problems_list(latest)}</section>')
 
@@ -318,7 +401,7 @@ STYLE = """
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
 <style>
-/* layout: one measured column, summary tiles first, then one section per machine with tables that scroll sideways */
+/* layout: one measured column; summary tiles, then one section per task with lane columns, then one block per machine */
 :root { --bg: #f6f7f5; --surface: #ffffff; --fg: #1d2420; --fg-2: #5a645e; --line: #d9ded9; --accent: #1f6f78; --good: #1b7f4a; --warn: #b86a00; --bad: #b3261e;
   --cpu: #2a78d6; --cuda: #eb6834; --vulkan: #1baf7a; --metal: #eda100;
   --display: "Barlow Semi Condensed", "Arial Narrow", sans-serif; --body: "Source Sans 3", "Segoe UI", sans-serif; --mono: "JetBrains Mono", Menlo, monospace; }
@@ -328,14 +411,16 @@ STYLE = """
   --cpu: #3987e5; --cuda: #d95926; --vulkan: #199e70; --metal: #c98500; color-scheme: dark; }
 body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.45; margin: 0;
   padding-block: 24px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
-main { max-width: 1180px; margin: 0 auto; display: grid; gap: 28px; }
+main { max-width: 1240px; margin: 0 auto; display: grid; gap: 28px; }
 h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.1; }
-h1 { font-size: 2.4rem; } h2 { font-size: 1.7rem; color: var(--accent); margin-top: 8px; } h3 { font-size: 1.15rem; margin-top: 18px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-2); }
-p { margin: 0; max-width: 70ch; } .note { color: var(--fg-2); font-size: .95rem; }
-header { display: grid; gap: 10px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+h1 { font-size: 2.4rem; } h2 { font-size: 1.7rem; color: var(--accent); margin-top: 8px; } h2 .sub { display: inline; font-family: var(--mono); font-size: .8rem; margin-left: 8px; }
+h3 { font-size: 1.15rem; margin-top: 18px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-2); }
+p { margin: 0; max-width: 72ch; } .note { color: var(--fg-2); font-size: .95rem; }
+header { display: grid; gap: 10px; } nav.jump { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: .95rem; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: grid; gap: 4px; }
-.tile-host { font-family: var(--mono); font-size: .85rem; } .tile-status { font-family: var(--display); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.tile-host { font-weight: 600; } .tile-host .sub { font-family: var(--mono); }
+.tile-status { font-family: var(--display); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
 .tile-big { font-size: 1.8rem; font-weight: 600; } .tile-big small { font-size: .9rem; color: var(--fg-2); font-weight: 400; margin-left: 4px; }
 .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--fg-2); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -343,6 +428,7 @@ header { display: grid; gap: 10px; }
 .scroll { overflow-x: auto; min-width: 0; }
 table { border-collapse: collapse; width: 100%; font-size: .9rem; } th, td { text-align: left; vertical-align: top; padding: 6px 10px; border-bottom: 1px solid var(--line); }
 thead th { font-family: var(--display); font-size: .95rem; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-2); }
+thead th .sub { text-transform: none; letter-spacing: 0; font-family: var(--mono); }
 tbody th { font-weight: 400; min-width: 180px; } td.cell { min-width: 150px; } td.bad { color: var(--bad); font-weight: 600; }
 .chip { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: .75rem; font-family: var(--mono); border: 1px solid currentColor; }
 .chip.good { color: var(--good); } .chip.warn { color: var(--warn); }
@@ -362,13 +448,20 @@ a { color: var(--accent); } :focus-visible { outline: 2px solid var(--accent); o
 """
 
 
+def jump_links(hosts):
+    tasks = "".join(f'<a href="#{task.lower().replace(" ", "-")}">{esc(task)}</a>' for task in TASK_ORDER)
+    machines = "".join(f'<a href="#{esc(host)}">{esc(machine_label(host))}</a>' for host in hosts)
+    return f'<nav class="jump">{tasks}{machines}<a href="#method">How to read it</a></nav>'
+
+
 def page_header(hosts, built_at):
     tiles = "".join(status_tile(latest_run(runs)) for runs in hosts.values())
     return (f'<header><h1>{PAGE_TITLE}</h1>'
             f'<p>Every Sunday from 18:00 CET, cron on the shared Tailscale machines benchmarks the qvac-fabric-speech.cpp engines on the '
             f'current engine and ggml heads: Parakeet TDT and Unified, TranscribePsy, Nemotron 3.5 ASR, Supertonic 3, the Audio8 LM and codec '
-            f'grid with voice cloning, MOSS-TTS v1.5 F16 and Q8_0 with cloning, and the ACE-Step 1.5 Turbo, SFT and Base DiTs. The fabric-llm '
-            f'engine bench owns Saturday on the same Mac. This page is rebuilt from each machine\'s <code>summary.json</code>; last build {esc(built_at)} UTC.</p>'
+            f'grid with voice cloning, MOSS-TTS v1.5 F16 and Q8_0 with cloning, and the ACE-Step 1.5 Turbo, SFT and Base DiTs. One table per '
+            f'task, one column per machine and backend; the fabric-llm engine bench owns Saturday on the same machines. Rebuilt from each '
+            f'machine\'s <code>summary.json</code>; last build {esc(built_at)} UTC.</p>{jump_links(hosts)}'
             f'<div class="tiles">{tiles}</div></header>')
 
 
@@ -376,18 +469,20 @@ METHOD = """<section id="method"><h2>How to read it</h2>
 <p>Speed is seconds of audio per second of wall clock: the 11 s JFK clip for ASR, the generated audio for TTS, a 30 s render for music.
 ASR and Supertonic rows time inference only through the engines' own bench modes; Audio8, MOSS-TTS and ACE-Step rows are the whole process
 including model load, so their speed is a throughput figure. Memory is the peak RSS of the process and, on NVIDIA backends, the rise of
-<code>nvidia-smi</code> memory in use over the run. WER is scored against the checked-in JFK transcript; TTS WER transcribes the last
-generated clip with pinned Whisper tiny on CPU, so it includes the scorer's own errors. A slower cell with unchanged pins usually means
-another user loaded the machine during the run; a changed pin names the engine, ggml or model cut to look at. Two rows differ from the
-desktop target set because the registry has no such cut: ACE-Step Base runs at Q4_K_M, and MOSS-TTS Q8_0 is the F16 backbone with its
-transformer blocks requantized on the machine.</p></section>"""
+<code>nvidia-smi</code> memory in use over the run (system memory rise on unified-memory hosts). WER is scored against the checked-in JFK
+transcript; TTS WER transcribes the last generated clip with pinned Whisper tiny on CPU, so it includes the scorer's own errors. A slower
+cell with unchanged pins usually means another user loaded the machine during the run; a changed pin names the engine, ggml or model cut
+to look at. Two rows differ from the desktop target set because the registry has no such cut: ACE-Step Base runs at Q4_K_M, and MOSS-TTS
+Q8_0 is the F16 backbone with its transformer blocks requantized on the machine. The "Other engines" tables are paired harness runs
+recorded in <code>comparisons.json</code>; they compare engines under one protocol and are not on the weekly clock.</p></section>"""
 
 
-def render(summaries, threshold):
+def render(summaries, threshold, comparisons):
     hosts = runs_by_host(summaries)
     built_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
-    sections = "".join(machine_section(host, runs, threshold) for host, runs in hosts.items())
-    return (f"<title>{PAGE_TITLE}</title>{STYLE}<main>{page_header(hosts, built_at)}{sections}{METHOD}</main>{data_script(hosts)}\n")
+    tasks = "".join(task_section(hosts, task, comparisons) for task in TASK_ORDER)
+    machines = "".join(machine_section(host, runs, threshold) for host, runs in hosts.items())
+    return f"<title>{PAGE_TITLE}</title>{STYLE}<main>{page_header(hosts, built_at)}{tasks}{machines}{METHOD}</main>{data_script(hosts)}\n"
 
 
 def parse_args(argv):
@@ -395,6 +490,7 @@ def parse_args(argv):
     parser.add_argument("summaries")
     parser.add_argument("-o", "--out", required=True)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD_PERCENT)
+    parser.add_argument("--comparisons", default=str(DEFAULT_COMPARISONS))
     return parser.parse_args(argv)
 
 
@@ -403,7 +499,7 @@ def main(argv=None):
     summaries = load_summaries(args.summaries)
     if not summaries:
         raise SystemExit(f"no summary.json files under {args.summaries}")
-    pathlib.Path(args.out).write_text(render(summaries, args.threshold))
+    pathlib.Path(args.out).write_text(render(summaries, args.threshold, load_comparisons(args.comparisons)))
     print(f"wrote {args.out} from {len(summaries)} runs on {len(runs_by_host(summaries))} hosts")
 
 

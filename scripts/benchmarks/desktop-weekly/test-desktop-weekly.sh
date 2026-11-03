@@ -196,6 +196,40 @@ check_cell_signature() {
   ok "a cell is reused only when build, iterations, spec and model hashes match"
 }
 
+check_machine_quirks() {
+  MEMORY_SAMPLER=meminfo
+  [ "$(memory_sampler_kind)" = "meminfo" ] || fail "MEMORY_SAMPLER override ignored"
+  if [ -r /proc/meminfo ]; then
+    start_gpu_sampler "$TMP/meminfo.csv"
+    sleep 1
+    stop_gpu_sampler
+    [ "$(head -1 "$TMP/meminfo.csv" | awk -F', ' '{print NF}')" = 3 ] || fail "meminfo sampler row shape: $(head -1 "$TMP/meminfo.csv")"
+  fi
+  MEMORY_SAMPLER=auto
+  [ "$(perl "$HERE/nsdate" +%N | wc -c | tr -d ' ')" = 10 ] || fail "nsdate +%N is not nine digits"
+  [[ "$(perl "$HERE/nsdate")" =~ ^[0-9]{19}$ ]] || fail "nsdate default is not seconds plus nanoseconds"
+  mkdir -p "$ENGINE_SRC/scripts/benchmarks"
+  echo 'now=$(/bin/date +%s%N)' > "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
+  install_nanosecond_shim
+  grep -q "bin/nsdate +%s%N" "$ENGINE_SRC/scripts/benchmarks/run-family.sh" || fail "clock shim not applied to run-family.sh"
+  [ -x "$BENCH_HOME/bin/nsdate" ] || fail "clock shim not installed"
+  bash -n "$HERE/scheduler.sh" || fail "scheduler.sh does not parse"
+  ok "meminfo sampler, nanosecond clock shim and scheduler are in place for the Spark, Strix and Mac mini"
+}
+
+check_skip_families() {
+  (
+    . "$HERE/weekly.sh"
+    load_config
+    SKIP_FAMILIES="supertonic3,moss-tts-f16"
+    QUICK=1
+    [ "$(selected_families 2>/dev/null)" = "parakeet-tdt,audio8-lm-q8_0-dec-q8_0" ] || { echo "SKIP_FAMILIES not applied: $(selected_families 2>/dev/null)" >&2; exit 1; }
+    FAMILIES_ARG="moss-tts-f16"
+    [ -z "$(selected_families 2>/dev/null)" ] || { echo "an explicitly requested skipped family slipped through" >&2; exit 1; }
+  ) || fail "SKIP_FAMILIES"
+  ok "SKIP_FAMILIES removes families from quick, default and explicit selections"
+}
+
 check_lib_deadline() {
   local status=0
   run_with_deadline 0 sleep 30 || status=$?
@@ -382,6 +416,8 @@ main() {
   check_lib_targets
   check_lib_lock
   check_run_lock
+  check_machine_quirks
+  check_skip_families
   check_lib_deadline
   check_failed_result
   check_previous_and_prune

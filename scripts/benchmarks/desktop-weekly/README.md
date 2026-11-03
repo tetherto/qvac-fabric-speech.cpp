@@ -8,8 +8,11 @@ machine and toolchain versions and the sha256 of every model file.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
+| DGX Spark GB10 | `spark-d9ca` | cpu, cuda | Sunday 18:00 CET (17:00 on the UTC clock) |
 | Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
+| Strix Halo | `qvac-dev-strix-0` | cpu, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
 | Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 18:00 CET |
+| Mac mini M4 | `mac-mini-m4-gpu` | cpu, metal | Sunday 18:00 CET |
 
 The two weekly benches on the shared machines run on different days so that neither disturbs the other: the
 fabric-llm engine bench on Saturday from 18:00 CET, the speech bench on Sunday from 18:00 CET (a full run takes
@@ -57,7 +60,8 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `machine-info.sh`, `collect-pins.sh` | `machine.json` (hardware, OS, driver, toolchain) and `pins.json` (engine and ggml commits, model sha256 and origins) |
 | `summarize.py` | run directory -> `summary.json` |
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
-| `build-artifact.py` | a folder of `summary.json` files -> the single HTML results page the speech-bench skill publishes as the weekly artifact |
+| `build-artifact.py`, `comparisons.json` | a folder of `summary.json` files -> the single HTML results page the speech-bench skill publishes as the weekly artifact, with the paired engine comparisons |
+| `nsdate`, `scheduler.sh` | nanosecond clock shim for macOS before 26, and the user-space scheduler for hosts without cron |
 | `narrate.py` | optional: asks Claude for a ten-line narrative placed above the report in the e-mail |
 | `send-report.py` | SMTP delivery with `report.md` and `summary.json` attached |
 | `install.sh`, `config.example.env` | deployment and the per-machine configuration |
@@ -100,9 +104,13 @@ line (Sunday 18:00 machine time by default; `--weekday`, `--hour`, `--minute` ch
 Then edit `config.env`: `MODELS_DIR`, `MAIL_TO` and the SMTP settings, optionally `ANTHROPIC_API_KEY_FILE`. The
 secrets live in files with mode 0600 that the config points at, never in `config.env` itself.
 
-Prerequisites already present on both machines: git, cmake, ninja, jq, python3, node, curl; CUDA 13.3 and the
-Vulkan SDK on the Linux box; Xcode command line tools and Homebrew on the Mac. The registry client is installed
-by `fetch-models.sh` into `models/registry-client` from npm.
+Prerequisites already present on the machines: git, cmake, ninja, jq, python3, node, curl; CUDA 13.3 and the
+Vulkan SDK on the Linux boxes; Xcode command line tools and Homebrew on the Macs. The registry client is installed
+by `fetch-models.sh` into `registry-client/` under the bench home from npm. Per-machine settings (`BACKENDS`,
+`CUDA_ARCH`, `CUDA_HOME`, `MEMORY_SAMPLER=meminfo` for unified-memory NVIDIA hosts, `SKIP_FAMILIES` for the 16 GB
+Mac mini) are listed in `config.example.env` and in the skill. A host without cron (the Strix Halo) gets
+`scheduler.sh` from `install.sh` instead of a crontab line; it does not survive a reboot. A macOS host whose
+`/bin/date` lacks `%N` (macOS 15) gets `run-family.sh` routed through the `nsdate` shim after every source update.
 
 Try the pipeline before the first Sunday:
 

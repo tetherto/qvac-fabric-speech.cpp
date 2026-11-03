@@ -1,0 +1,31 @@
+{
+  "_schema": {
+    "description": "Paired measurements of qvac-fabric-speech.cpp against other engines, shown on the weekly page under each task. Every row comes from one harness run that measured both engines with the same models, prompts and protocol, so rows share a `source` and a `measured` date; the weekly cron numbers are not mixed into them. Add a row per engine per lane; keep qvac's own row from the same run next to it.",
+    "fields": {
+      "task": "ASR, TTS, TTS cloning or Music (the page's section).",
+      "engine": "Engine name as the harness labels it.",
+      "model": "Model and quantization measured.",
+      "host": "Tailscale host name of the machine, or a free label for a machine the weekly bench does not run on.",
+      "backend": "cpu, cuda, vulkan or metal.",
+      "gen_ms": "Median generation or inference time in ms.",
+      "e2e_ms": "Median end-to-end time in ms including lazy loads, when the harness reports it.",
+      "rtf": "Median real-time factor (wall / audio); lower is better.",
+      "quality": "Harness quality metric as free text (CLAP, WER ...).",
+      "measured": "Date of the harness run.",
+      "harness": "Where the numbers come from and the protocol in one line.",
+      "source": "Repo-relative path or URL of the report."
+    }
+  },
+  "rows": [
+    {"task": "Music", "engine": "acestep.cpp (ace-lm + ace-synth)", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-linux-x64", "backend": "cuda", "gen_ms": 2826, "e2e_ms": 2826, "rtf": 0.301, "quality": "CLAP 0.308", "measured": "2026-08-24", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-nvidia-rtx5090/cuda.md"},
+    {"task": "Music", "engine": "qvac music-cli", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-linux-x64", "backend": "cuda", "gen_ms": 3715, "e2e_ms": 4285, "rtf": 0.404, "quality": "CLAP 0.334", "measured": "2026-08-24", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-nvidia-rtx5090/cuda.md"},
+    {"task": "Music", "engine": "acestep.cpp (ace-lm + ace-synth)", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-strix-0", "backend": "vulkan", "gen_ms": 4767, "e2e_ms": 4767, "rtf": 0.507, "quality": "CLAP 0.283", "measured": "2026-08-21", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-amd-strix/vulkan.md"},
+    {"task": "Music", "engine": "qvac music-cli", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-strix-0", "backend": "vulkan", "gen_ms": 5898, "e2e_ms": 6183, "rtf": 0.645, "quality": "CLAP 0.327", "measured": "2026-08-21", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-amd-strix/vulkan.md"},
+    {"task": "Music", "engine": "acestep.cpp (ace-lm + ace-synth)", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-strix-0", "backend": "cpu", "gen_ms": 10233, "e2e_ms": 10233, "rtf": 1.103, "quality": "CLAP 0.304", "measured": "2026-08-21", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 8 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-amd-strix/cpu.md"},
+    {"task": "Music", "engine": "qvac music-cli", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-strix-0", "backend": "cpu", "gen_ms": 18826, "e2e_ms": 19036, "rtf": 2.144, "quality": "CLAP 0.316", "measured": "2026-08-21", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 8 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/linux-amd-strix/cpu.md"},
+    {"task": "Music", "engine": "acestep.cpp (ace-lm + ace-synth)", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-mac-arm64", "backend": "metal", "gen_ms": 5944, "e2e_ms": 5944, "rtf": 0.628, "quality": "CLAP 0.283", "measured": "2026-08-20", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/mac-arm64/metal.md"},
+    {"task": "Music", "engine": "qvac music-cli", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-mac-arm64", "backend": "metal", "gen_ms": 3931, "e2e_ms": 4440, "rtf": 0.434, "quality": "CLAP 0.310", "measured": "2026-08-20", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 7.5 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/mac-arm64/metal.md"},
+    {"task": "Music", "engine": "acestep.cpp (ace-lm + ace-synth)", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-mac-arm64", "backend": "cpu", "gen_ms": 15895, "e2e_ms": 15895, "rtf": 1.740, "quality": "CLAP 0.267", "measured": "2026-08-20", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 8 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/mac-arm64/cpu.md"},
+    {"task": "Music", "engine": "qvac music-cli", "model": "ACE-Step 1.5 Turbo Q8_0", "host": "qvac-dev-mac-arm64", "backend": "cpu", "gen_ms": 17766, "e2e_ms": 17971, "rtf": 1.931, "quality": "CLAP 0.368", "measured": "2026-08-20", "harness": "engines/audiogen/benchmarks/comparison: 10 prompts of about 8 s, 1 warm-up + 3 timed runs, 4 threads, same GGUFs and seeds", "source": "engines/audiogen/benchmarks/comparison/reports/mac-arm64/cpu.md"}
+  ]
+}

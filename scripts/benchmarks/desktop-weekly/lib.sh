@@ -15,6 +15,9 @@ readonly LOCK_CONTENT_LIMIT=200
 readonly DEADLINE_POLL_SECONDS="${DEADLINE_POLL_SECONDS:-5}"
 readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
+readonly MEMORY_SAMPLE_SECONDS=0.25
+readonly KIB_PER_MIB=1024
+readonly NANOSECOND_SHIM="nsdate"
 readonly SECONDS_PER_MINUTE=60
 readonly SECONDS_PER_HOUR=3600
 readonly DEADLINE_EXIT_CODE=124
@@ -45,6 +48,8 @@ load_config() {
   GPU_INDEX="${GPU_INDEX:-0}"
   KEEP_RUNS="${KEEP_RUNS:-$DEFAULT_KEEP_RUNS}"
   QUICK_FAMILIES="${QUICK_FAMILIES:-$DEFAULT_QUICK_FAMILIES}"
+  SKIP_FAMILIES="${SKIP_FAMILIES:-}"
+  MEMORY_SAMPLER="${MEMORY_SAMPLER:-auto}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -229,10 +234,25 @@ update_repo() {
   fetch_ref "$dir" "${pin:-$branch}"
 }
 
+date_has_nanoseconds() { [[ "$(/bin/date +%N 2>/dev/null)" =~ ^[0-9]+$ ]]; }
+
+install_nanosecond_shim() {
+  mkdir -p "$BENCH_HOME/bin"
+  install -m 755 "$TOOLS_DIR/$NANOSECOND_SHIM" "$BENCH_HOME/bin/$NANOSECOND_SHIM"
+  perl -pi -e "s{/bin/date }{$BENCH_HOME/bin/$NANOSECOND_SHIM }g" "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
+}
+
+apply_clock_shim() {
+  if date_has_nanoseconds; then return 0; fi
+  log "system date has no nanoseconds; routing run-family.sh through $NANOSECOND_SHIM"
+  install_nanosecond_shim
+}
+
 update_sources() {
   mkdir -p "$SRC_DIR"
   update_repo "$ENGINE_REPO" "$ENGINE_BRANCH" "$ENGINE_SRC" "${ENGINE_PIN:-}" || return 1
   update_repo "$GGML_REPO" "$GGML_BRANCH" "$GGML_SRC" "${GGML_PIN:-}" || return 1
+  apply_clock_shim
   log "engine $(repo_head_line "$ENGINE_SRC") ggml $(repo_head_line "$GGML_SRC")"
 }
 
@@ -327,16 +347,35 @@ run_with_deadline() {
   )
 }
 
+sample_system_memory() {
+  while true; do
+    awk -v ts="$(utc_now)" -v kib="$KIB_PER_MIB" \
+      '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } END { printf "%s, %d, 0\n", ts, (t - a) / kib }' /proc/meminfo
+    sleep "$MEMORY_SAMPLE_SECONDS"
+  done
+}
+
+memory_sampler_kind() {
+  if [ "$MEMORY_SAMPLER" != "auto" ]; then echo "$MEMORY_SAMPLER"; return; fi
+  if command -v nvidia-smi > /dev/null; then echo "nvidia-smi"; else echo "none"; fi
+}
+
 start_gpu_sampler() {
   GPU_SAMPLER_PID=""
-  command -v nvidia-smi > /dev/null || return 0
-  nvidia-smi -i "$GPU_INDEX" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
-    -lms "$GPU_SAMPLE_MS" > "$1" 2>/dev/null &
+  case "$(memory_sampler_kind)" in
+    nvidia-smi)
+      nvidia-smi -i "$GPU_INDEX" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
+        -lms "$GPU_SAMPLE_MS" > "$1" 2>/dev/null & ;;
+    meminfo) sample_system_memory > "$1" & ;;
+    *) return 0 ;;
+  esac
   GPU_SAMPLER_PID=$!
 }
 
 stop_gpu_sampler() {
-  if [ -n "${GPU_SAMPLER_PID:-}" ]; then kill "$GPU_SAMPLER_PID" 2>/dev/null; wait "$GPU_SAMPLER_PID" 2>/dev/null; fi
+  if [ -n "${GPU_SAMPLER_PID:-}" ]; then kill "$GPU_SAMPLER_PID" 2>/dev/null; wait "$GPU_SAMPLER_PID" 2>/dev/null || true; fi
+  GPU_SAMPLER_PID=""
+  return 0
 }
 
 write_failed_result() {

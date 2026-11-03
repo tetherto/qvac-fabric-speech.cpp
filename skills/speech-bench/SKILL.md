@@ -25,16 +25,20 @@ twenty-odd people from disturbing each other on the same hardware.
 
 ## Machines, schedule and coordination
 
-| | linux (`qvac-dev-linux-x64`) | mac (`qvac-dev-mac-arm64`) |
-| --- | --- | --- |
-| hardware | AMD Ryzen 9 9950X, 60 GB, 2x RTX 5090 32 GB (the bench uses GPU 0) | Apple M3 Ultra, 60-core GPU, 96 GB unified |
-| backends | cpu, cuda, vulkan | cpu, metal |
-| clock | UTC | CET |
-| speech bench | Sunday 17:00 UTC = 18:00 CET, about 6 to 7 hours | Sunday 18:00 CET, about 6 to 7 hours |
-| fabric-llm bench | not on this machine | Saturday 18:00 CET, about 4 hours (Aman's `engine-bench`) |
-| bench folder | `~/speech-bench` (runs in `runs/<date>`, models in `/home/shared/models/qvac-speech/bench`) | `~/speech-bench` (models in `/Users/Shared/models/qvac-speech/bench`) |
+| machine | host | backends | clock | config.env | notes |
+| --- | --- | --- | --- | --- | --- |
+| DGX Spark (GB10, 128 GB unified) | `spark-d9ca` | cpu, cuda | UTC | `BACKENDS=cpu,cuda`, `CUDA_ARCH=121a-real`, `CUDA_HOME=/usr/local/cuda-13.3`, `MEMORY_SAMPLER=meminfo` | nvidia-smi reports no memory.used; weights load at about 0.5 GB/s |
+| RTX 5090 box (2x 32 GB, GPU 0 used) | `qvac-dev-linux-x64` | cpu, cuda, vulkan | UTC | `MODELS_DIR=/home/shared/models/qvac-speech/bench` | 22-account `dev` group can write the shared model folder |
+| Strix Halo (Radeon 8060S, 128 GB) | `qvac-dev-strix-0` | cpu, vulkan | UTC | `BACKENDS=cpu,vulkan` | no cron: `install.sh` starts `scheduler.sh`, which does not survive a reboot |
+| Mac Studio M3 Ultra (96 GB) | `qvac-dev-mac-arm64` | cpu, metal | CET | `MODELS_DIR=/Users/Shared/models/qvac-speech/bench` | shares Saturday with the fabric-llm bench |
+| Mac mini M4 (16 GB) | `mac-mini-m4-gpu` | cpu, metal | CET | `SKIP_FAMILIES=moss-tts-f16,moss-tts-q8_0,moss-tts-clone-f16` | macOS 15: `/bin/date` has no %N, the bench routes `run-family.sh` through `nsdate` |
 
-Two automated benches share the Mac. They are kept apart by **day** (LLM on Saturday, speech on Sunday, both
+Every machine runs the speech bench on Sunday from 18:00 CET (17:00 on the UTC clocks: `install.sh --hour 17`
+there, `--hour 18` on the Macs), about 6 to 7 hours. The fabric-llm bench (Aman's `engine-bench`) owns Saturday
+from 18:00 CET on the Mac Studio, the Strix Halo and the DGX Spark. The bench folder is `~/speech-bench` everywhere,
+with runs in `runs/<date>` and models in `models/` unless `MODELS_DIR` says otherwise.
+
+Two automated benches share three of the machines. They are kept apart by **day** (LLM on Saturday, speech on Sunday, both
 from 18:00 CET) and by the **lock** `/tmp/gpu-bench.lock`: each bench waits while the file exists or another
 user's GPU job runs, creates the file atomically when it starts measuring, and removes it when it is done. A
 contaminated run is one where something else ran on the machine during the measurement; the report flags it as a
@@ -64,7 +68,7 @@ which one. SSH as yourself with the host names above.
 Copy every finished run's summary into the local history folder, one file per run, named by host and run:
 
 ```sh
-H=qvac-dev-linux-x64   # and qvac-dev-mac-arm64
+H=qvac-dev-linux-x64   # and spark-d9ca, qvac-dev-strix-0, qvac-dev-mac-arm64, mac-mini-m4-gpu
 HISTORY=${SPEECH_BENCH_HISTORY:-$HOME/speech-bench-history}
 mkdir -p $HISTORY/summaries/$H
 for run in $(ssh $H 'cd ~/speech-bench/runs && for d in */; do [ -e "$d/DONE" ] && echo "${d%/}"; done'); do
@@ -87,10 +91,15 @@ python3 scripts/benchmarks/desktop-weekly/build-artifact.py $HISTORY/summaries -
 
 Then publish that file with the Artifact tool to the existing page, never as a new artifact:
 `url: https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY` (read it first in a fresh session, then publish
-with the same `url`). The page shows, per machine, the newest run with one column per backend (speed in seconds
-of audio per second of wall clock, wall median, peak RSS, GPU memory rise, WER or TTS WER), the speed of every
-family across the stored runs with moves over 5% marked, the engine, ggml and model pins, and the problem
-list. Tell the user what changed since the previous week: failed cells, moves over 5%, and which pins moved.
+with the same `url`). The page has one table per task (ASR, TTS, TTS cloning, Music) with a row per model and
+quantization and a column per machine and GPU backend from each machine's newest run (speed in seconds of audio
+per second of wall clock, wall median, peak RSS, GPU memory rise, WER or TTS WER), the CPU lanes collapsed under
+it, and the "Other engines" table from `comparisons.json`: paired harness runs that measured qvac and another
+engine the same way (today the ACE-Step rows from `engines/audiogen/benchmarks/comparison`). Below the tasks,
+one block per machine with the speed of every family across the stored runs (moves over 5% marked), the engine,
+ggml and model pins, and the problem list. Tell the user what changed since the previous week: failed cells,
+moves over 5%, and which pins moved. To add a comparison, run the harness that measures both engines, then add
+one row per engine and lane to `comparisons.json` with the same `source` and `measured` date.
 
 ### run
 

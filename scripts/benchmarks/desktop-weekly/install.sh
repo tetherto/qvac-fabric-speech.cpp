@@ -73,8 +73,26 @@ other_cron_lines() {
   crontab -l 2>/dev/null | grep -v -F "$CRON_TAG" || true
 }
 
+scheduler_running() {
+  local pid
+  pid="$(cat "$BENCH_HOME/scheduler.pid" 2>/dev/null)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+stop_scheduler() {
+  if scheduler_running; then kill "$(cat "$BENCH_HOME/scheduler.pid")"; fi
+  rm -f "$BENCH_HOME/scheduler.pid"
+}
+
+start_scheduler() {
+  stop_scheduler
+  BENCH_HOME="$BENCH_HOME" nohup /bin/bash "$BENCH_HOME/tools/scheduler.sh" "$WEEKDAY" "$HOUR" "$MINUTE" > "$BENCH_HOME/scheduler.log" 2>&1 < /dev/null &
+  echo "scheduler: no cron on this host; scheduler.sh (pid $!) runs weekly.sh on weekday $WEEKDAY at $HOUR:$MINUTE and does not survive a reboot"
+}
+
 install_cron() {
   [ "$CRON" = 1 ] || return 0
+  if ! command -v crontab > /dev/null; then start_scheduler; return 0; fi
   { other_cron_lines; cron_line; } | crontab -
   echo "crontab: $(cron_line)"
 }

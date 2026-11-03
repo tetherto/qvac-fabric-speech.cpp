@@ -46,11 +46,22 @@ compute_run_name() {
 
 run_name() { echo "$RUN_NAME"; }
 
-selected_families() {
+requested_families() {
   if [ -n "$FAMILIES_ARG" ]; then echo "$FAMILIES_ARG"
   elif [ "$QUICK" = 1 ]; then echo "$QUICK_FAMILIES"
   else all_families | tr '\n' ',' | sed 's/,$//'
   fi
+}
+
+family_skipped() {
+  case ",$SKIP_FAMILIES," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
+selected_families() {
+  local family
+  for family in $(split_list "$(requested_families)"); do
+    if family_skipped "$family"; then log "skip $family (SKIP_FAMILIES)" >&2; else echo "$family"; fi
+  done | tr '\n' ',' | sed 's/,$//'
 }
 
 apply_quick_iterations() {

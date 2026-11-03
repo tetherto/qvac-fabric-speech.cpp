@@ -18,23 +18,28 @@ def load_module(name, filename):
 build = load_module("build_artifact", "build-artifact.py")
 
 
-def row(backend, family, speed=10.0, status="ok"):
-    return {"backend": backend, "family": family, "task": "ASR", "model_label": f"Model {family}", "weights": "Q8_0", "status": status,
+def row(backend, family, speed=10.0, status="ok", task="ASR"):
+    return {"backend": backend, "family": family, "task": task, "model_label": f"Model {family}", "weights": "Q8_0", "status": status,
             "observed_backend": backend.upper(), "wall_ms_median": 1100.0, "wall_ms_min": 1000.0, "wall_ms_max": 1200.0,
             "speed_x": speed if status == "ok" else None, "peak_rss_mib": 1024.0, "gpu_memory_rise_mib": 512.0, "gpu_memory_peak_mib": 600.0,
             "quality": {"kind": "wer", "value": 0.0}, "runs": 3, "notes": ""}
 
 
-def summary(name, started, speeds, os_name="Linux", backends=("cpu", "cuda")):
-    results = [row(backend, family, speed) for family, speed in speeds.items() for backend in backends]
-    return {"schema": 1, "run": {"name": name, "host": "box", "started": started, "finished": started, "status": "ok"},
-            "machine": {"hostname": "box", "os": os_name, "os_version": "Ubuntu", "cpu": "cpu", "memory_gib": 60,
+def summary(name, started, speeds, os_name="Linux", backends=("cpu", "cuda"), host="box", tasks=None):
+    tasks = tasks or {}
+    results = [row(backend, family, speed, task=tasks.get(family, "ASR")) for family, speed in speeds.items() for backend in backends]
+    return {"schema": 1, "run": {"name": name, "host": host, "started": started, "finished": started, "status": "ok"},
+            "machine": {"hostname": host, "os": os_name, "os_version": "Ubuntu", "cpu": "cpu", "memory_gib": 60,
                         "gpu": {"name": "RTX", "driver": "595", "cuda_toolkit": "13.3", "unified_memory": False}, "tools": {"compiler": "gcc"}},
             "pins": {"engine": {"branch": "master", "sha": "abcdef1234567890", "commit_date": "2026-11-01"},
                      "ggml": {"branch": "speech", "sha": "fedcba0987654321", "commit_date": "2026-11-01"},
                      "models": [{"name": "m.gguf", "present": True, "bytes": 1073741824, "sha256": "0123456789abcdef", "source": "registry x"}]},
             "backends": list(backends), "families": list(speeds), "results": results,
             "counts": {"expected": len(results), "ok": len(results), "failed": 0}, "build_failures": [], "problems": []}
+
+
+COMPARISON = {"task": "Music", "engine": "other.cpp", "model": "M Q8_0", "host": "qvac-dev-linux-x64", "backend": "cuda", "gen_ms": 2000,
+              "e2e_ms": 2100, "rtf": 0.3, "quality": "CLAP 0.3", "measured": "2026-08-24", "harness": "harness text", "source": "reports/x.md"}
 
 
 class BuildArtifactTest(unittest.TestCase):
@@ -55,24 +60,52 @@ class BuildArtifactTest(unittest.TestCase):
         summaries = build.load_summaries(self.root)
         hosts = build.runs_by_host(summaries)
         self.assertEqual(build.latest_run(hosts["box"])["run"]["name"], "2026-11-08")
-        text = build.render(summaries, 5.0)
+        text = build.render(summaries, 5.0, [])
         self.assertIn("<title>Speech Fabric Weekly Bench</title>", text)
         self.assertIn('<section id="box">', text)
+        self.assertIn('<section id="asr">', text)
         self.assertIn('<span class="chip good">+20%</span>', text)
         self.assertIn('<span class="chip warn">-10%</span>', text)
         self.assertIn("Speed on cuda", text)
-        self.write("box", "2026-11-15", summary("2026-11-15", "2026-11-15T17:00:00Z", {"a": 12.0}))
-        text = build.render(build.load_summaries(self.root), 5.0)
-        self.assertIn("Model b", text.split("<h3>History</h3>")[1])
         self.assertIn('id="bench-data"', text)
+        self.write("box", "2026-11-15", summary("2026-11-15", "2026-11-15T17:00:00Z", {"a": 12.0}))
+        text = build.render(build.load_summaries(self.root), 5.0, [])
+        self.assertIn("Model b", text.split("<h3>History</h3>")[1])
+
+    def test_task_tables_use_gpu_lanes_per_machine(self):
+        (self.root / "qvac-dev-mac-arm64").mkdir()
+        self.write("qvac-dev-mac-arm64", "2026-11-08", summary("2026-11-08", "2026-11-08T17:00:00Z", {"a": 50.0, "m": 2.0}, os_name="Darwin",
+                                                               backends=("cpu", "metal"), host="qvac-dev-mac-arm64", tasks={"m": "Music"}))
+        hosts = build.runs_by_host(build.load_summaries(self.root))
+        self.assertEqual(list(hosts), ["qvac-dev-mac-arm64", "box"])
+        self.assertEqual(build.lanes(hosts, build.GPU_BACKENDS), [("qvac-dev-mac-arm64", "metal"), ("box", "cuda")])
+        self.assertEqual(build.task_families(hosts, "Music"), ["m"])
+        text = build.task_section(hosts, "ASR", [])
+        self.assertIn("Mac Studio M3 Ultra", text)
+        self.assertIn('<b class="num">50x</b>', text)
+        self.assertIn('<b class="num">12x</b>', text)
+        self.assertIn("<summary>CPU lanes</summary>", text)
+        self.assertNotIn("Model m", text)
+        self.assertIn("No paired measurement", text)
+
+    def test_comparisons_table(self):
+        hosts = build.runs_by_host(build.load_summaries(self.root))
+        text = build.task_section(hosts, "Music", [COMPARISON])
+        self.assertIn("other.cpp", text)
+        self.assertIn("RTX 5090 · cuda", text)
+        self.assertIn("2,000 ms", text)
+        self.assertIn("0.300", text)
+        self.assertIn("harness text", text)
+        self.assertEqual(build.load_comparisons(None), [])
+        self.assertTrue(build.load_comparisons(build.DEFAULT_COMPARISONS))
 
     def test_results_cells_and_failed_rows(self):
         data = summary("2026-11-15", "2026-11-15T17:00:00Z", {"a": 10.0})
         data["results"][1] = row("cuda", "a", status="timeout")
-        text = build.results_table(data)
-        self.assertIn('<td class="cell bad">timeout</td>', text)
-        self.assertIn('<b class="num">10x</b>', text)
-        self.assertIn("1,100 ms · 1.0 GiB", text)
+        self.assertEqual(build.cell_html(data["results"][1]), '<td class="cell bad">timeout</td>')
+        self.assertIn('<b class="num">10x</b>', build.cell_html(data["results"][0]))
+        self.assertIn("1,100 ms · 1.0 GiB", build.cell_html(data["results"][0]))
+        self.assertEqual(build.cell_html(None), '<td class="cell muted">not run</td>')
 
     def test_chart_scales_logarithmically_and_lists_backends(self):
         data = summary("2026-11-15", "2026-11-15T17:00:00Z", {"a": 1.0, "b": 10.0, "c": 100.0})
