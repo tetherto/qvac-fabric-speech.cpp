@@ -882,10 +882,17 @@ void test_backend_request_matching() {
     CHECK(backend_request_matches("cpu", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
     CHECK(!backend_request_matches("cpu", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
     CHECK(!backend_request_matches("auto", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("xdna", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(backend_request_matches("XDNA1", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
+    CHECK(!backend_request_matches("auto", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
     CHECK(!backend_request_matches("Vulkan0", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_GPU));
 
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_ACCEL, -1) == GpuTier::NotSelectable);
 }
 
 void test_dsp_library_path() {
@@ -1172,6 +1179,9 @@ void test_stage_placement() {
     using tts_cpp::acestep::resolve_stage_placement;
     using tts_cpp::acestep::StagePlacement;
 
+    const auto xdna = resolve_stage_placement("XDNA", "", {});
+    CHECK(!xdna.enc_on_gpu && !xdna.lm_on_gpu && !xdna.detok_on_gpu);
+
     // -- backend name matching ------------------------------------------------
     // ggml-metal registers as "MTL"; older ggml reported "Metal". Both must
     // match or the allowlist is silently dead on one of them.
@@ -1380,6 +1390,8 @@ void test_vae_backend_request_env() {
     set_env("ACESTEP_VAE_GPU", nullptr);
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
     CHECK(vae_backend_request_from_env("auto") == "auto");
+    CHECK(vae_backend_request_from_env("xdna") == "cpu");
+    CHECK(vae_backend_request_from_env("XDNA0") == "cpu");
 
     set_env("ACESTEP_VAE_GPU", "0");
     CHECK(vae_backend_request_from_env("hexagon") == "cpu");
@@ -1387,6 +1399,7 @@ void test_vae_backend_request_env() {
 
     set_env("ACESTEP_VAE_GPU", "1");
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
+    CHECK(vae_backend_request_from_env("xdna") == "xdna");
 
     set_env("ACESTEP_VAE_GPU", nullptr);
 }

@@ -43,6 +43,10 @@ selection through Fabric LLM's native GGML backend. It uses the existing GGUF,
 requires matching XDNA runtime artifacts, and schedules unsupported operations
 on CPU. Q8_0 matrices stay on the host; use F16 for NPU validation.
 
+ACE-Step also supports explicit [AMD XDNA DiT execution](engines/audiogen/docs/backends.md#amd-xdna-npu)
+through `backend = "xdna"` or `XDNA0`. Unsupported DiT operations use a CPU
+scheduler fallback; the encoders, LM, detokenizer and VAE retain CPU placement.
+
 MOSS cloning matches upstream reference loudness preprocessing and uses the
 TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)
 sets its model-specific sampling parameters explicitly; check generated speech

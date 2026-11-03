@@ -119,7 +119,7 @@ inline void assign_stage_backends(AcestepBackends & out) {
 }
 
 inline void report_stage_backends(const AcestepBackends & out) {
-    fprintf(stderr, "[acestep-engine] backends: enc=%s lm=%s detok=%s dit/vae=%s\n", ggml_backend_name(out.enc),
+    fprintf(stderr, "[acestep-engine] backends: enc=%s lm=%s detok=%s dit=%s\n", ggml_backend_name(out.enc),
             ggml_backend_name(out.lm), ggml_backend_name(out.detok), ggml_backend_name(out.backend));
 }
 
@@ -137,7 +137,7 @@ inline bool resolve_acestep_backends(const BackendRequest & req, AcestepBackends
     out.on_gpu = !backend_is_cpu_device(out.backend);
     if (!out.on_gpu && !backend_request_is_auto(req.backend)) out.gpu_fallback_reason = GpuFallbackReason::not_requested;
     if (out.on_gpu && req.verbose) {
-        fprintf(stderr, "[acestep-engine] DiT/VAE on GPU backend: %s\n", ggml_backend_name(out.backend));
+        fprintf(stderr, "[acestep-engine] DiT on requested accelerator: %s\n", ggml_backend_name(out.backend));
     }
     if (!attach_cpu_backend(out)) {
         free_acestep_backends(out);
@@ -171,7 +171,8 @@ inline int vae_gpu_layers_from_env(int n_gpu_layers) {
 
 inline std::string vae_backend_request_from_env(const std::string & backend) {
     const char * e = std::getenv("ACESTEP_VAE_GPU");
-    if (backend_request_is_auto(backend) || !e || e[0] == '1') return backend;
+    if (!e) return backend_request_is_xdna(backend) ? BACKEND_REQUEST_CPU : backend;
+    if (backend_request_is_auto(backend) || e[0] == '1') return backend;
     return BACKEND_REQUEST_CPU;
 }
 

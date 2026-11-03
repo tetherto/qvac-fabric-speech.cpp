@@ -1,7 +1,9 @@
 #include "dit_ggml.h"
 
 #include "audio_edit.h"
+#include "backend_registry.h"
 #include "dit_gguf.h"
+#include "dit_graph_allocator.h"
 #include "fit_measure.h"
 #include "philox.h"
 
@@ -29,6 +31,19 @@
 // reproduces the reference DiT latent (corr ~0.999).
 
 namespace tts_cpp::acestep {
+
+using DitBackendOwner = std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)>;
+
+static DitBackendOwner make_dit_cpu_fallback(ggml_backend_t backend) {
+    return DitBackendOwner(backend_name_is_xdna(backend_reg_name(backend)) ? backend_cpu_init() : nullptr,
+                           ggml_backend_free);
+}
+
+static bool initialize_dit_allocator(DitGraphAllocator & allocator, ggml_backend_t backend,
+                                     ggml_backend_t cpu, size_t nodes) {
+    const bool xdna = backend_name_is_xdna(backend_reg_name(backend));
+    return (!xdna || cpu) && allocator.initialize(backend, cpu, nodes, xdna);
+}
 
 // ------------------------------------------------------------------ structs
 struct DitTemb {
@@ -71,7 +86,8 @@ struct DitLayer {
 struct DitGraphCache {
     ggml_context * ctx = nullptr;
     ggml_cgraph *  gf  = nullptr;
-    ggml_gallocr_t ga  = nullptr;
+    std::unique_ptr<DitGraphAllocator> allocator;
+    ggml_backend_t cpu_fallback = nullptr;
     ggml_tensor *  input = nullptr, *enc_hidden = nullptr, *t_val = nullptr,
                 *  tr_val = nullptr, *positions = nullptr, *sa_mask = nullptr,
                 *  ca_mask = nullptr, *output = nullptr;
@@ -80,7 +96,8 @@ struct DitGraphCache {
     bool has_sa = false, has_ca = false;
 
     void release() {
-        if (ga)  ggml_gallocr_free(ga);
+        allocator.reset();
+        if (cpu_fallback) ggml_backend_free(cpu_fallback);
         if (ctx) ggml_free(ctx);
         *this = DitGraphCache{};
     }
@@ -764,7 +781,7 @@ DitModel * dit_model_load_metadata_only(const std::string & path, ggml_backend_t
 }
 
 size_t dit_model_compute_buffer_bytes(const DitModel * m) {
-    return (m && m->graph_cache.ga) ? ggml_gallocr_get_buffer_size(m->graph_cache.ga, 0) : 0;
+    return (m && m->graph_cache.allocator) ? m->graph_cache.allocator->bytes() : 0;
 }
 
 void dit_model_free(DitModel * m) {
@@ -813,14 +830,14 @@ bool dit_model_forward(DitModel * m, const DitForwardInputs & in, std::vector<fl
 
     ggml_context * ctx = nullptr;
     ggml_cgraph *  gf  = nullptr;
-    ggml_gallocr_t ga  = nullptr;
+    DitGraphAllocator * allocator = nullptr;
     ggml_tensor *input = nullptr, *enc_hidden = nullptr, *t_val = nullptr, *tr_val = nullptr,
                 *positions = nullptr, *sa_mask = nullptr, *ca_mask = nullptr, *output = nullptr;
 
     if (cache_hit) {
         ctx    = gc.ctx;
         gf     = gc.gf;
-        ga     = gc.ga;
+        allocator = gc.allocator.get();
         input  = gc.input;  enc_hidden = gc.enc_hidden;
         t_val  = gc.t_val;  tr_val = gc.tr_val; positions = gc.positions;
         sa_mask = gc.sa_mask; ca_mask = gc.ca_mask; output = gc.output;
@@ -891,30 +908,31 @@ bool dit_model_forward(DitModel * m, const DitForwardInputs & in, std::vector<fl
         gf = ggml_new_graph_custom(ctx, nodes, false);
         ggml_build_forward_expand(gf, output);
 
-        ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
-        if (!ga) {
-            fprintf(stderr, "[acestep-dit] forward gallocr init failed (T=%d N=%d)\n", T, N);
+        auto cpu = make_dit_cpu_fallback(m->backend);
+        auto owned_allocator = std::make_unique<DitGraphAllocator>();
+        allocator = owned_allocator.get();
+        if (!initialize_dit_allocator(*allocator, m->backend, cpu.get(), nodes)) {
+            fprintf(stderr, "[acestep-dit] forward allocator init failed (T=%d N=%d)\n", T, N);
             ggml_free(ctx);
             return false;
         }
         if (measure_compute) {
-            // Size-only twin of the persistent graph-cache allocation below.
-            *measure_compute = 0;
-            ggml_gallocr_reserve_n_size(ga, gf, nullptr, nullptr, measure_compute);
-            ggml_gallocr_free(ga);
+            const bool measured = allocator->reserve(gf, measure_compute);
+            owned_allocator.reset();
             ggml_free(ctx);
-            return true;
+            return measured;
         }
-        if (!ggml_gallocr_alloc_graph(ga, gf)) {
+        if (!allocator->reserve(gf, nullptr) || !allocator->allocate(gf)) {
             fprintf(stderr, "[acestep-dit] forward alloc failed (T=%d N=%d)\n", T, N);
-            ggml_gallocr_free(ga);
+            owned_allocator.reset();
             ggml_free(ctx);
             return false;
         }
 
         gc.ctx   = ctx;
         gc.gf    = gf;
-        gc.ga    = ga;
+        gc.allocator = std::move(owned_allocator);
+        gc.cpu_fallback = cpu.release();
         gc.input = input;  gc.enc_hidden = enc_hidden;
         gc.t_val = t_val;  gc.tr_val = tr_val; gc.positions = positions;
         gc.sa_mask = sa_mask; gc.ca_mask = ca_mask; gc.output = output;
@@ -937,7 +955,7 @@ bool dit_model_forward(DitModel * m, const DitForwardInputs & in, std::vector<fl
         if (sa_mask) ggml_backend_tensor_set(sa_mask, in.sa_mask_sw, 0, (size_t) S * S * N * sizeof(uint16_t));
     }
 
-    int rc = ggml_backend_graph_compute(m->backend, gf);
+    int rc = allocator->compute(gf);
     if (rc != GGML_STATUS_SUCCESS) {
         gc.release();
         return false;
@@ -1095,10 +1113,12 @@ bool dit_probe_cross_attention(DitModel *                            m,
         ggml_build_forward_expand(gf, tensor);
     }
 
-    ggml_gallocr_t ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
-    if (!ga || !ggml_gallocr_alloc_graph(ga, gf)) {
+    auto cpu = make_dit_cpu_fallback(m->backend);
+    DitGraphAllocator allocator;
+    if (!initialize_dit_allocator(allocator, m->backend, cpu.get(), nodes) ||
+        !allocator.reserve(gf, nullptr) || !allocator.allocate(gf)) {
         fprintf(stderr, "[acestep-dit] probe: graph alloc failed (T=%d enc_S=%d)\n", in.T, enc_S);
-        if (ga) ggml_gallocr_free(ga);
+        allocator.release();
         ggml_free(ctx);
         return false;
     }
@@ -1117,7 +1137,7 @@ bool dit_probe_cross_attention(DitModel *                            m,
     ggml_backend_tensor_set(sa_mask, self_mask.data(), 0, self_mask.size() * sizeof(uint16_t));
     ggml_backend_tensor_set(ca_mask, cross_mask.data(), 0, cross_mask.size() * sizeof(uint16_t));
 
-    const int  rc = ggml_backend_graph_compute(m->backend, gf);
+    const int  rc = allocator.compute(gf);
     bool       ok = rc == GGML_STATUS_SUCCESS;
     if (!ok) {
         fprintf(stderr, "[acestep-dit] probe: compute failed (%d)\n", rc);
@@ -1125,7 +1145,7 @@ bool dit_probe_cross_attention(DitModel *                            m,
         ok = read_captured_heads(gf, heads, enc_S, S, captured_out);
         if (!ok) captured_out.clear();
     }
-    ggml_gallocr_free(ga);
+    allocator.release();
     ggml_free(ctx);
     return ok;
 }

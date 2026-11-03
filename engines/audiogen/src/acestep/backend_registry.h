@@ -45,6 +45,8 @@ inline constexpr char BACKEND_REQUEST_CPU[]     = "cpu";
 inline constexpr char BACKEND_REQUEST_OPENCL[]  = "opencl";
 inline constexpr char BACKEND_REQUEST_WEBGPU[]  = "webgpu";
 inline constexpr char BACKEND_REQUEST_HEXAGON[] = "hexagon";
+inline constexpr char BACKEND_REQUEST_XDNA[]    = "xdna";
+inline constexpr char XDNA_PRIMARY_DEVICE[]     = "XDNA0";
 
 inline constexpr char HEXAGON_PRIMARY_DEVICE[] = "HTP0";
 inline constexpr char OPENCL_REG_NAME[]        = "OpenCL";
@@ -98,6 +100,9 @@ inline bool backend_request_matches(const std::string & requested, const char * 
     if (requested == BACKEND_REQUEST_CPU) return type == GGML_BACKEND_DEVICE_TYPE_CPU;
     if (requested == BACKEND_REQUEST_OPENCL) return reg_name && std::strcmp(reg_name, OPENCL_REG_NAME) == 0;
     if (requested == BACKEND_REQUEST_WEBGPU) return backend_name_is_webgpu(reg_name);
+    if (requested == BACKEND_REQUEST_XDNA) {
+        return backend_name_is_xdna(reg_name) && device_name && std::strcmp(device_name, XDNA_PRIMARY_DEVICE) == 0;
+    }
     if (requested == BACKEND_REQUEST_HEXAGON) {
         return backend_name_is_hexagon(reg_name) && device_name && std::strcmp(device_name, HEXAGON_PRIMARY_DEVICE) == 0;
     }
@@ -122,6 +127,11 @@ inline ggml_backend_dev_t backend_requested_device(const std::string & requested
         if (backend_device_matches_request(requested, dev)) return dev;
     }
     return nullptr;
+}
+
+inline bool backend_request_is_xdna(const std::string & requested) {
+    return requested == BACKEND_REQUEST_XDNA || requested == XDNA_PRIMARY_DEVICE ||
+           backend_name_is_xdna(backend_dev_reg_name(backend_requested_device(requested)));
 }
 
 struct RequestedBackendInit {
@@ -252,7 +262,8 @@ enum class GpuTier {
 inline GpuTier gpu_tier_for(const char *                     reg_name,
                             enum ggml_backend_dev_type       dev_type,
                             int                              adreno_version) {
-    if (!backend_device_type_is_gpu(dev_type) || backend_name_is_hexagon(reg_name)) return GpuTier::NotSelectable;
+    if (!backend_device_type_is_gpu(dev_type) || backend_name_is_hexagon(reg_name) ||
+        backend_name_is_xdna(reg_name)) return GpuTier::NotSelectable;
     const bool integrated = (dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU);
     if (reg_name && std::strcmp(reg_name, "OpenCL") == 0 && adreno_version >= 700) {
         return GpuTier::AdrenoOpenCL700Plus;
@@ -336,7 +347,7 @@ inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
 
                 ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
                 const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
-                if (backend_name_is_hexagon(reg_name)) continue;
+                if (backend_name_is_hexagon(reg_name) || backend_name_is_xdna(reg_name)) continue;
                 if (backend_reg_name_is_validated_gpu(reg_name) != require_validated) continue;
 
                 saw_device = true;
