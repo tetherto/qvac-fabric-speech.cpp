@@ -1,10 +1,12 @@
 # Weekly desktop benchmark on the shared Tailscale machines
 
-`weekly.sh` benchmarks the speech engines every Sunday morning on the team's shared machines, without any
+`weekly.sh` benchmarks the speech engines every Sunday evening on the team's shared machines, without any
 developer laptop in the loop: cron on each machine builds the current engine and ggml heads for every backend the
 machine has, provisions the pinned models, runs the matrix in `families.json` through
-`scripts/benchmarks/run-family.sh`, and e-mails a Markdown report with the numbers, the memory peaks, the exact
-machine and toolchain versions and the sha256 of every model file.
+`scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
+machine and toolchain versions and the sha256 of every model file. The results page that everyone reads is the
+weekly artifact, rebuilt from the machines' summaries every Monday (see `skills/speech-bench/SKILL.md`); e-mail
+delivery exists but is off unless `MAIL_TO` is set.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
@@ -101,8 +103,9 @@ ssh <host> 'bash speech-bench-src/install.sh --hour 18'   # --hour 17 on the UTC
 
 `install.sh` copies the tools to `~/speech-bench/tools`, seeds `~/speech-bench/config.env` and installs the cron
 line (Sunday 18:00 machine time by default; `--weekday`, `--hour`, `--minute` change it, `--no-cron` skips it).
-Then edit `config.env`: `MODELS_DIR`, `MAIL_TO` and the SMTP settings, optionally `ANTHROPIC_API_KEY_FILE`. The
-secrets live in files with mode 0600 that the config points at, never in `config.env` itself.
+Then edit `config.env` for the machine's settings (`MODELS_DIR`, `BACKENDS`, `CUDA_ARCH` and the other keys in
+`config.example.env`); mail and the Claude narrative are optional and stay off without their keys. Any secret
+lives in a file with mode 0600 that the config points at, never in `config.env` itself.
 
 Prerequisites already present on the machines: git, cmake, ninja, jq, python3, node, curl; CUDA 13.3 and the
 Vulkan SDK on the Linux boxes; Xcode command line tools and Homebrew on the Macs. The registry client is installed
@@ -123,13 +126,14 @@ ssh <host> 'nohup ~/speech-bench/tools/weekly.sh --quick --no-mail < /dev/null >
 checkouts, `--label NAME` keeps several runs of one day apart. Watch `runs/<date>-quick/weekly.log` and wait for
 `DONE` or `FAILED`; a family's own output is in `results/<backend>/<family>.log`.
 
-## E-mail
+## Where the results go
 
-tether.io mail is Google Workspace, so the simplest relay is `smtp.gmail.com:465` with an account's app password
-(a bot account is preferable to a personal one). `send-report.py` sends the Markdown report as the body, with the
-optional narrative above it, and attaches `report.md` and `summary.json`; the subject carries the host, the run
-name, the status and the ok count. A failed run (busy GPU, source update or summary failure) still sends a
-one-paragraph failure notice. Without `MAIL_TO` the report stays on disk and the run ends with exit code 0.
+Each run leaves `report.md` and `summary.json` under `runs/<date>/` on the machine, and the weekly artifact page
+is rebuilt from every machine's summaries by the speech-bench skill (a scheduled Monday task), so the page is the
+place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
+`config.env` (tether.io mail is Google Workspace, so `smtp.gmail.com:465` with an app password in a mode 0600 file),
+`send-report.py` also mails the report with `report.md` and `summary.json` attached, and a failed run mails a
+one-paragraph notice.
 
 ## Narrative by Claude
 

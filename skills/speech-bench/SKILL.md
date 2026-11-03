@@ -10,9 +10,10 @@ Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmark
 under the installing user's own account: it updates the engine `master` and ggml `speech` heads, provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
-machine is involved in the measurement. This skill is the Claude side: on-demand runs, collecting the summaries,
-building the results page from them and publishing it, and the rules that keep two automated benches and
-twenty-odd people from disturbing each other on the same hardware.
+machine is involved in the measurement. The results page, the weekly artifact linked from the team channel's canvas, is where
+everyone reads the numbers. This skill is the Claude side: on-demand runs, collecting the summaries, building the
+results page from them and publishing it, and the rules that keep two automated benches and twenty-odd people from
+disturbing each other on the same hardware.
 
 | path | what it is |
 | --- | --- |
@@ -127,9 +128,10 @@ scp -r scripts/benchmarks/desktop-weekly <host>:speech-bench-src
 ssh <host> 'bash speech-bench-src/install.sh --hour 18 && rm -rf speech-bench-src'   # --hour 17 on linux (UTC)
 ```
 
-Then set `MAIL_TO`, `MAIL_FROM`, the SMTP keys and `SMTP_PASSWORD_FILE` (a mode 0600 file with a Google
-Workspace app password) in `~/speech-bench/config.env`, optionally `ANTHROPIC_API_KEY_FILE` for the narrative,
-and try `weekly.sh --quick --no-mail` once. The README has the prerequisites and the layout.
+Then set the machine's keys in `~/speech-bench/config.env` (see the machines table) and try
+`weekly.sh --quick --no-mail` once. Results reach people through the artifact page, not by mail; `MAIL_TO` and
+`ANTHROPIC_API_KEY_FILE` stay unset unless someone asks for mail or the narrative. The README has the prerequisites
+and the layout.
 
 ## Reading a run
 
