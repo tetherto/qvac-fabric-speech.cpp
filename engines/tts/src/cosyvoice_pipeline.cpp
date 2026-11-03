@@ -228,6 +228,11 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
     // its own std::map during load on the win32 MSVC-lib + clang-addon link.
     auto mp = std::make_unique<model_ctx>();
     model_ctx & m = *mp;
+    struct load_guard {
+        model_ctx & model;
+        bool armed = true;
+        ~load_guard() { if (armed) cosyvoice_free(model); }
+    } rollback{m};
 
     // Map the GGUF so CPU/host weights can be backed in place; fall back to a
     // resident copy when mapping fails.  Measure mode bypasses the mmap: the
@@ -242,7 +247,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
     gguf_init_params gp = { /*.no_alloc=*/ true, /*.ctx=*/ &tmp_ctx };
     gguf_context * g = gguf_init_from_file(path.c_str(), gp);
     if (!g) {
-        tts_cpp::cosyvoice::mapped_file_close(m.mapped);
         throw std::runtime_error("gguf_init_from_file failed: " + path);
     }
     if (backend) {
@@ -254,7 +258,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
         m.owns_backend = true;
         if (!m.backend) {
             gguf_free(g); ggml_free(tmp_ctx);
-            tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: failed to init a CPU backend for " + path);
         }
     }
@@ -264,7 +267,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
             const std::string what = std::string(gguf_get_tensor_name(g, bad)) + " (" +
                                      ggml_type_name(gguf_get_tensor_type(g, bad)) + ")";
             gguf_free(g); ggml_free(tmp_ctx);
-            tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: Hexagon cannot run " + what + " in " + path +
                                      "; use a q8_0, q4_0, f16 or f32 GGUF");
         }
@@ -343,7 +345,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
         ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
         if (!cpu_dev) {
             gguf_free(g); ggml_free(tmp_ctx);
-            tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: no CPU device for host-resident weights");
         }
         if (measure) {
@@ -361,7 +362,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
         ::tts_cpp::detail::gguf_stream_reader rd(g, path);
         if (!rd.ok()) {
             gguf_free(g); ggml_free(tmp_ctx);
-            tts_cpp::cosyvoice::mapped_file_close(m.mapped);
             throw std::runtime_error("cosyvoice: failed to reopen GGUF for streaming: " + path);
         }
         for (ggml_context * ctx : { m.ctx_w, m.ctx_h }) {
@@ -374,7 +374,6 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
                     ? rd.to_backend(name, cur) : rd.bf16_to_f32(name, cur);
                 if (!loaded) {
                     gguf_free(g); ggml_free(tmp_ctx);
-                    tts_cpp::cosyvoice::mapped_file_close(m.mapped);
                     throw std::runtime_error(std::string("cosyvoice: failed to stream tensor ") +
                                              ggml_get_name(cur));
                 }
@@ -400,6 +399,7 @@ static model_ctx cosyvoice_load_gguf_impl(const std::string & path, ggml_backend
     }
     gguf_free(g);
     ggml_free(tmp_ctx);
+    rollback.armed = false;
     return std::move(m);
 }
 

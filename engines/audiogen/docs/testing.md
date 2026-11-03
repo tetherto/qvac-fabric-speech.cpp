@@ -38,8 +38,22 @@ CI runners do not report. Meaningful parity coverage therefore needs a
 non-virtualized Apple GPU, which is why the audiogen CI macOS lane runs on the
 self-hosted `qvac-macos26-arm64-gpu` runner and fails rather than passes if the
 test skips there.
-`test-acestep-integration` exercises the ACE-Step public API when model paths
-are supplied and otherwise reports a skipped test.
+`test-acestep-integration` requires `AUDIOGEN_TEST_MODELS_DIR` with the four
+ACE-Step GGUFs described in [model setup](pipeline.md#model-setup). From the
+repository root, run the model-backed test against a standalone build:
+
+```sh
+AUDIOGEN_TEST_MODELS_DIR=/path/to/acestep \
+ctest --test-dir build/audiogen -R '^test-acestep-integration$' --output-on-failure
+```
+
+The default reference uses CPU. Set `AUDIOGEN_TEST_GPU=1` to request GPU
+placement; this variable uses presence semantics, so unset it for CPU coverage.
+Set `AUDIOGEN_TEST_BASE_MODELS_DIR=/path/to/acestep-base` as well to exercise
+optional base-model lego coverage. The primary fixture being unset skips the
+test with return code 77; omitting the base fixture skips only that optional
+coverage. A successful model-free test run does not establish generation parity.
+For multi-config builds, add `-C Release` to `ctest`.
 
 `test-minimax-conditioner-layout` compares tiled, strided Core ML IO with an
 independent full convolution, including one-frame inputs and boundaries at
@@ -69,10 +83,3 @@ Dumps are the tool for localising a backend divergence. Run the same prompt twic
 `stage_cos.py` and `dequant_gguf.py` need `numpy`; `dequant_gguf.py` and
 `audit_quant_types.py` also need `gguf`. `compare_ar_dumps.py` uses `numpy`
 when it is installed and falls back to an equivalent stdlib path when it is not.
-
-An informal local comparison against upstream `acestep.cpp` measured 0.98 to
-0.99 end-to-end correlation on identical codes, and LM greedy decoding matched
-upstream argmax. This is not reproducible benchmark evidence: the repository
-does not pin the model set, upstream revision, command, correlation definition,
-or result artifact. Use stage dumps and the scripts above for a recorded
-comparison.

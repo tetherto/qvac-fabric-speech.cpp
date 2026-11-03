@@ -8,8 +8,28 @@ Part of the [audiogen engine documentation](../README.md).
 |---|---|
 | `music-cli` | end-to-end text-to-music |
 | `mm3-replay` | MiniMax full text-to-music generation and controlled replay |
+| `acestep-quantize` | quantize ACE-Step stage files or a MiniMax GGUF pair ([setup](pipeline.md#model-setup)) |
+| `acestep-fit-params` | ACE-Step memory-fit preflight |
 | `acestep-cli` | VAE decode and reconstruction roundtrip harness |
 | `textenc-smoke`, `lm-smoke`, `lmgen-smoke`, `bpe-smoke`, `detok-smoke`, `cond-smoke`, `dit-smoke` | per-stage smoke harnesses |
+
+Examples below assume the standalone build in `build/audiogen` and run from
+the repository root. For the umbrella build, use `build/engines/audiogen`.
+
+### MiniMax native generation
+
+Prepare the GGUF pair using [model setup](pipeline.md#minimax-music3).
+
+```sh
+./build/audiogen/mm3-replay --models models/minimax --mode full \
+  --device gpu --seed 7 --max-frames 300 \
+  --caption "Warm piano with gentle acoustic guitar" \
+  --lyrics "[Instrumental]" --out output/minimax
+```
+
+`--max-frames` caps generation in 25 Hz AR frames (300 is about 12 seconds).
+Use `--device cpu` for CPU generation or `auto` for GPU selection with CPU
+fallback. `--out` is a directory containing `audio.wav` and replay artifacts.
 
 ### MiniMax Core ML conditioner
 
@@ -51,6 +71,12 @@ seconds. Omitting `--coreml-cond` keeps the native conditioner.
                   --caption "warm Latin pop with a male lead vocal" \
                   --lyrics "[Verse]\nA brand new lyric" --gpu --out referenced.wav
 
+# follow source structure while changing its musical conditioning
+./build/audiogen/music-cli --models models/acestep --task cover-nofsq \
+                  --src-audio source-48k.wav --ref-audio source-48k.wav \
+                  --caption "dark analog synthwave" --lyrics "[Instrumental]" \
+                  --cover-strength 1.0 --cover-noise 0.0 --gpu --out cover.wav
+
 # repaint 10s..20s while preserving the rest of the source
 ./build/audiogen/music-cli --models models/acestep --src-audio source-48k.wav \
                   --caption "expressive analog synthesizer solo" \
@@ -81,7 +107,7 @@ seconds. Omitting `--coreml-cond` keeps the native conditioner.
 | `--seed N` | `42` | negative means random |
 | `--bpm N`, `--key STR`, `--tsig STR`, `--lang CODE` | inferred | optional metadata hints |
 | `--steps N`, `--shift F` | per variant | sampler overrides |
-| `--no-dcw` | DCW enabled | disable the official Haar low/high correction applied after each DiT step |
+| `--no-dcw` | enabled on turbo | disable the Haar low/high correction after each turbo DiT step; base/sft generation already disables DCW |
 | `--no-loudness` | normalization on | skip the percentile loudness normalization (99.999th percentile to 1.0, tail hard-clipped) applied to generation output; edits and lego stems are never normalized |
 | `--lrc out.lrc` | off | write synchronized lyric timestamps (LRC) next to the WAV; requires lyrics |
 | `--temp F`, `--topp F`, `--topk N`, `--cfg F` | `0.85`, `0.9`, off, `2.0` | LM sampling for the audio codes |
@@ -91,6 +117,11 @@ seconds. Omitting `--coreml-cond` keeps the native conditioner.
 | `--score` | off | teacher-forced LM quality score of the generated codes, printed with its per-condition breakdown |
 | `--understand FILE` | | reverse pipeline: describe a 48 kHz PCM16 WAV (metadata + caption + recovered codes) instead of generating |
 | `--req FILE` | | request JSON; pre-supplied `audio_codes` skip the LM stage |
+| `--task NAME` | `text2music` | `text2music`, `cover-nofsq` (follow source structure), or `lego` (generate a stem using a base DiT); FSQ-roundtrip `cover` is not implemented |
+| `--track NAME` | | required lego target: vocals, backing_vocals, drums, bass, guitar, keyboard, percussion, strings, synth, fx, brass, or woodwinds |
+| `--guidance F` | per variant | DiT guidance: `0` selects turbo `1.0` or base/sft `7.0`; turbo clamps overrides to `1.0` |
+| `--cover-strength F` | `1.0` | fraction of DiT steps retaining source context, in `[0, 1]`; lower values release the tail to text conditioning |
+| `--cover-noise F` | `0.0` | blend initial DiT noise toward the clean source latent, in `[0, 1]` |
 | `--ref-audio FILE` | | 48 kHz PCM16 WAV used by ACE-Step's timbre-conditioning path |
 | `--src-audio FILE` | | 48 kHz PCM16 source WAV; required for editing |
 | `--repaint-start SEC`, `--repaint-end SEC` | `0`, source end | standalone repaint range |
@@ -108,6 +139,12 @@ seconds. Omitting `--coreml-cond` keeps the native conditioner.
 | `--backends-dir DIR` | | directory containing staged dynamic ggml backend modules; required by Android and Linux arm64 dynamic-backend builds |
 | `--dump-stages DIR` | | write one `.bin` per stage into an existing directory |
 | `--out PATH` | `music_out.wav` | output WAV path |
+
+`cover-nofsq` VAE-encodes the source as DiT context and skips the LM and FSQ
+detokenizer. It requires `--src-audio`; omitting `--ref-audio` uses the same
+source for timbre conditioning. Source and reference WAVs must be mono or stereo
+PCM16 at 48 kHz. See [lego stems](pipeline.md#multi-track-lego) for base-model
+stem generation, and [editing](editing.md) for operations on an existing track.
 
 `--req` accepts a flat JSON object. Request values override overlapping CLI
 values after CLI parsing:
@@ -152,7 +189,8 @@ in array order and may repeat:
 }
 ```
 
-The sampler enables ACE-Step's single-level Haar DCW `double` mode by default.
+Turbo generation enables ACE-Step's single-level Haar DCW `double` mode by
+default; base/sft generation disables it.
 At timestep `t`, the low band uses `t * 0.05` and the high band uses
 `(1 - t) * 0.02`, matching the official Python defaults. The correction runs
 on the host latent between DiT steps, so it is backend-independent and adds
@@ -184,7 +222,7 @@ weights load, nothing runs). It resolves the same backends and stage placement
 `Engine::create` would, drives each stage loader in metadata-only mode, and
 prices the real compute graphs at the workload's shapes through ggml's
 size-only allocator APIs, so the projection tracks the runtime by construction.
-The default projection follows the per-stage low-memory residency above (the
+The default projection follows the [per-stage low-memory residency](backends.md#memory) (the
 peak phase per memory pool); `--keep-stages 1` (or `ACESTEP_KEEP_STAGES`)
 projects the everything-resident mode. Exit code follows the `@qvac/model-fit`
 contract: 0 = fits, 1 = does not fit (a valid answer), 2 = error. `--json`
