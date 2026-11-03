@@ -38,6 +38,7 @@ constexpr int FIT_PROMPT_ROWS = 8;
 constexpr int FIT_CONTEXT = 512;
 constexpr int FIT_MAX_NEW_TOKENS = 64;
 constexpr int SLOT_STEPS = 3;
+constexpr const char * TRUNCATION_FAILURE = "changed while loaded";
 
 bool hexagon_arm() {
     return arm.request == "hexagon";
@@ -53,8 +54,17 @@ std::vector<ggml_type> precisions() {
     return types;
 }
 
-bool sfx_loads(ggml_type precision) {
-    return precision != GGML_TYPE_Q4_0;
+template <typename Run>
+void require_truncation_failure(const char * stage, const std::filesystem::path & path, Run run) {
+    std::filesystem::resize_file(path, 0);
+    try {
+        run();
+    } catch (const std::runtime_error & e) {
+        require(std::string(e.what()).find(TRUNCATION_FAILURE) != std::string::npos,
+                std::string(stage) + ": wrong truncation failure: " + e.what());
+        return;
+    }
+    throw std::runtime_error(std::string(stage) + ": a model file truncated under the engine was accepted");
 }
 
 void compare(const char * stage, const std::vector<float> & cpu, const std::vector<float> & gpu) {
@@ -131,8 +141,7 @@ void hexagon_refuses_bf16() {
     require_hexagon_refusal("codec bf16", [&] { Codec codec(decoder.str(), device_request(), 2); });
     Fixture sfx_file{moss_sfx_fixtures::write_sfx_model("gpu-sfx-bf16", 26342)};
     moss_fixture_precision(sfx_file.path, GGML_TYPE_BF16);
-    require_hexagon_refusal("sfx bf16", [&] { SfxModel model(sfx_file.str(), device_request(), 2); },
-                            ggml_type_name(GGML_TYPE_Q4_0));
+    require_hexagon_refusal("sfx bf16", [&] { SfxModel model(sfx_file.str(), device_request(), 2); });
     Fixture speech_file{moss_speech_fixtures::write_lm("gpu-speech-bf16", 26342)};
     moss_fixture_precision(speech_file.path, GGML_TYPE_BF16);
     require_hexagon_refusal("speech bf16", [&] { SpeechLM lm(speech_file.str(), device_request(), 2); });
@@ -217,7 +226,10 @@ void delay(ggml_type precision) {
     Codec ec(encoder.str(), {}, 2), eg(encoder.str(), device_request(), 2);
     arm.require(eg.backend_name());
     require(ec.encode(signal(160)) == eg.encode(signal(160)), "codec encoder codes differ");
-    if (hexagon_arm()) fit_on_host_memory(lm_file.str(), decoder.str());
+    if (hexagon_arm()) {
+        fit_on_host_memory(lm_file.str(), decoder.str());
+        require_truncation_failure("delay", lm_file.path, [&] { gpu.step(rows.back()); });
+    }
 }
 
 constexpr int TTS_AUDIO_HEADS = 32;
@@ -335,6 +347,7 @@ void speech(ggml_type precision) {
         compare("speech audio-only", cpu.step(rows.back(), {false, true}).audio,
                 gpu.step(rows.back(), {false, true}).audio);
     }
+    if (hexagon_arm()) require_truncation_failure("speech", file.path, [&] { gpu.step(rows.back()); });
     Fixture vq{write_vq("gpu-speech-vq", 26342)};
     moss_fixture_precision(vq.path, precision == GGML_TYPE_BF16 ? GGML_TYPE_F16 : precision);
     SpeechTokenizer c(vq.str(), {}, 2), g(vq.str(), device_request(), 2);
@@ -359,7 +372,7 @@ int main(int argc, char ** argv) {
             std::printf("precision: %s\n", ggml_type_name(type));
             delay(type);
             if (arm.request == "vulkan") delay_many_heads(type);
-            if (sfx_loads(type)) sfx(type);
+            sfx(type);
             speech(type);
         }
         // MOSS-Speech's default LM export is BF16. Devices without native

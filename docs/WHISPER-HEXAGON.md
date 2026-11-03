@@ -6,6 +6,11 @@ Build the host backend and its DSP skeletons from one immutable revision. The
 Hexagon kernels were ported there from the former ggml-speech branch; the
 whisper measurements below predate that port and are due for a re-run on the
 fabric ggml.
+The former ggml-speech pin that the whisper measurements were taken on also
+carried the paired quantized REPACK storage gate and physical-buffer
+accounting fixes validated with Whisper (qvac-ext-ggml speech 2ff1f34c and
+72b70271); the fabric pin must carry their ports before Whisper on Hexagon is
+re-validated.
 The `third_party/whisper.cpp/ggml` copy is not the Speech dependency and must
 remain unchanged. This guide covers native Fabric builds and validation.
 

@@ -2,6 +2,57 @@
 
 Part of the [parakeet engine documentation](../README.md).
 
+## Offline GPU encoder handoff
+
+On 2026-11-02 the device-resident encoder-to-decoder handoff was compared with
+the previous host round trip on Windows 11, Ryzen 7 7700 and Radeon RX 7600 XT
+(16 GB, driver `32.0.21042.62`). Both builds use the same ggml revision
+`2d14e3017eaa8a46aa615a4ec30c6179f115d0c7` plus the experimental CPU planar
+convolution patch, GCC 14.2.0 Release, Vulkan and fused attention. The baseline
+speech revision is `40e7ae75`; the optimized build adds only the handoff and its
+locale-prompt graph changes. Thus these figures isolate the GPU handoff rather
+than adding the earlier CPU timings to GPU results.
+
+Each Q8_0 checkpoint uses `test/samples/sample-16k.wav` (20.1335 seconds),
+`--backend Vulkan0 --threads 8`, five warmups and 31 timed runs per process.
+Process order is baseline, optimized, optimized, baseline, one process at a
+time. Medians pool 62 timed samples per variant and exclude loading. Nemotron
+uses `--language en-US`. Full transcripts match across variants and repetitions.
+Separate before/after CLI runs also produce identical token ID sequences for
+all four checkpoints on this clip.
+
+| Model | Baseline inference ms | Handoff inference ms | Latency reduction | Reductions in the two paired comparisons |
+| --- | ---: | ---: | ---: | --- |
+| TranscribePsy 250M | 38.694 | 38.370 | 0.84% | 1.03%, 0.90% |
+| Parakeet-TDT 0.6B-v3 | 52.846 | 52.094 | 1.42% | 1.29%, 1.43% |
+| Unified 0.6B | 73.156 | 72.716 | 0.60% | 0.52%, 0.79% |
+| Nemotron 3.5 ASR 0.6B | 97.427 | 96.178 | 1.28% | 1.26%, 1.30% |
+
+The improvements are small but have the same sign in both comparisons for each
+checkpoint. They establish a benefit on this clip and GPU, not a general WER,
+streaming, long-recording or cross-backend performance claim. The eligible path
+removes the encoder download and decoder upload; Nemotron also avoids host
+packing and the extra prompt-output round trip. Same-device copies use ggml's
+asynchronous backend API, and the decoder preserves the previous predictor
+initialization order. No matrix arithmetic or quantization recipe changes.
+
+Six CPU/Vulkan fixture cases cover host-versus-device token IDs, repeated graph
+reuse, fallback, diagnostics, consumer errors, shape validation, prompt changes,
+bypass output reuse and the public Engine API. The CPU path falls back to host
+output. CUDA/Metal test variants are registered but were not executed here.
+See [device encoder handoff](backends.md#device-encoder-handoff) for routing and
+capacity limits. The CPU convolution experiment's numerical differences are
+separate from this GPU change, which preserves token IDs in these tests.
+
+Reproduce with matched builds and identical model files:
+
+```sh
+parakeet --model model.q8_0.gguf --wav engines/parakeet/test/samples/sample-16k.wav \
+  --backend Vulkan0 --threads 8 --bench --bench-warmup 5 --bench-runs 31 \
+  --bench-json result.json
+ctest --test-dir build -R '^test-encoder-device-decode-' --output-on-failure
+```
+
 ## Multi-machine benchmark: method and caveats
 
 Method and caveats:

@@ -7,6 +7,7 @@
 
 #include "parakeet_ctc.h"
 #include "mel_preprocess.h"
+#include "parity.h"
 
 #include <algorithm>
 #include <cmath>
@@ -68,26 +69,14 @@ int load_npy_f32(const std::string & path,
     for (int64_t d : out_shape) n *= static_cast<size_t>(d);
     out_data.resize(n);
     f.read(reinterpret_cast<char*>(out_data.data()), n * sizeof(float));
-    return 0;
+    return f ? 0 : 1;
 }
 
-void compute_parity(const std::vector<float> & a, const std::vector<float> & b,
-                    double & out_max_abs, double & out_rel) {
-    double max_abs = 0.0, ref_sq = 0.0, diff_sq = 0.0;
-    const size_t n = std::min(a.size(), b.size());
-    for (size_t i = 0; i < n; ++i) {
-        const double d = static_cast<double>(a[i]) - static_cast<double>(b[i]);
-        max_abs = std::max(max_abs, std::abs(d));
-        diff_sq += d * d;
-        ref_sq  += static_cast<double>(b[i]) * static_cast<double>(b[i]);
-    }
-    out_max_abs = max_abs;
-    out_rel = (ref_sq > 0) ? std::sqrt(diff_sq / ref_sq) : std::sqrt(diff_sq);
-}
+using parakeet_test::compute_parity;
 
 }
 
-int main(int argc, char ** argv) {
+int encoder_parity_main(int argc, char ** argv) {
     if (argc < 3) {
         std::fprintf(stderr,
             "usage: %s <parakeet-ctc.gguf> <reference-dir> [n_gpu_layers]\n"
@@ -118,9 +107,10 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "error: cannot load %s/mel.npy (rc=%d)\n", ref_dir.c_str(), rc);
         return rc;
     }
-    if (mel_shape.size() != 2 || mel_shape[0] != model.mel_cfg.n_mels) {
+    if (mel_shape.size() != 2 ||
+        !parakeet_test::matches_matrix(ref_mel, mel_shape, model.mel_cfg.n_mels, mel_shape[1])) {
         std::fprintf(stderr, "error: mel.npy has unexpected shape\n");
-        return 3;
+        return 1;
     }
     const int n_mels      = static_cast<int>(mel_shape[0]);
     const int n_mel_frames = static_cast<int>(mel_shape[1]);
@@ -166,6 +156,11 @@ int main(int argc, char ** argv) {
             all_pass = false;
             continue;
         }
+        if (!parakeet_test::matches_matrix(ref, shape, enc_out.n_enc_frames, enc_out.d_model)) {
+            std::fprintf(stderr, "[test-encoder] stage %s has unexpected reference shape\n", g.label);
+            all_pass = false;
+            continue;
+        }
         double max_abs = 0, rel = 0;
         compute_parity(*g.cpp, ref, max_abs, rel);
         const bool pass = rel < g.threshold;
@@ -179,8 +174,8 @@ int main(int argc, char ** argv) {
         std::vector<float> ref_logits;
         std::vector<int64_t> shape;
         if (load_npy_f32(ref_dir + "/logits.npy", ref_logits, shape) == 0 &&
-            shape.size() == 2 &&
-            enc_out.logits.size() == (size_t)(shape[0] * shape[1])) {
+            parakeet_test::matches_matrix(ref_logits, shape, enc_out.n_enc_frames, enc_out.vocab_size) &&
+            enc_out.logits.size() == ref_logits.size()) {
 
             const int T = (int) shape[0];
             const int V = (int) shape[1];
@@ -201,8 +196,17 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "[test-encoder] stage F  logits (host log_softmax)  rel=%.3e  max_abs=%.3e  %s\n",
                          rel, max_abs, pass ? "ok" : "FAIL");
             if (!pass) all_pass = false;
+        } else {
+            std::fprintf(stderr, "[test-encoder] missing, truncated or mismatched logits reference\n");
+            all_pass = false;
         }
     }
 
     return all_pass ? 0 : 1;
 }
+
+#ifndef PARAKEET_PARITY_TEST
+int main(int argc, char ** argv) {
+    return encoder_parity_main(argc, argv);
+}
+#endif

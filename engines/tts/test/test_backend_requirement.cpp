@@ -139,6 +139,13 @@ int main() {
     expect(gpu_backend_satisfies_requirement("OpenCL", lavasr), "LavaSR accepts OpenCL");
     expect(gpu_backend_satisfies_requirement("CUDA", lavasr), "LavaSR accepts CUDA");
     expect(!gpu_backend_satisfies_requirement("WebGPU", lavasr), "LavaSR rejects WebGPU");
+    expect(gpu_backend_satisfies_requirement("HTP", lavasr), "LavaSR accepts Hexagon");
+    expect(gpu_backend_satisfies_requirement("HTP", GpuBackendRequirement::Hexagon),
+           "Hexagon has an explicit requirement bit");
+    expect(!gpu_backend_satisfies_requirement("OpenCL", GpuBackendRequirement::Hexagon),
+           "Hexagon-only requirement rejects OpenCL");
+    expect(!gpu_backend_satisfies_requirement("HTP", desktop),
+           "existing desktop requirements keep excluding Hexagon");
 
     // Parler, Audio8 and CosyVoice3 (desktop) admit WebGPU since ggml-webgpu
     // honours GGML_PREC_F32; LavaSR still keeps it out (asserted above).

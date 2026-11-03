@@ -130,9 +130,10 @@ The workload (`--audio-seconds`, default 300) sets the longest single
 transcribe input to project for. Device-side memory is bounded by the
 long-form encoder window, so the device projection saturates once the audio
 exceeds one window; host-side buffers (full-input mel, stitched encoder
-output) keep growing with it. The projection prices the encoder graph
-*cache*, not one graph: a windowed pass keeps up to three window graphs
-resident (`run_encoder`'s 3-slot LRU), and all of them are counted.
+output) keep growing with it. The projection conservatively sums up to three
+window graph allocations. Windowed inference limits the encoder graph cache
+to one graph during the pass, so this part of the projection can overestimate
+the runtime's peak allocation.
 Sortformer diarization does not window — its device projection grows with
 the full input (`O(T^2)` head attention).
 
@@ -177,9 +178,9 @@ before it compares the projection with real reservations.
 The projection is exact where it can be: `test-fit-params` asserts the
 projected weight, encoder-compute, Sortformer-head, Nemotron
 prompt/step/pre-encode, and Nemotron 3 Diarization graph bytes equal what a
-real load/encode/diarize/stream allocates, byte for byte. On Hexagon each
-buffer also carries a 4 KiB guard page that ggml does not report, so the
-projection is short by one page per buffer. For the legacy families (CTC/RNN-T/TDT/EOU) the
+real load/encode/diarize/stream allocates, byte for byte. On Hexagon the
+buffer-sizing APIs include the 4 KiB guard page of every nonempty physical
+buffer, so the parity checks require exact bytes there too. For the legacy families (CTC/RNN-T/TDT/EOU) the
 projection covers the offline paths; their streaming sessions build smaller
 per-chunk graphs but rotate through the same graph cache with
 session-dependent keys, so treat the offline projection as a guide, not a

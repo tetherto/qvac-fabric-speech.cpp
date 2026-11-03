@@ -5,6 +5,7 @@
 #include "sentencepiece_bpe.h"
 #include "backend_util.h"
 #include "long_form.h"
+#include "lstm_concat_buffer.h"
 
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -274,21 +275,6 @@ void release_lstm_input_concat(TdtRuntimeWeights & W) {
     W.lstm_cat.clear();
 }
 
-// The decoder graphs execute directly on the backend, so every stacked GEMV
-// must be one the backend accepts with its weight where it was allocated.
-bool backend_runs_lstm_cat_gemv(const TdtRuntimeWeights & W) {
-    ggml_init_params ip = { ggml_tensor_overhead() * 2 * W.lstm_cat.size(), nullptr, true };
-    ggml_context * ctx = ggml_init(ip);
-    if (!ctx) return false;
-    bool ok = true;
-    for (const TdtLstmCatWeights & cat : W.lstm_cat) {
-        ggml_tensor * xh = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, cat.w->ne[0]);
-        ok = ok && ggml_backend_supports_op(W.backend, ggml_mul_mat(ctx, cat.w, xh));
-    }
-    ggml_free(ctx);
-    return ok;
-}
-
 // Allocate and fill the per-layer [w_ih | w_hh] stacks on the active backend,
 // in the buffer type the loader gives weights there (Hexagon runs quantized
 // GEMVs only from its repack buffer). Returns false (leaving concat disabled)
@@ -324,22 +310,12 @@ bool build_lstm_input_concat(TdtRuntimeWeights & W, size_t * measure_bytes = nul
     }
 
     const ggml_backend_buffer_type_t buft = weight_buffer_type(W.backend);
-    if (measure_bytes) {
-        *measure_bytes += ggml_backend_alloc_ctx_tensors_from_buft_size(W.lstm_cat_ctx, buft);
-        for (ggml_tensor * t = ggml_get_first_tensor(W.lstm_cat_ctx); t;
-             t = ggml_get_next_tensor(W.lstm_cat_ctx, t)) {
-            if (!t->data && !t->view_src) {
-                t->data = reinterpret_cast<void *>(static_cast<uintptr_t>(1));
-            }
-        }
-        return true;
-    }
-
-    W.lstm_cat_buffer = ggml_backend_alloc_ctx_tensors_from_buft(W.lstm_cat_ctx, buft);
-    if (!W.lstm_cat_buffer || !backend_runs_lstm_cat_gemv(W)) {
+    if (!detail::prepare_lstm_concat_buffer(W.lstm_cat_ctx, W.lstm_cat, W.backend,
+                                            buft, W.lstm_cat_buffer, measure_bytes)) {
         release_lstm_input_concat(W);
         return false;
     }
+    if (measure_bytes) return true;
 
     for (int l = 0; l < W.L; ++l) {
         upload_lstm_cat_weight(W.lstm_cat[l].w, W.weights->lstm[l]);
@@ -1883,7 +1859,8 @@ static int decode_bounded_window(const ParakeetCtcModel & model,
                                  const TdtDecodeOptions & opts,
                                  TdtDecodeState & state,
                                  std::vector<int32_t> & out_tokens,
-                                 int & out_steps) {
+                                 int & out_steps,
+                                 bool projection_ready = false) {
     const int H_pred  = W.H_pred;
     const int V_p1    = W.V_plus_1;
     const int D_n     = W.num_durations;
@@ -1899,7 +1876,7 @@ static int decode_bounded_window(const ParakeetCtcModel & model,
     // joint reads can ggml_get_rows directly. The host fallback keeps the
     // per-step gemv inside host_joint_step (better cache locality).
     if (W.use_graphs) {
-        if (!run_enc_proj(W, encoder_out_window, n_frames)) return 6;
+        if (!projection_ready && !run_enc_proj(W, encoder_out_window, n_frames)) return 6;
         ensure_unroll_graph(W, blank, opts.max_symbols_per_step);
     }
 
@@ -2334,6 +2311,37 @@ int tdt_greedy_decode(const ParakeetCtcModel & model,
     result.text = detokenize(model.vocab, result.token_ids);
     const auto t1 = std::chrono::steady_clock::now();
     result.decode_ms = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+    return 0;
+}
+
+bool tdt_accepts_device_input(const TdtRuntimeWeights & weights,
+                              const ggml_tensor * input, ggml_backend_t source_backend) {
+    return input && input->buffer && source_backend && weights.backend == source_backend &&
+        !backend_is_cpu(source_backend) && weights.use_graphs && weights.persist_buffer &&
+        input->type == GGML_TYPE_F32 && ggml_is_contiguous(input) &&
+        input->ne[0] == weights.D_enc && input->ne[1] > 0 &&
+        input->ne[1] <= weights.enc_proj_T_max && input->ne[2] == 1 && input->ne[3] == 1;
+}
+
+int tdt_greedy_decode_device(const ParakeetCtcModel & model,
+                             TdtRuntimeWeights & weights, ggml_tensor * input,
+                             const TdtDecodeOptions & options, TdtDecodeResult & result) {
+    if (!tdt_accepts_device_input(weights, input, weights.backend)) return 1;
+    const auto started = std::chrono::steady_clock::now();
+    const int frames = (int) input->ne[1];
+    result = TdtDecodeResult{};
+    TdtDecodeState state;
+    tdt_init_state(weights, (int) model.blank_id, state);
+    const auto * projection = get_enc_proj_graph(weights, frames);
+    if (!projection || !projection->alloc) return 6;
+    ggml_backend_tensor_copy_async(weights.backend, weights.backend, input, projection->enc_in);
+    if (!compute_graph(weights, projection->cg)) return 6;
+
+    if (int rc = decode_bounded_window(model, weights, nullptr, frames, weights.D_enc,
+            options, state, result.token_ids, result.steps, true); rc != 0) return rc;
+    result.text = detokenize(model.vocab, result.token_ids);
+    result.decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
     return 0;
 }
 

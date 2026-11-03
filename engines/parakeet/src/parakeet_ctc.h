@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -755,6 +756,8 @@ struct EncoderOutputs {
     std::vector<float> encoder_out;
     std::vector<float> logits;
 
+    bool encoder_consumed = false;
+
     // Diagnostic: fine-grained snapshots inside block 0's
     // relative-position multi-head attention. Populated only when
     // capture_intermediates=true. Empty on the flash-attn path (the
@@ -788,16 +791,17 @@ struct EncoderOutputs {
 // `test-tdt-encoder-parity` / `test-sortformer-parity`), every per-stage
 // capture tensor (subsampling_out, block_0_post_*, block_0_out,
 // block_last_out) is copied back to `out`. When false, only `encoder_out`
-// and (CTC GGUFs only) `logits` are copied -- the production path
-// (`Engine::transcribe()`, `StreamSession::process_window()`,
-// `Engine::diarize()` etc.) doesn't need the intermediates and pays a
-// 5+ MB host-copy round-trip per inference today, which is real
-// per-call cost on GPU/OpenCL backends and negligible-but-noisy on
-// CPU. The graph topology is unchanged either way -- only the
-// host-copy step is gated, so this is safe regardless of backend
-// scheduling. `allow_coreml_padded` is reserved for offline callers that know
-// trailing zero mel frames represent padding, not an in-progress streaming
-// window; it lets a fixed-shape Core ML sidecar consume that padded input.
+// and (CTC GGUFs only) `logits` are copied, unless a consumer handles the
+// encoder tensor directly. `allow_coreml_padded` lets offline callers use a
+// fixed-shape sidecar when trailing zero mel frames represent padding.
+// Called synchronously while the cached encoder output is valid. Return zero
+// for host fallback, one after consuming it, or a negative error code. The
+// consumer must not retain the tensor. Diagnostic captures keep host output.
+// Encoder tensors with frames beyond n_enc_frames also keep host output.
+using EncoderOutputConsumer = std::function<int(ggml_tensor *, ggml_backend_t)>;
+constexpr int kEncoderOutputHost = 0;
+constexpr int kEncoderOutputConsumed = 1;
+
 int run_encoder(ParakeetCtcModel   & model,
                 const float        * mel,
                 int                  n_mel_frames,
@@ -805,7 +809,8 @@ int run_encoder(ParakeetCtcModel   & model,
                 EncoderOutputs     & out,
                 int                  max_layers = -1,
                 bool                 capture_intermediates = true,
-                bool                 allow_coreml_padded = false);
+                bool                 allow_coreml_padded = false,
+                const EncoderOutputConsumer & consumer = {});
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute
@@ -824,6 +829,11 @@ int run_nemotron_prompt_projection(
     int d_model,
     int32_t prompt_id,
     std::vector<float> & projected);
+
+// The projected tensor stays valid until the next prompt projection or model
+// destruction. Consume it synchronously, without retaining the handle.
+int run_nemotron_prompt_projection_device(ParakeetCtcModel & model,
+    ggml_tensor * encoder_out, int32_t prompt_id, ggml_tensor * & projected);
 
 int init_nemotron_stream_state(
     const ParakeetCtcModel & model,

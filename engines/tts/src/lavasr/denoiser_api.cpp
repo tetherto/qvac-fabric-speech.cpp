@@ -7,6 +7,7 @@
 #include "coreml.h"
 
 #include <stdexcept>
+#include <mutex>
 
 namespace tts_cpp::lavasr {
 
@@ -14,6 +15,7 @@ struct Denoiser::Impl {
     DenoiserWeights               weights;
     std::unique_ptr<CoreMLNetwork> coreml;
     std::unique_ptr<DenoiserGgml> ggml; // non-null when a ggml backend is used
+    mutable std::mutex graph_mu;
 };
 
 Denoiser::Denoiser() : impl_(std::make_unique<Impl>()) {}
@@ -54,6 +56,7 @@ std::vector<float> Denoiser::denoise(const std::vector<float> & pcm_in,
             });
     }
     if (impl_->ggml) {
+        std::lock_guard<std::mutex> lock(impl_->graph_mu);
         DenoiserGgml * g = impl_->ggml.get();
         return tts_cpp::lavasr::denoise_with_batch_core(
             impl_->weights, pcm_in, sr_in,

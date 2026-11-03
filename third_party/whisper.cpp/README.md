@@ -177,6 +177,12 @@ cmake --build build -j --config Release
 
 ## Core ML support
 
+`whisper_encoder_on_coreml(ctx)` reports whether the default state loaded a
+Core ML encoder. It returns `false` for null or weight-only contexts and builds
+without Core ML. This is separate from `whisper_get_primary_backend_name`,
+which describes the ggml device. Build with `WHISPER_COREML_ALLOW_FALLBACK=ON`
+to retain ggml inference when the optional sidecar is absent.
+
 On Apple Silicon devices, the Encoder inference can be executed on the Apple Neural Engine (ANE) via Core ML. This can result in significant
 speed-up - more than x3 faster compared with CPU-only execution. Here are the instructions for generating a Core ML model and using it with `whisper.cpp`:
 

@@ -507,11 +507,14 @@ backend (measured on ggml-speech `6bb85ad6`).
 Weights go into the Hexagon repack buffer type. HTP multiplies `f32`, `f16`,
 `q8_0` and `q4_0` weights; the backbone and the codec refuse other types for
 the weights they place on the NPU. The text embedding table, the audio
-embedding tables and the text head stay on the host in any type, mapped from
-the GGUF rather than copied (they are read into memory instead when the file
-cannot be mapped or a table is not 32-byte aligned): at 155,648 x 4,096
-the text table and head are 1.27 GB each at `f16`, past HTP's 1 GiB buffer
-limit, and HTP cannot gather rows from a quantized table. While audio is
+embedding tables and the text head stay off the NPU in any type: at 155,648 x
+4,096 the text table and head are 1.27 GB each at `f16`, past HTP's 1 GiB
+buffer limit, and HTP cannot gather rows from a quantized table. The embedding
+tables are never loaded: each request reads its rows (one text and 32 audio
+rows per prompt row or step) from the GGUF and sums them on the host. The text
+head is read into host memory with the weights. Nothing stays mapped from the
+file, so a model file truncated while the engine is loaded fails the next
+request with an error instead of crashing the process. While audio is
 generated the text channel only chooses between the generation and delay slot
 tokens, so those two head rows run on the NPU as a small `f32` matrix; drain
 steps, whose text token is forced, project no text logits, and only steps
@@ -536,7 +539,8 @@ python scripts/requantize-gguf.py moss-tts-delay-f16.gguf \
 ```
 
 The file is 7.0 GB (MOSS-TTSD 6.7 GB). About 4.2 GB of it sits on the NPU
-besides the KV cache; the tables are paged in from the file as rows are read.
+besides the KV cache, and the 1.27 GB text head in host memory; the embedding
+tables stay in the file.
 Quantizing the heads as well (no `--name-filter`, 4.8 GB) is the only variant
 the CPU backend can hold beside the 1.8 GB codec on that phone, but it often
 fails to stop: the 4 s sentence below ran on for 20 s on both backends.
@@ -573,11 +577,34 @@ same GGUF. A step is memory-bound on both: in steady state the NPU spends about
 slower than real time (one frame is 80 ms of audio). The codec decodes 20.3 s
 of audio in 0.70 s on the NPU against 10.7 s on the CPU.
 
+The text head used to be mapped from the GGUF like the embedding tables.
+Reading it into memory and the embedding rows from the file leaves the logits
+on HTP bit for bit the same, so the requests below wrote identical audio, and
+Whisper still transcribes them verbatim. Measured on the S25 with the
+transformer-`q4_0` GGUFs, mapped against read, in alternating runs:
+
+| Request | Generate | Peak RSS | Lowest `MemAvailable` |
+|---|--:|--:|--:|
+| "The quick brown fox jumps over the lazy dog near the riverbank." | 9.3 / 8.0 s | 0.96 / 1.31 GB | 2.5 / 1.4 GB |
+| MOSS-TTSD, two voice references | 19.8 / 18.1 s | 1.52 / 1.37 GB | 2.4 / 1.1 GB |
+
+Peak RSS leaves out the weights on the NPU. The mapped head was paged in as
+it was used and could be dropped again under memory pressure; read into
+memory it stays resident while the engine is loaded, so the phone keeps about
+1.2 GB less memory available, and loading reads it, which adds about 0.8 s.
+Over four alternating runs of 20-30 steps, the median slot step took 87 ms
+(91 ms mapped), the median forced step 92 ms (106 ms) and the median step
+that projects the whole head 114 ms (115 ms); the mapped layout often fell
+into a slower mode of about 106 ms per step. Checking the file size before
+each whole-head step would keep the mapping without closing the race, and a
+`q8_0` copy of the head would take 0.66 GB at the cost of different logits.
+
 `test-moss-hexagon` (the `hexagon` arm of `test-moss-gpu`, registered when ggml
 carries Hexagon) compares HTP0 with the CPU on generated GGUFs at `f32`, `f16`,
 `q8_0` and `q4_0`: backbone prefill, decoding with slot and forced steps, both
 codec halves, streaming, dialogue channels and the memory projection; it also
-checks that `bf16` backbone and codec weights are refused. On the
+checks that `bf16` backbone and codec weights are refused and that a model file
+truncated under the loaded backbone fails the next step with an error. On the
 S25 the worst relative L2 error is 0.06% for the backbone and 0.08% for the
 codec. Whisper transcribed the Hexagon output of every request above, of
 streaming, of single-reference cloning and of MOSS-TTSD with and without
@@ -600,7 +627,11 @@ both [Hexagon](#hexagon-npu) layouts onto the CPU with f32, f16 and q8_0
 weights: host tables (whole-head, slot and forced steps against the device
 tables, also with q8_0 and q4_0 tables and head) and fused attention with the
 key-layout value cache (prefill, decoding and reset against the unfused
-attention); it also pins the weight types the Hexagon gate accepts. `test-moss-cancel` drives a real synthesis on the fixture models and
+attention). It also checks that a model file truncated under a loaded backbone
+fails every kind of step with an error, that the head keeps its values when
+the file's head bytes change, that the fit counts the head as host memory and
+the embedding tables as none, and it pins the weight types the Hexagon gate
+accepts. `test-moss-cancel` drives a real synthesis on the fixture models and
 cancels it from another thread. `test-moss-cli` covers the flag surface and
 runs the CLI end to end against the fixtures. `test-convert-moss` (Python,
 registered when an interpreter is available, skips without numpy/gguf)
@@ -635,7 +666,9 @@ the same noise, every stage matches the PyTorch fp32 pipeline: the text
 encoder, one DiT velocity for the prompt and for the empty negative prompt,
 an eight-step guided sampling loop, and the VAE decode. An f16 GGUF reaches
 cosine similarity 0.99998 or better on all three backends; a q8_0 GGUF reaches
-0.9995 per stage and 0.9987 after the eight sampling steps. The CPU path is
+0.9995 per stage and 0.9987 after the eight sampling steps; a q8_0 GGUF with
+[4-bit DiT blocks](#4-bit-weights) reaches 0.9990 in the DiT and 0.9975 after
+the eight steps. The CPU path is
 correct but slow (about ten seconds per DiT pass on an M1 Ultra, so a
 100-step clip takes over half an hour); use `--gpu` where one is available.
 
@@ -650,13 +683,90 @@ python scripts/convert-moss-sfx-to-gguf.py /path/to/MOSS-SoundEffect-v2.0 \
 ```
 
 `--outtype` picks the type of the linear weights and of the text token
-embedding: `f16` (6.4 GB) and `q8_0` (3.5 GB) are validated; `bf16` and `f32`
-are also written. Norms, biases, modulation tables, snake parameters, and the
+embedding: `f16` (6.4 GB) and `q8_0` (3.5 GB) are validated; `bf16`, `f32` and
+`q4_0` are also written. `--text-block-outtype` and `--dit-block-outtype`
+override the type of the text encoder's and the DiT's transformer-block
+weights (`text.blk.*`, `dit.blk.*`). The validated 4-bit file (2.8 GB) keeps
+everything else at `q8_0`; [4-bit weights](#4-bit-weights) explains why:
+
+```sh
+python scripts/convert-moss-sfx-to-gguf.py /path/to/MOSS-SoundEffect-v2.0 \
+    --outtype q8_0 --dit-block-outtype q4_0 --outfile moss-sfx-v2-q4_0.gguf
+```
+
+Without `--outfile` the name lists the overrides
+(`MOSS-SoundEffect-v2.0-q8_0-dit-q4_0.gguf`). The Core ML sidecars are found by
+dropping one trailing type tag from the GGUF name, so a name ending in `-q4_0`
+shares `moss-sfx-v2-dit.mlmodelc` and `moss-sfx-v2-vae.mlmodelc` with the other
+tiers. Norms, biases, modulation tables, snake parameters, and the
 two small 1x1 projections (`dit.patch_embd`, `vae.post_quant`) stay f32, and
 the VAE convolution kernels stay f16 because ggml's CPU im2col requires it.
 The converter drops the text encoder's unused language-model head, folds the
 VAE weight norm into plain kernels, lays out the transposed convolutions as
 GEMM columns, and stores `1 / (alpha + 1e-9)` next to each snake `alpha`.
+
+### 4-bit weights
+
+Four 4-bit layouts were checked against the PyTorch stage dumps with
+`test-moss-sfx-parity`, next to `f16` and `q8_0`. The backends give the same
+cosines to within 0.001 (CPU, CUDA and the Hexagon NPU for every layout, Metal
+for the two `q8_0`-based ones), so the quantization, not a backend, sets them.
+On the CPU (x86, 8 threads):
+
+| GGUF | Size | Text encoder | DiT, prompt / empty | Eight guided steps |
+|---|--:|--:|--:|--:|
+| `f16` | 6.4 GB | 1.000000 | 1.000000 / 1.000000 | 1.000000 |
+| `q8_0` | 3.5 GB | 0.999540 | 0.999576 / 0.999540 | 0.998745 |
+| `q8_0`, DiT blocks `q4_0` | 2.8 GB | 0.999540 | 0.999081 / 0.998962 | 0.997512 |
+| `q8_0`, all blocks `q4_0` | 2.1 GB | 0.974766 | 0.999081 / 0.998962 | 0.997512 |
+| `f16`, all blocks `q4_0` | 2.4 GB | 0.973943 | 0.999528 / 0.999464 | 0.998726 |
+| `q4_0` | 1.9 GB | 0.974618 | 0.979041 / 0.978707 | 0.973523 |
+
+The VAE is never quantized and matches at 0.999998 in every file. The DiT
+blocks hold up at four bits; the text encoder does not. With its blocks at
+`q4_0` the prompt context falls to 0.974, and no single group at `q8_0`
+recovers it (feed-forward 0.994, attention 0.981, the first and last three
+layers 0.986); only all 28 blocks at `q8_0` do. A file quantized throughout
+also takes the DiT's output head and its timestep modulation projection
+(`dit.head`, `dit.time_proj`) to `q4_0`, which costs the DiT 0.01 each.
+
+Each layout also rendered eight prompts with seeds 1, 2 and 3 (100 steps,
+guidance 4, 10 s, on CUDA): a glass shattering on tiles, rain on a tin roof
+with thunder, a dog barking twice, footsteps on gravel, a car starting and
+driving away, birds at dawn, a door creaking and slamming, and a campfire.
+[LAION CLAP](https://huggingface.co/laion/larger_clap_general) scored each
+clip's text-audio similarity, and, against the `f16` clip of the same prompt
+and seed, the cosine of the two CLAP audio embeddings and the correlation of
+the two log-mel spectrograms. Two `f16` clips of one prompt with different
+seeds score 0.794 and 0.551 on those last two, so that is how far apart two
+unrelated samples sit. Means over the 24 clips; the change in text-audio
+similarity is paired by prompt and seed, with a 95% bootstrap interval:
+
+| GGUF | CLAP text-audio | Change from `f16` | CLAP audio vs `f16` (worst) | Log-mel corr. vs `f16` (worst) |
+|---|--:|--:|--:|--:|
+| `f16` | 0.447 | | | |
+| `q8_0` | 0.451 | +0.004 (-0.001 to +0.010) | 0.991 (0.963) | 0.994 (0.983) |
+| `q8_0`, DiT blocks `q4_0` | 0.437 | -0.010 (-0.026 to +0.006) | 0.940 (0.804) | 0.954 (0.842) |
+| `q8_0`, all blocks `q4_0` | 0.438 | -0.009 (-0.026 to +0.008) | 0.914 (0.667) | 0.939 (0.821) |
+| `f16`, all blocks `q4_0` | 0.435 | -0.012 (-0.028 to +0.003) | 0.917 (0.673) | 0.943 (0.820) |
+| `q4_0` | 0.416 | -0.031 (-0.052 to -0.010) | 0.824 (0.651) | 0.896 (0.777) |
+
+`q8_0` with `q4_0` DiT blocks is the 4-bit file to use: the text encoder and
+the VAE match as well as in `q8_0`, the DiT drops by another 0.0005, the
+prompt match does not drop measurably, and the clips stay close to the `f16`
+ones.
+`test-moss-sfx-parity` holds a DiT whose coarsest weights are `q4_0` to 0.998
+and every other stage to the usual 0.999 (0.99 after the eight steps), so it
+passes this file and fails the other three 4-bit layouts. Quantizing the text
+encoder too saves another 0.7 GB without a measurable loss in prompt match,
+but its context misses that bound and its clips drift further from `f16`,
+the worst nearly as far as an unrelated sample; it is not recommended.
+`q4_0` throughout is not recommended: the prompt match drops. On an RTX 5090
+four-bit weights save memory but not time: a 100-step clip takes 9.1 s at `f16`
+and at either 4-bit layout (9.3 s at `q8_0`). On an x86 CPU they also make the
+DiT 2.4 times faster, because ggml repacks `q4_0` there but not `q8_0`
+([Engine notes](#engine-notes-1)); see
+[Hexagon NPU generation](#hexagon-npu-generation) for the phone.
 
 ### Run
 
@@ -761,6 +871,31 @@ on Metal. For 100 guided steps, conditioning uploads fall from 800 MiB
 latent uploads/downloads, positions, timestep and the cache-entry index; K/V
 never returns to host memory between diffusion steps.
 
+On the CPU, the quantized text-encoder and DiT matrices load into ggml-cpu's
+repacked layout (the `CPU_REPACK` buffer) where ggml has one for the type and
+the processor: `q4_0` with AVX2 or with ARM dotprod or i8mm, `q8_0` with ARM
+dotprod or i8mm. The loader asks the CPU device whether it runs each product
+from that buffer, and keeps in the default buffer every matrix it cannot
+repack, the token table (read by row), the VAE, and every unquantized tensor.
+The fit counts the same bytes, and the stages match the reference as before
+(Galaxy S25 CPU, `q8_0` with `q4_0` DiT blocks: DiT 0.99908 / 0.99897, eight
+steps 0.99749). The audio differs from the default layout by summation order,
+about as much as a CUDA render of the same request does (waveform cosine 0.88
+against 0.87 on a two-step clip). Diffusion for the two-step glass request,
+two rounds in opposite orders:
+
+| Machine | GGUF | Default layout | Repacked |
+|---|---|--:|--:|
+| Galaxy S25, 6 threads | `q8_0` | 137.8-140.7 s | 70.8-72.8 s |
+| same | `q8_0`, DiT blocks `q4_0` | 145.8-146.2 s | 71.1-72.0 s |
+| Ryzen 9 9950X3D, 8 threads | `q8_0`, DiT blocks `q4_0` | 30.6-30.9 s | 12.6-13.0 s |
+| same | `q4_0` | 30.3-30.9 s | 12.6-12.9 s |
+
+ggml has no x86 layout for `q8_0`, so a `q8_0` file runs as before there. The
+MOSS-TTS and MOSS-Speech language models keep the default layout: they decode
+one row at a time, and on the S25 the repacked kernels ran a single-row
+product 1.3 to 2.4 times slower.
+
 ### Core ML DiT and VAE
 
 On Apple builds with `TTS_CPP_COREML=ON`, the DiT and the VAE decoder can each
@@ -842,8 +977,9 @@ it: the table is never loaded, and each request reads its prompt's rows (at
 most 512) from the GGUF, so it takes no memory, and a model file truncated
 while the engine is loaded fails that request with an error instead of
 crashing the process. The loader takes `f32`, `f16`,
-`bf16` and `q8_0` linear weights; HTP runs all of them but `bf16`, which is
-refused at load, so both validated GGUFs run.
+`bf16`, `q8_0` and `q4_0` linear weights; HTP runs all of them but `bf16`, which is
+refused at load, so all three validated GGUFs run, including the
+[4-bit one](#4-bit-weights).
 
 It needs a fabric ggml build whose Hexagon backend carries the DSP buffer
 remapping fix (ggml-speech `d85713da` or later,
@@ -865,6 +1001,9 @@ Against the PyTorch dumps (`test-moss-sfx-parity` with
 |---|--:|--:|--:|--:|
 | `f16` | 0.999999 | 1.000000 / 1.000000 | 0.999994 | 0.999998 |
 | `q8_0` | 0.999687 | 0.999698 / 0.999656 | 0.999994 | 0.999645 |
+| `q8_0`, DiT blocks `q4_0` | 0.999687 | 0.999200 / 0.999079 | 0.999994 | 0.998436 |
+| `q8_0`, all blocks `q4_0` | 0.974574 | 0.999200 / 0.999079 | 0.999994 | 0.998436 |
+| `q4_0` | 0.973876 | 0.979137 / 0.978801 | 0.999994 | 0.974540 |
 
 Speed on the Galaxy S25 (seed 7, 6 CPU threads, each run started at thermal
 status 0; "glass" and "rain" are the prompts of the parity dumps and of
@@ -874,37 +1013,61 @@ status 0; "glass" and "rain" are the prompts of the parity dumps and of
 |---|---|---|--:|--:|--:|
 | glass, 5 s | `f16` | Hexagon | 2 | 3.6 s | 1.3 s |
 | same | `q8_0` | Hexagon | 2 | 3.2 s | 1.1 s |
+| same | `q8_0`, DiT `q4_0` | Hexagon | 2 | 3.2 s | 1.1 s |
 | same | `f16` | CPU | 2 | 163.4 s | 9.6 s |
-| same | `q8_0` | CPU | 2 | 122.0 s | 7.6 s |
+| same | `q8_0` | CPU | 2 | 70.8 s | 9.6 s |
+| same | `q8_0`, DiT `q4_0` | CPU | 2 | 71.1 s | 9.6 s |
 | glass, 5 s | `f16` | Hexagon | 100 | 367.6 s | 2.4 s |
 | rain, 10 s | `f16` | Hexagon | 100 | 316.8 s | 4.9 s |
 | same | `q8_0` | Hexagon | 100 | 326.9 s | 4.8 s |
+| same | `q8_0`, DiT `q4_0` | Hexagon | 100 | 266.6 s | 5.0 s |
 | rain, 30 s | `f16` | Hexagon | 100 | 372.7 s | 14.7 s |
 
 A guided step runs the DiT twice over the full 30-second latent, so the
 diffusion cost does not depend on the requested length. From a cool start a
-pass costs 0.89 s (`f16`) or 0.79 s (`q8_0`) on the NPU against 41 s and 31 s
+pass costs 0.89 s (`f16`) or 0.79 s (`q8_0`) on the NPU against 41 s and 18 s
 on the CPU; over a 100-step clip the NPU throttles to 1.6-1.9 s per pass, so a
-default clip takes five to six minutes, where the CPU would need over two
+default clip takes five to six minutes, where the CPU would need one to two
 hours. Text encoding takes about 0.1 s. The `f16` GGUF (6.4 GB, 5.8 GB of it
 on the NPU) runs on the 12 GB phone.
+
+The [4-bit file](#4-bit-weights) saves memory, not time. While the two-step
+glass request ran on the NPU, the phone's available memory fell by 6.1 GB with
+`f16`, 3.7 GB with `q8_0`, and 3.0 GB with `q8_0` and `q4_0` DiT blocks (2.2 GB
+with the text encoder at `q4_0` too). The NPU is compute-bound on the DiT, so a
+cold pass costs the same 0.81 s with `q4_0` DiT blocks as with `q8_0` in the
+same session (0.93 s with `f16`); the 100-step rows above differ by heat, and
+`q8_0` took 290.4 s for the same clip right after the 4-bit run. On the
+phone's CPU both files run from ggml's repacked layout
+([Engine notes](#engine-notes-1)) at the same speed, about 18 s per pass; the
+CPU process peaked at 4.0 GB resident with `q8_0` and 3.3 GB with `q4_0` DiT
+blocks.
 
 ### Test
 
 `test-moss-sfx` builds a tiny random-weight GGUF in-test and needs no
 download: the schedule, Euler step, guidance, prompt cleaning against
 upstream outputs, Python-compatible rounding, and noise; the load-time
-rejections for metadata bounds, tensor shapes, and tensor types; text-encoder
+rejections for metadata bounds, tensor shapes, and tensor types; f16, bf16,
+q8_0 and q4_0 linear weights loading as stored and following the f32 velocity,
+and q5_0 refused; on the CPU, quantized text-encoder and DiT matrices taking the
+repacked layout exactly where ggml offers one for the processor, the token
+table and the VAE keeping the default buffer, the same text context and
+velocity as the default layout, and the fit counting exactly the bytes of the
+default and repacked weight buffers;
+text-encoder
 causality, zero padding, and an f16 feed-forward sum past the half-precision
 range; DiT conditioning on text and timestep and the scheduler guard;
 windowed VAE decoding against a single window; engine determinism, guidance
 1, cancellation from the callback and from another thread, overlapping calls,
 and request validation; and the CLI's `sfx` and `tts` modes.
 `test-convert-moss` also fabricates a tiny MOSS-SoundEffect pipeline and
-checks the tensor census, the folded weight norm, the f16 and q8_0 paths, and
-the `.pth` VAE checkpoint (when torch is installed). `test-moss-sfx-cache`
-compares cached and uncached velocities and guided diffusion on a two-layer
-fixture in F32, F16 and Q8_0, including prompt replacement and reuse after
+checks the tensor census, the folded weight norm, the f16, q8_0 and q4_0 paths,
+the text- and DiT-block overrides with the default file name they produce, and
+the `.pth` VAE checkpoint (when torch is installed).
+`test-moss-sfx-cache` compares cached and uncached velocities and guided
+diffusion on a two-layer fixture in F32, F16, Q8_0 and Q4_0, including prompt
+replacement and reuse after
 changing projection weights. It uses CPU by default; set
 `MOSS_SFX_CACHE_BACKEND=MTL0` to exercise the same checks on Metal. A 128-wide
 head fixture checks automatic flash routing, forced unfused reference parity,
@@ -915,20 +1078,22 @@ exercises both cached conditioning branches.
 `test-moss-sfx-parity` is the reference check: it
 skips unless `MOSS_SFX_MODEL` points at a converted GGUF and
 `MOSS_SFX_REFERENCE_DIR` at stage dumps from the PyTorch pipeline
-(`MOSS_SFX_GPU=1` runs it on the GPU, `MOSS_SFX_BACKEND=hexagon` on the NPU). The dumps come from
+(`MOSS_SFX_GPU=1` runs it on the GPU, `MOSS_SFX_BACKEND=hexagon` on the NPU).
+Every stage must reach cosine 0.999 (0.99 after the eight steps), except a DiT
+whose coarsest weights are `q4_0`, which must reach 0.998. The dumps come from
 `scripts/dump-moss-sfx-reference.py <checkpoint> <out_dir> --upstream
 <MOSS-TTS checkout>`, whose defaults are the prompt, duration, and step count
 the test expects. `test-moss-sfx` also covers the sidecar routing without
 Core ML: the fixed VAE window plan, sidecar and fallback decodes, retiring a
 failed DiT or VAE sidecar, strict mode, the default compute units, and the
 per-request backend report. `test-moss-hexagon-layout` forces the Hexagon
-layout onto the CPU at f32, f16 and q8_0: token rows read from the file give
+layout onto the CPU at f32, f16, q8_0 and q4_0: token rows read from the file give
 the same text context as the device table, and fused attention in the text
 encoder and in the DiT's self- and cross-attention matches the unfused graphs;
 it also checks that the table leaves the device weights, that rows read at
-f32, f16 and q8_0 match ggml's dequantization, and that a file truncated under
+f32, f16, q8_0 and q4_0 match ggml's dequantization, and that a file truncated under
 a loaded model fails the request with an error. On a phone, `test-moss-hexagon` runs the text encoder, the DiT and the
-VAE on HTP0 against the CPU at f32, f16 and q8_0, checks that bf16 weights are
+VAE on HTP0 against the CPU at f32, f16, q8_0 and q4_0, checks that bf16 weights are
 refused, and projects the fit against host memory.
 `test-moss-sfx-coreml-exporter` (Python; skips without numpy or torch) checks
 the exporter's DiT and VAE rebuilds against independent NumPy references on
@@ -1148,10 +1313,13 @@ Weights go into the Hexagon repack buffer type, and HTP runs `f32`, `f16`,
 converter's default `bf16`; the tokenizer, whose loader takes `f32`, `f16`,
 `bf16` and `q8_0`, refuses `bf16` (the codec converter writes its matrices at
 `f16`). The text embedding table, the audio
-embedding table and the text head stay on the host, mapped from the GGUF as
-for [MOSS-TTS](#hexagon-npu): at 151,680 x 4,096 the text table and head are
+embedding table and the text head stay off the NPU as for
+[MOSS-TTS](#hexagon-npu): at 151,680 x 4,096 the text table and head are
 1.24 GB each at `f16`, past HTP's 1 GiB buffer and its 32,768-row limit for
-quantized heads. The text head runs on the CPU only on text-channel steps;
+quantized heads. Each step reads its embedding row from the GGUF, and the text
+head is read into host memory with the weights, so a model file truncated
+while the engine is loaded fails the next request with an error instead of
+crashing the process. The text head runs on the CPU only on text-channel steps;
 while the reply is spoken each step skips it. The audio head stays on the NPU.
 Attention runs as one `FLASH_ATTN_EXT`: per layer in the LM, whose value
 caches then use the key layout, with an F16 causal mask on prefill batches
@@ -1166,14 +1334,23 @@ python scripts/requantize-gguf.py moss-speech-f16.gguf \
     moss-speech-blk-q4_0.gguf q4_0 --name-filter blk.
 ```
 
-The file is 7.1 GB, about 4.3 GB of it on the NPU. Bound every request with
+The file is 7.1 GB, about 4.3 GB of it on the NPU and the 1.24 GB text head
+in host memory. Bound every request with
 `max_new_tokens` (`--max-new-tokens`): the default sizes the KV cache for the
 whole 40,960-position context (6.7 GB), which `begin()` refuses there with the
 sizes it needed and found. Even bounded, the LM, the tokenizer and the decoder
 held together left about 0.5 GB of the phone's memory free, so the engine
 releases the LM weights before each decode, releases the decoder after it, and
 reloads the LM on the next request: at least 3.0 GB then stays free, and the
-reload adds about 4.6 s to the next request's prefill.
+reload adds about 4.6 s to the next request's prefill. Reading the text head
+into memory instead of mapping it, as it used to be, adds about 0.8 s to a
+load and 1.2 s on average to a reload, and leaves the reply below bit for bit
+the same. Generation took 18.1 s against 20.1 s mapped, and the peak RSS stays
+1.90 GB, reached while decoding with the LM released; while the LM is loaded
+the phone keeps about 1.3 GB less memory available (at least 1.9 GB against
+3.2 GB in this run). Over four alternating runs of 20-30 steps the median
+text-channel step took 116 ms (115 ms mapped) and the median audio-only step
+93 ms (102 ms).
 
 Against the PyTorch dumps (`test-moss-speech-parity` with
 `MOSS_SPEECH_BACKEND=hexagon`; same question as the reference, CUDA bf16 dumps):
@@ -1249,11 +1426,15 @@ Hexagon layout onto the CPU at f32, f16 and q8_0: the host tables give the same
 heads as the device tables, before and after the weights are released and
 reloaded, fused attention in the LM matches the unfused graph in batched prefill,
 decoding and audio-only steps, the fused Whisper-VQ encoder gives the same codes,
-and `use_gpu` places the decoder on the GPU beside an explicit backend. On a
+and `use_gpu` places the decoder on the GPU beside an explicit backend. It also
+checks that a model file truncated under a loaded LM fails decoding,
+audio-only steps and the weight reload with an error, and that the text head
+keeps its values when the file's head bytes change. On a
 phone, `test-moss-hexagon` runs the LM (prefill in batches, decoding, audio-only
-steps, weight eviction) and the tokenizer on HTP0 against the CPU at f32, f16,
-q8_0 and q4_0, and checks that bf16 LM and tokenizer weights are refused, the
-tokenizer's refusal without offering `q4_0`. The generated GGUFs are narrow:
+steps, weight eviction, a model file truncated under it) and the tokenizer on
+HTP0 against the CPU at f32, f16, q8_0 and q4_0, and checks that bf16 LM and
+tokenizer weights are refused, the tokenizer's refusal without offering
+`q4_0`. The generated GGUFs are narrow:
 only the LM's 32-wide feed-forward down projection holds a quantization block,
 so the quantized tiers leave the tables, the other LM matrices and the whole
 tokenizer at `f16`; the full checkpoint covers `q4_0` layers on the NPU.

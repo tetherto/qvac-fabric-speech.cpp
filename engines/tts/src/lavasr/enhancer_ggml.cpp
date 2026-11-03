@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -280,9 +282,11 @@ EnhancerGgml * enhancer_ggml_create(const EnhancerWeights & w, ggml_backend_t ba
         return nullptr;
     }
 
-    EnhancerGgml * g = new EnhancerGgml();
+    std::unique_ptr<EnhancerGgml, void (*)(EnhancerGgml *)> owner(new EnhancerGgml(), enhancer_ggml_free);
+    EnhancerGgml * g = owner.get();
     g->backend       = backend;
-    g->use_dw_direct = ::tts_cpp::detail::backend_is_vulkan(backend);
+    g->use_dw_direct = ::tts_cpp::detail::backend_is_vulkan(backend) ||
+                       ::tts_cpp::detail::backend_is_hexagon(backend);
     g->mulmat_needs_pad = ::tts_cpp::detail::backend_is_arm_mali_vulkan(backend);
     g->C         = w.dim;
     g->F         = w.ffn_dim;
@@ -306,7 +310,6 @@ EnhancerGgml * enhancer_ggml_create(const EnhancerWeights & w, ggml_backend_t ba
     g->wctx = ggml_init(ip);
     if (!g->wctx) {
         std::fprintf(stderr, "lavasr enhancer ggml: weight ctx init failed\n");
-        enhancer_ggml_free(g);
         return nullptr;
     }
 
@@ -343,7 +346,6 @@ EnhancerGgml * enhancer_ggml_create(const EnhancerWeights & w, ggml_backend_t ba
     g->wbuf = ggml_backend_alloc_ctx_tensors(g->wctx, backend);
     if (!g->wbuf) {
         std::fprintf(stderr, "lavasr enhancer ggml: weight buffer alloc failed\n");
-        enhancer_ggml_free(g);
         return nullptr;
     }
 
@@ -371,17 +373,15 @@ EnhancerGgml * enhancer_ggml_create(const EnhancerWeights & w, ggml_backend_t ba
     ok = ok && upload_weight(g->spec_w, w, "spec_head.out.weight");
     ok = ok && upload_weight(g->spec_b, w, "spec_head.out.bias");
     if (!ok) {
-        enhancer_ggml_free(g);
         return nullptr;
     }
 
     g->allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!g->allocr) {
         std::fprintf(stderr, "lavasr enhancer ggml: gallocr init failed\n");
-        enhancer_ggml_free(g);
         return nullptr;
     }
-    return g;
+    return owner.release();
 }
 
 // =============================================================================
@@ -413,6 +413,7 @@ bool enhancer_ggml_spec_forward(EnhancerGgml * g,
     if (!ctx) {
         return false;
     }
+    std::unique_ptr<ggml_context, void (*)(ggml_context *)> context_owner(ctx, ggml_free);
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, MAX_NODES, false);
 
     // Input: mel [T, n_mels, 1] (holds mel[c*T+t] = ne0=T, ne1=C).
@@ -477,15 +478,22 @@ bool enhancer_ggml_spec_forward(EnhancerGgml * g,
     ggml_build_forward_expand(gf, re);
     ggml_build_forward_expand(gf, im);
 
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (!ggml_backend_supports_op(g->backend, node)) {
+            std::fprintf(stderr, "lavasr enhancer ggml: op '%s' unsupported on backend '%s'\n",
+                         ggml_op_name(node->op), ggml_backend_name(g->backend));
+            return false;
+        }
+    }
+
     // Allocate + run.
     if (!ggml_gallocr_reserve(g->allocr, gf)) {
         std::fprintf(stderr, "lavasr enhancer ggml: gallocr reserve failed\n");
-        ggml_free(ctx);
         return false;
     }
     if (!ggml_gallocr_alloc_graph(g->allocr, gf)) {
         std::fprintf(stderr, "lavasr enhancer ggml: gallocr alloc failed\n");
-        ggml_free(ctx);
         return false;
     }
 
@@ -494,7 +502,6 @@ bool enhancer_ggml_spec_forward(EnhancerGgml * g,
 
     if (ggml_backend_graph_compute(g->backend, gf) != GGML_STATUS_SUCCESS) {
         std::fprintf(stderr, "lavasr enhancer ggml: graph compute failed\n");
-        ggml_free(ctx);
         return false;
     }
 
@@ -505,7 +512,6 @@ bool enhancer_ggml_spec_forward(EnhancerGgml * g,
     ggml_backend_tensor_get(re, real.data(), 0, real.size() * sizeof(float));
     ggml_backend_tensor_get(im, imag.data(), 0, imag.size() * sizeof(float));
 
-    ggml_free(ctx);
     return true;
 }
 
@@ -523,6 +529,11 @@ std::vector<float> enhance(const EnhancerWeights & w, EnhancerGgml * gpu,
         [gpu, &w](const std::vector<float> & mel, int T, std::vector<float> & real,
                   std::vector<float> & imag) {
             if (!enhancer_ggml_spec_forward(gpu, mel, T, real, imag)) {
+                const char * forced_backend = std::getenv("TTS_CPP_GPU_BACKEND");
+                if (::tts_cpp::detail::backend_is_hexagon(gpu->backend) ||
+                    (forced_backend && *forced_backend)) {
+                    throw std::runtime_error("lavasr enhancer: requested backend forward failed");
+                }
                 // Robustness: a runtime backend failure falls back to the
                 // scalar core so the pipeline still produces valid audio.
                 enhancer_spec_forward(w, mel, T, real, imag);

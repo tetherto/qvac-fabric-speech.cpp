@@ -51,6 +51,7 @@ enum class GpuBackendRequirement : unsigned {
     OpenCL = 1u << 2,
     CUDA   = 1u << 3,
     WebGPU = 1u << 4,
+    Hexagon = 1u << 5,
     // Every registered GPU, including any backend with no flag of its own.
     Any    = ~0u,
 };
@@ -130,6 +131,15 @@ ggml_backend_t init_requested_backend(const std::string & requested,
 std::string dsp_library_path_with(const std::string & dir, const char * current);
 
 ggml_backend_buffer_type_t weight_buffer_type(ggml_backend_t backend);
+
+// ggml-cpu's CPU_REPACK buffer type (weights rearranged for the i8mm/dotprod
+// and AVX2 matrix kernels) when `backend` is the CPU, else nullptr. Only a
+// matrix product can read a tensor stored there.
+ggml_backend_buffer_type_t cpu_repack_buffer_type(ggml_backend_t backend);
+
+// Whether the CPU runs a matrix product whose weight has `weight`'s type and
+// shape when that weight lives in `repack`.
+bool cpu_repack_runs_matmul(ggml_backend_buffer_type_t repack, const ggml_tensor * weight);
 
 // The weight types whose products HTP runs (I32 covers index tables).  An
 // engine refuses a GGUF holding any other type on Hexagon rather than quietly

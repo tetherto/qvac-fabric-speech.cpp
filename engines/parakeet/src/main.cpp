@@ -13,6 +13,7 @@
 #include "parakeet_eou.h"
 #include "mel_preprocess.h"
 #include "long_form_encoder.h"
+#include "encoder_device_decode.h"
 
 #include "ggml-backend.h"
 
@@ -925,6 +926,36 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         static TdtRuntimeWeights rt;
         static bool rt_ready = false;
 
+        TdtDecodeResult device_result;
+        double device_decode_ms = 0.0;
+        EncoderOutputConsumer device_consumer;
+        const bool device_transducer = model_has_gpu_backend(model) &&
+            (model.model_type == ParakeetModelType::TDT || model.model_type == ParakeetModelType::RNNT ||
+             model.model_type == ParakeetModelType::NEMOTRON);
+        if (device_transducer && !long_form.enabled && !std::getenv("PARAKEET_DUMP_ENCODER") &&
+            !std::getenv("PARAKEET_DUMP_PROMPT_OUTPUT")) {
+            if (!rt_ready) {
+                if (tdt_prepare_runtime(model, rt) != 0) return 20;
+                rt_ready = true;
+            }
+            TdtDecodeOptions options;
+            if (model.model_type == ParakeetModelType::RNNT) {
+                options.max_symbols_per_step = model.encoder_cfg.rnnt_max_symbols_per_step;
+            } else if (model.model_type == ParakeetModelType::NEMOTRON) {
+                options.max_symbols_per_step = model.nemotron_cfg.max_symbols_per_step;
+            }
+            int32_t prompt_id = -1;
+            if (model.model_type == ParakeetModelType::NEMOTRON) {
+                try { prompt_id = resolve_nemotron_prompt_id(model, opts.language); }
+                catch (const std::exception & error) {
+                    PARAKEET_LOG_ERROR("error: %s\n", error.what());
+                    return 2;
+                }
+            }
+            device_consumer = make_device_encoder_consumer(model, rt, prompt_id,
+                options, device_result, device_decode_ms);
+        }
+
         const int exact_mel_frames = model_coreml_fixed_mel_frames(model);
         const bool cache_aware_nemotron =
             model.model_type == ParakeetModelType::NEMOTRON &&
@@ -995,8 +1026,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
                     /*max_layers=*/-1,
                     /*capture_intermediates=*/false,
-                    /*allow_coreml_padded=*/true); rc != 0) return rc;
-            times.enc_ms = ms_since(t2);
+                    /*allow_coreml_padded=*/true, device_consumer); rc != 0) return rc;
+            times.enc_ms = ms_since(t2) - device_decode_ms;
         }
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
@@ -1055,7 +1086,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         const auto t3 = clock::now();
         std::vector<float> conditioned_encoder;
         const float * decoder_input = enc_out.encoder_out.data();
-        if (model.model_type == ParakeetModelType::NEMOTRON) {
+        if (!enc_out.encoder_consumed && model.model_type == ParakeetModelType::NEMOTRON) {
             int32_t prompt_id = -1;
             try {
                 prompt_id = resolve_nemotron_prompt_id(
@@ -1093,7 +1124,10 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             }
         }
 
-        if (model.model_type == ParakeetModelType::RNNT ||
+        if (enc_out.encoder_consumed) {
+            ids_out = std::move(device_result.token_ids);
+            text_out = std::move(device_result.text);
+        } else if (model.model_type == ParakeetModelType::RNNT ||
             model.model_type == ParakeetModelType::NEMOTRON ||
             model.model_type == ParakeetModelType::TDT) {
             if (!rt_ready) {
@@ -1169,7 +1203,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     dump_path);
             }
         }
-        times.dec_ms = ms_since(t3);
+        times.dec_ms = enc_out.encoder_consumed ? device_decode_ms : ms_since(t3);
         times.inference_ms = times.mel_ms + times.enc_ms + times.dec_ms;
         times.tokens = (int) ids_out.size();
         n_frames_out = n_frames;

@@ -2,6 +2,35 @@
 
 Part of the [parakeet engine documentation](../README.md).
 
+## Device encoder handoff
+
+Offline TDT, Unified RNN-T and Nemotron ASR can decode the ggml encoder's output
+without downloading it to the host. A synchronous internal consumer runs while
+the cached encoder tensor is valid. It queues a same-backend device copy into
+the decoder projection graph, then decodes before returning; no borrowed graph
+tensor escapes its lifetime. Nemotron also concatenates its cached locale
+one-hot tensor and computes the prompt projection on the backend, avoiding the
+additional host packing, download and upload of conditioned features.
+
+This path requires a graph decoder on the same non-CPU backend, a contiguous F32
+encoder tensor, and a frame count within the decoder's projection capacity.
+The tensor's frame count must equal the valid encoder length. When padding
+produces extra tensor frames, the handoff is declined and host decoding uses
+only the valid prefix.
+CPU and OpenCL's CPU decoder, Core ML encoder output, diagnostic captures,
+windowed long-form encoding, and cache-aware streaming retain their existing
+feature-transfer routing.
+CLI encoder dumps also retain host output. Errors propagate rather than
+silently decoding through a second path. Encoder and decoder timing fields
+charge the consumer's work to decoding.
+
+Fixture tests cover CPU fallback and Vulkan handoff for TDT 0.6B-v3, Unified
+0.6B and Nemotron 3.5 ASR Q8_0, including exact token IDs, graph reuse,
+diagnostic output, consumer errors, invalid tensor shapes, padded Nemotron
+host/device parity, prompt changes and
+the public Engine API. CUDA and Metal variants register when those backends are
+built; this change has been measured on the Radeon RX 7600 XT with Vulkan.
+
 ## Backends and runtime selection
 
 Any combination of Metal, CUDA, Vulkan, OpenCL, and WebGPU may be built or
@@ -60,7 +89,7 @@ WebGPU (ggml-webgpu on Dawn, `GGML_WEBGPU=ON`) registers one discrete
 `WebGPU` device and takes the same tier as Vulkan and Metal, so it is chosen
 automatically when no CUDA device is present and explicitly with
 `--backend webgpu`. Validated on an RTX 5090 (Dawn on Vulkan, 2026-10-20) with
-the TranscribePsy 250M CTC model: the transcript is identical to the CPU run
+the TranscribePsy 250M TDT model: the transcript is identical to the CPU run
 and the end-to-end time 2.8x shorter. The encoder keeps its unfused attention
 graph on WebGPU (`flash_attn_allowed` admits only CUDA, Metal and Vulkan)
 until the fused path is compared there too. The backend reports its
@@ -158,7 +187,10 @@ process-global: the first `Engine` construction loads from that directory and
 later engines reuse the populated registry. Leave it empty for ggml's default
 search path. In static `GGML_BACKEND_DL=OFF` builds the setting is a no-op.
 
-`Engine::backend_name()` reports the ggml backend used by the decoder.
+`Engine::backend_name()` reports the primary active ggml backend. Individual
+stages can run elsewhere: with OpenCL selected, TDT and RNN-T decoder graphs
+run on CPU, while `backend_name()` still reports OpenCL. Benchmark log output
+reports the decoder separately in `decoder_backend`.
 `Engine::encoder_backend()` reports the loaded encoder-sidecar configuration;
 benchmark JSON additionally reports whether every measured invocation actually
 completed through Core ML.

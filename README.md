@@ -18,6 +18,12 @@ The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
 validated on it.
 
+Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
+through decoding, including Nemotron's locale-prompt projection. Encoder tensors
+with extra padding frames retain host routing. See the
+[device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
+for routing, fallback and validation coverage.
+
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
@@ -27,7 +33,7 @@ validated on it.
 | [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3, Parler mini, CosyVoice3 and Audio8 also validated on WebGPU |
 | TTS | Pocket TTS | English synthesis and incremental CPU/Metal/CUDA/Vulkan/OpenCL streaming; cloning requires encoder-enabled weights |
 | TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; single-reference dialogue avoids duplicate reference encoding; selective text-control projection on Metal; batched audio-logit readback on Vulkan; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
-| TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; SoundEffect reuses fixed cross-attention K/V and selects supported Metal DiT flash attention, with the cache and retained scheduler peak included in metadata-only memory fit for repeated requests; CPU/Metal generation validated; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage; explicit Hexagon NPU placement for SoundEffect, with reference parity, and for the Speech LM and speech tokenizer |
+| TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; SoundEffect reuses fixed cross-attention K/V, selects supported Metal DiT flash attention, and runs quantized matrices from ggml's repacked CPU layout, with the cache and retained scheduler peak included in metadata-only memory fit for repeated requests; CPU/Metal generation validated, including a `q8_0` GGUF with `q4_0` DiT blocks; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage; explicit Hexagon NPU placement for SoundEffect, with reference parity, and for the Speech LM and speech tokenizer |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages and excludes WebGPU, whose kernels lack an op the graphs need |
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, optional [Core ML conditioner projection](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner), and metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
@@ -91,6 +97,9 @@ re-exported for padding invariance. See the
 
 ### Apple Core ML sidecars
 
+Whisper exposes `whisper_encoder_on_coreml(ctx)` for the loaded encoder state,
+independently of the ggml primary device.
+
 Optional sidecars accelerate a stage while the rest of the pipeline stays on
 ggml. They default to disabled and have model-specific input and fallback
 contracts; see the engine guides before exporting or deploying one.
@@ -135,7 +144,7 @@ and OpenCL on the same device.
 | Engine | Models | Guide |
 |---|---|---|
 | ASR | Parakeet CTC and TDT 0.6B (`q8_0`), TranscribePsy-250M-EU-sub (`q8_0`), MOSS-Transcribe-Diarize (`q8_0`, `f16`) | [Parakeet Hexagon](engines/parakeet/docs/backends.md#hexagon-npu), [MOSS Hexagon](engines/parakeet/docs/moss-transcribe.md#hexagon-npu) |
-| TTS | Chatterbox Turbo and Multilingual (`q4_0`, `q8_0`, `f16` or `f32`), Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 / MOSS-TTSD (`q4_0` transformer), MOSS-SoundEffect-v2 (`f16` or `q8_0`), MOSS-Speech LM (`q4_0` transformer) and speech tokenizer (`f16` codec) | [Chatterbox Hexagon](engines/tts/docs/chatterbox.md#snapdragon-hexagon-npu), [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), [MOSS Hexagon](engines/tts/docs/moss.md#hexagon-npu), [MOSS-SoundEffect Hexagon](engines/tts/docs/moss.md#hexagon-npu-generation), [MOSS-Speech Hexagon](engines/tts/docs/moss.md#hexagon-npu-speech-to-speech), and the matching sections in the other model guides |
+| TTS | Chatterbox Turbo and Multilingual (`q4_0`, `q8_0`, `f16` or `f32`), Supertonic 3, Parler-TTS mini, CosyVoice3, Audio8, MOSS-TTS-v1.5 / MOSS-TTSD (`q4_0` transformer), MOSS-SoundEffect-v2 (`f16`, `q8_0`, or `q8_0` with `q4_0` DiT blocks), MOSS-Speech LM (`q4_0` transformer) and speech tokenizer (`f16` codec) | [Chatterbox Hexagon](engines/tts/docs/chatterbox.md#snapdragon-hexagon-npu), [Audio8 Hexagon](engines/tts/docs/audio8.md#hexagon-npu-snapdragon), [MOSS Hexagon](engines/tts/docs/moss.md#hexagon-npu), [MOSS-SoundEffect Hexagon](engines/tts/docs/moss.md#hexagon-npu-generation), [MOSS-Speech Hexagon](engines/tts/docs/moss.md#hexagon-npu-speech-to-speech), and the matching sections in the other model guides |
 | AudioGen | ACE-Step v15 turbo (`q8_0` DiT; K-quant GGUFs are refused at load) | [AudioGen Hexagon](engines/audiogen/docs/backends.md#hexagon-npu) |
 
 ### WebGPU (Dawn)
@@ -153,7 +162,7 @@ same NVIDIA card), and is selected explicitly with `--backend webgpu` or
 |---|---|---|
 | Whisper | tiny.en, base, small | Validated: same transcripts; encoder 8x (base) to 33x (small) faster than CPU, a 2-minute clip 3.1x faster end to end |
 | Whisper | large-v3-turbo | Validated: same transcripts; a 2-minute clip encodes in 0.27 s against 23.4 s on the CPU, 11x faster end to end |
-| Parakeet | TranscribePsy 250M CTC | Validated: identical transcript, 2.8x faster end to end |
+| Parakeet | TranscribePsy 250M TDT | Validated: identical transcript, 2.8x faster end to end |
 | TTS | Supertonic 3 | Validated: waveform correlation 0.997 with the CPU render, identical transcript |
 | TTS | Parler-TTS mini (f16, q8_0) | Validated: the same Whisper transcripts as the CPU render over four prompts; 3.5x faster end to end |
 | TTS | CosyVoice3 (q8_0 LM, f16 flow and HiFT) | Validated: the same Whisper transcripts as the CPU render over four prompts; 12x faster end to end |
@@ -254,6 +263,11 @@ and model-specific exceptions.
 | [AudioGen](engines/audiogen/NOTICE) | MIT | ACE-Step 1.5 MIT; Qwen3-Embedding Apache-2.0; MiniMax-Music3 Community License |
 
 ## Documentation
+
+Parakeet's [test guide](engines/parakeet/docs/testing.md) separates model-free
+unit tests from fixture coverage. Its fixture runner rejects runs with no executed
+tests and can require specific model-family tests to pass; the opt-in GPU CI lane
+uses this gate.
 
 | Topic | Where |
 |---|---|
