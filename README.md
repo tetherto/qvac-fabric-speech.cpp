@@ -282,6 +282,8 @@ uses this gate.
 | Synthesis, voice cloning, sound effects, speech-to-speech, enhancement | [TTS](engines/tts/README.md) |
 | Music generation and editing | [AudioGen](engines/audiogen/README.md) |
 | Benchmark quality diagnostics and model preparation | [Music alignment guide](scripts/benchmarks/music-alignment.md) |
+| Weekly desktop benchmark on the shared Tailscale machines | [desktop-weekly](scripts/benchmarks/desktop-weekly/README.md) |
+| Running, collecting and publishing that benchmark from Claude | [speech-bench skill](skills/speech-bench/SKILL.md) |
 | Historical development and integration reports | [Chatterbox](engines/tts/docs/history/chatterbox-port.md), [Supertonic](engines/tts/docs/history/supertonic-port.md), [Pocket](engines/tts/docs/history/pocket-integration.md), [Parakeet](engines/parakeet/docs/history/parakeet-port.md), [Strix Halo](engines/audiogen/docs/history/strix-halo.md) |
 
 Audio8 exposes incremental PCM through `Engine::synthesize_stream()`, with codec-window
