@@ -55,6 +55,7 @@
 #include "vae_coreml_windows.h"
 #include "vae_encode_windows.h"
 #include "vae_ggml.h"
+#include "vae_gguf.h"
 #include "wav_reader.h"
 
 #include "audiogen-cpp/acestep/engine.h"
@@ -1636,6 +1637,38 @@ void test_stage_dump_rejects_malformed() {
     CHECK(!tts_cpp::acestep::read_stage_dump("test", missing.c_str(), out, &d0, &d1));
 }
 
+void test_gguf_parse_failure_releases_mapping() {
+    using namespace tts_cpp::acestep;
+    const std::string path = test_temp_dir() + "/qvac-acestep-invalid-gguf-test.gguf";
+    FILE * file = std::fopen(path.c_str(), "wb");
+    CHECK(file != nullptr);
+    if (!file) return;
+    const char invalid[] = "not a GGUF model";
+    CHECK(std::fwrite(invalid, 1, sizeof(invalid), file) == sizeof(invalid));
+    std::fclose(file);
+
+    for (int retry = 0; retry < 3; ++retry) {
+        DitGGUF dit;
+        VaeGGUF vae;
+        CHECK(!dit_gguf_open(dit, path));
+        CHECK(!vae_gguf_open(vae, path));
+        CHECK(dit.ctx == nullptr && dit.meta == nullptr);
+        CHECK(vae.ctx == nullptr && vae.meta == nullptr);
+        CHECK(dit.file.data == nullptr && dit.file.size == 0);
+        CHECK(vae.file.data == nullptr && vae.file.size == 0);
+#ifdef _WIN32
+        CHECK(dit.file.file_handle == nullptr && dit.file.map_handle == nullptr);
+        CHECK(vae.file.file_handle == nullptr && vae.file.map_handle == nullptr);
+#else
+        CHECK(dit.file.fd == -1);
+        CHECK(vae.file.fd == -1);
+#endif
+        dit_gguf_close(dit);
+        vae_gguf_close(vae);
+    }
+    std::remove(path.c_str());
+}
+
 constexpr int TINY_LM_HIDDEN     = 128;
 constexpr int TINY_LM_FFN        = 256;
 constexpr int TINY_LM_VOCAB      = 200;
@@ -1742,6 +1775,12 @@ void test_lm_split_table_matches_whole_table() {
     CHECK(whole != nullptr);
     CHECK(split != nullptr);
     if (whole && split) {
+        // Splitting retains the host embedding table as well as the head
+        // chunks. Its weight footprint must include both copies, even when
+        // the backend can map the remaining transformer weights in place.
+        const size_t table_bytes = ggml_row_size(GGML_TYPE_Q8_0, TINY_LM_HIDDEN) * TINY_LM_VOCAB;
+        CHECK(tts_cpp::acestep::lm_model_weight_bytes(split) >=
+              tts_cpp::acestep::lm_model_weight_bytes(whole) + table_bytes);
         const int32_t      prompt[] = { 0, 3, 77, 150, TINY_LM_VOCAB - 1 };
         std::vector<float> whole_logits, split_logits;
         CHECK(lm_model_forward(whole, prompt, 5, whole_logits));
@@ -3738,6 +3777,7 @@ int main() {
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();
     test_lm_head_chunk_ranges();
+    test_gguf_parse_failure_releases_mapping();
     test_lm_split_table_matches_whole_table();
     test_stage_dump_round_trip();
     test_stage_dump_rejects_malformed();

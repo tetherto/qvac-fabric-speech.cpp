@@ -65,12 +65,23 @@ class ShapeTest(unittest.TestCase):
         src = self.directory / (stem + "-source.gguf")
         dst = self.directory / (stem + "-" + tier + ".gguf")
         write_gguf(src, arch, tensors)
+        return self.requantize_path(src, dst, tier)
+
+    def requantize_path(self, src, dst, tier, *options):
         source_hash = hashlib.sha256(src.read_bytes()).hexdigest()
-        proc = subprocess.run([sys.executable, str(SCRIPTS / "requantize-gguf.py"), str(src), str(dst), tier],
+        proc = subprocess.run([sys.executable, str(SCRIPTS / "requantize-gguf.py"), str(src), str(dst), tier, *options],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
         self.assertEqual(hashlib.sha256(src.read_bytes()).hexdigest(), source_hash)
         return gguf.GGUFReader(str(dst))
+
+    @staticmethod
+    def snapshot(reader):
+        tensors = {t.name: (tuple(reversed(t.shape)), t.tensor_type, t.data.tobytes())
+                   for t in reader.tensors}
+        field = reader.fields.get("supertonic.pwconv_squeezed")
+        roster = [] if field is None else [bytes(field.parts[i]).decode("utf-8") for i in field.data]
+        return tensors, roster
 
     def assert_kept(self, tensor, original):
         self.assertEqual(tuple(reversed(tensor.shape)), original.shape)
@@ -135,6 +146,53 @@ class ShapeTest(unittest.TestCase):
                 field = reader.fields["supertonic.pwconv_squeezed"]
                 self.assertEqual([bytes(field.parts[i]).decode("utf-8") for i in field.data], [name])
                 self.assert_kept(tensors[raw_name], pointwise)
+
+    def test_supertonic_squeeze_roster_survives_filtered_passes(self):
+        vocoder_name = "supertonic/vocoder/t0"
+        vector_name = "supertonic/vector_estimator/t0"
+        vocoder = weights((64, 32, 1))
+        vector = weights((32, 64, 1))
+        for first_tier, second_tier in (("q8_0", "q8_0"), ("q4_0", "q4_0"), ("q8_0", "q4_0")):
+            with self.subTest(first_tier=first_tier, second_tier=second_tier):
+                stem = first_tier + "-then-" + second_tier
+                src = self.directory / (stem + "-source.gguf")
+                first = self.directory / (stem + "-first.gguf")
+                second = self.directory / (stem + "-second.gguf")
+                write_gguf(src, "supertonic3", {vocoder_name: vocoder, vector_name: vector})
+                reader = self.requantize_path(src, first, first_tier, "--name-filter", "/vocoder/")
+                before, first_roster = self.snapshot(reader)
+                del reader
+                reader = self.requantize_path(first, second, second_tier, "--name-filter", "/vector_estimator/")
+                after, final_roster = self.snapshot(reader)
+                del reader
+
+                self.assertEqual(first_roster, [vocoder_name])
+                self.assertEqual(before[vocoder_name], after[vocoder_name])
+                self.assertEqual(after[vocoder_name][:2], ((64, 32), POLICY._QUANT_TYPE[first_tier]))
+                self.assertEqual(after[vocoder_name][2],
+                                 gguf.quants.quantize(vocoder[:, :, 0], POLICY._QUANT_TYPE[first_tier]).tobytes())
+                self.assertEqual(after[vector_name][:2], ((32, 64), POLICY._QUANT_TYPE[second_tier]))
+                self.assertEqual(after[vector_name][2],
+                                 gguf.quants.quantize(vector[:, :, 0], POLICY._QUANT_TYPE[second_tier]).tobytes())
+                self.assertEqual(final_roster, [vocoder_name, vector_name])
+
+    def test_supertonic_squeeze_roster_survives_passthrough(self):
+        name = "supertonic/vocoder/t0"
+        for tier in ("q4_0", "q8_0"):
+            with self.subTest(tier=tier):
+                src = self.directory / (tier + "-source.gguf")
+                first = self.directory / (tier + "-first.gguf")
+                second = self.directory / (tier + "-passthrough.gguf")
+                write_gguf(src, "supertonic3", {name: weights((64, 32, 1))})
+                reader = self.requantize_path(src, first, tier)
+                before, first_roster = self.snapshot(reader)
+                del reader
+                reader = self.requantize_path(first, second, tier, "--name-filter", "no-matching-tensor")
+                after, final_roster = self.snapshot(reader)
+                del reader
+                self.assertEqual(before, after)
+                self.assertEqual(first_roster, [name])
+                self.assertEqual(final_roster, first_roster)
 
     @unittest.skipUnless(all(importlib.util.find_spec(name) is not None for name in CONVERTER_DEPS),
                          "direct converter imports require torch/safetensors/huggingface_hub")
