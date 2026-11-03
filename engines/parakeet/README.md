@@ -118,7 +118,7 @@ machines; see [the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
 ## Backend selection
 
 `parakeet --backend NAME` and `EngineOptions::backend` select the runtime device
-(`auto`, `cpu`, `cuda`, `vulkan`, `opencl`, `webgpu`, `metal`, `hexagon` or an exact ggml device name);
+(`auto`, `cpu`, `cuda`, `vulkan`, `opencl`, `webgpu`, `metal`, `hexagon`, `xdna` or an exact ggml device name);
 `parakeet-fit-params --backend NAME` and `FitOptions::backend` project memory for
 the same device. Long-form encoder graph projections conservatively count up to
 three graphs, while windowed inference retains one; see
@@ -132,6 +132,11 @@ automatic placement and validation coverage,
 (TranscribePsy measurements included), and
 [docs/moss-transcribe.md](docs/moss-transcribe.md#hexagon-npu) for
 MOSS-Transcribe-Diarize on the NPU.
+
+AMD `--backend xdna` uses Fabric LLM's native GGML XDNA backend with the existing
+GGUF model and CPU fallback. F16/BF16 matrix kernels can run on the NPU;
+Q8_0 matrices use the host. This requires the compatible GGML dependency and
+matching XRT/IRON artifacts; see [AMD XDNA](docs/backends.md#amd-xdna-npu).
 
 ## Performance
 

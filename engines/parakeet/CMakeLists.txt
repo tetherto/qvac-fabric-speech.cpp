@@ -815,6 +815,19 @@ if (PARAKEET_BUILD_TESTS)
     parakeet_apply_ccache(test-parakeet-backend-request)
     parakeet_register_test(test-parakeet-backend-request LABEL "unit")
 
+    add_executable(test-encoder-graph-allocator test/test_encoder_graph_allocator.cpp)
+    target_include_directories(test-encoder-graph-allocator PRIVATE src)
+    target_link_libraries(test-encoder-graph-allocator PRIVATE ggml)
+    parakeet_register_test(test-encoder-graph-allocator LABEL "unit")
+
+    add_executable(test-xdna-transcription test/test_xdna_transcription.cpp)
+    target_link_libraries(test-xdna-transcription PRIVATE qvac-parakeet ggml)
+    parakeet_apply_ccache(test-xdna-transcription)
+    parakeet_register_test(test-xdna-transcription
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
+
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
     target_include_directories(test-parakeet-streaming PRIVATE include src ggml/include)

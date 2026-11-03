@@ -80,7 +80,7 @@ void print_usage(const char * argv0) {
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
         "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
-        "                       hexagon (HTP0), or exact ggml device name. Explicit\n"
+        "                       hexagon (HTP0), xdna (XDNA0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
         "                       unavailable.\n"
         "  --backends-dir DIR                 directory to scan for dynamically-loaded\n"

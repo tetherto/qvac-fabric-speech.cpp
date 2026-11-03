@@ -837,7 +837,8 @@ bool Engine::is_transcription_model() const {
 }
 
 BackendDevice Engine::backend_device() const {
-    if (backend_is_hexagon(pimpl_->model.backend_active())) return BackendDevice::NPU;
+    const auto backend = pimpl_->model.backend_active();
+    if (backend_is_hexagon(backend) || backend_is_xdna(backend)) return BackendDevice::NPU;
     return model_has_gpu_backend(pimpl_->model) ? BackendDevice::GPU
                                                 : BackendDevice::CPU;
 }

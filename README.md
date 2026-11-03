@@ -38,6 +38,11 @@ for routing, fallback and validation coverage.
 | [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation, source-conditioned covers, and editing; base additionally supports lego stems ([CLI](engines/audiogen/docs/cli.md), [C++ usage](engines/audiogen/docs/build.md)) |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, optional [Core ML conditioner projection](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner), and metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
 
+Parakeet also accepts explicit [AMD XDNA](engines/parakeet/docs/backends.md#amd-xdna-npu)
+selection through Fabric LLM's native GGML backend. It uses the existing GGUF,
+requires matching XDNA runtime artifacts, and schedules unsupported operations
+on CPU. Q8_0 matrices stay on the host; use F16 for NPU validation.
+
 MOSS cloning matches upstream reference loudness preprocessing and uses the
 TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)
 sets its model-specific sampling parameters explicitly; check generated speech

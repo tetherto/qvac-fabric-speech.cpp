@@ -41,9 +41,10 @@ the whole encoder, not a partial layer count.
 
 Set `EngineOptions::backend` or CLI `--backend` to select a primary GGML backend
 explicitly. `auto` (the default) preserves the policy below; `cpu`, `cuda`,
-`vulkan`, `opencl`, `webgpu`, `metal` and `hexagon` override `n_gpu_layers`. `hexagon`
+`vulkan`, `opencl`, `webgpu`, `metal`, `hexagon` and `xdna` override `n_gpu_layers`. `hexagon`
 selects the `HTP0` device from the `HTP` registry. An exact GGML device name
 such as `HTP0` is also accepted.
+`xdna` selects AMD `XDNA0` explicitly; automatic GPU selection excludes XDNA.
 An unavailable or failed explicit selection fails loading instead of selecting
 another backend. The existing per-operation CPU scheduler still handles
 unsupported operations; selecting HTP0 does not claim every operation ran there.
@@ -203,6 +204,44 @@ cmake -S engines/parakeet -B build-cuda -DGGML_CUDA=ON
 cmake -S engines/parakeet -B build-vulkan -DGGML_VULKAN=ON
 cmake -S engines/parakeet -B build-opencl -DGGML_OPENCL=ON
 ```
+
+## AMD XDNA NPU
+
+Parakeet uses Fabric LLM's native GGML XDNA backend and the existing GGUF model.
+It needs no ONNX export or ONNX Runtime session. Select it with
+`EngineOptions::backend = "xdna"` or `--backend xdna`; `XDNA0` is accepted too.
+`Engine::backend_device()` reports `BackendDevice::NPU` for this selection.
+The encoder retains a scheduler with each cached graph so unsupported operations
+can execute on CPU without invalidating that graph's copies between requests.
+Other backends retain their direct encoder allocator.
+
+The current backend targets XDNA2 devices, including Strix Point and Strix Halo,
+through XRT. Its NPU matrix kernels accept eligible F16/BF16 and K-quantized
+weights; Q8_0 matrices execute on its host path. Use the F16 model for NPU
+validation. The backend also executes host operations inside its own chunks,
+so selecting `XDNA0` does not mean every operation executes on the NPU.
+Its `GGML_XDNA_GLUE_THREADS` and `GGML_XDNA_GLUE_THREADS_BIG` settings control
+that host work independently of Parakeet's `--threads`.
+
+Build the backend and matching IRON kernel artifacts as described in
+[build.md](build.md#amd-xdna-dependency). Missing GEMM artifacts leave matrix
+work on the host; check the loaded geometries and collect XRT submission
+evidence when validating actual NPU execution. Compare CPU and XDNA using the
+same model, audio and host thread settings. The backend's
+`GGML_XDNA_PROF=1` diagnostics describe its host sections; backend identity
+alone is insufficient evidence of NPU execution.
+
+```bash
+GGML_XDNA_KERNEL_DIR=/path/to/xdna-artifacts \
+  build-parakeet/parakeet \
+  --model models/parakeet-tdt-0.6b-v3.f16.gguf \
+  --wav engines/parakeet/test/samples/jfk.wav \
+  --backend xdna --threads 4 --bench --bench-json xdna.json
+```
+
+`test-xdna-transcription` compares CPU and XDNA transcript text and token IDs,
+repeated cached-graph use, streaming and a recreated Engine. It needs the F16
+TDT fixture and XDNA0; hosts without that device skip the fixture test.
 
 ## Hexagon NPU
 
