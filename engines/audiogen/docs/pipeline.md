@@ -44,16 +44,9 @@ weights and graphs live on the first usable backend the ggml registry offers
 full model pair must fit in device memory (~22 GB for the f16 pair, 12.7 GB
 for `q8_0`, 7.6 GB for `q4_k_m`). The LM's KV cache and compute buffers are
 released after the AR stage and rebuilt on the next generation, and the
-vocoder decodes in overlapped tiles whose 32-frame overlap exceeds its conv
-stack's receptive field, so no tile interior depends on context outside the
-tile: the tiled output is bit-identical to a single-shot decode on the CPU and
-matches it to rounding on GPU backends (waveform correlation 0.99999994 on
-CUDA and 0.999996 on Vulkan, RTX 5090), whose GEMM kernels depend on the
-product shape. Together these let the `q4_k_m` pair complete full generations on a
-10 GiB GPU (RTX 3080, peak 9.4 GiB alongside a desktop) and on a 16 GB
-Apple-silicon Mac over Metal (peak RSS 8.4 GiB), both of which the `q8_0`
-pair cannot fit. `tts_cpp::minimax::fit_params` projects this footprint from
-the GGUF metadata before a load; see [memory-fit.md](memory-fit.md). The flow DiT runs with flash attention by default on a GPU
+vocoder decodes in overlapping tiles to bound decode memory. Use
+`tts_cpp::minimax::fit_params` to project the full workload footprint before
+loading; see [memory-fit.md](memory-fit.md). The flow DiT runs with flash attention by default on a GPU
 backend (off on CPU); set `MM3_DIT_NO_FLASH=1` to force it off. The LM runs
 flash attention by default on CUDA and Vulkan, where its teacher-forced logits
 were measured against the CPU rendering, and keeps the explicit-softmax path on
@@ -64,59 +57,9 @@ The weight-free `test-minimax-metal-ops` regression compares the 4096-channel
 condition projection and every DAC transposed-convolution stride against CPU on
 Metal.
 
-Vulkan and CUDA are the measured GPU backends at `q8_0`/`f16`, both on an RTX
-5090. On each, `mm3-replay --mode replay` forcing the recorded official prompt
-tokens, codes, and noise reproduces the CPU rendering (time-domain audio
-correlation 0.9998 on Vulkan, 0.9993 on CUDA), `--mode condcheck` confirms
-byte-identical DiT velocities across repeated computes, and
-`test-minimax-quality` lands the final flow latents on the learned manifold.
-Vulkan is measured with both the `q8_0` and the `f16` pair; the 22 GB `f16`
-pair far exceeds ggml's 1 GiB Vulkan suballocation block and loads through the
-chunked device buffers ggml creates automatically. The full
-`test-backend-ops` suite passes on the same device, including the
-`b_absmax=1e5` LM-shaped `mul_mat` stress cases. The `q4_k_m` pair is
-measured on CPU, Metal (M5), Vulkan (Strix Halo RADV and RTX 3080), and CUDA
-(RTX 3080): teacher-forced replays of the same inputs agree with the
-F32-dequantized reference at 0.97 waveform correlation on every backend
-(the `q8_0` pair's own figure on the same probe is 0.9995), condcheck stays
-byte-identical, and `q4_k_m` generates faster than `q8_0` (Strix Vulkan
-94.7 s vs 105.5 s, CPU 397 s vs 471 s for the same 12 s clip). OpenCL
-remains unmeasured for MiniMax and takes the same all-on-GPU placement, so
-measure it the same way before shipping it.
-
-Every stage evaluates both classifier-free-guidance branches in one pass. The
-LM and the RVQ depth decoder fold the conditional and unconditional rows into
-the columns of each weight product, so a decode step streams every weight once
-instead of once per branch. For float (`f16`/`bf16`/`f32`) weights those
-two-column products request `GGML_PREC_F32`, which CUDA and Vulkan serve with
-matrix-vector kernels that keep the activations and the accumulation in f32 at
-no cost in speed; CUDA needs a ggml that routes the request on half-precision
-weights to that kernel
-([qvac-ext-ggml#104](https://github.com/tetherto/qvac-ext-ggml/pull/104)), and
-an older one computes the same products with f16 activations. Quantized
-weights keep the default precision and their integer kernels, since CUDA would
-serve the request by dequantizing the whole matrix for an f32 GEMM. The LM and
-the depth decoder also load each layer's q/k/v and gate/up projections stacked
-into one matrix when the parts share a type (MiniMax's own conversions always do; a
-mixed k-quant layer keeps them separate), so a layer reads its input with two
-products instead of five, and the LM keeps its K/V cache as one
-`[head_dim * heads]` row per position with the unconditional row's positions
-after the conditional row's, which attention reads in place. The flow DiT runs
-both branches as one batched forward with a condition gate per branch, which
-adds about 100 MB of DiT compute buffer at the 689-frame window; its biases are
-added straight after their products, where CUDA folds them into the GEMM's f32
-conversion
-([qvac-ext-ggml#105](https://github.com/tetherto/qvac-ext-ggml/pull/105)). With
-the `f16` pair on an RTX 5090 this generates a 20 s vocal track (500 frames) in
-11.7 s on CUDA and 13.2 s on Vulkan (15.1 s and 15.7 s before) and a 2-minute
-song (3000 frames) in 73.9 s and 84.2 s (102.3 s and 105.4 s before); the LM
-decode step drops from 15.8 to 9.6 ms on CUDA and from 15.7 to 11.3 ms on
-Vulkan over the 2-minute context. A 3001-iteration teacher-forced replay of
-that song agrees with the CPU rendering as closely as before (CFG-guided argmax
-agreement 99.70 % on both backends, against 99.60 % on CUDA and 99.87 % on
-Vulkan before), and a 20 s replay through the full flow reproduces the CPU
-audio at 0.99982 (CUDA) and 0.99987 (Vulkan) waveform correlation (0.99988 and
-0.99989 before).
+Backend parity measurements and optimization details are in
+[performance.md](performance.md#minimax-native-backend-validation-and-optimization).
+OpenCL remains unmeasured for MiniMax.
 
 The frame rate, maximum frame count, CFG scale, and output sample rate come from
 GGUF metadata. Current converted files specify 25 frames per second, at most
@@ -126,18 +69,14 @@ but the engine uses its own recommendation of 20 unless `inference_steps` is set
 on the request, because the metadata value is a fixed converter constant rather
 than a property of the checkpoint.
 
-Files converted before 2026-09-17 carry `mm3.flow.steps = 30`; they run at 20
-steps like everything else. On an AMD Strix Halo (Radeon 8060S, RADV) the flow
-stage is exactly linear in the step count — 612 ms per step at L=689, flat from
-8 steps to 30 — so 20 steps cuts a 10 s track from 57.0 s to 47.2 s end to end.
-
 Download the Comfy-Org single-file safetensors checkpoint (the converter's
 preferred source; requires the Hugging Face CLI,
-`pip install -U huggingface_hub`) and convert it:
+`pip install -U huggingface_hub`); conversion needs `numpy` and `gguf`.
+Run these commands from the repository root:
 
 ```sh
-scripts/download-minimax-music3.sh --dir checkpoints/MiniMax-Music3
-python3 scripts/convert-minimax-music3-to-gguf.py \
+engines/audiogen/scripts/download-minimax-music3.sh --dir checkpoints/MiniMax-Music3
+python3 engines/audiogen/scripts/convert-minimax-music3-to-gguf.py \
   --src checkpoints/MiniMax-Music3 --out models/minimax --quant f16
 ```
 
@@ -166,16 +105,6 @@ would silently fall back to a host copy on every depth step). The condition
 encoder and vocoder keep their converted (F16/F32) precision. Quantize from the `f16` pair, not `q8_0` —
 `acestep-quantize` only requantizes BF16/F16/F32 source tensors, so an
 already-`q8_0` tensor passes through untouched.
-
-The depth decoder used to be held at `q8_0` whatever variant was requested, on the
-grounds that its per-frame matvec graphs want the integer fast path. Since the
-depth decoder gained a K/V cache every one of those matvecs runs with a single
-new token, and at that width `q4_K` measured faster than `q8_0` on an AMD Strix
-Halo under RADV (65 µs against 107 µs for the 4096×4096 projections) with a
-teacher-forced correlation of 0.9998 against the `q8_0` render. That device
-reports no integer dot-product support, so the integer fast path was not part of
-the comparison; on a device that has it, `q8_0` may still be the faster choice
-for the depth decoder and is one `--quant q8_0` conversion away.
 
 `mm3-replay` (built with `AUDIOGEN_BUILD_EXECUTABLES`) is the MiniMax CLI and
 parity harness:
@@ -239,7 +168,10 @@ caption, complete lyrics, and every metadata field left unset — BPM,
 key/scale, time signature, vocal language, and duration when `duration <= 0`.
 Fields the caller sets are forced through the metadata FSM and kept. `lyrics`
 must be empty (the LM writes them) or `[Instrumental]`, which forwards the
-instrumental hint to the LM. Simple Mode requires the plain `text2music` task
+instrumental hint to the LM. In C++, `GenerateParams::lyrics` defaults to
+`[Instrumental]`: call `params.lyrics.clear()` to request LM-written vocals.
+The CLI clears lyrics automatically with `--simple` when `--lyrics` is omitted.
+Simple Mode requires the plain `text2music` task
 with no pre-supplied `audio_codes`; the composed request is reported back in
 `GenerateResult::metadata`. The inspire pass emits `lm` progress ticks and
 honors cancellation like every other stage.
@@ -358,9 +290,11 @@ The download script needs the Hugging Face CLI
 live under `./build/engines/audiogen/`; a standalone `engines/audiogen` build
 places them under `./build/audiogen/` instead.
 
+Run these commands from the repository root:
+
 ```sh
-scripts/download-acestep-checkpoints.sh --dir checkpoints
-python3 scripts/convert-acestep-to-gguf.py --checkpoints checkpoints --out models/bf16
+engines/audiogen/scripts/download-acestep-checkpoints.sh --dir checkpoints
+python3 engines/audiogen/scripts/convert-acestep-to-gguf.py --checkpoints checkpoints --out models/bf16
 
 mkdir -p models/acestep
 ./build/engines/audiogen/acestep-quantize models/bf16/Qwen3-Embedding-0.6B-BF16.gguf \

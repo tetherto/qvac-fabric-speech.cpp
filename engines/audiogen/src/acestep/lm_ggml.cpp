@@ -600,6 +600,11 @@ static LMModel * lm_model_load_impl(const std::string & path, ggml_backend_t bac
     // Exact mmapped weight footprint (see dit_gguf_mapped_bytes); reported by
     // lm_model_weight_bytes below so mapped loads don't look like a few-MB stub.
     m->mapped_bytes = mapped ? dit_gguf_mapped_bytes(ctx, g) : 0;
+    // A split table is retained in the host GGUF mapping for embedding lookup,
+    // separately from its uploaded head chunks. It has no tensor in weight_ctx,
+    // so the sum above cannot see it. Charge its logical payload in both real
+    // and metadata-only loads; this is not the whole mapping's measured RSS.
+    if (split_table) m->mapped_bytes += ggml_nbytes(embed);
     if (measure) {
         measure->weights_mapped_bytes = m->mapped_bytes;
         // Mark still-unallocated weights externally-allocated so graph sizing

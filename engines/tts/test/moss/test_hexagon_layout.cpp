@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -167,14 +168,41 @@ double relative_l2(const std::vector<float> & expected, const std::vector<float>
 }
 
 bool audio_close(const DelayLogits & expected, const DelayLogits & actual) {
+    if (expected.audio.size() != actual.audio.size()) return false;
     for (size_t channel = 0; channel < expected.audio.size(); ++channel) {
-        if (relative_l2(expected.audio[channel], actual.audio[channel]) > FUSED_RELATIVE_TOLERANCE) return false;
+        if (!(relative_l2(expected.audio[channel], actual.audio[channel]) <= FUSED_RELATIVE_TOLERANCE)) return false;
     }
-    return expected.audio.size() == actual.audio.size();
+    return true;
 }
 
 bool logits_close(const DelayLogits & expected, const DelayLogits & actual) {
     return relative_l2(expected.text, actual.text) <= FUSED_RELATIVE_TOLERANCE && audio_close(expected, actual);
+}
+
+void test_audio_comparison_rejects_invalid_logits() {
+    const DelayLogits expected{{1.0f, 2.0f}, {{3.0f, 4.0f}, {5.0f, 6.0f}}};
+    check(logits_close(expected, expected), "equal finite logits pass layout comparison");
+    DelayLogits finite = expected;
+    finite.audio[0][0] += 0.0001f;
+    check(logits_close(expected, finite), "near finite audio passes layout comparison");
+    finite.audio[0][0] += 0.1f;
+    check(!logits_close(expected, finite), "divergent finite audio fails layout comparison");
+    for (float value : {std::numeric_limits<float>::quiet_NaN(),
+                        std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()}) {
+        for (size_t channel = 0; channel < expected.audio.size(); ++channel) {
+            DelayLogits actual = expected;
+            actual.audio[channel][0] = value;
+            check(!logits_close(expected, actual), "nonfinite candidate audio fails layout comparison");
+            check(!logits_close(actual, expected), "nonfinite reference audio fails layout comparison");
+        }
+    }
+    DelayLogits fewer_channels = expected;
+    fewer_channels.audio.pop_back();
+    check(!logits_close(expected, fewer_channels), "missing audio channel fails layout comparison");
+    check(!logits_close(fewer_channels, expected), "extra audio channel fails layout comparison");
+    DelayLogits fewer_logits = expected;
+    fewer_logits.audio[0].pop_back();
+    check(!logits_close(expected, fewer_logits), "audio logit count mismatch fails layout comparison");
 }
 
 void check_fused_steps(DelayLM & unfused, DelayLM & fused, const std::vector<DelayRow> & rows,
@@ -631,6 +659,7 @@ void test_cpu_keeps_tables_on_device() {
 
 int main() {
     try {
+        test_audio_comparison_rejects_invalid_logits();
         test_precision_fixture_keeps_the_tensor_list();
         test_hexagon_weight_types();
         test_first_refused_weight();
