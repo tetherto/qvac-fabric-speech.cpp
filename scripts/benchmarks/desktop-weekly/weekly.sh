@@ -146,6 +146,7 @@ main() {
   if [ "$UPDATE" = 1 ]; then update_sources || fail "source update failed"; fi
   [ -d "$ENGINE_SRC/.git" ] || fail "no engine checkout at $ENGINE_SRC"
   FAMILIES="$(selected_families)"
+  export SELECTED_FAMILIES="$FAMILIES"
   apply_quick_iterations
   bash "$TOOLS_DIR/fetch-models.sh" "$FAMILIES" > "$RUN_DIR/logs/fetch-models.log" 2>&1 || log "fetch-models.sh reported errors"
   bash "$TOOLS_DIR/machine-info.sh" > "$RUN_DIR/machine.json"

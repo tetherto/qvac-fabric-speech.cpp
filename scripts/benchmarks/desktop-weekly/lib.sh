@@ -50,6 +50,7 @@ load_config() {
   QUICK_FAMILIES="${QUICK_FAMILIES:-$DEFAULT_QUICK_FAMILIES}"
   SKIP_FAMILIES="${SKIP_FAMILIES:-}"
   MEMORY_SAMPLER="${MEMORY_SAMPLER:-auto}"
+  EVICT_PAGE_CACHE="${EVICT_PAGE_CACHE:-0}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -110,8 +111,13 @@ family_warmup() {
 }
 
 cmake_targets() {
-  { jq -r 'to_entries[] | select(.key | startswith("_") | not) | .value.cmake_target' "$FAMILIES_JSON"; echo "$EXTRA_TARGETS"; } |
-    tr ' ' '\n' | sort -u | tr '\n' ' '
+  local family
+  { for family in $(split_list "${SELECTED_FAMILIES:-$(all_families | tr '\n' ',')}"); do family_field "$family" cmake_target; done
+    echo "$EXTRA_TARGETS"; } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
+}
+
+cmake_generator() {
+  if command -v ninja > /dev/null; then echo "Ninja"; else echo "Unix Makefiles"; fi
 }
 
 gpu_busy_linux() {
@@ -280,7 +286,7 @@ build_is_current() {
 
 configure_ggml() {
   local backend="$1" dir="$BUILDS_DIR/$1" log_dir="$2"
-  cmake -S "$GGML_SRC" -B "$dir/ggml" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  cmake -S "$GGML_SRC" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_CCACHE=OFF \
     -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" $(ggml_backend_options "$backend") > "$log_dir/ggml-configure.log" 2>&1
 }
@@ -294,7 +300,7 @@ build_ggml() {
 
 configure_engine() {
   local dir="$BUILDS_DIR/$1" log_dir="$2"
-  cmake -S "$ENGINE_SRC" -B "$dir/speech" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
+  cmake -S "$ENGINE_SRC" -B "$dir/speech" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
     -DCMAKE_PREFIX_PATH="$dir/ggml-install" > "$log_dir/speech-configure.log" 2>&1
 }
 
@@ -423,11 +429,16 @@ discard_cell() {
   rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv"
 }
 
+evict_model_cache() {
+  if [ "$EVICT_PAGE_CACHE" = 1 ]; then python3 "$TOOLS_DIR/prepare-derived.py" evict "$MODELS_DIR/store" > /dev/null; fi
+}
+
 run_family() {
   local family="$1" backend="$2" results="$3" out="$3/$1.json" status signature
   signature="$(cell_signature "$family" "$backend")"
   if cell_is_reusable "$out" "$signature"; then log "skip $family on $backend (result present with the same inputs)"; return 0; fi
   if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
+  evict_model_cache
   log "run $family on $backend"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1

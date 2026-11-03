@@ -118,7 +118,10 @@ check_lib_targets() {
   for target in whisper-cli parakeet-cli supertonic-bench audio8-cli moss-cli music-cli; do
     case " $targets " in *" $target "*) ;; *) fail "cmake target $target missing from '$targets'" ;; esac
   done
-  ok "cmake targets cover every family plus whisper-cli"
+  targets="$(SELECTED_FAMILIES=parakeet-tdt,supertonic3 cmake_targets)"
+  [ "$targets" = "parakeet-cli supertonic-bench whisper-cli " ] || fail "selected-family targets: '$targets'"
+  [ "$(PATH=/nonexistent cmake_generator)" = "Unix Makefiles" ] || fail "generator fallback without ninja"
+  ok "cmake targets follow the selected families and the generator falls back to make"
 }
 
 check_lib_lock() {
@@ -208,6 +211,8 @@ check_machine_quirks() {
   MEMORY_SAMPLER=auto
   [ "$(perl "$HERE/nsdate" +%N | wc -c | tr -d ' ')" = 10 ] || fail "nsdate +%N is not nine digits"
   [[ "$(perl "$HERE/nsdate")" =~ ^[0-9]{19}$ ]] || fail "nsdate default is not seconds plus nanoseconds"
+  mkdir -p "$TMP/evict" && printf 'data' > "$TMP/evict/a.bin"
+  [[ "$(python3 "$HERE/prepare-derived.py" evict "$TMP/evict")" =~ ^advised\ [01]\ files$ ]] || fail "evict subcommand"
   mkdir -p "$ENGINE_SRC/scripts/benchmarks"
   echo 'now=$(/bin/date +%s%N)' > "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
   install_nanosecond_shim
