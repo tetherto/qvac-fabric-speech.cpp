@@ -210,6 +210,8 @@ struct EngineOptions {
     // - Nemotron: locale alias or "auto"; empty resolves to "auto".
     // - Multilingual CTC: required language id (e.g. "hi", "ta") when the
     //   GGUF advertises parakeet.ctc.lang_* ranges.
+    // - TranscribePsy-250M-EU: "en" runs the bare trunk, "other" runs its
+    //   CAFE adapters, and "auto" (also empty) chooses via the language gate.
     // - Monolingual CTC and existing transducer families: ignored.
     // Unsupported Nemotron locales and multilingual CTC language IDs throw.
     std::string language;
@@ -245,7 +247,9 @@ enum class BackendDevice : int {
 // before the first encoder dispatch.
 struct PrecomputedMel {
     std::vector<float> mel;
+    std::vector<float> eu_gate_mel;
     int    n_frames      = 0;
+    int    eu_gate_frames = 0;
     int    n_mels        = 0;
     int    audio_samples = 0;
     int    sample_rate   = 16000;

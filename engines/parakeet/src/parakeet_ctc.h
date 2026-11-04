@@ -217,6 +217,25 @@ struct TdtWeights {
     ggml_tensor * joint_out_b  = nullptr;
 };
 
+struct TranscribePsyEuAdapter {
+    int layer = -1;
+    ggml_tensor * down_w = nullptr;
+    ggml_tensor * down_b = nullptr;
+    ggml_tensor * up_w = nullptr;
+    ggml_tensor * up_b = nullptr;
+};
+
+struct TranscribePsyEuGate {
+    int layer = -1;
+    int attn_dim = 0;
+    int hidden = 0;
+    float threshold = 0.0f;
+    std::vector<float> proj0_w, proj0_b, proj2_w, proj2_b;
+    std::vector<float> norm_w, norm_b, mlp0_w, mlp0_b, mlp3_w, mlp3_b;
+};
+
+inline constexpr int kTranscribePsyEuGateSeconds = 20;
+
 using RnntWeights = TdtWeights;
 
 struct NemotronLocalePrompt {
@@ -477,6 +496,9 @@ struct ParakeetCtcModel {
     CtcHeadWeights            ctc;
     RnntWeights               rnnt;
     TdtWeights                tdt;
+    std::vector<TranscribePsyEuAdapter> eu_adapters;
+    TranscribePsyEuGate       eu_gate;
+    bool                      eu_use_adapters = false;
     // CPU-resident copies of the TDT / RNN-T decoder weights, built when the
     // encoder runs on OpenCL: ggml-opencl cannot run the decoder graphs, so
     // they run on the CPU backend from these copies. Empty on every other
@@ -811,6 +833,14 @@ int run_encoder(ParakeetCtcModel   & model,
                 bool                 capture_intermediates = true,
                 bool                 allow_coreml_padded = false,
                 const EncoderOutputConsumer & consumer = {});
+
+bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
+                                    const std::string & language,
+                                    const float * mel, int n_mel_frames, int n_mels,
+                                    float * p_non_english = nullptr,
+                                    const float * cropped_mel = nullptr,
+                                    int cropped_mel_frames = 0,
+                                    int audio_samples = 0);
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute

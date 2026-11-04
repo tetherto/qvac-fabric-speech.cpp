@@ -87,7 +87,17 @@ def parse_args(
             "its default CTC branch."
         ),
     )
+    parser.add_argument(
+        "--eu-adapters", type=Path, default=None,
+        help="TranscribePsy-250M-EU adapters.safetensors (requires --eu-gate).",
+    )
+    parser.add_argument(
+        "--eu-gate", type=Path, default=None,
+        help="TranscribePsy-250M-EU language_gate.safetensors (requires --eu-adapters).",
+    )
     args = parser.parse_args(argv)
+    if (args.eu_adapters is None) != (args.eu_gate is None):
+        parser.error("--eu-adapters and --eu-gate must be specified together")
     if args.out is None:
         args.out = Path(f"models/{DEFAULT_MODEL_STEM}.{args.quant}.gguf")
     return args
