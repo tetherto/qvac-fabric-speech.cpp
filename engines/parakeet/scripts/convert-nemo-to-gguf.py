@@ -669,15 +669,17 @@ def detect_model_type(cfg: dict, head: str = "auto") -> str:
     # Hybrid RNNT+CTC targets contain "RNNT", so resolve them before the
     # generic RNNT branch. Vanilla hybrid (IndicConformer) exports CTC for
     # v1; hybrid+TDT keeps the TDT export path.
+    loss = cfg.get("loss") or {}
+    durations = (cfg.get("model_defaults") or {}).get("tdt_durations") or \
+                (loss.get("tdt_kwargs") or {}).get("durations") or \
+                (cfg.get("decoding") or {}).get("durations")
     if "HybridRNNTCTC" in target:
-        durations = cfg.get("model_defaults", {}).get("tdt_durations")
         if durations:
             return "tdt"
         return "ctc"
     is_rnnt = "rnnt" in target.lower() or \
-              "tdt" in cfg.get("loss", {}).get("loss_name", "").lower()
+              "tdt" in str(loss.get("loss_name", "")).lower()
     if is_rnnt:
-        durations = cfg.get("model_defaults", {}).get("tdt_durations")
         if durations:
             return "tdt"
         labels = cfg.get("labels") or cfg.get("decoder", {}).get("vocabulary") or []
@@ -1010,11 +1012,64 @@ def write_provenance(writer, model_type: str, description=None):
         )
 
 
+def load_transcribepsy_eu_weights(cfg, model_type, eu_adapters, eu_gate):
+    if model_type != "tdt":
+        raise ValueError("TranscribePsy EU adapters require a TDT checkpoint")
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+    with safe_open(str(eu_adapters), framework="pt") as f:
+        adapter_meta = f.metadata() or {}
+    with safe_open(str(eu_gate), framework="pt") as f:
+        gate_meta = f.metadata() or {}
+    layers = [int(v) for v in adapter_meta["encoder_layers"].split(",")]
+    adapters = load_file(str(eu_adapters), device="cpu")
+    gate = load_file(str(eu_gate), device="cpu")
+    dim = int(adapter_meta["dim"])
+    rank = int(adapter_meta["rank"])
+    tap = int(gate_meta["tap_encoder_layer"])
+    attn_dim = int(gate_meta["attn_dim"])
+    hidden = int(gate_meta["hidden"])
+    threshold = float(gate_meta["threshold"])
+    if dim != int(cfg["encoder"]["d_model"]) or len(layers) != len(set(layers)) or \
+        any(layer < 0 or layer >= int(cfg["encoder"]["n_layers"]) for layer in layers) or \
+        tap < 0 or tap >= int(cfg["encoder"]["n_layers"]) or not 0 < threshold < 1:
+        raise ValueError("TranscribePsy EU adapter/gate metadata is incompatible with encoder")
+    adapter_shapes = {}
+    for i in range(len(layers)):
+        adapter_shapes.update({
+            f"adapter.{i}.down.weight": (rank, dim),
+            f"adapter.{i}.down.bias": (rank,),
+            f"adapter.{i}.up.weight": (dim, rank),
+            f"adapter.{i}.up.bias": (dim,),
+        })
+    gate_shapes = {
+        "pool.proj.0.weight": (attn_dim, dim),
+        "pool.proj.0.bias": (attn_dim,),
+        "pool.proj.2.weight": (dim, attn_dim),
+        "pool.proj.2.bias": (dim,),
+        "norm.weight": (2 * dim,), "norm.bias": (2 * dim,),
+        "mlp.0.weight": (hidden, 2 * dim), "mlp.0.bias": (hidden,),
+        "mlp.3.weight": (1, hidden), "mlp.3.bias": (1,),
+    }
+    for label, tensors, shapes in (("adapters", adapters, adapter_shapes),
+                                    ("gate", gate, gate_shapes)):
+        if set(tensors) != set(shapes):
+            raise ValueError(f"TranscribePsy EU {label} tensor names mismatch")
+        for name, shape in shapes.items():
+            if tuple(tensors[name].shape) != shape:
+                raise ValueError(f"TranscribePsy EU {label} tensor {name} has invalid shape")
+    return layers, adapters, gate, rank, tap, attn_dim, hidden, threshold
+
+
 def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
                multilingual_tok: dict, quant: str, head: str = "auto",
                description=None, long_form_window_sec=None, long_form_overlap=None,
-               writer_factory=None):
+               writer_factory=None, eu_adapters=None, eu_gate=None):
     model_type = detect_model_type(cfg, head)
+    if (eu_adapters is None) != (eu_gate is None):
+        raise ValueError("TranscribePsy EU requires both adapters and gate")
+    eu_weights = (load_transcribepsy_eu_weights(cfg, model_type, eu_adapters, eu_gate)
+                  if eu_adapters is not None else None)
     if model_type == "rnnt":
         validate_rnnt_contract(cfg, sd)
     if model_type == "eou":
@@ -1066,6 +1121,15 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
     writer.add_file_type(FILE_TYPE_MAP[quant])
 
     writer.add_string("parakeet.model.type", model_type)
+    if eu_weights is not None:
+        layers, _, _, rank, tap, attn_dim, hidden, threshold = eu_weights
+        writer.add_string("parakeet.model_variant", "transcribepsy-250m-eu")
+        writer.add_array("parakeet.eu.adapter_layers", layers)
+        writer.add_uint32("parakeet.eu.adapter_rank", rank)
+        writer.add_uint32("parakeet.eu.gate_layer", tap)
+        writer.add_uint32("parakeet.eu.gate_attn_dim", attn_dim)
+        writer.add_uint32("parakeet.eu.gate_hidden", hidden)
+        writer.add_float32("parakeet.eu.gate_threshold", threshold)
 
     conv_norm_type   = str(enc.get("conv_norm_type", "batch_norm"))
     conv_context_str = str(enc.get("conv_context_size", "default"))
@@ -1310,6 +1374,16 @@ def write_gguf(out: Path, ckpt: Path, cfg: dict, sd: dict, tok_bytes: bytes,
         add_f32(f"{p}.norm_out.weight",   sd[f"{k}.norm_out.weight"])
         add_f32(f"{p}.norm_out.bias",     sd[f"{k}.norm_out.bias"])
 
+    if eu_weights is not None:
+        layers, adapters, gate, _, _, _, _, _ = eu_weights
+        for i, _ in enumerate(layers):
+            p = f"adapter.{i}"
+            for part in ("down", "up"):
+                add_2d(f"eu.{p}.{part}.weight", adapters[f"{p}.{part}.weight"])
+                add_f32(f"eu.{p}.{part}.bias", adapters[f"{p}.{part}.bias"])
+        for name, tensor in gate.items():
+            writer.add_tensor(f"eu.gate.{name}", as_np(tensor, np.float32))
+
     if model_type == "ctc":
         dec_w, dec_b = resolve_ctc_head_tensors(sd)
         add_2d ("ctc.decoder.weight", dec_w)
@@ -1427,6 +1501,7 @@ def main():
         args.out, ckpt, cfg, sd, tok_bytes, multilingual_tok, args.quant,
         args.head, args.description,
         args.long_form_window_sec, args.long_form_overlap,
+        eu_adapters=args.eu_adapters, eu_gate=args.eu_gate,
     )
 
 

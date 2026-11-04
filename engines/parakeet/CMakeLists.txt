@@ -682,6 +682,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
     set(_qvp_tdt_coreml     "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3-encoder.mlmodelc")
     set(_qvp_transcribepsy_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub.gguf")
+    set(_qvp_transcribepsy_eu_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu.gguf")
     set(_qvp_transcribepsy_coreml_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml.gguf")
     set(_qvp_transcribepsy_coreml_encoder "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-encoder.mlmodelc")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
@@ -1642,6 +1643,15 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_nemo_to_gguf.py")
         set_property(TEST test-converter-rnnt PROPERTY LABELS unit)
+        if (TARGET parakeet-cli)
+            add_test(NAME test-transcribepsy-eu
+                COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_transcribepsy_eu.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_transcribepsy_eu_gguf}")
+            set_tests_properties(test-transcribepsy-eu PROPERTIES
+                LABELS "fixture" SKIP_RETURN_CODE 77)
+        endif()
         add_test(
             NAME test-converter-moss-transcribe
             COMMAND ${Python3_EXECUTABLE}
@@ -2926,6 +2936,13 @@ if (PARAKEET_BUILD_TESTS)
     target_link_libraries(test-transcribepsy PRIVATE qvac-parakeet)
     target_include_directories(test-transcribepsy PRIVATE include src ggml/include)
     parakeet_apply_ccache(test-transcribepsy)
+    add_executable(test-transcribepsy-eu-api test/test_transcribepsy_eu_api.cpp)
+    target_link_libraries(test-transcribepsy-eu-api PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(test-transcribepsy-eu-api)
+    parakeet_register_test(test-transcribepsy-eu-api
+        LABEL "fixture"
+        ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+        REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}")
     set(_qvp_transcribepsy_clips
         "--wav" "${_qvp_jfk_wav}" "--wav2" "${_qvp_fr_multipiece_wav}" "--wav-sample" "${_qvp_sample_wav}")
     set(_qvp_transcribepsy_clip_files "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "${_qvp_sample_wav}")

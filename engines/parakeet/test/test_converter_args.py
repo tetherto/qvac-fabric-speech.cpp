@@ -84,6 +84,14 @@ class ConverterArgsTest(unittest.TestCase):
         args = parse_args(argv=["--description", "TranscribePsy-250M-EU-sub"])
         self.assertEqual(args.description, "TranscribePsy-250M-EU-sub")
 
+    def test_eu_weights_must_be_supplied_together(self):
+        with self.assertRaises(SystemExit):
+            parse_args(argv=["--eu-adapters", "adapters.safetensors"])
+        args = parse_args(argv=["--eu-adapters", "adapters.safetensors",
+                                "--eu-gate", "language_gate.safetensors"])
+        self.assertEqual(args.eu_adapters, Path("adapters.safetensors"))
+        self.assertEqual(args.eu_gate, Path("language_gate.safetensors"))
+
 
 if __name__ == "__main__":
     unittest.main()

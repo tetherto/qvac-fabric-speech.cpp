@@ -2,6 +2,7 @@
 
 #include "parakeet_ctc.h"
 #include "long_form.h"
+#include "mel_preprocess.h"
 #include "parakeet_log.h"
 #include "backend_util.h"
 #include "encoder_graph_allocator.h"
@@ -60,6 +61,7 @@ struct EncoderGraph {
     int            n_run_layers = 0;
     bool           all_valid = false;
     bool           bypass_pre_encode = false; // true: skip subsampling, pre_encode_in is direct input
+    bool           eu_use_adapters = false;
 
     std::vector<float> pe_host;
     std::vector<float> att_mask_host;   // (T_enc, T_enc) row-major; 0 for visible, -inf for masked
@@ -128,6 +130,7 @@ struct EncoderGraph {
         T_enc = 0;
         all_valid = false;
         bypass_pre_encode = false;
+        eu_use_adapters = false;
         pe_host.clear();
         att_mask_host.clear();
         src_backup.clear();
@@ -2294,6 +2297,69 @@ static void load_encoder_weights(ParakeetCtcModel::Impl * impl, ParakeetCtcModel
     }
 }
 
+static void load_transcribepsy_eu_weights(const gguf_context * g,
+                                         ParakeetCtcModel::Impl * impl,
+                                         ParakeetCtcModel & out_model,
+                                         bool measure) {
+    const int id = require_key(g, "parakeet.eu.adapter_layers");
+    if (gguf_get_kv_type(g, id) != GGUF_TYPE_ARRAY ||
+        gguf_get_arr_type(g, id) != GGUF_TYPE_INT32)
+        throw std::runtime_error("gguf: invalid TranscribePsy EU adapter layer type");
+    const size_t count = gguf_get_arr_n(g, id);
+    if (count == 0 || count > (size_t) out_model.encoder_cfg.n_layers)
+        throw std::runtime_error("gguf: invalid TranscribePsy EU adapter count");
+    const int n = (int) count;
+    const int32_t * layers = (const int32_t *) gguf_get_arr_data(g, id);
+    const int dim = out_model.encoder_cfg.d_model;
+    const int rank = (int) get_u32(g, "parakeet.eu.adapter_rank", 0);
+    auto shape = [](ggml_tensor * t, int64_t n0, int64_t n1 = 1) {
+        return t && t->ne[0] == n0 && t->ne[1] == n1;
+    };
+    if (n <= 0 || dim <= 0 || rank <= 0 || !layers)
+        throw std::runtime_error("gguf: invalid TranscribePsy EU adapter metadata");
+    for (int i = 0; i < n; ++i) {
+        TranscribePsyEuAdapter a;
+        a.layer = layers[i];
+        if (a.layer < 0 || a.layer >= out_model.encoder_cfg.n_layers ||
+            (i > 0 && a.layer <= layers[i - 1]))
+            throw std::runtime_error("gguf: invalid TranscribePsy EU adapter layer");
+        const std::string p = "eu.adapter." + std::to_string(i) + ".";
+        a.down_w = require_tensor(impl->ctx, p + "down.weight");
+        a.down_b = require_tensor(impl->ctx, p + "down.bias");
+        a.up_w = require_tensor(impl->ctx, p + "up.weight");
+        a.up_b = require_tensor(impl->ctx, p + "up.bias");
+        if (!shape(a.down_w, dim, rank) || !shape(a.down_b, rank) ||
+            !shape(a.up_w, rank, dim) || !shape(a.up_b, dim))
+            throw std::runtime_error("gguf: invalid TranscribePsy EU adapter tensor shape");
+        out_model.eu_adapters.push_back(a);
+    }
+    auto & gate = out_model.eu_gate;
+    gate.layer = (int) get_u32(g, "parakeet.eu.gate_layer", out_model.encoder_cfg.n_layers);
+    gate.attn_dim = (int) get_u32(g, "parakeet.eu.gate_attn_dim", 0);
+    gate.hidden = (int) get_u32(g, "parakeet.eu.gate_hidden", 0);
+    gate.threshold = get_f32(g, "parakeet.eu.gate_threshold", -1.0f);
+    if (gate.layer < 0 || gate.layer >= out_model.encoder_cfg.n_layers ||
+        gate.attn_dim <= 0 || gate.hidden <= 0 ||
+        !(gate.threshold > 0.0f && gate.threshold < 1.0f))
+        throw std::runtime_error("gguf: invalid TranscribePsy EU gate metadata");
+    auto read = [&](const std::string & name, int64_t n0, int64_t n1 = 1) {
+        ggml_tensor * t = require_tensor(impl->ctx, "eu.gate." + name);
+        if (!shape(t, n0, n1) || t->type != GGML_TYPE_F32)
+            throw std::runtime_error("gguf: invalid TranscribePsy EU gate tensor " + name);
+        return measure ? std::vector<float>{} : read_filterbank_to_vector(t);
+    };
+    gate.proj0_w = read("pool.proj.0.weight", dim, gate.attn_dim);
+    gate.proj0_b = read("pool.proj.0.bias", gate.attn_dim);
+    gate.proj2_w = read("pool.proj.2.weight", gate.attn_dim, dim);
+    gate.proj2_b = read("pool.proj.2.bias", dim);
+    gate.norm_w = read("norm.weight", 2 * dim);
+    gate.norm_b = read("norm.bias", 2 * dim);
+    gate.mlp0_w = read("mlp.0.weight", 2 * dim, gate.hidden);
+    gate.mlp0_b = read("mlp.0.bias", gate.hidden);
+    gate.mlp3_w = read("mlp.3.weight", gate.hidden, 1);
+    gate.mlp3_b = read("mlp.3.bias", 1);
+}
+
 // Shared body of load_from_gguf and load_from_gguf_metadata_only. When
 // `measure` is non-null the load is metadata-only: every allocation the real
 // path makes is sized into `measure` instead of performed and no tensor data
@@ -2410,7 +2476,8 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     // cannot project such a model.
     const bool gguf_has_encoder = gguf_has_encoder_weights(g);
 #ifdef PARAKEET_USE_COREML
-    if (!measure && coreml_must_own_encoder(gguf_has_encoder)) {
+    if (!measure && get_str(g, "parakeet.model_variant", "") != "transcribepsy-250m-eu" &&
+        coreml_must_own_encoder(gguf_has_encoder)) {
         impl->ctx_coreml = init_coreml_only_encoder(g, gguf_path, verbose);
         impl->coreml_owns_encoder = impl->ctx_coreml != nullptr;
     }
@@ -2591,6 +2658,10 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     // Optional variant tag (empty for legacy GGUFs that predate the key).
     out_model.model_variant = get_str(g, "parakeet.model_variant", "");
+    if (out_model.model_variant == "transcribepsy-250m-eu" &&
+        out_model.model_type != ParakeetModelType::TDT) {
+        throw std::runtime_error("gguf: TranscribePsy EU requires a TDT head");
+    }
     long_form_hint_for_model(get_u32(g, "parakeet.long_form.window_frames", 0),
                              get_u32(g, "parakeet.long_form.context_frames", 0),
                              get_str(g, "general.description", ""),
@@ -2741,6 +2812,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
     if (!owns_encoder) {
         load_encoder_weights(impl.get(), out_model);
     }
+
+    if (out_model.model_variant == "transcribepsy-250m-eu")
+        load_transcribepsy_eu_weights(g, impl.get(), out_model, measure != nullptr);
 
     if (out_model.model_type == ParakeetModelType::CTC) {
         out_model.ctc.w = require_tensor(impl->ctx, "ctc.decoder.weight");
@@ -4465,6 +4539,7 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
     if (n_run_layers > N_LAYERS) n_run_layers = N_LAYERS;
     if (n_run_layers < 0)        n_run_layers = 0;
     g.n_run_layers = n_run_layers;
+    g.eu_use_adapters = model.eu_use_adapters;
 
     build_pos_proj_cache(model, g, backend, n_run_layers, T, /*measure_only=*/measure_compute != nullptr);
     const float ff_headroom = matmul_output_headroom(backend);
@@ -4585,6 +4660,16 @@ static int build_encoder_graph_cached(const ParakeetCtcModel & model,
                                       dw_lowering, model.impl->attn, model.impl->glu_fused,
                                       enc.conv_norm_type, enc.conv_causal, ff_headroom);
         }
+        if (model.eu_use_adapters) {
+            for (const auto & a : model.eu_adapters) {
+                if (a.layer != i) continue;
+                ggml_tensor * y = maybe_add_bias(gctx, affine_mul_mat(gctx, a.down_w, x), a.down_b);
+                y = ggml_gelu_erf(gctx, y);
+                y = maybe_add_bias(gctx, affine_mul_mat(gctx, a.up_w, y), a.up_b);
+                x = ggml_add(gctx, x, y);
+                break;
+            }
+        }
         if (i == n_run_layers - 1) {
             g.block_last_out_node = x;
             ggml_set_name(g.block_last_out_node, "block_last_out");
@@ -4682,6 +4767,7 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
                                       bool all_valid,
                                       bool capture_intermediates,
                                       bool allow_coreml_padded) {
+    if (model.model_variant == "transcribepsy-250m-eu") return false;
     if (!model.impl || model.impl->ctx_coreml == nullptr) return false;
     if (model.model_type != ParakeetModelType::CTC &&
         model.model_type != ParakeetModelType::RNNT &&
@@ -5088,13 +5174,18 @@ int run_encoder(ParakeetCtcModel   & model,
 #endif
 
     auto & cache = model.impl->encoder_graphs;
-    const int layers_key = (max_layers >= 0) ? max_layers : -1;
+    const int layers_key = std::clamp(
+        max_layers >= 0 ? max_layers :
+            (std::getenv("PARAKEET_MAX_LAYERS") ? std::atoi(std::getenv("PARAKEET_MAX_LAYERS"))
+                                                : enc.n_layers),
+        0, enc.n_layers);
 
     EncoderGraph * g_ptr = nullptr;
     for (size_t i = 0; i < cache.size(); ++i) {
         EncoderGraph & e = *cache[i];
-        const bool layers_match = (layers_key < 0) || (e.n_run_layers == layers_key);
-        if (!e.bypass_pre_encode && e.T_mel == n_mel_frames && e.T_mel_valid == mel_valid && layers_match) {
+        const bool layers_match = e.n_run_layers == layers_key;
+        if (!e.bypass_pre_encode && e.T_mel == n_mel_frames && e.T_mel_valid == mel_valid &&
+            e.eu_use_adapters == model.eu_use_adapters && layers_match) {
             if (i + 1 != cache.size()) {
                 auto moved = std::move(cache[i]);
                 cache.erase(cache.begin() + i);
@@ -5226,6 +5317,159 @@ int run_encoder(ParakeetCtcModel   & model,
     return 0;
 }
 
+static void eu_gate_dense(const float * w, const float * b, const float * x,
+                          int in, int out, float * y) {
+    for (int o = 0; o < out; ++o) {
+        float v = b[o];
+        const float * row = w + (size_t) o * in;
+        for (int i = 0; i < in; ++i) v += row[i] * x[i];
+        y[o] = v;
+    }
+}
+
+static std::vector<float> eu_gate_pool(const TranscribePsyEuGate & gate,
+                                       const std::vector<float> & features,
+                                       int frames, int dim) {
+    const int attn = gate.attn_dim;
+    std::vector<float> attention((size_t) frames * dim);
+    std::vector<float> hidden(attn);
+    for (int t = 0; t < frames; ++t) {
+        const float * x = features.data() + (size_t) t * dim;
+        eu_gate_dense(gate.proj0_w.data(), gate.proj0_b.data(), x, dim, attn, hidden.data());
+        for (float & v : hidden) v = std::tanh(v);
+        eu_gate_dense(gate.proj2_w.data(), gate.proj2_b.data(), hidden.data(), attn, dim,
+                      attention.data() + (size_t) t * dim);
+    }
+    std::vector<float> pooled(2 * dim);
+    for (int d = 0; d < dim; ++d) {
+        float max_logit = std::numeric_limits<float>::lowest();
+        for (int t = 0; t < frames; ++t)
+            max_logit = std::max(max_logit, attention[(size_t) t * dim + d]);
+        double sum = 0.0, mean = 0.0, second = 0.0;
+        for (int t = 0; t < frames; ++t) {
+            const double w = std::exp(attention[(size_t) t * dim + d] - max_logit);
+            const double x = features[(size_t) t * dim + d];
+            sum += w;
+            mean += w * x;
+            second += w * x * x;
+        }
+        mean /= sum;
+        pooled[d] = (float) mean;
+        pooled[dim + d] = (float) std::sqrt(std::max(1e-8, second / sum - mean * mean));
+    }
+    return pooled;
+}
+
+static float eu_gate_head(const TranscribePsyEuGate & gate, std::vector<float> pooled) {
+    double avg = 0.0, variance = 0.0;
+    for (float v : pooled) avg += v;
+    avg /= pooled.size();
+    for (float v : pooled) variance += (v - avg) * (v - avg);
+    variance /= pooled.size();
+    const float inv_std = (float) (1.0 / std::sqrt(variance + 1e-5));
+    for (size_t i = 0; i < pooled.size(); ++i)
+        pooled[i] = (pooled[i] - (float) avg) * inv_std * gate.norm_w[i] + gate.norm_b[i];
+    std::vector<float> mlp(gate.hidden);
+    eu_gate_dense(gate.mlp0_w.data(), gate.mlp0_b.data(), pooled.data(), (int) pooled.size(),
+                  gate.hidden, mlp.data());
+    for (float & v : mlp)
+        v = 0.5f * v * (1.0f + std::erf(v * 0.7071067811865475f));
+    float logit = gate.mlp3_b[0];
+    for (int i = 0; i < gate.hidden; ++i) logit += gate.mlp3_w[i] * mlp[i];
+    return 1.0f / (1.0f + std::exp(-logit));
+}
+
+struct EuGateMel {
+    std::vector<float> owned;
+    const float * external = nullptr;
+    int frames = 0;
+
+    const float * data() const { return owned.empty() ? external : owned.data(); }
+};
+
+static EuGateMel prepare_eu_gate_mel(const ParakeetCtcModel & model,
+                                     const float * mel, int n_mel_frames, int n_mels,
+                                     const float * cropped_mel, int cropped_mel_frames) {
+    const int max_frames = 1 + kTranscribePsyEuGateSeconds *
+        model.mel_cfg.sample_rate / model.mel_cfg.hop_length;
+    EuGateMel input;
+    input.external = mel;
+    input.frames = std::min(n_mel_frames, max_frames);
+    if (cropped_mel && cropped_mel_frames > 0) {
+        input.external = cropped_mel;
+        input.frames = cropped_mel_frames;
+    } else if (n_mel_frames > max_frames) {
+        input.owned.assign(mel, mel + (size_t) input.frames * n_mels);
+        if (model.mel_cfg.normalize == MelNormalize::PerFeature)
+            apply_per_feature_cmvn(input.owned, input.frames - 1, n_mels);
+        std::fill(input.owned.end() - n_mels, input.owned.end(), 0.0f);
+    }
+    return input;
+}
+
+static int eu_gate_valid_mel_frames(const ParakeetCtcModel & model,
+                                    const EuGateMel & input, int audio_samples) {
+    if (audio_samples <= 0) return std::max(1, input.frames - 1);
+    const int64_t gate_samples = (int64_t) kTranscribePsyEuGateSeconds *
+        model.mel_cfg.sample_rate;
+    const int64_t samples = std::min((int64_t) audio_samples, gate_samples);
+    const int64_t hop = model.mel_cfg.hop_length;
+    const int valid_frames = (int) std::max<int64_t>(1, (samples + hop - 1) / hop);
+    return std::min(valid_frames, input.frames);
+}
+
+static int eu_gate_valid_encoder_frames(const EncoderConfig & config, int mel_frames,
+                                         int total_encoder_frames) {
+    int frames = mel_frames;
+    for (int factor = 1; factor < config.subsampling_factor; factor *= 2)
+        frames = config.causal_downsampling ? frames / 2 + 1 : (frames + 1) / 2;
+    return std::min(frames, total_encoder_frames);
+}
+
+bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
+                                    const std::string & language,
+                                    const float * mel, int n_mel_frames, int n_mels,
+                                    float * p_non_english,
+                                    const float * cropped_mel,
+                                    int cropped_mel_frames,
+                                    int audio_samples) {
+    if (model.model_variant != "transcribepsy-250m-eu") return false;
+    model.eu_use_adapters = false;
+    if (p_non_english) *p_non_english = -1.0f;
+    if (language == "en") return false;
+    if (language == "other") {
+        model.eu_use_adapters = true;
+        return true;
+    }
+    if (!language.empty() && language != "auto")
+        throw std::invalid_argument("TranscribePsy EU language must be en, other, or auto");
+    const auto & gate = model.eu_gate;
+    const int dim = model.encoder_cfg.d_model;
+    if (!mel || n_mel_frames <= 0 || n_mels != model.mel_cfg.n_mels ||
+        gate.proj0_w.empty())
+        throw std::runtime_error("TranscribePsy EU gate is unavailable");
+
+    const EuGateMel input = prepare_eu_gate_mel(
+        model, mel, n_mel_frames, n_mels, cropped_mel, cropped_mel_frames);
+    EncoderOutputs tap;
+    const int rc = run_encoder(model, input.data(), input.frames, n_mels, tap,
+                               gate.layer + 1, /*capture_intermediates=*/false);
+    if (rc != 0 || tap.n_enc_frames <= 0 ||
+        tap.encoder_out.size() != (size_t) tap.n_enc_frames * dim)
+        throw std::runtime_error("TranscribePsy EU gate encoder failed (rc=" +
+                                 std::to_string(rc) + ")");
+    const int frames = eu_gate_valid_encoder_frames(
+        model.encoder_cfg, eu_gate_valid_mel_frames(model, input, audio_samples),
+        tap.n_enc_frames);
+    const float probability = eu_gate_head(gate, eu_gate_pool(gate, tap.encoder_out, frames, dim));
+    if (p_non_english) *p_non_english = probability;
+    model.eu_use_adapters = probability >= gate.threshold;
+    PARAKEET_LOG_INFO("TranscribePsy EU gate: p(non-English)=%.4f, threshold=%.4f, route=%s, frames=%d/%d\n",
+                      probability, gate.threshold,
+                      model.eu_use_adapters ? "other" : "en", frames, tap.n_enc_frames);
+    return model.eu_use_adapters;
+}
+
 int measure_encoder_compute(ParakeetCtcModel & model,
                             int                n_mel_frames,
                             int                n_mels,
@@ -5310,7 +5554,8 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
     for (size_t i = 0; i < cache.size(); ++i) {
         EncoderGraph & e = *cache[i];
         const bool layers_match = (layers_key < 0) || (e.n_run_layers == layers_key);
-        if (e.bypass_pre_encode && e.T_enc == n_pre_encode_frames && layers_match) {
+        if (e.bypass_pre_encode && e.T_enc == n_pre_encode_frames &&
+            e.eu_use_adapters == model.eu_use_adapters && layers_match) {
             if (i + 1 != cache.size()) {
                 auto moved = std::move(cache[i]);
                 cache.erase(cache.begin() + i);
