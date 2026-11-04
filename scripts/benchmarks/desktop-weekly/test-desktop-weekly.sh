@@ -289,11 +289,17 @@ check_build_marker() {
   CUDA_ARCH=89-real
   if build_is_current cuda; then fail "build_is_current after CUDA_ARCH changed"; fi
   CUDA_ARCH=120a-real
+  CMAKE_PREFIX_PATH=/opt/deps
+  if build_is_current cuda; then fail "build_is_current after CMAKE_PREFIX_PATH changed"; fi
+  [ "$(cmake_prefix_path)" = "/opt/deps" ] || fail "cmake_prefix_path without an own prefix"
+  [ "$(cmake_prefix_path /b/ggml-install)" = "/b/ggml-install;/opt/deps" ] || fail "cmake_prefix_path with an own prefix"
+  CMAKE_PREFIX_PATH=
+  [ "$(cmake_prefix_path /b/ggml-install)" = "/b/ggml-install" ] || fail "cmake_prefix_path without extra prefixes"
   mkdir -p "$TMP/rebuild/results/cuda"
   touch "$TMP/rebuild/results/cuda/old.json"
   discard_backend_results "$TMP/rebuild" cuda
   [ ! -e "$TMP/rebuild/results/cuda/old.json" ] || fail "discard_backend_results kept old rows"
-  ok "build markers track the commits and the build options, and a rebuild discards that backend's rows"
+  ok "build markers track the commits, the build options and the cmake prefixes, and a rebuild discards that backend's rows"
 }
 
 check_fetch_models_offline() {

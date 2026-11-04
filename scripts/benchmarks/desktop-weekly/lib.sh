@@ -51,6 +51,7 @@ load_config() {
   SKIP_FAMILIES="${SKIP_FAMILIES:-}"
   MEMORY_SAMPLER="${MEMORY_SAMPLER:-auto}"
   EVICT_PAGE_CACHE="${EVICT_PAGE_CACHE:-0}"
+  CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -273,7 +274,7 @@ ggml_backend_options() {
 }
 
 build_signature() {
-  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") targets=$(cmake_targets)"
+  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") prefix=$CMAKE_PREFIX_PATH targets=$(cmake_targets)"
 }
 
 build_marker() { echo "${BUILDS_DIR:?}/${1:?}/BUILT"; }
@@ -284,11 +285,17 @@ build_is_current() {
   [ -f "$marker" ] && [ "$(cat "$marker")" = "$(build_signature "$1")" ]
 }
 
+cmake_prefix_path() {
+  local own="${1:-}"
+  echo "$own${own:+${CMAKE_PREFIX_PATH:+;}}$CMAKE_PREFIX_PATH"
+}
+
 configure_ggml() {
   local backend="$1" dir="$BUILDS_DIR/$1" log_dir="$2"
   cmake -S "$GGML_SRC" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_CCACHE=OFF \
-    -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" $(ggml_backend_options "$backend") > "$log_dir/ggml-configure.log" 2>&1
+    -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" -DCMAKE_PREFIX_PATH="$(cmake_prefix_path)" $(ggml_backend_options "$backend") \
+    > "$log_dir/ggml-configure.log" 2>&1
 }
 
 build_ggml() {
@@ -301,7 +308,7 @@ build_ggml() {
 configure_engine() {
   local dir="$BUILDS_DIR/$1" log_dir="$2"
   cmake -S "$ENGINE_SRC" -B "$dir/speech" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
-    -DCMAKE_PREFIX_PATH="$dir/ggml-install" > "$log_dir/speech-configure.log" 2>&1
+    -DCMAKE_PREFIX_PATH="$(cmake_prefix_path "$dir/ggml-install")" > "$log_dir/speech-configure.log" 2>&1
 }
 
 build_engine() {
