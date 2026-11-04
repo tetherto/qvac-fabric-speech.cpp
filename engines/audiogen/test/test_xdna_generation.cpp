@@ -11,6 +11,7 @@
 namespace {
 
 constexpr int kThreads = 4;
+constexpr int kSingleThread = 1;
 constexpr int kSteps = 2;
 constexpr int kReuses = 2;
 constexpr int kSampleRate = 48000;
@@ -94,7 +95,8 @@ void report_difference(const GenerateResult & expected, const GenerateResult & a
     std::printf("Seeded CPU/XDNA PCM relative L2: %.8f\n", std::sqrt(error / norm));
 }
 
-void check_lyric_alignment(const EngineOptions & config) {
+void check_lyric_alignment(EngineOptions config) {
+    config.n_threads = kSingleThread;
     auto engine = Engine::create(config);
     auto params = parameters();
     params.lyrics = "Shine a little light";

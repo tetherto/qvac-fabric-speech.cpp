@@ -34,9 +34,11 @@ namespace tts_cpp::acestep {
 
 using DitBackendOwner = std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)>;
 
-static DitBackendOwner make_dit_cpu_fallback(ggml_backend_t backend) {
-    return DitBackendOwner(backend_name_is_xdna(backend_reg_name(backend)) ? backend_cpu_init() : nullptr,
-                           ggml_backend_free);
+static DitBackendOwner make_dit_cpu_fallback(ggml_backend_t backend, int n_threads) {
+    DitBackendOwner cpu(backend_name_is_xdna(backend_reg_name(backend)) ? backend_cpu_init() : nullptr,
+                        ggml_backend_free);
+    if (cpu) backend_set_n_threads(cpu.get(), n_threads);
+    return cpu;
 }
 
 static bool initialize_dit_allocator(DitGraphAllocator & allocator, ggml_backend_t backend,
@@ -105,6 +107,7 @@ struct DitGraphCache {
 
 struct DitModel {
     ggml_backend_t        backend    = nullptr;  // borrowed
+    int                   n_threads  = 0;
     ggml_context *        weight_ctx = nullptr;
     ggml_backend_buffer_t weight_buf = nullptr;
 
@@ -596,7 +599,7 @@ static ggml_tensor * build_layer(ggml_context * ctx, DitModel * m, int idx, ggml
 // Shared body of dit_model_load and dit_model_load_metadata_only. When
 // `measure` is non-null the load is metadata-only: the weight allocation is
 // sized into `measure` instead of performed and no tensor data is read.
-static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t backend, bool verbose,
+static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t backend, int n_threads, bool verbose,
                                       AcestepStageMeasure * measure) {
     DitGGUF g;
     if (!dit_gguf_open(g, path)) return nullptr;
@@ -604,6 +607,7 @@ static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t b
 
     DitModel * m = new DitModel();
     m->backend = backend;
+    m->n_threads = n_threads;
     if (!dit_gguf_read_config(g, m->cfg)) {
         dit_gguf_close(g);
         delete m;
@@ -770,14 +774,14 @@ static DitModel * dit_model_load_impl(const std::string & path, ggml_backend_t b
     return m;
 }
 
-DitModel * dit_model_load(const std::string & path, ggml_backend_t backend, bool verbose) {
-    return dit_model_load_impl(path, backend, verbose, /*measure=*/nullptr);
+DitModel * dit_model_load(const std::string & path, ggml_backend_t backend, int n_threads, bool verbose) {
+    return dit_model_load_impl(path, backend, n_threads, verbose, /*measure=*/nullptr);
 }
 
 DitModel * dit_model_load_metadata_only(const std::string & path, ggml_backend_t backend,
-                                        bool verbose, AcestepStageMeasure & measure) {
+                                        int n_threads, bool verbose, AcestepStageMeasure & measure) {
     measure = AcestepStageMeasure{};
-    return dit_model_load_impl(path, backend, verbose, &measure);
+    return dit_model_load_impl(path, backend, n_threads, verbose, &measure);
 }
 
 size_t dit_model_compute_buffer_bytes(const DitModel * m) {
@@ -908,7 +912,7 @@ bool dit_model_forward(DitModel * m, const DitForwardInputs & in, std::vector<fl
         gf = ggml_new_graph_custom(ctx, nodes, false);
         ggml_build_forward_expand(gf, output);
 
-        auto cpu = make_dit_cpu_fallback(m->backend);
+        auto cpu = make_dit_cpu_fallback(m->backend, m->n_threads);
         auto owned_allocator = std::make_unique<DitGraphAllocator>();
         allocator = owned_allocator.get();
         if (!initialize_dit_allocator(*allocator, m->backend, cpu.get(), nodes)) {
@@ -1113,7 +1117,7 @@ bool dit_probe_cross_attention(DitModel *                            m,
         ggml_build_forward_expand(gf, tensor);
     }
 
-    auto cpu = make_dit_cpu_fallback(m->backend);
+    auto cpu = make_dit_cpu_fallback(m->backend, m->n_threads);
     DitGraphAllocator allocator;
     if (!initialize_dit_allocator(allocator, m->backend, cpu.get(), nodes) ||
         !allocator.reserve(gf, nullptr) || !allocator.allocate(gf)) {
