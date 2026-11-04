@@ -16,7 +16,8 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
-validated on it.
+validated on it. AudioGen automatic GPU selection requires F32 matrix
+multiplication support and otherwise continues to another device or CPU.
 
 Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
 through decoding, including Nemotron's locale-prompt projection. Encoder tensors

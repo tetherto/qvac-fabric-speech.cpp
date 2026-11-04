@@ -776,6 +776,36 @@ void test_backend_device_types() {
 // 6b. GPU fallback reason -----------------------------------------------------
 // A CPU run after a GPU request is the symptom users report, so the reason must
 // never disagree with what the registry actually returned.
+void test_gpu_matmul_capability() {
+    using namespace tts_cpp::acestep;
+    bool inspected = false;
+    CHECK(!probe_gpu_matmul([&inspected](const ggml_tensor * operation) {
+        inspected = true;
+        CHECK(operation->op == GGML_OP_MUL_MAT);
+        CHECK(operation->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->type == GGML_TYPE_F32);
+        CHECK(operation->src[1]->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->data == nullptr && operation->src[1]->data == nullptr);
+        CHECK(operation->src[0]->ne[0] == GPU_MATMUL_PROBE_DIMENSION);
+        CHECK(operation->src[1]->ne[1] == GPU_MATMUL_PROBE_COLUMNS);
+        return false;
+    }));
+    CHECK(inspected);
+    CHECK(probe_gpu_matmul([](const ggml_tensor *) { return true; }));
+    CHECK(!backend_supports_gpu_matmul(nullptr));
+    ggml_backend_t cpu = backend_cpu_init();
+    CHECK(cpu != nullptr);
+    if (cpu) {
+        CHECK(backend_supports_gpu_matmul(cpu));
+        CHECK(keep_usable_gpu(cpu, backend_supports_gpu_matmul) == cpu);
+        ggml_backend_free(cpu);
+    }
+    ggml_backend_t unsupported = backend_cpu_init();
+    CHECK(unsupported != nullptr);
+    CHECK(keep_usable_gpu(unsupported, [](ggml_backend_t) { return false; }) == nullptr);
+    CHECK(keep_usable_gpu(nullptr, [](ggml_backend_t) { return true; }) == nullptr);
+}
+
 void test_gpu_fallback_reason() {
     using tts_cpp::GpuFallbackReason;
     using tts_cpp::gpu_fallback_reason_name;
@@ -3768,6 +3798,7 @@ int main() {
     test_coreml_plan_windows();
     test_vae_window_core();
     test_backend_device_types();
+    test_gpu_matmul_capability();
     test_gpu_fallback_reason();
     test_gpu_tier_policy();
     test_backend_request_matching();

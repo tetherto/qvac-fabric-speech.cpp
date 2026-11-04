@@ -277,6 +277,44 @@ inline GpuTier gpu_tier_for(const char *                     reg_name,
     return integrated ? GpuTier::OtherIntegrated : GpuTier::OtherDiscrete;
 }
 
+inline constexpr int GPU_MATMUL_PROBE_DIMENSION = 32;
+inline constexpr int GPU_MATMUL_PROBE_COLUMNS = 1;
+
+template <typename SupportsOp>
+inline bool probe_gpu_matmul(SupportsOp supports_op) {
+    const ggml_init_params params{ggml_tensor_overhead() * 3, nullptr, true};
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) return false;
+    ggml_tensor * weights = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                                              GPU_MATMUL_PROBE_DIMENSION, GPU_MATMUL_PROBE_DIMENSION);
+    ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                                            GPU_MATMUL_PROBE_DIMENSION, GPU_MATMUL_PROBE_COLUMNS);
+    ggml_tensor * projection = ggml_mul_mat(ctx, weights, input);
+    ggml_mul_mat_set_prec(projection, GGML_PREC_F32);
+    const bool supported = supports_op(projection);
+    ggml_free(ctx);
+    return supported;
+}
+
+inline bool backend_supports_gpu_matmul(ggml_backend_t backend) {
+    return backend && probe_gpu_matmul([backend](const ggml_tensor * operation) {
+        return ggml_backend_supports_op(backend, operation);
+    });
+}
+
+template <typename SupportsMatmul>
+inline ggml_backend_t keep_usable_gpu(ggml_backend_t backend, SupportsMatmul supports_matmul) {
+    if (!backend || supports_matmul(backend)) return backend;
+    fprintf(stderr, "[acestep-engine] %s lacks required F32 matrix multiplication; trying another backend\n",
+            ggml_backend_name(backend));
+    ggml_backend_free(backend);
+    return nullptr;
+}
+
+inline ggml_backend_t backend_init_usable_gpu(ggml_backend_dev_t device) {
+    return keep_usable_gpu(ggml_backend_dev_init(device, nullptr), backend_supports_gpu_matmul);
+}
+
 // GPU backend from the registry. Prefer Adreno 700+ OpenCL, then CUDA on
 // NVIDIA (vendor-native, measurably faster than the same card's Vulkan
 // adapter), then a validated Vulkan/Metal device, then a discrete adapter,
@@ -289,11 +327,11 @@ inline GpuTier gpu_tier_for(const char *                     reg_name,
 // prefers discrete over integrated (dGPU tier tried before iGPU tier at the
 // same validated level).
 //
-// Try every matching device so one adapter failing to initialise does not hide
-// another usable one.
+// Try every matching device so an adapter that cannot initialise or execute
+// the required F32 matrix multiplication does not hide another usable one.
 // `reason`, when given, receives why no backend was returned, so a caller can
-// tell "no GPU device was enumerated" from "a device was found and refused to
-// initialise" instead of inferring from a null.
+// tell "no GPU device was enumerated" from "devices were found but none was
+// usable" instead of inferring from a null.
 inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
     bool saw_device = false;
 
@@ -303,7 +341,7 @@ inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
         if (!dev || !backend_device_type_is_gpu(ggml_backend_dev_type(dev))) continue;
         if (!backend_dev_prefers_opencl(dev)) continue;
         saw_device = true;
-        if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+        if (ggml_backend_t backend = backend_init_usable_gpu(dev)) {
             if (reason) *reason = GpuFallbackReason::none;
             return backend;
         }
@@ -328,7 +366,7 @@ inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
             const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
             if (!reg_name || std::strcmp(reg_name, "CUDA") != 0) continue;
             saw_device = true;
-            if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+            if (ggml_backend_t backend = backend_init_usable_gpu(dev)) {
                 if (reason) *reason = GpuFallbackReason::none;
                 return backend;
             }
@@ -351,7 +389,7 @@ inline ggml_backend_t backend_gpu_init(GpuFallbackReason * reason = nullptr) {
                 if (backend_reg_name_is_validated_gpu(reg_name) != require_validated) continue;
 
                 saw_device = true;
-                if (ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr)) {
+                if (ggml_backend_t backend = backend_init_usable_gpu(dev)) {
                     if (reason) *reason = GpuFallbackReason::none;
                     return backend;
                 }

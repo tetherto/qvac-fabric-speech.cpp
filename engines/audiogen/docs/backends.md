@@ -9,7 +9,11 @@ registry. Selection tries Adreno 700+ OpenCL first; validated
 Vulkan/Metal/CUDA discrete devices, then validated integrated devices; and
 finally other discrete, then integrated GPU backends. Integrated-device
 support is required because Vulkan reports Android UMA adapters such as
-Pixel's Mali-G715 as `IGPU`.
+Pixel's Mali-G715 as `IGPU`. Each automatic candidate must initialise and
+report support for the engine's F32 matrix projection. Unsupported devices,
+including virtual Metal adapters without SIMD-group reduction, are released
+and selection continues to another GPU or CPU. The same resolver is used by
+generation and memory-fit projection.
 
 `EngineOptions::backend` (`--backend` on the CLIs) replaces that walk with an
 explicit device: `cpu`, `opencl`, `webgpu`, `xdna`, `hexagon` (the Snapdragon HTP0

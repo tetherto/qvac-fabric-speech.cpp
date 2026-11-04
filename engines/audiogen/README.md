@@ -11,6 +11,11 @@ Native [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) and MiniMax-Musi
 | ggml | requires the `ggml-speech` port for the custom `ggml_snake` and `ggml_col2im_1d` ops |
 | Consumed by | the `@qvac/audiogen-ggml` addon in [QVAC](https://github.com/tetherto/qvac) |
 
+Automatic GPU selection accepts only devices supporting the required F32
+matrix multiplication. An unusable virtual Metal device therefore leaves the
+engine on another compatible GPU or CPU; explicit device requests keep their
+existing behavior. See [backend selection](docs/backends.md#backends).
+
 ## Supported models
 
 | Model | Task | Output | Quantization | Backends |
