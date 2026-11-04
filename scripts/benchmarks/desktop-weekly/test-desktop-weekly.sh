@@ -14,7 +14,10 @@ check_scripts_parse() {
   local script
   for script in "$HERE"/*.sh; do bash -n "$script" || fail "$script does not parse"; done
   python3 -c 'import ast, sys; [ast.parse(open(path).read(), path) for path in sys.argv[1:]]' "$HERE"/*.py || fail "a python script does not parse"
-  if command -v node > /dev/null; then node --check "$HERE/fetch-registry.js" || fail "fetch-registry.js does not parse"; fi
+  if command -v node > /dev/null; then
+    node --check "$HERE/fetch-registry.js" || fail "fetch-registry.js does not parse"
+    node --check "$HERE/dashboard/app.js" || fail "dashboard/app.js does not parse"
+  fi
   ok "every script parses"
 }
 

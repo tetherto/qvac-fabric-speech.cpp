@@ -5,8 +5,8 @@ developer laptop in the loop: cron on each machine builds the current engine and
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the
-task dashboards (ASR, TTS, Music) behind the weekly landing page, refreshed from the machines' summaries every
-Monday (see `skills/speech-bench/SKILL.md`); e-mail delivery exists but is off unless `MAIL_TO` is set.
+Speech Bench hub and one dashboard per machine, refreshed from the machines' summaries every Monday (see
+`skills/speech-bench/SKILL.md`); e-mail delivery exists but is off unless `MAIL_TO` is set.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
@@ -62,9 +62,9 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `machine-info.sh`, `collect-pins.sh` | `machine.json` (hardware, OS, driver, toolchain) and `pins.json` (engine and ggml commits, model sha256 and origins) |
 | `summarize.py` | run directory -> `summary.json` |
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
-| `build-dashboard-data.py`, `comparisons.json` | a folder of `summary.json` files -> the JSON files the task dashboards read (`<task>/latest.json`, `<task>/weekly.json`, `<task>/campaign.json`, `runs.json`); `comparisons.json` holds the dated competitor rows (qvac RTF and competitor-over-qvac time ratio per lane) of the campaign |
-| `dashboard/index.html`, `dashboards.json` | the one page every task dashboard runs (cards per machine and backend, the campaign comparison coloured per engine, week-over-week lines, the run log) and the links of the landing page and the three dashboards |
-| `build-landing.py` | a folder of `summary.json` files -> the landing page: dashboard links, every machine's newest run, how to read the numbers |
+| `build-dashboard-data.py`, `comparisons.json`, `engines.json` | a folder of `summary.json` files -> per machine the JSON files its dashboard reads (`<host>/runs.json`, `history.json`, `coverage.json`, `engines.json`, `machine.json`, `commentary.json`) and `hub.json` for the hub; `comparisons.json` holds the dated competitor rows of the campaign (qvac RTF and competitor-over-qvac time ratio per device and backend), `engines.json` the engines with their scope |
+| `dashboard/index.html`, `dashboard/app.js`, `dashboard/app.css`, `dashboards.json` | the page every machine dashboard runs (overview, a tab per task with a speed chart per model, backend and input and a week-over-week line per backend, runs and coverage) and the links of the hub and the dashboards |
+| `build-landing.py`, `dashboard/hub.css` | `hub.json` -> the Speech Bench hub: per task every machine with a link into its dashboard's tab, the quality flags, the engines and how the bench runs |
 | `build-artifact.py` | a folder of `summary.json` files -> one self-contained HTML report (tables per task, history and pins per machine) for reading offline, without the dashboards |
 | `nsdate`, `scheduler.sh` | nanosecond clock shim for macOS before 26, and the user-space scheduler for hosts without cron |
 | `narrate.py` | optional: asks Claude for a ten-line narrative placed above the report in the e-mail |
@@ -133,8 +133,8 @@ checkouts, `--label NAME` keeps several runs of one day apart. Watch `runs/<date
 
 Each run leaves `report.md` and `summary.json` under `runs/<date>/` on the machine. The speech-bench skill (a
 scheduled Monday task) copies every machine's summaries into a history folder, turns them into the dashboards' data
-files with `build-dashboard-data.py`, uploads those to the ASR, TTS and Music dashboards and republishes the landing
-page from `build-landing.py`, so the dashboards are the place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
+files with `build-dashboard-data.py`, uploads each machine's files to that machine's dashboard and republishes the
+hub from `build-landing.py`, so the hub and its dashboards are the place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
 `config.env` (tether.io mail is Google Workspace, so `smtp.gmail.com:465` with an app password in a mode 0600 file),
 `send-report.py` also mails the report with `report.md` and `summary.json` attached, and a failed run mails a
 one-paragraph notice.

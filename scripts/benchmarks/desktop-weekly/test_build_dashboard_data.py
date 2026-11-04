@@ -17,104 +17,225 @@ def load_module(name, filename):
 
 build = load_module("build_dashboard_data", "build-dashboard-data.py")
 
-
-def row(backend, family, speed=10.0, status="ok", task="ASR"):
-    return {"backend": backend, "family": family, "task": task, "model_label": f"Model {family}", "weights": "Q8_0", "status": status,
-            "observed_backend": backend.upper(), "wall_ms_median": 1100.0, "wall_ms_min": 1000.0, "wall_ms_max": 1200.0,
-            "speed_x": speed if status == "ok" else None, "audio_seconds": 11.0, "peak_rss_mib": 1024.0, "gpu_memory_rise_mib": 512.0,
-            "gpu_memory_peak_mib": 600.0, "quality": {"kind": "wer", "value": 0.0125}, "runs": 3, "notes": ""}
-
-
-def summary(name, started, speeds, backends=("cuda",), host="qvac-dev-linux-x64", tasks=None):
-    tasks = tasks or {}
-    results = [row(backend, family, speed, task=tasks.get(family, "ASR")) for family, speed in speeds.items() for backend in backends]
-    return {"schema": 1, "run": {"name": name, "host": host, "started": started, "finished": started, "status": "ok"},
-            "machine": {"hostname": host, "os": "Linux", "cpu": "cpu", "memory_gib": 60, "gpu": {"name": "RTX"}},
-            "pins": {"engine": {"sha": "abcdef1234567890", "commit_date": "2026-11-01"}, "ggml": {"sha": "fedcba0987654321", "commit_date": "2026-11-01"}},
-            "backends": list(backends), "families": list(speeds), "results": results,
-            "counts": {"expected": len(results), "ok": len(results), "failed": 0}, "build_failures": [], "problems": ["one problem"]}
-
-
+HOST = "qvac-dev-linux-x64"
+FAMILIES = {
+    "parakeet-tdt": {"task": "ASR", "model_label": "Parakeet TDT 0.6B v3", "weights": "Q8_0", "bench_kind": "native", "binary": "engines/parakeet/parakeet",
+                     "args": ["--model", "${MODEL_DIR}/parakeet.gguf"], "runs": 10, "warmup": 2, "cpu_runs": 5, "cpu_warmup": 1},
+    "audio8-lm-f16-dec-f16": {"task": "TTS", "model_label": "Audio8 TTS Preview 0.6B", "weights": "LM F16, codec decoder F16", "bench_kind": "time-wrapped",
+                              "binary": "engines/tts/audio8-cli", "args": ["--lm", "${MODEL_DIR}/lm.gguf"], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
+    "audio8-clone-enc-f16": {"task": "TTS cloning", "model_label": "Audio8 TTS Preview 0.6B", "weights": "LM Q8_0, codec encoder F16", "bench_kind": "time-wrapped",
+                             "binary": "engines/tts/audio8-cli", "args": [], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
+    "moss-tts-f16": {"task": "TTS", "model_label": "MOSS-TTS v1.5 8.5B", "weights": "F16", "bench_kind": "time-wrapped", "binary": "engines/tts/moss-cli",
+                     "args": [], "runs": 3, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
+}
 COMPARISONS = [
-    {"task": "ASR", "engine": "other.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
-     "qvac_rtf": "0.0007 / 0.0006", "ratio": "2.09× / 3.18×", "measured": "2026-09-22", "source": "campaign", "harness": "h"},
+    {"task": "ASR", "engine": "transcribe.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
+     "qvac_rtf": "0.0007 / 0.0006", "ratio": "7.11× / 8.54×", "measured": "2026-09-22", "source": "campaign", "harness": "h",
+     "qvac_version": "46afe7d9", "engine_version": "v0.2.3"},
+    {"task": "ASR", "engine": "audio.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
+     "qvac_rtf": "0.0007 / 0.0006", "ratio": "1.84× / 1.85×", "measured": "2026-09-22", "source": "campaign", "harness": "h"},
+    {"task": "TTS", "engine": "audio.cpp", "model": "Audio8 TTS Preview 0.6B", "quantization": "LM q8_0", "device": "RTX 5090 box", "backend": "vulkan",
+     "qvac_rtf": "2.634 / 2.060", "ratio": "2.22× / OOM", "measured": "2026-09-30", "source": "campaign", "harness": "h"},
     {"task": "Music", "engine": "acestep.cpp", "model": "ACE-Step 1.5 Turbo", "quantization": "Q8_0", "device": "RTX 5090 box", "backend": "cuda",
      "qvac_rtf": "0.139 single set", "ratio": "1.91× single set", "measured": "2026-09-14", "source": "campaign", "harness": "h"},
+    {"task": "ASR", "engine": "audio.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "MacBook Air M5", "backend": "metal",
+     "qvac_rtf": "0.0055 / 0.0077", "ratio": "1.46× / 1.14×", "measured": "2026-09-22", "source": "campaign", "harness": "h"},
 ]
+ENGINES = [{"engine": build.QVAC, "role": "QVAC engine", "ggml": "ggml-based", "details": "weekly", "source": "bench"},
+           {"engine": "audio.cpp", "role": "prior-report competitor", "ggml": "ggml-based", "details": "campaign", "source": "report"},
+           {"engine": "SGLang-Omni", "role": "new competitor, measured", "ggml": "Not ggml-based", "details": "none here", "source": "report"}]
 
 
-class BuildDashboardDataTest(unittest.TestCase):
+def result(backend, family, speed=10.0, status="ok", wer=0.0125):
+    spec = FAMILIES[family]
+    return {"backend": backend, "family": family, "task": spec["task"], "model_label": spec["model_label"], "weights": spec["weights"],
+            "status": status, "observed_backend": backend.upper(), "wall_ms_median": 1100.0, "wall_ms_min": 1000.0, "wall_ms_max": 1200.0,
+            "speed_x": speed if status == "ok" else None, "audio_seconds": 11.0, "peak_rss_mib": 1024.0,
+            "gpu_memory_rise_mib": 512.0 if backend == "cuda" else None,
+            "quality": {"kind": "wer" if spec["task"] == "ASR" else "tts_wer", "value": wer}, "runs": 3, "notes": f"note {family}"}
+
+
+def summary(name, started, results, families=None, backends=("cpu", "cuda")):
+    return {"schema": 1, "_host": HOST, "_file": f"{HOST}/{name}.json",
+            "run": {"name": name, "host": HOST, "started": started, "finished": started, "status": "ok"},
+            "machine": {"os_version": "Ubuntu 25.10", "cpu": "Ryzen", "memory_gib": 60,
+                        "gpu": {"name": "RTX 5090", "driver": "595", "cuda_toolkit": "13.3", "unified_memory": False}},
+            "pins": {"engine": {"sha": "abcdef1234567890", "commit_date": "2026-11-01"}, "ggml": {"sha": "fedcba0987654321", "commit_date": "2026-11-01"},
+                     "build": {"cuda_arch": "120a-real"}, "models": [{"name": "parakeet.gguf", "sha256": "0123456789abcdef", "source": "registry parakeet"}]},
+            "backends": list(backends), "families": families or sorted({r["family"] for r in results}), "results": results,
+            "counts": {"expected": len(results), "ok": sum(1 for r in results if r["status"] == "ok")}, "problems": []}
+
+
+class WeeklyRowsTest(unittest.TestCase):
+    def setUp(self):
+        self.older = summary("2026-11-01", "2026-11-01T17:00:00Z", [result("cpu", "parakeet-tdt", 9.0), result("cuda", "audio8-clone-enc-f16", 2.0)])
+        self.newer = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("cpu", "parakeet-tdt", 12.0),
+                                                                    result("cuda", "audio8-lm-f16-dec-f16", status="run-failed")])
+
+    def test_weekly_row_carries_units_pins_and_provenance(self):
+        row = build.weekly_row(self.newer, result("cuda", "parakeet-tdt", 12.0), FAMILIES, "2026-11-08")
+        self.assertEqual((row["machine"], row["variant"], row["timing_class"]), ("RTX 5090", "Q8_0", "native_excl_load"))
+        self.assertEqual((row["runs"], row["warmups"]), (3, 2))
+        self.assertAlmostEqual(row["rtf"], 1 / 12.0)
+        self.assertEqual((row["gpu_mib"], row["gpu_kind"]), (512.0, "sampled rise"))
+        self.assertEqual((row["wer_pct"], row["wer_kind"]), (1.25, "ASR ground truth"))
+        self.assertEqual(row["hashes"], "parakeet.gguf 0123456789")
+        self.assertEqual(row["pins"], "qvac abcdef1234 (2026-11-01), ggml speech fedcba0987 (2026-11-01)")
+        self.assertEqual(row["caveats"], "note parakeet-tdt")
+
+    def test_synthesis_and_cloning_get_short_variants_and_separate_charts(self):
+        tts = build.weekly_row(self.newer, result("cuda", "audio8-lm-f16-dec-f16", 3.0), FAMILIES, "2026-11-08")
+        clone = build.weekly_row(self.newer, result("cuda", "audio8-clone-enc-f16", 2.0), FAMILIES, "2026-11-08")
+        self.assertEqual((tts["variant"], tts["precision"]), ("LM F16 · decoder F16", "LM F16, codec decoder F16"))
+        self.assertEqual(clone["variant"], "encoder F16")
+        self.assertNotEqual(tts["group"], clone["group"])
+        self.assertEqual((tts["timing_class"], clone["timing_class"]), ("fresh_process", "fresh_process_ref"))
+        self.assertEqual((tts["dashboard"], clone["dashboard"]), ("tts", "tts"))
+
+    def test_newest_result_wins_and_an_older_cell_says_where_it_comes_from(self):
+        cells = {(r["backend"], r["family"]): r for r in build.newest_cells([self.older, self.newer], FAMILIES)}
+        self.assertEqual(cells[("cpu", "parakeet-tdt")]["speed_x"], 12.0)
+        self.assertIn("earlier run 2026-11-01", cells[("cuda", "audio8-clone-enc-f16")]["caveats"])
+        failed = cells[("cuda", "audio8-lm-f16-dec-f16")]
+        self.assertEqual((failed["status"], failed["accepted"], failed["speed_x"]), ("failed", False, None))
+
+    def test_history_keeps_every_run_with_its_rtf(self):
+        rows = build.history_rows([self.older, self.newer], FAMILIES)
+        self.assertEqual([r["run"] for r in rows], ["2026-11-01", "2026-11-01", "2026-11-08", "2026-11-08"])
+        self.assertAlmostEqual(rows[0]["rtf"], 1 / 9.0)
+
+
+class CampaignRowsTest(unittest.TestCase):
+    def setUp(self):
+        self.rows = build.campaign_rows(HOST, COMPARISONS)
+
+    def test_one_qvac_row_per_chart_and_competitor_time_from_the_ratio(self):
+        jfk = [r for r in self.rows if r["task"] == "ASR" and r["scenario"] == "jfk"]
+        self.assertEqual(sorted(r["engine"] for r in jfk), ["audio.cpp", build.QVAC, "transcribe.cpp"])
+        self.assertEqual(len({r["group"] for r in jfk}), 1)
+        qvac = next(r for r in jfk if r["is_qvac"])
+        transcribe = next(r for r in jfk if r["engine"] == "transcribe.cpp")
+        self.assertEqual((qvac["latency_ms"], qvac["pins"]), (7.7, "46afe7d9"))
+        self.assertAlmostEqual(transcribe["rtf"], 0.0007 * 7.11)
+        self.assertAlmostEqual(transcribe["speed_x"], 1 / (0.0007 * 7.11), places=2)
+        self.assertEqual(transcribe["pins"], "v0.2.3")
+
+    def test_a_competitor_without_a_ratio_is_a_failed_row(self):
+        competitor = next(r for r in self.rows if r["scenario"] == "long_prompt" and not r["is_qvac"])
+        self.assertEqual((competitor["status"], competitor["status_detail"], competitor["accepted"]), ("failed", "OOM", False))
+        self.assertIsNone(competitor["speed_x"])
+        self.assertIn("Campaign result: OOM.", competitor["caveats"])
+
+    def test_music_rows_keep_the_rtf_without_a_duration(self):
+        music = [r for r in self.rows if r["task"] == "Music"]
+        self.assertEqual(len(music), 2)
+        self.assertTrue(all(r["latency_ms"] is None for r in music))
+        self.assertAlmostEqual(next(r for r in music if not r["is_qvac"])["rtf"], 0.139 * 1.91)
+
+    def test_devices_outside_the_lab_are_left_out(self):
+        self.assertEqual(len(self.rows), 12)
+        self.assertFalse([r for r in self.rows if r["backend"] == "metal"])
+
+
+class CommentaryTest(unittest.TestCase):
+    def setUp(self):
+        first = summary("2026-11-01", "2026-11-01T17:00:00Z", [result("cpu", "parakeet-tdt", 10.0), result("cpu", "audio8-lm-f16-dec-f16", 1.0)])
+        quick = summary("2026-11-02-quick", "2026-11-02T10:00:00Z", [result("cpu", "parakeet-tdt", 50.0)])
+        newest = summary("2026-11-08", "2026-11-08T17:00:00Z",
+                         [result("cpu", "parakeet-tdt", 12.0), result("cpu", "audio8-lm-f16-dec-f16", 1.02),
+                          result("cuda", "audio8-lm-f16-dec-f16", status="run-failed"), result("cuda", "audio8-clone-enc-f16", status="run-failed")],
+                         families=["parakeet-tdt", "audio8-lm-f16-dec-f16", "audio8-clone-enc-f16"])
+        self.summaries = [first, quick, newest]
+        self.runs = build.newest_cells(self.summaries, FAMILIES) + build.campaign_rows(HOST, COMPARISONS)
+        self.notes = build.commentary_rows(self.summaries, self.runs, FAMILIES)
+
+    def topics(self, key):
+        return {n["topic"]: n["comment"] for n in self.notes if n["dashboard"] == key}
+
+    def comments(self, key, topic):
+        return [n["comment"] for n in self.notes if n["dashboard"] == key and n["topic"] == topic]
+
+    def test_summary_names_fastest_cells_failures_moves_coverage_and_pins(self):
+        notes = self.topics(build.SUMMARY)
+        self.assertIn("ASR: Parakeet TDT 0.6B v3 (Q8_0) on CPU, 12.0× real time", notes["Fastest cells this week"])
+        self.assertIn("2 weekly cells failed", notes["Failed cells"])
+        self.assertIn("previous full run (2026-11-01)", notes["Week over week"])
+        self.assertIn("+20%", notes["Week over week"])
+        self.assertNotIn("Audio8", notes["Week over week"])
+        self.assertIn("2 of 4 weekly cells measured on CPU and CUDA", notes["Coverage"])
+        self.assertIn("Not run on this machine: MOSS-TTS v1.5 8.5B", notes["Coverage"])
+        self.assertIn("qvac abcdef1234", notes["Pins"])
+
+    def test_campaign_lines_give_the_ratio_range_per_task(self):
+        self.assertEqual(self.comments("asr", "Against other engines"),
+                         ["ASR campaign of 2026-09-22 against audio.cpp and transcribe.cpp: competitor ÷ QVAC time 1.84 to 8.54 over 4 pairs; "
+                          "QVAC took less time in 4 of 4."])
+        self.assertEqual(self.comments("tts", "Against other engines"),
+                         ["TTS campaign of 2026-09-30 against audio.cpp: competitor ÷ QVAC time 2.22 over 1 pair; QVAC took less time in 1 of 1."])
+
+    def test_failures_of_synthesis_and_cloning_share_the_tts_tab(self):
+        failures = self.comments("tts", "Failed cells")
+        self.assertEqual(len(failures), 1)
+        self.assertIn("(LM F16 · decoder F16) on CUDA and Audio8 TTS Preview 0.6B (encoder F16) on CUDA", failures[0])
+
+    def test_rules_are_the_general_notes(self):
+        self.assertEqual(len(self.topics(build.GENERAL)), len(build.RULES))
+
+    def test_quick_runs_are_never_a_baseline(self):
+        notes = build.commentary_rows(self.summaries[1:], self.runs, FAMILIES)
+        moves = [n["comment"] for n in notes if n["topic"] == "Week over week"]
+        self.assertEqual(moves, ["First full run of this machine: no earlier full run to compare with (quick runs are not baselines)."])
+
+
+class HubAndFilesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
-        (self.root / "summaries" / "qvac-dev-linux-x64").mkdir(parents=True)
-        self.write("2026-11-01-heavy", summary("2026-11-01-heavy", "2026-11-01T17:00:00Z", {"parakeet-tdt": 10.0, "supertonic3": 100.0, "acestep-turbo-q8_0": 0.5},
-                                              tasks={"supertonic3": "TTS", "acestep-turbo-q8_0": "Music"}))
-        self.write("2026-11-08", summary("2026-11-08", "2026-11-08T17:00:00Z", {"parakeet-tdt": 12.0, "transcribepsy": 40.0}))
-        self.summaries = build.load_summaries(self.root / "summaries")
+        self.summary = summary("2026-11-08", "2026-11-08T17:00:00Z",
+                               [result("cpu", "parakeet-tdt"), result("cuda", "parakeet-tdt"), result("cuda", "audio8-lm-f16-dec-f16", 0.7, wer=0.147)])
+        self.rows = {HOST: build.newest_cells([self.summary], FAMILIES) + build.campaign_rows(HOST, COMPARISONS)}
+        self.links = {HOST: "https://example.test/rtx", "landing": "https://example.test/hub"}
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def write(self, name, data):
-        (self.root / "summaries" / "qvac-dev-linux-x64" / f"{name}.json").write_text(json.dumps(data))
+    def test_hub_counts_models_backends_and_other_engines_per_task(self):
+        hub = build.hub_document({HOST: [self.summary]}, self.rows, ENGINES, self.links)
+        machine = hub["machines"][0]
+        self.assertEqual((machine["machine"], machine["url"], hub["hub_url"]), ("RTX 5090", "https://example.test/rtx", "https://example.test/hub"))
+        self.assertEqual(machine["tasks"]["asr"], {"models": 1, "backends": ["cpu", "cuda"], "others": 2, "rows": 8})
+        self.assertEqual(machine["tasks"]["music"]["others"], 1)
+        self.assertEqual((hub["measured"], hub["accepted"]), ("2026-11-08", machine["accepted"]))
 
-    def test_weekly_rows_carry_labels_order_and_units(self):
-        rows = build.weekly_rows(self.summaries, "asr")
-        self.assertEqual(len(rows), 3)
-        first = next(r for r in rows if r["run"] == "2026-11-08" and r["family"] == "parakeet-tdt")
-        self.assertEqual(first["label"], "Parakeet TDT 0.6B v3 Q8_0")
-        self.assertEqual(first["order"], 0)
-        self.assertEqual(first["machine"], "RTX 5090")
-        self.assertEqual(first["lane"], "RTX 5090 cuda")
-        self.assertEqual(first["rss_gib"], 1.0)
-        self.assertEqual(first["gpu_mem_rise_gib"], 0.5)
-        self.assertEqual(first["quality"], "WER")
-        self.assertEqual(first["quality_pct"], 1.25)
-        self.assertAlmostEqual(first["rtf"], 1 / 12.0, places=4)
-        self.assertEqual(first["engine"], "abcdef1234")
+    def test_quality_flags_keep_tts_rows_at_or_over_the_threshold(self):
+        flags = build.hub_document({HOST: [self.summary]}, self.rows, ENGINES, self.links)["quality_flags"]
+        self.assertEqual([(f["model"], f["variant"], f["wer_pct"]) for f in flags], [("Audio8 TTS Preview 0.6B", "LM F16 · decoder F16", 14.7)])
 
-    def test_latest_keeps_newest_cell_and_flags_older_runs(self):
-        latest = build.latest_cells(build.weekly_rows(self.summaries, "asr"), self.summaries)
-        by_family = {r["family"]: r for r in latest}
-        self.assertEqual(set(by_family), {"parakeet-tdt", "transcribepsy"})
-        self.assertEqual(by_family["parakeet-tdt"]["run"], "2026-11-08")
-        self.assertTrue(by_family["parakeet-tdt"]["current"])
-        tts = build.latest_cells(build.weekly_rows(self.summaries, "tts"), self.summaries)
-        self.assertEqual(tts[0]["run"], "2026-11-01-heavy")
-        self.assertFalse(tts[0]["current"])
+    def test_engines_say_where_they_have_rows(self):
+        engines = {e["engine"]: e for e in build.engine_rows(ENGINES, self.rows)}
+        self.assertEqual((engines["audio.cpp"]["measured_on"], engines["audio.cpp"]["status"]), ("RTX 5090", "measured"))
+        self.assertEqual((engines["SGLang-Omni"]["measured_on"], engines["SGLang-Omni"]["status"]), ("", "not measured"))
 
-    def test_campaign_rows_turn_rtf_and_ratio_into_speeds(self):
-        rows = build.campaign_rows(COMPARISONS, "asr")
-        self.assertEqual(len(rows), 1)
-        asr = rows[0]
-        self.assertEqual(asr["label"], "Parakeet TDT 0.6B v3 q8_0")
-        self.assertEqual((asr["qvac_rtf_short"], asr["qvac_rtf_long"]), (0.0007, 0.0006))
-        self.assertEqual((asr["ratio_short"], asr["ratio_long"]), (2.09, 3.18))
-        self.assertAlmostEqual(asr["qvac_speed_long"], 1 / 0.0006, places=2)
-        self.assertAlmostEqual(asr["competitor_rtf_long"], 0.0006 * 3.18, places=6)
-        self.assertAlmostEqual(asr["competitor_speed_short"], 1 / (0.0007 * 2.09), places=2)
-        music = build.campaign_rows(COMPARISONS, "music")[0]
-        self.assertEqual((music["qvac_rtf_short"], music["qvac_rtf_long"]), (0.139, None))
-        self.assertIsNone(music["competitor_speed_long"])
-        self.assertAlmostEqual(music["competitor_speed_short"], 1 / (0.139 * 1.91), places=2)
+    def test_build_writes_the_machine_files_and_the_hub(self):
+        written = build.build([self.summary], COMPARISONS, ENGINES, FAMILIES, self.links, self.root / "out")
+        self.assertEqual(sorted(written[HOST]), ["commentary", "coverage", "engines", "history", "machine", "runs"])
+        machine = json.loads((self.root / "out" / HOST / "machine.json").read_text())[0]
+        self.assertEqual((machine["backends"], machine["failed"]), ("cpu, cuda", 1))
+        coverage = json.loads((self.root / "out" / HOST / "coverage.json").read_text())
+        self.assertIn("not attempted", {c["status"] for c in coverage})
+        self.assertTrue((self.root / "out" / "hub.json").is_file())
 
-    def test_build_writes_one_folder_per_task_and_the_runs_file(self):
-        out = self.root / "out"
-        written = build.build(self.summaries, COMPARISONS, out)
-        self.assertEqual(written["asr"], {"weekly": 3, "latest": 2, "campaign": 1})
-        self.assertEqual(written["music"], {"weekly": 1, "latest": 1, "campaign": 1})
-        self.assertEqual(written["tts"]["campaign"], 0)
-        runs = json.loads((out / "runs.json").read_text())
-        self.assertEqual([r["run"] for r in runs], ["2026-11-01-heavy", "2026-11-08"])
-        self.assertEqual(runs[0]["problems"], "one problem")
-        self.assertEqual(runs[0]["backends"], "cuda")
-        self.assertTrue((out / "tts" / "latest.json").is_file())
-
-    def test_main_reports_what_it_wrote(self):
-        out = self.root / "out"
-        build.main([str(self.root / "summaries"), "-o", str(out), "--comparisons", str(self.root / "missing.json")])
-        self.assertEqual(json.loads((out / "asr" / "campaign.json").read_text()), [])
+    def test_main_reads_summaries_and_tolerates_a_missing_comparison_file(self):
+        folder = self.root / "summaries" / HOST
+        folder.mkdir(parents=True)
+        (folder / "2026-11-08.json").write_text(json.dumps({k: v for k, v in self.summary.items() if not k.startswith("_")}))
+        families, engines = self.root / "families.json", self.root / "engines.json"
+        families.write_text(json.dumps(FAMILIES))
+        engines.write_text(json.dumps({"rows": ENGINES}))
+        build.main([str(self.root / "summaries"), "-o", str(self.root / "out"), "--comparisons", str(self.root / "missing.json"),
+                    "--families", str(families), "--engines", str(engines), "--dashboards", str(self.root / "none.json")])
+        runs = json.loads((self.root / "out" / HOST / "runs.json").read_text())
+        self.assertEqual({r["comparison_set"] for r in runs}, {"weekly"})
 
 
 if __name__ == "__main__":

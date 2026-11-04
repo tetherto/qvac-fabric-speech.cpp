@@ -1,480 +1,186 @@
-<style>
-#dash-root .sb { display: flex; flex-direction: column; gap: var(--cds-gap-xl); font-family: var(--font-anthropic-sans); font-variant-numeric: tabular-nums; }
-.sb-head { display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
-.sb-crumb { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
-.sb-crumb a { color: var(--color-fg-muted); }
-.sb-title { margin: 0; font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); text-wrap: balance; }
-.sb-take { margin: 0; max-width: 72ch; color: var(--color-fg); font-size: var(--cds-font-size-body); line-height: 1.5; }
-.sb-meta { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm) var(--cds-gap-md); align-items: center; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
-.sb-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--color-border-line); color: var(--color-fg); }
-.sb-pill i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--color-fg-muted); }
-.sb-pill[data-status="ok"] i { background: var(--color-ok); }
-.sb-pill[data-status="partial"] i { background: var(--color-warn); }
-.sb-pill[data-status="failed"] i { background: var(--color-bad); }
-.sb-sec { display: flex; flex-direction: column; gap: var(--cds-gap-md); }
-.sb-sec > h2 { margin: 0; font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); }
-.sb-note { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); line-height: 1.45; max-width: 90ch; }
-.sb-controls { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm) var(--cds-gap-lg); align-items: center; }
-.sb-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.sb-group > span { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin-right: 4px; }
-.sb-group button, .sb-select { font: inherit; font-size: var(--cds-font-size-caption); padding: 4px 12px; border-radius: 999px; border: 1px solid var(--color-border-line); background: var(--color-panel); color: var(--color-fg); cursor: pointer; }
-.sb-group button[aria-pressed="true"] { background: var(--color-fg); color: var(--color-bg); border-color: var(--color-fg); }
-.sb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--cds-gap-md); }
-.sb-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: flex; flex-direction: column; gap: var(--cds-gap-sm); min-width: 0; }
-.sb-card.wide { grid-column: 1 / -1; }
-.sb-card h3 { margin: 0; font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.sb-card h3 small { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); font-weight: 400; }
-.sb-chart { position: relative; min-height: 80px; }
-.sb-chart.tall { min-height: 240px; }
-.sb-chart svg { display: block; overflow: visible; }
-.sb-chart .lbl { fill: var(--color-fg-muted); font-size: var(--cds-font-size-caption); font-family: var(--font-anthropic-sans); }
-.sb-chart .grp { fill: var(--color-fg); font-size: var(--cds-font-size-caption); font-family: var(--font-anthropic-sans); font-weight: var(--cds-font-weight-medium); }
-.sb-chart .end { fill: var(--color-fg); font-size: var(--cds-font-size-caption); font-family: var(--font-anthropic-sans); }
-.sb-chart .stale { opacity: 0.55; }
-.sb-key { display: flex; flex-wrap: wrap; gap: 4px var(--cds-gap-md); color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
-.sb-key span { display: inline-flex; align-items: center; gap: 6px; }
-.sb-key i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.sb-key svg { display: block; }
-.sb-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; z-index: 2; max-width: 90vw; }
-.sb-tip .k { color: var(--cds-text-secondary); margin-bottom: 2px; }
-.sb-tip i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.sb-scroll { overflow-x: auto; }
-.sb-table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-caption); }
-.sb-table th, .sb-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--color-border-line); white-space: nowrap; vertical-align: top; }
-.sb-table td.wrap { white-space: normal; min-width: 18rem; }
-.sb-table th { color: var(--color-fg-muted); font-weight: var(--cds-font-weight-medium); }
-[data-dash-source-state=empty] { color: transparent; }
-[data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
-.sb-fail { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: inherit; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
-.sb-fail::before { content: ""; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--color-bad); }
-.sb-empty { display: flex; align-items: center; justify-content: center; min-height: inherit; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); text-align: center; padding: var(--cds-pad-md); }
-</style>
-
-<div class="sb">
-  <header class="sb-head" id="top">
-    <div class="sb-crumb"><a href="https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY" target="_blank" rel="noopener">QVAC speech weekly bench</a> · <span id="crumb-task">one task, every machine</span></div>
-    <h1 class="sb-title" id="title">Speech Engine Bench</h1>
-    <p class="sb-take dash-skeleton" id="takeaway"></p>
-    <div class="sb-meta" id="run-meta"></div>
+<meta name="dash-one-writer">
+<link rel="stylesheet" href="app.css">
+<div class="fsb">
+  <header class="top" id="top">
+    <div class="eyebrow">QVAC speech · <a href="https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY" target="_blank" rel="noopener">Speech Bench</a> · weekly run finished <span data-draw="fact" data-key="snapshot_utc" data-source="machine" data-field="snapshot_utc">—</span></div>
+    <h1 data-draw="fact" data-key="machine" data-source="machine" data-field="machine">—</h1>
+    <p class="lede">Every Sunday from 18:00 CET this machine builds the engine master and ggml speech heads and runs the weekly matrix: Parakeet TDT and Unified, TranscribePsy and Nemotron for ASR; Supertonic 3, the Audio8 LM and codec cuts with voice cloning, and MOSS-TTS with cloning for TTS; the ACE-Step Turbo, SFT and Base DiTs for music. Where the speech engines campaign measured this machine, its rows against audio.cpp, transcribe.cpp, LocalAI parakeet.cpp and acestep.cpp sit in their own charts with their own build and date.</p>
+    <p class="small muted" data-draw="fact" data-key="hardware" data-source="machine" data-field="hardware">—</p>
   </header>
 
-  <section class="sb-sec" id="latest">
-    <h2>Latest results, by machine</h2>
-    <p class="sb-note" id="latest-note">Newest result of every model and backend on each shared machine, from the Sunday 18:00 CET run of qvac-fabric-speech.cpp at the engine master and ggml speech heads of that night. Speed is seconds of audio per second of wall clock (above 1 is faster than real time). A faded bar comes from an earlier run than the machine's newest.</p>
-    <div class="sb-controls">
-      <div class="sb-group" id="lane-buttons" role="group" aria-label="Backends"><span>Lanes</span></div>
-      <div class="sb-group" id="metric-buttons" role="group" aria-label="Metric"><span>Show</span></div>
-    </div>
-    <div class="sb-key" id="key-backends"></div>
-    <div class="sb-grid dash-skeleton" id="lanes" data-source="latest"></div>
-  </section>
+  <nav class="tabs" role="tablist" aria-label="Report sections">
+    <button type="button" role="tab" data-tab="overview" id="tab-overview">Overview</button>
+    <button type="button" role="tab" data-tab="asr" id="tab-asr">ASR</button>
+    <button type="button" role="tab" data-tab="tts" id="tab-tts">TTS and voice cloning</button>
+    <button type="button" role="tab" data-tab="music" id="tab-music">Music generation</button>
+    <button type="button" role="tab" data-tab="runs" id="tab-runs">Runs and coverage</button>
+  </nav>
 
-  <section class="sb-sec" id="others">
-    <h2>Against other engines</h2>
-    <p class="sb-note" id="others-note">Paired measurements from the QVAC speech engines campaign (Gustavo Araujo, October 2026 edition): both engines on the same device with the same inputs, so each bar pair is comparable within its card. These rows are dated and are not on the weekly clock; the weekly cards above are the current numbers. A campaign card may use a different build and clip than the weekly run, so compare engines within a card, not a card with the weekly cards.</p>
-    <div class="sb-controls">
-      <div class="sb-group" id="input-buttons" role="group" aria-label="Input length"><span>Input</span></div>
-    </div>
-    <div class="sb-key" id="key-engines"></div>
-    <div class="sb-grid dash-skeleton" id="devices" data-source="campaign"></div>
-  </section>
-
-  <section class="sb-sec" id="trends">
-    <h2>Week over week</h2>
-    <div class="sb-card">
-      <div class="sb-controls">
-        <div class="sb-group"><span>Model</span><select class="sb-select" id="trend-family" aria-label="Model"></select></div>
-        <div class="sb-group" id="trend-metric-buttons" role="group" aria-label="Metric"><span>Show</span></div>
+  <section class="page" id="overview" data-page="overview">
+    <div class="two">
+      <div class="card" id="status">
+        <h2>Status</h2>
+        <div data-draw="mstatus" data-source="machine">—</div>
       </div>
-      <p class="sb-note">One line per machine and backend across every stored run, the lanes chosen above. A move with unchanged engine and ggml commits points at load from another user that night; a changed commit names what to look at.</p>
-      <div class="sb-key" id="key-machines"></div>
-      <div class="sb-chart tall dash-skeleton" id="trend" data-source="weekly"></div>
+      <div class="card" id="summary">
+        <h2>On this machine</h2>
+        <div data-draw="notes" data-task="summary" data-source="commentary">—</div>
+      </div>
     </div>
+
+    <div class="card" id="quality-flags">
+      <h3>Quality problems that performance bars do not show</h3>
+      <p class="small muted">TTS rows on this machine with intelligibility WER at or above the flag threshold.</p>
+      <div data-draw="qflags" data-source="runs">—</div>
+    </div>
+
+    <div class="card qa" id="q-matrix">
+      <h3>Which models ran on which backend</h3>
+      <p class="small">A dot is an accepted measurement, colored by engine; hover or tap it for the inputs and timing scopes. A red cross is a failed run. A labelled gap carries the recorded reason. An empty cell means no row exists, which says nothing about support.</p>
+      <div class="legend" data-draw="legend" data-source="runs">—</div>
+      <div class="scroll" data-draw="matrix" data-source="runs coverage">—</div>
+    </div>
+
+    <div class="two">
+      <div class="card" id="gaps">
+        <h3>Not measured here, and why</h3>
+        <div data-draw="gaps" data-source="coverage">—</div>
+      </div>
+      <div class="card qa" id="q-nx">
+        <h3>Reading the numbers</h3>
+        <div class="defs">
+          <span><strong>Speed × real time</strong> = audio duration / processing time; higher is better.</span>
+          <span><strong>RTF</strong> = processing time / audio duration; lower is better.</span>
+          <span><strong>Competitor ÷ QVAC time</strong> is the competitor's time divided by QVAC's time on the same setup. Above 1 means QVAC took less time.</span>
+        </div>
+        <p class="small muted">ASR, Supertonic and Nemotron rows time inference only. Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load, so their speed is a throughput figure, not a latency. Variants generate audio of slightly different length for the same prompt, so each comparison shows latency, generated duration and speed together.</p>
+      </div>
+    </div>
+
+    <div class="card qa" id="engines-here">
+      <h3>Engines on this machine</h3>
+      <p class="small muted">Engines with rows here, then the other engines of the comparison with where they were measured instead.</p>
+      <div class="scroll"><table class="ctable" data-source="engines" data-row-key="engine"><thead><tr><th data-field="engine">Engine</th><th data-field="role">Role</th><th data-field="measured_on">Measured on</th><th data-field="details">Scope and caveats</th></tr></thead><tbody data-draw="engines-here"></tbody></table></div>
+    </div>
+
+    <div class="card" id="general-notes">
+      <h3>Comments and comparison rules</h3>
+      <div data-draw="notes" data-task="all" data-source="commentary">—</div>
+    </div>
+    <p class="small muted">Other machines and the weekly schedule: <a href="https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY" target="_blank" rel="noopener">Speech Bench</a>.</p>
   </section>
 
-  <section class="sb-sec" id="runs-sec">
-    <h2>Every run</h2>
-    <div class="sb-card">
-      <p class="sb-note">One row per stored run on each machine, newest first: the cells that finished against the matrix, the backends built, the engine and ggml commits measured, and the problems the run reported. A labelled or quick run is one started by hand.</p>
-      <div class="sb-scroll">
-        <table class="sb-table" id="runs-table" data-source="runs" data-row-key="host,run">
-          <thead><tr>
-            <th data-field="machine">Machine</th><th data-field="run">Run</th><th data-field="started">Started</th><th data-field="status">Status</th>
-            <th data-field="ok">Cells ok</th><th data-field="expected">Expected</th><th data-field="backends">Backends</th>
-            <th data-field="engine">Engine</th><th data-field="ggml">ggml</th><th data-field="problems">Problems</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
+  <section class="page" id="asr" data-page="asr" data-task="asr" hidden>
+    <div class="card">
+      <h2>ASR</h2>
+      <p>Speech to text on the 11 s JFK clip with its reference transcript: Parakeet TDT 0.6B v3 and Parakeet Unified English 0.6B at Q8_0, TranscribePsy-250M-EU-sub at Q8_0 and Nemotron 3.5 ASR Streaming 0.6B at F16, each timed as inference only with the model loaded. The campaign charts compare QVAC with transcribe.cpp, audio.cpp and LocalAI parakeet.cpp on Parakeet TDT, at the campaign's build, on its 11.0 s and 98.49 s clips.</p>
+    </div>
+    <div data-draw="models" data-source="runs ratios coverage">—</div>
+    <div class="card" id="trend-asr">
+      <h3>Week over week</h3>
+      <p class="small muted">One line per backend across every stored run of this machine. A move with unchanged engine and ggml commits points at load from another user that night; a changed commit names what to look at.</p>
+      <div class="ctl">
+        <label>Model<select data-draw="trend-model" data-source="history" aria-label="Model"></select></label>
+        <label>Metric<span class="seg" role="group" aria-label="Metric"><button type="button" data-metric="speed">Speed ×</button><button type="button" data-metric="latency">Latency</button><button type="button" data-metric="rtf">RTF</button><button type="button" data-metric="rss">Host RSS</button><button type="button" data-metric="gpu">Device memory</button><button type="button" data-metric="wer">WER</button></span></label>
       </div>
+      <div data-draw="trend" data-source="history">—</div>
+    </div>
+    <details class="card tnotes"><summary>About these measurements and interpretation notes</summary>
+      <p class="small muted">ASR WER is ground truth against the JFK transcript, a single-clip smoke check, not a corpus benchmark. Weekly rows and campaign rows are never in one chart.</p>
+      <div data-draw="notes" data-source="commentary">—</div>
+    </details>
+  </section>
+
+  <section class="page" id="tts" data-page="tts" data-task="tts" hidden>
+    <div class="card">
+      <h2>TTS and voice cloning</h2>
+      <p>Speech synthesis from one fixed English prompt and voice cloning from the JFK clip. Supertonic 3 at Q8_0 is timed as inference only. The Audio8 TTS Preview 0.6B grid of LM F16, Q8_0 and Q4_0 by codec decoder F16 and Q8_0, Audio8 cloning with the F16 and Q8_0 encoders, MOSS-TTS v1.5 8.5B at F16 and with Q8_0 transformer blocks, and MOSS-TTS cloning run as fresh processes including model load. The campaign charts compare QVAC with audio.cpp on Supertonic 3 and the Audio8 LM cuts, on a 9-word and a 76-word prompt.</p>
+    </div>
+    <div data-draw="models" data-source="runs ratios coverage">—</div>
+    <div class="card" id="trend-tts">
+      <h3>Week over week</h3>
+      <p class="small muted">One line per backend across every stored run of this machine.</p>
+      <div class="ctl">
+        <label>Model<select data-draw="trend-model" data-source="history" aria-label="Model"></select></label>
+        <label>Metric<span class="seg" role="group" aria-label="Metric"><button type="button" data-metric="speed">Speed ×</button><button type="button" data-metric="latency">Latency</button><button type="button" data-metric="rtf">RTF</button><button type="button" data-metric="rss">Host RSS</button><button type="button" data-metric="gpu">Device memory</button><button type="button" data-metric="wer">WER</button></span></label>
+      </div>
+      <div data-draw="trend" data-source="history">—</div>
+    </div>
+    <details class="card tnotes"><summary>About these measurements and interpretation notes</summary>
+      <p class="small muted">TTS WER is intelligibility: pinned Whisper tiny transcribes the generated clip outside the timed region. It includes scorer errors and does not measure naturalness or speaker similarity. Fresh-process timings include model loading from a warm filesystem cache; they are not cold-disk startup times. MOSS-TTS Q8_0 is the F16 backbone with its transformer blocks requantized on the machine, because the registry has no Q8_0 cut.</p>
+      <div data-draw="notes" data-source="commentary">—</div>
+    </details>
+  </section>
+
+  <section class="page" id="music" data-page="music" data-task="music" hidden>
+    <div class="card">
+      <h2>Music generation</h2>
+      <p>A 30 s instrumental render at seed 42 as a fresh process including the load of all four stages: ACE-Step 1.5 Turbo with the DiT at Q8_0 and at Q4_K_M, SFT at Q8_0 and Base at Q4_K_M, each with the Qwen3-Embedding-0.6B Q8_0, the 5Hz LM 0.6B Q8_0 and the BF16 VAE. The campaign charts compare QVAC with acestep.cpp on ACE-Step Turbo over the campaign's ten prompts.</p>
+    </div>
+    <div data-draw="models" data-source="runs ratios coverage">—</div>
+    <div class="card" id="trend-music">
+      <h3>Week over week</h3>
+      <p class="small muted">One line per backend across every stored run of this machine.</p>
+      <div class="ctl">
+        <label>Model<select data-draw="trend-model" data-source="history" aria-label="Model"></select></label>
+        <label>Metric<span class="seg" role="group" aria-label="Metric"><button type="button" data-metric="speed">Speed ×</button><button type="button" data-metric="latency">Latency</button><button type="button" data-metric="rtf">RTF</button><button type="button" data-metric="rss">Host RSS</button><button type="button" data-metric="gpu">Device memory</button></span></label>
+      </div>
+      <div data-draw="trend" data-source="history">—</div>
+    </div>
+    <details class="card tnotes"><summary>About these measurements and interpretation notes</summary>
+      <p class="small muted">Music quality is unmeasured: there is no scorer and no listening protocol. ACE-Step Base runs at Q4_K_M because the registry has no Q8_0 Base cut.</p>
+      <div data-draw="notes" data-source="commentary">—</div>
+    </details>
+  </section>
+
+  <section class="page" id="runs" data-page="runs" hidden>
+    <div class="card" id="run-table">
+      <h2>All rows</h2>
+      <p class="small muted">Every weekly cell of the newest result and every campaign row of this machine. Search any text (model, engine, hash, caveat) and click a row to see its full provenance. Click a column heading to sort.</p>
+      <div class="ctl">
+        <label>Search<input type="search" id="runs-q" class="runs-q" placeholder="e.g. Supertonic, vulkan, failed" aria-label="Search runs"></label>
+        <label>Status<select id="runs-status" class="runs-status" aria-label="Status"><option value="">All</option><option value="measured">Measured</option><option value="failed">Failed</option></select></label>
+      </div>
+      <div class="scroll tall"><table class="ctable runs-table" data-source="runs" data-row-key="id"><thead><tr>
+        <th data-field="id"><button type="button" class="sort" data-sort="id">Row</button></th>
+        <th data-field="machine"><button type="button" class="sort" data-sort="machine">Machine</button></th>
+        <th data-field="backend"><button type="button" class="sort" data-sort="backend">Backend</button></th>
+        <th data-field="task"><button type="button" class="sort" data-sort="task">Task</button></th>
+        <th data-field="model"><button type="button" class="sort" data-sort="model">Model</button></th>
+        <th data-field="engine"><button type="button" class="sort" data-sort="engine">Engine</button></th>
+        <th data-field="variant"><button type="button" class="sort" data-sort="variant">Variant</button></th>
+        <th data-field="scenario_label">Input</th>
+        <th data-field="timing_label">Timing scope</th>
+        <th data-field="status"><button type="button" class="sort" data-sort="status">Status</button></th>
+        <th data-field="latency_ms" class="r"><button type="button" class="sort" data-sort="latency_ms">Latency</button></th>
+        <th data-field="audio_s" class="r"><button type="button" class="sort" data-sort="audio_s">Audio s</button></th>
+        <th data-field="speed_x" class="r"><button type="button" class="sort" data-sort="speed_x">Speed ×</button></th>
+        <th data-field="rtf" class="r"><button type="button" class="sort" data-sort="rtf">RTF</button></th>
+        <th data-field="rss_mib" class="r"><button type="button" class="sort" data-sort="rss_mib">RSS MiB</button></th>
+        <th data-field="gpu_mib" class="r"><button type="button" class="sort" data-sort="gpu_mib">Device MiB</button></th>
+        <th data-field="wer_pct" class="r"><button type="button" class="sort" data-sort="wer_pct">WER %</button></th>
+        <th data-field="runs" class="r">Runs</th>
+        <th data-field="warmups" class="r">Warmups</th>
+        <th data-field="date">Date</th>
+      </tr></thead><tbody data-draw="runs-table"></tbody></table></div>
+      <div data-draw="run-detail" data-source="runs">—</div>
+    </div>
+
+    <div class="card" id="coverage">
+      <h2>Coverage</h2>
+      <p class="small muted">Measured, failed and skipped cells of the matrix on this machine, plus the campaign cells, each with its recorded reason.</p>
+      <div class="ctl">
+        <label>Status
+          <span class="seg" role="group" aria-label="Coverage status">
+            <button type="button" data-cov="">All</button>
+            <button type="button" data-cov="measured">Measured</button>
+            <button type="button" data-cov="failed">Failed</button>
+            <button type="button" data-cov="not attempted">Not attempted</button>
+          </span>
+        </label>
+      </div>
+      <div class="scroll tall"><table class="ctable" data-source="coverage" data-row-key="id"><thead><tr><th data-field="id">Cell</th><th data-field="machine">Machine</th><th data-field="backend">Backend</th><th data-field="task">Task</th><th data-field="model">Model</th><th data-field="engine">Engine</th><th data-field="status">Status</th><th data-field="rows" class="r">Rows</th><th data-field="scenario">Input</th><th data-field="reason">Recorded reason</th><th data-field="source">Source</th></tr></thead><tbody data-draw="coverage-table"></tbody></table></div>
     </div>
   </section>
 </div>
-
-<script>
-(() => {
-  // the same page on every task's dashboard: the task, machines, backends and engines come from the data
-  const LANDING = "https://claude.ai/artifact/MAF5hDfMrpqbQ7Dsqmc8gY";
-  const TASK_TITLES = { ASR: "ASR Engine Bench", TTS: "TTS Engine Bench", "TTS cloning": "TTS Engine Bench", Music: "Music Engine Bench" };
-  const TASK_CRUMBS = { ASR: "speech to text", TTS: "text to speech and voice cloning", "TTS cloning": "text to speech and voice cloning", Music: "music generation" };
-  const MACHINE_ORDER = ["DGX Spark", "RTX 5090", "Strix Halo", "Strix Halo (1)", "Jetson Orin Nano", "Mac Studio M3 Ultra", "Mac mini M4"];
-  const MACHINE_COLOR = { "DGX Spark": 0, "RTX 5090": 1, "Strix Halo": 2, "Strix Halo (1)": 2, "Jetson Orin Nano": 3, "Mac Studio M3 Ultra": 4, "Mac mini M4": 5 };
-  const BACKEND_ORDER = ["cuda", "metal", "vulkan", "coreml", "cpu"];
-  const BACKEND_COLOR = { cuda: 0, metal: 1, vulkan: 2, coreml: 3, cpu: 7 };
-  const QVAC = "qvac-fabric-speech.cpp";
-  const ENGINE_ORDER = [QVAC, "audio.cpp", "transcribe.cpp", "LocalAI / parakeet.cpp", "acestep.cpp"];
-  const ENGINE_COLOR = { [QVAC]: 0, "audio.cpp": 1, "transcribe.cpp": 2, "LocalAI / parakeet.cpp": 3, "acestep.cpp": 4 };
-  const DEVICE_ORDER = ["Mac Studio M3 Ultra", "RTX 5090 box", "DGX Spark GB10", "Strix Halo", "MacBook Air M5", "RTX 3080 desktop", "Jetson Orin 8 GB"];
-  const LANES = { gpu: "GPU", cpu: "CPU", all: "All" };
-  const METRICS = {
-    speed: { label: "× real time", field: "speed_x", unit: "×", log: true, fmt: (v) => fmtSpeed(v) },
-    wall: { label: "wall time", field: "wall_ms", unit: "ms", log: true, fmt: (v) => fmtMs(v) },
-    rss: { label: "peak RSS", field: "rss_gib", unit: "GiB", log: false, fmt: (v) => `${f2(v)} GiB` },
-    quality: { label: "WER", field: "quality_pct", unit: "%", log: false, fmt: (v) => `${f2(v)} %` },
-  };
-  const INPUTS = { long: "long", short: "short" };
-  const OTHER_COLOR = 6;
-  const BAR_H = 20, GROUP_GAP = 10, PAD_BOTTOM = 22;
-  const f1 = d3.format(",.1f"), f2 = d3.format(",.2f"), f0 = d3.format(",.0f");
-  const dayFmt = d3.utcFormat("%b %-d, %Y"), dayShort = d3.utcFormat("%b %-d");
-  const day = (s) => String(s || "").slice(0, 10);
-  const parseDay = (s) => new Date(day(s) + "T00:00:00Z");
-  const NS = "http://www.w3.org/2000/svg";
-  let lane = "gpu", metric = "speed", input = "long", trendFamily = null, trendMetric = "speed";
-
-  const fmtSpeed = (v) => (v >= 100 ? `${f0(v)}×` : v >= 10 ? `${f1(v)}×` : `${f2(v)}×`);
-  const fmtMs = (v) => (v >= 10000 ? `${f1(v / 1000)} s` : v >= 1000 ? `${f2(v / 1000)} s` : `${f0(v)} ms`);
-  const num = (v) => (v == null || v === "" ? null : Number(v));
-  const orderOf = (list, k) => (list.indexOf(k) < 0 ? list.length : list.indexOf(k));
-  const byMachine = (a, b) => orderOf(MACHINE_ORDER, a) - orderOf(MACHINE_ORDER, b) || String(a).localeCompare(b);
-  const byBackend = (a, b) => orderOf(BACKEND_ORDER, a) - orderOf(BACKEND_ORDER, b);
-  const byEngine = (a, b) => orderOf(ENGINE_ORDER, a) - orderOf(ENGINE_ORDER, b) || String(a).localeCompare(b);
-  const byDevice = (a, b) => orderOf(DEVICE_ORDER, a) - orderOf(DEVICE_ORDER, b) || String(a).localeCompare(b);
-  const byOrder = (a, b) => num(a.order) - num(b.order) || String(a.label).localeCompare(b.label);
-  const backendColor = (b) => dash.colors[BACKEND_COLOR[b] ?? OTHER_COLOR];
-  const engineColor = (e) => dash.colors[ENGINE_COLOR[e] ?? OTHER_COLOR];
-  const machineColor = (m) => dash.colors[MACHINE_COLOR[m] ?? OTHER_COLOR];
-  const inLane = (backend) => lane === "all" || (lane === "cpu") === (backend === "cpu");
-
-  function rowsOf(id) { const d = dash.data(id); return { st: d.status, rows: d.status === "ok" ? (d.data || []) : [] }; }
-  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
-  function failed(el) { clear(el); el.classList.remove("dash-skeleton"); const p = document.createElement("div"); p.className = "sb-fail"; p.textContent = "Failed to load"; el.appendChild(p); }
-  function empty(el, text) { clear(el); el.classList.remove("dash-skeleton"); const p = document.createElement("div"); p.className = "sb-empty"; p.textContent = text; el.appendChild(p); }
-  function span(text, src, field, where) {
-    const s = document.createElement("span"); s.textContent = text;
-    if (src) { s.dataset.source = src; s.dataset.field = field; if (where) s.dataset.where = where; }
-    return s;
-  }
-  const where = (o) => Object.entries(o).filter(([, v]) => v != null).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
-  function tipFor(box) { let t = box.querySelector(".sb-tip"); if (!t) { t = document.createElement("div"); t.className = "sb-tip"; t.hidden = true; box.appendChild(t); } return t; }
-  function placeTip(tip, box, x, y) {
-    tip.hidden = false; const bw = box.clientWidth, tw = tip.offsetWidth;
-    let left = x + 14; if (left + tw > bw) left = x - tw - 14; if (left < 0) left = 0;
-    tip.style.left = left + "px"; tip.style.top = Math.max(0, y - 12) + "px";
-  }
-  function tipLines(tip, head, lines) {
-    clear(tip);
-    const h = document.createElement("div"); h.className = "k"; h.textContent = head; tip.appendChild(h);
-    lines.filter(Boolean).forEach(([c, label, val]) => {
-      const d = document.createElement("div");
-      if (c) { const i = document.createElement("i"); i.style.background = c; d.appendChild(i); }
-      d.appendChild(document.createTextNode(val == null ? label : `${label}  ${val}`)); tip.appendChild(d);
-    });
-  }
-  function buttons(el, choices, current, onPick) {
-    [...el.querySelectorAll("button")].forEach((b) => b.remove());
-    Object.entries(choices).forEach(([k, label]) => {
-      const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.setAttribute("aria-pressed", String(k === current));
-      b.addEventListener("click", () => onPick(k)); el.appendChild(b);
-    });
-  }
-  function key(el, items) {
-    clear(el);
-    items.forEach(([label, color, dashed]) => {
-      const s = document.createElement("span");
-      if (dashed == null) { const i = document.createElement("i"); i.style.background = color; s.appendChild(i); }
-      else {
-        const svg = document.createElementNS(NS, "svg"); svg.setAttribute("width", "28"); svg.setAttribute("height", "8");
-        const l = document.createElementNS(NS, "line"); l.setAttribute("x1", "0"); l.setAttribute("x2", "28"); l.setAttribute("y1", "4"); l.setAttribute("y2", "4");
-        l.setAttribute("stroke", color); l.setAttribute("stroke-width", "2"); if (dashed) l.setAttribute("stroke-dasharray", "2 4");
-        svg.appendChild(l); s.appendChild(svg);
-      }
-      s.append(label); el.appendChild(s);
-    });
-  }
-  function card(parent, title, sub, wide) {
-    const c = document.createElement("article"); c.className = wide ? "sb-card wide" : "sb-card";
-    const h = document.createElement("h3"); h.textContent = title;
-    if (sub) { const s = document.createElement("small"); s.textContent = sub; h.appendChild(s); }
-    const box = document.createElement("div"); box.className = "sb-chart";
-    c.append(h, box); parent.appendChild(c);
-    return box;
-  }
-  function shorten(probe, text, maxW) {
-    let s = text; probe.text(s);
-    while (s.length > 4 && probe.node().getComputedTextLength() > maxW) { s = s.slice(0, -1); probe.text(`${s.trimEnd()}…`); }
-    return probe.text();
-  }
-
-  // groups: [{label, bars: [{v, color, stale, name, detail}]}]; one row of bars per group, labelled at the left
-  function groupedBars(box, groups, opt) {
-    clear(box); box.classList.remove("dash-skeleton");
-    const W = Math.max(240, box.clientWidth);
-    const rows = groups.reduce((n, g) => n + g.bars.length, 0);
-    const H = rows * BAR_H + groups.length * GROUP_GAP + PAD_BOTTOM;
-    const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("width", "100%"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", opt.aria);
-    box.appendChild(svg);
-    const g = d3.select(svg);
-    const probe = g.append("text").attr("class", "lbl");
-    const maxName = W * 0.38;
-    let nameW = 0;
-    groups.forEach((gr) => { gr.short = shorten(probe, gr.label, maxName); nameW = Math.max(nameW, probe.node().getComputedTextLength()); });
-    probe.remove();
-    const padL = nameW + 10, padR = 58;
-    const values = groups.flatMap((gr) => gr.bars.map((b) => b.v)).filter((v) => v != null && v > 0);
-    const hi = (d3.max(values) || 1), lo = d3.min(values) || 1;
-    const x = opt.log ? d3.scaleLog().domain([Math.min(lo / 2, 0.5), hi * 1.15]).range([padL, W - padR])
-      : d3.scaleLinear([0, hi * 1.08], [padL, W - padR]).nice();
-    const x0 = x.range()[0];
-    const ticks = opt.log ? x.ticks(4).filter((t) => /^1(0*)$/.test(String(t)) || t === 2 || t === 5) : x.ticks(3);
-    ticks.forEach((t) => {
-      g.append("line").attr("x1", x(t)).attr("x2", x(t)).attr("y1", 0).attr("y2", H - PAD_BOTTOM + 2).attr("stroke", "var(--cds-chart-grid)");
-      g.append("text").attr("class", "lbl").attr("x", x(t)).attr("y", H - 4).attr("text-anchor", "middle").text(opt.tick(t));
-    });
-    const tip = tipFor(box);
-    let y = GROUP_GAP / 2;
-    groups.forEach((gr) => {
-      const mid = y + (gr.bars.length * BAR_H) / 2;
-      g.append("text").attr("class", gr.bars.length > 1 ? "grp" : "lbl").attr("x", padL - 8).attr("y", mid + 4).attr("text-anchor", "end").text(gr.short);
-      gr.bars.forEach((b) => {
-        const yy = y + 2, has = b.v != null && b.v > 0;
-        const rect = g.append("rect").attr("x", x0).attr("y", yy).attr("width", has ? Math.max(2, x(b.v) - x0) : 2).attr("height", BAR_H - 4).attr("rx", 4)
-          .attr("fill", has ? b.color : "var(--color-fg-muted)");
-        if (b.stale) rect.attr("class", "stale");
-        g.append("text").attr("class", "end").attr("x", (has ? x(b.v) : x0) + 6).attr("y", yy + BAR_H / 2 + 1).attr("fill", "var(--color-fg)").text(has ? opt.fmt(b.v) : b.missing || "—");
-        g.append("rect").attr("x", 0).attr("y", y).attr("width", W).attr("height", BAR_H).attr("fill", "transparent")
-          .on("pointermove", (ev) => { tipLines(tip, b.name || gr.label, b.detail); const r = box.getBoundingClientRect(); placeTip(tip, box, ev.clientX - r.left, ev.clientY - r.top); })
-          .on("pointerleave", () => { tip.hidden = true; });
-        y += BAR_H;
-      });
-      y += GROUP_GAP;
-    });
-  }
-
-  // series: [{name, color, dashed, pts: [{x: Date, y, row}]}]
-  function lineChart(box, series, opt) {
-    clear(box); box.classList.remove("dash-skeleton");
-    const W = Math.max(280, box.clientWidth), H = opt.height || 240;
-    const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("width", "100%"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", opt.aria);
-    box.appendChild(svg);
-    const g = d3.select(svg);
-    const all = series.flatMap((s) => s.pts);
-    const y = d3.scaleLinear([0, (d3.max(all, (p) => p.y) || 1) * 1.08], [H - 26, 8]).nice();
-    const probe = g.append("text").attr("class", "lbl").text(opt.tick(y.domain()[1]));
-    const tickW = probe.node().getComputedTextLength(); probe.remove();
-    const endProbe = g.append("text").attr("class", "end");
-    let endW = 0;
-    series.forEach((s) => { const last = s.pts[s.pts.length - 1]; if (last) { endProbe.text(`${s.name} ${opt.tick(last.y)}`); endW = Math.max(endW, endProbe.node().getComputedTextLength()); } });
-    endProbe.remove();
-    const showNames = W - tickW - endW > 300;
-    const padL = tickW + 12, padR = (showNames ? endW : 40) + 12;
-    const xs = [...new Set(all.map((p) => +p.x))].sort((a, b) => a - b).map((v) => new Date(v));
-    let a = xs[0], b = xs[xs.length - 1];
-    if (+a === +b) { a = d3.utcDay.offset(a, -7); b = d3.utcDay.offset(b, 7); }
-    const x = d3.scaleUtc([a, b], [padL, W - padR]);
-    let lastX = -Infinity; const xl = [];
-    xs.forEach((t) => { const px = x(t); if (px - lastX > 44) { xl.push(t); lastX = px; } });
-    const ticksY = y.ticks(4);
-    g.append("g").selectAll("line").data(ticksY).join("line").attr("x1", padL).attr("x2", W - padR).attr("y1", (t) => y(t)).attr("y2", (t) => y(t)).attr("stroke", "var(--cds-chart-grid)");
-    g.append("g").selectAll("text").data(ticksY).join("text").attr("class", "lbl").attr("x", padL - 8).attr("y", (t) => y(t) + 4).attr("text-anchor", "end").text((t) => opt.tick(t));
-    g.append("g").selectAll("text").data(xl).join("text").attr("class", "lbl").attr("x", (t) => x(t)).attr("y", H - 6).attr("text-anchor", "middle").text((t) => dayShort(t));
-    g.append("line").attr("x1", padL).attr("x2", W - padR).attr("y1", y(0)).attr("y2", y(0)).attr("stroke", "var(--cds-chart-axis)");
-    const line = d3.line().x((p) => x(p.x)).y((p) => y(p.y));
-    series.forEach((s) => {
-      g.append("path").attr("d", line(s.pts)).attr("fill", "none").attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-linejoin", "round").attr("stroke-dasharray", s.dashed ? "2 4" : null);
-      g.append("g").selectAll("circle").data(s.pts).join("circle").attr("cx", (p) => x(p.x)).attr("cy", (p) => y(p.y)).attr("r", 3.5).attr("fill", s.color).attr("stroke", "var(--color-panel)").attr("stroke-width", 1.5);
-    });
-    const ends = series.filter((s) => s.pts.length).map((s) => { const p = s.pts[s.pts.length - 1]; return { s, x: x(p.x) + 8, y: y(p.y) + 4, v: p.y }; });
-    ends.sort((p, q) => p.y - q.y);
-    for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
-    const over = ends.length ? ends[ends.length - 1].y - (H - 22) : 0;
-    if (over > 0) ends.forEach((e) => { e.y -= over; });
-    ends.forEach((e) => g.append("text").attr("class", "end").attr("x", e.x).attr("y", e.y).attr("fill", e.s.color).text(showNames ? `${e.s.name} ${opt.tick(e.v)}` : opt.tick(e.v)));
-    const tip = tipFor(box);
-    const rule = g.append("line").attr("y1", 8).attr("y2", H - 26).attr("stroke", "var(--cds-chart-reference)").attr("visibility", "hidden");
-    g.append("rect").attr("x", padL).attr("y", 0).attr("width", Math.max(1, W - padL - padR)).attr("height", H - 20).attr("fill", "transparent")
-      .on("pointermove", (ev) => {
-        const [mx] = d3.pointer(ev);
-        let best = xs[0], bd = Infinity;
-        xs.forEach((v) => { const d = Math.abs(x(v) - mx); if (d < bd) { bd = d; best = v; } });
-        rule.attr("x1", x(best)).attr("x2", x(best)).attr("visibility", "visible");
-        const lines = series.map((s) => [s, s.pts.find((p) => +p.x === +best)]).filter(([, p]) => p).sort((p, q) => q[1].y - p[1].y).map(([s, p]) => [s.color, s.name, `${opt.tick(p.y)} (${p.row.run})`]);
-        tipLines(tip, dayFmt(best), lines);
-        const r = box.getBoundingClientRect(); placeTip(tip, box, ev.clientX - r.left, ev.clientY - r.top);
-      })
-      .on("pointerleave", () => { tip.hidden = true; rule.attr("visibility", "hidden"); });
-  }
-
-  const taskOf = (rows) => rows.find((r) => r.task && r.task !== "TTS cloning")?.task || rows[0]?.task || "";
-  const cellDetail = (r) => [
-    [null, r.weights],
-    [null, "speed", fmtSpeed(num(r.speed_x) || 0)],
-    r.wall_ms != null ? [null, "wall median", `${fmtMs(num(r.wall_ms))}${r.wall_min_ms != null && r.wall_max_ms != null ? ` (${fmtMs(num(r.wall_min_ms))} to ${fmtMs(num(r.wall_max_ms))}, ${r.runs} runs)` : ""}`] : null,
-    r.audio_s != null ? [null, "audio", `${f1(num(r.audio_s))} s`] : null,
-    r.rss_gib != null ? [null, "peak RSS", `${f2(num(r.rss_gib))} GiB`] : null,
-    r.gpu_mem_rise_gib != null ? [null, "GPU memory rise", `${f2(num(r.gpu_mem_rise_gib))} GiB`] : null,
-    r.quality_pct != null ? [null, r.quality || "WER", `${f2(num(r.quality_pct))} %`] : null,
-    [null, "status", `${r.status}${r.observed_backend ? ` on ${r.observed_backend}` : ""}`],
-    [null, "run", `${r.run}${r.current === false || r.current === "false" ? " (earlier than the machine's newest run)" : ""}`],
-    [null, "engine", `${r.engine}, ggml ${r.ggml}`],
-    r.notes ? [null, r.notes] : null,
-  ];
-  const isStale = (r) => r.current === false || r.current === "false";
-
-  function drawLanes(latest) {
-    const grid = document.getElementById("lanes");
-    if (latest.st === "error") return failed(grid);
-    if (latest.st !== "ok") return;
-    const rows = latest.rows.filter((r) => inLane(r.backend));
-    const m = METRICS[metric];
-    const lanes = [...new Set(rows.map((r) => `${r.machine}\u0000${r.backend}`))].map((k) => k.split("\u0000"))
-      .sort((a, b) => byMachine(a[0], b[0]) || byBackend(a[1], b[1]));
-    clear(grid); grid.classList.remove("dash-skeleton");
-    if (!lanes.length) return empty(grid, "No results for these lanes yet.");
-    lanes.forEach(([machine, backend]) => {
-      const cells = rows.filter((r) => r.machine === machine && r.backend === backend).sort(byOrder);
-      const newest = cells.filter((r) => !isStale(r))[0] || cells[0];
-      const box = card(grid, `${machine} · ${backend}`, newest ? `${dayFmt(parseDay(newest.started))}${cells.some(isStale) ? ", some from earlier runs" : ""}` : "");
-      const groups = cells.map((r) => ({ label: r.label, bars: [{ v: r.status === "ok" ? num(r[m.field]) : null, color: backendColor(backend), stale: isStale(r), name: r.label, missing: r.status === "ok" ? "not sampled" : r.status, detail: cellDetail(r) }] }));
-      if (!groups.some((gr) => gr.bars[0].v != null)) return empty(box, metric === "quality" ? "No WER on this lane." : "No result on this lane.");
-      groupedBars(box, groups, { aria: `${m.label} per model on ${machine} ${backend}`, log: m.log, fmt: m.fmt, tick: m.log ? (t) => (metric === "wall" ? fmtMs(t) : `${t}×`) : (t) => String(t) });
-    });
-  }
-
-  function drawDevices(campaign) {
-    const grid = document.getElementById("devices"), sec = document.getElementById("others");
-    if (campaign.st === "error") return failed(grid);
-    if (campaign.st === "missing") { sec.hidden = true; return; }
-    if (campaign.st !== "ok") return;
-    const rows = campaign.rows.filter((r) => inLane(r.backend));
-    const hasLong = campaign.rows.some((r) => r.qvac_speed_long != null);
-    document.getElementById("input-buttons").hidden = !hasLong;
-    const which = hasLong ? input : "short";
-    const devices = [...new Set(rows.map((r) => r.device))].sort(byDevice);
-    clear(grid); grid.classList.remove("dash-skeleton");
-    if (!devices.length) return empty(grid, "No campaign rows for these lanes.");
-    devices.forEach((device) => {
-      const dr = rows.filter((r) => r.device === device);
-      const groupsKeys = [...new Set(dr.map((r) => `${r.label}\u0000${r.backend}`))].map((k) => k.split("\u0000")).sort((a, b) => a[0].localeCompare(b[0]) || byBackend(a[1], b[1]));
-      const measured = [...new Set(dr.map((r) => r.measured))].sort();
-      const box = card(grid, device, `measured ${measured.join(", ")}`);
-      const groups = groupsKeys.map(([label, backend]) => {
-        const pairs = dr.filter((r) => r.label === label && r.backend === backend).sort((a, b) => byEngine(a.engine, b.engine));
-        const q = pairs[0];
-        const qvacBar = { v: num(q[`qvac_speed_${which}`]), color: engineColor(QVAC), name: `${QVAC} · ${label} · ${backend}`,
-          detail: [[null, "qvac build", q.qvac_version], [null, "speed, short input", fmtSpeed(num(q.qvac_speed_short) || 0)], q.qvac_speed_long != null ? [null, "speed, long input", fmtSpeed(num(q.qvac_speed_long))] : null, [null, q.harness]] };
-        const bars = pairs.map((r) => ({ v: num(r[`competitor_speed_${which}`]), color: engineColor(r.engine), name: `${r.engine} · ${label} · ${backend}`,
-          detail: [[null, "version", r.engine_version], [null, "speed, short input", fmtSpeed(num(r.competitor_speed_short) || 0)], r.competitor_speed_long != null ? [null, "speed, long input", fmtSpeed(num(r.competitor_speed_long))] : null,
-            [null, "qvac faster by", `${f2(num(r.ratio_short))}× short${r.ratio_long != null ? `, ${f2(num(r.ratio_long))}× long` : ""}`], [null, "source", r.source]] }));
-        return { label: `${label} · ${backend}`, bars: [qvacBar, ...bars] };
-      });
-      groupedBars(box, groups, { aria: `Seconds of audio per second of wall clock per engine on ${device}, ${which} input`, log: true, fmt: fmtSpeed, tick: (t) => `${t}×` });
-    });
-  }
-
-  function drawTrend(weekly) {
-    const box = document.getElementById("trend"), sel = document.getElementById("trend-family");
-    if (weekly.st === "error") return failed(box);
-    if (weekly.st !== "ok") return;
-    const families = [...new Map(weekly.rows.map((r) => [r.family, r])).values()].sort(byOrder);
-    if (!families.some((r) => r.family === trendFamily)) trendFamily = families[0]?.family || null;
-    sel.replaceChildren(...families.map((r) => new Option(r.label, r.family)));
-    sel.value = trendFamily || "";
-    const m = METRICS[trendMetric];
-    const rows = weekly.rows.filter((r) => r.family === trendFamily && inLane(r.backend) && r.status === "ok" && num(r[m.field]) != null);
-    const lanes = [...new Set(rows.map((r) => `${r.machine}\u0000${r.backend}`))].map((k) => k.split("\u0000")).sort((a, b) => byMachine(a[0], b[0]) || byBackend(a[1], b[1]));
-    key(document.getElementById("key-machines"), lanes.map(([machine, backend]) => [`${machine} ${backend}`, machineColor(machine), backend === "cpu"]));
-    if (!rows.length) return empty(box, "No stored run has this model on these lanes yet.");
-    const series = lanes.map(([machine, backend]) => ({ name: `${machine} ${backend}`, color: machineColor(machine), dashed: backend === "cpu",
-      pts: rows.filter((r) => r.machine === machine && r.backend === backend).map((r) => ({ x: parseDay(r.started), y: num(r[m.field]), row: r })).sort((p, q) => p.x - q.x) }));
-    lineChart(box, series, { aria: `${m.label} of ${families.find((r) => r.family === trendFamily)?.label || ""} by run`, tick: m.log ? (metric === "wall" ? (t) => fmtMs(t) : (t) => `${f0(t)}×`) : (t) => String(t) });
-  }
-
-  function newestRuns(runs) {
-    const newest = {};
-    runs.rows.forEach((r) => { if (!newest[r.host] || String(r.started) > String(newest[r.host].started)) newest[r.host] = r; });
-    return Object.values(newest).sort((a, b) => byMachine(a.machine, b.machine));
-  }
-
-  function drawHeader(latest, campaign, runs) {
-    const task = taskOf(latest.rows) || taskOf(campaign.rows);
-    document.getElementById("title").textContent = TASK_TITLES[task] || "Speech Engine Bench";
-    document.getElementById("crumb-task").textContent = TASK_CRUMBS[task] || "one task, every machine";
-    const take = document.getElementById("takeaway"), meta = document.getElementById("run-meta");
-    clear(take); clear(meta);
-    if (latest.st === "error") { take.classList.remove("dash-skeleton"); take.textContent = "The latest results failed to load."; }
-    else if (latest.st === "ok") {
-      take.classList.remove("dash-skeleton");
-      const gpu = latest.rows.filter((r) => r.backend !== "cpu" && r.status === "ok" && num(r.speed_x) > 0).sort(byOrder);
-      const head = gpu[0];
-      const best = head ? gpu.filter((r) => r.family === head.family).sort((a, b) => num(b.speed_x) - num(a.speed_x))[0] : null;
-      if (best) {
-        take.append(`${best.label} runs fastest on ${best.machine} ${best.backend}: `);
-        take.append(span(fmtSpeed(num(best.speed_x)), "latest", "speed_x", where({ host: best.host, backend: best.backend, family: best.family })), ` real time (`);
-        take.append(span(fmtMs(num(best.wall_ms)), "latest", "wall_ms", where({ host: best.host, backend: best.backend, family: best.family })), ` wall for ${f1(num(best.audio_s))} s of audio).`);
-      } else take.textContent = "No GPU lane has a result yet; see each run's status below.";
-      if (campaign.st === "ok") {
-        const long = campaign.rows.filter((r) => r.ratio_long != null), pool = long.length ? long : campaign.rows;
-        const top = pool.slice().sort((a, b) => (num(b.ratio_long) ?? num(b.ratio_short)) - (num(a.ratio_long) ?? num(a.ratio_short)))[0];
-        if (top) {
-          const field = top.ratio_long != null ? "ratio_long" : "ratio_short";
-          take.append(` In the campaign of ${dayFmt(parseDay(top.measured))}, ${QVAC} ran ${top.label} on ${top.device} ${top.backend} `);
-          take.append(span(`${f2(num(top[field]))}×`, "campaign", field, where({ model: top.model, quantization: top.quantization, engine: top.engine, device: top.device, backend: top.backend })), ` faster than ${top.engine}.`);
-        }
-      }
-    }
-    if (runs.st === "ok") newestRuns(runs).forEach((r) => {
-      const pill = document.createElement("span"); pill.className = "sb-pill"; pill.dataset.status = r.status;
-      pill.appendChild(document.createElement("i"));
-      pill.append(`${r.machine} `, span(`${r.ok}/${r.expected}`, "runs", "ok", where({ host: r.host, run: r.run })), ` ${dayShort(parseDay(r.started))}`);
-      meta.appendChild(pill);
-    });
-  }
-
-  function drawRuns(runs) {
-    const tb = document.querySelector("#runs-table tbody");
-    clear(tb);
-    if (runs.st !== "ok") return;
-    runs.rows.slice().sort((a, b) => String(b.started).localeCompare(String(a.started)) || byMachine(a.machine, b.machine)).forEach((r) => {
-      const tr = document.createElement("tr"); tr.dataset.key = `${encodeURIComponent(r.host)},${encodeURIComponent(r.run)}`;
-      [r.machine, r.run, day(r.started), r.status, r.ok, r.expected, r.backends, String(r.engine || "").slice(0, 10), String(r.ggml || "").slice(0, 10), r.problems || ""].forEach((v, i) => {
-        const td = document.createElement("td"); td.textContent = v == null || v === "" ? "—" : String(v); if (i === 9) td.className = "wrap"; tr.appendChild(td);
-      });
-      tb.appendChild(tr);
-    });
-  }
-
-  function render() {
-    const latest = rowsOf("latest"), campaign = rowsOf("campaign"), weekly = rowsOf("weekly"), runs = rowsOf("runs");
-    buttons(document.getElementById("lane-buttons"), LANES, lane, (k) => { lane = k; render(); });
-    const metrics = Object.fromEntries(Object.entries(METRICS).filter(([k]) => k !== "quality" || latest.rows.some((r) => r.quality_pct != null)).map(([k, m]) => [k, m.label]));
-    if (!metrics[metric]) metric = "speed";
-    buttons(document.getElementById("metric-buttons"), metrics, metric, (k) => { metric = k; render(); });
-    buttons(document.getElementById("input-buttons"), INPUTS, input, (k) => { input = k; render(); });
-    buttons(document.getElementById("trend-metric-buttons"), Object.fromEntries(Object.entries(METRICS).filter(([k]) => k !== "quality").map(([k, m]) => [k, m.label])), trendMetric, (k) => { trendMetric = k; render(); });
-    const backends = [...new Set(latest.rows.map((r) => r.backend))].sort(byBackend);
-    key(document.getElementById("key-backends"), backends.map((b) => [b, backendColor(b)]));
-    const engines = [...new Set([QVAC, ...campaign.rows.map((r) => r.engine)])].sort(byEngine);
-    key(document.getElementById("key-engines"), campaign.st === "ok" ? engines.map((e) => [e, engineColor(e)]) : []);
-    drawHeader(latest, campaign, runs);
-    drawLanes(latest);
-    drawDevices(campaign);
-    drawTrend(weekly);
-    drawRuns(runs);
-  }
-
-  document.getElementById("trend-family").addEventListener("change", (ev) => { trendFamily = ev.target.value; render(); });
-  dash.onData(render);
-})();
-</script>
+<script src="app.js"></script>

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Write the dataset files the task dashboards read, from the stored summaries and comparisons.json.
+"""Write the data files of the per-machine dashboards and of the hub page from the stored summaries.
 
-usage: build-dashboard-data.py <summaries dir> -o <out dir> [--comparisons comparisons.json]
+usage: build-dashboard-data.py <summaries dir> -o <out dir> [--comparisons comparisons.json] [--engines engines.json]
+       [--families families.json] [--dashboards dashboards.json]
 
-For every task (ASR, TTS with cloning, Music) it writes three JSON files of row objects under <out dir>/<task key>/:
-weekly.json (one row per machine, backend and family of every stored run), latest.json (the newest result of every
-machine, backend and family, flagged current when it comes from that machine's newest run) and campaign.json (the
-paired competitor rows with speeds in seconds of audio per second of wall clock), plus runs.json with one row per stored run (pins,
-status, counts) shared by every task. The dashboards attach these files as their datasets; the Monday task uploads
-new versions after each Sunday run.
+For every machine with a stored run it writes <out dir>/<host>/: runs.json (one row per backend and model of the
+machine's newest result, plus the campaign rows measured on that machine), history.json (every stored result, for the
+week-over-week lines), coverage.json (measured, failed and skipped cells with their reasons), engines.json (the engines
+with where they were measured), machine.json (hardware, counts, snapshot) and commentary.json (the overview summary,
+the notes of each task tab and the comparison rules). It also writes <out dir>/hub.json, the input of build-landing.py.
 """
 from __future__ import annotations
 
@@ -18,150 +18,555 @@ import json
 import pathlib
 import re
 
+HERE = pathlib.Path(__file__).resolve().parent
+QVAC = "qvac-fabric-speech.cpp"
+TASK_ORDER = ("ASR", "TTS", "TTS cloning", "Music")
 TASK_KEYS = {"ASR": "asr", "TTS": "tts", "TTS cloning": "tts", "Music": "music"}
+TASK_NAMES = {"ASR": "ASR", "TTS": "TTS", "TTS cloning": "voice cloning", "Music": "music"}
+SUMMARY = "summary"
+GENERAL = "all"
 MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-0": "Strix Halo",
-                  "qvac-dev-strix-1": "Strix Halo (1)", "qvac-dev-linux-arm64": "Jetson Orin Nano",
+                  "qvac-dev-strix-1": "Strix Halo (1)", "qvac-dev-linux-arm64": "Jetson Orin",
                   "qvac-dev-mac-arm64": "Mac Studio M3 Ultra", "mac-mini-m4-gpu": "Mac mini M4"}
-FAMILY_LABELS = {"parakeet-tdt": "Parakeet TDT 0.6B v3 Q8_0", "parakeet-unified": "Parakeet Unified EN 0.6B Q8_0",
-                 "transcribepsy": "TranscribePsy 250M Q8_0", "nemotron": "Nemotron 3.5 streaming 0.6B F16",
-                 "supertonic3": "Supertonic 3 Q8_0", "audio8-lm-f16-dec-f16": "Audio8 LM F16, decoder F16",
-                 "audio8-lm-f16-dec-q8_0": "Audio8 LM F16, decoder Q8_0", "audio8-lm-q8_0-dec-f16": "Audio8 LM Q8_0, decoder F16",
-                 "audio8-lm-q8_0-dec-q8_0": "Audio8 LM Q8_0, decoder Q8_0", "audio8-lm-q4_0-dec-f16": "Audio8 LM Q4_0, decoder F16",
-                 "audio8-lm-q4_0-dec-q8_0": "Audio8 LM Q4_0, decoder Q8_0", "audio8-clone-enc-f16": "Audio8 cloning, encoder F16",
-                 "audio8-clone-enc-q8_0": "Audio8 cloning, encoder Q8_0", "moss-tts-f16": "MOSS-TTS 8.5B F16",
-                 "moss-tts-q8_0": "MOSS-TTS 8.5B Q8_0 blocks", "moss-tts-clone-f16": "MOSS-TTS 8.5B cloning F16",
-                 "acestep-turbo-q8_0": "ACE-Step Turbo Q8_0", "acestep-turbo-q4_k_m": "ACE-Step Turbo Q4_K_M",
-                 "acestep-sft-q8_0": "ACE-Step SFT Q8_0", "acestep-base-q4_k_m": "ACE-Step Base Q4_K_M"}
-FAMILY_ORDER = list(FAMILY_LABELS)
-MIB_PER_GIB = 1024.0
+BACKEND_NAMES = {"cpu": "CPU", "cuda": "CUDA", "vulkan": "Vulkan", "metal": "Metal", "coreml": "Core ML"}
+VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcribepsy": "Q8_0", "nemotron": "F16", "supertonic3": "Q8_0",
+                  "audio8-lm-f16-dec-f16": "LM F16 · decoder F16", "audio8-lm-f16-dec-q8_0": "LM F16 · decoder Q8_0",
+                  "audio8-lm-q8_0-dec-f16": "LM Q8_0 · decoder F16", "audio8-lm-q8_0-dec-q8_0": "LM Q8_0 · decoder Q8_0",
+                  "audio8-lm-q4_0-dec-f16": "LM Q4_0 · decoder F16", "audio8-lm-q4_0-dec-q8_0": "LM Q4_0 · decoder Q8_0",
+                  "audio8-clone-enc-f16": "encoder F16", "audio8-clone-enc-q8_0": "encoder Q8_0", "moss-tts-f16": "F16",
+                  "moss-tts-q8_0": "Q8_0 blocks", "moss-tts-clone-f16": "F16", "acestep-turbo-q8_0": "DiT Q8_0",
+                  "acestep-turbo-q4_k_m": "DiT Q4_K_M", "acestep-sft-q8_0": "DiT Q8_0", "acestep-base-q4_k_m": "DiT Q4_K_M"}
+CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-0", "DGX Spark GB10": "spark-d9ca",
+                  "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
+HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
+SCENARIOS = {"ASR": ("jfk", "JFK clip, 11.0 s (has reference transcript)"), "TTS": ("fixed_prompt", "Fixed English prompt"),
+             "TTS cloning": ("clone_jfk", "Voice cloning from JFK reference, fixed English target text"),
+             "Music": ("music_30s", "30 s instrumental request, seed 42")}
+TIMING = {"native": ("native_excl_load", "Native bench, inference only (excludes model load)",
+                     "Mel, encoder and decoder of one clip; the model is loaded before the timed runs."),
+          "time-wrapped": ("fresh_process", "Fresh process incl. model load (warm filesystem cache)",
+                           "Whole process wall clock from launch to exit, model load and output writing included.")}
+TIMING_CLONING = ("fresh_process_ref", "Fresh process incl. load and reference encoding (warm filesystem cache)",
+                  "Whole process wall clock including model load and the encoding of the reference recording.")
+CAMPAIGN_TIMING = ("campaign", "Campaign measurement (see the harness note)", "")
+CAMPAIGN_CLIPS = {"ASR": (("jfk", "JFK clip, 11.0 s", 11.0), ("long_clip", "98.49 s clip", 98.49)),
+                  "TTS": (("fixed_prompt_short", "9-word prompt (about 3.1 s of speech)", 3.1), ("long_prompt", "76-word prompt (about 26 s of speech)", 26.0)),
+                  "Music": (("music_set", "Ten fixed prompts of the campaign", None),)}
+WER_KINDS = {"wer": ("ASR ground truth", "JFK reference transcript, single clip; smoke check, not a corpus benchmark"),
+             "tts_wer": ("TTS intelligibility", "Pinned Whisper tiny transcribes the generated clip; scorer errors included")}
+QUALITY_FLAG_PCT = 10.0
+MOVE_THRESHOLD = 0.05
+QUICK_MARK = "-quick"
 PERCENT = 100.0
+MS_PER_S = 1000.0
+MS_SECONDS_FROM = 10000.0
 SHA_SHORT = 10
-SPEED_DIGITS = 4
-RTF_DIGITS = 6
 RTF_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+PAIR_SEPARATOR = "/"
+NO_RATIO = "no ratio recorded"
+RULES = [
+    ("Weekly rows and campaign rows are separate", "The weekly rows come from the Sunday run at the engine master and ggml speech heads; the campaign rows keep the build, inputs and dates of the report they come from. Each chart compares rows of one source only: a weekly chart holds QVAC variants, a campaign chart holds QVAC and its competitors as the campaign measured them."),
+    ("Timing scopes", "ASR, Supertonic and Nemotron rows time inference only. Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load, so their speed is a throughput figure, not a latency. Rows of different scopes are never in one chart."),
+    ("Competitor ÷ QVAC time", "In a campaign chart, the competitor's time divided by QVAC's time on the same device, backend and input; above 1 means QVAC took less time. The campaign measured its own QVAC build, so the ratio describes that build, not this week's."),
+    ("Reading a move", "A slower cell with unchanged engine and ggml commits points at load from another user that night; a changed commit names what to look at."),
+]
+
+
+def load_json(path):
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def load_rows(path, default=()):
+    if not path or not pathlib.Path(path).is_file():
+        return list(default)
+    data = load_json(path)
+    return data.get("rows", []) if isinstance(data, dict) else data
 
 
 def load_summaries(folder):
     found = []
     for path in sorted(pathlib.Path(folder).glob("*/*.json")):
-        with path.open() as handle:
-            summary = json.load(handle)
+        summary = load_json(path)
         summary["_host"] = path.parent.name
+        summary["_file"] = f"{path.parent.name}/{path.name}"
         found.append(summary)
-    return sorted(found, key=lambda s: (s["_host"], s.get("run", {}).get("started") or ""))
+    return sorted(found, key=lambda s: (s["_host"], run_started(s)))
 
 
-def load_comparisons(path):
-    if not path or not pathlib.Path(path).is_file():
-        return []
-    with open(path) as handle:
-        return json.load(handle).get("rows", [])
+def load_families(path):
+    return {k: v for k, v in load_json(path).items() if not k.startswith("_")}
 
 
 def machine_label(host):
     return MACHINE_LABELS.get(host, host)
 
 
-def speed_from_rtf(rtf):
-    return None if not rtf else round(1 / rtf, SPEED_DIGITS)
+def backend_name(backend):
+    return BACKEND_NAMES.get(backend, backend)
 
 
-def gib(mib):
-    return None if mib is None else round(mib / MIB_PER_GIB, 2)
+def run_started(summary):
+    return summary.get("run", {}).get("started") or ""
 
 
-def quality_fields(row):
+def run_name(summary):
+    return summary.get("run", {}).get("name", "")
+
+
+def short_sha(pins, key):
+    return ((pins.get(key) or {}).get("sha") or "")[:SHA_SHORT]
+
+
+def pins_text(summary):
+    pins = summary.get("pins", {})
+    engine, ggml = pins.get("engine") or {}, pins.get("ggml") or {}
+    return f"qvac {short_sha(pins, 'engine')} ({engine.get('commit_date', '')}), ggml speech {short_sha(pins, 'ggml')} ({ggml.get('commit_date', '')})"
+
+
+def variant_label(row):
+    return VARIANT_LABELS.get(row["family"]) or row.get("weights", "")
+
+
+def family_models(summary, family, families):
+    names = {pathlib.Path(a.split("/")[-1]).name for a in families.get(family, {}).get("args", []) if "${MODEL_DIR}/" in a}
+    return [m for m in summary.get("pins", {}).get("models", []) if m.get("name") in names]
+
+
+def hashes_text(models):
+    return "; ".join(f"{m['name']} {(m.get('sha256') or '')[:SHA_SHORT]}" for m in models)
+
+
+def revisions_text(models):
+    return "; ".join(f"{m['name']}: {m.get('source', '')}" for m in models)
+
+
+def command_text(family, families):
+    spec = families.get(family, {})
+    return f"{spec.get('binary', '')} {' '.join(spec.get('args', []))}".strip()
+
+
+def iteration_counts(family, backend, families):
+    spec = families.get(family, {})
+    if backend == "cpu":
+        return spec.get("cpu_runs"), spec.get("cpu_warmup")
+    return spec.get("runs"), spec.get("warmup")
+
+
+def timing_of(row, families):
+    if row.get("task") == "TTS cloning":
+        return TIMING_CLONING
+    return TIMING.get(families.get(row["family"], {}).get("bench_kind", "native"), TIMING["native"])
+
+
+def gpu_fields(row, summary):
+    rise = row.get("gpu_memory_rise_mib")
+    unified = (summary.get("machine", {}).get("gpu") or {}).get("unified_memory")
+    if rise is not None:
+        return rise, "sampled rise", "Rise of the GPU's used memory while the cell ran, sampled with nvidia-smi."
+    if unified:
+        return None, "unavailable", "Unified memory: the GPU reports no per-process memory use; host RSS carries the model."
+    return None, "unavailable", "No GPU memory sampler on this lane."
+
+
+def wer_fields(row):
     quality = row.get("quality") or {}
-    kind = {"wer": "WER", "tts_wer": "TTS WER"}.get(quality.get("kind"), "")
+    kind, scope = WER_KINDS.get(quality.get("kind"), ("", ""))
     value = quality.get("value")
-    return {"quality": kind, "quality_pct": None if value is None else round(value * PERCENT, 2)}
+    if value is None:
+        return None, kind, scope, "Not measured for this family"
+    return round(value * PERCENT, 2), kind, scope, ""
 
 
-def family_label(family, row):
-    return FAMILY_LABELS.get(family) or f"{row.get('model_label', family)} {row.get('weights', '')}".strip()
+def stale_note(summary, newest_name):
+    if run_name(summary) == newest_name:
+        return ""
+    return f"From the earlier run {run_name(summary)}; the machine's newest run {newest_name} has no result for this cell."
 
 
-def family_order(family):
-    return FAMILY_ORDER.index(family) if family in FAMILY_ORDER else len(FAMILY_ORDER)
+def weekly_row(summary, row, families, newest_name):
+    host, run = summary["_host"], summary.get("run", {})
+    task = row.get("task", "")
+    model = row.get("model_label", row["family"])
+    scenario, scenario_label = SCENARIOS.get(task, SCENARIOS["ASR"])
+    timing_class, timing_label, timing_includes = timing_of(row, families)
+    runs, warmups = iteration_counts(row["family"], row["backend"], families)
+    gpu_mib, gpu_kind, gpu_note = gpu_fields(row, summary)
+    wer_pct, wer_kind, wer_scope, wer_reason = wer_fields(row)
+    models = family_models(summary, row["family"], families)
+    accepted = row.get("status") == "ok"
+    speed = row.get("speed_x") or None
+    caveats = " ".join(x for x in [row.get("notes", ""), stale_note(summary, newest_name)] if x)
+    return {"id": f"w-{row['backend']}-{row['family']}", "host": host, "machine": machine_label(host), "task": task,
+            "dashboard": TASK_KEYS.get(task, "asr"), "family": row["family"], "model": model,
+            "model_detail": row.get("weights", ""), "required_family": True, "engine": QVAC, "is_qvac": True,
+            "variant": variant_label(row), "backend": row["backend"], "observed_backend": row.get("observed_backend") or "",
+            "precision": row.get("weights", ""), "precision_source": "families.json", "scenario": scenario, "scenario_label": scenario_label,
+            "timing_class": timing_class, "timing_label": timing_label, "timing_includes": timing_includes, "comparison_set": "weekly",
+            "status": "measured" if accepted else "failed", "status_detail": row.get("status", ""), "accepted": accepted,
+            "latency_ms": row.get("wall_ms_median"), "min_ms": row.get("wall_ms_min"), "max_ms": row.get("wall_ms_max"), "samples_ms": "",
+            "audio_s": row.get("audio_seconds"), "speed_x": speed, "rtf": None if not speed else 1 / speed, "load_ms": None,
+            "rss_mib": row.get("peak_rss_mib"), "gpu_mib": gpu_mib, "gpu_kind": gpu_kind, "gpu_note": gpu_note,
+            "wer_pct": wer_pct, "wer_kind": wer_kind, "wer_scope": wer_scope, "wer_scored_outputs": 1 if wer_pct is not None else None,
+            "wer_reason": wer_reason, "runs": row.get("runs") or runs, "warmups": warmups, "threads": None,
+            "date": run_started(summary)[:10], "date_source": "run start", "started_utc": run.get("started", ""), "finished_utc": run.get("finished", ""),
+            "pins": pins_text(summary), "model_revisions": revisions_text(models), "hashes": hashes_text(models),
+            "command": command_text(row["family"], families), "config": f"BENCH backends {', '.join(summary.get('backends', []))}; CUDA arch {(summary.get('pins', {}).get('build') or {}).get('cuda_arch', '')}",
+            "caveats": caveats, "comparison_limitation": "", "host_conditions": HOST_CONDITIONS.get(host, ""),
+            "source_file": summary["_file"], "source_row": row["family"], "raw_source": f"runs/{run_name(summary)}/results/{row['backend']}/{row['family']}.json",
+            "group": f"{host}|{row['backend']}|{model}|{task}|weekly", "ratio_qualifier": "", "run": run_name(summary)}
 
 
-def weekly_row(summary, row):
-    run, pins = summary.get("run", {}), summary.get("pins", {})
-    out = {"host": summary["_host"], "machine": machine_label(summary["_host"]), "run": run.get("name", ""),
-           "label": family_label(row["family"], row), "order": family_order(row["family"]),
-           "started": run.get("started", ""), "day": (run.get("started") or "")[:10], "backend": row["backend"],
-           "lane": f"{machine_label(summary['_host'])} {row['backend']}", "family": row["family"], "task": row.get("task", ""),
-           "model": row.get("model_label", row["family"]), "weights": row.get("weights", ""), "status": row.get("status", ""),
-           "wall_ms": row.get("wall_ms_median"), "wall_min_ms": row.get("wall_ms_min"), "wall_max_ms": row.get("wall_ms_max"),
-           "speed_x": row.get("speed_x"), "rtf": None if not row.get("speed_x") else round(1 / row["speed_x"], 5),
-           "audio_s": row.get("audio_seconds"), "rss_mib": row.get("peak_rss_mib"), "rss_gib": gib(row.get("peak_rss_mib")),
-           "gpu_mem_rise_mib": row.get("gpu_memory_rise_mib"), "gpu_mem_rise_gib": gib(row.get("gpu_memory_rise_mib")),
-           "gpu_mem_peak_mib": row.get("gpu_memory_peak_mib"), "observed_backend": row.get("observed_backend"), "runs": row.get("runs"),
-           "notes": row.get("notes", ""), "engine": (pins.get("engine") or {}).get("sha", "")[:SHA_SHORT],
-           "ggml": (pins.get("ggml") or {}).get("sha", "")[:SHA_SHORT]}
-    out.update(quality_fields(row))
+def newest_cells(host_summaries, families):
+    newest_name = run_name(host_summaries[-1])
+    cells = {}
+    for summary in host_summaries:
+        for row in summary.get("results", []):
+            cells[(row["backend"], row["family"])] = weekly_row(summary, row, families, newest_name)
+    return list(cells.values())
+
+
+def history_rows(host_summaries, families):
+    return [history_row(weekly_row(summary, row, families, run_name(host_summaries[-1])))
+            for summary in host_summaries for row in summary.get("results", [])]
+
+
+def history_row(row):
+    keys = ("host", "machine", "run", "date", "started_utc", "backend", "family", "model", "variant", "task", "dashboard", "status",
+            "latency_ms", "speed_x", "rtf", "rss_mib", "gpu_mib", "wer_pct", "pins")
+    return {k: row.get(k) for k in keys}
+
+
+def pair_parts(text):
+    return [part.strip() for part in (text or "").split(PAIR_SEPARATOR)]
+
+
+def part_number(part):
+    found = RTF_PATTERN.findall(part)
+    return float(found[0]) if found else None
+
+
+def sentence_case(text):
+    return text[:1].upper() + text[1:]
+
+
+def campaign_latency(rtf, seconds):
+    return None if rtf is None or seconds is None else round(rtf * seconds * MS_PER_S, 1)
+
+
+def campaign_rtf(rtf, ratio, is_qvac):
+    if is_qvac:
+        return rtf
+    return None if ratio is None else rtf * ratio
+
+
+def campaign_row(host, row, index, clip, rtf, ratio, engine, failure=""):
+    scenario, scenario_label, seconds = clip
+    is_qvac = engine == QVAC
+    own_rtf = campaign_rtf(rtf, ratio, is_qvac)
+    task = row.get("task", "")
+    group = f"{host}|{row.get('backend', '')}|{row.get('model', '')}|{row.get('quantization', '')}|{scenario}|campaign"
+    return {"id": f"c-{index}-{scenario}-{'qvac' if is_qvac else engine_slug(engine)}", "host": host, "machine": machine_label(host), "task": task,
+            "dashboard": TASK_KEYS.get(task, "asr"), "family": "", "model": row.get("model", ""), "model_detail": row.get("quantization", ""),
+            "required_family": False, "engine": engine, "is_qvac": is_qvac, "variant": "", "backend": row.get("backend", ""), "observed_backend": "",
+            "precision": row.get("quantization", ""), "precision_source": "campaign report", "scenario": scenario, "scenario_label": scenario_label,
+            "timing_class": CAMPAIGN_TIMING[0], "timing_label": CAMPAIGN_TIMING[1], "timing_includes": row.get("harness", ""), "comparison_set": "campaign",
+            "status": "measured" if own_rtf is not None else "failed", "status_detail": "campaign row" if own_rtf is not None else (failure or NO_RATIO),
+            "accepted": own_rtf is not None,
+            "latency_ms": campaign_latency(own_rtf, seconds), "min_ms": None, "max_ms": None, "samples_ms": "", "audio_s": seconds,
+            "speed_x": None if not own_rtf else round(1 / own_rtf, 4), "rtf": own_rtf, "load_ms": None, "rss_mib": None, "gpu_mib": None,
+            "gpu_kind": "not recorded", "gpu_note": "The campaign report carries no memory figures.", "wer_pct": None, "wer_kind": "", "wer_scope": "",
+            "wer_scored_outputs": None, "wer_reason": "Not part of the campaign rows", "runs": None, "warmups": None, "threads": None,
+            "date": row.get("measured", ""), "date_source": "campaign row", "started_utc": "", "finished_utc": "",
+            "pins": row.get("qvac_version", "") if is_qvac else row.get("engine_version", ""), "model_revisions": "", "hashes": "", "command": "",
+            "config": row.get("device", ""), "caveats": " ".join(x for x in [f"Campaign result: {failure}." if failure else "", row.get("harness", "")] if x),
+            "comparison_limitation": f"Campaign of {row.get('measured', '')}: its own QVAC build and inputs, not the weekly run; compare only within this chart.",
+            "host_conditions": "", "source_file": "comparisons.json", "source_row": index, "raw_source": row.get("source", ""),
+            "group": group, "ratio_qualifier": "qualified: campaign inputs and builds of the measured date; seconds of speech of the TTS prompts are approximate",
+            "run": "campaign"}
+
+
+def engine_slug(engine):
+    return re.sub(r"[^a-z0-9]+", "-", engine.lower()).strip("-")
+
+
+def comparison_rows(host, row, index, seen):
+    rows = []
+    for clip, qvac_part, ratio_part in zip(CAMPAIGN_CLIPS.get(row.get("task", ""), ()), pair_parts(row.get("qvac_rtf", "")), pair_parts(row.get("ratio", ""))):
+        qvac_rtf, ratio = part_number(qvac_part), part_number(ratio_part)
+        if qvac_rtf is None:
+            continue
+        key = (row.get("backend"), row.get("model"), row.get("quantization"), clip[0])
+        if key not in seen:
+            seen.add(key)
+            rows.append(campaign_row(host, row, index, clip, qvac_rtf, None, QVAC))
+        rows.append(campaign_row(host, row, index, clip, qvac_rtf, ratio, row.get("engine", ""), "" if ratio is not None else ratio_part))
+    return rows
+
+
+def campaign_rows(host, comparisons):
+    rows, seen = [], set()
+    for index, row in enumerate(comparisons):
+        if CAMPAIGN_HOSTS.get(row.get("device", "")) == host:
+            rows += comparison_rows(host, row, index, seen)
+    return rows
+
+
+def coverage_reason(row):
+    if row["status"] == "measured":
+        return "Accepted measurement"
+    return f"{row['status_detail']}: {row['caveats'] or 'no driver note'}"
+
+
+def coverage_cell(index, row):
+    return {"id": f"k{index:03d}", "host": row["host"], "machine": row["machine"], "task": row["task"], "model": row["model"], "engine": row["engine"],
+            "backend": row["backend"], "status": row["status"], "rows": 1, "reason": coverage_reason(row), "source": row["source_file"],
+            "scenario": row["scenario_label"]}
+
+
+def skipped_families(host_summaries, families):
+    ran = set(host_summaries[-1].get("families", []))
+    return [family for family in families if family not in ran]
+
+
+def skipped_cell(newest, family, spec, backend, number):
+    return {"id": f"k{number:03d}", "host": newest["_host"], "machine": machine_label(newest["_host"]), "task": spec.get("task", ""),
+            "model": spec.get("model_label", family), "engine": QVAC, "backend": backend, "status": "not attempted", "rows": 0,
+            "reason": "Skipped on this machine (SKIP_FAMILIES in its config.env, usually memory)", "source": newest["_file"],
+            "scenario": SCENARIOS.get(spec.get("task", ""), SCENARIOS["ASR"])[1]}
+
+
+def skipped_cells(host_summaries, families, start):
+    newest = host_summaries[-1]
+    pairs = [(family, backend) for family in skipped_families(host_summaries, families) for backend in newest.get("backends", [])]
+    return [skipped_cell(newest, family, families[family], backend, start + i) for i, (family, backend) in enumerate(pairs)]
+
+
+def coverage_rows(host_summaries, runs, families):
+    cells = [coverage_cell(i, row) for i, row in enumerate(runs)]
+    return cells + skipped_cells(host_summaries, families, len(cells))
+
+
+def machines_of(engine, rows_by_host):
+    return sorted({machine_label(h) for h, rows in rows_by_host.items() if any(r["engine"] == engine and r["accepted"] for r in rows)})
+
+
+def engine_rows(engines, rows_by_host):
+    out = []
+    for seed in engines:
+        measured_on = machines_of(seed["engine"], rows_by_host)
+        out.append({"engine": seed["engine"], "role": seed.get("role", ""), "status": "measured" if measured_on else "not measured",
+                    "ggml": seed.get("ggml", ""), "measured_on": ", ".join(measured_on), "details": f"{seed.get('ggml', '')}. {seed.get('details', '')}".strip(". "),
+                    "source": seed.get("source", "")})
     return out
 
 
-def weekly_rows(summaries, task_key):
-    return [weekly_row(summary, row) for summary in summaries for row in summary.get("results", [])
-            if TASK_KEYS.get(row.get("task", "")) == task_key]
+def hardware_text(summary):
+    machine = summary.get("machine", {})
+    gpu = machine.get("gpu") or {}
+    parts = [machine.get("os_version") or machine.get("os", ""), machine.get("cpu", ""),
+             f"{machine.get('memory_gib', '')} GiB" if machine.get("memory_gib") else "", gpu.get("name", ""),
+             f"driver {gpu.get('driver')}" if gpu.get("driver") else "", f"CUDA {gpu.get('cuda_toolkit')}" if gpu.get("cuda_toolkit") else ""]
+    return " · ".join(p for p in parts if p)
 
 
-def newest_run_name(summaries, host):
-    return max((s for s in summaries if s["_host"] == host), key=lambda s: s.get("run", {}).get("started") or "")["run"].get("name", "")
+def machine_row(host_summaries, runs):
+    newest = host_summaries[-1]
+    run, counts = newest.get("run", {}), newest.get("counts", {})
+    weekly = [r for r in runs if r["comparison_set"] == "weekly"]
+    campaign = [r for r in runs if r["comparison_set"] == "campaign"]
+    accepted = sum(1 for r in runs if r["accepted"])
+    campaign_text = f"{len(campaign)} campaign rows from {', '.join(sorted({r['date'] for r in campaign}))}" if campaign else "no campaign rows for this machine"
+    return [{"host": newest["_host"], "machine": machine_label(newest["_host"]), "hardware": hardware_text(newest), "accepted": accepted,
+             "failed": len(runs) - accepted, "superseded": 0, "backends": ", ".join(newest.get("backends", [])),
+             "status": f"Newest run {run.get('name', '')} {run.get('status', '')}: {counts.get('ok', 0)} of {counts.get('expected', 0)} cells ok; {len(host_summaries)} stored runs",
+             "work": f"{sum(1 for r in weekly if r['accepted'])} weekly rows at {pins_text(newest)}; {campaign_text}",
+             "conditions": HOST_CONDITIONS.get(newest["_host"], ""), "snapshot_utc": run.get("finished", "")}]
 
 
-def latest_cells(rows, summaries):
-    newest = {}
-    for row in rows:
-        newest[(row["host"], row["backend"], row["family"])] = row
-    for row in newest.values():
-        row["current"] = row["run"] == newest_run_name(summaries, row["host"])
-    return list(newest.values())
+def fmt_speed(value):
+    return f"{value:,.0f}×" if value >= 100 else f"{value:.1f}×" if value >= 10 else f"{value:.2f}×"
 
 
-def rtf_pair(text):
-    numbers = RTF_PATTERN.findall(text or "")
-    return (float(numbers[0]) if numbers else None, float(numbers[1]) if len(numbers) > 1 else None)
+def fmt_ms(value):
+    return f"{value / MS_PER_S:,.1f} s" if value >= MS_SECONDS_FROM else f"{value:,.0f} ms"
 
 
-def campaign_row(row):
-    qvac_short, qvac_long = rtf_pair(row.get("qvac_rtf", ""))
-    ratio_short, ratio_long = rtf_pair(row.get("ratio", ""))
-    return {"task": row.get("task", ""), "model": row.get("model", ""), "quantization": row.get("quantization", ""),
-            "label": f"{row.get('model', '')} {row.get('quantization', '')}".strip(), "engine": row.get("engine", ""), "engine_version": row.get("engine_version", ""), "qvac_version": row.get("qvac_version", ""),
-            "host": row.get("host", ""), "device": row.get("device", ""), "backend": row.get("backend", ""),
-            "lane": f"{row.get('device', '')} {row.get('backend', '')}", "qvac_rtf_short": qvac_short, "qvac_rtf_long": qvac_long,
-            "ratio_short": ratio_short, "ratio_long": ratio_long,
-            "competitor_rtf_short": rounded_rtf(competitor_rtf(qvac_short, ratio_short)),
-            "competitor_rtf_long": rounded_rtf(competitor_rtf(qvac_long, ratio_long)),
-            "qvac_speed_short": speed_from_rtf(qvac_short), "qvac_speed_long": speed_from_rtf(qvac_long),
-            "competitor_speed_short": speed_from_rtf(competitor_rtf(qvac_short, ratio_short)),
-            "competitor_speed_long": speed_from_rtf(competitor_rtf(qvac_long, ratio_long)),
-            "measured": row.get("measured", ""), "source": row.get("source", ""), "harness": row.get("harness", "")}
+def join_words(words):
+    words = list(words)
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
 
 
-def competitor_rtf(qvac_rtf, ratio):
-    return None if qvac_rtf is None or ratio is None else qvac_rtf * ratio
+def fastest_cell(runs, task):
+    rows = [r for r in runs if r["comparison_set"] == "weekly" and r["task"] == task and r["accepted"] and r["speed_x"]]
+    return max(rows, key=lambda r: r["speed_x"]) if rows else None
 
 
-def rounded_rtf(rtf):
-    return None if rtf is None else round(rtf, RTF_DIGITS)
+def cell_text(row):
+    audio = f" for {row['audio_s']:.1f} s of audio" if row["audio_s"] else ""
+    return f"{row['model']} ({row['variant']}) on {backend_name(row['backend'])}, {fmt_speed(row['speed_x'])} real time, {fmt_ms(row['latency_ms'])}{audio}"
 
 
-def campaign_rows(comparisons, task_key):
-    return [campaign_row(row) for row in comparisons if TASK_KEYS.get(row.get("task", "")) == task_key]
+def fastest_items(runs):
+    items, parts = [], []
+    for task in TASK_ORDER:
+        best = fastest_cell(runs, task)
+        if best is None:
+            continue
+        items.append((TASK_KEYS[task], f"Fastest {TASK_NAMES[task]} cell", f"{cell_text(best)}."))
+        parts.append(f"{sentence_case(TASK_NAMES[task])}: {cell_text(best)}")
+    if parts:
+        items.insert(0, (SUMMARY, "Fastest cells this week", "; ".join(parts) + "."))
+    return items
 
 
-def run_row(summary):
-    run, counts, pins = summary.get("run", {}), summary.get("counts", {}), summary.get("pins", {})
-    return {"host": summary["_host"], "machine": machine_label(summary["_host"]), "run": run.get("name", ""),
-            "started": run.get("started", ""), "finished": run.get("finished", ""), "status": run.get("status", ""),
-            "ok": counts.get("ok", 0), "expected": counts.get("expected", 0), "backends": ",".join(summary.get("backends", [])),
-            "engine": (pins.get("engine") or {}).get("sha", ""), "engine_date": (pins.get("engine") or {}).get("commit_date", ""),
-            "ggml": (pins.get("ggml") or {}).get("sha", ""), "ggml_date": (pins.get("ggml") or {}).get("commit_date", ""),
-            "problems": "; ".join(summary.get("problems") or [])}
+def campaign_groups(runs):
+    groups = {}
+    for row in runs:
+        if row["comparison_set"] == "campaign" and row["accepted"] and row["rtf"]:
+            groups.setdefault(row["group"], []).append(row)
+    return groups.values()
+
+
+def campaign_pairs(runs):
+    pairs = []
+    for rows in campaign_groups(runs):
+        qvac = [r for r in rows if r["is_qvac"]]
+        if len(qvac) == 1:
+            pairs += [(r, r["rtf"] / qvac[0]["rtf"]) for r in rows if not r["is_qvac"]]
+    return pairs
+
+
+def campaign_text(task, pairs):
+    ratios = [ratio for _, ratio in pairs]
+    engines = sorted({row["engine"] for row, _ in pairs})
+    dates = sorted({row["date"] for row, _ in pairs})
+    faster = sum(1 for ratio in ratios if ratio > 1)
+    return (f"{sentence_case(TASK_NAMES[task])} campaign of {', '.join(dates)} against {join_words(engines)}: competitor ÷ QVAC time {ratio_range(ratios)} "
+            f"over {pairs_text(len(ratios))}; QVAC took less time in {faster} of {len(ratios)}.")
+
+
+def ratio_range(ratios):
+    low, high = f"{min(ratios):.2f}", f"{max(ratios):.2f}"
+    return low if low == high else f"{low} to {high}"
+
+
+def pairs_text(count):
+    return "1 pair" if count == 1 else f"{count} pairs"
+
+
+def campaign_items(runs):
+    items = []
+    pairs = campaign_pairs(runs)
+    for task in TASK_ORDER:
+        task_pairs = [(row, ratio) for row, ratio in pairs if row["task"] == task]
+        if task_pairs:
+            text = campaign_text(task, task_pairs)
+            items += [(SUMMARY, "Against other engines", text), (TASK_KEYS[task], "Against other engines", text)]
+    return items
+
+
+def task_keys():
+    return list(dict.fromkeys(TASK_KEYS[task] for task in TASK_ORDER))
+
+
+def failure_items(runs):
+    failed = [r for r in runs if r["comparison_set"] == "weekly" and not r["accepted"]]
+    items = []
+    for key in task_keys():
+        cells = [f"{r['model']} ({r['variant']}) on {backend_name(r['backend'])}" for r in failed if r["dashboard"] == key]
+        if cells:
+            items.append((key, "Failed cells", f"{join_words(cells)}. The driver notes are in the Runs and coverage tab."))
+    if failed:
+        items.insert(0, (SUMMARY, "Failed cells", f"{len(failed)} weekly cells failed in the newest result; each task tab and the Runs and coverage tab name them with the driver note."))
+    return items
+
+
+def baseline_runs(host_summaries):
+    return [s for s in host_summaries[:-1] if QUICK_MARK not in run_name(s)]
+
+
+def previous_values(host_summaries):
+    baselines = baseline_runs(host_summaries)
+    if not baselines:
+        return {}
+    return {(r["backend"], r["family"]): r.get("speed_x") for r in baselines[-1].get("results", []) if r.get("speed_x")}
+
+
+def moves(host_summaries, runs):
+    previous = previous_values(host_summaries)
+    found = []
+    for row in runs:
+        before = previous.get((row["backend"], row["family"]))
+        if row["comparison_set"] != "weekly" or not row["speed_x"] or not before:
+            continue
+        change = row["speed_x"] / before - 1
+        if abs(change) > MOVE_THRESHOLD:
+            found.append(f"{row['model']} ({row['variant']}) on {backend_name(row['backend'])} {change:+.0%} ({fmt_speed(before)} to {fmt_speed(row['speed_x'])})")
+    return found
+
+
+def move_items(host_summaries, runs):
+    baselines = baseline_runs(host_summaries)
+    if not baselines:
+        return [(SUMMARY, "Week over week", "First full run of this machine: no earlier full run to compare with (quick runs are not baselines).")]
+    found = moves(host_summaries, runs)
+    if not found:
+        return [(SUMMARY, "Week over week", f"No cell moved more than {MOVE_THRESHOLD:.0%} against the previous full run ({run_name(baselines[-1])}).")]
+    return [(SUMMARY, "Week over week", f"Moves over {MOVE_THRESHOLD:.0%} against the previous full run ({run_name(baselines[-1])}): {'; '.join(found)}.")]
+
+
+def coverage_item(host_summaries, runs, families):
+    newest = host_summaries[-1]
+    weekly = [r for r in runs if r["comparison_set"] == "weekly"]
+    measured = sum(1 for r in weekly if r["accepted"])
+    skipped = sorted({families[f].get("model_label", f) for f in skipped_families(host_summaries, families)})
+    skipped_text = f" Not run on this machine: {join_words(skipped)} (SKIP_FAMILIES in its config.env, usually memory)." if skipped else ""
+    backends = join_words([backend_name(b) for b in newest.get("backends", [])]) if newest.get("backends") else "no backend"
+    return (SUMMARY, "Coverage", f"{measured} of {len(weekly)} weekly cells measured on {backends}.{skipped_text}")
+
+
+def pins_item(newest):
+    cuda_arch = (newest.get("pins", {}).get("build") or {}).get("cuda_arch", "") or "n/a"
+    return (SUMMARY, "Pins", f"Newest run {run_name(newest)} at {pins_text(newest)}; CUDA arch {cuda_arch}.")
+
+
+def commentary_rows(host_summaries, runs, families):
+    newest = host_summaries[-1]
+    items = fastest_items(runs) + campaign_items(runs) + failure_items(runs) + move_items(host_summaries, runs)
+    items += [coverage_item(host_summaries, runs, families), pins_item(newest)]
+    items += [(GENERAL, topic, text) for topic, text in RULES]
+    sources = {GENERAL: "comparison rules of the weekly bench"}
+    return [{"id": f"c{i:02d}", "dashboard": key, "topic": topic, "comment": text, "scope": "", "source": sources.get(key, newest["_file"])}
+            for i, (key, topic, text) in enumerate(items)]
+
+
+def quality_flags(rows_by_host):
+    flagged = [r for rows in rows_by_host.values() for r in rows
+               if r["accepted"] and r["task"] in ("TTS", "TTS cloning") and r["wer_pct"] is not None and r["wer_pct"] >= QUALITY_FLAG_PCT]
+    return [{"engine": r["engine"], "model": r["model"], "variant": r["variant"], "machine": r["machine"], "backend": r["backend"], "task": r["task"],
+             "wer_pct": r["wer_pct"], "speed_x": r["speed_x"], "wer_kind": r["wer_kind"]} for r in sorted(flagged, key=lambda r: -r["wer_pct"])]
+
+
+def hub_task(rows, task_key):
+    task_rows = [r for r in rows if r["dashboard"] == task_key and r["accepted"]]
+    return {"models": len({r["model"] for r in task_rows}), "backends": sorted({r["backend"] for r in task_rows}),
+            "others": len({r["engine"] for r in task_rows if not r["is_qvac"]}), "rows": len(task_rows)}
+
+
+def hub_machine(host, host_summaries, rows, dashboards):
+    newest = host_summaries[-1]
+    return {"host": host, "machine": machine_label(host), "url": dashboards.get(host, ""), "hardware": hardware_text(newest),
+            "newest_run": run_name(newest), "date": run_started(newest)[:10], "status": newest.get("run", {}).get("status", ""),
+            "ok": newest.get("counts", {}).get("ok", 0), "expected": newest.get("counts", {}).get("expected", 0), "pins": pins_text(newest),
+            "accepted": sum(1 for r in rows if r["accepted"]), "tasks": {key: hub_task(rows, key) for key in ("asr", "tts", "music")}}
+
+
+def hub_document(summaries_by_host, rows_by_host, engines, dashboards):
+    machines = [hub_machine(host, summaries_by_host[host], rows_by_host[host], dashboards) for host in summaries_by_host]
+    newest = max(m["date"] for m in machines)
+    return {"measured": newest, "machines": machines, "accepted": sum(m["accepted"] for m in machines),
+            "quality_flags": quality_flags(rows_by_host), "engines": engine_rows(engines, rows_by_host), "hub_url": dashboards.get("landing", "")}
 
 
 def write_rows(path, rows):
@@ -169,17 +574,32 @@ def write_rows(path, rows):
     path.write_text(json.dumps(rows, indent=1) + "\n")
 
 
-def build(summaries, comparisons, out_dir):
+def group_by_host(summaries):
+    by_host = {}
+    for summary in summaries:
+        by_host.setdefault(summary["_host"], []).append(summary)
+    return by_host
+
+
+def machine_files(host_summaries, runs, engines, rows_by_host, families):
+    return {"runs": runs, "history": history_rows(host_summaries, families), "coverage": coverage_rows(host_summaries, runs, families),
+            "engines": engine_rows(engines, rows_by_host), "machine": machine_row(host_summaries, runs),
+            "commentary": commentary_rows(host_summaries, runs, families)}
+
+
+def write_machine_files(folder, files):
+    for name, rows in files.items():
+        write_rows(folder / f"{name}.json", rows)
+    return {name: len(rows) for name, rows in files.items()}
+
+
+def build(summaries, comparisons, engines, families, dashboards, out_dir):
+    by_host = group_by_host(summaries)
+    rows_by_host = {host: newest_cells(host_summaries, families) + campaign_rows(host, comparisons) for host, host_summaries in by_host.items()}
     written = {}
-    for task_key in sorted(set(TASK_KEYS.values())):
-        folder = out_dir / task_key
-        weekly = weekly_rows(summaries, task_key)
-        files = {"weekly": weekly, "latest": latest_cells(weekly, summaries),
-                 "campaign": campaign_rows(comparisons, task_key)}
-        for name, rows in files.items():
-            write_rows(folder / f"{name}.json", rows)
-        written[task_key] = {name: len(rows) for name, rows in files.items()}
-    write_rows(out_dir / "runs.json", [run_row(summary) for summary in summaries])
+    for host, host_summaries in by_host.items():
+        written[host] = write_machine_files(out_dir / host, machine_files(host_summaries, rows_by_host[host], engines, rows_by_host, families))
+    write_rows(out_dir / "hub.json", hub_document(by_host, rows_by_host, engines, dashboards))
     return written
 
 
@@ -187,7 +607,10 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("summaries")
     parser.add_argument("-o", "--out", required=True)
-    parser.add_argument("--comparisons", default=str(pathlib.Path(__file__).resolve().parent / "comparisons.json"))
+    parser.add_argument("--comparisons", default=str(HERE / "comparisons.json"))
+    parser.add_argument("--engines", default=str(HERE / "engines.json"))
+    parser.add_argument("--families", default=str(HERE / "families.json"))
+    parser.add_argument("--dashboards", default=str(HERE / "dashboards.json"))
     return parser.parse_args(argv)
 
 
@@ -196,9 +619,10 @@ def main(argv=None):
     summaries = load_summaries(args.summaries)
     if not summaries:
         raise SystemExit(f"no summary.json files under {args.summaries}")
-    written = build(summaries, load_comparisons(args.comparisons), pathlib.Path(args.out))
+    dashboards = load_json(args.dashboards) if pathlib.Path(args.dashboards).is_file() else {}
+    written = build(summaries, load_rows(args.comparisons), load_rows(args.engines), load_families(args.families), dashboards, pathlib.Path(args.out))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"{stamp} wrote {json.dumps(written)} and runs.json ({len(summaries)} runs) under {args.out}")
+    print(f"{stamp} wrote {json.dumps(written)} and hub.json under {args.out}")
 
 
 if __name__ == "__main__":

@@ -18,56 +18,63 @@ def load_module(name, filename):
 landing = load_module("build_landing", "build-landing.py")
 
 
-def summary(name, host, started, families, status="ok", problems=()):
-    results = [{"backend": "cuda", "family": f, "task": t, "model_label": f, "weights": "Q8_0", "status": "ok", "speed_x": 2.0} for f, t in families.items()]
-    return {"schema": 1, "run": {"name": name, "host": host, "started": started, "finished": started, "status": status},
-            "machine": {"hostname": host, "os": "Linux", "os_version": "Ubuntu 25.10", "cpu": "Ryzen <9>", "gpu": {"name": "RTX 5090"}},
-            "pins": {"engine": {"sha": "abcdef1234567890", "commit_date": "2026-11-01"}, "ggml": {"sha": "fedcba0987654321", "commit_date": "2026-11-01"}},
-            "backends": ["cuda"], "families": list(families), "results": results,
-            "counts": {"expected": len(results), "ok": len(results), "failed": 0}, "build_failures": [], "problems": list(problems)}
+def tasks(asr=(0, (), 0), tts=(0, (), 0), music=(0, (), 0)):
+    return {key: {"models": models, "backends": list(backends), "others": others, "rows": models * 2}
+            for key, (models, backends, others) in (("asr", asr), ("tts", tts), ("music", music))}
+
+
+def hub(flags=()):
+    return {"measured": "2026-11-08", "accepted": 12, "hub_url": "https://example.test/hub", "quality_flags": list(flags),
+            "machines": [
+                {"host": "mac-mini-m4-gpu", "machine": "Mac mini <M4>", "url": "", "newest_run": "2026-11-08", "status": "ok", "ok": 4, "expected": 4,
+                 "pins": "qvac abc", "tasks": tasks(asr=(1, ("metal",), 0))},
+                {"host": "qvac-dev-linux-x64", "machine": "RTX 5090", "url": "https://example.test/rtx", "newest_run": "2026-11-08", "status": "partial",
+                 "ok": 9, "expected": 10, "pins": "qvac abc", "tasks": tasks(asr=(2, ("cpu", "cuda"), 3), tts=(1, ("cuda",), 1))}],
+            "engines": [{"engine": "qvac-fabric-speech.cpp", "role": "QVAC engine", "status": "measured", "measured_on": "RTX 5090", "details": "weekly", "source": "bench"},
+                        {"engine": "audio.cpp", "role": "prior-report competitor", "status": "measured", "measured_on": "RTX 5090", "details": "ggml-based. <x>", "source": "report"},
+                        {"engine": "SGLang-Omni", "role": "new competitor, measured", "status": "not measured", "measured_on": "", "details": "none", "source": "report"}]}
+
+
+FLAG = {"engine": "qvac-fabric-speech.cpp", "model": "Audio8 TTS Preview 0.6B", "variant": "LM Q4_0 · decoder F16", "machine": "RTX 5090", "backend": "cpu",
+        "task": "TTS", "wer_pct": 14.71, "speed_x": 0.721, "wer_kind": "TTS intelligibility"}
 
 
 class BuildLandingTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.tmp.name)
-        for host in ("qvac-dev-linux-x64", "spark-d9ca"):
-            (self.root / "summaries" / host).mkdir(parents=True)
-        self.write("qvac-dev-linux-x64", "2026-11-01", summary("2026-11-01", "qvac-dev-linux-x64", "2026-11-01T17:00:00Z", {"parakeet-tdt": "ASR"}))
-        self.write("qvac-dev-linux-x64", "2026-11-08", summary("2026-11-08", "qvac-dev-linux-x64", "2026-11-08T17:00:00Z", {"parakeet-tdt": "ASR", "supertonic3": "TTS"},
-                                                               status="partial", problems=["cuda: nemotron timed out"]))
-        self.write("spark-d9ca", "2026-11-08", summary("2026-11-08", "spark-d9ca", "2026-11-08T17:00:00Z", {"acestep-turbo-q8_0": "Music"}))
-        self.summaries = landing.data.load_summaries(self.root / "summaries")
-        self.dashboards = {"asr": "https://example.test/asr", "tts": "https://example.test/tts"}
+        self.page = landing.render(hub(), "2026-11-09 08:00 UTC")
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def test_task_boxes_link_each_machine_to_its_dashboard_tab(self):
+        self.assertIn('href="https://example.test/rtx#asr"', self.page)
+        self.assertIn("2 models · CPU, CUDA · 3 other engines", self.page)
+        self.assertIn("1 model · CUDA · 1 other engine<", self.page)
+        self.assertLess(self.page.index("RTX 5090"), self.page.index("Mac mini"))
 
-    def write(self, host, name, data):
-        (self.root / "summaries" / host / f"{name}.json").write_text(json.dumps(data))
+    def test_machines_without_rows_or_link_are_marked(self):
+        self.assertIn("<b>RTX 5090</b><small>collecting</small>", self.page)
+        self.assertIn("<b>Mac mini &lt;M4&gt;</b><small>dashboard link not set</small>", self.page)
 
-    def test_task_cards_link_dashboards_and_name_the_machines_with_results(self):
-        page = landing.render(self.summaries, self.dashboards, "2026-11-09 08:00 UTC")
-        self.assertIn('href="https://example.test/asr"', page)
-        self.assertIn("results from RTX 5090", page)
-        self.assertIn("results from DGX Spark", page)
-        self.assertIn("dashboard link not set", page)
+    def test_quality_flags_list_the_flagged_rows(self):
+        self.assertIn("No TTS row reaches the 10% intelligibility WER flag", self.page)
+        flagged = landing.render(hub([FLAG]), "2026-11-09 08:00 UTC")
+        self.assertIn("intelligibility WER <b>14.7%</b> at 0.72×", flagged)
 
-    def test_machine_tiles_show_the_newest_run_and_escape_text(self):
-        page = landing.render(self.summaries, self.dashboards, "2026-11-09 08:00 UTC")
-        self.assertIn("2026-11-08", page)
-        self.assertNotIn("2026-11-01 ·", page)
-        self.assertIn('class="tile-status warn">partial', page)
-        self.assertIn("Ryzen &lt;9&gt;", page)
-        self.assertIn("cuda: nemotron timed out", page)
-        self.assertIn("<title>Speech Fabric Weekly Bench</title>", page)
+    def test_engines_are_split_by_role_and_escaped(self):
+        for title in ("Weekly engine", "From the previous comparison", "New competitors"):
+            self.assertIn(f"<h3>{title}</h3>", self.page)
+        self.assertIn("ggml-based. &lt;x&gt;", self.page)
+        self.assertIn("<td>not measured</td><td>none</td>", self.page)
+
+    def test_header_and_method_name_the_run_and_pins(self):
+        self.assertIn("<title>Speech Bench</title>", self.page)
+        self.assertIn("2 machines · 12 accepted measurements", self.page)
+        self.assertIn("run 2026-11-08 (partial, 9 of 10 cells) at qvac abc", self.page)
 
     def test_main_writes_the_page(self):
-        out = self.root / "landing.html"
-        links = self.root / "dashboards.json"
-        links.write_text(json.dumps(self.dashboards))
-        landing.main([str(self.root / "summaries"), "-o", str(out), "--dashboards", str(links)])
-        self.assertIn("Open the TTS dashboard", out.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            source, out = pathlib.Path(tmp) / "hub.json", pathlib.Path(tmp) / "landing.html"
+            source.write_text(json.dumps(hub()))
+            landing.main([str(source), "-o", str(out)])
+            self.assertIn("Speech Bench", out.read_text())
 
 
 if __name__ == "__main__":

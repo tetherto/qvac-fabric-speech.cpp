@@ -10,9 +10,9 @@ Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmark
 under the installing user's own account: it updates the engine `master` and ggml `speech` heads, provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
-machine is involved in the measurement. The dashboards behind the weekly landing page, linked from the team channel's canvas,
+machine is involved in the measurement. The Speech Bench hub and its per-machine dashboards, linked from the team channel's canvas,
 are where everyone reads the numbers. This skill is the Claude side: on-demand runs, collecting the summaries, building the
-results page from them and publishing it, and the rules that keep two automated benches and twenty-odd people from
+dashboards' data and the hub from them and publishing them, and the rules that keep two automated benches and twenty-odd people from
 disturbing each other on the same hardware.
 
 | path | what it is |
@@ -21,9 +21,9 @@ disturbing each other on the same hardware.
 | `scripts/benchmarks/desktop-weekly/weekly.sh` | the entry point cron runs; `--quick`, `--families`, `--backends`, `--no-update`, `--no-mail`, `--label` |
 | `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 20 families with their driver spec, iteration counts, timeouts and model provisioning |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
-| `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files -> the JSON files the task dashboards read (latest result per lane, every result, campaign rows, runs) |
-| `scripts/benchmarks/desktop-weekly/build-landing.py` | a folder of `summary.json` files -> the landing page (dashboard links, every machine's newest run, how to read it) |
-| `scripts/benchmarks/desktop-weekly/dashboard/index.html`, `dashboards.json` | the page every task dashboard runs, and the links of the landing page and the three dashboards |
+| `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files -> per machine the six JSON files its dashboard reads, and `hub.json` |
+| `scripts/benchmarks/desktop-weekly/build-landing.py` | `hub.json` -> the Speech Bench hub (per task every machine with a link into its dashboard, quality flags, engines, how it runs) |
+| `scripts/benchmarks/desktop-weekly/dashboard/`, `dashboards.json` | the page every machine dashboard runs (`index.html`, `app.js`, `app.css`) and the hub's stylesheet; the links of the hub and of every machine's dashboard |
 | `scripts/benchmarks/desktop-weekly/install.sh` | deploys the tools to `~/speech-bench/tools` and installs the crontab line |
 
 ## Machines, schedule and coordination
@@ -81,48 +81,58 @@ for run in $(ssh $H 'cd ~/speech-bench/runs && for d in */; do [ -e "$d/DONE" ] 
 done
 ```
 
-The history folder is the input of `build-dashboard-data.py` and `build-landing.py`. Keep it; a run pruned on the machine (the bench keeps
+The history folder is the input of `build-dashboard-data.py`. Keep it; a run pruned on the machine (the bench keeps
 12) stays in the page's history only through this folder. Also copy `report.md` of the newest run when the user
 wants to read it.
 
 ### publish
 
-Build the dashboards' data files and the landing page from the history folder:
+Build the data files and the hub from the history folder:
 
 ```sh
 HISTORY=${SPEECH_BENCH_HISTORY:-$HOME/speech-bench-history}
 D=scripts/benchmarks/desktop-weekly
 python3 $D/build-dashboard-data.py $HISTORY/summaries -o $HISTORY/dashboard-data
-python3 $D/build-landing.py $HISTORY/summaries -o $HISTORY/speech-weekly-landing.html
+python3 $D/build-landing.py $HISTORY/dashboard-data/hub.json -o $HISTORY/speech-weekly-landing.html
 ```
 
-The links are in `$D/dashboards.json`: `landing` (the page linked from the canvas) and one dashboard per task,
-`asr`, `tts` and `music`. Each dashboard is a Dashboard-type artifact whose page reads four attached files, the
-datasets `latest`, `weekly`, `campaign` and `runs`. Refresh them in place, never as new artifacts:
+The links are in `$D/dashboards.json`: `landing` (the Speech Bench hub, the page linked from the canvas) and one
+dashboard per host. Each dashboard is a Dashboard-type artifact whose page (`files/index.html`, `files/app.js`,
+`files/app.css`) reads six attached files from `$HISTORY/dashboard-data/<host>/`: the datasets `runs`, `history`,
+`coverage`, `engines`, `machine` and `commentary`. Refresh them in place, never as new artifacts:
 
-1. For each task, upload the four files of `$HISTORY/dashboard-data/<task>/` (`runs.json` lives one level up and
-   is the same for every task) with the Artifact tool: `url` = that dashboard, `asset: true`, `file_path` = the
-   file. Each upload answers with a `/_blob/<id>` url.
-2. Point the datasets at the new files with the ArtifactData tool: read `datasets/<id>` (for its `version`), then
-   `update` it with `if_version`, `source.url` = the new blob url, `source.name` = the file name,
-   `updated: {at: <UTC ISO>, by: "Claude (<run date>)"}` and `edit: {via: "claude", at: <UTC ISO>}`. The
-   `campaign` dataset is `fixed: true`; upload it only when `comparisons.json` changed.
-3. Only when `$D/dashboard/index.html` changed: read `files/index.html` and `set` it to
-   `{"text": <the file>, "edit": {...}}` with `if_version`, on all three dashboards.
-4. Read the landing artifact (`landing` in `dashboards.json`) with the Artifact tool, then publish
-   `$HISTORY/speech-weekly-landing.html` with the same `url` (no icon). If the publish is refused because a newer
-   version is live, publish again: the page is rebuilt from the history folder and contains everything.
+1. For each host with a new run, upload the files of `$HISTORY/dashboard-data/<host>/` that changed (usually `runs`,
+   `history`, `coverage`, `machine` and `commentary`; `engines` changes when an engine gains or loses a machine) with
+   the Artifact tool: `url` = that host's dashboard, `asset: true`, `file_path` = the file. Each upload answers with a
+   `/_blob/<id>` url.
+2. Point the datasets at the new files with the ArtifactData tool, one batch per dashboard: read `datasets/<id>` for
+   its `version`, then `update` it with `if_version`, `source` = `{kind: "file", url: <the blob url>, name: <the file
+   name>, format: "json"}`, `updated: {at: <UTC ISO>, by: "Claude (weekly run <date>)"}` and
+   `edit: {via: "claude", at: <UTC ISO>}`.
+3. Only when `$D/dashboard/index.html`, `app.js` or `app.css` changed: read `files/<name>` and `set` it to
+   `{"text": <the file>, "edit": {...}}` with `if_version`, on every dashboard.
+4. Read the hub (`landing`) with the Artifact tool, then publish `$HISTORY/speech-weekly-landing.html` with the same
+   `url` (no icon). If the publish is refused because a newer version is live, publish again: the page is rebuilt from
+   the history folder and contains everything.
 
-Each dashboard shows, for one task, a card per machine and backend with the newest result of every model (speed in
-seconds of audio per second of wall clock, wall time, peak RSS or WER by the metric buttons; GPU lanes first, the
-lane buttons switch to CPU), the campaign comparison against other engines coloured per engine (transcribe.cpp,
-audio.cpp and LocalAI parakeet.cpp for Parakeet TDT; audio.cpp for Supertonic 3 and Audio8; acestep.cpp for
-ACE-Step), the week-over-week line per lane for a chosen model, and the run log; the Sources panel shows every
-file and row behind a number. Tell the user what changed since the previous week: failed cells, moves over 5%,
-and which pins moved. To refresh a comparison, re-run the campaign's measurement for that model and lane and
-replace the row (`qvac_rtf`, `ratio`, versions, `measured`, `source`) in `comparisons.json`; TranscribePsy,
-Nemotron and MOSS-TTS have no campaign rows yet. `build-artifact.py` still writes a single self-contained HTML
-report from the same folder for reading offline.
+A machine new to the bench gets its dashboard once: create an artifact from the Dashboard type
+(`https://claude.ai/artifact/GZLZthZ2sQjn7T16skfdeF`, title `Speech Bench · <machine>`), write `dash/meta`, the six
+datasets and the three page files in one ArtifactData batch, and add the host to `dashboards.json`, to `MACHINE_LABELS`
+in `build-dashboard-data.py` and, when the campaign measured that machine, to `CAMPAIGN_HOSTS`. Only its owner can share
+it with the organization, from its Share menu.
+
+The pages follow the Speech Bench report the team approved. The hub lists, per task (TTS and voice cloning, ASR,
+music), every machine with its models, backends and other engines, linking into that machine's dashboard tab, then the
+quality flags (TTS rows with intelligibility WER at or above 10%), the engines and how the bench runs. A machine
+dashboard has an overview (status, a summary of the week generated from the summaries, quality flags, which models ran
+on which backend, gaps, engines, comparison rules), one tab per task with a section per model (a speed chart per backend
+and input: the weekly charts hold QVAC's variants, the campaign charts hold QVAC and transcribe.cpp, audio.cpp, LocalAI
+parakeet.cpp or acestep.cpp in engine colors; details with exact values, precision, time ratios and sources) and a
+week-over-week line per backend, and a Runs and coverage tab. Tell the user what changed since the previous week: failed
+cells, moves over 5% and which pins moved, as each dashboard's summary states them. To refresh a comparison, re-run the
+campaign's measurement for that model and device and replace the row (`qvac_rtf`, `ratio`, versions, `measured`,
+`source`) in `comparisons.json`; TranscribePsy, Nemotron and MOSS-TTS have no campaign rows yet. `build-artifact.py`
+still writes a single self-contained HTML report from the same folder for reading offline.
 
 ### run
 
@@ -171,6 +181,7 @@ kind and value, runs, notes), `counts`, `build_failures`, `problems`.
 ## Rules
 
 - Benchmarks only: do not commit, push or open pull requests from a benchmark session.
-- Publish only to the artifact named above, and only when the user asks or the scheduled task runs.
+- Publish only to the hub and the dashboards named in `dashboards.json`, and only when the user asks or the scheduled
+  task runs.
 - Never start a run inside the weekend window, never touch other users' files, locks or processes, and never run
   anything as root.
