@@ -61,7 +61,7 @@ struct AcestepStageMeasure;  // fit_measure.h
 // Load DiT weights from `path` onto `backend` (borrowed). Returns nullptr on
 // failure. Reads config from GGUF metadata; fuses QKV / gate-up when tensor
 // types match and pre-permutes proj_in/proj_out convs at load time.
-DitModel *        dit_model_load(const std::string & path, ggml_backend_t backend, bool verbose);
+DitModel *        dit_model_load(const std::string & path, ggml_backend_t backend, int n_threads, bool verbose);
 void              dit_model_free(DitModel * m);
 const DitConfig & dit_model_config(const DitModel * m);
 size_t            dit_model_weight_bytes(const DitModel * m);
@@ -71,7 +71,7 @@ size_t            dit_model_weight_bytes(const DitModel * m);
 // performed and no tensor data is read. Only good for the measure-mode forward
 // below; free with dit_model_free.
 DitModel * dit_model_load_metadata_only(const std::string & path, ggml_backend_t backend,
-                                        bool verbose, AcestepStageMeasure & measure);
+                                        int n_threads, bool verbose, AcestepStageMeasure & measure);
 
 // Compute-buffer bytes of the persistent forward-graph cache (0 when no graph
 // has been built); lets the fit parity tests compare projection vs the real

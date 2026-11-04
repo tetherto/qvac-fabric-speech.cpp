@@ -166,7 +166,7 @@ int main(int argc, char ** argv) {
                 "           [--score]  (teacher-forced LM quality score of the generated codes)\n"
                 "           [--temp 0.85] [--cfg 2.0] [--topp 0.9] [--topk 0 (off)]\n"
                 "           [--no-phase1]  (values shown are the defaults)\n"
-                "  backend: [--gpu] [--backend auto|cpu|opencl|hexagon|<device>] [--lm-backend <same names>]\n"
+                "  backend: [--gpu] [--backend auto|cpu|opencl|webgpu|hexagon|xdna|<device>] [--lm-backend <same names>]\n"
                 "           [--threads N] [--backends-dir <dir>]\n"
                 "           [--dump-stages <existing dir>]\n");
         return 1;

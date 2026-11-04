@@ -57,6 +57,10 @@ inline bool backend_name_is_webgpu(const char * name) {
     return name && std::strcmp(name, "WebGPU") == 0;
 }
 
+inline bool backend_name_is_xdna(const char * name) {
+    return name && std::strcmp(name, "XDNA") == 0;
+}
+
 // The src0 types ggml_hexagon_supported_mul_mat accepts plus the F16/BF16
 // tables HTP GET_ROWS gathers from. The stages compute their graphs directly
 // on the backend, so any other quantisation reaches the DSP and faults.
@@ -103,8 +107,8 @@ struct PlacementOverrides {
     bool encoders_cpu = false;  // ACESTEP_ENCODERS_CPU
 };
 
-// Per-stage answer. Defaults are the "GPU is active and allowlisted" case; the
-// DiT and the VAE are not represented because they always run on the GPU.
+// Per-stage answer. Defaults are the "GPU is active and allowlisted" case.
+// DiT and VAE backend resolution lives in engine_backends.h.
 struct StagePlacement {
     bool enc_on_gpu   = true;
     bool lm_on_gpu    = true;
@@ -118,6 +122,8 @@ struct StagePlacement {
 inline StagePlacement resolve_stage_placement(const char * reg_name, const char * device_desc,
                                               const PlacementOverrides & ov) {
     StagePlacement p;
+
+    if (backend_name_is_xdna(reg_name)) p.enc_on_gpu = false;
 
     if (backend_name_is_vulkan(reg_name)) {
         p.lm_on_gpu = !vulkan_device_lm_blocked(device_desc);

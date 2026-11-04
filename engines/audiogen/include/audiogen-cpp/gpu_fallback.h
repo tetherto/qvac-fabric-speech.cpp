@@ -19,7 +19,7 @@ enum class GpuFallbackReason {
     // backend module never loaded: wrong backends_dir, or a .so the process
     // cannot reach.
     no_devices,
-    // A device was enumerated but every ggml_backend_dev_init() on it failed.
+    // Devices were enumerated but none could initialise a usable backend.
     init_failed
 };
 

@@ -16,7 +16,8 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
-validated on it.
+validated on it. AudioGen automatic GPU selection requires F32 matrix
+multiplication support and otherwise continues to another device or CPU.
 
 Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
 through decoding, including Nemotron's locale-prompt projection. Encoder tensors
@@ -42,6 +43,10 @@ Parakeet also accepts explicit [AMD XDNA](engines/parakeet/docs/backends.md#amd-
 selection through Fabric LLM's native GGML backend. It uses the existing GGUF,
 requires matching XDNA runtime artifacts, and schedules unsupported operations
 on CPU. Q8_0 matrices stay on the host; use F16 for NPU validation.
+
+ACE-Step also supports explicit [AMD XDNA DiT execution](engines/audiogen/docs/backends.md#amd-xdna-npu)
+through `backend = "xdna"` or `XDNA0`. Unsupported DiT operations use a CPU
+scheduler fallback; the encoders, LM, detokenizer and VAE retain CPU placement.
 
 MOSS cloning matches upstream reference loudness preprocessing and uses the
 TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)
