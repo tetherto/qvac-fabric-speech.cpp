@@ -22,8 +22,8 @@ disturbing each other on the same hardware.
 | `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 20 families with their driver spec, iteration counts, timeouts and model provisioning |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
 | `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files -> per machine the six JSON files its dashboard reads, and `hub.json` |
-| `scripts/benchmarks/desktop-weekly/build-landing.py` | `hub.json` -> the Speech Bench hub (per task every machine with a link into its dashboard, quality flags, engines, how it runs) |
-| `scripts/benchmarks/desktop-weekly/dashboard/`, `dashboards.json` | the page every machine dashboard runs (`index.html`, `app.js`, `app.css`) and the hub's stylesheet; the links of the hub and of every machine's dashboard |
+| `scripts/benchmarks/desktop-weekly/build-landing.py`, `task_views.py` | `hub.json` and the machines' `runs.json` and `coverage.json` -> the Speech Bench hub (per task every machine with a link to its task page, quality flags, engines, how it runs) with the 18 task pages as views of the same page (`<hub link>#<machine>-<task>`) |
+| `scripts/benchmarks/desktop-weekly/dashboard/`, `dashboards.json` | the page every machine dashboard runs (`index.html`, `app.js`, `app.css`) and the hub's stylesheets (`hub.css`, `task.css`); the links of the hub and of every machine's dashboard |
 | `scripts/benchmarks/desktop-weekly/install.sh` | deploys the tools to `~/speech-bench/tools` and installs the crontab line |
 
 ## Machines, schedule and coordination
@@ -114,7 +114,7 @@ dashboard per host. Each dashboard is a Dashboard-type artifact whose page (`fil
 3. Only when `$D/dashboard/index.html`, `app.js` or `app.css` changed: read `files/<name>` and `set` it to
    `{"text": <the file>, "edit": {...}}` with `if_version`, on every dashboard.
 4. Read the hub (`landing`) with the Artifact tool, then publish `$HISTORY/speech-weekly-landing.html` with the same
-   `url` (no icon). If the publish is refused because a newer version is live, publish again: the page is rebuilt from
+   `url` (no icon); it carries the task pages of every machine, so there is nothing else to publish for them. If the publish is refused because a newer version is live, publish again: the page is rebuilt from
    the history folder and contains everything.
 
 A machine new to the bench gets its dashboard once: create an artifact from the Dashboard type
@@ -124,9 +124,13 @@ in `build-dashboard-data.py` and, when the campaign measured that machine, to `C
 it with the organization, from its Share menu.
 
 The pages follow the Speech Bench report the team approved. The hub lists, per task (TTS and voice cloning, ASR,
-music), every machine with its models, backends and other engines, linking into that machine's dashboard tab, then the
-quality flags (TTS rows with intelligibility WER at or above 10%), the engines and how the bench runs. A machine
-dashboard has an overview (status, a summary of the week generated from the summaries, quality flags, which models ran
+music), every machine with its models, backends and other engines, linking to that machine's task page, then the
+quality flags (TTS rows with intelligibility WER at or above 10%), the engines and how the bench runs. A task page is a
+view of the hub page, reached at the hub's link plus `#<machine>-<task>` (for example `#dgx-spark-tts`), so it is
+shared with the hub and needs no artifact of its own: one section per model with a horizontal speed chart per backend
+and input (the weekly charts hold QVAC's variants, the campaign charts hold QVAC and its competitors in engine colors),
+a details panel per chart (exact values, precision per row, the competitor-over-QVAC time ratio, notes and sources)
+and, at the end, what was not measured there and why. A machine dashboard has an overview (status, a summary of the week generated from the summaries, quality flags, which models ran
 on which backend, gaps, engines, comparison rules), one tab per task with a section per model (a speed chart per backend
 and input: the weekly charts hold QVAC's variants, the campaign charts hold QVAC and transcribe.cpp, audio.cpp, LocalAI
 parakeet.cpp or acestep.cpp in engine colors; details with exact values, precision, time ratios and sources) and a

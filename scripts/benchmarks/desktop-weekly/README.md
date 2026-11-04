@@ -5,7 +5,8 @@ developer laptop in the loop: cron on each machine builds the current engine and
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the
-Speech Bench hub and one dashboard per machine, refreshed from the machines' summaries every Monday (see
+Speech Bench hub, with a task page per machine and task, and one dashboard per machine, refreshed from the machines'
+summaries every Monday (see
 `skills/speech-bench/SKILL.md`); e-mail delivery exists but is off unless `MAIL_TO` is set.
 
 | machine | host | backends | schedule |
@@ -64,7 +65,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
 | `build-dashboard-data.py`, `comparisons.json`, `engines.json` | a folder of `summary.json` files -> per machine the JSON files its dashboard reads (`<host>/runs.json`, `history.json`, `coverage.json`, `engines.json`, `machine.json`, `commentary.json`) and `hub.json` for the hub; `comparisons.json` holds the dated competitor rows of the campaign (qvac RTF and competitor-over-qvac time ratio per device and backend), `engines.json` the engines with their scope |
 | `dashboard/index.html`, `dashboard/app.js`, `dashboard/app.css`, `dashboards.json` | the page every machine dashboard runs (overview, a tab per task with a speed chart per model, backend and input and a week-over-week line per backend, runs and coverage) and the links of the hub and the dashboards |
-| `build-landing.py`, `dashboard/hub.css` | `hub.json` -> the Speech Bench hub: per task every machine with a link into its dashboard's tab, the quality flags, the engines and how the bench runs |
+| `build-landing.py`, `task_views.py`, `dashboard/hub.css`, `dashboard/task.css` | `hub.json` and the machines' `runs.json` and `coverage.json` -> the Speech Bench hub: per task every machine with a link to its task page, the quality flags, the engines and how the bench runs. The task pages (one section per model with a speed chart per backend and input, details with exact values, precision, time ratios and sources, and what was not measured) are views of the hub page, each at the hub's link plus `#<machine>-<task>`, for example `#dgx-spark-tts` |
 | `build-artifact.py` | a folder of `summary.json` files -> one self-contained HTML report (tables per task, history and pins per machine) for reading offline, without the dashboards |
 | `nsdate`, `scheduler.sh` | nanosecond clock shim for macOS before 26, and the user-space scheduler for hosts without cron |
 | `narrate.py` | optional: asks Claude for a ten-line narrative placed above the report in the e-mail |
@@ -134,7 +135,7 @@ checkouts, `--label NAME` keeps several runs of one day apart. Watch `runs/<date
 Each run leaves `report.md` and `summary.json` under `runs/<date>/` on the machine. The speech-bench skill (a
 scheduled Monday task) copies every machine's summaries into a history folder, turns them into the dashboards' data
 files with `build-dashboard-data.py`, uploads each machine's files to that machine's dashboard and republishes the
-hub from `build-landing.py`, so the hub and its dashboards are the place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
+hub, with its task pages, from `build-landing.py`, so the hub and its dashboards are the place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
 `config.env` (tether.io mail is Google Workspace, so `smtp.gmail.com:465` with an app password in a mode 0600 file),
 `send-report.py` also mails the report with `report.md` and `summary.json` attached, and a failed run mails a
 one-paragraph notice.

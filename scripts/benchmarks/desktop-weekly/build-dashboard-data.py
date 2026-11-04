@@ -63,6 +63,7 @@ SHA_SHORT = 10
 RTF_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 PAIR_SEPARATOR = "/"
 NO_RATIO = "no ratio recorded"
+NOT_RECORDED = "not recorded"
 RULES = [
     ("Weekly rows and campaign rows are separate", "The weekly rows come from the Sunday run at the engine master and ggml speech heads; the campaign rows keep the build, inputs and dates of the report they come from. Each chart compares rows of one source only: a weekly chart holds QVAC variants, a campaign chart holds QVAC and its competitors as the campaign measured them."),
     ("Timing scopes", "ASR, Supertonic and Nemotron rows time inference only. Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load, so their speed is a throughput figure, not a latency. Rows of different scopes are never in one chart."),
@@ -268,7 +269,7 @@ def campaign_row(host, row, index, clip, rtf, ratio, engine, failure=""):
     return {"id": f"c-{index}-{scenario}-{'qvac' if is_qvac else engine_slug(engine)}", "host": host, "machine": machine_label(host), "task": task,
             "dashboard": TASK_KEYS.get(task, "asr"), "family": "", "model": row.get("model", ""), "model_detail": row.get("quantization", ""),
             "required_family": False, "engine": engine, "is_qvac": is_qvac, "variant": "", "backend": row.get("backend", ""), "observed_backend": "",
-            "precision": row.get("quantization", ""), "precision_source": "campaign report", "scenario": scenario, "scenario_label": scenario_label,
+            "precision": row.get("quantization", "") if is_qvac else NOT_RECORDED, "precision_source": "campaign report", "scenario": scenario, "scenario_label": scenario_label,
             "timing_class": CAMPAIGN_TIMING[0], "timing_label": CAMPAIGN_TIMING[1], "timing_includes": row.get("harness", ""), "comparison_set": "campaign",
             "status": "measured" if own_rtf is not None else "failed", "status_detail": "campaign row" if own_rtf is not None else (failure or NO_RATIO),
             "accepted": own_rtf is not None,

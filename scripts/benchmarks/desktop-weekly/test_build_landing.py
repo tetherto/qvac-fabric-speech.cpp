@@ -39,19 +39,33 @@ FLAG = {"engine": "qvac-fabric-speech.cpp", "model": "Audio8 TTS Preview 0.6B", 
         "task": "TTS", "wer_pct": 14.71, "speed_x": 0.721, "wer_kind": "TTS intelligibility"}
 
 
+ROW = {"engine": "qvac-fabric-speech.cpp", "is_qvac": True, "variant": "Q8_0", "model": "Parakeet TDT 0.6B v3", "task": "ASR", "backend": "cuda",
+       "scenario": "jfk", "scenario_label": "JFK clip", "timing_class": "native_excl_load", "timing_label": "Native bench", "comparison_set": "weekly",
+       "group": "rtx|cuda|parakeet|ASR|weekly", "accepted": True, "status": "measured", "latency_ms": 16.9, "audio_s": 11.0, "speed_x": 648.0,
+       "rtf": 0.0015, "date": "2026-11-08", "run": "2026-11-08", "precision": "Q8_0"}
+
+
 class BuildLandingTest(unittest.TestCase):
     def setUp(self):
         self.page = landing.render(hub(), "2026-11-09 08:00 UTC")
 
-    def test_task_boxes_link_each_machine_to_its_dashboard_tab(self):
-        self.assertIn('href="https://example.test/rtx#asr"', self.page)
-        self.assertIn("2 models · CPU, CUDA · 3 other engines", self.page)
+    def test_task_boxes_open_the_task_page_of_each_machine(self):
+        self.assertIn('<a href="#rtx-5090-asr"><b>RTX 5090</b><small>2 models · CPU, CUDA · 3 other engines</small></a>', self.page)
         self.assertIn("1 model · CUDA · 1 other engine<", self.page)
+        self.assertIn('<a href="#mac-mini-m4-asr"><b>Mac mini &lt;M4&gt;</b>', self.page)
         self.assertLess(self.page.index("RTX 5090"), self.page.index("Mac mini"))
 
-    def test_machines_without_rows_or_link_are_marked(self):
-        self.assertIn("<b>RTX 5090</b><small>collecting</small>", self.page)
-        self.assertIn("<b>Mac mini &lt;M4&gt;</b><small>dashboard link not set</small>", self.page)
+    def test_machines_without_rows_say_so(self):
+        self.assertIn(f"<b>RTX 5090</b><small>{landing.NO_ROWS}</small>", self.page)
+
+    def test_task_pages_are_hidden_views_behind_the_hub(self):
+        page = landing.render(hub(), "2026-11-09 08:00 UTC", {"qvac-dev-linux-x64": [ROW]}, {})
+        self.assertLess(page.index('data-view="hub"'), page.index('data-view="rtx-5090-tts"'))
+        self.assertIn('<div class="view" data-view="rtx-5090-asr" hidden>', page)
+        self.assertIn("RTX 5090: ASR", page)
+        self.assertIn("Parakeet TDT 0.6B v3: transcription speed", page)
+        self.assertIn(".msec {", page)
+        self.assertIn("document.addEventListener('click', follow);", page)
 
     def test_quality_flags_list_the_flagged_rows(self):
         self.assertIn("No TTS row reaches the 10% intelligibility WER flag", self.page)
@@ -64,17 +78,22 @@ class BuildLandingTest(unittest.TestCase):
         self.assertIn("ggml-based. &lt;x&gt;", self.page)
         self.assertIn("<td>not measured</td><td>none</td>", self.page)
 
-    def test_header_and_method_name_the_run_and_pins(self):
+    def test_header_and_method_name_the_run_pins_and_page_links(self):
         self.assertIn("<title>Speech Bench</title>", self.page)
         self.assertIn("2 machines · 12 accepted measurements", self.page)
         self.assertIn("run 2026-11-08 (partial, 9 of 10 cells) at qvac abc", self.page)
+        self.assertIn("https://example.test/hub#dgx-spark-tts", self.page)
+        self.assertIn('<a href="https://example.test/rtx" target="_blank" rel="noopener">RTX 5090</a>: the machine dashboards', self.page)
 
-    def test_main_writes_the_page(self):
+    def test_main_reads_the_machine_rows_next_to_hub_json(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source, out = pathlib.Path(tmp) / "hub.json", pathlib.Path(tmp) / "landing.html"
+            folder = pathlib.Path(tmp)
+            source, out = folder / "hub.json", folder / "landing.html"
             source.write_text(json.dumps(hub()))
+            (folder / "qvac-dev-linux-x64").mkdir()
+            (folder / "qvac-dev-linux-x64" / "runs.json").write_text(json.dumps([ROW]))
             landing.main([str(source), "-o", str(out)])
-            self.assertIn("Speech Bench", out.read_text())
+            self.assertIn("Parakeet TDT 0.6B v3: transcription speed", out.read_text())
 
 
 if __name__ == "__main__":

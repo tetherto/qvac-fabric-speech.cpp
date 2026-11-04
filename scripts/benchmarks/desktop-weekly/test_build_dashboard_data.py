@@ -120,6 +120,11 @@ class CampaignRowsTest(unittest.TestCase):
         self.assertAlmostEqual(transcribe["speed_x"], 1 / (0.0007 * 7.11), places=2)
         self.assertEqual(transcribe["pins"], "v0.2.3")
 
+    def test_only_the_qvac_row_carries_the_campaign_quantization(self):
+        jfk = [r for r in self.rows if r["task"] == "ASR" and r["scenario"] == "jfk"]
+        self.assertEqual({r["engine"]: r["precision"] for r in jfk},
+                         {build.QVAC: COMPARISONS[0]["quantization"], "audio.cpp": build.NOT_RECORDED, "transcribe.cpp": build.NOT_RECORDED})
+
     def test_a_competitor_without_a_ratio_is_a_failed_row(self):
         competitor = next(r for r in self.rows if r["scenario"] == "long_prompt" and not r["is_qvac"])
         self.assertEqual((competitor["status"], competitor["status_detail"], competitor["accepted"]), ("failed", "OOM", False))
