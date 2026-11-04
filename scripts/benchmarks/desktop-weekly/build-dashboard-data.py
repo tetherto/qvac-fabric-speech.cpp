@@ -25,8 +25,7 @@ TASK_KEYS = {"ASR": "asr", "TTS": "tts", "TTS cloning": "tts", "Music": "music"}
 TASK_NAMES = {"ASR": "ASR", "TTS": "TTS", "TTS cloning": "voice cloning", "Music": "music"}
 SUMMARY = "summary"
 GENERAL = "all"
-MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-0": "Strix Halo",
-                  "qvac-dev-strix-1": "Strix Halo (1)", "qvac-dev-linux-arm64": "Jetson Orin",
+MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-1": "Strix Halo", "qvac-dev-linux-arm64": "Jetson Orin",
                   "qvac-dev-mac-arm64": "Mac Studio M3 Ultra", "mac-mini-m4-gpu": "Mac mini M4"}
 BACKEND_NAMES = {"cpu": "CPU", "cuda": "CUDA", "vulkan": "Vulkan", "metal": "Metal", "coreml": "Core ML"}
 VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcribepsy": "Q8_0", "nemotron": "F16", "supertonic3": "Q8_0",
@@ -36,7 +35,7 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "audio8-clone-enc-f16": "encoder F16", "audio8-clone-enc-q8_0": "encoder Q8_0", "moss-tts-f16": "F16",
                   "moss-tts-q8_0": "Q8_0 blocks", "moss-tts-clone-f16": "F16", "acestep-turbo-q8_0": "DiT Q8_0",
                   "acestep-turbo-q4_k_m": "DiT Q4_K_M", "acestep-sft-q8_0": "DiT Q8_0", "acestep-base-q4_k_m": "DiT Q4_K_M"}
-CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-0", "DGX Spark GB10": "spark-d9ca",
+CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
 SCENARIOS = {"ASR": ("jfk", "JFK clip, 11.0 s (has reference transcript)"), "TTS": ("fixed_prompt", "Fixed English prompt"),

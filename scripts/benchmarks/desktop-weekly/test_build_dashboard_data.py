@@ -132,6 +132,12 @@ class CampaignRowsTest(unittest.TestCase):
         self.assertTrue(all(r["latency_ms"] is None for r in music))
         self.assertAlmostEqual(next(r for r in music if not r["is_qvac"])["rtf"], 0.139 * 1.91)
 
+    def test_the_strix_halo_is_strix_1_and_takes_the_campaign_rows(self):
+        rows = build.campaign_rows("qvac-dev-strix-1", [dict(COMPARISONS[0], device="Strix Halo")])
+        self.assertEqual(build.machine_label("qvac-dev-strix-1"), "Strix Halo")
+        self.assertEqual({r["machine"] for r in rows}, {"Strix Halo"})
+        self.assertEqual(build.campaign_rows("qvac-dev-strix-0", [dict(COMPARISONS[0], device="Strix Halo")]), [])
+
     def test_devices_outside_the_lab_are_left_out(self):
         self.assertEqual(len(self.rows), 12)
         self.assertFalse([r for r in self.rows if r["backend"] == "metal"])

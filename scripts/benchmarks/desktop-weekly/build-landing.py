@@ -15,7 +15,7 @@ import html
 import json
 import pathlib
 
-MACHINE_ORDER = ["DGX Spark", "RTX 5090", "Strix Halo", "Strix Halo (1)", "Jetson Orin", "Mac Studio M3 Ultra", "Mac mini M4"]
+MACHINE_ORDER = ["DGX Spark", "RTX 5090", "Strix Halo", "Jetson Orin", "Mac Studio M3 Ultra", "Mac mini M4"]
 TASKS = [("tts", "TTS and voice cloning", "Speech synthesis from a fixed English prompt and voice cloning from the JFK clip: Supertonic 3, the Audio8 LM and codec cuts, MOSS-TTS."),
          ("asr", "ASR", "Speech to text on the 11 s JFK clip with its reference transcript: Parakeet TDT and Unified, TranscribePsy, Nemotron 3.5 streaming."),
          ("music", "Music generation", "A 30 s render as a fresh process including model load: ACE-Step 1.5 Turbo, SFT and Base.")]

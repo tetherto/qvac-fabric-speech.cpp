@@ -20,7 +20,7 @@
     'OpenMOSS PyTorch reference': '#7d8f1a',
   };
   const ENGINE_ORDER = Object.keys(ENGINE_COLORS);
-  const MACHINE_ORDER = ['DGX Spark', 'RTX 5090', 'Strix Halo', 'Strix Halo (1)', 'Jetson Orin', 'Mac Studio M3 Ultra', 'Mac mini M4'];
+  const MACHINE_ORDER = ['DGX Spark', 'RTX 5090', 'Strix Halo', 'Jetson Orin', 'Mac Studio M3 Ultra', 'Mac mini M4'];
   const BACKEND_ORDER = ['cpu', 'vulkan', 'cuda', 'metal', 'coreml'];
   const BACKEND_COLORS = { cpu: '#4f52c9', cuda: '#4d8a12', vulkan: '#b9303b', metal: '#c45a22', coreml: '#2aa5c9' };
   const TASK_ORDER = ['ASR', 'TTS', 'TTS cloning', 'Music'];

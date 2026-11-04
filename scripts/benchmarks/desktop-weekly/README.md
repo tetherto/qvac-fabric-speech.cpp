@@ -12,7 +12,7 @@ Speech Bench hub and one dashboard per machine, refreshed from the machines' sum
 | --- | --- | --- | --- |
 | DGX Spark GB10 | `spark-d9ca` | cpu, cuda | Sunday 18:00 CET (17:00 on the UTC clock) |
 | Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
-| Strix Halo | `qvac-dev-strix-0` | cpu, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
+| Strix Halo | `qvac-dev-strix-1` | cpu, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
 | Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 18:00 CET |
 | Mac mini M4 | `mac-mini-m4-gpu` | cpu, metal | Sunday 18:00 CET |
 
