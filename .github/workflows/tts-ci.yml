@@ -546,6 +546,28 @@ jobs:
           CHATTERBOX_COREML_TEST_SHAPES="$PWD/chatterbox-coreml-shapes" \
             ./build/test-chatterbox-coreml --shape-fixture
 
+      # Pocket FlowLM Core ML step: frame-by-frame decoding through the
+      # stateful step against a full causal forward, ggml's RoPE, and a Core ML
+      # export of a tiny GGUF predicting with its prefix written into the
+      # state, all on random weights (no download). Then the runtime runs a
+      # tiny real step against its float32 reference after copying prefix rows
+      # into the state, and must reject sidecars declaring any other shape,
+      # schema or checkpoint hash, or no state, before predicting (a skip, 77,
+      # fails the step). Parity against ggml and Engine routing on the real
+      # checkpoint are test-pocket-coreml-engine (POCKET_COREML_TEST_BUNDLE).
+      - name: Test (Core ML Pocket FlowLM step exporter and runtime checks)
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-pocket-coreml
+          .venv-pocket-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          .venv-pocket-coreml/bin/python engines/tts/test/test_export_pocket_coreml.py -v
+          .venv-pocket-coreml/bin/python engines/tts/test/prepare_pocket_coreml_fixture.py --out pocket-coreml-shapes
+          POCKET_COREML_TEST_SHAPES="$PWD/pocket-coreml-shapes" ./build/test-pocket-coreml --shape-fixture
+
       # Core ML Parler DAC sidecar on a tiny random-weight Parler GGUF built
       # in place (no download): the sidecar is exported by the repo's
       # exporter with rows folded at 64 samples so the tiny decoder still

@@ -7,6 +7,7 @@
 #include "backend_selection.h"
 #include "pocket/reference_audio.h"
 #include "pocket/backend.h"
+#include "pocket/coreml.h"
 #include "pocket/ggml_utils.h"
 #include <algorithm>
 #include <cmath>
@@ -82,7 +83,8 @@ void validate(const FitOptions & o) {
         e.steps < 1 || e.steps > 64 || !std::isfinite(e.temperature) || e.temperature < 0 || e.temperature > 10 ||
         !std::isfinite(e.noise_clamp) || e.noise_clamp < 0 || !std::isfinite(e.eos_threshold) ||
         e.frames_after_eos < -1 || e.frames_after_eos > 100 || e.max_tokens < 1 || e.max_tokens > 1024 ||
-        e.voice_path.empty() == e.reference_audio_path.empty())
+        e.voice_path.empty() == e.reference_audio_path.empty() ||
+        (!e.coreml_compute_units.empty() && !detail::coreml_valid_units(e.coreml_compute_units)))
         throw std::invalid_argument("invalid Pocket fit options");
 }
 }
@@ -91,6 +93,14 @@ FitResult fit_params(const FitOptions & o) {
     try {
         validate(o);
         const auto & e = o.engine;
+        // An enabled Core ML step sidecar runs FlowLM outside ggml: its
+        // resident model and state cannot be projected (CosyVoice's rule).
+        if (detail::coreml_step_enabled(e.flow_lm_path, detail::resolve_coreml_policy(e.coreml_compute_units, e.coreml_strict))) {
+            r.reason = "coreml-memory-estimate-unavailable";
+            r.report = "The FlowLM Core ML step sidecar's resident model and state cannot be projected; "
+                       "set POCKET_COREML_DISABLE=1 to project the ggml FlowLM instead.\n";
+            return r;
+        }
         // Snapshot before backend initialization and metadata/container loads:
         // all of those allocations are charged in the projection below.
         if (!e.backends_dir.empty()) ::tts_cpp::detail::set_backends_directory(e.backends_dir);

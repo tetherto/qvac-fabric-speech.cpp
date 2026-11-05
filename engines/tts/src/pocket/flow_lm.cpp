@@ -407,12 +407,20 @@ FrameCondition FlowLM::advance(const std::vector<float> & latent) {
     upload(input, latent.empty() ? pocket_read(impl_->tensor("bos_emb")) : latent);
     FrameCondition result;
     result.hidden = impl_->backbone(g.compute(impl_->backend, output));
+    try { result.eos_logit = eos_logit(result.hidden); }
+    catch (...) { reset(); throw; }
+    return result;
+}
+
+float FlowLM::eos_logit(const std::vector<float> & hidden) const {
+    auto backend_lock = lock_backend(impl_->backend);
+    if (hidden.size() != static_cast<size_t>(config().dim)) fail("invalid hidden dimensions");
     // A small dot product avoids constructing a second graph for one logit.
     const auto w = pocket_read(impl_->tensor("out_eos.weight"));
-    result.eos_logit = pocket_read(impl_->tensor("out_eos.bias"))[0];
-    for (size_t i = 0; i < w.size(); ++i) result.eos_logit += w[i] * result.hidden[i];
-    if (!std::isfinite(result.eos_logit)) { reset(); fail("non-finite EOS logit"); }
-    return result;
+    float logit = pocket_read(impl_->tensor("out_eos.bias"))[0];
+    for (size_t i = 0; i < w.size(); ++i) logit += w[i] * hidden[i];
+    if (!std::isfinite(logit)) fail("non-finite EOS logit");
+    return logit;
 }
 
 std::vector<float> FlowLM::sample(const std::vector<float> & hidden, const std::vector<float> & noise, int steps) {
@@ -475,12 +483,20 @@ int FlowLM::measure_voice(const std::string & path, const FlowMemory & model, in
     return read_voice_file(path, model.config, context, model.source_hash, false).frames;
 }
 VoiceState FlowLM::capture_voice() const {
-    auto backend_lock = lock_backend(impl_->backend);
     if (position() < 1) fail("cannot capture an empty voice prefix");
-    VoiceState result; result.source_hash = source_hash(); result.frames = position();
+    auto rows = cache_rows(0, position());
+    VoiceState result; result.source_hash = source_hash(); result.frames = rows.count;
+    result.keys = std::move(rows.keys); result.values = std::move(rows.values);
+    return result;
+}
+CacheRows FlowLM::cache_rows(int start, int count) const {
+    auto backend_lock = lock_backend(impl_->backend);
+    if (start < 0 || count < 1 || count > position() - start) fail("cache rows outside the filled prefix");
+    CacheRows result; result.start = start; result.count = count;
+    const size_t offset = size_t(start)*config().dim, size = size_t(count)*config().dim;
     for (int i = 0; i < config().layers; ++i) {
-        result.keys.push_back(pocket_read(impl_->keys[i], 0, result.frames*config().dim));
-        result.values.push_back(pocket_read(impl_->values[i], 0, result.frames*config().dim));
+        result.keys.push_back(pocket_read(impl_->keys[i], offset, size));
+        result.values.push_back(pocket_read(impl_->values[i], offset, size));
     }
     return result;
 }
@@ -495,6 +511,19 @@ void FlowLM::restore_voice(const VoiceState & voice) {
     reset();
     for (int i = 0; i < config().layers; ++i) { upload(impl_->keys[i], voice.keys[i]); upload(impl_->values[i], voice.values[i]); }
     impl_->past = voice.frames;
+}
+std::vector<float> FlowLM::audio_embeddings(const std::vector<float> & latents) const {
+    if (latents.empty() || latents.size()%config().latent_dim || latents.size()/config().latent_dim > size_t(impl_->capacity))
+        fail("invalid audio latents");
+    finite(latents);
+    PocketFlowGraph g(impl_->backend, &impl_->hexagon_caps);
+    auto * x = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32, config().latent_dim, latents.size()/config().latent_dim);
+    ggml_set_input(x); auto * output = impl_->audio_projection(g, x);
+    g.prepare(output); upload(x, latents); return g.compute(impl_->backend, output);
+}
+std::vector<float> FlowLM::bos_latent() const {
+    auto backend_lock = lock_backend(impl_->backend);
+    return pocket_read(impl_->tensor("bos_emb"));
 }
 std::vector<float> FlowLM::voice_embeddings(const std::vector<float> & latents) const {
     if (latents.empty() || latents.size()%config().latent_dim || latents.size()/config().latent_dim > 375) fail("invalid voice latents");
