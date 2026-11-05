@@ -1609,6 +1609,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
                                      std::to_string(rc) + ")");
         }
         encoder_ms = ms_since(t_enc);
+        dres.used_coreml = enc_out.used_coreml;
 
         int diarize_rc = sortformer_diarize_ggml(impl.model,
                                                  enc_out.encoder_out.data(),
@@ -1624,6 +1625,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
     result.n_frames       = dres.n_frames;
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
+    result.encoder_used_coreml = dres.used_coreml;
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;
@@ -1755,6 +1757,7 @@ static DiarizationResult engine_impl_diarize_streaming_helper(
     result.n_frames       = dres.n_frames;
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
+    result.encoder_used_coreml = dres.used_coreml;
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;
@@ -1820,7 +1823,8 @@ static DiarizationResult engine_impl_diarize_nemotron_with_gain(
     const auto inference_start = std::chrono::steady_clock::now();
     DiarizationResult result;
     if (run_nemotron_diarization(impl.model, mel.data(), mel_frames,
-        result.speaker_probs) != 0) {
+        result.speaker_probs, NemotronAttention::Automatic,
+        &result.encoder_used_coreml) != 0) {
         throw std::runtime_error("Nemotron diarization inference failed");
     }
     result.decode_ms = ms_since(inference_start);
@@ -1914,6 +1918,7 @@ static DiarizationResult engine_impl_diarize_nemotron_streaming(
         state_data, previous_speaker_frames + previous_fifo_frames, chunk) != 0) {
         throw std::runtime_error("Nemotron streaming inference failed");
     }
+    result.encoder_used_coreml = chunk.used_coreml;
     std::vector<float> coarse;
     average_nemotron_coarse_probabilities(chunk, result.num_spks, factor, coarse);
     const int committed_offset = chunk.state_frames + left;
@@ -2797,6 +2802,8 @@ struct SortformerStreamSession::Impl {
     bool                   cache_active = false;
     float                  nemotron_stream_gain = 0.0f;
     std::vector<float> *   probability_sink = nullptr;
+    int                    network_passes = 0;
+    int                    coreml_passes = 0;
 
     // Speaking vs silent from Sortformer probs: max probability above opts.threshold.
     // Initial Unknown forces a transition on the first chunk.
@@ -2929,6 +2936,11 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
                     *engine_impl, win, n, opts.sample_rate, diopts, nemotron_stream_gain)
                 : engine_impl_diarize_helper(*engine_impl, win, n, opts.sample_rate, diopts);
         }
+    }
+
+    if (diar.n_frames > 0) {
+        ++network_passes;
+        if (diar.encoder_used_coreml) ++coreml_passes;
     }
 
     if (probability_sink && cache_active) {
@@ -3349,17 +3361,19 @@ static void feed_in_blocks(SortformerStreamSession & session, const float * samp
     }
 }
 
-static std::vector<float> nemotron_long_form_probabilities(
-    Engine::Impl & impl, const float * samples, int n_samples, int sample_rate) {
-    std::vector<float> probabilities;
+static void run_nemotron_long_form(
+    Engine::Impl & impl, const float * samples, int n_samples, int sample_rate,
+    DiarizationResult & result) {
     auto session_impl = make_diarization_session(
         impl, nemotron_long_form_options(sample_rate), nullptr);
-    session_impl->probability_sink = &probabilities;
+    session_impl->probability_sink = &result.speaker_probs;
     session_impl->nemotron_stream_gain = nemotron_audio_gain(samples, n_samples);
+    const SortformerStreamSession::Impl & passes = *session_impl;
     SortformerStreamSession session(std::move(session_impl));
     feed_in_blocks(session, samples, n_samples, nemotron_long_form_block_samples(sample_rate));
     session.finalize();
-    return probabilities;
+    result.encoder_used_coreml =
+        passes.network_passes > 0 && passes.coreml_passes == passes.network_passes;
 }
 
 static DiarizationResult engine_impl_diarize_nemotron_long_form(
@@ -3372,7 +3386,7 @@ static DiarizationResult engine_impl_diarize_nemotron_long_form(
     DiarizationResult result;
     result.num_spks = impl.model.nemotron_diarization_cfg.speakers;
     result.n_frames = static_cast<int>(nemotron_diarization_mel_frames(impl.model, n_samples));
-    result.speaker_probs = nemotron_long_form_probabilities(impl, samples, n_samples, sample_rate);
+    run_nemotron_long_form(impl, samples, n_samples, sample_rate, result);
     hold_last_frame(result.speaker_probs, result.num_spks, result.n_frames);
     result.frame_stride_s = static_cast<double>(impl.model.mel_cfg.hop_length) / sample_rate;
     result.audio_samples = n_samples;

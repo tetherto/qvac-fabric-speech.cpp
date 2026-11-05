@@ -385,7 +385,8 @@ public:
 
     // True when an Apple Core ML encoder or diarizer sidecar was found. This
     // is a load-status query, not a guarantee that every call shape uses Core
-    // ML; the per-call truth is EngineResult::encoder_used_coreml.
+    // ML; the per-call truth is EngineResult::encoder_used_coreml and
+    // DiarizationResult::encoder_used_coreml.
     // CTC/IndicConformer, Unified RNN-T, and TDT pad shorter inputs to the
     // compiled capacity and window longer offline inputs. EOU and Nemotron use
     // Core ML only at the exact compiled shape: shorter calls are never padded,

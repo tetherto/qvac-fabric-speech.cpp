@@ -1,8 +1,8 @@
 // fit_params must charge the Core ML diarizer sidecars beside a Nemotron 3
 // Diarization or Sortformer v2.1 GGUF: a short offline input loads only the
-// smallest bundle, a long Nemotron input reaches every bundle through its
-// long-form blocks, a long Sortformer input exceeds them all and runs on
-// ggml, the charge decides the verdict on unified memory, and
+// smallest bundle, a long Nemotron input reaches every bundle up to the one
+// covering its long-form block, a long Sortformer input exceeds them all and
+// runs on ggml, the charge decides the verdict on unified memory, and
 // PARAKEET_COREML_DIARIZER_DISABLE removes it. parakeet-fit-params --json
 // reports the same figure. Exits 77 without sidecars.
 
@@ -31,6 +31,7 @@ constexpr float kShortSeconds = 27.3f;
 constexpr float kLongSeconds = 273.0f;
 constexpr uint64_t kDefaultMargin = 256ull * 1024 * 1024;
 constexpr int kAllFrames = std::numeric_limits<int>::max();
+constexpr int kLongFormBlockFrames = 745;
 constexpr const char * kNemotronType = "nemotron-diarization";
 constexpr const char * kReportLine = "core ml sidecars:";
 constexpr const char * kJsonKey = "\"coremlBytes\": ";
@@ -52,8 +53,9 @@ parakeet::FitResult project(const std::string & gguf, float seconds, uint64_t ma
     return parakeet::fit_params(opts);
 }
 
-uint64_t charge(const std::vector<parakeet::CoremlDiarizerBundle> & bundles) {
-    return parakeet::coreml_diarizer_resident_bytes(bundles, {{1, kAllFrames}});
+uint64_t charge(const std::vector<parakeet::CoremlDiarizerBundle> & bundles,
+                int frames = kAllFrames) {
+    return parakeet::coreml_diarizer_resident_bytes(bundles, {{1, frames}});
 }
 
 bool reports_sidecars(const parakeet::FitResult & result) {
@@ -107,8 +109,9 @@ void check_workloads(const std::string & gguf,
     check_cli_json(gguf, offline.coreml_bytes);
     const parakeet::FitResult long_input = project(gguf, kLongSeconds, kDefaultMargin);
     const bool nemotron = long_input.model_type == kNemotronType;
-    check(long_input.coreml_bytes == (nemotron ? charge(bundles) : 0),
-          nemotron ? "long-form input charges every bundle" : "input above every bundle charges none");
+    check(long_input.coreml_bytes == (nemotron ? charge(bundles, kLongFormBlockFrames) : 0),
+          nemotron ? "long-form input charges every bundle up to its block"
+                   : "input above every bundle charges none");
 }
 
 void check_verdict(const std::string & gguf) {

@@ -745,6 +745,7 @@ bool sortformer_diarize_coreml(const ParakeetCtcModel & model,
         {kCoremlProbabilities, 0, T_enc, num_spks, out.speaker_probs.data()}};
     if (diarizers->run(T_enc, inputs, 1, outputs, 1) != 0) return false;
     out.segments.clear();
+    out.used_coreml = true;
     finish_diarization(model, T_enc, opts, out);
     out.decode_ms = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - t0).count() / 1000.0;
@@ -864,6 +865,7 @@ static int diarize_concatenation(ParakeetCtcModel & model,
             enc_cat.n_enc_frames, enc_cat.d_model, T_cat, D);
         return -2;
     }
+    diar_cat.used_coreml = enc_cat.used_coreml;
     return sortformer_diarize_ggml(model, enc_cat.encoder_out.data(), T_cat, D, opts, diar_cat);
 }
 
@@ -890,6 +892,7 @@ int sortformer_aosc_step(ParakeetCtcModel & model,
         out.num_spks = num_spks;
         out.speaker_probs.clear();
         out.segments.clear();
+        out.used_coreml = false;
         return 0;
     }
     if (lc + chunk_len_eff + rc > T_chunk_pre) {
@@ -953,6 +956,7 @@ int sortformer_aosc_step(ParakeetCtcModel & model,
     out.n_frames       = chunk_len_eff;
     out.num_spks       = num_spks;
     out.frame_stride_s = diar_cat.frame_stride_s;
+    out.used_coreml    = diar_cat.used_coreml;
     out.segments.clear();
     sf_threshold_segments(chunk_probs, chunk_len_eff, num_spks,
                           out.frame_stride_s, opts.threshold, out.segments);
