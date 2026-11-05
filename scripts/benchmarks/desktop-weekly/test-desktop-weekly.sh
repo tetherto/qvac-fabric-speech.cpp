@@ -39,7 +39,7 @@ check_spec_fields() {
 check_args_are_provisioned() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | .key as $family
-    | ([.value.provision[] | (.registry // .huggingface.name // .fixture // .derived.name) | split("/") | last]) as $files
+    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .derived.name) | split("/") | last))]) as $files
     | [.value.args[] | select(startswith("${MODEL_DIR}/")) | sub("^\\$\\{MODEL_DIR\\}/"; "")] | map(select(. as $f | $files | index($f) | not))
     | select(length > 0) | "\($family): \(join(","))"' "$HERE/families.json")"
   [ -z "$bad" ] || fail "args reference files no provision entry supplies: $bad"
@@ -313,6 +313,7 @@ check_fetch_models_offline() {
     "task": "TTS", "model_label": "x", "weights": "x", "runs": 1, "warmup": 0, "cpu_runs": 1, "cpu_warmup": 0, "timeout_minutes": 1,
     "provision": [
       {"fixture": "engines/parakeet/test/samples/jfk.wav"},
+      {"fixture": "engines/parakeet/test/samples/jfk.wav", "as": "voice.wav"},
       {"derived": {"name": "jfk-24k.wav", "kind": "resample", "source": "engines/parakeet/test/samples/jfk.wav", "rate": 24000}}
     ]
   }
@@ -321,10 +322,11 @@ SPEC
   FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch.log" 2>&1 || fail "fetch-models.sh failed: $(cat "$TMP/fetch.log")"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk.wav" ] || fail "fixture not linked"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk-24k.wav" ] || fail "derived file not linked"
+  [ "$(readlink "$BENCH_HOME/models/families/clone-test/voice.wav")" = "$BENCH_HOME/models/store/jfk.wav" ] || fail "as link not pointing at the store file"
   [ -s "$BENCH_HOME/models/store/jfk.wav.sha256" ] || fail "sha256 sidecar"
   grep -q "^fixture engines/parakeet" "$BENCH_HOME/models/store/jfk.wav.source" || fail "source sidecar"
   grep -q "^derived resample 24000" "$BENCH_HOME/models/store/jfk-24k.wav.source" || fail "derived source sidecar"
-  ok "fetch-models.sh provisions fixtures and derived files offline"
+  ok "fetch-models.sh provisions fixtures and derived files offline and links a file under its as name"
 }
 
 check_fetch_models_reprovisions_on_origin_change() {

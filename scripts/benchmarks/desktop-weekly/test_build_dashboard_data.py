@@ -27,6 +27,8 @@ FAMILIES = {
                              "binary": "engines/tts/audio8-cli", "args": [], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
     "moss-tts-f16": {"task": "TTS", "model_label": "MOSS-TTS v1.5 8.5B", "weights": "F16", "bench_kind": "time-wrapped", "binary": "engines/tts/moss-cli",
                      "args": [], "runs": 3, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
+    "parakeet-tdt-abcba": {"task": "ASR", "model_label": "Parakeet TDT 0.6B v3", "weights": "Q8_0", "bench_kind": "native", "binary": "engines/parakeet/parakeet",
+                           "args": ["--model", "${MODEL_DIR}/parakeet.gguf"], "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
 }
 COMPARISONS = [
     {"task": "ASR", "engine": "transcribe.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
@@ -91,6 +93,14 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertNotEqual(tts["group"], clone["group"])
         self.assertEqual((tts["timing_class"], clone["timing_class"]), ("fresh_process", "fresh_process_ref"))
         self.assertEqual((tts["dashboard"], clone["dashboard"]), ("tts", "tts"))
+
+    def test_a_family_with_its_own_clip_gets_that_scenario_and_its_own_chart(self):
+        jfk = build.weekly_row(self.newer, result("cuda", "parakeet-tdt", 12.0), FAMILIES, "2026-11-08")
+        long = build.weekly_row(self.newer, result("cuda", "parakeet-tdt-abcba", 6.0), FAMILIES, "2026-11-08")
+        self.assertEqual((jfk["scenario"], long["scenario"]), ("jfk", "abcba"))
+        self.assertEqual(long["scenario_label"], "ABCBA multi-speaker clip, 160.6 s (no reference transcript)")
+        self.assertNotEqual(jfk["group"], long["group"])
+        self.assertEqual(build.skipped_cell(self.newer, "parakeet-tdt-abcba", FAMILIES["parakeet-tdt-abcba"], "cpu", 1)["scenario"], long["scenario_label"])
 
     def test_newest_result_wins_and_an_older_cell_says_where_it_comes_from(self):
         cells = {(r["backend"], r["family"]): r for r in build.newest_cells([self.older, self.newer], FAMILIES)}

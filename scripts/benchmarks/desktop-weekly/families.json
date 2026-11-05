@@ -10,7 +10,8 @@
       "cpu_runs": "Timed iterations on the CPU backend (heavy generators get fewer).",
       "cpu_warmup": "Untimed iterations on the CPU backend.",
       "timeout_minutes": "Wall-clock cap for the whole family on one backend; the watchdog kills the driver past it.",
-      "provision": "How fetch-models.sh fills models/<family>/: {registry: <key under qvac_models_compiled/ggml/>}, {huggingface: {repo, revision, name, sha256?}}, {fixture: <repo-relative file>} or {derived: {name, kind: requantize|resample, source, type|rate, name_filter?}}. Registry, HuggingFace and derived files live once in models/store/ and are linked into every family directory that lists them."
+      "scenario": "Optional input key for the report when the family does not use the task's default input: abcba for the 160.6 s multi-speaker clip (engines/parakeet/test/samples/abcba.wav, no reference transcript).",
+      "provision": "How fetch-models.sh fills models/<family>/: {registry: <key under qvac_models_compiled/ggml/>}, {huggingface: {repo, revision, name, sha256?}}, {fixture: <repo-relative file>} or {derived: {name, kind: requantize|resample, source, type|rate, name_filter?}}. Registry, HuggingFace and derived files live once in models/store/ and are linked into every family directory that lists them. A registry or fixture entry may carry {as: <name>} to link the file into the family directory under another name (CosyVoice3 looks for voice.gguf)."
     }
   },
   "parakeet-tdt": {
@@ -93,6 +94,160 @@
     "correctness": {"kind": "wer", "reference": "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt", "normalizer": "english"},
     "notes": "Offline decode of the 11 s JFK clip with the en-US locale prompt."
   },
+  "parakeet-eou": {
+    "task": "ASR",
+    "model_label": "Parakeet Realtime EOU 120M",
+    "weights": "F16",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["2026-07-01/parakeet-eou-120m-v1.f16.gguf"],
+    "provision": [
+      {"registry": "parakeet/2026-07-01/parakeet-eou-120m-v1.f16.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/parakeet-eou-120m-v1.f16.gguf", "--wav", "${AUDIO_DIR}/jfk.wav",
+             "--n-gpu-layers", "999", "--bench", "--bench-runs", "${RUNS}", "--bench-warmup", "${WARMUP}",
+             "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 11.0,
+    "runs": 10, "warmup": 2, "cpu_runs": 5, "cpu_warmup": 1, "timeout_minutes": 20,
+    "correctness": {"kind": "wer", "reference": "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt", "normalizer": "english"},
+    "notes": "11 s JFK clip; WER against the checked-in transcript. The 2026-07-01 registry cut of the EOU model."
+  },
+  "whisper-small": {
+    "task": "ASR",
+    "model_label": "Whisper small multilingual",
+    "weights": "F16 (upstream whisper.cpp GGML)",
+    "cmake_target": "whisper-cli",
+    "bench_kind": "time-wrapped",
+    "binary": "bin/whisper-cli",
+    "models": ["ggml-small.bin"],
+    "provision": [
+      {"huggingface": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-small.bin", "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"}}
+    ],
+    "args": ["-m", "${MODEL_DIR}/ggml-small.bin", "-f", "${AUDIO_DIR}/jfk.wav", "-t", "4", "-nt"],
+    "audio_duration_seconds": 11.0,
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 20,
+    "correctness": {"kind": "wer", "reference": "third_party/whisper.cpp/tests/parakeet-expected-jfk-output.txt", "normalizer": "english"},
+    "notes": "Upstream whisper-cli on the 11 s JFK clip with 4 threads and no timestamps (-nt), so the stdout transcript is scored; process wall clock including model load."
+  },
+  "parakeet-tdt-abcba": {
+    "task": "ASR",
+    "model_label": "Parakeet TDT 0.6B v3",
+    "weights": "Q8_0",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["2026-09-30/parakeet-tdt-0.6b-v3.q8_0.gguf"],
+    "provision": [
+      {"registry": "parakeet/2026-09-30/parakeet-tdt-0.6b-v3.q8_0.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/parakeet-tdt-0.6b-v3.q8_0.gguf", "--wav", "${AUDIO_DIR}/abcba.wav",
+             "--n-gpu-layers", "999", "--bench", "--bench-runs", "${RUNS}", "--bench-warmup", "${WARMUP}",
+             "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER."
+  },
+  "parakeet-unified-abcba": {
+    "task": "ASR",
+    "model_label": "Parakeet Unified English 0.6B",
+    "weights": "Q8_0",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["2026-09-30/parakeet-unified-en-0.6b.q8_0.gguf"],
+    "provision": [
+      {"registry": "parakeet/2026-09-30/parakeet-unified-en-0.6b.q8_0.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/parakeet-unified-en-0.6b.q8_0.gguf", "--wav",
+             "${AUDIO_DIR}/abcba.wav", "--n-gpu-layers", "999", "--bench", "--bench-runs", "${RUNS}",
+             "--bench-warmup", "${WARMUP}", "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER."
+  },
+  "transcribepsy-abcba": {
+    "task": "ASR",
+    "model_label": "TranscribePsy-250M-EU-sub",
+    "weights": "Q8_0",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["transcribepsy-250m-eu-sub.gguf"],
+    "provision": [
+      {"huggingface": {"repo": "qvac/TranscribePsy-250M-EU-sub-gguf", "revision": "92460e0a8e7dc20f2fb126198bdd9eebb9ba2dc7", "name": "transcribepsy-250m-eu-sub.gguf", "sha256": "a93ef324d38e410b5e49389db95d06364eddbb890b74a69f311e482d2fda6f4b"}}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/transcribepsy-250m-eu-sub.gguf", "--wav", "${AUDIO_DIR}/abcba.wav",
+             "--n-gpu-layers", "999", "--bench", "--bench-runs", "${RUNS}", "--bench-warmup", "${WARMUP}",
+             "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER. The clip exercises the 60 s long-form window."
+  },
+  "nemotron-abcba": {
+    "task": "ASR",
+    "model_label": "Nemotron 3.5 ASR Streaming 0.6B",
+    "weights": "F16",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["2026-09-30/nemotron-3.5-asr-streaming-0.6b.f16.gguf"],
+    "provision": [
+      {"registry": "parakeet/2026-09-30/nemotron-3.5-asr-streaming-0.6b.f16.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/nemotron-3.5-asr-streaming-0.6b.f16.gguf", "--wav",
+             "${AUDIO_DIR}/abcba.wav", "--language", "en-US", "--n-gpu-layers", "999", "--bench", "--bench-runs",
+             "${RUNS}", "--bench-warmup", "${WARMUP}", "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER."
+  },
+  "parakeet-eou-abcba": {
+    "task": "ASR",
+    "model_label": "Parakeet Realtime EOU 120M",
+    "weights": "F16",
+    "cmake_target": "parakeet-cli",
+    "bench_kind": "native",
+    "binary": "engines/parakeet/parakeet",
+    "s3_prefix": "parakeet",
+    "models": ["2026-07-01/parakeet-eou-120m-v1.f16.gguf"],
+    "provision": [
+      {"registry": "parakeet/2026-07-01/parakeet-eou-120m-v1.f16.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/parakeet-eou-120m-v1.f16.gguf", "--wav", "${AUDIO_DIR}/abcba.wav",
+             "--n-gpu-layers", "999", "--bench", "--bench-runs", "${RUNS}", "--bench-warmup", "${WARMUP}",
+             "--bench-json", "${JSON_OUT}"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER."
+  },
+  "whisper-small-abcba": {
+    "task": "ASR",
+    "model_label": "Whisper small multilingual",
+    "weights": "F16 (upstream whisper.cpp GGML)",
+    "cmake_target": "whisper-cli",
+    "bench_kind": "time-wrapped",
+    "binary": "bin/whisper-cli",
+    "models": ["ggml-small.bin"],
+    "provision": [
+      {"huggingface": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-small.bin", "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"}}
+    ],
+    "args": ["-m", "${MODEL_DIR}/ggml-small.bin", "-f", "${AUDIO_DIR}/abcba.wav", "-t", "4", "-nt"],
+    "audio_duration_seconds": 160.6,
+    "scenario": "abcba",
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "notes": "160.6 s multi-speaker ABCBA clip from the parakeet test samples; it has no reference transcript, so no WER. Process wall clock including model load."
+  },
   "supertonic3": {
     "task": "TTS",
     "model_label": "Supertonic 3",
@@ -112,6 +267,70 @@
     "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
                     "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
     "notes": "Fixed English prompt; the last WAV is transcribed by pinned Whisper tiny on CPU outside the timed region."
+  },
+  "chatterbox-turbo": {
+    "task": "TTS",
+    "model_label": "Chatterbox Turbo",
+    "weights": "T3 Turbo Q8_0, S3Gen Q8_0",
+    "cmake_target": "tts-cli",
+    "bench_kind": "time-wrapped",
+    "binary": "engines/tts/tts-cli",
+    "s3_prefix": "chatterbox",
+    "models": ["2026-05-18/chatterbox-t3-turbo-q8_0.gguf", "2026-06-01/chatterbox-s3gen-q8_0.gguf"],
+    "provision": [
+      {"registry": "chatterbox/2026-05-18/chatterbox-t3-turbo-q8_0.gguf"},
+      {"registry": "chatterbox/2026-06-01/chatterbox-s3gen-q8_0.gguf"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/chatterbox-t3-turbo-q8_0.gguf", "--s3gen-gguf",
+             "${MODEL_DIR}/chatterbox-s3gen-q8_0.gguf", "--n-gpu-layers", "999", "--seed", "42", "--text",
+             "${TTS_TEXT}", "--out", "${TTS_AUDIO_OUT}"],
+    "audio_duration_seconds": null,
+    "runs": 5, "warmup": 3, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
+                    "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
+    "notes": "Built-in voice, fixed English prompt; process wall clock including model load; seed 42."
+  },
+  "parler-mini": {
+    "task": "TTS",
+    "model_label": "Parler-TTS mini v1",
+    "weights": "Q8_0",
+    "cmake_target": "parler-bench",
+    "bench_kind": "native",
+    "binary": "engines/tts/parler-bench",
+    "s3_prefix": "parler-tts",
+    "models": ["2026-07-20/parler-mini-v1-q8_0.gguf"],
+    "provision": [
+      {"registry": "parler-tts/2026-07-20/parler-mini-v1-q8_0.gguf"}
+    ],
+    "args": ["--model", "${MODEL_DIR}/parler-mini-v1-q8_0.gguf", "--text", "${TTS_TEXT}", "--n-gpu-layers", "999",
+             "--runs", "${RUNS}", "--warmup", "${WARMUP}", "--json-out", "${JSON_OUT}", "--wav-out",
+             "${TTS_AUDIO_OUT}", "--sampled", "--seed", "42"],
+    "audio_duration_seconds": null,
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
+                    "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
+    "notes": "Fixed English prompt with parler-bench's default description; sampled decoding at seed 42 because greedy decoding degenerates. The native bench times synthesis only."
+  },
+  "parler-indic": {
+    "task": "TTS",
+    "model_label": "Indic Parler-TTS",
+    "weights": "Q8_0",
+    "cmake_target": "parler-bench",
+    "bench_kind": "native",
+    "binary": "engines/tts/parler-bench",
+    "s3_prefix": "parler-tts",
+    "models": ["2026-07-20/parler-indic-q8_0.gguf"],
+    "provision": [
+      {"registry": "parler-tts/2026-07-20/parler-indic-q8_0.gguf"}
+    ],
+    "args": ["--model", "${MODEL_DIR}/parler-indic-q8_0.gguf", "--text", "${TTS_TEXT}", "--n-gpu-layers", "999",
+             "--runs", "${RUNS}", "--warmup", "${WARMUP}", "--json-out", "${JSON_OUT}", "--wav-out",
+             "${TTS_AUDIO_OUT}", "--sampled", "--seed", "42"],
+    "audio_duration_seconds": null,
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
+                    "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
+    "notes": "The Indic checkpoint on the shared English prompt (an Indic-script prompt could not be scored by the English reference ASR); sampled decoding at seed 42. The native bench times synthesis only."
   },
   "audio8-lm-f16-dec-f16": {
     "task": "TTS",
@@ -355,6 +574,64 @@
     "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
                     "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
     "notes": "Voice cloning from the JFK clip resampled to the codec's 24 kHz; process wall clock including model load and reference encoding."
+  },
+  "chatterbox-mtl-clone": {
+    "task": "TTS cloning",
+    "model_label": "Chatterbox Multilingual 0.5B",
+    "weights": "T3 MTL Q8_0, S3Gen MTL Q8_0",
+    "cmake_target": "tts-cli",
+    "bench_kind": "time-wrapped",
+    "binary": "engines/tts/tts-cli",
+    "s3_prefix": "chatterbox",
+    "models": ["2026-05-18/chatterbox-t3-mtl-q8_0.gguf", "2026-06-01/chatterbox-s3gen-mtl-q8_0.gguf"],
+    "provision": [
+      {"registry": "chatterbox/2026-05-18/chatterbox-t3-mtl-q8_0.gguf"},
+      {"registry": "chatterbox/2026-06-01/chatterbox-s3gen-mtl-q8_0.gguf"},
+      {"fixture": "engines/parakeet/test/samples/jfk.wav"}
+    ],
+    "args": ["--verbose", "--model", "${MODEL_DIR}/chatterbox-t3-mtl-q8_0.gguf", "--s3gen-gguf",
+             "${MODEL_DIR}/chatterbox-s3gen-mtl-q8_0.gguf", "--language", "en", "--reference-audio",
+             "${MODEL_DIR}/jfk.wav", "--n-gpu-layers", "999", "--seed", "42", "--text", "${TTS_TEXT}", "--out",
+             "${TTS_AUDIO_OUT}"],
+    "audio_duration_seconds": null,
+    "runs": 5, "warmup": 3, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
+                    "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
+    "notes": "Voice cloning from the 11 s JFK clip (resampled by the engine); process wall clock including model load and reference encoding; seed 42."
+  },
+  "cosyvoice3-clone": {
+    "task": "TTS cloning",
+    "model_label": "CosyVoice3 0.5B",
+    "weights": "LM Q8_0, flow F32, HiFT F32, speech tokenizer Q8_0, CAM++ F32",
+    "cmake_target": "cosyvoice-bench",
+    "bench_kind": "native",
+    "binary": "engines/tts/cosyvoice-bench",
+    "s3_prefix": "cosy_voice",
+    "models": ["2026-07-23/cosyvoice3-llm-q8_0.gguf", "2026-07-23/cosyvoice3-flow-f32.gguf", "2026-07-23/cosyvoice3-hift-f32.gguf", "2026-07-23/voice-en.gguf", "2026-07-23/vocab.json", "2026-07-23/merges.txt", "2026-08-14/cosyvoice3-s3tok-q8_0.gguf", "2026-08-14/cosyvoice3-campplus-f32.gguf"],
+    "provision": [
+      {"registry": "cosy_voice/2026-07-23/cosyvoice3-llm-q8_0.gguf"},
+      {"registry": "cosy_voice/2026-07-23/cosyvoice3-flow-f32.gguf"},
+      {"registry": "cosy_voice/2026-07-23/cosyvoice3-hift-f32.gguf"},
+      {"registry": "cosy_voice/2026-07-23/voice-en.gguf", "as": "voice.gguf"},
+      {"registry": "cosy_voice/2026-07-23/vocab.json"},
+      {"registry": "cosy_voice/2026-07-23/merges.txt"},
+      {"registry": "cosy_voice/2026-08-14/cosyvoice3-s3tok-q8_0.gguf"},
+      {"registry": "cosy_voice/2026-08-14/cosyvoice3-campplus-f32.gguf"},
+      {"fixture": "engines/parakeet/test/samples/jfk.wav"}
+    ],
+    "args": ["--model-dir", "${MODEL_DIR}", "--llm-gguf", "${MODEL_DIR}/cosyvoice3-llm-q8_0.gguf", "--flow-gguf",
+             "${MODEL_DIR}/cosyvoice3-flow-f32.gguf", "--hift-gguf", "${MODEL_DIR}/cosyvoice3-hift-f32.gguf",
+             "--s3tok-gguf", "${MODEL_DIR}/cosyvoice3-s3tok-q8_0.gguf", "--campplus-gguf",
+             "${MODEL_DIR}/cosyvoice3-campplus-f32.gguf", "--reference-audio", "${MODEL_DIR}/jfk.wav",
+             "--prompt-text",
+             "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+             "--n-gpu-layers", "999", "--seed", "42", "--runs", "${RUNS}", "--warmup", "${WARMUP}", "--json-out",
+             "${JSON_OUT}", "--text", "${TTS_TEXT}", "--wav-out", "${TTS_AUDIO_OUT}"],
+    "audio_duration_seconds": null,
+    "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1, "timeout_minutes": 30,
+    "correctness": {"kind": "tts_intelligibility", "reference": "scripts/benchmarks/fixtures/tts-intelligibility.txt", "normalizer": "english",
+                    "asr_model": {"repo": "ggerganov/whisper.cpp", "revision": "5359861c739e955e79d9a303bcbc70fb988958b1", "name": "ggml-tiny.bin", "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"}},
+    "notes": "Zero-shot cloning from the 11 s JFK clip with its transcript as the prompt text; the native bench times synthesis only (model load and the reference encoding happen before the timed runs). The engine requires voice.gguf even when cloning, so the English baked voice is linked under that name."
   },
   "acestep-turbo-q8_0": {
     "task": "Music",

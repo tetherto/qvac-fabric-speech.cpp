@@ -88,6 +88,10 @@ class ChartTest(unittest.TestCase):
         self.assertIn(views.esc(views.SETS_NOTE), html)
         self.assertIn(' <span class="tag">required</span>', html)
 
+    def test_the_long_clip_is_its_own_panel(self):
+        rows = [weekly(), weekly(scenario="abcba", scenario_label="ABCBA clip, 160.6 s", audio_s=160.6, speed_x=20.0, group="abcba")]
+        self.assertEqual(re.findall(r'<div class="panel"><h4>(.*?)</h4>', page(rows)), ["CPU · JFK 11 s", "CPU · ABCBA 160.6 s"])
+
     def test_a_chart_without_an_accepted_row_moves_into_the_details(self):
         rows = [weekly(), weekly(backend="vulkan", group="vulkan", accepted=False, speed_x=None, status_detail="run-failed")]
         html = page(rows)

@@ -162,6 +162,10 @@ entry_name() {
     else .derived.name end'
 }
 
+link_name() {
+  echo "$1" | jq -r --arg name "$(entry_name "$1")" '.as // $name'
+}
+
 provision_entry() {
   local entry="$1"
   if echo "$entry" | jq -e '.huggingface' > /dev/null; then
@@ -174,9 +178,9 @@ provision_entry() {
 }
 
 link_into_family() {
-  local family="$1" name="$2"
+  local family="$1" name="$2" link="$3"
   mkdir -p "$FAMILIES_ROOT/$family"
-  ln -sfn "$STORE/$name" "$FAMILIES_ROOT/$family/$name"
+  ln -sfn "$STORE/$name" "$FAMILIES_ROOT/$family/$link"
 }
 
 provision_family() {
@@ -184,7 +188,7 @@ provision_family() {
   for entry in $(jq -c --arg f "$family" '.[$f].provision[]' "$FAMILIES_JSON" | tr ' ' '\001'); do
     entry="$(echo "$entry" | tr '\001' ' ')"
     name="$(entry_name "$entry")"
-    if provision_entry "$entry"; then link_into_family "$family" "$name"; else note_failure "$family: $name"; fi
+    if provision_entry "$entry"; then link_into_family "$family" "$name" "$(link_name "$entry")"; else note_failure "$family: $name"; fi
   done
 }
 

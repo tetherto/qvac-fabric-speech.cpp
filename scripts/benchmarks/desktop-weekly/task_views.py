@@ -34,7 +34,7 @@ METRIC_NOTES = {
     "Music": "Seconds of music generated per second of processing, higher is better. Each chart is one backend, and every row in it received the same request as a fresh process including model load.",
 }
 SETS_NOTE = "Weekly charts hold this week's QVAC variants; campaign charts hold QVAC and its competitors as the campaign measured them, and the two are never mixed."
-SCENARIO_SHORT = {"jfk": "JFK 11 s", "long_clip": "98.49 s clip", "fixed_prompt": "fixed prompt", "fixed_prompt_short": "9-word prompt",
+SCENARIO_SHORT = {"jfk": "JFK 11 s", "abcba": "ABCBA 160.6 s", "long_clip": "98.49 s clip", "fixed_prompt": "fixed prompt", "fixed_prompt_short": "9-word prompt",
                   "long_prompt": "76-word prompt", "clone_jfk": "cloning, JFK reference", "music_30s": "30 s request", "music_set": "campaign prompt set"}
 SCENARIO_ORDER = tuple(SCENARIO_SHORT)
 TIMING_SHORT = {"native_excl_load": "inference only", "fresh_process": "fresh process including load",

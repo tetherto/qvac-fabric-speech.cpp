@@ -34,13 +34,18 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "audio8-lm-q4_0-dec-f16": "LM Q4_0 · decoder F16", "audio8-lm-q4_0-dec-q8_0": "LM Q4_0 · decoder Q8_0",
                   "audio8-clone-enc-f16": "encoder F16", "audio8-clone-enc-q8_0": "encoder Q8_0", "moss-tts-f16": "F16",
                   "moss-tts-q8_0": "Q8_0 blocks", "moss-tts-clone-f16": "F16", "acestep-turbo-q8_0": "DiT Q8_0",
-                  "acestep-turbo-q4_k_m": "DiT Q4_K_M", "acestep-sft-q8_0": "DiT Q8_0", "acestep-base-q4_k_m": "DiT Q4_K_M"}
+                  "acestep-turbo-q4_k_m": "DiT Q4_K_M", "acestep-sft-q8_0": "DiT Q8_0", "acestep-base-q4_k_m": "DiT Q4_K_M",
+                  "parakeet-eou": "F16", "whisper-small": "F16", "parakeet-tdt-abcba": "Q8_0", "parakeet-unified-abcba": "Q8_0",
+                  "transcribepsy-abcba": "Q8_0", "nemotron-abcba": "F16", "parakeet-eou-abcba": "F16", "whisper-small-abcba": "F16",
+                  "chatterbox-turbo": "Q8_0", "chatterbox-mtl-clone": "Q8_0", "cosyvoice3-clone": "LM Q8_0", "parler-mini": "Q8_0",
+                  "parler-indic": "Q8_0"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
 SCENARIOS = {"ASR": ("jfk", "JFK clip, 11.0 s (has reference transcript)"), "TTS": ("fixed_prompt", "Fixed English prompt"),
              "TTS cloning": ("clone_jfk", "Voice cloning from JFK reference, fixed English target text"),
              "Music": ("music_30s", "30 s instrumental request, seed 42")}
+FAMILY_SCENARIOS = {"abcba": ("abcba", "ABCBA multi-speaker clip, 160.6 s (no reference transcript)")}
 TIMING = {"native": ("native_excl_load", "Native bench, inference only (excludes model load)",
                      "Mel, encoder and decoder of one clip; the model is loaded before the timed runs."),
           "time-wrapped": ("fresh_process", "Fresh process incl. model load (warm filesystem cache)",
@@ -128,6 +133,11 @@ def variant_label(row):
     return VARIANT_LABELS.get(row["family"]) or row.get("weights", "")
 
 
+def scenario_of(spec):
+    task_default = SCENARIOS.get(spec.get("task", ""), SCENARIOS["ASR"])
+    return FAMILY_SCENARIOS.get(spec.get("scenario", ""), task_default)
+
+
 def family_models(summary, family, families):
     names = {pathlib.Path(a.split("/")[-1]).name for a in families.get(family, {}).get("args", []) if "${MODEL_DIR}/" in a}
     return [m for m in summary.get("pins", {}).get("models", []) if m.get("name") in names]
@@ -188,7 +198,7 @@ def weekly_row(summary, row, families, newest_name):
     host, run = summary["_host"], summary.get("run", {})
     task = row.get("task", "")
     model = row.get("model_label", row["family"])
-    scenario, scenario_label = SCENARIOS.get(task, SCENARIOS["ASR"])
+    scenario, scenario_label = scenario_of(families.get(row["family"], {"task": task}))
     timing_class, timing_label, timing_includes = timing_of(row, families)
     runs, warmups = iteration_counts(row["family"], row["backend"], families)
     gpu_mib, gpu_kind, gpu_note = gpu_fields(row, summary)
@@ -214,7 +224,7 @@ def weekly_row(summary, row, families, newest_name):
             "command": command_text(row["family"], families), "config": f"BENCH backends {', '.join(summary.get('backends', []))}; CUDA arch {(summary.get('pins', {}).get('build') or {}).get('cuda_arch', '')}",
             "caveats": caveats, "comparison_limitation": "", "host_conditions": HOST_CONDITIONS.get(host, ""),
             "source_file": summary["_file"], "source_row": row["family"], "raw_source": f"runs/{run_name(summary)}/results/{row['backend']}/{row['family']}.json",
-            "group": f"{host}|{row['backend']}|{model}|{task}|weekly", "ratio_qualifier": "", "run": run_name(summary)}
+            "group": f"{host}|{row['backend']}|{model}|{task}|{scenario}|weekly", "ratio_qualifier": "", "run": run_name(summary)}
 
 
 def newest_cells(host_summaries, families):
@@ -333,7 +343,7 @@ def skipped_cell(newest, family, spec, backend, number):
     return {"id": f"k{number:03d}", "host": newest["_host"], "machine": machine_label(newest["_host"]), "task": spec.get("task", ""),
             "model": spec.get("model_label", family), "engine": QVAC, "backend": backend, "status": "not attempted", "rows": 0,
             "reason": "Skipped on this machine (SKIP_FAMILIES in its config.env, usually memory)", "source": newest["_file"],
-            "scenario": SCENARIOS.get(spec.get("task", ""), SCENARIOS["ASR"])[1]}
+            "scenario": scenario_of(spec)[1]}
 
 
 def skipped_cells(host_summaries, families, start):

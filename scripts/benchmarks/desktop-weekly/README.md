@@ -34,18 +34,30 @@ and the weekly artifact.
 | ASR | `parakeet-unified` | Parakeet Unified English 0.6B Q8_0 |
 | ASR | `transcribepsy` | TranscribePsy-250M-EU-sub Q8_0 (HuggingFace, pinned revision) |
 | ASR | `nemotron` | Nemotron 3.5 ASR Streaming 0.6B F16 |
+| ASR | `parakeet-eou` | Parakeet Realtime EOU 120M F16 |
+| ASR | `whisper-small` | Upstream whisper.cpp `ggml-small.bin` through `whisper-cli` (HuggingFace, pinned revision) |
+| ASR | `{parakeet-tdt,parakeet-unified,transcribepsy,nemotron,parakeet-eou,whisper-small}-abcba` | the same models on the 160.6 s multi-speaker ABCBA clip, which has no reference transcript (no WER) |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
+| TTS | `chatterbox-turbo` | Chatterbox Turbo: T3 Turbo Q8_0 with S3Gen Q8_0, built-in voice |
+| TTS | `parler-mini`, `parler-indic` | Parler-TTS mini v1 and Indic Parler-TTS Q8_0, sampled decoding at seed 42 |
 | TTS | `audio8-lm-{f16,q8_0,q4_0}-dec-{f16,q8_0}` | Audio8 TTS Preview 0.6B, LM x codec decoder grid |
 | TTS cloning | `audio8-clone-enc-{f16,q8_0}` | Audio8 with the codec encoder, cloning the JFK clip |
 | TTS | `moss-tts-f16`, `moss-tts-q8_0` | MOSS-TTS v1.5 8.5B: F16 backbone, and transformer blocks requantized to Q8_0; decoder F16 |
 | TTS cloning | `moss-tts-clone-f16` | MOSS-TTS with the F16 tokenizer encoder and the JFK clip at 24 kHz |
+| TTS cloning | `chatterbox-mtl-clone` | Chatterbox Multilingual 0.5B (T3 MTL Q8_0, S3Gen MTL Q8_0) cloning the JFK clip |
+| TTS cloning | `cosyvoice3-clone` | CosyVoice3 0.5B (LM Q8_0, flow and HiFT F32, speech tokenizer Q8_0, CAM++ F32) cloning the JFK clip with its transcript as the prompt text |
 | Music | `acestep-turbo-q8_0`, `acestep-turbo-q4_k_m`, `acestep-sft-q8_0`, `acestep-base-q4_k_m` | ACE-Step 1.5 DiT variants with Qwen3-Embedding-0.6B Q8_0, 5Hz LM 0.6B Q8_0 and the BF16 VAE |
 
 Every family is a `run-family.sh` spec (same fields as `scripts/benchmarks/families.json`) plus `runs`, `warmup`,
 `cpu_runs`, `cpu_warmup`, `timeout_minutes` and a `provision` list that says where each model file comes from.
-ASR rows report the native bench's inference time, RTF and WER on the 11 s JFK clip; TTS rows report the process
-wall clock including model load, the generated duration and the TTS intelligibility WER (pinned Whisper tiny on
-CPU); music rows report the process wall clock of a 30 s render at seed 42. Memory is the peak RSS from
+ASR rows report the native bench's inference time, RTF and WER on the 11 s JFK clip, and the `-abcba` families the
+same on the 160.6 s ABCBA clip (`engines/parakeet/test/samples/abcba.wav`, no reference transcript, so no WER); the
+whisper rows are the whole `whisper-cli` process including model load. TTS rows report the process wall clock
+including model load (the native Supertonic, Parler and CosyVoice benches time synthesis only), the generated duration
+and the TTS intelligibility WER (pinned Whisper tiny on CPU); music rows report the process wall clock of a 30 s render
+at seed 42. A family with its own input names it in `scenario` (`abcba`); the report keeps every input in its own chart.
+A provision entry with `as` links the file into the family directory under another name (CosyVoice3 requires
+`voice.gguf` even when cloning). Memory is the peak RSS from
 `/usr/bin/time` and, on NVIDIA backends, the rise of `nvidia-smi` memory.used over the run.
 
 Two requested cuts are not in the registry: MOSS-TTS Q8_0 is produced on the machine by requantizing the `blk.*`
