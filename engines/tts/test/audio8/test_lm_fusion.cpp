@@ -189,6 +189,37 @@ void compare(const run_outputs & fused, const run_outputs & split, const std::st
     expect(fused.codes == split.codes, tag + ": the fast head picked different codes");
 }
 
+size_t projection_count(ggml_cgraph * graph, const ggml_tensor * weight) {
+    size_t count = 0;
+    for (int index = 0; index < ggml_graph_n_nodes(graph); ++index) {
+        const ggml_tensor * node = ggml_graph_node(graph, index);
+        if (node->op == GGML_OP_MUL_MAT &&
+            (node->src[0] == weight || node->src[0]->view_src == weight)) ++count;
+    }
+    return count;
+}
+
+void check_projection_width(lm_model & model, int width, const std::string & tag) {
+    scratch build(AUDIO8_MAX_NODES);
+    if (!build.ok()) {
+        fail(tag + ": could not create projection graph");
+        return;
+    }
+    slow_graph_outputs outputs;
+    build_slow_graph(model, build, width, 0, outputs);
+    const auto & block = model.blocks.front();
+    const bool separate = width > 1 && block.attn.wqkv->type == GGML_TYPE_F32 &&
+        tts_cpp::detail::reg_name_is_cuda(tts_cpp::detail::backend_reg_name(model.backend));
+    expect(projection_count(build.graph, block.attn.wqkv) == (separate ? 3u : 1u),
+           tag + ": unexpected QKV projection count at width " + std::to_string(width));
+    expect(projection_count(build.graph, block.w13) == (separate ? 2u : 1u),
+           tag + ": unexpected FFN projection count at width " + std::to_string(width));
+}
+
+void check_projection_routes(lm_model & model, const std::string & tag) {
+    for (int width : {1, 3, 5, 8}) check_projection_width(model, width, tag);
+}
+
 void check_tier(bool q8_matrices) {
     const std::string tag = q8_matrices ? "q8_0" : "f32";
     audio8_test::tiny_lm params;
@@ -204,6 +235,7 @@ void check_tier(bool q8_matrices) {
         return;
     }
     check_layouts(fused.model, split.model, tag);
+    check_projection_routes(fused.model, tag);
     check_key_copy_sources(fused.model, tag + " fused");
     check_key_copy_sources(split.model, tag + " split");
     run_outputs fused_out, split_out;

@@ -219,3 +219,7 @@ not bundle ggml.
 Audio8 supports codec-window PCM callbacks through `Engine::synthesize_stream()`.
 The CLI `--stream` mode measures callback first-audio latency and real-time factor;
 see [incremental PCM streaming](docs/audio8.md#incremental-pcm-streaming).
+
+Audio8 preserves separate CUDA F32 projection shapes during multi-token prefill
+for fused/separate numerical consistency. Decode and other weight types retain
+projection fusion; shared CUDA matmul routing is unchanged.
