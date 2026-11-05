@@ -19,9 +19,11 @@ disturbing each other on the same hardware.
 | --- | --- |
 | `scripts/benchmarks/desktop-weekly/README.md` | the full description of the bench, its layout on a machine and its configuration |
 | `scripts/benchmarks/desktop-weekly/weekly.sh` | the entry point cron runs; `--quick`, `--families`, `--backends`, `--no-update`, `--no-mail`, `--label` |
-| `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 33 families with their driver spec, iteration counts, timeouts and model provisioning |
+| `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 37 families with their driver spec, iteration counts, timeouts and model provisioning; four of them run the MLX engines (parakeet-mlx, mlx-whisper) on the Mac Studio Metal backend beside QVAC |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
 | `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files (plus `comparisons.json` and the `report-rows.json` next to the summaries folder) -> per machine the six JSON files its dashboard reads, and `hub.json` |
+| `scripts/benchmarks/desktop-weekly/mlx-bench.py` | the bench the MLX families run (`run-family.sh` calls it through the venv at `~/speech-bench/mlx/venv` on the Mac Studio; README, Install) |
+| `scripts/benchmarks/desktop-weekly/build-highlights.py`, `highlights.json` | the dashboard-data folder -> `speech-bench-highlights.html`, a short page of cards (QVAC against the other engines of a few GPU charts) for blog posts and updates |
 | `scripts/benchmarks/desktop-weekly/import-report.py` | the saved task pages of a comparison report -> `report-rows.json`; the pages of the 2026-11-04 report and the rows are kept in the history folder (`report-pages/`, `report-rows.json`) |
 | `scripts/benchmarks/desktop-weekly/build-landing.py`, `task_views.py` | `hub.json` and the machines' `runs.json` and `coverage.json` -> the Speech Bench hub (per task every machine with a link to its task page, quality flags, engines, how it runs) with the 18 task pages as views of the same page (`<hub link>#<machine>-<task>`) |
 | `scripts/benchmarks/desktop-weekly/dashboard/`, `dashboards.json` | the page every machine dashboard runs (`index.html`, `app.js`, `app.css`) and the hub's stylesheets (`hub.css`, `task.css`); the links of the hub and of every machine's dashboard |
@@ -35,7 +37,7 @@ disturbing each other on the same hardware.
 | RTX 5090 box (2x 32 GB, GPU 0 used) | `qvac-dev-linux-x64` | cpu, cuda, vulkan | UTC | `MODELS_DIR=/home/shared/models/qvac-speech/bench` | 22-account `dev` group can write the shared model folder |
 | Strix Halo (Radeon 8060S, 128 GB) | `qvac-dev-strix-1` | cpu, vulkan | UTC | `BACKENDS=cpu,vulkan` | no cron: `install.sh` starts `scheduler.sh`, which does not survive a reboot; no ninja (the bench falls back to make) |
 | Jetson Orin (8 GB) | `qvac-dev-linux-arm64` | cpu, cuda, vulkan | UTC | `BACKENDS=cpu,cuda,vulkan`, `CUDA_ARCH=87-real`, `MEMORY_SAMPLER=meminfo`, `EVICT_PAGE_CACHE=1`, `SKIP_FAMILIES` of the MOSS families and of every ACE-Step family but `acestep-turbo-q8_0`, `CMAKE_PREFIX_PATH=$HOME/speech-bench/deps` | no Vulkan SDK and no root: SPIRV-Headers and Vulkan-Headers are installed under `deps` by hand; no weekly schedule installed yet |
-| Mac Studio M3 Ultra (96 GB) | `qvac-dev-mac-arm64` | cpu, metal | CET | `MODELS_DIR=/Users/Shared/models/qvac-speech/bench` | shares Saturday with the fabric-llm bench |
+| Mac Studio M3 Ultra (96 GB) | `qvac-dev-mac-arm64` | cpu, metal | CET | `MODELS_DIR=/Users/Shared/models/qvac-speech/bench` | shares Saturday with the fabric-llm bench; the only host of the MLX families, through the venv at `~/speech-bench/mlx/venv` (README, Install) |
 | Mac mini M4 (16 GB) | `mac-mini-m4-gpu` | cpu, metal | CET | `SKIP_FAMILIES=moss-tts-f16,moss-tts-q8_0,moss-tts-clone-f16` | macOS 15: `/bin/date` has no %N, the bench routes `run-family.sh` through `nsdate` |
 
 `qvac-dev-strix-0` has the same hardware as `qvac-dev-strix-1` and ran the bench until 2026-11-04 (`build-dashboard-data.py` lists it in `RETIRED_HOSTS` and skips its summaries); the results show one

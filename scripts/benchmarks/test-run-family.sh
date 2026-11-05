@@ -564,6 +564,11 @@ jq -n --arg sha "$hello_sha" \
     source: "huggingface", hf_repo: "stub/repo", hf_ref: "0000000000000000000000000000000000000000",
     models_by_size: {tiny: {name: "ggml-tiny.bin"}},
     args: [], audio_duration_seconds: null, notes: "n"
+  },
+  "ext-ok": {
+    bench_kind: "native", binary: "${BENCH_HOME}/extbin/nat-ok", engine: "stub-engine",
+    args: ["${JSON_OUT}"], audio_duration_seconds: null,
+    notes: "an engine outside the build dir: the binary is resolved from BENCH_HOME, not from --build-dir"
   }
 }' > "$SPEC"
 
@@ -790,7 +795,9 @@ done
 printf 'hello' > "$dest"
 STUB
 
-chmod +x "$BUILD"/bin/* "$STUBBIN"/*
+mkdir -p "$TMP/extbin"
+cp "$BUILD/bin/nat-ok" "$TMP/extbin/nat-ok"
+chmod +x "$BUILD"/bin/* "$STUBBIN"/* "$TMP"/extbin/*
 
 run_driver() {
   # run_driver <family> <out.json> <stderr-log> [extra env as VAR=VALUE...]
@@ -808,6 +815,15 @@ run_driver nat-ok "$OUT/nat-ok.json" "$OUT/nat-ok.err" BENCH_FAMILIES_JSON="$SPE
 jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100 and .rtf_median == 0.5' \
   "$OUT/nat-ok.json" > /dev/null || fail "nat-ok: $(cat "$OUT/nat-ok.json")"
 ok "native bench JSON drives stats, rtf, and backend"
+
+# an external engine names its binary through ${BENCH_HOME}; without BENCH_HOME
+# the placeholder stays and the driver reports the binary as missing.
+run_driver ext-ok "$OUT/ext-ok.json" "$OUT/ext-ok.err" BENCH_FAMILIES_JSON="$SPEC" BENCH_HOME="$TMP"
+jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100' "$OUT/ext-ok.json" > /dev/null \
+  || fail "ext-ok: $(cat "$OUT/ext-ok.json")"
+run_driver ext-ok "$OUT/ext-nohome.json" "$OUT/ext-nohome.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "build-failed"' "$OUT/ext-nohome.json" > /dev/null || fail "ext-ok without BENCH_HOME: $(cat "$OUT/ext-nohome.json")"
+ok "a \${BENCH_HOME} binary runs outside the build dir and is missing without BENCH_HOME"
 
 # native, exit 0 without JSON (the sortformer failure shape): run-failed and
 # the child's output is dumped to the step log instead of vanishing.

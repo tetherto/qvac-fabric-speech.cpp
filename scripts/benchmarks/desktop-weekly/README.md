@@ -37,6 +37,8 @@ and the weekly artifact.
 | ASR | `parakeet-eou` | Parakeet Realtime EOU 120M F16 |
 | ASR | `whisper-small` | Upstream whisper.cpp `ggml-small.bin` through `whisper-cli` (HuggingFace, pinned revision) |
 | ASR | `{parakeet-tdt,parakeet-unified,transcribepsy,nemotron,parakeet-eou,whisper-small}-abcba` | the same models on the 160.6 s multi-speaker ABCBA clip, which has no reference transcript (no WER) |
+| ASR | `parakeet-mlx`, `parakeet-mlx-abcba` | another engine beside QVAC, Mac Studio Metal only: parakeet-mlx on the mlx-community Parakeet TDT 0.6B v3 conversion (BF16), timed in process after one model load like the QVAC native rows, so it shares their charts |
+| ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
 | TTS | `chatterbox-turbo` | Chatterbox Turbo: T3 Turbo Q8_0 with S3Gen Q8_0, built-in voice |
 | TTS | `parler-mini`, `parler-indic` | Parler-TTS mini v1 and Indic Parler-TTS Q8_0, sampled decoding at seed 42 |
@@ -70,6 +72,17 @@ retired host (`RETIRED_HOSTS`, today `qvac-dev-strix-0`, replaced by `qvac-dev-s
 stored. Cloning rows of a time-wrapped family include model load and reference encoding; those of a native bench
 (CosyVoice3) time synthesis only, and the pages say which.
 
+A family may name another engine (`engine`, `platform`, `backends` in `families.json`): `weekly.sh` skips it on the other
+platforms, the driver skips it on the other backends, and `build-dashboard-data.py` puts its rows in the chart of the QVAC
+family with the same model, input and timing scope, so the weekly charts compare QVAC with that engine every week. The
+MLX families run `mlx-bench.py` with the venv described under Install; their models are pinned Hugging Face snapshots
+that the script fetches into `models/families/<family>/` on the first run, outside the timed region.
+
+`build-highlights.py` turns the charts named in `highlights.json` (a few GPU results per machine: Parakeet, Nemotron,
+Supertonic 3, Audio8, MiniMax Music3, ACE-Step, and the MLX engines on the Mac Studio) into one short page of cards for a
+blog post or a status update, QVAC against every other engine of that chart; a card whose chart has no other engine yet is
+left out and named on stderr.
+
 Two requested cuts are not in the registry: MOSS-TTS Q8_0 is produced on the machine by requantizing the `blk.*`
 tensors of the F16 backbone with `engines/tts/scripts/requantize-gguf.py`, and the ACE-Step Base DiT ships only as
 Q4_K_M, so that row is Q4_K_M and says so.
@@ -80,6 +93,8 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | --- | --- |
 | `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail |
 | `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
+| `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription |
+| `build-highlights.py`, `highlights.json` | the dashboard-data folder -> `speech-bench-highlights.html`, the cards of the charts listed in `highlights.json` |
 | `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, run selection |
 | `families.json` | the matrix (see above) |
 | `fetch-models.sh`, `fetch-registry.js`, `prepare-derived.py` | model provisioning: registry client, HuggingFace, repo fixtures, requantized and resampled files |
@@ -141,6 +156,12 @@ by `fetch-models.sh` into `registry-client/` under the bench home from npm. Per-
 Mac mini) are listed in `config.example.env` and in the skill. A host without cron (the Strix Halo) gets
 `scheduler.sh` from `install.sh` instead of a crontab line; it does not survive a reboot. A macOS host whose
 `/bin/date` lacks `%N` (macOS 15) gets `run-family.sh` routed through the `nsdate` shim after every source update.
+
+The MLX families need, on the Mac Studio only, a Python virtual environment at `~/speech-bench/mlx/venv` with `mlx`,
+`parakeet-mlx`, `mlx-whisper`, `huggingface_hub`, `soundfile` and `numpy` (Python 3.11 or newer; the machine has no
+Homebrew, so use a uv-managed interpreter: `python3.11 -m venv ~/speech-bench/mlx/venv && ~/speech-bench/mlx/venv/bin/pip
+install mlx parakeet-mlx mlx-whisper huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
+(binary missing) and the rest of the run is unaffected.
 
 Try the pipeline before the first Sunday:
 

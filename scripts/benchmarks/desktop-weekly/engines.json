@@ -114,6 +114,20 @@
       "ggml": "Not ggml-based",
       "details": "The official MOSS-TTS v1.5 reference as a resident API on DGX Spark (CPU, CUDA F32 and configured pairs) and Strix Halo CPU in the report.",
       "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "parakeet-mlx",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based (MLX)",
+      "details": "senstella/parakeet-mlx on the mlx-community Parakeet TDT 0.6B v3 conversion (bf16), Metal GPU through MLX, driven by the weekly run on the Mac Studio with the model loaded once and the clip's log-mel, encoder and decoder timed in process, the same scope as the QVAC native rows.",
+      "source": "scripts/benchmarks/desktop-weekly (families parakeet-mlx and parakeet-mlx-abcba through mlx-bench.py)"
+    },
+    {
+      "engine": "mlx-whisper",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based (MLX)",
+      "details": "ml-explore mlx-whisper on the mlx-community Whisper small conversion (f16), Metal GPU through MLX, driven by the weekly run on the Mac Studio with the model loaded once and greedy English decoding timed in process; the QVAC whisper-small rows are fresh-process timings, so the two stay in separate charts.",
+      "source": "scripts/benchmarks/desktop-weekly (families mlx-whisper and mlx-whisper-abcba through mlx-bench.py)"
     }
   ]
 }

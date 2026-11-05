@@ -40,7 +40,7 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "parakeet-eou": "F16", "whisper-small": "F16", "parakeet-tdt-abcba": "Q8_0", "parakeet-unified-abcba": "Q8_0",
                   "transcribepsy-abcba": "Q8_0", "nemotron-abcba": "F16", "parakeet-eou-abcba": "F16", "whisper-small-abcba": "F16",
                   "chatterbox-turbo": "Q8_0", "chatterbox-mtl-clone": "Q8_0", "cosyvoice3-clone": "LM Q8_0", "parler-mini": "Q8_0",
-                  "parler-indic": "Q8_0"}
+                  "parler-indic": "Q8_0", "parakeet-mlx": "BF16", "parakeet-mlx-abcba": "BF16", "mlx-whisper": "F16", "mlx-whisper-abcba": "F16"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
@@ -171,6 +171,10 @@ def iteration_counts(family, backend, families):
     return spec.get("runs"), spec.get("warmup")
 
 
+def engine_of(family, families):
+    return families.get(family, {}).get("engine") or QVAC
+
+
 def timing_of(row, families):
     bench_kind = families.get(row["family"], {}).get("bench_kind", "native")
     if row.get("task") == "TTS cloning" and bench_kind == "time-wrapped":
@@ -213,12 +217,13 @@ def weekly_row(summary, row, families, newest_name):
     gpu_mib, gpu_kind, gpu_note = gpu_fields(row, summary)
     wer_pct, wer_kind, wer_scope, wer_reason = wer_fields(row)
     models = family_models(summary, row["family"], families)
+    engine = engine_of(row["family"], families)
     accepted = row.get("status") == "ok"
     speed = row.get("speed_x") or None
     caveats = " ".join(x for x in [row.get("notes", ""), stale_note(summary, newest_name)] if x)
     return {"id": f"w-{row['backend']}-{row['family']}", "host": host, "machine": machine_label(host), "task": task,
             "dashboard": TASK_KEYS.get(task, "asr"), "family": row["family"], "model": model,
-            "model_detail": row.get("weights", ""), "required_family": True, "engine": QVAC, "is_qvac": True,
+            "model_detail": row.get("weights", ""), "required_family": True, "engine": engine, "is_qvac": engine == QVAC,
             "variant": variant_label(row), "backend": row["backend"], "observed_backend": row.get("observed_backend") or "",
             "precision": row.get("weights", ""), "precision_source": "families.json", "scenario": scenario, "scenario_label": scenario_label,
             "timing_class": timing_class, "timing_label": timing_label, "timing_includes": timing_includes, "comparison_set": "weekly",
@@ -352,6 +357,12 @@ def coverage_cell(index, row):
             "scenario": row["scenario_label"]}
 
 
+def family_fits(spec, newest, backend):
+    platform = spec.get("platform")
+    backends = spec.get("backends")
+    return (not platform or platform == newest.get("machine", {}).get("os")) and (not backends or backend in backends)
+
+
 def skipped_families(host_summaries, families):
     ran = set(host_summaries[-1].get("families", []))
     return [family for family in families if family not in ran]
@@ -366,7 +377,8 @@ def skipped_cell(newest, family, spec, backend, number):
 
 def skipped_cells(host_summaries, families, start):
     newest = host_summaries[-1]
-    pairs = [(family, backend) for family in skipped_families(host_summaries, families) for backend in newest.get("backends", [])]
+    pairs = [(family, backend) for family in skipped_families(host_summaries, families) for backend in newest.get("backends", [])
+             if family_fits(families[family], newest, backend)]
     return [skipped_cell(newest, family, families[family], backend, start + i) for i, (family, backend) in enumerate(pairs)]
 
 

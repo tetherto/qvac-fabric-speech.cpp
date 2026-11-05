@@ -25,7 +25,7 @@ ENGINE_CLASSES = {"qvac-fabric-speech.cpp": "e-qvac", "QVAC bundled whisper.cpp"
                   "LocalAI / parakeet.cpp": "e-localai", "transcribe.cpp": "e-transcribe", "NeMo-Speech.cpp": "e-nemo",
                   "whisper.cpp (upstream)": "e-whispercpp", "cosyvoice.cpp": "e-cosy", "TTS.cpp": "e-ttscpp", "acestep.cpp": "e-acestep",
                   "minimaxmusic.cpp": "e-minimax", "faster-whisper (CTranslate2)": "e-fw", "vLLM": "e-vllm", "SGLang-Omni": "e-sglang",
-                  "OpenMOSS PyTorch reference": "e-moss"}
+                  "OpenMOSS PyTorch reference": "e-moss", "parakeet-mlx": "e-mlx", "mlx-whisper": "e-mlx"}
 OTHER_ENGINE = "e-other"
 METRICS = {"ASR": "transcription speed", "TTS": "speech synthesis speed", "TTS cloning": "voice cloning speed", "Music": "music generation speed"}
 DEFAULT_METRIC = "speed"
@@ -35,8 +35,8 @@ METRIC_NOTES = {
     "TTS cloning": "Seconds of cloned speech generated per second of processing, higher is better. Each chart is one backend and reference recording, under the same timing scope for every row.",
     "Music": "Seconds of music generated per second of processing, higher is better. Each chart is one backend, and every row in it received the same request as a fresh process including model load.",
 }
-SETS_NOTE = ("Weekly charts hold this week's QVAC variants; report and campaign charts hold QVAC and its competitors as that comparison "
-             "measured them, and the sets are never mixed.")
+SETS_NOTE = ("Weekly charts hold this week's QVAC variants and the engines the weekly run drives beside them (the MLX engines on the Mac Studio); "
+             "report and campaign charts hold QVAC and its competitors as that comparison measured them, and the sets are never mixed.")
 SCENARIO_SHORT = {"jfk": "JFK 11 s", "abcba": "ABCBA 160.6 s", "long_clip": "98.49 s clip", "fixed_prompt": "fixed prompt", "fixed_prompt_short": "9-word prompt",
                   "long_prompt": "76-word prompt", "clone_jfk": "cloning, JFK reference", "clone_bwav": "cloning, b.wav reference",
                   "music_30s": "30 s request", "music_10s": "10 s request", "music_set": "campaign prompt set"}

@@ -623,6 +623,7 @@ expand_placeholder() {
   if [[ "$s" == '${TTS_TEXT}' ]]; then printf '%s' "$TTS_TEXT"; return; fi
   s="${s//\$\{MODEL_DIR\}/$MODEL_DIR}"
   s="${s//\$\{MODELS_ROOT\}/$MODELS_ROOT}"
+  s="${s//\$\{BENCH_HOME\}/${BENCH_HOME:-}}"
   s="${s//\$\{AUDIO_DIR\}/$AUDIO_DIR}"
   s="${s//\$\{AUDIO_INPUT\}/$AUDIO_INPUT}"
   s="${s//\$\{AUDIO_OUT\}/$AUDIO_OUT}"
@@ -649,7 +650,13 @@ build_bench_args() {
 }
 build_bench_args
 
-BINARY="$BUILD_DIR/$BINARY_REL"
+# An external engine (a Python venv interpreter, say) names its binary with an
+# absolute path or ${BENCH_HOME}; engine targets stay relative to the build dir.
+resolve_binary() {
+  local path; path="$(expand_placeholder "$1")"
+  case "$path" in /*) printf '%s' "$path" ;; *) printf '%s/%s' "$BUILD_DIR" "$path" ;; esac
+}
+BINARY="$(resolve_binary "$BINARY_REL")"
 if ! [[ -x "$BINARY" ]]; then
   echo "binary not found or not executable: $BINARY" >&2
   emit_json "build-failed" null null null " (binary '$BINARY' missing)"; exit 0

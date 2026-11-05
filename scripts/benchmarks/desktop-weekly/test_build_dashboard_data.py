@@ -31,6 +31,9 @@ FAMILIES = {
                            "args": ["--model", "${MODEL_DIR}/parakeet.gguf"], "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
     "cosyvoice3-clone": {"task": "TTS cloning", "model_label": "CosyVoice3 0.5B", "weights": "LM Q8_0", "bench_kind": "native", "binary": "engines/tts/cosyvoice-bench",
                          "args": [], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
+    "parakeet-mlx-abcba": {"task": "ASR", "model_label": "Parakeet TDT 0.6B v3", "weights": "BF16 (MLX conversion)", "engine": "parakeet-mlx", "platform": "Darwin",
+                           "backends": ["metal"], "bench_kind": "native", "binary": "${BENCH_HOME}/mlx/venv/bin/python3", "args": ["${BENCH_HOME}/tools/mlx-bench.py"],
+                           "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
 }
 COMPARISONS = [
     {"task": "ASR", "engine": "transcribe.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
@@ -109,6 +112,24 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertEqual(long["scenario_label"], "ABCBA multi-speaker clip, 160.6 s (no reference transcript)")
         self.assertNotEqual(jfk["group"], long["group"])
         self.assertEqual(build.skipped_cell(self.newer, "parakeet-tdt-abcba", FAMILIES["parakeet-tdt-abcba"], "cpu", 1)["scenario"], long["scenario_label"])
+
+    def test_a_family_of_another_engine_shares_the_chart_of_the_qvac_family(self):
+        qvac = build.weekly_row(self.newer, result("metal", "parakeet-tdt-abcba", 6.0), FAMILIES, "2026-11-08")
+        mlx = build.weekly_row(self.newer, result("metal", "parakeet-mlx-abcba", 4.0), FAMILIES, "2026-11-08")
+        self.assertEqual((mlx["engine"], mlx["is_qvac"], mlx["variant"], mlx["precision"]), ("parakeet-mlx", False, "BF16", "BF16 (MLX conversion)"))
+        self.assertEqual((qvac["engine"], qvac["is_qvac"]), (build.QVAC, True))
+        self.assertEqual(mlx["group"], qvac["group"])
+        self.assertEqual(mlx["command"], "${BENCH_HOME}/mlx/venv/bin/python3 ${BENCH_HOME}/tools/mlx-bench.py")
+
+    def test_families_outside_the_hosts_platform_or_backends_are_not_coverage_gaps(self):
+        darwin = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("metal", "parakeet-tdt", 12.0)], backends=("cpu", "metal"))
+        darwin["machine"]["os"] = "Darwin"
+        linux = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("cuda", "parakeet-tdt", 12.0)])
+        linux["machine"]["os"] = "Linux"
+        self.assertEqual([(c["model"], c["backend"]) for c in build.skipped_cells([darwin], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0)],
+                         [("Parakeet TDT 0.6B v3", "metal")])
+        self.assertEqual(build.skipped_cells([linux], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0), [])
+        self.assertEqual(len(build.skipped_cells([linux], {"moss-tts-f16": FAMILIES["moss-tts-f16"]}, 0)), 2)
 
     def test_newest_result_wins_and_an_older_cell_says_where_it_comes_from(self):
         cells = {(r["backend"], r["family"]): r for r in build.newest_cells([self.older, self.newer], FAMILIES)}

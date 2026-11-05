@@ -403,7 +403,7 @@ run_family_driver() {
   local family="$1" backend="$2" out="$3" runs warmup
   runs="$(family_runs "$family" "$backend")"
   warmup="$(family_warmup "$family" "$backend")"
-  ( cd "$ENGINE_SRC" && BENCH_FAMILIES_JSON="$FAMILIES_JSON" bash scripts/benchmarks/run-family.sh \
+  ( cd "$ENGINE_SRC" && BENCH_FAMILIES_JSON="$FAMILIES_JSON" BENCH_HOME="$BENCH_HOME" bash scripts/benchmarks/run-family.sh \
       --family "$family" --runs "$runs" --warmup "$warmup" --build-dir "$BUILDS_DIR/$backend/speech" \
       --models-root "$MODELS_DIR/families" --runner "$(hostname -s)-$backend" --out "$out" )
 }
@@ -457,11 +457,24 @@ run_family() {
   log "done $family on $backend: $(jq -r '[.status, .backend, .wall_ms_median] | map(tostring) | join(" ")' "$out")"
 }
 
+family_backends() {
+  jq -r --arg f "$1" '.[$f].backends // [] | join(",")' "$FAMILIES_JSON"
+}
+
+family_runs_on_backend() {
+  local allowed; allowed="$(family_backends "$1")"
+  [ -z "$allowed" ] || case ",$allowed," in *",$2,"*) return 0 ;; *) return 1 ;; esac
+}
+
+run_family_if_allowed() {
+  if family_runs_on_backend "$1" "$2"; then run_family "$1" "$2" "$3"; else log "skip $1 on $2 (family backends: $(family_backends "$1"))"; fi
+}
+
 run_families_on_backend() {
   local backend="$1" families="$2" results="$3/results/$1" family
   mkdir -p "$results"
   export_backend_environment "$backend"
-  for family in $(split_list "$families"); do run_family "$family" "$backend" "$results"; done
+  for family in $(split_list "$families"); do run_family_if_allowed "$family" "$backend" "$results"; done
 }
 
 discard_backend_results() { rm -rf "${1:?}/results/${2:?}"; }

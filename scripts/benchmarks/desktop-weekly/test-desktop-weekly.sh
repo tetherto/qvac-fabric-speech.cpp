@@ -24,9 +24,12 @@ check_scripts_parse() {
 check_spec_fields() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
-    | select([.value.bench_kind, .value.binary, .value.cmake_target, .value.task, .value.model_label, .value.weights] | any(. == null))
+    | select([.value.bench_kind, .value.binary, (.value.cmake_target // .value.engine), .value.task, .value.model_label, .value.weights] | any(. == null))
     | .key' "$HERE/families.json")"
-  [ -z "$bad" ] || fail "families without bench_kind/binary/cmake_target/task/model_label/weights: $bad"
+  [ -z "$bad" ] || fail "families without bench_kind/binary/cmake_target (or engine)/task/model_label/weights: $bad"
+  bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | select(.value.engine != null)
+    | select((.value.platform == null) or (.value.backends | type != "array") or (.value.binary | startswith("${BENCH_HOME}/") | not)) | .key' "$HERE/families.json")"
+  [ -z "$bad" ] || fail "families of another engine without platform, backends and a \${BENCH_HOME} binary: $bad"
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
     | select([.value.runs, .value.warmup, .value.cpu_runs, .value.cpu_warmup, .value.timeout_minutes] | any(. == null))
     | .key' "$HERE/families.json")"
@@ -234,8 +237,25 @@ check_skip_families() {
     [ "$(selected_families 2>/dev/null)" = "parakeet-tdt,audio8-lm-q8_0-dec-q8_0" ] || { echo "SKIP_FAMILIES not applied: $(selected_families 2>/dev/null)" >&2; exit 1; }
     FAMILIES_ARG="moss-tts-f16"
     [ -z "$(selected_families 2>/dev/null)" ] || { echo "an explicitly requested skipped family slipped through" >&2; exit 1; }
+    FAMILIES_ARG="parakeet-mlx,parakeet-tdt"
+    BENCH_TEST_PLATFORM=Linux
+    [ "$(selected_families 2>/dev/null)" = "parakeet-tdt" ] || { echo "a Darwin-only family ran on Linux: $(selected_families 2>/dev/null)" >&2; exit 1; }
+    BENCH_TEST_PLATFORM=Darwin
+    [ "$(selected_families 2>/dev/null)" = "parakeet-mlx,parakeet-tdt" ] || { echo "a Darwin-only family was skipped on Darwin: $(selected_families 2>/dev/null)" >&2; exit 1; }
   ) || fail "SKIP_FAMILIES"
-  ok "SKIP_FAMILIES removes families from quick, default and explicit selections"
+  ok "SKIP_FAMILIES and the family platform remove families from quick, default and explicit selections"
+}
+
+check_family_backends() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    family_runs_on_backend parakeet-mlx metal || { echo "parakeet-mlx must run on metal" >&2; exit 1; }
+    ! family_runs_on_backend parakeet-mlx cpu || { echo "parakeet-mlx must not run on cpu" >&2; exit 1; }
+    family_runs_on_backend parakeet-tdt cpu || { echo "a family without backends must run everywhere" >&2; exit 1; }
+    [ "$(family_backends mlx-whisper-abcba)" = "metal" ] || { echo "family_backends: $(family_backends mlx-whisper-abcba)" >&2; exit 1; }
+  ) || fail "family backends"
+  ok "a family's backends list keeps it off the other backends"
 }
 
 check_lib_deadline() {
@@ -460,6 +480,7 @@ main() {
   check_run_lock
   check_machine_quirks
   check_skip_families
+  check_family_backends
   check_lib_deadline
   check_failed_result
   check_previous_and_prune

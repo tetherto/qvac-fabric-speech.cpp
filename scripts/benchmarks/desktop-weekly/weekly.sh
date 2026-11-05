@@ -57,11 +57,24 @@ family_skipped() {
   case ",$SKIP_FAMILIES," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
+family_platform() { family_field "$1" platform; }
+
+host_platform() { echo "${BENCH_TEST_PLATFORM:-$OS_NAME}"; }
+
+family_off_platform() {
+  local platform; platform="$(family_platform "$1")"
+  [ -n "$platform" ] && [ "$platform" != "$(host_platform)" ]
+}
+
+select_family() {
+  if family_skipped "$1"; then log "skip $1 (SKIP_FAMILIES)" >&2
+  elif family_off_platform "$1"; then log "skip $1 (platform $(family_platform "$1"))" >&2
+  else echo "$1"; fi
+}
+
 selected_families() {
   local family
-  for family in $(split_list "$(requested_families)"); do
-    if family_skipped "$family"; then log "skip $family (SKIP_FAMILIES)" >&2; else echo "$family"; fi
-  done | tr '\n' ',' | sed 's/,$//'
+  for family in $(split_list "$(requested_families)"); do select_family "$family"; done | tr '\n' ',' | sed 's/,$//'
 }
 
 apply_quick_iterations() {
