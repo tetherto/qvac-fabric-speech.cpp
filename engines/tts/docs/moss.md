@@ -493,6 +493,37 @@ batch took 512 ms on ggml and 700 ms on the sidecar on the M4 (0.73x), and
 114 ms against 330 ms on the M3 Ultra (0.35x), which is why batch decodes stay
 on ggml. Under `all` the M4 stream took 814 ms (0.89x).
 
+### AMD XDNA NPU
+
+MOSS-TTS-v1.5 and MOSS-TTSD use the XDNA0 device when explicitly requested
+with `EngineOptions::backend = "xdna"` or `moss-cli --backend xdna`.
+The exact ggml device name `XDNA0` also works. Automatic `--gpu` selection
+does not include XDNA. The build must include the ggml XDNA backend and its
+matching kernel artifacts and the `ggml_backend_xdna_set_host_prefill` backend
+procedure; set `GGML_XDNA_KERNEL_DIR` if the artifacts are outside the
+backend's search paths.
+
+The delay backbone runs prompt prefill on CPU and subsequent generation steps
+on XDNA, sharing the same weights and KV cache. The codec uses the selected
+XDNA backend with its existing CPU fallback for unsupported operations.
+
+Use F16 backbone and codec GGUFs for native XDNA matrix kernels. Operations
+without an XDNA kernel run on the host through the backend or CPU fallback.
+The existing `q4_0` and `q8_0` MOSS checkpoints can load, but their matrix
+weights are not accelerated by the current XDNA kernels.
+
+```sh
+GGML_XDNA_KERNEL_DIR=/path/to/xdna-kernels build/moss-cli \
+    --backbone moss-tts-delay-f16.gguf \
+    --decoder moss-codec-decoder-f16.gguf \
+    --backend xdna --language en --text "The signal is clear." --out xdna.wav
+```
+
+The `test-moss-xdna` arm compares the backbone's prefill and decode, codec
+encoder and decoder, and dialogue channel handling against CPU on generated
+fixtures. `test-moss-tts-stream-e2e xdna` accepts real checkpoints for batch,
+streaming, cancellation and reuse validation.
+
 ### Hexagon NPU
 
 MOSS-TTS-v1.5 and MOSS-TTSD run on the Snapdragon Hexagon NPU (HTP0; measured
