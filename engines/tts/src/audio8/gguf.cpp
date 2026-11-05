@@ -469,7 +469,7 @@ ggml_backend_t init_explicit_backend(const std::string & requested) {
 //
 // `backend` is EngineOptions::backend (CLI --backend): "" / "auto" takes the
 // legacy tier-based GPU path; "cpu" short-circuits to the CPU backend;
-// "hexagon" or an exact ggml device name is resolved against the ggml device
+// "hexagon", "xdna", or an exact ggml device name is resolved against the ggml device
 // registry via init_explicit_backend. Explicit requests never fall back to
 // CPU on failure -- the caller sees a hard "failed to init a compute
 // backend" error instead of running on the wrong device.
@@ -968,10 +968,11 @@ void attach_coreml_sidecar(const std::string & gguf_path, codec_model & model,
 }  // namespace
 
 // Registry names and exact device names are distinct in ggml. Hexagon
-// registers as "HTP" and exposes a single device "HTP0". "cpu" and "opencl"
-// select by registry; "hexagon" selects by matching BOTH; anything else is
-// treated as an exact ggml device name (e.g. "HTP0", "CUDA0"). Mirrors the
-// Parakeet matcher in engines/parakeet/src/backend_util.h so a user who
+// registers as "HTP" and exposes "HTP0"; AMD XDNA registers as "XDNA" and
+// exposes "XDNA0". "cpu" and "opencl" select by registry; the accelerator
+// aliases select by matching both; anything else is an exact ggml device name
+// (e.g. "HTP0", "CUDA0"). Mirrors the Parakeet matcher in
+// engines/parakeet/src/backend_util.h so a user who
 // learned the names on one engine finds them identical on the other.
 // Declared in internal.h so tests can exercise the policy without having
 // to spin up a ggml device.
@@ -985,6 +986,10 @@ bool backend_selection_matches(const std::string & requested,
     if (requested == "hexagon") {
         return reg && std::strcmp(reg, "HTP") == 0 &&
                device && std::strcmp(device, "HTP0") == 0;
+    }
+    if (requested == "xdna") {
+        return reg && std::strcmp(reg, "XDNA") == 0 &&
+               device && std::strcmp(device, "XDNA0") == 0;
     }
     return device && requested == device;
 }

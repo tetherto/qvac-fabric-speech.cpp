@@ -272,6 +272,20 @@ they do — codebook counts and widths, the codec's two halves against each othe
 and both against the language model — from their headers, before it reads a
 byte of weights.
 
+### AMD XDNA NPU (Ryzen AI)
+
+Select the XDNA0 device explicitly with `--backend xdna` or
+`EngineOptions::backend = "xdna"`. The exact device name `XDNA0` also works.
+The ggml XDNA backend and its matching kernel artifacts must be available at
+runtime; `GGML_XDNA_KERNEL_DIR` can point to the artifact directory. Operations
+without an XDNA kernel run on the host through the backend or CPU fallback.
+
+Use an F16 LM GGUF for native XDNA matrix kernels. The XDNA backend does not
+currently accelerate Audio8's Q8_0 matrix weights, so selecting `xdna` with a
+Q8_0 LM can still run those projections on the host. The codec decoder can
+remain Q8_0. On a Ryzen AI MAX+ 395, an F16 LM and Q8_0 decoder passed the
+three-frame CPU/XDNA parity harness and produced a complete WAV with the CLI.
+
 ### Hexagon NPU (Snapdragon)
 
 Audio8 runs end-to-end on the Hexagon HTP0 accelerator on Snapdragon 8 Elite
