@@ -4,8 +4,9 @@
 //                                       detection, fit refusal, option checks
 //   test-pocket-coreml --shape-fixture  a tiny real step reproduces its float32
 //                                       reference after the prefix is written
-//                                       into its state, and a random full-size
-//                                       Mimi decoder streams its reference;
+//                                       into its state and after a reset clears
+//                                       a NaN row, and a random full-size Mimi
+//                                       decoder streams its reference;
 //                                       every declared shape, the schema, the
 //                                       checkpoint hash and state presence are
 //                                       checked before predicting
@@ -253,6 +254,16 @@ void check_decoder_fixture(const fs::path & root) {
                 std::string("tiny decoder diverges from its reference on ") + units);
         require(max_error(split, one_by_one) < 1e-6, "split decode calls change the stream");
     }
+    // Strict mode keeps a decoder whose prediction failed; the next chunk's
+    // reset() must clear the non-finite stream state. The Neural Engine
+    // decodes a NaN latent to finite PCM, so the failure is forced on the CPU.
+    {
+        pd::CoremlDecoder decoder(sidecar("good"), "cpu_only", source);
+        require(throws([&] { decoder.decode(std::vector<float>(pd::CoremlDecoderGeometry::latent, NAN)); }),
+                "a NaN latent decoded");
+        decoder.reset();
+        require(snr_db(decoder.decode(latents), want) > 30, "reset after a failure leaves the stream broken");
+    }
     require(throws([&] { pd::CoremlDecoder decoder(sidecar("good"), "cpu_only", "another-mimi"); }),
             "a decoder of another checkpoint");
     { pd::CoremlDecoder probe(sidecar("probe"), "cpu_only", source); }
@@ -308,21 +319,37 @@ int shape_fixture() {
         rows.keys.emplace_back(keys.begin() + l * layer_size, keys.begin() + (l + 1) * layer_size);
         rows.values.emplace_back(values.begin() + l * layer_size, values.begin() + (l + 1) * layer_size);
     }
+    const auto at = [](const std::vector<float> & all, int row, int width) {
+        return std::vector<float>(all.begin() + size_t(row) * width, all.begin() + size_t(row + 1) * width);
+    };
     for (const char * units : {"cpu_only", pd::COREML_STEP_DEFAULT_UNITS}) {
         pd::CoremlStep step(sidecar("good"), units, cfg, source);
         require(step.context() == context, "context read from the sidecar");
-        step.write_rows(rows);
         std::vector<float> hidden, next;
-        for (int f = 0; f < frames; ++f) {
-            const auto at = [](const std::vector<float> & all, int row, int width) {
-                return std::vector<float>(all.begin() + size_t(row) * width, all.begin() + size_t(row + 1) * width);
-            };
-            step.step(prefix + f, at(latents, f, cfg.latent_dim), at(noises, f, cfg.latent_dim), hidden, next);
-            const double eh = max_error(hidden, at(hidden_ref, f, cfg.dim));
-            const double en = max_error(next, at(next_ref, f, cfg.latent_dim));
-            std::printf("[good %s] frame %d: hidden error %.2e, next latent error %.2e\n", units, f, eh, en);
-            require(eh < 3e-2 && en < 3e-2, std::string("tiny step diverges from its reference on ") + units);
-        }
+        const auto replay = [&](const char * tag) {
+            for (int f = 0; f < frames; ++f) {
+                step.step(prefix + f, at(latents, f, cfg.latent_dim), at(noises, f, cfg.latent_dim), hidden, next);
+                const double eh = max_error(hidden, at(hidden_ref, f, cfg.dim));
+                const double en = max_error(next, at(next_ref, f, cfg.latent_dim));
+                std::printf("[%s %s] frame %d: hidden error %.2e, next latent error %.2e\n", tag, units, f, eh, en);
+                require(eh < 3e-2 && en < 3e-2, std::string("tiny step diverges from its reference on ") + units);
+            }
+        };
+        step.write_rows(rows);
+        replay("good");
+
+        // A failed prediction can leave NaN in a row past the prefix (here
+        // written directly). Rewriting the prefix keeps it: the blended write
+        // multiplies it by zero and the attention mask only adds to its score.
+        // reset() clears it and the frames replay to the reference.
+        const std::vector<std::vector<float>> nan_rows(size_t(cfg.layers), std::vector<float>(size_t(cfg.dim), NAN));
+        step.write_rows({prefix + 1, 1, nan_rows, nan_rows});
+        require(throws([&] { replay("poisoned"); }), "a NaN row past the prefix left the step finite");
+        step.write_rows(rows);
+        require(throws([&] { replay("prefix rewritten"); }), "rewriting the prefix cleared a NaN row");
+        step.reset(rows);
+        replay("reset");
+
         const std::vector<float> zeros(size_t(cfg.latent_dim));
         require(throws([&] { step.step(context, zeros, zeros, hidden, next); }), "position past the context");
         require(throws([&] { pd::CacheRows late = rows; late.start = context - 1; step.write_rows(late); }),

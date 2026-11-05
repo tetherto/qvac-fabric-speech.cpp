@@ -266,6 +266,11 @@ engine's lifetime. ggml then catches up by replaying the current chunk:
 - For the decoder, the chunk's earlier latents are decoded again on ggml,
   with the output discarded, to rebuild Mimi's streaming state.
 
+In strict mode the call fails and both sidecars stay loaded for later calls.
+The step's state is replaced by one holding only the voice rows, since a
+failed frame can leave non-finite values in any row. The decoder's stream
+restarts with the next chunk.
+
 `Engine::flow_lm_on_coreml()` and `Engine::mimi_on_coreml()` report whether
 each sidecar is loaded and not retired. `SynthesisResult::flow_lm_backend` and
 `SynthesisResult::mimi_backend` report where a call's work ran:
@@ -312,9 +317,10 @@ Tests:
 - `test-pocket-coreml-shapes` (`POCKET_COREML_TEST_SHAPES`, written by
   `test/prepare_pocket_coreml_fixture.py`) runs two references:
   - a tiny real step against its FP32 reference, after copying prefix rows
-    into the state;
+    into the state, and again after a NaN row past the prefix (which
+    rewriting the prefix does not clear) is reset away;
   - a random full-size decoder against its eager stream, in calls of several
-    sizes.
+    sizes, and again after a reset that follows a failed frame.
 
   It also checks that sidecars declaring any other shape, schema or checkpoint
   hash, or the wrong statefulness, are rejected before prediction. That is 42

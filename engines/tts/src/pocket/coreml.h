@@ -100,6 +100,11 @@ public:
 
     // Copies cache rows (FlowLM::cache_rows) into the state at their positions.
     void write_rows(const CacheRows & rows);
+    // Replaces the whole state with a zeroed one, then writes `rows`. Needed
+    // after a failed prediction: its blended write can leave non-finite values
+    // in any row, and neither a later blend (0 * NaN) nor the attention mask
+    // clears them.
+    void reset(const CacheRows & rows);
 
     // One frame at `position` (the cache holds every earlier one): latent
     // (bos_latent() for a chunk's first frame) and noise [latent_dim] ->

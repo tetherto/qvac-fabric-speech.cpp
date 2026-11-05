@@ -113,7 +113,7 @@ struct Engine::Impl {
         fail(reason + " (Core ML strict policy: coreml_strict / " + detail::COREML_STRICT_ENV + ")");
     }
     // The voice prefix never changes and no frame writes below it, so its
-    // rows go into the sidecar's state once.
+    // rows go into the sidecar's state once (again after a strict failure).
     void load_coreml_step() {
         if (!detail::coreml_step_enabled(opts.flow_lm_path, coreml_policy)) return;
         try {
@@ -123,7 +123,7 @@ struct Engine::Impl {
             if (voice.frames+2 > loaded->context())
                 throw std::runtime_error("the " + std::to_string(voice.frames) + "-frame voice fills the Core ML step "
                     "sidecar's " + std::to_string(loaded->context()) + " positions; export a longer --context");
-            loaded->write_rows(voice_rows());
+            loaded->reset(voice_rows());
             bos = lm->bos_latent();
             coreml_label = loaded->label();
             step = std::move(loaded);
@@ -154,10 +154,11 @@ struct Engine::Impl {
     }
     detail::CacheRows voice_rows() const { return {0, voice.frames, voice.keys, voice.values}; }
     // Strict mode keeps the sidecar for later calls: the failed frame's
-    // blended write may have poisoned the voice rows, so they are rewritten.
+    // blended write may have left non-finite values in any row, so the state
+    // is replaced by one holding only the voice rows.
     void retire_step(const std::exception & e) {
         if (coreml_policy.strict) {
-            try { step->write_rows(voice_rows()); }
+            try { step->reset(voice_rows()); }
             catch (const std::exception &) { coreml_active.store(false); step.reset(); }
             fail_strict(e.what());
         }

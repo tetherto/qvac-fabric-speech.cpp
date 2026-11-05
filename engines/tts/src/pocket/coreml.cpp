@@ -231,6 +231,11 @@ void CoremlStep::write_rows(const CacheRows & rows) {
     }
 }
 
+void CoremlStep::reset(const CacheRows & rows) {
+    if (moss_coreml_reset_state(model_) != 0) fail("cannot replace the KV state");
+    write_rows(rows);
+}
+
 void CoremlStep::step(int position, const std::vector<float> & latent, const std::vector<float> & noise,
                       std::vector<float> & hidden, std::vector<float> & next_latent) {
     if (position < 0 || position >= context_) fail("position outside the sidecar's context");
@@ -353,6 +358,7 @@ CoremlStep::CoremlStep(const std::string &, const std::string &, const FlowConfi
 }
 CoremlStep::~CoremlStep() = default;
 void CoremlStep::write_rows(const CacheRows &) { fail("this build has no Core ML"); }
+void CoremlStep::reset(const CacheRows &) { fail("this build has no Core ML"); }
 void CoremlStep::step(int, const std::vector<float> &, const std::vector<float> &, std::vector<float> &,
                       std::vector<float> &) {
     fail("this build has no Core ML");
