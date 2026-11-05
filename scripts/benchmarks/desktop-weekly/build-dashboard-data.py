@@ -26,6 +26,7 @@ TASK_KEYS = {"ASR": "asr", "TTS": "tts", "TTS cloning": "tts", "Music": "music"}
 TASK_NAMES = {"ASR": "ASR", "TTS": "TTS", "TTS cloning": "voice cloning", "Music": "music"}
 SUMMARY = "summary"
 GENERAL = "all"
+RETIRED_HOSTS = ("qvac-dev-strix-0",)
 MACHINE_LABELS = {"spark-d9ca": "DGX Spark", "qvac-dev-linux-x64": "RTX 5090", "qvac-dev-strix-1": "Strix Halo", "qvac-dev-linux-arm64": "Jetson Orin",
                   "qvac-dev-mac-arm64": "Mac Studio M3 Ultra", "mac-mini-m4-gpu": "Mac mini M4"}
 BACKEND_NAMES = {"cpu": "CPU", "cuda": "CUDA", "vulkan": "Vulkan", "metal": "Metal", "coreml": "Core ML"}
@@ -92,9 +93,13 @@ def load_rows(path, default=()):
     return data.get("rows", []) if isinstance(data, dict) else data
 
 
+def current_summary_paths(folder):
+    return [path for path in sorted(pathlib.Path(folder).glob("*/*.json")) if path.parent.name not in RETIRED_HOSTS]
+
+
 def load_summaries(folder):
     found = []
-    for path in sorted(pathlib.Path(folder).glob("*/*.json")):
+    for path in current_summary_paths(folder):
         summary = load_json(path)
         summary["_host"] = path.parent.name
         summary["_file"] = f"{path.parent.name}/{path.name}"
@@ -167,9 +172,10 @@ def iteration_counts(family, backend, families):
 
 
 def timing_of(row, families):
-    if row.get("task") == "TTS cloning":
+    bench_kind = families.get(row["family"], {}).get("bench_kind", "native")
+    if row.get("task") == "TTS cloning" and bench_kind == "time-wrapped":
         return TIMING_CLONING
-    return TIMING.get(families.get(row["family"], {}).get("bench_kind", "native"), TIMING["native"])
+    return TIMING.get(bench_kind, TIMING["native"])
 
 
 def gpu_fields(row, summary):

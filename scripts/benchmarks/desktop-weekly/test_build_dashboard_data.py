@@ -29,6 +29,8 @@ FAMILIES = {
                      "args": [], "runs": 3, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
     "parakeet-tdt-abcba": {"task": "ASR", "model_label": "Parakeet TDT 0.6B v3", "weights": "Q8_0", "bench_kind": "native", "binary": "engines/parakeet/parakeet",
                            "args": ["--model", "${MODEL_DIR}/parakeet.gguf"], "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
+    "cosyvoice3-clone": {"task": "TTS cloning", "model_label": "CosyVoice3 0.5B", "weights": "LM Q8_0", "bench_kind": "native", "binary": "engines/tts/cosyvoice-bench",
+                         "args": [], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
 }
 COMPARISONS = [
     {"task": "ASR", "engine": "transcribe.cpp", "model": "Parakeet TDT 0.6B v3", "quantization": "q8_0", "device": "RTX 5090 box", "backend": "cuda",
@@ -93,6 +95,12 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertNotEqual(tts["group"], clone["group"])
         self.assertEqual((tts["timing_class"], clone["timing_class"]), ("fresh_process", "fresh_process_ref"))
         self.assertEqual((tts["dashboard"], clone["dashboard"]), ("tts", "tts"))
+
+    def test_only_time_wrapped_cloning_includes_load_and_reference_encoding(self):
+        native = build.weekly_row(self.newer, result("cuda", "cosyvoice3-clone", 3.5), FAMILIES, "2026-11-08")
+        wrapped = build.weekly_row(self.newer, result("cuda", "audio8-clone-enc-f16", 2.0), FAMILIES, "2026-11-08")
+        self.assertEqual((native["timing_class"], native["timing_label"]), build.TIMING["native"][:2])
+        self.assertEqual(wrapped["timing_class"], "fresh_process_ref")
 
     def test_a_family_with_its_own_clip_gets_that_scenario_and_its_own_chart(self):
         jfk = build.weekly_row(self.newer, result("cuda", "parakeet-tdt", 12.0), FAMILIES, "2026-11-08")
@@ -241,7 +249,7 @@ class CommentaryTest(unittest.TestCase):
         self.assertIn("+20%", notes["Week over week"])
         self.assertNotIn("Audio8", notes["Week over week"])
         self.assertIn("2 of 4 weekly cells measured on CPU and CUDA", notes["Coverage"])
-        self.assertIn("Not run on this machine: MOSS-TTS v1.5 8.5B", notes["Coverage"])
+        self.assertIn("Not run on this machine: CosyVoice3 0.5B, MOSS-TTS v1.5 8.5B and Parakeet TDT 0.6B v3", notes["Coverage"])
         self.assertIn("qvac abcdef1234", notes["Pins"])
 
     def test_campaign_lines_give_the_ratio_range_per_task(self):
@@ -302,6 +310,12 @@ class HubAndFilesTest(unittest.TestCase):
         coverage = json.loads((self.root / "out" / HOST / "coverage.json").read_text())
         self.assertIn("not attempted", {c["status"] for c in coverage})
         self.assertTrue((self.root / "out" / "hub.json").is_file())
+
+    def test_retired_hosts_are_left_out_of_the_summaries(self):
+        for host in ("qvac-dev-strix-0", "qvac-dev-strix-1"):
+            (self.root / "in" / host).mkdir(parents=True)
+            (self.root / "in" / host / "2026-11-02.json").write_text(json.dumps({k: v for k, v in self.summary.items() if not k.startswith("_")}))
+        self.assertEqual([s["_host"] for s in build.load_summaries(self.root / "in")], ["qvac-dev-strix-1"])
 
     def test_main_reads_summaries_and_tolerates_a_missing_comparison_file(self):
         folder = self.root / "summaries" / HOST

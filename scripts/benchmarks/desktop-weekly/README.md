@@ -65,7 +65,10 @@ campaign rows of `comparisons.json` (ratios from the October 2026 report) and th
 which `import-report.py` copies from the saved task pages of the comparison report of 2026-11-04 (QVAC and twelve
 other engines on the same machines, with that report's own builds, inputs and timing scopes: resident API, native
 stage sum, fresh process, HTTP). `build-dashboard-data.py` reads `report-rows.json` from the folder above the
-summaries folder (or `--report`); the file and the saved pages live in the history folder, not in the repo.
+summaries folder (or `--report`); the file and the saved pages live in the history folder, not in the repo. Summaries of a
+retired host (`RETIRED_HOSTS`, today `qvac-dev-strix-0`, replaced by `qvac-dev-strix-1`) are ignored even when they are still
+stored. Cloning rows of a time-wrapped family include model load and reference encoding; those of a native bench
+(CosyVoice3) time synthesis only, and the pages say which.
 
 Two requested cuts are not in the registry: MOSS-TTS Q8_0 is produced on the machine by requantizing the `blk.*`
 tensors of the F16 backbone with `engines/tts/scripts/requantize-gguf.py`, and the ACE-Step Base DiT ships only as

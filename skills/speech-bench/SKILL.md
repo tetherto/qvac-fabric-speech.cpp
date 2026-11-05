@@ -38,7 +38,7 @@ disturbing each other on the same hardware.
 | Mac Studio M3 Ultra (96 GB) | `qvac-dev-mac-arm64` | cpu, metal | CET | `MODELS_DIR=/Users/Shared/models/qvac-speech/bench` | shares Saturday with the fabric-llm bench |
 | Mac mini M4 (16 GB) | `mac-mini-m4-gpu` | cpu, metal | CET | `SKIP_FAMILIES=moss-tts-f16,moss-tts-q8_0,moss-tts-clone-f16` | macOS 15: `/bin/date` has no %N, the bench routes `run-family.sh` through `nsdate` |
 
-`qvac-dev-strix-0` has the same hardware as `qvac-dev-strix-1` and ran the bench until 2026-11-04; the results show one
+`qvac-dev-strix-0` has the same hardware as `qvac-dev-strix-1` and ran the bench until 2026-11-04 (`build-dashboard-data.py` lists it in `RETIRED_HOSTS` and skips its summaries); the results show one
 Strix Halo, so it is not part of the weekly set.
 
 Every machine runs the speech bench on Sunday from 18:00 CET (17:00 on the UTC clocks: `install.sh --hour 17`
