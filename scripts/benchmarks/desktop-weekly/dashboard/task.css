@@ -30,7 +30,7 @@ details.md[open] > summary { margin-bottom: 12px; }
 .plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 0.86rem; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot.e-qvac { background: var(--e-qvac); } .dot.e-audiocpp { background: var(--e-audiocpp); } .dot.e-localai { background: var(--e-localai); }
-.dot.e-transcribe { background: var(--e-transcribe); } .dot.e-nemo { background: var(--e-nemo); } .dot.e-whispercpp { background: var(--e-whispercpp); } .dot.e-mlx { background: var(--e-mlx); }
+.dot.e-transcribe { background: var(--e-transcribe); } .dot.e-nemo { background: var(--e-nemo); } .dot.e-whispercpp { background: var(--e-whispercpp); } .dot.e-mlx { background: var(--e-mlx); } .dot.e-fluid { background: var(--e-fluid); }
 .dot.e-cosy { background: var(--e-cosy); } .dot.e-ttscpp { background: var(--e-ttscpp); } .dot.e-acestep { background: var(--e-acestep); }
 .dot.e-minimax { background: var(--e-minimax); } .dot.e-fw { background: var(--e-fw); } .dot.e-vllm { background: var(--e-vllm); }
 .dot.e-sglang { background: var(--e-sglang); } .dot.e-moss { background: var(--e-moss); } .dot.e-other { background: var(--e-other); }

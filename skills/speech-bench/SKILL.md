@@ -19,7 +19,7 @@ disturbing each other on the same hardware.
 | --- | --- |
 | `scripts/benchmarks/desktop-weekly/README.md` | the full description of the bench, its layout on a machine and its configuration |
 | `scripts/benchmarks/desktop-weekly/weekly.sh` | the entry point cron runs; `--quick`, `--families`, `--backends`, `--no-update`, `--no-mail`, `--label` |
-| `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 44 families with their driver spec, iteration counts, timeouts and model provisioning; eleven of them run the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio) on the Mac Studio Metal backend beside QVAC; the models no MLX engine covers are the `not_measured` gaps of `engines.json` |
+| `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 48 families with their driver spec, iteration counts, timeouts and model provisioning; eleven of them run the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio) and four FluidAudio (Core ML on the Apple Neural Engine, built from `fluidaudio-bench/`) on the Mac Studio Metal lane beside QVAC; the models no MLX engine covers are the `not_measured` gaps of `engines.json` |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
 | `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files (plus `comparisons.json` and the `report-rows.json` next to the summaries folder) -> per machine the six JSON files its dashboard reads, and `hub.json` |
 | `scripts/benchmarks/desktop-weekly/mlx-bench.py` | the bench the MLX families run (`run-family.sh` calls it through the venv at `~/speech-bench/mlx/venv` on the Mac Studio; README, Install) |

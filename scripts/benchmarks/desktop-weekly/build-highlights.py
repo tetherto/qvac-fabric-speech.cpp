@@ -32,7 +32,7 @@ STYLE = """
   --cuda: #4d8a12; --vulkan: #b9303b; --cpu: #4f52c9; --metal: #c45a22; --bad: #b9303b;
   --t-asr: #2f6fdb; --t-tts: #1c9e8a; --t-music: #b04fc7;
   --e-qvac: #2f6fdb; --e-audiocpp: #e0663a; --e-acestep: #1c9e8a; --e-fw: #8b5cf6; --e-vllm: #d18a14; --e-sglang: #d14b8f;
-  --e-moss: #7d8f1a; --e-cosy: #a8733a; --e-ttscpp: #4f9a3c; --e-minimax: #b04fc7; --e-localai: #2aa5c9; --e-transcribe: #b5951a; --e-nemo: #4a5d70; --e-whispercpp: #c93d3d; --e-mlx: #0f8f7a; --e-other: #6f7782;
+  --e-moss: #7d8f1a; --e-cosy: #a8733a; --e-ttscpp: #4f9a3c; --e-minimax: #b04fc7; --e-localai: #2aa5c9; --e-transcribe: #b5951a; --e-nemo: #4a5d70; --e-whispercpp: #c93d3d; --e-mlx: #0f8f7a; --e-fluid: #8c5a3c; --e-other: #6f7782;
   --font-display: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
   --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -43,7 +43,7 @@ STYLE = """
     --cuda: #8cc455; --vulkan: #ef6b74; --cpu: #9b9ef2; --metal: #ec8a52; --bad: #ef6b74;
     --t-asr: #5b8ff0; --t-tts: #33b8a2; --t-music: #c879dc;
     --e-qvac: #5b8ff0; --e-audiocpp: #ef7f55; --e-acestep: #33b8a2; --e-fw: #a283f8; --e-vllm: #e8a73a; --e-sglang: #e46aa6;
-    --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-other: #8b939d;
+    --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-fluid: #c08a62; --e-other: #8b939d;
     color-scheme: dark;
   }
 }
@@ -52,7 +52,7 @@ STYLE = """
   --cuda: #8cc455; --vulkan: #ef6b74; --cpu: #9b9ef2; --metal: #ec8a52; --bad: #ef6b74;
   --t-asr: #5b8ff0; --t-tts: #33b8a2; --t-music: #c879dc;
   --e-qvac: #5b8ff0; --e-audiocpp: #ef7f55; --e-acestep: #33b8a2; --e-fw: #a283f8; --e-vllm: #e8a73a; --e-sglang: #e46aa6;
-  --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-other: #8b939d;
+  --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-fluid: #c08a62; --e-other: #8b939d;
   color-scheme: dark;
 }
 body { background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--font-body); }
@@ -93,7 +93,7 @@ p { margin: 0; }
 .e-qvac { background: var(--e-qvac); } .e-audiocpp { background: var(--e-audiocpp); } .e-acestep { background: var(--e-acestep); } .e-minimax { background: var(--e-minimax); }
 .e-localai { background: var(--e-localai); } .e-transcribe { background: var(--e-transcribe); } .e-nemo { background: var(--e-nemo); } .e-whispercpp { background: var(--e-whispercpp); }
 .e-fw { background: var(--e-fw); } .e-vllm { background: var(--e-vllm); } .e-sglang { background: var(--e-sglang); } .e-moss { background: var(--e-moss); } .e-cosy { background: var(--e-cosy); }
-.e-ttscpp { background: var(--e-ttscpp); } .e-mlx { background: var(--e-mlx); } .e-other { background: var(--muted); }
+.e-ttscpp { background: var(--e-ttscpp); } .e-mlx { background: var(--e-mlx); } .e-fluid { background: var(--e-fluid); } .e-other { background: var(--muted); }
 .note { font-size: 0.8rem; color: var(--muted); }
 .more { margin-top: auto; font-size: 0.85rem; color: var(--focus); text-decoration: none; }
 .more:hover { text-decoration: underline; }

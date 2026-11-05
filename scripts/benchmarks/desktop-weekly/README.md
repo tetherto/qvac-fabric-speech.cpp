@@ -43,6 +43,7 @@ and the weekly artifact.
 | TTS, TTS cloning | `audio8-mlx-audio`, `audio8-clone-mlx-audio` | mlx-audio Audio8 TTS Preview 0.6B (BF16 conversion) with the sampling of the Audio8 families, synthesis and JFK cloning, Mac Studio Metal only, fresh processes like the `audio8-lm-*` and `audio8-clone-enc-*` rows |
 | Music | `minimax-music3-mlx-audio` | mlx-audio on the 8-bit MiniMax Music3 conversion (the bf16 one needs 27 GB more disk), the 30 s instrumental request of the ACE-Step rows, Mac Studio Metal only; it stands alone until a QVAC MiniMax family runs weekly |
 | TTS | `moss-tts-mlx-audio` | mlx-audio on the original MOSS-TTS v1.5 checkpoint (BF16, seed 1234), Mac Studio Metal only, a fresh process like the `moss-tts-f16` rows |
+| ASR | `parakeet-fluidaudio`, `parakeet-fluidaudio-abcba`, `parakeet-unified-fluidaudio`, `parakeet-unified-fluidaudio-abcba` | FluidAudio (Swift, Core ML, encoder on the Apple Neural Engine, int8 encoder) on its Parakeet TDT 0.6B v3 and Parakeet Unified English 0.6B conversions, Mac Studio only, timed in process like the QVAC native rows through `fluidaudio-bench/` |
 | ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
 | TTS | `chatterbox-turbo` | Chatterbox Turbo: T3 Turbo Q8_0 with S3Gen Q8_0, built-in voice |
@@ -102,6 +103,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | --- | --- |
 | `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail |
 | `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
+| `fluidaudio-bench/` | Swift package: native-style bench of FluidAudio (Parakeet TDT v3 and Unified on Core ML, ANE encoder) for `run-family.sh`, same JSON as `mlx-bench.py` |
 | `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio Nemotron) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription, or for the mlx-audio Chatterbox Turbo synthesis of a time-wrapped family |
 | `build-highlights.py`, `highlights.json` | the dashboard-data folder -> `speech-bench-highlights.html`, the cards of the charts listed in `highlights.json` |
 | `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, run selection |
@@ -171,6 +173,11 @@ The MLX families need, on the Mac Studio only, a Python virtual environment at `
 Homebrew, so use a uv-managed interpreter: `python3.11 -m venv ~/speech-bench/mlx/venv && ~/speech-bench/mlx/venv/bin/pip
 install mlx parakeet-mlx mlx-whisper mlx-audio huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
 (binary missing) and the rest of the run is unaffected.
+
+The FluidAudio families need, on the Mac Studio only, the Swift bench package built once: copy `fluidaudio-bench/` to
+`~/speech-bench/fluidaudio/bench` and run `swift build -c release` there (Xcode's toolchain; SwiftPM fetches FluidAudio at the
+commit pinned in `Package.swift`). Its Core ML models download into `models/fluidaudio/` on the first run, outside the timed
+region. Without the binary those cells report `build-failed`.
 
 Try the pipeline before the first Sunday:
 

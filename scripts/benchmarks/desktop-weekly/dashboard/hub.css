@@ -4,7 +4,7 @@
   --cuda: #4d8a12; --vulkan: #b9303b; --cpu: #4f52c9; --metal: #c45a22;
   --warn: #9a6200; --bad: #b9303b; --ok: #3d7a10;
   --e-qvac: #2f6fdb; --e-audiocpp: #e0663a; --e-acestep: #1c9e8a; --e-fw: #8b5cf6; --e-vllm: #d18a14; --e-sglang: #d14b8f;
-  --e-moss: #7d8f1a; --e-cosy: #a8733a; --e-ttscpp: #4f9a3c; --e-minimax: #b04fc7; --e-localai: #2aa5c9; --e-transcribe: #b5951a; --e-nemo: #4a5d70; --e-whispercpp: #c93d3d; --e-mlx: #0f8f7a; --e-other: #6f7782;
+  --e-moss: #7d8f1a; --e-cosy: #a8733a; --e-ttscpp: #4f9a3c; --e-minimax: #b04fc7; --e-localai: #2aa5c9; --e-transcribe: #b5951a; --e-nemo: #4a5d70; --e-whispercpp: #c93d3d; --e-mlx: #0f8f7a; --e-fluid: #8c5a3c; --e-other: #6f7782;
   --font-display: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
   --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -14,7 +14,7 @@
     --bg: #101317; --surface: #171b21; --ink: #e8ebef; --ink-2: #b4bbc4; --muted: #8b939d; --rule: #2a3038; --track: #232931; --focus: #6ea4f5;
     --cuda: #8cc455; --vulkan: #ef6b74; --cpu: #9b9ef2; --metal: #ec8a52; --warn: #e0a440; --bad: #ef6b74; --ok: #8cc455;
     --e-qvac: #5b8ff0; --e-audiocpp: #ef7f55; --e-acestep: #33b8a2; --e-fw: #a283f8; --e-vllm: #e8a73a; --e-sglang: #e46aa6;
-    --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-other: #8b939d;
+    --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-fluid: #c08a62; --e-other: #8b939d;
     color-scheme: dark;
   }
 }
@@ -22,7 +22,7 @@
   --bg: #101317; --surface: #171b21; --ink: #e8ebef; --ink-2: #b4bbc4; --muted: #8b939d; --rule: #2a3038; --track: #232931; --focus: #6ea4f5;
   --cuda: #8cc455; --vulkan: #ef6b74; --cpu: #9b9ef2; --metal: #ec8a52; --warn: #e0a440; --bad: #ef6b74; --ok: #8cc455;
   --e-qvac: #5b8ff0; --e-audiocpp: #ef7f55; --e-acestep: #33b8a2; --e-fw: #a283f8; --e-vllm: #e8a73a; --e-sglang: #e46aa6;
-  --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-other: #8b939d;
+  --e-moss: #a3b83a; --e-cosy: #c99257; --e-ttscpp: #6fbb5b; --e-minimax: #c879dc; --e-localai: #4cc0e2; --e-transcribe: #d6b53c; --e-nemo: #8a9db2; --e-whispercpp: #e86a6a; --e-mlx: #3cc2a9; --e-fluid: #c08a62; --e-other: #8b939d;
   color-scheme: dark;
 }
 body { background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--font-body); }
@@ -87,7 +87,7 @@ a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .e-fw i, .bar.e-fw { background: var(--e-fw); } .e-vllm i, .bar.e-vllm { background: var(--e-vllm); } .e-sglang i, .bar.e-sglang { background: var(--e-sglang); }
 .e-moss i, .bar.e-moss { background: var(--e-moss); } .e-cosy i, .bar.e-cosy { background: var(--e-cosy); } .e-ttscpp i, .bar.e-ttscpp { background: var(--e-ttscpp); }
 .e-minimax i, .bar.e-minimax { background: var(--e-minimax); } .e-localai i, .bar.e-localai { background: var(--e-localai); } .e-transcribe i, .bar.e-transcribe { background: var(--e-transcribe); }
-.e-nemo i, .bar.e-nemo { background: var(--e-nemo); } .e-whispercpp i, .bar.e-whispercpp { background: var(--e-whispercpp); } .e-mlx i, .bar.e-mlx { background: var(--e-mlx); }
+.e-nemo i, .bar.e-nemo { background: var(--e-nemo); } .e-whispercpp i, .bar.e-whispercpp { background: var(--e-whispercpp); } .e-mlx i, .bar.e-mlx { background: var(--e-mlx); } .e-fluid i, .bar.e-fluid { background: var(--e-fluid); }
 .sub { color: var(--muted); font-size: 0.74rem; font-variant-numeric: tabular-nums; margin: -2px 0 2px 1.1rem; }
 .gn.nq { color: var(--muted); }
 .boxes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; }
