@@ -161,7 +161,7 @@ def method_section(hub):
     <div>
       <h3>What each page shows</h3>
       <ul>
-        <li>Pick a task, then a machine: its task page has one section per model with a speed chart per backend and input, every engine in its color. Weekly charts hold this week's QVAC variants; campaign charts hold QVAC and its competitors as the campaign measured them.</li>
+        <li>Pick a task, then a machine: its task page has one section per model with a speed chart per backend and input, every engine in its color. Weekly charts hold this week's QVAC variants; report and campaign charts hold QVAC and its competitors as that comparison measured them.</li>
         <li>Each section folds away the details of every chart: exact values, precision per row, timed runs and warmups, generated duration, the competitor ÷ QVAC time ratio with its qualifier, and a Sources panel with source file, engine commits, model hashes, command, configuration and caveats. Every task page ends with what was not measured there, and why.</li>
         <li>Each task page has its own link, the hub's link plus the machine and task, for example {example_link(hub)}.</li>
         <li>{dashboard_links(hub)}: the machine dashboards, with an overview of the machine, ASR, TTS and music tabs with a week-over-week line per backend (buttons for speed, latency, RTF, host memory, device memory and WER), and a Runs and coverage tab listing every row and every skipped or failed cell.</li>
@@ -171,7 +171,7 @@ def method_section(hub):
       <h3>How it runs</h3>
       <ul>
         <li>Every Sunday from 18:00 CET each shared machine updates the engine master and ggml speech heads, builds every backend it has, provisions the pinned models and runs the matrix of <code>scripts/benchmarks/desktop-weekly/families.json</code>; a Claude task collects the summaries on Monday morning and refreshes these pages.</li>
-        <li>Weekly rows and campaign rows are never in one chart: the campaign rows keep the build, inputs and dates of the QVAC speech engines report (October 2026 edition) and are compared only among themselves.</li>
+        <li>Weekly rows, report rows and campaign rows are never in one chart: the report rows are copied from the comparison report of 2026-11-04 (QVAC and twelve other engines on the same machines, with that report's builds, inputs and timing scopes) and the campaign rows keep the build, inputs and dates of the QVAC speech engines report (October 2026 edition); each set is compared only among itself.</li>
         <li>ASR, Supertonic and Nemotron rows time inference only; Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load from a warm filesystem cache.</li>
         <li>Quality checks are narrow: ASR WER on one English clip, TTS intelligibility on one prompt. Music quality and speaker similarity are unmeasured.</li>
         <li>Deviations from the ticket: ACE-Step Base runs at Q4_K_M because the registry has no Q8_0 Base cut; MOSS-TTS Q8_0 is the F16 backbone with its transformer blocks requantized on the machine.</li>
@@ -190,7 +190,7 @@ def hub_view(hub, built_at):
   <header>
     <div class="eyebrow">QVAC speech · weekly bench · newest run {esc(hub["measured"])} · {len(hub["machines"])} machines · {hub["accepted"]} accepted measurements · page built {esc(built_at)}</div>
     <h1>Speech Bench</h1>
-    <p class="lede">QVAC (qvac-fabric-speech.cpp) every week on the shared machines, with the campaign rows against other speech engines. Pick a task, then a machine: each task page shows, per model and backend, this week's numbers and how QVAC compared with the other engines on that machine.</p>
+    <p class="lede">QVAC (qvac-fabric-speech.cpp) every week on the shared machines, with the rows of the comparison report and of the campaign against other speech engines. Pick a task, then a machine: each task page shows, per model and backend, this week's numbers and how QVAC compared with the other engines on that machine.</p>
   </header>
   {task_boxes(hub)}
   <details class="more">

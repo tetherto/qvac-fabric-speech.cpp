@@ -1,8 +1,8 @@
 {
   "_schema": {
-    "description": "Engines shown on the dashboards: the QVAC engine and the competitors of the campaign in comparisons.json. measured_on is filled by build-dashboard-data.py from the rows; details and source are the campaign's own words.",
+    "description": "Engines shown on the dashboards: the QVAC engine, the competitors of the campaign in comparisons.json and the engines of the comparison report imported by import-report.py. measured_on is filled by build-dashboard-data.py from the rows; details and source are the campaign's or the report's own words.",
     "fields": {
-      "engine": "Engine name exactly as comparisons.json spells it.",
+      "engine": "Engine name exactly as comparisons.json or report-rows.json spells it.",
       "role": "QVAC engine, prior-report competitor or new competitor, measured.",
       "ggml": "ggml-based or not, as a short phrase.",
       "details": "Scope and caveats of the engine's rows.",
@@ -44,6 +44,76 @@
       "ggml": "ggml-based",
       "details": "ACE-Step 1.5 Turbo with the same four model files as QVAC over ten fixed prompts; one prompt-set RTF and generation-time ratio per device.",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)"
+    },
+    {
+      "engine": "QVAC bundled whisper.cpp",
+      "role": "QVAC engine",
+      "ggml": "ggml-based",
+      "details": "The whisper.cpp bundled in the QVAC engine, driven through its resident C API and through whisper-server over HTTP in the report's Whisper small rows.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "NeMo-Speech.cpp",
+      "role": "new competitor, measured",
+      "ggml": "ggml-based",
+      "details": "Parakeet TDT and Nemotron rows of the report on Strix Halo and the RTX 5090 box; its Nemotron rows run a 160 ms streaming policy that the report keeps in its own chart.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "whisper.cpp (upstream)",
+      "role": "new competitor, measured",
+      "ggml": "ggml-based",
+      "details": "Upstream whisper-cli on Whisper small (Whisper tiny on Jetson Orin) in the report's resident-API rows.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "cosyvoice.cpp",
+      "role": "prior-report competitor",
+      "ggml": "ggml-based",
+      "details": "CosyVoice3 0.5B cloning from the b.wav reference in the report; its own frontend ONNX models, Q8_0 GGUF.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "TTS.cpp",
+      "role": "prior-report competitor",
+      "ggml": "ggml-based",
+      "details": "Parler-TTS mini v1 on Strix Halo CPU in the report; the external T5 path failed its warmup.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "minimaxmusic.cpp",
+      "role": "prior-report competitor",
+      "ggml": "ggml-based",
+      "details": "MiniMax Music3 10 s requests in the report, with a Flow-VAE codec unlike QVAC's DAC-style codec, so the ratio is a configured-deployment comparison.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "faster-whisper (CTranslate2)",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based",
+      "details": "Whisper small on DGX Spark CUDA in the report.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "vLLM",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based",
+      "details": "Whisper small over HTTP and the Nemotron plugin (offline API and HTTP) on DGX Spark in the report.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "SGLang-Omni",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based",
+      "details": "Nemotron through the offline runner on the RTX 5090 box in the report; its ARM64 install failed on DGX Spark.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
+    },
+    {
+      "engine": "OpenMOSS PyTorch reference",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based",
+      "details": "The official MOSS-TTS v1.5 reference as a resident API on DGX Spark (CPU, CUDA F32 and configured pairs) and Strix Halo CPU in the report.",
+      "source": "Speech Bench comparison report of 2026-11-04 (Gustavo Araujo), copied by import-report.py"
     }
   ]
 }

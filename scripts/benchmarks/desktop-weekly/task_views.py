@@ -14,8 +14,10 @@ import math
 import re
 
 WEEKLY = "weekly"
+REPORT = "report"
 CAMPAIGN = "campaign"
-SET_ORDER = (WEEKLY, CAMPAIGN)
+SET_ORDER = (WEEKLY, REPORT, CAMPAIGN)
+COPIED_SETS = (REPORT, CAMPAIGN)
 TASK_PAGES = (("tts", "TTS and voice cloning", ("TTS", "TTS cloning")), ("asr", "ASR", ("ASR",)), ("music", "Music generation", ("Music",)))
 BACKEND_LABELS = {"cpu": "CPU", "cuda": "CUDA", "vulkan": "Vulkan", "metal": "Metal", "coreml": "Core ML"}
 BACKEND_ORDER = tuple(BACKEND_LABELS)
@@ -33,13 +35,16 @@ METRIC_NOTES = {
     "TTS cloning": "Seconds of cloned speech generated per second of processing, higher is better. Each chart is one backend and reference recording, under the same timing scope for every row.",
     "Music": "Seconds of music generated per second of processing, higher is better. Each chart is one backend, and every row in it received the same request as a fresh process including model load.",
 }
-SETS_NOTE = "Weekly charts hold this week's QVAC variants; campaign charts hold QVAC and its competitors as the campaign measured them, and the two are never mixed."
+SETS_NOTE = ("Weekly charts hold this week's QVAC variants; report and campaign charts hold QVAC and its competitors as that comparison "
+             "measured them, and the sets are never mixed.")
 SCENARIO_SHORT = {"jfk": "JFK 11 s", "abcba": "ABCBA 160.6 s", "long_clip": "98.49 s clip", "fixed_prompt": "fixed prompt", "fixed_prompt_short": "9-word prompt",
-                  "long_prompt": "76-word prompt", "clone_jfk": "cloning, JFK reference", "music_30s": "30 s request", "music_set": "campaign prompt set"}
+                  "long_prompt": "76-word prompt", "clone_jfk": "cloning, JFK reference", "clone_bwav": "cloning, b.wav reference",
+                  "music_30s": "30 s request", "music_10s": "10 s request", "music_set": "campaign prompt set"}
 SCENARIO_ORDER = tuple(SCENARIO_SHORT)
 TIMING_SHORT = {"native_excl_load": "inference only", "fresh_process": "fresh process including load",
-                "fresh_process_ref": "fresh process including load and reference encoding", "campaign": "campaign harness"}
-REGION_LABELS = {WEEKLY: "Timed region", CAMPAIGN: "Campaign method"}
+                "fresh_process_ref": "fresh process including load and reference encoding", "resident_api": "resident API",
+                "http": "HTTP, full response", "campaign": "campaign harness"}
+REGION_LABELS = {WEEKLY: "Timed region", REPORT: "Timed region", CAMPAIGN: "Campaign method"}
 DURATION_TASKS = ("TTS", "TTS cloning", "Music")
 TABLE_HEAD = ("Engine", "Latency median (min to max)", "Audio", "Speed ×", "RTF", "Host RSS", "Device", "WER", "Runs / warmups")
 AXIS_TICKS = 4
@@ -52,6 +57,7 @@ DETAILS_SUMMARY = "Details: exact values, precision, time ratios, comparison lim
 SOURCES_SUMMARY = "Sources and exact values"
 NOT_MEASURED_SUMMARY = "Not measured here, and why"
 NO_CHART_TITLE = "Cells without a chart (no accepted measurement in this setup)"
+QVAC_ONLY_TITLE = "QVAC-only timings for this model (no competitor in the same setup)"
 NO_CHART_NOTE = "No accepted measurement for this model on this machine; the details name each cell and why."
 EMPTY_PAGE = "Nothing for this task on this machine yet."
 NO_WEEKLY = "No weekly row for this task on this machine; the end of the page says why."
@@ -245,8 +251,9 @@ def chart_date(rows):
 
 
 def set_label(rows):
-    if rows[0].get("comparison_set") == CAMPAIGN:
-        return f"campaign {chart_date(rows)}"
+    name = rows[0].get("comparison_set")
+    if name in COPIED_SETS:
+        return f"{name} {chart_date(rows)}"
     return f"weekly run {chart_date(rows)}"
 
 
@@ -467,19 +474,31 @@ def detail_block(rows):
             f'{results_table(rows)}{precision_list(rows)}{ratio_block(rows)}{notes_html(rows)}{sources_html(rows)}</div>')
 
 
+def listed_value(row):
+    if not is_accepted(row) or not row.get("speed_x"):
+        return latency_cell(row)
+    return f"{latency_cell(row)}, {fmt_speed(row['speed_x'])}"
+
+
 def blank_item(row):
     return (f'<li>{dot(row["engine"])} {esc(engine_name(row))} · {esc(backend_label(row.get("backend", "")))} · {esc(scenario_short(row))} · '
-            f'{esc(timing_short(row))}: {esc(latency_cell(row))}</li>')
+            f'{esc(timing_short(row))}: {esc(listed_value(row))}</li>')
 
 
-def blank_block(groups):
+def list_block(title, groups):
     rows = flatten(groups)
-    return f'<div class="gd"><h4>{esc(NO_CHART_TITLE)}</h4><ul class="plain">{"".join(blank_item(row) for row in rows)}</ul>{sources_html(rows)}</div>'
+    return f'<div class="gd"><h4>{esc(title)}</h4><ul class="plain">{"".join(blank_item(row) for row in rows)}</ul>{sources_html(rows)}</div>'
 
 
-def details_html(drawn, blank):
-    blocks = [detail_block(rows) for rows in drawn] + ([blank_block(blank)] if blank else [])
+def details_html(drawn, listed, blank):
+    blocks = [detail_block(rows) for rows in drawn]
+    blocks += [list_block(QVAC_ONLY_TITLE, listed)] if listed else []
+    blocks += [list_block(NO_CHART_TITLE, blank)] if blank else []
     return f'<details class="md"><summary>{esc(DETAILS_SUMMARY)}</summary>{"".join(blocks)}</details>'
+
+
+def is_listed(rows):
+    return all(row.get("no_chart") for row in rows)
 
 
 def required_tag(rows):
@@ -488,16 +507,17 @@ def required_tag(rows):
 
 def section_note(task, rows):
     sets = {row.get("comparison_set") for row in rows}
-    extra = f" {SETS_NOTE}" if WEEKLY in sets and CAMPAIGN in sets else ""
+    extra = f" {SETS_NOTE}" if WEEKLY in sets and sets & set(COPIED_SETS) else ""
     return METRIC_NOTES.get(task, "") + extra
 
 
 def section_html(model, task, rows):
     groups = charts(rows)
-    drawn = [group for group in groups if has_accepted(group)]
-    blank = [group for group in groups if not has_accepted(group)]
+    drawn = [group for group in groups if has_accepted(group) and not is_listed(group)]
+    listed = [group for group in groups if is_listed(group)]
+    blank = [group for group in groups if not has_accepted(group) and not is_listed(group)]
     return (f'<section class="msec"><h2>{esc(model)}: {esc(METRICS.get(task, DEFAULT_METRIC))} <span class="hib">(higher is better)</span>{required_tag(rows)}</h2>'
-            f'<p class="one">{esc(section_note(task, rows))}</p>{panels_html(drawn)}{details_html(drawn, blank)}</section>')
+            f'<p class="one">{esc(section_note(task, rows))}</p>{panels_html(drawn)}{details_html(drawn, listed, blank)}</section>')
 
 
 def sections_html(rows):
@@ -518,8 +538,9 @@ def missing_groups(cells):
 def missing_item(key, backends):
     status, model, engine, reason = key
     pill = "pill bad" if status == FAILED else "pill"
-    names = join_words(backend_label(backend) for backend in ordered(BACKEND_ORDER, set(backends)))
-    return f'<li><span class="{pill}">{esc(status)}</span> {esc(model)} · {esc(engine)} on {esc(names)}: {esc(reason)}</li>'
+    names = join_words(backend_label(backend) for backend in ordered(BACKEND_ORDER, {b for b in backends if b}))
+    where = f" on {esc(names)}" if names else ""
+    return f'<li><span class="{pill}">{esc(status)}</span> {esc(model)} · {esc(engine)}{where}: {esc(reason)}</li>'
 
 
 def not_measured_html(coverage, tasks, expanded=False):
@@ -555,10 +576,21 @@ def dashboard_sentence(machine):
             f'{esc(machine["machine"])} dashboard</a>.')
 
 
+def report_sentence(rows):
+    engines = join_words(sorted({row["engine"] for row in rows if not row.get("is_qvac")}))
+    if not rows:
+        return ""
+    dates = join_words(sorted({row["date"] for row in rows if row.get("date")}))
+    against = f" with {engines}" if engines else ""
+    return esc(f"Report charts are copied from the comparison report of {dates}: QVAC{against} as that report measured them, with its own builds, inputs and timing scopes.")
+
+
 def lede_html(machine, rows):
     weekly = [row for row in rows if row.get("comparison_set") == WEEKLY]
+    report = [row for row in rows if row.get("comparison_set") == REPORT]
     campaign = [row for row in rows if row.get("comparison_set") == CAMPAIGN]
-    return " ".join(part for part in (weekly_sentence(machine, weekly), campaign_sentence(campaign), dashboard_sentence(machine)) if part)
+    parts = (weekly_sentence(machine, weekly), report_sentence(report), campaign_sentence(campaign), dashboard_sentence(machine))
+    return " ".join(part for part in parts if part)
 
 
 def nav_item(machine, page, current):

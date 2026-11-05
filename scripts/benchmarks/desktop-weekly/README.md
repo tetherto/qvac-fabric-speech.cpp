@@ -60,6 +60,13 @@ A provision entry with `as` links the file into the family directory under anoth
 `voice.gguf` even when cloning). Memory is the peak RSS from
 `/usr/bin/time` and, on NVIDIA backends, the rise of `nvidia-smi` memory.used over the run.
 
+Next to the weekly rows the dashboards and task pages show two copied sets, never mixed with the weekly charts: the
+campaign rows of `comparisons.json` (ratios from the October 2026 report) and the report rows of `report-rows.json`,
+which `import-report.py` copies from the saved task pages of the comparison report of 2026-11-04 (QVAC and twelve
+other engines on the same machines, with that report's own builds, inputs and timing scopes: resident API, native
+stage sum, fresh process, HTTP). `build-dashboard-data.py` reads `report-rows.json` from the folder above the
+summaries folder (or `--report`); the file and the saved pages live in the history folder, not in the repo.
+
 Two requested cuts are not in the registry: MOSS-TTS Q8_0 is produced on the machine by requantizing the `blk.*`
 tensors of the F16 backbone with `engines/tts/scripts/requantize-gguf.py`, and the ACE-Step Base DiT ships only as
 Q4_K_M, so that row is Q4_K_M and says so.
@@ -69,6 +76,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | file | what it does |
 | --- | --- |
 | `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail |
+| `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
 | `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, run selection |
 | `families.json` | the matrix (see above) |
 | `fetch-models.sh`, `fetch-registry.js`, `prepare-derived.py` | model provisioning: registry client, HuggingFace, repo fixtures, requantized and resampled files |

@@ -25,8 +25,9 @@
   const BACKEND_COLORS = { cpu: '#4f52c9', cuda: '#4d8a12', vulkan: '#b9303b', metal: '#c45a22', coreml: '#2aa5c9' };
   const TASK_ORDER = ['ASR', 'TTS', 'TTS cloning', 'Music'];
   const FIELD = { backend: 'backend', model: 'model', scenario: 'scenario_label' };
-  const SCEN_SHORT = { jfk: 'JFK 11 s', long_clip: '98 s clip', fixed_prompt: 'fixed prompt', fixed_prompt_short: '9-word prompt', long_prompt: '76-word prompt', clone_jfk: 'clone, JFK ref', music_30s: '30 s request', music_set: 'campaign prompt set' };
-  const SCOPE_SHORT = { campaign: 'campaign', fresh_process: 'fresh process', fresh_process_ref: 'fresh process + ref encode', native_excl_load: 'native, excl. load' };
+  const SCEN_SHORT = { jfk: 'JFK 11 s', abcba: 'ABCBA 160.6 s', long_clip: '98 s clip', fixed_prompt: 'fixed prompt', fixed_prompt_short: '9-word prompt', long_prompt: '76-word prompt', clone_jfk: 'clone, JFK ref', clone_bwav: 'clone, b.wav ref', music_30s: '30 s request', music_10s: '10 s request', music_set: 'campaign prompt set' };
+  const SCOPE_SHORT = { campaign: 'campaign', fresh_process: 'fresh process', fresh_process_ref: 'fresh process + ref encode', native_excl_load: 'native, excl. load', resident_api: 'resident API', http: 'HTTP, full response' };
+  const SET_LABEL = { weekly: 'weekly run', report: 'report', campaign: 'campaign' };
   const TREND_HEIGHT = 220;
   const TREND_MIN_WIDTH = 280;
   const COV_CLASS = { measured: 'ok', failed: 'bad', superseded: 'mute', 'unsupported by competitor': 'mute', 'budget-excluded': 'warn', 'not attempted': 'mute', inaccessible: 'warn', excluded: 'mute', 'install failed': 'bad', 'configuration failed': 'bad' };
@@ -602,10 +603,10 @@
   // ---------- per-model comparison sections ----------
   const WHAT = { ASR: 'transcription speed', TTS: 'speech synthesis speed', 'TTS cloning': 'voice cloning speed', Music: 'music generation speed' };
   const ONE_LINE = {
-    ASR: 'Seconds of audio transcribed per second of processing, higher is better. Each chart is one backend and clip from one source: the weekly run, whose bars are QVAC variants, or the dated campaign, whose bars are QVAC and the other engines on the same input and timing scope.',
-    TTS: 'Seconds of speech generated per second of processing, higher is better. Each chart is one backend and prompt from one source: the weekly run, whose bars are QVAC variants, or the dated campaign, whose bars are QVAC and the other engines on the same prompt and timing scope.',
-    'TTS cloning': 'Seconds of cloned speech generated per second of processing, higher is better. Each chart is one backend of the weekly run, cloning the JFK reference as a fresh process including model load and reference encoding.',
-    Music: 'Seconds of music generated per second of processing, higher is better. Each chart is one backend from one source: the weekly run, a fresh process per render including model load, or the dated campaign against acestep.cpp over its ten prompts.',
+    ASR: 'Seconds of audio transcribed per second of processing, higher is better. Each chart is one backend and clip from one source: the weekly run, whose bars are QVAC variants, or a dated report or campaign, whose bars are QVAC and the other engines on the same input and timing scope.',
+    TTS: 'Seconds of speech generated per second of processing, higher is better. Each chart is one backend and prompt from one source: the weekly run, whose bars are QVAC variants, or a dated report or campaign, whose bars are QVAC and the other engines on the same prompt and timing scope.',
+    'TTS cloning': 'Seconds of cloned speech generated per second of processing, higher is better. Each chart is one backend and reference recording from one source: the weekly run, whose bars are QVAC variants, or a dated report, whose bars are QVAC and the other engines under the same timing scope.',
+    Music: 'Seconds of music generated per second of processing, higher is better. Each chart is one backend from one source: the weekly run, a fresh process per render including model load, a dated report with the other engines on the same request, or the dated campaign against acestep.cpp over its ten prompts.',
   };
   const LATE_MODELS = ['Nemotron'];
   const modelRank = (m) => { const i = LATE_MODELS.findIndex((p) => m.startsWith(p)); return i < 0 ? 0 : i + 1; };
@@ -619,7 +620,7 @@
   }
   const isWeekly = (list) => list.every((r) => r.comparison_set === 'weekly');
   function panelTitle(f) {
-    return (BACKEND_LABEL[f.backend] || f.backend) + ' · ' + (SCEN_SHORT[f.scenario] || f.scenario_label) + (f.comparison_set === 'weekly' ? ' · weekly run' : ' · campaign ' + f.date);
+    return (BACKEND_LABEL[f.backend] || f.backend) + ' · ' + (SCEN_SHORT[f.scenario] || f.scenario_label) + ' · ' + (SET_LABEL[f.comparison_set] || f.comparison_set) + (f.comparison_set === 'weekly' ? '' : ' ' + f.date);
   }
   function speedPanel(list) {
     const weekly = isWeekly(list);

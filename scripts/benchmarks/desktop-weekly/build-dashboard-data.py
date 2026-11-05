@@ -2,10 +2,11 @@
 """Write the data files of the per-machine dashboards and of the hub page from the stored summaries.
 
 usage: build-dashboard-data.py <summaries dir> -o <out dir> [--comparisons comparisons.json] [--engines engines.json]
-       [--families families.json] [--dashboards dashboards.json]
+       [--families families.json] [--dashboards dashboards.json] [--report report-rows.json]
 
 For every machine with a stored run it writes <out dir>/<host>/: runs.json (one row per backend and model of the
-machine's newest result, plus the campaign rows measured on that machine), history.json (every stored result, for the
+machine's newest result, plus the campaign rows measured on that machine and the rows of the comparison report that
+import-report.py copied for it), history.json (every stored result, for the
 week-over-week lines), coverage.json (measured, failed and skipped cells with their reasons), engines.json (the engines
 with where they were measured), machine.json (hardware, counts, snapshot) and commentary.json (the overview summary,
 the notes of each task tab and the comparison rules). It also writes <out dir>/hub.json, the input of build-landing.py.
@@ -53,6 +54,8 @@ TIMING = {"native": ("native_excl_load", "Native bench, inference only (excludes
 TIMING_CLONING = ("fresh_process_ref", "Fresh process incl. load and reference encoding (warm filesystem cache)",
                   "Whole process wall clock including model load and the encoding of the reference recording.")
 CAMPAIGN_TIMING = ("campaign", "Campaign measurement (see the harness note)", "")
+REPORT = "report"
+REPORT_FILE = "report-rows.json"
 CAMPAIGN_CLIPS = {"ASR": (("jfk", "JFK clip, 11.0 s", 11.0), ("long_clip", "98.49 s clip", 98.49)),
                   "TTS": (("fixed_prompt_short", "9-word prompt (about 3.1 s of speech)", 3.1), ("long_prompt", "76-word prompt (about 26 s of speech)", 26.0)),
                   "Music": (("music_set", "Ten fixed prompts of the campaign", None),)}
@@ -322,6 +325,15 @@ def campaign_rows(host, comparisons):
     return rows
 
 
+def report_rows(host, report):
+    return [row for row in report.get("rows", []) if row.get("host") == host]
+
+
+def report_coverage(host, report, start):
+    cells = [cell for cell in report.get("coverage", []) if cell.get("host") == host]
+    return [dict(cell, id=f"k{start + index:03d}") for index, cell in enumerate(cells)]
+
+
 def coverage_reason(row):
     if row["status"] == "measured":
         return "Accepted measurement"
@@ -352,9 +364,10 @@ def skipped_cells(host_summaries, families, start):
     return [skipped_cell(newest, family, families[family], backend, start + i) for i, (family, backend) in enumerate(pairs)]
 
 
-def coverage_rows(host_summaries, runs, families):
+def coverage_rows(host_summaries, runs, families, report):
     cells = [coverage_cell(i, row) for i, row in enumerate(runs)]
-    return cells + skipped_cells(host_summaries, families, len(cells))
+    cells += skipped_cells(host_summaries, families, len(cells))
+    return cells + report_coverage(host_summaries[-1]["_host"], report, len(cells))
 
 
 def machines_of(engine, rows_by_host):
@@ -384,14 +397,20 @@ def machine_row(host_summaries, runs):
     newest = host_summaries[-1]
     run, counts = newest.get("run", {}), newest.get("counts", {})
     weekly = [r for r in runs if r["comparison_set"] == "weekly"]
-    campaign = [r for r in runs if r["comparison_set"] == "campaign"]
     accepted = sum(1 for r in runs if r["accepted"])
-    campaign_text = f"{len(campaign)} campaign rows from {', '.join(sorted({r['date'] for r in campaign}))}" if campaign else "no campaign rows for this machine"
+    campaign_text = "; ".join(copied_rows_text(runs, name) for name in ("campaign", REPORT))
     return [{"host": newest["_host"], "machine": machine_label(newest["_host"]), "hardware": hardware_text(newest), "accepted": accepted,
              "failed": len(runs) - accepted, "superseded": 0, "backends": ", ".join(newest.get("backends", [])),
              "status": f"Newest run {run.get('name', '')} {run.get('status', '')}: {counts.get('ok', 0)} of {counts.get('expected', 0)} cells ok; {len(host_summaries)} stored runs",
              "work": f"{sum(1 for r in weekly if r['accepted'])} weekly rows at {pins_text(newest)}; {campaign_text}",
              "conditions": HOST_CONDITIONS.get(newest["_host"], ""), "snapshot_utc": run.get("finished", "")}]
+
+
+def copied_rows_text(runs, name):
+    rows = [r for r in runs if r["comparison_set"] == name]
+    if not rows:
+        return f"no {name} rows for this machine"
+    return f"{len(rows)} {name} rows from {', '.join(sorted({r['date'] for r in rows}))}"
 
 
 def fmt_speed(value):
@@ -541,9 +560,18 @@ def pins_item(newest):
     return (SUMMARY, "Pins", f"Newest run {run_name(newest)} at {pins_text(newest)}; CUDA arch {cuda_arch}.")
 
 
+def report_item(runs):
+    rows = [r for r in runs if r["comparison_set"] == REPORT and r["accepted"]]
+    if not rows:
+        return []
+    engines = join_words(sorted({r["engine"] for r in rows if not r["is_qvac"]}))
+    dates = join_words(sorted({r["date"] for r in rows}))
+    return [(SUMMARY, "Comparison report", f"{len(rows)} rows copied from the comparison report of {dates}: QVAC against {engines} with that report's own builds, inputs and timing scopes; its charts are never mixed with the weekly ones.")]
+
+
 def commentary_rows(host_summaries, runs, families):
     newest = host_summaries[-1]
-    items = fastest_items(runs) + campaign_items(runs) + failure_items(runs) + move_items(host_summaries, runs)
+    items = fastest_items(runs) + campaign_items(runs) + report_item(runs) + failure_items(runs) + move_items(host_summaries, runs)
     items += [coverage_item(host_summaries, runs, families), pins_item(newest)]
     items += [(GENERAL, topic, text) for topic, text in RULES]
     sources = {GENERAL: "comparison rules of the weekly bench"}
@@ -591,8 +619,8 @@ def group_by_host(summaries):
     return by_host
 
 
-def machine_files(host_summaries, runs, engines, rows_by_host, families):
-    return {"runs": runs, "history": history_rows(host_summaries, families), "coverage": coverage_rows(host_summaries, runs, families),
+def machine_files(host_summaries, runs, engines, rows_by_host, families, report):
+    return {"runs": runs, "history": history_rows(host_summaries, families), "coverage": coverage_rows(host_summaries, runs, families, report),
             "engines": engine_rows(engines, rows_by_host), "machine": machine_row(host_summaries, runs),
             "commentary": commentary_rows(host_summaries, runs, families)}
 
@@ -603,12 +631,14 @@ def write_machine_files(folder, files):
     return {name: len(rows) for name, rows in files.items()}
 
 
-def build(summaries, comparisons, engines, families, dashboards, out_dir):
+def build(summaries, comparisons, engines, families, dashboards, out_dir, report=None):
+    report = report or {}
     by_host = group_by_host(summaries)
-    rows_by_host = {host: newest_cells(host_summaries, families) + campaign_rows(host, comparisons) for host, host_summaries in by_host.items()}
+    rows_by_host = {host: newest_cells(host_summaries, families) + campaign_rows(host, comparisons) + report_rows(host, report)
+                    for host, host_summaries in by_host.items()}
     written = {}
     for host, host_summaries in by_host.items():
-        written[host] = write_machine_files(out_dir / host, machine_files(host_summaries, rows_by_host[host], engines, rows_by_host, families))
+        written[host] = write_machine_files(out_dir / host, machine_files(host_summaries, rows_by_host[host], engines, rows_by_host, families, report))
     write_rows(out_dir / "hub.json", hub_document(by_host, rows_by_host, engines, dashboards))
     return written
 
@@ -621,7 +651,16 @@ def parse_args(argv):
     parser.add_argument("--engines", default=str(HERE / "engines.json"))
     parser.add_argument("--families", default=str(HERE / "families.json"))
     parser.add_argument("--dashboards", default=str(HERE / "dashboards.json"))
+    parser.add_argument("--report", default="", help=f"rows written by import-report.py; default: {REPORT_FILE} next to the summaries folder")
     return parser.parse_args(argv)
+
+
+def report_path(args):
+    return args.report or str(pathlib.Path(args.summaries).resolve().parent / REPORT_FILE)
+
+
+def load_report(path):
+    return load_json(path) if pathlib.Path(path).is_file() else {}
 
 
 def main(argv=None):
@@ -630,7 +669,8 @@ def main(argv=None):
     if not summaries:
         raise SystemExit(f"no summary.json files under {args.summaries}")
     dashboards = load_json(args.dashboards) if pathlib.Path(args.dashboards).is_file() else {}
-    written = build(summaries, load_rows(args.comparisons), load_rows(args.engines), load_families(args.families), dashboards, pathlib.Path(args.out))
+    written = build(summaries, load_rows(args.comparisons), load_rows(args.engines), load_families(args.families), dashboards, pathlib.Path(args.out),
+                    load_report(report_path(args)))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"{stamp} wrote {json.dumps(written)} and hub.json under {args.out}")
 

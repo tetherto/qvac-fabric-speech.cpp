@@ -21,7 +21,8 @@ disturbing each other on the same hardware.
 | `scripts/benchmarks/desktop-weekly/weekly.sh` | the entry point cron runs; `--quick`, `--families`, `--backends`, `--no-update`, `--no-mail`, `--label` |
 | `scripts/benchmarks/desktop-weekly/families.json` | the matrix: 33 families with their driver spec, iteration counts, timeouts and model provisioning |
 | `scripts/benchmarks/desktop-weekly/report.py` | `summary.json` (+ previous run) -> Markdown report with the changes over 5% and whether a pin moved |
-| `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files -> per machine the six JSON files its dashboard reads, and `hub.json` |
+| `scripts/benchmarks/desktop-weekly/build-dashboard-data.py` | a folder of `summary.json` files (plus `comparisons.json` and the `report-rows.json` next to the summaries folder) -> per machine the six JSON files its dashboard reads, and `hub.json` |
+| `scripts/benchmarks/desktop-weekly/import-report.py` | the saved task pages of a comparison report -> `report-rows.json`; the pages of the 2026-11-04 report and the rows are kept in the history folder (`report-pages/`, `report-rows.json`) |
 | `scripts/benchmarks/desktop-weekly/build-landing.py`, `task_views.py` | `hub.json` and the machines' `runs.json` and `coverage.json` -> the Speech Bench hub (per task every machine with a link to its task page, quality flags, engines, how it runs) with the 18 task pages as views of the same page (`<hub link>#<machine>-<task>`) |
 | `scripts/benchmarks/desktop-weekly/dashboard/`, `dashboards.json` | the page every machine dashboard runs (`index.html`, `app.js`, `app.css`) and the hub's stylesheets (`hub.css`, `task.css`); the links of the hub and of every machine's dashboard |
 | `scripts/benchmarks/desktop-weekly/install.sh` | deploys the tools to `~/speech-bench/tools` and installs the crontab line |

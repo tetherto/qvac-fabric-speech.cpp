@@ -137,6 +137,31 @@ class DetailsTest(unittest.TestCase):
         self.assertIn("<dt>Source</dt><dd>spark-d9ca/2026-11-08.json row parakeet-tdt</dd>", html)
 
 
+class ReportSetTest(unittest.TestCase):
+    def test_report_charts_sit_between_weekly_and_campaign_and_carry_their_labels(self):
+        report = [weekly(engine="transcribe.cpp", is_qvac=False, variant="", comparison_set="report", group="r", timing_class="resident_api", date="2026-11-04",
+                         scenario="abcba", scenario_label="ABCBA clip", speed_x=20.0, audio_s=160.6),
+                  weekly(variant="", comparison_set="report", group="r", timing_class="resident_api", date="2026-11-04", scenario="abcba", speed_x=10.0, audio_s=160.6)]
+        rows = [campaign(QVAC), campaign("audio.cpp", latency_ms=500.0, speed_x=1.0)] + report + [weekly()]
+        html = page(rows, key="tts") + page(rows)
+        self.assertLess(html.index("weekly run 2026-11-08"), html.index("report 2026-11-04"))
+        self.assertIn('<h4>CPU · ABCBA 160.6 s</h4><p class="cap">resident API · report 2026-11-04</p>', html)
+        self.assertIn(views.esc(views.SETS_NOTE), page(report + [weekly()]))
+        self.assertIn("Report charts are copied from the comparison report of 2026-11-04: QVAC with transcribe.cpp", page(report + [weekly()]))
+
+    def test_qvac_only_report_rows_are_listed_in_the_details_without_a_chart(self):
+        listed = weekly(variant="", comparison_set="report", group="only", timing_class="native_excl_load", no_chart=True, speed_x=559.0, latency_ms=287.0,
+                        min_ms=None, max_ms=None)
+        html = page([weekly(), listed])
+        self.assertEqual(re.findall(r'<div class="panel"><h4>(.*?)</h4>', html), ["CPU · JFK 11 s"])
+        self.assertIn(f"<h4>{views.QVAC_ONLY_TITLE}</h4>", html)
+        self.assertIn("qvac-fabric-speech.cpp · CPU · JFK 11 s · inference only: 287.0 ms, 559×", html)
+
+    def test_coverage_without_a_backend_names_no_backend(self):
+        coverage = [{"task": "TTS", "status": "not attempted", "model": "Indic original reference", "engine": "all engines", "backend": "", "reason": "HTTP 401"}]
+        self.assertIn("Indic original reference · all engines: HTTP 401", views.not_measured_html(coverage, ("TTS",)))
+
+
 class PageTest(unittest.TestCase):
     def test_header_links_the_sibling_pages_and_the_dashboard(self):
         html = page([weekly()])

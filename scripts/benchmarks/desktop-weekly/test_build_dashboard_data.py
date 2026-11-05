@@ -158,6 +158,63 @@ class CampaignRowsTest(unittest.TestCase):
         self.assertFalse([r for r in self.rows if r["backend"] == "metal"])
 
 
+def report_row(engine, is_qvac, speed, wer=None, host=HOST, backend="cuda"):
+    return {"id": f"r-{engine}", "host": host, "machine": build.machine_label(host), "task": "TTS", "dashboard": "tts", "family": "", "model": "Supertonic 3",
+            "model_detail": "", "required_family": True, "engine": engine, "is_qvac": is_qvac, "variant": "", "backend": backend, "observed_backend": "",
+            "precision": "Q8_0", "precision_source": "report page", "scenario": "fixed_prompt", "scenario_label": "fixed prompt",
+            "timing_class": "fresh_process", "timing_label": "fresh process including load", "timing_includes": "", "comparison_set": "report",
+            "status": "measured", "status_detail": "measured", "accepted": True, "latency_ms": 612.6, "min_ms": None, "max_ms": None, "samples_ms": "",
+            "audio_s": 12.47, "speed_x": speed, "rtf": 1 / speed, "load_ms": None, "rss_mib": 799.0, "gpu_mib": None, "gpu_kind": "unavailable", "gpu_note": "",
+            "wer_pct": wer, "wer_kind": "TTS intelligibility (Whisper-tiny)", "wer_scope": "", "wer_scored_outputs": 1 if wer is not None else None,
+            "wer_reason": "", "runs": 3, "warmups": 1, "threads": 5, "date": "2026-11-04", "date_source": "report page", "started_utc": "", "finished_utc": "",
+            "pins": "", "model_revisions": "", "hashes": "", "command": "", "config": "", "caveats": "", "comparison_limitation": "", "host_conditions": "",
+            "source_file": "report-rows.json", "source_row": 0, "raw_source": "", "group": f"{host}|{backend}|Supertonic 3|TTS|fixed_prompt|report|0",
+            "ratio_qualifier": "", "run": "report"}
+
+
+REPORT = {"rows": [report_row(build.QVAC, True, 20.4, 2.9), report_row("audio.cpp", False, 16.4, 12.0), report_row("audio.cpp", False, 9.0, host="spark-d9ca")],
+          "coverage": [{"id": "r000", "host": HOST, "machine": "RTX 5090", "task": "TTS", "model": "Indic original reference", "engine": "all engines",
+                        "backend": "", "status": "not attempted", "rows": 0, "reason": "HTTP 401", "source": "report-rows.json", "scenario": ""}]}
+
+
+class ReportRowsTest(unittest.TestCase):
+    def setUp(self):
+        self.summary = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("cpu", "parakeet-tdt")])
+        self.runs = build.newest_cells([self.summary], FAMILIES) + build.report_rows(HOST, REPORT)
+
+    def test_only_the_machines_own_report_rows_join_its_runs(self):
+        self.assertEqual([r["engine"] for r in self.runs if r["comparison_set"] == "report"], [build.QVAC, "audio.cpp"])
+        self.assertEqual(build.report_rows("qvac-dev-strix-1", REPORT), [])
+
+    def test_report_coverage_cells_follow_the_weekly_ones_with_fresh_ids(self):
+        cells = build.coverage_rows([self.summary], self.runs, FAMILIES, REPORT)
+        self.assertEqual((cells[-1]["id"], cells[-1]["model"], cells[-1]["status"]), (f"k{len(cells) - 1:03d}", "Indic original reference", "not attempted"))
+        self.assertEqual(len(build.coverage_rows([self.summary], self.runs, FAMILIES, {})), len(cells) - 1)
+
+    def test_commentary_and_machine_row_name_the_report(self):
+        notes = [n["comment"] for n in build.commentary_rows([self.summary], self.runs, FAMILIES) if n["topic"] == "Comparison report"]
+        self.assertEqual(notes, ["2 rows copied from the comparison report of 2026-11-04: QVAC against audio.cpp with that report's own builds, inputs and "
+                                 "timing scopes; its charts are never mixed with the weekly ones."])
+        self.assertIn("no campaign rows for this machine; 2 report rows from 2026-11-04", build.machine_row([self.summary], self.runs)[0]["work"])
+
+    def test_the_hub_counts_report_engines_and_flags_their_wer(self):
+        hub = build.hub_document({HOST: [self.summary]}, {HOST: self.runs}, ENGINES, {})
+        self.assertEqual(hub["machines"][0]["tasks"]["tts"], {"models": 1, "backends": ["cuda"], "others": 1, "rows": 2})
+        self.assertEqual([(f["engine"], f["wer_pct"]) for f in hub["quality_flags"]], [("audio.cpp", 12.0)])
+
+    def test_build_reads_the_report_next_to_the_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "summaries" / HOST).mkdir(parents=True)
+            (root / "summaries" / HOST / "2026-11-08.json").write_text(json.dumps({k: v for k, v in self.summary.items() if not k.startswith("_")}))
+            (root / "report-rows.json").write_text(json.dumps(REPORT))
+            args = build.parse_args([str(root / "summaries"), "-o", str(root / "out")])
+            self.assertEqual(build.report_path(args), str(root / "report-rows.json"))
+            build.main([str(root / "summaries"), "-o", str(root / "out"), "--comparisons", "", "--dashboards", ""])
+            runs = json.loads((root / "out" / HOST / "runs.json").read_text())
+        self.assertEqual(sum(1 for r in runs if r["comparison_set"] == "report"), 2)
+
+
 class CommentaryTest(unittest.TestCase):
     def setUp(self):
         first = summary("2026-11-01", "2026-11-01T17:00:00Z", [result("cpu", "parakeet-tdt", 10.0), result("cpu", "audio8-lm-f16-dec-f16", 1.0)])
