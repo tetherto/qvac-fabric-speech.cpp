@@ -4,22 +4,30 @@
 Loads the model once from a pinned Hugging Face snapshot, decodes the clip with soundfile outside the timed region,
 runs the untimed warm-ups and the timed transcriptions, and writes the bench JSON the driver reads for native families
 (inference_ms, rtf_median, backend, transcript). With --once it transcribes the clip a single time and prints the text,
-for time-wrapped families.
+for time-wrapped families. The TTS engine (mlx-audio Chatterbox Turbo) runs only with --once: it synthesizes --text
+into --out with the built-in voice at a fixed seed, for a time-wrapped family.
 """
 import argparse
 import json
 import pathlib
 import statistics
+import sys
 import time
 
 PARAKEET = "parakeet-mlx"
 WHISPER = "mlx-whisper"
-ENGINES = (PARAKEET, WHISPER)
+NEMOTRON = "mlx-audio-nemotron"
+CHATTERBOX = "mlx-audio-chatterbox-turbo"
+ENGINES = (PARAKEET, WHISPER, NEMOTRON, CHATTERBOX)
+TTS_ENGINES = (CHATTERBOX,)
 BACKEND = "Metal"
 REVISION_MARKER = ".revision"
 MS_PER_S = 1000.0
 BYTES_PER_MIB = 1024 * 1024
 LANGUAGE = "en"
+LANGUAGE_TAG = "en-US"
+DEFAULT_RATE = 16000
+SEED = 42
 
 
 def parse_args(argv):
@@ -28,12 +36,24 @@ def parse_args(argv):
     parser.add_argument("--repo", required=True, help="Hugging Face repo of the MLX conversion")
     parser.add_argument("--revision", required=True, help="commit sha of the conversion")
     parser.add_argument("--model-dir", required=True, help="where the snapshot is kept (downloaded on the first run)")
-    parser.add_argument("--wav", required=True)
+    parser.add_argument("--wav", help="clip to transcribe (ASR engines)")
+    parser.add_argument("--text", help="prompt to synthesize (TTS engines)")
+    parser.add_argument("--out", help="WAV written by a TTS engine")
     parser.add_argument("--bench-runs", type=int, default=5)
     parser.add_argument("--bench-warmup", type=int, default=1)
     parser.add_argument("--bench-json")
-    parser.add_argument("--once", action="store_true", help="transcribe once and print the text (time-wrapped mode)")
-    return parser.parse_args(argv)
+    parser.add_argument("--once", action="store_true", help="transcribe or synthesize once (time-wrapped mode)")
+    return check_args(parser.parse_args(argv))
+
+
+def check_args(args):
+    if args.engine in TTS_ENGINES and not (args.once and args.text and args.out):
+        raise SystemExit("a TTS engine needs --once, --text and --out")
+    if args.engine not in TTS_ENGINES and not args.wav:
+        raise SystemExit("an ASR engine needs --wav")
+    if args.engine not in TTS_ENGINES and not args.once and not args.bench_json:
+        raise SystemExit("--bench-json is required without --once")
+    return args
 
 
 def pinned(model_dir, revision):
@@ -82,13 +102,52 @@ def whisper_rate():
     return SAMPLE_RATE
 
 
+def nemotron_transcriber(model_dir, samples, rate):
+    import mlx.core as mx
+    from mlx_audio.stt import load
+    model = load(model_dir)
+    check_rate(rate, getattr(getattr(model, "preprocessor_config", None), "sample_rate", DEFAULT_RATE))
+    audio = mx.array(samples)
+    return lambda: model.generate(audio, language=LANGUAGE_TAG, chunk_duration=None).text
+
+
 def build_transcriber(engine, model_dir, samples, rate):
     if engine == PARAKEET:
         model = load_parakeet(model_dir)
         check_rate(rate, model.preprocessor_config.sample_rate)
         return parakeet_transcriber(model, samples)
+    if engine == NEMOTRON:
+        return nemotron_transcriber(model_dir, samples, rate)
     check_rate(rate, whisper_rate())
     return whisper_transcriber(model_dir, samples)
+
+
+def synthesized_audio(model, text):
+    import numpy as np
+    return np.concatenate([np.array(result.audio) for result in model.generate(text)])
+
+
+def backend_name():
+    import mlx.core as mx
+    return BACKEND if mx.default_device().type == mx.DeviceType.gpu else "CPU"
+
+
+def announce_backend():
+    line = f"backend: {backend_name()}"
+    print(line, file=sys.stderr)
+    print(line)
+
+
+def synthesize(model_dir, text, out):
+    import mlx.core as mx
+    import soundfile
+    from mlx_audio.tts.utils import load_model
+    announce_backend()
+    model = load_model(model_dir)
+    mx.random.seed(SEED)
+    audio = synthesized_audio(model, text)
+    soundfile.write(out, audio, model.sample_rate)
+    print(f"wrote {out}: {len(audio) / model.sample_rate:.2f} s at {model.sample_rate} Hz")
 
 
 def timed_call(fn):
@@ -125,6 +184,7 @@ def write_json(path, payload):
 
 
 def run_once(fn):
+    announce_backend()
     print(fn().strip())
 
 
@@ -136,18 +196,22 @@ def run_bench(args, fn, load_ms, audio_seconds):
     print(json.dumps({k: payload[k] for k in ("engine", "inference_ms", "rtf_median", "transcript")}))
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    fetch_snapshot(args.repo, args.revision, args.model_dir)
+def run_asr(args):
     samples, rate = read_clip(args.wav)
     start = time.perf_counter()
     fn = build_transcriber(args.engine, args.model_dir, samples, rate)
     load_ms = (time.perf_counter() - start) * MS_PER_S
     if args.once:
         return run_once(fn)
-    if not args.bench_json:
-        raise SystemExit("--bench-json is required without --once")
     run_bench(args, fn, load_ms, len(samples) / rate)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    fetch_snapshot(args.repo, args.revision, args.model_dir)
+    if args.engine in TTS_ENGINES:
+        return synthesize(args.model_dir, args.text, args.out)
+    run_asr(args)
 
 
 if __name__ == "__main__":

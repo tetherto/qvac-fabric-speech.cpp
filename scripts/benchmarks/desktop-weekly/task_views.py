@@ -25,7 +25,7 @@ ENGINE_CLASSES = {"qvac-fabric-speech.cpp": "e-qvac", "QVAC bundled whisper.cpp"
                   "LocalAI / parakeet.cpp": "e-localai", "transcribe.cpp": "e-transcribe", "NeMo-Speech.cpp": "e-nemo",
                   "whisper.cpp (upstream)": "e-whispercpp", "cosyvoice.cpp": "e-cosy", "TTS.cpp": "e-ttscpp", "acestep.cpp": "e-acestep",
                   "minimaxmusic.cpp": "e-minimax", "faster-whisper (CTranslate2)": "e-fw", "vLLM": "e-vllm", "SGLang-Omni": "e-sglang",
-                  "OpenMOSS PyTorch reference": "e-moss", "parakeet-mlx": "e-mlx", "mlx-whisper": "e-mlx"}
+                  "OpenMOSS PyTorch reference": "e-moss", "parakeet-mlx": "e-mlx", "mlx-whisper": "e-mlx", "mlx-audio": "e-mlx"}
 OTHER_ENGINE = "e-other"
 METRICS = {"ASR": "transcription speed", "TTS": "speech synthesis speed", "TTS cloning": "voice cloning speed", "Music": "music generation speed"}
 DEFAULT_METRIC = "speed"

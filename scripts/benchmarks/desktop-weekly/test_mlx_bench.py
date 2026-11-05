@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
@@ -48,6 +49,35 @@ class TimingTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             bench.check_rate(44100, 16000)
         bench.check_rate(16000, 16000)
+
+
+class ArgsTest(unittest.TestCase):
+    def test_a_tts_engine_needs_once_text_and_out_and_an_asr_engine_a_clip(self):
+        parsed = bench.parse_args(["--engine", "mlx-audio-chatterbox-turbo", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--text", "hi", "--out", "o.wav"])
+        self.assertEqual((parsed.engine in bench.TTS_ENGINES, parsed.text, parsed.out), (True, "hi", "o.wav"))
+        with self.assertRaises(SystemExit):
+            bench.parse_args(["--engine", "mlx-audio-chatterbox-turbo", "--repo", "r", "--revision", "v", "--model-dir", "m", "--text", "hi", "--out", "o.wav"])
+        with self.assertRaises(SystemExit):
+            bench.parse_args(["--engine", "mlx-audio-nemotron", "--repo", "r", "--revision", "v", "--model-dir", "m", "--bench-json", "b.json"])
+        with self.assertRaises(SystemExit):
+            bench.parse_args(["--engine", "mlx-audio-nemotron", "--repo", "r", "--revision", "v", "--model-dir", "m", "--wav", "a.wav"])
+
+    def test_once_mode_announces_the_backend_for_the_driver(self):
+        with mock.patch.object(bench, "backend_name", return_value="Metal"), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            bench.run_once(lambda: " hello ")
+        self.assertEqual(out.getvalue(), "backend: Metal\nhello\n")
+
+    def test_synthesized_audio_joins_the_segments(self):
+        class Segment:
+            def __init__(self, audio):
+                self.audio = audio
+
+        class Model:
+            def generate(self, text):
+                yield Segment([0.1, 0.2])
+                yield Segment([0.3])
+
+        self.assertEqual(list(bench.synthesized_audio(Model(), "hi")), [0.1, 0.2, 0.3])
 
 
 class SnapshotTest(unittest.TestCase):

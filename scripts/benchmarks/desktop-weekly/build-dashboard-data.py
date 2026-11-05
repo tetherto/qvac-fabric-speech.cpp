@@ -40,7 +40,8 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "parakeet-eou": "F16", "whisper-small": "F16", "parakeet-tdt-abcba": "Q8_0", "parakeet-unified-abcba": "Q8_0",
                   "transcribepsy-abcba": "Q8_0", "nemotron-abcba": "F16", "parakeet-eou-abcba": "F16", "whisper-small-abcba": "F16",
                   "chatterbox-turbo": "Q8_0", "chatterbox-mtl-clone": "Q8_0", "cosyvoice3-clone": "LM Q8_0", "parler-mini": "Q8_0",
-                  "parler-indic": "Q8_0", "parakeet-mlx": "BF16", "parakeet-mlx-abcba": "BF16", "mlx-whisper": "F16", "mlx-whisper-abcba": "F16"}
+                  "parler-indic": "Q8_0", "parakeet-mlx": "BF16", "parakeet-mlx-abcba": "BF16", "mlx-whisper": "F16", "mlx-whisper-abcba": "F16",
+                  "nemotron-mlx-audio": "BF16", "nemotron-mlx-audio-abcba": "BF16", "chatterbox-turbo-mlx-audio": "F16"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}

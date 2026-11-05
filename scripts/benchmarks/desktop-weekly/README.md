@@ -38,6 +38,8 @@ and the weekly artifact.
 | ASR | `whisper-small` | Upstream whisper.cpp `ggml-small.bin` through `whisper-cli` (HuggingFace, pinned revision) |
 | ASR | `{parakeet-tdt,parakeet-unified,transcribepsy,nemotron,parakeet-eou,whisper-small}-abcba` | the same models on the 160.6 s multi-speaker ABCBA clip, which has no reference transcript (no WER) |
 | ASR | `parakeet-mlx`, `parakeet-mlx-abcba` | another engine beside QVAC, Mac Studio Metal only: parakeet-mlx on the mlx-community Parakeet TDT 0.6B v3 conversion (BF16), timed in process after one model load like the QVAC native rows, so it shares their charts |
+| ASR | `nemotron-mlx-audio`, `nemotron-mlx-audio-abcba` | mlx-audio on the mlx-community Nemotron 3.5 ASR Streaming 0.6B conversion (BF16), Mac Studio Metal only, offline decoding timed in process like the QVAC `nemotron` rows |
+| TTS | `chatterbox-turbo-mlx-audio` | mlx-audio Chatterbox Turbo (F16 conversion, built-in voice, seed 42), Mac Studio Metal only, a fresh process including load like the QVAC `chatterbox-turbo` rows |
 | ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
 | TTS | `chatterbox-turbo` | Chatterbox Turbo: T3 Turbo Q8_0 with S3Gen Q8_0, built-in voice |
@@ -93,7 +95,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | --- | --- |
 | `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail |
 | `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
-| `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription |
+| `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio Nemotron) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription, or for the mlx-audio Chatterbox Turbo synthesis of a time-wrapped family |
 | `build-highlights.py`, `highlights.json` | the dashboard-data folder -> `speech-bench-highlights.html`, the cards of the charts listed in `highlights.json` |
 | `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, run selection |
 | `families.json` | the matrix (see above) |
@@ -158,9 +160,9 @@ Mac mini) are listed in `config.example.env` and in the skill. A host without cr
 `/bin/date` lacks `%N` (macOS 15) gets `run-family.sh` routed through the `nsdate` shim after every source update.
 
 The MLX families need, on the Mac Studio only, a Python virtual environment at `~/speech-bench/mlx/venv` with `mlx`,
-`parakeet-mlx`, `mlx-whisper`, `huggingface_hub`, `soundfile` and `numpy` (Python 3.11 or newer; the machine has no
+`parakeet-mlx`, `mlx-whisper`, `mlx-audio`, `huggingface_hub`, `soundfile` and `numpy` (Python 3.11 or newer; the machine has no
 Homebrew, so use a uv-managed interpreter: `python3.11 -m venv ~/speech-bench/mlx/venv && ~/speech-bench/mlx/venv/bin/pip
-install mlx parakeet-mlx mlx-whisper huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
+install mlx parakeet-mlx mlx-whisper mlx-audio huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
 (binary missing) and the rest of the run is unaffected.
 
 Try the pipeline before the first Sunday:

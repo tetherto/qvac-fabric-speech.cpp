@@ -15,29 +15,109 @@
       "host": "spark-d9ca",
       "backend": "cuda",
       "cards": [
-        {"task": "ASR", "model": "Parakeet TDT 0.6B v3", "scenario": "abcba", "timing_class": "resident_api", "set": "report"},
-        {"task": "TTS", "model": "Supertonic 3", "scenario": "fixed_prompt", "timing_class": "fresh_process", "set": "report"},
-        {"task": "TTS", "model": "Audio8 TTS Preview 0.6B", "scenario": "fixed_prompt", "timing_class": "fresh_process", "set": "report"},
-        {"task": "Music", "model": "MiniMax Music3", "scenario": "music_10s", "timing_class": "fresh_process", "set": "report"}
+        {
+          "task": "ASR",
+          "model": "Parakeet TDT 0.6B v3",
+          "scenario": "abcba",
+          "timing_class": "resident_api",
+          "set": "report"
+        },
+        {
+          "task": "TTS",
+          "model": "Supertonic 3",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "report"
+        },
+        {
+          "task": "TTS",
+          "model": "Audio8 TTS Preview 0.6B",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "report"
+        },
+        {
+          "task": "Music",
+          "model": "MiniMax Music3",
+          "scenario": "music_10s",
+          "timing_class": "fresh_process",
+          "set": "report"
+        }
       ]
     },
     {
       "host": "qvac-dev-strix-1",
       "backend": "vulkan",
       "cards": [
-        {"task": "ASR", "model": "Parakeet TDT 0.6B v3", "scenario": "abcba", "timing_class": "resident_api", "set": "report"},
-        {"task": "ASR", "model": "Nemotron 3.5 ASR Streaming 0.6B", "scenario": "abcba", "timing_class": "resident_api", "set": "report"},
-        {"task": "TTS", "model": "Supertonic 3", "scenario": "fixed_prompt", "timing_class": "fresh_process", "set": "report"},
-        {"task": "TTS", "model": "Audio8 TTS Preview 0.6B", "scenario": "fixed_prompt", "timing_class": "fresh_process", "set": "report"},
-        {"task": "Music", "model": "ACE-Step 1.5 Turbo", "scenario": "music_30s", "timing_class": "fresh_process", "set": "report"}
+        {
+          "task": "ASR",
+          "model": "Parakeet TDT 0.6B v3",
+          "scenario": "abcba",
+          "timing_class": "resident_api",
+          "set": "report"
+        },
+        {
+          "task": "ASR",
+          "model": "Nemotron 3.5 ASR Streaming 0.6B",
+          "scenario": "abcba",
+          "timing_class": "resident_api",
+          "set": "report"
+        },
+        {
+          "task": "TTS",
+          "model": "Supertonic 3",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "report"
+        },
+        {
+          "task": "TTS",
+          "model": "Audio8 TTS Preview 0.6B",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "report"
+        },
+        {
+          "task": "Music",
+          "model": "ACE-Step 1.5 Turbo",
+          "scenario": "music_30s",
+          "timing_class": "fresh_process",
+          "set": "report"
+        }
       ]
     },
     {
       "host": "qvac-dev-mac-arm64",
       "backend": "metal",
       "cards": [
-        {"task": "ASR", "model": "Parakeet TDT 0.6B v3", "scenario": "abcba", "timing_class": "native_excl_load", "set": "weekly"},
-        {"task": "ASR", "model": "Whisper small multilingual", "scenario": "abcba", "timing_class": "fresh_process", "set": "weekly"}
+        {
+          "task": "ASR",
+          "model": "Parakeet TDT 0.6B v3",
+          "scenario": "abcba",
+          "timing_class": "native_excl_load",
+          "set": "weekly"
+        },
+        {
+          "task": "ASR",
+          "model": "Nemotron 3.5 ASR Streaming 0.6B",
+          "scenario": "abcba",
+          "timing_class": "native_excl_load",
+          "set": "weekly"
+        },
+        {
+          "task": "ASR",
+          "model": "Whisper small multilingual",
+          "scenario": "abcba",
+          "timing_class": "fresh_process",
+          "set": "weekly"
+        },
+        {
+          "task": "TTS",
+          "model": "Chatterbox Turbo",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "weekly"
+        }
       ]
     }
   ]

@@ -128,6 +128,13 @@
       "ggml": "Not ggml-based (MLX)",
       "details": "ml-explore mlx-whisper on the mlx-community Whisper small conversion (f16), Metal GPU through MLX, driven by the weekly run on the Mac Studio with the model loaded once and greedy English decoding timed in process; the QVAC whisper-small rows are fresh-process timings, so the two stay in separate charts.",
       "source": "scripts/benchmarks/desktop-weekly (families mlx-whisper and mlx-whisper-abcba through mlx-bench.py)"
+    },
+    {
+      "engine": "mlx-audio",
+      "role": "new competitor, measured",
+      "ggml": "Not ggml-based (MLX)",
+      "details": "Blaizzy/mlx-audio on the mlx-community conversions, Metal GPU through MLX, driven by the weekly run on the Mac Studio: Nemotron 3.5 ASR Streaming 0.6B (bf16) decoded offline with the model loaded once, the same scope as the QVAC native rows; Chatterbox Turbo (f16, built-in voice, seed 42) as a fresh process including model load like the QVAC chatterbox-turbo rows.",
+      "source": "scripts/benchmarks/desktop-weekly (families nemotron-mlx-audio, nemotron-mlx-audio-abcba and chatterbox-turbo-mlx-audio through mlx-bench.py)"
     }
   ]
 }
