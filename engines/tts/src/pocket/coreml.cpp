@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -48,12 +49,57 @@ void require_finite(const std::vector<float> & values, const char * name) {
     if (!std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); }))
         fail(std::string("non-finite ") + name);
 }
+
+struct expected_feature {
+    std::string name;
+    bool state;
+    std::vector<int64_t> dims;
+};
+
+void require_features(moss_coreml_model * model, const std::string & path, const std::vector<expected_feature> & expected) {
+    for (const auto & feature : expected) {
+        const auto declared = feature_dims(model, feature.name.c_str(), feature.state);
+        if (declared != feature.dims)
+            fail(path + " declares " + feature.name + " " + dims_text(declared) + " where the runtime needs " +
+                 dims_text(feature.dims));
+    }
+}
+
+void require_stamp(moss_coreml_model * model, const std::string & path, const std::string & source_hash) {
+    if (metadata(model, "pocket.coreml.schema") != COREML_SCHEMA)
+        fail(path + " has an unsupported schema; re-export it with scripts/export-pocket-coreml.py");
+    if (metadata(model, "pocket.source_sha256") != source_hash)
+        fail(path + " was exported from another checkpoint than its GGUF");
+}
+
+using Geometry = CoremlDecoderGeometry;
+
+// (name, channels, length) of each Mimi causal-conv history, as
+// histories() in scripts/pocket_coreml_mimi.py orders them.
+struct history_spec {
+    const char * name;
+    const char * output;
+    int channels, length;
+};
+constexpr std::array<history_spec, 9> HISTORIES = {{
+    {"h_upsample", "new_h_upsample", 512, 1}, {"h_conv0", "new_h_conv0", 512, 6},
+    {"h_convtr0", "new_h_convtr0", 512, 1}, {"h_residual0", "new_h_residual0", 256, 2},
+    {"h_convtr1", "new_h_convtr1", 256, 1}, {"h_residual1", "new_h_residual1", 128, 2},
+    {"h_convtr2", "new_h_convtr2", 128, 1}, {"h_residual2", "new_h_residual2", 64, 2},
+    {"h_final", "new_h_final", 64, 2},
+}};
+constexpr int DECODER_ROWS = Geometry::frames * Geometry::upsample;
+constexpr size_t KV_SIZE = size_t(Geometry::layers) * Geometry::heads * Geometry::keep * Geometry::head_dim;
 #endif
 
 } // namespace
 
 bool coreml_valid_units(const std::string & units) {
     return units == "all" || units == "cpu_and_ane" || units == "cpu_and_gpu" || units == "cpu_only";
+}
+
+std::string coreml_units(const CoremlPolicy & policy, const char * sidecar_default) {
+    return policy.compute_units.empty() ? sidecar_default : policy.compute_units;
 }
 
 CoremlPolicy resolve_coreml_policy(const std::string & compute_units, std::optional<bool> strict) {
@@ -77,15 +123,29 @@ std::string coreml_step_path(const std::string & flow_lm_gguf) {
     return ::tts_cpp::detail::coreml_sidecar_path(flow_lm_gguf, COREML_STEP_SUFFIX);
 }
 
-bool coreml_step_enabled(const std::string & flow_lm_gguf, const CoremlPolicy & policy) {
+std::string coreml_decoder_path(const std::string & mimi_gguf) {
+    return ::tts_cpp::detail::coreml_sidecar_path(mimi_gguf, COREML_DECODER_SUFFIX);
+}
+
+namespace {
+bool sidecar_enabled(const std::string & gguf, const std::string & sidecar, const CoremlPolicy & policy) {
 #ifdef TTS_CPP_USE_COREML
-    return !policy.disabled && !flow_lm_gguf.empty() &&
-        ::tts_cpp::detail::coreml_sidecar_exists(coreml_step_path(flow_lm_gguf));
+    return !policy.disabled && !gguf.empty() && ::tts_cpp::detail::coreml_sidecar_exists(sidecar);
 #else
-    (void) flow_lm_gguf;
+    (void) gguf;
+    (void) sidecar;
     (void) policy;
     return false;
 #endif
+}
+} // namespace
+
+bool coreml_step_enabled(const std::string & flow_lm_gguf, const CoremlPolicy & policy) {
+    return sidecar_enabled(flow_lm_gguf, coreml_step_path(flow_lm_gguf), policy);
+}
+
+bool coreml_decoder_enabled(const std::string & mimi_gguf, const CoremlPolicy & policy) {
+    return sidecar_enabled(mimi_gguf, coreml_decoder_path(mimi_gguf), policy);
 }
 
 void coreml_rope(int position, int head_dim, float base, std::vector<float> & cos, std::vector<float> & sin) {
@@ -109,28 +169,19 @@ CoremlStep::CoremlStep(const std::string & path, const std::string & compute_uni
     }
     try {
         if (!moss_coreml_has_state(model_)) fail(path + " declares no KV state; re-export it");
-        if (metadata(model_, "pocket.coreml.schema") != COREML_SCHEMA)
-            fail(path + " has an unsupported schema; re-export it with scripts/export-pocket-coreml.py");
-        if (metadata(model_, "pocket.source_sha256") != source_hash)
-            fail(path + " was exported from another checkpoint than the FlowLM GGUF");
+        require_stamp(model_, path, source_hash);
         const int64_t heads = config.heads, head_dim = config.dim / config.heads;
         const std::vector<int64_t> mask = feature_dims(model_, "mask", false);
         context_ = mask.size() == 4 ? int(mask[3]) : 0;
         if (context_ < 2) fail(path + " declares mask " + dims_text(mask) + "; expected [1, 1, 1, context]");
         const int64_t c = context_, latent = config.latent_dim;
-        const struct { const char * name; bool state; std::vector<int64_t> dims; } expected[] = {
+        require_features(model_, path, {
             {"latent", false, {1, latent}}, {"noise", false, {1, latent}},
             {"cos", false, {1, head_dim / 2}}, {"sin", false, {1, head_dim / 2}},
             {"mask", false, {1, 1, 1, c}}, {"write_mask", false, {1, 1, c, 1}},
             {"hidden", false, {1, config.dim}}, {"next_latent", false, {1, latent}},
             {"keys", true, {config.layers, heads, c, head_dim}}, {"values", true, {config.layers, heads, c, head_dim}},
-        };
-        for (const auto & feature : expected) {
-            const auto declared = feature_dims(model_, feature.name, feature.state);
-            if (declared != feature.dims)
-                fail(path + " declares " + feature.name + " " + dims_text(declared) + " where this FlowLM needs " +
-                     dims_text(feature.dims));
-        }
+        });
     } catch (...) {
         moss_coreml_free(model_);
         model_ = nullptr;
@@ -207,6 +258,94 @@ void CoremlStep::step(int position, const std::vector<float> & latent, const std
     require_finite(hidden, "hidden output");
     require_finite(next_latent, "latent output");
 }
+CoremlDecoder::CoremlDecoder(const std::string & path, const std::string & compute_units,
+                             const std::string & source_hash) {
+    model_ = moss_coreml_load(path.c_str(), compute_units.c_str());
+    if (model_ == nullptr) fail("cannot load " + path + " on " + compute_units);
+    try {
+        if (moss_coreml_has_state(model_)) fail(path + " declares Core ML state; re-export it");
+        require_stamp(model_, path, source_hash);
+        const std::vector<int64_t> kv = {Geometry::layers, Geometry::heads, Geometry::keep, Geometry::head_dim};
+        std::vector<expected_feature> expected = {
+            {"latents", false, {Geometry::frames, Geometry::latent}},
+            {"cos", false, {DECODER_ROWS, Geometry::head_dim / 2}}, {"sin", false, {DECODER_ROWS, Geometry::head_dim / 2}},
+            {"mask", false, {DECODER_ROWS, Geometry::keep + DECODER_ROWS}},
+            {"keys", false, kv}, {"values", false, kv}, {"new_keys", false, kv}, {"new_values", false, kv},
+            {"pcm", false, {int64_t(Geometry::frames) * Geometry::frame_samples}},
+        };
+        for (const auto & h : HISTORIES) {
+            expected.push_back({h.name, false, {h.channels, h.length}});
+            expected.push_back({h.output, false, {h.channels, h.length}});
+        }
+        require_features(model_, path, expected);
+        label_ = moss_coreml_label(model_);
+        reset();
+        decode(std::vector<float>(size_t(Geometry::frames) * Geometry::latent));
+        reset();
+    } catch (...) {
+        moss_coreml_free(model_);
+        model_ = nullptr;
+        throw;
+    }
+}
+
+CoremlDecoder::~CoremlDecoder() {
+    if (model_ != nullptr) moss_coreml_free(model_);
+}
+
+void CoremlDecoder::reset() {
+    position_ = 0;
+    keys_.assign(KV_SIZE, 0.0f);
+    values_.assign(KV_SIZE, 0.0f);
+    histories_.resize(HISTORIES.size());
+    for (size_t i = 0; i < HISTORIES.size(); ++i)
+        histories_[i].assign(size_t(HISTORIES[i].channels) * HISTORIES[i].length, 0.0f);
+}
+
+// One prediction: RoPE tables for this call's transformer rows, and the mask
+// letting row i see the WINDOW positions up to its own among the KEEP
+// retained rows (unfilled before position KEEP) and this call's rows. The
+// new state comes back into the same buffers: the runner copies every input
+// before predicting and writes outputs after.
+void CoremlDecoder::predict(const float * latent, float * pcm) {
+    constexpr int keep = Geometry::keep, half = Geometry::head_dim / 2, columns = keep + DECODER_ROWS;
+    cos_.resize(size_t(DECODER_ROWS) * half);
+    sin_.resize(cos_.size());
+    for (int row = 0; row < DECODER_ROWS; ++row) {
+        coreml_rope(int(position_) + row, Geometry::head_dim, 10000.0f, row_cos_, row_sin_);
+        std::copy(row_cos_.begin(), row_cos_.end(), cos_.begin() + size_t(row) * half);
+        std::copy(row_sin_.begin(), row_sin_.end(), sin_.begin() + size_t(row) * half);
+    }
+    mask_.assign(size_t(DECODER_ROWS) * columns, COREML_MASKED);
+    const int first = keep - int(std::min<int64_t>(position_, keep));
+    for (int row = 0; row < DECODER_ROWS; ++row)
+        std::fill(mask_.begin() + size_t(row) * columns + std::max(row, first),
+                  mask_.begin() + size_t(row) * columns + keep + row + 1, 0.0f);
+    std::vector<const char *> in_names = {"latents", "cos", "sin", "mask", "keys", "values"};
+    std::vector<const float *> in_data = {latent, cos_.data(), sin_.data(), mask_.data(), keys_.data(), values_.data()};
+    std::vector<const char *> out_names = {"pcm", "new_keys", "new_values"};
+    std::vector<float *> out_data = {pcm, keys_.data(), values_.data()};
+    for (size_t i = 0; i < HISTORIES.size(); ++i) {
+        in_names.push_back(HISTORIES[i].name);
+        in_data.push_back(histories_[i].data());
+        out_names.push_back(HISTORIES[i].output);
+        out_data.push_back(histories_[i].data());
+    }
+    if (moss_coreml_predict(model_, in_names.data(), in_data.data(), int(in_names.size()), out_names.data(),
+                            out_data.data(), int(out_names.size())) != 0)
+        fail("Mimi decoder prediction failed");
+    position_ += DECODER_ROWS;
+}
+
+std::vector<float> CoremlDecoder::decode(const std::vector<float> & latents) {
+    constexpr size_t frame = size_t(Geometry::frames) * Geometry::latent;
+    if (latents.empty() || latents.size() % frame) fail("invalid Mimi decoder latents");
+    std::vector<float> pcm(latents.size() / frame * Geometry::frames * Geometry::frame_samples);
+    for (size_t at = 0, out = 0; at < latents.size(); at += frame, out += size_t(Geometry::frames) * Geometry::frame_samples)
+        predict(latents.data() + at, pcm.data() + out);
+    require_finite(pcm, "Mimi decoder output");
+    return pcm;
+}
 #else
 CoremlStep::CoremlStep(const std::string &, const std::string &, const FlowConfig & config, const std::string &)
     : config_(config) {
@@ -218,6 +357,13 @@ void CoremlStep::step(int, const std::vector<float> &, const std::vector<float> 
                       std::vector<float> &) {
     fail("this build has no Core ML");
 }
+CoremlDecoder::CoremlDecoder(const std::string &, const std::string &, const std::string &) {
+    fail("this build has no Core ML (TTS_CPP_COREML=OFF)");
+}
+CoremlDecoder::~CoremlDecoder() = default;
+void CoremlDecoder::reset() {}
+void CoremlDecoder::predict(const float *, float *) { fail("this build has no Core ML"); }
+std::vector<float> CoremlDecoder::decode(const std::vector<float> &) { fail("this build has no Core ML"); }
 #endif
 
 } // namespace tts_cpp::pocket::detail

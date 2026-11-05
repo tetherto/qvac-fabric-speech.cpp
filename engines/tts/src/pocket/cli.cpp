@@ -57,8 +57,9 @@ void print_help() {
               "           [--threads 1 --steps 1 --temperature 0.3 --seed 1234 --runs 1 --report FILE.json]\n"
               "           [--gpu] [--backends-dir DIR] [--frames-after-eos -1]\n"
               "--gpu selects Metal, CUDA, Vulkan or OpenCL for FlowLM and Mimi; CPU is the default.\n"
-              "A Core ML step sidecar next to the FlowLM GGUF (flow-lm-step.mlmodelc) runs the generation steps;\n"
-              "POCKET_COREML_DISABLE, POCKET_COREML_STRICT and POCKET_COREML_COMPUTE_UNITS set its policy.\n"
+              "Core ML sidecars next to the GGUFs (flow-lm-step.mlmodelc, mimi-decoder.mlmodelc) run the generation\n"
+              "steps and Mimi decoding; POCKET_COREML_DISABLE, POCKET_COREML_STRICT and POCKET_COREML_COMPUTE_UNITS\n"
+              "set their policy.\n"
               "--backend cpu|opencl|webgpu|hexagon|HTP0 explicitly selects a backend; unavailable backends are errors.\n"
               "--frames-after-eos -1 uses the checkpoint/text default; explicit range 0..100.\n"
               "DIR contains flow-lm.gguf, mimi.gguf, frontend.json, voice.gguf. Individual asset paths can override DIR.\n"
@@ -133,7 +134,7 @@ Json benchmark_once(Engine & engine, const std::string & text, const std::string
     const double duration = double(result.pcm.size())/result.sample_rate;
     Json measurement = {{"seconds",elapsed},{"first_audio_seconds",first_audio},
                         {"audio_seconds",duration},{"real_time_factor",elapsed/duration},
-                        {"flow_lm_backend",result.flow_lm_backend}};
+                        {"flow_lm_backend",result.flow_lm_backend},{"mimi_backend",result.mimi_backend}};
     std::puts(measurement.dump().c_str());
     if (!output.empty()) write_wav(output, result);
     return measurement;
@@ -148,8 +149,9 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
     if (runs < 1 || runs > 100) throw std::runtime_error("runs must be 1..100");
     const auto start = Clock::now(); Engine engine(opts);
     const double load = seconds_since(start);
-    std::fprintf(stderr, "Pocket FlowLM: %s%s; Mimi: %s; device: %s\n", engine.flow_lm_backend_name(),
-                 engine.flow_lm_on_coreml() ? " (generation steps on the Core ML sidecar)" : "", engine.mimi_backend_name(), engine.device_name());
+    std::fprintf(stderr, "Pocket FlowLM: %s%s; Mimi: %s%s; device: %s\n", engine.flow_lm_backend_name(),
+                 engine.flow_lm_on_coreml() ? " (generation steps on the Core ML sidecar)" : "", engine.mimi_backend_name(),
+                 engine.mimi_on_coreml() ? " (decoding on the Core ML sidecar)" : "", engine.device_name());
     if (runs > 1) engine.synthesize("A short warm up.");
     const auto measurements = benchmark_runs(engine, text, args.get("--output", "pocket-output.wav"), runs);
     write_report(args.get("--report", ""), {
@@ -160,7 +162,8 @@ int run_synthesis(const Arguments & args, const EngineOptions & opts, const std:
         {"frames_after_eos",opts.frames_after_eos},
         {"seed",opts.seed},{"text",text},{"load_seconds",load},{"warmups",runs>1?1:0},{"runs",measurements},
         {"source_sha256",engine.model_source_sha256()},{"sample_rate",engine.sample_rate()},
-        {"compute_precision",engine.flow_lm_on_coreml() ? "float32 (FlowLM steps: Core ML float16)" : "float32"},{"rng","Fabric MT19937 Box-Muller (not PyTorch seed-equivalent)"},
+        {"compute_precision",engine.flow_lm_on_coreml() || engine.mimi_on_coreml() ?
+            "float32 (Core ML sidecars: float16)" : "float32"},{"rng","Fabric MT19937 Box-Muller (not PyTorch seed-equivalent)"},
         {"assets",{{"flow_lm",opts.flow_lm_path},{"mimi",opts.mimi_path},{"frontend",opts.frontend_path},{"voice",opts.voice_path}}}});
     return 0;
 }

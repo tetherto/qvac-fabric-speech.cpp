@@ -93,12 +93,13 @@ FitResult fit_params(const FitOptions & o) {
     try {
         validate(o);
         const auto & e = o.engine;
-        // An enabled Core ML step sidecar runs FlowLM outside ggml: its
-        // resident model and state cannot be projected (CosyVoice's rule).
-        if (detail::coreml_step_enabled(e.flow_lm_path, detail::resolve_coreml_policy(e.coreml_compute_units, e.coreml_strict))) {
+        // Enabled Core ML sidecars run FlowLM or Mimi outside ggml: their
+        // resident models and buffers cannot be projected (CosyVoice's rule).
+        const auto policy = detail::resolve_coreml_policy(e.coreml_compute_units, e.coreml_strict);
+        if (detail::coreml_step_enabled(e.flow_lm_path, policy) || detail::coreml_decoder_enabled(e.mimi_path, policy)) {
             r.reason = "coreml-memory-estimate-unavailable";
-            r.report = "The FlowLM Core ML step sidecar's resident model and state cannot be projected; "
-                       "set POCKET_COREML_DISABLE=1 to project the ggml FlowLM instead.\n";
+            r.report = "Core ML sidecars' resident models and buffers cannot be projected; "
+                       "set POCKET_COREML_DISABLE=1 to project the ggml FlowLM and Mimi instead.\n";
             return r;
         }
         // Snapshot before backend initialization and metadata/container loads:
