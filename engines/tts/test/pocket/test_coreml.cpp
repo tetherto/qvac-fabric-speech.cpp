@@ -1,26 +1,29 @@
-// Pocket FlowLM Core ML step sidecar.
+// Pocket Core ML sidecars: the FlowLM step and the Mimi decoder.
 //
 //   test-pocket-coreml                  policy, naming, RoPE tables, sidecar
 //                                       detection, fit refusal, option checks
 //   test-pocket-coreml --shape-fixture  a tiny real step reproduces its float32
 //                                       reference after the prefix is written
-//                                       into its state; every declared shape,
-//                                       the schema, the checkpoint hash and
-//                                       the state are checked before predicting
-//   test-pocket-coreml --engine-fixture the real step against ggml FlowLM frame
-//                                       by frame, the ggml replay of frames a
-//                                       retired sidecar generated, and the
+//                                       into its state, and a random full-size
+//                                       Mimi decoder streams its reference;
+//                                       every declared shape, the schema, the
+//                                       checkpoint hash and state presence are
+//                                       checked before predicting
+//   test-pocket-coreml --engine-fixture the real sidecars against ggml FlowLM
+//                                       and Mimi, the ggml replay of frames a
+//                                       retired step generated, and the
 //                                       Engine's routing, labels and strict mode
 //
 // The shape fixture reads POCKET_COREML_TEST_SHAPES (the directory
 // test/prepare_pocket_coreml_fixture.py writes); the engine fixture reads
 // POCKET_COREML_TEST_BUNDLE (a Pocket bundle directory with the exported
-// flow-lm-step.mlmodelc next to flow-lm.gguf). Each reports a skip (77)
+// flow-lm-step.mlmodelc and mimi-decoder.mlmodelc next to their GGUFs). Each reports a skip (77)
 // without its inputs or without Core ML.
 
 #include "pocket/coreml.h"
 #include "pocket/flow_lm.h"
 #include "pocket/frontend.h"
+#include "pocket/mimi.h"
 #include "coreml_sidecar_path.h"
 #include "json.hpp"
 #include "npy.h"
@@ -98,6 +101,17 @@ double max_error(const std::vector<float> & got, const std::vector<float> & want
     return error / scale;
 }
 
+double snr_db(const std::vector<float> & got, const std::vector<float> & want) {
+    require(got.size() == want.size(), "size mismatch");
+    double signal = 0, noise = 0;
+    for (size_t i = 0; i < got.size(); ++i) {
+        require(std::isfinite(got[i]), "non-finite output");
+        signal += double(want[i]) * want[i];
+        noise += (double(got[i]) - want[i]) * (double(got[i]) - want[i]);
+    }
+    return 10 * std::log10(signal / std::max(noise, 1e-30));
+}
+
 double cosine(const std::vector<float> & a, const std::vector<float> & b) {
     double dot = 0, na = 0, nb = 0;
     for (size_t i = 0; i < a.size(); ++i) { dot += double(a[i]) * b[i]; na += double(a[i]) * a[i]; nb += double(b[i]) * b[i]; }
@@ -110,17 +124,20 @@ void check_policy() {
     unsetenv(pd::COREML_STRICT_ENV);
     unsetenv(pd::COREML_DISABLE_ENV);
     auto policy = pd::resolve_coreml_policy();
-    require(policy.compute_units == "cpu_and_gpu" && !policy.strict && !policy.disabled, "default policy");
+    require(policy.compute_units.empty() && !policy.strict && !policy.disabled, "default policy");
+    require(pd::coreml_units(policy, pd::COREML_STEP_DEFAULT_UNITS) == "cpu_and_gpu" &&
+            pd::coreml_units(policy, pd::COREML_DECODER_DEFAULT_UNITS) == "cpu_and_ane", "per-sidecar default units");
 
     setenv(pd::COREML_UNITS_ENV, "all", 1);
     setenv(pd::COREML_STRICT_ENV, "0", 1);  // presence means strict
     policy = pd::resolve_coreml_policy();
     require(policy.compute_units == "all" && policy.strict, "inherited policy");
+    require(pd::coreml_units(policy, pd::COREML_DECODER_DEFAULT_UNITS) == "all", "set units apply to every sidecar");
     policy = pd::resolve_coreml_policy("cpu_only", false);
     require(policy.compute_units == "cpu_only" && !policy.strict, "explicit policy overrides the environment");
 
     setenv(pd::COREML_UNITS_ENV, "gpu_please", 1);
-    require(pd::resolve_coreml_policy().compute_units == "cpu_and_gpu", "invalid inherited units keep the default");
+    require(pd::resolve_coreml_policy().compute_units.empty(), "invalid inherited units keep the defaults");
     require(throws([] { pd::resolve_coreml_policy("gpu_please"); }), "invalid explicit units throw");
 
     setenv(pd::COREML_DISABLE_ENV, "1", 1);
@@ -130,6 +147,7 @@ void check_policy() {
 void check_naming() {
     require(pd::coreml_step_path("models/pocket/flow-lm.gguf") == "models/pocket/flow-lm-step.mlmodelc", "bundle name");
     require(pd::coreml_step_path("m/flow-lm-f16.gguf") == "m/flow-lm-step.mlmodelc", "quant tag dropped");
+    require(pd::coreml_decoder_path("models/pocket/mimi.gguf") == "models/pocket/mimi-decoder.mlmodelc", "decoder name");
 }
 
 void check_rope() {
@@ -153,8 +171,26 @@ void check_detection_and_fit() {
     unsetenv(pd::COREML_STRICT_ENV);
     unsetenv(pd::COREML_DISABLE_ENV);
     temp_dir dir("detect");
-    const std::string gguf = (dir.path / "flow-lm.gguf").string();
+    const std::string gguf = (dir.path / "flow-lm.gguf").string(), mimi_gguf = (dir.path / "mimi.gguf").string();
     require(!pd::coreml_step_enabled(gguf, pd::resolve_coreml_policy()), "no sidecar");
+    require(!pd::coreml_decoder_enabled(mimi_gguf, pd::resolve_coreml_policy()), "no decoder sidecar");
+    // The decoder alone makes fit refuse too.
+    fs::create_directories(pd::coreml_decoder_path(mimi_gguf));
+    {
+        tts_cpp::pocket::FitOptions decoder_only;
+        decoder_only.text = "Hi.";
+        decoder_only.engine.flow_lm_path = gguf;
+        decoder_only.engine.mimi_path = mimi_gguf;
+        decoder_only.engine.frontend_path = (dir.path / "frontend.json").string();
+        decoder_only.engine.voice_path = (dir.path / "voice.gguf").string();
+#ifdef TTS_CPP_USE_COREML
+        require(pd::coreml_decoder_enabled(mimi_gguf, pd::resolve_coreml_policy()), "decoder sidecar detected");
+        require(tts_cpp::pocket::fit_params(decoder_only).reason == "coreml-memory-estimate-unavailable",
+                "fit refuses the Core ML decoder");
+#else
+        require(!pd::coreml_decoder_enabled(mimi_gguf, pd::resolve_coreml_policy()), "no Core ML decoder in this build");
+#endif
+    }
     fs::create_directories(pd::coreml_step_path(gguf));
     tts_cpp::pocket::FitOptions fit;
     fit.text = "Hi.";
@@ -185,6 +221,60 @@ std::vector<float> npy_floats(const fs::path & path) {
     const float * data = npy_as_f32(array);
     return std::vector<float>(data, data + array.n_elements());
 }
+
+#ifdef TTS_CPP_USE_COREML
+// The random full-size decoder streams its eager reference one frame per
+// call (past the attention window), in calls of several frames, and again
+// after reset(); each defective sidecar is rejected at load.
+void check_decoder_fixture(const fs::path & root) {
+    const fs::path reference = root / "good" / "reference";
+    std::ifstream config_file(reference / "config.json");
+    const auto config = nlohmann::json::parse(config_file);
+    const std::string source = config["source"];
+    const auto sidecar = [&](const std::string & variant) { return (root / variant / "mimi-decoder.mlmodelc").string(); };
+    const auto latents = npy_floats(reference / "latents.npy"), want = npy_floats(reference / "pcm.npy");
+    for (const char * units : {"cpu_only", pd::COREML_DECODER_DEFAULT_UNITS}) {
+        pd::CoremlDecoder decoder(sidecar("good"), units, source);
+        const auto one_by_one = decoder.decode(latents);
+        const double snr = snr_db(one_by_one, want);
+        decoder.reset();
+        std::vector<float> split;
+        const size_t frame = pd::CoremlDecoderGeometry::latent;
+        for (size_t at = 0, count = 3; at < latents.size(); at += count * frame, count = count % 5 + 1) {
+            const size_t end = std::min(latents.size(), at + count * frame);
+            const auto part = decoder.decode(std::vector<float>(latents.begin() + at, latents.begin() + end));
+            split.insert(split.end(), part.begin(), part.end());
+        }
+        std::printf("[mimi good %s] SNR %.1f dB vs the eager stream; split calls %.2e from one-by-one\n", units, snr,
+                    max_error(split, one_by_one));
+        // Broken state feedback scores <= 6 dB on these weights. The Neural
+        // Engine computes them at ~25 dB (the real checkpoint at ~46 dB).
+        require(snr > (std::string(units) == "cpu_only" ? 30 : 15),
+                std::string("tiny decoder diverges from its reference on ") + units);
+        require(max_error(split, one_by_one) < 1e-6, "split decode calls change the stream");
+    }
+    require(throws([&] { pd::CoremlDecoder decoder(sidecar("good"), "cpu_only", "another-mimi"); }),
+            "a decoder of another checkpoint");
+    { pd::CoremlDecoder probe(sidecar("probe"), "cpu_only", source); }
+    std::vector<std::string> variants = {"latents", "cos", "sin", "mask", "keys", "values", "pcm", "new_keys",
+                                         "new_values", "source", "stateful"};
+    for (const char * h : {"h_upsample", "h_conv0", "h_convtr0", "h_residual0", "h_convtr1", "h_residual1", "h_convtr2",
+                           "h_residual2", "h_final"}) {
+        variants.push_back(h);
+        variants.push_back(std::string("new_") + h);
+    }
+    for (const auto & variant : variants) {
+        std::string error;
+        try {
+            pd::CoremlDecoder decoder(sidecar(variant), "cpu_only", source);
+        } catch (const std::exception & e) {
+            error = e.what();
+        }
+        require(!error.empty(), "accepted the mimi " + variant + " variant");
+        std::printf("[mimi %s] rejected: %s\n", variant.c_str(), error.c_str());
+    }
+}
+#endif
 
 int shape_fixture() {
 #ifndef TTS_CPP_USE_COREML
@@ -218,7 +308,7 @@ int shape_fixture() {
         rows.keys.emplace_back(keys.begin() + l * layer_size, keys.begin() + (l + 1) * layer_size);
         rows.values.emplace_back(values.begin() + l * layer_size, values.begin() + (l + 1) * layer_size);
     }
-    for (const char * units : {"cpu_only", pd::COREML_DEFAULT_UNITS}) {
+    for (const char * units : {"cpu_only", pd::COREML_STEP_DEFAULT_UNITS}) {
         pd::CoremlStep step(sidecar("good"), units, cfg, source);
         require(step.context() == context, "context read from the sidecar");
         step.write_rows(rows);
@@ -270,6 +360,7 @@ int shape_fixture() {
     const int status_name = moss_coreml_write_state(model, "kv", row.data(), inside, count, 4);
     moss_coreml_free(model);
     require(status_inside == 0 && status_outside != 0 && status_rank != 0 && status_name != 0, "state write bounds");
+    check_decoder_fixture(root / "mimi");
     std::puts("test-pocket-coreml --shape-fixture: ok");
     return 0;
 #endif
@@ -288,7 +379,7 @@ EngineOptions bundle_options(const fs::path & dir) {
 void check_stage_parity(const EngineOptions & opts) {
     pd::FlowLM lm(opts.flow_lm_path, 2048, 4);
     const auto voice = lm.read_voice(opts.voice_path);
-    pd::CoremlStep step(pd::coreml_step_path(opts.flow_lm_path), pd::COREML_DEFAULT_UNITS, lm.config(), lm.source_hash());
+    pd::CoremlStep step(pd::coreml_step_path(opts.flow_lm_path), pd::COREML_STEP_DEFAULT_UNITS, lm.config(), lm.source_hash());
     step.write_rows({0, voice.frames, voice.keys, voice.values});
     lm.restore_voice(voice);
     pd::Frontend frontend(opts.frontend_path);
@@ -343,6 +434,26 @@ void check_replay(const EngineOptions & opts) {
     require(error < 1e-3 && std::abs(replayed.eos_logit - sequential.eos_logit) < 1e-2, "ggml replay diverges");
 }
 
+// The real decoder against ggml Mimi on the same streamed latents.
+void check_decoder_parity(const EngineOptions & opts) {
+    pd::Mimi mimi(opts.mimi_path, 4);
+    pd::CoremlDecoder decoder(pd::coreml_decoder_path(opts.mimi_path), pd::COREML_DECODER_DEFAULT_UNITS,
+                              mimi.source_hash());
+    std::mt19937 rng(3);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::vector<float> latents(size_t(40) * pd::Mimi::latent_dim());
+    for (auto & x : latents) x = normal(rng);
+    mimi.reset_decoder();
+    std::vector<float> want;
+    for (size_t at = 0; at < latents.size(); at += size_t(8) * pd::Mimi::latent_dim()) {
+        const auto part = mimi.decode(std::vector<float>(latents.begin() + at, latents.begin() + at + 8 * pd::Mimi::latent_dim()));
+        want.insert(want.end(), part.begin(), part.end());
+    }
+    const double snr = snr_db(decoder.decode(latents), want);
+    std::printf("[decoder] %s: 40 frames, SNR %.1f dB vs ggml Mimi\n", decoder.label().c_str(), snr);
+    require(snr > 35, "Core ML Mimi decoder diverges from ggml Mimi");
+}
+
 void check_engine(const EngineOptions & base) {
     env_guard units(pd::COREML_UNITS_ENV), strict(pd::COREML_STRICT_ENV), disabled(pd::COREML_DISABLE_ENV);
     unsetenv(pd::COREML_UNITS_ENV);
@@ -350,7 +461,7 @@ void check_engine(const EngineOptions & base) {
     unsetenv(pd::COREML_DISABLE_ENV);
     const std::string text = "The quick brown fox jumps over the lazy dog. It barked twice.";
     Engine coreml(base);
-    require(coreml.flow_lm_on_coreml(), "sidecar loaded");
+    require(coreml.flow_lm_on_coreml() && coreml.mimi_on_coreml(), "sidecars loaded");
     const auto batch = coreml.synthesize(text);
     std::vector<float> streamed;
     const auto stream = coreml.synthesize_stream(text, [&](const float * pcm, size_t n, int) {
@@ -358,13 +469,16 @@ void check_engine(const EngineOptions & base) {
     });
     require(batch.flow_lm_backend.rfind("coreml-", 0) == 0 && stream.flow_lm_backend == batch.flow_lm_backend,
             "Core ML label, got " + batch.flow_lm_backend);
+    require(batch.mimi_backend.rfind("coreml-", 0) == 0 && stream.mimi_backend == batch.mimi_backend,
+            "Core ML Mimi label, got " + batch.mimi_backend);
     require(max_error(streamed, batch.pcm) < 1e-4, "stream and batch differ on Core ML");
 
     setenv(pd::COREML_DISABLE_ENV, "1", 1);
     Engine ggml(base);
     unsetenv(pd::COREML_DISABLE_ENV);
     const auto reference = ggml.synthesize(text);
-    require(!ggml.flow_lm_on_coreml() && reference.flow_lm_backend == "ggml", "POCKET_COREML_DISABLE keeps ggml");
+    require(!ggml.flow_lm_on_coreml() && !ggml.mimi_on_coreml() && reference.flow_lm_backend == "ggml" &&
+            reference.mimi_backend == "ggml", "POCKET_COREML_DISABLE keeps ggml");
     std::printf("[engine] %s: %d frames; ggml: %d frames\n", batch.flow_lm_backend.c_str(), batch.generated_frames,
                 reference.generated_frames);
     require(std::abs(batch.generated_frames - reference.generated_frames) <= 4, "Core ML changes the speech length");
@@ -379,7 +493,8 @@ void check_engine(const EngineOptions & base) {
     unsetenv(pd::COREML_DISABLE_ENV);
     std::printf("[engine] %d-token chunks: %s %d frames; ggml %d frames\n", chunked.max_tokens,
                 several.flow_lm_backend.c_str(), several.generated_frames, several_ggml.generated_frames);
-    require(several.flow_lm_backend == batch.flow_lm_backend, "multi-chunk call left Core ML");
+    require(several.flow_lm_backend == batch.flow_lm_backend && several.mimi_backend == batch.mimi_backend,
+            "multi-chunk call left Core ML");
     require(std::abs(several.generated_frames - several_ggml.generated_frames) <= 8, "multi-chunk speech length");
 
     EngineOptions steps = base;
@@ -423,7 +538,9 @@ int engine_fixture() {
     }
     const auto opts = bundle_options(dir);
     require(tts_cpp::detail::coreml_sidecar_exists(pd::coreml_step_path(opts.flow_lm_path)), "bundle has no step sidecar");
+    require(tts_cpp::detail::coreml_sidecar_exists(pd::coreml_decoder_path(opts.mimi_path)), "bundle has no Mimi decoder sidecar");
     check_stage_parity(opts);
+    check_decoder_parity(opts);
     check_replay(opts);
     check_engine(opts);
     std::puts("test-pocket-coreml --engine-fixture: ok");

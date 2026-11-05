@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Write tiny Pocket FlowLM Core ML step sidecars for the runtime checks.
+"""Write tiny Pocket Core ML sidecars for the runtime checks.
+
+FlowLM step:
 
 `good/flow-lm-step.mlmodelc` is the real step of a random-weight FlowLM
 (scripts/pocket_coreml_models.random_checkpoint, source "tiny-checkpoint")
@@ -9,9 +11,19 @@ a float32 causal forward gives for a few frames after that prefix.
 `probe/` declares exactly the features the runtime expects but only sums its
 inputs; every `<feature>/` declares one of them with a doubled leading
 dimension, `schema/` and `source/` carry the wrong schema or checkpoint hash
-and `stateless/` keeps no state. test-pocket-coreml --shape-fixture
-(POCKET_COREML_TEST_SHAPES=<out>) must reproduce the reference with the good
-sidecar, accept the probe and reject every other one before predicting.
+and `stateless/` keeps no state.
+
+Mimi decoder, under `mimi/`: `good/mimi-decoder.mlmodelc` is the real decoder
+of a random full-size Mimi (scripts/pocket_coreml_mimi.random_checkpoint,
+source "tiny-mimi"), with `good/reference/` holding latents and the PCM the
+eager decoder streams from them one frame at a time, past the attention
+window. `probe/` declares the expected features, every `<feature>/` one of
+them doubled, `source/` another checkpoint hash and `stateful/` a Core ML
+state.
+
+test-pocket-coreml --shape-fixture (POCKET_COREML_TEST_SHAPES=<out>) must
+reproduce each reference with its good sidecar, accept the probes and reject
+every other sidecar before predicting.
 """
 
 import argparse
@@ -25,9 +37,11 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import pocket_coreml_mimi as mimi  # noqa: E402
 import pocket_coreml_models as pm  # noqa: E402
 
 CONTEXT, PREFIX, FRAMES, SOURCE, SCHEMA = 12, 5, 4, "tiny-checkpoint", "1"
+MIMI_SOURCE, MIMI_FRAMES = "tiny-mimi", 20
 
 
 def features(d):
@@ -67,16 +81,17 @@ def convert(model, inputs, outputs, states, metadata):
         traced, convert_to="mlprogram",
         inputs=[ct.TensorType(name=n, shape=s, dtype=np.float32) for n, s in inputs.items()],
         outputs=[ct.TensorType(name=n, dtype=np.float32) for n in outputs],
-        states=[ct.StateType(wrapped_type=ct.TensorType(shape=s, dtype=np.float16), name=n) for n, s in states.items()],
+        states=[ct.StateType(wrapped_type=ct.TensorType(shape=s, dtype=np.float16), name=n)
+                for n, s in states.items()] or None,
         minimum_deployment_target=ct.target.iOS18, compute_precision=ct.precision.FLOAT16)
     for key, value in metadata.items():
         converted.user_defined_metadata[key] = value
     return converted
 
 
-def compile_into(model, directory, scratch):
+def compile_into(model, directory, scratch, stem="flow-lm-step"):
     directory.mkdir(parents=True, exist_ok=True)
-    package = Path(scratch) / directory.name / "flow-lm-step.mlpackage"
+    package = Path(scratch) / directory.parent.name / directory.name / f"{stem}.mlpackage"
     package.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(package))
     subprocess.run(["xcrun", "coremlcompiler", "compile", str(package), str(directory)],
@@ -121,6 +136,36 @@ def doubled(shape):
     return (shape[0] * 2,) + tuple(shape[1:])
 
 
+def write_mimi(out, scratch):
+    tensors, _ = mimi.random_checkpoint(5, source=MIMI_SOURCE)
+    decoder = mimi.Decoder(tensors).eval()
+    example = mimi.Stream().inputs(np.zeros((mimi.FRAMES, mimi.LATENT), np.float32))
+    inputs = {name: tuple(example[name].shape) for name in mimi.INPUTS}
+    with torch.no_grad():
+        shapes = [tuple(o.shape) for o in decoder(*(torch.from_numpy(example[n]) for n in mimi.INPUTS))]
+    outputs = dict(zip(mimi.OUTPUTS, shapes))
+    stamp = {"pocket.coreml.schema": SCHEMA, "pocket.source_sha256": MIMI_SOURCE, "pocket.coreml.frames": str(mimi.FRAMES)}
+    compile_into(convert(decoder, inputs, outputs, {}, stamp), out / "good", scratch, "mimi-decoder")
+    latents = np.random.default_rng(9).normal(0, 1, (MIMI_FRAMES, mimi.LATENT)).astype(np.float32)
+    reference = out / "good" / "reference"
+    reference.mkdir(parents=True, exist_ok=True)
+    np.save(reference / "latents.npy", latents)
+    np.save(reference / "pcm.npy", mimi.run(decoder, latents, (1,) * MIMI_FRAMES).astype(np.float32))
+    (reference / "config.json").write_text(json.dumps({"source": MIMI_SOURCE, "frames": MIMI_FRAMES}) + "\n")
+    print(f"[mimi good] real decoder, {MIMI_FRAMES} reference frames")
+    compile_into(convert(Probe(outputs, {}), inputs, outputs, {}, stamp), out / "probe", scratch, "mimi-decoder")
+    for name in list(inputs) + list(outputs):
+        bad_in = {n: doubled(s) if n == name else s for n, s in inputs.items()}
+        bad_out = {n: doubled(s) if n == name else s for n, s in outputs.items()}
+        compile_into(convert(Probe(bad_out, {}), bad_in, bad_out, {}, stamp), out / name, scratch, "mimi-decoder")
+        print(f"[mimi {name}] declared {doubled({**inputs, **outputs}[name])}")
+    compile_into(convert(Probe(outputs, {}), inputs, outputs, {}, {**stamp, "pocket.source_sha256": "another-mimi"}),
+                 out / "source", scratch, "mimi-decoder")
+    compile_into(convert(Probe(outputs, {"cache": (1, 4)}), inputs, outputs, {"cache": (1, 4)}, stamp),
+                 out / "stateful", scratch, "mimi-decoder")
+    print("[mimi source] another checkpoint hash; [mimi stateful] declares a state")
+
+
 def write_fixture(out):
     import coremltools as ct
 
@@ -151,6 +196,7 @@ def write_fixture(out):
                                 outputs=[ct.TensorType(name=n, dtype=np.float32) for n in outputs],
                                 minimum_deployment_target=ct.target.iOS18), out / "stateless", scratch)
         print("[stateless] no state")
+        write_mimi(out / "mimi", scratch)
 
 
 if __name__ == "__main__":

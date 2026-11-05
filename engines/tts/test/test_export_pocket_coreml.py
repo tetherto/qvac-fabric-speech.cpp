@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Pocket FlowLM Core ML step rebuild checks without model downloads.
+"""Pocket Core ML sidecar rebuild checks without model downloads.
 
-Random weights with the checkpoint's tensor names and small dimensions: the
-stateful step decoding frame by frame over a prefix written into its state
+FlowLM step, on random weights with the checkpoint's tensor names and small
+dimensions: decoding frame by frame over a prefix written into its state
 matches a full causal forward of the same rows, RoPE tables match ggml's mode
 0, the sidecar naming rule and shared constants match the runtime, and a
 Core ML export of a tiny GGUF (macOS with coremltools) carries the
 checkpoint hash and predicts the same frames with the prefix written into its
-Core ML state."""
+Core ML state.
+
+Mimi decoder, on random full-size weights: the phase-form upsample and
+transposed convolutions match PyTorch's transposed convolutions, decoding in
+calls of any frame count (across the attention window) gives the same PCM,
+the geometry matches the runtime, and a Core ML export reproduces the eager
+stream frame by frame with its state fed back."""
 
 import importlib.util
 import math
@@ -26,6 +32,8 @@ HAVE_COREML = HAVE_GGUF and importlib.util.find_spec("coremltools") is not None 
 if HAVE_DEPS:
     import numpy as np
     import torch
+    import torch.nn.functional as F
+    import pocket_coreml_mimi as mimi
     import pocket_coreml_models as pm
     SPEC = importlib.util.spec_from_file_location("export_pocket_coreml", ROOT / "scripts/export-pocket-coreml.py")
     EXPORTER = importlib.util.module_from_spec(SPEC)
@@ -168,6 +176,74 @@ class ExportTest(unittest.TestCase):
                     got, want = out[name].reshape(-1), expected.numpy().reshape(-1)
                     scale = max(1.0, float(np.abs(want).max()))
                     self.assertLess(float(np.abs(got - want).max()) / scale, 3e-2, f"frame {f} {name}")
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/torch unavailable")
+class MimiTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tensors, cls.metadata = mimi.random_checkpoint(5, source="tiny-mimi")
+        cls.model = mimi.Decoder(cls.tensors).eval()
+        cls.latents = np.random.default_rng(2).normal(0, 1, (20, mimi.LATENT)).astype(np.float32)
+
+    def test_naming_and_geometry_match_runtime(self):
+        self.assertEqual(EXPORTER.model_stem("m/mimi.gguf") + EXPORTER.MIMI_SUFFIX, "mimi-decoder")
+        self.assertEqual(runtime_constant("COREML_DECODER_SUFFIX"), '"%s"' % EXPORTER.MIMI_SUFFIX)
+        header = (ROOT / "src/pocket/coreml.h").read_text()
+        for name, value in (("dim", mimi.DIM), ("latent", mimi.LATENT), ("heads", mimi.HEADS),
+                            ("head_dim", mimi.HEAD_DIM), ("layers", mimi.LAYERS), ("keep", mimi.KEEP),
+                            ("upsample", mimi.UP), ("frame_samples", mimi.FRAME_SAMPLES), ("frames", mimi.FRAMES)):
+            self.assertRegex(header, rf"\b{name} = {value}\b", name)
+        runtime = (ROOT / "src/pocket/coreml.cpp").read_text()
+        for name, channels, length in mimi.HISTORIES:
+            self.assertIn(f'{{"{name}", "new_{name}", {channels}, {length}}}', runtime)
+
+    def test_phase_forms_match_transposed_convolutions(self):
+        rng = np.random.default_rng(4)
+        steps = 5
+        x = torch.from_numpy(rng.normal(0, 1, (1, mimi.DIM, steps + 1)).astype(np.float32))  # [history, x]
+        with torch.no_grad():
+            # upsample: depthwise, stride 16, kernel 32
+            y = F.conv1d(x, self.model.upsample, groups=mimi.DIM).reshape(mimi.DIM, mimi.UP, -1)
+            y = y.permute(0, 2, 1).reshape(1, mimi.DIM, -1)
+            w = torch.from_numpy(self.tensors["upsample.convtr.convtr.weight"].T.copy())[:, None, :]  # [DIM, 1, 32]
+            want = F.conv_transpose1d(x, w, stride=mimi.UP, groups=mimi.DIM)[..., mimi.UP:mimi.UP * (steps + 1)]
+            np.testing.assert_allclose(y.numpy(), want.numpy(), atol=1e-5)
+            # first decoder transposed conv: ratio 6, kernel 12
+            ratio, k = mimi.RATIOS[0], self.tensors["decoder.model.2.convtr.weight"]  # [2r, out, in]
+            y = F.conv1d(x, self.model.p["convtr0_w"])
+            out = self.model.out_channels[0]
+            y = y.reshape(ratio, out, -1).permute(1, 2, 0).reshape(1, out, -1)
+            w = torch.from_numpy(k.transpose(2, 1, 0).copy())  # [in, out, 2r]
+            want = F.conv_transpose1d(x, w, stride=ratio)[..., ratio:ratio * (steps + 1)]
+            np.testing.assert_allclose(y.numpy(), want.numpy(), atol=1e-4)
+
+    def test_any_call_split_gives_the_same_stream(self):
+        # 20 frames = 320 transformer rows, past the 250-row attention window.
+        whole = mimi.run(self.model, self.latents, (20,))
+        for calls in ((1,) * 20, (3, 7, 1, 9), (16, 4)):
+            np.testing.assert_allclose(mimi.run(self.model, self.latents, calls), whole, atol=2e-5, err_msg=str(calls))
+        self.assertGreater(float(np.abs(whole).max()), 1e-3)
+
+    @unittest.skipUnless(HAVE_COREML, "coremltools/gguf unavailable or not macOS")
+    def test_coreml_decoder_streams(self):
+        import coremltools as ct
+
+        inputs = mimi.Stream().inputs(np.zeros((mimi.FRAMES, mimi.LATENT), np.float32))
+        converted = EXPORTER.convert_decoder(self.model, inputs)
+        with tempfile.TemporaryDirectory() as scratch:
+            package = Path(scratch) / "mimi-decoder.mlpackage"
+            converted.save(str(package))
+            mlmodel = ct.models.MLModel(str(package), compute_units=ct.ComputeUnit.CPU_ONLY)
+            frames = 18
+            want = mimi.run(self.model, self.latents[:frames], (1,) * frames)
+            stream, got = mimi.Stream(), []
+            for f in range(frames):
+                out = mlmodel.predict(stream.inputs(self.latents[f:f + 1]))
+                got.append(stream.update(out, 1))
+            got = np.concatenate(got)
+            snr = 10 * np.log10((want ** 2).sum() / ((got - want) ** 2).sum())
+            self.assertGreater(snr, 30, f"Core ML Mimi SNR {snr:.1f} dB")
 
 
 if __name__ == "__main__":

@@ -83,7 +83,7 @@ engine, not every backend ggml can compile.
 | Parler-TTS mini/large/Indic | English or 21 Indic languages | natural-language description | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | yes² |
 | Fun-CosyVoice3-0.5B | model-advertised multilingual text | baked voice or zero-shot/cross-lingual reference WAV; instruct controls | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes | yes² |
 | Audio8-TTS-Preview-0.6B | multilingual checkpoint vocabulary | model voice or zero-shot reference WAV + transcript | 44.1 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | yes² |
-| Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | yes (+ optional Core ML sidecar) | yes | yes | yes | untested |
+| Pocket TTS | English | prepared voice; cloning requires encoder-enabled weights | 24 kHz | yes | yes (+ optional Core ML sidecars) | yes | yes | yes | untested |
 | MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | model-advertised multilingual text | model voice, zero-shot reference WAV, or two-speaker dialogue references; pause/duration/pronunciation controls | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
 | MOSS-SoundEffect-v2 (text to sound effects) | text prompt | none | 48 kHz | yes | yes (+ optional Core ML sidecars) | scoped¹ | untested | scoped¹ | untested |
 | MOSS-Speech (speech to speech) | spoken English and Chinese | built-in default voice or reference WAV | 24 kHz | yes | yes (+ optional Core ML sidecar) | scoped¹ | untested | scoped¹ | untested |
@@ -124,14 +124,14 @@ model guides for setup and validated tiers. Audio8's corrected baseline uses `q8
 recipe (`OPPOLL=1`, `OPSTAGE=3`, `OPFUSION=1`), the corrected single-prompt
 baseline, and the remaining cross-backend correctness limits. Optional
 Apple Core ML sidecars accelerate the Chatterbox Turbo and Multilingual S3Gen
-encoder, CFM and HiFT, the Pocket TTS FlowLM generation step, the CosyVoice3
+encoder, CFM and HiFT, the Pocket TTS FlowLM generation step and Mimi decoder, the CosyVoice3
 speech LM, flow and HiFT neural
 stages, the Supertonic vocoder, the Audio8 codec, the Parler-TTS DAC decoder
 (on the Neural Engine), and
 the MOSS-TTS codec decoder, MOSS-SoundEffect DiT and VAE, and MOSS-Speech
 speech tokenizer. Export, routing, fallback, and per-call status are documented in
 [Chatterbox](docs/chatterbox.md#core-ml-sidecars),
-[Pocket TTS](docs/pocket-tts.md#core-ml-step-sidecar),
+[Pocket TTS](docs/pocket-tts.md#core-ml-sidecars),
 [CosyVoice3](docs/cosyvoice3.md#core-ml-sidecars),
 [Supertonic](docs/supertonic.md#core-ml-vocoder-sidecar),
 [Audio8](docs/audio8.md#core-ml-codec-sidecar),
