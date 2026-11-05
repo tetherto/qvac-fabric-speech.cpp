@@ -44,7 +44,7 @@ SEPARATOR = " · "
 TAG = re.compile(r"<[^>]+>")
 SECTION = re.compile(r'<section class="msec"><h2>(.*?)</h2>(.*?)</section>', re.S)
 CHART = re.compile(r'<div class="gd"><h4>(.*?)</h4>(.*?)(?=<div class="gd">|</details></div>|</details></section>)', re.S)
-TABLE_ROW = re.compile(r"<tr>((?:<td>.*?</td>)+)</tr>", re.S)
+TABLE_ROW = re.compile(r"<tr>(.*?)</tr>", re.S)
 CELL = re.compile(r"<td>(.*?)</td>", re.S)
 LIST_ITEM = re.compile(r"<li>(.*?)</li>", re.S)
 TERM = re.compile(r"<dt>(.*?)</dt><dd>(.*?)</dd>", re.S)
@@ -130,7 +130,8 @@ def source_lists(fragment):
 
 
 def table_rows(fragment):
-    return [[text(cell) for cell in CELL.findall(cells)] for cells in TABLE_ROW.findall(fragment)]
+    rows = [[text(cell) for cell in CELL.findall(cells)] for cells in TABLE_ROW.findall(fragment)]
+    return [cells for cells in rows if cells]
 
 
 def precision_by_label(fragment):
