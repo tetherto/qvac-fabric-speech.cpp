@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -53,10 +54,10 @@ class TimingTest(unittest.TestCase):
 
 class ArgsTest(unittest.TestCase):
     def test_a_tts_engine_needs_once_text_and_out_and_an_asr_engine_a_clip(self):
-        parsed = bench.parse_args(["--engine", "mlx-audio-chatterbox-turbo", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--text", "hi", "--out", "o.wav"])
+        parsed = bench.parse_args(["--engine", "mlx-audio-tts", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--text", "hi", "--out", "o.wav"])
         self.assertEqual((parsed.engine in bench.TTS_ENGINES, parsed.text, parsed.out), (True, "hi", "o.wav"))
         with self.assertRaises(SystemExit):
-            bench.parse_args(["--engine", "mlx-audio-chatterbox-turbo", "--repo", "r", "--revision", "v", "--model-dir", "m", "--text", "hi", "--out", "o.wav"])
+            bench.parse_args(["--engine", "mlx-audio-tts", "--repo", "r", "--revision", "v", "--model-dir", "m", "--text", "hi", "--out", "o.wav"])
         with self.assertRaises(SystemExit):
             bench.parse_args(["--engine", "mlx-audio-nemotron", "--repo", "r", "--revision", "v", "--model-dir", "m", "--bench-json", "b.json"])
         with self.assertRaises(SystemExit):
@@ -67,17 +68,54 @@ class ArgsTest(unittest.TestCase):
             bench.run_once(lambda: " hello ")
         self.assertEqual(out.getvalue(), "backend: Metal\nhello\n")
 
+    def test_a_music_engine_needs_once_caption_and_lyrics(self):
+        parsed = bench.parse_args(["--engine", "mlx-audio-music", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--caption", "jazz", "--lyrics", "[instrumental]"])
+        self.assertEqual((parsed.duration, parsed.out), (30, None))
+        with self.assertRaises(SystemExit):
+            bench.parse_args(["--engine", "mlx-audio-music", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--caption", "jazz"])
+
+    def test_rendered_music_passes_the_request_and_returns_the_first_result(self):
+        class Result:
+            audio = [0.0, 0.5]
+            sample_rate = 44100
+
+        class Model:
+            def generate(self, **request):
+                self.request = request
+                yield Result()
+
+        model = Model()
+        args = bench.parse_args(["--engine", "mlx-audio-music", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--caption", "jazz", "--lyrics", "[instrumental]", "--duration", "10"])
+        audio, rate = bench.rendered_music(model, args, {"seed": 42, "steps": 30})
+        self.assertEqual((list(audio), rate), ([0.0, 0.5], 44100))
+        self.assertEqual(model.request, {"text": "jazz", "lyrics": "[instrumental]", "duration": 10.0, "seed": 42, "steps": 30})
+
+    def test_generate_options_take_the_seed_out_and_default_it(self):
+        parsed = bench.parse_args(["--engine", "mlx-audio-tts", "--repo", "r", "--revision", "v", "--model-dir", "m", "--once", "--text", "hi", "--out", "o.wav",
+                                   "--options", '{"seed": 1234, "temperature": 0.8, "max_tokens": 1024}'])
+        self.assertEqual(bench.generate_options(parsed), (1234, {"temperature": 0.8, "max_tokens": 1024}))
+        parsed.options = "{}"
+        self.assertEqual(bench.generate_options(parsed), (42, {}))
+
+    def test_a_reference_clip_is_resampled_to_the_models_rate(self):
+        self.assertEqual(bench.resampled([1.0, 2.0], 16000, 16000), [1.0, 2.0])
+        with mock.patch.dict(sys.modules, {"soxr": mock.Mock(resample=lambda s, r, t: ("resampled", r, t))}):
+            self.assertEqual(bench.resampled([1.0], 16000, 44100), ("resampled", 16000, 44100))
+
     def test_synthesized_audio_joins_the_segments(self):
         class Segment:
             def __init__(self, audio):
                 self.audio = audio
 
         class Model:
-            def generate(self, text):
+            def generate(self, text, **options):
+                self.options = options
                 yield Segment([0.1, 0.2])
                 yield Segment([0.3])
 
-        self.assertEqual(list(bench.synthesized_audio(Model(), "hi")), [0.1, 0.2, 0.3])
+        model = Model()
+        self.assertEqual(list(bench.synthesized_audio(model, "hi", temperature=0.8)), [0.1, 0.2, 0.3])
+        self.assertEqual(model.options, {"temperature": 0.8})
 
 
 class SnapshotTest(unittest.TestCase):

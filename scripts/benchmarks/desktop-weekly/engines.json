@@ -6,7 +6,8 @@
       "role": "QVAC engine, prior-report competitor or new competitor, measured.",
       "ggml": "ggml-based or not, as a short phrase.",
       "details": "Scope and caveats of the engine's rows.",
-      "source": "Where the rows come from."
+      "source": "Where the rows come from.",
+      "not_measured": "Optional list of {host, backend, task, model, reason}: models of the weekly matrix this engine cannot measure on that host; build-dashboard-data.py turns them into coverage cells of the host (status not attempted)."
     }
   },
   "rows": [
@@ -133,8 +134,87 @@
       "engine": "mlx-audio",
       "role": "new competitor, measured",
       "ggml": "Not ggml-based (MLX)",
-      "details": "Blaizzy/mlx-audio on the mlx-community conversions, Metal GPU through MLX, driven by the weekly run on the Mac Studio: Nemotron 3.5 ASR Streaming 0.6B (bf16) decoded offline with the model loaded once, the same scope as the QVAC native rows; Chatterbox Turbo (f16, built-in voice, seed 42) as a fresh process including model load like the QVAC chatterbox-turbo rows.",
-      "source": "scripts/benchmarks/desktop-weekly (families nemotron-mlx-audio, nemotron-mlx-audio-abcba and chatterbox-turbo-mlx-audio through mlx-bench.py)"
+      "details": "Blaizzy/mlx-audio 0.6.4 on the mlx-community conversions (and the original MOSS-TTS v1.5 checkpoint), Metal GPU through MLX, driven by the weekly run on the Mac Studio: Nemotron 3.5 ASR Streaming 0.6B (bf16) decoded offline with the model loaded once, the same scope as the QVAC native rows; Chatterbox Turbo (f16, built-in voice), Audio8 TTS Preview 0.6B (bf16, synthesis and JFK cloning) and MOSS-TTS v1.5 (bf16) as fresh processes including model load like the matching QVAC rows; MiniMax Music3 (8-bit conversion) rendering the 30 s instrumental request of the ACE-Step rows, without a QVAC MiniMax row to compare with yet.",
+      "source": "scripts/benchmarks/desktop-weekly (the mlx-audio families of families.json through mlx-bench.py)",
+      "not_measured": [
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "TTS",
+          "model": "Supertonic 3",
+          "reason": "no MLX path: mlx-community/supertonic-3-mlx is an ONNX Runtime package, not an mlx-audio model"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "TTS cloning",
+          "model": "CosyVoice3 0.5B",
+          "reason": "mlx-community/Fun-CosyVoice3-0.5B-2512 is converted for the mlx-audio-plus fork; mlx-audio 0.6.4 has no CosyVoice3 loader"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "TTS",
+          "model": "Parler-TTS mini v1",
+          "reason": "mlx-community/parler-tts-mini exists but mlx-audio 0.6.4 has no parler loader"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "TTS",
+          "model": "Indic Parler-TTS",
+          "reason": "no MLX conversion and no mlx-audio loader"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "TTS cloning",
+          "model": "Chatterbox Multilingual 0.5B",
+          "reason": "mlx-community/chatterbox-multilingual-v3 exists; its support in the mlx-audio chatterbox loader is not verified, so it stays out until checked"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "ASR",
+          "model": "Parakeet Unified English 0.6B",
+          "reason": "the only conversion (littlebearlabs/parakeet-unified-en-0.6b-mlx) ships no config.json, so neither parakeet-mlx nor mlx-audio loads it"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "ASR",
+          "model": "Parakeet Realtime EOU 120M",
+          "reason": "no MLX conversion (only ONNX and Core ML ones)"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "ASR",
+          "model": "TranscribePsy-250M-EU-sub",
+          "reason": "no MLX conversion"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "Music",
+          "model": "ACE-Step 1.5 Turbo",
+          "reason": "no MLX port of ACE-Step (only its 5 Hz language-model half exists as an MLX conversion)"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "Music",
+          "model": "ACE-Step 1.5 SFT",
+          "reason": "no MLX port of ACE-Step"
+        },
+        {
+          "host": "qvac-dev-mac-arm64",
+          "backend": "metal",
+          "task": "Music",
+          "model": "ACE-Step 1.5 Base",
+          "reason": "no MLX port of ACE-Step"
+        }
+      ]
     }
   ]
 }

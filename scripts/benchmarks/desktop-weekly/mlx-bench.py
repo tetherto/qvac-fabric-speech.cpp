@@ -4,8 +4,11 @@
 Loads the model once from a pinned Hugging Face snapshot, decodes the clip with soundfile outside the timed region,
 runs the untimed warm-ups and the timed transcriptions, and writes the bench JSON the driver reads for native families
 (inference_ms, rtf_median, backend, transcript). With --once it transcribes the clip a single time and prints the text,
-for time-wrapped families. The TTS engine (mlx-audio Chatterbox Turbo) runs only with --once: it synthesizes --text
-into --out with the built-in voice at a fixed seed, for a time-wrapped family.
+for time-wrapped families. The TTS engine (any mlx-audio text-to-speech model: Chatterbox Turbo, Audio8, MOSS-TTS)
+runs only with --once: it synthesizes --text into --out, with --ref-audio and --ref-text for voice cloning and the
+generate options of --options (a JSON object; its seed, default 42, seeds MLX), for a time-wrapped family. The music
+engine (mlx-audio MiniMax Music3) also runs only with --once: it renders --caption and --lyrics for --duration seconds
+and writes --out when given.
 """
 import argparse
 import json
@@ -17,9 +20,13 @@ import time
 PARAKEET = "parakeet-mlx"
 WHISPER = "mlx-whisper"
 NEMOTRON = "mlx-audio-nemotron"
-CHATTERBOX = "mlx-audio-chatterbox-turbo"
-ENGINES = (PARAKEET, WHISPER, NEMOTRON, CHATTERBOX)
-TTS_ENGINES = (CHATTERBOX,)
+MLX_AUDIO_TTS = "mlx-audio-tts"
+MLX_AUDIO_MUSIC = "mlx-audio-music"
+ENGINES = (PARAKEET, WHISPER, NEMOTRON, MLX_AUDIO_TTS, MLX_AUDIO_MUSIC)
+TTS_ENGINES = (MLX_AUDIO_TTS,)
+MUSIC_ENGINES = (MLX_AUDIO_MUSIC,)
+SEED_OPTION = "seed"
+DEFAULT_MUSIC_SECONDS = 30
 BACKEND = "Metal"
 REVISION_MARKER = ".revision"
 MS_PER_S = 1000.0
@@ -39,6 +46,12 @@ def parse_args(argv):
     parser.add_argument("--wav", help="clip to transcribe (ASR engines)")
     parser.add_argument("--text", help="prompt to synthesize (TTS engines)")
     parser.add_argument("--out", help="WAV written by a TTS engine")
+    parser.add_argument("--ref-audio", help="reference recording for voice cloning (TTS engines)")
+    parser.add_argument("--ref-text", help="transcript of the reference recording")
+    parser.add_argument("--options", default="{}", help="JSON object of generate() options; seed is taken out and used to seed MLX")
+    parser.add_argument("--caption", help="style caption of a music request (music engines)")
+    parser.add_argument("--lyrics", help="lyrics of a music request; [instrumental] for none")
+    parser.add_argument("--duration", type=float, default=DEFAULT_MUSIC_SECONDS, help="requested seconds of music")
     parser.add_argument("--bench-runs", type=int, default=5)
     parser.add_argument("--bench-warmup", type=int, default=1)
     parser.add_argument("--bench-json")
@@ -46,12 +59,18 @@ def parse_args(argv):
     return check_args(parser.parse_args(argv))
 
 
+def is_asr(engine):
+    return engine not in TTS_ENGINES and engine not in MUSIC_ENGINES
+
+
 def check_args(args):
     if args.engine in TTS_ENGINES and not (args.once and args.text and args.out):
         raise SystemExit("a TTS engine needs --once, --text and --out")
-    if args.engine not in TTS_ENGINES and not args.wav:
+    if args.engine in MUSIC_ENGINES and not (args.once and args.caption and args.lyrics):
+        raise SystemExit("a music engine needs --once, --caption and --lyrics")
+    if is_asr(args.engine) and not args.wav:
         raise SystemExit("an ASR engine needs --wav")
-    if args.engine not in TTS_ENGINES and not args.once and not args.bench_json:
+    if is_asr(args.engine) and not args.once and not args.bench_json:
         raise SystemExit("--bench-json is required without --once")
     return args
 
@@ -122,9 +141,29 @@ def build_transcriber(engine, model_dir, samples, rate):
     return whisper_transcriber(model_dir, samples)
 
 
-def synthesized_audio(model, text):
+def synthesized_audio(model, text, **options):
     import numpy as np
-    return np.concatenate([np.array(result.audio) for result in model.generate(text)])
+    return np.concatenate([np.array(result.audio) for result in model.generate(text, **options)])
+
+
+def resampled(samples, rate, target_rate):
+    if rate == target_rate:
+        return samples
+    import soxr
+    return soxr.resample(samples, rate, target_rate)
+
+
+def reference_options(args, model):
+    if not args.ref_audio:
+        return {}
+    samples, rate = read_clip(args.ref_audio)
+    return {"ref_audio": resampled(samples, rate, model.sample_rate), "ref_text": args.ref_text}
+
+
+def generate_options(args):
+    options = dict(json.loads(args.options))
+    seed = options.pop(SEED_OPTION, SEED)
+    return seed, options
 
 
 def backend_name():
@@ -138,16 +177,17 @@ def announce_backend():
     print(line)
 
 
-def synthesize(model_dir, text, out):
+def synthesize(args):
     import mlx.core as mx
     import soundfile
     from mlx_audio.tts.utils import load_model
     announce_backend()
-    model = load_model(model_dir)
-    mx.random.seed(SEED)
-    audio = synthesized_audio(model, text)
-    soundfile.write(out, audio, model.sample_rate)
-    print(f"wrote {out}: {len(audio) / model.sample_rate:.2f} s at {model.sample_rate} Hz")
+    model = load_model(args.model_dir)
+    seed, options = generate_options(args)
+    mx.random.seed(seed)
+    audio = synthesized_audio(model, args.text, **options, **reference_options(args, model))
+    soundfile.write(args.out, audio, model.sample_rate)
+    print(f"wrote {args.out}: {len(audio) / model.sample_rate:.2f} s at {model.sample_rate} Hz")
 
 
 def timed_call(fn):
@@ -196,6 +236,30 @@ def run_bench(args, fn, load_ms, audio_seconds):
     print(json.dumps({k: payload[k] for k in ("engine", "inference_ms", "rtf_median", "transcript")}))
 
 
+def rendered_music(model, args, options):
+    import numpy as np
+    result = next(model.generate(text=args.caption, lyrics=args.lyrics, duration=args.duration, **options))
+    return np.array(result.audio), result.sample_rate
+
+
+def write_music(out, audio, rate):
+    if out:
+        import soundfile
+        soundfile.write(out, audio, rate)
+
+
+def render_music(args):
+    import mlx.core as mx
+    from mlx_audio.music import load
+    announce_backend()
+    model = load(args.model_dir)
+    seed, options = generate_options(args)
+    mx.random.seed(seed)
+    audio, rate = rendered_music(model, args, {SEED_OPTION: seed, **options})
+    write_music(args.out, audio, rate)
+    print(f"rendered {len(audio) / rate:.2f} s at {rate} Hz")
+
+
 def run_asr(args):
     samples, rate = read_clip(args.wav)
     start = time.perf_counter()
@@ -210,7 +274,9 @@ def main(argv=None):
     args = parse_args(argv)
     fetch_snapshot(args.repo, args.revision, args.model_dir)
     if args.engine in TTS_ENGINES:
-        return synthesize(args.model_dir, args.text, args.out)
+        return synthesize(args)
+    if args.engine in MUSIC_ENGINES:
+        return render_music(args)
     run_asr(args)
 
 

@@ -40,6 +40,9 @@ and the weekly artifact.
 | ASR | `parakeet-mlx`, `parakeet-mlx-abcba` | another engine beside QVAC, Mac Studio Metal only: parakeet-mlx on the mlx-community Parakeet TDT 0.6B v3 conversion (BF16), timed in process after one model load like the QVAC native rows, so it shares their charts |
 | ASR | `nemotron-mlx-audio`, `nemotron-mlx-audio-abcba` | mlx-audio on the mlx-community Nemotron 3.5 ASR Streaming 0.6B conversion (BF16), Mac Studio Metal only, offline decoding timed in process like the QVAC `nemotron` rows |
 | TTS | `chatterbox-turbo-mlx-audio` | mlx-audio Chatterbox Turbo (F16 conversion, built-in voice, seed 42), Mac Studio Metal only, a fresh process including load like the QVAC `chatterbox-turbo` rows |
+| TTS, TTS cloning | `audio8-mlx-audio`, `audio8-clone-mlx-audio` | mlx-audio Audio8 TTS Preview 0.6B (BF16 conversion) with the sampling of the Audio8 families, synthesis and JFK cloning, Mac Studio Metal only, fresh processes like the `audio8-lm-*` and `audio8-clone-enc-*` rows |
+| Music | `minimax-music3-mlx-audio` | mlx-audio on the 8-bit MiniMax Music3 conversion (the bf16 one needs 27 GB more disk), the 30 s instrumental request of the ACE-Step rows, Mac Studio Metal only; it stands alone until a QVAC MiniMax family runs weekly |
+| TTS | `moss-tts-mlx-audio` | mlx-audio on the original MOSS-TTS v1.5 checkpoint (BF16, seed 1234), Mac Studio Metal only, a fresh process like the `moss-tts-f16` rows |
 | ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
 | TTS | `chatterbox-turbo` | Chatterbox Turbo: T3 Turbo Q8_0 with S3Gen Q8_0, built-in voice |
@@ -78,7 +81,11 @@ A family may name another engine (`engine`, `platform`, `backends` in `families.
 platforms, the driver skips it on the other backends, and `build-dashboard-data.py` puts its rows in the chart of the QVAC
 family with the same model, input and timing scope, so the weekly charts compare QVAC with that engine every week. The
 MLX families run `mlx-bench.py` with the venv described under Install; their models are pinned Hugging Face snapshots
-that the script fetches into `models/families/<family>/` on the first run, outside the timed region.
+that the script fetches once into `models/mlx/<conversion name>/` on the first run, outside the timed region, shared by the families of one model.
+
+The models of the matrix that no MLX engine can run on the Mac Studio (Supertonic 3, CosyVoice3, both Parler models, Chatterbox
+Multilingual, Parakeet Unified and EOU, TranscribePsy and ACE-Step) are listed as `not_measured` of the mlx-audio
+entry in `engines.json`, with the reason, and appear as coverage gaps on that machine's task pages.
 
 `build-highlights.py` turns the charts named in `highlights.json` (a few GPU results per machine: Parakeet, Nemotron,
 Supertonic 3, Audio8, MiniMax Music3, ACE-Step, and the MLX engines on the Mac Studio) into one short page of cards for a

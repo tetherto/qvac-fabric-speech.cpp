@@ -41,7 +41,9 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "transcribepsy-abcba": "Q8_0", "nemotron-abcba": "F16", "parakeet-eou-abcba": "F16", "whisper-small-abcba": "F16",
                   "chatterbox-turbo": "Q8_0", "chatterbox-mtl-clone": "Q8_0", "cosyvoice3-clone": "LM Q8_0", "parler-mini": "Q8_0",
                   "parler-indic": "Q8_0", "parakeet-mlx": "BF16", "parakeet-mlx-abcba": "BF16", "mlx-whisper": "F16", "mlx-whisper-abcba": "F16",
-                  "nemotron-mlx-audio": "BF16", "nemotron-mlx-audio-abcba": "BF16", "chatterbox-turbo-mlx-audio": "F16"}
+                  "nemotron-mlx-audio": "BF16", "nemotron-mlx-audio-abcba": "BF16", "chatterbox-turbo-mlx-audio": "F16",
+                  "audio8-mlx-audio": "BF16", "audio8-clone-mlx-audio": "BF16", "moss-tts-mlx-audio": "BF16",
+                  "minimax-music3-mlx-audio": "8-bit"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
@@ -58,6 +60,7 @@ TIMING_CLONING = ("fresh_process_ref", "Fresh process incl. load and reference e
 CAMPAIGN_TIMING = ("campaign", "Campaign measurement (see the harness note)", "")
 REPORT = "report"
 REPORT_FILE = "report-rows.json"
+ENGINES_FILE = "engines.json"
 CAMPAIGN_CLIPS = {"ASR": (("jfk", "JFK clip, 11.0 s", 11.0), ("long_clip", "98.49 s clip", 98.49)),
                   "TTS": (("fixed_prompt_short", "9-word prompt (about 3.1 s of speech)", 3.1), ("long_prompt", "76-word prompt (about 26 s of speech)", 26.0)),
                   "Music": (("music_set", "Ten fixed prompts of the campaign", None),)}
@@ -364,29 +367,59 @@ def family_fits(spec, newest, backend):
     return (not platform or platform == newest.get("machine", {}).get("os")) and (not backends or backend in backends)
 
 
-def skipped_families(host_summaries, families):
-    ran = set(host_summaries[-1].get("families", []))
-    return [family for family in families if family not in ran]
+SKIPPED_REASON = "No stored result on this machine: SKIP_FAMILIES in its config.env, or the family has not run here yet"
+
+
+def stored_families(runs):
+    return {row["family"] for row in runs if row.get("comparison_set") == "weekly"}
+
+
+def fits_somewhere(spec, newest):
+    return any(family_fits(spec, newest, backend) for backend in newest.get("backends", []))
+
+
+def skipped_families(runs, families, newest):
+    stored = stored_families(runs)
+    return [family for family, spec in families.items() if family not in stored and fits_somewhere(spec, newest)]
 
 
 def skipped_cell(newest, family, spec, backend, number):
     return {"id": f"k{number:03d}", "host": newest["_host"], "machine": machine_label(newest["_host"]), "task": spec.get("task", ""),
-            "model": spec.get("model_label", family), "engine": QVAC, "backend": backend, "status": "not attempted", "rows": 0,
-            "reason": "Skipped on this machine (SKIP_FAMILIES in its config.env, usually memory)", "source": newest["_file"],
-            "scenario": scenario_of(spec)[1]}
+            "model": spec.get("model_label", family), "engine": spec.get("engine") or QVAC, "backend": backend, "status": "not attempted",
+            "rows": 0, "reason": SKIPPED_REASON, "source": newest["_file"], "scenario": scenario_of(spec)[1]}
 
 
-def skipped_cells(host_summaries, families, start):
+def stored_cells(runs):
+    return {(row["backend"], row["family"]) for row in runs if row.get("comparison_set") == "weekly"}
+
+
+def skipped_pairs(runs, families, newest):
+    stored = stored_cells(runs)
+    return [(family, backend) for family in families for backend in newest.get("backends", [])
+            if (backend, family) not in stored and family_fits(families[family], newest, backend)]
+
+
+def skipped_cells(host_summaries, runs, families, start):
     newest = host_summaries[-1]
-    pairs = [(family, backend) for family in skipped_families(host_summaries, families) for backend in newest.get("backends", [])
-             if family_fits(families[family], newest, backend)]
-    return [skipped_cell(newest, family, families[family], backend, start + i) for i, (family, backend) in enumerate(pairs)]
+    return [skipped_cell(newest, family, families[family], backend, start + i) for i, (family, backend) in enumerate(skipped_pairs(runs, families, newest))]
 
 
-def coverage_rows(host_summaries, runs, families, report):
+def engine_gap_cell(host, seed, gap, number):
+    return {"id": f"k{number:03d}", "host": host, "machine": machine_label(host), "task": gap.get("task", ""), "model": gap.get("model", ""),
+            "engine": seed["engine"], "backend": gap.get("backend", ""), "status": "not attempted", "rows": 0, "reason": gap.get("reason", ""),
+            "source": ENGINES_FILE, "scenario": ""}
+
+
+def engine_gaps(host, engines, start):
+    gaps = [(seed, gap) for seed in engines for gap in seed.get("not_measured", []) if gap.get("host") == host]
+    return [engine_gap_cell(host, seed, gap, start + i) for i, (seed, gap) in enumerate(gaps)]
+
+
+def coverage_rows(host_summaries, runs, families, report, engines):
     cells = [coverage_cell(i, row) for i, row in enumerate(runs)]
-    cells += skipped_cells(host_summaries, families, len(cells))
-    return cells + report_coverage(host_summaries[-1]["_host"], report, len(cells))
+    cells += skipped_cells(host_summaries, runs, families, len(cells))
+    cells += report_coverage(host_summaries[-1]["_host"], report, len(cells))
+    return cells + engine_gaps(host_summaries[-1]["_host"], engines, len(cells))
 
 
 def machines_of(engine, rows_by_host):
@@ -568,8 +601,8 @@ def coverage_item(host_summaries, runs, families):
     newest = host_summaries[-1]
     weekly = [r for r in runs if r["comparison_set"] == "weekly"]
     measured = sum(1 for r in weekly if r["accepted"])
-    skipped = sorted({families[f].get("model_label", f) for f in skipped_families(host_summaries, families)})
-    skipped_text = f" Not run on this machine: {join_words(skipped)} (SKIP_FAMILIES in its config.env, usually memory)." if skipped else ""
+    skipped = sorted({families[f].get("model_label", f) for f in skipped_families(runs, families, newest)})
+    skipped_text = f" No stored result on this machine for {join_words(skipped)} (SKIP_FAMILIES in its config.env, or not run here yet)." if skipped else ""
     backends = join_words([backend_name(b) for b in newest.get("backends", [])]) if newest.get("backends") else "no backend"
     return (SUMMARY, "Coverage", f"{measured} of {len(weekly)} weekly cells measured on {backends}.{skipped_text}")
 
@@ -639,7 +672,7 @@ def group_by_host(summaries):
 
 
 def machine_files(host_summaries, runs, engines, rows_by_host, families, report):
-    return {"runs": runs, "history": history_rows(host_summaries, families), "coverage": coverage_rows(host_summaries, runs, families, report),
+    return {"runs": runs, "history": history_rows(host_summaries, families), "coverage": coverage_rows(host_summaries, runs, families, report, engines),
             "engines": engine_rows(engines, rows_by_host), "machine": machine_row(host_summaries, runs),
             "commentary": commentary_rows(host_summaries, runs, families)}
 

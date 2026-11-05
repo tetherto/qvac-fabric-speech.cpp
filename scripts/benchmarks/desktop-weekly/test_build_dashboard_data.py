@@ -126,10 +126,25 @@ class WeeklyRowsTest(unittest.TestCase):
         darwin["machine"]["os"] = "Darwin"
         linux = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("cuda", "parakeet-tdt", 12.0)])
         linux["machine"]["os"] = "Linux"
-        self.assertEqual([(c["model"], c["backend"]) for c in build.skipped_cells([darwin], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0)],
-                         [("Parakeet TDT 0.6B v3", "metal")])
-        self.assertEqual(build.skipped_cells([linux], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0), [])
-        self.assertEqual(len(build.skipped_cells([linux], {"moss-tts-f16": FAMILIES["moss-tts-f16"]}, 0)), 2)
+        self.assertEqual([(c["model"], c["backend"], c["engine"]) for c in build.skipped_cells([darwin], [], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0)],
+                         [("Parakeet TDT 0.6B v3", "metal", "parakeet-mlx")])
+        self.assertEqual(build.skipped_cells([linux], [], {"parakeet-mlx-abcba": FAMILIES["parakeet-mlx-abcba"]}, 0), [])
+        self.assertEqual(len(build.skipped_cells([linux], [], {"moss-tts-f16": FAMILIES["moss-tts-f16"]}, 0)), 2)
+
+    def test_a_family_with_a_stored_row_from_an_older_run_is_not_a_coverage_gap(self):
+        runs = build.newest_cells([self.older, self.newer], FAMILIES)
+        cells = build.skipped_cells([self.older, self.newer], runs, {"parakeet-tdt": FAMILIES["parakeet-tdt"], "audio8-clone-enc-f16": FAMILIES["audio8-clone-enc-f16"],
+                                                                   "moss-tts-f16": FAMILIES["moss-tts-f16"]}, 0)
+        self.assertEqual([(c["model"], c["backend"]) for c in cells], [("Parakeet TDT 0.6B v3", "cuda"), ("Audio8 TTS Preview 0.6B", "cpu"),
+                                                                       ("MOSS-TTS v1.5 8.5B", "cpu"), ("MOSS-TTS v1.5 8.5B", "cuda")])
+        self.assertEqual(cells[0]["reason"], build.SKIPPED_REASON)
+
+    def test_an_engine_can_declare_what_it_cannot_measure_on_a_host(self):
+        engines = [{"engine": "mlx-audio", "not_measured": [{"host": HOST, "task": "TTS", "model": "Supertonic 3", "backend": "metal", "reason": "no loader"},
+                                                             {"host": "other", "task": "TTS", "model": "X", "backend": "metal", "reason": "elsewhere"}]}]
+        cells = build.coverage_rows([self.newer], [], {}, {}, engines)
+        self.assertEqual([(c["id"], c["engine"], c["model"], c["backend"], c["status"], c["reason"], c["source"]) for c in cells],
+                         [("k000", "mlx-audio", "Supertonic 3", "metal", "not attempted", "no loader", "engines.json")])
 
     def test_newest_result_wins_and_an_older_cell_says_where_it_comes_from(self):
         cells = {(r["backend"], r["family"]): r for r in build.newest_cells([self.older, self.newer], FAMILIES)}
@@ -216,9 +231,9 @@ class ReportRowsTest(unittest.TestCase):
         self.assertEqual(build.report_rows("qvac-dev-strix-1", REPORT), [])
 
     def test_report_coverage_cells_follow_the_weekly_ones_with_fresh_ids(self):
-        cells = build.coverage_rows([self.summary], self.runs, FAMILIES, REPORT)
+        cells = build.coverage_rows([self.summary], self.runs, FAMILIES, REPORT, [])
         self.assertEqual((cells[-1]["id"], cells[-1]["model"], cells[-1]["status"]), (f"k{len(cells) - 1:03d}", "Indic original reference", "not attempted"))
-        self.assertEqual(len(build.coverage_rows([self.summary], self.runs, FAMILIES, {})), len(cells) - 1)
+        self.assertEqual(len(build.coverage_rows([self.summary], self.runs, FAMILIES, {}, [])), len(cells) - 1)
 
     def test_commentary_and_machine_row_name_the_report(self):
         notes = [n["comment"] for n in build.commentary_rows([self.summary], self.runs, FAMILIES) if n["topic"] == "Comparison report"]
@@ -270,7 +285,7 @@ class CommentaryTest(unittest.TestCase):
         self.assertIn("+20%", notes["Week over week"])
         self.assertNotIn("Audio8", notes["Week over week"])
         self.assertIn("2 of 4 weekly cells measured on CPU and CUDA", notes["Coverage"])
-        self.assertIn("Not run on this machine: CosyVoice3 0.5B, MOSS-TTS v1.5 8.5B and Parakeet TDT 0.6B v3", notes["Coverage"])
+        self.assertIn("No stored result on this machine for CosyVoice3 0.5B, MOSS-TTS v1.5 8.5B and Parakeet TDT 0.6B v3", notes["Coverage"])
         self.assertIn("qvac abcdef1234", notes["Pins"])
 
     def test_campaign_lines_give_the_ratio_range_per_task(self):

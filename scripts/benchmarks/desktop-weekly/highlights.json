@@ -117,6 +117,14 @@
           "scenario": "fixed_prompt",
           "timing_class": "fresh_process",
           "set": "weekly"
+        },
+        {
+          "task": "TTS",
+          "model": "Audio8 TTS Preview 0.6B",
+          "scenario": "fixed_prompt",
+          "timing_class": "fresh_process",
+          "set": "weekly",
+          "variant": "LM Q8_0 · decoder Q8_0"
         }
       ]
     }
