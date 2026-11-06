@@ -47,10 +47,10 @@ struct EngineOptions {
 
     // Explicit backend selection. Accepted values: "auto" / "" (default,
     // tier-based GPU selection honouring n_gpu_layers), "cpu", or a specific
-    // backend name such as "hexagon" (Snapdragon HTP0) or an exact ggml
-    // device name (e.g. "HTP0"). Explicit requests fail construction when
-    // the named backend is unavailable; "auto" never fails on that path and
-    // falls back to CPU. Hexagon is experimental and currently requires a
+    // backend name such as "hexagon" (Snapdragon HTP0), "xdna" (AMD XDNA0),
+    // or an exact ggml device name (e.g. "HTP0"). Explicit requests fail
+    // construction when the named backend is unavailable; "auto" falls back
+    // to CPU. Hexagon is experimental and currently requires a
     // build that ships the matching ggml Hexagon backend and DSP library
     // next to the binary.
     std::string backend = "auto";

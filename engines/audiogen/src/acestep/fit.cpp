@@ -389,7 +389,7 @@ static FitResult fit_params_unguarded(const FitOptions & opts) {
     }
 
     // DiT
-    guard.dit = dit_model_load_metadata_only(paths.dit_model_path, rb.backend, opts.verbose, dit_w);
+    guard.dit = dit_model_load_metadata_only(paths.dit_model_path, rb.backend, rb.nth, opts.verbose, dit_w);
     if (!guard.dit) return fail_unreadable();
     size_t dit_graph = 0;
     {

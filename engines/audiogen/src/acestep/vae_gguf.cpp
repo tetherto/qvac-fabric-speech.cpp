@@ -15,7 +15,11 @@ bool vae_gguf_open(VaeGGUF & g, const std::string & path) {
     if (!mapped_file_open(g.file, path, "acestep-vae")) return false;
     struct gguf_init_params p = { /*no_alloc=*/true, /*ctx=*/&g.meta };
     g.ctx = gguf_init_from_file(path.c_str(), p);
-    if (!g.ctx) { fprintf(stderr, "[acestep-vae] failed to parse %s\n", path.c_str()); return false; }
+    if (!g.ctx) {
+        fprintf(stderr, "[acestep-vae] failed to parse %s\n", path.c_str());
+        vae_gguf_close(g);
+        return false;
+    }
     g.data_off = gguf_get_data_offset(g.ctx);
     return true;
 }

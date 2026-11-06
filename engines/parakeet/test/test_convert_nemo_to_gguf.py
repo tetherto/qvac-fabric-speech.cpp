@@ -255,6 +255,11 @@ class ConverterRnntTests(unittest.TestCase):
         config["model_defaults"]["tdt_durations"] = [0, 1, 2]
         self.assertEqual(CONVERTER.detect_model_type(config), "tdt")
 
+    def test_detects_transcribepsy_tdt_from_loss(self):
+        config = unified_config()
+        config["loss"] = {"loss_name": "tdt", "tdt_kwargs": {"durations": [0, 1, 2, 3, 4]}}
+        self.assertEqual(CONVERTER.detect_model_type(config), "tdt")
+
     def test_keeps_eou_detection(self):
         config = unified_config()
         config["labels"] = ["<unk>", "<EOU>"]

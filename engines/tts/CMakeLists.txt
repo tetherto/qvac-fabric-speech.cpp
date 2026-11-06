@@ -1576,6 +1576,13 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-cosyvoice-load PRIVATE ggml)
     target_include_directories(test-cosyvoice-load PRIVATE ggml/include src)
     tts_cpp_apply_ccache(test-cosyvoice-load)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_definitions(test-cosyvoice-load PRIVATE TTS_CPP_COSYVOICE_TRACK_ALLOCATIONS)
+        foreach(_cosy_load_symbol ggml_init ggml_free ggml_backend_cpu_buffer_from_ptr
+                ggml_backend_alloc_ctx_tensors_from_buft ggml_backend_buffer_free ggml_backend_free)
+            target_link_options(test-cosyvoice-load PRIVATE "LINKER:--wrap=${_cosy_load_symbol}")
+        endforeach()
+    endif()
     tts_cpp_register_test(test-cosyvoice-load LABEL "unit")
 
     add_executable(test-cosyvoice-bf16 test/test_cosyvoice_bf16.cpp ${_tcb_cosy_core_srcs})
@@ -1721,6 +1728,14 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-moss-sfx-fit PRIVATE src)
     tts_cpp_apply_ccache(test-moss-sfx-fit)
     tts_cpp_register_test(test-moss-sfx-fit)
+
+    add_executable(test-moss-header-includes
+        test/moss/test_header_includes.cpp
+        test/moss/header_includes_gguf_metadata.cpp)
+    target_link_libraries(test-moss-header-includes PRIVATE tts-cpp)
+    target_include_directories(test-moss-header-includes PRIVATE src)
+    tts_cpp_apply_ccache(test-moss-header-includes)
+    tts_cpp_register_test(test-moss-header-includes)
 
     add_executable(test-moss-sfx-cache test/moss/test_sfx_cache.cpp)
     target_link_libraries(test-moss-sfx-cache PRIVATE tts-cpp)

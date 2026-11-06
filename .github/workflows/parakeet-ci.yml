@@ -77,7 +77,7 @@ concurrency:
 
 env:
   GGML_REPO: https://github.com/tetherto/qvac-fabric-llm.cpp.git
-  GGML_REF: d3d019a3b9914688e28963e4a49406ee15362aed # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
+  GGML_REF: 991bede69b8f1784c8603bd47afacbb5ca0612cf # the fabric ggml pin (qvac-fabric-llm.cpp, ggml/); one pin shared by every lane
 
 jobs:
   runner_names:

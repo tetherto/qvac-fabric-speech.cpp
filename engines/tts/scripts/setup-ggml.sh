@@ -20,7 +20,7 @@
 set -euo pipefail
 
 GGML_REPO_URL="https://github.com/tetherto/qvac-fabric-llm.cpp.git"
-GGML_REF="d3d019a3b9914688e28963e4a49406ee15362aed"   # qvac-fabric-llm.cpp#455: speech memory accessors, CPU graph-plan proc, CUDA PAD grid
+GGML_REF="991bede69b8f1784c8603bd47afacbb5ca0612cf"   # qvac-fabric-llm.cpp#479: buffer sizing query (temp-11739)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTS_CPP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"

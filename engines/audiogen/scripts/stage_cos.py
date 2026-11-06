@@ -3,10 +3,9 @@
 
 Stage dumps are int32 {ndim=2, d0, d1} followed by d0*d1 float32 (StageDump::write).
 
-Exits non-zero on any comparison the numbers cannot be trusted through: a missing
-or truncated counterpart, a shape mismatch, an empty directory, or a worst-stage
-cosine under the bar. A parity gate that returns 0 when it could not actually
-compare the stages is worse than no gate.
+Exits non-zero on mismatched stage rosters, malformed or nonfinite dumps, a
+shape mismatch, an empty directory, or a worst-stage cosine under the bar.
+A parity gate must actually compare valid stages before returning success.
 """
 import pathlib
 import struct
@@ -28,10 +27,15 @@ def load(path):
         if len(header) != 12:
             die(f"{path}: truncated header, got {len(header)} of 12 bytes")
         ndim, d0, d1 = struct.unpack("iii", header)
-        data = np.fromfile(f, dtype=np.float32)
+        if ndim != 2 or d0 <= 0 or d1 <= 0:
+            die(f"{path}: expected a nonempty 2-D stage, got {[ndim, d0, d1]}")
+        payload = f.read()
     expected = d0 * d1
-    if data.size != expected:
-        die(f"{path}: header declares {d0}x{d1} ({expected} floats) but payload holds {data.size}")
+    if len(payload) != expected * 4:
+        die(f"{path}: header declares {d0}x{d1} ({expected * 4} bytes) but payload holds {len(payload)} bytes")
+    data = np.frombuffer(payload, dtype=np.float32)
+    if not np.isfinite(data).all():
+        die(f"{path}: stage contains nonfinite values")
     return data, (ndim, d0, d1)
 
 
@@ -46,6 +50,10 @@ def main():
     stages = sorted(p.name for p in a_dir.glob("*.bin"))
     if not stages:
         die(f"{a_dir}: no *.bin stage dumps to compare")
+    b_stages = {p.name for p in b_dir.glob("*.bin")}
+    if set(stages) != b_stages:
+        die(f"stage roster mismatch: only in {a_dir}: {sorted(set(stages) - b_stages)}; "
+            f"only in {b_dir}: {sorted(b_stages - set(stages))}")
 
     print(f"{'stage':<20}{'shape':>18}{'cosine':>12}{'rel_l2':>12}{'max_abs':>12}")
     worst = 1.0
@@ -67,7 +75,10 @@ def main():
         else:
             cos = float(a @ b / (na * nb))
         rel = float(np.linalg.norm(a - b) / (na + 1e-30))
-        print(f"{s:<20}{str(list(a_dims[1:])):>18}{cos:12.6f}{rel:12.6f}{np.abs(a - b).max():12.4g}")
+        max_abs = float(np.abs(a - b).max())
+        if not np.isfinite([cos, rel, max_abs]).all():
+            die(f"{s}: comparison produced nonfinite metrics")
+        print(f"{s:<20}{str(list(a_dims[1:])):>18}{cos:12.6f}{rel:12.6f}{max_abs:12.4g}")
         worst = min(worst, cos)
 
     ok = worst >= PASS_COSINE

@@ -9,10 +9,14 @@ registry. Selection tries Adreno 700+ OpenCL first; validated
 Vulkan/Metal/CUDA discrete devices, then validated integrated devices; and
 finally other discrete, then integrated GPU backends. Integrated-device
 support is required because Vulkan reports Android UMA adapters such as
-Pixel's Mali-G715 as `IGPU`.
+Pixel's Mali-G715 as `IGPU`. Each automatic candidate must initialise and
+report support for the engine's F32 matrix projection. Unsupported devices,
+including virtual Metal adapters without SIMD-group reduction, are released
+and selection continues to another GPU or CPU. The same resolver is used by
+generation and memory-fit projection.
 
 `EngineOptions::backend` (`--backend` on the CLIs) replaces that walk with an
-explicit device: `cpu`, `opencl`, `webgpu`, `hexagon` (the Snapdragon HTP0
+explicit device: `cpu`, `opencl`, `webgpu`, `xdna`, `hexagon` (the Snapdragon HTP0
 NPU), or an exact ggml device name. An explicit request has no fallback, so `create()`
 throws when the device is missing. The Hexagon NPU is never picked by the
 automatic walk; see [Hexagon NPU](#hexagon-npu).
@@ -26,9 +30,16 @@ device with the same names.
 | LM | GPU on Vulkan (every device except Mali), Metal, OpenCL and CUDA, the NPU on Hexagon; CPU on Mali Vulkan devices and every unmeasured backend (WebGPU included) |
 | FSQ detokenizer | GPU on Vulkan, Metal, OpenCL, and CUDA, the NPU on Hexagon; CPU on every unmeasured backend (WebGPU included) |
 
-The LM and detokenizer are allowlisted per backend: a backend nobody has run keeps the CPU placement, so adding one cannot silently regress generated audio. Metal and OpenCL are validated for both stages; the recorded OpenCL validation used an Adreno 740. Vulkan carries both stages on every device except the ones on a per-device denylist (`vulkan_device_lm_blocked`): Mali keeps the LM on the CPU, because Mali-G715 testing showed code collapse and early termination there. A single misbehaving GPU family should cost that family the stage, not every Vulkan device, so the per-device rule denies rather than admits. CUDA needs the `snake` / `col2im_1d` VAE kernels from the `ggml-speech` fork's CUDA backend and its `GGML_PREC_F32` MUL_MAT support (the LM-shaped q4_0/q4_K strided-B `b_absmax=1e5` stress cases produced NaN before the fork routed explicit-precision matmuls to the f32 cuBLAS path); with that ggml, `test-backend-ops` on an RTX 5090 passes the full suite, the Q8_0 LM matches the F32-dequantized reference at 0.9999 logit cosine with an identical greedy trajectory where the CPU Q8_0 path sits at 0.994, and `--quantized-batch-cfg-regression` passes, so the LM runs on the GPU. Hexagon runs the LM on the NPU, which needs a `ggml-speech` whose HTP `q8_0` activation quantizer matches the CPU's (see [Hexagon NPU](#hexagon-npu)). The HIP/MUSA builds of the same backend register as `ROCm`/`MUSA` and stay off the allowlist until measured.
+The LM and detokenizer use the backend allowlists in the table above. Mali
+Vulkan devices keep the LM on CPU because testing showed code collapse and
+early termination. HIP/MUSA register as `ROCm`/`MUSA` and remain outside the
+allowlists until measured.
 
-Measurement is against an F32-dequantized reference (`scripts/dequant_gguf.py`), not against CPU. CPU is not automatically ground truth for a quantized model — ggml's CPU matmul quantizes activations to Q8_1 internally. On Metal the LM reproduces the F32 argmax trajectory exactly where CPU Q8_0 diverges at the first token. The RADV validation (AMD Strix Halo, Radeon 8060S) followed the same protocol: on 300-token prefills the Vulkan Q8_0 LM matches the F32 reference argmax on 3/3 probes with logit cosine >= 0.99999995, where CPU Q8_0 matches on 1/3 at cosine ~0.9998, and the GPU LM stage runs ~2x faster than the CPU path on that device. The NVIDIA Vulkan validation (GeForce RTX 3080, proprietary driver) used the same protocol on 300-token prefills: the Vulkan Q8_0 LM matches the F32 reference argmax on 3/3 seeds with logit cosine >= 0.99999998 and top-50 overlap 49.8/50, where CPU Q8_0 on the same box matches on 0/9, 5/9 and 0/9 steps at cosine ~0.9999 with logit differences up to 10.2. On Mali Vulkan, however, the LM produces repeated semantic codes and can terminate at roughly half the requested duration, while the same device produces a diverse full-length sequence with the LM on CPU — that report predates the strided-`src0` matmul binding fix in the `ggml-speech` Vulkan backend, which removed exactly that degenerate-trajectory symptom on another non-cooperative-matrix GPU, so the Mali entry is worth re-testing on device before it is trusted further.
+CUDA requires the fabric ggml's (`qvac-fabric` port) `snake` / `col2im_1d` VAE kernels and
+`GGML_PREC_F32` matmul support. Hexagon requires the matching HTP activation
+quantizer described [below](#hexagon-npu). Recorded comparisons and the
+F32-dequantized reference protocol are in
+[performance.md](performance.md#ace-step-backend-validation).
 
 On a GPU that supports F32 flash attention, Phase 2 also decodes the conditional and unconditional CFG paths in one batched graph. This matches the reference `acestep.cpp` LM path: the same prompt, model, sampler settings, and seed produce the same semantic-code sequence. Unsupported backends keep the separate F32 manual-attention path.
 
@@ -76,8 +87,58 @@ By default no stage stays resident after `create()`: `generate()` loads each sta
 Long VAE decodes are split into overlapping windows. The engine probes the
 active backend's maximum allocation size against the real decode graph and
 shrinks the core window when needed; short inputs remain a single graph.
-`ACESTEP_VAE_WIN_CORE` can pin the core only for diagnostics. VAE encode is not
-windowed and still allocates one full graph.
+`ACESTEP_VAE_WIN_CORE` can pin the core only for diagnostics. VAE encode also uses
+overlapping windows on long inputs, trimming their context before stitching
+the latent cores. Each encode graph is bounded to one window.
+
+## AMD XDNA NPU
+
+`EngineOptions::backend = "xdna"` or `"XDNA0"` (`--backend xdna` on
+`music-cli`) selects Fabric LLM's native GGML XDNA backend for the DiT.
+The graph cache retains a scheduler for XDNA operations and CPU fallback;
+lyric cross-attention probes use the same scheduling policy. Text and condition
+encoders, the LM, FSQ detokenizer and VAE use CPU placement. Existing explicit
+stage overrides still apply. Automatic GPU selection never picks XDNA, and
+an unavailable explicit XDNA request fails instead of selecting another device.
+
+Build against a GGML installation with XDNA and the speech operations, plus
+matching XRT, amdxdna and kernel artifacts. Follow the
+[shared XDNA runtime setup](../../parakeet/docs/backends.md#amd-xdna-npu), then
+build AudioGen with `CMAKE_PREFIX_PATH` pointing to that GGML installation as
+in the [build guide](build.md). There is no ONNX conversion or ONNX Runtime
+in this path. The published `qvac-fabric` port carries XDNA as a feature since
+11739.0.0#1; ordinary package CI validates regression compatibility separately
+from native NPU hardware execution.
+
+Use the existing stage GGUFs, selecting a BF16 turbo DiT for the validated
+NPU matmuls. Quantized weights can take XDNA's host path and are not covered by
+the reported speedup. The other stage models can keep their existing precision.
+
+```sh
+export GGML_XDNA_KERNEL_DIR=/path/to/matching-kernel-artifacts
+./build/audiogen/music-cli --models /path/to/acestep-models --backend xdna \
+  --caption "Warm piano with a steady acoustic rhythm" --dur 5 --seed 42 \
+  --out music.wav
+./build/audiogen/test-acestep-xdna-generation /path/to/acestep-models
+```
+
+The hardware test exercises public Engine generation, CPU stage placement,
+seeded repeated calls, engine recreation, exact-device selection and lyric
+alignment. Without an XDNA device it reports a skipped hardware test. It prints
+CPU/XDNA numerical differences rather than asserting bitwise equality between
+backends.
+
+A Strix Halo Ryzen AI MAX+ 395 validation used the full 24-layer turbo BF16
+DiT, eight diffusion steps, shift 3 and Haar DCW. With the same captured
+conditioning for 5.2 seconds of stereo audio, the warm median was 5.91 seconds
+with XDNA DiT and CPU VAE versus 7.37 seconds on CPU (one warmup, three runs,
+four CPU threads and four XDNA host threads). This excludes prompt encoding,
+LM generation and model loading. The first XDNA generation took 20.13 seconds.
+Peak process RSS was 7.37 GB versus 4.18 GB on CPU, including backend packing.
+CPU/XDNA PCM cosine was 0.99873 and relative L2 error was 5.11%; this is a
+numerical comparison, not proof of perceptual equivalence. Driver tracing
+confirmed real NPU command submission. Validation used
+[Fabric LLM GGML e4df67a](https://github.com/tetherto/qvac-fabric-llm.cpp/commit/e4df67a89e430d2918f7b16ac85b044fffa4588d).
 
 ## Hexagon NPU
 
@@ -144,20 +205,8 @@ reference's greedy trajectory, as the CPU does, with a mean audio-code logit
 KL of 1.05e-2 (CPU 1.10e-2, OpenCL 2.6e-6). `--quantized-batch-cfg-regression`
 passes with identical logits.
 
-Stage compute on the same phone (`music-cli --dur 30`, `ACESTEP_KEEP_STAGES=1`
-so loads are excluded, `q8_0` DiT, the run with the median total of three,
-milliseconds):
-
-| Placement | LM | DiT | VAE | generate |
-|---|--:|--:|--:|--:|
-| CPU (8 threads) | 26,459 | 51,861 | 58,725 | 147,482 |
-| OpenCL (Adreno 830) | 10,661 | 10,989 | 28,519 | 51,574 |
-| `hexagon` + `lm_backend = "cpu"` | 23,812 | 1,946 | 12,165 | 38,517 |
-| `hexagon` + `lm_backend = "opencl"` | 10,830 | 1,870 | 13,440 | 26,686 |
-| `hexagon` | 7,522 | 1,920 | 12,458 | 22,479 |
-
-At `--dur 8` the same five placements generate in 45,743 / 13,412 / 16,267 /
-8,973 / 7,832 ms.
+Generation timings for the same placements are in
+[performance.md](performance.md#ace-step-15-on-snapdragon-8-elite-2026-10).
 
 ## MiniMax Core ML conditioner
 

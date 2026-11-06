@@ -55,6 +55,7 @@
 #include "vae_coreml_windows.h"
 #include "vae_encode_windows.h"
 #include "vae_ggml.h"
+#include "vae_gguf.h"
 #include "wav_reader.h"
 
 #include "audiogen-cpp/acestep/engine.h"
@@ -775,6 +776,36 @@ void test_backend_device_types() {
 // 6b. GPU fallback reason -----------------------------------------------------
 // A CPU run after a GPU request is the symptom users report, so the reason must
 // never disagree with what the registry actually returned.
+void test_gpu_matmul_capability() {
+    using namespace tts_cpp::acestep;
+    bool inspected = false;
+    CHECK(!probe_gpu_matmul([&inspected](const ggml_tensor * operation) {
+        inspected = true;
+        CHECK(operation->op == GGML_OP_MUL_MAT);
+        CHECK(operation->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->type == GGML_TYPE_F32);
+        CHECK(operation->src[1]->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->data == nullptr && operation->src[1]->data == nullptr);
+        CHECK(operation->src[0]->ne[0] == GPU_MATMUL_PROBE_DIMENSION);
+        CHECK(operation->src[1]->ne[1] == GPU_MATMUL_PROBE_COLUMNS);
+        return false;
+    }));
+    CHECK(inspected);
+    CHECK(probe_gpu_matmul([](const ggml_tensor *) { return true; }));
+    CHECK(!backend_supports_gpu_matmul(nullptr));
+    ggml_backend_t cpu = backend_cpu_init();
+    CHECK(cpu != nullptr);
+    if (cpu) {
+        CHECK(backend_supports_gpu_matmul(cpu));
+        CHECK(keep_usable_gpu(cpu, backend_supports_gpu_matmul) == cpu);
+        ggml_backend_free(cpu);
+    }
+    ggml_backend_t unsupported = backend_cpu_init();
+    CHECK(unsupported != nullptr);
+    CHECK(keep_usable_gpu(unsupported, [](ggml_backend_t) { return false; }) == nullptr);
+    CHECK(keep_usable_gpu(nullptr, [](ggml_backend_t) { return true; }) == nullptr);
+}
+
 void test_gpu_fallback_reason() {
     using tts_cpp::GpuFallbackReason;
     using tts_cpp::gpu_fallback_reason_name;
@@ -881,10 +912,17 @@ void test_backend_request_matching() {
     CHECK(backend_request_matches("cpu", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
     CHECK(!backend_request_matches("cpu", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
     CHECK(!backend_request_matches("auto", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("xdna", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(backend_request_matches("XDNA1", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
+    CHECK(!backend_request_matches("auto", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
     CHECK(!backend_request_matches("Vulkan0", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_GPU));
 
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_ACCEL, -1) == GpuTier::NotSelectable);
 }
 
 void test_dsp_library_path() {
@@ -1171,6 +1209,9 @@ void test_stage_placement() {
     using tts_cpp::acestep::resolve_stage_placement;
     using tts_cpp::acestep::StagePlacement;
 
+    const auto xdna = resolve_stage_placement("XDNA", "", {});
+    CHECK(!xdna.enc_on_gpu && !xdna.lm_on_gpu && !xdna.detok_on_gpu);
+
     // -- backend name matching ------------------------------------------------
     // ggml-metal registers as "MTL"; older ggml reported "Metal". Both must
     // match or the allowlist is silently dead on one of them.
@@ -1379,6 +1420,8 @@ void test_vae_backend_request_env() {
     set_env("ACESTEP_VAE_GPU", nullptr);
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
     CHECK(vae_backend_request_from_env("auto") == "auto");
+    CHECK(vae_backend_request_from_env("xdna") == "cpu");
+    CHECK(vae_backend_request_from_env("XDNA0") == "cpu");
 
     set_env("ACESTEP_VAE_GPU", "0");
     CHECK(vae_backend_request_from_env("hexagon") == "cpu");
@@ -1386,6 +1429,7 @@ void test_vae_backend_request_env() {
 
     set_env("ACESTEP_VAE_GPU", "1");
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
+    CHECK(vae_backend_request_from_env("xdna") == "xdna");
 
     set_env("ACESTEP_VAE_GPU", nullptr);
 }
@@ -1636,6 +1680,38 @@ void test_stage_dump_rejects_malformed() {
     CHECK(!tts_cpp::acestep::read_stage_dump("test", missing.c_str(), out, &d0, &d1));
 }
 
+void test_gguf_parse_failure_releases_mapping() {
+    using namespace tts_cpp::acestep;
+    const std::string path = test_temp_dir() + "/qvac-acestep-invalid-gguf-test.gguf";
+    FILE * file = std::fopen(path.c_str(), "wb");
+    CHECK(file != nullptr);
+    if (!file) return;
+    const char invalid[] = "not a GGUF model";
+    CHECK(std::fwrite(invalid, 1, sizeof(invalid), file) == sizeof(invalid));
+    std::fclose(file);
+
+    for (int retry = 0; retry < 3; ++retry) {
+        DitGGUF dit;
+        VaeGGUF vae;
+        CHECK(!dit_gguf_open(dit, path));
+        CHECK(!vae_gguf_open(vae, path));
+        CHECK(dit.ctx == nullptr && dit.meta == nullptr);
+        CHECK(vae.ctx == nullptr && vae.meta == nullptr);
+        CHECK(dit.file.data == nullptr && dit.file.size == 0);
+        CHECK(vae.file.data == nullptr && vae.file.size == 0);
+#ifdef _WIN32
+        CHECK(dit.file.file_handle == nullptr && dit.file.map_handle == nullptr);
+        CHECK(vae.file.file_handle == nullptr && vae.file.map_handle == nullptr);
+#else
+        CHECK(dit.file.fd == -1);
+        CHECK(vae.file.fd == -1);
+#endif
+        dit_gguf_close(dit);
+        vae_gguf_close(vae);
+    }
+    std::remove(path.c_str());
+}
+
 constexpr int TINY_LM_HIDDEN     = 128;
 constexpr int TINY_LM_FFN        = 256;
 constexpr int TINY_LM_VOCAB      = 200;
@@ -1742,6 +1818,12 @@ void test_lm_split_table_matches_whole_table() {
     CHECK(whole != nullptr);
     CHECK(split != nullptr);
     if (whole && split) {
+        // Splitting retains the host embedding table as well as the head
+        // chunks. Its weight footprint must include both copies, even when
+        // the backend can map the remaining transformer weights in place.
+        const size_t table_bytes = ggml_row_size(GGML_TYPE_Q8_0, TINY_LM_HIDDEN) * TINY_LM_VOCAB;
+        CHECK(tts_cpp::acestep::lm_model_weight_bytes(split) >=
+              tts_cpp::acestep::lm_model_weight_bytes(whole) + table_bytes);
         const int32_t      prompt[] = { 0, 3, 77, 150, TINY_LM_VOCAB - 1 };
         std::vector<float> whole_logits, split_logits;
         CHECK(lm_model_forward(whole, prompt, 5, whole_logits));
@@ -3716,6 +3798,7 @@ int main() {
     test_coreml_plan_windows();
     test_vae_window_core();
     test_backend_device_types();
+    test_gpu_matmul_capability();
     test_gpu_fallback_reason();
     test_gpu_tier_policy();
     test_backend_request_matching();
@@ -3738,6 +3821,7 @@ int main() {
     test_convert_f32_to_f16_rows();
     test_fused_load_fail_closed();
     test_lm_head_chunk_ranges();
+    test_gguf_parse_failure_releases_mapping();
     test_lm_split_table_matches_whole_table();
     test_stage_dump_round_trip();
     test_stage_dump_rejects_malformed();

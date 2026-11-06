@@ -181,26 +181,32 @@ int largest_power_of_two_below(int n) {
     return power;
 }
 
-bool backend_projects(ggml_backend_t backend, const ggml_tensor * table, int rows) {
-    ggml_context * ctx = ggml_init({3 * ggml_tensor_overhead(), nullptr, true});
-    if (!ctx) return false;
-    ggml_tensor * weight = ggml_new_tensor_2d(ctx, table->type, table->ne[0], rows);
-    ggml_tensor * hidden = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, table->ne[0], 1);
-    const bool supported = ggml_backend_supports_op(backend, ggml_mul_mat(ctx, weight, hidden));
-    ggml_free(ctx);
-    return supported;
-}
-
 int largest_head_rows(ggml_backend_t backend, const ggml_tensor * table) {
     const int vocab = (int) table->ne[1];
-    if (backend_projects(backend, table, vocab)) return vocab;
+    if (transcribe_backend_projects(backend, table, vocab)) return vocab;
     for (int rows = largest_power_of_two_below(vocab); rows >= MIN_HEAD_ROWS; rows /= 2) {
-        if (backend_projects(backend, table, rows)) return rows;
+        if (transcribe_backend_projects(backend, table, rows)) return rows;
     }
     return 0;
 }
 
 } // namespace
+
+bool transcribe_backend_projects(ggml_backend_t backend, const ggml_tensor * table, int rows, CopySupport supports) {
+    if (!backend || !table || rows < 1 || !supports) return false;
+    const std::unique_ptr<ggml_context, decltype(&ggml_free)> ctx(
+        ggml_init({3 * ggml_tensor_overhead(), nullptr, true}), ggml_free);
+    if (!ctx) return false;
+    const std::unique_ptr<ggml_backend_buffer, decltype(&ggml_backend_buffer_free)> candidate(
+        ggml_backend_buft_alloc_buffer(weight_buffer_type(backend), 0), ggml_backend_buffer_free);
+    if (!candidate) return false;
+    ggml_tensor * weight = ggml_new_tensor_2d(ctx.get(), table->type, table->ne[0], rows);
+    // A bufferless probe describes the backend's default allocation, which may
+    // be host-visible. Hexagon quantized heads use its explicit REPACK buffer.
+    weight->buffer = candidate.get();
+    ggml_tensor * hidden = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, table->ne[0], 1);
+    return supports(backend, ggml_mul_mat(ctx.get(), weight, hidden));
+}
 
 std::vector<TranscribeHeadChunk> plan_transcribe_head(int vocab, int max_rows) {
     if (vocab < 1 || max_rows < 1) {

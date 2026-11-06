@@ -16,28 +16,12 @@
 //     DiT (diffusion transformer)     -> 64-channel acoustic latent
 //     VAE (AutoencoderOobleck)        -> 48 kHz stereo PCM   [see vae.h]
 //
-// With a GPU selected, DiT, VAE and the encoders use it by default. The LM and
-// detokenizer use the validated Metal/OpenCL and Vulkan/Metal/OpenCL allowlists,
-// respectively, with CPU fallback for unmeasured backends.
-//
-// Port status:
-//   [x] custom ggml ops: ggml_col2im_1d, ggml_snake (CPU) in the fabric ggml
-//   [x] VAE stage (tts_cpp::acestep::Vae) — decode/encode validated on CPU
-//   [x] DiT stage (dit_ggml) — load + forward + Euler flow-matching sampler
-//   [x] LM stage (lm_ggml + bpe_tokenizer + lm_pipeline) — Phase-2 codes
-//   [x] FSQ detokenizer (detok_ggml) — codes -> DiT context latents
-//   [x] text-encoder (textenc_ggml) + cond-encoder (cond_ggml)
-//   [x] Engine::generate() end-to-end: text -> LM -> detok -> textenc/cond ->
-//       DiT -> VAE -> stereo 48 kHz (native, no acestep.cpp binaries).
-//   [x] LM Phase-2 CFG (multi-set KV in lm_ggml) + upstream sampling defaults.
-//   [x] LM Phase-1 CoT/metadata auto-gen + metadata FSM (metadata_fsm.h).
-//   [x] is_turbo auto-detect -> steps/shift (turbo 8/3.0, base/sft 50/1.0).
-//   [x] Informal parity vs acestep.cpp: synth correlation measured at 0.98-0.99
-//       on same codes; no reproducible result artifact is committed.
-//   [x] DiT sampler Haar DCW "double" correction (official ACE-Step defaults).
-//   [x] Simple Mode: LM inspire pass expands a short query into the full
-//       request (caption, lyrics, metadata) ahead of synthesis.
-// Deferred: DiT CFG/APG (guidance>1, base/sft only).
+// With a GPU selected, DiT, VAE and the encoders use it by default. The LM
+// and detokenizer use validated CUDA, Vulkan, Metal and OpenCL backends;
+// Mali Vulkan keeps the LM on CPU. Explicit Hexagon placement runs every
+// stage on the NPU. Explicit XDNA placement uses the NPU for DiT and CPU for
+// the remaining stages. Unmeasured backends keep the LM and detokenizer on CPU.
+// See docs/backends.md for placement overrides and backend requirements.
 
 #include "audiogen-cpp/export.h"
 #include "audiogen-cpp/gpu_fallback.h"
@@ -75,10 +59,10 @@ struct EngineOptions {
     // search path (static-linked desktop / Apple builds need nothing here).
     std::string backends_dir;
     // "auto" (or empty) keeps the n_gpu_layers request and runtime GPU tiering.
-    // "cpu", "opencl", "webgpu" and "hexagon" (the HTP0 NPU session) select a
+    // "cpu", "opencl", "webgpu", "xdna" and "hexagon" (the HTP0 NPU session) select a
     // backend explicitly, as does an exact ggml device name ("HTP0", "Vulkan0", ...).
     // An explicit request overrides n_gpu_layers and makes create() throw when
-    // the device is missing or fails to initialise. Hexagon is never chosen
+    // the device is missing or fails to initialise. Hexagon and XDNA are never chosen
     // automatically. The stage-placement allowlist still applies on top.
     std::string backend = "auto";
     // "auto" keeps the stage-placement policy for the LM. Any other value uses
@@ -94,7 +78,7 @@ struct EngineOptions {
     // NOTE: VAE windowed decode probes the active backend's allocation cap and
     // adapts its window for bounded memory on long tracks. It is intentionally
     // not exposed as an API option; ACESTEP_VAE_WIN_CORE is diagnostic only.
-    // VAE encode remains a full-graph operation.
+    // VAE encode also uses overlapping windows for bounded graph memory.
 };
 
 inline constexpr char AUDIO_EDIT_DEFAULT_LYRICS[] = "[Instrumental]";

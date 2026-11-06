@@ -303,6 +303,16 @@ if (AUDIOGEN_BUILD_TESTS)
         set_property(TEST ${target} PROPERTY LABELS ${ART_LABEL})
     endfunction()
 
+    add_executable(test-acestep-graph-allocator test/test_dit_graph_allocator.cpp)
+    target_include_directories(test-acestep-graph-allocator PRIVATE src)
+    target_link_libraries(test-acestep-graph-allocator PRIVATE ggml)
+    audiogen_register_test(test-acestep-graph-allocator LABEL "unit")
+
+    add_executable(test-acestep-xdna-generation test/test_xdna_generation.cpp)
+    audiogen_link_in_tree_binary(test-acestep-xdna-generation)
+    audiogen_register_test(test-acestep-xdna-generation LABEL "integration")
+    set_property(TEST test-acestep-xdna-generation PROPERTY SKIP_RETURN_CODE 77)
+
     # CPU-only, weight-free unit tests for the pipeline's pure logic
     # (dit schedule, philox golden vector, FSQ decode, top-k/p sampler).
     add_executable(test-acestep-units test/test_acestep_units.cpp)
@@ -368,6 +378,12 @@ if (AUDIOGEN_BUILD_TESTS)
         )
         set_property(TEST test-acestep-converter PROPERTY LABELS "unit")
         set_property(TEST test-acestep-converter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+        add_test(NAME test-acestep-stage-cos
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_stage_cos.py
+        )
+        set_property(TEST test-acestep-stage-cos PROPERTY LABELS "unit")
+        set_property(TEST test-acestep-stage-cos PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
         # Skips without torch under the system interpreter; the audiogen CI
         # macOS lane also runs it with the Core ML export venv, where torch is

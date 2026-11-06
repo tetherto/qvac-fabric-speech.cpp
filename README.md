@@ -16,7 +16,8 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 
 The engine guides own model formats, quantization, backend validation, and input
 requirements. An available ggml backend does not imply every model has been
-validated on it.
+validated on it. AudioGen automatic GPU selection requires F32 matrix
+multiplication support and otherwise continues to another device or CPU.
 
 Eligible offline Parakeet TDT and RNN-T calls keep encoder features on the GPU
 through decoding, including Nemotron's locale-prompt projection. Encoder tensors
@@ -27,7 +28,7 @@ for routing, fallback and validation coverage.
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
-| [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy ships as ready-made GGUF and Core ML files for eight European languages and runs on the Hexagon NPU |
+| [Parakeet](engines/parakeet/README.md) | CTC, Unified RNN-T, TDT, TranscribePsy, IndicConformer, realtime EOU, Nemotron 3.5 ASR | Offline, streaming, long-form ASR and end-of-turn detection; IndicConformer CTC requires a language selection; TranscribePsy EU-sub ships as ready-made GGUF and Core ML files for eight European languages and runs on the Hexagon NPU; the full 25-language EU model converts with its CAFE adapters and language gate into one GGUF |
 | Parakeet | Sortformer v1/v2/v2.1, Nemotron 3 Diarization | Speaker diarization and attributed ASR; Sortformer supports up to four speakers, Nemotron up to eight |
 | Parakeet | MOSS-Transcribe-Diarize | One-pass transcription, speakers, timestamps, hotwords and metadata-only memory fit including scheduler storage and CPU scratch; fused CPU encoder attention; CPU/Metal validated on Spanish/Chinese; Metal decode reuses one graph per cache window (29-42% faster decode on M3 Ultra, identical transcripts); explicit CUDA/Vulkan/OpenCL/Metal/Hexagon selection with generated-model CPU parity and quantized checkpoint smoke coverage; English long-form skips spans in both native and reference runs |
 | [TTS](engines/tts/README.md) | Chatterbox Turbo/Multilingual, Supertonic 1/2/3, Parler mini/large/Indic, CosyVoice3, Audio8 | Synthesis with preset, described, or cloned voices, depending on the model; streaming support varies by API and CLI; Supertonic 3, Parler mini, CosyVoice3 and Audio8 also validated on WebGPU |
@@ -35,8 +36,17 @@ for routing, fallback and validation coverage.
 | TTS | MOSS-TTS-v1.5 / MOSS-TTSD | Multilingual synthesis, cloning, dialogue and streaming; single-reference dialogue avoids duplicate reference encoding; selective text-control projection on Metal; batched audio-logit readback on Vulkan; CPU/Metal validated; CUDA/Vulkan generated-model parity and synthesis/streaming/cancellation checks (see scoped validation in the TTS guide); explicit Hexagon NPU placement with a `q4_0` transformer; numerical reference parity pending |
 | TTS | MOSS-SoundEffect-v2, MOSS-Speech | Sound-effect generation and spoken replies respectively; SoundEffect reuses fixed cross-attention K/V, selects supported Metal DiT flash attention, and runs quantized matrices from ggml's repacked CPU layout, with the cache and retained scheduler peak included in metadata-only memory fit for repeated requests; CPU/Metal generation validated, including a `q8_0` GGUF with `q4_0` DiT blocks; CUDA/Vulkan generated-model parity and quantized SoundEffect/Speech checkpoint smoke coverage; explicit Hexagon NPU placement for SoundEffect, with reference parity, and for the Speech LM and speech tokenizer |
 | TTS | LavaSR denoiser/enhancer | Speech denoising and bandwidth extension; GPU selection includes ARM Mali for both stages and excludes WebGPU, whose kernels lack an op the graphs need |
-| [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation and editing; base additionally supports lego stems |
+| [AudioGen](engines/audiogen/README.md) | ACE-Step v15 turbo/sft/base | Music generation, source-conditioned covers, and editing; base additionally supports lego stems ([CLI](engines/audiogen/docs/cli.md), [C++ usage](engines/audiogen/docs/build.md)) |
 | AudioGen | MiniMax-Music3 | Desktop music generation on CPU or GPU, optional [Core ML conditioner projection](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner), and metadata-only [memory-fit preflight](engines/audiogen/docs/memory-fit.md); unavailable on Android/iOS |
+
+Parakeet also accepts explicit [AMD XDNA](engines/parakeet/docs/backends.md#amd-xdna-npu)
+selection through Fabric LLM's native GGML backend. It uses the existing GGUF,
+requires matching XDNA runtime artifacts, and schedules unsupported operations
+on CPU. Q8_0 matrices stay on the host; use F16 for NPU validation.
+
+ACE-Step also supports explicit [AMD XDNA DiT execution](engines/audiogen/docs/backends.md#amd-xdna-npu)
+through `backend = "xdna"` or `XDNA0`. Unsupported DiT operations use a CPU
+scheduler fallback; the encoders, LM, detokenizer and VAE retain CPU placement.
 
 MOSS cloning matches upstream reference loudness preprocessing and uses the
 TTSD-specific dialogue prompt. The [TTSD example](engines/tts/docs/moss.md)
@@ -174,8 +184,9 @@ Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
 renders diverge after the first differing token the way any two backends do;
 the transcripts are the check. They rely on ggml-webgpu computing the matmul
 and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
-f32 accumulation, which the fabric ggml provides from qvac-fabric-llm.cpp
-`be6e387b` (ported from ggml-speech 2026-10-27); with an older ggml their
+f32 accumulation, which the fabric ggml provides since qvac-fabric-llm.cpp
+`be6e387b` (ported from ggml-speech 2026-10-27) and on the temp-11739 line
+since its base `ee1ccf4e3`; with an older ggml their
 decoders overflow f16 and produce NaN logits, silence or
 noise.
 
@@ -282,7 +293,13 @@ uses this gate.
 | Synthesis, voice cloning, sound effects, speech-to-speech, enhancement | [TTS](engines/tts/README.md) |
 | Music generation and editing | [AudioGen](engines/audiogen/README.md) |
 | Benchmark quality diagnostics and model preparation | [Music alignment guide](scripts/benchmarks/music-alignment.md) |
+| Weekly desktop benchmark on the shared Tailscale machines | [desktop-weekly](scripts/benchmarks/desktop-weekly/README.md) |
+| Running, collecting and publishing that benchmark from Claude | [speech-bench skill](skills/speech-bench/SKILL.md) |
 | Historical development and integration reports | [Chatterbox](engines/tts/docs/history/chatterbox-port.md), [Supertonic](engines/tts/docs/history/supertonic-port.md), [Pocket](engines/tts/docs/history/pocket-integration.md), [Parakeet](engines/parakeet/docs/history/parakeet-port.md), [Strix Halo](engines/audiogen/docs/history/strix-halo.md) |
 
 Audio8 exposes incremental PCM through `Engine::synthesize_stream()`, with codec-window
 delivery on ggml and Core ML. See the [streaming API and measurement guide](engines/tts/docs/audio8.md#incremental-pcm-streaming).
+
+Audio8 preserves separate CUDA F32 projection shapes during multi-token prefill
+for fused/separate numerical consistency. Decode and other weight types retain
+projection fusion; shared CUDA matmul routing is unchanged.

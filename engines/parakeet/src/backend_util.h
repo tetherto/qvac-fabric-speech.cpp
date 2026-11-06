@@ -42,6 +42,7 @@ inline bool backend_selection_matches(const std::string & requested,
     if (requested == "vulkan") return reg && std::strcmp(reg, "Vulkan") == 0;
     if (requested == "cuda") return reg && std::strcmp(reg, "CUDA") == 0;
     if (requested == "webgpu") return reg && std::strcmp(reg, "WebGPU") == 0;
+    if (requested == "xdna") return reg && std::strcmp(reg, "XDNA") == 0;
     if (requested == "metal") return reg && (std::strcmp(reg, "MTL") == 0 || std::strcmp(reg, "Metal") == 0);
     if (requested == "hexagon") {
         return reg && std::strcmp(reg, "HTP") == 0 && device && std::strcmp(device, "HTP0") == 0;
@@ -72,6 +73,7 @@ enum class GpuTier {
 inline GpuTier gpu_tier_for(const char *                     reg_name,
                             enum ggml_backend_dev_type       dev_type,
                             int                              adreno_version) {
+    if (reg_name && std::strcmp(reg_name, "XDNA") == 0) return GpuTier::NotSelectable;
     if (dev_type != GGML_BACKEND_DEVICE_TYPE_GPU &&
         dev_type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
         return GpuTier::NotSelectable;
@@ -144,6 +146,10 @@ inline bool backend_is_webgpu(ggml_backend_t b) {
 
 inline bool backend_is_hexagon(ggml_backend_t b) {
     return std::strcmp(backend_reg_name(b), "HTP") == 0;
+}
+
+inline bool backend_is_xdna(ggml_backend_t b) {
+    return std::strcmp(backend_reg_name(b), "XDNA") == 0;
 }
 
 inline bool description_names_adreno(const char * description) {

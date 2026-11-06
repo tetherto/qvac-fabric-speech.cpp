@@ -837,7 +837,8 @@ bool Engine::is_transcription_model() const {
 }
 
 BackendDevice Engine::backend_device() const {
-    if (backend_is_hexagon(pimpl_->model.backend_active())) return BackendDevice::NPU;
+    const auto backend = pimpl_->model.backend_active();
+    if (backend_is_hexagon(backend) || backend_is_xdna(backend)) return BackendDevice::NPU;
     return model_has_gpu_backend(pimpl_->model) ? BackendDevice::GPU
                                                 : BackendDevice::CPU;
 }
@@ -900,13 +901,20 @@ void require_transcription_model(const ParakeetCtcModel & model, const char * wh
 // compute_mel, which may run concurrently with a transcription.
 PrecomputedMel build_precomputed_mel(const ParakeetCtcModel & model, MelState & state,
                                      const float * samples, int n_samples, int sample_rate,
-                                     const char * where) {
+                                     const std::string & language, const char * where) {
     const auto t_mel = std::chrono::steady_clock::now();
     PrecomputedMel out;
     if (int rc = compute_log_mel(samples, n_samples, model.mel_cfg, state,
                                  out.mel, out.n_frames); rc != 0) {
         throw std::runtime_error(std::string("parakeet::Engine::") + where +
                                  ": compute_log_mel failed (rc=" + std::to_string(rc) + ")");
+    }
+    const int gate_samples = kTranscribePsyEuGateSeconds * model.mel_cfg.sample_rate;
+    if (model.model_variant == "transcribepsy-250m-eu" &&
+        (language.empty() || language == "auto") && n_samples > gate_samples &&
+        compute_log_mel(samples, gate_samples, model.mel_cfg, state,
+                        out.eu_gate_mel, out.eu_gate_frames) != 0) {
+        throw std::runtime_error("TranscribePsy EU gate mel preprocessing failed");
     }
     out.n_mels        = model.mel_cfg.n_mels;
     out.audio_samples = n_samples;
@@ -926,7 +934,7 @@ EngineResult Engine::transcribe(const std::string & wav_path) {
 
     PrecomputedMel mel = build_precomputed_mel(pimpl_->model, pimpl_->mel_state,
                                                samples.data(), (int) samples.size(), sr,
-                                               "transcribe");
+                                               pimpl_->opts.language, "transcribe");
     // Everything from here on reads the mel, never the audio, so neither the
     // waveform nor the STFT scratch is held across the encoder and decoder.
     std::vector<float>().swap(samples);
@@ -941,7 +949,7 @@ EngineResult Engine::transcribe_samples(const float * samples, int n_samples, in
 
     PrecomputedMel mel = build_precomputed_mel(pimpl_->model, pimpl_->mel_state,
                                                samples, n_samples, sample_rate,
-                                               "transcribe_samples");
+                                               pimpl_->opts.language, "transcribe_samples");
     pimpl_->mel_state.release_scratch();
     return transcribe_mel_impl(std::move(mel), mel.preprocess_ms);
 }
@@ -953,7 +961,7 @@ PrecomputedMel Engine::compute_mel(const float * samples, int n_samples, int sam
     // since the expected caller is one long-lived prefetch worker.
     static thread_local MelState tls_mel_state;
     return build_precomputed_mel(pimpl_->model, tls_mel_state, samples, n_samples, sample_rate,
-                                 "compute_mel");
+                                 pimpl_->opts.language, "compute_mel");
 }
 
 PrecomputedMel Engine::compute_mel_wav(const std::string & wav_path) const {
@@ -975,14 +983,17 @@ namespace {
 // and the buffer it carries are checked against each other before the encoder
 // reads it. The product is formed in size_t and checked by division so an
 // oversized frame count cannot wrap into a plausible size.
-void require_mel_buffer(const PrecomputedMel & mel, int expected_n_mels) {
+void require_mel_buffer(const PrecomputedMel & mel, const MelConfig & config) {
+    if (config.n_mels <= 0 || config.sample_rate <= 0 || config.hop_length <= 0) {
+        throw std::runtime_error("parakeet::Engine::transcribe_mel: invalid model mel configuration");
+    }
     if (mel.empty()) {
         throw std::runtime_error("parakeet::Engine::transcribe_mel: empty mel");
     }
-    if (mel.n_mels != expected_n_mels) {
+    if (mel.n_mels != config.n_mels) {
         throw std::runtime_error("parakeet::Engine::transcribe_mel: mel has " +
                                  std::to_string(mel.n_mels) + " bins but model expects " +
-                                 std::to_string(expected_n_mels));
+                                 std::to_string(config.n_mels));
     }
     const size_t frames   = (size_t) mel.n_frames;
     const size_t bins     = (size_t) mel.n_mels;
@@ -993,12 +1004,18 @@ void require_mel_buffer(const PrecomputedMel & mel, int expected_n_mels) {
                                  std::to_string(mel.n_frames) + " frames x " +
                                  std::to_string(mel.n_mels) + " bins were declared");
     }
+    const int64_t max_gate_frames = 1 + (int64_t) kTranscribePsyEuGateSeconds *
+        config.sample_rate / config.hop_length;
+    if (mel.eu_gate_frames < 0 || mel.eu_gate_frames > max_gate_frames ||
+        mel.eu_gate_mel.size() != (size_t) mel.eu_gate_frames * bins) {
+        throw std::runtime_error("parakeet::Engine::transcribe_mel: invalid EU gate mel buffer");
+    }
 }
 
 }  // namespace
 
 EngineResult Engine::transcribe_mel(PrecomputedMel mel) {
-    require_mel_buffer(mel, pimpl_->model.mel_cfg.n_mels);
+    require_mel_buffer(mel, pimpl_->model.mel_cfg);
     require_transcription_model(pimpl_->model, "transcribe_mel");
     pimpl_->cancel_flag.store(false);
     // The mel was timed on whichever thread built it; only the stages from
@@ -1016,10 +1033,19 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     const int    sample_rate   = precomputed.sample_rate;
     const double preprocess_ms = precomputed.preprocess_ms;
 
+    const auto t_gate = clock::now();
+    resolve_transcribepsy_eu_route(pimpl_->model, pimpl_->opts.language,
+                                   mel.data(), n_mel_frames,
+                                   pimpl_->model.mel_cfg.n_mels, nullptr,
+                                   precomputed.eu_gate_mel.data(),
+                                   precomputed.eu_gate_frames, n_samples);
+    const double gate_ms = ms_since(t_gate);
+
 #ifdef PARAKEET_USE_COREML
     // With a TDT decoder sidecar the whole pass runs as pause-cut segments,
     // batched on the Neural Engine; anything below is the fallback.
-    if (pimpl_->model.model_type == ParakeetModelType::TDT) {
+    if (pimpl_->model.model_type == ParakeetModelType::TDT &&
+        pimpl_->model.model_variant != "transcribepsy-250m-eu") {
         IndependentSegmentsOutcome seg;
         if (transcribe_independent_segments(pimpl_->model, pimpl_->transducer_rt, mel.data(),
                                             n_mel_frames, pimpl_->model.mel_cfg.n_mels,
@@ -1030,7 +1056,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     }
 #endif
 
-    double encoder_ms = 0.0;
+    double encoder_ms = gate_ms;
     double device_decode_ms = 0.0;
     TdtDecodeResult device_result;
     TdtDecodeOptions device_options = transducer_decode_options(pimpl_->model);
@@ -1105,7 +1131,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                      "run_encoder_windowed failed (rc=" +
                                      std::to_string(rc) + ")");
         }
-        encoder_ms = wstats.encoder_ms;
+        encoder_ms += wstats.encoder_ms;
     } else {
         const auto t_enc = clock::now();
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
@@ -1116,7 +1142,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
             throw std::runtime_error("parakeet::Engine::transcribe_samples: run_encoder failed (rc=" +
                                      std::to_string(rc) + ")");
         }
-        encoder_ms = ms_since(t_enc) - device_decode_ms;
+        encoder_ms += ms_since(t_enc) - device_decode_ms;
     }
 
     // A cancel() during the windowed encoder loop can leave no committed
@@ -1327,9 +1353,26 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
         throw std::runtime_error("parakeet::Engine::transcribe_samples_stream: compute_log_mel failed (rc=" +
                                  std::to_string(rc) + ")");
     }
+    std::vector<float> eu_gate_mel;
+    int eu_gate_frames = 0;
+    const int gate_samples = kTranscribePsyEuGateSeconds * pimpl_->model.mel_cfg.sample_rate;
+    if (pimpl_->model.model_variant == "transcribepsy-250m-eu" &&
+        (pimpl_->opts.language.empty() || pimpl_->opts.language == "auto") &&
+        n_samples > gate_samples &&
+        compute_log_mel(samples, gate_samples, pimpl_->model.mel_cfg,
+                        eu_gate_mel, eu_gate_frames) != 0) {
+        throw std::runtime_error("TranscribePsy EU gate mel preprocessing failed");
+    }
     const double preprocess_ms = ms_since(t_mel);
 
-    double encoder_ms = 0.0;
+    const auto t_gate = clock::now();
+    resolve_transcribepsy_eu_route(pimpl_->model, pimpl_->opts.language,
+                                   mel.data(), n_mel_frames,
+                                   pimpl_->model.mel_cfg.n_mels, nullptr,
+                                   eu_gate_mel.data(), eu_gate_frames, n_samples);
+    const double gate_ms = ms_since(t_gate);
+
+    double encoder_ms = gate_ms;
     EncoderOutputs enc_out;
     const LongFormPlan lf =
         resolve_long_form_plan(pimpl_->model, pimpl_->opts, n_mel_frames);
@@ -1345,7 +1388,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
                                      "run_encoder_windowed failed (rc=" +
                                      std::to_string(rc) + ")");
         }
-        encoder_ms = wstats.encoder_ms;
+        encoder_ms += wstats.encoder_ms;
     } else {
         const auto t_enc = clock::now();
         if (int rc = run_encoder(pimpl_->model, mel.data(), n_mel_frames,
@@ -1356,7 +1399,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
             throw std::runtime_error("parakeet::Engine::transcribe_samples_stream: run_encoder failed (rc=" +
                                      std::to_string(rc) + ")");
         }
-        encoder_ms = ms_since(t_enc);
+        encoder_ms += ms_since(t_enc);
     }
 
     const int T_enc = enc_out.n_enc_frames;
@@ -1566,6 +1609,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
                                      std::to_string(rc) + ")");
         }
         encoder_ms = ms_since(t_enc);
+        dres.used_coreml = enc_out.used_coreml;
 
         int diarize_rc = sortformer_diarize_ggml(impl.model,
                                                  enc_out.encoder_out.data(),
@@ -1581,6 +1625,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
     result.n_frames       = dres.n_frames;
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
+    result.encoder_used_coreml = dres.used_coreml;
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;
@@ -1712,6 +1757,7 @@ static DiarizationResult engine_impl_diarize_streaming_helper(
     result.n_frames       = dres.n_frames;
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
+    result.encoder_used_coreml = dres.used_coreml;
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;
@@ -1777,7 +1823,8 @@ static DiarizationResult engine_impl_diarize_nemotron_with_gain(
     const auto inference_start = std::chrono::steady_clock::now();
     DiarizationResult result;
     if (run_nemotron_diarization(impl.model, mel.data(), mel_frames,
-        result.speaker_probs) != 0) {
+        result.speaker_probs, NemotronAttention::Automatic,
+        &result.encoder_used_coreml) != 0) {
         throw std::runtime_error("Nemotron diarization inference failed");
     }
     result.decode_ms = ms_since(inference_start);
@@ -1871,6 +1918,7 @@ static DiarizationResult engine_impl_diarize_nemotron_streaming(
         state_data, previous_speaker_frames + previous_fifo_frames, chunk) != 0) {
         throw std::runtime_error("Nemotron streaming inference failed");
     }
+    result.encoder_used_coreml = chunk.used_coreml;
     std::vector<float> coarse;
     average_nemotron_coarse_probabilities(chunk, result.num_spks, factor, coarse);
     const int committed_offset = chunk.state_frames + left;
@@ -2754,6 +2802,8 @@ struct SortformerStreamSession::Impl {
     bool                   cache_active = false;
     float                  nemotron_stream_gain = 0.0f;
     std::vector<float> *   probability_sink = nullptr;
+    int                    network_passes = 0;
+    int                    coreml_passes = 0;
 
     // Speaking vs silent from Sortformer probs: max probability above opts.threshold.
     // Initial Unknown forces a transition on the first chunk.
@@ -2886,6 +2936,11 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
                     *engine_impl, win, n, opts.sample_rate, diopts, nemotron_stream_gain)
                 : engine_impl_diarize_helper(*engine_impl, win, n, opts.sample_rate, diopts);
         }
+    }
+
+    if (diar.n_frames > 0) {
+        ++network_passes;
+        if (diar.encoder_used_coreml) ++coreml_passes;
     }
 
     if (probability_sink && cache_active) {
@@ -3306,17 +3361,19 @@ static void feed_in_blocks(SortformerStreamSession & session, const float * samp
     }
 }
 
-static std::vector<float> nemotron_long_form_probabilities(
-    Engine::Impl & impl, const float * samples, int n_samples, int sample_rate) {
-    std::vector<float> probabilities;
+static void run_nemotron_long_form(
+    Engine::Impl & impl, const float * samples, int n_samples, int sample_rate,
+    DiarizationResult & result) {
     auto session_impl = make_diarization_session(
         impl, nemotron_long_form_options(sample_rate), nullptr);
-    session_impl->probability_sink = &probabilities;
+    session_impl->probability_sink = &result.speaker_probs;
     session_impl->nemotron_stream_gain = nemotron_audio_gain(samples, n_samples);
+    const SortformerStreamSession::Impl & passes = *session_impl;
     SortformerStreamSession session(std::move(session_impl));
     feed_in_blocks(session, samples, n_samples, nemotron_long_form_block_samples(sample_rate));
     session.finalize();
-    return probabilities;
+    result.encoder_used_coreml =
+        passes.network_passes > 0 && passes.coreml_passes == passes.network_passes;
 }
 
 static DiarizationResult engine_impl_diarize_nemotron_long_form(
@@ -3329,7 +3386,7 @@ static DiarizationResult engine_impl_diarize_nemotron_long_form(
     DiarizationResult result;
     result.num_spks = impl.model.nemotron_diarization_cfg.speakers;
     result.n_frames = static_cast<int>(nemotron_diarization_mel_frames(impl.model, n_samples));
-    result.speaker_probs = nemotron_long_form_probabilities(impl, samples, n_samples, sample_rate);
+    run_nemotron_long_form(impl, samples, n_samples, sample_rate, result);
     hold_last_frame(result.speaker_probs, result.num_spks, result.n_frames);
     result.frame_stride_s = static_cast<double>(impl.model.mel_cfg.hop_length) / sample_rate;
     result.audio_samples = n_samples;
