@@ -381,6 +381,15 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english", max_wer: 0.1},
     notes: "forced-ggml baseline emits an empty transcript and must reject the comparison"
   },
+  "coreml-no-correctness": {
+    bench_kind: "native", binary: "bin/nat-coreml-baseline-empty", cmake_target: "x",
+    models: ["stub.f16.gguf"], args: ["${JSON_OUT}"], audio_duration_seconds: 160.6,
+    coreml_compare_on_darwin: true,
+    coreml_require_transcript_match: false,
+    coreml_model_basename: "stub",
+    coreml_export_mel_frames: 1101,
+    notes: "a clip without a reference transcript: the comparison runs without scoring"
+  },
   "wer-perfect": {
     bench_kind: "native", binary: "bin/nat-transcript-perfect", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
@@ -564,12 +573,38 @@ jq -n --arg sha "$hello_sha" \
     source: "huggingface", hf_repo: "stub/repo", hf_ref: "0000000000000000000000000000000000000000",
     models_by_size: {tiny: {name: "ggml-tiny.bin"}},
     args: [], audio_duration_seconds: null, notes: "n"
+  },
+  "ext-ok": {
+    bench_kind: "native", binary: "${BENCH_HOME}/extbin/nat-ok", engine: "stub-engine",
+    args: ["${JSON_OUT}"], audio_duration_seconds: null,
+    notes: "an engine outside the build dir: the binary is resolved from BENCH_HOME, not from --build-dir"
+  },
+  "nat-control": {
+    bench_kind: "native", binary: "bin/nat-control", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: null,
+    notes: "a transcript with a raw control byte must not break the JSON parse"
+  },
+  "scratch-ok": {
+    bench_kind: "native", binary: "bin/nat-scratch", cmake_target: "x",
+    args: ["${JSON_OUT}", "${SCRATCH_DIR}"], audio_duration_seconds: null,
+    notes: "${SCRATCH_DIR} expands to the temporary directory of the driver for benches that write files"
   }
 }' > "$SPEC"
 
 cat > "$BUILD/bin/nat-ok" <<'STUB'
 #!/usr/bin/env bash
 printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU"}' > "$1"
+STUB
+
+cat > "$BUILD/bin/nat-control" <<'STUB'
+#!/usr/bin/env bash
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"hello\033world\tand\nmore"}' > "$1"
+STUB
+
+cat > "$BUILD/bin/nat-scratch" <<'STUB'
+#!/usr/bin/env bash
+[[ -d "$2" ]] || { echo "scratch dir missing: $2" >&2; exit 1; }
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"%s"}' "$2" > "$1"
 STUB
 
 cat > "$BUILD/bin/nat-nojson" <<'STUB'
@@ -790,7 +825,9 @@ done
 printf 'hello' > "$dest"
 STUB
 
-chmod +x "$BUILD"/bin/* "$STUBBIN"/*
+mkdir -p "$TMP/extbin"
+cp "$BUILD/bin/nat-ok" "$TMP/extbin/nat-ok"
+chmod +x "$BUILD"/bin/* "$STUBBIN"/* "$TMP"/extbin/*
 
 run_driver() {
   # run_driver <family> <out.json> <stderr-log> [extra env as VAR=VALUE...]
@@ -809,6 +846,23 @@ jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100 and 
   "$OUT/nat-ok.json" > /dev/null || fail "nat-ok: $(cat "$OUT/nat-ok.json")"
 ok "native bench JSON drives stats, rtf, and backend"
 
+# an external engine names its binary through ${BENCH_HOME}; without BENCH_HOME
+# the placeholder stays and the driver reports the binary as missing.
+run_driver ext-ok "$OUT/ext-ok.json" "$OUT/ext-ok.err" BENCH_FAMILIES_JSON="$SPEC" BENCH_HOME="$TMP"
+jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100' "$OUT/ext-ok.json" > /dev/null \
+  || fail "ext-ok: $(cat "$OUT/ext-ok.json")"
+run_driver ext-ok "$OUT/ext-nohome.json" "$OUT/ext-nohome.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "build-failed"' "$OUT/ext-nohome.json" > /dev/null || fail "ext-ok without BENCH_HOME: $(cat "$OUT/ext-nohome.json")"
+ok "a \${BENCH_HOME} binary runs outside the build dir and is missing without BENCH_HOME"
+
+run_driver scratch-ok "$OUT/scratch-ok.json" "$OUT/scratch-ok.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and (.backend | startswith("/"))' "$OUT/scratch-ok.json" > /dev/null || fail "scratch-ok: $(cat "$OUT/scratch-ok.json")"
+ok "\${SCRATCH_DIR} expands to an existing temporary directory"
+
+run_driver nat-control "$OUT/nat-control.json" "$OUT/nat-control.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wall_ms_median == 100' "$OUT/nat-control.json" > /dev/null || fail "nat-control: $(cat "$OUT/nat-control.json")"
+ok "raw control bytes, tabs and newlines in the bench JSON transcript do not fail the cell"
+
 # native, exit 0 without JSON (the sortformer failure shape): run-failed and
 # the child's output is dumped to the step log instead of vanishing.
 run_driver nat-nojson "$OUT/nat-nojson.json" "$OUT/nat-nojson.err" BENCH_FAMILIES_JSON="$SPEC"
@@ -819,6 +873,13 @@ grep -q 'did not emit the --json-out file' "$OUT/nat-nojson.err" \
 grep -q 'speaker_0' "$OUT/nat-nojson.err" \
   || fail "nat-nojson: child stdout not dumped to the step log"
 ok "silent no-JSON native bench reports run-failed with dumped child output"
+
+mkdir -p "$MODELS/coreml-no-correctness/stub-encoder.mlmodelc"
+printf 'stub' > "$MODELS/coreml-no-correctness/stub.f16.gguf"
+run_driver coreml-no-correctness "$OUT/coreml-no-correctness.json" "$OUT/coreml-no-correctness.err" BENCH_FAMILIES_JSON="$SPEC" BENCH_TEST_PLATFORM=Darwin
+jq -e '.status == "ok" and .wall_ms_median == 30 and .baseline_inference_ms_median == 40 and .wer_median == null' \
+  "$OUT/coreml-no-correctness.json" > /dev/null || fail "coreml-no-correctness: $(cat "$OUT/coreml-no-correctness.json")"
+ok "a Core ML comparison without a correctness spec keeps both timings and scores nothing"
 
 mkdir -p "$MODELS/coreml-baseline-empty/stub-encoder.mlmodelc"
 printf 'stub' > "$MODELS/coreml-baseline-empty/stub.f16.gguf"

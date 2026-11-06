@@ -16,7 +16,7 @@ repo_json() {
 family_file_names() {
   local family
   for family in $(split_list "$1"); do
-    jq -r --arg f "$family" '.[$f].provision[] | (.registry // .huggingface.name // .fixture // .derived.name) | split("/") | last' "$FAMILIES_JSON"
+    jq -r --arg f "$family" '.[$f].provision[] | (.registry // .huggingface.name // .fixture // .prepared // .sidecar.name // .derived.name) | split("/") | last' "$FAMILIES_JSON"
   done | sort -u
 }
 
