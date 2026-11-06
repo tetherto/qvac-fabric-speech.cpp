@@ -279,6 +279,10 @@ unit tests from fixture coverage. Its fixture runner rejects runs with no execut
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane
 uses this gate.
 
+AudioGen's [test guide](engines/audiogen/docs/testing.md) documents independent
+model-free suites and required model-backed CI coverage. The macOS lane stages
+pinned ACE-Step and MiniMax fixtures and fails if generation tests skip.
+
 | Topic | Where |
 |---|---|
 | Architecture and repository layout | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
