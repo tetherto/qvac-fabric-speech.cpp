@@ -246,6 +246,23 @@ check_skip_families() {
   ok "SKIP_FAMILIES and the family platform remove families from quick, default and explicit selections"
 }
 
+check_skip_cells() {
+  (
+    . "$HERE/weekly.sh"
+    load_config
+    SKIP_FAMILIES="moss-tts-f16,parakeet-tdt:cuda,supertonic3:vulkan"
+    QUICK=1
+    [ "$(selected_families 2>/dev/null)" = "parakeet-tdt,supertonic3,audio8-lm-q8_0-dec-q8_0" ] || { echo "a cell skip removed its whole family: $(selected_families 2>/dev/null)" >&2; exit 1; }
+    [ "$(skipped_cells)" = "parakeet-tdt:cuda,supertonic3:vulkan" ] || { echo "skipped_cells: $(skipped_cells)" >&2; exit 1; }
+    run_family() { echo "ran $1 on $2"; }
+    case "$(run_family_if_allowed parakeet-tdt cuda "$TMP")" in *"skip parakeet-tdt on cuda (SKIP_FAMILIES)") ;; *) echo "a skipped cell ran" >&2; exit 1 ;; esac
+    [ "$(run_family_if_allowed parakeet-tdt vulkan "$TMP")" = "ran parakeet-tdt on vulkan" ] || { echo "a cell skip leaked to another backend" >&2; exit 1; }
+    SKIP_FAMILIES="moss-tts-f16"
+    [ -z "$(skipped_cells)" ] || { echo "skipped_cells without cell entries: $(skipped_cells)" >&2; exit 1; }
+  ) || fail "SKIP_FAMILIES cells"
+  ok "family:backend entries of SKIP_FAMILIES skip one cell and keep the family on the other backends"
+}
+
 check_engine_platform_options() {
   (
     . "$HERE/lib.sh"
@@ -505,6 +522,7 @@ main() {
   check_run_lock
   check_machine_quirks
   check_skip_families
+  check_skip_cells
   check_family_backends
   check_engine_platform_options
   check_lib_deadline

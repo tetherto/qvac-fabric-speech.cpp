@@ -167,7 +167,8 @@ Prerequisites already present on the machines: git, cmake, ninja, jq, python3, n
 Vulkan SDK on the Linux boxes; Xcode command line tools and Homebrew on the Macs. The registry client is installed
 by `fetch-models.sh` into `registry-client/` under the bench home from npm. Per-machine settings (`BACKENDS`,
 `CUDA_ARCH`, `CUDA_HOME`, `MEMORY_SAMPLER=meminfo` for unified-memory NVIDIA hosts, `SKIP_FAMILIES` for the 16 GB
-Mac mini) are listed in `config.example.env` and in the skill. A host without cron (the Strix Halo) gets
+Mac mini, where a `family:backend` entry skips one cell that does not fit on one lane, as on the 8 GB Jetson) are
+listed in `config.example.env` and in the skill. A host without cron (the Strix Halo) gets
 `scheduler.sh` from `install.sh` instead of a crontab line; it does not survive a reboot. A macOS host whose
 `/bin/date` lacks `%N` (macOS 15) gets `run-family.sh` routed through the `nsdate` shim after every source update.
 
