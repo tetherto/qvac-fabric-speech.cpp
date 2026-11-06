@@ -308,7 +308,7 @@ build_ggml() {
 
 engine_platform_options() {
   case "$1" in
-    Darwin) echo "-DPARAKEET_COREML=ON" ;;
+    Darwin) echo "-DPARAKEET_COREML=ON -DTTS_CPP_COREML=ON" ;;
     *) echo "" ;;
   esac
 }

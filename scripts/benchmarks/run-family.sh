@@ -1218,11 +1218,15 @@ case "$BENCH_KIND" in
       cp "$coreml_json" "$artifact_dir/${FAMILY}-coreml-native.json"
       cp "$baseline_json" "$artifact_dir/${FAMILY}-metal-native.json"
 
-      coreml_corr="$(score_correctness bench-json "$coreml_json" || true)"
-      baseline_corr="$(score_correctness bench-json "$baseline_json" || true)"
-      if [[ -z "$coreml_corr" || -z "$baseline_corr" ]]; then
-        emit_json "run-failed" null null null " (Core ML and baseline correctness must both be scoreable)"
-        exit 0
+      coreml_corr=""
+      baseline_corr=""
+      if [[ -n "$(spec_field correctness)" ]]; then
+        coreml_corr="$(score_correctness bench-json "$coreml_json" || true)"
+        baseline_corr="$(score_correctness bench-json "$baseline_json" || true)"
+        if [[ -z "$coreml_corr" || -z "$baseline_corr" ]]; then
+          emit_json "run-failed" null null null " (Core ML and baseline correctness must both be scoreable)"
+          exit 0
+        fi
       fi
 
       IFS='|' read -r coreml_score coreml_kind coreml_ref <<< "$coreml_corr"

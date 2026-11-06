@@ -43,7 +43,8 @@ and the weekly artifact.
 | TTS, TTS cloning | `audio8-mlx-audio`, `audio8-clone-mlx-audio` | mlx-audio Audio8 TTS Preview 0.6B (BF16 conversion) with the sampling of the Audio8 families, synthesis and JFK cloning, Mac Studio Metal only, fresh processes like the `audio8-lm-*` and `audio8-clone-enc-*` rows |
 | Music | `minimax-music3-mlx-audio` | mlx-audio on the 8-bit MiniMax Music3 conversion (the bf16 one needs 27 GB more disk), the 30 s instrumental request of the ACE-Step rows, Mac Studio Metal only, beside the QVAC `minimax-music3-q8_0` row |
 | TTS | `moss-tts-mlx-audio` | mlx-audio on the original MOSS-TTS v1.5 checkpoint (BF16, seed 1234), Mac Studio Metal only, a fresh process like the `moss-tts-f16` rows |
-| ASR | `{parakeet-tdt,parakeet-unified,parakeet-eou,nemotron}-coreml` | the same QVAC models on the JFK clip with the engine's Core ML encoder sidecar on the Apple Neural Engine (exported once from the GGUF, 6-bit palettized), Mac Studio only; the driver also runs the forced-ggml baseline in the same process and the row keeps its time (the comparison needs a scoreable WER, so the ABCBA clip has no Core ML twin) |
+| ASR | `{parakeet-tdt,parakeet-unified,parakeet-eou,nemotron}-coreml` and their `-abcba` twins | the same QVAC models with the engine's Core ML encoder sidecar on the Apple Neural Engine (exported once from the GGUF, 6-bit palettized; Parakeet TDT also gets the batched TDT decoder sidecar), Mac Studio only; the driver also runs the forced-ggml baseline in the same process and the row keeps its time; the ABCBA twins have no reference transcript, so they keep both timings and score nothing |
+| TTS | `supertonic3-coreml`, `audio8-lm-q8_0-dec-q8_0-coreml` | Supertonic 3 with its Core ML vocoder sidecar and Audio8 with its Core ML codec decoder sidecar on the Apple Neural Engine (exported once by the engine's exporters through `COREML_PYTHON`, a `sidecar` provision entry), Mac Studio only |
 | Music | `minimax-music3-q8_0` | MiniMax Music3 through `mm3-replay`, the 30 s instrumental request at seed 42, Mac Studio only; its GGUF pair is prepared by `scripts/benchmarks/prepare-minimax.py` elsewhere and placed in `models/store/` by hand |
 | ASR | `parakeet-fluidaudio`, `parakeet-fluidaudio-abcba`, `parakeet-unified-fluidaudio`, `parakeet-unified-fluidaudio-abcba` | FluidAudio (Swift, Core ML, encoder on the Apple Neural Engine, int8 encoder) on its Parakeet TDT 0.6B v3 and Parakeet Unified English 0.6B conversions, Mac Studio only, timed in process like the QVAC native rows through `fluidaudio-bench/` |
 | ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
@@ -176,8 +177,8 @@ Homebrew, so use a uv-managed interpreter: `python3.11 -m venv ~/speech-bench/ml
 install mlx parakeet-mlx mlx-whisper mlx-audio huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
 (binary missing) and the rest of the run is unaffected.
 
-On macOS the engine is configured with `-DPARAKEET_COREML=ON` (part of the build signature, so the first run after the change
-rebuilds), which the `-coreml` families need. They also need, on the Mac Studio only, a Python with `engines/parakeet/scripts/requirements-coreml.txt`
+On macOS the engine is configured with `-DPARAKEET_COREML=ON -DTTS_CPP_COREML=ON` (part of the build signature, so the first run
+after the change rebuilds), which the `-coreml` families need. They also need, on the Mac Studio only, a Python with `engines/parakeet/scripts/requirements-coreml.txt`
 (coremltools, torch) named by `COREML_PYTHON` in `config.env`; the first run of each family exports and compiles the encoder
 sidecar into the family folder (minutes per model), later runs reuse it. The MiniMax family needs `mm3-lm-q8_0.gguf` and
 `mm3-synth-q8_0.gguf` in `models/store/`: run `scripts/benchmarks/prepare-minimax.py --models-root <dir> --quant q8_0` on a

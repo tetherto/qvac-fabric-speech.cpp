@@ -155,11 +155,34 @@ provision_derived() {
   esac
 }
 
+sidecar_package() { echo "$STORE/${1%.mlmodelc}.mlpackage"; }
+
+sidecar_args() { echo "$1" | jq -r '.args[]?'; }
+
+run_sidecar_exporter() {
+  local name="$1" exporter="$2" source="$3"; shift 3
+  ( cd "$ENGINE_SRC" && "$COREML_PYTHON" "$exporter" --gguf "$STORE/$source" --out "$(sidecar_package "$name")" --compile-dir "$STORE" "$@" ) \
+    > "$STORE/$name.export.log" 2>&1
+}
+
+export_sidecar() {
+  local entry="$1" name exporter source
+  name="$(echo "$entry" | jq -r '.name')"; exporter="$(echo "$entry" | jq -r '.exporter')"; source="$(echo "$entry" | jq -r '.source')"
+  [ -d "$STORE/$name" ] && return 0
+  if [ -z "$COREML_PYTHON" ]; then log "sidecar $name needs COREML_PYTHON in config.env"; return 1; fi
+  [ -f "$STORE/$source" ] || { log "sidecar $name: source $source is not in the store"; return 1; }
+  log "exporting Core ML sidecar $name from $source"
+  run_sidecar_exporter "$name" "$exporter" "$source" $(sidecar_args "$entry") || return 1
+  rm -rf "$(sidecar_package "$name")"
+  [ -d "$STORE/$name" ]
+}
+
 entry_name() {
   echo "$1" | jq -r 'if .registry then (.registry | split("/") | last)
     elif .huggingface then .huggingface.name
     elif .fixture then (.fixture | split("/") | last)
     elif .prepared then .prepared
+    elif .sidecar then .sidecar.name
     else .derived.name end'
 }
 
@@ -174,6 +197,7 @@ provision_entry() {
       "$(echo "$entry" | jq -r '.huggingface.name')" "$(echo "$entry" | jq -r '.huggingface.sha256 // ""')"
   elif echo "$entry" | jq -e '.fixture' > /dev/null; then copy_fixture "$(echo "$entry" | jq -r '.fixture')"
   elif echo "$entry" | jq -e '.derived' > /dev/null; then provision_derived "$(echo "$entry" | jq -c '.derived')"
+  elif echo "$entry" | jq -e '.sidecar' > /dev/null; then export_sidecar "$(echo "$entry" | jq -c '.sidecar')"
   else [ -f "$STORE/$(entry_name "$entry")" ]
   fi
 }

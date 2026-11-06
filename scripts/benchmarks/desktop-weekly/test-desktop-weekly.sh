@@ -42,7 +42,7 @@ check_spec_fields() {
 check_args_are_provisioned() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | .key as $family
-    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .prepared // .derived.name) | split("/") | last))]) as $files
+    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .prepared // .sidecar.name // .derived.name) | split("/") | last))]) as $files
     | [.value.args[] | select(startswith("${MODEL_DIR}/")) | sub("^\\$\\{MODEL_DIR\\}/"; "")] | map(select(. as $f | $files | index($f) | not))
     | select(length > 0) | "\($family): \(join(","))"' "$HERE/families.json")"
   [ -z "$bad" ] || fail "args reference files no provision entry supplies: $bad"
@@ -250,7 +250,7 @@ check_engine_platform_options() {
   (
     . "$HERE/lib.sh"
     load_config
-    [ "$(engine_platform_options Darwin)" = "-DPARAKEET_COREML=ON" ] || { echo "Darwin builds must enable the Parakeet Core ML sidecars" >&2; exit 1; }
+    [ "$(engine_platform_options Darwin)" = "-DPARAKEET_COREML=ON -DTTS_CPP_COREML=ON" ] || { echo "Darwin builds must enable the Parakeet and TTS Core ML sidecars" >&2; exit 1; }
     [ -z "$(engine_platform_options Linux)" ] || { echo "Linux builds must not carry Darwin options" >&2; exit 1; }
     build_signature cuda | grep -q "engine_options=" || { echo "engine options missing from the build signature" >&2; exit 1; }
   ) || fail "engine platform options"
@@ -345,12 +345,24 @@ check_fetch_models_offline() {
     "provision": [
       {"fixture": "engines/parakeet/test/samples/jfk.wav"},
       {"fixture": "engines/parakeet/test/samples/jfk.wav", "as": "voice.wav"},
-      {"derived": {"name": "jfk-24k.wav", "kind": "resample", "source": "engines/parakeet/test/samples/jfk.wav", "rate": 24000}}
+      {"derived": {"name": "jfk-24k.wav", "kind": "resample", "source": "engines/parakeet/test/samples/jfk.wav", "rate": 24000}},
+      {"sidecar": {"exporter": "engines/stub-export.py", "source": "jfk.wav", "name": "jfk-vocoder.mlmodelc", "args": ["--palettize", "6"]}}
     ]
   }
 }
 SPEC
-  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch.log" 2>&1 || fail "fetch-models.sh failed: $(cat "$TMP/fetch.log")"
+  cat > "$TMP/stub-coreml-python" <<'STUB'
+#!/usr/bin/env bash
+out=""; dir=""; pal=""
+while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift ;; --compile-dir) dir="$2"; shift ;; --palettize) pal="$2"; shift ;; esac; shift; done
+[ "$pal" = "6" ] || { echo "palettize argument missing" >&2; exit 1; }
+mkdir -p "$out" "$dir/$(basename "${out%.mlpackage}").mlmodelc"
+STUB
+  chmod +x "$TMP/stub-coreml-python"
+  FAMILIES_JSON="$TMP/families-test.json" COREML_PYTHON="$TMP/stub-coreml-python" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch.log" 2>&1 || fail "fetch-models.sh failed: $(cat "$TMP/fetch.log")"
+  [ -d "$BENCH_HOME/models/store/jfk-vocoder.mlmodelc" ] || fail "sidecar not exported into the store"
+  [ ! -e "$BENCH_HOME/models/store/jfk-vocoder.mlpackage" ] || fail "sidecar package not removed after compiling"
+  [ -L "$BENCH_HOME/models/families/clone-test/jfk-vocoder.mlmodelc" ] || fail "sidecar not linked into the family"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk.wav" ] || fail "fixture not linked"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk-24k.wav" ] || fail "derived file not linked"
   [ "$(readlink "$BENCH_HOME/models/families/clone-test/voice.wav")" = "$BENCH_HOME/models/store/jfk.wav" ] || fail "as link not pointing at the store file"

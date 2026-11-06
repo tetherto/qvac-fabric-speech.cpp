@@ -45,8 +45,11 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "audio8-mlx-audio": "BF16", "audio8-clone-mlx-audio": "BF16", "moss-tts-mlx-audio": "BF16",
                   "minimax-music3-mlx-audio": "8-bit", "parakeet-fluidaudio": "Core ML int8, ANE", "parakeet-fluidaudio-abcba": "Core ML int8, ANE",
                   "parakeet-unified-fluidaudio": "Core ML int8, ANE", "parakeet-unified-fluidaudio-abcba": "Core ML int8, ANE",
-                  "parakeet-tdt-coreml": "Q8_0, Core ML encoder on the ANE", "parakeet-unified-coreml": "Q8_0, Core ML encoder on the ANE",
+                  "parakeet-tdt-coreml": "Q8_0, Core ML encoder and decoder on the ANE", "parakeet-unified-coreml": "Q8_0, Core ML encoder on the ANE",
                   "parakeet-eou-coreml": "F16, Core ML encoder on the ANE", "nemotron-coreml": "F16, Core ML encoder on the ANE",
+                  "parakeet-tdt-abcba-coreml": "Q8_0, Core ML encoder and decoder on the ANE", "parakeet-unified-abcba-coreml": "Q8_0, Core ML encoder on the ANE",
+                  "parakeet-eou-abcba-coreml": "F16, Core ML encoder on the ANE", "nemotron-abcba-coreml": "F16, Core ML encoder on the ANE",
+                  "supertonic3-coreml": "Q8_0, Core ML vocoder on the ANE", "audio8-lm-q8_0-dec-q8_0-coreml": "LM Q8_0 · decoder Q8_0, Core ML codec on the ANE",
                   "minimax-music3-q8_0": "LM Q8_0 · synth Q8_0"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}

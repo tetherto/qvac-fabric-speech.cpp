@@ -381,6 +381,15 @@ jq -n --arg sha "$hello_sha" \
     correctness: {kind: "wer", reference: $ref_perfect, normalizer: "english", max_wer: 0.1},
     notes: "forced-ggml baseline emits an empty transcript and must reject the comparison"
   },
+  "coreml-no-correctness": {
+    bench_kind: "native", binary: "bin/nat-coreml-baseline-empty", cmake_target: "x",
+    models: ["stub.f16.gguf"], args: ["${JSON_OUT}"], audio_duration_seconds: 160.6,
+    coreml_compare_on_darwin: true,
+    coreml_require_transcript_match: false,
+    coreml_model_basename: "stub",
+    coreml_export_mel_frames: 1101,
+    notes: "a clip without a reference transcript: the comparison runs without scoring"
+  },
   "wer-perfect": {
     bench_kind: "native", binary: "bin/nat-transcript-perfect", cmake_target: "x",
     args: ["${JSON_OUT}"], audio_duration_seconds: 11.0,
@@ -864,6 +873,13 @@ grep -q 'did not emit the --json-out file' "$OUT/nat-nojson.err" \
 grep -q 'speaker_0' "$OUT/nat-nojson.err" \
   || fail "nat-nojson: child stdout not dumped to the step log"
 ok "silent no-JSON native bench reports run-failed with dumped child output"
+
+mkdir -p "$MODELS/coreml-no-correctness/stub-encoder.mlmodelc"
+printf 'stub' > "$MODELS/coreml-no-correctness/stub.f16.gguf"
+run_driver coreml-no-correctness "$OUT/coreml-no-correctness.json" "$OUT/coreml-no-correctness.err" BENCH_FAMILIES_JSON="$SPEC" BENCH_TEST_PLATFORM=Darwin
+jq -e '.status == "ok" and .wall_ms_median == 30 and .baseline_inference_ms_median == 40 and .wer_median == null' \
+  "$OUT/coreml-no-correctness.json" > /dev/null || fail "coreml-no-correctness: $(cat "$OUT/coreml-no-correctness.json")"
+ok "a Core ML comparison without a correctness spec keeps both timings and scores nothing"
 
 mkdir -p "$MODELS/coreml-baseline-empty/stub-encoder.mlmodelc"
 printf 'stub' > "$MODELS/coreml-baseline-empty/stub.f16.gguf"
