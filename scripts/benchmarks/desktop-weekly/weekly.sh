@@ -125,7 +125,7 @@ build_report() {
   local previous
   previous="$(previous_summary "$RUN_DIR")"
   python3 "$TOOLS_DIR/summarize.py" --run-dir "$RUN_DIR" --families "$FAMILIES_JSON" --started "$STARTED" \
-    --backends "$(resolve_backends)" --families-selected "$FAMILIES" || fail "summarize.py failed"
+    --backends "$(resolve_backends)" --families-selected "$FAMILIES" --skip-cells "$(skipped_cells)" || fail "summarize.py failed"
   python3 "$TOOLS_DIR/report.py" "$RUN_DIR/summary.json" ${previous:+--previous "$previous"} -o "$RUN_DIR/report.md" ||
     fail "report.py failed"
 }

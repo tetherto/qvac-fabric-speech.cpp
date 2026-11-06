@@ -82,6 +82,13 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(summary["counts"], {"expected": 3, "ok": 2, "failed": 1})
         self.assertEqual(summary["problems"], ["asr on cpu not-run"])
 
+    def test_a_skipped_cell_is_not_expected_but_its_family_stays_on_the_other_backends(self):
+        summary = summarize.build_summary(self.run_dir, self.specs(), ["cuda", "cpu"], ["asr", "tts"], "", ["asr:cpu", "tts:cuda"])
+        pairs = [(row["backend"], row["family"]) for row in summary["results"]]
+        self.assertEqual(pairs, [("cuda", "asr"), ("cpu", "tts")])
+        self.assertEqual(summary["counts"], {"expected": 2, "ok": 1, "failed": 1})
+        self.assertEqual(summary["problems"], ["tts on cpu not-run"])
+
     def test_build_failure_marks_every_family_on_that_backend(self):
         (self.run_dir / "build-failures.txt").write_text("cpu\n")
         summary = summarize.build_summary(self.run_dir, self.specs(), ["cuda", "cpu"], ["asr", "tts"], "")
