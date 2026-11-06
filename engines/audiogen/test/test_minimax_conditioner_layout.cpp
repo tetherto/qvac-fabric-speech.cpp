@@ -1,4 +1,5 @@
 #include "minimax/conditioner-layout.h"
+#include "parity_checks.h"
 
 #include <cmath>
 #include <cstdio>
@@ -45,7 +46,7 @@ int main() {
                 output.data(), D, std::min(payload, frames - first), cs, ts, actual.data() + first * D);
         }
         for (size_t i = 0; i < expected.size(); ++i) {
-            if (std::fabs(expected[i] - actual[i]) > 1e-6f) {
+            if (!audiogen_test::samples_match(expected[i], actual[i], 1e-6f)) {
                 std::fprintf(stderr, "Convolution differs at frames=%d element=%zu: %g vs %g\n", frames, i, expected[i], actual[i]);
                 return 1;
             }

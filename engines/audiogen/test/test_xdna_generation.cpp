@@ -1,6 +1,7 @@
 #include "audiogen-cpp/acestep/engine.h"
 #include "acestep/engine_backends.h"
 #include "ggml-backend.h"
+#include "parity_checks.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@ constexpr int kChannels = 2;
 constexpr float kDuration = 2.0f;
 constexpr long long kSeed = 42;
 constexpr int kNoHardware = 77;
+constexpr double kMaxCpuXdnaRelativeL2 = 0.1;
 
 using namespace tts_cpp::acestep;
 
@@ -83,7 +85,7 @@ void check_reuse(const EngineOptions & config, const GenerateResult & expected) 
     }
 }
 
-void report_difference(const GenerateResult & expected, const GenerateResult & actual) {
+void check_cpu_parity(const GenerateResult & expected, const GenerateResult & actual) {
     require(actual.pcm.size() == expected.pcm.size(), "CPU and XDNA output lengths differ");
     double error = 0, norm = 0;
     for (size_t index = 0; index < actual.pcm.size(); ++index) {
@@ -92,7 +94,11 @@ void report_difference(const GenerateResult & expected, const GenerateResult & a
         norm += static_cast<double>(expected.pcm[index]) * expected.pcm[index];
     }
     require(norm > 0, "CPU fixture produced silent audio");
-    std::printf("Seeded CPU/XDNA PCM relative L2: %.8f\n", std::sqrt(error / norm));
+    const double relative_l2 = std::sqrt(error / norm);
+    std::printf("Seeded CPU/XDNA PCM relative L2: %.8f (maximum %.8f)\n", relative_l2,
+                kMaxCpuXdnaRelativeL2);
+    require(audiogen_test::relative_error_passes(relative_l2, kMaxCpuXdnaRelativeL2),
+            "XDNA generation exceeds the CPU parity tolerance");
 }
 
 void check_lyric_alignment(EngineOptions config) {
@@ -125,7 +131,7 @@ int main(int argc, char ** argv) {
         check_placement();
         const auto cpu = generate(options(models, "cpu"));
         const auto xdna = generate(options(models, "xdna"));
-        report_difference(cpu, xdna);
+        check_cpu_parity(cpu, xdna);
         check_reuse(options(models, "XDNA0"), xdna);
         check_lyric_alignment(options(models, "xdna"));
         std::puts("XDNA stage placement, generation, repeated calls and engine recreation passed");

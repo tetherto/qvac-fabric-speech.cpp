@@ -303,6 +303,9 @@ if (AUDIOGEN_BUILD_TESTS)
         set_property(TEST ${target} PROPERTY LABELS ${ART_LABEL})
     endfunction()
 
+    add_executable(test-audiogen-parity-checks test/test_parity_checks.cpp)
+    audiogen_register_test(test-audiogen-parity-checks)
+
     add_executable(test-acestep-graph-allocator test/test_dit_graph_allocator.cpp)
     target_include_directories(test-acestep-graph-allocator PRIVATE src)
     target_link_libraries(test-acestep-graph-allocator PRIVATE ggml)
@@ -318,6 +321,12 @@ if (AUDIOGEN_BUILD_TESTS)
     add_executable(test-acestep-units test/test_acestep_units.cpp)
     audiogen_link_in_tree_binary(test-acestep-units)
     audiogen_register_test(test-acestep-units LABEL "unit")
+
+    foreach (_domain IN ITEMS tokenizer backends loading quantization audio generation)
+        add_executable(test-acestep-${_domain} test/test_acestep_${_domain}.cpp)
+        audiogen_link_in_tree_binary(test-acestep-${_domain})
+        audiogen_register_test(test-acestep-${_domain})
+    endforeach()
 
     add_executable(test-music-cli-edit
         test/test_music_cli_edit.cpp
@@ -373,6 +382,11 @@ if (AUDIOGEN_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter)
     if (Python3_Interpreter_FOUND)
+        add_test(NAME test-audiogen-ci-models
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_prepare_ci_models.py)
+        set_tests_properties(test-audiogen-ci-models PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
         add_test(NAME test-acestep-converter
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_acestep.py
         )
@@ -396,6 +410,10 @@ if (AUDIOGEN_BUILD_TESTS)
     endif()
 
     if (AUDIOGEN_BUILD_MINIMAX)
+        add_executable(test-minimax-tokenizer test/test_minimax_tokenizer.cpp)
+        audiogen_link_in_tree_binary(test-minimax-tokenizer)
+        audiogen_register_test(test-minimax-tokenizer)
+
         add_executable(test-minimax-conditioner-layout test/test_minimax_conditioner_layout.cpp)
         audiogen_link_in_tree_binary(test-minimax-conditioner-layout)
         audiogen_register_test(test-minimax-conditioner-layout LABEL "unit")
@@ -453,6 +471,31 @@ if (AUDIOGEN_BUILD_TESTS)
 
         find_package(Python3 COMPONENTS Interpreter)
         if (Python3_Interpreter_FOUND)
+            add_test(NAME test-minimax-quality-selection
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_minimax_quality_selection.py
+                        --executable $<TARGET_FILE:test-minimax-quality>)
+            set_tests_properties(test-minimax-quality-selection PROPERTIES
+                LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+            foreach (_suite IN ITEMS ane_models ane_export)
+                string(REPLACE "_" "-" _name "${_suite}")
+                add_test(NAME test-minimax-${_name}
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_minimax_${_suite}.py)
+                set_tests_properties(test-minimax-${_name} PROPERTIES
+                    LABELS "unit" SKIP_RETURN_CODE 77 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            endforeach()
+            add_test(NAME test-minimax-converter-roundtrip
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_minimax_roundtrip.py)
+            set_tests_properties(test-minimax-converter-roundtrip PROPERTIES
+                LABELS "unit" SKIP_RETURN_CODE 77 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            if (TARGET mm3-replay AND AUDIOGEN_MINIMAX_COREML)
+                add_test(NAME test-minimax-ane-cli
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_minimax_ane_cli.py
+                            --executable $<TARGET_FILE:mm3-replay>)
+                set_tests_properties(test-minimax-ane-cli PROPERTIES
+                    LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+            endif()
+
             add_test(NAME test-minimax-conditioner-exporter
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_minimax_conditioner_coreml.py
             )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect one runs/<date>/ directory into summary.json.
 
-usage: summarize.py --run-dir DIR --families families.json --backends cpu,cuda --families-selected a,b [--started ISO]
+usage: summarize.py --run-dir DIR --families families.json --backends cpu,cuda --families-selected a,b [--started ISO] [--skip-cells a:cuda]
 
 Reads machine.json, pins.json, results/<backend>/<family>.json and the nvidia-smi samples next to them,
 and writes <run dir>/summary.json with one row per (backend, family), run-level counts and the problem list.
@@ -139,9 +139,13 @@ def family_runs_on_backend(spec, backend):
     return not allowed or backend in allowed
 
 
-def collect_rows(run_dir, backends, families, specs, build_failures):
+def cell_expected(spec, family, backend, skipped_cells):
+    return family_runs_on_backend(spec, backend) and f"{family}:{backend}" not in skipped_cells
+
+
+def collect_rows(run_dir, backends, families, specs, build_failures, skipped_cells=()):
     return [row_for(run_dir, backend, family, specs[family], backend in build_failures)
-            for backend in backends for family in families if family_runs_on_backend(specs[family], backend)]
+            for backend in backends for family in families if cell_expected(specs[family], family, backend, skipped_cells)]
 
 
 def count_rows(rows):
@@ -176,10 +180,10 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_summary(run_dir, specs, backends, families, started):
+def build_summary(run_dir, specs, backends, families, started, skipped_cells=()):
     machine = load_optional_json(run_dir / "machine.json")
     build_failures = read_build_failures(run_dir)
-    rows = collect_rows(run_dir, backends, families, specs, build_failures)
+    rows = collect_rows(run_dir, backends, families, specs, build_failures, skipped_cells)
     counts = count_rows(rows)
     return {"schema": SCHEMA_VERSION,
             "run": {"name": run_dir.name, "host": machine.get("hostname", ""), "started": started, "finished": utc_now(),
@@ -196,6 +200,7 @@ def parse_args(argv):
     parser.add_argument("--backends", required=True)
     parser.add_argument("--families-selected", required=True)
     parser.add_argument("--started", default="")
+    parser.add_argument("--skip-cells", default="", help="family:backend pairs the host does not run")
     return parser.parse_args(argv)
 
 
@@ -203,7 +208,7 @@ def main(argv=None):
     args = parse_args(argv)
     run_dir = pathlib.Path(args.run_dir)
     summary = build_summary(run_dir, load_families(args.families), split_list(args.backends),
-                            split_list(args.families_selected), args.started)
+                            split_list(args.families_selected), args.started, split_list(args.skip_cells))
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"{summary['run']['status']}: {summary['counts']['ok']}/{summary['counts']['expected']} ok")
 
