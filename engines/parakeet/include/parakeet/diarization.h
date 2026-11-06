@@ -34,6 +34,13 @@ struct DiarizationResult {
     int    num_spks        = 0;
     double frame_stride_s  = 0.08;
 
+    // True only when every network pass of this call ran its encoder on
+    // Core ML: a diarizer sidecar, or a Sortformer v2.1 encoder sidecar ahead
+    // of the ggml speaker head. False when any pass ran on ggml, and when the
+    // call ran no pass. Unlike Engine::encoder_on_coreml(), this reports
+    // actual per-call routing rather than sidecar availability.
+    bool   encoder_used_coreml = false;
+
     int    audio_samples   = 0;
     int    sample_rate     = 16000;
     double preprocess_ms   = 0.0;

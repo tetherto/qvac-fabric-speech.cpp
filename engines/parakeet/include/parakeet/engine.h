@@ -210,13 +210,15 @@ struct EngineOptions {
     // - Nemotron: locale alias or "auto"; empty resolves to "auto".
     // - Multilingual CTC: required language id (e.g. "hi", "ta") when the
     //   GGUF advertises parakeet.ctc.lang_* ranges.
+    // - TranscribePsy-250M-EU: "en" runs the bare trunk, "other" runs its
+    //   CAFE adapters, and "auto" (also empty) chooses via the language gate.
     // - Monolingual CTC and existing transducer families: ignored.
     // Unsupported Nemotron locales and multilingual CTC language IDs throw.
     std::string language;
 
     // "auto" (or empty) preserves n_gpu_layers and runtime GPU tiering.
-    // "cpu", "cuda", "vulkan", "opencl", "webgpu", "metal" and "hexagon" explicitly
-    // select a backend; "hexagon" selects HTP0. An exact ggml device name (e.g. HTP0)
+    // "cpu", "cuda", "vulkan", "opencl", "webgpu", "metal", "hexagon" and "xdna" explicitly
+    // select a backend; "hexagon" selects HTP0 and "xdna" selects XDNA0. An exact ggml device name (e.g. HTP0)
     // is also accepted. Explicit selection overrides n_gpu_layers and
     // fails construction if unavailable or initialization fails. Individual
     // unsupported operations can still use the existing CPU scheduler.
@@ -245,7 +247,9 @@ enum class BackendDevice : int {
 // before the first encoder dispatch.
 struct PrecomputedMel {
     std::vector<float> mel;
+    std::vector<float> eu_gate_mel;
     int    n_frames      = 0;
+    int    eu_gate_frames = 0;
     int    n_mels        = 0;
     int    audio_samples = 0;
     int    sample_rate   = 16000;
@@ -381,7 +385,8 @@ public:
 
     // True when an Apple Core ML encoder or diarizer sidecar was found. This
     // is a load-status query, not a guarantee that every call shape uses Core
-    // ML; the per-call truth is EngineResult::encoder_used_coreml.
+    // ML; the per-call truth is EngineResult::encoder_used_coreml and
+    // DiarizationResult::encoder_used_coreml.
     // CTC/IndicConformer, Unified RNN-T, and TDT pad shorter inputs to the
     // compiled capacity and window longer offline inputs. EOU and Nemotron use
     // Core ML only at the exact compiled shape: shorter calls are never padded,

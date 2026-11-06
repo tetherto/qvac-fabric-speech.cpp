@@ -37,7 +37,7 @@ int main(int argc, char ** argv) {
     ggml_backend_t backend = ggml_backend_cpu_init();
     if (!backend) { fprintf(stderr, "cpu backend init failed\n"); return 1; }
 
-    DitModel * m = dit_model_load(model, backend, /*verbose=*/true);
+    DitModel * m = dit_model_load(model, backend, /*n_threads=*/0, /*verbose=*/true);
     if (!m) { fprintf(stderr, "dit_model_load failed\n"); ggml_backend_free(backend); return 1; }
 
     const DitConfig & c = dit_model_config(m);

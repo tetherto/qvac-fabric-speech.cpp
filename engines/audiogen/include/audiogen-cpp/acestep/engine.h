@@ -19,7 +19,8 @@
 // With a GPU selected, DiT, VAE and the encoders use it by default. The LM
 // and detokenizer use validated CUDA, Vulkan, Metal and OpenCL backends;
 // Mali Vulkan keeps the LM on CPU. Explicit Hexagon placement runs every
-// stage on the NPU. Unmeasured backends keep the LM and detokenizer on CPU.
+// stage on the NPU. Explicit XDNA placement uses the NPU for DiT and CPU for
+// the remaining stages. Unmeasured backends keep the LM and detokenizer on CPU.
 // See docs/backends.md for placement overrides and backend requirements.
 
 #include "audiogen-cpp/export.h"
@@ -58,10 +59,10 @@ struct EngineOptions {
     // search path (static-linked desktop / Apple builds need nothing here).
     std::string backends_dir;
     // "auto" (or empty) keeps the n_gpu_layers request and runtime GPU tiering.
-    // "cpu", "opencl", "webgpu" and "hexagon" (the HTP0 NPU session) select a
+    // "cpu", "opencl", "webgpu", "xdna" and "hexagon" (the HTP0 NPU session) select a
     // backend explicitly, as does an exact ggml device name ("HTP0", "Vulkan0", ...).
     // An explicit request overrides n_gpu_layers and makes create() throw when
-    // the device is missing or fails to initialise. Hexagon is never chosen
+    // the device is missing or fails to initialise. Hexagon and XDNA are never chosen
     // automatically. The stage-placement allowlist still applies on top.
     std::string backend = "auto";
     // "auto" keeps the stage-placement policy for the LM. Any other value uses

@@ -99,6 +99,13 @@ void test_explicit_selection() {
     CHECK(backend_selection_is_auto("auto"));
     CHECK(backend_selection_is_auto(""));
     CHECK(!backend_selection_is_auto("hexagon"));
+    CHECK(!backend_selection_is_auto("xdna"));
+    CHECK(backend_selection_matches("xdna", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_IGPU));
+    CHECK(backend_selection_matches("XDNA0", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_IGPU));
+    CHECK(!backend_selection_matches("xdna", "Vulkan", "Vulkan0", GGML_BACKEND_DEVICE_TYPE_IGPU));
+    CHECK(!backend_selection_matches("xdna", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(!backend_selection_matches("xdna", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_IGPU));
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::NotSelectable);
     // Both devices advertise GPU. An explicit NPU request must still select
     // HTP0 when OpenCL is registered first, regardless of normal GPU tiering.
     CHECK(!backend_selection_matches("hexagon", "OpenCL", "OpenCL", GGML_BACKEND_DEVICE_TYPE_GPU));

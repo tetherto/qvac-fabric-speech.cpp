@@ -67,8 +67,8 @@ void print_usage(const char * argv0) {
         "                       If omitted, falls back to the model's rate with a warning.\n"
         "  --threads N          number of CPU threads (0 = hardware_concurrency)\n"
         "  --language ID        Nemotron locale alias (e.g. en-US, hi-IN, auto), or\n"
-        "                       CTC language id for multilingual aggregate vocabs\n"
-        "                       (e.g. hi, ta, gu). Empty selects auto for Nemotron.\n"
+        "                       CTC language id, or TranscribePsy EU en/other/auto\n"
+        "                       (e.g. hi, ta, gu). Empty selects auto for Nemotron and EU.\n"
         "  --n-gpu-layers N     when > 0, run the encoder on one GPU selected from the\n"
         "                       ggml backend registry. Multiple Metal/CUDA/Vulkan/OpenCL\n"
         "                       backends may be built or loaded; runtime tiering prefers\n"
@@ -80,7 +80,7 @@ void print_usage(const char * argv0) {
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
         "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
-        "                       hexagon (HTP0), or exact ggml device name. Explicit\n"
+        "                       hexagon (HTP0), xdna (XDNA0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
         "                       unavailable.\n"
         "  --backends-dir DIR                 directory to scan for dynamically-loaded\n"
@@ -903,6 +903,29 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                                      model.mel_cfg, mel, n_frames); rc != 0) return rc;
         times.mel_ms = ms_since(t1);
 
+        std::vector<float> eu_gate_mel;
+        int eu_gate_frames = 0;
+        const int gate_samples = kTranscribePsyEuGateSeconds * model.mel_cfg.sample_rate;
+        if (model.model_variant == "transcribepsy-250m-eu" &&
+            (opts.language.empty() || opts.language == "auto") &&
+            samples.size() > (size_t) gate_samples) {
+            if (int rc = compute_log_mel(samples.data(), gate_samples, model.mel_cfg,
+                                         eu_gate_mel, eu_gate_frames); rc != 0) return rc;
+            times.mel_ms = ms_since(t1);
+        }
+
+        const auto t_gate = clock::now();
+        try {
+            resolve_transcribepsy_eu_route(model, opts.language, mel.data(), n_frames,
+                                           model.mel_cfg.n_mels, nullptr,
+                                           eu_gate_mel.data(), eu_gate_frames,
+                                           (int) samples.size());
+        } catch (const std::exception & error) {
+            PARAKEET_LOG_ERROR("error: %s\n", error.what());
+            return 2;
+        }
+        const double gate_ms = ms_since(t_gate);
+
         if (!extra.dump_mel_path.empty()) {
             std::vector<float> transposed((size_t) model.mel_cfg.n_mels * n_frames);
             for (int t = 0; t < n_frames; ++t)
@@ -1031,6 +1054,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         }
         times.encoder_frames = enc_out.n_enc_frames;
         times.encoder_coreml = enc_out.used_coreml;
+        times.enc_ms += gate_ms;
 
         if (extra.require_coreml && !times.encoder_coreml) {
             PARAKEET_LOG_ERROR(

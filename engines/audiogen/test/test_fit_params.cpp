@@ -235,8 +235,8 @@ int main(int argc, char ** argv) {
 
     {  // DiT
         AcestepStageMeasure w{};
-        DitModel * meta = dit_model_load_metadata_only(paths.dit_model_path, rb.backend, false, w);
-        DitModel * real = dit_model_load(paths.dit_model_path, rb.backend, false);
+        DitModel * meta = dit_model_load_metadata_only(paths.dit_model_path, rb.backend, rb.nth, false, w);
+        DitModel * real = dit_model_load(paths.dit_model_path, rb.backend, rb.nth, false);
         if (!meta || !real) {
             fail("dit loads failed");
         } else {

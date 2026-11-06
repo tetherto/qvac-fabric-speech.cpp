@@ -47,6 +47,38 @@ The Parakeet CLI is then `build/engines/parakeet/parakeet`. The umbrella
 defaults follow `SPEECH_BUILD_EXECUTABLES` and `SPEECH_BUILD_TESTS`, and force
 `PARAKEET_BUILD_EXAMPLES=OFF`. Enable examples only in a direct engine build.
 
+### AMD XDNA dependency
+
+XDNA lives in Fabric LLM's GGML. The speech GGML migration is tracked in
+[Fabric Speech #390](https://github.com/tetherto/qvac-fabric-speech.cpp/pull/390).
+The migration's initial LLM revision predates XDNA; the consumed revision must
+contain both the XDNA backend and the speech operations and memory APIs.
+This feature does not add XDNA to the older `qvac-ext-ggml@speech` dependency.
+
+For a standalone validation, install the compatible GGML first and use the
+existing system-GGML build mode. XDNA additionally requires XRT and an IRON
+Python environment (`mlir_aie` and `llvm-aie`) to compile its kernel artifacts.
+Follow that backend's `ggml/src/ggml-xdna/README.md` for toolchain and runtime
+requirements. Keep the backend library and artifacts from the same revision.
+
+```bash
+cmake -S /path/to/qvac-fabric-llm.cpp/ggml -B build-ggml-xdna \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_XDNA=ON \
+  -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+  -DGGML_XDNA_GEMM_PYTHON=/path/to/iron-env/bin/python \
+  -DCMAKE_INSTALL_PREFIX=/path/to/ggml-xdna-install
+cmake --build build-ggml-xdna -j
+cmake --install build-ggml-xdna
+
+cmake -S engines/parakeet -B build-parakeet-xdna \
+  -DCMAKE_BUILD_TYPE=Release -DPARAKEET_USE_SYSTEM_GGML=ON \
+  -DCMAKE_PREFIX_PATH=/path/to/ggml-xdna-install
+cmake --build build-parakeet-xdna -j
+```
+
+If artifacts are staged separately, set `GGML_XDNA_KERNEL_DIR` to their directory.
+See [backends](backends.md#amd-xdna-npu) for model formats and runtime selection.
+
 ### CMake options
 
 | Option | Standalone default | As an umbrella subdirectory | Effect |
