@@ -94,6 +94,8 @@ struct DelayLM::Impl {
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t weight_buffer = nullptr;
     ggml_backend_buffer_t state_buffer = nullptr;
+    using HostPrefill = bool (*)(ggml_backend_buffer_t, bool);
+    HostPrefill host_prefill = nullptr;
     ggml_context * host_weights = nullptr;
     ggml_context * row_tables = nullptr;
     HostTables host_tables{OWNER};
@@ -519,6 +521,15 @@ struct DelayLM::Impl {
 
     void select_backend(const BackendRequest & request) {
         backend = ::tts_cpp::moss::detail::init_backend(request, OWNER);
+        if (std::strcmp(::tts_cpp::detail::backend_reg_name(backend), "XDNA") == 0) {
+            ggml_backend_dev_t device = ggml_backend_get_device(backend);
+            ggml_backend_reg_t registry = ggml_backend_dev_backend_reg(device);
+            host_prefill = reinterpret_cast<HostPrefill>(
+                    ggml_backend_reg_get_proc_address(registry, "ggml_backend_xdna_set_host_prefill"));
+            if (!host_prefill) {
+                fail("XDNA backend requires host-prefill support in qvac-ext-ggml");
+            }
+        }
         tables_on_host = places_tables_on_host(layout.tables, backend);
         fused = fuses_attention(layout.attention, backend);
     }
@@ -851,7 +862,8 @@ struct DelayLM::Impl {
         return logits;
     }
 
-    DelayLogits forward(const std::vector<DelayRow> & rows, TextLogits requested_text = TextLogits::Full) {
+    DelayLogits forward(const std::vector<DelayRow> & rows, TextLogits requested_text = TextLogits::Full,
+                        bool is_prefill = false) {
         validate_rows(rows);
         const TextLogits text = projected_text(requested_text);
         begin_graph();
@@ -914,6 +926,14 @@ struct DelayLM::Impl {
             fail("graph allocation failed");
         }
         set_graph_inputs();
+        if (is_prefill && host_prefill && !host_prefill(weight_buffer, true)) {
+            fail("cannot select host prefill for XDNA weights");
+        }
+        struct PrefillReset {
+            HostPrefill fn;
+            ggml_backend_buffer_t weights;
+            ~PrefillReset() { if (fn) fn(weights, false); }
+        } prefill_reset{is_prefill ? host_prefill : nullptr, weight_buffer};
         const ggml_status status = ::tts_cpp::detail::sched_fallback_compute(sched, backend, graph, n_threads);
         if (status != GGML_STATUS_SUCCESS) {
             fail("graph compute failed");
@@ -997,7 +1017,7 @@ int32_t DelayLM::token_id(const std::string & token) const {
 }
 
 DelayLogits DelayLM::prefill(const std::vector<DelayRow> & rows, TextLogits text) {
-    return impl_->forward(rows, text);
+    return impl_->forward(rows, text, true);
 }
 
 DelayLogits DelayLM::step(const DelayRow & row, TextLogits text) {

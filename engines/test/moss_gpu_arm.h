@@ -7,8 +7,8 @@
 // configured arm must fail when that backend is unavailable, never pass on the
 // CPU or on another accelerator registered alongside it.
 struct MossGpuArm {
-    std::string request;  // TTS_CPP_GPU_BACKEND / TranscribeOptions::backend
-    std::string prefix;   // ggml instance name: "CUDA0", "Vulkan0", "HTP0", "OpenCL", "WebGPU: WebGPU", "MTL0"
+    std::string request;  // TTS_CPP_GPU_BACKEND or an explicit engine backend
+    std::string prefix;   // ggml instance name: "CUDA0", "Vulkan0", "HTP0", "XDNA", "OpenCL", "WebGPU: WebGPU", "MTL0"
     std::string device;   // ggml device name, as fit results report it: "GPUOpenCL" for OpenCL, else as `prefix`
 
     bool selected(const char * name) const {
@@ -28,9 +28,10 @@ inline MossGpuArm moss_gpu_arm(const std::string & request) {
     if (request == "cuda") return {request, "CUDA", "CUDA"};
     if (request == "vulkan") return {request, "Vulkan", "Vulkan"};
     if (request == "hexagon") return {request, "HTP", "HTP"};
+    if (request == "xdna") return {request, "XDNA", "XDNA0"};
     if (request == "opencl") return {request, "OpenCL", "GPUOpenCL"};
     if (request == "webgpu") return {request, "WebGPU", "WebGPU"};
     if (request == "metal") return {request, "MTL", "MTL"};
     throw std::runtime_error("unknown accelerator arm '" + request +
-                             "' (expected cuda, vulkan, hexagon, opencl, webgpu or metal)");
+                             "' (expected cuda, vulkan, hexagon, xdna, opencl, webgpu or metal)");
 }

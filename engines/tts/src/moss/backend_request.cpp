@@ -13,7 +13,7 @@ constexpr int GPU_REQUESTED = 1;
 } // namespace
 
 BackendRequest backend_request(const EngineOptions & options) {
-    return {options.backend, options.use_gpu};
+    return {options.backend == "xdna" ? "XDNA0" : options.backend, options.use_gpu};
 }
 
 BackendRequest backend_request(const SoundEffectOptions & options) {
