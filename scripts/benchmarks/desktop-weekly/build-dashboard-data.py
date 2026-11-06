@@ -267,7 +267,7 @@ def weekly_row(summary, row, families, newest_name):
             "command": command_text(row["family"], families), "config": f"BENCH backends {', '.join(summary.get('backends', []))}; CUDA arch {(summary.get('pins', {}).get('build') or {}).get('cuda_arch', '')}",
             "caveats": caveats, "comparison_limitation": "", "host_conditions": HOST_CONDITIONS.get(host, ""),
             "source_file": summary["_file"], "source_row": row["family"], "raw_source": f"runs/{run_name(summary)}/results/{row['backend']}/{row['family']}.json",
-            "group": f"{host}|{row['backend']}|{model}|{task}|{scenario}|weekly", "ratio_qualifier": "", "run": run_name(summary)}
+            "group": f"{host}|{row['backend']}|{model}|{task}|{scenario}|{timing_class}|weekly", "ratio_qualifier": "", "run": run_name(summary)}
 
 
 def newest_cells(host_summaries, families):

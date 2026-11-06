@@ -31,6 +31,17 @@ FAMILIES = {
                            "args": ["--model", "${MODEL_DIR}/parakeet.gguf"], "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
     "cosyvoice3-clone": {"task": "TTS cloning", "model_label": "CosyVoice3 0.5B", "weights": "LM Q8_0", "bench_kind": "native", "binary": "engines/tts/cosyvoice-bench",
                          "args": [], "runs": 5, "warmup": 1, "cpu_runs": 3, "cpu_warmup": 1},
+    "whisper-small": {"task": "ASR", "model_label": "Whisper small multilingual", "weights": "GGML small", "bench_kind": "time-wrapped",
+                      "binary": "engines/whisper/whisper-cli", "args": ["-m", "${MODEL_DIR}/ggml-small.bin"], "runs": 10, "warmup": 2, "cpu_runs": 5, "cpu_warmup": 1},
+    "mlx-whisper": {"task": "ASR", "model_label": "Whisper small multilingual", "weights": "FP16 (MLX conversion)", "engine": "mlx-whisper", "platform": "Darwin",
+                    "backends": ["metal"], "bench_kind": "native", "binary": "${BENCH_HOME}/mlx/venv/bin/python3", "args": ["${BENCH_HOME}/tools/mlx-bench.py"],
+                    "runs": 10, "warmup": 2, "cpu_runs": 1, "cpu_warmup": 0},
+    "whisper-small-abcba": {"task": "ASR", "model_label": "Whisper small multilingual", "weights": "GGML small", "bench_kind": "time-wrapped",
+                            "binary": "engines/whisper/whisper-cli", "args": ["-m", "${MODEL_DIR}/ggml-small.bin"], "scenario": "abcba", "runs": 5, "warmup": 1,
+                            "cpu_runs": 3, "cpu_warmup": 1},
+    "mlx-whisper-abcba": {"task": "ASR", "model_label": "Whisper small multilingual", "weights": "FP16 (MLX conversion)", "engine": "mlx-whisper", "platform": "Darwin",
+                          "backends": ["metal"], "bench_kind": "native", "binary": "${BENCH_HOME}/mlx/venv/bin/python3", "args": ["${BENCH_HOME}/tools/mlx-bench.py"],
+                          "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
     "parakeet-mlx-abcba": {"task": "ASR", "model_label": "Parakeet TDT 0.6B v3", "weights": "BF16 (MLX conversion)", "engine": "parakeet-mlx", "platform": "Darwin",
                            "backends": ["metal"], "bench_kind": "native", "binary": "${BENCH_HOME}/mlx/venv/bin/python3", "args": ["${BENCH_HOME}/tools/mlx-bench.py"],
                            "scenario": "abcba", "runs": 5, "warmup": 1, "cpu_runs": 1, "cpu_warmup": 0},
@@ -129,6 +140,14 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertEqual((qvac["engine"], qvac["is_qvac"]), (build.QVAC, True))
         self.assertEqual(mlx["group"], qvac["group"])
         self.assertEqual(mlx["command"], "${BENCH_HOME}/mlx/venv/bin/python3 ${BENCH_HOME}/tools/mlx-bench.py")
+
+    def test_rows_of_different_timing_scopes_never_share_a_chart(self):
+        for qvac_family, rival_family in (("whisper-small", "mlx-whisper"), ("whisper-small-abcba", "mlx-whisper-abcba")):
+            qvac = build.weekly_row(self.newer, result("metal", qvac_family, 6.0), FAMILIES, "2026-11-08")
+            rival = build.weekly_row(self.newer, result("metal", rival_family, 4.0), FAMILIES, "2026-11-08")
+            self.assertEqual((qvac["timing_class"], rival["timing_class"]), ("fresh_process", "native_excl_load"))
+            self.assertNotEqual(qvac["group"], rival["group"])
+            self.assertIn(qvac["timing_class"], qvac["group"])
 
     def test_families_outside_the_hosts_platform_or_backends_are_not_coverage_gaps(self):
         darwin = summary("2026-11-08", "2026-11-08T17:00:00Z", [result("metal", "parakeet-tdt", 12.0)], backends=("cpu", "metal"))
@@ -294,7 +313,7 @@ class CommentaryTest(unittest.TestCase):
         self.assertIn("+20%", notes["Week over week"])
         self.assertNotIn("Audio8", notes["Week over week"])
         self.assertIn("2 of 4 weekly cells measured on CPU and CUDA", notes["Coverage"])
-        self.assertIn("No stored result on this machine for CosyVoice3 0.5B, MOSS-TTS v1.5 8.5B and Parakeet TDT 0.6B v3", notes["Coverage"])
+        self.assertIn("No stored result on this machine for CosyVoice3 0.5B, MOSS-TTS v1.5 8.5B, Parakeet TDT 0.6B v3 and Whisper small multilingual", notes["Coverage"])
         self.assertIn("qvac abcdef1234", notes["Pins"])
 
     def test_campaign_lines_give_the_ratio_range_per_task(self):

@@ -134,9 +134,14 @@ def row_for(run_dir, backend, family, spec, build_failed):
     return measured_row(backend, family, spec, result, gpu_memory(run_dir, backend, family))
 
 
+def family_runs_on_backend(spec, backend):
+    allowed = spec.get("backends")
+    return not allowed or backend in allowed
+
+
 def collect_rows(run_dir, backends, families, specs, build_failures):
     return [row_for(run_dir, backend, family, specs[family], backend in build_failures)
-            for backend in backends for family in families]
+            for backend in backends for family in families if family_runs_on_backend(specs[family], backend)]
 
 
 def count_rows(rows):
