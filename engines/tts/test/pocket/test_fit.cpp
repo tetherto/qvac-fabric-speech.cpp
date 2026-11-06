@@ -1,6 +1,7 @@
 #include "tts-cpp/pocket/fit.h"
 #include "test_workload.h"
 #include "test_backend.h"
+#include "../test_env_portable.h"
 #include "gguf.h"
 #include "ggml.h"
 #include <chrono>
@@ -60,6 +61,9 @@ void check_tail_budget(pocket::FitOptions opts) {
 int main(int argc, char ** argv) {
     try {
         check(argc == 2 || argc == 3, "expected Pocket bundle directory [cpu|opencl|hexagon|HTP0|--gpu]");
+        // Projects the ggml engine; test-pocket-coreml covers the refusal a Core
+        // ML step sidecar next to the bundle's FlowLM GGUF triggers.
+        setenv("POCKET_COREML_DISABLE", "1", 1);
         pocket::FitOptions opts;
         opts.engine.use_gpu = argc == 3 && std::string(argv[2]) == "--gpu";
         opts.engine.backend = argc == 3 && !opts.engine.use_gpu ? argv[2] : "";

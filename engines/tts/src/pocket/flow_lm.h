@@ -34,6 +34,12 @@ struct VoiceState {
     int frames = 0;
     std::vector<std::vector<float>> keys, values;
 };
+// KV cache rows [start, start + count) of every layer, each row-major
+// [count, heads, head_dim] (keys after RoPE), as the ggml cache stores them.
+struct CacheRows {
+    int start = 0, count = 0;
+    std::vector<std::vector<float>> keys, values;
+};
 
 // One instance owns weights, its backend, and a bounded linear KV cache.
 // Calls must be serialized by the caller. reset() starts an independent
@@ -58,7 +64,13 @@ public:
     VoiceState read_voice(const std::string & path) const;
     VoiceState capture_voice() const;
     void restore_voice(const VoiceState & voice);
+    CacheRows cache_rows(int start, int count) const;
     std::vector<float> voice_embeddings(const std::vector<float> & latents) const;
+    // Row-major [frames, dim] audio inputs of normalized latents [frames,
+    // latent_dim] (the rows advance() feeds), for prefilling frames generated
+    // elsewhere. bos_latent() is the latent advance() uses when given none.
+    std::vector<float> audio_embeddings(const std::vector<float> & latents) const;
+    std::vector<float> bos_latent() const;
 
     // Row-major [frames, dim], including any checkpoint-specific voice/BOS
     // conditioning prepared by the frontend. Returns all normalized rows.
@@ -67,6 +79,8 @@ public:
     // Empty latent selects the learned audio BOS. Otherwise takes one
     // normalized continuous latent (the output of sample()).
     FrameCondition advance(const std::vector<float> & latent = {});
+    // The EOS head on an out_norm hidden row; throws on a non-finite logit.
+    float eos_logit(const std::vector<float> & hidden) const;
     // Noise is supplied by the caller to permit exact reference replay.
     // Temperature / truncation are applied to noise before this call.
     std::vector<float> sample(const std::vector<float> & hidden,
