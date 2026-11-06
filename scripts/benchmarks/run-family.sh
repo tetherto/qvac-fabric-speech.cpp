@@ -954,6 +954,15 @@ now_ns() {
 # RTF likewise: .rtf.median (supertonic-shape) vs .rtf_median (parakeet).
 # Backend likewise: .backend at top level (parakeet) — otherwise fall back
 # to stderr parsing.
+# A bench binary may write a token's raw control byte into its transcript
+# string; jq rejects such JSON, so the bytes that JSON forbids in strings go
+# before the file is parsed (newlines and tabs stay).
+strip_control_characters() {
+  local path="$1"
+  [[ -s "$path" ]] || return 0
+  tr -d '\000-\010\013\014\016-\037' < "$path" > "$path.clean" && mv "$path.clean" "$path"
+}
+
 run_native() {
   local native_json="$1"; shift
   local stderr_log="$1"; shift
@@ -977,6 +986,7 @@ run_native() {
     return 1
   fi
 
+  strip_control_characters "$native_json"
   if ! [[ -s "$native_json" ]]; then
     # Exit 0 without the JSON means the binary took a code path that never
     # reaches its bench writer (this is how the sortformer diarization cells

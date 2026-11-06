@@ -210,17 +210,23 @@ def bar_width(row, top):
 
 
 def bar_html(row, top, qvac):
-    ratio = "" if row is qvac else f'<small>{esc(fmt_factor(factor_of(qvac, row)))} {QVAC_LABEL}</small>'
-    label = qvac_label(row, row.get("comparison_set") == views.WEEKLY) if row is qvac else views.engine_name(row)
-    return (f'<div class="row{" q" if row is qvac else ""}"><span class="lab">{esc(label)}</span><span class="track">'
+    own = bool(row.get("is_qvac"))
+    ratio = "" if own else f'<small>{esc(fmt_factor(factor_of(qvac, row)))} {QVAC_LABEL}</small>'
+    label = qvac_label(row, row.get("comparison_set") == views.WEEKLY) if own else views.engine_name(row)
+    return (f'<div class="row{" q" if own else ""}"><span class="lab">{esc(label)}</span><span class="track">'
             f'<span class="bar {views.engine_class(row["engine"])}" style="width:{bar_width(row, top):.2f}%"></span></span>'
             f'<span class="val">RTF {esc(fmt_rtf(rtf_of(row)))}{ratio}</span></div>')
 
 
-def bars_html(qvac, rivals):
-    top = max(rtf_of(row) for row in [qvac] + rivals)
-    rows = "".join(bar_html(row, top, qvac) for row in [qvac] + rivals)
-    return f'<div class="bars" role="img" aria-label="Real-time factor per engine, lower is better">{rows}</div>'
+def own_rows(rows):
+    return sorted(qvac_rows(rows), key=rtf_of)
+
+
+def bars_html(qvac, rivals, rows):
+    drawn = own_rows(rows) + rivals
+    top = max(rtf_of(row) for row in drawn)
+    bars = "".join(bar_html(row, top, qvac) for row in drawn)
+    return f'<div class="bars" role="img" aria-label="Real-time factor per engine, lower is better">{bars}</div>'
 
 
 def note_html(qvac):
@@ -242,7 +248,7 @@ def card_html(machine, rows, hub_url):
     qvac, rivals = fastest(qvac_rows(rows)), competitors(rows)
     return (f'<article class="card"><div class="ch"><span class="task {TASK_CLASSES.get(qvac["task"], "t-asr")}">{esc(TASK_SHORT.get(qvac["task"], qvac["task"]))}</span>'
             f'<h3>{esc(qvac["model"])}</h3><p class="cap">{esc(caption(qvac))}</p></div>{win_html(qvac, rivals)}{sub_html(qvac)}'
-            f'{bars_html(qvac, rivals)}{note_html(qvac)}{link_html(machine, qvac, hub_url)}</article>')
+            f'{bars_html(qvac, rivals, rows)}{note_html(qvac)}{link_html(machine, qvac, hub_url)}</article>')
 
 
 def card_name(machine, card):

@@ -93,6 +93,14 @@
         {
           "task": "ASR",
           "model": "Parakeet TDT 0.6B v3",
+          "scenario": "jfk",
+          "timing_class": "native_excl_load",
+          "set": "weekly",
+          "variant": "Q8_0"
+        },
+        {
+          "task": "ASR",
+          "model": "Parakeet TDT 0.6B v3",
           "scenario": "abcba",
           "timing_class": "native_excl_load",
           "set": "weekly"

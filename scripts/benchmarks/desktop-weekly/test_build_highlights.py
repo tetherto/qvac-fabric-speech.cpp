@@ -80,11 +80,16 @@ class CardTest(unittest.TestCase):
         self.assertIn('<p class="win loss"><b>1.1×</b> higher RTF than audio.cpp, which leads here</p>', page)
         self.assertIn("<small>0.9× QVAC</small>", page)
 
-    def test_weekly_qvac_bar_keeps_its_variant(self):
-        rows = [row(QVAC, 100.0, comparison_set="weekly", variant="Q8_0"), row("parakeet-mlx", 150.0, comparison_set="weekly", variant="bf16")]
+    def test_weekly_qvac_bars_keep_their_variants_and_every_qvac_variant_is_drawn(self):
+        rows = [row(QVAC, 100.0, comparison_set="weekly", variant="Q8_0"), row("parakeet-mlx", 150.0, comparison_set="weekly", variant="bf16"),
+                row(QVAC, 90.0, comparison_set="weekly", variant="Q8_0, Core ML encoder on the ANE")]
         page = highlights.card_html({"host": "spark-d9ca", "machine": "DGX Spark", "backend": "cuda"}, rows, "")
         self.assertIn('<span class="lab">QVAC Q8_0</span>', page)
+        self.assertIn('<span class="lab">QVAC Q8_0, Core ML encoder on the ANE</span>', page)
         self.assertIn('<span class="lab">parakeet-mlx (bf16)</span>', page)
+        self.assertEqual(page.count('class="row q"'), 2)
+        self.assertEqual(page.count("× QVAC</small>"), 1)
+        self.assertIn("QVAC RTF 0.00056 (90 ms", page)
 
 
 class PageTest(unittest.TestCase):

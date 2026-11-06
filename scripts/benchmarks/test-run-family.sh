@@ -570,6 +570,11 @@ jq -n --arg sha "$hello_sha" \
     args: ["${JSON_OUT}"], audio_duration_seconds: null,
     notes: "an engine outside the build dir: the binary is resolved from BENCH_HOME, not from --build-dir"
   },
+  "nat-control": {
+    bench_kind: "native", binary: "bin/nat-control", cmake_target: "x",
+    args: ["${JSON_OUT}"], audio_duration_seconds: null,
+    notes: "a transcript with a raw control byte must not break the JSON parse"
+  },
   "scratch-ok": {
     bench_kind: "native", binary: "bin/nat-scratch", cmake_target: "x",
     args: ["${JSON_OUT}", "${SCRATCH_DIR}"], audio_duration_seconds: null,
@@ -580,6 +585,11 @@ jq -n --arg sha "$hello_sha" \
 cat > "$BUILD/bin/nat-ok" <<'STUB'
 #!/usr/bin/env bash
 printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU"}' > "$1"
+STUB
+
+cat > "$BUILD/bin/nat-control" <<'STUB'
+#!/usr/bin/env bash
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"hello\033world"}' > "$1"
 STUB
 
 cat > "$BUILD/bin/nat-scratch" <<'STUB'
@@ -839,6 +849,10 @@ ok "a \${BENCH_HOME} binary runs outside the build dir and is missing without BE
 run_driver scratch-ok "$OUT/scratch-ok.json" "$OUT/scratch-ok.err" BENCH_FAMILIES_JSON="$SPEC"
 jq -e '.status == "ok" and (.backend | startswith("/"))' "$OUT/scratch-ok.json" > /dev/null || fail "scratch-ok: $(cat "$OUT/scratch-ok.json")"
 ok "\${SCRATCH_DIR} expands to an existing temporary directory"
+
+run_driver nat-control "$OUT/nat-control.json" "$OUT/nat-control.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and .wall_ms_median == 100' "$OUT/nat-control.json" > /dev/null || fail "nat-control: $(cat "$OUT/nat-control.json")"
+ok "a raw control byte in the bench JSON transcript does not fail the cell"
 
 # native, exit 0 without JSON (the sortformer failure shape): run-failed and
 # the child's output is dumped to the step log instead of vanishing.
