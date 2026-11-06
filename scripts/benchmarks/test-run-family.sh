@@ -589,7 +589,7 @@ STUB
 
 cat > "$BUILD/bin/nat-control" <<'STUB'
 #!/usr/bin/env bash
-printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"hello\033world"}' > "$1"
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU","transcript":"hello\033world\tand\nmore"}' > "$1"
 STUB
 
 cat > "$BUILD/bin/nat-scratch" <<'STUB'
@@ -852,7 +852,7 @@ ok "\${SCRATCH_DIR} expands to an existing temporary directory"
 
 run_driver nat-control "$OUT/nat-control.json" "$OUT/nat-control.err" BENCH_FAMILIES_JSON="$SPEC"
 jq -e '.status == "ok" and .wall_ms_median == 100' "$OUT/nat-control.json" > /dev/null || fail "nat-control: $(cat "$OUT/nat-control.json")"
-ok "a raw control byte in the bench JSON transcript does not fail the cell"
+ok "raw control bytes, tabs and newlines in the bench JSON transcript do not fail the cell"
 
 # native, exit 0 without JSON (the sortformer failure shape): run-failed and
 # the child's output is dumped to the step log instead of vanishing.

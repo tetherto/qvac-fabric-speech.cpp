@@ -954,13 +954,24 @@ now_ns() {
 # RTF likewise: .rtf.median (supertonic-shape) vs .rtf_median (parakeet).
 # Backend likewise: .backend at top level (parakeet) — otherwise fall back
 # to stderr parsing.
-# A bench binary may write a token's raw control byte into its transcript
-# string; jq rejects such JSON, so the bytes that JSON forbids in strings go
-# before the file is parsed (newlines and tabs stay).
+# A bench binary may write a token's raw control byte (a tab, a newline, an
+# escape) into its transcript string; jq rejects such JSON, so the file is
+# re-serialized by a tolerant parser before anything reads it.
 strip_control_characters() {
   local path="$1"
   [[ -s "$path" ]] || return 0
-  tr -d '\000-\010\013\014\016-\037' < "$path" > "$path.clean" && mv "$path.clean" "$path"
+  python3 - "$path" <<'PY' || true
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8", errors="replace") as stream:
+    text = stream.read()
+try:
+    payload = json.loads(text, strict=False)
+except ValueError:
+    sys.exit(0)
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, ensure_ascii=False, indent=2)
+PY
 }
 
 run_native() {
