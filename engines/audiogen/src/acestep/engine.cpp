@@ -204,7 +204,7 @@ struct Engine::Impl {
     void ensure_dit() {
         if (dit) return;
         if (opts.verbose) fprintf(stderr, "[acestep-engine] loading DiT\n");
-        dit = dit_model_load(opts.dit_model_path, backend, opts.verbose);
+        dit = dit_model_load(opts.dit_model_path, backend, nth, opts.verbose);
         if (!dit) throw std::runtime_error("acestep engine: DiT load failed");
     }
     void ensure_vae(bool with_encoder = false) {

@@ -367,9 +367,10 @@ bool load_lm(const std::string & path, int n_gpu_layers,
              std::string * error);
 void free_lm(lm_model & model);
 
-// Backend-selector matcher: shared with tests so the alias ("hexagon" ->
-// HTP/HTP0), exact-device ("HTP0", "CUDA0"), and policy ("auto", "cpu",
-// "opencl") rules can be covered without having to spin up a ggml device.
+// Backend-selector matcher: shared with tests so the aliases ("hexagon" ->
+// HTP/HTP0, "xdna" -> XDNA/XDNA0), exact-device ("HTP0", "CUDA0"),
+// and policy ("auto", "cpu", "opencl") rules can be covered without
+// having to spin up a ggml device.
 // `reg` and `device` may be nullptr; nullptrs never match.
 bool backend_selection_matches(const std::string & requested,
                                const char * reg, const char * device,

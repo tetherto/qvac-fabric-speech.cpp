@@ -15,8 +15,39 @@ dependencies before running its converter.
 | Nemotron 3 Diarization | `engines/parakeet/scripts/download_nemotron_diarization.py` | Official pinned Q8_0 GGUF; optional source conversion is separate |
 | MOSS-Transcribe-Diarize | Download the [Hugging Face checkpoint](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize), then [convert-moss-transcribe-to-gguf.py](moss-transcribe.md#convert) | Separate MOSS GGUF, API and CLI |
 | TranscribePsy-250M-EU-sub | `engines/parakeet/scripts/download-all-models.sh transcribepsy` | Published q8_0 GGUF; on Apple, the encoder-less GGUF with its Neural Engine encoder and decoder sidecars |
+| TranscribePsy-250M-EU | Download the NeMo checkpoint, CAFE adapters and language gate, then convert all three into one GGUF | Full 25-language TDT model; `en`, `other` and `auto` routing |
 
 ### TranscribePsy
+
+The full [TranscribePsy-250M-EU](https://huggingface.co/qvac/TranscribePsy-250M-EU)
+is separate from the published eight-language EU-sub model below. Its bare
+trunk handles English; six CAFE adapters handle non-English speech. The
+language gate selects between them when the caller does not know which route
+to use. Convert the checkpoint, adapters and gate together:
+
+```bash
+hf download qvac/TranscribePsy-250M-EU \
+  TranscribePsy-250M-EU.nemo adapters.safetensors language_gate.safetensors \
+  --local-dir engines/parakeet/models
+python engines/parakeet/scripts/convert-nemo-to-gguf.py \
+  --ckpt engines/parakeet/models/TranscribePsy-250M-EU.nemo \
+  --hf-repo qvac/TranscribePsy-250M-EU \
+  --eu-adapters engines/parakeet/models/adapters.safetensors \
+  --eu-gate engines/parakeet/models/language_gate.safetensors \
+  --out engines/parakeet/models/transcribepsy-250m-eu.gguf --quant q8_0
+```
+
+Use `--language en` for known English, `--language other` for known non-English,
+or `--language auto` (also the default) to run the gate on the first 20 seconds
+before transcription. `EngineOptions::language` accepts the same values for
+this model. The gate and adapters are embedded in the GGUF; no extra files are
+needed at inference time. The native ggml encoder handles both routes; the
+EU-sub Core ML sidecars do not contain the full model's adapters.
+
+```bash
+build-parakeet/parakeet --model engines/parakeet/models/transcribepsy-250m-eu.gguf \
+  --wav engines/parakeet/test/samples/fr-multipiece-16k.wav --language auto
+```
 
 [TranscribePsy-250M-EU-sub](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub)
 is a 254M FastConformer-TDT distilled from Parakeet-TDT-0.6B-v3 for Dutch,

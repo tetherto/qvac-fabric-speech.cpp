@@ -37,7 +37,7 @@ struct options {
 };
 
 void usage(const char * executable) {
-    std::printf("usage: %s --lm model.gguf --codec decoder.gguf [--backend cpu|hexagon|opencl]\n"
+    std::printf("usage: %s --lm model.gguf --codec decoder.gguf [--backend cpu|hexagon|opencl|xdna]\n"
                 "       [--text TEXT] [--frames N] [--threads N] [--precise-outputs]\n"
                 "       [--slow-layers N] [--skip-codec]\n"
                 "Models/backend also accept AUDIO8_PARITY_LM/CODEC/BACKEND. Missing models exit 77.\n",
@@ -75,8 +75,9 @@ options parse(int argc, char ** argv) {
         else if (key == "--slow-layers") out.slow_layers = positive_integer(value);
         else throw std::runtime_error("unknown option " + key);
     }
-    if (out.backend != "cpu" && out.backend != "hexagon" && out.backend != "opencl") {
-        throw std::runtime_error("backend must be cpu, hexagon or opencl");
+    if (out.backend != "cpu" && out.backend != "hexagon" && out.backend != "opencl" &&
+        out.backend != "xdna") {
+        throw std::runtime_error("backend must be cpu, hexagon, opencl or xdna");
     }
     if (out.text.empty()) throw std::runtime_error("text must not be empty");
     return out;

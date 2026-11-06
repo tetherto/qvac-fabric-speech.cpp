@@ -9,10 +9,14 @@ registry. Selection tries Adreno 700+ OpenCL first; validated
 Vulkan/Metal/CUDA discrete devices, then validated integrated devices; and
 finally other discrete, then integrated GPU backends. Integrated-device
 support is required because Vulkan reports Android UMA adapters such as
-Pixel's Mali-G715 as `IGPU`.
+Pixel's Mali-G715 as `IGPU`. Each automatic candidate must initialise and
+report support for the engine's F32 matrix projection. Unsupported devices,
+including virtual Metal adapters without SIMD-group reduction, are released
+and selection continues to another GPU or CPU. The same resolver is used by
+generation and memory-fit projection.
 
 `EngineOptions::backend` (`--backend` on the CLIs) replaces that walk with an
-explicit device: `cpu`, `opencl`, `webgpu`, `hexagon` (the Snapdragon HTP0
+explicit device: `cpu`, `opencl`, `webgpu`, `xdna`, `hexagon` (the Snapdragon HTP0
 NPU), or an exact ggml device name. An explicit request has no fallback, so `create()`
 throws when the device is missing. The Hexagon NPU is never picked by the
 automatic walk; see [Hexagon NPU](#hexagon-npu).
@@ -86,6 +90,55 @@ shrinks the core window when needed; short inputs remain a single graph.
 `ACESTEP_VAE_WIN_CORE` can pin the core only for diagnostics. VAE encode also uses
 overlapping windows on long inputs, trimming their context before stitching
 the latent cores. Each encode graph is bounded to one window.
+
+## AMD XDNA NPU
+
+`EngineOptions::backend = "xdna"` or `"XDNA0"` (`--backend xdna` on
+`music-cli`) selects Fabric LLM's native GGML XDNA backend for the DiT.
+The graph cache retains a scheduler for XDNA operations and CPU fallback;
+lyric cross-attention probes use the same scheduling policy. Text and condition
+encoders, the LM, FSQ detokenizer and VAE use CPU placement. Existing explicit
+stage overrides still apply. Automatic GPU selection never picks XDNA, and
+an unavailable explicit XDNA request fails instead of selecting another device.
+
+Build against a GGML installation with XDNA and the speech operations, plus
+matching XRT, amdxdna and kernel artifacts. Follow the
+[shared XDNA runtime setup](../../parakeet/docs/backends.md#amd-xdna-npu), then
+build AudioGen with `CMAKE_PREFIX_PATH` pointing to that GGML installation as
+in the [build guide](build.md). There is no ONNX conversion or ONNX Runtime
+in this path. The currently published `ggml-speech` dependency does not contain
+XDNA; ordinary package CI validates regression compatibility separately from
+native NPU hardware execution.
+
+Use the existing stage GGUFs, selecting a BF16 turbo DiT for the validated
+NPU matmuls. Quantized weights can take XDNA's host path and are not covered by
+the reported speedup. The other stage models can keep their existing precision.
+
+```sh
+export GGML_XDNA_KERNEL_DIR=/path/to/matching-kernel-artifacts
+./build/audiogen/music-cli --models /path/to/acestep-models --backend xdna \
+  --caption "Warm piano with a steady acoustic rhythm" --dur 5 --seed 42 \
+  --out music.wav
+./build/audiogen/test-acestep-xdna-generation /path/to/acestep-models
+```
+
+The hardware test exercises public Engine generation, CPU stage placement,
+seeded repeated calls, engine recreation, exact-device selection and lyric
+alignment. Without an XDNA device it reports a skipped hardware test. It prints
+CPU/XDNA numerical differences rather than asserting bitwise equality between
+backends.
+
+A Strix Halo Ryzen AI MAX+ 395 validation used the full 24-layer turbo BF16
+DiT, eight diffusion steps, shift 3 and Haar DCW. With the same captured
+conditioning for 5.2 seconds of stereo audio, the warm median was 5.91 seconds
+with XDNA DiT and CPU VAE versus 7.37 seconds on CPU (one warmup, three runs,
+four CPU threads and four XDNA host threads). This excludes prompt encoding,
+LM generation and model loading. The first XDNA generation took 20.13 seconds.
+Peak process RSS was 7.37 GB versus 4.18 GB on CPU, including backend packing.
+CPU/XDNA PCM cosine was 0.99873 and relative L2 error was 5.11%; this is a
+numerical comparison, not proof of perceptual equivalence. Driver tracing
+confirmed real NPU command submission. Validation used
+[Fabric LLM GGML e4df67a](https://github.com/tetherto/qvac-fabric-llm.cpp/commit/e4df67a89e430d2918f7b16ac85b044fffa4588d).
 
 ## Hexagon NPU
 

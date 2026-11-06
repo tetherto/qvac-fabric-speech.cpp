@@ -682,6 +682,7 @@ if (PARAKEET_BUILD_TESTS)
     set(_qvp_tdt_f16_gguf  "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3.f16.gguf")
     set(_qvp_tdt_coreml     "${PARAKEET_TEST_MODEL_DIR}/parakeet-tdt-0.6b-v3-encoder.mlmodelc")
     set(_qvp_transcribepsy_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub.gguf")
+    set(_qvp_transcribepsy_eu_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu.gguf")
     set(_qvp_transcribepsy_coreml_gguf "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml.gguf")
     set(_qvp_transcribepsy_coreml_encoder "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-sub-coreml-encoder.mlmodelc")
     set(_qvp_eou_q8_gguf   "${PARAKEET_TEST_MODEL_DIR}/parakeet_realtime_eou_120m-v1.q8_0.gguf")
@@ -814,6 +815,19 @@ if (PARAKEET_BUILD_TESTS)
     target_link_libraries(test-parakeet-backend-request PRIVATE qvac-parakeet)
     parakeet_apply_ccache(test-parakeet-backend-request)
     parakeet_register_test(test-parakeet-backend-request LABEL "unit")
+
+    add_executable(test-encoder-graph-allocator test/test_encoder_graph_allocator.cpp)
+    target_include_directories(test-encoder-graph-allocator PRIVATE src)
+    target_link_libraries(test-encoder-graph-allocator PRIVATE ggml)
+    parakeet_register_test(test-encoder-graph-allocator LABEL "unit")
+
+    add_executable(test-xdna-transcription test/test_xdna_transcription.cpp)
+    target_link_libraries(test-xdna-transcription PRIVATE qvac-parakeet ggml)
+    parakeet_apply_ccache(test-xdna-transcription)
+    parakeet_register_test(test-xdna-transcription
+        LABEL    "fixture"
+        ARGS     "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_f16_gguf}" "${_qvp_jfk_wav}")
 
     add_executable(test-parakeet-streaming test/test_streaming.cpp)
     target_link_libraries(test-parakeet-streaming PRIVATE qvac-parakeet)
@@ -1629,6 +1643,15 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_convert_nemo_to_gguf.py")
         set_property(TEST test-converter-rnnt PROPERTY LABELS unit)
+        if (TARGET parakeet-cli)
+            add_test(NAME test-transcribepsy-eu
+                COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_transcribepsy_eu.py"
+                    "--binary" "$<TARGET_FILE:parakeet-cli>"
+                    "--model" "${_qvp_transcribepsy_eu_gguf}")
+            set_tests_properties(test-transcribepsy-eu PROPERTIES
+                LABELS "fixture" SKIP_RETURN_CODE 77)
+        endif()
         add_test(
             NAME test-converter-moss-transcribe
             COMMAND ${Python3_EXECUTABLE}
@@ -2129,6 +2152,19 @@ if (PARAKEET_BUILD_TESTS)
                 ARGS     "${_qvp_sfsv21_f16_gguf}"
                 REQUIRES "${_qvp_sfsv21_f16_gguf}")
             set_property(TEST test-fit-coreml-diarizers-sortformer PROPERTY SKIP_RETURN_CODE 77)
+
+            # DiarizationResult::encoder_used_coreml through the public Engine:
+            # true only when every pass of a call ran on a diarizer sidecar.
+            # Skips (77) without `<model>-diarizer-358.mlmodelc` beside the GGUF.
+            add_executable(test-diarize-coreml-routing test/test_diarize_coreml_routing.cpp)
+            target_link_libraries(test-diarize-coreml-routing PRIVATE qvac-parakeet)
+            target_include_directories(test-diarize-coreml-routing PRIVATE include)
+            parakeet_apply_ccache(test-diarize-coreml-routing)
+            parakeet_register_test(test-diarize-coreml-routing
+                LABEL    "fixture;coreml"
+                ARGS     "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}"
+                REQUIRES "${PARAKEET_TEST_NEMOTRON_DIARIZATION_GGUF}")
+            set_property(TEST test-diarize-coreml-routing PROPERTY SKIP_RETURN_CODE 77)
         endif()
     endif()
 
@@ -2913,6 +2949,13 @@ if (PARAKEET_BUILD_TESTS)
     target_link_libraries(test-transcribepsy PRIVATE qvac-parakeet)
     target_include_directories(test-transcribepsy PRIVATE include src ggml/include)
     parakeet_apply_ccache(test-transcribepsy)
+    add_executable(test-transcribepsy-eu-api test/test_transcribepsy_eu_api.cpp)
+    target_link_libraries(test-transcribepsy-eu-api PRIVATE qvac-parakeet)
+    parakeet_apply_ccache(test-transcribepsy-eu-api)
+    parakeet_register_test(test-transcribepsy-eu-api
+        LABEL "fixture"
+        ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+        REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}")
     set(_qvp_transcribepsy_clips
         "--wav" "${_qvp_jfk_wav}" "--wav2" "${_qvp_fr_multipiece_wav}" "--wav-sample" "${_qvp_sample_wav}")
     set(_qvp_transcribepsy_clip_files "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "${_qvp_sample_wav}")

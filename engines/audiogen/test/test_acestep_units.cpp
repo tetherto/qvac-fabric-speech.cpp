@@ -776,6 +776,36 @@ void test_backend_device_types() {
 // 6b. GPU fallback reason -----------------------------------------------------
 // A CPU run after a GPU request is the symptom users report, so the reason must
 // never disagree with what the registry actually returned.
+void test_gpu_matmul_capability() {
+    using namespace tts_cpp::acestep;
+    bool inspected = false;
+    CHECK(!probe_gpu_matmul([&inspected](const ggml_tensor * operation) {
+        inspected = true;
+        CHECK(operation->op == GGML_OP_MUL_MAT);
+        CHECK(operation->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->type == GGML_TYPE_F32);
+        CHECK(operation->src[1]->type == GGML_TYPE_F32);
+        CHECK(operation->src[0]->data == nullptr && operation->src[1]->data == nullptr);
+        CHECK(operation->src[0]->ne[0] == GPU_MATMUL_PROBE_DIMENSION);
+        CHECK(operation->src[1]->ne[1] == GPU_MATMUL_PROBE_COLUMNS);
+        return false;
+    }));
+    CHECK(inspected);
+    CHECK(probe_gpu_matmul([](const ggml_tensor *) { return true; }));
+    CHECK(!backend_supports_gpu_matmul(nullptr));
+    ggml_backend_t cpu = backend_cpu_init();
+    CHECK(cpu != nullptr);
+    if (cpu) {
+        CHECK(backend_supports_gpu_matmul(cpu));
+        CHECK(keep_usable_gpu(cpu, backend_supports_gpu_matmul) == cpu);
+        ggml_backend_free(cpu);
+    }
+    ggml_backend_t unsupported = backend_cpu_init();
+    CHECK(unsupported != nullptr);
+    CHECK(keep_usable_gpu(unsupported, [](ggml_backend_t) { return false; }) == nullptr);
+    CHECK(keep_usable_gpu(nullptr, [](ggml_backend_t) { return true; }) == nullptr);
+}
+
 void test_gpu_fallback_reason() {
     using tts_cpp::GpuFallbackReason;
     using tts_cpp::gpu_fallback_reason_name;
@@ -882,10 +912,17 @@ void test_backend_request_matching() {
     CHECK(backend_request_matches("cpu", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
     CHECK(!backend_request_matches("cpu", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
     CHECK(!backend_request_matches("auto", "HTP", "HTP0", GGML_BACKEND_DEVICE_TYPE_GPU));
+    CHECK(backend_request_matches("xdna", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(backend_request_matches("XDNA1", "XDNA", "XDNA1", GGML_BACKEND_DEVICE_TYPE_ACCEL));
+    CHECK(!backend_request_matches("xdna", "CPU", "CPU", GGML_BACKEND_DEVICE_TYPE_CPU));
+    CHECK(!backend_request_matches("auto", "XDNA", "XDNA0", GGML_BACKEND_DEVICE_TYPE_ACCEL));
     CHECK(!backend_request_matches("Vulkan0", nullptr, nullptr, GGML_BACKEND_DEVICE_TYPE_GPU));
 
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
     CHECK(gpu_tier_for("HTP", GGML_BACKEND_DEVICE_TYPE_IGPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_GPU, -1) == GpuTier::NotSelectable);
+    CHECK(gpu_tier_for("XDNA", GGML_BACKEND_DEVICE_TYPE_ACCEL, -1) == GpuTier::NotSelectable);
 }
 
 void test_dsp_library_path() {
@@ -1172,6 +1209,9 @@ void test_stage_placement() {
     using tts_cpp::acestep::resolve_stage_placement;
     using tts_cpp::acestep::StagePlacement;
 
+    const auto xdna = resolve_stage_placement("XDNA", "", {});
+    CHECK(!xdna.enc_on_gpu && !xdna.lm_on_gpu && !xdna.detok_on_gpu);
+
     // -- backend name matching ------------------------------------------------
     // ggml-metal registers as "MTL"; older ggml reported "Metal". Both must
     // match or the allowlist is silently dead on one of them.
@@ -1380,6 +1420,8 @@ void test_vae_backend_request_env() {
     set_env("ACESTEP_VAE_GPU", nullptr);
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
     CHECK(vae_backend_request_from_env("auto") == "auto");
+    CHECK(vae_backend_request_from_env("xdna") == "cpu");
+    CHECK(vae_backend_request_from_env("XDNA0") == "cpu");
 
     set_env("ACESTEP_VAE_GPU", "0");
     CHECK(vae_backend_request_from_env("hexagon") == "cpu");
@@ -1387,6 +1429,7 @@ void test_vae_backend_request_env() {
 
     set_env("ACESTEP_VAE_GPU", "1");
     CHECK(vae_backend_request_from_env("hexagon") == "hexagon");
+    CHECK(vae_backend_request_from_env("xdna") == "xdna");
 
     set_env("ACESTEP_VAE_GPU", nullptr);
 }
@@ -3755,6 +3798,7 @@ int main() {
     test_coreml_plan_windows();
     test_vae_window_core();
     test_backend_device_types();
+    test_gpu_matmul_capability();
     test_gpu_fallback_reason();
     test_gpu_tier_policy();
     test_backend_request_matching();

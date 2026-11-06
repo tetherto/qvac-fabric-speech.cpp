@@ -267,6 +267,15 @@ void run_synthetic_lm_gates() {
         expect(backend_selection_matches("HTP0", "HTP", "HTP0",
                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
                "exact device name 'HTP0' did not match");
+        expect(backend_selection_matches("xdna", "XDNA", "XDNA0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'xdna' alias did not match XDNA/XDNA0");
+        expect(!backend_selection_matches("xdna", "XDNA", "XDNA1",
+                                          GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "'xdna' alias matched XDNA/XDNA1");
+        expect(backend_selection_matches("XDNA0", "XDNA", "XDNA0",
+                                         GGML_BACKEND_DEVICE_TYPE_ACCEL),
+               "exact device name 'XDNA0' did not match");
         expect(backend_selection_matches("cpu", "CPU", "CPU",
                                          GGML_BACKEND_DEVICE_TYPE_CPU),
                "'cpu' did not match by CPU type");
