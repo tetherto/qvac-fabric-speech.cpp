@@ -49,7 +49,8 @@ int run_nemotron_diarization(
     const float * mel,
     int mel_frames,
     std::vector<float> & probabilities,
-    NemotronAttention attention = NemotronAttention::Automatic);
+    NemotronAttention attention = NemotronAttention::Automatic,
+    bool * used_coreml = nullptr);
 
 int prewarm_nemotron_diarization(
     const ParakeetCtcModel & model,

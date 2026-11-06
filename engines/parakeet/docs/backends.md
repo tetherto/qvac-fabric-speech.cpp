@@ -743,6 +743,9 @@ zero-padded and masked out of attention and the speaker-head convolution, which
 leaves the valid rows unchanged. Calls above the largest capacity run on ggml.
 A capacity loads on first use. If it fails to load or predict, it is
 quarantined for the lifetime of the engine and that call falls back to ggml.
+`DiarizationResult::encoder_used_coreml` reports whether every network pass of
+a call ran on a sidecar; `Engine::encoder_on_coreml()` only reports that one
+was found.
 `PARAKEET_COREML_DISABLE=1` and `PARAKEET_COREML_COMPUTE_UNITS` apply as for
 the encoder sidecars. Like the Neural Engine encoder and TDT decoder exports,
 the diarizers load with CPU and Neural Engine compute units unless

@@ -369,7 +369,7 @@
       "ratio": "6.78× / 7.58×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -385,7 +385,7 @@
       "ratio": "7.06× / 7.54×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -401,7 +401,7 @@
       "ratio": "10.95× / 5.80×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -417,7 +417,7 @@
       "ratio": "6.74× / 6.13×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -433,7 +433,7 @@
       "ratio": "7.68× / 6.43×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -449,7 +449,7 @@
       "ratio": "2.75× / 2.64×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -465,7 +465,7 @@
       "ratio": "2.88× / 2.61×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -481,7 +481,7 @@
       "ratio": "4.10× / 4.08×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -497,7 +497,7 @@
       "ratio": "5.77× / 4.97×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -513,7 +513,7 @@
       "ratio": "5.78× / 5.76×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Hal"
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall, model load included; short is a 9-word prompt (~3.1 s of speech), long a 76-word prompt (~26 s). Core ML rows use the Metal build with the vocoder sidecar and compare against audio.cpp on Metal. Measured 2026-09-24 to 2026-09-30 at fabric-speech f265d81b on ggml speech@59a0ca2c (2026-09-15, before the ggml 0.20.2 merge). Strix Halo rows come from qvac-dev-strix-0 (32 CPU threads); Mac Studio rows from qvac-dev-mac-arm64 (16 threads); RTX 5090 rows from qvac-dev-linux-x64 (10 threads; the added quantization tiers ran on its second GPU with their competitors re-run on the same GPU). DGX Spark GB10 rows come from spark-d9ca and cover the GPU backends only (CUDA, Vulkan). RTX 3080 rows were not re-measured."
     },
     {
       "task": "TTS",
@@ -529,7 +529,7 @@
       "ratio": "2.17× / 1.81×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -545,7 +545,7 @@
       "ratio": "2.19× / 1.73×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -561,7 +561,7 @@
       "ratio": "1.67× / 1.50×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -577,7 +577,7 @@
       "ratio": "1.66× / 1.12×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -593,7 +593,7 @@
       "ratio": "1.76× / 1.80×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -609,7 +609,7 @@
       "ratio": "1.79× / 2.31×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -625,7 +625,7 @@
       "ratio": "1.52× / 1.07×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -641,7 +641,7 @@
       "ratio": "1.18× / 1.30×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -657,7 +657,7 @@
       "ratio": "2.53× / 1.47×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -673,7 +673,7 @@
       "ratio": "1.99× / 2.30×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -689,7 +689,7 @@
       "ratio": "2.18× / 2.04×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -705,7 +705,7 @@
       "ratio": "2.22× / 1.93×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -721,7 +721,7 @@
       "ratio": "1.74× / 1.69×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -737,7 +737,7 @@
       "ratio": "1.87× / 1.43×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -753,7 +753,7 @@
       "ratio": "2.13× / 2.26×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -769,7 +769,7 @@
       "ratio": "2.04× / 2.43×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -785,7 +785,7 @@
       "ratio": "1.83× / 1.19×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -801,7 +801,7 @@
       "ratio": "1.57× / 1.73×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -817,7 +817,7 @@
       "ratio": "2.60× / 1.70×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -833,7 +833,7 @@
       "ratio": "2.47× / 2.71×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -849,7 +849,7 @@
       "ratio": "2.22× / OOM",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -865,7 +865,7 @@
       "ratio": "2.17× / 2.04×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -881,7 +881,7 @@
       "ratio": "2.21× / 2.04×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -897,7 +897,7 @@
       "ratio": "1.89× / 1.81×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -913,7 +913,7 @@
       "ratio": "2.35× / 1.61×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -929,7 +929,7 @@
       "ratio": "2.36× / 2.54×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -945,7 +945,7 @@
       "ratio": "1.88× / 2.51×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -961,7 +961,7 @@
       "ratio": "2.04× / 1.26×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -977,7 +977,7 @@
       "ratio": "1.69× / 2.02×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -993,7 +993,7 @@
       "ratio": "2.91× / 1.96×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "TTS",
@@ -1009,7 +1009,7 @@
       "ratio": "3.04× / 3.32×",
       "measured": "2026-09-30",
       "source": "QVAC speech engines report (Gustavo Araujo, 2026-10-01 edition)",
-      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only: its medium and long runs fail with Vulkan "
+      "harness": "Ratios are competitor end-to-end process wall divided by QVAC wall (short ~3 s and long ~24 s of speech). The LM q4_0 tier pairs the q4_0 LM with the q8_0 codec decoder. Core ML rows use the codec sidecar and compare against audio.cpp on Metal. The Jetson Orin row (Orin Nano 8 GB Super, 25 W mode, Vulkan) compares against audio.cpp on the short text only; its medium and long runs failed on Vulkan."
     },
     {
       "task": "Music",

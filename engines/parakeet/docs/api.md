@@ -20,6 +20,7 @@ Include `<parakeet/parakeet.h>` for the complete surface or individual headers.
 | `EngineOptions::prewarm` / `prewarm_audio_seconds` | Run a configurable encoder-only synthetic forward during construction; Nemotron 3 Diarization runs one offline pass and one chunk at the default live geometry |
 | `Engine::encoder_on_coreml` / `encoder_backend` | Whether an Apple Core ML encoder or diarizer sidecar loaded (`encoder_backend()` returns the Core ML label, otherwise `backend_name()`); see [Core ML encoder sidecar](backends.md#core-ml-encoder-sidecar) and [diarizer sidecars](backends.md#core-ml-diarizer-sidecars) |
 | `EngineResult::encoder_used_coreml` | Whether every encoder invocation of this transcription ran on the Core ML sidecar |
+| `DiarizationResult::encoder_used_coreml` | Whether every network pass of this diarization ran its encoder on Core ML: a diarizer sidecar, or Sortformer v2.1's encoder sidecar. False for calls above the staged capacities, which run on ggml |
 | `EngineResult::segment_plan_ms` / `assemble_ms` | Non-zero only on the Core ML independent-segment path (TDT decoder sidecar): pause-cut planning, and per-segment concatenation plus stitching; with `preprocess_ms`, `encoder_ms` and `decode_ms` they account for `total_ms` |
 | `parakeet_log_set` | Install the host logging sink |
 | `parakeet_cli_main` | Embed the same CLI entry point exported by the library |

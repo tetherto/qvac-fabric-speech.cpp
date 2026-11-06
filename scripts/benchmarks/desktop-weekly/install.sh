@@ -87,6 +87,7 @@ stop_scheduler() {
 start_scheduler() {
   stop_scheduler
   BENCH_HOME="$BENCH_HOME" nohup /bin/bash "$BENCH_HOME/tools/scheduler.sh" "$WEEKDAY" "$HOUR" "$MINUTE" > "$BENCH_HOME/scheduler.log" 2>&1 < /dev/null &
+  echo $! > "$BENCH_HOME/scheduler.pid"
   echo "scheduler: no cron on this host; scheduler.sh (pid $!) runs weekly.sh on weekday $WEEKDAY at $HOUR:$MINUTE and does not survive a reboot"
 }
 

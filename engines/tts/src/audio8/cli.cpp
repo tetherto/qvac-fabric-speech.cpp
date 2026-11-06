@@ -63,9 +63,9 @@ void print_usage(const char * program) {
                  "          [--backend NAME] [--backends-dir DIR] [--verbose] [--stream]\n"
                  "\n"
                  "  --backend NAME   explicit backend: auto (default), cpu,\n"
-                 "                   hexagon (Snapdragon HTP0), or an exact\n"
-                 "                   ggml device name. Overrides --n-gpu-layers\n"
-                 "                   when non-auto.\n",
+                 "                   hexagon (Snapdragon HTP0), xdna (AMD XDNA0),\n"
+                 "                   or an exact ggml device name. Overrides\n"
+                 "                   --n-gpu-layers when non-auto.\n",
                  program);
 }
 
