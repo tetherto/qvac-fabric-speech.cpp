@@ -11,6 +11,12 @@ cmake --build build/audiogen -j
 ctest --test-dir build/audiogen
 ```
 
+ACE-Step model-free tests are split into `test-acestep-units` (math and
+sampling), `test-acestep-tokenizer`, `test-acestep-backends`,
+`test-acestep-loading`, `test-acestep-quantization`, `test-acestep-audio`, and
+`test-acestep-generation` (request policies and editing). Each suite has its
+own process and assertion counters. Run one domain with `ctest -R`.
+
 `test-acestep-units`, `test-acestep-converter`, `test-minimax-units`,
 `test-minimax-converter`, `test-minimax-quant-audit`, and
 `test-minimax-dump-compare` cover weight-free CPU logic and need no GGUFs.
@@ -28,6 +34,19 @@ directory containing the MiniMax GGUF pair to run `test-minimax-integration`,
 which covers model loading, generation output, progress, and cancellation, and
 `test-minimax-fit-models`, which repeats the preflight parity check on the real
 pair on the device `MM3_DEVICE` selects.
+`test-minimax-tokenizer` loads a synthetic GGUF vocabulary and checks exact
+IDs for BPE merges, byte fallback, Unicode, longest special-token matching,
+empty inputs, and missing metadata. `test-minimax-converter-roundtrip` converts
+a tiny safetensors conditioner and reads its GGUF back; serialization checks
+cover F16, Q8_0, protected F32, overflow, and weight-norm folding. These real
+conversion cases require `numpy` and `gguf`.
+
+MiniMax integration distinguishes callback cancellation from explicit
+`cancel()` and cross-thread cancellation. `MM3_DEVICE=gpu` requires successful
+GPU execution; a missing GPU fails the test. `auto` can fall back to CPU.
+The Q4 quality run requires `AUDIOGEN_TEST_MINIMAX_Q4_MODELS_DIR` to resolve to
+Q4_K_M or Q4_K_S; a mixed directory selecting Q8 or F16 fails.
+
 On a Metal build, `ctest --test-dir build/audiogen -R
 test-minimax-metal-ops` runs the model-free CPU/Metal condition and vocoder
 parity regression. It skips with return code 77 either when Metal is
@@ -83,3 +102,40 @@ Dumps are the tool for localising a backend divergence. Run the same prompt twic
 `stage_cos.py` and `dequant_gguf.py` need `numpy`; `dequant_gguf.py` and
 `audit_quant_types.py` also need `gguf`. `compare_ar_dumps.py` uses `numpy`
 when it is installed and falls back to an equivalent stdlib path when it is not.
+
+## Required CI coverage
+
+The self-hosted macOS lane builds with both Core ML flags enabled and runs
+the VAE/conditioner exporters and all three MiniMax ANE Python suites with
+the pinned dependencies in `engines/parakeet/scripts/requirements-coreml.txt`.
+The ANE model and exporter suites are also registered with CTest; missing
+Python dependencies produce an explicit skip (77). The ANE CLI suite is
+registered when `AUDIOGEN_MINIMAX_COREML=ON` and executables are enabled.
+Direct CI invocations fail if a required Python suite skips.
+
+`test/ci-models.json` pins upstream revisions and SHA-256 hashes for the real
+ACE-Step turbo/base stages, MiniMax checkpoint, and tokenizer. The staging
+script verifies downloads, converts the MiniMax F16 pair with this checkout's
+converter, and quantizes a separate Q4_K_M pair. Source downloads and outputs
+persist under `$HOME/.cache/qvac-audiogen-ci-models`; converter, quantizer
+header, or manifest changes invalidate the converted output cache. Allow at
+least 80 GiB of disk for the fixtures and export artifacts.
+
+CI runs ACE-Step integration (including the base lego lane), ACE-Step fit
+parity, MiniMax CPU/GPU integration, MiniMax fit parity, and MiniMax F16/Q4
+quality tests directly. A skipped binary exits 77 and fails the step. These
+model runs are separate from the weight-free Metal operation parity test.
+To stage the same fixtures locally, run from the repository root:
+
+```sh
+python3 engines/audiogen/scripts/prepare-ci-models.py \
+  --cache-dir "$HOME/.cache/qvac-audiogen-ci-models" \
+  --build-dir build/audiogen --output-env audiogen-models.env
+```
+
+The generated file contains the four fixture environment variables. Export
+them before invoking the model-backed binaries. Set `MM3_DEVICE=gpu` to
+require MiniMax GPU coverage and `AUDIOGEN_TEST_GPU=1` for ACE-Step GPU
+placement. `test-acestep-xdna-generation` additionally requires XDNA0 and
+enforces a PCM relative-L2 limit of 0.1 against CPU; it reports the measured
+error before enforcing that bound.
