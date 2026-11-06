@@ -648,7 +648,7 @@
     "coreml_compare_on_darwin": true,
     "coreml_model_basename": "parakeet-eou-120m-v1",
     "coreml_source_gguf": "parakeet-eou-120m-v1.f16.gguf",
-    "coreml_export_mel_frames": 1101,
+    "coreml_export_mel_frames": 16060,
     "scenario": "abcba",
     "coreml_require_transcript_match": false
   },
@@ -674,7 +674,7 @@
     "backends": ["metal"],
     "coreml_compare_on_darwin": true,
     "coreml_model_basename": "nemotron-3.5-asr-streaming-0.6b",
-    "coreml_export_mel_frames": 1101,
+    "coreml_export_mel_frames": 16060,
     "coreml_require_transcript_match": false,
     "scenario": "abcba"
   },

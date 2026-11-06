@@ -430,9 +430,11 @@ check_info_scripts() {
   bash "$HERE/machine-info.sh" > "$TMP/machine.json" || fail "machine-info.sh failed"
   [ "$(jq -r .hostname "$TMP/machine.json")" = "$(hostname -s)" ] || fail "machine.json hostname"
   jq -e '.tools.cmake != null and .gpu != null' "$TMP/machine.json" > /dev/null || fail "machine.json shape"
-  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/collect-pins.sh" clone-test > "$TMP/pins.json" || fail "collect-pins.sh failed"
+  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/collect-pins.sh" clone-test > "$TMP/pins.json" 2> "$TMP/pins.err" || fail "collect-pins.sh failed"
+  [ ! -s "$TMP/pins.err" ] || fail "collect-pins.sh wrote errors: $(cat "$TMP/pins.err")"
   [ "$(jq -r .engine.sha "$TMP/pins.json")" = "$(git -C "$ENGINE_SRC" rev-parse HEAD)" ] || fail "pins engine sha"
   [ "$(jq -r '.models[] | select(.name == "jfk-24k.wav") | .present' "$TMP/pins.json")" = "true" ] || fail "pins model entry"
+  jq -e '.models[] | select(.name == "jfk-vocoder.mlmodelc")' "$TMP/pins.json" > /dev/null || fail "pins list the sidecar entry"
   ok "machine-info.sh and collect-pins.sh emit the expected JSON"
 }
 
