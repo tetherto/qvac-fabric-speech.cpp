@@ -41,8 +41,10 @@ and the weekly artifact.
 | ASR | `nemotron-mlx-audio`, `nemotron-mlx-audio-abcba` | mlx-audio on the mlx-community Nemotron 3.5 ASR Streaming 0.6B conversion (BF16), Mac Studio Metal only, offline decoding timed in process like the QVAC `nemotron` rows |
 | TTS | `chatterbox-turbo-mlx-audio` | mlx-audio Chatterbox Turbo (F16 conversion, built-in voice, seed 42), Mac Studio Metal only, a fresh process including load like the QVAC `chatterbox-turbo` rows |
 | TTS, TTS cloning | `audio8-mlx-audio`, `audio8-clone-mlx-audio` | mlx-audio Audio8 TTS Preview 0.6B (BF16 conversion) with the sampling of the Audio8 families, synthesis and JFK cloning, Mac Studio Metal only, fresh processes like the `audio8-lm-*` and `audio8-clone-enc-*` rows |
-| Music | `minimax-music3-mlx-audio` | mlx-audio on the 8-bit MiniMax Music3 conversion (the bf16 one needs 27 GB more disk), the 30 s instrumental request of the ACE-Step rows, Mac Studio Metal only; it stands alone until a QVAC MiniMax family runs weekly |
+| Music | `minimax-music3-mlx-audio` | mlx-audio on the 8-bit MiniMax Music3 conversion (the bf16 one needs 27 GB more disk), the 30 s instrumental request of the ACE-Step rows, Mac Studio Metal only, beside the QVAC `minimax-music3-q8_0` row |
 | TTS | `moss-tts-mlx-audio` | mlx-audio on the original MOSS-TTS v1.5 checkpoint (BF16, seed 1234), Mac Studio Metal only, a fresh process like the `moss-tts-f16` rows |
+| ASR | `{parakeet-tdt,parakeet-unified,parakeet-eou,nemotron}-coreml` | the same QVAC models on the JFK clip with the engine's Core ML encoder sidecar on the Apple Neural Engine (exported once from the GGUF, 6-bit palettized), Mac Studio only; the driver also runs the forced-ggml baseline in the same process and the row keeps its time (the comparison needs a scoreable WER, so the ABCBA clip has no Core ML twin) |
+| Music | `minimax-music3-q8_0` | MiniMax Music3 through `mm3-replay`, the 30 s instrumental request at seed 42, Mac Studio only; its GGUF pair is prepared by `scripts/benchmarks/prepare-minimax.py` elsewhere and placed in `models/store/` by hand |
 | ASR | `parakeet-fluidaudio`, `parakeet-fluidaudio-abcba`, `parakeet-unified-fluidaudio`, `parakeet-unified-fluidaudio-abcba` | FluidAudio (Swift, Core ML, encoder on the Apple Neural Engine, int8 encoder) on its Parakeet TDT 0.6B v3 and Parakeet Unified English 0.6B conversions, Mac Studio only, timed in process like the QVAC native rows through `fluidaudio-bench/` |
 | ASR | `mlx-whisper`, `mlx-whisper-abcba` | mlx-whisper on the mlx-community Whisper small conversion (F16), Mac Studio Metal only, timed in process; the QVAC `whisper-small` rows are fresh-process timings, so these stay in their own charts |
 | TTS | `supertonic3` | Supertonic 3 Q8_0, every component and voice in one GGUF |
@@ -173,6 +175,14 @@ The MLX families need, on the Mac Studio only, a Python virtual environment at `
 Homebrew, so use a uv-managed interpreter: `python3.11 -m venv ~/speech-bench/mlx/venv && ~/speech-bench/mlx/venv/bin/pip
 install mlx parakeet-mlx mlx-whisper mlx-audio huggingface_hub soundfile numpy`). Without it those cells report `build-failed`
 (binary missing) and the rest of the run is unaffected.
+
+On macOS the engine is configured with `-DPARAKEET_COREML=ON` (part of the build signature, so the first run after the change
+rebuilds), which the `-coreml` families need. They also need, on the Mac Studio only, a Python with `engines/parakeet/scripts/requirements-coreml.txt`
+(coremltools, torch) named by `COREML_PYTHON` in `config.env`; the first run of each family exports and compiles the encoder
+sidecar into the family folder (minutes per model), later runs reuse it. The MiniMax family needs `mm3-lm-q8_0.gguf` and
+`mm3-synth-q8_0.gguf` in `models/store/`: run `scripts/benchmarks/prepare-minimax.py --models-root <dir> --quant q8_0` on a
+machine with 64 GiB of RAM and 80 GB of free disk (an x86_64 Linux box or a Mac; its pinned requirements carry no aarch64
+hashes) and copy the pair over.
 
 The FluidAudio families need, on the Mac Studio only, the Swift bench package built once: copy `fluidaudio-bench/` to
 `~/speech-bench/fluidaudio/bench` and run `swift build -c release` there (Xcode's toolchain; SwiftPM fetches FluidAudio at the

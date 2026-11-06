@@ -44,7 +44,10 @@ VARIANT_LABELS = {"parakeet-tdt": "Q8_0", "parakeet-unified": "Q8_0", "transcrib
                   "nemotron-mlx-audio": "BF16", "nemotron-mlx-audio-abcba": "BF16", "chatterbox-turbo-mlx-audio": "F16",
                   "audio8-mlx-audio": "BF16", "audio8-clone-mlx-audio": "BF16", "moss-tts-mlx-audio": "BF16",
                   "minimax-music3-mlx-audio": "8-bit", "parakeet-fluidaudio": "Core ML int8, ANE", "parakeet-fluidaudio-abcba": "Core ML int8, ANE",
-                  "parakeet-unified-fluidaudio": "Core ML int8, ANE", "parakeet-unified-fluidaudio-abcba": "Core ML int8, ANE"}
+                  "parakeet-unified-fluidaudio": "Core ML int8, ANE", "parakeet-unified-fluidaudio-abcba": "Core ML int8, ANE",
+                  "parakeet-tdt-coreml": "Q8_0, Core ML encoder on the ANE", "parakeet-unified-coreml": "Q8_0, Core ML encoder on the ANE",
+                  "parakeet-eou-coreml": "F16, Core ML encoder on the ANE", "nemotron-coreml": "F16, Core ML encoder on the ANE",
+                  "minimax-music3-q8_0": "LM Q8_0 · synth Q8_0"}
 CAMPAIGN_HOSTS = {"RTX 5090 box": "qvac-dev-linux-x64", "Strix Halo": "qvac-dev-strix-1", "DGX Spark GB10": "spark-d9ca",
                   "Mac Studio M3 Ultra": "qvac-dev-mac-arm64", "Jetson Orin 8 GB": "qvac-dev-linux-arm64"}
 HOST_CONDITIONS = {"qvac-dev-linux-x64": "Shared box: the bench uses GPU 0 while other people's jobs may run on GPU 1."}
@@ -206,6 +209,24 @@ def wer_fields(row):
     return round(value * PERCENT, 2), kind, scope, ""
 
 
+COREML_PREFIX = "coreml"
+
+
+def observed_backend(row):
+    encoder = row.get("encoder_backend") or ""
+    observed = row.get("observed_backend") or ""
+    if encoder.startswith(COREML_PREFIX):
+        return f"{observed}, encoder {encoder}"
+    return observed
+
+
+def baseline_note(row):
+    baseline = row.get("baseline_inference_ms_median")
+    if baseline is None:
+        return ""
+    return f"The same process forced to the ggml encoder: {baseline:.1f} ms median."
+
+
 def stale_note(summary, newest_name):
     if run_name(summary) == newest_name:
         return ""
@@ -225,11 +246,11 @@ def weekly_row(summary, row, families, newest_name):
     engine = engine_of(row["family"], families)
     accepted = row.get("status") == "ok"
     speed = row.get("speed_x") or None
-    caveats = " ".join(x for x in [row.get("notes", ""), stale_note(summary, newest_name)] if x)
+    caveats = " ".join(x for x in [row.get("notes", ""), baseline_note(row), stale_note(summary, newest_name)] if x)
     return {"id": f"w-{row['backend']}-{row['family']}", "host": host, "machine": machine_label(host), "task": task,
             "dashboard": TASK_KEYS.get(task, "asr"), "family": row["family"], "model": model,
             "model_detail": row.get("weights", ""), "required_family": True, "engine": engine, "is_qvac": engine == QVAC,
-            "variant": variant_label(row), "backend": row["backend"], "observed_backend": row.get("observed_backend") or "",
+            "variant": variant_label(row), "backend": row["backend"], "observed_backend": observed_backend(row),
             "precision": row.get("weights", ""), "precision_source": "families.json", "scenario": scenario, "scenario_label": scenario_label,
             "timing_class": timing_class, "timing_label": timing_label, "timing_includes": timing_includes, "comparison_set": "weekly",
             "status": "measured" if accepted else "failed", "status_detail": row.get("status", ""), "accepted": accepted,

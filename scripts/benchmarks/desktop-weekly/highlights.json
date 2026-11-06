@@ -125,6 +125,13 @@
           "timing_class": "fresh_process",
           "set": "weekly",
           "variant": "LM Q8_0 · decoder Q8_0"
+        },
+        {
+          "task": "Music",
+          "model": "MiniMax Music3",
+          "scenario": "music_30s",
+          "timing_class": "fresh_process",
+          "set": "weekly"
         }
       ]
     }

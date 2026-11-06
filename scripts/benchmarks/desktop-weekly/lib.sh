@@ -52,6 +52,7 @@ load_config() {
   MEMORY_SAMPLER="${MEMORY_SAMPLER:-auto}"
   EVICT_PAGE_CACHE="${EVICT_PAGE_CACHE:-0}"
   CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+  COREML_PYTHON="${COREML_PYTHON:-}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -274,7 +275,7 @@ ggml_backend_options() {
 }
 
 build_signature() {
-  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") prefix=$CMAKE_PREFIX_PATH targets=$(cmake_targets)"
+  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") engine_options=$(engine_platform_options "$OS_NAME") prefix=$CMAKE_PREFIX_PATH targets=$(cmake_targets)"
 }
 
 build_marker() { echo "${BUILDS_DIR:?}/${1:?}/BUILT"; }
@@ -305,10 +306,17 @@ build_ggml() {
     cmake --install "$dir/ggml" > "$log_dir/ggml-install.log" 2>&1
 }
 
+engine_platform_options() {
+  case "$1" in
+    Darwin) echo "-DPARAKEET_COREML=ON" ;;
+    *) echo "" ;;
+  esac
+}
+
 configure_engine() {
   local dir="$BUILDS_DIR/$1" log_dir="$2"
   cmake -S "$ENGINE_SRC" -B "$dir/speech" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
-    -DCMAKE_PREFIX_PATH="$(cmake_prefix_path "$dir/ggml-install")" > "$log_dir/speech-configure.log" 2>&1
+    -DCMAKE_PREFIX_PATH="$(cmake_prefix_path "$dir/ggml-install")" $(engine_platform_options "$OS_NAME") > "$log_dir/speech-configure.log" 2>&1
 }
 
 build_engine() {
@@ -332,6 +340,11 @@ export_backend_environment() {
   export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH="$lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
   export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
+  export_coreml_python
+}
+
+export_coreml_python() {
+  if [ -n "$COREML_PYTHON" ]; then export PARAKEET_COREML_PYTHON="$COREML_PYTHON"; fi
 }
 
 kill_process_group() {

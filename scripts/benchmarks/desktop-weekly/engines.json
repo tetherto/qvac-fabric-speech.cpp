@@ -134,7 +134,7 @@
       "engine": "mlx-audio",
       "role": "new competitor, measured",
       "ggml": "Not ggml-based (MLX)",
-      "details": "Blaizzy/mlx-audio 0.6.4 on the mlx-community conversions (and the original MOSS-TTS v1.5 checkpoint), Metal GPU through MLX, driven by the weekly run on the Mac Studio: Nemotron 3.5 ASR Streaming 0.6B (bf16) decoded offline with the model loaded once, the same scope as the QVAC native rows; Chatterbox Turbo (f16, built-in voice), Audio8 TTS Preview 0.6B (bf16, synthesis and JFK cloning) and MOSS-TTS v1.5 (bf16) as fresh processes including model load like the matching QVAC rows; MiniMax Music3 (8-bit conversion) rendering the 30 s instrumental request of the ACE-Step rows, without a QVAC MiniMax row to compare with yet.",
+      "details": "Blaizzy/mlx-audio 0.6.4 on the mlx-community conversions (and the original MOSS-TTS v1.5 checkpoint), Metal GPU through MLX, driven by the weekly run on the Mac Studio: Nemotron 3.5 ASR Streaming 0.6B (bf16) decoded offline with the model loaded once, the same scope as the QVAC native rows; Chatterbox Turbo (f16, built-in voice), Audio8 TTS Preview 0.6B (bf16, synthesis and JFK cloning) and MOSS-TTS v1.5 (bf16) as fresh processes including model load like the matching QVAC rows; MiniMax Music3 (8-bit conversion) rendering the 30 s instrumental request of the ACE-Step rows beside the QVAC minimax-music3-q8_0 row.",
       "source": "scripts/benchmarks/desktop-weekly (the mlx-audio families of families.json through mlx-bench.py)",
       "not_measured": [
         {

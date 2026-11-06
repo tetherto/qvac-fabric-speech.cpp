@@ -42,7 +42,7 @@ check_spec_fields() {
 check_args_are_provisioned() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | .key as $family
-    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .derived.name) | split("/") | last))]) as $files
+    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .prepared // .derived.name) | split("/") | last))]) as $files
     | [.value.args[] | select(startswith("${MODEL_DIR}/")) | sub("^\\$\\{MODEL_DIR\\}/"; "")] | map(select(. as $f | $files | index($f) | not))
     | select(length > 0) | "\($family): \(join(","))"' "$HERE/families.json")"
   [ -z "$bad" ] || fail "args reference files no provision entry supplies: $bad"
@@ -244,6 +244,17 @@ check_skip_families() {
     [ "$(selected_families 2>/dev/null)" = "parakeet-mlx,parakeet-tdt" ] || { echo "a Darwin-only family was skipped on Darwin: $(selected_families 2>/dev/null)" >&2; exit 1; }
   ) || fail "SKIP_FAMILIES"
   ok "SKIP_FAMILIES and the family platform remove families from quick, default and explicit selections"
+}
+
+check_engine_platform_options() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    [ "$(engine_platform_options Darwin)" = "-DPARAKEET_COREML=ON" ] || { echo "Darwin builds must enable the Parakeet Core ML sidecars" >&2; exit 1; }
+    [ -z "$(engine_platform_options Linux)" ] || { echo "Linux builds must not carry Darwin options" >&2; exit 1; }
+    build_signature cuda | grep -q "engine_options=" || { echo "engine options missing from the build signature" >&2; exit 1; }
+  ) || fail "engine platform options"
+  ok "Darwin engine builds enable the Core ML sidecars and the option is part of the build signature"
 }
 
 check_family_backends() {
@@ -481,6 +492,7 @@ main() {
   check_machine_quirks
   check_skip_families
   check_family_backends
+  check_engine_platform_options
   check_lib_deadline
   check_failed_result
   check_previous_and_prune

@@ -113,6 +113,15 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertNotEqual(jfk["group"], long["group"])
         self.assertEqual(build.skipped_cell(self.newer, "parakeet-tdt-abcba", FAMILIES["parakeet-tdt-abcba"], "cpu", 1)["scenario"], long["scenario_label"])
 
+    def test_a_core_ml_cell_names_its_encoder_and_keeps_the_forced_ggml_time(self):
+        cell = result("metal", "parakeet-tdt", 12.0)
+        cell.update({"encoder_backend": "coreml-all", "baseline_inference_ms_median": 37.034})
+        row = build.weekly_row(self.newer, cell, FAMILIES, "2026-11-08")
+        self.assertEqual(row["observed_backend"], "METAL, encoder coreml-all")
+        self.assertIn("The same process forced to the ggml encoder: 37.0 ms median.", row["caveats"])
+        plain = build.weekly_row(self.newer, result("metal", "parakeet-tdt", 12.0), FAMILIES, "2026-11-08")
+        self.assertEqual((plain["observed_backend"], "ggml" in plain["caveats"]), ("METAL", False))
+
     def test_a_family_of_another_engine_shares_the_chart_of_the_qvac_family(self):
         qvac = build.weekly_row(self.newer, result("metal", "parakeet-tdt-abcba", 6.0), FAMILIES, "2026-11-08")
         mlx = build.weekly_row(self.newer, result("metal", "parakeet-mlx-abcba", 4.0), FAMILIES, "2026-11-08")

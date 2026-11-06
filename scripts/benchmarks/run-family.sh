@@ -624,6 +624,7 @@ expand_placeholder() {
   s="${s//\$\{MODEL_DIR\}/$MODEL_DIR}"
   s="${s//\$\{MODELS_ROOT\}/$MODELS_ROOT}"
   s="${s//\$\{BENCH_HOME\}/${BENCH_HOME:-}}"
+  s="${s//\$\{SCRATCH_DIR\}/$tmp_dir}"
   s="${s//\$\{AUDIO_DIR\}/$AUDIO_DIR}"
   s="${s//\$\{AUDIO_INPUT\}/$AUDIO_INPUT}"
   s="${s//\$\{AUDIO_OUT\}/$AUDIO_OUT}"

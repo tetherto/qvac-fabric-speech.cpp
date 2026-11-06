@@ -159,6 +159,7 @@ entry_name() {
   echo "$1" | jq -r 'if .registry then (.registry | split("/") | last)
     elif .huggingface then .huggingface.name
     elif .fixture then (.fixture | split("/") | last)
+    elif .prepared then .prepared
     else .derived.name end'
 }
 

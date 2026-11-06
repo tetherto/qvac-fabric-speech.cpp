@@ -107,7 +107,7 @@ def unrun_row(backend, family, spec, status):
     row.update({"status": status, "observed_backend": None, "runner": None, "wall_ms_median": None, "wall_ms_min": None,
                 "wall_ms_max": None, "rtf_median": None, "audio_seconds": None, "speed_x": None, "peak_rss_mib": None,
                 "gpu_memory_peak_mib": None, "gpu_memory_rise_mib": None, "gpu_util_max": None, "quality": None, "runs": 0,
-                "notes": ""})
+                "notes": "", "encoder_backend": None, "baseline_inference_ms_median": None})
     return row
 
 
@@ -119,7 +119,8 @@ def measured_row(backend, family, spec, result, gpu):
                 "wall_ms_min": result.get("wall_ms_min"), "wall_ms_max": result.get("wall_ms_max"),
                 "rtf_median": result.get("rtf_median"), "audio_seconds": seconds,
                 "speed_x": speed_x(seconds, result.get("wall_ms_median")), "peak_rss_mib": result.get("peak_rss_mib"),
-                "quality": quality(result), "runs": result.get("runs", 0), "notes": result.get("notes", "")})
+                "quality": quality(result), "runs": result.get("runs", 0), "notes": result.get("notes", ""),
+                "encoder_backend": result.get("encoder_backend"), "baseline_inference_ms_median": result.get("baseline_inference_ms_median")})
     row.update(gpu)
     return row
 

@@ -569,12 +569,23 @@ jq -n --arg sha "$hello_sha" \
     bench_kind: "native", binary: "${BENCH_HOME}/extbin/nat-ok", engine: "stub-engine",
     args: ["${JSON_OUT}"], audio_duration_seconds: null,
     notes: "an engine outside the build dir: the binary is resolved from BENCH_HOME, not from --build-dir"
+  },
+  "scratch-ok": {
+    bench_kind: "native", binary: "bin/nat-scratch", cmake_target: "x",
+    args: ["${JSON_OUT}", "${SCRATCH_DIR}"], audio_duration_seconds: null,
+    notes: "${SCRATCH_DIR} expands to the temporary directory of the driver for benches that write files"
   }
 }' > "$SPEC"
 
 cat > "$BUILD/bin/nat-ok" <<'STUB'
 #!/usr/bin/env bash
 printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"StubGPU"}' > "$1"
+STUB
+
+cat > "$BUILD/bin/nat-scratch" <<'STUB'
+#!/usr/bin/env bash
+[[ -d "$2" ]] || { echo "scratch dir missing: $2" >&2; exit 1; }
+printf '{"stages":{"tot":{"median_ms":100,"min_ms":90,"max_ms":110}},"rtf":{"median":0.5},"backend":"%s"}' "$2" > "$1"
 STUB
 
 cat > "$BUILD/bin/nat-nojson" <<'STUB'
@@ -824,6 +835,10 @@ jq -e '.status == "ok" and .backend == "StubGPU" and .wall_ms_median == 100' "$O
 run_driver ext-ok "$OUT/ext-nohome.json" "$OUT/ext-nohome.err" BENCH_FAMILIES_JSON="$SPEC"
 jq -e '.status == "build-failed"' "$OUT/ext-nohome.json" > /dev/null || fail "ext-ok without BENCH_HOME: $(cat "$OUT/ext-nohome.json")"
 ok "a \${BENCH_HOME} binary runs outside the build dir and is missing without BENCH_HOME"
+
+run_driver scratch-ok "$OUT/scratch-ok.json" "$OUT/scratch-ok.err" BENCH_FAMILIES_JSON="$SPEC"
+jq -e '.status == "ok" and (.backend | startswith("/"))' "$OUT/scratch-ok.json" > /dev/null || fail "scratch-ok: $(cat "$OUT/scratch-ok.json")"
+ok "\${SCRATCH_DIR} expands to an existing temporary directory"
 
 # native, exit 0 without JSON (the sortformer failure shape): run-failed and
 # the child's output is dumped to the step log instead of vanishing.
