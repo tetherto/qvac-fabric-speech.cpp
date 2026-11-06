@@ -127,11 +127,38 @@ ggml_tensor * row_slice(ggml_context * ctx, ggml_tensor * heads, int first, int 
                         static_cast<size_t>(first) * heads->nb[1]);
 }
 
-// One matmul yields q, k and v as consecutive heads, and q and k rotate in one
-// pass; every value is computed exactly as the separate path computes it.
+bool preserve_cuda_f32_rows(const ggml_tensor * weight) {
+    return weight->type == GGML_TYPE_F32 && weight->buffer &&
+           ::tts_cpp::detail::reg_name_is_cuda(
+               ::tts_cpp::detail::buft_reg_name(ggml_backend_buffer_get_type(weight->buffer)));
+}
+
+ggml_tensor * projection_rows(ggml_context * ctx, ggml_tensor * weight,
+                              int64_t first, int64_t count) {
+    return ggml_view_2d(ctx, weight, weight->ne[0], count, weight->nb[1],
+                        first * weight->nb[1]);
+}
+
+ggml_tensor * projection_bias(ggml_context * ctx, ggml_tensor * bias,
+                              int64_t first, int64_t count) {
+    return bias ? ggml_view_1d(ctx, bias, count, first * bias->nb[0]) : nullptr;
+}
+
 projected_heads project_stacked(ggml_context * ctx, const attention_weights & weights,
                                 ggml_tensor * x, const rope_planes & rope,
                                 const attention_shape & shape) {
+    if (x->ne[1] > 1 && preserve_cuda_f32_rows(weights.wqkv)) {
+        attention_weights split = weights;
+        const int64_t q = shape.head_dim * shape.n_head;
+        const int64_t kv = shape.head_dim * shape.n_kv;
+        split.wq = projection_rows(ctx, weights.wqkv, 0, q);
+        split.wk = projection_rows(ctx, weights.wqkv, q, kv);
+        split.wv = projection_rows(ctx, weights.wqkv, q + kv, kv);
+        split.wq_b = projection_bias(ctx, weights.wqkv_b, 0, q);
+        split.wk_b = projection_bias(ctx, weights.wqkv_b, q, kv);
+        split.wv_b = projection_bias(ctx, weights.wqkv_b, q + kv, kv);
+        return project_separately(ctx, split, x, rope, shape);
+    }
     const int rotated_heads = shape.n_head + shape.n_kv;
     ggml_tensor * heads = project_heads(ctx, weights.wqkv, weights.wqkv_b, x, shape.head_dim,
                                         rotated_heads + shape.n_kv);
@@ -314,6 +341,11 @@ ggml_tensor * swiglu(ggml_context * ctx, ggml_tensor * w1, ggml_tensor * w2,
 
 ggml_tensor * swiglu_stacked(ggml_context * ctx, ggml_tensor * w13, ggml_tensor * w2,
                              ggml_tensor * x) {
+    if (x->ne[1] > 1 && preserve_cuda_f32_rows(w13)) {
+        const int64_t rows = w13->ne[1] / 2;
+        return swiglu(ctx, projection_rows(ctx, w13, 0, rows), w2,
+                      projection_rows(ctx, w13, rows, rows), x);
+    }
     return precise_mul_mat(ctx, w2, ggml_swiglu(ctx, precise_mul_mat(ctx, w13, x)));
 }
 

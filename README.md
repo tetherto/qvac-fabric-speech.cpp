@@ -298,3 +298,7 @@ uses this gate.
 
 Audio8 exposes incremental PCM through `Engine::synthesize_stream()`, with codec-window
 delivery on ggml and Core ML. See the [streaming API and measurement guide](engines/tts/docs/audio8.md#incremental-pcm-streaming).
+
+Audio8 preserves separate CUDA F32 projection shapes during multi-token prefill
+for fused/separate numerical consistency. Decode and other weight types retain
+projection fusion; shared CUDA matmul routing is unchanged.
