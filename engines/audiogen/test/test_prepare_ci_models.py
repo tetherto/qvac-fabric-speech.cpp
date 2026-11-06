@@ -49,5 +49,49 @@ class DownloadTests(unittest.TestCase):
             self.assertNotEqual(staging.conversion_key(), original)
 
 
+class ModelCacheTests(unittest.TestCase):
+    def test_base_stages_follow_repaired_source_for_links_and_copies(self):
+        for copy_fallback in (False, True):
+            with self.subTest(copy_fallback=copy_fallback), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                turbo, base = root / "turbo", root / "base"
+                turbo.mkdir()
+                base.mkdir()
+                for name in staging.COMMON_ACE_FILES:
+                    (turbo / name).write_bytes(b"old weights")
+                original_link = staging.os.link
+                with mock.patch.object(staging.os, "link",
+                                       side_effect=OSError("copy fallback") if copy_fallback else original_link):
+                    staging.link_base_models(turbo, base)
+                    for name in staging.COMMON_ACE_FILES:
+                        replacement = turbo / (name + ".replacement")
+                        replacement.write_bytes(b"verified replacement")
+                        replacement.replace(turbo / name)
+                    staging.link_base_models(turbo, base)
+                for name in staging.COMMON_ACE_FILES:
+                    self.assertEqual((base / name).read_bytes(), b"verified replacement")
+
+    def test_pruning_retains_current_and_unrelated_cache_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            current = root / (staging.CONVERTED_PREFIX + "a" * staging.SHA256_HEX_LENGTH)
+            obsolete = root / (staging.CONVERTED_PREFIX + "b" * staging.SHA256_HEX_LENGTH)
+            unrelated = root / "minimax-source"
+            invalid = root / "converted-not-a-hash"
+            for path in (current, obsolete, unrelated, invalid):
+                path.mkdir()
+                (path / "model").write_bytes(b"fixture")
+            staging.prune_converted_models(root, current)
+            self.assertFalse(obsolete.exists())
+            for path in (current, unrelated, invalid):
+                self.assertEqual((path / "model").read_bytes(), b"fixture")
+
+    def test_pruning_rejects_a_current_directory_outside_the_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with self.assertRaisesRegex(ValueError, "direct child"):
+                staging.prune_converted_models(root, root.parent / "outside")
+
+
 if __name__ == "__main__":
     unittest.main()

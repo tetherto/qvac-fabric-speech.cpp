@@ -119,7 +119,9 @@ script verifies downloads, converts the MiniMax F16 pair with this checkout's
 converter, and quantizes a separate Q4_K_M pair. Source downloads and outputs
 persist under `$HOME/.cache/qvac-audiogen-ci-models`; converter, quantizer
 header, or manifest changes invalidate the converted output cache. Allow at
-least 80 GiB of disk for the fixtures and export artifacts.
+least 80 GiB of disk for the fixtures and export artifacts. Staging removes
+obsolete converted generations before conversion and refreshes shared base
+stages when verified source weights change.
 
 CI runs ACE-Step integration (including the base lego lane), ACE-Step fit
 parity, MiniMax CPU/GPU integration, MiniMax fit parity, and MiniMax F16/Q4

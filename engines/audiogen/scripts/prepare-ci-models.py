@@ -16,6 +16,9 @@ CHUNK_BYTES = 8 * 1024 * 1024
 NETWORK_TIMEOUT_SECONDS = 120
 COMMON_ACE_FILES = ("Qwen3-Embedding-0.6B-Q8_0.gguf", "acestep-5Hz-lm-0.6B-Q8_0.gguf", "vae-BF16.gguf")
 MINIMAX_ROLES = ("lm", "synth")
+CONVERTED_PREFIX = "converted-"
+SHA256_HEX_LENGTH = 64
+SHA256_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 def sha256(path):
@@ -50,13 +53,16 @@ def download_group(group, directory):
 
 def link_base_models(turbo, base):
     for name in COMMON_ACE_FILES:
+        source = turbo / name
         destination = base / name
         if destination.exists():
-            continue
+            if os.path.samefile(source, destination) or sha256(source) == sha256(destination):
+                continue
+            destination.unlink()
         try:
-            os.link(turbo / name, destination)
+            os.link(source, destination)
         except OSError:
-            shutil.copyfile(turbo / name, destination)
+            shutil.copyfile(source, destination)
 
 
 def conversion_key():
@@ -66,8 +72,25 @@ def conversion_key():
     return hashlib.sha256("".join(sha256(path) for path in inputs).encode()).hexdigest()
 
 
+def prune_converted_models(cache, current):
+    root = cache.resolve()
+    if current.resolve().parent != root:
+        raise ValueError("Converted models must be a direct child of the cache directory")
+    for directory in root.glob(CONVERTED_PREFIX + "*"):
+        key = directory.name[len(CONVERTED_PREFIX):]
+        if directory == current or directory.is_symlink() or not directory.is_dir():
+            continue
+        if len(key) != SHA256_HEX_LENGTH or not set(key).issubset(SHA256_HEX_DIGITS):
+            continue
+        target = directory.resolve()
+        if target.parent != root:
+            raise ValueError("Converted models resolved outside the cache directory")
+        shutil.rmtree(target)
+
+
 def convert_minimax(cache, build):
-    output = cache / ("converted-" + conversion_key())
+    output = cache / (CONVERTED_PREFIX + conversion_key())
+    prune_converted_models(cache, output)
     native, quantized = output / "f16", output / "q4"
     converter = ENGINE / "scripts" / "convert-minimax-music3-to-gguf.py"
     tokenizer = cache / "minimax-tokenizer" / "qwen_7B" / "qwen3-8B-tokenizer-music" / "tokenizer.json"
