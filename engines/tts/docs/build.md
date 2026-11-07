@@ -5,19 +5,21 @@ Part of the [tts engine documentation](../README.md).
 ## Build paths
 
 Prerequisites are CMake 3.20 or newer, a C++17 compiler, and either an installed
-`ggml` CMake package from the `ggml-speech` port or a `qvac-ext-ggml@speech`
-checkout staged by `scripts/setup-ggml.sh` for the bundled path.
+`ggml` CMake package from the `qvac-fabric` port (or a local install of the
+qvac-fabric-llm.cpp `ggml/` tree) or that tree staged by
+`scripts/setup-ggml.sh` for the bundled path.
 
 | Path | Configure entry | ggml source | Main artifacts |
 |---|---|---|---|
 | Umbrella speech build | repository root, `-DSPEECH_BUILD_TTS=ON` | system `ggml` | `build/engines/tts/tts-cli` and sibling tools; library under `build/engines/tts/` |
 | Direct in-tree package | `engines/tts` | system `ggml` by default (`TTS_CPP_USE_SYSTEM_GGML=ON`) | `engines/tts/build/tts-cli` and `engines/tts/build/libtts-cpp.*` |
-| Bundled ggml | `engines/tts` with `TTS_CPP_USE_SYSTEM_GGML=OFF` | `engines/tts/ggml` checkout of `qvac-ext-ggml@speech`, staged by `scripts/setup-ggml.sh` | `engines/tts/build-bundled/tts-cli` and `engines/tts/build-bundled/libtts-cpp.*` |
-| vcpkg consumer | `speech-cpp[tts]` feature | `ggml-speech` dependency | `<vcpkg>/installed/<triplet>/lib/` (or `debug/lib/`), headers under `include/tts-cpp/`, config under `share/tts-cpp/` |
+| Bundled ggml | `engines/tts` with `TTS_CPP_USE_SYSTEM_GGML=OFF` | `engines/tts/ggml`, the `ggml/` tree of the pinned qvac-fabric-llm.cpp clone, staged by `scripts/setup-ggml.sh` | `engines/tts/build-bundled/tts-cli` and `engines/tts/build-bundled/libtts-cpp.*` |
+| vcpkg consumer | `speech-cpp[tts]` feature | `qvac-fabric` dependency | `<vcpkg>/installed/<triplet>/lib/` (or `debug/lib/`), headers under `include/tts-cpp/`, config under `share/tts-cpp/` |
 
-The bundled path applies no patch overlay — the speech branch is patched at
-the commit level. `scripts/setup-ggml.sh` clones the pinned speech ref into
-`engines/tts/ggml/` and is idempotent on re-run; bump `GGML_REF` in the script
+The bundled path applies no patch overlay — the fabric ggml is patched at
+the commit level. `scripts/setup-ggml.sh` fetches the pinned commit into
+`engines/tts/ggml-src/`, links `engines/tts/ggml/` to its `ggml/` tree and is
+idempotent on re-run; bump `GGML_REF` in the script
 to move the pin. The separate
 `chatterbox.cpp` repository has its own pinned bundled-ggml setup flow and
 produces artifacts under its own `build/`.
@@ -28,7 +30,7 @@ From the repository root:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/path/to/ggml-speech/install \
+  -DCMAKE_PREFIX_PATH=/path/to/ggml-install \
   -DSPEECH_BUILD_TTS=ON
 cmake --build build --target tts-cli
 ```
@@ -36,7 +38,7 @@ cmake --build build --target tts-cli
 `SPEECH_BUILD_EXECUTABLES` controls all engine CLIs and defaults to `ON`;
 `SPEECH_BUILD_TESTS` controls TTS test harnesses and defaults to `OFF`.
 
-When building the `ggml-speech` install yourself, configure the ggml build
+When building the fabric ggml install yourself, configure the ggml build
 with `-DGGML_LLAMAFILE=ON`: standalone ggml defaults it OFF, and without
 tinyBLAS every CPU matmul takes the generic vec_dot path (measured 1.8x
 slower on the CosyVoice3 DiT). The bundled-ggml path
@@ -48,7 +50,7 @@ From the repository root:
 
 ```bash
 cmake -S engines/tts -B engines/tts/build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/path/to/ggml-speech/install
+  -DCMAKE_PREFIX_PATH=/path/to/ggml-install
 cmake --build engines/tts/build --target tts-cli
 ```
 
@@ -57,7 +59,7 @@ executables are shown as `build/<name>`.
 
 ### Bundled-ggml build
 
-Stage `qvac-ext-ggml@speech` as `engines/tts/ggml`, then configure:
+Stage the fabric ggml as `engines/tts/ggml`, then configure:
 
 ```bash
 bash engines/tts/scripts/setup-ggml.sh
@@ -114,7 +116,7 @@ cd -
 
 ### Shared ggml and registry features
 
-Production consumers install `speech-cpp[tts]`, whose shared `ggml-speech`
+Production consumers install `speech-cpp[tts]`, whose shared `qvac-fabric`
 dependency supplies the requested backends. The installed CMake package remains
 `tts-cpp`; it does not require a separate legacy engine port. See the
 [umbrella package guide](../../../docs/BUILD.md#consumable-packages) for feature
@@ -133,7 +135,7 @@ override with `-D<flag>=...` at configure time):
 | `TTS_CPP_BUILD_EXECUTABLES` | `ON` standalone / `OFF` subdir | `tts-cli`, `mel2wav`, `cosyvoice-hift`, `cosyvoice-flow`, `cosyvoice-llm`, `cosyvoice-cli`, `cosyvoice-bench`, `supertonic-cli`, `parler-cli`, `parler-bench`, `lavasr-bench`, `audio8-cli`, `pocket-cli`, and `moss-cli` |
 | `TTS_CPP_BUILD_TESTS` | `ON` standalone / `OFF` subdir | `test-*` parity / unit harnesses, registered with CTest (label-filterable via `ctest -L unit` / `ctest -L fixture` / `ctest -L gpu`) |
 | `TTS_CPP_INSTALL` | `ON` | Generate `install` rules + the `tts-cpp` CMake package config so consumers can `find_package(tts-cpp CONFIG REQUIRED)` |
-| `TTS_CPP_USE_SYSTEM_GGML` | `ON` | Use `find_package(ggml CONFIG REQUIRED)` against `ggml-speech`. `OFF` uses `add_subdirectory(ggml)` and requires an `engines/tts/ggml` checkout of `qvac-ext-ggml@speech`, staged by `scripts/setup-ggml.sh`; no patch overlay — the speech branch is patched at the commit level |
+| `TTS_CPP_USE_SYSTEM_GGML` | `ON` | Use `find_package(ggml CONFIG REQUIRED)` against the fabric ggml (`qvac-fabric` port or a local install). `OFF` uses `add_subdirectory(ggml)` and requires `engines/tts/ggml` to be the `ggml/` tree of qvac-fabric-llm.cpp, staged by `scripts/setup-ggml.sh`; no patch overlay — that tree is patched at the commit level |
 | `TTS_CPP_CCACHE` | `ON` | Use ccache as compiler launcher for `tts-cpp`'s own targets when `find_program(ccache)` succeeds. Scoped per target; ggml's independent `GGML_CCACHE` option handles the ggml subdirectory |
 | `TTS_CPP_COREML` | `OFF` | Apple-only. Compile the Core ML (Neural Engine) sidecars for the Audio8 codec synthesis stack, the Supertonic vocoder and the Parler-TTS DAC decoder (among others): at load each engine looks for its sidecar next to the GGUF (`audio8-codec-decoder-q8_0.gguf` → `audio8-codec-decoder.mlmodelc`; `supertonic2-q8_0.gguf` → `supertonic2-vocoder.mlmodelc`; `parler-mini-v1-q8_0.gguf` → `parler-mini-v1-dac.mlmodelc`; `chatterbox-s3gen-q8_0.gguf` → `chatterbox-s3gen-{encoder,cfm,hift}.mlmodelc`) and runs the stage on it when present, on ggml otherwise (Supertonic also keeps ggml for vocoders stored below 8 bits, such as `q4_0`). Export with `scripts/export-audio8-codec-coreml.py` / `scripts/export-supertonic-coreml.py` / `scripts/parler/export-dac-coreml.py` / `scripts/export-chatterbox-coreml.py`; see the [Audio8 guide](audio8.md#core-ml-codec-sidecar), the [Supertonic guide](supertonic.md#core-ml-vocoder-sidecar) the [Parler guide](parler.md#core-ml-dac-sidecar-apple-neural-engine) and the [Chatterbox guide](chatterbox.md#core-ml-sidecars). A non-Apple configure with this `ON` is a hard error |
 | `TTS_CPP_OPENMP` | `ON` | Link OpenMP when available. On Windows non-MinGW builds it is forced `OFF` to avoid clang-cl/MSVC and msys2 `libgomp` incompatibilities; advanced callers can explicitly set both `TTS_CPP_OPENMP_USER_OVERRIDE=ON` and `TTS_CPP_OPENMP=ON` |
@@ -204,8 +206,9 @@ engines/tts/                     multi-engine TTS and enhancement package
                                    (S3Gen / HiFT / streaming / MTL T3 /
                                     MTL tokenizer / voice features / Metal ops)
   scripts/
-    setup-ggml.sh                clones the pinned qvac-ext-ggml@speech ref
-                                   into ggml/ for the bundled-ggml dev build
+    setup-ggml.sh                fetches the pinned qvac-fabric-llm.cpp commit
+                                   and links ggml/ to its ggml/ tree for the
+                                   bundled-ggml dev build
     synthesize.sh                text → wav wrapper around tts-cli
     convert-t3-turbo-to-gguf.py  Turbo T3 weights + GPT-2 BPE + VE + builtin
                                    voice → T3 GGUF (--quant)
@@ -233,8 +236,9 @@ engines/tts/                     multi-engine TTS and enhancement package
     gen-audio8-unicode-tables.py generates src/audio8/unicode_tables.inc
     reference-t3-turbo.py        PyTorch T3 bit-exact compare vs C++
     compare-tokenizer.py         10-case BPE tokenizer compare vs HF
-  (no patches/ overlay; ggml comes from the system ggml-speech package, or
-   scripts/setup-ggml.sh stages an untracked ggml/ checkout for bundled builds)
+  (no patches/ overlay; ggml comes from the system qvac-fabric package, or
+   scripts/setup-ggml.sh stages an untracked ggml-src/ clone + ggml/ link for
+   bundled builds)
   voices/                        baked voice profiles (not tracked; populated
                                    by --save-voice)
   models/                        generated GGUFs (not tracked)

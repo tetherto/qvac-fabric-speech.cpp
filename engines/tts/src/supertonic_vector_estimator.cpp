@@ -295,7 +295,7 @@ ggml_tensor * edge_clamp_pad_1d(ggml_context * ctx, ggml_tensor * x, int pad_lef
         x->type == GGML_TYPE_F32 &&
         x->ne[2] == 1 && x->ne[3] == 1 &&
         ggml_is_contiguous(x)) {
-        return ggml_supertonic_edge_pad_1d(ctx, x, pad_left, pad_right);
+        return ggml_pad_replicate_1d(ctx, x, pad_left, pad_right);
     }
     const int64_t L = x->ne[0];
     const int64_t C = x->ne[1];
@@ -417,7 +417,7 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
         return custom;
     }
     const int K = (int) w->ne[0];
-    // Fused-op fast path (any backend that registers GGML_OP_SUPERTONIC_DEPTHWISE_1D
+    // Fused-op fast path (any backend that registers GGML_OP_CONV_1D_DW_DIRECT
     // — Metal does via the local ggml port overlay; CPU's
     // ggml_compute_forward_supertonic_depthwise_1d is the parity backstop).
     // Replaces the edge_clamp_pad + im2col + mul_mat + add chain with one
@@ -432,7 +432,7 @@ ggml_tensor * depthwise_same_ggml(ggml_context * ctx,
         x->ne[2] == 1 && x->ne[3] == 1 && w->ne[1] == 1 && w->ne[3] == 1 &&
         w->ne[2] == x->ne[1] && b->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(w) && ggml_is_contiguous(b)) {
-        return ggml_supertonic_depthwise_1d(ctx, x, w, b, dilation);
+        return ggml_conv_1d_dw_direct(ctx, x, w, b, dilation);
     }
     const int pad_left = ((K - 1) * dilation) / 2;
     const int pad_right = (K - 1) * dilation - pad_left;
@@ -449,7 +449,7 @@ ggml_tensor * layer_norm_ggml(ggml_context * ctx,
                               ggml_tensor * g,
                               ggml_tensor * b) {
     // Fused-op fast path on non-CPU backends (Metal/Vulkan/CUDA/OpenCL):
-    // GGML_OP_SUPERTONIC_LAYER_NORM_CHANNEL collapses the
+    // GGML_OP_NORM_CHANNEL collapses the
     // permute + cont + ggml_norm + mul + add + permute + cont chain into
     // a single dispatch.  Override with SUPERTONIC_DISABLE_FUSED_LAYER_NORM=1.
     static const bool disable_fused_layer_norm =
@@ -459,7 +459,7 @@ ggml_tensor * layer_norm_ggml(ggml_context * ctx,
         x->ne[2] == 1 && x->ne[3] == 1 &&
         g->ne[0] == x->ne[1] && b->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(g) && ggml_is_contiguous(b)) {
-        return ggml_supertonic_layer_norm_channel(ctx, x, g, b, 1e-6f);
+        return ggml_norm_channel(ctx, x, g, b, 1e-6f);
     }
     // CPU-only direct row-wise layer-norm; falls through to permute +
     // ggml_norm on non-CPU backends so the graph stays GPU-executable.
@@ -712,7 +712,7 @@ ggml_tensor * dense_matmul_time_wt_pretransposed_ggml(ggml_context * ctx,
 ggml_tensor * bias_gelu_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor * b) {
     const bool use_cpu_custom = supertonic_use_cpu_custom_ops();
     // Fused-op fast path (any backend that registers
-    // GGML_OP_SUPERTONIC_BIAS_GELU — Metal does via the local ggml port
+    // GGML_OP_BIAS_GELU — Metal does via the local ggml port
     // overlay; CPU's ggml_compute_forward_supertonic_bias_gelu is the
     // parity backstop).  Replaces the add(bias) + gelu_erf chain
     // (2 dispatches on Metal) with one dispatch.  Override with
@@ -725,7 +725,7 @@ ggml_tensor * bias_gelu_ggml(ggml_context * ctx, ggml_tensor * x, ggml_tensor * 
         x->ne[2] == 1 && x->ne[3] == 1 &&
         b->ne[0] == x->ne[1] &&
         ggml_is_contiguous(x) && ggml_is_contiguous(b)) {
-        return ggml_supertonic_bias_gelu(ctx, x, b);
+        return ggml_bias_gelu(ctx, x, b);
     }
     // CPU-only fused bias + GELU; falls back to gelu(add(x, b)) on GPU.
     if (use_cpu_custom &&
@@ -771,7 +771,7 @@ ggml_tensor * pw2_residual_ggml(ggml_context * ctx,
     }
     const bool use_cpu_custom = supertonic_use_cpu_custom_ops();
     // Fused-op fast path (any backend that registers
-    // GGML_OP_SUPERTONIC_PW2_RESIDUAL — Metal does via the local ggml port
+    // GGML_OP_SCALE_RESIDUAL — Metal does via the local ggml port
     // overlay; CPU's ggml_compute_forward_supertonic_pw2_residual is the
     // parity backstop).  Replaces the add(bias) + mul(gamma) + add(residual)
     // chain with one dispatch.  Override with
@@ -787,7 +787,7 @@ ggml_tensor * pw2_residual_ggml(ggml_context * ctx,
         fused_b->ne[0] == x->ne[1] && fused_gamma->ne[0] == x->ne[1] &&
         ggml_is_contiguous(residual) && ggml_is_contiguous(x) &&
         ggml_is_contiguous(fused_b) && ggml_is_contiguous(fused_gamma)) {
-        return ggml_supertonic_pw2_residual(ctx, x, fused_b, fused_gamma, residual);
+        return ggml_scale_residual(ctx, x, fused_b, fused_gamma, residual);
     }
     // CPU-only fused (bias + gamma + residual); falls back to the
     // 3-step add/mul/add chain on GPU.
@@ -940,8 +940,8 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
     ggml_tensor * dw_w = require_source_tensor(model, p + ".dwconv.weight");
     ggml_tensor * dw_b = flatten_1d(require_source_tensor(model, p + ".dwconv.bias"));
     ggml_tensor * y = seg_len > 0
-        ? ggml_supertonic_depthwise_1d_ct_segmented(ctx, x_ct, dw_w, dw_b, dilation, seg_len)
-        : ggml_supertonic_depthwise_1d_ct(ctx, x_ct, dw_w, dw_b, dilation);
+        ? ggml_conv_1d_dw_direct_ct_segmented(ctx, x_ct, dw_w, dw_b, dilation, seg_len)
+        : ggml_conv_1d_dw_direct_ct(ctx, x_ct, dw_w, dw_b, dilation);
     // layer_norm over the channel dim.  In [C, T] the channels are already
     // the inner-most axis, so the stock decomposition needs no permute:
     // ggml_norm reduces over ne[0] and the affine broadcasts along T.
@@ -955,7 +955,7 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
         y = ggml_add(ctx, y, ggml_reshape_2d(ctx,
             flatten_1d(require_source_tensor(model, p + ".norm.norm.bias")), y->ne[0], 1));
     } else {
-        y = ggml_supertonic_layer_norm_channel_ct(ctx, y,
+        y = ggml_norm_channel_ct(ctx, y,
             flatten_1d(require_source_tensor(model, p + ".norm.norm.weight")),
             flatten_1d(require_source_tensor(model, p + ".norm.norm.bias")),
             1e-6f);
@@ -965,14 +965,14 @@ ggml_tensor * vector_convnext_ggml_ct(ggml_context * ctx,
         require_source_tensor(model, p + ".pwconv1.weight"),
         nullptr);
     // bias_gelu_ct: [OC, T] -> [OC, T]
-    y = ggml_supertonic_bias_gelu_ct(ctx, y,
+    y = ggml_bias_gelu_ct(ctx, y,
         flatten_1d(require_source_tensor(model, p + ".pwconv1.bias")));
     // pw2 matmul: [IC=OC, T] -> [C, T]   (restores channel count)
     y = pointwise_matmul_ct(ctx, model, y,
         require_source_tensor(model, p + ".pwconv2.weight"),
         nullptr);
     // pw2_residual_ct: x[C, T] + bias[C] (×) gamma[C] + residual[C, T] -> [C, T]
-    return ggml_supertonic_pw2_residual_ct(ctx, y,
+    return ggml_scale_residual_ct(ctx, y,
         flatten_1d(require_source_tensor(model, p + ".pwconv2.bias")),
         flatten_1d(require_source_tensor(model, p + ".gamma")),
         residual);
@@ -4767,7 +4767,7 @@ ggml_tensor * layer_norm_ct_ggml(ggml_context * ctx, const supertonic_model & mo
         y = ggml_mul(ctx, y, ggml_reshape_2d(ctx, flatten_channel_param(ctx, g), y->ne[0], 1));
         return ggml_add(ctx, y, ggml_reshape_2d(ctx, flatten_channel_param(ctx, b), y->ne[0], 1));
     }
-    return ggml_supertonic_layer_norm_channel_ct(ctx, x_ct,
+    return ggml_norm_channel_ct(ctx, x_ct,
         flatten_channel_param(ctx, g), flatten_channel_param(ctx, b), kLayerNormEps);
 }
 

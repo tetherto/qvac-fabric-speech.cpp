@@ -25,7 +25,7 @@ struct FitOptions {
 // Host estimates conservatively include load staging, container overhead, thread
 // stacks, and native PCM buffers. Shared-memory OpenCL charges device and host
 // together; discrete OpenCL checks VRAM and host RAM separately. The OpenCL
-// scratch bound is tied to the reviewed ggml-speech F32 paths; see the guide.
+// scratch bound is tied to the reviewed fabric ggml F32 paths; see the guide.
 // SDK/JS copies and application buffers are outside
 // this native engine projection. Never throws; see tts-cpp/fit.h for status codes.
 TTS_CPP_API FitResult fit_params(const FitOptions & options);

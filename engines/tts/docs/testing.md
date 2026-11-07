@@ -87,8 +87,8 @@ The following records describe the validation performed when the backend paths
 were introduced. Fixture counts and timings are historical evidence; use the
 current CTest registrations to inspect available coverage.
 
- on two ggml-cuda fixes carried by
-[`qvac-ext-ggml@speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
+ on two ggml-cuda fixes carried by the fabric ggml (ported from
+[`qvac-ext-ggml@speech`](https://github.com/tetherto/qvac-ext-ggml/tree/speech)).
 Without the first (`im2col` / `pad` striding the grid Y and Z axes, which are
 capped at 65535) a chunk past roughly ten seconds aborts the launch; Chatterbox
 splits on sentences but readily emits a thirty-second chunk from ordinary

@@ -18,13 +18,13 @@ option(TTS_CPP_BUILD_SHARED      "tts-cpp: build tts-cpp as a SHARED library (ot
 option(TTS_CPP_BUILD_EXECUTABLES "tts-cpp: build tts-cli, mel2wav, CosyVoice, Supertonic, Parler, LavaSR, and Audio8 command-line tools" ${TTS_CPP_STANDALONE_DEFAULT})
 option(TTS_CPP_BUILD_TESTS       "tts-cpp: build per-stage numerical validation harnesses"   ${TTS_CPP_STANDALONE_DEFAULT})
 option(TTS_CPP_INSTALL           "tts-cpp: generate install rules"                           ON)
-option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add_subdirectory(ggml). Defaults to ON for qvac-fabric-speech.cpp and vcpkg builds. OFF requires an engines/tts/ggml checkout of qvac-ext-ggml@speech, staged via scripts/setup-ggml.sh (or by hand); no patches overlay — the speech branch is patched at the commit level." ON)
+option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add_subdirectory(ggml). Defaults to ON for qvac-fabric-speech.cpp and vcpkg builds. OFF requires engines/tts/ggml to be the ggml/ tree of qvac-fabric-llm.cpp, staged via scripts/setup-ggml.sh (or by hand); no patches overlay — that tree is patched at the commit level." ON)
 # Note: the standalone chatterbox.cpp repo carries a TTS_CPP_GGML_LIB_PREFIX
 # option here that controls renaming of bundled libggml-*.so to
 # libspeech-ggml-*.so when add_subdirectory(ggml) builds it locally. This
-# in-tree package can consume a locally staged speech-branch checkout but
-# does not expose the standalone filename-prefix option; the speech branch or
-# `ggml-speech` vcpkg port already emits the integrated filenames.
+# in-tree package can consume a locally staged fabric ggml checkout but
+# does not expose the standalone filename-prefix option; the fabric ggml
+# names its runtime-loaded backends qvac-ggml-* itself.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
 option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
 
@@ -165,28 +165,28 @@ if (NOT TARGET ggml)
         if (NOT ggml_FOUND)
             message(FATAL_ERROR
                 "tts-cpp: system-installed GGML library not found.  Install the "
-                "qvac speech-stack `ggml-speech` vcpkg port (qvac-ext-ggml/speech "
-                "branch) and re-run cmake.")
+                "`qvac-fabric` vcpkg port (the ggml of qvac-fabric-llm.cpp) "
+                "and re-run cmake.")
         endif()
         add_library(ggml ALIAS ggml::ggml)
     else()
         # Bundled-ggml dev build path (TTS_CPP_USE_SYSTEM_GGML=OFF).
-        # Expects `tts-cpp/ggml/` to be a checkout of the
-        # tetherto/qvac-ext-ggml repo on the `speech` branch — the QVAC
-        # fork carrying every infrastructure patch + the Supertonic 2
-        # fused custom op family as commits (not as a patches/ overlay).
+        # Expects `tts-cpp/ggml/` to be the ggml/ tree of
+        # tetherto/qvac-fabric-llm.cpp — the shared QVAC ggml carrying every
+        # infrastructure patch + the fused speech op family as commits (not
+        # as a patches/ overlay).
         #
-        # Stage the checkout with `scripts/setup-ggml.sh`, which clones the
-        # pinned speech ref into `engines/tts/ggml/` and is idempotent on
-        # re-run. No patches/ directory is consulted: the speech branch is
-        # already patched at the commit level.
+        # Stage it with `scripts/setup-ggml.sh`, which fetches the pinned
+        # commit into `engines/tts/ggml-src/` and links `engines/tts/ggml/`
+        # to its ggml/ tree; idempotent on re-run. No patches/ directory is
+        # consulted: the tree is already patched at the commit level.
         if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ggml/CMakeLists.txt")
             message(FATAL_ERROR
                 "tts-cpp: bundled-ggml build requires engines/tts/ggml/ to be "
-                "a checkout of tetherto/qvac-ext-ggml@speech. Run "
+                "the ggml/ tree of tetherto/qvac-fabric-llm.cpp. Run "
                 "scripts/setup-ggml.sh to stage it, or pass "
-                "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the QVAC "
-                "speech-stack `ggml-speech` vcpkg port.")
+                "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the "
+                "`qvac-fabric` vcpkg port.")
         endif()
         # tinyBLAS rationale and measurements: docs/build.md.
         if (NOT DEFINED GGML_LLAMAFILE_DEFAULT)
@@ -250,8 +250,8 @@ endif()
 # block (helper function, tts_cpp_apply_ggml_prefix loop, and
 # GGML_BACKEND_DL_PROJECT_PREFIX define). This in-tree package does not expose
 # that rename surface. System builds consume filenames and macros installed by
-# the ggml-speech port; bundled builds use the filenames produced by the
-# locally staged speech-branch checkout (scripts/setup-ggml.sh).
+# the qvac-fabric port; bundled builds use the filenames produced by the
+# locally staged fabric ggml checkout (scripts/setup-ggml.sh).
 
 option(TTS_CPP_OPENMP "tts-cpp: enable OpenMP for the tts-cpp target" ON)
 if (WIN32 AND NOT MINGW AND TTS_CPP_OPENMP AND NOT DEFINED CACHE{TTS_CPP_OPENMP_USER_OVERRIDE})

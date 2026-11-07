@@ -56,7 +56,7 @@ namespaces used by tests, are private and hidden from shared-library consumers.
 ### Consumer integration
 
 Downstream projects consume this engine through `speech-cpp[tts]`, which
-depends on the shared `ggml-speech` package. The installed CMake package and
+depends on the shared `qvac-fabric` package. The installed CMake package and
 imported target retain the `tts-cpp` name. See the
 [package guide](../../../docs/BUILD.md#consumable-packages) for features.
 Integration uses:
