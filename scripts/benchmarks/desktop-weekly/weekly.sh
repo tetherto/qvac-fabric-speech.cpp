@@ -57,11 +57,24 @@ family_skipped() {
   case ",$SKIP_FAMILIES," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 
+family_platform() { family_field "$1" platform; }
+
+host_platform() { echo "${BENCH_TEST_PLATFORM:-$OS_NAME}"; }
+
+family_off_platform() {
+  local platform; platform="$(family_platform "$1")"
+  [ -n "$platform" ] && [ "$platform" != "$(host_platform)" ]
+}
+
+select_family() {
+  if family_skipped "$1"; then log "skip $1 (SKIP_FAMILIES)" >&2
+  elif family_off_platform "$1"; then log "skip $1 (platform $(family_platform "$1"))" >&2
+  else echo "$1"; fi
+}
+
 selected_families() {
   local family
-  for family in $(split_list "$(requested_families)"); do
-    if family_skipped "$family"; then log "skip $family (SKIP_FAMILIES)" >&2; else echo "$family"; fi
-  done | tr '\n' ',' | sed 's/,$//'
+  for family in $(split_list "$(requested_families)"); do select_family "$family"; done | tr '\n' ',' | sed 's/,$//'
 }
 
 apply_quick_iterations() {
@@ -112,7 +125,7 @@ build_report() {
   local previous
   previous="$(previous_summary "$RUN_DIR")"
   python3 "$TOOLS_DIR/summarize.py" --run-dir "$RUN_DIR" --families "$FAMILIES_JSON" --started "$STARTED" \
-    --backends "$(resolve_backends)" --families-selected "$FAMILIES" || fail "summarize.py failed"
+    --backends "$(resolve_backends)" --families-selected "$FAMILIES" --skip-cells "$(skipped_cells)" || fail "summarize.py failed"
   python3 "$TOOLS_DIR/report.py" "$RUN_DIR/summary.json" ${previous:+--previous "$previous"} -o "$RUN_DIR/report.md" ||
     fail "report.py failed"
 }
@@ -146,6 +159,7 @@ main() {
   if [ "$UPDATE" = 1 ]; then update_sources || fail "source update failed"; fi
   [ -d "$ENGINE_SRC/.git" ] || fail "no engine checkout at $ENGINE_SRC"
   FAMILIES="$(selected_families)"
+  export SELECTED_FAMILIES="$FAMILIES"
   apply_quick_iterations
   bash "$TOOLS_DIR/fetch-models.sh" "$FAMILIES" > "$RUN_DIR/logs/fetch-models.log" 2>&1 || log "fetch-models.sh reported errors"
   bash "$TOOLS_DIR/machine-info.sh" > "$RUN_DIR/machine.json"

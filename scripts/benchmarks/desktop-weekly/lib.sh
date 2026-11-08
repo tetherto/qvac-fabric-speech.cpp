@@ -50,6 +50,9 @@ load_config() {
   QUICK_FAMILIES="${QUICK_FAMILIES:-$DEFAULT_QUICK_FAMILIES}"
   SKIP_FAMILIES="${SKIP_FAMILIES:-}"
   MEMORY_SAMPLER="${MEMORY_SAMPLER:-auto}"
+  EVICT_PAGE_CACHE="${EVICT_PAGE_CACHE:-0}"
+  CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+  COREML_PYTHON="${COREML_PYTHON:-}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -110,8 +113,13 @@ family_warmup() {
 }
 
 cmake_targets() {
-  { jq -r 'to_entries[] | select(.key | startswith("_") | not) | .value.cmake_target' "$FAMILIES_JSON"; echo "$EXTRA_TARGETS"; } |
-    tr ' ' '\n' | sort -u | tr '\n' ' '
+  local family
+  { for family in $(split_list "${SELECTED_FAMILIES:-$(all_families | tr '\n' ',')}"); do family_field "$family" cmake_target; done
+    echo "$EXTRA_TARGETS"; } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
+}
+
+cmake_generator() {
+  if command -v ninja > /dev/null; then echo "Ninja"; else echo "Unix Makefiles"; fi
 }
 
 gpu_busy_linux() {
@@ -267,7 +275,7 @@ ggml_backend_options() {
 }
 
 build_signature() {
-  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") targets=$(cmake_targets)"
+  echo "engine=$(repo_sha "$ENGINE_SRC") ggml=$(repo_sha "$GGML_SRC") backend=$1 options=$(ggml_backend_options "$1") engine_options=$(engine_platform_options "$OS_NAME") prefix=$CMAKE_PREFIX_PATH targets=$(cmake_targets)"
 }
 
 build_marker() { echo "${BUILDS_DIR:?}/${1:?}/BUILT"; }
@@ -278,11 +286,17 @@ build_is_current() {
   [ -f "$marker" ] && [ "$(cat "$marker")" = "$(build_signature "$1")" ]
 }
 
+cmake_prefix_path() {
+  local own="${1:-}"
+  echo "$own${own:+${CMAKE_PREFIX_PATH:+;}}$CMAKE_PREFIX_PATH"
+}
+
 configure_ggml() {
   local backend="$1" dir="$BUILDS_DIR/$1" log_dir="$2"
-  cmake -S "$GGML_SRC" -B "$dir/ggml" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  cmake -S "$GGML_SRC" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_CCACHE=OFF \
-    -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" $(ggml_backend_options "$backend") > "$log_dir/ggml-configure.log" 2>&1
+    -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" -DCMAKE_PREFIX_PATH="$(cmake_prefix_path)" $(ggml_backend_options "$backend") \
+    > "$log_dir/ggml-configure.log" 2>&1
 }
 
 build_ggml() {
@@ -292,10 +306,17 @@ build_ggml() {
     cmake --install "$dir/ggml" > "$log_dir/ggml-install.log" 2>&1
 }
 
+engine_platform_options() {
+  case "$1" in
+    Darwin) echo "-DPARAKEET_COREML=ON -DTTS_CPP_COREML=ON" ;;
+    *) echo "" ;;
+  esac
+}
+
 configure_engine() {
   local dir="$BUILDS_DIR/$1" log_dir="$2"
-  cmake -S "$ENGINE_SRC" -B "$dir/speech" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
-    -DCMAKE_PREFIX_PATH="$dir/ggml-install" > "$log_dir/speech-configure.log" 2>&1
+  cmake -S "$ENGINE_SRC" -B "$dir/speech" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DSPEECH_BUILD_TESTS=OFF \
+    -DCMAKE_PREFIX_PATH="$(cmake_prefix_path "$dir/ggml-install")" $(engine_platform_options "$OS_NAME") > "$log_dir/speech-configure.log" 2>&1
 }
 
 build_engine() {
@@ -319,6 +340,11 @@ export_backend_environment() {
   export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH="$lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
   export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
+  export_coreml_python
+}
+
+export_coreml_python() {
+  if [ -n "$COREML_PYTHON" ]; then export PARAKEET_COREML_PYTHON="$COREML_PYTHON"; fi
 }
 
 kill_process_group() {
@@ -390,7 +416,7 @@ run_family_driver() {
   local family="$1" backend="$2" out="$3" runs warmup
   runs="$(family_runs "$family" "$backend")"
   warmup="$(family_warmup "$family" "$backend")"
-  ( cd "$ENGINE_SRC" && BENCH_FAMILIES_JSON="$FAMILIES_JSON" bash scripts/benchmarks/run-family.sh \
+  ( cd "$ENGINE_SRC" && BENCH_FAMILIES_JSON="$FAMILIES_JSON" BENCH_HOME="$BENCH_HOME" bash scripts/benchmarks/run-family.sh \
       --family "$family" --runs "$runs" --warmup "$warmup" --build-dir "$BUILDS_DIR/$backend/speech" \
       --models-root "$MODELS_DIR/families" --runner "$(hostname -s)-$backend" --out "$out" )
 }
@@ -423,11 +449,16 @@ discard_cell() {
   rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv"
 }
 
+evict_model_cache() {
+  if [ "$EVICT_PAGE_CACHE" = 1 ]; then python3 "$TOOLS_DIR/prepare-derived.py" evict "$MODELS_DIR/store" > /dev/null; fi
+}
+
 run_family() {
   local family="$1" backend="$2" results="$3" out="$3/$1.json" status signature
   signature="$(cell_signature "$family" "$backend")"
   if cell_is_reusable "$out" "$signature"; then log "skip $family on $backend (result present with the same inputs)"; return 0; fi
   if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
+  evict_model_cache
   log "run $family on $backend"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1
@@ -439,11 +470,32 @@ run_family() {
   log "done $family on $backend: $(jq -r '[.status, .backend, .wall_ms_median] | map(tostring) | join(" ")' "$out")"
 }
 
+family_backends() {
+  jq -r --arg f "$1" '.[$f].backends // [] | join(",")' "$FAMILIES_JSON"
+}
+
+family_runs_on_backend() {
+  local allowed; allowed="$(family_backends "$1")"
+  [ -z "$allowed" ] || case ",$allowed," in *",$2,"*) return 0 ;; *) return 1 ;; esac
+}
+
+cell_skipped() {
+  case ",$SKIP_FAMILIES," in *",$1:$2,"*) return 0 ;; *) return 1 ;; esac
+}
+
+skipped_cells() { split_list "$SKIP_FAMILIES" | sed -n '/:/p' | paste -sd, -; }
+
+run_family_if_allowed() {
+  if cell_skipped "$1" "$2"; then log "skip $1 on $2 (SKIP_FAMILIES)"
+  elif family_runs_on_backend "$1" "$2"; then run_family "$1" "$2" "$3"
+  else log "skip $1 on $2 (family backends: $(family_backends "$1"))"; fi
+}
+
 run_families_on_backend() {
   local backend="$1" families="$2" results="$3/results/$1" family
   mkdir -p "$results"
   export_backend_environment "$backend"
-  for family in $(split_list "$families"); do run_family "$family" "$backend" "$results"; done
+  for family in $(split_list "$families"); do run_family_if_allowed "$family" "$backend" "$results"; done
 }
 
 discard_backend_results() { rm -rf "${1:?}/results/${2:?}"; }

@@ -14,16 +14,22 @@ check_scripts_parse() {
   local script
   for script in "$HERE"/*.sh; do bash -n "$script" || fail "$script does not parse"; done
   python3 -c 'import ast, sys; [ast.parse(open(path).read(), path) for path in sys.argv[1:]]' "$HERE"/*.py || fail "a python script does not parse"
-  if command -v node > /dev/null; then node --check "$HERE/fetch-registry.js" || fail "fetch-registry.js does not parse"; fi
+  if command -v node > /dev/null; then
+    node --check "$HERE/fetch-registry.js" || fail "fetch-registry.js does not parse"
+    node --check "$HERE/dashboard/app.js" || fail "dashboard/app.js does not parse"
+  fi
   ok "every script parses"
 }
 
 check_spec_fields() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
-    | select([.value.bench_kind, .value.binary, .value.cmake_target, .value.task, .value.model_label, .value.weights] | any(. == null))
+    | select([.value.bench_kind, .value.binary, (.value.cmake_target // .value.engine), .value.task, .value.model_label, .value.weights] | any(. == null))
     | .key' "$HERE/families.json")"
-  [ -z "$bad" ] || fail "families without bench_kind/binary/cmake_target/task/model_label/weights: $bad"
+  [ -z "$bad" ] || fail "families without bench_kind/binary/cmake_target (or engine)/task/model_label/weights: $bad"
+  bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | select(.value.engine != null)
+    | select((.value.platform == null) or (.value.backends | type != "array") or (.value.binary | startswith("${BENCH_HOME}/") | not)) | .key' "$HERE/families.json")"
+  [ -z "$bad" ] || fail "families of another engine without platform, backends and a \${BENCH_HOME} binary: $bad"
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not)
     | select([.value.runs, .value.warmup, .value.cpu_runs, .value.cpu_warmup, .value.timeout_minutes] | any(. == null))
     | .key' "$HERE/families.json")"
@@ -36,7 +42,7 @@ check_spec_fields() {
 check_args_are_provisioned() {
   local bad
   bad="$(jq -r 'to_entries[] | select(.key | startswith("_") | not) | .key as $family
-    | ([.value.provision[] | (.registry // .huggingface.name // .fixture // .derived.name) | split("/") | last]) as $files
+    | ([.value.provision[] | (.as // ((.registry // .huggingface.name // .fixture // .prepared // .sidecar.name // .derived.name) | split("/") | last))]) as $files
     | [.value.args[] | select(startswith("${MODEL_DIR}/")) | sub("^\\$\\{MODEL_DIR\\}/"; "")] | map(select(. as $f | $files | index($f) | not))
     | select(length > 0) | "\($family): \(join(","))"' "$HERE/families.json")"
   [ -z "$bad" ] || fail "args reference files no provision entry supplies: $bad"
@@ -118,7 +124,10 @@ check_lib_targets() {
   for target in whisper-cli parakeet-cli supertonic-bench audio8-cli moss-cli music-cli; do
     case " $targets " in *" $target "*) ;; *) fail "cmake target $target missing from '$targets'" ;; esac
   done
-  ok "cmake targets cover every family plus whisper-cli"
+  targets="$(SELECTED_FAMILIES=parakeet-tdt,supertonic3 cmake_targets)"
+  [ "$targets" = "parakeet-cli supertonic-bench whisper-cli " ] || fail "selected-family targets: '$targets'"
+  [ "$(PATH=/nonexistent cmake_generator)" = "Unix Makefiles" ] || fail "generator fallback without ninja"
+  ok "cmake targets follow the selected families and the generator falls back to make"
 }
 
 check_lib_lock() {
@@ -208,6 +217,8 @@ check_machine_quirks() {
   MEMORY_SAMPLER=auto
   [ "$(perl "$HERE/nsdate" +%N | wc -c | tr -d ' ')" = 10 ] || fail "nsdate +%N is not nine digits"
   [[ "$(perl "$HERE/nsdate")" =~ ^[0-9]{19}$ ]] || fail "nsdate default is not seconds plus nanoseconds"
+  mkdir -p "$TMP/evict" && printf 'data' > "$TMP/evict/a.bin"
+  [[ "$(python3 "$HERE/prepare-derived.py" evict "$TMP/evict")" =~ ^advised\ [01]\ files$ ]] || fail "evict subcommand"
   mkdir -p "$ENGINE_SRC/scripts/benchmarks"
   echo 'now=$(/bin/date +%s%N)' > "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
   install_nanosecond_shim
@@ -226,8 +237,53 @@ check_skip_families() {
     [ "$(selected_families 2>/dev/null)" = "parakeet-tdt,audio8-lm-q8_0-dec-q8_0" ] || { echo "SKIP_FAMILIES not applied: $(selected_families 2>/dev/null)" >&2; exit 1; }
     FAMILIES_ARG="moss-tts-f16"
     [ -z "$(selected_families 2>/dev/null)" ] || { echo "an explicitly requested skipped family slipped through" >&2; exit 1; }
+    FAMILIES_ARG="parakeet-mlx,parakeet-tdt"
+    BENCH_TEST_PLATFORM=Linux
+    [ "$(selected_families 2>/dev/null)" = "parakeet-tdt" ] || { echo "a Darwin-only family ran on Linux: $(selected_families 2>/dev/null)" >&2; exit 1; }
+    BENCH_TEST_PLATFORM=Darwin
+    [ "$(selected_families 2>/dev/null)" = "parakeet-mlx,parakeet-tdt" ] || { echo "a Darwin-only family was skipped on Darwin: $(selected_families 2>/dev/null)" >&2; exit 1; }
   ) || fail "SKIP_FAMILIES"
-  ok "SKIP_FAMILIES removes families from quick, default and explicit selections"
+  ok "SKIP_FAMILIES and the family platform remove families from quick, default and explicit selections"
+}
+
+check_skip_cells() {
+  (
+    . "$HERE/weekly.sh"
+    load_config
+    SKIP_FAMILIES="moss-tts-f16,parakeet-tdt:cuda,supertonic3:vulkan"
+    QUICK=1
+    [ "$(selected_families 2>/dev/null)" = "parakeet-tdt,supertonic3,audio8-lm-q8_0-dec-q8_0" ] || { echo "a cell skip removed its whole family: $(selected_families 2>/dev/null)" >&2; exit 1; }
+    [ "$(skipped_cells)" = "parakeet-tdt:cuda,supertonic3:vulkan" ] || { echo "skipped_cells: $(skipped_cells)" >&2; exit 1; }
+    run_family() { echo "ran $1 on $2"; }
+    case "$(run_family_if_allowed parakeet-tdt cuda "$TMP")" in *"skip parakeet-tdt on cuda (SKIP_FAMILIES)") ;; *) echo "a skipped cell ran" >&2; exit 1 ;; esac
+    [ "$(run_family_if_allowed parakeet-tdt vulkan "$TMP")" = "ran parakeet-tdt on vulkan" ] || { echo "a cell skip leaked to another backend" >&2; exit 1; }
+    SKIP_FAMILIES="moss-tts-f16"
+    [ -z "$(skipped_cells)" ] || { echo "skipped_cells without cell entries: $(skipped_cells)" >&2; exit 1; }
+  ) || fail "SKIP_FAMILIES cells"
+  ok "family:backend entries of SKIP_FAMILIES skip one cell and keep the family on the other backends"
+}
+
+check_engine_platform_options() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    [ "$(engine_platform_options Darwin)" = "-DPARAKEET_COREML=ON -DTTS_CPP_COREML=ON" ] || { echo "Darwin builds must enable the Parakeet and TTS Core ML sidecars" >&2; exit 1; }
+    [ -z "$(engine_platform_options Linux)" ] || { echo "Linux builds must not carry Darwin options" >&2; exit 1; }
+    build_signature cuda | grep -q "engine_options=" || { echo "engine options missing from the build signature" >&2; exit 1; }
+  ) || fail "engine platform options"
+  ok "Darwin engine builds enable the Core ML sidecars and the option is part of the build signature"
+}
+
+check_family_backends() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    family_runs_on_backend parakeet-mlx metal || { echo "parakeet-mlx must run on metal" >&2; exit 1; }
+    ! family_runs_on_backend parakeet-mlx cpu || { echo "parakeet-mlx must not run on cpu" >&2; exit 1; }
+    family_runs_on_backend parakeet-tdt cpu || { echo "a family without backends must run everywhere" >&2; exit 1; }
+    [ "$(family_backends mlx-whisper-abcba)" = "metal" ] || { echo "family_backends: $(family_backends mlx-whisper-abcba)" >&2; exit 1; }
+  ) || fail "family backends"
+  ok "a family's backends list keeps it off the other backends"
 }
 
 check_lib_deadline() {
@@ -284,11 +340,17 @@ check_build_marker() {
   CUDA_ARCH=89-real
   if build_is_current cuda; then fail "build_is_current after CUDA_ARCH changed"; fi
   CUDA_ARCH=120a-real
+  CMAKE_PREFIX_PATH=/opt/deps
+  if build_is_current cuda; then fail "build_is_current after CMAKE_PREFIX_PATH changed"; fi
+  [ "$(cmake_prefix_path)" = "/opt/deps" ] || fail "cmake_prefix_path without an own prefix"
+  [ "$(cmake_prefix_path /b/ggml-install)" = "/b/ggml-install;/opt/deps" ] || fail "cmake_prefix_path with an own prefix"
+  CMAKE_PREFIX_PATH=
+  [ "$(cmake_prefix_path /b/ggml-install)" = "/b/ggml-install" ] || fail "cmake_prefix_path without extra prefixes"
   mkdir -p "$TMP/rebuild/results/cuda"
   touch "$TMP/rebuild/results/cuda/old.json"
   discard_backend_results "$TMP/rebuild" cuda
   [ ! -e "$TMP/rebuild/results/cuda/old.json" ] || fail "discard_backend_results kept old rows"
-  ok "build markers track the commits and the build options, and a rebuild discards that backend's rows"
+  ok "build markers track the commits, the build options and the cmake prefixes, and a rebuild discards that backend's rows"
 }
 
 check_fetch_models_offline() {
@@ -299,18 +361,32 @@ check_fetch_models_offline() {
     "task": "TTS", "model_label": "x", "weights": "x", "runs": 1, "warmup": 0, "cpu_runs": 1, "cpu_warmup": 0, "timeout_minutes": 1,
     "provision": [
       {"fixture": "engines/parakeet/test/samples/jfk.wav"},
-      {"derived": {"name": "jfk-24k.wav", "kind": "resample", "source": "engines/parakeet/test/samples/jfk.wav", "rate": 24000}}
+      {"fixture": "engines/parakeet/test/samples/jfk.wav", "as": "voice.wav"},
+      {"derived": {"name": "jfk-24k.wav", "kind": "resample", "source": "engines/parakeet/test/samples/jfk.wav", "rate": 24000}},
+      {"sidecar": {"exporter": "engines/stub-export.py", "source": "jfk.wav", "name": "jfk-vocoder.mlmodelc", "args": ["--palettize", "6"]}}
     ]
   }
 }
 SPEC
-  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch.log" 2>&1 || fail "fetch-models.sh failed: $(cat "$TMP/fetch.log")"
+  cat > "$TMP/stub-coreml-python" <<'STUB'
+#!/usr/bin/env bash
+out=""; dir=""; pal=""
+while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift ;; --compile-dir) dir="$2"; shift ;; --palettize) pal="$2"; shift ;; esac; shift; done
+[ "$pal" = "6" ] || { echo "palettize argument missing" >&2; exit 1; }
+mkdir -p "$out" "$dir/$(basename "${out%.mlpackage}").mlmodelc"
+STUB
+  chmod +x "$TMP/stub-coreml-python"
+  FAMILIES_JSON="$TMP/families-test.json" COREML_PYTHON="$TMP/stub-coreml-python" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch.log" 2>&1 || fail "fetch-models.sh failed: $(cat "$TMP/fetch.log")"
+  [ -d "$BENCH_HOME/models/store/jfk-vocoder.mlmodelc" ] || fail "sidecar not exported into the store"
+  [ ! -e "$BENCH_HOME/models/store/jfk-vocoder.mlpackage" ] || fail "sidecar package not removed after compiling"
+  [ -L "$BENCH_HOME/models/families/clone-test/jfk-vocoder.mlmodelc" ] || fail "sidecar not linked into the family"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk.wav" ] || fail "fixture not linked"
   [ -L "$BENCH_HOME/models/families/clone-test/jfk-24k.wav" ] || fail "derived file not linked"
+  [ "$(readlink "$BENCH_HOME/models/families/clone-test/voice.wav")" = "$BENCH_HOME/models/store/jfk.wav" ] || fail "as link not pointing at the store file"
   [ -s "$BENCH_HOME/models/store/jfk.wav.sha256" ] || fail "sha256 sidecar"
   grep -q "^fixture engines/parakeet" "$BENCH_HOME/models/store/jfk.wav.source" || fail "source sidecar"
   grep -q "^derived resample 24000" "$BENCH_HOME/models/store/jfk-24k.wav.source" || fail "derived source sidecar"
-  ok "fetch-models.sh provisions fixtures and derived files offline"
+  ok "fetch-models.sh provisions fixtures and derived files offline and links a file under its as name"
 }
 
 check_fetch_models_reprovisions_on_origin_change() {
@@ -325,6 +401,26 @@ check_fetch_models_reprovisions_on_origin_change() {
   FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/fetch-models.sh" clone-test > "$TMP/fetch3.log" 2>&1 || fail "third fetch-models.sh failed"
   [ "$(wc -c < "$BENCH_HOME/models/store/jfk-24k.wav" | tr -d ' ')" -gt 1000 ] || fail "a file without an origin sidecar was kept"
   ok "files are re-provisioned when their recorded origin differs or is missing"
+}
+
+check_fetch_registry_discards_partial() {
+  command -v node > /dev/null || { ok "fetch-registry.js partial check skipped without node"; return 0; }
+  mkdir -p "$TMP/registry-stub" "$TMP/registry-store"
+  cat > "$TMP/registry-stub/index.js" <<'STUB'
+class QVACRegistryClient {
+  async ready () {}
+  async close () {}
+  async downloadModel (key, source, options) { require('fs').writeFileSync(options.outputFile, `fresh ${key}`) }
+}
+module.exports = { QVACRegistryClient }
+STUB
+  echo stale > "$TMP/registry-store/model.gguf.part"
+  REGISTRY_CLIENT="$TMP/registry-stub/index.js" node "$HERE/fetch-registry.js" "$TMP/registry-store" acestep/2026-07-22/model.gguf > "$TMP/registry.log" 2>&1 || fail "fetch-registry.js failed: $(cat "$TMP/registry.log")"
+  grep -q "discard stale" "$TMP/registry.log" || fail "a stale .part was not discarded"
+  [ ! -e "$TMP/registry-store/model.gguf.part" ] || fail "the .part file survived the download"
+  grep -q "fresh qvac_models_compiled/ggml/acestep/2026-07-22/model.gguf" "$TMP/registry-store/model.gguf" || fail "the model was not downloaded afresh"
+  REGISTRY_CLIENT="$TMP/registry-stub/index.js" node "$HERE/fetch-registry.js" "$TMP/registry-store" acestep/2026-07-22/model.gguf | grep -q "^present" || fail "a present model was fetched again"
+  ok "fetch-registry.js discards a stale partial download and keeps a present model"
 }
 
 check_weekly_helpers() {
@@ -351,9 +447,11 @@ check_info_scripts() {
   bash "$HERE/machine-info.sh" > "$TMP/machine.json" || fail "machine-info.sh failed"
   [ "$(jq -r .hostname "$TMP/machine.json")" = "$(hostname -s)" ] || fail "machine.json hostname"
   jq -e '.tools.cmake != null and .gpu != null' "$TMP/machine.json" > /dev/null || fail "machine.json shape"
-  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/collect-pins.sh" clone-test > "$TMP/pins.json" || fail "collect-pins.sh failed"
+  FAMILIES_JSON="$TMP/families-test.json" bash "$HERE/collect-pins.sh" clone-test > "$TMP/pins.json" 2> "$TMP/pins.err" || fail "collect-pins.sh failed"
+  [ ! -s "$TMP/pins.err" ] || fail "collect-pins.sh wrote errors: $(cat "$TMP/pins.err")"
   [ "$(jq -r .engine.sha "$TMP/pins.json")" = "$(git -C "$ENGINE_SRC" rev-parse HEAD)" ] || fail "pins engine sha"
   [ "$(jq -r '.models[] | select(.name == "jfk-24k.wav") | .present' "$TMP/pins.json")" = "true" ] || fail "pins model entry"
+  jq -e '.models[] | select(.name == "jfk-vocoder.mlmodelc")' "$TMP/pins.json" > /dev/null || fail "pins list the sidecar entry"
   ok "machine-info.sh and collect-pins.sh emit the expected JSON"
 }
 
@@ -424,6 +522,9 @@ main() {
   check_run_lock
   check_machine_quirks
   check_skip_families
+  check_skip_cells
+  check_family_backends
+  check_engine_platform_options
   check_lib_deadline
   check_failed_result
   check_previous_and_prune
@@ -436,6 +537,7 @@ main() {
   check_nvcc_release
   check_input_validation
   check_entry_points
+  check_fetch_registry_discards_partial
   check_python_tests
   echo "all $PASS checks passed"
 }

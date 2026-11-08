@@ -188,7 +188,8 @@ bool dit_is_deterministic_across_computes(const MM3Model & model, std::string * 
                          repeat_unconditional.data(), error)) {
         return false;
     }
-    if (first != repeat || first_unconditional != repeat_unconditional) {
+    if (first != repeat || first_unconditional != repeat_unconditional ||
+        first != swapped || first_unconditional != swapped_unconditional) {
         if (error) {
             *error = "DiT output changed between identical computes";
         }
@@ -214,6 +215,11 @@ int main(int argc, char ** argv) {
     MM3Model model;
     const tts_cpp::minimax::detail::ModelPair pair =
         tts_cpp::minimax::detail::resolve_model_pair(models_dir, "", "");
+    if (q4_run && pair.quant != "q4_k_m" && pair.quant != "q4_k_s") {
+        std::fprintf(stderr, "FAIL --q4 selected %s; provide a directory containing only the Q4 pair\n",
+                     pair.quant.c_str());
+        return 1;
+    }
     model.models_dir = models_dir;
     mm3_probe_file(pair.lm, &model.lm_file, &model.lm_cfg, nullptr, &model.meta_errors);
     mm3_probe_file(pair.synth, &model.synth_file, nullptr, &model.synth_cfg, &model.meta_errors);

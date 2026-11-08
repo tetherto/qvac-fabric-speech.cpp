@@ -204,7 +204,7 @@ endif()
 # variants register only for backends that engine's production allowlist
 # accepts, so an off-allowlist build neither runs unvalidated backends nor
 # silently skips validated ones.
-foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon webgpu)
+foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon webgpu xdna)
     string(TOUPPER "${_tts_ggml_backend}" _tts_ggml_backend_uc)
     set(TTS_CPP_GGML_${_tts_ggml_backend_uc} FALSE)
     if (GGML_${_tts_ggml_backend_uc} OR
@@ -1632,6 +1632,9 @@ if (TTS_CPP_BUILD_TESTS)
     endif()
     if (TTS_CPP_GGML_HEXAGON)
         list(APPEND _tcb_moss_arms hexagon)
+    endif()
+    if (TTS_CPP_GGML_XDNA)
+        list(APPEND _tcb_moss_arms xdna)
     endif()
     if (_tcb_moss_arms)
         add_executable(test-moss-gpu test/moss/test_gpu.cpp)

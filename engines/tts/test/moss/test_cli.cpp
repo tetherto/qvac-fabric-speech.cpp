@@ -1,6 +1,7 @@
 #include "gguf_fixtures.h"
 
 #include "moss/cli.h"
+#include "moss/backend_request.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -66,6 +67,12 @@ void test_option_mapping() {
 }
 
 void test_backend_modes() {
+    CliArgs tts;
+    check(parse({"moss-cli", "--backbone", "b.gguf", "--decoder", "d.gguf", "--text", "hello",
+            "--backend", "xdna"}, tts), "--backend xdna is accepted in TTS mode");
+    check(tts.options.backend == "xdna", "TTS CLI preserves the requested XDNA alias");
+    check(tts_cpp::moss::detail::backend_request(tts.options).name == "XDNA0",
+          "TTS XDNA alias selects the primary device");
     CliArgs sfx;
     check(parse({"moss-cli", "--mode", "sfx", "--model", "m.gguf", "--text", "rain",
             "--backend", "hexagon"}, sfx), "--backend is accepted in sfx mode");

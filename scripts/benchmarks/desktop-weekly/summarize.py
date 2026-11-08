@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect one runs/<date>/ directory into summary.json.
 
-usage: summarize.py --run-dir DIR --families families.json --backends cpu,cuda --families-selected a,b [--started ISO]
+usage: summarize.py --run-dir DIR --families families.json --backends cpu,cuda --families-selected a,b [--started ISO] [--skip-cells a:cuda]
 
 Reads machine.json, pins.json, results/<backend>/<family>.json and the nvidia-smi samples next to them,
 and writes <run dir>/summary.json with one row per (backend, family), run-level counts and the problem list.
@@ -107,7 +107,7 @@ def unrun_row(backend, family, spec, status):
     row.update({"status": status, "observed_backend": None, "runner": None, "wall_ms_median": None, "wall_ms_min": None,
                 "wall_ms_max": None, "rtf_median": None, "audio_seconds": None, "speed_x": None, "peak_rss_mib": None,
                 "gpu_memory_peak_mib": None, "gpu_memory_rise_mib": None, "gpu_util_max": None, "quality": None, "runs": 0,
-                "notes": ""})
+                "notes": "", "encoder_backend": None, "baseline_inference_ms_median": None})
     return row
 
 
@@ -119,7 +119,8 @@ def measured_row(backend, family, spec, result, gpu):
                 "wall_ms_min": result.get("wall_ms_min"), "wall_ms_max": result.get("wall_ms_max"),
                 "rtf_median": result.get("rtf_median"), "audio_seconds": seconds,
                 "speed_x": speed_x(seconds, result.get("wall_ms_median")), "peak_rss_mib": result.get("peak_rss_mib"),
-                "quality": quality(result), "runs": result.get("runs", 0), "notes": result.get("notes", "")})
+                "quality": quality(result), "runs": result.get("runs", 0), "notes": result.get("notes", ""),
+                "encoder_backend": result.get("encoder_backend"), "baseline_inference_ms_median": result.get("baseline_inference_ms_median")})
     row.update(gpu)
     return row
 
@@ -133,9 +134,18 @@ def row_for(run_dir, backend, family, spec, build_failed):
     return measured_row(backend, family, spec, result, gpu_memory(run_dir, backend, family))
 
 
-def collect_rows(run_dir, backends, families, specs, build_failures):
+def family_runs_on_backend(spec, backend):
+    allowed = spec.get("backends")
+    return not allowed or backend in allowed
+
+
+def cell_expected(spec, family, backend, skipped_cells):
+    return family_runs_on_backend(spec, backend) and f"{family}:{backend}" not in skipped_cells
+
+
+def collect_rows(run_dir, backends, families, specs, build_failures, skipped_cells=()):
     return [row_for(run_dir, backend, family, specs[family], backend in build_failures)
-            for backend in backends for family in families]
+            for backend in backends for family in families if cell_expected(specs[family], family, backend, skipped_cells)]
 
 
 def count_rows(rows):
@@ -170,10 +180,10 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_summary(run_dir, specs, backends, families, started):
+def build_summary(run_dir, specs, backends, families, started, skipped_cells=()):
     machine = load_optional_json(run_dir / "machine.json")
     build_failures = read_build_failures(run_dir)
-    rows = collect_rows(run_dir, backends, families, specs, build_failures)
+    rows = collect_rows(run_dir, backends, families, specs, build_failures, skipped_cells)
     counts = count_rows(rows)
     return {"schema": SCHEMA_VERSION,
             "run": {"name": run_dir.name, "host": machine.get("hostname", ""), "started": started, "finished": utc_now(),
@@ -190,6 +200,7 @@ def parse_args(argv):
     parser.add_argument("--backends", required=True)
     parser.add_argument("--families-selected", required=True)
     parser.add_argument("--started", default="")
+    parser.add_argument("--skip-cells", default="", help="family:backend pairs the host does not run")
     return parser.parse_args(argv)
 
 
@@ -197,7 +208,7 @@ def main(argv=None):
     args = parse_args(argv)
     run_dir = pathlib.Path(args.run_dir)
     summary = build_summary(run_dir, load_families(args.families), split_list(args.backends),
-                            split_list(args.families_selected), args.started)
+                            split_list(args.families_selected), args.started, split_list(args.skip_cells))
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"{summary['run']['status']}: {summary['counts']['ok']}/{summary['counts']['expected']} ok")
 

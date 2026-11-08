@@ -623,6 +623,8 @@ expand_placeholder() {
   if [[ "$s" == '${TTS_TEXT}' ]]; then printf '%s' "$TTS_TEXT"; return; fi
   s="${s//\$\{MODEL_DIR\}/$MODEL_DIR}"
   s="${s//\$\{MODELS_ROOT\}/$MODELS_ROOT}"
+  s="${s//\$\{BENCH_HOME\}/${BENCH_HOME:-}}"
+  s="${s//\$\{SCRATCH_DIR\}/$tmp_dir}"
   s="${s//\$\{AUDIO_DIR\}/$AUDIO_DIR}"
   s="${s//\$\{AUDIO_INPUT\}/$AUDIO_INPUT}"
   s="${s//\$\{AUDIO_OUT\}/$AUDIO_OUT}"
@@ -649,7 +651,13 @@ build_bench_args() {
 }
 build_bench_args
 
-BINARY="$BUILD_DIR/$BINARY_REL"
+# An external engine (a Python venv interpreter, say) names its binary with an
+# absolute path or ${BENCH_HOME}; engine targets stay relative to the build dir.
+resolve_binary() {
+  local path; path="$(expand_placeholder "$1")"
+  case "$path" in /*) printf '%s' "$path" ;; *) printf '%s/%s' "$BUILD_DIR" "$path" ;; esac
+}
+BINARY="$(resolve_binary "$BINARY_REL")"
 if ! [[ -x "$BINARY" ]]; then
   echo "binary not found or not executable: $BINARY" >&2
   emit_json "build-failed" null null null " (binary '$BINARY' missing)"; exit 0
@@ -946,6 +954,26 @@ now_ns() {
 # RTF likewise: .rtf.median (supertonic-shape) vs .rtf_median (parakeet).
 # Backend likewise: .backend at top level (parakeet) — otherwise fall back
 # to stderr parsing.
+# A bench binary may write a token's raw control byte (a tab, a newline, an
+# escape) into its transcript string; jq rejects such JSON, so the file is
+# re-serialized by a tolerant parser before anything reads it.
+strip_control_characters() {
+  local path="$1"
+  [[ -s "$path" ]] || return 0
+  python3 - "$path" <<'PY' || true
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8", errors="replace") as stream:
+    text = stream.read()
+try:
+    payload = json.loads(text, strict=False)
+except ValueError:
+    sys.exit(0)
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, ensure_ascii=False, indent=2)
+PY
+}
+
 run_native() {
   local native_json="$1"; shift
   local stderr_log="$1"; shift
@@ -969,6 +997,7 @@ run_native() {
     return 1
   fi
 
+  strip_control_characters "$native_json"
   if ! [[ -s "$native_json" ]]; then
     # Exit 0 without the JSON means the binary took a code path that never
     # reaches its bench writer (this is how the sortformer diarization cells
@@ -1189,11 +1218,15 @@ case "$BENCH_KIND" in
       cp "$coreml_json" "$artifact_dir/${FAMILY}-coreml-native.json"
       cp "$baseline_json" "$artifact_dir/${FAMILY}-metal-native.json"
 
-      coreml_corr="$(score_correctness bench-json "$coreml_json" || true)"
-      baseline_corr="$(score_correctness bench-json "$baseline_json" || true)"
-      if [[ -z "$coreml_corr" || -z "$baseline_corr" ]]; then
-        emit_json "run-failed" null null null " (Core ML and baseline correctness must both be scoreable)"
-        exit 0
+      coreml_corr=""
+      baseline_corr=""
+      if [[ -n "$(spec_field correctness)" ]]; then
+        coreml_corr="$(score_correctness bench-json "$coreml_json" || true)"
+        baseline_corr="$(score_correctness bench-json "$baseline_json" || true)"
+        if [[ -z "$coreml_corr" || -z "$baseline_corr" ]]; then
+          emit_json "run-failed" null null null " (Core ML and baseline correctness must both be scoreable)"
+          exit 0
+        fi
       fi
 
       IFS='|' read -r coreml_score coreml_kind coreml_ref <<< "$coreml_corr"

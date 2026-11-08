@@ -109,13 +109,15 @@ void cancel(Engine & engine, const std::string & text, bool explicit_cancel) {
 
 int main(int argc, char ** argv) {
     if (argc != 9) {
-        std::fprintf(stderr, "usage: %s cpu|cuda|vulkan|webgpu|metal LM.gguf DECODER.gguf ENCODER.gguf REFERENCE.wav OUTPUT_DIR SHORT.txt LONG.txt\n", argv[0]);
+        std::fprintf(stderr,
+                "usage: %s cpu|cuda|vulkan|webgpu|metal|xdna LM.gguf DECODER.gguf "
+                "ENCODER.gguf REFERENCE.wav OUTPUT_DIR SHORT.txt LONG.txt\n", argv[0]);
         return 77;
     }
     try {
         const bool cpu = std::string(argv[1]) == "cpu";
         const MossGpuArm arm = cpu ? MossGpuArm{"cpu", "CPU"} : moss_gpu_arm(argv[1]);
-        setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
+        if (arm.request != "xdna") setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
         unsetenv("GGML_VK_DISABLE_F16");
         const fs::path output(argv[6]);
         fs::create_directories(output);
@@ -141,7 +143,7 @@ int main(int argc, char ** argv) {
                     options.reference_audio_path = argv[5];
                 }
                 options.language = "en";
-                if (cpu) options.backend = "cpu";
+                if (cpu || arm.request == "xdna") options.backend = arm.request;
                 options.use_gpu = !cpu;
                 options.n_threads = 4;
                 options.seed = 1234;

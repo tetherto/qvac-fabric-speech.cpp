@@ -18,6 +18,16 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#define dup _dup
+#define dup2 _dup2
+#define close _close
+#define fileno _fileno
+#else
+#include <unistd.h>
+#endif
+
 extern "C" int acestep_fit_cli_main(int argc, char ** argv);
 
 using namespace tts_cpp::acestep::fitutil;
@@ -42,6 +52,38 @@ int run_cli(std::vector<std::string> args) {
     argv.reserve(args.size());
     for (std::string & a : args) argv.push_back(a.data());
     return acestep_fit_cli_main((int) argv.size(), argv.data());
+}
+
+void expect_cli_error(const std::vector<std::string> & args, const char * diagnostic,
+                      bool argument_error = true) {
+    FILE * captured = std::tmpfile();
+    expect(captured != nullptr, "create stderr capture");
+    if (!captured) return;
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    if (saved < 0 || dup2(fileno(captured), fileno(stderr)) < 0) {
+        fail("redirect stderr");
+        if (saved >= 0) close(saved);
+        std::fclose(captured);
+        return;
+    }
+    const int status = run_cli(args);
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(captured);
+    std::string output;
+    constexpr size_t kCaptureBufferBytes = 512;
+    char buffer[kCaptureBufferBytes];
+    while (std::fgets(buffer, sizeof(buffer), captured)) output += buffer;
+    std::fclose(captured);
+    expect(status == static_cast<int>(tts_cpp::acestep::FitStatus::Error), "CLI exits Error");
+    expect(output.find(diagnostic) != std::string::npos,
+           std::string("expected argument diagnostic: ") + diagnostic + "; got: " + output);
+    if (argument_error) {
+        expect(output.find("acestep-fit-params: error:") == std::string::npos,
+               "invalid argument reached model preflight");
+    }
 }
 
 constexpr uint64_t U64_MAX = std::numeric_limits<uint64_t>::max();
@@ -144,37 +186,23 @@ int main() {
     //    or backend work; the missing-model path is covered by the
     //    fixture-gated test_fit_params.cpp) ───────────────────────────────
     {
-        const int err = (int) tts_cpp::acestep::FitStatus::Error;
         expect(run_cli({"--help"}) == 0,                            "--help exits 0");
-        expect(run_cli({}) == err,                                  "missing models exits Error");
-        expect(run_cli({"--bogus-flag"}) == err,                    "unknown flag exits Error");
-        expect(run_cli({"--models-dir"}) == err,                    "--models-dir without value exits Error");
-        expect(run_cli({"--models-dir", "x", "--duration", "abc"}) == err,
-               "--duration garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--duration", "0"}) == err,
-               "--duration 0 exits Error");
-        expect(run_cli({"--models-dir", "x", "--n-gpu-layers", "1x"}) == err,
-               "--n-gpu-layers trailing garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--threads", "two"}) == err,
-               "--threads garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--margin-mib", "-1"}) == err,
-               "--margin-mib negative exits Error");
-        expect(run_cli({"--models-dir", "x", "--text-tokens", "1.5"}) == err,
-               "--text-tokens non-integer exits Error");
-        expect(run_cli({"--models-dir", "x", "--lyric-tokens", "x"}) == err,
-               "--lyric-tokens garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--lm-cfg", "-2"}) == err,
-               "--lm-cfg negative exits Error");
-        expect(run_cli({"--models-dir", "x", "--guidance", "no"}) == err,
-               "--guidance garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--keep-stages", "2"}) == err,
-               "--keep-stages out-of-range exits Error");
-        expect(run_cli({"--models-dir", "x", "--lm-max-new-tokens", "many"}) == err,
-               "--lm-max-new-tokens garbage exits Error");
-        expect(run_cli({"--models-dir", "x", "--lm-prompt-tokens", "1e3"}) == err,
-               "--lm-prompt-tokens non-integer exits Error");
-        expect(run_cli({"--dit", "x.gguf"}) == err,
-               "explicit paths missing a stage exit Error");
+        expect_cli_error({}, "--models-dir (or all four stage paths) is required");
+        expect_cli_error({"--bogus-flag"}, "unknown or incomplete argument: --bogus-flag");
+        expect_cli_error({"--models-dir"}, "unknown or incomplete argument: --models-dir");
+        expect_cli_error({"--models-dir", "x", "--duration", "abc"}, "--duration:");
+        expect_cli_error({"--models-dir", "x", "--duration", "0"}, "--duration:");
+        expect_cli_error({"--models-dir", "x", "--n-gpu-layers", "1x"}, "--n-gpu-layers:");
+        expect_cli_error({"--models-dir", "x", "--threads", "two"}, "--threads:");
+        expect_cli_error({"--models-dir", "x", "--margin-mib", "-1"}, "--margin-mib:");
+        expect_cli_error({"--models-dir", "x", "--text-tokens", "1.5"}, "--text-tokens:");
+        expect_cli_error({"--models-dir", "x", "--lyric-tokens", "x"}, "--lyric-tokens:");
+        expect_cli_error({"--models-dir", "x", "--lm-cfg", "-2"}, "--lm-cfg:");
+        expect_cli_error({"--models-dir", "x", "--guidance", "no"}, "--guidance:");
+        expect_cli_error({"--models-dir", "x", "--keep-stages", "2"}, "--keep-stages:");
+        expect_cli_error({"--models-dir", "x", "--lm-max-new-tokens", "many"}, "--lm-max-new-tokens:");
+        expect_cli_error({"--models-dir", "x", "--lm-prompt-tokens", "1e3"}, "--lm-prompt-tokens:");
+        expect_cli_error({"--dit", "x.gguf"}, "--models-dir (or all four stage paths) is required");
     }
 
     // ── Library-level argument validation (no models touched) ──────────────
@@ -194,7 +222,6 @@ int main() {
     //    graph builders a negative dimension. The guard is model-independent,
     //    so fake paths never get opened. ─────────────────────────────────────
     {
-        const int err = (int) tts_cpp::acestep::FitStatus::Error;
 
         tts_cpp::acestep::FitOptions o;
         o.text_enc_model_path = "x.gguf";
@@ -228,11 +255,11 @@ int main() {
         expect(tts_cpp::acestep::fit_params(one).reason == "workload-too-large",
                "INT_MAX lm_max_new_tokens was not workload-too-large");
 
-        // The reviewer's CLI repro, end to end: exit 2, no crash.
-        expect(run_cli({"--text-enc", "x.gguf", "--lm", "x.gguf", "--dit", "x.gguf",
+        // Oversized but syntactically valid integers must reach the workload guard.
+        expect_cli_error({"--text-enc", "x.gguf", "--lm", "x.gguf", "--dit", "x.gguf",
                         "--vae", "x.gguf", "--lm-prompt-tokens", "100",
-                        "--text-tokens", "1500000000", "--lyric-tokens", "1000000000"}) == err,
-               "near-INT_MAX token CLI repro did not exit Error");
+                        "--text-tokens", "1500000000", "--lyric-tokens", "1000000000"},
+                         "acestep-fit-params: error: workload-too-large", false);
     }
 
     if (g_failures == 0) {
