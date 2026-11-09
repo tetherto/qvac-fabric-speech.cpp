@@ -10,7 +10,7 @@ Part of the [tts engine documentation](../README.md).
 | Supertonic 1/2/3 | `<tts-cpp/supertonic/engine.h>` | text-chunk pipeline streaming | `supertonic-cli` batch/streaming; `tts-cli` batch only and rejects streaming flags |
 | Parler | `<tts-cpp/parler/engine.h>` | incremental callback via `stream_chunk_frames` | `parler-cli` and `tts-cli` batch only; neither exposes streaming |
 | CosyVoice3 | `<tts-cpp/cosyvoice/engine.h>` | callback is post-hoc chunking after full generation | `cosyvoice-cli` |
-| Audio8 | `<tts-cpp/audio8/engine.h>` | no | `audio8-cli` |
+| Audio8 | `<tts-cpp/audio8/engine.h>` | codec-window PCM callbacks via `synthesize_stream`; models without finite post-transformer attention windows deliver one final callback | `audio8-cli` batch/streaming (`--stream`) |
 | Pocket TTS | `<tts-cpp/pocket/engine.h>` | incremental FlowLM/Mimi PCM callbacks | `pocket-cli` batch WAV and memory preflight |
 | MOSS Delay / TTSD | `<tts-cpp/moss/engine.h>` | incremental codec PCM callbacks | `moss-cli` batch/streaming and dialogue |
 | MOSS-SoundEffect | `<tts-cpp/moss/sound_effect.h>` | progress callback; no incremental PCM | `moss-cli --mode sfx` |
