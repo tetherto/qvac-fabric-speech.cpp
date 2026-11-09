@@ -782,7 +782,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: supertonic-coreml-fixture
-          key: supertonic-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_export_supertonic_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          key: supertonic-coreml-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/export-supertonic-encoder-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_export_supertonic_coreml.py', 'engines/tts/test/test_export_supertonic_encoder_coreml.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Build Core ML Supertonic fixture
         if: runner.os == 'macOS' && steps.supertonic-coreml-cache.outputs.cache-hit != 'true'
@@ -804,6 +804,7 @@ jobs:
             "onnx==1.17.0" huggingface_hub
           .venv-coreml/bin/python -c 'import numpy; assert numpy.__version__ == "1.26.4", numpy.__version__'
           .venv-coreml/bin/python engines/tts/test/test_export_supertonic_coreml.py
+          .venv-coreml/bin/python engines/tts/test/test_export_supertonic_encoder_coreml.py
           .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
             --arch supertonic2 --ftype f16 \
             --out supertonic-coreml-fixture/supertonic2-f16.gguf
@@ -812,7 +813,11 @@ jobs:
             --compile-dir supertonic-coreml-fixture | tee supertonic-export.log
           grep -oE 'context=[0-9]+' supertonic-export.log | head -1 | cut -d= -f2 \
             > supertonic-coreml-fixture/context.txt
+          .venv-coreml/bin/python engines/tts/scripts/export-supertonic-encoder-coreml.py \
+            --gguf supertonic-coreml-fixture/supertonic2-f16.gguf \
+            --compile-dir supertonic-coreml-fixture
           rm -rf supertonic-coreml-fixture/supertonic2-vocoder.mlpackage supertonic-export.log
+          rm -rf supertonic-coreml-fixture/supertonic2-encoder.mlpackage
 
       # Runs the binary directly: a skip (exit 77) fails the step, so a green
       # lane proves the parity, fallback, strict, and warm-up assertions ran
@@ -833,6 +838,69 @@ jobs:
             echo "::error::causal-context mismatch: exporter computed $exporter_context latent frames, the runtime computed $runtime_context"
             exit 1
           fi
+
+      - name: Test (Core ML Supertonic encoder sidecar)
+        if: runner.os == 'macOS'
+        env:
+          SUPERTONIC_COREML_ENCODER_TEST_GGUF: ${{ github.workspace }}/supertonic-coreml-fixture/supertonic2-f16.gguf
+        run: ./build/test-supertonic-coreml-encoder
+
+      - name: Cache Core ML Supertonic 3 vector fixture
+        if: runner.os == 'macOS'
+        id: supertonic3-vector-cache
+        uses: actions/cache@v4
+        with:
+          path: supertonic3-vector-fixture
+          key: supertonic3-vector-fp16-fp32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-vector-coreml.py', 'engines/tts/scripts/supertonic_coreml_vector_4d.py', 'engines/tts/test/test_export_supertonic_vector_coreml.py', 'engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/export-supertonic-encoder-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_supertonic_coreml_vector.cpp', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Build Core ML Supertonic 3 vector fixture
+        if: runner.os == 'macOS' && steps.supertonic3-vector-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -x .venv-coreml/bin/python ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-coreml
+            .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+          fi
+          .venv-coreml/bin/python -m pip install \
+            -c engines/parakeet/scripts/requirements-coreml.txt "onnx==1.17.0" "scikit-learn==1.5.1" "scipy==1.14.1" huggingface_hub
+          .venv-coreml/bin/python engines/tts/test/test_export_supertonic_vector_coreml.py
+          .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
+            --arch supertonic3 --repo-id supertone-oss-archive/supertonic-3 --ftype f16 \
+            --out supertonic3-vector-fixture/supertonic3-f16.gguf
+          .venv-coreml/bin/python engines/tts/scripts/export-supertonic-vector-coreml.py \
+            --gguf supertonic3-vector-fixture/supertonic3-f16.gguf \
+            --precision fp32 --layout 3d --buckets 128 --compile-dir supertonic3-vector-fixture
+          rm -rf supertonic3-vector-fixture/supertonic3-vector-L128.mlpackage
+          mkdir -p supertonic3-vector-fixture/default-fp16
+          ln -s ../supertonic3-f16.gguf supertonic3-vector-fixture/default-fp16/supertonic3-f16.gguf
+          .venv-coreml/bin/python engines/tts/scripts/export-supertonic-vector-coreml.py \
+            --gguf supertonic3-vector-fixture/default-fp16/supertonic3-f16.gguf \
+            --buckets 128 --compile-dir supertonic3-vector-fixture/default-fp16
+          rm -rf supertonic3-vector-fixture/default-fp16/supertonic3-vector-L128.mlpackage
+          .venv-coreml/bin/python engines/tts/scripts/export-supertonic-coreml.py \
+            --gguf supertonic3-vector-fixture/default-fp16/supertonic3-f16.gguf \
+            --compute-units CPU_ONLY --compile-dir supertonic3-vector-fixture/default-fp16
+          rm -rf supertonic3-vector-fixture/default-fp16/supertonic3-vocoder.mlpackage
+
+      - name: Test (Core ML Supertonic 3 FP32 numerical reference)
+        if: runner.os == 'macOS'
+        env:
+          SUPERTONIC_COREML_VECTOR_TEST_GGUF: ${{ github.workspace }}/supertonic3-vector-fixture/supertonic3-f16.gguf
+          # Hosted macOS need not expose a physical GPU/ANE. This lane gates
+          # Core ML math and routing; GPU timings require actual Apple silicon.
+          SUPERTONIC_COREML_VECTOR_COMPUTE_UNITS: cpu_only
+        run: ./build/test-supertonic-coreml-vector
+
+      - name: Test (Core ML Supertonic 3 FP16 vector and vocoder combination)
+        if: runner.os == 'macOS'
+        env:
+          SUPERTONIC_COREML_VECTOR_TEST_GGUF: ${{ github.workspace }}/supertonic3-vector-fixture/default-fp16/supertonic3-f16.gguf
+          SUPERTONIC_COREML_VECTOR_TEST_REQUIRE_VOCODER: '1'
+          SUPERTONIC_COREML_COMPUTE_UNITS: cpu_only
+          SUPERTONIC_COREML_STRICT: '1'
+          SUPERTONIC_COREML_VECTOR_COMPUTE_UNITS: cpu_only
+        run: ./build/test-supertonic-coreml-vector
 
   # GPU lane stub: opt-in until self-hosted GPU runners exist. Trial outcome
   # (QVAC-22775): hosted macos-14 exposes Metal but its Apple Paravirtual

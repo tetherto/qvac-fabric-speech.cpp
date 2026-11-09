@@ -20,6 +20,11 @@ LEGACY_V2_ALIASES = (
     (EMBED_W, 'vocoder:onnx::Conv_1440'),
     (EMBED_B, 'vocoder:onnx::Conv_1441'),
     (HEAD_PRELU, 'vocoder:onnx::PRelu_1505'),
+) + tuple(
+    (f'text_encoder:tts.ttl.speech_prompted_text_encoder.attention{layer}.{name}.linear.weight',
+     f'text_encoder:onnx::MatMul_{number}')
+    for layer, numbers in ((1, (3678, 3680, 3681)), (2, (3682, 3684, 3685)))
+    for name, number in zip(('W_query', 'W_value', 'out_fc'), numbers)
 )
 
 

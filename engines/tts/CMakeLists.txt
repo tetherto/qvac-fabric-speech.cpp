@@ -483,6 +483,8 @@ if (TTS_CPP_BUILD_LIBRARY)
         add_library(tts-cpp.coreml OBJECT
             src/audio8/coreml/codec-synth.mm
             src/supertonic_coreml_vocoder.mm
+            src/supertonic_coreml_encoder.mm
+            src/supertonic_coreml_vector.mm
             src/moss/coreml/runner.mm
             src/parler/decoder_coreml.mm)
         tts_cpp_apply_ccache(tts-cpp.coreml)
@@ -499,7 +501,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1315,6 +1317,16 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-supertonic-coreml-exporter PROPERTY LABELS "unit")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
+
+        add_test(NAME test-supertonic-encoder-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_encoder_coreml.py")
+        set_tests_properties(test-supertonic-encoder-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_RETURN_CODE 77)
+
+        add_test(NAME test-supertonic-vector-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_vector_coreml.py")
+        set_tests_properties(test-supertonic-vector-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_RETURN_CODE 77)
 
         add_test(NAME test-cosyvoice-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_cosyvoice_coreml.py")
@@ -2474,6 +2486,26 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-coreml-parity)
     tts_cpp_register_test(test-supertonic-coreml-parity LABEL "fixture")
     set_property(TEST test-supertonic-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-supertonic-coreml-encoder test/test_supertonic_coreml_encoder.cpp)
+    target_link_libraries(test-supertonic-coreml-encoder PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-encoder PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-coreml-encoder PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-encoder)
+    tts_cpp_register_test(test-supertonic-coreml-encoder LABEL "fixture")
+    set_property(TEST test-supertonic-coreml-encoder PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-supertonic-coreml-vector test/test_supertonic_coreml_vector.cpp)
+    target_link_libraries(test-supertonic-coreml-vector PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-vector PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-coreml-vector PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-vector)
+    tts_cpp_register_test(test-supertonic-coreml-vector LABEL "fixture")
+    set_property(TEST test-supertonic-coreml-vector PROPERTY SKIP_RETURN_CODE 77)
 
     # Self-skips (77) without TTS_CPP_COREML or a staged
     # AUDIO8_COREML_TEST_MODELS_DIR; CI runs the binary directly so a skip fails.

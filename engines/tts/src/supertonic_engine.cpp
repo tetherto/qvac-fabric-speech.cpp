@@ -317,7 +317,7 @@ struct Engine::Impl {
 
             // follow-up — opt-in first-synth pre-warm.
             // Skipped on empty `prewarm_text` (the caller didn't ask)
-            // and on CPU without a Core ML vocoder sidecar (nothing
+            // and on CPU without a Core ML sidecar (nothing
             // to amortise).  On Vulkan / OpenCL this runs one
             // throwaway synth to force every per-stage graph cache
             // to populate and every shader pipeline to compile, so
@@ -524,8 +524,9 @@ struct Engine::Impl {
         }
 
         std::vector<float> text_emb;
+        std::string encoder_backend;
         if (!supertonic_text_encoder_forward_ggml(model, text_ids.data(), (int) text_ids.size(),
-                                                  style_ttl, text_emb, &error)) {
+                                                  style_ttl, text_emb, &error, &encoder_backend)) {
             throw std::runtime_error("Supertonic Engine: text encoder failed: " + error);
         }
 
@@ -550,10 +551,11 @@ struct Engine::Impl {
         // (worst-case cancel latency = whole CFM loop).  CPU keeps per-step
         // cancellation via the fallback.
         std::vector<float> final_latent;
+        std::string vector_backend;
         if (!supertonic_vector_loop_ggml(model, latent.data(), latent_len,
                                           text_emb.data(), (int) text_ids.size(),
                                           style_ttl, latent_mask.data(),
-                                          steps, final_latent, &error)) {
+                                          steps, final_latent, &error, &vector_backend)) {
             throw std::runtime_error("Supertonic Engine: vector estimator failed: " + error);
         }
         latent = std::move(final_latent);
@@ -572,6 +574,8 @@ struct Engine::Impl {
         SynthesisResult result;
         result.duration_s  = duration_s;
         result.vocoder_synthesis_backend = std::move(vocoder_backend);
+        result.text_encoder_synthesis_backend = std::move(encoder_backend);
+        result.vector_estimator_synthesis_backend = std::move(vector_backend);
         result.pcm.assign(wav_full.begin(),
                           wav_full.begin() + std::min((size_t) wav_len, wav_full.size()));
 
@@ -735,6 +739,12 @@ struct Engine::Impl {
 
             full.pcm.insert(full.pcm.end(), emit.begin(), emit.end());
             full.duration_s += chunk_res.duration_s;
+            if (k == 0) full.vector_estimator_synthesis_backend = std::move(chunk_res.vector_estimator_synthesis_backend);
+            else if (full.vector_estimator_synthesis_backend != chunk_res.vector_estimator_synthesis_backend)
+                full.vector_estimator_synthesis_backend = "mixed";
+            if (k == 0) full.text_encoder_synthesis_backend = std::move(chunk_res.text_encoder_synthesis_backend);
+            else if (full.text_encoder_synthesis_backend != chunk_res.text_encoder_synthesis_backend)
+                full.text_encoder_synthesis_backend = "mixed";
             if (k == 0) {
                 full.vocoder_synthesis_backend =
                     std::move(chunk_res.vocoder_synthesis_backend);
@@ -751,7 +761,7 @@ struct Engine::Impl {
     }
 
     bool wants_warm_up() const {
-        return !model.backend_is_cpu || model.vocoder_on_coreml;
+        return !model.backend_is_cpu || model.vocoder_on_coreml || model.encoder_on_coreml || model.vector_on_coreml;
     }
 
     std::string backend_name() const {
@@ -842,6 +852,14 @@ bool Engine::gpu_unsupported() const {
 
 bool Engine::vocoder_on_coreml() const {
     return pimpl_ && pimpl_->vocoder_on_coreml();
+}
+
+bool Engine::encoder_on_coreml() const {
+    return pimpl_ && pimpl_->model.encoder_on_coreml;
+}
+
+bool Engine::vector_estimator_on_coreml() const {
+    return pimpl_ && pimpl_->model.vector_on_coreml;
 }
 
 // Convenience one-shot wrapper.  Pays the full GGUF load + free per
