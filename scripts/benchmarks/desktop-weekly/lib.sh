@@ -479,8 +479,16 @@ family_runs_on_backend() {
   [ -z "$allowed" ] || case ",$allowed," in *",$2,"*) return 0 ;; *) return 1 ;; esac
 }
 
+cell_skipped() {
+  case ",$SKIP_FAMILIES," in *",$1:$2,"*) return 0 ;; *) return 1 ;; esac
+}
+
+skipped_cells() { split_list "$SKIP_FAMILIES" | sed -n '/:/p' | paste -sd, -; }
+
 run_family_if_allowed() {
-  if family_runs_on_backend "$1" "$2"; then run_family "$1" "$2" "$3"; else log "skip $1 on $2 (family backends: $(family_backends "$1"))"; fi
+  if cell_skipped "$1" "$2"; then log "skip $1 on $2 (SKIP_FAMILIES)"
+  elif family_runs_on_backend "$1" "$2"; then run_family "$1" "$2" "$3"
+  else log "skip $1 on $2 (family backends: $(family_backends "$1"))"; fi
 }
 
 run_families_on_backend() {

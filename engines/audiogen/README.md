@@ -50,6 +50,12 @@ and MiniMax model preparation and transfer. Diagnostics do not gate quality.
 
 ## Documentation
 
+Model-free tests run as separate math, tokenizer, backend, loading,
+quantization, audio, and generation-policy suites. The macOS CI lane also
+requires real ACE-Step and MiniMax generation with pinned fixtures, including
+MiniMax Q4 and explicit GPU execution. See [tests and parity](docs/testing.md)
+for dependencies, fixture caching, and local commands.
+
 | Topic | Where |
 |---|---|
 | Pipeline, model stages, model setup | [docs/pipeline.md](docs/pipeline.md) |

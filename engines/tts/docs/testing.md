@@ -236,9 +236,9 @@ and CUDA matches the CPU's output length exactly on the reference sentences.
 
 Commands below assume a direct build from `engines/tts`.
 
-`supertonic-bench` is built only by `TTS_CPP_BUILD_TESTS`; it is not in the
-executable gate. The tests also produce the following representative
-validation harnesses:
+`supertonic-bench` is built by `TTS_CPP_BUILD_EXECUTABLES`, independently of
+`TTS_CPP_BUILD_TESTS`. The table includes that benchmark alongside representative
+validation harnesses built by `TTS_CPP_BUILD_TESTS`:
 
 | Binary | What it does |
 |--------|--------------|

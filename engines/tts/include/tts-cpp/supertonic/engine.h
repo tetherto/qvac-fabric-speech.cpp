@@ -392,6 +392,9 @@ struct SynthesisResult {
     // "ggml", the Core ML sidecar's compute-unit label (e.g. "coreml-all"),
     // or "mixed" when streamed chunks used different vocoder paths.
     std::string vocoder_synthesis_backend = "ggml";
+    // Actual encoder/vector paths; "mixed" for streaming across paths.
+    std::string text_encoder_synthesis_backend = "ggml";
+    std::string vector_estimator_synthesis_backend = "ggml";
 };
 
 // Persistent engine.  Loads the GGUF once at construction; subsequent
@@ -482,6 +485,10 @@ public:
     // SynthesisResult::vocoder_synthesis_backend.  Always false when the build is not
     // compiled with TTS_CPP_COREML or SUPERTONIC_COREML_DISABLE is set.
     bool vocoder_on_coreml() const;
+    // Load status of the optional <model>-encoder.mlmodelc sidecar.
+    bool encoder_on_coreml() const;
+    // Load status only; individual shapes/predictions can fall back to ggml.
+    bool vector_estimator_on_coreml() const;
 
 private:
     struct Impl;

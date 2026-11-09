@@ -6,7 +6,8 @@
 # AUDIOGEN_USE_SYSTEM_GGML defaults ON and the engine needs the custom snake /
 # col2im_1d ops that live in that tree), then run the non-GPU ctest suite on both lanes and the
 # weight-free MiniMax Metal parity test on the self-hosted Apple-silicon
-# runner. Model-dependent smoke harnesses stay downstream on-device.
+# runner. The macOS lane also requires real ACE-Step and MiniMax generation
+# with pinned fixtures; direct invocations fail on skipped coverage.
 name: audiogen CI
 
 on:
@@ -158,7 +159,7 @@ jobs:
     needs: [runner_names, authorize]
     if: needs.authorize.outputs.allowed == 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - name: Manual Workspace Cleanup
         run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
@@ -212,6 +213,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DAUDIOGEN_BUILD_TESTS=ON \
             -DAUDIOGEN_COREML=ON \
+            -DAUDIOGEN_MINIMAX_COREML=ON \
             -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
 
       - name: Build
@@ -235,6 +237,39 @@ jobs:
             exit 1
           fi
 
+      - name: Install Python test dependencies
+        run: |
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-coreml
+          .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+
+      - name: Test (Core ML Python suites)
+        run: |
+          .venv-coreml/bin/python engines/audiogen/test/test_export_vae_coreml.py
+          .venv-coreml/bin/python engines/audiogen/test/test_export_minimax_conditioner_coreml.py
+          .venv-coreml/bin/python engines/audiogen/test/test_minimax_ane_models.py
+          .venv-coreml/bin/python engines/audiogen/test/test_minimax_ane_export.py
+          .venv-coreml/bin/python engines/audiogen/test/test_convert_minimax_roundtrip.py
+          .venv-coreml/bin/python engines/audiogen/test/test_minimax_ane_cli.py --executable build/mm3-replay
+
+      - name: Stage generation fixtures
+        run: |
+          .venv-coreml/bin/python engines/audiogen/scripts/prepare-ci-models.py \
+            --cache-dir "$HOME/.cache/qvac-audiogen-ci-models" \
+            --build-dir "$PWD/build" --output-env "$GITHUB_ENV"
+
+      - name: Test (real generation and fit)
+        env:
+          AUDIOGEN_TEST_GPU: '1'
+          MM3_DEVICE: gpu
+        run: |
+          ./build/test-acestep-integration
+          ./build/test-acestep-fit-params
+          ./build/test-minimax-integration
+          ./build/test-minimax-fit-models
+          ./build/test-minimax-quality
+          ./build/test-minimax-quality --q4
+
       - name: Cache Core ML VAE fixture
         id: coreml-fixture-cache
         uses: actions/cache@v4
@@ -252,11 +287,6 @@ jobs:
           curl -sSfL --retry 3 -o coreml-fixture/vae-BF16.gguf \
             https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/resolve/9b3707625776cc4cf775e9b12ab82f9fe48335ff/vae-BF16.gguf
           echo "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8  coreml-fixture/vae-BF16.gguf" | shasum -a 256 -c -
-          coreml_python="$(command -v python3.11 || command -v python3)"
-          "$coreml_python" -m venv .venv-coreml
-          .venv-coreml/bin/python -m pip install --upgrade pip
-          .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
-          .venv-coreml/bin/python engines/audiogen/test/test_export_vae_coreml.py
           .venv-coreml/bin/python engines/audiogen/scripts/export-vae-coreml.py \
             --gguf coreml-fixture/vae-BF16.gguf \
             --out coreml-fixture/vae-decoder.mlpackage --compile-dir coreml-fixture

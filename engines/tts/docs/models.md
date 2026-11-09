@@ -26,7 +26,7 @@ model guide for quality limits and stage-specific restrictions.
 | Fun-CosyVoice3-0.5B | `f32`; LM and flow also `q8_0`, `q4_0`; flow and HiFT also `f16`; flow also `bf16` | [Guide](cosyvoice3.md) |
 | Audio8-TTS-Preview-0.6B | `f32`, `f16`, `q8_0`; LM also `q4_0` | [Guide](audio8.md) |
 | Pocket TTS | `f32`; `f16` as storage | [Guide](pocket-tts.md) |
-| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | `f32`, `f16` | [Guide](moss.md) |
+| MOSS Delay (MOSS-TTS-v1.5 / MOSS-TTSD) | `f32`, `f16`; transformer matrices also `q8_0`, `q4_0` via requantization, with embeddings, output heads and codec at source precision | [Guide](moss.md) |
 | MOSS-SoundEffect-v2 | `f16`, `q8_0`, `q8_0` with `q4_0` DiT blocks; converter also writes `f32`, `bf16`, `q4_0` | [Guide](moss.md) |
 | MOSS-Speech | LM `bf16`, `q8_0`; converter also writes `f16`, `f32`; codec `f16` | [Guide](moss.md) |
 | LavaSR denoiser (UL-UNAS) | `f32`, `f16` | [Guide](lavasr.md) |
@@ -38,3 +38,10 @@ it is not a uniform six-bit model. CosyVoice's preferred flow tier depends on
 the backend; [its guide](cosyvoice3.md#convert) documents that choice and the
 unsupported LM F16 caveat. Supertonic's converter offers F32/F16/Q8_0;
 low-bit vocoders do not automatically use the reference-precision Core ML sidecar.
+
+MOSS Delay/TTSD Q8_0 transformer checkpoints have scoped CUDA/Vulkan smoke
+coverage; see [GPU validation](moss.md#gpu-validation-cuda-and-vulkan).
+The Q4_0 transformer recipe keeps tables and heads at F16 for Hexagon memory
+fit, but stops less reliably than F16; quantizing the heads as well further
+degrades stopping. See the [Hexagon guide](moss.md#hexagon-npu) for measured
+limits and the requantization command.

@@ -5,7 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,6 +16,7 @@
 namespace {
 
 int failures = 0;
+constexpr int kCancellationFlowSteps = 4;
 
 void check(bool condition, const char * expression) {
     if (condition) return;
@@ -117,17 +121,72 @@ void verify_recursive_generation(tts_cpp::minimax::Engine & engine) {
     verify_result(engine, subsequent);
 }
 
-void verify_cancellation(tts_cpp::minimax::Engine & engine) {
+void verify_callback_cancellation(tts_cpp::minimax::Engine & engine) {
+    bool callback_called = false;
+    const auto result = engine.generate(
+        make_generate_params(),
+        [&callback_called](const std::string &, int64_t, int64_t) {
+            callback_called = true;
+            return false;
+        });
+    CHECK(callback_called);
+    CHECK(result.pcm.empty());
+}
+
+void verify_explicit_cancellation(tts_cpp::minimax::Engine & engine) {
     bool callback_called = false;
     const auto result = engine.generate(
         make_generate_params(),
         [&engine, &callback_called](const std::string &, int64_t, int64_t) {
             callback_called = true;
             engine.cancel();
-            return false;
+            return true;
         });
     CHECK(callback_called);
     CHECK(result.pcm.empty());
+}
+
+void verify_cross_thread_cancellation(tts_cpp::minimax::Engine & engine) {
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool flow_started = false;
+    bool finished = false;
+    bool cancellation_requested = false;
+    auto cancellation = std::async(std::launch::async, [&] {
+        std::unique_lock<std::mutex> lock(mutex);
+        ready.wait(lock, [&] { return flow_started || finished; });
+        if (!flow_started) return false;
+        engine.cancel();
+        cancellation_requested = true;
+        ready.notify_one();
+        return true;
+    });
+    const auto finish = [&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        finished = true;
+        ready.notify_one();
+    };
+    try {
+        auto params = make_generate_params();
+        params.inference_steps = kCancellationFlowSteps;
+        const auto result = engine.generate(params, [&](const std::string & stage, int64_t, int64_t) {
+            if (stage == "flow") {
+                std::unique_lock<std::mutex> lock(mutex);
+                flow_started = true;
+                ready.notify_one();
+                ready.wait(lock, [&] { return cancellation_requested; });
+            }
+            return true;
+        });
+        finish();
+        CHECK(cancellation.get());
+        CHECK(result.pcm.empty());
+    } catch (...) {
+        finish();
+        cancellation.wait();
+        throw;
+    }
+    verify_result(engine, engine.generate(make_generate_params()));
 }
 
 // Deterministic regression for the startup race: a cancellation requested
@@ -148,9 +207,7 @@ void verify_pre_armed_cancellation(tts_cpp::minimax::Engine & engine) {
     verify_result(engine, subsequent);
 }
 
-// When the environment requests a non-CPU device, run one generation with the
-// engine deferring to MM3_DEVICE. device=gpu on a machine without a usable GPU
-// must fail engine creation (only device=auto may fall back to the CPU).
+// Explicit GPU coverage must execute on a GPU. Only auto may fall back to CPU.
 void verify_environment_device_request(const char * models_dir) {
     const char * requested = std::getenv("MM3_DEVICE");
     if (!requested || !*requested || std::strcmp(requested, "cpu") == 0) {
@@ -158,17 +215,16 @@ void verify_environment_device_request(const char * models_dir) {
     }
     auto options = make_engine_options(models_dir);
     options.device.clear();
-    try {
-        std::unique_ptr<tts_cpp::minimax::Engine> engine = tts_cpp::minimax::Engine::create(options);
-        CHECK(!engine->backend_name().empty());
-        std::fprintf(stderr, "[test-minimax-integration] MM3_DEVICE=%s ran on %s\n", requested,
-                     engine->backend_name().c_str());
-        verify_result(*engine, engine->generate(make_generate_params()));
-        verify_cancellation(*engine);
-    } catch (const std::runtime_error & error) {
-        const std::string message = error.what();
-        CHECK(message.find("no usable GPU") != std::string::npos);
+    std::unique_ptr<tts_cpp::minimax::Engine> engine = tts_cpp::minimax::Engine::create(options);
+    CHECK(!engine->backend_name().empty());
+    if (std::strcmp(requested, "gpu") == 0) {
+        CHECK(engine->backend_name() != "CPU");
+        CHECK(engine->gpu_fallback_reason() == tts_cpp::GpuFallbackReason::none);
     }
+    std::fprintf(stderr, "[test-minimax-integration] MM3_DEVICE=%s ran on %s\n", requested,
+                 engine->backend_name().c_str());
+    verify_result(*engine, engine->generate(make_generate_params()));
+    verify_callback_cancellation(*engine);
 }
 
 int run_integration(const char * models_dir) {
@@ -178,7 +234,9 @@ int run_integration(const char * models_dir) {
                 tts_cpp::minimax::Engine::create(make_engine_options(models_dir));
             CHECK(engine->backend_name() == "CPU");
             verify_recursive_generation(*engine);
-            verify_cancellation(*engine);
+            verify_callback_cancellation(*engine);
+            verify_explicit_cancellation(*engine);
+            verify_cross_thread_cancellation(*engine);
             verify_pre_armed_cancellation(*engine);
         }
         verify_environment_device_request(models_dir);

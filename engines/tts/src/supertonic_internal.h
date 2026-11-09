@@ -22,6 +22,8 @@
 // the model struct compiles on every platform; only TTS_CPP_USE_COREML
 // builds ever hold a non-null one.
 struct supertonic_coreml_vocoder_context;
+struct supertonic_coreml_encoder_context;
+struct supertonic_coreml_vector_context;
 
 namespace tts_cpp::supertonic::detail {
 
@@ -586,6 +588,10 @@ struct supertonic_model {
     // GGUF", on a real load it means the sidecar initialised.
     ::supertonic_coreml_vocoder_context * coreml_vocoder = nullptr;
     bool vocoder_on_coreml = false;
+    ::supertonic_coreml_encoder_context * coreml_encoder = nullptr;
+    bool encoder_on_coreml = false;
+    ::supertonic_coreml_vector_context * coreml_vector = nullptr;
+    bool vector_on_coreml = false;
 };
 
 // `f16_weights`:
@@ -949,7 +955,8 @@ bool supertonic_text_encoder_forward_ggml(const supertonic_model & model,
                                           int text_len,
                                           const float * style_ttl,
                                           std::vector<float> & text_emb_out,
-                                          std::string * error = nullptr);
+                                          std::string * error = nullptr,
+                                          std::string * backend_used = nullptr);
 
 // Per-island path: one graph per stage with host residual adds and layer norms.
 bool supertonic_text_encoder_forward_islands_ggml(const supertonic_model & model,
@@ -1102,7 +1109,8 @@ bool supertonic_vector_step_ggml(const supertonic_model & model,
                                  int current_step,
                                  int total_steps,
                                  std::vector<float> & next_latent_out,
-                                 std::string * error = nullptr);
+                                 std::string * error = nullptr,
+                                 std::string * backend_used = nullptr);
 
 // Audit finding F9 — `time_embedding(model, current, total)` is a
 // pure function over (current_step, total_steps) whose output (64
@@ -1223,7 +1231,8 @@ bool supertonic_vector_loop_ggml(const supertonic_model & model,
                                   const float * latent_mask,
                                   int total_steps,
                                   std::vector<float> & final_latent_out,
-                                  std::string * error = nullptr);
+                                  std::string * error = nullptr,
+                                  std::string * backend_used = nullptr);
 
 bool supertonic_vector_trace_proj_ggml(const supertonic_model & model,
                                        const float * noisy_latent,

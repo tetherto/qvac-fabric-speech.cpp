@@ -9,12 +9,15 @@ from unittest import mock
 
 
 def load_converter():
-    sys.modules.setdefault("numpy", types.ModuleType("numpy"))
-    sys.modules.setdefault("gguf", types.ModuleType("gguf"))
     path = pathlib.Path(__file__).parents[1] / "scripts" / "convert-minimax-music3-to-gguf.py"
     spec = importlib.util.spec_from_file_location("convert_minimax_music3", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    stubs = {}
+    for dependency in ("numpy", "gguf"):
+        if importlib.util.find_spec(dependency) is None:
+            stubs[dependency] = types.ModuleType(dependency)
+    with mock.patch.dict(sys.modules, stubs):
+        spec.loader.exec_module(module)
     return module
 
 

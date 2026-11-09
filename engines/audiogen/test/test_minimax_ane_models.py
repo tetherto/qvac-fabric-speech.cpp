@@ -1,3 +1,11 @@
+import importlib.util
+
+REQUIRED_DEPENDENCIES = ('numpy', 'torch')
+missing = [name for name in REQUIRED_DEPENDENCIES if importlib.util.find_spec(name) is None]
+if missing:
+    print("SKIP: missing " + ", ".join(missing))
+    raise SystemExit(77)
+
 import sys
 from pathlib import Path
 import unittest
