@@ -238,6 +238,23 @@ void zero_state(MLModel * model, MLState * state) {
 }
 #endif
 
+#if MOSS_COREML_STATE_SDK
+// Records the shape of every float32/float16 state buffer (others stay
+// unwritable from the host; the model still loads).
+API_AVAILABLE(macos(15.0), ios(18.0))
+void describe_states(MLModel * model, std::vector<Feature> * states) {
+    NSDictionary<NSString *, MLFeatureDescription *> * descriptions = model.modelDescription.stateDescriptionsByName;
+    for (NSString * name in descriptions) {
+        MLStateConstraint * constraint = descriptions[name].stateConstraint;
+        if (constraint == nil || !supported_data_type(constraint.dataType)) continue;
+        Feature feature;
+        feature.name = name.UTF8String;
+        feature.dims = dims_of(constraint.bufferShape);
+        if (element_count(feature.dims) > 0) states->push_back(feature);
+    }
+}
+#endif
+
 const void * fresh_state(MLModel * model) {
 #if MOSS_COREML_STATE_SDK
     if (@available(macOS 15.0, iOS 18.0, *)) {
@@ -261,6 +278,7 @@ struct moss_coreml_model {
     bool                 stateful = false;
     std::vector<Feature> inputs;
     std::vector<Feature> outputs;
+    std::vector<Feature> states;  // shapes only; the buffers live in `state`
     std::string          label;
     std::mutex           mutex;
 };
@@ -294,6 +312,9 @@ bool bind_io(moss_coreml_model * model, MLModel * mlmodel) {
 bool bind_state(moss_coreml_model * model, MLModel * mlmodel) {
     model->stateful = model_declares_state(mlmodel);
     if (!model->stateful) return true;
+#if MOSS_COREML_STATE_SDK
+    if (@available(macOS 15.0, iOS 18.0, *)) describe_states(mlmodel, &model->states);
+#endif
     model->state = fresh_state(mlmodel);
     return model->state != nullptr;
 }
@@ -497,6 +518,78 @@ int moss_coreml_predict_batch(struct moss_coreml_model * model,
                                                          options:[[MLPredictionOptions alloc] init] error:&error];
         if (result == nil || error != nil || result.count != batch_size) return 3;
         return read_batch_outputs(model, result, output_names, outputs, n_outputs, batch_size) ? 0 : 4;
+    }
+}
+
+int moss_coreml_state_dims(const struct moss_coreml_model * model, const char * name, int64_t * dims, int max_dims) {
+    if (model == nullptr || dims == nullptr) return 0;
+    const Feature * feature = find_feature(model->states, name);
+    if (feature == nullptr || (int) feature->dims.size() > max_dims) return 0;
+    std::copy(feature->dims.begin(), feature->dims.end(), dims);
+    return (int) feature->dims.size();
+}
+
+int moss_coreml_write_state(struct moss_coreml_model * model, const char * name, const float * data,
+                            const int64_t * start, const int64_t * count, int rank) {
+    if (model == nullptr || name == nullptr || data == nullptr || start == nullptr || count == nullptr) return 1;
+    const Feature * feature = find_feature(model->states, name);
+    if (!model->stateful || feature == nullptr || rank != (int) feature->dims.size()) return 2;
+    for (int d = 0; d < rank; ++d) {
+        if (start[d] < 0 || count[d] <= 0 || start[d] > feature->dims[(size_t) d] - count[d]) return 3;
+    }
+#if MOSS_COREML_STATE_SDK
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        @autoreleasepool {
+            std::lock_guard<std::mutex> lock(model->mutex);
+            const std::vector<int64_t> declared = feature->dims;
+            const std::vector<int64_t> origin(start, start + rank), box(count, count + rank);
+            __block bool written = false;
+            MLState * state = (__bridge MLState *) model->state;
+            [state getMultiArrayForStateNamed:[NSString stringWithUTF8String:name]
+                                      handler:^(MLMultiArray * buffer) {
+                if (dims_of(buffer.shape) != declared || !supported_data_type(buffer.dataType)) return;
+                const bool f32 = buffer.dataType == MLMultiArrayDataTypeFloat32;
+                [buffer getMutableBytesWithHandler:^(void * bytes, NSInteger size, NSArray<NSNumber *> * strides) {
+                    const std::vector<int64_t> step = dims_of(strides);
+                    const int64_t capacity = size / (f32 ? (int64_t) sizeof(float) : (int64_t) sizeof(uint16_t));
+                    const int64_t width = box.back();
+                    const int64_t rows = element_count(box) / width;
+                    std::vector<int64_t> offsets((size_t) rows);
+                    for (int64_t row = 0; row < rows; ++row) {
+                        int64_t offset = origin.back() * step.back(), rest = row;
+                        for (int d = rank - 2; d >= 0; --d) {
+                            offset += (origin[(size_t) d] + rest % box[(size_t) d]) * step[(size_t) d];
+                            rest /= box[(size_t) d];
+                        }
+                        if (offset < 0 || offset + (width - 1) * step.back() >= capacity) return;
+                        offsets[(size_t) row] = offset;
+                    }
+                    for (int64_t row = 0; row < rows; ++row) {
+                        const float * src = data + row * width;
+                        if (f32) write_row_f32((float *) bytes + offsets[(size_t) row], step.back(), src, width);
+                        else write_row_f16((uint16_t *) bytes + offsets[(size_t) row], step.back(), src, width);
+                    }
+                    written = true;
+                }];
+            }];
+            return written ? 0 : 4;
+        }
+    }
+#endif
+    return 2;
+}
+
+int moss_coreml_metadata(const struct moss_coreml_model * model, const char * key, char * value, int capacity) {
+    if (model == nullptr || key == nullptr || value == nullptr || capacity <= 0) return -1;
+    @autoreleasepool {
+        MLModel *      mlmodel = (__bridge MLModel *) model->model;
+        NSDictionary * user    = mlmodel.modelDescription.metadata[MLModelCreatorDefinedKey];
+        id found = [user isKindOfClass:[NSDictionary class]] ? user[[NSString stringWithUTF8String:key]] : nil;
+        if (![found isKindOfClass:[NSString class]]) return -1;
+        const std::string text = [(NSString *) found UTF8String];
+        if ((int) text.size() >= capacity) return -1;
+        std::memcpy(value, text.c_str(), text.size() + 1);
+        return (int) text.size();
     }
 }
 

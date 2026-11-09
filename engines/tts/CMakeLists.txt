@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, Pocket FlowLM/Mimi, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -380,6 +380,7 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/frontend.cpp
     src/pocket/engine.cpp
     src/pocket/fit.cpp
+    src/pocket/coreml.cpp
     src/pocket/reference_audio.cpp
     src/moss/backend_request.cpp
     src/moss/gguf_rows.cpp
@@ -498,7 +499,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, Chatterbox S3Gen stages, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1325,6 +1326,11 @@ if (TTS_CPP_BUILD_TESTS)
         set_tests_properties(test-chatterbox-coreml-exporter PROPERTIES
             LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
 
+        add_test(NAME test-pocket-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_pocket_coreml.py")
+        set_tests_properties(test-pocket-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
+
         foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
             string(REPLACE "_" "-" _moss_exporter_test "${_moss_exporter}")
             add_test(NAME test-moss-${_moss_exporter_test}-coreml-exporter
@@ -1970,6 +1976,24 @@ if (TTS_CPP_BUILD_TESTS)
             ARGS "${TTS_CPP_POCKET_MODEL_DIR}" "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf"
             REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
                      "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+        # Core ML FlowLM step and Mimi decoder sidecars: policy/naming/fit
+        # refusal always; the tiny sidecars of
+        # test/prepare_pocket_coreml_fixture.py with POCKET_COREML_TEST_SHAPES;
+        # parity against ggml and Engine routing on a real bundle with
+        # POCKET_COREML_TEST_BUNDLE (both sidecars exported next to their GGUFs).
+        add_executable(test-pocket-coreml test/pocket/test_coreml.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-coreml PRIVATE src include)
+        target_link_libraries(test-pocket-coreml PRIVATE tts-cpp ggml)
+        if (TTS_CPP_COREML)
+            target_compile_definitions(test-pocket-coreml PRIVATE TTS_CPP_USE_COREML)
+        endif()
+        tts_cpp_apply_ccache(test-pocket-coreml)
+        tts_cpp_register_test(test-pocket-coreml LABEL "unit")
+        tts_cpp_register_test(test-pocket-coreml-shapes
+            EXE test-pocket-coreml LABEL "fixture" ARGS "--shape-fixture")
+        tts_cpp_register_test(test-pocket-coreml-engine
+            EXE test-pocket-coreml LABEL "fixture" ARGS "--engine-fixture")
+        set_tests_properties(test-pocket-coreml-shapes test-pocket-coreml-engine PROPERTIES SKIP_RETURN_CODE 77)
         foreach(_pocket_backend opencl hexagon)
             string(TOUPPER "${_pocket_backend}" _pocket_backend_uc)
             if (TTS_CPP_POCKET_${_pocket_backend_uc}_TESTS)

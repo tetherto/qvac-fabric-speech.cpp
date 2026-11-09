@@ -204,6 +204,133 @@ with llama.cpp's full Pocket TTS model/mmproj files.
 
 The C++ core does not load Python, safetensors, ONNX Runtime, or a second ggml copy.
 
+## Core ML sidecars
+
+On Apple platforms a `TTS_CPP_COREML=ON` build can run the two per-frame
+stages on Core ML, whatever the ggml backend. Both require macOS 15 / iOS 18.
+
+| Sidecar | GGUF → sidecar | Runs | Default placement |
+|---|---|---|---|
+| FlowLM step | `flow-lm.gguf` → `flow-lm-step.mlmodelc` | each generated frame: `input_linear`, the six transformer layers, `out_norm` and the one-step LSD flow, with the KV cache in Core ML state | `cpu_and_gpu`: Core ML cannot place model state on the Neural Engine |
+| Mimi decoder | `mimi.gguf` → `mimi-decoder.mlmodelc` | one Mimi decode frame (1920 samples) per prediction: upsample, transformer, SEANet decoder. The conv histories and the 250-position attention window are explicit inputs and outputs that the engine keeps | `cpu_and_ane` |
+
+Text prefill, voice preparation and the EOS head stay on ggml. The step's
+voice KV rows are copied into its state once per engine, and each chunk's text
+KV rows before its first frame. The two sidecars work independently, so a
+bundle can carry either one.
+
+Export from the bundle's GGUFs (FlowLM F32 or F16), using the Core ML
+toolchain from `engines/parakeet/scripts/requirements-coreml.txt`:
+
+```sh
+python3 -m venv /tmp/coreml-venv
+/tmp/coreml-venv/bin/pip install -r engines/parakeet/scripts/requirements-coreml.txt
+/tmp/coreml-venv/bin/python engines/tts/scripts/export-pocket-coreml.py \
+  --gguf /path/to/pocket-bundle/flow-lm.gguf /path/to/pocket-bundle/mimi.gguf --compile
+```
+
+Each GGUF's architecture selects its sidecar, which is written next to it.
+Like every TTS sidecar, it is named by dropping a quant tag and adding a
+suffix, so `flow-lm-f16.gguf` also maps to `flow-lm-step.mlmodelc`.
+
+The engine loads a sidecar only after these checks pass:
+- every input, output and state shape matches;
+- the schema is supported;
+- the checkpoint hash in the sidecar matches its GGUF's `pocket.source_sha256`;
+- one warm-up prediction succeeds.
+
+Bundles share file names across checkpoints, so a sidecar from another
+checkpoint is rejected rather than run.
+
+Step `--context` (default 1024) fixes how many positions the state holds:
+voice, text and generated frames. A chunk that needs more positions than this
+runs FlowLM on ggml. A chunk needs voice frames, plus tokens, plus the frame
+estimate, plus the EOS tail. For a full default chunk (`max_tokens = 50`) with
+the 126-frame English voice that is 126 + 50 + 234 + a 3–5 frame tail, about
+415 positions. `--context 512` makes each step about 15% faster on an M2 when
+every chunk fits. A step sidecar whose context the voice already fills is not
+loaded.
+
+Policy, resolved once per `Engine`:
+
+| Setting | Effect |
+|---|---|
+| `EngineOptions::coreml_compute_units` / `POCKET_COREML_COMPUTE_UNITS` | Unset keeps each sidecar's default. `all`, `cpu_and_gpu`, `cpu_only` or `cpu_and_ane` applies to both sidecars; with `cpu_and_ane` the step fails to load and FlowLM falls back. An explicit invalid value throws; an invalid inherited value warns and keeps the defaults. |
+| `EngineOptions::coreml_strict` / `POCKET_COREML_STRICT` | A sidecar that cannot load, or fails a prediction, becomes an error instead of falling back to ggml. A chunk too long for the step is rejected before any PCM; without strict mode that chunk runs FlowLM on ggml. Presence of the environment variable means true. |
+| `POCKET_COREML_DISABLE` | Keeps FlowLM and Mimi on ggml. |
+
+Without strict mode, a failing prediction retires that sidecar for the
+engine's lifetime. ggml then catches up by replaying the current chunk:
+- For the step, the frames it generated are prefilled into the ggml cache in
+  one batch.
+- For the decoder, the chunk's earlier latents are decoded again on ggml,
+  with the output discarded, to rebuild Mimi's streaming state.
+
+In strict mode the call fails and both sidecars stay loaded for later calls.
+The step's state is replaced by one holding only the voice rows, since a
+failed frame can leave non-finite values in any row. The decoder's stream
+restarts with the next chunk.
+
+`Engine::flow_lm_on_coreml()` and `Engine::mimi_on_coreml()` report whether
+each sidecar is loaded and not retired. `SynthesisResult::flow_lm_backend` and
+`SynthesisResult::mimi_backend` report where a call's work ran:
+- `"ggml"`;
+- the sidecar label, such as `"coreml-gpu"` or `"coreml-ane"`, when all of it
+  ran there;
+- `"mixed"` when some ran on ggml. For the step that also includes
+  `steps > 1`, whose extra flow steps run on ggml from the sidecar's hidden
+  output.
+
+`pocket-cli` reports both labels for each run. With either sidecar enabled,
+`fit_params` returns `Error` with `coreml-memory-estimate-unavailable`.
+
+Measured on an Apple M2 (macOS 15) with the English 2026-04 bundle, against
+ggml F32:
+
+| Check | Result |
+|---|---|
+| Teacher-forced FlowLM, 48 frames (`test-pocket-coreml --engine-fixture`) | hidden cosine ≥ 0.999997; EOS logit error ≤ 0.012; next latent error ≤ 0.0032 |
+| Mimi decoder, same latents streamed | SNR 46–49 dB vs ggml Mimi |
+| One step, context 1024 / 512 | `cpu_and_gpu` 5.5 / 4.6 ms; `cpu_only` 8.1 / 5.7 ms; ggml advance + flow: Metal ~8–13 ms, CPU ~23 ms |
+| One Mimi frame | `cpu_and_ane` 1.5 ms; `cpu_only` 2.2 ms; `cpu_and_gpu` 5.1 ms; ggml: Metal 6.1 ms (1.3 ms/frame batched by 16), CPU 22–28 ms |
+| 11.04 s utterance, warm runs, default CPU backend | RTF **0.100** with both sidecars, 0.304 with the step only, 0.311 for ggml; with `--threads 4`, 0.083 vs 0.17–0.19 |
+| Same utterance, `--gpu` (Metal) | RTF 0.065–0.073 with both sidecars, 0.073–0.077 with the step only, 0.097 for ggml; first audio 16–23 ms vs 20–26 ms |
+| Whisper base.en transcripts, CPU and Metal | identical to ggml, word for word |
+
+With both sidecars, generation is limited by the step, at about 5.5 ms per
+80 ms frame. On the default CPU backend, the remaining cost is ggml's text
+prefill for each chunk; more `--threads` reduce it.
+
+Tests:
+
+- `test/test_export_pocket_coreml.py` checks the PyTorch rebuilds on random
+  weights.
+  - Step: decoding frame by frame through the stateful step must match a full
+    causal forward, and the RoPE tables must match ggml mode 0.
+  - Decoder: the phase-form upsample and transposed convolutions must match
+    PyTorch's transposed convolutions, and decoding in calls of any frame
+    count, across the attention window, must give the same stream.
+  - Both: names and constants are checked against the runtime, and both are
+    exported to Core ML.
+- `test-pocket-coreml` covers the policy, naming, detection, the fit refusal
+  and option validation.
+- `test-pocket-coreml-shapes` (`POCKET_COREML_TEST_SHAPES`, written by
+  `test/prepare_pocket_coreml_fixture.py`) runs two references:
+  - a tiny real step against its FP32 reference, after copying prefix rows
+    into the state, and again after a NaN row past the prefix (which
+    rewriting the prefix does not clear) is reset away;
+  - a random full-size decoder against its eager stream, in calls of several
+    sizes, and again after a reset that follows a failed frame.
+
+  It also checks that sidecars declaring any other shape, schema or checkpoint
+  hash, or the wrong statefulness, are rejected before prediction. That is 42
+  defective sidecars.
+- `test-pocket-coreml-engine` (`POCKET_COREML_TEST_BUNDLE`, a bundle directory
+  with both exported sidecars) compares both sidecars against ggml and checks
+  the batched ggml replay of a retired step's frames. It also checks the
+  `Engine` labels, stream versus batch, multi-chunk calls,
+  `POCKET_COREML_DISABLE`, `steps > 1`, the strict refusal and the fit refusal.
+
 
 ## Reproduce numerical validation
 
@@ -287,7 +414,9 @@ GGUF tensor payloads are never read and model/graph buffers are never allocated
 or executed during preflight. Backend initialization can allocate its own scratch.
 The estimate includes expanded F32 weights, state, overlapping worker compute,
 host containers, thread stacks, load staging, and native batch PCM buffers.
-It excludes application and SDK/JS copies. This is a memory projection, not a
+It excludes application and SDK/JS copies. An enabled
+[Core ML sidecar](#core-ml-sidecars) makes preflight return `Error`
+with `coreml-memory-estimate-unavailable`. This is a memory projection, not a
 validation of tensor contents, checkpoint encoder capability, or speech quality.
 
 OpenCL fit uses the same selection rules as synthesis. Adreno OpenCL is treated
