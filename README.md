@@ -121,6 +121,7 @@ contracts; see the engine guides before exporting or deploying one.
 | Parakeet | Nemotron 3 Diarization and Sortformer v2.1 whole networks | [Diarizer sidecars](engines/parakeet/docs/backends.md#core-ml-diarizer-sidecars) |
 | Parakeet | MOSS-Transcribe-Diarize audio encoder | [MOSS-Transcribe-Diarize](engines/parakeet/docs/moss-transcribe.md#core-ml-encoder-sidecar) |
 | TTS | Chatterbox Turbo and Multilingual S3Gen encoder, CFM and HiFT (overlapping the next sentence's T3) | [Chatterbox Core ML](engines/tts/docs/chatterbox.md#core-ml-sidecars) |
+| TTS | Pocket TTS FlowLM generation step (KV cache in Core ML state) and Mimi decoder (Neural Engine) | [Pocket TTS Core ML](engines/tts/docs/pocket-tts.md#core-ml-sidecars) |
 | TTS | CosyVoice3 speech LM, flow and HiFT neural stages | [CosyVoice3 Core ML](engines/tts/docs/cosyvoice3.md#core-ml-sidecars) |
 | TTS | Supertonic vocoder, Audio8 codec synthesis | [Supertonic](engines/tts/docs/supertonic.md#core-ml-vocoder-sidecar), [Audio8](engines/tts/docs/audio8.md#core-ml-codec-sidecar) |
 | TTS | LavaSR denoiser (batch prediction) and enhancer neural cores, with explicit model paths and compute policies | [LavaSR Core ML](engines/tts/docs/lavasr.md#core-ml) |
@@ -278,6 +279,10 @@ Parakeet's [test guide](engines/parakeet/docs/testing.md) separates model-free
 unit tests from fixture coverage. Its fixture runner rejects runs with no executed
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane
 uses this gate.
+
+AudioGen's [test guide](engines/audiogen/docs/testing.md) documents independent
+model-free suites and required model-backed CI coverage. The macOS lane stages
+pinned ACE-Step and MiniMax fixtures and fails if generation tests skip.
 
 | Topic | Where |
 |---|---|

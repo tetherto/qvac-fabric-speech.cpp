@@ -22,7 +22,7 @@ void print_usage() {
         "       [--language zh] [--duration-tokens 0]   target length, 12.5 tokens per second\n"
         "       [--max-new-tokens 2048] [--context 4096]\n"
         "       [--stream] [--stream-chunk-frames 25]\n"
-        "       [--seed 1234] [--threads 4] [--gpu] [--backend auto|cpu|hexagon|DEVICE] [--backends-dir dir]\n"
+        "       [--seed 1234] [--threads 4] [--gpu] [--backend auto|cpu|hexagon|xdna|DEVICE] [--backends-dir dir]\n"
         "       [--text-temperature 1.5] [--text-top-p 1.0] [--text-top-k 50]\n"
         "       [--audio-temperature 1.7] [--audio-top-p 0.8] [--audio-top-k 25]\n"
         "       [--audio-repetition-penalty 1.0]\n"

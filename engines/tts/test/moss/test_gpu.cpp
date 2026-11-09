@@ -45,7 +45,9 @@ bool hexagon_arm() {
 }
 
 BackendRequest device_request() {
-    return hexagon_arm() ? BackendRequest{arm.request, false} : BackendRequest{"", true};
+    if (hexagon_arm()) return {arm.request, false};
+    if (arm.request == "xdna") return {"XDNA0", false};
+    return {"", true};
 }
 
 std::vector<ggml_type> precisions() {
@@ -361,11 +363,18 @@ void speech(ggml_type precision) {
 
 int main(int argc, char ** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "usage: %s cuda|vulkan|hexagon|opencl|webgpu\n", argv[0]);
+        std::fprintf(stderr, "usage: %s cuda|vulkan|hexagon|xdna|opencl|webgpu\n", argv[0]);
         return 2;
     }
     try {
         arm = moss_gpu_arm(argv[1]);
+        if (arm.request == "xdna") {
+            tts_cpp::detail::ensure_backends_loaded();
+            delay(GGML_TYPE_F16);
+            delay_many_heads(GGML_TYPE_F16);
+            std::puts("MOSS TTS CPU/XDNA parity: OK");
+            return 0;
+        }
         if (!hexagon_arm()) setenv("TTS_CPP_GPU_BACKEND", arm.request.c_str(), 1);
         tts_cpp::detail::ensure_backends_loaded();
         for (ggml_type type : precisions()) {

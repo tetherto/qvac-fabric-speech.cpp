@@ -276,11 +276,11 @@ def compile_model(package_path, compile_dir):
     return Path(compile_dir) / (Path(package_path).stem + '.mlmodelc')
 
 
-def report_placement(package_path):
+def report_placement(package_path, compute_units=None):
     import coremltools as ct
 
     plan = ct.models.compute_plan.MLComputePlan.load_from_path(
-        str(package_path), compute_units=ct.ComputeUnit.ALL)
+        str(package_path), compute_units=compute_units if compute_units is not None else ct.ComputeUnit.ALL)
     program = plan.model_structure.program
     counts = {}
     for op in program.functions['main'].block.operations:

@@ -9,6 +9,8 @@
 
 #ifdef TTS_CPP_USE_COREML
 #include "supertonic_coreml_vocoder.h"
+#include "supertonic_coreml_encoder.h"
+#include "supertonic_coreml_vector.h"
 #endif
 
 // The per-backend `#include "ggml-{cuda,metal,vulkan,opencl}.h"`
@@ -1936,11 +1938,62 @@ const ggml_tensor * supertonic_first_low_bit_vocoder_weight(
     return nullptr;
 }
 
-// The metadata-only load only checks for the sidecar, so a fit preflight
-// stays a preflight (no MLModel is compiled or loaded).  The sidecar's own
-// resident footprint (the MLModel plus two cached window-sized MLMultiArrays)
-// is deliberately not priced into the fit measure, matching the Audio8
-// sidecar's preflight.
+// Metadata-only loads detect sidecars without loading MLModels. Their model
+// and cached-I/O footprints are not priced into ggml's fit measure, matching
+// the existing Audio8 and Supertonic vocoder sidecar policy.
+static void attach_coreml_vector_sidecar(const std::string & gguf_path,
+                                        supertonic_model & model, bool metadata_only, bool verbose) {
+#ifdef TTS_CPP_USE_COREML
+    if (std::getenv("SUPERTONIC_COREML_DISABLE") || std::getenv("SUPERTONIC_COREML_VECTOR_DISABLE")) return;
+    auto paths = coreml_vector_sidecar_paths(gguf_path);
+    if (paths.empty()) return;
+    if (!coreml_vocoder_low_bit_allowed()) {
+        for (const auto & entry : model.source_tensors) {
+            if (entry.first.compare(0, 17, "vector_estimator:") == 0 && entry.second &&
+                model.low_bit_source_tensors.count(ggml_get_name(entry.second))) {
+                if (verbose) fprintf(stderr, "supertonic: Core ML vector skipped: GGUF weights below 8 bits\n");
+                return;
+            }
+        }
+    }
+    if (metadata_only) { model.vector_on_coreml = true; return; }
+    model.coreml_vector = supertonic_coreml_vector_init(paths, model.hparams.vector_text_attn_heads,
+        model.hparams.cfg_cond_scale, model.hparams.cfg_uncond_scale);
+    model.vector_on_coreml = model.coreml_vector != nullptr;
+    if (verbose || !model.vector_on_coreml) fprintf(stderr, "supertonic: Core ML vector buckets: %s\n",
+        model.vector_on_coreml ? "loaded" : "failed to load; using ggml");
+#else
+    (void) gguf_path; (void) model; (void) metadata_only; (void) verbose;
+#endif
+}
+
+static void attach_coreml_encoder_sidecar(const std::string & gguf_path,
+                                         supertonic_model & model, bool metadata_only, bool verbose) {
+#ifdef TTS_CPP_USE_COREML
+    if (std::getenv("SUPERTONIC_COREML_DISABLE") || std::getenv("SUPERTONIC_COREML_ENCODER_DISABLE")) return;
+    const std::string sidecar = coreml_encoder_sidecar_path(gguf_path);
+    if (!::tts_cpp::detail::coreml_sidecar_exists(sidecar)) return;
+    // Match the vocoder's storage-width policy, before runtime dequantization.
+    if (!coreml_vocoder_low_bit_allowed()) {
+        for (const auto & entry : model.source_tensors) {
+            if (entry.first.compare(0, 13, "text_encoder:") == 0 && entry.second &&
+                model.low_bit_source_tensors.count(ggml_get_name(entry.second))) {
+                if (verbose) fprintf(stderr, "supertonic: Core ML encoder skipped: weights below 8 bits\n");
+                return;
+            }
+        }
+    }
+    if (metadata_only) { model.encoder_on_coreml = true; return; }
+    auto * embedding = require_source_tensor(model, "text_encoder:tts.ttl.text_encoder.text_embedder.char_embedder.weight");
+    model.coreml_encoder = supertonic_coreml_encoder_init(sidecar.c_str(), embedding->ne[1]);
+    model.encoder_on_coreml = model.coreml_encoder != nullptr;
+    if (verbose || !model.encoder_on_coreml) fprintf(stderr, "supertonic: Core ML encoder %s: %s\n",
+        sidecar.c_str(), model.encoder_on_coreml ? "loaded" : "failed to load; using ggml");
+#else
+    (void) gguf_path; (void) model; (void) metadata_only; (void) verbose;
+#endif
+}
+
 static void attach_coreml_vocoder_sidecar(const std::string & gguf_path,
                                           supertonic_model & model,
                                           bool metadata_only,
@@ -2637,6 +2690,8 @@ static bool load_supertonic_gguf_impl(const std::string & path,
 
         bind_vocoder_weights(model);
         attach_coreml_vocoder_sidecar(path, model, /*metadata_only=*/measure != nullptr, verbose);
+        attach_coreml_encoder_sidecar(path, model, /*metadata_only=*/measure != nullptr, verbose);
+        attach_coreml_vector_sidecar(path, model, /*metadata_only=*/measure != nullptr, verbose);
 
         // Audit finding F1 — cache the vector-estimator RoPE θ
         // tensor on the host once at load time.  All four group
@@ -3023,7 +3078,13 @@ bool load_supertonic_gguf_metadata_only(const std::string & path,
 void free_supertonic_model(supertonic_model & model) {
 #ifdef TTS_CPP_USE_COREML
     supertonic_coreml_vocoder_free(model.coreml_vocoder);
+    supertonic_coreml_encoder_free(model.coreml_encoder);
+    supertonic_coreml_vector_free(model.coreml_vector);
 #endif
+    model.coreml_vector = nullptr;
+    model.vector_on_coreml = false;
+    model.coreml_encoder = nullptr;
+    model.encoder_on_coreml = false;
     model.coreml_vocoder = nullptr;
     model.vocoder_on_coreml = false;
     // Drive every per-stage thread_local graph cache populated on this

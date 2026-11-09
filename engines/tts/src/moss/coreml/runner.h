@@ -30,6 +30,21 @@ int moss_coreml_has_state(const struct moss_coreml_model * model);
 
 int moss_coreml_reset_state(struct moss_coreml_model * model);
 
+// Shape of a state buffer of a stateful model; returns the rank, or 0 when the
+// model has no such state or it has more than `max_dims` dimensions.
+int moss_coreml_state_dims(const struct moss_coreml_model * model, const char * name, int64_t * dims, int max_dims);
+
+// Copies `data`, row-major over `count`, into the box of state `name` that
+// starts at `start` (both `rank` long, the state's rank), converting to the
+// state's element type. Returns 0, or nonzero (nothing written) when the model
+// is not stateful, the state is absent or the box leaves its buffer.
+int moss_coreml_write_state(struct moss_coreml_model * model, const char * name, const float * data,
+                            const int64_t * start, const int64_t * count, int rank);
+
+// Copies the model's user-defined metadata value for `key` into `value`.
+// Returns its length, or -1 when the key is absent or does not fit `capacity`.
+int moss_coreml_metadata(const struct moss_coreml_model * model, const char * key, char * value, int capacity);
+
 int moss_coreml_predict(struct moss_coreml_model * model,
                         const char * const * input_names, const float * const * inputs, int n_inputs,
                         const char * const * output_names, float * const * outputs, int n_outputs);

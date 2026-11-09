@@ -28,5 +28,11 @@ struct FitOptions {
 // scratch bound is tied to the reviewed ggml-speech F32 paths; see the guide.
 // SDK/JS copies and application buffers are outside
 // this native engine projection. Never throws; see tts-cpp/fit.h for status codes.
+// Core ML: when a step sidecar (flow-lm-step.mlmodelc) or Mimi decoder
+// sidecar (mimi-decoder.mlmodelc) sits next to its GGUF in a TTS_CPP_COREML
+// build and POCKET_COREML_DISABLE is unset, the result is Error with reason
+// "coreml-memory-estimate-unavailable": resident Core ML models and their
+// buffers cannot be projected by the native fitter. Detection is
+// presence-only, as for the Engine's load attempt.
 TTS_CPP_API FitResult fit_params(const FitOptions & options);
 }

@@ -26,7 +26,7 @@ option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add
 # does not expose the standalone filename-prefix option; the speech branch or
 # `ggml-speech` vcpkg port already emits the integrated filenames.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
-option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
+option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, Pocket FlowLM/Mimi, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
 
 # OBJC + OBJCXX up front, before any add_subdirectory(ggml); see engines/parakeet.
 if (TTS_CPP_COREML)
@@ -204,7 +204,7 @@ endif()
 # variants register only for backends that engine's production allowlist
 # accepts, so an off-allowlist build neither runs unvalidated backends nor
 # silently skips validated ones.
-foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon webgpu)
+foreach(_tts_ggml_backend metal vulkan cuda opencl hexagon webgpu xdna)
     string(TOUPPER "${_tts_ggml_backend}" _tts_ggml_backend_uc)
     set(TTS_CPP_GGML_${_tts_ggml_backend_uc} FALSE)
     if (GGML_${_tts_ggml_backend_uc} OR
@@ -380,6 +380,7 @@ set(TTS_CPP_LIB_SOURCES
     src/pocket/frontend.cpp
     src/pocket/engine.cpp
     src/pocket/fit.cpp
+    src/pocket/coreml.cpp
     src/pocket/reference_audio.cpp
     src/moss/backend_request.cpp
     src/moss/gguf_rows.cpp
@@ -482,6 +483,8 @@ if (TTS_CPP_BUILD_LIBRARY)
         add_library(tts-cpp.coreml OBJECT
             src/audio8/coreml/codec-synth.mm
             src/supertonic_coreml_vocoder.mm
+            src/supertonic_coreml_encoder.mm
+            src/supertonic_coreml_vector.mm
             src/moss/coreml/runner.mm
             src/parler/decoder_coreml.mm)
         tts_cpp_apply_ccache(tts-cpp.coreml)
@@ -498,7 +501,7 @@ if (TTS_CPP_BUILD_LIBRARY)
             ${TTS_CPP_FOUNDATION_FRAMEWORK}
             ${TTS_CPP_COREML_FRAMEWORK}
         )
-        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic vocoder, Chatterbox S3Gen stages, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
+        message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
@@ -1315,6 +1318,16 @@ if (TTS_CPP_BUILD_TESTS)
         set_property(TEST test-supertonic-coreml-exporter PROPERTY ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         set_property(TEST test-supertonic-coreml-exporter PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: numpy")
 
+        add_test(NAME test-supertonic-encoder-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_encoder_coreml.py")
+        set_tests_properties(test-supertonic-encoder-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_RETURN_CODE 77)
+
+        add_test(NAME test-supertonic-vector-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_supertonic_vector_coreml.py")
+        set_tests_properties(test-supertonic-vector-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_RETURN_CODE 77)
+
         add_test(NAME test-cosyvoice-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_cosyvoice_coreml.py")
         set_tests_properties(test-cosyvoice-coreml-exporter PROPERTIES
@@ -1323,6 +1336,11 @@ if (TTS_CPP_BUILD_TESTS)
         add_test(NAME test-chatterbox-coreml-exporter
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_chatterbox_coreml.py")
         set_tests_properties(test-chatterbox-coreml-exporter PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
+
+        add_test(NAME test-pocket-coreml-exporter
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_pocket_coreml.py")
+        set_tests_properties(test-pocket-coreml-exporter PROPERTIES
             LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" SKIP_REGULAR_EXPRESSION "SKIP: ")
 
         foreach(_moss_exporter IN ITEMS speech_tokenizer sfx codec)
@@ -1626,6 +1644,9 @@ if (TTS_CPP_BUILD_TESTS)
     endif()
     if (TTS_CPP_GGML_HEXAGON)
         list(APPEND _tcb_moss_arms hexagon)
+    endif()
+    if (TTS_CPP_GGML_XDNA)
+        list(APPEND _tcb_moss_arms xdna)
     endif()
     if (_tcb_moss_arms)
         add_executable(test-moss-gpu test/moss/test_gpu.cpp)
@@ -1967,6 +1988,24 @@ if (TTS_CPP_BUILD_TESTS)
             ARGS "${TTS_CPP_POCKET_MODEL_DIR}" "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf"
             REQUIRES "${TTS_CPP_POCKET_MODEL_DIR}/flow-lm.gguf" "${TTS_CPP_POCKET_MODEL_DIR}/mimi.gguf"
                      "${TTS_CPP_POCKET_MODEL_DIR}/frontend.json" "${TTS_CPP_POCKET_MODEL_DIR}/voice.gguf")
+        # Core ML FlowLM step and Mimi decoder sidecars: policy/naming/fit
+        # refusal always; the tiny sidecars of
+        # test/prepare_pocket_coreml_fixture.py with POCKET_COREML_TEST_SHAPES;
+        # parity against ggml and Engine routing on a real bundle with
+        # POCKET_COREML_TEST_BUNDLE (both sidecars exported next to their GGUFs).
+        add_executable(test-pocket-coreml test/pocket/test_coreml.cpp src/pocket/frontend.cpp)
+        target_include_directories(test-pocket-coreml PRIVATE src include)
+        target_link_libraries(test-pocket-coreml PRIVATE tts-cpp ggml)
+        if (TTS_CPP_COREML)
+            target_compile_definitions(test-pocket-coreml PRIVATE TTS_CPP_USE_COREML)
+        endif()
+        tts_cpp_apply_ccache(test-pocket-coreml)
+        tts_cpp_register_test(test-pocket-coreml LABEL "unit")
+        tts_cpp_register_test(test-pocket-coreml-shapes
+            EXE test-pocket-coreml LABEL "fixture" ARGS "--shape-fixture")
+        tts_cpp_register_test(test-pocket-coreml-engine
+            EXE test-pocket-coreml LABEL "fixture" ARGS "--engine-fixture")
+        set_tests_properties(test-pocket-coreml-shapes test-pocket-coreml-engine PROPERTIES SKIP_RETURN_CODE 77)
         foreach(_pocket_backend opencl hexagon)
             string(TOUPPER "${_pocket_backend}" _pocket_backend_uc)
             if (TTS_CPP_POCKET_${_pocket_backend_uc}_TESTS)
@@ -2447,6 +2486,26 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-coreml-parity)
     tts_cpp_register_test(test-supertonic-coreml-parity LABEL "fixture")
     set_property(TEST test-supertonic-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-supertonic-coreml-encoder test/test_supertonic_coreml_encoder.cpp)
+    target_link_libraries(test-supertonic-coreml-encoder PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-encoder PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-coreml-encoder PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-encoder)
+    tts_cpp_register_test(test-supertonic-coreml-encoder LABEL "fixture")
+    set_property(TEST test-supertonic-coreml-encoder PROPERTY SKIP_RETURN_CODE 77)
+
+    add_executable(test-supertonic-coreml-vector test/test_supertonic_coreml_vector.cpp)
+    target_link_libraries(test-supertonic-coreml-vector PRIVATE tts-cpp ggml)
+    target_include_directories(test-supertonic-coreml-vector PRIVATE include src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-supertonic-coreml-vector PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-supertonic-coreml-vector)
+    tts_cpp_register_test(test-supertonic-coreml-vector LABEL "fixture")
+    set_property(TEST test-supertonic-coreml-vector PROPERTY SKIP_RETURN_CODE 77)
 
     # Self-skips (77) without TTS_CPP_COREML or a staged
     # AUDIO8_COREML_TEST_MODELS_DIR; CI runs the binary directly so a skip fails.

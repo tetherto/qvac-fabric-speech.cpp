@@ -2,6 +2,10 @@
 
 #include "ggml-alloc.h"
 
+#ifdef TTS_CPP_USE_COREML
+#include "supertonic_coreml_encoder.h"
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1575,7 +1579,25 @@ bool supertonic_text_encoder_forward_ggml(const supertonic_model & model,
                                           int text_len,
                                           const float * style_ttl,
                                           std::vector<float> & text_emb_out,
-                                          std::string * error) {
+                                          std::string * error,
+                                          std::string * backend_used) {
+    if (backend_used) *backend_used = "ggml";
+#ifdef TTS_CPP_USE_COREML
+    if (model.coreml_encoder) {
+        const auto start = std::chrono::steady_clock::now();
+        if (supertonic_coreml_encoder_encode(model.coreml_encoder, text_ids, text_len, style_ttl, text_emb_out)) {
+            if (backend_used) *backend_used = supertonic_coreml_encoder_backend_label(model.coreml_encoder);
+            if (error) error->clear();
+            if (supertonic_profile_csv_enabled()) supertonic_profile_csv_record("text", "coreml", -1,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            return true;
+        }
+    }
+    if (std::getenv("SUPERTONIC_COREML_ENCODER_STRICT")) {
+        if (error) *error = "Core ML text encoder unavailable, input exceeds capacity, or prediction failed";
+        return false;
+    }
+#endif
     if (use_text_encoder_one_graph(model)) {
         return supertonic_text_encoder_forward_one_graph_ggml(model, text_ids, text_len, style_ttl, text_emb_out, error);
     }

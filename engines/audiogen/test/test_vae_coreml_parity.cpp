@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "parity_checks.h"
 
 namespace {
 constexpr int SKIP_EXIT_CODE = 77;
@@ -148,7 +149,7 @@ int main() {
     const double cos = cosine(pcm_ggml, pcm_coreml);
     std::fprintf(stderr, "[coreml-parity] T_latent=%d samples=%zu cosine=%.7f (min %.4f)\n",
                  T_LATENT, pcm_ggml.size(), cos, MIN_COSINE);
-    if (cos < MIN_COSINE) return 1;
+    if (!audiogen_test::cosine_passes(cos, MIN_COSINE)) return 1;
 
     return check_coreml_cancellation(gguf, latent) ? 0 : 1;
 }

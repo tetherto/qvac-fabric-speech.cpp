@@ -225,8 +225,11 @@ synthesis (default 10 for Multilingual's standard CFM).  N=7 saves ~22%
 of S3Gen wall time at log-mel cosine 0.995 vs the N=10 reference and is
 the recommended quality knee on M3 Ultra (see the [Chatterbox port archive §3.21](history/chatterbox-port.md));
 N=6 is too aggressive (cosine 0.990 right at the threshold, PCM cosine
-drops to 0.88).  Streaming chunks ignore this flag and use
-`--stream-cfm-steps` instead.
+drops to 0.88). Streaming chunks use a positive `--stream-cfm-steps` value
+when supplied, otherwise they fall back to `--cfm-steps`. With neither set,
+the model default applies: 2 for Turbo meanflow, or the model's timestep
+count (10 for Multilingual standard CFM). Multilingual streaming floors
+lower step counts to the model's timestep count.
 
 `--output-sample-rate HZ` selects the output frequency. The
 pipeline natively emits 24 kHz (Chatterbox) / the model's metadata rate
@@ -397,7 +400,7 @@ Relevant flags:
 | `--input-by-line`             | One Enter-terminated line = one request.  `. ! ?` inside a line stay part of the same utterance (no mid-line restart). |
 | `--input-eof-marker STR`      | Exit cleanly after seeing `STR` anywhere in the input (useful for scripted pipelines).                                |
 | `--stream-chunk-tokens N`     | Speech-token chunk granularity for the S3Gen streaming loop.  25 is a good default.                                   |
-| `--stream-cfm-steps N`        | CFM Euler steps per chunk.  2 is the minimum the model was designed for; 4–5 gives crisper word endings on cloned voices. |
+| `--stream-cfm-steps N`        | CFM Euler steps per chunk; a positive value overrides `--cfm-steps`. Turbo meanflow defaults to 2 and accepts 1 to reduce CFM cost. Multilingual standard CFM floors streaming counts to the model's timestep count (10). |
 | `--stream-first-chunk-tokens N` | Override the first chunk's size to minimise first-audio-out latency.                                                |
 
 The process keeps the T3 + S3Gen models warm across requests, so
@@ -420,7 +423,10 @@ inference cost (well under real-time on any GPU backend).
   `parler-fit-params`, `cosyvoice-cli`, `cosyvoice-bench`,
   `cosyvoice-fit-params`, and `moss-cli` in every mode) — run on
   one device: `cpu`, `opencl`, `hexagon` (the Snapdragon HTP0 NPU) or an
-  exact ggml device name; MOSS is validated on `cpu` and `hexagon` only. It overrides `--n-gpu-layers` (`--gpu` on
+  exact ggml device name. MOSS has CPU/Metal and Hexagon validation, plus
+  scoped CUDA/Vulkan parity and checkpoint smoke coverage; see
+  [MOSS GPU validation](moss.md#gpu-validation-cuda-and-vulkan) for its limits.
+  It overrides `--n-gpu-layers` (`--gpu` on
   `moss-cli`, except that in `s2s` mode `--gpu` still places the S3Gen decoder
   on the automatic GPU) and fails instead of falling back when the device is
   missing; the automatic walk never picks Hexagon.
