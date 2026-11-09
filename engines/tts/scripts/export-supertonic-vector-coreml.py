@@ -389,7 +389,20 @@ NAMES = (
 FIELD_NAMES = NAMES[:-1]
 
 
-def main():
+def palettize_field(model, bits):
+    """Compress projection/convolution weights; keep normalization and other constants."""
+    import coremltools.optimize.coreml as cto
+
+    if bits != 8:
+        raise ValueError("only 8-bit palettization is supported")
+    config = cto.OpPalettizerConfig(mode="kmeans", nbits=bits, weight_threshold=2048)
+    return cto.palettize_weights(
+        model,
+        cto.OptimizationConfig(op_type_configs={"conv": config, "linear": config}),
+    )
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--gguf", required=True)
     p.add_argument(
@@ -400,15 +413,37 @@ def main():
     p.add_argument("--parity-dir", type=Path)
     p.add_argument("--no-export", action="store_true")
     p.add_argument(
+        "--layout",
+        choices=["3d", "4d"],
+        default="4d",
+        help="internal vector-field layout (default: 4d channel-first convolutions)",
+    )
+    p.add_argument(
+        "--palettize",
+        type=int,
+        choices=[0, 8],
+        default=0,
+        help="optional 8-bit weight LUT compression (default: 0, uncompressed)",
+    )
+    p.add_argument(
         "--precision",
         choices=["fp16", "fp32"],
         default="fp16",
         help="FP16 for ANE inference (default); FP32 for numerical diagnostics",
     )
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if not 1 <= args.text_capacity <= 4096 or any(b < 1 for b in args.buckets):
         p.error("text capacity must be 1..4096 and latent capacities positive")
+    return args
+
+
+def main():
+    args = parse_args()
     model, tensors, theta = load_vector(args.gguf)
+    if args.layout == "4d":
+        from supertonic_coreml_vector_4d import VectorEstimator4D
+
+        model = VectorEstimator4D(model).eval()
     if args.parity_dir:
         r = args.parity_dir
         latent = np.load(r / "noise.npy")
@@ -475,9 +510,13 @@ def main():
             ],
             outputs=[ct.TensorType(name="velocity", dtype=np.float32)],
         )
+        if args.palettize:
+            exported = palettize_field(exported, args.palettize)
         exported.user_defined_metadata.update(
             {
                 "supertonic.vector_protocol": "2",
+                "supertonic.vector_layout": args.layout,
+                "supertonic.vector_lut_bits": str(args.palettize),
                 "supertonic.vector_heads": str(model.groups[0].text_attn.heads),
                 "supertonic.cfg_cond_scale": str(model.cond_scale),
                 "supertonic.cfg_uncond_scale": str(model.uncond_scale),

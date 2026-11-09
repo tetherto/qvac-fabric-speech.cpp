@@ -92,6 +92,14 @@ def random_tensors(heads):
 
 
 class VectorTests(unittest.TestCase):
+    def test_export_defaults_and_optional_palettization(self):
+        defaults = ve.parse_args(["--gguf", "supertonic3.gguf"])
+        self.assertEqual(
+            (defaults.layout, defaults.precision, defaults.palettize), ("4d", "fp16", 0)
+        )
+        compressed = ve.parse_args(["--gguf", "supertonic3.gguf", "--palettize", "8"])
+        self.assertEqual((compressed.layout, compressed.palettize), ("4d", 8))
+
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
@@ -100,6 +108,102 @@ class VectorTests(unittest.TestCase):
         cls.text = rng.standard_normal((1, 256, 7)).astype(np.float32)
         cls.style = rng.standard_normal((1, 50, 256)).astype(np.float32)
         cls.theta = np.linspace(1, 1000, 32, dtype=np.float32)
+
+    def test_4d_layout_matches_3d_with_padding_and_cfg(self):
+        from supertonic_coreml_vector_4d import VectorEstimator4D
+
+        for heads, cs, us in ((4, 1, 0), (8, 4, 3)):
+            tensors = random_tensors(heads)
+            model = ve.VectorEstimator(tensors, heads, cs, us).eval()
+            candidate = VectorEstimator4D(model).eval()
+            for length, text_length in ((1, 1), (2, 3), (9, 7)):
+                with self.subTest(heads=heads, length=length), torch.no_grad():
+                    inp = ve.inputs_for(
+                        tensors,
+                        self.theta,
+                        self.latent[..., :length],
+                        self.text[..., :text_length],
+                        self.style,
+                        2,
+                        5,
+                        16,
+                        16,
+                    )
+                    torch.testing.assert_close(
+                        candidate.velocity(*inp[:-1]),
+                        model.velocity(*inp[:-1]),
+                        atol=6e-6,
+                        rtol=5e-5,
+                    )
+
+    def test_4d_trace_and_full_trajectory_match_3d(self):
+        from supertonic_coreml_vector_4d import VectorEstimator4D
+
+        tensors = random_tensors(8)
+        model = ve.VectorEstimator(tensors, 8, 4, 3).eval()
+        field = ve.VelocityField(VectorEstimator4D(model)).eval()
+        initial = ve.inputs_for(
+            tensors, self.theta, self.latent, self.text, self.style, 0, 5, 16, 16
+        )
+        with torch.no_grad():
+            traced = torch.jit.trace(field, initial[:-1])
+            for steps in (5, 8):
+                want, got = initial[0], initial[0]
+                for step in range(steps):
+                    inp = ve.inputs_for(
+                        tensors,
+                        self.theta,
+                        self.latent,
+                        self.text * 0.7,
+                        self.style * 0.5,
+                        step,
+                        steps,
+                        16,
+                        16,
+                    )
+                    want = model(want, *inp[1:])
+                    velocity = traced(got, *inp[1:-1])
+                    got = got + (4 * velocity[:1] - 3 * velocity[1:]) * inp[3] / steps
+                torch.testing.assert_close(got, want, atol=1e-5, rtol=8e-5)
+
+    def test_palettization_compresses_weights_but_keeps_conditioning(self):
+        try:
+            import coremltools as ct
+            from sklearn.cluster import KMeans  # noqa: F401
+        except ImportError:
+            self.skipTest(
+                "coremltools and scikit-learn required for palettization check"
+            )
+
+        class Probe(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = torch.nn.Conv2d(64, 64, 1)
+                self.register_buffer("conditioning", torch.randn(1, 64, 1, 64))
+
+            def forward(self, x):
+                return self.conv(x) + self.conditioning
+
+        sample = torch.randn(1, 64, 1, 64)
+        model = ct.convert(
+            torch.jit.trace(Probe().eval(), sample),
+            inputs=[ct.TensorType(shape=sample.shape)],
+            convert_to="mlprogram",
+            minimum_deployment_target=ct.target.macOS14,
+            skip_model_load=True,
+        )
+        compressed = ve.palettize_field(model, 8)
+        operations = compressed._mil_program.functions["main"].operations
+        conv = next(op for op in operations if op.op_type == "conv")
+        self.assertEqual(conv.weight.op.op_type, "constexpr_lut_to_dense")
+        self.assertEqual(conv.bias.op.op_type, "const")
+        addition = next(op for op in operations if op.op_type == "add")
+        self.assertTrue(
+            any(
+                v.op.op_type == "const" and v.shape == (1, 64, 1, 64)
+                for v in (addition.x, addition.y)
+            )
+        )
 
     def test_padded_buckets_equal_unpadded_for_v2_and_v3(self):
         for heads, cs, us in ((4, 1, 0), (8, 4, 3)):

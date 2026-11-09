@@ -828,7 +828,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: supertonic3-vector-fixture
-          key: supertonic3-vector-fp16-fp32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-vector-coreml.py', 'engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/export-supertonic-encoder-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_supertonic_coreml_vector.cpp', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+          key: supertonic3-vector-fp16-fp32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engines/tts/scripts/export-supertonic-vector-coreml.py', 'engines/tts/scripts/supertonic_coreml_vector_4d.py', 'engines/tts/test/test_export_supertonic_vector_coreml.py', 'engines/tts/scripts/export-supertonic-coreml.py', 'engines/tts/scripts/export-supertonic-encoder-coreml.py', 'engines/tts/scripts/supertonic_coreml_gguf.py', 'engines/tts/scripts/convert-supertonic2-to-gguf.py', 'engines/tts/test/test_supertonic_coreml_vector.cpp', 'engines/parakeet/scripts/requirements-coreml.txt') }}
 
       - name: Build Core ML Supertonic 3 vector fixture
         if: runner.os == 'macOS' && steps.supertonic3-vector-cache.outputs.cache-hit != 'true'
@@ -840,14 +840,14 @@ jobs:
             .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
           fi
           .venv-coreml/bin/python -m pip install \
-            -c engines/parakeet/scripts/requirements-coreml.txt "onnx==1.17.0" huggingface_hub
+            -c engines/parakeet/scripts/requirements-coreml.txt "onnx==1.17.0" "scikit-learn==1.5.1" "scipy==1.14.1" huggingface_hub
           .venv-coreml/bin/python engines/tts/test/test_export_supertonic_vector_coreml.py
           .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
             --arch supertonic3 --repo-id supertone-oss-archive/supertonic-3 --ftype f16 \
             --out supertonic3-vector-fixture/supertonic3-f16.gguf
           .venv-coreml/bin/python engines/tts/scripts/export-supertonic-vector-coreml.py \
             --gguf supertonic3-vector-fixture/supertonic3-f16.gguf \
-            --precision fp32 --buckets 128 --compile-dir supertonic3-vector-fixture
+            --precision fp32 --layout 3d --buckets 128 --compile-dir supertonic3-vector-fixture
           rm -rf supertonic3-vector-fixture/supertonic3-vector-L128.mlpackage
           mkdir -p supertonic3-vector-fixture/default-fp16
           ln -s ../supertonic3-f16.gguf supertonic3-vector-fixture/default-fp16/supertonic3-f16.gguf

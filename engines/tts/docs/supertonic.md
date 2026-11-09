@@ -275,6 +275,47 @@ end; `test-supertonic-coreml-exporter` unit-tests the PyTorch rebuild
 (causality, unpack layout, squeezed pointwise re-expansion, receptive field,
 stem rule) without a checkpoint.
 
+## Core ML vector export defaults
+
+With `TTS_CPP_COREML=ON`, the engine can load Supertonic vector-estimator
+sidecars alongside the vocoder. The vector exporter defaults to **4D,
+channel-first layout, FP16 computation and uncompressed weights**. It uses
+1×1 convolutions for projections and requests CPU + ANE. Guidance and Euler
+integration remain FP32 on the host. `--layout 3d` retains the previous layout.
+
+Use the Python 3.11 Core ML conversion environment to export from an F32/F16
+GGUF:
+
+```bash
+python engines/tts/scripts/export-supertonic-vector-coreml.py \
+  --gguf models/supertonic3.gguf --buckets 64 128 --compile-dir models
+```
+
+Eight-bit weight palettization is optional and selected when building the
+Core ML model. The same Core ML-enabled native binary supports either model;
+no additional CMake option is needed. Install the optional conversion dependencies
+and add `--palettize 8`:
+
+```bash
+python -m pip install "scikit-learn==1.5.1" "scipy==1.14.1"
+python engines/tts/scripts/export-supertonic-vector-coreml.py \
+  --gguf models/supertonic3.gguf --buckets 64 128 --compile-dir models \
+  --palettize 8
+```
+
+Palettization uses per-tensor k-means LUTs for convolution/linear constants
+of at least 2,048 values. Normalization and other constants remain uncompressed;
+computation remains FP16. Compression changes the weights and numerical outputs.
+Omitting the flag, or using `--palettize 0`, retains uncompressed weights.
+
+Both variants export the canonical `<basename-minus-quant>-vector-L64.mlmodelc`
+and `-vector-L128.mlmodelc` names that the engine discovers automatically.
+Use separate model directories when retaining alternative layouts or compression
+variants, since exports share filenames. Larger 256/512-frame buckets are also
+supported; text capacity defaults to 128. Over-capacity requests and unavailable
+sidecars retain ggml fallback. The external field interface and denoising step
+count are unchanged by layout or palettization.
+
 ## Core ML vs ggml Metal
 
 Measured with `supertonic-bench` (voice `F1`, 5 steps, speed `1.05`, 4
