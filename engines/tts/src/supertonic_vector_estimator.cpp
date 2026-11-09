@@ -2,6 +2,10 @@
 
 #include "ggml-alloc.h"
 
+#ifdef TTS_CPP_USE_COREML
+#include "supertonic_coreml_vector.h"
+#endif
+
 #if defined(TTS_CPP_USE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
 #elif defined(TTS_CPP_USE_CBLAS)
@@ -5733,6 +5737,32 @@ bool supertonic_vector_loop_one_graph_ggml(const supertonic_model & model,
 // loop on CPU.  Gate the unrolled path off with
 // SUPERTONIC_DISABLE_LOOP_GRAPH=1 to A/B against the per-step path on
 // the same backend.
+#ifdef TTS_CPP_USE_COREML
+static bool try_coreml_vector(const supertonic_model & model, const float * latent, int length,
+        const float * text, int text_length, const float * style, const float * mask,
+        int begin, int total, int count, std::vector<float> & output, std::string * backend_used) {
+    if (!model.coreml_vector || model.vector_rope_theta.size() < 32 ||
+        begin < 0 || total <= 0 || count <= 0 || begin > total - count) return false;
+    try {
+        std::vector<float> time;
+        time.reserve((size_t) count * 64);
+        for (int i = 0; i < count; ++i) {
+            auto embedding = cached_time_embedding(model, begin + i, total);
+            time.insert(time.end(), embedding.begin(), embedding.end());
+        }
+        auto start = std::chrono::steady_clock::now();
+        if (!supertonic_coreml_vector_run(model.coreml_vector, latent, length, text, text_length,
+                style, mask, time.data(), model.vector_rope_theta.data(), total, count, output)) return false;
+        if (backend_used) *backend_used = supertonic_coreml_vector_backend_label(model.coreml_vector);
+        if (supertonic_profile_csv_enabled()) supertonic_profile_csv_record("vector", "coreml", count == 1 ? begin : -1,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+#endif
+
 bool supertonic_vector_loop_ggml(const supertonic_model & model,
                                   const float * initial_noisy_latent,
                                   int latent_len,
@@ -5742,7 +5772,20 @@ bool supertonic_vector_loop_ggml(const supertonic_model & model,
                                   const float * latent_mask,
                                   int total_steps,
                                   std::vector<float> & final_latent_out,
-                                  std::string * error) {
+                                  std::string * error,
+                                  std::string * backend_used) {
+    if (backend_used) *backend_used = "ggml";
+#ifdef TTS_CPP_USE_COREML
+    if (try_coreml_vector(model, initial_noisy_latent, latent_len, text_emb, text_len,
+            style_ttl, latent_mask, 0, total_steps, total_steps, final_latent_out, backend_used)) {
+        if (error) error->clear();
+        return true;
+    }
+    if (std::getenv("SUPERTONIC_COREML_VECTOR_STRICT")) {
+        if (error) *error = "Core ML vector loop unavailable, unsupported shape/mask, or prediction failed";
+        return false;
+    }
+#endif
     const bool disable_loop =
         std::getenv("SUPERTONIC_DISABLE_LOOP_GRAPH") != nullptr;
     if (!disable_loop && !model_prefers_cpu_kernels(model)) {
@@ -5783,7 +5826,20 @@ bool supertonic_vector_step_ggml(const supertonic_model & model,
                                  int current_step,
                                  int total_steps,
                                  std::vector<float> & next_latent_out,
-                                 std::string * error) {
+                                 std::string * error,
+                                 std::string * backend_used) {
+    if (backend_used) *backend_used = "ggml";
+#ifdef TTS_CPP_USE_COREML
+    if (try_coreml_vector(model, noisy_latent, latent_len, text_emb, text_len,
+            style_ttl, latent_mask, current_step, total_steps, 1, next_latent_out, backend_used)) {
+        if (error) error->clear();
+        return true;
+    }
+    if (std::getenv("SUPERTONIC_COREML_VECTOR_STRICT")) {
+        if (error) *error = "Core ML vector step unavailable, unsupported shape/mask, or prediction failed";
+        return false;
+    }
+#endif
     supertonic_op_dispatch_scope dispatch(model);
     // Metal / CUDA / Vulkan / OpenCL: use the consolidated one-graph path
     // (one ggml_backend_graph_compute call per CFM step instead of ~21).
