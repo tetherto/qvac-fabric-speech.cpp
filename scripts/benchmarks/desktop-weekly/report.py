@@ -14,6 +14,7 @@ import json
 import sys
 
 STATUS_OK = "ok"
+CELL_NOT_EXPECTED = "n/a"
 MS_PER_SECOND = 1000.0
 MIB_PER_GIB = 1024.0
 BYTES_PER_MIB = 1024.0 * 1024.0
@@ -164,6 +165,8 @@ def backend_section(backend, rows):
 
 
 def speed_cell(row):
+    if row is None:
+        return CELL_NOT_EXPECTED
     return fmt_speed(row["speed_x"]) if row["status"] == STATUS_OK else row["status"]
 
 
@@ -173,7 +176,7 @@ def speed_section(summary):
     rows = []
     for family in summary["families"]:
         first = next(row for row in summary["results"] if row["family"] == family)
-        rows.append([first["model_label"], first["weights"]] + [speed_cell(by_key[(backend, family)]) for backend in backends])
+        rows.append([first["model_label"], first["weights"]] + [speed_cell(by_key.get((backend, family))) for backend in backends])
     return ["## Speed across backends", ""] + table(["model", "weights"] + backends, rows)
 
 

@@ -219,6 +219,7 @@ check_machine_quirks() {
   [[ "$(perl "$HERE/nsdate")" =~ ^[0-9]{19}$ ]] || fail "nsdate default is not seconds plus nanoseconds"
   mkdir -p "$TMP/evict" && printf 'data' > "$TMP/evict/a.bin"
   [[ "$(python3 "$HERE/prepare-derived.py" evict "$TMP/evict")" =~ ^advised\ [01]\ files$ ]] || fail "evict subcommand"
+  [ "$(page_cache_trees)" = "$MODELS_DIR/store $BUILDS_DIR $SRC_DIR $BENCH_HOME/deps" ] || fail "page cache eviction misses the build, source or dependency trees: $(page_cache_trees)"
   mkdir -p "$ENGINE_SRC/scripts/benchmarks"
   echo 'now=$(/bin/date +%s%N)' > "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
   install_nanosecond_shim

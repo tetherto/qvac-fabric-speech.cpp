@@ -449,8 +449,10 @@ discard_cell() {
   rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv"
 }
 
-evict_model_cache() {
-  if [ "$EVICT_PAGE_CACHE" = 1 ]; then python3 "$TOOLS_DIR/prepare-derived.py" evict "$MODELS_DIR/store" > /dev/null; fi
+page_cache_trees() { echo "$MODELS_DIR/store" "$BUILDS_DIR" "$SRC_DIR" "$BENCH_HOME/deps"; }
+
+evict_page_cache() {
+  if [ "$EVICT_PAGE_CACHE" = 1 ]; then python3 "$TOOLS_DIR/prepare-derived.py" evict $(page_cache_trees) > /dev/null; fi
 }
 
 run_family() {
@@ -458,7 +460,7 @@ run_family() {
   signature="$(cell_signature "$family" "$backend")"
   if cell_is_reusable "$out" "$signature"; then log "skip $family on $backend (result present with the same inputs)"; return 0; fi
   if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
-  evict_model_cache
+  evict_page_cache
   log "run $family on $backend"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1
