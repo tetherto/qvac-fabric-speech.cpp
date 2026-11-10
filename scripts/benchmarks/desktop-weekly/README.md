@@ -138,7 +138,7 @@ registry-client/       the npm registry client, private to this account
 venv/                  python venv with gguf and numpy for the requantized cut, private to this account
 models/store/          one copy of every model file, with .sha256 and .source sidecars
 models/families/<f>/   symlinks the driver reads as --models-root
-runs/<date>/           weekly.log, machine.json, pins.json, results/<backend>/<family>.{json,log,gpu.csv},
+runs/<date>/           weekly.log, machine.json, pins.json, results/<backend>/<family>.{json,log,gpu.csv,load.json},
                        summary.json, report.md, narrative.md, mail-body.md, DONE or FAILED
 ```
 
@@ -225,14 +225,24 @@ report still goes out.
 
 - **Pins** names the engine and ggml commits, the CUDA architecture, the registry client, the TTS scorer pin and
   every model file with its size, sha256 and origin (registry key, HuggingFace URL, repo fixture or derived cut).
-- **Results on &lt;backend&gt;** has one row per family: status, wall median with its min and max, speed (seconds of
-  audio per second of wall clock), peak RSS, GPU memory rise and peak, quality, the backend the driver observed in
-  the logs, and the iteration count.
+- **Results on &lt;backend&gt;** has one row per family: status (`ok (under load)` for a cell that started on a busy
+  machine, see below), wall median with its min and max, speed (seconds of audio per second of wall clock), peak RSS,
+  GPU memory rise and peak, quality, the backend the driver observed in the logs, and the iteration count.
 - **Speed across backends** is the same matrix transposed for a quick look.
 - **Changes** compares every ok cell with the previous finished run: wall median and peak RSS moves over 5%, and
   whether the engine, ggml or model pins changed in between. A slower cell with unchanged pins usually means
-  another user loaded the machine; a changed pin points at a commit or a model cut.
-- **Problems** lists build failures, timeouts and every non-ok cell with the driver's note.
+  another user loaded the machine, which the under-load flag confirms when that load was there as the cell started;
+  a changed pin points at a commit or a model cut.
+- **Problems** lists build failures, timeouts, every non-ok cell with the driver's note, and every cell measured
+  under load with its busy share.
+- **Under load** marks a cell that started while other work kept the machine busy. Just before each cell the driver
+  measures, over one second (`HOST_LOAD_WINDOW_SECONDS` in `lib.sh`), the share of the CPUs that were busy (from
+  `/proc/stat` on Linux, from `top` on macOS) and the one-minute load average, and stores both in
+  `results/<backend>/<family>.load.json`. Nothing of the bench runs during that second, so the share is other work
+  on the machine. At 10% or more (`CONTENDED_BUSY_PERCENT` in `summarize.py`) the cell's status reads
+  `ok (under load)`, Problems lists it with the share, and the machine's dashboard and the hub's task pages mark it.
+  The measurement stays in the results, but its time can be slower than the machine's own. The sample is taken once,
+  so load that begins during a long cell is not caught. A resumed run keeps the sample of every cell it reuses.
 
 ## Adding or changing a model
 

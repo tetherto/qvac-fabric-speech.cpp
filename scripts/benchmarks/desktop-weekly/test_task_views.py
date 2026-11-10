@@ -73,6 +73,12 @@ class ChartTest(unittest.TestCase):
         self.assertIn('<span class="hv na">failed</span>', html)
         self.assertLess(html.index("0.70×"), html.index("hv na"))
 
+    def test_a_cell_measured_under_load_is_flagged_on_its_bar(self):
+        html = views.panel_html([weekly(contended=True, busy_before_pct=35.2), weekly(engine="audio.cpp", is_qvac=False, variant="", speed_x=20.0)])
+        self.assertIn(f'{QVAC}<small>Q8_0</small><small class="ul">under load</small>', html)
+        self.assertIn("under load: 35% of the CPUs busy with other work before the cell", html)
+        self.assertEqual(html.count("under load"), 2)
+
     def test_sections_split_synthesis_and_cloning_in_first_appearance_order(self):
         rows = [weekly(model="Supertonic 3", task="TTS", group="a"), weekly(model="Audio8", task="TTS", group="b"),
                 weekly(model="Audio8", task="TTS cloning", group="c")]

@@ -46,6 +46,28 @@ class ReportTest(unittest.TestCase):
         self.assertIn("- b on cuda timeout", text)
         self.assertIn("- no previous run to compare with", text)
 
+    def test_a_family_expected_on_one_backend_only_shows_an_empty_speed_cell_on_the_others(self):
+        data = summary()
+        data["families"].append("c")
+        data["results"].append(row("cuda", "c"))
+        text = report.render(data, None, 5.0)
+        self.assertIn("| Model c | Q8_0 | 11x | n/a |", text)
+
+    def test_a_family_without_any_row_in_the_run_is_left_out_of_the_speed_table(self):
+        data = summary()
+        data["families"].append("metal-only")
+        text = report.render(data, None, 5.0)
+        self.assertNotIn("metal-only", text)
+        self.assertIn("| Model b | Q8_0 | timeout | 1.80x |", text)
+
+    def test_a_cell_measured_under_load_says_so_in_its_status(self):
+        data = summary()
+        data["results"][2]["contended"] = True
+        data["results"][2]["busy_before_pct"] = 35.2
+        text = report.render(data, None, 5.0)
+        self.assertIn("| Model a | Q8_0 | ok (under load) |", text)
+        self.assertIn("| Model a | Q8_0 | ok | 1,000 ms", text)
+
     def test_cpu_rows_hide_gpu_memory(self):
         text = report.render(summary(), None, 5.0)
         self.assertIn("| Model a | Q8_0 | ok | 5,000 ms (4,990 ms to 5,010 ms) | 2.20x | 1.0 GiB | - | WER 0.0% | CPU | 10 |", text)
