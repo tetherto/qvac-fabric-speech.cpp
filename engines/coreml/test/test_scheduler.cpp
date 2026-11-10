@@ -783,6 +783,7 @@ void case_eviction() {
 
 void case_resident_cap() {
     Env e;
+    const int base = g_live_models.load();
     auto pool = e.m->make_pool(3);
     std::vector<std::shared_ptr<Slot>> w;
     for (int i = 1; i <= 5; ++i) {
@@ -822,6 +823,7 @@ void case_resident_cap() {
     CHECK(calls("w5") == 0);
     CHECK(w[4]->state() == SlotState::queued);
     CHECK(pool->live() == 3);
+    CHECK(g_live_models.load() == base + 3);
     // The unit releases w4: it becomes evictable and w5 loads.
     h4 = Acquired{};
     CHECK(wait_for([&] { return is_ready(w[4]); }));
@@ -831,6 +833,46 @@ void case_resident_cap() {
     sampler.join();
     CHECK(max_live.load() <= 3);
     std::printf("    resident cap 3: max live instances observed %zu\n", max_live.load());
+}
+
+// §2.9 counts handles a unit still retains as live instances, whatever happened
+// to the slot that published them.
+void case_resident_cap_retained_handle() {
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        return e.m->make_slot(s, e.policy());
+    };
+    auto a = mk("ra");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    Acquired held = a->acquire(Demand::if_ready);
+    CHECK(held);
+    a.reset();  // the engine destroys its slot; the unit still holds the model
+    CHECK(g_live_models.load() == base + 1);
+    CHECK(pool->live() == 1);
+    // A reload of the same function shares the retained instance.
+    auto a2 = mk("ra");
+    a2->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a2); }));
+    CHECK(calls("ra") == 1);
+    CHECK(g_live_models.load() == base + 1 && pool->live() == 1);
+    a2.reset();
+    CHECK(pool->live() == 1);
+    // A replacement is not admitted over the cap while the handle lives.
+    auto b = mk("rb");
+    b->request(Priority::current);
+    std::this_thread::sleep_for(80ms);
+    CHECK(calls("rb") == 0);
+    CHECK(b->state() == SlotState::queued);
+    CHECK(g_live_models.load() == base + 1 && pool->live() == 1);
+    held = Acquired{};  // the unit finishes: the instance dies and rb loads
+    CHECK(wait_for([&] { return is_ready(b); }));
+    CHECK(g_live_models.load() == base + 1);
+    CHECK(pool->live() == 1);
 }
 
 void case_key_lock_requeue() {
@@ -1461,6 +1503,7 @@ const Case kCases[] = {
     {"handoff-ineligible", case_handoff_ineligible},
     {"eviction", case_eviction},
     {"resident-cap", case_resident_cap},
+    {"resident-cap-retained-handle", case_resident_cap_retained_handle},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"evicted-after-ready-group", case_evicted_after_ready_group},

@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <functional>
-#include <set>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -186,7 +185,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
             gy.keep(m);
             if (!m->retired()) {
                 c->model = m;
-                c->last_model = m;
+                pool_record_locked(*c, m);
                 c->state = SlotState::ready;
                 c->last_used = Clock::now();
                 ++c->ready_events;
@@ -348,17 +347,26 @@ int64_t Runtime::job_w(const Job & j) const {
     return -1;
 }
 
-size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
-    // Distinct live instances, identified without taking strong references
-    // (a strong copy would also defeat the eviction use_count check).
-    std::set<std::weak_ptr<SharedModel>, std::owner_less<std::weak_ptr<SharedModel>>> live;
-    for (const auto & w : p.members) {
-        std::shared_ptr<SlotCore> m = w.lock();
-        if (!m) continue;
-        gy.keep(m);
-        if (!m->last_model.expired()) live.insert(m->last_model);
+void Runtime::pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m) {
+    std::shared_ptr<PoolCore> p = c.pool.lock();
+    if (!p || !m) return;
+    auto & v = p->models;
+    v.erase(std::remove_if(v.begin(), v.end(), [](const std::weak_ptr<SharedModel> & w) { return w.expired(); }),
+            v.end());
+    for (const auto & w : v) {
+        if (!w.owner_before(m) && !m.owner_before(w)) return;
     }
-    size_t n = live.size();
+    v.push_back(m);
+}
+
+size_t Runtime::pool_live_locked(const PoolCore & p) const {
+    // Live instances, tracked independently of slot lifetime and counted
+    // without taking strong references (a strong copy would also defeat the
+    // eviction use_count check), plus the load in flight for this pool.
+    size_t n = 0;
+    for (const auto & w : p.models) {
+        if (!w.expired()) ++n;
+    }
     if (running_ && running_->kind == JobKind::load && !running_->done) {
         for (const auto & wp : running_->pools) {
             if (wp.lock().get() == &p) {
@@ -383,7 +391,7 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(const Job & j, Graveyard & gy) 
     }
     PoolVerdict verdict = PoolVerdict::admit;
     for (const std::shared_ptr<PoolCore> & p : pools) {
-        if (pool_live_locked(*p, gy) < p->cap) continue;
+        if (pool_live_locked(*p) < p->cap) continue;
         // Least recently used member that no unit holds, the current call does
         // not predict, and that is not part of this job.
         std::shared_ptr<SlotCore> victim;
@@ -782,7 +790,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         if (!c) continue;  // evicted or destroyed meanwhile: never repopulated
         gy.keep(c->model);  // never drop a model under mu
         c->model = m;
-        c->last_model = m;
+        pool_record_locked(*c, m);
         c->job.reset();
         c->state = SlotState::ready;
         c->reason.clear();
@@ -1076,9 +1084,8 @@ void Runtime::pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr
 }
 
 size_t Runtime::pool_live(const PoolCore & p) {
-    Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    return pool_live_locked(p, gy);
+    return pool_live_locked(p);
 }
 
 }  // namespace detail

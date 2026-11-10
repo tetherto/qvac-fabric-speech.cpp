@@ -97,7 +97,6 @@ struct SlotCore {
     uint64_t epoch = 0;
     std::shared_ptr<Job> job;
     std::shared_ptr<SharedModel> model;
-    std::weak_ptr<SharedModel> last_model;  // live-instance accounting after eviction
     std::string artifact_path;
     std::string artifact_key;
     std::string hint_path;
@@ -115,6 +114,9 @@ struct PoolCore {
     // (mu)
     std::vector<std::weak_ptr<SlotCore>> members;
     std::vector<std::weak_ptr<SlotCore>> predicted;
+    // Every instance published to a member, until the instance itself dies:
+    // a handle retained after its slot was evicted or destroyed still counts.
+    std::vector<std::weak_ptr<SharedModel>> models;
 };
 
 class Runtime : public std::enable_shared_from_this<Runtime> {
@@ -190,7 +192,8 @@ private:
     int64_t job_w(const Job & j) const;
     std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
     PoolVerdict pool_admits_locked(const Job & j, Graveyard & gy);
-    size_t pool_live_locked(const PoolCore & p, Graveyard & gy) const;
+    size_t pool_live_locked(const PoolCore & p) const;
+    void pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m);
     void start_locked(const std::shared_ptr<Job> & j, Clock::time_point now, Graveyard & gy);
     void set_phase(const std::shared_ptr<Job> & j, SlotState st);
     void run_load(const std::shared_ptr<Job> & j);
