@@ -75,7 +75,10 @@ which one. SSH as yourself with the host names above.
 
 ### collect
 
-Copy every finished run's summary into the local history folder, one file per run, named by host and run:
+When the hosts push to the results repository (`RESULTS_REPO` in their `config.env`), clone it instead: its
+`summaries/` folder is this history, and the Monday cloud routine whose prompt is
+`scripts/benchmarks/desktop-weekly/publish-routine.md` collects and publishes without any of these steps. By hand,
+copy every finished run's summary into the local history folder, one file per run, named by host and run:
 
 ```sh
 H=qvac-dev-linux-x64   # and spark-d9ca, qvac-dev-strix-1, qvac-dev-linux-arm64, qvac-dev-mac-arm64, mac-mini-m4-gpu

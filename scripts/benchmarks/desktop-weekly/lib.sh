@@ -17,6 +17,11 @@ readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
 readonly HOST_LOAD_WINDOW_SECONDS=1
 readonly HOST_LOAD_SUFFIX=".load.json"
+readonly RESULTS_PUSH_ATTEMPTS=5
+readonly RESULTS_PUSH_RETRY_SECONDS="${RESULTS_PUSH_RETRY_SECONDS:-20}"
+readonly FAILURE_LOG_LINES=40
+readonly NO_PUSH_MARKER="NO_PUSH"
+readonly SCHEDULED_RUN_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 readonly MEMORY_SAMPLE_SECONDS=0.25
 readonly KIB_PER_MIB=1024
 readonly NANOSECOND_SHIM="nsdate"
@@ -55,6 +60,11 @@ load_config() {
   EVICT_PAGE_CACHE="${EVICT_PAGE_CACHE:-0}"
   CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
   COREML_PYTHON="${COREML_PYTHON:-}"
+  RESULTS_REPO="${RESULTS_REPO:-}"
+  RESULTS_BRANCH="${RESULTS_BRANCH:-main}"
+  RESULTS_KEY_FILE="${RESULTS_KEY_FILE:-}"
+  RESULTS_DIR="${RESULTS_DIR:-$BENCH_HOME/results-repo}"
+  RESULTS_HOST="${RESULTS_HOST:-$(hostname -s)}"
   FAMILIES_JSON="${FAMILIES_JSON:-$TOOLS_DIR/families.json}"
   SRC_DIR="$BENCH_HOME/src"
   BUILDS_DIR="$BENCH_HOME/builds"
@@ -598,6 +608,123 @@ prune_old_runs() {
 valid_label() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 
 private_file() { [ -f "$1" ] && [ "$(ls -l "$1" | cut -c5-10)" = "------" ]; }
+
+results_key_unusable() { [ -n "$RESULTS_KEY_FILE" ] && ! private_file "$RESULTS_KEY_FILE"; }
+
+results_ssh_command() {
+  if [ -n "$RESULTS_KEY_FILE" ]; then
+    printf 'ssh -i %q -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\n' "$RESULTS_KEY_FILE"
+  else
+    echo "ssh"
+  fi
+}
+
+results_git() { GIT_SSH_COMMAND="$(results_ssh_command)" git -C "$RESULTS_DIR" "$@"; }
+
+clone_results_repo() {
+  GIT_SSH_COMMAND="$(results_ssh_command)" git clone -q --branch "$RESULTS_BRANCH" "$RESULTS_REPO" "$RESULTS_DIR"
+}
+
+results_clone_tracks_repo() { [ "$(results_git remote get-url origin 2>/dev/null)" = "$RESULTS_REPO" ]; }
+
+refresh_results_repo() {
+  if ! results_clone_tracks_repo; then
+    log "results clone $RESULTS_DIR does not track $RESULTS_REPO; leaving it alone"
+    return 1
+  fi
+  results_git fetch -q origin "$RESULTS_BRANCH" && results_git reset -q --hard "origin/$RESULTS_BRANCH" && results_git clean -fdq
+}
+
+ensure_results_repo() {
+  if [ -d "$RESULTS_DIR/.git" ]; then refresh_results_repo; else clone_results_repo; fi
+}
+
+results_host() { echo "$RESULTS_HOST"; }
+
+results_summary_path() { echo "$RESULTS_DIR/summaries/$(results_host)/$1.json"; }
+
+results_failure_path() { echo "$RESULTS_DIR/failures/$(results_host)/$1.txt"; }
+
+copy_summary_of_run() {
+  local run_dir="$1" name
+  name="$(basename "$run_dir")"
+  mkdir -p "$RESULTS_DIR/summaries/$(results_host)" "$RESULTS_DIR/reports/$(results_host)"
+  cp "$run_dir/summary.json" "$(results_summary_path "$name")"
+  if [ -f "$run_dir/report.md" ]; then cp "$run_dir/report.md" "$RESULTS_DIR/reports/$(results_host)/$name.md"; fi
+  rm -f "$(results_failure_path "$name")"
+}
+
+scheduled_run_name() { [[ "$1" =~ $SCHEDULED_RUN_PATTERN ]]; }
+
+run_awaits_push() {
+  local run_dir="$1" name
+  name="$(basename "$run_dir")"
+  scheduled_run_name "$name" && [ -f "$run_dir/DONE" ] && [ -f "$run_dir/summary.json" ] &&
+    [ ! -e "$run_dir/$NO_PUSH_MARKER" ] && [ ! -e "$(results_summary_path "$name")" ]
+}
+
+copy_unpushed_scheduled_runs() {
+  local run_dir
+  for run_dir in "${RUNS_DIR:?}"/*/; do
+    run_dir="${run_dir%/}"
+    if run_awaits_push "$run_dir"; then copy_summary_of_run "$run_dir"; fi
+  done
+}
+
+copy_run_results() {
+  copy_summary_of_run "$RUN_DIR"
+  copy_unpushed_scheduled_runs
+}
+
+copy_run_failure() {
+  mkdir -p "$RESULTS_DIR/failures/$(results_host)"
+  { cat "$RUN_DIR/failure.txt"; echo; tail -n "$FAILURE_LOG_LINES" "$RUN_DIR/weekly.log"; } > "$(results_failure_path "$(run_name)")"
+}
+
+results_commit_message() {
+  jq -r --arg host "$(results_host)" --arg run "$(run_name)" \
+    '"\($host): \($run) \(.run.status) (\(.counts.ok)/\(.counts.expected) ok) at engine \(.pins.engine.sha // "" | .[0:8])"' "$RUN_DIR/summary.json"
+}
+
+results_git_as_host() {
+  results_git -c "user.name=speech-bench $(results_host)" -c "user.email=speech-bench@$(results_host).invalid" "$@"
+}
+
+commit_results() {
+  results_git add -A
+  results_git diff --cached --quiet && return 0
+  results_git_as_host commit -q -m "$1"
+}
+
+publish_attempt() {
+  ensure_results_repo && "$1" && commit_results "$2" && results_git push -q origin "HEAD:$RESULTS_BRANCH"
+}
+
+publish_with_retries() {
+  local attempt
+  for attempt in $(seq 1 "$RESULTS_PUSH_ATTEMPTS"); do
+    publish_attempt "$1" "$2" && return 0
+    if [ "$attempt" -lt "$RESULTS_PUSH_ATTEMPTS" ]; then sleep "$RESULTS_PUSH_RETRY_SECONDS"; fi
+  done
+  return 1
+}
+
+publish_results() {
+  [ -n "${RESULTS_REPO:-}" ] || return 0
+  if results_key_unusable; then
+    log "results key $RESULTS_KEY_FILE is missing or readable by the group or others; not pushing"
+    return 0
+  fi
+  if publish_with_retries "$1" "$2"; then
+    log "results pushed to $RESULTS_REPO ($RESULTS_BRANCH)"
+  else
+    log "results push FAILED for $RESULTS_REPO"
+  fi
+}
+
+publish_run_results() { publish_results copy_run_results "$(results_commit_message)"; }
+
+publish_run_failure() { publish_results copy_run_failure "$(results_host): $(run_name) FAILED: $1"; }
 
 read_secret() {
   [ -n "$1" ] || return 0

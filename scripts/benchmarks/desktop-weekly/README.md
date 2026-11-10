@@ -5,9 +5,9 @@ developer laptop in the loop: cron on each machine builds the current engine and
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the
-Speech Bench hub, with a task page per machine and task, and one dashboard per machine, refreshed from the machines'
-summaries every Monday (see
-`skills/speech-bench/SKILL.md`); e-mail delivery exists but is off unless `MAIL_TO` is set.
+Speech Bench hub, with a task page per machine and task, and one dashboard per machine, refreshed every Monday from
+the summaries the machines push to a results repository (see "Where the results go"); e-mail delivery exists but is
+off unless `MAIL_TO` is set.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
@@ -104,12 +104,13 @@ Q4_K_M, so that row is Q4_K_M and says so.
 
 | file | what it does |
 | --- | --- |
-| `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail |
+| `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail, push to the results repository |
+| `publish-routine.md` | the prompt of the Monday cloud routine that publishes the dashboards and the hub from the results repository |
 | `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
 | `fluidaudio-bench/` | Swift package: native-style bench of FluidAudio (Parakeet TDT v3 and Unified on Core ML, ANE encoder) for `run-family.sh`, same JSON as `mlx-bench.py` |
 | `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio Nemotron) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription, or for the mlx-audio Chatterbox Turbo synthesis of a time-wrapped family |
 | `build-highlights.py`, `highlights.json` | the dashboard-data folder -> `speech-bench-highlights.html`, the cards of the charts listed in `highlights.json` |
-| `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, run selection |
+| `lib.sh` | shared functions: config, lock, source update, per-backend builds, watchdog, GPU sampler, host load sample, run selection, results push |
 | `families.json` | the matrix (see above) |
 | `fetch-models.sh`, `fetch-registry.js`, `prepare-derived.py` | model provisioning: registry client, HuggingFace, repo fixtures, requantized and resampled files |
 | `machine-info.sh`, `collect-pins.sh` | `machine.json` (hardware, OS, driver, toolchain) and `pins.json` (engine and ggml commits, model sha256 and origins) |
@@ -191,6 +192,14 @@ The FluidAudio families need, on the Mac Studio only, the Swift bench package bu
 commit pinned in `Package.swift`). Its Core ML models download into `models/fluidaudio/` on the first run, outside the timed
 region. Without the binary those cells report `build-failed`.
 
+To push results without any workstation, give each host its own deploy key for the results repository:
+`ssh-keygen -t ed25519 -N '' -f ~/speech-bench/secrets/results-deploy-key` (the folder mode 0700, the key 0600), add the
+public half to the repository's deploy keys with write access, and set `RESULTS_REPO`, `RESULTS_KEY_FILE` and, where the
+short hostname differs from the host's name on the dashboards (the Mac mini is `Users-Mac-mini`), `RESULTS_HOST` in
+`config.env`. A key file that the group or others can read stops the push instead of falling back to another ssh
+identity. The first push records github.com's host key (`StrictHostKeyChecking=accept-new`). Every deploy key can write
+to the whole repository, so protect its main branch against force pushes and deletion.
+
 Try the pipeline before the first Sunday:
 
 ```sh
@@ -199,15 +208,26 @@ ssh <host> 'nohup ~/speech-bench/tools/weekly.sh --quick --no-mail < /dev/null >
 
 `--quick` runs `QUICK_FAMILIES` (Parakeet TDT, Supertonic 3 and one Audio8 pair) with one timed iteration into
 `runs/<date>-quick`; `--families a,b` and `--backends a,b` narrow a run further, `--no-update` keeps the current
-checkouts, `--label NAME` keeps several runs of one day apart. Watch `runs/<date>-quick/weekly.log` and wait for
+checkouts, `--label NAME` keeps several runs of one day apart, `--no-push` keeps a test run out of the results
+repository. Watch `runs/<date>-quick/weekly.log` and wait for
 `DONE` or `FAILED`; a family's own output is in `results/<backend>/<family>.log`.
 
 ## Where the results go
 
-Each run leaves `report.md` and `summary.json` under `runs/<date>/` on the machine. The speech-bench skill (a
-scheduled Monday task) copies every machine's summaries into a history folder, turns them into the dashboards' data
-files with `build-dashboard-data.py`, uploads each machine's files to that machine's dashboard and republishes the
-hub, with its task pages, from `build-landing.py`, so the hub and its dashboards are the place to look. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
+Each run leaves `report.md` and `summary.json` under `runs/<date>/` on the machine. With `RESULTS_REPO` set, a
+finished run also pushes them to `summaries/<host>/<run>.json` and `reports/<host>/<run>.md` of the results repository
+(a private GitHub repository), and a failed run pushes a notice with its reason and the tail of `weekly.log` to
+`failures/<host>/<run>.txt`. Each host pushes with its own deploy key, on a fresh copy of the repository, and retries
+when another host pushed first; a weekly run whose push failed goes out with the next run, and a run started with
+`--no-push` never does. A labelled
+rerun is pushed under its own name and, being newer, replaces on the dashboards the cells it measured.
+
+A cloud routine in claude.ai (its prompt is `publish-routine.md`, Monday 08:00 UTC) clones the results repository and
+this one, reports which hosts delivered and which failed, turns the summaries into the dashboards' data files with
+`build-dashboard-data.py`, uploads each machine's files to that machine's dashboard, republishes the hub with its task
+pages from `build-landing.py` and commits the built data back, so no lab machine and no workstation has to be on for
+the hub and its dashboards, the place to look, to refresh. Without the results repository the speech-bench skill does
+the same by hand, collecting the summaries over ssh into a history folder. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
 `config.env` (tether.io mail is Google Workspace, so `smtp.gmail.com:465` with an app password in a mode 0600 file),
 `send-report.py` also mails the report with `report.md` and `summary.json` attached, and a failed run mails a
 one-paragraph notice.

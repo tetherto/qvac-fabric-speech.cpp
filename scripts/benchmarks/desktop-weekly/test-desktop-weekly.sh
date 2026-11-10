@@ -74,7 +74,7 @@ make_repo() {
 }
 
 setup_home() {
-  export BENCH_HOME="$TMP/home" CONFIG_FILE="$TMP/none" KILL_GRACE_SECONDS=1 DEADLINE_POLL_SECONDS=1 LOCK_POLL_SECONDS=1
+  export BENCH_HOME="$TMP/home" CONFIG_FILE="$TMP/none" KILL_GRACE_SECONDS=1 DEADLINE_POLL_SECONDS=1 LOCK_POLL_SECONDS=1 RESULTS_PUSH_RETRY_SECONDS=0
   mkdir -p "$BENCH_HOME/runs"
   make_repo "$BENCH_HOME/src/speech"
   make_repo "$BENCH_HOME/src/ggml"
@@ -470,6 +470,92 @@ STUB
   ok "fetch-registry.js discards a stale partial download and keeps a present model"
 }
 
+commit_as_other_host() {
+  ( cd "$TMP/results-seed" && git -c user.name=t -c user.email=t@t pull -q --rebase origin main &&
+    echo "$1" > "$1.txt" && git add "$1.txt" && git -c user.name=t -c user.email=t@t commit -q -m "$1" && git push -q origin HEAD:main )
+}
+
+write_finished_run() {
+  mkdir -p "$RUNS_DIR/$1"
+  jq -n '{run: {status: "ok"}, counts: {ok: 3, expected: 3}, pins: {engine: {sha: "abcdef1234567890"}}}' > "$RUNS_DIR/$1/summary.json"
+  echo "# report $1" > "$RUNS_DIR/$1/report.md"
+  touch "$RUNS_DIR/$1/DONE"
+}
+
+check_results_push() {
+  (
+    . "$HERE/weekly.sh"
+    load_config
+    git init -q --bare -b main "$TMP/results.git"
+    git clone -q "$TMP/results.git" "$TMP/results-seed" 2>/dev/null
+    ( cd "$TMP/results-seed" && echo seed > README.md && git add README.md && git -c user.name=t -c user.email=t@t commit -q -m seed && git push -q origin HEAD:main )
+    RESULTS_REPO="$TMP/results.git"; RESULTS_BRANCH=main; RESULTS_KEY_FILE=""; RESULTS_DIR="$TMP/results-clone"; RESULTS_HOST="box-1"
+    RUNS_DIR="$TMP/push-runs"
+    write_finished_run 2026-11-01
+    write_finished_run 2026-11-02-trial; touch "$RUNS_DIR/2026-11-02-trial/$NO_PUSH_MARKER"
+    write_finished_run 2026-11-03-quick
+    write_finished_run 2026-11-08; RUN_DIR="$RUNS_DIR/2026-11-08"; RUN_NAME="2026-11-08"
+    grep -q "results pushed" <<< "$(publish_finished_run)" || { echo "first push not reported" >&2; exit 1; }
+    commit_as_other_host other-host
+    write_finished_run 2026-11-15; RUN_DIR="$RUNS_DIR/2026-11-15"; RUN_NAME="2026-11-15"
+    grep -q "results pushed" <<< "$(publish_finished_run)" || { echo "push behind another host not reported" >&2; exit 1; }
+    grep -q "results pushed" <<< "$(publish_finished_run)" || { echo "a push without changes failed" >&2; exit 1; }
+    mkdir -p "$RUNS_DIR/2026-11-22"; RUN_DIR="$RUNS_DIR/2026-11-22"; RUN_NAME="2026-11-22"
+    printf 'GPU busy for 12 hours\n\nlog: weekly.log\n' > "$RUN_DIR/failure.txt"; printf 'line %s\n' 1 2 3 > "$RUN_DIR/weekly.log"
+    grep -q "results pushed" <<< "$(publish_failed_run "GPU busy for 12 hours")" || { echo "failure notice not pushed" >&2; exit 1; }
+    git clone -q "$TMP/results.git" "$TMP/results-check"
+    grep -q "GPU busy for 12 hours" "$TMP/results-check/failures/box-1/2026-11-22.txt" && grep -q "line 3" "$TMP/results-check/failures/box-1/2026-11-22.txt" ||
+      { echo "failure notice lacks the reason or the log tail" >&2; exit 1; }
+    [ "$(git -C "$TMP/results-check" log --format=%s -1)" = "box-1: 2026-11-22 FAILED: GPU busy for 12 hours" ] || { echo "failure commit: $(git -C "$TMP/results-check" log --format=%s -1)" >&2; exit 1; }
+    write_finished_run 2026-11-22
+    commit_as_other_host later-host
+    printf '#!/bin/sh\nif [ -e "%s" ]; then rm -f "%s"; exit 1; fi\n' "$TMP/reject-once" "$TMP/reject-once" > "$TMP/results.git/hooks/pre-receive"
+    chmod +x "$TMP/results.git/hooks/pre-receive"; touch "$TMP/reject-once"
+    grep -q "results pushed" <<< "$(publish_finished_run 2>/dev/null)" || { echo "a rejected push was not retried on a fresh copy" >&2; exit 1; }
+    [ ! -e "$TMP/reject-once" ] || { echo "the rejecting hook never ran" >&2; exit 1; }
+    git -C "$TMP/results-check" pull -q
+    for f in summaries/box-1/2026-11-01.json summaries/box-1/2026-11-08.json summaries/box-1/2026-11-15.json summaries/box-1/2026-11-22.json reports/box-1/2026-11-15.md other-host.txt later-host.txt; do
+      [ -f "$TMP/results-check/$f" ] || { echo "missing in the results repository: $f" >&2; exit 1; }
+    done
+    [ ! -e "$TMP/results-check/summaries/box-1/2026-11-02-trial.json" ] && [ ! -e "$TMP/results-check/summaries/box-1/2026-11-03-quick.json" ] ||
+      { echo "an earlier test run was pushed" >&2; exit 1; }
+    [ ! -e "$TMP/results-check/failures/box-1/2026-11-22.txt" ] || { echo "the failure notice of a run that finished later was kept" >&2; exit 1; }
+    [ "$(git -C "$TMP/results-check" log --format=%s -1 -- summaries/box-1/2026-11-15.json)" = "box-1: 2026-11-15 ok (3/3 ok) at engine abcdef12" ] ||
+      { echo "commit message: $(git -C "$TMP/results-check" log --format=%s -1 -- summaries/box-1/2026-11-15.json)" >&2; exit 1; }
+    git init -q -b main "$TMP/other-checkout"; echo work > "$TMP/other-checkout/work.txt"
+    RESULTS_DIR="$TMP/other-checkout"
+    grep -q "does not track $RESULTS_REPO" <<< "$(publish_finished_run)" || { echo "a clone of another repository was refreshed" >&2; exit 1; }
+    [ -f "$TMP/other-checkout/work.txt" ] || { echo "uncommitted work in another checkout was removed" >&2; exit 1; }
+    RESULTS_DIR="$TMP/results-clone"
+    printf 'k' > "$TMP/open-key"; chmod 644 "$TMP/open-key"; RESULTS_KEY_FILE="$TMP/open-key"
+    before="$(git -C "$TMP/results.git" rev-parse main)"
+    grep -q "not pushing" <<< "$(publish_finished_run)" || { echo "a readable deploy key did not stop the push" >&2; exit 1; }
+    [ "$(git -C "$TMP/results.git" rev-parse main)" = "$before" ] || { echo "a push went out with a readable deploy key" >&2; exit 1; }
+    RESULTS_KEY_FILE=""
+    PUSH=0
+    [ -z "$(publish_finished_run)" ] && [ -z "$(publish_failed_run reason)" ] || { echo "a --no-push run touched the results repository" >&2; exit 1; }
+    mark_run_unpushed && [ -e "$RUN_DIR/$NO_PUSH_MARKER" ] || { echo "--no-push did not mark the run" >&2; exit 1; }
+    clear_run_outputs; [ ! -e "$RUN_DIR/$NO_PUSH_MARKER" ] || { echo "a resumed run kept the no-push marker" >&2; exit 1; }
+    PUSH=1; parse_args --no-push; [ "$PUSH" = 0 ] || { echo "--no-push not parsed" >&2; exit 1; }
+    PUSH=1; RESULTS_REPO=""
+    [ -z "$(publish_finished_run)" ] || { echo "publish ran without RESULTS_REPO" >&2; exit 1; }
+  ) || fail "results push"
+  ok "finished runs push their summary and report, failed runs a notice, rejected pushes retry, missed weekly runs heal, test runs stay out"
+}
+
+check_results_ssh_command() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    RESULTS_KEY_FILE=""
+    [ "$(results_ssh_command)" = "ssh" ] || { echo "ssh command without a key file: $(results_ssh_command)" >&2; exit 1; }
+    mkdir -p "$TMP/deploy keys"; printf 'k' > "$TMP/deploy keys/key"; chmod 600 "$TMP/deploy keys/key"; RESULTS_KEY_FILE="$TMP/deploy keys/key"
+    eval "set -- $(results_ssh_command)"
+    [ "$1 $2" = "ssh -i" ] && [ "$3" = "$TMP/deploy keys/key" ] && [ "$#" = 7 ] || { echo "ssh command with a key file: $(results_ssh_command)" >&2; exit 1; }
+  ) || fail "results ssh command"
+  ok "the results push names its deploy key alone, quoted for a path with spaces"
+}
+
 check_weekly_helpers() {
   (
     . "$HERE/weekly.sh"
@@ -582,6 +668,8 @@ main() {
   check_cell_signature
   check_resume_keeps_load_samples
   check_weekly_helpers
+  check_results_push
+  check_results_ssh_command
   check_info_scripts
   check_nvcc_release
   check_input_validation

@@ -5,18 +5,20 @@ set -uo pipefail
 QUICK=0
 UPDATE=1
 MAIL=1
+PUSH=1
 LABEL=""
 FAMILIES_ARG=""
 BACKENDS_ARG=""
 
 usage() {
   cat <<USAGE >&2
-usage: weekly.sh [--quick] [--families a,b] [--backends a,b] [--no-update] [--no-mail] [--label NAME]
+usage: weekly.sh [--quick] [--families a,b] [--backends a,b] [--no-update] [--no-mail] [--no-push] [--label NAME]
   --quick       run the QUICK_FAMILIES subset with one timed iteration per family
   --families    comma-separated family names from families.json (default: all)
   --backends    comma-separated backends (default: cpu,cuda,vulkan on Linux; cpu,metal on macOS)
   --no-update   keep the current engine and ggml checkouts
   --no-mail     write the report but do not e-mail it
+  --no-push     keep this run out of the results repository (for test runs)
   --label NAME  suffix for the run directory (runs/<date>-NAME)
 USAGE
 }
@@ -29,6 +31,7 @@ parse_args() {
       --backends) BACKENDS_ARG="$2"; shift 2 ;;
       --no-update) UPDATE=0; shift ;;
       --no-mail) MAIL=0; shift ;;
+      --no-push) PUSH=0; shift ;;
       --label) valid_label "$2" || { usage; exit 2; }; LABEL="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) usage; exit 2 ;;
@@ -103,8 +106,15 @@ fail() {
   echo "$1" > "$RUN_DIR/FAILED"
   printf '%s\n\nlog: %s\n' "$1" "$RUN_DIR/weekly.log" > "$RUN_DIR/failure.txt"
   mail_report "[speech-bench] $(hostname -s) $(run_name): FAILED" "$RUN_DIR/failure.txt"
+  publish_failed_run "$1"
   exit 1
 }
+
+publish_finished_run() { if [ "$PUSH" = 1 ]; then publish_run_results; fi; }
+
+publish_failed_run() { if [ "$PUSH" = 1 ]; then publish_run_failure "$1"; fi; }
+
+mark_run_unpushed() { if [ "$PUSH" = 0 ]; then touch "$RUN_DIR/$NO_PUSH_MARKER"; fi; }
 
 write_narrative() {
   ANTHROPIC_API_KEY="$(read_secret "${ANTHROPIC_API_KEY_FILE:-}")" python3 "$TOOLS_DIR/narrate.py" \
@@ -132,7 +142,7 @@ build_report() {
 
 clear_run_outputs() {
   local name
-  for name in DONE FAILED build-failures.txt summary.json report.md narrative.md mail-body.md failure.txt; do
+  for name in DONE FAILED build-failures.txt summary.json report.md narrative.md mail-body.md failure.txt "$NO_PUSH_MARKER"; do
     rm -f "${RUN_DIR:?}/$name"
   done
   discard_failed_results "$RUN_DIR"
@@ -152,6 +162,7 @@ main() {
   setup_path
   if [ -n "$BACKENDS_ARG" ]; then BACKENDS="$BACKENDS_ARG"; fi
   prepare_run_dir
+  mark_run_unpushed
   STARTED="$(utc_now)"
   log "start $(run_name) backends=$(resolve_backends)"
   take_run_lock || fail "another weekly.sh run holds $(run_lock_dir) ($(run_lock_holder))"
@@ -173,6 +184,7 @@ main() {
   compose_mail_body > "$RUN_DIR/mail-body.md"
   mail_report "$(summary_subject)" "$RUN_DIR/mail-body.md"
   touch "$RUN_DIR/DONE"
+  publish_finished_run
   prune_old_runs
   log "end $(run_name)"
 }
