@@ -45,6 +45,14 @@ public:
     const SpeechVoice & default_voice();
     std::vector<float> decode(const std::vector<int32_t> & codes, const SpeechVoice & voice,
                               const SpeechDecodeOptions & options = {});
+    // Device bytes the token-to-wave decoder holds while decoding `n_codes`
+    // with `voice` (weights plus stage arenas); 0 when it decodes on the CPU
+    // and UINT64_MAX when the projection fails.
+    uint64_t decoder_device_bytes(size_t n_codes, const SpeechVoice & voice) const;
+    // Load the decoder now and keep it resident across decode() calls, until
+    // release_decoder_hold() or destruction.
+    void hold_decoder();
+    void release_decoder_hold();
 
 private:
     struct Impl;

@@ -462,6 +462,16 @@ void test_cache_memory_guard() {
                    "a KV cache larger than the free memory is refused");
 }
 
+void test_stage_residency_policy() {
+    constexpr uint64_t GIB = 1024ull * 1024 * 1024;
+    constexpr uint64_t MIB = 1024ull * 1024;
+    check(speech_stages_fit(14 * GIB, 4 * GIB), "a decoder that leaves room for a turn fits beside the LM");
+    check(!speech_stages_fit(3 * GIB, 4 * GIB), "a decoder larger than the free memory does not fit");
+    check(!speech_stages_fit(4 * GIB + 100 * MIB, 4 * GIB), "a decoder that leaves no room for a turn does not fit");
+    check(!speech_stages_fit(UNKNOWN_FREE_BYTES, 4 * GIB), "unknown free memory does not fit");
+    check(!speech_stages_fit(14 * GIB, std::numeric_limits<uint64_t>::max()), "a failed projection does not fit");
+}
+
 void test_generation_loop() {
     const auto path = write_lm("speech-loop", WEIGHT_SEED);
     SpeechLM lm(path.string(), {}, 1);
@@ -788,6 +798,7 @@ int main() {
         test_lm_skips_the_text_head();
         test_lm_weight_tiers();
         test_cache_memory_guard();
+        test_stage_residency_policy();
         test_options_keep_their_field_order();
         test_generation_loop();
         test_segment_arithmetic();

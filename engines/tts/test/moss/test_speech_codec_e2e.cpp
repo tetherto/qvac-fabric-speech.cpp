@@ -3,6 +3,7 @@
 // noise.
 #include "moss/speech_codec.h"
 #include "backend_selection.h"
+#include "chatterbox_tts_test_hooks.h"
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
 #include "npy.h"
 #include "dr_wav.h"
@@ -120,6 +121,38 @@ double rms(const std::vector<float> & pcm) {
     return std::sqrt(sum / pcm.size());
 }
 
+// The engine keeps the Speech LM on the device during decode only when this
+// projection fits, so it must cover what a real decode leaves resident.
+void check_decoder_projection(const std::string & model, const SpeechVoice & voice, uint64_t projected) {
+    namespace hooks = tts_cpp::chatterbox::test_hooks;
+    require(projected > 0 && projected != std::numeric_limits<uint64_t>::max(), "decoder projection failed");
+    require(s3gen_preload(model, 1) == 0, "decoder preload failed");
+    struct Lease { ~Lease() { s3gen_unload(); } } lease;
+    std::vector<float> pcm;
+    s3gen_synthesize_opts opts;
+    opts.s3gen_gguf_path = model;
+    opts.pcm_out = &pcm;
+    opts.prompt_token_view_data = voice.tokens.data();
+    opts.prompt_token_view_size = voice.tokens.size();
+    opts.prompt_feat_view_data = voice.feat.data();
+    opts.prompt_feat_view_size = voice.feat.size();
+    opts.prompt_feat_view_rows = voice.feat_frames;
+    opts.embedding_view_data = voice.embedding.data();
+    opts.embedding_view_size = voice.embedding.size();
+    opts.n_threads = 2;
+    opts.n_gpu_layers = 1;
+    opts.append_lookahead_silence = false;
+    opts.apply_trim_fade = false;
+    require(s3gen_synthesize_to_wav(CODES, opts) == 0 && !pcm.empty(), "codec synthesis failed");
+    const uint64_t resident = hooks::s3gen_cached_weights_bytes() + hooks::encoder_graph_cache_buffer_bytes() +
+                              hooks::cfm_estimator_cache_buffer_bytes() + hooks::f0_graph_cache_buffer_bytes() +
+                              hooks::stft_graph_cache_buffer_bytes() + hooks::hift_graph_cache_buffer_bytes();
+    std::printf("decoder projection: projected %llu resident %llu\n", (unsigned long long) projected,
+                (unsigned long long) resident);
+    require(projected >= resident, "decoder projection is below the real decode");
+    require(projected - resident <= resident / 20, "decoder projection overshoots the real decode by more than 5%");
+}
+
 void compare(const Result & cpu, const Result & gpu) {
     require(cpu.mel.n_elements() > 0 && cpu.mel.shape == gpu.mel.shape, "mel shape mismatch");
     const auto stats = compare_f32(npy_as_f32(gpu.mel), npy_as_f32(cpu.mel), cpu.mel.n_elements());
@@ -155,6 +188,7 @@ int main(int argc, char ** argv) {
         fs::create_directories(output);
         SpeechVoice voice;
         int ratio = 0;
+        uint64_t projected = 0;
         {
             SpeechCodec codec(argv[2], {}, 2);
             voice = codec.default_voice();
@@ -164,6 +198,11 @@ int main(int argc, char ** argv) {
         voice.feat_frames = (int) voice.tokens.size() * ratio;
         voice.feat.resize((size_t) voice.feat_frames * 80);
         require(!voice.tokens.empty(), "missing voice conditioning");
+        {
+            SpeechCodec codec(argv[2], {{}, true}, 2);
+            projected = codec.decoder_device_bytes(CODES.size(), voice);
+        }
+        check_decoder_projection(argv[2], voice, projected);
         std::vector<float> noise(80 * ratio * (voice.tokens.size() + CODES.size()));
         std::mt19937 rng(0);
         std::normal_distribution<float> normal(0, 1);

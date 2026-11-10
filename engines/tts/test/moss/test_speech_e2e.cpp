@@ -1,5 +1,6 @@
-// Full-checkpoint GPU regression: two replies on the same engine must fit
-// without retaining the first turn's LM/decoder device allocations.
+// Full-checkpoint GPU regression: two replies on the same engine must fit,
+// whether it keeps the LM and decoder resident together or stages them per
+// turn.
 #include "tts-cpp/moss/speech.h"
 #include "voice_features.h"
 #include "dr_wav.h"

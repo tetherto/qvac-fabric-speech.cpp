@@ -3606,7 +3606,7 @@ namespace tts_cpp::chatterbox::detail {
 bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
                        const std::string & backend,
                        int n_speech_tokens, s3gen_fit_measure & out,
-                       std::string * error) {
+                       std::string * error, const s3gen_fit_prompt & prompt) {
     using ::tts_cpp::fitutil::sat_add;
     out = s3gen_fit_measure{};
     if (n_speech_tokens <= 0) {
@@ -3632,16 +3632,20 @@ bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
 
         // Workload shapes, exactly as s3gen_synthesize_to_wav derives them on
         // the batch path (finalize=true appends 3 lookahead-silence tokens).
-        // Conditioning lengths come from the built-in voice tensors;
-        // reference-audio conditioning is capped to the same lengths
-        // (10 s -> 250 prompt tokens / 500 prompt_feat frames).
-        ggml_tensor * t_pt = find_tensor(m, "s3gen/builtin/prompt_token");
-        ggml_tensor * t_pf = find_tensor(m, "s3gen/builtin/prompt_feat");
+        // Conditioning lengths come from the caller's voice when given, else
+        // from the built-in voice tensors; reference-audio conditioning is
+        // capped to the same lengths (10 s -> 250 prompt tokens / 500
+        // prompt_feat frames).
         const int pre_lookahead_len = 3;  // Chatterbox default (s3gen_synthesize_to_wav)
-        out.n_prompt_token = (int) ggml_nelements(t_pt);
-        out.mel_len1       = (int) t_pf->ne[1];
+        if (prompt.n_prompt_token >= 0 && prompt.prompt_feat_frames >= 0) {
+            out.n_prompt_token = prompt.n_prompt_token;
+            out.mel_len1       = prompt.prompt_feat_frames;
+        } else {
+            out.n_prompt_token = (int) ggml_nelements(find_tensor(m, "s3gen/builtin/prompt_token"));
+            out.mel_len1       = (int) find_tensor(m, "s3gen/builtin/prompt_feat")->ne[1];
+        }
         out.n_total        = out.n_prompt_token + n_speech_tokens + pre_lookahead_len;
-        out.T_mu           = 2 * out.n_total;
+        out.T_mu           = m.token_mel_ratio * out.n_total;
         if (out.T_mu <= out.mel_len1) {
             if (error) *error = "s3gen_measure_fit: workload shorter than the conditioning prompt";
             return false;

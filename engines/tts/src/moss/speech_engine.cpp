@@ -34,6 +34,10 @@ constexpr double MAX_AUDIO_SECONDS = 600.0;
 constexpr double MAX_VOICE_SECONDS = 60.0;
 constexpr float MAX_TEMPERATURE = 10.0f;
 constexpr float MAX_REPLY_SECONDS = 3600.0f;
+// Reply length the resident decoder is sized for; its stage arenas grow with the reply.
+constexpr float PLANNED_REPLY_SECONDS = 30.0f;
+// KV cache and prefill/step graphs of a turn, on top of both weight sets.
+constexpr uint64_t TURN_HEADROOM_BYTES = 2048ull * 1024 * 1024;
 
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error("moss speech: " + message);
@@ -136,6 +140,10 @@ int speech_generation_budget(size_t prompt_rows, int requested_tokens, int n_ctx
     return budget;
 }
 
+bool speech_stages_fit(uint64_t device_free_bytes, uint64_t decoder_bytes) {
+    return decoder_bytes <= device_free_bytes && device_free_bytes - decoder_bytes >= TURN_HEADROOM_BYTES;
+}
+
 } // namespace detail
 
 struct SpeechEngine::Impl {
@@ -143,6 +151,7 @@ struct SpeechEngine::Impl {
     std::unique_ptr<SpeechLM> lm;
     std::unique_ptr<SpeechCodec> codec;
     std::unique_ptr<SpeechTextTokenizer> tokenizer;
+    bool stages_resident = false;
     std::atomic<bool> cancel_requested{false};
     std::mutex respond_mutex;
 
@@ -158,6 +167,33 @@ struct SpeechEngine::Impl {
         codec = std::make_unique<SpeechCodec>(options.codec_path, request, options.n_threads);
         tokenizer = std::make_unique<SpeechTextTokenizer>(lm->tokenizer_tokens(), lm->tokenizer_merges(),
                 lm->tokenizer_types());
+        hold_stages_together();
+    }
+
+    size_t planned_reply_codes() const {
+        return (size_t) std::ceil(PLANNED_REPLY_SECONDS * tokens_per_second());
+    }
+
+    // Reloading the LM before every prefill costs seconds per turn, so keep it
+    // and the decoder resident together when the device holds both and a
+    // turn. Upload the decoder now: uploading it beside an LM that has already
+    // run measured ~50x slower on NVIDIA Vulkan.
+    void hold_stages_together() {
+        if (lm->runs_on_cpu()) {
+            return;
+        }
+        const uint64_t decoder = codec->decoder_device_bytes(planned_reply_codes(), codec->default_voice());
+        if (decoder > 0 && detail::speech_stages_fit(lm->free_device_bytes(), decoder)) {
+            codec->hold_decoder();
+            stages_resident = true;
+        }
+    }
+
+    // Back to staging the LM and decoder turn by turn, for the rest of the
+    // engine's life.
+    void release_stages() {
+        codec->release_decoder_hold();
+        stages_resident = false;
     }
 
     float tokens_per_second() const {
@@ -213,13 +249,12 @@ struct SpeechEngine::Impl {
         return custom;
     }
 
-    void speak(SpeechResult & result, const std::vector<int32_t> & codes, const SpeechRequest & request) {
+    void speak(SpeechResult & result, const std::vector<int32_t> & codes, const detail::SpeechVoice & voice) {
         const auto decode_start = std::chrono::steady_clock::now();
-        detail::SpeechVoice custom;
         detail::SpeechDecodeOptions decode;
         decode.cancel = &cancel_requested;
         decode.release_decoder = !lm->runs_on_cpu();
-        result.pcm = codec->decode(codes, reply_voice(request, custom), decode);
+        result.pcm = codec->decode(codes, voice, decode);
         result.decode_ms = elapsed_ms(decode_start);
         result.cancelled = cancel_requested.load();
     }
@@ -237,10 +272,23 @@ struct SpeechEngine::Impl {
     detail::SpeechLogits prefill_prompt(const std::vector<SpeechRow> & prompt, const detail::SpeechLimits & limits,
                                         SpeechResult & result) {
         const auto prefill_start = std::chrono::steady_clock::now();
-        lm->begin(result.prompt_tokens + limits.max_new_tokens);
+        begin_turn(result.prompt_tokens + limits.max_new_tokens);
         detail::SpeechLogits logits = lm->prefill(prompt, PREFILL_BATCH_TOKENS, stop_signal());
         result.prefill_ms = elapsed_ms(prefill_start);
         return logits;
+    }
+
+    void begin_turn(int n_ctx) {
+        try {
+            lm->begin(n_ctx);
+        } catch (const std::runtime_error &) {
+            if (!stages_resident) {
+                throw;
+            }
+            // A long conversation's KV cache needs the decoder's memory.
+            release_stages();
+            lm->begin(n_ctx);
+        }
     }
 
     static SpeechResult cancelled_result(SpeechResult result) {
@@ -277,17 +325,22 @@ struct SpeechEngine::Impl {
         result.reply_tokens = (int) codes.size();
         // Each request begins with a fresh prompt; the completed LM's KV and
         // prefill graph buffers are no longer needed during S3Gen/HiFT decode.
-        if (!lm->runs_on_cpu() && !result.cancelled && !request.text_reply) {
-            // An LM on a GPU or the NPU and the S3Gen decoder exceed smaller
-            // GPUs and 12 GB phones when resident together. Keep metadata and
-            // backend identity, but reload LM weights at the next begin().
+        lm->release_generation();
+        if (result.cancelled || request.text_reply) {
+            return result;
+        }
+        detail::SpeechVoice custom;
+        const detail::SpeechVoice & voice = reply_voice(request, custom);
+        if (stages_resident && codes.size() > planned_reply_codes()) {
+            release_stages();
+        }
+        // Otherwise an LM on a GPU or the NPU and the S3Gen decoder exceed
+        // smaller GPUs and 12 GB phones when resident together. Keep metadata
+        // and backend identity, but reload LM weights at the next begin().
+        if (!lm->runs_on_cpu() && !stages_resident) {
             lm->release_weights();
-        } else {
-            lm->release_generation();
         }
-        if (!result.cancelled && !request.text_reply) {
-            speak(result, codes, request);
-        }
+        speak(result, codes, voice);
         return result;
     }
 
