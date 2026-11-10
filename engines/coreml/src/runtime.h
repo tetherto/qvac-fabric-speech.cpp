@@ -78,6 +78,9 @@ struct Job {
     int64_t backoff_ms = 0;
     bool deferred_memory = false;
     Clock::time_point deferred_since{};
+    // A resident cap with nothing evictable denies this load: acquisitions do
+    // not wait on it (§2.9, §2.10); it stays queued and retries after a release.
+    bool cap_blocked = false;
     std::vector<std::weak_ptr<PoolCore>> pools;  // pools served while running
     Timings timings;
 
@@ -191,7 +194,8 @@ private:
     bool hinted(const std::string & hint_path) const;
     int64_t job_w(const Job & j) const;
     std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
-    PoolVerdict pool_admits_locked(const Job & j, Graveyard & gy);
+    PoolVerdict pool_admits_locked(Job & j, Graveyard & gy);
+    void set_cap_blocked_locked(Job & j, bool blocked);
     size_t pool_live_locked(const PoolCore & p) const;
     void pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m);
     void start_locked(const std::shared_ptr<Job> & j, Clock::time_point now, Graveyard & gy);

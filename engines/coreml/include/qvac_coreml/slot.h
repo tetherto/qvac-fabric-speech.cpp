@@ -189,7 +189,7 @@ struct Acquired {
 };
 
 // Thrown by strict acquisitions (§2.10): a terminal non-ready state, a timeout,
-// or deferred(memory).
+// deferred(memory), or a stage that cannot serve the unit (resident cap).
 class CoremlError : public std::runtime_error {
 public:
     CoremlError(const std::string & what, SlotState state, ErrorClass cls)
@@ -244,9 +244,11 @@ public:
     // whole unit (§2.10). With Demand::now the slot is raised to `now`; then:
     //  - wait none/construct: the bounded wait of §2.9 against `deadline` (the
     //    unit's single aggregate deadline), otherwise no blocking;
-    //  - wait call: block until ready or terminal; deferred(memory) falls back;
+    //  - wait call: block until ready or terminal; deferred(memory) and a
+    //    resident cap with nothing evictable (the caller may hold every
+    //    instance) fall back at once, the load staying queued;
     //  - strict: like call, but throw CoremlError on a terminal non-ready
-    //    state, deferred(memory) or strict_wait_ms.
+    //    state, deferred(memory), a resident-cap denial or strict_wait_ms.
     // `cancel` interrupts waits; it is polled every 50 ms.
     Acquired acquire(Demand d, std::optional<Clock::time_point> deadline = std::nullopt,
                      const std::atomic<bool> * cancel = nullptr);

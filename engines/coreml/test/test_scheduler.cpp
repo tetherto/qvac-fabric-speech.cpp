@@ -875,6 +875,71 @@ void case_resident_cap_retained_handle() {
     CHECK(pool->live() == 1);
 }
 
+// The caller itself holds every instance the cap permits: nothing can be
+// released, so call, strict, the bounded wait and construct groups never wait
+// on the replacement (§2.9, §2.10); it loads in the background after a release.
+void case_resident_cap_acquire() {
+    Env e;
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn, Wait w = Wait::none, bool strict = false) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        SlotPolicy p = e.policy(w);
+        p.strict = strict;
+        return e.m->make_slot(s, p);
+    };
+    auto a = mk("ca");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    Acquired held = a->acquire(Demand::now);
+    CHECK(held);
+
+    auto b = mk("cb", Wait::call);
+    Acquired r;
+    must_complete("call acquisition under the cap", [&] { r = b->acquire(Demand::now); });
+    CHECK(!r && r.pending);
+    CHECK(b->state() == SlotState::queued);  // still queued for a later release
+
+    auto st = mk("cs", Wait::call, true);  // strict, default unbounded strict_wait_ms
+    std::optional<SlotState> thrown;
+    must_complete("strict acquisition under the cap", [&] {
+        try {
+            st->acquire(Demand::now);
+        } catch (const CoremlError & err) {
+            thrown = err.state;
+        }
+    });
+    CHECK(thrown == SlotState::queued);
+    st.reset();
+
+    auto bw = mk("cb");  // bounded wait with a non-stale hint: no wait either
+    seed_hint(bw, 20);
+    Acquired rw;
+    must_complete("bounded wait under the cap", [&] { rw = bw->acquire(Demand::now, Clock::now() + 10s); });
+    CHECK(!rw && rw.pending);
+    bw.reset();
+
+    auto g = e.m->issue_group(GroupKind::construction, {{b, Priority::minimal}}, true);
+    PrewarmResult gr;
+    must_complete("construct group under the cap", [&] { gr = g->wait(10s); });
+    CHECK(g->finished() && !gr.success);
+
+    // Released but predicted for the current call: still never evicted.
+    pool->set_predicted({a});
+    held = Acquired{};
+    must_complete("call acquisition with a predicted instance", [&] { r = b->acquire(Demand::now); });
+    CHECK(!r && r.pending);
+    CHECK(is_ready(a));
+    CHECK(calls("cb") == 0 && calls("cs") == 0);
+
+    // Nothing protects it any more: the queued replacement loads.
+    pool->clear_predicted();
+    CHECK(wait_for([&] { return is_ready(b); }));
+    CHECK(a->state() == SlotState::idle);
+    CHECK(calls("cb") == 1);
+    CHECK(pool->live() == 1);
+}
+
 void case_key_lock_requeue() {
     Config cfg = fast_config();
     cfg.backoff_initial = milliseconds(60);  // wide enough that "other" runs inside it
@@ -1504,6 +1569,7 @@ const Case kCases[] = {
     {"eviction", case_eviction},
     {"resident-cap", case_resident_cap},
     {"resident-cap-retained-handle", case_resident_cap_retained_handle},
+    {"resident-cap-acquire", case_resident_cap_acquire},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"evicted-after-ready-group", case_evicted_after_ready_group},

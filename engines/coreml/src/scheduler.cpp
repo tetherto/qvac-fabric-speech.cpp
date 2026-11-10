@@ -378,7 +378,14 @@ size_t Runtime::pool_live_locked(const PoolCore & p) const {
     return n;
 }
 
-Runtime::PoolVerdict Runtime::pool_admits_locked(const Job & j, Graveyard & gy) {
+void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
+    if (j.cap_blocked == blocked) return;
+    j.cap_blocked = blocked;
+    if (blocked) event_locked("blocked:cap:" + j.load.stage + "/" + j.load.function);
+    state_cv.notify_all();
+}
+
+Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     std::vector<std::shared_ptr<PoolCore>> pools;
     std::vector<std::shared_ptr<SlotCore>> own;
     for (const Sub & s : j.subs) {
@@ -468,9 +475,16 @@ std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_poi
     for (const Cand & c : cands) {
         if (c.job->kind != JobKind::load) return c.job;
         switch (pool_admits_locked(*c.job, gy)) {
-            case PoolVerdict::admit: return c.job;
-            case PoolVerdict::wait_release: return nullptr;  // re-picked when the evicted model is released
+            case PoolVerdict::admit:
+                set_cap_blocked_locked(*c.job, false);
+                return c.job;
+            case PoolVerdict::wait_release:
+                set_cap_blocked_locked(*c.job, false);
+                return nullptr;  // re-picked when the evicted model is released
             case PoolVerdict::blocked:
+                // Retried when a release bumps the generation (Handle::reset,
+                // the model's destructor, set_predicted) or at the recheck.
+                set_cap_blocked_locked(*c.job, true);
                 wake = std::min(wake, now + cfg.memory_recheck);
                 continue;  // a lower-priority job of another stage may run meanwhile
         }
@@ -828,6 +842,7 @@ Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<
     if (w < 0) return none;
     std::shared_ptr<Job> own = c.job;
     if (!own || own->kind != JobKind::load) return none;  // preparation ahead: unbounded
+    if (own->cap_blocked) return none;                    // nothing can be released for it
     int64_t remaining_ms = 0;
     const int64_t budget = w + w / 2;  // w x 1.5
     if (c.state == SlotState::loading || c.state == SlotState::warming) {
@@ -914,6 +929,18 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                     return out;  // waits never block on memory
                 }
                 if (st == SlotState::idle) return out;  // evicted or cancelled meanwhile
+                if (c->job && c->job->cap_blocked) {
+                    // §2.9: nothing can be released, so the replacement is not
+                    // loaded and the unit runs with what is ready; §2.10: strict
+                    // cannot serve the unit.
+                    if (strict) {
+                        throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function +
+                                              " cannot be served: resident cap reached and every live instance is "
+                                              "held or predicted",
+                                          st, ErrorClass::transient);
+                    }
+                    return out;
+                }
                 Clock::time_point until = now + cfg.wait_poll;
                 if (strict_deadline) {
                     if (now >= *strict_deadline) {
@@ -933,6 +960,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 if (!wp.wait) return out;
             }
             if (st != SlotState::queued && st != SlotState::loading && st != SlotState::warming) return out;
+            if (c->job && c->job->cap_blocked) return out;
             if (now >= *deadline) {
                 const int64_t budget = wp.w_ms + wp.w_ms / 2;
                 if ((st == SlotState::loading || st == SlotState::warming) && c->job && running_ == c->job &&
