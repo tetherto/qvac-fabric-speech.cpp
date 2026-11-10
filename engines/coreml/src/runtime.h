@@ -148,6 +148,9 @@ public:
     void on_model_released(const std::string & key);
     void notify();
     void stop();
+    // Pins this image (§2.9) before work is requested; never under mu. Every
+    // entry point that reaches request_locked() calls it first.
+    void pin_for_work();
     Stats stats_snapshot();
     std::vector<std::string> events_snapshot();
 

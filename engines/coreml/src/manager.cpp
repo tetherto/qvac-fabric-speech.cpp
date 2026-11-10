@@ -277,6 +277,7 @@ std::shared_ptr<Group> Manager::issue_group(GroupKind kind, const std::vector<Gr
     g->kind_ = kind;
     g->rt_ = rt_;
     g->skipped_ = std::move(skipped_route_none);
+    rt_->pin_for_work();
     detail::Graveyard gy;
     std::lock_guard<std::mutex> lk(rt_->mu);
     const Clock::time_point now = Clock::now();

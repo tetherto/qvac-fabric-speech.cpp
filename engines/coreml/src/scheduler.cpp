@@ -289,6 +289,15 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
         return;
     }
     if (c->spec.route == Route::none) return;
+    if (cfg.pin_image && pin_state() != PinState::pinned && pin_state() != PinState::main_image) {
+        // §2.9: no asynchronous work from an image that a dlclose could unmap.
+        // pin_for_work() ran before mu was taken; this slot falls back to ggml.
+        c->state = SlotState::failed;
+        c->error = Error::deterministic("the library image could not be pinned against unload");
+        c->reason = c->error.message;
+        bump_locked();
+        return;
+    }
     if (!c->artifact_path.empty()) {
         subscribe_load_locked(c, p, nd, gy);
     } else if (c->spec.route == Route::generate && c->spec.prepare_fn != nullptr) {
@@ -304,7 +313,15 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
     bump_locked();
 }
 
+void Runtime::pin_for_work() {
+    // Synchronous, on the caller's thread, before any request can start a
+    // worker or publish a job: the caller still holds its reference to this
+    // image, so a dlclose right after it returns cannot unmap running code.
+    if (cfg.pin_image) pin_image();
+}
+
 void Runtime::request(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
+    pin_for_work();
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
     request_locked(c, p, nd, gy);
@@ -508,7 +525,6 @@ void Runtime::worker_main(JobKind kind) {
             start_locked(job, now, gy);
             lk.unlock();
             gy.items.clear();
-            if (cfg.pin_image) pin_image();
             if (kind == JobKind::load) {
                 run_load(job);
             } else {
@@ -839,6 +855,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                           const std::atomic<bool> * cancel) {
     Acquired out;
     std::string stale_path;
+    if (d == Demand::now) pin_for_work();
     {
         Graveyard gy;
         std::unique_lock<std::mutex> lk(mu);

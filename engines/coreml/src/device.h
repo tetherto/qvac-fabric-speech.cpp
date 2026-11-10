@@ -24,10 +24,20 @@ std::string device_os_build();
 OsVersion device_os_version();
 Platform device_platform();
 
+enum class PinState {
+    untried,
+    pinned,      // dlopen(path, RTLD_NOLOAD | RTLD_NODELETE) took a reference
+    main_image,  // the runtime lives in the main executable: never unloaded
+    failed,      // a loadable image that could not be pinned
+};
+
 // Pins the library image that contains this runtime (dladdr on a runtime
 // symbol, then dlopen(path, RTLD_NOLOAD | RTLD_NODELETE)), so machine code and
-// callbacks outlive any dlclose. Idempotent; returns whether the image is pinned.
-bool pin_image();
+// callbacks outlive any dlclose. Idempotent. It enters the dynamic loader, so
+// it is never called with Runtime::mu held.
+PinState pin_image();
+// The cached result of pin_image(); never enters the loader.
+PinState pin_state();
 
 }  // namespace detail
 }  // namespace QVAC_COREML_NS

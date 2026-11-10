@@ -1074,43 +1074,77 @@ void case_stateful_isolation() {
     CHECK(a1 && a2 && a1.model.get() != a2.model.get());
 }
 
-void case_dlclose_in_flight() {
+// Child process: one dlclose scenario on a freshly loaded (unpinned) plugin.
+//   in-flight:  unload while the plugin's LoadFn runs;
+//   immediate:  unload right after request() returns;
+//   deferred:   unload while the image's first job is deferred by low power.
+int child_dlclose(const std::string & mode, const std::string & plugin, const std::string & dir) {
+    void * h = dlopen(plugin.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!h) {
+        std::fprintf(stderr, "dlopen: %s\n", dlerror());
+        return 3;
+    }
+    using StartFn = int (*)(const char *);
+    using IntFn = int (*)();
+    auto start = reinterpret_cast<StartFn>(
+        dlsym(h, mode == "deferred" ? "qvac_coreml_plugin_start_deferred" : "qvac_coreml_plugin_start"));
+    auto started = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_started"));
+    if (!start || !started || start(dir.c_str()) != 0) return 3;
+    if (mode == "in-flight" && !wait_for([&] { return started() == 1; })) return 3;
+    dlclose(h);  // the host unloads the library
+    void * again = dlopen(plugin.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (!again) {
+        // Exit before an unmapped worker runs.
+        std::fprintf(stderr, "dlclose %s: image not pinned; the scheduler threads would run unmapped code\n",
+                     mode.c_str());
+        std::fflush(stderr);
+        _exit(1);
+    }
+    // Still mapped: finish the job through the pinned image.
+    using VoidFn = void (*)();
+    auto rel = reinterpret_cast<VoidFn>(dlsym(again, "qvac_coreml_plugin_release"));
+    auto power = reinterpret_cast<VoidFn>(dlsym(again, "qvac_coreml_plugin_power_restored"));
+    auto ready = reinterpret_cast<IntFn>(dlsym(again, "qvac_coreml_plugin_ready"));
+    if (!rel || !power || !ready) return 3;
+    if (mode == "deferred" && started() != 0) return 4;  // it really was deferred
+    power();
+    rel();
+    if (!wait_for([&] { return ready() == 1; })) return 5;
+    dlclose(again);
+    return 0;
+}
+
+int run_child(const std::vector<std::string> & args, int timeout_ms = 10000) {
+    std::vector<char *> argv;
+    argv.push_back(const_cast<char *>(g_self.c_str()));
+    for (const std::string & a : args) argv.push_back(const_cast<char *>(a.c_str()));
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    if (posix_spawn(&pid, g_self.c_str(), nullptr, nullptr, argv.data(), environ) != 0) return -1;
+    int status = 0;
+    const auto t0 = Clock::now();
+    while (ms_since(t0) < timeout_ms) {
+        if (waitpid(pid, &status, WNOHANG) == pid) return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+        std::this_thread::sleep_for(5ms);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return -2;  // hung
+}
+
+void case_dlclose() {
     if (g_plugin.empty()) {
         CHECK(!"--plugin was not given");
         return;
     }
-    const std::string dir = make_temp_dir();
-    void * h = dlopen(g_plugin.c_str(), RTLD_NOW | RTLD_LOCAL);
-    CHECK(h != nullptr);
-    if (!h) {
-        std::fprintf(stderr, "dlopen: %s\n", dlerror());
-        return;
+    for (const char * mode : {"immediate", "deferred", "in-flight"}) {
+        const std::string dir = make_temp_dir();
+        const int rc = run_child({"--child", "dlclose", mode, g_plugin, dir});
+        if (rc != 0) std::fprintf(stderr, "    dlclose %s: child exit %d\n", mode, rc);
+        CHECK(rc == 0);
+        std::error_code ec;
+        fs::remove_all(dir, ec);
     }
-    using StartFn = int (*)(const char *);
-    using IntFn = int (*)();
-    using VoidFn = void (*)();
-    auto start = reinterpret_cast<StartFn>(dlsym(h, "qvac_coreml_plugin_start"));
-    auto started = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_started"));
-    auto rel = reinterpret_cast<VoidFn>(dlsym(h, "qvac_coreml_plugin_release"));
-    auto ready = reinterpret_cast<IntFn>(dlsym(h, "qvac_coreml_plugin_ready"));
-    CHECK(start && started && rel && ready);
-    if (!(start && started && rel && ready)) return;
-    CHECK(start(dir.c_str()) == 0);
-    CHECK(wait_for([&] { return started() == 1; }));
-    dlclose(h);  // the host unloads the library while the fake load is in flight
-    void * again = dlopen(g_plugin.c_str(), RTLD_NOW | RTLD_NOLOAD);
-    CHECK(again != nullptr);  // pinned: still mapped
-    if (!again) {
-        std::fprintf(stderr, "FAIL [%s] image not pinned; the in-flight job would run unmapped code\n",
-                     g_case.c_str());
-        std::fflush(stderr);
-        _exit(1);
-    }
-    dlclose(again);
-    rel();
-    CHECK(wait_for([&] { return ready() == 1; }));
-    std::error_code ec;
-    fs::remove_all(dir, ec);
 }
 
 int child_exit_during_load(const std::string & dir) {
@@ -1436,7 +1470,7 @@ const Case kCases[] = {
     {"destroy-during-prepare-load-warm", case_destroy_during_jobs},
     {"reload-during-load", case_reload_during_load},
     {"stateful-isolation", case_stateful_isolation},
-    {"dlclose-in-flight", case_dlclose_in_flight},
+    {"dlclose", case_dlclose},
     {"exit-during-load", case_exit_during_load},
     {"resolve-precedence", case_resolve_precedence},
     {"plan-route", case_plan_route},
@@ -1458,6 +1492,9 @@ int main(int argc, char ** argv) {
             only = argv[++i];
         } else if (a == "--child" && i + 2 < argc && std::string(argv[i + 1]) == "exit-during-load") {
             return child_exit_during_load(argv[i + 2]);
+        } else if (a == "--child" && i + 4 < argc && std::string(argv[i + 1]) == "dlclose") {
+            g_case = "dlclose";
+            return child_dlclose(argv[i + 2], argv[i + 3], argv[i + 4]);
         } else {
             std::fprintf(stderr, "usage: %s --plugin <module> [--only <case>]\n", argv[0]);
             return 2;
