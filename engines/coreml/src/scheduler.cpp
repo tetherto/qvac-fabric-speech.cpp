@@ -1,0 +1,1064 @@
+// Scheduler (PLAN §2.9): prepare queue + load lane behind one admission gate,
+// memory admission for cold ANE loads, would_block re-queue, resident cap,
+// observed-warm hints and the bounded wait.
+
+#include "runtime.h"
+
+#include "device.h"
+#include "hints.h"
+
+#include <algorithm>
+#include <functional>
+#include <set>
+
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sys/qos.h>
+#endif
+#include <unistd.h>
+
+namespace QVAC_COREML_NS {
+namespace detail {
+
+namespace {
+
+int64_t ms_between(Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+}
+
+bool same_core(const std::weak_ptr<SlotCore> & w, const std::shared_ptr<SlotCore> & c) {
+    return !w.owner_before(c) && !c.owner_before(w);
+}
+
+int64_t * timing_slot(Timings & t, SlotState phase) {
+    switch (phase) {
+        case SlotState::digesting: return &t.digest;
+        case SlotState::generating: return &t.write;
+        case SlotState::compiling: return &t.compile;
+        case SlotState::loading: return &t.load;
+        case SlotState::warming: return &t.warm;
+        default: return nullptr;
+    }
+}
+
+constexpr int64_t kStaleSeconds = 24 * 60 * 60;
+
+}  // namespace
+
+std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
+    return artifact + '\n' + function + '\n' + to_string(units);
+}
+
+Runtime::Runtime(Config c) : cfg(std::move(c)) {
+    host_id = cfg.host_id.empty() ? device_host_id() : cfg.host_id;
+    os_build = cfg.os_build.empty() ? device_os_build() : cfg.os_build;
+    os = device_os_version();
+    platform = device_platform();
+}
+
+Runtime::~Runtime() {
+    // stop() joined the threads, or this is the last reference released by a
+    // worker thread that already left its loop.
+    if (prepare_thread_.joinable()) prepare_thread_.detach();
+    if (load_thread_.joinable()) load_thread_.detach();
+}
+
+void Runtime::stop() {
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        stopping_ = true;
+        bump_locked();
+    }
+    for (std::thread * t : {&prepare_thread_, &load_thread_}) {
+        if (!t->joinable()) continue;
+        if (t->get_id() == std::this_thread::get_id()) {
+            t->detach();
+        } else {
+            t->join();
+        }
+    }
+}
+
+void Runtime::bump_locked() {
+    ++gen_;
+    work_cv.notify_all();
+    state_cv.notify_all();
+}
+
+void Runtime::notify() {
+    std::lock_guard<std::mutex> lk(mu);
+    bump_locked();
+}
+
+void Runtime::event_locked(std::string e) {
+    if (events_.size() >= 4096) events_.erase(events_.begin(), events_.begin() + 1024);
+    events_.push_back(std::move(e));
+}
+
+void Runtime::ensure_threads_locked() {
+    if (threads_started_ || stopping_) return;
+    threads_started_ = true;
+    std::shared_ptr<Runtime> self = shared_from_this();
+    prepare_thread_ = std::thread([self] { self->worker_main(JobKind::prepare); });
+    load_thread_ = std::thread([self] { self->worker_main(JobKind::load); });
+}
+
+Stats Runtime::stats_snapshot() {
+    std::lock_guard<std::mutex> lk(mu);
+    return stats_;
+}
+
+std::vector<std::string> Runtime::events_snapshot() {
+    std::lock_guard<std::mutex> lk(mu);
+    return events_;
+}
+
+// ---- subscriptions --------------------------------------------------------
+
+std::shared_ptr<SlotCore> Runtime::live_core(const Sub & s, const Job & j, Graveyard & gy) const {
+    std::shared_ptr<SlotCore> c = s.core.lock();
+    if (!c) return nullptr;
+    gy.keep(c);
+    if (c->epoch != s.epoch || c->job.get() != &j) return nullptr;
+    return c;
+}
+
+Runtime::JobView Runtime::view_locked(const Job & j, Graveyard & gy) const {
+    JobView v;
+    bool all_deferrable = true;
+    for (const Sub & s : j.subs) {
+        if (!live_core(s, j, gy)) continue;
+        v.live = true;
+        if (static_cast<int>(s.prio) > static_cast<int>(v.prio)) v.prio = s.prio;
+        if (s.prio != Priority::prewarm || s.non_deferrable) all_deferrable = false;
+    }
+    v.deferrable = v.live && all_deferrable;
+    return v;
+}
+
+void Runtime::set_subs_state_locked(Job & j, SlotState st, Graveyard & gy) {
+    for (const Sub & s : j.subs) {
+        if (std::shared_ptr<SlotCore> c = live_core(s, j, gy)) c->state = st;
+    }
+}
+
+void Runtime::cancel_locked(const std::shared_ptr<Job> & j) {
+    auto it = std::find(queue_.begin(), queue_.end(), j);
+    if (it != queue_.end()) queue_.erase(it);
+    auto f = inflight_.find(j->dedup_key);
+    if (f != inflight_.end() && f->second == j) inflight_.erase(f);
+    j->done = true;
+    ++stats_.cancelled;
+    event_locked("cancel:" + std::string(j->kind == JobKind::load ? "load:" + j->load.stage + "/" + j->load.function
+                                                                     : "prepare:" + j->prepare.key));
+}
+
+void Runtime::unsubscribe_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    std::shared_ptr<Job> j = std::move(c->job);
+    c->job.reset();
+    if (!j) return;
+    j->subs.erase(std::remove_if(j->subs.begin(), j->subs.end(), [&](const Sub & s) { return same_core(s.core, c); }),
+                  j->subs.end());
+    if (!j->started && !j->done && !view_locked(*j, gy).live) cancel_locked(j);
+}
+
+void Runtime::evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
+    gy.keep(c->model);
+    c->model.reset();
+    ++c->epoch;
+    unsubscribe_locked(c, gy);
+    if (!is_terminal(c->state)) c->state = SlotState::idle;
+    c->queued_behind = false;
+    ++stats_.evictions;
+    event_locked("evict:" + c->spec.stage + "/" + c->spec.function);
+    bump_locked();
+}
+
+void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
+    const std::string key = model_key(c->artifact_path, c->spec.function, c->spec.units);
+    if (auto r = retired_.find(key); r != retired_.end()) {
+        c->state = SlotState::retired;
+        c->reason = r->second;
+        return;
+    }
+    if (c->spec.shareable) {
+        if (std::shared_ptr<SharedModel> m = registry_[key].lock()) {
+            gy.keep(m);
+            if (!m->retired()) {
+                c->model = m;
+                c->last_model = m;
+                c->state = SlotState::ready;
+                c->last_used = Clock::now();
+                ++c->ready_events;
+                c->ready_snapshot = status_locked(*c, Clock::now());
+                return;
+            }
+        }
+    }
+    // Stateful templates never share a model; the same slot may still rejoin
+    // its own running job after an eviction.
+    const std::string dedup = c->spec.shareable ? key : key + "#" + std::to_string(reinterpret_cast<uintptr_t>(c.get()));
+    if (auto it = inflight_.find(dedup); it != inflight_.end() && !it->second->done) {
+        std::shared_ptr<Job> j = it->second;
+        j->subs.push_back(Sub{c, c->epoch, p, nd});
+        c->job = j;
+        c->state = j->started ? j->phase : (j->deferred_memory ? SlotState::deferred_memory : SlotState::queued);
+        return;
+    }
+    auto j = std::make_shared<Job>();
+    j->kind = JobKind::load;
+    j->seq = ++seq_;
+    j->dedup_key = dedup;
+    j->model_key = key;
+    j->load.engine = c->spec.engine;
+    j->load.stage = c->spec.stage;
+    j->load.artifact_path = c->artifact_path;
+    j->load.function = c->spec.function;
+    j->load.units = c->spec.units;
+    j->load.tmpl = c->spec.tmpl;
+    j->load.geometry = c->spec.geometry;
+    j->load_fn = c->spec.load_fn;
+    j->warm_fn = c->spec.warm_fn;
+    j->shareable = c->spec.shareable;
+    j->ane = units_include_ane(c->spec.units);
+    j->ane_reserve = c->spec.ane_compile_reserve_bytes;
+    j->hint_path = c->hint_path;
+    j->expected_warm_ms = c->spec.expected_warm_load_ms;
+    j->enqueued_at = Clock::now();
+    j->subs.push_back(Sub{c, c->epoch, p, nd});
+    queue_.push_back(j);
+    inflight_[dedup] = j;
+    c->job = j;
+    c->state = SlotState::queued;
+    c->queued_behind = false;
+}
+
+void Runtime::subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
+    const std::string dedup = c->spec.prepare.key.empty()
+                                  ? "prepare#" + std::to_string(reinterpret_cast<uintptr_t>(c.get()))
+                                  : "prepare\n" + c->spec.prepare.key;
+    if (auto it = inflight_.find(dedup); it != inflight_.end() && !it->second->done) {
+        std::shared_ptr<Job> j = it->second;
+        j->subs.push_back(Sub{c, c->epoch, p, nd});
+        c->job = j;
+        c->state = j->started ? j->phase : SlotState::queued;
+        return;
+    }
+    auto j = std::make_shared<Job>();
+    j->kind = JobKind::prepare;
+    j->seq = ++seq_;
+    j->dedup_key = dedup;
+    j->prepare = c->spec.prepare;
+    j->prepare_fn = c->spec.prepare_fn;
+    j->load.engine = c->spec.engine;
+    j->load.stage = c->spec.stage;
+    j->load.function = c->spec.function;
+    j->load.units = c->spec.units;
+    j->enqueued_at = Clock::now();
+    j->subs.push_back(Sub{c, c->epoch, p, nd});
+    queue_.push_back(j);
+    inflight_[dedup] = j;
+    c->job = j;
+    c->state = SlotState::queued;
+}
+
+void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
+    if (stopping_ || exiting()) return;
+    if (c->model && c->model->retired()) {
+        gy.keep(c->model);
+        c->model.reset();
+        c->state = SlotState::retired;
+        if (auto r = retired_.find(model_key(c->artifact_path, c->spec.function, c->spec.units)); r != retired_.end()) {
+            c->reason = r->second;
+        }
+        return;
+    }
+    if (c->state == SlotState::ready) {
+        c->last_used = Clock::now();
+        return;
+    }
+    if (is_terminal(c->state)) return;
+    if (c->job) {
+        for (Sub & s : c->job->subs) {
+            if (same_core(s.core, c) && s.epoch == c->epoch) {
+                if (static_cast<int>(p) > static_cast<int>(s.prio)) s.prio = p;
+                s.non_deferrable = s.non_deferrable || nd;
+            }
+        }
+        bump_locked();
+        return;
+    }
+    if (c->spec.route == Route::none) return;
+    if (!c->artifact_path.empty()) {
+        subscribe_load_locked(c, p, nd, gy);
+    } else if (c->spec.route == Route::generate && c->spec.prepare_fn != nullptr) {
+        subscribe_prepare_locked(c, p, nd);
+    } else {
+        c->state = SlotState::failed;
+        c->error = Error::deterministic("no artifact path and no prepare function");
+        c->reason = c->error.message;
+        bump_locked();
+        return;
+    }
+    ensure_threads_locked();
+    bump_locked();
+}
+
+void Runtime::request(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    request_locked(c, p, nd, gy);
+}
+
+// ---- admission ------------------------------------------------------------
+
+bool Runtime::low_power_locked() const { return cfg.low_power ? cfg.low_power() : device_low_power(); }
+
+bool Runtime::hinted(const std::string & path) const {
+    if (path.empty()) return false;
+    std::optional<HintRecord> h = read_hint(path);
+    return h.has_value() && !hint_stale(*h, unix_now_s());
+}
+
+// Expected warm time of a job's load: -1 when it has no non-stale hint, or
+// when neither an observed warm time nor a template estimate exists.
+int64_t Runtime::job_w(const Job & j) const {
+    if (j.kind != JobKind::load || j.hint_path.empty()) return -1;
+    std::optional<HintRecord> h = read_hint(j.hint_path);
+    if (!h || hint_stale(*h, unix_now_s())) return -1;
+    if (h->warm_load_ms) return *h->warm_load_ms;
+    if (j.expected_warm_ms) return *j.expected_warm_ms;
+    return -1;
+}
+
+size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
+    // Distinct live instances, identified without taking strong references
+    // (a strong copy would also defeat the eviction use_count check).
+    std::set<std::weak_ptr<SharedModel>, std::owner_less<std::weak_ptr<SharedModel>>> live;
+    for (const auto & w : p.members) {
+        std::shared_ptr<SlotCore> m = w.lock();
+        if (!m) continue;
+        gy.keep(m);
+        if (!m->last_model.expired()) live.insert(m->last_model);
+    }
+    size_t n = live.size();
+    if (running_ && running_->kind == JobKind::load && !running_->done) {
+        for (const auto & wp : running_->pools) {
+            if (wp.lock().get() == &p) {
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+Runtime::PoolVerdict Runtime::pool_admits_locked(const Job & j, Graveyard & gy) {
+    std::vector<std::shared_ptr<PoolCore>> pools;
+    std::vector<std::shared_ptr<SlotCore>> own;
+    for (const Sub & s : j.subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, j, gy);
+        if (!c) continue;
+        own.push_back(c);
+        if (std::shared_ptr<PoolCore> p = c->pool.lock()) {
+            if (std::find(pools.begin(), pools.end(), p) == pools.end()) pools.push_back(p);
+        }
+    }
+    PoolVerdict verdict = PoolVerdict::admit;
+    for (const std::shared_ptr<PoolCore> & p : pools) {
+        if (pool_live_locked(*p, gy) < p->cap) continue;
+        // Least recently used member that no unit holds, the current call does
+        // not predict, and that is not part of this job.
+        std::shared_ptr<SlotCore> victim;
+        for (const auto & w : p->members) {
+            std::shared_ptr<SlotCore> m = w.lock();
+            if (!m) continue;
+            gy.keep(m);
+            if (!m->model || m->model.use_count() != 1 || m->model->holds_.load() != 0) continue;
+            if (std::find(own.begin(), own.end(), m) != own.end()) continue;
+            bool predicted = false;
+            for (const auto & pw : p->predicted) predicted = predicted || same_core(pw, m);
+            if (predicted) continue;
+            if (!victim || m->last_used < victim->last_used) victim = m;
+        }
+        if (victim) {
+            evict_locked(victim, gy);  // the instance is released once mu is unlocked
+            verdict = PoolVerdict::wait_release;
+        } else {
+            return PoolVerdict::blocked;
+        }
+    }
+    return verdict;
+}
+
+std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy) {
+    const bool lp = low_power_locked();
+    std::optional<uint64_t> mem;
+    struct Cand {
+        std::shared_ptr<Job> job;
+        Priority prio;
+    };
+    std::vector<Cand> cands;
+    for (size_t i = 0; i < queue_.size();) {
+        std::shared_ptr<Job> j = queue_[i];
+        const JobView v = view_locked(*j, gy);
+        if (!v.live) {
+            cancel_locked(j);  // erases queue_[i]
+            continue;
+        }
+        ++i;
+        if (j->retry_at > now) {
+            wake = std::min(wake, j->retry_at);
+            continue;
+        }
+        if (lp && v.deferrable) {
+            wake = std::min(wake, now + cfg.memory_recheck);
+            continue;
+        }
+        if (j->kind == JobKind::load && j->ane && j->ane_reserve > 0 && !hinted(j->hint_path)) {
+            if (!mem) mem = cfg.available_memory ? cfg.available_memory() : device_available_memory();
+            if (*mem < j->ane_reserve) {
+                if (!j->deferred_memory) {
+                    j->deferred_memory = true;
+                    j->deferred_since = now;
+                    set_subs_state_locked(*j, SlotState::deferred_memory, gy);
+                    event_locked("defer:memory:" + j->load.stage + "/" + j->load.function);
+                    state_cv.notify_all();
+                }
+                wake = std::min(wake, now + cfg.memory_recheck);
+                continue;
+            }
+        }
+        if (j->deferred_memory) {
+            j->deferred_memory = false;
+            set_subs_state_locked(*j, SlotState::queued, gy);
+            state_cv.notify_all();
+        }
+        cands.push_back({j, v.prio});
+    }
+    std::stable_sort(cands.begin(), cands.end(), [](const Cand & a, const Cand & b) {
+        if (a.prio != b.prio) return static_cast<int>(a.prio) > static_cast<int>(b.prio);
+        return a.job->seq < b.job->seq;
+    });
+    for (const Cand & c : cands) {
+        if (c.job->kind != JobKind::load) return c.job;
+        switch (pool_admits_locked(*c.job, gy)) {
+            case PoolVerdict::admit: return c.job;
+            case PoolVerdict::wait_release: return nullptr;  // re-picked when the evicted model is released
+            case PoolVerdict::blocked:
+                wake = std::min(wake, now + cfg.memory_recheck);
+                continue;  // a lower-priority job of another stage may run meanwhile
+        }
+    }
+    return nullptr;
+}
+
+void Runtime::start_locked(const std::shared_ptr<Job> & j, Clock::time_point now, Graveyard & gy) {
+    running_ = j;
+    handoff_ = -1;
+    queue_.erase(std::remove(queue_.begin(), queue_.end(), j), queue_.end());
+    j->started = true;
+    j->started_at = now;
+    j->phase_at = now;
+    j->timings.queued = ms_between(j->enqueued_at, now);
+    j->phase = j->kind == JobKind::load ? SlotState::loading : SlotState::digesting;
+    j->pools.clear();
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;
+        c->state = j->phase;
+        c->timings.queued = j->timings.queued;
+        if (std::shared_ptr<PoolCore> p = c->pool.lock()) j->pools.push_back(p);
+    }
+    if (j->kind == JobKind::load) {
+        j->hinted_at_start = hinted(j->hint_path);
+        ++stats_.loads_started;
+        event_locked("start:load:" + j->load.stage + "/" + j->load.function);
+    } else {
+        ++stats_.prepares_started;
+        event_locked("start:prepare:" + j->prepare.key);
+    }
+    state_cv.notify_all();
+}
+
+void Runtime::worker_main(JobKind kind) {
+#if defined(__APPLE__)
+    if (kind == JobKind::prepare) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+    std::unique_lock<std::mutex> lk(mu);
+    while (!stopping_) {
+        Graveyard gy;
+        const Clock::time_point now = Clock::now();
+        Clock::time_point wake = now + std::chrono::hours(1);
+        const uint64_t seen = gen_;
+        std::shared_ptr<Job> job;
+        if (!running_ && !exiting()) {
+            job = pick_locked(now, wake, gy);
+            if (job && job->kind != kind) {
+                handoff_ = static_cast<int>(job->kind);
+                work_cv.notify_all();
+                job.reset();
+            }
+        }
+        if (job) {
+            start_locked(job, now, gy);
+            lk.unlock();
+            gy.items.clear();
+            if (cfg.pin_image) pin_image();
+            if (kind == JobKind::load) {
+                run_load(job);
+            } else {
+                run_prepare(job);
+            }
+            lk.lock();
+            if (running_ == job) running_.reset();
+            bump_locked();
+            continue;
+        }
+        if (!gy.items.empty()) {
+            lk.unlock();
+            gy.items.clear();
+            lk.lock();
+            if (gen_ != seen) continue;
+        }
+        work_cv.wait_until(lk, wake, [&] {
+            return stopping_ || gen_ != seen || handoff_ == static_cast<int>(kind);
+        });
+    }
+}
+
+// ---- job execution (unlocked) --------------------------------------------
+
+void Runtime::set_phase(const std::shared_ptr<Job> & j, SlotState st) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    const Clock::time_point now = Clock::now();
+    if (int64_t * t = timing_slot(j->timings, j->phase)) *t = ms_between(j->phase_at, now);
+    j->phase = st;
+    j->phase_at = now;
+    set_subs_state_locked(*j, st, gy);
+    state_cv.notify_all();
+}
+
+void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    j->done = true;
+    if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;
+        c->job.reset();
+        c->state = st;
+        c->error = e;
+        c->reason = e.message;
+    }
+    if (j->kind == JobKind::load) ++stats_.load_failures;
+    event_locked("fail:" + j->load.stage + "/" + j->load.function + ":" + e.message);
+    bump_locked();
+}
+
+void Runtime::requeue(const std::shared_ptr<Job> & j) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    const Clock::time_point now = Clock::now();
+    const int64_t initial = cfg.backoff_initial.count();
+    const int64_t maxb = cfg.backoff_max.count();
+    j->backoff_ms = j->backoff_ms == 0 ? initial : std::min(j->backoff_ms * 2, maxb);
+    j->retry_at = now + std::chrono::milliseconds(j->backoff_ms);
+    j->started = false;
+    j->completing = false;
+    j->phase = SlotState::queued;
+    queue_.push_back(j);
+    set_subs_state_locked(*j, SlotState::queued, gy);
+    ++stats_.requeues;
+    event_locked("requeue:" + std::string(j->kind == JobKind::load ? "load:" + j->load.stage + "/" + j->load.function
+                                                                      : "prepare:" + j->prepare.key));
+    bump_locked();
+}
+
+std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool warm) {
+    if (j.hint_path.empty()) return std::nullopt;
+    std::lock_guard<std::mutex> hl(hint_mu_);
+    HintRecord rec = read_hint(j.hint_path).value_or(HintRecord{});
+    if (warm) {
+        rec.warm_load_ms = ms;
+    } else {
+        rec.cold_load_ms = ms;
+    }
+    rec.last_ok = iso8601_utc(unix_now_s());
+    // stale_until written meanwhile is preserved (read just above).
+    write_hint(j.hint_path, rec);
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        ++stats_.hint_writes;
+    }
+    return HintView{rec.warm_load_ms, rec.cold_load_ms, hint_stale(rec, unix_now_s())};
+}
+
+void Runtime::write_stale(const std::string & path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> hl(hint_mu_);
+    HintRecord rec = read_hint(path).value_or(HintRecord{});
+    rec.stale_until_s = unix_now_s() + kStaleSeconds;
+    write_hint(path, rec);
+}
+
+void Runtime::run_load(const std::shared_ptr<Job> & j) {
+    {
+        std::shared_ptr<SharedModel> existing;
+        bool retired = false;
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (auto r = retired_.find(j->model_key); r != retired_.end()) {
+                retired = true;
+                reason = r->second;
+            } else if (j->shareable) {
+                existing = registry_[j->model_key].lock();
+            }
+        }
+        if (retired) {
+            fail(j, Error::deterministic(reason), SlotState::retired);
+            return;
+        }
+        if (existing && !existing->retired()) {
+            // Another owner's model is still alive (e.g. a unit retains it after
+            // an eviction): no second instance.
+            publish(j, existing, false, std::nullopt);
+            return;
+        }
+    }
+
+    const Clock::time_point t0 = Clock::now();
+    LoadResult r = j->load_fn ? j->load_fn(j->load) : LoadResult{};
+    if (!j->load_fn) r.error = Error::deterministic("no LoadFn");
+    if (r.would_block) {
+        requeue(j);
+        return;
+    }
+    if (!r.error.ok() || !r.model) {
+        if (r.lease_fd >= 0) ::close(r.lease_fd);
+        fail(j, r.error.ok() ? Error::deterministic("LoadFn returned no model") : r.error);
+        return;
+    }
+    const Clock::time_point t1 = Clock::now();
+    if (j->warm_fn) {
+        set_phase(j, SlotState::warming);
+        Error e = j->warm_fn(r.model.get(), j->load);
+        if (!e.ok()) {
+            if (r.lease_fd >= 0) ::close(r.lease_fd);
+            r.model.reset();
+            fail(j, e);
+            return;
+        }
+    }
+    const Clock::time_point t2 = Clock::now();
+    bool expired = false;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        j->completing = true;
+        expired = j->wait_expired.load();
+        j->timings.load = ms_between(t0, t1);
+        j->timings.warm = j->warm_fn ? ms_between(t1, t2) : 0;
+    }
+    // A load counts as warm if a non-stale hint existed when it started; one
+    // whose bounded wait expired does not train warm_load_ms.
+    const std::optional<HintView> hint = record_hint(*j, ms_between(t0, t2), j->hinted_at_start.load() && !expired);
+    std::shared_ptr<SharedModel> sm(
+        new SharedModel(std::move(r.model), j->load, j->model_key, r.lease_fd, weak_from_this()));
+    publish(j, sm, true, hint);
+}
+
+namespace {
+class PrepareCtx final : public PrepareContext {
+public:
+    PrepareCtx(std::function<void(PreparePhase)> on_phase, std::function<bool()> on_abandoned)
+        : on_phase_(std::move(on_phase)), on_abandoned_(std::move(on_abandoned)) {}
+    void phase(PreparePhase p) override { on_phase_(p); }
+    bool abandoned() const override { return on_abandoned_(); }
+
+private:
+    std::function<void(PreparePhase)> on_phase_;
+    std::function<bool()> on_abandoned_;
+};
+}  // namespace
+
+void Runtime::run_prepare(const std::shared_ptr<Job> & j) {
+    PrepareCtx ctx(
+        [this, j](PreparePhase p) {
+            set_phase(j, p == PreparePhase::digesting    ? SlotState::digesting
+                         : p == PreparePhase::generating ? SlotState::generating
+                                                         : SlotState::compiling);
+        },
+        [this, j]() {
+            if (exiting()) return true;
+            Graveyard gy;
+            std::lock_guard<std::mutex> lk(mu);
+            return !view_locked(*j, gy).live;
+        });
+    PrepareResult r;
+    if (j->prepare_fn) {
+        r = j->prepare_fn(j->prepare, ctx);
+    } else {
+        r.error = Error::deterministic("no PrepareFn");
+    }
+    if (r.would_block) {
+        requeue(j);
+        return;
+    }
+    if (!r.error.ok() || r.artifact_path.empty()) {
+        fail(j, r.error.ok() ? Error::deterministic("PrepareFn returned no artifact") : r.error);
+        return;
+    }
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    const Clock::time_point now = Clock::now();
+    if (int64_t * t = timing_slot(j->timings, j->phase)) *t = ms_between(j->phase_at, now);
+    j->done = true;
+    if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
+    ++stats_.prepares_completed;
+    event_locked("prepared:" + j->prepare.key);
+    // Every live subscriber adopts the artifact and hands it to the load lane.
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;
+        c->job.reset();
+        c->artifact_path = r.artifact_path;
+        c->artifact_key = r.artifact_key;
+        c->status_route = r.cache_hit ? StatusRoute::cached : StatusRoute::generated;
+        c->timings.digest = j->timings.digest;
+        c->timings.write = j->timings.write;
+        c->timings.compile = j->timings.compile;
+        c->hint_path = hint_path_for(c->policy.cache_dir, host_id, c->artifact_path, c->spec.function,
+                                     to_string(c->spec.units), os_build);
+        subscribe_load_locked(c, s.prio, s.non_deferrable, gy);
+    }
+    bump_locked();
+}
+
+void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<SharedModel> & m, bool loaded,
+                      const std::optional<HintView> & hint) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    const Clock::time_point now = Clock::now();
+    j->done = true;
+    if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
+    if (auto r = retired_.find(j->model_key); r != retired_.end()) {
+        // Retired while this load ran: deliver nothing.
+        for (const Sub & s : j->subs) {
+            std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+            if (!c) continue;
+            c->job.reset();
+            c->state = SlotState::retired;
+            c->reason = r->second;
+        }
+        bump_locked();
+        return;
+    }
+    if (j->shareable) registry_[j->model_key] = m;
+    for (const Sub & s : j->subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
+        if (!c) continue;  // evicted or destroyed meanwhile: never repopulated
+        gy.keep(c->model);  // never drop a model under mu
+        c->model = m;
+        c->last_model = m;
+        c->job.reset();
+        c->state = SlotState::ready;
+        c->reason.clear();
+        c->error = Error{};
+        c->queued_behind = false;
+        c->last_used = now;
+        c->timings.queued = j->timings.queued;
+        c->timings.load = j->timings.load;
+        c->timings.warm = j->timings.warm;
+        ++c->ready_events;
+        c->ready_snapshot = status_locked(*c, now);
+        c->ready_snapshot.hint = hint;
+    }
+    if (loaded) {
+        ++stats_.loads_completed;
+        event_locked("ready:" + j->load.stage + "/" + j->load.function);
+    }
+    bump_locked();
+}
+
+// ---- acquisition ----------------------------------------------------------
+
+Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<Clock::time_point> deadline,
+                                                    Clock::time_point now, Graveyard & gy) {
+    WaitPlan none;
+    if (!deadline || c.hint_path.empty()) return none;
+    std::optional<HintRecord> h = read_hint(c.hint_path);
+    if (!h || hint_stale(*h, unix_now_s())) return none;  // only a non-stale hint is waited on
+    int64_t w = -1;
+    if (h->warm_load_ms) {
+        w = *h->warm_load_ms;
+    } else if (c.spec.expected_warm_load_ms) {
+        w = *c.spec.expected_warm_load_ms;
+    }
+    if (w < 0) return none;
+    std::shared_ptr<Job> own = c.job;
+    if (!own || own->kind != JobKind::load) return none;  // preparation ahead: unbounded
+    int64_t remaining_ms = 0;
+    const int64_t budget = w + w / 2;  // w x 1.5
+    if (c.state == SlotState::loading || c.state == SlotState::warming) {
+        if (running_ != own) return none;
+        remaining_ms = std::max<int64_t>(0, budget - ms_between(own->started_at, now));
+    } else if (c.state == SlotState::queued) {
+        remaining_ms = budget;
+        if (running_ && running_ != own) {
+            if (running_->kind != JobKind::load) return none;  // an admitted prepare job ahead
+            const int64_t wr = job_w(*running_);
+            if (wr < 0) return none;  // an unhinted (possibly cold) load ahead
+            remaining_ms += wr;
+        }
+        const bool lp = low_power_locked();
+        for (const std::shared_ptr<Job> & q : queue_) {
+            if (q == own || q->retry_at > now || q->deferred_memory) continue;
+            const JobView v = view_locked(*q, gy);
+            if (!v.live || (lp && v.deferrable)) continue;
+            if (v.prio != Priority::now || q->seq > own->seq) continue;
+            if (q->kind != JobKind::load) return none;
+            const int64_t wq = job_w(*q);
+            if (wq < 0) return none;
+            remaining_ms += wq;
+        }
+    } else {
+        return none;
+    }
+    if (now + std::chrono::milliseconds(remaining_ms) > *deadline) return none;
+    return WaitPlan{true, w};
+}
+
+Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::optional<Clock::time_point> deadline,
+                          const std::atomic<bool> * cancel) {
+    Acquired out;
+    std::string stale_path;
+    {
+        Graveyard gy;
+        std::unique_lock<std::mutex> lk(mu);
+        if (d == Demand::now) request_locked(c, Priority::now, false, gy);
+        const bool strict = c->policy.strict;
+        const Wait wait = strict ? Wait::call : c->policy.wait;
+        std::optional<Clock::time_point> strict_deadline;
+        if (strict && c->policy.strict_wait_ms) {
+            strict_deadline = Clock::now() + std::chrono::milliseconds(*c->policy.strict_wait_ms);
+        }
+        bool planned = false;
+        WaitPlan wp;
+        for (;;) {
+            const Clock::time_point now = Clock::now();
+            if (c->model && c->model->retired()) {
+                gy.keep(c->model);
+                c->model.reset();
+                c->state = SlotState::retired;
+            }
+            const SlotState st = c->state;
+            out.state = st;
+            if (st == SlotState::ready && c->model) {
+                c->last_used = now;
+                c->queued_behind = false;
+                out.model = Handle(c->model);
+                out.pending = false;
+                return out;
+            }
+            if (is_terminal(st)) {
+                out.pending = false;
+                if (strict) {
+                    throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function + " is " +
+                                          state_label(st, c->reason) + (c->reason.empty() ? "" : ": " + c->reason),
+                                      st, c->error.cls);
+                }
+                return out;
+            }
+            out.pending = true;
+            if (d == Demand::if_ready || exiting() || stopping_) return out;
+            if (cancel && cancel->load()) return out;
+            if (wait == Wait::call) {
+                if (st == SlotState::deferred_memory) {
+                    if (strict) {
+                        throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function +
+                                              " is deferred(memory)",
+                                          st, ErrorClass::transient);
+                    }
+                    return out;  // waits never block on memory
+                }
+                if (st == SlotState::idle) return out;  // evicted or cancelled meanwhile
+                Clock::time_point until = now + cfg.wait_poll;
+                if (strict_deadline) {
+                    if (now >= *strict_deadline) {
+                        throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function +
+                                              " not ready within strict_wait_ms (" + state_label(st, c->reason) + ")",
+                                          st, ErrorClass::transient);
+                    }
+                    until = std::min(until, *strict_deadline);
+                }
+                state_cv.wait_until(lk, until);
+                continue;
+            }
+            // none / construct: the bounded wait (§2.9), decided once.
+            if (!planned) {
+                planned = true;
+                wp = plan_bounded_wait_locked(*c, deadline, now, gy);
+                if (!wp.wait) return out;
+            }
+            if (st != SlotState::queued && st != SlotState::loading && st != SlotState::warming) return out;
+            if (now >= *deadline) {
+                const int64_t budget = wp.w_ms + wp.w_ms / 2;
+                if ((st == SlotState::loading || st == SlotState::warming) && c->job && running_ == c->job &&
+                    !c->job->completing && ms_between(c->job->started_at, now) > budget) {
+                    // Its own load ran past w x 1.5: cool the hint down for 24 h
+                    // so a cold load is never waited on twice.
+                    c->job->wait_expired = true;
+                    stale_path = c->hint_path;
+                } else if (st == SlotState::queued) {
+                    c->queued_behind = true;  // hint untouched
+                }
+                break;
+            }
+            state_cv.wait_until(lk, std::min(*deadline, now + cfg.wait_poll));
+        }
+    }
+    write_stale(stale_path);
+    return out;
+}
+
+// ---- eviction, retirement, status ----------------------------------------
+
+void Runtime::evict(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    evict_locked(c, gy);
+}
+
+void Runtime::release_slot(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    gy.keep(c->model);
+    c->model.reset();
+    ++c->epoch;
+    unsubscribe_locked(c, gy);
+    if (!is_terminal(c->state)) c->state = SlotState::idle;
+    bump_locked();
+}
+
+void Runtime::retire_model(SharedModel & m, const std::string & reason) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    m.retired_ = true;
+    retired_[m.key_] = reason;
+    registry_.erase(m.key_);
+    for (const auto & w : slots_) {
+        std::shared_ptr<SlotCore> c = w.lock();
+        if (!c) continue;
+        gy.keep(c);
+        if (c->model.get() != &m) continue;
+        gy.keep(c->model);
+        c->model.reset();
+        c->state = SlotState::retired;
+        c->reason = reason;
+    }
+    event_locked("retire:" + m.req_.stage + "/" + m.req_.function + ":" + reason);
+    bump_locked();
+}
+
+void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string & reason) {
+    std::shared_ptr<SharedModel> m;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        m = c->model;
+    }
+    if (m) {
+        retire_model(*m, reason);
+        return;
+    }
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    unsubscribe_locked(c, gy);
+    c->state = SlotState::retired;
+    c->reason = reason;
+    bump_locked();
+}
+
+void Runtime::on_model_released(const std::string & key) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (auto it = registry_.find(key); it != registry_.end() && it->second.expired()) registry_.erase(it);
+    bump_locked();
+}
+
+SlotState Runtime::state(const std::shared_ptr<SlotCore> & c) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (c->model && c->model->retired()) return SlotState::retired;
+    return c->state;
+}
+
+std::string Runtime::hint_path(const std::shared_ptr<SlotCore> & c) {
+    std::lock_guard<std::mutex> lk(mu);
+    return c->hint_path;
+}
+
+SlotStatus Runtime::status_locked(SlotCore & c, Clock::time_point now) const {
+    SlotStatus s;
+    s.stage = c.spec.stage;
+    s.function = c.spec.function;
+    s.state = (c.model && c.model->retired()) ? SlotState::retired : c.state;
+    s.reason = c.reason;
+    s.route = c.status_route;
+    s.compute_units = to_string(c.spec.units);
+    s.label = s.state == SlotState::ready ? label_for(c.spec.units) : "ggml";
+    s.artifact_key = c.artifact_key;
+    s.path = c.artifact_path;
+    s.timings_ms = c.timings;
+    if (c.job && (c.state == SlotState::loading || c.state == SlotState::warming || c.state == SlotState::digesting ||
+                  c.state == SlotState::generating || c.state == SlotState::compiling)) {
+        s.timings_ms.queued = c.job->timings.queued;
+    }
+    s.error = c.error.message;
+    s.error_class = c.error.cls;
+    if (c.queued_behind) s.wait = "queued_behind";
+    if (s.state == SlotState::deferred_memory && c.job) s.deferred_ms = ms_between(c.job->deferred_since, now);
+    return s;
+}
+
+SlotStatus Runtime::status(const std::shared_ptr<SlotCore> & c) {
+    SlotStatus s;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        s = status_locked(*c, Clock::now());
+        path = c->hint_path;
+    }
+    if (std::optional<HintRecord> h = read_hint(path)) {
+        s.hint = HintView{h->warm_load_ms, h->cold_load_ms, hint_stale(*h, unix_now_s())};
+    }
+    return s;
+}
+
+void Runtime::add_slot(const std::shared_ptr<SlotCore> & c) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    slots_.erase(std::remove_if(slots_.begin(), slots_.end(), [](const std::weak_ptr<SlotCore> & w) { return w.expired(); }),
+                 slots_.end());
+    slots_.push_back(c);
+}
+
+void Runtime::pool_add(PoolCore & p, const std::shared_ptr<SlotCore> & c) {
+    std::lock_guard<std::mutex> lk(mu);
+    p.members.push_back(c);
+}
+
+void Runtime::pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & cores) {
+    std::lock_guard<std::mutex> lk(mu);
+    p.predicted.assign(cores.begin(), cores.end());
+    bump_locked();
+}
+
+size_t Runtime::pool_live(const PoolCore & p) {
+    Graveyard gy;
+    std::lock_guard<std::mutex> lk(mu);
+    return pool_live_locked(p, gy);
+}
+
+}  // namespace detail
+}  // namespace QVAC_COREML_NS
