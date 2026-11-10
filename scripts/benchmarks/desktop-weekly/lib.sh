@@ -16,6 +16,7 @@ readonly DEADLINE_POLL_SECONDS="${DEADLINE_POLL_SECONDS:-5}"
 readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
 readonly HOST_LOAD_WINDOW_SECONDS=1
+readonly HOST_LOAD_SUFFIX=".load.json"
 readonly MEMORY_SAMPLE_SECONDS=0.25
 readonly KIB_PER_MIB=1024
 readonly NANOSECOND_SHIM="nsdate"
@@ -447,7 +448,7 @@ cell_is_reusable() {
 
 discard_cell() {
   local out="$1"
-  rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv" "${out%.json}.load.json"
+  rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv" "$(host_load_file "$out")"
 }
 
 cpu_ticks() { awk '/^cpu /{total=0; for (i=2; i<=NF; i++) total+=$i; printf "%.0f %.0f\n", total, $5+$6}' /proc/stat; }
@@ -472,15 +473,19 @@ load_average_one() { case "$OS_NAME" in Darwin) sysctl -n vm.loadavg | awk '{pri
 
 online_cpus() { getconf _NPROCESSORS_ONLN; }
 
+host_load_file() { echo "${1%.json}$HOST_LOAD_SUFFIX"; }
+
+is_host_load_file() { case "$1" in *"$HOST_LOAD_SUFFIX") return 0 ;; *) return 1 ;; esac; }
+
 write_host_load() {
   jq -n --arg at "$(utc_now)" --argjson busy "$(host_busy_percent)" --argjson load "$(load_average_one)" --argjson cpus "$(online_cpus)" \
     '{sampled_at: $at, busy_before_pct: $busy, load1_before: $load, cpu_count: $cpus}' > "$1"
 }
 
-page_cache_trees() { echo "$MODELS_DIR/store" "$BUILDS_DIR" "$SRC_DIR" "$BENCH_HOME/deps"; }
+evict_trees() { python3 "$TOOLS_DIR/prepare-derived.py" evict "$@" > /dev/null; }
 
 evict_page_cache() {
-  if [ "$EVICT_PAGE_CACHE" = 1 ]; then python3 "$TOOLS_DIR/prepare-derived.py" evict $(page_cache_trees) > /dev/null; fi
+  if [ "$EVICT_PAGE_CACHE" = 1 ]; then evict_trees "$MODELS_DIR/store" "$BUILDS_DIR" "$SRC_DIR" "$BENCH_HOME/deps"; fi
 }
 
 run_family() {
@@ -490,7 +495,7 @@ run_family() {
   if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
   evict_page_cache
   log "run $family on $backend"
-  write_host_load "$results/$family.load.json"
+  write_host_load "$(host_load_file "$out")"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1
   status=$?
@@ -544,11 +549,13 @@ bench_backend() {
 
 result_failed() { [ "$(jq -r '.status // ""' "$1" 2>/dev/null)" != "ok" ]; }
 
+failed_cell_result() { ! is_host_load_file "$1" && result_failed "$1"; }
+
 discard_failed_results() {
   local result
   for result in "${1:?}"/results/*/*.json; do
     [ -f "$result" ] || continue
-    if result_failed "$result"; then discard_cell "$result"; fi
+    if failed_cell_result "$result"; then discard_cell "$result"; fi
   done
 }
 

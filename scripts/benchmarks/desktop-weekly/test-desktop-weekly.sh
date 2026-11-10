@@ -205,6 +205,27 @@ check_cell_signature() {
   ok "a cell is reused only when build, iterations, spec and model hashes match"
 }
 
+check_resume_keeps_load_samples() {
+  local run="$TMP/resume" results="$TMP/resume/results/cpu" sample
+  mkdir -p "$results"
+  FAMILIES_JSON="$TMP/families-test.json"
+  run_family_driver() { echo '{"status":"ok","backend":"CPU","wall_ms_median":1}' > "$3"; }
+  run_family clone-test cpu "$results" > "$TMP/resume1.log" 2>&1
+  [ -f "$results/clone-test.load.json" ] || fail "a measured cell has no load sample"
+  sample="$(cat "$results/clone-test.load.json")"
+  echo '{"status":"timeout"}' > "$results/failed-test.json"
+  echo '{"busy_before_pct":1.0,"load1_before":0.5,"cpu_count":8}' > "$results/failed-test.load.json"
+  discard_failed_results "$run"
+  [ -f "$results/clone-test.json" ] && [ -f "$results/clone-test.load.json" ] || fail "a resumed run dropped the load sample of an ok cell"
+  [ ! -e "$results/failed-test.json" ] && [ ! -e "$results/failed-test.load.json" ] || fail "a resumed run kept a failed cell or its load sample"
+  run_family clone-test cpu "$results" > "$TMP/resume2.log" 2>&1
+  grep -q "skip clone-test on cpu" "$TMP/resume2.log" || fail "the ok cell was not reused on resume"
+  [ "$(cat "$results/clone-test.load.json")" = "$sample" ] || fail "the reused cell lost or resampled its load sample"
+  unset -f run_family_driver
+  FAMILIES_JSON="$HERE/families.json"
+  ok "a resumed run reuses an ok cell with its load sample and drops a failed cell with its sample"
+}
+
 check_machine_quirks() {
   MEMORY_SAMPLER=meminfo
   [ "$(memory_sampler_kind)" = "meminfo" ] || fail "MEMORY_SAMPLER override ignored"
@@ -219,7 +240,6 @@ check_machine_quirks() {
   [[ "$(perl "$HERE/nsdate")" =~ ^[0-9]{19}$ ]] || fail "nsdate default is not seconds plus nanoseconds"
   mkdir -p "$TMP/evict" && printf 'data' > "$TMP/evict/a.bin"
   [[ "$(python3 "$HERE/prepare-derived.py" evict "$TMP/evict")" =~ ^advised\ [01]\ files$ ]] || fail "evict subcommand"
-  [ "$(page_cache_trees)" = "$MODELS_DIR/store $BUILDS_DIR $SRC_DIR $BENCH_HOME/deps" ] || fail "page cache eviction misses the build, source or dependency trees: $(page_cache_trees)"
   [ "$(busy_percent_between "100 50" "300 110")" = "70.0" ] || fail "busy_percent_between: $(busy_percent_between "100 50" "300 110")"
   [ "$(busy_percent_between "100 50" "100 50")" = "0.0" ] || fail "busy_percent_between without elapsed ticks"
   [ "$(busy_percent_between "5119870000 5062390000" "5119870600 5062390400")" = "33.3" ] || fail "busy_percent_between loses precision on long-uptime tick counts: $(busy_percent_between "5119870000 5062390000" "5119870600 5062390400")"
@@ -238,6 +258,21 @@ check_machine_quirks() {
   [ -x "$BENCH_HOME/bin/nsdate" ] || fail "clock shim not installed"
   bash -n "$HERE/scheduler.sh" || fail "scheduler.sh does not parse"
   ok "meminfo sampler, host load sample, nanosecond clock shim and scheduler are in place for the Spark, Strix and Mac mini"
+}
+
+check_page_cache_eviction() {
+  (
+    BENCH_HOME="$TMP/bench home"; MODELS_DIR="$TMP/shared models"; BUILDS_DIR="$BENCH_HOME/builds"; SRC_DIR="$BENCH_HOME/src"
+    EVICT_PAGE_CACHE=1
+    python3() { printf '%s\n' "$@" > "$TMP/evict-args"; }
+    evict_page_cache
+    [ "$(cat "$TMP/evict-args")" = "$(printf '%s\n' "$TOOLS_DIR/prepare-derived.py" evict "$MODELS_DIR/store" "$BUILDS_DIR" "$SRC_DIR" "$BENCH_HOME/deps")" ] ||
+      { echo "eviction arguments: $(tr '\n' '|' < "$TMP/evict-args")" >&2; exit 1; }
+    rm -f "$TMP/evict-args"; EVICT_PAGE_CACHE=0
+    evict_page_cache
+    [ ! -e "$TMP/evict-args" ] || { echo "eviction ran with EVICT_PAGE_CACHE=0" >&2; exit 1; }
+  ) || fail "page cache eviction"
+  ok "page cache eviction passes the model store and the build, source and dependency trees whole, spaces included"
 }
 
 check_skip_families() {
@@ -533,6 +568,7 @@ main() {
   check_lib_lock
   check_run_lock
   check_machine_quirks
+  check_page_cache_eviction
   check_skip_families
   check_skip_cells
   check_family_backends
@@ -544,6 +580,7 @@ main() {
   check_fetch_models_offline
   check_fetch_models_reprovisions_on_origin_change
   check_cell_signature
+  check_resume_keeps_load_samples
   check_weekly_helpers
   check_info_scripts
   check_nvcc_release
