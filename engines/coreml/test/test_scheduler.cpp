@@ -66,6 +66,24 @@ int64_t ms_since(Clock::time_point t) {
     return std::chrono::duration_cast<milliseconds>(Clock::now() - t).count();
 }
 
+// Runs `fn` on a detached thread; if it has not returned within `timeout_ms`
+// the runtime is deadlocked, so fail and exit at once (joining would hang).
+void must_complete(const char * what, std::function<void()> fn, int timeout_ms = 3000) {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread([fn = std::move(fn), done] {
+        fn();
+        done->store(true);
+    }).detach();
+    const auto end = Clock::now() + milliseconds(timeout_ms);
+    while (!done->load() && Clock::now() < end) std::this_thread::sleep_for(1ms);
+    if (!done->load()) {
+        std::fprintf(stderr, "FAIL [%s] %s did not complete within %d ms (deadlock)\n", g_case.c_str(), what,
+                     timeout_ms);
+        std::fflush(stderr);
+        _exit(1);
+    }
+}
+
 bool wait_for(const std::function<bool()> & pred, int timeout_ms = 5000) {
     const auto end = Clock::now() + milliseconds(timeout_ms);
     while (Clock::now() < end) {
@@ -231,7 +249,14 @@ Error fake_warm(void * model, const LoadRequest & r) {
     return Error{};
 }
 
+std::mutex g_tid_mu;
+std::thread::id g_prepare_tid;  // the prepare worker that ran fake_prepare last
+
 PrepareResult fake_prepare(const PrepareRequest & req, PrepareContext & ctx) {
+    {
+        std::lock_guard<std::mutex> lk(g_tid_mu);
+        g_prepare_tid = std::this_thread::get_id();
+    }
     const std::string key = "prepare:" + req.key;
     int n = 0;
     const Behaviour b = enter(key, key, n);
@@ -658,6 +683,58 @@ void case_low_power() {
     e.m->notify();
     CHECK(wait_for([&] { return is_ready(deferred); }));
     CHECK(g_free->wait(2000ms).success);
+}
+
+// The prepare worker picks the published load and hands it to the load worker;
+// low power turns on before the load worker selects it, so the handed-off job
+// is no longer eligible. The handoff must not keep the load worker spinning:
+// once the job is cancelled, a spinning worker would hold the runtime lock.
+std::atomic<bool> g_handoff_armed{false};
+std::atomic<bool> g_handoff_prep_checked{false};
+std::atomic<int> g_handoff_after{0};  // low-power checks by the load worker after the handoff
+bool handoff_low_power() {
+    if (!g_handoff_armed.load()) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_tid_mu);
+        if (std::this_thread::get_id() == g_prepare_tid) {
+            g_handoff_prep_checked = true;
+            return false;  // the prepare worker still sees normal power and hands the load off
+        }
+    }
+    if (g_handoff_prep_checked.load()) ++g_handoff_after;
+    return true;
+}
+
+void case_handoff_ineligible() {
+    g_handoff_armed = false;
+    g_handoff_prep_checked = false;
+    g_handoff_after = 0;
+    Config cfg = fast_config();
+    cfg.low_power = &handoff_low_power;
+    cfg.memory_recheck = std::chrono::seconds(30);  // no periodic wake inside the window
+    Env e(cfg);
+    set_beh("prepare:handoff", {true});
+    auto slot = e.generated("handoff-load", "handoff");
+    slot->request(Priority::prewarm);
+    CHECK(wait_for([] { return in_progress("prepare:handoff"); }));
+    g_handoff_armed = true;
+    release("prepare:handoff");
+    CHECK(wait_for([] { return g_handoff_after.load() >= 1; }));  // handed off, then deferred
+    CHECK(wait_for([&] { return slot->state() == SlotState::queued; }));
+    // Deferred, not spinning: the load worker sleeps until something changes.
+    std::this_thread::sleep_for(50ms);
+    const int n0 = g_handoff_after.load();
+    std::this_thread::sleep_for(100ms);
+    CHECK(g_handoff_after.load() - n0 < 10);
+    CHECK(calls("handoff-load") == 0);
+    // Cancel the handed-off job; later runtime calls must still complete.
+    must_complete("slot destruction", [&] { slot.reset(); });
+    must_complete("Manager::notify", [&] { e.m->notify(); });
+    auto other = e.slot("handoff-other");
+    must_complete("request", [&] { other->request(Priority::now); });
+    g_handoff_armed = false;
+    must_complete("Manager::notify", [&] { e.m->notify(); });
+    CHECK(wait_for([&] { return is_ready(other); }));
 }
 
 void case_eviction() {
@@ -1347,6 +1424,7 @@ const Case kCases[] = {
     {"groups-construct", case_groups_construct},
     {"nothing-to-prepare", case_nothing_to_prepare},
     {"low-power", case_low_power},
+    {"handoff-ineligible", case_handoff_ineligible},
     {"eviction", case_eviction},
     {"resident-cap", case_resident_cap},
     {"key-lock-requeue", case_key_lock_requeue},

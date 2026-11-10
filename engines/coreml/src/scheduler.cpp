@@ -487,6 +487,10 @@ void Runtime::worker_main(JobKind kind) {
 #endif
     std::unique_lock<std::mutex> lk(mu);
     while (!stopping_) {
+        // A handoff is a one-shot wake token: consumed by this wake whether or
+        // not a job starts, so a handed-off job that became ineligible (low
+        // power, cancelled) never keeps the wait predicate true.
+        if (handoff_ == static_cast<int>(kind)) handoff_ = -1;
         Graveyard gy;
         const Clock::time_point now = Clock::now();
         Clock::time_point wake = now + std::chrono::hours(1);
