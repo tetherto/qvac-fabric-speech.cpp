@@ -170,14 +170,25 @@ def speed_cell(row):
     return fmt_speed(row["speed_x"]) if row["status"] == STATUS_OK else row["status"]
 
 
-def speed_section(summary):
-    backends = summary["backends"]
+def first_row_of(summary, family):
+    return next((row for row in summary["results"] if row["family"] == family), None)
+
+
+def speed_row(summary, family, by_key):
+    first = first_row_of(summary, family)
+    if first is None:
+        return None
+    return [first["model_label"], first["weights"]] + [speed_cell(by_key.get((backend, family))) for backend in summary["backends"]]
+
+
+def speed_rows(summary):
     by_key = {(row["backend"], row["family"]): row for row in summary["results"]}
-    rows = []
-    for family in summary["families"]:
-        first = next(row for row in summary["results"] if row["family"] == family)
-        rows.append([first["model_label"], first["weights"]] + [speed_cell(by_key.get((backend, family))) for backend in backends])
-    return ["## Speed across backends", ""] + table(["model", "weights"] + backends, rows)
+    rows = [speed_row(summary, family, by_key) for family in summary["families"]]
+    return [row for row in rows if row is not None]
+
+
+def speed_section(summary):
+    return ["## Speed across backends", ""] + table(["model", "weights"] + summary["backends"], speed_rows(summary))
 
 
 def change_percent(previous, current):
