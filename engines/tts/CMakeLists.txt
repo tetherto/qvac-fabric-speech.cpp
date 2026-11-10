@@ -503,6 +503,10 @@ if (TTS_CPP_BUILD_LIBRARY)
         )
         message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
+    # Shared Core ML runtime (engines/coreml): compiled into libtts-cpp under its
+    # own namespace when TTS_CPP_COREML is on. No engine source uses it yet.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML})
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
@@ -773,6 +777,10 @@ if (TTS_CPP_BUILD_TESTS)
         set(_tcb_default_cangjie_tsv "${TTS_CPP_TEST_MODEL_DIR}/Cangjie5_TC.tsv")
     endif()
     set(TTS_CPP_TEST_CANGJIE_TSV "${_tcb_default_cangjie_tsv}"                    CACHE FILEPATH "tts-cpp: Cangjie5_TC TSV used by zh multilingual tests")
+
+    # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_tests()
 
     # Helper: register a built test target with CTest.  Mirrors the
     # standard llama-style `<project>_test()` macro: every harness ends

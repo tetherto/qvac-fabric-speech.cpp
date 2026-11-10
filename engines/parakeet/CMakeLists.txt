@@ -474,6 +474,11 @@ if (PARAKEET_BUILD_LIBRARY)
         )
         message(STATUS "parakeet: Core ML encoder and TDT decoder sidecars enabled (PARAKEET_USE_COREML)")
     endif()
+    # Shared Core ML runtime (engines/coreml): compiled into libqvac-parakeet
+    # under its own namespace when PARAKEET_COREML is on. No engine source uses
+    # it yet.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_to(qvac-parakeet NAMESPACE parakeet_coreml PREFIX PARAKEET ENABLE ${PARAKEET_COREML})
 
     set_target_properties(qvac-parakeet PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -585,6 +590,10 @@ if (PARAKEET_BUILD_TESTS)
     set(PARAKEET_TEST_REF_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/artifacts"     CACHE PATH "parakeet: directory containing NeMo .npy reference dumps (scripts/dump-*-reference.py)")
     set(PARAKEET_TEST_MOSAIC_DIR "${PARAKEET_TEST_MODEL_DIR}/mosaic" CACHE PATH
         "parakeet: Mosaic integration fixture root (bundle/ and audio/)")
+
+    # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_tests()
 
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness
@@ -3376,6 +3385,11 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     endforeach()
     if (PARAKEET_COREML)
         list(APPEND _pk_pc_private "-framework CoreML" "-framework Foundation")
+        # The shared Core ML runtime (engines/coreml) compiled into the archive.
+        get_target_property(_pk_coreml_pc qvac-parakeet QVAC_COREML_PKGCONFIG_LIBS)
+        if (_pk_coreml_pc)
+            list(APPEND _pk_pc_private ${_pk_coreml_pc})
+        endif()
     endif()
     if (_pk_pc_private)
         list(REMOVE_DUPLICATES _pk_pc_private)
