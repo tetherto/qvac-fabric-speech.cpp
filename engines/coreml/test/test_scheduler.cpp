@@ -1013,6 +1013,59 @@ void case_memory_admission() {
     CHECK(calls("ane-cold") == 1);
 }
 
+// Memory admission while an unrelated job holds the gate: the cold ANE load is
+// marked deferred(memory) at once, waits do not sit behind the gate holder,
+// and the periodic recheck still runs.
+void case_memory_behind_gate() {
+    Env e;
+    g_mem = 1 << 20;
+    const uint64_t reserve = uint64_t(100) << 20;
+    auto mk = [&](Wait w = Wait::none, bool strict = false) {
+        SlotSpec s = e.spec("ane-gated", ComputeUnits::cpu_and_ane);
+        s.ane_compile_reserve_bytes = reserve;
+        SlotPolicy p = e.policy(w);
+        p.strict = strict;
+        return e.m->make_slot(s, p);
+    };
+    set_beh("gate-holder", {true});
+    auto holder = e.slot("gate-holder");
+    holder->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("gate-holder"); }));
+
+    auto cold = mk();
+    cold->request(Priority::now);
+    CHECK(wait_for([&] { return cold->state() == SlotState::deferred_memory; }));
+    CHECK(in_progress("gate-holder"));  // decided without the gate
+
+    auto as_call = mk(Wait::call);
+    Acquired a;
+    must_complete("call acquisition behind the gate", [&] { a = as_call->acquire(Demand::now); });
+    CHECK(!a && a.pending);
+    auto as_strict = mk(Wait::call, true);
+    std::optional<SlotState> thrown;
+    must_complete("strict acquisition behind the gate", [&] {
+        try {
+            as_strict->acquire(Demand::now);
+        } catch (const CoremlError & err) {
+            thrown = err.state;
+        }
+    });
+    CHECK(thrown == SlotState::deferred_memory);
+    auto g = e.m->issue_group(GroupKind::construction, {{cold, Priority::minimal}}, true);
+    PrewarmResult r;
+    must_complete("construct group behind the gate", [&] { r = g->wait(10s); });
+    CHECK(g->finished() && !r.success);
+
+    // The periodic recheck lifts the deferral with the gate still held (no notify).
+    g_mem = uint64_t(8) << 30;
+    CHECK(wait_for([&] { return cold->state() == SlotState::queued; }));
+    CHECK(in_progress("gate-holder"));
+    CHECK(calls("ane-gated") == 0);
+    release("gate-holder");
+    CHECK(wait_for([&] { return is_ready(cold); }));
+    CHECK(calls("ane-gated") == 1);
+}
+
 void case_evicted_after_ready_group() {
     Env e;
     auto s = e.slot("ga");
@@ -1572,6 +1625,7 @@ const Case kCases[] = {
     {"resident-cap-acquire", case_resident_cap_acquire},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
+    {"memory-behind-gate", case_memory_behind_gate},
     {"evicted-after-ready-group", case_evicted_after_ready_group},
     {"strict", case_strict},
     {"retire", case_retire},

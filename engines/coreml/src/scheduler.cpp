@@ -367,15 +367,61 @@ size_t Runtime::pool_live_locked(const PoolCore & p) const {
     for (const auto & w : p.models) {
         if (!w.expired()) ++n;
     }
-    if (running_ && running_->kind == JobKind::load && !running_->done) {
-        for (const auto & wp : running_->pools) {
-            if (wp.lock().get() == &p) {
-                ++n;
-                break;
-            }
+    return running_serves_locked(p) ? n + 1 : n;
+}
+
+bool Runtime::running_serves_locked(const PoolCore & p) const {
+    if (!running_ || running_->kind != JobKind::load || running_->done) return false;
+    for (const auto & wp : running_->pools) {
+        if (wp.lock().get() == &p) return true;
+    }
+    return false;
+}
+
+void Runtime::job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
+                               std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const {
+    for (const Sub & s : j.subs) {
+        std::shared_ptr<SlotCore> c = live_core(s, j, gy);
+        if (!c) continue;
+        own.push_back(c);
+        if (std::shared_ptr<PoolCore> p = c->pool.lock()) {
+            if (std::find(pools.begin(), pools.end(), p) == pools.end()) pools.push_back(p);
         }
     }
-    return n;
+}
+
+// Least recently used member that no unit holds, the current call does not
+// predict, and that is not part of the job asking for room.
+std::shared_ptr<SlotCore> Runtime::pool_victim_locked(const PoolCore & p,
+                                                      const std::vector<std::shared_ptr<SlotCore>> & own,
+                                                      Graveyard & gy) const {
+    std::shared_ptr<SlotCore> victim;
+    for (const auto & w : p.members) {
+        std::shared_ptr<SlotCore> m = w.lock();
+        if (!m) continue;
+        gy.keep(m);
+        if (!m->model || m->model.use_count() != 1 || m->model->holds_.load() != 0) continue;
+        if (std::find(own.begin(), own.end(), m) != own.end()) continue;
+        bool predicted = false;
+        for (const auto & pw : p.predicted) predicted = predicted || same_core(pw, m);
+        if (predicted) continue;
+        if (!victim || m->last_used < victim->last_used) victim = m;
+    }
+    return victim;
+}
+
+bool Runtime::cap_denied_locked(const Job & j, Graveyard & gy) const {
+    std::vector<std::shared_ptr<SlotCore>> own;
+    std::vector<std::shared_ptr<PoolCore>> pools;
+    job_pools_locked(j, own, pools, gy);
+    for (const std::shared_ptr<PoolCore> & p : pools) {
+        if (pool_live_locked(*p) < p->cap) continue;
+        // The load in flight for this pool may publish an evictable model:
+        // undecided until it does, so nobody gives up on it yet.
+        if (running_serves_locked(*p)) return false;
+        if (!pool_victim_locked(*p, own, gy)) return true;
+    }
+    return false;
 }
 
 void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
@@ -386,34 +432,13 @@ void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
 }
 
 Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
-    std::vector<std::shared_ptr<PoolCore>> pools;
     std::vector<std::shared_ptr<SlotCore>> own;
-    for (const Sub & s : j.subs) {
-        std::shared_ptr<SlotCore> c = live_core(s, j, gy);
-        if (!c) continue;
-        own.push_back(c);
-        if (std::shared_ptr<PoolCore> p = c->pool.lock()) {
-            if (std::find(pools.begin(), pools.end(), p) == pools.end()) pools.push_back(p);
-        }
-    }
+    std::vector<std::shared_ptr<PoolCore>> pools;
+    job_pools_locked(j, own, pools, gy);
     PoolVerdict verdict = PoolVerdict::admit;
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p) < p->cap) continue;
-        // Least recently used member that no unit holds, the current call does
-        // not predict, and that is not part of this job.
-        std::shared_ptr<SlotCore> victim;
-        for (const auto & w : p->members) {
-            std::shared_ptr<SlotCore> m = w.lock();
-            if (!m) continue;
-            gy.keep(m);
-            if (!m->model || m->model.use_count() != 1 || m->model->holds_.load() != 0) continue;
-            if (std::find(own.begin(), own.end(), m) != own.end()) continue;
-            bool predicted = false;
-            for (const auto & pw : p->predicted) predicted = predicted || same_core(pw, m);
-            if (predicted) continue;
-            if (!victim || m->last_used < victim->last_used) victim = m;
-        }
-        if (victim) {
+        if (std::shared_ptr<SlotCore> victim = pool_victim_locked(*p, own, gy)) {
             evict_locked(victim, gy);  // the instance is released once mu is unlocked
             verdict = PoolVerdict::wait_release;
         } else {
@@ -423,22 +448,57 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     return verdict;
 }
 
-std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy) {
-    const bool lp = low_power_locked();
+// Admission screening, separate from job selection so it also runs while
+// another job holds the gate: drops jobs without live subscribers, marks
+// unhinted cold ANE loads deferred(memory) or lifts that, and refreshes the
+// resident-cap denial seen by acquisitions. `wake` gets the memory recheck.
+void Runtime::screen_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy) {
     std::optional<uint64_t> mem;
+    for (size_t i = 0; i < queue_.size();) {
+        std::shared_ptr<Job> j = queue_[i];
+        if (!view_locked(*j, gy).live) {
+            cancel_locked(j);  // erases queue_[i]
+            continue;
+        }
+        ++i;
+        if (j->kind != JobKind::load) continue;
+        bool short_of_memory = false;
+        if (j->ane && j->ane_reserve > 0 && !hinted(j->hint_path)) {
+            if (!mem) mem = cfg.available_memory ? cfg.available_memory() : device_available_memory();
+            short_of_memory = *mem < j->ane_reserve;
+        }
+        if (short_of_memory) {
+            if (!j->deferred_memory) {
+                j->deferred_memory = true;
+                j->deferred_since = now;
+                set_subs_state_locked(*j, SlotState::deferred_memory, gy);
+                event_locked("defer:memory:" + j->load.stage + "/" + j->load.function);
+                state_cv.notify_all();
+            }
+            wake = std::min(wake, now + cfg.memory_recheck);
+            continue;
+        }
+        if (j->deferred_memory) {
+            j->deferred_memory = false;
+            set_subs_state_locked(*j, SlotState::queued, gy);
+            state_cv.notify_all();
+        }
+        set_cap_blocked_locked(*j, cap_denied_locked(*j, gy));
+    }
+}
+
+std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy) {
+    screen_locked(now, wake, gy);
+    const bool lp = low_power_locked();
     struct Cand {
         std::shared_ptr<Job> job;
         Priority prio;
     };
     std::vector<Cand> cands;
     for (size_t i = 0; i < queue_.size();) {
-        std::shared_ptr<Job> j = queue_[i];
+        std::shared_ptr<Job> j = queue_[i++];
+        if (j->deferred_memory) continue;  // screened above, with the recheck in `wake`
         const JobView v = view_locked(*j, gy);
-        if (!v.live) {
-            cancel_locked(j);  // erases queue_[i]
-            continue;
-        }
-        ++i;
         if (j->retry_at > now) {
             wake = std::min(wake, j->retry_at);
             continue;
@@ -446,25 +506,6 @@ std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_poi
         if (lp && v.deferrable) {
             wake = std::min(wake, now + cfg.memory_recheck);
             continue;
-        }
-        if (j->kind == JobKind::load && j->ane && j->ane_reserve > 0 && !hinted(j->hint_path)) {
-            if (!mem) mem = cfg.available_memory ? cfg.available_memory() : device_available_memory();
-            if (*mem < j->ane_reserve) {
-                if (!j->deferred_memory) {
-                    j->deferred_memory = true;
-                    j->deferred_since = now;
-                    set_subs_state_locked(*j, SlotState::deferred_memory, gy);
-                    event_locked("defer:memory:" + j->load.stage + "/" + j->load.function);
-                    state_cv.notify_all();
-                }
-                wake = std::min(wake, now + cfg.memory_recheck);
-                continue;
-            }
-        }
-        if (j->deferred_memory) {
-            j->deferred_memory = false;
-            set_subs_state_locked(*j, SlotState::queued, gy);
-            state_cv.notify_all();
         }
         cands.push_back({j, v.prio});
     }
@@ -542,6 +583,10 @@ void Runtime::worker_main(JobKind kind) {
                 work_cv.notify_all();
                 job.reset();
             }
+        } else if (running_ && !exiting()) {
+            // The other worker holds the gate: requests and the periodic
+            // memory recheck are still screened, without selecting a job.
+            screen_locked(now, wake, gy);
         }
         if (job) {
             start_locked(job, now, gy);

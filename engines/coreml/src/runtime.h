@@ -197,6 +197,13 @@ private:
     PoolVerdict pool_admits_locked(Job & j, Graveyard & gy);
     void set_cap_blocked_locked(Job & j, bool blocked);
     size_t pool_live_locked(const PoolCore & p) const;
+    bool running_serves_locked(const PoolCore & p) const;
+    void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
+                          std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
+    std::shared_ptr<SlotCore> pool_victim_locked(const PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & own,
+                                                 Graveyard & gy) const;
+    bool cap_denied_locked(const Job & j, Graveyard & gy) const;
+    void screen_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
     void pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m);
     void start_locked(const std::shared_ptr<Job> & j, Clock::time_point now, Graveyard & gy);
     void set_phase(const std::shared_ptr<Job> & j, SlotState st);
