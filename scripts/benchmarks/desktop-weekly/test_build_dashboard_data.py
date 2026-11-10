@@ -101,6 +101,18 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertEqual(row["pins"], "qvac abcdef1234 (2026-11-01), ggml speech fedcba0987 (2026-11-01)")
         self.assertEqual(row["caveats"], "note parakeet-tdt")
 
+    def test_a_cell_measured_under_load_carries_the_flag_a_caveat_and_a_comment(self):
+        contended = dict(result("cuda", "parakeet-tdt", 12.0), contended=True, busy_before_pct=35.2)
+        row = build.weekly_row(self.newer, contended, FAMILIES, "2026-11-08")
+        self.assertEqual((row["contended"], row["busy_before_pct"]), (True, 35.2))
+        self.assertIn("Measured under load: 35% of the CPUs", row["caveats"])
+        plain = build.weekly_row(self.newer, result("cuda", "parakeet-tdt", 12.0), FAMILIES, "2026-11-08")
+        self.assertEqual((plain["contended"], plain["busy_before_pct"]), (False, None))
+        items = build.contention_items([row, plain])
+        self.assertEqual(items[0][:2], ("summary", "Cells under load"))
+        self.assertIn("35% busy", items[1][2])
+        self.assertEqual(build.contention_items([plain]), [])
+
     def test_synthesis_and_cloning_get_short_variants_and_separate_charts(self):
         tts = build.weekly_row(self.newer, result("cuda", "audio8-lm-f16-dec-f16", 3.0), FAMILIES, "2026-11-08")
         clone = build.weekly_row(self.newer, result("cuda", "audio8-clone-enc-f16", 2.0), FAMILIES, "2026-11-08")

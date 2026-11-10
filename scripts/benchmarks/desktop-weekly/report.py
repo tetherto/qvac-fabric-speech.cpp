@@ -83,7 +83,9 @@ def fmt_gpu_memory(row):
 
 
 def status_cell(row):
-    return row["status"] if row["status"] == STATUS_OK else f"**{row['status']}**"
+    if row["status"] != STATUS_OK:
+        return f"**{row['status']}**"
+    return f"{row['status']} (under load)" if row.get("contended") else row["status"]
 
 
 def header(summary):

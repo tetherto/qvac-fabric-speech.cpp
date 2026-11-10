@@ -121,9 +121,13 @@ def engine_name(row):
     return f'{row["engine"]} ({row["variant"]})' if row.get("variant") else row["engine"]
 
 
+UNDER_LOAD = "under load"
+
+
 def engine_label(row):
     small = f'<small>{esc(row["variant"])}</small>' if row.get("variant") else ""
-    return f'{esc(row["engine"])}{small}'
+    flag = f'<small class="ul">{UNDER_LOAD}</small>' if row.get("contended") else ""
+    return f'{esc(row["engine"])}{small}{flag}'
 
 
 def fmt_speed(value):
@@ -222,6 +226,8 @@ def bar_title(row):
     if not is_accepted(row):
         return f"{engine_name(row)} · {FAILED}: {row.get('status_detail', '')}"
     parts = [engine_name(row)]
+    if row.get("contended"):
+        parts.append(f"{UNDER_LOAD}: {row['busy_before_pct']:.0f}% of the CPUs busy with other work before the cell")
     if row.get("latency_ms"):
         parts.append(f"latency {fmt_latency(row['latency_ms'])}")
     if row.get("audio_s"):

@@ -220,13 +220,22 @@ check_machine_quirks() {
   mkdir -p "$TMP/evict" && printf 'data' > "$TMP/evict/a.bin"
   [[ "$(python3 "$HERE/prepare-derived.py" evict "$TMP/evict")" =~ ^advised\ [01]\ files$ ]] || fail "evict subcommand"
   [ "$(page_cache_trees)" = "$MODELS_DIR/store $BUILDS_DIR $SRC_DIR $BENCH_HOME/deps" ] || fail "page cache eviction misses the build, source or dependency trees: $(page_cache_trees)"
+  [ "$(busy_percent_between "100 50" "300 110")" = "70.0" ] || fail "busy_percent_between: $(busy_percent_between "100 50" "300 110")"
+  [ "$(busy_percent_between "100 50" "100 50")" = "0.0" ] || fail "busy_percent_between without elapsed ticks"
+  [ "$(echo "CPU usage: 3.57% user, 7.14% sys, 89.28% idle" | busy_percent_from_top)" = "10.7" ] || fail "busy_percent_from_top: $(echo "CPU usage: 3.57% user, 7.14% sys, 89.28% idle" | busy_percent_from_top)"
+  [ "$(printf '' | busy_percent_from_top)" = "0.0" ] || fail "busy_percent_from_top without a top line"
+  write_host_load "$TMP/load.json"
+  [ "$(jq -r '[.busy_before_pct, .load1_before, .cpu_count] | map(type) | join(",")' "$TMP/load.json")" = "number,number,number" ] || fail "write_host_load shape: $(cat "$TMP/load.json")"
+  printf '{}' > "$TMP/cell.json"; printf 'x' > "$TMP/cell.load.json"
+  discard_cell "$TMP/cell.json"
+  [ ! -e "$TMP/cell.load.json" ] || fail "discard_cell keeps the load sample"
   mkdir -p "$ENGINE_SRC/scripts/benchmarks"
   echo 'now=$(/bin/date +%s%N)' > "$ENGINE_SRC/scripts/benchmarks/run-family.sh"
   install_nanosecond_shim
   grep -q "bin/nsdate +%s%N" "$ENGINE_SRC/scripts/benchmarks/run-family.sh" || fail "clock shim not applied to run-family.sh"
   [ -x "$BENCH_HOME/bin/nsdate" ] || fail "clock shim not installed"
   bash -n "$HERE/scheduler.sh" || fail "scheduler.sh does not parse"
-  ok "meminfo sampler, nanosecond clock shim and scheduler are in place for the Spark, Strix and Mac mini"
+  ok "meminfo sampler, host load sample, nanosecond clock shim and scheduler are in place for the Spark, Strix and Mac mini"
 }
 
 check_skip_families() {

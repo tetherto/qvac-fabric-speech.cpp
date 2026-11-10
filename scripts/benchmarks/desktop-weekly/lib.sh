@@ -15,6 +15,7 @@ readonly LOCK_CONTENT_LIMIT=200
 readonly DEADLINE_POLL_SECONDS="${DEADLINE_POLL_SECONDS:-5}"
 readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
+readonly HOST_LOAD_WINDOW_SECONDS=1
 readonly MEMORY_SAMPLE_SECONDS=0.25
 readonly KIB_PER_MIB=1024
 readonly NANOSECOND_SHIM="nsdate"
@@ -446,7 +447,34 @@ cell_is_reusable() {
 
 discard_cell() {
   local out="$1"
-  rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv"
+  rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv" "${out%.json}.load.json"
+}
+
+cpu_ticks() { awk '/^cpu /{total=0; for (i=2; i<=NF; i++) total+=$i; print total, $5+$6}' /proc/stat; }
+
+busy_percent_between() {
+  awk -v a="$1" -v b="$2" 'BEGIN{split(a,x," "); split(b,y," "); dt=y[1]-x[1]; di=y[2]-x[2]; if (dt<=0) print "0.0"; else printf "%.1f\n", 100*(dt-di)/dt}'
+}
+
+linux_busy_percent() {
+  local before after
+  before="$(cpu_ticks)"; sleep "$HOST_LOAD_WINDOW_SECONDS"; after="$(cpu_ticks)"
+  busy_percent_between "$before" "$after"
+}
+
+busy_percent_from_top() { sed -n 's/.* \([0-9.]*\)% idle.*/\1/p' | awk 'END{if (NR==0) print "0.0"; else printf "%.1f\n", 100-$1}'; }
+
+darwin_busy_percent() { top -l 2 -s "$HOST_LOAD_WINDOW_SECONDS" -n 0 2>/dev/null | grep "CPU usage" | tail -n 1 | busy_percent_from_top; }
+
+host_busy_percent() { case "$OS_NAME" in Darwin) darwin_busy_percent ;; *) linux_busy_percent ;; esac; }
+
+load_average_one() { case "$OS_NAME" in Darwin) sysctl -n vm.loadavg | awk '{print $2}' ;; *) awk '{print $1}' /proc/loadavg ;; esac; }
+
+online_cpus() { getconf _NPROCESSORS_ONLN; }
+
+write_host_load() {
+  jq -n --arg at "$(utc_now)" --argjson busy "$(host_busy_percent)" --argjson load "$(load_average_one)" --argjson cpus "$(online_cpus)" \
+    '{sampled_at: $at, busy_before_pct: $busy, load1_before: $load, cpu_count: $cpus}' > "$1"
 }
 
 page_cache_trees() { echo "$MODELS_DIR/store" "$BUILDS_DIR" "$SRC_DIR" "$BENCH_HOME/deps"; }
@@ -462,6 +490,7 @@ run_family() {
   if [ -e "$out" ]; then log "rerun $family on $backend (inputs changed)"; discard_cell "$out"; fi
   evict_page_cache
   log "run $family on $backend"
+  write_host_load "$results/$family.load.json"
   start_gpu_sampler "$results/$family.gpu.csv"
   run_with_deadline "$(family_field "$family" timeout_minutes)" run_family_driver "$family" "$backend" "$out" > "$results/$family.log" 2>&1
   status=$?
