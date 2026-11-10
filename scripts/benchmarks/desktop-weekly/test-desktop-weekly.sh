@@ -222,6 +222,8 @@ check_machine_quirks() {
   [ "$(page_cache_trees)" = "$MODELS_DIR/store $BUILDS_DIR $SRC_DIR $BENCH_HOME/deps" ] || fail "page cache eviction misses the build, source or dependency trees: $(page_cache_trees)"
   [ "$(busy_percent_between "100 50" "300 110")" = "70.0" ] || fail "busy_percent_between: $(busy_percent_between "100 50" "300 110")"
   [ "$(busy_percent_between "100 50" "100 50")" = "0.0" ] || fail "busy_percent_between without elapsed ticks"
+  [ "$(busy_percent_between "5119870000 5062390000" "5119870600 5062390400")" = "33.3" ] || fail "busy_percent_between loses precision on long-uptime tick counts: $(busy_percent_between "5119870000 5062390000" "5119870600 5062390400")"
+  if [ -r /proc/stat ]; then [[ "$(cpu_ticks)" =~ ^[0-9]+\ [0-9]+$ ]] || fail "cpu_ticks is not two integers: $(cpu_ticks)"; fi
   [ "$(echo "CPU usage: 3.57% user, 7.14% sys, 89.28% idle" | busy_percent_from_top)" = "10.7" ] || fail "busy_percent_from_top: $(echo "CPU usage: 3.57% user, 7.14% sys, 89.28% idle" | busy_percent_from_top)"
   [ "$(printf '' | busy_percent_from_top)" = "0.0" ] || fail "busy_percent_from_top without a top line"
   write_host_load "$TMP/load.json"

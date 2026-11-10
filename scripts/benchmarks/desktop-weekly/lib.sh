@@ -450,7 +450,7 @@ discard_cell() {
   rm -f "${out:?}" "${out:?}.sig" "${out%.json}.log" "${out%.json}.gpu.csv" "${out%.json}.load.json"
 }
 
-cpu_ticks() { awk '/^cpu /{total=0; for (i=2; i<=NF; i++) total+=$i; print total, $5+$6}' /proc/stat; }
+cpu_ticks() { awk '/^cpu /{total=0; for (i=2; i<=NF; i++) total+=$i; printf "%.0f %.0f\n", total, $5+$6}' /proc/stat; }
 
 busy_percent_between() {
   awk -v a="$1" -v b="$2" 'BEGIN{split(a,x," "); split(b,y," "); dt=y[1]-x[1]; di=y[2]-x[2]; if (dt<=0) print "0.0"; else printf "%.1f\n", 100*(dt-di)/dt}'
