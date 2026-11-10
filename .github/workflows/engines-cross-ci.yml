@@ -18,6 +18,7 @@ on:
       - 'engines/parakeet/**'
       - 'engines/tts/**'
       - 'engines/audiogen/**'
+      - 'engines/coreml/**'
       - 'third_party/whisper.cpp/**'
       - 'CMakeLists.txt'
       - '.github/workflows/engines-cross-ci.yml'
@@ -26,6 +27,7 @@ on:
       - 'engines/parakeet/**'
       - 'engines/tts/**'
       - 'engines/audiogen/**'
+      - 'engines/coreml/**'
       - 'third_party/whisper.cpp/**'
       - 'CMakeLists.txt'
       - '.github/workflows/engines-cross-ci.yml'
@@ -264,3 +266,65 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH="$PWD/ggml-install"
           cmake --build build -j4
 
+
+  # Shared Core ML runtime (engines/coreml): tts-cpp, qvac-parakeet and
+  # audiogen each compile their own copy in their own namespace. This builds
+  # the umbrella with all three Core ML options on; test-coreml-link links the
+  # three libraries and every runtime copy into one binary (any symbol that
+  # escaped its namespace is a duplicate), then runs each copy.
+  macos-coreml-link:
+    needs: runner_names
+    runs-on: ${{ needs.runner_names.outputs.macos_14 }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve ggml pin (tip of ${{ env.GGML_BRANCH }})
+        id: ggml
+        run: echo "sha=$(git ls-remote "$GGML_REPO" "refs/heads/$GGML_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      # Same CPU-only shared build (and cache key) as parakeet-ci's macos-14 lane.
+      - name: Cache ggml install
+        id: ggml-cache
+        uses: actions/cache@v4
+        with:
+          path: ggml-install
+          key: ggml-install-portable-macos-14-${{ steps.ggml.outputs.sha }}
+
+      - name: Build ggml (CPU-only, shared)
+        if: steps.ggml-cache.outputs.cache-hit != 'true'
+        run: |
+          # Fetch the exact SHA the cache key was derived from (the branch
+          # tip may advance between ls-remote and this step).
+          git init -q ggml-src
+          git -C ggml-src remote add origin "$GGML_REPO"
+          git -C ggml-src fetch --depth 1 origin ${{ steps.ggml.outputs.sha }}
+          git -C ggml-src checkout -q FETCH_HEAD
+          cmake -S ggml-src -B ggml-src/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_METAL=OFF \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ggml-install"
+          cmake --build ggml-src/build -j4
+          cmake --install ggml-src/build
+
+      - name: Configure (umbrella, Core ML on for all three engines)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_BUILD_WHISPER=OFF \
+            -DSPEECH_BUILD_EXECUTABLES=OFF \
+            -DSPEECH_BUILD_TESTS=ON \
+            -DTTS_CPP_COREML=ON \
+            -DPARAKEET_COREML=ON \
+            -DAUDIOGEN_COREML=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/ggml-install"
+
+      - name: Build test-coreml-link
+        run: cmake --build build -j4 --target test-coreml-link
+
+      - name: Test (test-coreml-link)
+        run: ctest --test-dir build -R '^test-coreml-link$' --no-tests=error --output-on-failure --timeout 300
