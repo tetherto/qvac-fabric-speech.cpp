@@ -2827,9 +2827,32 @@ if (PARAKEET_BUILD_TESTS)
         REQUIRES "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
 
     if (PARAKEET_BUILD_LIBRARY)
-        add_executable(test-encoder-device-decode test/test_encoder_device_decode.cpp)
-        target_link_libraries(test-encoder-device-decode PRIVATE qvac-parakeet)
-        target_include_directories(test-encoder-device-decode PRIVATE src)
+        # test_encoder_device_decode.cpp drives internal entry points (run_encoder,
+        # tdt_greedy_decode, tdt_prepare_runtime, ...) that the shared library does
+        # not export (CXX_VISIBILITY_PRESET hidden), so compile the sources in
+        # directly like test-encoder-graph-cache.
+        add_executable(test-encoder-device-decode
+            test/test_encoder_device_decode.cpp
+            src/parakeet_ctc.cpp
+            src/parakeet_engine.cpp
+            src/parakeet_nemotron.cpp
+            src/parakeet_unified.cpp
+            src/parakeet_log.cpp
+            src/parakeet_tdt.cpp
+            src/parakeet_eou.cpp
+            src/parakeet_sortformer.cpp
+            src/parakeet_diarization_v3.cpp
+            src/mel_preprocess.cpp
+            src/sentencepiece_bpe.cpp
+            src/energy_vad.cpp)
+        target_link_libraries(test-encoder-device-decode PRIVATE ggml parakeet-backend-defs)
+        target_include_directories(test-encoder-device-decode PRIVATE src include ggml/include)
+        if (PARAKEET_F16_ACTIVATIONS)
+            target_compile_definitions(test-encoder-device-decode
+                PRIVATE PARAKEET_F16_ACTIVATIONS=1)
+        endif()
+        parakeet_apply_backend_defs(test-encoder-device-decode)
+        parakeet_apply_ccache(test-encoder-device-decode)
         set(_device_decode_backends cpu)
         if (GGML_VULKAN)
             list(APPEND _device_decode_backends vulkan)
