@@ -863,7 +863,7 @@ jobs:
             .venv-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
           fi
           .venv-coreml/bin/python -m pip install \
-            -c engines/parakeet/scripts/requirements-coreml.txt "onnx==1.17.0" "scikit-learn==1.5.1" "scipy==1.14.1" huggingface_hub
+            -c engines/parakeet/scripts/requirements-coreml.txt "onnx==1.17.0" "onnxruntime==1.19.2" "scikit-learn==1.5.1" "scipy==1.14.1" huggingface_hub
           .venv-coreml/bin/python engines/tts/test/test_export_supertonic_vector_coreml.py
           .venv-coreml/bin/python engines/tts/scripts/convert-supertonic2-to-gguf.py \
             --arch supertonic3 --repo-id supertone-oss-archive/supertonic-3 --ftype f16 \
