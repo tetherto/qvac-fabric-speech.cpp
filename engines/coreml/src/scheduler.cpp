@@ -227,15 +227,16 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
         c->reason = r->second;
         return;
     }
-    if (c->spec.shareable) {
-        std::shared_ptr<SharedModel> m = registry_[key].lock();
-        gy.keep(m);
-        // Another owner's live instance is adopted at once only when this
-        // slot's pool already counts it or has room (§2.9). Otherwise a queued
-        // job takes it through admission (evict or stay cap-blocked) and
-        // run_load() publishes the existing instance without loading again.
-        if (m && !m->retired() && pool_takes_locked(*c, m.get(), gy)) {
-            c->model = m;
+    // Another owner's live instance is adopted at once only when this slot's
+    // pool already counts it or has room (§2.9). Otherwise a queued job takes
+    // it through admission (evict or stay cap-blocked) and run_load()
+    // publishes the existing instance without loading again. The only strong
+    // reference taken here becomes the slot's own.
+    const SharedModel * existing = c->spec.shareable ? registered_locked(key) : nullptr;
+    if (existing && pool_takes_locked(*c, existing, gy)) {
+        if (std::shared_ptr<SharedModel> m = registry_[key].model.lock()) {
+            if (c->model != m) drop_model_locked(*c, gy);
+            c->model = std::move(m);
             c->state = SlotState::ready;
             c->last_used = Clock::now();
             ++c->ready_events;
@@ -418,15 +419,20 @@ std::shared_ptr<PoolRef> Runtime::pool_ref_locked(const SlotCore & c) {
     return r;
 }
 
+// The identity of the live, non-retired registry instance for `key`, or null.
+// No strong reference: identity only, for comparisons under mu.
+const SharedModel * Runtime::registered_locked(const std::string & key) const {
+    if (retired_.count(key) != 0) return nullptr;
+    auto it = registry_.find(key);
+    if (it == registry_.end() || it->second.model.expired()) return nullptr;
+    return it->second.id;
+}
+
 // The live instance a load job would publish without loading (another owner's,
 // in the registry), or null: run_load() adopts it instead of loading.
-const SharedModel * Runtime::existing_locked(const Job & j, Graveyard & gy) const {
+const SharedModel * Runtime::existing_locked(const Job & j) const {
     if (j.kind != JobKind::load || !j.shareable) return nullptr;
-    auto it = registry_.find(j.model_key);
-    if (it == registry_.end()) return nullptr;
-    std::shared_ptr<SharedModel> m = it->second.lock();
-    gy.keep(m);
-    return m && !m->retired() ? m.get() : nullptr;
+    return registered_locked(j.model_key);
 }
 
 size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
@@ -449,7 +455,7 @@ size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     for (const SharedModel * m : p.releasing) add(m);
     const size_t live = seen.size();
     if (!running_serves_locked(p)) return live;
-    const SharedModel * existing = existing_locked(*running_, gy);
+    const SharedModel * existing = existing_locked(*running_);
     const bool counted = existing && std::find(seen.begin(), seen.end(), existing) != seen.end();
     return counted ? live : live + 1;
 }
@@ -488,7 +494,7 @@ void Runtime::reserve_locked(Job & j, const SlotCore & c, Graveyard & gy) {
     for (const auto & wp : j.pools) {
         if (wp.lock() == p) return;
     }
-    const SharedModel * existing = existing_locked(j, gy);
+    const SharedModel * existing = existing_locked(j);
     if ((existing && pool_counts_locked(*p, existing, gy)) || pool_live_locked(*p, gy) < p->cap) j.pools.push_back(p);
 }
 
@@ -568,7 +574,7 @@ bool Runtime::sub_denied_locked(const Job & j, const SlotCore & c, const std::ve
     if (running_serves_locked(*p)) return false;
     if (pool_live_locked(*p, gy) < p->cap) return false;
     if (!p->releasing.empty()) return false;  // undecided until the pending release completes
-    if (const SharedModel * existing = existing_locked(j, gy); existing && pool_counts_locked(*p, existing, gy)) {
+    if (const SharedModel * existing = existing_locked(j); existing && pool_counts_locked(*p, existing, gy)) {
         return false;
     }
     return pool_victim_locked(*p, own, gy).empty();
@@ -611,7 +617,7 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     std::vector<std::vector<std::shared_ptr<SlotCore>>> victims;
     // A pool that already counts the instance this job would publish takes it
     // without a new place: nothing is evicted for it (§2.9).
-    const SharedModel * existing = existing_locked(j, gy);
+    const SharedModel * existing = existing_locked(j);
     bool releasing = false;
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p, gy) < p->cap) continue;
@@ -900,7 +906,9 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
                 retired = true;
                 reason = r->second;
             } else if (j->shareable) {
-                existing = registry_[j->model_key].lock();
+                // The load worker's own reference: no replacement can load
+                // while it lives, since this job holds the gate.
+                if (auto it = registry_.find(j->model_key); it != registry_.end()) existing = it->second.model.lock();
             }
         }
         if (retired) {
@@ -1041,7 +1049,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         bump_locked();
         return;
     }
-    if (j->shareable) registry_[j->model_key] = m;
+    if (j->shareable) registry_[j->model_key] = RegEntry{m, m.get()};
     const std::vector<Sub> subs = j->subs;  // a subscriber may move to a new job below
     for (const Sub & s : subs) {
         std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
@@ -1146,6 +1154,14 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
         }
         bool planned = false;
         WaitPlan wp;
+        // What a poll collected is released outside mu before the next one,
+        // so a long wait never accumulates or pins other slots' state.
+        auto release_graveyard = [&] {
+            if (gy.items.empty()) return;
+            lk.unlock();
+            gy.items.clear();
+            lk.lock();
+        };
         for (;;) {
             const Clock::time_point now = Clock::now();
             if (c->model && c->model->retired()) {
@@ -1205,6 +1221,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                     until = std::min(until, *strict_deadline);
                 }
                 state_cv.wait_until(lk, until);
+                release_graveyard();
                 continue;
             }
             // none / construct: the bounded wait (§2.9), decided once.
@@ -1229,6 +1246,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 break;
             }
             state_cv.wait_until(lk, std::min(*deadline, now + cfg.wait_poll));
+            release_graveyard();
         }
     }
     write_stale(stale_path);
@@ -1296,7 +1314,7 @@ void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string
 
 void Runtime::on_model_released(const std::string & key) {
     std::lock_guard<std::mutex> lk(mu);
-    if (auto it = registry_.find(key); it != registry_.end() && it->second.expired()) registry_.erase(it);
+    if (auto it = registry_.find(key); it != registry_.end() && it->second.model.expired()) registry_.erase(it);
     bump_locked();
 }
 

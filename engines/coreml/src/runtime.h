@@ -238,7 +238,8 @@ private:
     void reserve_locked(Job & j, const SlotCore & c, Graveyard & gy);
     bool sub_denied_locked(const Job & j, const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
                            Graveyard & gy) const;
-    const SharedModel * existing_locked(const Job & j, Graveyard & gy) const;
+    const SharedModel * registered_locked(const std::string & key) const;
+    const SharedModel * existing_locked(const Job & j) const;
     void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
                           std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
     std::vector<std::shared_ptr<SlotCore>> pool_victim_locked(const PoolCore & p,
@@ -265,7 +266,14 @@ private:
     std::vector<std::shared_ptr<Job>> queue_;
     std::shared_ptr<Job> running_;
     std::unordered_map<std::string, std::shared_ptr<Job>> inflight_;
-    std::unordered_map<std::string, std::weak_ptr<SharedModel>> registry_;
+    // Live shareable instances by model key. `id` is identity only (valid
+    // while `model` has not expired): lookups that only compare instances
+    // take no strong reference, so they never keep one alive.
+    struct RegEntry {
+        std::weak_ptr<SharedModel> model;
+        const SharedModel * id = nullptr;
+    };
+    std::unordered_map<std::string, RegEntry> registry_;
     std::unordered_map<std::string, std::string> retired_;
     std::vector<std::weak_ptr<SlotCore>> slots_;
     uint64_t seq_ = 0;

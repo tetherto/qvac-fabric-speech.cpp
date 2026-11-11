@@ -1462,6 +1462,49 @@ void case_resident_cap_shared_release() {
     CHECK(over_rounds == 0);
 }
 
+// A pooled wait=call acquisition queued behind a long load keeps nothing alive
+// while it waits: when the only owner of the registry instance it would adopt
+// goes away, that instance is released at once, not when the waiter returns.
+void case_call_wait_pins_nothing() {
+    reset_world();
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        return e.m->make_slot(s, e.policy(Wait::call));
+    };
+    auto a = mk("wpa");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    auto x = e.slot("wps");  // another owner of the shared instance, no pool
+    x->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(x); }));
+    set_beh("wpl", {true});
+    auto l = e.slot("wpl");  // a long load holding the gate
+    l->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("wpl"); }));
+    auto b = mk("wps");  // full pool: a queued job, not an adoption
+    std::atomic<bool> done{false};
+    Acquired hb;
+    std::thread acq([&] {
+        hb = b->acquire(Demand::now);
+        done = true;
+    });
+    CHECK(wait_for([&] { return b->state() == SlotState::queued; }));
+    std::this_thread::sleep_for(30ms);  // several polls of the wait
+    CHECK(g_live_models.load() == base + 2);
+    x.reset();  // the only owner of the shared instance goes away
+    CHECK(wait_for([&] { return g_live_models.load() == base + 1; }, 1000));
+    CHECK(!done.load());
+    release("wpl");
+    acq.join();
+    CHECK(hb);
+    CHECK(calls("wps") == 2);  // the instance died: a fresh load
+    CHECK(pool->live() == 1);
+}
+
 // The pool count drops when an instance is released or evicted, not when the
 // last strong reference is finally gone (§2.9): a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
@@ -2221,6 +2264,7 @@ const Case kCases[] = {
     {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
     {"resident-cap-pending-release", case_resident_cap_pending_release},
     {"resident-cap-shared-release", case_resident_cap_shared_release},
+    {"call-wait-pins-nothing", case_call_wait_pins_nothing},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},
