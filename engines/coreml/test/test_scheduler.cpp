@@ -1362,6 +1362,106 @@ void case_resident_cap_pending_release() {
     g_delete_open = true;
 }
 
+// A native model whose deleter takes 3 ms (functions "sd*").
+LoadResult slow_delete_load(const LoadRequest & r) {
+    LoadResult out = fake_load(r);
+    if (!out.model || r.function.rfind("sd", 0) != 0) return out;
+    auto inner = std::static_pointer_cast<FakeModel>(out.model);
+    out.model = std::shared_ptr<FakeModel>(new FakeModel(inner->name), [](FakeModel * m) {
+        std::this_thread::sleep_for(3ms);
+        delete m;
+    });
+    return out;
+}
+
+// References a pool drops while another member or a Handle still counts the
+// instance are accounted too (§2.9): whichever reference is released last, the
+// place comes back only after the native deleter ran.
+void case_resident_cap_shared_release() {
+    // Two members share the victim: the worker evicts both, and the graveyard
+    // releases their references in either order.
+    {
+        reset_world();
+        Env e;
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &gated_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto b = mk("gds");
+        b->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(b); }));
+        auto c = mk("gds");
+        c->request(Priority::minimal);
+        CHECK(is_ready(c));  // adopts b's instance: one place
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+        g_delete_entered = 0;
+        g_delete_open = false;
+        auto d = mk("srr");
+        d->request(Priority::current);  // the worker evicts b and c
+        CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+        const auto end = Clock::now() + 200ms;
+        int over = 0;
+        while (Clock::now() < end) {
+            if (calls("srr") != 0 || is_ready(d) || g_live_models.load() > base + 1 || pool->live() != 1) ++over;
+            std::this_thread::sleep_for(1ms);
+        }
+        CHECK(over == 0);
+        CHECK(calls("srr") == 0);
+        g_delete_open = true;
+        CHECK(wait_for([&] { return is_ready(d); }));
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+    }
+    // An explicit eviction of a held instance races the Handle's release, both
+    // started together; the native deleter is slow. Whichever reference goes
+    // last, the replacement never overlaps it.
+    int over_rounds = 0;
+    for (int i = 0; i < 60; ++i) {
+        reset_world();
+        Env e;
+        const std::string tag = std::to_string(i);
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &slow_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto a = mk("sd" + tag);
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired h = a->acquire(Demand::now);
+        CHECK(h);
+        auto b = mk("sr" + tag);
+        b->request(Priority::current);  // cap-blocked: a's instance is held
+        std::atomic<bool> go{false};
+        std::thread t1([&] {
+            while (!go.load()) std::this_thread::yield();
+            a->evict();
+        });
+        std::thread t2([&] {
+            while (!go.load()) std::this_thread::yield();
+            h = Acquired{};
+        });
+        go = true;
+        int max_live = 0;
+        const auto end = Clock::now() + 12ms;
+        while (Clock::now() < end) max_live = std::max(max_live, g_live_models.load() - base);
+        t1.join();
+        t2.join();
+        CHECK(wait_for([&] { return is_ready(b); }));
+        max_live = std::max(max_live, g_live_models.load() - base);
+        if (max_live > 1) ++over_rounds;
+    }
+    CHECK(over_rounds == 0);
+}
+
 // The pool count drops when an instance is released or evicted, not when the
 // last strong reference is finally gone (§2.9): a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
@@ -2120,6 +2220,7 @@ const Case kCases[] = {
     {"resident-cap-release-window", case_resident_cap_release_window},
     {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
     {"resident-cap-pending-release", case_resident_cap_pending_release},
+    {"resident-cap-shared-release", case_resident_cap_shared_release},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},

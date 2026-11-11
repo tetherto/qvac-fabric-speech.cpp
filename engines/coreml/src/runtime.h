@@ -129,8 +129,9 @@ struct PoolRef {
 // its live members hold, plus those units retain through it (PoolRef), plus the
 // load in flight for it, plus the instances its members dropped (evicted,
 // released, retired or replaced) whose strong reference is still on its way
-// out (`releasing`). Another owner's reference to the same instance never
-// counts here: a dropped instance stops counting once this pool's reference is
+// out (`releasing`). Each is counted once, by identity, however many of these
+// reference it. Another owner's reference to the same instance never counts
+// here: a dropped instance stops counting once this pool's references to it are
 // released, whoever else still holds it.
 struct PoolCore {
     size_t cap = 0;
@@ -138,7 +139,9 @@ struct PoolCore {
     std::vector<std::weak_ptr<SlotCore>> members;
     std::vector<std::weak_ptr<SlotCore>> predicted;
     std::vector<std::shared_ptr<PoolRef>> refs;
-    size_t releasing = 0;  // pending releases (Runtime::drop_model_locked)
+    // One entry per pending release (Runtime::drop_model_locked), by instance
+    // identity: an instance two members dropped is listed twice, counted once.
+    std::vector<const SharedModel *> releasing;
 };
 
 class Runtime : public std::enable_shared_from_this<Runtime> {
@@ -170,8 +173,9 @@ public:
     void pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & cores);
     size_t pool_live(const PoolCore & p);
     void on_model_released(const std::string & key);
-    // A pending release of pool `p` (drop_model_locked) completed outside mu.
-    void on_pool_released(const std::weak_ptr<PoolCore> & p);
+    // A pending release of instance `m` from pool `p` (drop_model_locked)
+    // completed outside mu: its reference is gone.
+    void on_pool_released(const std::weak_ptr<PoolCore> & p, const SharedModel * m);
     void notify();
     void stop();
     // Pins this image (§2.9) before work is requested; never under mu. Every
@@ -213,9 +217,10 @@ private:
     void cancel_locked(const std::shared_ptr<Job> & j);
     void unsubscribe_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     void evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
-    // Drops slot `c`'s model into `gy`. When its pool stops counting the
-    // instance, the pool keeps a pending-release place until the reference is
-    // released outside mu (§2.9: a replacement is admitted only then).
+    // Drops slot `c`'s model into `gy`. A pooled slot's reference always leaves
+    // as a pending release: the pool counts the instance until that reference
+    // is released outside mu (§2.9: a replacement is admitted only then),
+    // whether or not another member or a Handle also counts it meanwhile.
     void drop_model_locked(SlotCore & c, Graveyard & gy);
     void retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy);
     void subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);

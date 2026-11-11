@@ -44,18 +44,21 @@ constexpr int64_t kStaleSeconds = 24 * 60 * 60;
 
 // A pool's reference to an instance one of its members dropped, kept in a
 // Graveyard: destroyed outside mu, it releases the reference first and then
-// gives the pool its place back (Runtime::drop_model_locked).
+// removes its entry from the pool's pending releases (drop_model_locked). The
+// pool counts the instance while any entry for it remains, so the order in
+// which a graveyard releases several references to it does not matter.
 struct PendingRelease {
     std::shared_ptr<SharedModel> model;
+    const SharedModel * id = nullptr;
     std::weak_ptr<PoolCore> pool;
     std::weak_ptr<Runtime> rt;
     PendingRelease(std::shared_ptr<SharedModel> m, std::weak_ptr<PoolCore> p, std::weak_ptr<Runtime> r)
-        : model(std::move(m)), pool(std::move(p)), rt(std::move(r)) {}
+        : model(std::move(m)), id(model.get()), pool(std::move(p)), rt(std::move(r)) {}
     PendingRelease(const PendingRelease &) = delete;
     PendingRelease & operator=(const PendingRelease &) = delete;
     ~PendingRelease() {
         model.reset();  // may run the engine's deleter (takes mu itself)
-        if (std::shared_ptr<Runtime> r = rt.lock()) r->on_pool_released(pool);
+        if (std::shared_ptr<Runtime> r = rt.lock()) r->on_pool_released(pool, id);
     }
 };
 
@@ -183,19 +186,25 @@ void Runtime::drop_model_locked(SlotCore & c, Graveyard & gy) {
     c.model.reset();
     if (!m) return;
     std::shared_ptr<PoolCore> p = c.pool.lock();
-    if (!p || pool_counts_locked(*p, m.get(), gy)) {
-        gy.keep(m);  // no pool, or another member / a retained handle still counts it
+    if (!p) {
+        gy.keep(m);  // no resident cap to account for
         return;
     }
-    ++p->releasing;
+    // Also when another member or a Handle still counts the instance: that
+    // reference may be released first, on another thread, leaving this one
+    // the last (§2.9).
+    p->releasing.push_back(m.get());
     gy.items.push_back(std::make_shared<PendingRelease>(std::move(m), p, weak_from_this()));
 }
 
-void Runtime::on_pool_released(const std::weak_ptr<PoolCore> & wp) {
+void Runtime::on_pool_released(const std::weak_ptr<PoolCore> & wp, const SharedModel * m) {
     std::shared_ptr<PoolCore> p = wp.lock();
     {
         std::lock_guard<std::mutex> lk(mu);
-        if (p && p->releasing > 0) --p->releasing;
+        if (p) {
+            auto it = std::find(p->releasing.begin(), p->releasing.end(), m);
+            if (it != p->releasing.end()) p->releasing.erase(it);
+        }
         bump_locked();  // admission may take the place now
     }
 }
@@ -437,7 +446,8 @@ size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     for (const std::shared_ptr<PoolRef> & r : p.refs) {
         if (r->holds.load() > 0) add(r->model);
     }
-    const size_t live = seen.size() + p.releasing;
+    for (const SharedModel * m : p.releasing) add(m);
+    const size_t live = seen.size();
     if (!running_serves_locked(p)) return live;
     const SharedModel * existing = existing_locked(*running_, gy);
     const bool counted = existing && std::find(seen.begin(), seen.end(), existing) != seen.end();
@@ -557,7 +567,7 @@ bool Runtime::sub_denied_locked(const Job & j, const SlotCore & c, const std::ve
     gy.keep(p);
     if (running_serves_locked(*p)) return false;
     if (pool_live_locked(*p, gy) < p->cap) return false;
-    if (p->releasing > 0) return false;  // undecided until the pending release completes
+    if (!p->releasing.empty()) return false;  // undecided until the pending release completes
     if (const SharedModel * existing = existing_locked(j, gy); existing && pool_counts_locked(*p, existing, gy)) {
         return false;
     }
@@ -606,7 +616,7 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p, gy) < p->cap) continue;
         if (existing && pool_counts_locked(*p, existing, gy)) continue;
-        if (p->releasing > 0) {
+        if (!p->releasing.empty()) {
             // A release is on its way out: wait for it rather than evicting a
             // second victim meanwhile (§2.9).
             releasing = true;
