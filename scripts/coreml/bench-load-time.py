@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""Load-time benchmark harness for the Core ML runtime (PLAN §5.3, unit S1c).
+"""Load-time benchmark harness for the Core ML runtime.
 
-Measures what S1b and S6 need on the M2 bench host, from the workloads pinned
-in bench-manifest.json:
+Measures what the Chatterbox Core ML runtime and its generation templates are
+tuned from, on the workloads pinned in bench-manifest.json:
 
-  sizes       multifunction spec sizes per stage and width set (§2.5)
-  memory      the runtime's available-memory reading under normal load (§2.9)
+  sizes       multifunction spec sizes per stage and width set
+  memory      the runtime's available-memory reading under normal load
   load        per function: cold load on a fresh identity, warm load + first
               prediction (expected_warm_load_ms), prediction time, and whether
-              loaded functions share weight memory (§2.13)
+              loaded functions share weight memory
   ttr         time until every function is ready, with and without the
               admission gate, the worst-case prepare-queue wait, and cached
-              startup (§2.9, §5.3)
+              startup
   metal_cost  per-variant linear Metal cost constants for
-              s3gen_estimate_metal_ms (§3.1.1)
+              s3gen_estimate_metal_ms
   synthesis   warm tts-cli synthesis on the benchmark prompt: Metal, Core ML
-              with 7 and 3 widths, Core ML with the encoder on Metal (§3.1.1)
+              with 7 and 3 widths, Core ML with the encoder on Metal
 
 Usage:
   bench-load-time.py --dry-run [--check-models]       validate the manifest, print the plan
-  bench-load-time.py build-driver [--out PATH]        compile bench-load-driver (lane build)
-  bench-load-time.py run [MEASUREMENT ...] --tts-cli PATH [--out DIR]   (lane quiet)
+  bench-load-time.py build-driver [--out PATH]        compile bench-load-driver
+  bench-load-time.py run [MEASUREMENT ...] --tts-cli PATH [--out DIR]   (idle machine, AC power)
   bench-load-time.py report --results DIR [--out doc.md]
-  bench-load-time.py smoke                            fresh-host.sh identity + e5rt cache smoke (lane device)
+  bench-load-time.py smoke                            fresh-host.sh identity + e5rt cache smoke (device)
   bench-load-time.py cleanup                          delete every qvac-bench-* identity and cache
 
 Cold runs use scripts/coreml/fresh-host.sh identities with sidecars cloned to a
@@ -65,7 +65,7 @@ RUNTIME_SOURCES = ("src/hints.cpp", "src/manager.cpp", "src/options.cpp", "src/p
 STAGES = ("encoder", "cfm", "hift")
 MEASUREMENTS = ("sizes", "memory", "load", "ttr", "metal_cost", "synthesis")
 RUN_KEYS = ("metal", "cold_prebuilt", "cold_generate", "time_to_ready", "cached_startup", "in_memory_ready")
-SECTION_5_3_RUNS = {"metal": 10, "cold_prebuilt": 10, "cold_generate": 10, "time_to_ready": 5, "cached_startup": 5,
+REQUIRED_RUNS = {"metal": 10, "cold_prebuilt": 10, "cold_generate": 10, "time_to_ready": 5, "cached_startup": 5,
                     "in_memory_ready": 5}
 UNITS = ("all", "cpu_and_ane", "cpu_and_gpu", "cpu_only")
 TTR_ROUTES = ("prebuilt", "generate")
@@ -215,8 +215,9 @@ def validate(m: dict, repo: Path = REPO, models: Path | None = None, check_model
     proto = m.get("protocol", {})
     runs = proto.get("runs", {})
     for k in RUN_KEYS:
-        if runs.get(k) != SECTION_5_3_RUNS[k]:
-            errors.append(f"protocol.runs.{k} must be {SECTION_5_3_RUNS[k]} (§5.3), got {runs.get(k)!r}")
+        if runs.get(k) != REQUIRED_RUNS[k]:
+            errors.append(f"protocol.runs.{k} must be {REQUIRED_RUNS[k]} (the published run count), "
+                          f"got {runs.get(k)!r}")
     if proto.get("units") not in UNITS:
         errors.append(f"protocol.units must be one of {UNITS}")
     if not isinstance(proto.get("ane_compiler_max_cpu_pct"), (int, float)) or proto["ane_compiler_max_cpu_pct"] <= 0:
@@ -265,7 +266,7 @@ def validate(m: dict, repo: Path = REPO, models: Path | None = None, check_model
 
     variants = m.get("variants", {})
     if set(variants) != {"turbo", "mtl"}:
-        errors.append("variants must be exactly turbo and mtl (QVAC-27561)")
+        errors.append("variants must be exactly turbo and mtl (the two Chatterbox models the runtime serves)")
     for name, v in variants.items():
         w = f"variants.{name}"
         for k in ("t3", "s3gen", "export_source"):
@@ -291,9 +292,10 @@ def validate(m: dict, repo: Path = REPO, models: Path | None = None, check_model
     else:
         _check_file(errors, "workloads.benchmark-prompt.text", bp.get("text"), repo, models, check_models)
         if bp.get("max_sentence_chars") != 180:
-            errors.append("workloads.benchmark-prompt.max_sentence_chars must be 180 (AC2)")
+            errors.append("workloads.benchmark-prompt.max_sentence_chars must be 180, "
+                          "the benchmark's sentence-split length")
         if bp.get("seed") != 42:
-            errors.append("workloads.benchmark-prompt.seed must be 42 (AC2)")
+            errors.append("workloads.benchmark-prompt.seed must be 42, the synthesis comparison's fixed seed")
     sw = wl.get("length-sweep")
     if not sw:
         errors.append("workloads.length-sweep is missing")
@@ -667,7 +669,7 @@ class Runner:
                     ac_power="AC Power" in power, units=self.units, sidecars=digests,
                     models_root=str(self.models))
         if "AC Power" not in power and not self.args.allow_battery:
-            raise SystemExit("bench-load-time: §5.3 runs on AC power (pmset reports battery); "
+            raise SystemExit("bench-load-time: benchmark runs need AC power (pmset reports battery); "
                              "pass --allow-battery only for a smoke run")
 
     # ---- sizes ----
@@ -1272,7 +1274,7 @@ def cmd_run(args, m) -> int:
 
 
 def cmd_smoke(args, m) -> int:
-    """Device smoke for fresh-host.sh (lane device): a re-signed copy reports a new
+    """Device smoke for fresh-host.sh: a re-signed copy reports a new
     host identity, a plain copy does not, a cold load creates the identity's
     e5rt cache, and cleanup deletes it."""
     driver = Path(args.driver or DEFAULT_BUILD / "bench-load-driver").resolve()
@@ -1332,7 +1334,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd")
     b = sub.add_parser("build-driver", help="compile bench-load-driver with the runtime sources")
     b.add_argument("--out")
-    r = sub.add_parser("run", help="run measurements (under lane quiet)")
+    r = sub.add_parser("run", help="run measurements (on an otherwise idle machine)")
     r.add_argument("measurements", nargs="*", metavar="MEASUREMENT", help=f"any of {', '.join(MEASUREMENTS)} (default all)")
     r.add_argument("--variant", action="append", choices=("turbo", "mtl"))
     r.add_argument("--out", help="results directory (default build-bench/results/<UTC time>)")
@@ -1341,12 +1343,12 @@ def main(argv=None) -> int:
     r.add_argument("--units", choices=UNITS)
     r.add_argument("--runs", type=int, help="override every run count (smoke tests only)")
     r.add_argument("--no-quiet-check", action="store_true", help="skip the ANECompilerService wait (smoke only)")
-    r.add_argument("--allow-battery", action="store_true", help="run on battery power (smoke only, not §5.3)")
+    r.add_argument("--allow-battery", action="store_true", help="run on battery power (smoke runs only; numbers are not comparable)")
     rp = sub.add_parser("report", help="render the measurements doc from results")
     rp.add_argument("--results", required=True)
     rp.add_argument("--out")
     sub.add_parser("cleanup", help="delete every qvac-bench-* identity copy and cache")
-    sm = sub.add_parser("smoke", help="fresh-host.sh identity smoke and e5rt cache cleanup (lane device)")
+    sm = sub.add_parser("smoke", help="fresh-host.sh identity smoke and e5rt cache cleanup (needs Core ML)")
     sm.add_argument("--driver")
     args = ap.parse_args(argv)
 

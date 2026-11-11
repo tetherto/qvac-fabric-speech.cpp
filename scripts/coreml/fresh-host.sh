@@ -1,9 +1,9 @@
 #!/bin/bash
-# fresh-host.sh: give a benchmark binary a host identity the ANE has never seen
-# (PLAN §5.3 "Cold host").
+# fresh-host.sh: give a benchmark binary a host identity the ANE has never seen,
+# so a cold-load measurement really starts with no cached ANE plans.
 #
 # The ANE plan cache and the per-executable e5rt cache are keyed by the host's
-# code-signing identity (F6); a plain copy keeps the identifier, so a cold run
+# code-signing identity; a plain copy keeps the identifier, so a cold run
 # needs a re-signed copy. For an ad-hoc signature the identifier and the file
 # name are both set to qvac-bench-<uuid>, so either observation of the host key
 # (code-signing identifier or executable name) sees a new host.

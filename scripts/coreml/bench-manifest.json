@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "description": "Pinned workloads for scripts/coreml/bench-load-time.py (PLAN §5.3). Files under root 'repo' are checked by --dry-run; files under root 'models' are checked with --check-models (QVAC_BENCH_MODELS, default ~/tether/models). Sidecars are exported locally from the pinned export_source GGUF with the pinned exporter options, so their digests are recorded per run in the results, not pinned here.",
+  "description": "Pinned workloads for scripts/coreml/bench-load-time.py. Files under root 'repo' are checked by --dry-run; files under root 'models' are checked with --check-models (QVAC_BENCH_MODELS, default ~/tether/models). Sidecars are exported locally from the pinned export_source GGUF with the pinned exporter options, so their digests are recorded per run in the results, not pinned here.",
   "host": {
     "chip": "Apple M2",
     "memsize_gb": 24,
@@ -98,7 +98,7 @@
   },
   "workloads": {
     "benchmark-prompt": {
-      "description": "QVAC-27306's benchmark prompt: three sentences, two segments at max_sentence_chars 180 (engines/tts/docs/chatterbox.md:134-137).",
+      "description": "The Chatterbox Core ML benchmark prompt: three sentences, two segments at max_sentence_chars 180 (engines/tts/docs/chatterbox.md:134-137).",
       "text": {
         "root": "repo",
         "path": "scripts/benchmarks/fixtures/tts-intelligibility.txt",
@@ -198,17 +198,17 @@
   },
   "measurements": {
     "sizes": {
-      "what": "Multifunction spec sizes (§2.5): model.mil, model.mlmodel, weight.bin, zlib and LZFSE sizes, per stage and width set.",
+      "what": "Multifunction spec sizes: model.mil, model.mlmodel, weight.bin, zlib and LZFSE sizes, per stage and width set.",
       "variants": ["turbo", "mtl"],
       "sets": ["w7", "w3"]
     },
     "memory": {
-      "what": "The runtime's available-memory reading under the normal desktop load (§2.9 memory admission), against each artifact's ane_compile_reserve_bytes.",
+      "what": "The runtime's available-memory reading under the normal desktop load (the input to memory admission), against each artifact's ane_compile_reserve_bytes.",
       "samples": 120,
       "interval_ms": 1000
     },
     "load": {
-      "what": "Per function: cold load (fresh identity, fresh path), warm load + first prediction (expected_warm_load_ms, §2.9), prediction time, and whether loaded functions share weight memory (§2.13).",
+      "what": "Per function: cold load (fresh identity, fresh path), warm load + first prediction (expected_warm_load_ms), prediction time, and whether loaded functions share weight memory.",
       "variants": ["turbo", "mtl"],
       "sets": ["w7", "w3"],
       "warm_runs": 5,
@@ -217,7 +217,7 @@
       "sharing_units": ["cpu_and_ane", "cpu_only"]
     },
     "ttr": {
-      "what": "Time until every function is ready (§5.3 time-to-ready), with and without the admission gate (§2.9), the worst-case prepare-queue wait, and cached startup with the same identity.",
+      "what": "Time until every function is ready, with and without the admission gate, the worst-case prepare-queue wait, and cached startup with the same identity.",
       "variants": ["turbo", "mtl"],
       "configs": [
         {"name": "prebuilt-gated", "route": "prebuilt", "mode": "manager", "set": "w7", "runs": 5, "cached_startup_runs": 1},
@@ -229,13 +229,13 @@
       "timeout_s": 1800
     },
     "metal_cost": {
-      "what": "Per-variant linear Metal cost constants for s3gen_estimate_metal_ms (§3.1.1): stage ms = a + b x frames, from CHATTERBOX_CHUNK_PROFILE.",
+      "what": "Per-variant linear Metal cost constants for s3gen_estimate_metal_ms: stage ms = a + b x frames, from CHATTERBOX_CHUNK_PROFILE.",
       "variants": ["turbo", "mtl"],
       "workload": "length-sweep",
       "runs": 3
     },
     "synthesis": {
-      "what": "Warm tts-cli synthesis on the benchmark prompt: Metal, Core ML with 7 and 3 widths (padding cost), and Core ML without the encoder sidecar (encoder-fallback contention during overlap, §3.1.1).",
+      "what": "Warm tts-cli synthesis on the benchmark prompt: Metal, Core ML with 7 and 3 widths (padding cost), and Core ML without the encoder sidecar (encoder-fallback contention during overlap).",
       "variants": ["turbo", "mtl"],
       "workload": "benchmark-prompt",
       "configs": [

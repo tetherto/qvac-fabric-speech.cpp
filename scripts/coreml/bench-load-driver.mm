@@ -1,8 +1,8 @@
-// bench-load-driver.mm: native driver for scripts/coreml/bench-load-time.py
-// (PLAN §5.3, S1c). macOS 15+ only; built by `bench-load-time.py build-driver`
-// together with the shared runtime sources (engines/coreml/src) in the
-// namespace qvac_coreml_bench, so `ttr --mode manager` runs the real S1a
-// scheduler: admission gate, memory admission, hints.
+// bench-load-driver.mm: native driver for scripts/coreml/bench-load-time.py.
+// macOS 15+ only; built by `bench-load-time.py build-driver` together with the
+// shared runtime sources (engines/coreml/src) in the namespace
+// qvac_coreml_bench, so `ttr --mode manager` runs the real runtime scheduler:
+// admission gate, memory admission, hints.
 //
 // Every subcommand prints one JSON object on stdout; diagnostics go to stderr.
 //
@@ -10,7 +10,7 @@
 //       host_id / os_build exactly as the runtime computes them (fresh-host.sh
 //       smoke: a re-signed copy must report its new identifier).
 //   memory [--samples N] [--interval-ms M]
-//       the runtime's available-memory reading (§2.9 memory admission).
+//       the runtime's available-memory reading, the input to memory admission.
 //   functions --model X.mlmodelc
 //       the function names of a compiled model.
 //   load --model X.mlmodelc [--units U] [--function F]... [--predict N] [--keep]
@@ -24,9 +24,11 @@
 //       time until every function is loaded and warmed (one zero prediction).
 //       route generate takes .mlpackage paths: a stand-in prepare job copies the
 //       package (the weight write) and compiles it with compileModelAtURL, as
-//       on-device generation will (S2b). manager = the S1a Manager (gated);
+//       on-device generation will. manager = the runtime's Manager (gated);
 //       manual-gated = one thread per queue sharing one mutex (the gate by
 //       hand); ungated = the same two threads without the mutex.
+//       Every model that loads stays resident until the final readings;
+//       detail.models_live counts them.
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
@@ -263,7 +265,7 @@ std::vector<std::string> function_names(const std::string & path, std::string & 
     return names;
 }
 
-// ---- runtime callbacks (plain function pointers, §2.9) -------------------------
+// ---- runtime callbacks (plain function pointers) ------------------------------
 
 qc::LoadResult bench_load_fn(const qc::LoadRequest & req) {
     qc::LoadResult r;
@@ -288,7 +290,7 @@ qc::Error bench_warm_fn(void * model, const qc::LoadRequest & req) {
     return ok ? qc::Error{} : qc::Error::deterministic(error, "MLModel");
 }
 
-// The stand-in for generation (S2b): copy the package (the weight write) and
+// The stand-in for on-device generation: copy the package (the weight write) and
 // compile it on device into a fresh, write-once directory.
 bool stand_in_prepare(const std::string & package, const std::string & dir, const std::string & stage,
                       std::string & out_path, std::string & error) {

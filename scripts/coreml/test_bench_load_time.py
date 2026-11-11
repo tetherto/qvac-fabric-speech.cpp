@@ -26,8 +26,10 @@ spec.loader.exec_module(blt)
 
 MANIFEST = blt.load_manifest(blt.DEFAULT_MANIFEST)
 
-# Plan sections, work-unit ids and ticket ids: none belong in code or docs.
-TASK_ID = re.compile(r"QVAC-[0-9]|PLAN|§|\b(S[0-9][a-c]?|P[0-9]|A1|Q[0-9]|H[0-9]|R[0-9])\b")
+# Plan sections, work-unit ids and ticket ids: none belong in code or docs. The
+# pattern is assembled from pieces so this file does not match it itself.
+TASK_ID = re.compile("|".join(["QVAC" + "-[0-9]", "P" + "LAN", "\u00a7",
+                               r"\b(S[0-9][a-c]?|P[0-9]|A[1]|Q[0-9]|H[0-9]|R[0-9])\b"]))
 
 
 def errors_of(mutate):
@@ -79,7 +81,7 @@ class ManifestTest(unittest.TestCase):
 
         cases = [
             ("schema", lambda m: m.update(schema=2), "schema must be 1"),
-            ("§5.3 N", lambda m: m["protocol"]["runs"].update(cold_prebuilt=5), "protocol.runs.cold_prebuilt"),
+            ("published run count", lambda m: m["protocol"]["runs"].update(cold_prebuilt=5), "protocol.runs.cold_prebuilt"),
             ("repo sha", flip_sha, "sha256"),
             ("repo bytes", lambda m: m["quality_sets"]["der"][0]["rttm"].update(bytes=1), "pinned 1"),
             ("traversal", lambda m: m["workloads"]["benchmark-prompt"]["text"].update(path="../x"), "without '..'"),
@@ -95,7 +97,7 @@ class ManifestTest(unittest.TestCase):
             ("stem", lambda m: m["variants"]["mtl"].update(sidecar_stem="chatterbox-s3gen"), "sidecar_stem"),
             ("variants", lambda m: m["variants"].pop("mtl"), "turbo and mtl"),
             ("hf pin", lambda m: m["variants"]["turbo"]["hf"].update(revision="main"), "40-hex"),
-            ("AC2 chars", lambda m: m["workloads"]["benchmark-prompt"].update(max_sentence_chars=200), "180"),
+            ("sentence-split chars", lambda m: m["workloads"]["benchmark-prompt"].update(max_sentence_chars=200), "180"),
             ("sweep", lambda m: m["workloads"]["length-sweep"]["sentences"].append("One. Two."), "one sentence"),
             ("measurements", lambda m: m["measurements"].pop("sizes"), "measurements must be exactly"),
             ("ttr ungated", lambda m: m["measurements"]["ttr"].update(
@@ -299,6 +301,17 @@ class AnalysisTest(unittest.TestCase):
         for cmd in ("--dry-run --check-models", "build-driver", "smoke", "run --tts-cli", "report --results",
                     "cleanup"):
             self.assertIn(cmd, doc)
+
+    def test_sources_cite_no_task_identifiers(self):
+        files = sorted(p for p in HERE.iterdir() if p.is_file() and p.suffix in (".py", ".sh", ".mm", ".h", ".cpp",
+                                                                                 ".json"))
+        files.append(blt.REPO / "docs" / "COREML-LOAD-TIME.md")
+        hits = [f"{p.name}:{i}: {ln.strip()}" for p in files
+                for i, ln in enumerate(p.read_text().splitlines(), 1) if TASK_ID.search(ln)]
+        self.assertGreaterEqual(len(files), 8)
+        self.assertEqual(hits, [])
+        for sample in ("QVAC" + "-12345", "the " + "P" + "LAN", "\u00a7" + "2.9", "unit " + "S" + "1c", "A" + "1"):
+            self.assertIsNotNone(TASK_ID.search(sample), sample)
 
     def test_report_cites_no_task_identifiers(self):
         doc = blt.render(blt.summarize([]))
