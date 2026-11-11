@@ -1,6 +1,7 @@
 #include "parakeet/engine.h"
 #include "../src/parakeet_ctc.h"
 #include "../src/long_form_encoder.h"
+#include "../src/parakeet_coreml_path.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -179,6 +181,86 @@ void check_initial_placement(const char * path) {
                         units ? units : "default", (int) (owned != nullptr), actual.c_str());
         }
     }
+}
+
+class SidecarFixture {
+public:
+    explicit SidecarFixture(const char * source) : source_(source) {
+        directory_ = std::filesystem::temp_directory_path() / ("eu-sidecar-selection-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directory(directory_);
+        model = (directory_ / source_.filename()).string();
+        std::filesystem::create_symlink(std::filesystem::absolute(source_), model);
+    }
+    ~SidecarFixture() { std::filesystem::remove_all(directory_); }
+    void link(const std::string & sidecar) {
+        link_as(sidecar, std::filesystem::path(sidecar).filename().string());
+    }
+    void link_as(const std::string & sidecar, const std::string & filename) {
+        std::filesystem::create_directory_symlink(std::filesystem::absolute(sidecar), directory_ / filename);
+    }
+    std::string model;
+private:
+    std::filesystem::path source_, directory_;
+};
+
+void check_partial_route_fallback(const parakeet::EngineOptions & options,
+                                  const std::vector<float> & french) {
+    parakeet::Engine engine(options);
+    require(engine.encoder_on_coreml(), "English sidecar availability missing from partial fixture");
+    parakeet::EngineResult expected;
+    {
+        EnvironmentScope disabled("PARAKEET_COREML_DISABLE", "1");
+        parakeet::Engine native(options);
+        expected = native.transcribe_samples(french.data(), (int) french.size(), kRate);
+    }
+    const auto actual = engine.transcribe_samples(french.data(), (int) french.size(), kRate);
+    require(!actual.encoder_used_coreml && !actual.decoder_used_coreml,
+            "partial other route unexpectedly executed Core ML");
+    require(!expected.token_ids.empty() && actual.token_ids == expected.token_ids,
+            "unavailable adapted sidecar changed native continuous decoding");
+}
+
+void check_sidecar_selection(const char * path, const std::vector<float> & english,
+                             const std::vector<float> & french) {
+    EnvironmentScope enabled("PARAKEET_COREML_DISABLE", nullptr);
+    EnvironmentScope ownership("PARAKEET_COREML_ONLY", nullptr);
+    EnvironmentScope policy("PARAKEET_COREML_COMPUTE_UNITS", nullptr);
+    EnvironmentScope batch("PARAKEET_ANE_BATCH_DECODE", nullptr);
+    SidecarFixture partial(path);
+    partial.link(parakeet::coreml_encoder_sidecar_path(path));
+    parakeet::EngineOptions options;
+    options.model_gguf_path = partial.model;
+    options.n_threads = kThreads;
+    options.backend = "cpu";
+    options.language = "other";
+    const auto long_french = parakeet_test::tile_to_seconds(french, kRate, 22);
+    check_partial_route_fallback(options, long_french);
+    // A decoder sidecar must not independently enable encoder segmentation.
+    partial.link(parakeet::coreml_decoder_sidecar_path(path));
+    check_partial_route_fallback(options, long_french);
+    partial.link_as(parakeet::coreml_encoder_sidecar_path(path),
+        std::filesystem::path(parakeet::coreml_eu_other_sidecar_path(path)).filename().string());
+    check_partial_route_fallback(options, long_french);
+
+    SidecarFixture flexible(path);
+    flexible.link(parakeet::coreml_eu_flexible_sidecar_path(path, false));
+    flexible.link(parakeet::coreml_eu_flexible_sidecar_path(path, true));
+    auto gate = parakeet::coreml_eu_gate_sidecar_path(path);
+    gate.insert(gate.size() - std::string(".mlmodelc").size(), "-flexible");
+    flexible.link(gate);
+    options.model_gguf_path = flexible.model;
+    options.long_form_window_frames = -1;
+    for (const char * language : {"en", "other", "auto"}) {
+        options.language = language;
+        parakeet::Engine engine(options);
+        require(engine.encoder_on_coreml(), "flexible-only encoder capability missing before inference");
+        const auto & pcm = options.language == "en" ? english : french;
+        const auto actual = engine.transcribe_samples(pcm.data(), (int) pcm.size(), kRate);
+        require(actual.encoder_used_coreml && !actual.text.empty(),
+                "flexible-only route or gate did not execute Core ML");
+    }
+    std::printf("sidecar selection: three native-continuity fallbacks and three flexible-only routes passed\n");
 }
 
 std::unique_ptr<parakeet::Engine> native_reference(const parakeet::EngineOptions & options) {
@@ -396,8 +478,9 @@ int transcribepsy_eu_coreml_test(int argc, char ** argv) {
                                       std::string(argv[4]) == "--context-parity" ||
                                       std::string(argv[4]) == "--explicit-context" ||
                                       std::string(argv[4]) == "--warm-stream" ||
-                                      std::string(argv[4]) == "--initial-placement"))) {
-        std::fprintf(stderr, "usage: %s full-eu.gguf english.wav french.wav [--unwindowed|--context-parity|--explicit-context|--warm-stream|--initial-placement]\n", argv[0]);
+                                      std::string(argv[4]) == "--initial-placement" ||
+                                      std::string(argv[4]) == "--sidecar-selection"))) {
+        std::fprintf(stderr, "usage: %s full-eu.gguf english.wav french.wav [--unwindowed|--context-parity|--explicit-context|--warm-stream|--initial-placement|--sidecar-selection]\n", argv[0]);
         return 2;
     }
     try {
@@ -408,6 +491,10 @@ int transcribepsy_eu_coreml_test(int argc, char ** argv) {
         check_encoder_ownership(argv[1]);
         const auto english = read_samples(argv[2]);
         const auto french = read_samples(argv[3]);
+        if (argc == 5 && std::string(argv[4]) == "--sidecar-selection") {
+            check_sidecar_selection(argv[1], english, french);
+            return 0;
+        }
         if (argc == 5 && std::string(argv[4]) == "--explicit-context") {
             check_explicit_context(argv[1], english);
             return 0;

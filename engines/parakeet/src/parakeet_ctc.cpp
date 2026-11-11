@@ -3153,7 +3153,8 @@ CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m) {
 
 bool model_encoder_on_coreml(const ParakeetCtcModel & m) {
 #ifdef PARAKEET_USE_COREML
-    return m.impl && (m.impl->ctx_coreml != nullptr || m.impl->coreml_diarizers != nullptr);
+    return m.impl && (m.impl->ctx_coreml != nullptr || m.impl->coreml_diarizers != nullptr ||
+        (m.model_variant == "transcribepsy-250m-eu" && model_selected_encoder_on_coreml(m, 1)));
 #else
     (void) m;
     return false;
@@ -4935,7 +4936,8 @@ static parakeet_coreml_context * selected_coreml_encoder(
     const char * units = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
     const bool cpu_only = parakeet::coreml_eu_requires_cpu_precision(units);
     if (max_layers == model.eu_gate.layer + 1 && !model.eu_use_adapters) {
-        if (!cpu_only && !prefer_precise_eu) return model.impl->ctx_coreml_eu_gate;
+        if (!cpu_only && !prefer_precise_eu && model.impl->ctx_coreml_eu_gate)
+            return model.impl->ctx_coreml_eu_gate;
         auto & gate = model.impl->ctx_coreml_eu_gate_flexible;
         if (!gate && !model.impl->eu_gate_flexible_path.empty())
             gate = load_eu_coreml_encoder(model.impl->eu_gate_flexible_path, "gate",
@@ -5135,6 +5137,18 @@ static int run_encoder_coreml(ParakeetCtcModel & model,
     return 0;
 }
 #endif  // PARAKEET_USE_COREML
+
+bool model_selected_encoder_on_coreml(const ParakeetCtcModel & model, int n_mel_frames) {
+#ifdef PARAKEET_USE_COREML
+    if (n_mel_frames <= 0) return false;
+    auto * ctx = selected_coreml_encoder(model, -1, n_mel_frames, n_mel_frames, false);
+    return should_use_coreml_encoder(model, n_mel_frames, true, false, true, ctx);
+#else
+    (void) model;
+    (void) n_mel_frames;
+    return false;
+#endif
+}
 
 // Build (and, unless measuring, allocate) the two-layer locale-prompt
 // projection graph at `n_frames` encoder frames. Shared by

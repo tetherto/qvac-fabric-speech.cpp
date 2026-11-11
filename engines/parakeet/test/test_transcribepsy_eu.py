@@ -117,6 +117,30 @@ def check_sidecar_fallbacks(binary: Path, model: Path, french: Path):
         assert missing_flexible.returncode != 0 and "weights were not loaded" in missing_flexible.stderr, missing_flexible
 
 
+def check_flexible_only_cli(binary: Path, model: Path, french: Path):
+    stem = sidecar_stem(model)
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        candidate = directory / model.name
+        candidate.symlink_to(model.resolve())
+        for suffix in ("encoder-flexible", "encoder-other-flexible", "encoder-gate-flexible"):
+            sidecar = model.parent / f"{stem}-{suffix}.mlmodelc"
+            (directory / sidecar.name).symlink_to(sidecar.resolve(), target_is_directory=True)
+        environment = dict(os.environ)
+        for key in ("PARAKEET_COREML_DISABLE", "PARAKEET_COREML_ONLY", "PARAKEET_ANE_BATCH_DECODE"):
+            environment.pop(key, None)
+        for language in ("en", "other", "auto"):
+            result = subprocess.run(
+                [str(binary), "--model", str(candidate), "--wav", str(french),
+                 "--language", language, "--backend", "cpu", "--threads", "4",
+                 "--window-sec", "0", "--bench", "--bench-runs", "1", "--bench-warmup", "0",
+                 "--require-coreml"], env=environment, capture_output=True, text=True)
+            assert result.returncode == 0 and result.stdout.strip(), result
+            assert "encoder_backend=coreml-cpu" in result.stderr, result
+            if language == "auto":
+                assert "gate encoder: coreml" in result.stderr, result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -176,6 +200,10 @@ def main():
         assert gate_decision(silent_log)[3:] == expected, silent_log
     if args.coreml:
         check_sidecar_fallbacks(args.binary, args.model, samples / "fr-multipiece-16k.wav")
+        flexible = ("encoder-flexible", "encoder-other-flexible", "encoder-gate-flexible")
+        if all((args.model.parent / f"{sidecar_stem(args.model)}-{suffix}.mlmodelc").is_dir()
+               for suffix in flexible):
+            check_flexible_only_cli(args.binary, args.model, samples / "fr-multipiece-16k.wav")
     print("TranscribePsy EU: English/French gate and explicit routes agree")
     return 0
 

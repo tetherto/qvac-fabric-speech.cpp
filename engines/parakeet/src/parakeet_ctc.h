@@ -704,9 +704,11 @@ std::string model_active_backend_name(const ParakeetCtcModel & m);
 std::string model_active_device_name(const ParakeetCtcModel & m);
 ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 
-// True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
-// instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
+// True when a compatible encoder sidecar is available. Full-EU lazy programs
+// are validated on demand. Always false on non-Apple / non-Core ML builds.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+// Validate the encoder selected for the current EU route and input shape.
+bool        model_selected_encoder_on_coreml(const ParakeetCtcModel & m, int n_mel_frames);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);

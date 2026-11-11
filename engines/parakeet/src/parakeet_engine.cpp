@@ -584,18 +584,19 @@ bool transcribe_independent_segments(ParakeetCtcModel & model, TdtRuntimeWeights
     if (env_flag_disabled(kSegmentBatchDecodeEnv) || n_mel_frames <= 0) return false;
     CoremlLaneStepper stepper(dec);
     const bool usable_decoder = dec && stepper.usable();
-    const bool native_segments = model.model_variant == "transcribepsy-250m-eu" &&
-        model_encoder_on_coreml(model);
+    const bool full_eu = model.model_variant == "transcribepsy-250m-eu";
     if (dec && stepper.n_width != 1)
         PARAKEET_LOG_WARN("parakeet: Core ML decoder was exported at width=%lld; only width=1 is driven\n",
                           (long long) stepper.n_width);
-    if (!usable_decoder && !native_segments) return false;
-    if (!usable_decoder && env_flag_enabled(kSegmentBatchDecodeEnv))
-        PARAKEET_LOG_WARN("parakeet: requested Core ML decoder unavailable; using native segment decode\n");
+    if (!usable_decoder && !full_eu) return false;
     const double mel_stride_ms = model.mel_cfg.hop_length > 0 && model.mel_cfg.sample_rate > 0
         ? 1000.0 * (double) model.mel_cfg.hop_length / (double) model.mel_cfg.sample_rate
         : 0.0;
     if (mel_stride_ms <= 0.0) return false;
+    if (full_eu && !model_selected_encoder_on_coreml(model,
+            std::min(n_mel_frames, resolve_segment_frames(model, mel_stride_ms)))) return false;
+    if (!usable_decoder && env_flag_enabled(kSegmentBatchDecodeEnv))
+        PARAKEET_LOG_WARN("parakeet: requested Core ML decoder unavailable; using native segment decode\n");
 
     const auto t_plan = clock::now();
     const std::vector<float> energy = mel_frame_energy(mel, n_mel_frames, n_mels);
@@ -622,6 +623,8 @@ bool transcribe_independent_segments(ParakeetCtcModel & model, TdtRuntimeWeights
                          windows, outcome)) {
         return false;
     }
+
+    if (full_eu && !outcome.used_coreml) return false;
 
     const TdtDecodeOptions dopts;
     const bool host = native_for_crossover || env_flag_enabled(kSegmentHostDecodeEnv);

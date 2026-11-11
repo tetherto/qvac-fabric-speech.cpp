@@ -3022,6 +3022,16 @@ if (PARAKEET_BUILD_TESTS)
                      "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other.mlmodelc"
                      "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate.mlmodelc")
         set_tests_properties(test-transcribepsy-eu-coreml-initial-placement PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-sidecar-selection
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--sidecar-selection"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-decoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-sidecar-selection PROPERTIES SKIP_RETURN_CODE 77)
         parakeet_register_test(test-transcribepsy-eu-coreml-unwindowed
             EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
             ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--unwindowed"
