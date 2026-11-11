@@ -10,10 +10,11 @@ Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmark
 under the installing user's own account: it updates the engine `master` and ggml `speech` heads, provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
-machine is involved in the measurement. The Speech Bench hub and its per-machine dashboards, linked from the team channel's canvas,
-are where everyone reads the numbers. This skill is the Claude side: on-demand runs, collecting the summaries, building the
-dashboards' data and the hub from them and publishing them, and the rules that keep two automated benches and twenty-odd people from
-disturbing each other on the same hardware.
+machine is involved in the measurement. The Speech Bench site, which the results repository's
+workflow rebuilds and deploys to its private GitHub Pages site, is where everyone reads the numbers; the claude.ai hub and
+dashboards linked from the team channel's canvas came before it. This skill is the Claude side: on-demand runs, collecting the
+summaries and publishing them by hand where the results repository does not, and the rules that keep two automated benches and
+twenty-odd people from disturbing each other on the same hardware.
 
 | path | what it is |
 | --- | --- |
@@ -76,8 +77,8 @@ which one. SSH as yourself with the host names above.
 ### collect
 
 When the hosts push to the results repository (`RESULTS_REPO` in their `config.env`), clone it instead: its
-`summaries/` folder is this history, and the Monday cloud routine whose prompt is
-`scripts/benchmarks/desktop-weekly/publish-routine.md` collects and publishes without any of these steps. By hand,
+`summaries/` folder is this history, and its workflow publishes the site without any of these steps (see "Where the
+results go" in the README). By hand,
 copy every finished run's summary into the local history folder, one file per run, named by host and run:
 
 ```sh
@@ -94,6 +95,11 @@ The history folder is the input of `build-dashboard-data.py`. Keep it; a run pru
 wants to read it.
 
 ### publish
+
+With the results repository, its workflow publishes the site: `gh workflow run publish-site.yml -R
+tetherto/qvac-speech-bench-results` publishes it on demand, and `python3 scripts/benchmarks/desktop-weekly/build-site.py
+--results <results checkout> --out <new folder>` builds the same site locally to look at. The steps below publish the
+claude.ai hub and dashboards by hand, for as long as those are still read.
 
 Build the data files and the hub from the history folder:
 
@@ -170,7 +176,7 @@ ssh <host> 'bash speech-bench-src/install.sh --hour 18 && rm -rf speech-bench-sr
 ```
 
 Then set the machine's keys in `~/speech-bench/config.env` (see the machines table) and try
-`weekly.sh --quick --no-mail` once. Results reach people through the artifact page, not by mail; `MAIL_TO` and
+`weekly.sh --quick --no-mail` once. Results reach people through the site, not by mail; `MAIL_TO` and
 `ANTHROPIC_API_KEY_FILE` stay unset unless someone asks for mail or the narrative. The README has the prerequisites
 and the layout.
 
@@ -193,7 +199,7 @@ kind and value, runs, notes), `counts`, `build_failures`, `problems`.
 ## Rules
 
 - Benchmarks only: do not commit, push or open pull requests from a benchmark session.
-- Publish only to the hub and the dashboards named in `dashboards.json`, and only when the user asks or the scheduled
-  task runs.
+- Publish only through the results repository's workflow or to the hub and the dashboards named in `dashboards.json`,
+  and only when the user asks or the scheduled task runs.
 - Never start a run inside the weekend window, never touch other users' files, locks or processes, and never run
   anything as root.

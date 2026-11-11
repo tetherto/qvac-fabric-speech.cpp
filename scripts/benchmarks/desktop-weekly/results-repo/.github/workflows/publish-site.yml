@@ -1,0 +1,80 @@
+name: Publish the Speech Bench site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "summaries/**"
+      - "failures/**"
+      - "report-rows.json"
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.delivery.outputs.publish }}
+    steps:
+      - name: Check out the results
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: results
+      - name: Check out the bench tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: tetherto/qvac-fabric-speech.cpp
+          ref: master
+          path: engine
+          sparse-checkout: scripts/benchmarks/desktop-weekly
+      - name: Check which machines delivered this week
+        id: delivery
+        run: >-
+          python3 engine/scripts/benchmarks/desktop-weekly/check-delivery.py
+          --results results --event "$GITHUB_EVENT_NAME" --summary "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the results
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: results
+      - name: Check out the bench tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: tetherto/qvac-fabric-speech.cpp
+          ref: master
+          path: engine
+          sparse-checkout: scripts/benchmarks/desktop-weekly
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - name: Build the site
+        run: >-
+          python3 engine/scripts/benchmarks/desktop-weekly/build-site.py
+          --results results --out site --base-url "${{ steps.pages.outputs.base_url }}"
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+      - name: Deploy the site
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

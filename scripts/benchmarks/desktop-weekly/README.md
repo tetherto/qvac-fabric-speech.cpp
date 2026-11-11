@@ -5,9 +5,10 @@ developer laptop in the loop: cron on each machine builds the current engine and
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the
-Speech Bench hub, with a task page per machine and task, and one dashboard per machine, refreshed every Monday from
-the summaries the machines push to a results repository (see "Where the results go"); e-mail delivery exists but is
-off unless `MAIL_TO` is set.
+Speech Bench site, a private GitHub Pages site with the hub, a task page per machine and task, and one dashboard per
+machine, rebuilt from the summaries the machines push to a results repository as soon as every machine has delivered
+and at the latest on Monday morning (see "Where the results go"); e-mail delivery exists but is off unless `MAIL_TO`
+is set.
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
@@ -22,7 +23,7 @@ fabric-llm engine bench on Saturday from 18:00 CET, the speech bench on Sunday f
 about 6 to 7 hours). Both also hold the same `/tmp/gpu-bench.lock` on the Mac; this run waits for the lock (up to
 `LOCK_WAIT_HOURS`, 12 by default) and for every other GPU job to end before it starts, then holds the lock while it
 benchmarks. See [`skills/speech-bench/SKILL.md`](../../../skills/speech-bench/SKILL.md) for the coordination rules
-and the weekly artifact.
+and the site.
 
 ## What is measured
 
@@ -105,7 +106,9 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | file | what it does |
 | --- | --- |
 | `weekly.sh` | entry point: lock, update sources, fetch models, build and bench every backend, summarize, report, e-mail, push to the results repository |
-| `publish-routine.md` | the prompt of the Monday cloud routine that publishes the dashboards and the hub from the results repository |
+| `check-delivery.py` | a results checkout -> whether the site workflow publishes: on a push once every machine has delivered this week's summary or failure notice, on the Monday schedule and a manual run always |
+| `build-site.py` | a results checkout -> the static Speech Bench site: the hub (`index.html`), the highlights page and `machines/<host>/` with each machine's dashboard and its data files |
+| `results-repo/` | the README and the Pages workflow (`.github/workflows/publish-site.yml`) of the results repository, copied into it when it is set up |
 | `import-report.py` | the saved task pages of a comparison report -> `report-rows.json` (rows in the shape of `runs.json`, comparison set `report`, plus its not-measured lists as coverage cells) |
 | `fluidaudio-bench/` | Swift package: native-style bench of FluidAudio (Parakeet TDT v3 and Unified on Core ML, ANE encoder) for `run-family.sh`, same JSON as `mlx-bench.py` |
 | `mlx-bench.py` | native-style bench of the MLX engines (parakeet-mlx, mlx-whisper, mlx-audio Nemotron) for `run-family.sh`: pinned snapshot, model loaded once, warm-ups, timed transcriptions, the driver's bench JSON; `--once` for a single transcription, or for the mlx-audio Chatterbox Turbo synthesis of a time-wrapped family |
@@ -118,6 +121,7 @@ Q4_K_M, so that row is Q4_K_M and says so.
 | `report.py` | `summary.json` (+ previous run) -> `report.md` with the changes over 5% and whether a pin moved |
 | `build-dashboard-data.py`, `comparisons.json`, `engines.json` | a folder of `summary.json` files -> per machine the JSON files its dashboard reads (`<host>/runs.json`, `history.json`, `coverage.json`, `engines.json`, `machine.json`, `commentary.json`) and `hub.json` for the hub; `comparisons.json` holds the dated competitor rows of the campaign (qvac RTF and competitor-over-qvac time ratio per device and backend), `engines.json` the engines with their scope |
 | `dashboard/index.html`, `dashboard/app.js`, `dashboard/app.css`, `dashboards.json` | the page every machine dashboard runs (overview, a tab per task with a speed chart per model, backend and input and a week-over-week line per backend, runs and coverage) and the links of the hub and the dashboards |
+| `dashboard/static.html`, `dashboard/static-runtime.js`, `dashboard/static-theme.css` | what runs that page on the site instead of claude.ai: the page shell, a stand-in for the calls it makes to the claude.ai Dashboard runtime (`data`, `onData`, `calc`, `draw`, `params`, `setParams`, `setLink`) that reads the data files beside the page, and the theme's color, spacing and font tokens |
 | `build-landing.py`, `task_views.py`, `dashboard/hub.css`, `dashboard/task.css` | `hub.json` and the machines' `runs.json` and `coverage.json` -> the Speech Bench hub: per task every machine with a link to its task page, the quality flags, the engines and how the bench runs. The task pages (one section per model with a speed chart per backend and input, details with exact values, precision, time ratios and sources, and what was not measured) are views of the hub page, each at the hub's link plus `#<machine>-<task>`, for example `#dgx-spark-tts` |
 | `build-artifact.py` | a folder of `summary.json` files -> one self-contained HTML report (tables per task, history and pins per machine) for reading offline, without the dashboards |
 | `nsdate`, `scheduler.sh` | nanosecond clock shim for macOS before 26, and the user-space scheduler for hosts without cron |
@@ -222,12 +226,21 @@ when another host pushed first; a weekly run whose push failed goes out with the
 `--no-push` never does. A labelled
 rerun is pushed under its own name and, being newer, replaces on the dashboards the cells it measured.
 
-A cloud routine in claude.ai (its prompt is `publish-routine.md`, Monday 08:00 UTC) clones the results repository and
-this one, reports which hosts delivered and which failed, turns the summaries into the dashboards' data files with
-`build-dashboard-data.py`, uploads each machine's files to that machine's dashboard, republishes the hub with its task
-pages from `build-landing.py` and commits the built data back, so no lab machine and no workstation has to be on for
-the hub and its dashboards, the place to look, to refresh. Without the results repository the speech-bench skill does
-the same by hand, collecting the summaries over ssh into a history folder. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
+The results repository publishes the site itself. Its workflow (`results-repo/.github/workflows/publish-site.yml`)
+runs on every push and asks `check-delivery.py` whether every machine has delivered the week's summary or failure
+notice; once they have, it builds the site with `build-site.py` from this repository's master and deploys it to the
+repository's GitHub Pages site, which only people with read access to the repository can open. Every Monday at 08:00
+UTC it publishes whatever has arrived and names the missing machines in the run's summary, and "Run workflow" on its
+Actions tab publishes on demand, so no lab machine, workstation or Claude session has to be on for the site to
+refresh. The machine dashboards on the site are the page of the claude.ai dashboards (`dashboard/index.html`,
+`app.js`), run by `dashboard/static-runtime.js` instead of the claude.ai runtime, with d3 from jsDelivr.
+
+Setting the results repository up: an organization owner creates it as a private repository and gives the bench
+maintainer admin on it. Copy `results-repo/` into it together with the stored history (`summaries/`,
+`report-rows.json`) before any host pushes, so a host's backlog never overwrites a corrected summary; turn GitHub
+Pages on with GitHub Actions as its source and private visibility; add each host's deploy key; then set `RESULTS_REPO`
+on the hosts. Without the results repository the speech-bench skill collects the summaries over ssh and publishes the
+claude.ai hub and dashboards by hand. E-mail is optional and off by default: with `MAIL_TO`, `MAIL_FROM` and the SMTP keys set in
 `config.env` (tether.io mail is Google Workspace, so `smtp.gmail.com:465` with an app password in a mode 0600 file),
 `send-report.py` also mails the report with `report.md` and `summary.json` attached, and a failed run mails a
 one-paragraph notice.

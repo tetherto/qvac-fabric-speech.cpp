@@ -640,6 +640,26 @@ check_python_tests() {
   ok "python unit tests pass"
 }
 
+check_results_repo_workflow() {
+  local workflow="$HERE/results-repo/.github/workflows/publish-site.yml" unpinned script
+  [ -f "$workflow" ] || fail "the results repository's workflow is missing"
+  unpinned="$(grep -E '^[[:space:]-]*uses:' "$workflow" | grep -v -E 'uses: [a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}( |$)' || true)"
+  [ -z "$unpinned" ] || fail "the results repository's workflow uses an action without a pinned commit: $unpinned"
+  for script in check-delivery.py build-site.py; do
+    grep -q "desktop-weekly/$script" "$workflow" && [ -f "$HERE/$script" ] || fail "the results repository's workflow does not run $script"
+  done
+  if python3 -c 'import yaml' 2> /dev/null; then
+    python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$workflow" || fail "the results repository's workflow is not valid YAML"
+  fi
+  ok "the results repository's workflow pins every action to a commit and runs the delivery check and the site build"
+}
+
+check_static_runtime() {
+  command -v node > /dev/null || { ok "static dashboard runtime check skipped without node"; return 0; }
+  node "$HERE/test_static_runtime.js" > "$TMP/runtime.log" 2>&1 || fail "static dashboard runtime: $(grep -A6 '^not ok' "$TMP/runtime.log")"
+  ok "the static dashboard runtime loads data files, works calcs once per change, redraws and keeps filters and links"
+}
+
 main() {
   check_scripts_parse
   check_spec_fields
@@ -675,6 +695,8 @@ main() {
   check_input_validation
   check_entry_points
   check_fetch_registry_discards_partial
+  check_results_repo_workflow
+  check_static_runtime
   check_python_tests
   echo "all $PASS checks passed"
 }
