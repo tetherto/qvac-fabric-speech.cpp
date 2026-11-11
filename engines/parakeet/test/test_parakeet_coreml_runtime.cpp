@@ -6,6 +6,10 @@
 //                         (coreml_pending) and its transcript equals use = off
 //   prebuilt-slot-loads   the prebuilt encoder loads in the background through
 //                         its slot; the next call runs on Core ML
+//   capacity-miss         with long-form windowing disabled, an input longer
+//                         than the fixed encoder's capacity runs that call on
+//                         ggml and leaves the slot ready; the next call that
+//                         fits runs on Core ML (a capacity miss never retires)
 //   diarizer-pending      a diarizer capacity that is not ready -> kNoSidecar
 //                         -> ggml; ready after prewarm all -> Core ML
 //   coreml-only-full      PARAKEET_COREML_ONLY with a full GGUF keeps the ggml
@@ -16,14 +20,18 @@
 // Every case runs or fails: there is no skip path (exit 0 = pass, 1 = fail,
 // 2 = bad arguments).
 
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 #include "parakeet_ctc.h"
+#include "test_utils.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <unistd.h>
 
@@ -171,6 +179,40 @@ void case_encoderless(const std::string & gguf) {
 
 }  // namespace
 
+// The TDT fixture's encoder is a fixed 1501-frame export (15 s). 30 s is
+// above it, so with windowing disabled the encoder cannot serve the call.
+void case_capacity_miss(const std::string & gguf, const std::string & wav) {
+    std::vector<float> source;
+    int rate = 0;
+    expect(parakeet_test::load_wav_pcm16le_mono(wav, source, rate) && !source.empty(),
+           "capacity-miss: the wav loads");
+    if (source.empty()) return;
+    std::vector<float> long_input;
+    const size_t target = (size_t) rate * 30;
+    while (long_input.size() < target) {
+        const size_t n = std::min(source.size(), target - long_input.size());
+        long_input.insert(long_input.end(), source.begin(), source.begin() + (long) n);
+    }
+
+    parakeet::EngineOptions o = engine_options(gguf, coreml_ready_options());
+    o.long_form_window_frames = -1;
+    parakeet::Engine engine(o);
+    expect(engine.encoder_on_coreml(), "capacity-miss: the encoder is ready after construction");
+    const parakeet::EngineResult over =
+        engine.transcribe_samples(long_input.data(), (int) long_input.size(), rate);
+    std::printf("       over-capacity call: mel=%d backend=%s\n", over.mel_frames,
+                over.encoder_backend.c_str());
+    expect(over.encoder_backend == "ggml" && !over.encoder_used_coreml && !over.text.empty(),
+           "capacity-miss: the over-capacity single-pass call ran on ggml");
+    const std::string status = engine.coreml_status_json();
+    expect(!has(status, "\"retired\"") && engine.encoder_on_coreml(),
+           "capacity-miss: the encoder slot is still ready (not retired)");
+    const parakeet::EngineResult next = engine.transcribe(wav);
+    std::printf("       next call: backend=%s\n", next.encoder_backend.c_str());
+    expect(next.encoder_used_coreml && next.encoder_backend.rfind("coreml-", 0) == 0,
+           "capacity-miss: the next call that fits runs on Core ML");
+}
+
 int main(int argc, char ** argv) {
     std::string gguf, wav, diar_gguf, diar_wav, encoderless;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -193,6 +235,7 @@ int main(int argc, char ** argv) {
     try {
         parakeet::EngineResult reference;
         case_transcription(gguf, wav, reference);
+        case_capacity_miss(gguf, wav);
         case_coreml_only_full(gguf, wav, reference);
         if (!diar_gguf.empty()) case_diarizer(diar_gguf, diar_wav.empty() ? wav : diar_wav);
         if (!encoderless.empty()) case_encoderless(encoderless);
