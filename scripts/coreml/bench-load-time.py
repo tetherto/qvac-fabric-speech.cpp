@@ -816,7 +816,10 @@ class Runner:
     @staticmethod
     def _ttr_summary(r: dict) -> dict:
         slots = r.get("detail", {}).get("slots", [])
-        return {"time_to_ready_ms": r["time_to_ready_ms"], "all_ready": r["time_to_ready_ms"] >= 0,
+        # Ready means every model is loaded, warmed and still resident when the run ends.
+        live = r.get("detail", {}).get("models_live")
+        all_ready = r["time_to_ready_ms"] >= 0 and live == len(slots)
+        return {"time_to_ready_ms": r["time_to_ready_ms"], "all_ready": all_ready, "models_live": live,
                 "available_bytes_at_start": r.get("available_bytes_at_start"),
                 "deferred_memory_ms": sum(s.get("deferred_memory_ms", 0) or 0 for s in slots),
                 "prepare_waits_ms": prepare_waits(r), "load_gate_waits_ms": load_gate_waits(r),

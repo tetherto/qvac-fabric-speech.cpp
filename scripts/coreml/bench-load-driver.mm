@@ -51,6 +51,7 @@
 #include <thread>
 #include <vector>
 
+#include "bench-ttr.h"
 #include "device.h"
 #include "nlohmann/json.hpp"
 #include "qvac_coreml/manager.h"
@@ -517,9 +518,17 @@ uint64_t weight_bytes(const std::string & artifact) {
 
 json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::ComputeUnits units,
                  const std::string & work, const std::string & cache, bool memory_admission, double timeout_s,
-                 double & ready_ms) {
-    auto mgr = qc::Manager::create();
-    std::vector<std::shared_ptr<qc::Slot>> slots;
+                 double & ready_ms, std::shared_ptr<void> & keep) {
+    // Members destroy in reverse order: slots, then the group, then the Manager.
+    struct Held {
+        std::shared_ptr<qc::Manager> mgr;
+        std::shared_ptr<qc::Group> group;
+        std::vector<std::shared_ptr<qc::Slot>> slots;
+    };
+    auto held = std::make_shared<Held>();
+    held->mgr = qc::Manager::create();
+    auto & mgr = held->mgr;
+    auto & slots = held->slots;
     std::vector<qc::GroupRequest> reqs;
     for (const ArtifactArg & a : arts) {
         for (const std::string & fn : a.functions) {
@@ -551,7 +560,8 @@ json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::Compu
         }
     }
     const double t_issue = now_ms();
-    auto group = mgr->issue_group(qc::GroupKind::construction, reqs, /*waited=*/true);
+    held->group = mgr->issue_group(qc::GroupKind::construction, reqs, /*waited=*/true);
+    auto & group = held->group;
     // Poll for state transitions (deferred(memory) time, per-slot ready time).
     std::vector<std::string> last(slots.size());
     std::vector<double> ready_at(slots.size(), -1.0);
@@ -592,8 +602,12 @@ json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::Compu
                             {"deferred_memory_ms", deferred_ms[i]},
                             {"status", json::parse(qc::to_json(slots[i]->status()))}});
     }
+    size_t live = 0;
+    for (const auto & slot : slots) live += slot->state() == qc::SlotState::ready ? 1 : 0;
     const qc::Stats st = mgr->stats();
+    keep = held;
     return {{"t_issue_ms", t_issue},
+            {"models_live", live},
             {"group", json::parse(qc::to_json(res))},
             {"slots", per_slot},
             {"transitions", transitions},
@@ -603,86 +617,44 @@ json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::Compu
                        {"hint_writes", st.hint_writes}}}};
 }
 
-// Two worker threads (prepare, load) with or without one shared mutex.
+// Two worker threads (prepare, load) with or without one shared mutex. The
+// loaded models go to `keep` so they stay resident until the caller has taken
+// its final readings, as the Manager's slots keep theirs.
 json ttr_manual(const std::vector<ArtifactArg> & arts, bool generate, qc::ComputeUnits units, const std::string & work,
-                bool gated, double & ready_ms) {
-    struct Item {
-        std::string stage, path, fn;
-    };
-    std::mutex gate, q_mu;
-    std::condition_variable q_cv;
-    std::deque<Item> loads;
-    bool prepares_done = false;
-    std::vector<json> results;
-    std::mutex res_mu;
+                bool gated, double & ready_ms, std::shared_ptr<void> & keep) {
+    std::vector<bench_ttr::ManualStage> stages;
+    for (const ArtifactArg & a : arts) stages.push_back({a.stage, a.path, a.functions});
     const double t_issue = now_ms();
-
-    auto enqueue = [&](const ArtifactArg & a, const std::string & path) {
-        std::lock_guard<std::mutex> lk(q_mu);
-        for (const std::string & fn : a.functions) loads.push_back({a.stage, path, fn});
-        q_cv.notify_all();
-    };
-
-    std::thread prep([&] {
+    auto prepare = [&](const std::string & stage, const std::string & path, std::string & out) {
         pthread_setname_np("bench-prepare");
-        for (const ArtifactArg & a : arts) {
-            std::string path = a.path;
-            if (generate) {
-                std::unique_lock<std::mutex> g(gate, std::defer_lock);
-                if (gated) g.lock();
-                const double t0 = now_ms();
-                std::string out, error;
-                const bool ok = stand_in_prepare(a.path, work + "/" + a.stage + "-manual", a.stage, out, error);
-                record("prepare", a.stage, t0, now_ms(), ok);
-                if (!ok) die("prepare " + a.stage + ": " + error);
-                path = out;
-            }
-            enqueue(a, path);
-        }
-        std::lock_guard<std::mutex> lk(q_mu);
-        prepares_done = true;
-        q_cv.notify_all();
-    });
-
-    std::thread load([&] {
+        const double t0 = now_ms();
+        std::string error;
+        const bool ok = stand_in_prepare(path, work + "/" + stage + "-manual", stage, out, error);
+        record("prepare", stage, t0, now_ms(), ok);
+        if (!ok) die("prepare " + stage + ": " + error);
+        return ok;
+    };
+    auto load = [&](const std::string & stage, const std::string & path, const std::string & fn) {
         pthread_setname_np("bench-load");
-        while (true) {
-            Item it;
-            {
-                std::unique_lock<std::mutex> lk(q_mu);
-                q_cv.wait(lk, [&] { return !loads.empty() || prepares_done; });
-                if (loads.empty()) return;
-                it = loads.front();
-                loads.pop_front();
-            }
-            std::unique_lock<std::mutex> g(gate, std::defer_lock);
-            if (gated) g.lock();
-            qc::LoadRequest req;
-            req.engine = "chatterbox-bench";
-            req.stage = it.stage;
-            req.artifact_path = it.path;
-            req.function = it.fn;
-            req.units = units;
-            qc::LoadResult r = bench_load_fn(req);
-            bool ok = r.error.ok();
-            if (ok) ok = bench_warm_fn(r.model.get(), req).ok();
-            const double t = now_ms() - t_issue;
-            std::lock_guard<std::mutex> lk(res_mu);
-            results.push_back({{"slot", it.stage + "/" + it.fn}, {"ready_ms", ok ? t : -1.0}, {"ok", ok}});
-        }
-    });
-    prep.join();
-    load.join();
-    ready_ms = 0;
-    for (const json & r : results) {
-        const double v = r["ready_ms"].get<double>();
-        if (v < 0) {
-            ready_ms = -1;
-            break;
-        }
-        ready_ms = std::max(ready_ms, v);
-    }
-    return {{"t_issue_ms", t_issue}, {"slots", results}};
+        qc::LoadRequest req;
+        req.engine = "chatterbox-bench";
+        req.stage = stage;
+        req.artifact_path = path;
+        req.function = fn;
+        req.units = units;
+        qc::LoadResult r = bench_load_fn(req);
+        if (!r.error.ok() || !bench_warm_fn(r.model.get(), req).ok()) return std::shared_ptr<void>();
+        return r.model;
+    };
+    auto out = std::make_shared<bench_ttr::ManualOutcome>(
+        bench_ttr::run_manual(stages, generate, gated, prepare, load, now_ms, t_issue));
+    ready_ms = bench_ttr::manual_ready_ms(out->results);
+    json slots = json::array();
+    for (const bench_ttr::ManualResult & r : out->results)
+        slots.push_back({{"slot", r.slot}, {"ready_ms", r.ready_ms}, {"ok", r.ok}});
+    const size_t live = out->retained.size();
+    keep = out;
+    return {{"t_issue_ms", t_issue}, {"slots", slots}, {"models_live", live}};
 }
 
 int cmd_ttr(const Args & a) {
@@ -702,10 +674,13 @@ int cmd_ttr(const Args & a) {
     const uint64_t base = phys_footprint();
     double ready_ms = -1;
     json detail;
+    // Holds every loaded model until after the final readings below.
+    std::shared_ptr<void> keep;
     if (mode == "manager") {
-        detail = ttr_manager(arts, generate, units, work, cache, a.flag("--memory-admission"), timeout_s, ready_ms);
+        detail = ttr_manager(arts, generate, units, work, cache, a.flag("--memory-admission"), timeout_s, ready_ms,
+                             keep);
     } else if (mode == "manual-gated" || mode == "ungated") {
-        detail = ttr_manual(arts, generate, units, work, mode == "manual-gated", ready_ms);
+        detail = ttr_manual(arts, generate, units, work, mode == "manual-gated", ready_ms, keep);
     } else {
         die("--mode must be manager, manual-gated or ungated");
     }

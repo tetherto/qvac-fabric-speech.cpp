@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -288,6 +289,39 @@ class AnalysisTest(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform != "win32", "bash")
+class TtrSummaryTest(unittest.TestCase):
+    @staticmethod
+    def run_record(ttr_ms, live, n=3):
+        slots = [{"slot": f"cfm/f{i}", "ready_ms": 10.0 * i} for i in range(n)]
+        return {"time_to_ready_ms": ttr_ms, "detail": {"t_issue_ms": 0.0, "slots": slots, "models_live": live}}
+
+    def test_ready_needs_every_model_resident_at_the_end(self):
+        s = blt.Runner._ttr_summary(self.run_record(30.0, 3))
+        self.assertTrue(s["all_ready"])
+        self.assertEqual(s["models_live"], 3)
+        self.assertFalse(blt.Runner._ttr_summary(self.run_record(30.0, 0))["all_ready"])
+        self.assertFalse(blt.Runner._ttr_summary(self.run_record(30.0, None))["all_ready"])
+        self.assertFalse(blt.Runner._ttr_summary(self.run_record(-1, 3))["all_ready"])
+
+
+class NativeTest(unittest.TestCase):
+    """Builds and runs test_bench_ttr.cpp: the driver's time-to-ready bookkeeping."""
+
+    def test_bench_ttr(self):
+        cxx = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if cxx is None:
+            self.skipTest("no C++ compiler")
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "test_bench_ttr"
+            build = subprocess.run([cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread", "-I", str(HERE),
+                                    str(HERE / "test_bench_ttr.cpp"), "-o", str(exe)],
+                                   capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("test_bench_ttr: ok", run.stdout)
+
+
 class FreshHostTest(unittest.TestCase):
     def run_fh(self, *args, env):
         return subprocess.run(["bash", str(blt.FRESH_HOST), *args], capture_output=True, text=True, env=env)
