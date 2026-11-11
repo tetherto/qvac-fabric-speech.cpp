@@ -41,8 +41,9 @@ Use `--language en` for known English, `--language other` for known non-English,
 or `--language auto` (also the default) to run the gate on the first 20 seconds
 before transcription. `EngineOptions::language` accepts the same values for
 this model. The gate and adapters are embedded in the GGUF; no extra files are
-needed at inference time. The native ggml encoder handles both routes; the
-EU-sub Core ML sidecars do not contain the full model's adapters.
+needed at inference time. CPU and Metal handle both routes. Full-EU Core ML sidecars accelerate both routes
+and the gate encoder on macOS/iOS; [export the matching full-EU sidecars](transcribepsy-eu-coreml.md).
+EU-sub sidecars do not contain this model's adapters and are rejected for full EU.
 
 ```bash
 build-parakeet/parakeet --model engines/parakeet/models/transcribepsy-250m-eu.gguf \

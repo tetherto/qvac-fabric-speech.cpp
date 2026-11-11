@@ -96,6 +96,45 @@ def nemotron_meta():
 
 
 class ExportContractTests(unittest.TestCase):
+    def test_full_eu_flexible_precision_avoids_nonfinite_fp16_execution(self):
+        meta = {"parakeet.model_variant": "transcribepsy-250m-eu"}
+        self.assertEqual(EXPORTER.resolve_export_precision(meta, None, True), "fp32")
+        self.assertEqual(EXPORTER.resolve_export_precision(meta, "fp32", True), "fp32")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            EXPORTER.resolve_export_precision(meta, "fp16", True)
+        self.assertEqual(EXPORTER.resolve_export_precision({}, None, True), "fp16")
+
+    def test_flexible_input_minimum_includes_single_encoder_row(self):
+        if not hasattr(EXPORTER.ct, "proto"):
+            self.skipTest("Core ML protobuf definitions unavailable")
+        spec = EXPORTER.ct.proto.Model_pb2.Model()
+        feature = spec.description.input.add()
+        feature.name = "mel"
+        for lower, upper in ((128, 128), (9, 40000)):
+            size_range = feature.type.multiArrayType.shapeRange.sizeRanges.add()
+            size_range.lowerBound, size_range.upperBound = lower, upper
+        mask = spec.description.input.add()
+        mask.name = "mel_valid_mask"
+        mask_range = mask.type.multiArrayType.shapeRange.sizeRanges.add()
+        mask_range.lowerBound, mask_range.upperBound = 9, 40000
+        EXPORTER.set_flexible_input_minimum(spec, 1)
+        self.assertEqual(mask_range.lowerBound, 1)
+        ranges = feature.type.multiArrayType.shapeRange.sizeRanges
+        self.assertEqual((ranges[0].lowerBound, ranges[1].lowerBound, ranges[1].upperBound),
+                         (128, 1, 40000))
+        with self.assertRaises(ValueError):
+            EXPORTER.set_flexible_input_minimum(spec, 0)
+
+    def test_full_eu_flexible_accepts_all_routes(self):
+        meta = {"parakeet.model_variant": "transcribepsy-250m-eu", "parakeet.model.type": "tdt",
+                "parakeet.encoder.conv_norm_type": "layer_norm"}
+        for route in ("en", "other", "gate"):
+            self.assertEqual(EXPORTER.validate_export_contract(meta, flexible=True, eu_route=route), "tdt")
+
+    def test_full_eu_requires_route_aware_exporter(self):
+        with self.assertRaisesRegex(ValueError, "--eu-route"):
+            EXPORTER.validate_export_contract({"parakeet.model_variant": "transcribepsy-250m-eu"})
+
     def test_accepts_indic_ctc_fixed_and_flexible(self):
         self.assertEqual(
             EXPORTER.validate_export_contract(indic_ctc_meta()), "ctc")
@@ -257,6 +296,32 @@ class ExportContractTests(unittest.TestCase):
         self.assertLess(mask[3, 4].item(), -1e20)
 
     @unittest.skipIf(torch is None, "torch is not installed")
+    def test_flexible_subsampling_preserves_native_padding_boundaries(self):
+        reference = EXPORTER.load_reference_encoder(Path(__file__).parents[1] / "scripts")
+        weights = {
+            "encoder.subsampling.conv0.weight": torch.randn(2, 1, 3, 3),
+            "encoder.subsampling.conv0.bias": torch.randn(2),
+            "encoder.subsampling.conv1_dw.weight": torch.randn(2, 1, 3, 3),
+            "encoder.subsampling.conv1_dw.bias": torch.randn(2),
+            "encoder.subsampling.conv1_pw.weight": torch.randn(2, 2, 1, 1),
+            "encoder.subsampling.conv1_pw.bias": torch.randn(2),
+            "encoder.subsampling.conv2_dw.weight": torch.randn(2, 1, 3, 3),
+            "encoder.subsampling.conv2_dw.bias": torch.randn(2),
+            "encoder.subsampling.conv2_pw.weight": torch.randn(2, 2, 1, 1),
+            "encoder.subsampling.conv2_pw.bias": torch.randn(2),
+            "encoder.subsampling.out.weight": torch.randn(4, 2),
+            "encoder.subsampling.out.bias": torch.randn(4),
+        }
+        for frames in (399, 400, 401, 402, 407, 408, 409):
+            for valid in (frames, frames - 1):
+                with self.subTest(frames=frames, valid=valid):
+                    mel = torch.randn(8, frames)
+                    mask = (torch.arange(frames) < valid).float()
+                    actual = EXPORTER.subsampling_shape_generic(mel, weights, mask)
+                    expected, _ = reference.subsampling(mel, weights, valid)
+                    torch.testing.assert_close(actual, expected)
+                    self.assertEqual(actual.shape[1], (frames + 7) // 8)
+
     def test_causal_subsampling_dimensions(self):
         weights = {
             "encoder.subsampling.conv0.weight": torch.zeros(2, 1, 3, 3),

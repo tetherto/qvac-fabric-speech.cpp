@@ -832,7 +832,9 @@ int run_encoder(ParakeetCtcModel   & model,
                 int                  max_layers = -1,
                 bool                 capture_intermediates = true,
                 bool                 allow_coreml_padded = false,
-                const EncoderOutputConsumer & consumer = {});
+                const EncoderOutputConsumer & consumer = {},
+                int valid_mel_frames_override = 0,
+                bool prefer_precise_eu = false);
 
 bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     const std::string & language,
@@ -840,7 +842,9 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     float * p_non_english = nullptr,
                                     const float * cropped_mel = nullptr,
                                     int cropped_mel_frames = 0,
-                                    int audio_samples = 0);
+                                    int audio_samples = 0,
+                                    bool * encoder_used_coreml = nullptr,
+                                    bool prefer_precise_eu = false);
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute

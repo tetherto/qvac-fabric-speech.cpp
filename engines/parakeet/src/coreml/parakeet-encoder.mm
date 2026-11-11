@@ -570,8 +570,9 @@ int encode_ane_window(parakeet_coreml_context * ctx,
     const AneWindow & ane = ctx->ane;
     if (n_mels != ane.n_mels || d_model != ane.d_model) return 2;
     if (n_mel_frames > ane.window_mel || n_enc_frames > ane.enc_frames) return 2;
-    const parakeet::CoremlAneValidity valid =
+    parakeet::CoremlAneValidity valid =
         parakeet::coreml_ane_valid_lengths(n_mel_frames, n_mel_valid, n_enc_frames);
+    if (parakeet_coreml_preserves_encoder_padding(ctx)) valid.enc_frames = n_enc_frames;
 
     MLModel  * model    = (__bridge MLModel *) ctx->model;
     NSString * out_name = [NSString stringWithUTF8String:ctx->output_name.c_str()];
@@ -640,7 +641,7 @@ bool prepare_cached_io(parakeet_coreml_context * ctx, MLModel * model,
     MLMultiArray * out_arr = nil;
     const parakeet::CoremlTrailingMatch out_match =
         parakeet::coreml_match_trailing_capacity(dims_of(out_constraint.shape), n_enc_frames, d_model);
-    if (out_match.matched) {
+    if (ctx->input_shape_fixed && out_match.matched) {
         out_arr = build_array(out_constraint.shape, out_constraint.dataType, &err);
         if (out_arr == nil || err != nil) return false;
         options.outputBackings = @{ out_name : out_arr };
@@ -684,7 +685,7 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
     MLMultiArray * in_arr = build_array(in_shape, in_constraint.dataType, &err);
     if (in_arr == nil || err != nil) return false;
     MLMultiArray * mask_arr = build_array(
-        mask_constraint.shape, mask_constraint.dataType, &err);
+        ctx->input_shape_fixed ? mask_constraint.shape : @[@(capacity)], mask_constraint.dataType, &err);
     if (mask_arr == nil || err != nil || (int64_t) mask_arr.count != capacity) return false;
 
     MLDictionaryFeatureProvider * provider =
@@ -698,7 +699,7 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
     const parakeet::CoremlTrailingMatch out_match =
         parakeet::coreml_match_trailing_capacity(
             dims_of(out_constraint.shape), output_rows, d_model);
-    if (out_match.matched) {
+    if (ctx->input_shape_fixed && out_match.matched) {
         out_arr = build_array(out_constraint.shape, out_constraint.dataType, &err);
         if (out_arr == nil || err != nil) return false;
         options.outputBackings = @{ out_name : out_arr };
@@ -718,12 +719,32 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
 
 }  // namespace
 
+enum class CoremlPlacement { Automatic, Cpu, NeuralEngine, Gpu };
+static parakeet_coreml_context * init_coreml_model(const char *, const char *, CoremlPlacement);
+
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc) {
-    return parakeet_coreml_init_with_units_env(path_mlmodelc, kComputeUnitsEnv);
+    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Automatic);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_ane(const char * path_mlmodelc) {
+    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::NeuralEngine);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_gpu(const char * path_mlmodelc) {
+    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Gpu);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_cpu(const char * path_mlmodelc) {
+    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Cpu);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env) {
+    return init_coreml_model(path_mlmodelc, units_env, CoremlPlacement::Automatic);
+}
+
+static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
+                                                  const char * units_env, CoremlPlacement placement) {
     if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
 
     @autoreleasepool {
@@ -738,6 +759,18 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
         std::string label;
         config.computeUnits = parakeet_coreml_requested_units(
             units_env, mlmodelc_declares_ane_inputs(path), &label);
+        if (placement == CoremlPlacement::NeuralEngine) {
+            config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+            label = "coreml-ane";
+        }
+        if (placement == CoremlPlacement::Cpu) {
+            config.computeUnits = MLComputeUnitsCPUOnly;
+            label = "coreml-cpu";
+        }
+        if (placement == CoremlPlacement::Gpu) {
+            config.computeUnits = MLComputeUnitsCPUAndGPU;
+            label = "coreml-cpu-gpu";
+        }
 
         NSError * err   = nil;
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]
@@ -796,6 +829,53 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
     }
 }
 
+bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx,
+                                     const char * route, int layers, bool flexible) {
+    if (!ctx || !route || layers <= 0) return false;
+    @autoreleasepool {
+        MLModel * model = (__bridge MLModel *) ctx->model;
+        NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+        const bool valid_interface = flexible
+            ? !ctx->input_shape_fixed &&
+                [metadata[@"parakeet.eu.flexible"] isEqualToString:@"true"] &&
+                [metadata[@"parakeet.eu.native_padding"] isEqualToString:@"true"] &&
+                model.modelDescription.inputDescriptionsByName.count == 2 &&
+                ctx->masks_mel_padding &&
+                model.modelDescription.inputDescriptionsByName[@"mel"].type == MLFeatureTypeMultiArray &&
+                model.modelDescription.inputDescriptionsByName[@"mel"].multiArrayConstraint.dataType == MLMultiArrayDataTypeFloat32
+            : ctx->ane.active && model.modelDescription.inputDescriptionsByName.count == 4 &&
+                model.modelDescription.inputDescriptionsByName[kAneMelMaskInput].type == MLFeatureTypeMultiArray;
+        return valid_interface &&
+            [metadata[@"parakeet.model_variant"] isEqualToString:@"transcribepsy-250m-eu"] &&
+            [metadata[@"parakeet.eu.route"] isEqualToString:[NSString stringWithUTF8String:route]] &&
+            [metadata[@"parakeet.encoder.n_layers"] isEqualToString:[NSString stringWithFormat:@"%d", layers]];
+    }
+}
+
+bool parakeet_coreml_is_fp32(const struct parakeet_coreml_context * ctx) {
+    if (!ctx || !ctx->model) return false;
+    @autoreleasepool {
+        MLModel * model = (__bridge MLModel *) ctx->model;
+        NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+        if (![metadata[@"parakeet.encoder.precision"] isEqualToString:@"fp32"]) return false;
+        for (MLFeatureDescription * input in model.modelDescription.inputDescriptionsByName.allValues) {
+            if (input.type != MLFeatureTypeMultiArray ||
+                input.multiArrayConstraint.dataType != MLMultiArrayDataTypeFloat32) return false;
+        }
+        return true;
+    }
+}
+
+bool parakeet_coreml_preserves_encoder_padding(const struct parakeet_coreml_context * ctx) {
+    if (ctx == nullptr || ctx->model == nullptr) return false;
+    if (!ctx || !ctx->model) return false;
+    MLModel * model = (__bridge MLModel *) ctx->model;
+    NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
+    return [metadata[@"parakeet.model_variant"] isEqualToString:@"transcribepsy-250m-eu"] &&
+        (parakeet_coreml_is_fp32(ctx) ||
+         [metadata[@"parakeet.eu.native_padding"] isEqualToString:@"true"]);
+}
+
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx) {
     if (ctx == nullptr) return;
     release_cached_io(ctx);
@@ -849,7 +929,7 @@ int parakeet_coreml_encode_valid(struct parakeet_coreml_context * ctx,
         NSString * out_name = [NSString stringWithUTF8String:ctx->output_name.c_str()];
 
         if (ctx->masks_mel_padding) {
-            const int64_t capacity = fixed_mel_frames_for(ctx, n_mels);
+            const int64_t capacity = ctx->input_shape_fixed ? fixed_mel_frames_for(ctx, n_mels) : n_mel_frames;
             if (capacity <= 0 || n_mel_frames > capacity) return 2;
             NSString * mask_name = [NSString stringWithUTF8String:ctx->valid_mask_name.c_str()];
             if (!prepare_cached_masked_io(ctx, model, in_name, mask_name, out_name,

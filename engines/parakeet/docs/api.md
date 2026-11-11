@@ -54,6 +54,13 @@ streaming. Unified selects trained chunk/right-context values and ignores
 `left_context_ms`; Nemotron selects its operating point from `chunk_ms` and
 ignores both sliding-window context knobs.
 
+`StreamingOptions::chunk_ms = 0` (the default) resolves to 2000 ms for full
+TranscribePsy EU and the previous 1000 ms value for other ASR families. Positive
+values remain explicit: setting 1000 preserves one-second behavior. Resolution
+happens before callback/push validation and context calculations;
+`StreamSession::options().chunk_ms` reports the effective value. Nemotron still
+requires one of its trained positive operating points.
+
 Always call `finalize()` to drain the partial tail. Destroying a
 `StreamSession` or `SortformerStreamSession` cancels it and does not finalize
 it. `cancel()` stops future work; `Engine::cancel()` may be called from another

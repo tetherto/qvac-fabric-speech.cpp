@@ -1651,6 +1651,15 @@ if (PARAKEET_BUILD_TESTS)
                     "--model" "${_qvp_transcribepsy_eu_gguf}")
             set_tests_properties(test-transcribepsy-eu PROPERTIES
                 LABELS "fixture" SKIP_RETURN_CODE 77)
+            if (PARAKEET_COREML)
+                add_test(NAME test-transcribepsy-eu-coreml-cli
+                    COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/test/test_transcribepsy_eu.py"
+                        "--binary" "$<TARGET_FILE:parakeet-cli>"
+                        "--model" "${_qvp_transcribepsy_eu_gguf}" "--coreml")
+                set_tests_properties(test-transcribepsy-eu-coreml-cli
+                    PROPERTIES LABELS "fixture;coreml" SKIP_RETURN_CODE 77)
+            endif()
         endif()
         add_test(
             NAME test-converter-moss-transcribe
@@ -2011,6 +2020,11 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_encoder_coreml.py")
         set_property(TEST test-export-encoder-coreml PROPERTY LABELS "unit")
+        add_test(NAME test-compiled-precision-cli
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_compiled_precision_cli.py")
+        set_property(TEST test-compiled-precision-cli PROPERTY LABELS "unit")
+        set_property(TEST test-compiled-precision-cli PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
         foreach(padding_test IN ITEMS test_coreml_padding test_coreml_padding_runtime)
             add_test(NAME ${padding_test}
                 COMMAND ${Python3_EXECUTABLE}
@@ -2975,6 +2989,52 @@ if (PARAKEET_BUILD_TESTS)
     add_executable(test-transcribepsy-eu-api test/test_transcribepsy_eu_api.cpp)
     target_link_libraries(test-transcribepsy-eu-api PRIVATE qvac-parakeet)
     parakeet_apply_ccache(test-transcribepsy-eu-api)
+    if (PARAKEET_COREML)
+        add_executable(test-transcribepsy-eu-coreml test/test_transcribepsy_eu_coreml.cpp)
+        target_link_libraries(test-transcribepsy-eu-coreml PRIVATE qvac-parakeet ggml)
+        parakeet_apply_ccache(test-transcribepsy-eu-coreml)
+        parakeet_register_test(test-transcribepsy-eu-coreml
+            LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-coreml-unwindowed
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--unwindowed"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml-unwindowed PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-coreml-owned
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--unwindowed"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml-owned PROPERTIES
+            SKIP_RETURN_CODE 77 ENVIRONMENT "PARAKEET_COREML_ONLY=1")
+        parakeet_register_test(test-transcribepsy-eu-explicit-context
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--explicit-context"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-decoder.mlmodelc")
+        parakeet_register_test(test-transcribepsy-eu-stream-precision
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--context-parity"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+    endif()
     parakeet_register_test(test-transcribepsy-eu-api
         LABEL "fixture"
         ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
