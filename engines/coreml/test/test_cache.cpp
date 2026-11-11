@@ -141,6 +141,15 @@ struct Env {
 
     cache::Layout layout() const { return cache::Layout(cache); }
 
+    // Every routine prune sweeps this test's own temp dir, never the host's
+    // $TMPDIR (where S2b's in-flight qvac-coreml-*.mlmodelc compile outputs live).
+    cache::PrunePolicy routine(int64_t later_s = 0) const {
+        cache::PrunePolicy p = cache::PrunePolicy::routine();
+        p.tmp_dir = td / "tmp";
+        if (later_s != 0) p.now_s = detail::unix_now_s() + later_s;
+        return p;
+    }
+
     int artifacts() const { return count_files(layout().artifacts); }
     int memos() const { return static_cast<int>(cache::all_memos(layout()).size()); }
     // Every memo points at a valid artifact.
@@ -507,9 +516,9 @@ void case_scope() {
     CHECK(r.deleted_artifacts.empty() && env.artifacts() == 1);
     r = cache::prune(env.cache, cache::PrunePolicy::scoped({a}), env.catalog());  // no memo: never scoped
     CHECK(r.deleted_artifacts.empty() && env.artifacts() == 1);
-    r = cache::prune(env.cache, cache::PrunePolicy::routine(), env.catalog());
+    r = cache::prune(env.cache, env.routine(), env.catalog());
     CHECK(r.deleted_artifacts.empty() && env.artifacts() == 1);  // inside the grace period
-    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    cache::PrunePolicy later = env.routine();
     later.now_s = now_s() + 31 * kDay;
     r = cache::prune(env.cache, later, env.catalog());
     CHECK(r.deleted_artifacts.size() == 1 && env.artifacts() == 0);
@@ -524,6 +533,29 @@ void case_scope() {
     CHECK(r.deleted_artifacts.size() == 1 && env.artifacts() == 0 && env.memos() == 0);
 }
 
+// routine removes compile outputs (qvac-coreml-*.mlmodelc) older than an hour
+// from its tmp_dir only; Env::routine() keeps every test off the host's $TMPDIR.
+void case_tmp_outputs() {
+    Env env;
+    const std::string tmp = env.td / "tmp";
+    const std::string out = tmp + "/qvac-coreml-1234.abcd.mlmodelc";
+    const std::vector<std::string> other = {tmp + "/qvac-coreml-1234.mlpackage", tmp + "/other.mlmodelc",
+                                            tmp + "/qvac-coreml-gen-x"};
+    for (const std::string & d : other) fs::create_directories(d);
+    write_bytes(out + "/coremldata.bin", "x");
+    // A compile output outside this test's tmp_dir (the host's $TMPDIR): never touched.
+    TempDir host;
+    const std::string host_out = host / "qvac-coreml-9999.ffff.mlmodelc";
+    fs::create_directories(host_out);
+    cache::PrunePolicy r0 = env.routine();
+    CHECK(r0.tmp_dir == tmp && !r0.now_s);
+    fs::create_directories(env.layout().root);  // prune returns early without a cache root
+    CHECK(cache::prune(env.cache, r0, env.catalog()).tmp == 0 && fs::exists(out));  // in flight
+    CHECK(cache::prune(env.cache, env.routine(2 * 3600), env.catalog()).tmp == 1 && !fs::exists(out));
+    for (const std::string & d : other) CHECK(fs::exists(d));
+    CHECK(fs::exists(host_out));
+}
+
 void case_used_age() {
     // routine measures age from used/<key32> (last successful load).
     Env env;
@@ -535,7 +567,7 @@ void case_used_age() {
     }
     fs::remove(a);  // the memo is dead: only age protects the artifact
     cache::touch_used(env.layout(), key);
-    cache::PrunePolicy p = cache::PrunePolicy::routine();
+    cache::PrunePolicy p = env.routine();
     p.now_s = now_s() + 29 * kDay;
     CHECK(cache::prune(env.cache, p, env.catalog()).deleted_artifacts.empty());
     p.now_s = now_s() + 31 * kDay;
@@ -555,8 +587,8 @@ void case_superseded_and_retired() {
             c.retired_ids = {"toy-dac"};
         }
         // The file still exists, but the memo is dead: collected only after the grace period.
-        CHECK(cache::prune(env.cache, cache::PrunePolicy::routine(), c).deleted_artifacts.empty());
-        cache::PrunePolicy later = cache::PrunePolicy::routine();
+        CHECK(cache::prune(env.cache, env.routine(), c).deleted_artifacts.empty());
+        cache::PrunePolicy later = env.routine();
         later.now_s = now_s() + 31 * kDay;
         cache::PruneReport r = cache::prune(env.cache, later, c);
         CHECK_MSG(r.deleted_artifacts.size() == 1 && env.artifacts() == 0 && env.memos() == 0,
@@ -579,9 +611,9 @@ void case_dead_memos_of_kept_artifacts() {
         CHECK(ready(oa) && ready(ob));
     }
     fs::remove(a);
-    cache::PruneReport r = cache::prune(env.cache, cache::PrunePolicy::routine(), env.catalog());
+    cache::PruneReport r = cache::prune(env.cache, env.routine(), env.catalog());
     CHECK(r.deleted_memos.empty() && env.memos() == 2);  // young dead memo stays
-    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    cache::PrunePolicy later = env.routine();
     later.now_s = now_s() + 31 * kDay;
     r = cache::prune(env.cache, later, env.catalog());
     CHECK(r.deleted_artifacts.empty() && env.artifacts() == 1);  // B is live
@@ -623,7 +655,7 @@ void case_unknown_ids() {
     fs::create_directories(other_staging);
     write_bytes(other_staging + "/" + cache::STAGING_OWNER_FILE, "other-tpl");
     fs::remove(a);
-    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    cache::PrunePolicy later = env.routine();
     later.now_s = now_s() + 31 * kDay;
     for (const cache::PrunePolicy & p :
          {later, cache::PrunePolicy::scoped({env.td / "deleted.gguf", a}), cache::PrunePolicy::all()}) {
@@ -678,8 +710,7 @@ void case_staging_ownership() {
     auto survivors = [&] {
         return fs::exists(unknown) && fs::exists(no_owner) && fs::exists(junk);
     };
-    cache::PrunePolicy fresh = cache::PrunePolicy::routine();
-    fresh.tmp_dir = env.td / "tmp";
+    cache::PrunePolicy fresh = env.routine();
     cache::prune(env.cache, fresh, cat);  // nothing is older than 1 h
     CHECK(fs::exists(d1) && fs::exists(d2) && fs::exists(busy) && survivors());
     cache::prune(env.cache, cache::PrunePolicy::scoped({a}), cat);  // scoped never touches staging
@@ -739,9 +770,8 @@ void case_hint_ownership() {
         for (const std::string & h : keep) all = all && fs::exists(h);
         return all;
     };
-    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    cache::PrunePolicy later = env.routine();
     later.now_s = now_s() + 400 * kDay;
-    later.tmp_dir = env.td / "tmp";
     for (const cache::PrunePolicy & p : {later, cache::PrunePolicy::scoped({a, dir})}) {
         CHECK(cache::prune(env.cache, p, cat).hints == 0);  // only `all` removes hints
     }
@@ -781,7 +811,7 @@ void case_prune_vs_leases() {
     CHECK(loaded.recv() == 'l');
     r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
     CHECK(r.busy_artifacts.size() == 1 && r.deleted_artifacts.empty());
-    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    cache::PrunePolicy later = env.routine();
     later.now_s = now_s() + 365 * kDay;
     fs::remove(a);  // dead memo, old: routine would collect it, but it is leased
     r = cache::prune(env.cache, later, env.catalog());
@@ -1049,7 +1079,7 @@ void case_quarantine() {
     CHECK(cache::validate(dir) == cache::Validity::invalid);
     CHECK(cache::quarantine(env.layout(), "toy-dac", key) == cache::KeyLock::Result::ok);
     CHECK(!fs::exists(dir) && count_files(env.layout().quarantine) == 2);
-    cache::PruneReport r = cache::prune(env.cache, cache::PrunePolicy::routine(), env.catalog());
+    cache::PruneReport r = cache::prune(env.cache, env.routine(), env.catalog());
     CHECK(r.quarantine == 2 && count_files(env.layout().quarantine) == 0);
 }
 
@@ -1065,8 +1095,7 @@ void case_prune_trash() {
         write_bytes(t + "/model.mlmodelc/weights/weight.bin", "partly deleted");
         return t;
     };
-    cache::PrunePolicy routine = cache::PrunePolicy::routine();
-    routine.tmp_dir = env.td / "tmp";
+    cache::PrunePolicy routine = env.routine();
     for (const cache::PrunePolicy & p : {routine, cache::PrunePolicy::all()}) {
         const std::string mine = leftover("toy-dac");
         const std::string theirs = leftover("other-tpl");
@@ -1127,9 +1156,8 @@ void case_malformed_records() {
     write_bytes(failed::record_path(l.failed, other), R"({"schema":1,"class":"transient","attempts":"two"})");
     fs::create_directories(l.artifact_dir("toy-dac", other));
     write_bytes(l.artifact_dir("toy-dac", other) + "/artifact.json", R"({"schema":null})");
-    cache::PrunePolicy routine = cache::PrunePolicy::routine();
+    cache::PrunePolicy routine = env.routine();
     routine.now_s = now_s() + 400 * kDay;
-    routine.tmp_dir = env.td / "tmp";
     cache::prune(env.cache, routine, env.catalog());
     cache::prune(env.cache, cache::PrunePolicy::scoped({a}), env.catalog());
     cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
@@ -1351,6 +1379,7 @@ int main(int argc, char ** argv) {
                          {"recheck-memo-io-failure", case_recheck_memo_io_failure},
                          {"relocation", case_relocation},
                          {"scope", case_scope},
+                         {"tmp-outputs", case_tmp_outputs},
                          {"used-age", case_used_age},
                          {"superseded-and-retired", case_superseded_and_retired},
                          {"dead-memos-of-kept-artifacts", case_dead_memos_of_kept_artifacts},
