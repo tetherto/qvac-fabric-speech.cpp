@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 
@@ -144,6 +145,10 @@ bool speech_stages_fit(uint64_t device_free_bytes, uint64_t decoder_bytes) {
     return decoder_bytes <= device_free_bytes && device_free_bytes - decoder_bytes >= TURN_HEADROOM_BYTES;
 }
 
+bool speech_decode_within_plan(uint64_t planned_bytes, uint64_t decode_bytes) {
+    return decode_bytes != std::numeric_limits<uint64_t>::max() && decode_bytes <= planned_bytes;
+}
+
 } // namespace detail
 
 struct SpeechEngine::Impl {
@@ -152,6 +157,7 @@ struct SpeechEngine::Impl {
     std::unique_ptr<SpeechCodec> codec;
     std::unique_ptr<SpeechTextTokenizer> tokenizer;
     bool stages_resident = false;
+    uint64_t planned_decoder_bytes = 0;
     std::atomic<bool> cancel_requested{false};
     std::mutex respond_mutex;
 
@@ -186,7 +192,18 @@ struct SpeechEngine::Impl {
         if (decoder > 0 && detail::speech_stages_fit(lm->free_device_bytes(), decoder)) {
             codec->hold_decoder();
             stages_resident = true;
+            planned_decoder_bytes = decoder;
         }
+    }
+
+    // The plan covers the default voice up to planned_reply_codes(); a custom
+    // voice's conditioning (up to 60 s) can need more even for a short reply.
+    bool decode_within_plan(size_t n_codes, const SpeechRequest & request, const detail::SpeechVoice & voice) const {
+        if (n_codes > planned_reply_codes()) {
+            return false;
+        }
+        return request.voice.empty() ||
+               detail::speech_decode_within_plan(planned_decoder_bytes, codec->decoder_device_bytes(n_codes, voice));
     }
 
     // Back to staging the LM and decoder turn by turn, for the rest of the
@@ -272,23 +289,17 @@ struct SpeechEngine::Impl {
     detail::SpeechLogits prefill_prompt(const std::vector<SpeechRow> & prompt, const detail::SpeechLimits & limits,
                                         SpeechResult & result) {
         const auto prefill_start = std::chrono::steady_clock::now();
-        begin_turn(result.prompt_tokens + limits.max_new_tokens);
-        detail::SpeechLogits logits = lm->prefill(prompt, PREFILL_BATCH_TOKENS, stop_signal());
+        const int n_ctx = result.prompt_tokens + limits.max_new_tokens;
+        // A long conversation's KV cache or prefill graphs can need the
+        // decoder's memory; begin() resets the KV cache for the retry.
+        detail::SpeechLogits logits = detail::retry_after_releasing_stages(stages_resident,
+                [&] {
+                    lm->begin(n_ctx);
+                    return lm->prefill(prompt, PREFILL_BATCH_TOKENS, stop_signal());
+                },
+                [this] { release_stages(); });
         result.prefill_ms = elapsed_ms(prefill_start);
         return logits;
-    }
-
-    void begin_turn(int n_ctx) {
-        try {
-            lm->begin(n_ctx);
-        } catch (const std::runtime_error &) {
-            if (!stages_resident) {
-                throw;
-            }
-            // A long conversation's KV cache needs the decoder's memory.
-            release_stages();
-            lm->begin(n_ctx);
-        }
     }
 
     static SpeechResult cancelled_result(SpeechResult result) {
@@ -331,7 +342,7 @@ struct SpeechEngine::Impl {
         }
         detail::SpeechVoice custom;
         const detail::SpeechVoice & voice = reply_voice(request, custom);
-        if (stages_resident && codes.size() > planned_reply_codes()) {
+        if (stages_resident && !decode_within_plan(codes.size(), request, voice)) {
             release_stages();
         }
         // Otherwise an LM on a GPU or the NPU and the S3Gen decoder exceed

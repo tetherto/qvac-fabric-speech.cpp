@@ -1150,16 +1150,29 @@ embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
 reuses it; the codec only changes the token-to-mel ratio and the speech
 vocabulary, which the S3Gen loader now reads from the GGUF.
 
-Speech replies with the LM on a GPU or on the
-[Hexagon NPU](#hexagon-npu-speech-to-speech) run the LM and S3Gen decoder in
+When the LM and the S3Gen decoder both run on a GPU, the engine projects the
+decoder's weights and stage buffers for a 30 s reply with the default voice.
+If that fits in the free device memory, with 2 GiB to spare for a turn's KV
+cache and graphs, the engine loads the decoder and holds it for its lifetime.
+The LM weights then stay loaded across replies, so a loaded engine uses more
+device memory than before its first reply.
+
+Otherwise, speech replies with the LM on a GPU or on the
+[Hexagon NPU](#hexagon-npu-speech-to-speech) run the LM and decoder in
 separate memory phases. After token generation, the engine releases LM weights
 and KV/graph buffers before decoding audio, while retaining tokenizer metadata
 and backend identity. A GPU decoder holds a matched S3Gen cache reference only
 for that decode; other cache owners retain their references. The next request
 reloads LM weights from the same GGUF, so keep the model file available. This
-reduces peak GPU memory, and on a 12 GB phone keeps the request within the
-host's memory, at the cost of loading weights again between spoken replies. An
-LM on the CPU keeps its resident weights.
+reduces peak memory, and on a 12 GB phone keeps the request within the host's
+memory, at the cost of loading weights again between spoken replies. An LM on
+the CPU keeps its resident weights.
+
+A resident engine switches to separate phases, for the rest of its lifetime,
+when a reply exceeds the 30 s plan, when a custom reply voice needs more
+decoder memory than the plan, or when a prompt's KV cache or prefill fails to
+allocate. A failed prefill is retried from the start after the decoder is
+released.
 
 **Status — CPU and Metal, validated against the reference pipeline.** Every
 stage matches the PyTorch pipeline on a real question: the log-mel features
