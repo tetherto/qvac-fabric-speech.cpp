@@ -940,6 +940,70 @@ void case_resident_cap_acquire() {
     CHECK(a->state() == SlotState::idle);
     CHECK(calls("cb") == 1);
     CHECK(pool->live() == 1);
+
+    // The denial is decided when the caller asks, not by the last worker
+    // screening: an acquisition right after the caller lifts it (releasing its
+    // handle, or narrowing the prediction) waits for the replacement (§2.10).
+    // Each round first acquires under the denial, so a cached verdict exists.
+    auto denied_now = [](const std::shared_ptr<Slot> & s, bool strict) {
+        bool denied = false;
+        must_complete("acquisition under the cap", [&] {
+            try {
+                denied = s->acquire(Demand::now).pending;
+            } catch (const CoremlError &) {
+                denied = strict;
+            }
+        });
+        return denied;
+    };
+    for (int round = 0; round < 8; ++round) {
+        for (const bool strict : {false, true}) {
+            for (const bool via_predicted : {false, true}) {
+                const std::string tag = std::to_string(round) + (strict ? "s" : "c") + (via_predicted ? "p" : "r");
+                auto rp = e.m->make_pool(1);
+                auto mk2 = [&](const std::string & fn, bool s) {
+                    SlotSpec spec = e.spec(fn);
+                    spec.pool = rp;
+                    SlotPolicy p = e.policy(Wait::call);
+                    p.strict = s;
+                    return e.m->make_slot(spec, p);
+                };
+                auto ra = mk2("la" + tag, false);
+                ra->request(Priority::minimal);
+                CHECK(wait_for([&] { return is_ready(ra); }));
+                Acquired rheld = ra->acquire(Demand::now);
+                CHECK(rheld);
+                auto rb = mk2("lb" + tag, strict);
+                CHECK(denied_now(rb, strict));
+                if (via_predicted) {
+                    rp->set_predicted({ra});
+                    rheld = Acquired{};
+                    CHECK(denied_now(rb, strict));
+                }
+                Acquired got;
+                std::string threw;
+                must_complete("acquisition right after the denial was lifted", [&] {
+                    // Lift and acquire on one thread, before a worker re-screens.
+                    if (via_predicted) {
+                        rp->set_predicted({rb});  // narrowed: ra is evictable now
+                    } else {
+                        rheld = Acquired{};  // released: ra is evictable now
+                    }
+                    try {
+                        got = rb->acquire(Demand::now);
+                    } catch (const CoremlError & err) {
+                        threw = err.what();
+                    }
+                });
+                if (!got || !threw.empty()) {
+                    std::printf("    round %s: pending=%d threw='%s'\n", tag.c_str(), int(got.pending), threw.c_str());
+                }
+                CHECK(got && !got.pending && threw.empty());
+                CHECK(got && got.model->as<FakeModel>()->name == "lb" + tag);
+                CHECK(rp->live() == 1);
+            }
+        }
+    }
 }
 
 // Two engines, one resident pool each, sharing one instance (§2.9): each pool

@@ -457,6 +457,11 @@ bool Runtime::cap_denied_locked(const Job & j, Graveyard & gy) const {
     return false;
 }
 
+bool Runtime::cap_blocked_now_locked(const Job & j, Graveyard & gy) const {
+    if (j.kind != JobKind::load || j.started || j.done || j.deferred_memory) return false;
+    return cap_denied_locked(j, gy);
+}
+
 void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
     if (j.cap_blocked == blocked) return;
     j.cap_blocked = blocked;
@@ -919,7 +924,7 @@ Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<
     if (w < 0) return none;
     std::shared_ptr<Job> own = c.job;
     if (!own || own->kind != JobKind::load) return none;  // preparation ahead: unbounded
-    if (own->cap_blocked) return none;                    // nothing can be released for it
+    if (cap_blocked_now_locked(*own, gy)) return none;    // nothing can be released for it
     int64_t remaining_ms = 0;
     const int64_t budget = w + w / 2;  // w x 1.5
     if (c.state == SlotState::loading || c.state == SlotState::warming) {
@@ -1006,7 +1011,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                     return out;  // waits never block on memory
                 }
                 if (st == SlotState::idle) return out;  // evicted or cancelled meanwhile
-                if (c->job && c->job->cap_blocked) {
+                if (c->job && cap_blocked_now_locked(*c->job, gy)) {
                     // §2.9: nothing can be released, so the replacement is not
                     // loaded and the unit runs with what is ready; §2.10: strict
                     // cannot serve the unit.
@@ -1037,7 +1042,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 if (!wp.wait) return out;
             }
             if (st != SlotState::queued && st != SlotState::loading && st != SlotState::warming) return out;
-            if (c->job && c->job->cap_blocked) return out;
+            if (c->job && cap_blocked_now_locked(*c->job, gy)) return out;
             if (now >= *deadline) {
                 const int64_t budget = wp.w_ms + wp.w_ms / 2;
                 if ((st == SlotState::loading || st == SlotState::warming) && c->job && running_ == c->job &&

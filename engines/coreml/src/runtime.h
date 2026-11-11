@@ -78,8 +78,9 @@ struct Job {
     int64_t backoff_ms = 0;
     bool deferred_memory = false;
     Clock::time_point deferred_since{};
-    // A resident cap with nothing evictable denies this load: acquisitions do
-    // not wait on it (§2.9, §2.10); it stays queued and retries after a release.
+    // The last worker screening found the resident cap denying this load. Only
+    // for the event and the wake-up: acquisitions decide the denial when they
+    // ask (Runtime::cap_blocked_now_locked), never from this cached verdict.
     bool cap_blocked = false;
     std::vector<std::weak_ptr<PoolCore>> pools;  // pools served while running
     Timings timings;
@@ -175,6 +176,10 @@ public:
     std::condition_variable state_cv;
     void request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
+    // A queued load the resident cap denies right now (§2.9): acquisitions and
+    // groups do not wait on it. Decided at the call, from the current holds,
+    // predictions and residents.
+    bool cap_blocked_now_locked(const Job & j, Graveyard & gy) const;
 
 private:
     struct WaitPlan {

@@ -185,7 +185,7 @@ PrewarmResult Group::collect(bool & finished, detail::Graveyard & gy) const {
                 e.last = rt_->status_locked(*c, now);
                 const SlotState st = e.last.state;
                 const bool done = is_terminal(st) || st == SlotState::deferred_memory || st == SlotState::idle ||
-                                  (c->job && c->job->cap_blocked);
+                                  (c->job && rt_->cap_blocked_now_locked(*c->job, gy));
                 if (!done) finished = false;
             }
         }
