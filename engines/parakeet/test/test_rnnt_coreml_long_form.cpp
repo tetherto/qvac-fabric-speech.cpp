@@ -5,6 +5,7 @@
 // An over-capacity result can report encoder_used_coreml only when the Engine
 // selected the fixed-capacity long-form plan and every window used Core ML.
 
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 #include "test_utils.h"
 
@@ -26,6 +27,7 @@ namespace {
 struct ChildResult {
     bool parsed = false;
     bool coreml_available = false;
+    bool coreml_planned = false;
     bool coreml_used = false;
     int mel_frames = 0;
     int encoder_frames = 0;
@@ -78,12 +80,17 @@ std::string run_child(const std::string & gguf, const std::string & wav,
             if (disable_windowing) {
                 opts.long_form_window_frames = -1;
             }
+            // Wait for every sidecar at construction: they load in the
+            // background otherwise, and the call would run on ggml.
+            if (!disable_coreml) opts.coreml = coreml_ready_options();
             parakeet::Engine engine(opts);
             const parakeet::EngineResult result = engine.transcribe_samples(
                 samples.data(), static_cast<int>(samples.size()), sample_rate);
 
             std::ostringstream payload;
             payload << "coreml_available=" << (engine.encoder_on_coreml() ? 1 : 0)
+                    << "\ncoreml_planned="
+                    << (coreml_sidecar_planned(engine.coreml_status_json()) ? 1 : 0)
                     << "\ncoreml_used=" << (result.encoder_used_coreml ? 1 : 0)
                     << "\nmel_frames=" << result.mel_frames
                     << "\nencoder_frames=" << result.encoder_frames
@@ -135,6 +142,8 @@ ChildResult parse_result(const std::string & raw) {
     std::string line;
     if (!std::getline(input, line) ||
         !parse_bool_line(line, "coreml_available", result.coreml_available)) return result;
+    if (!std::getline(input, line) ||
+        !parse_bool_line(line, "coreml_planned", result.coreml_planned)) return result;
     if (!std::getline(input, line) ||
         !parse_bool_line(line, "coreml_used", result.coreml_used)) return result;
     if (!std::getline(input, line) || line.rfind("mel_frames=", 0) != 0) return result;
@@ -208,6 +217,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[rnnt-coreml-long-form] FAIL: Core ML child failed\n");
         return 1;
     }
+    if (!coreml.coreml_available && coreml.coreml_planned) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: a Core ML sidecar is planned but was not active "
+            "after waiting at construction\n");
+        return 1;
+    }
     if (!coreml.coreml_available) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] SKIP: Core ML sidecar is not active.\n");
@@ -234,7 +249,7 @@ int main(int argc, char ** argv) {
         run_child(gguf, wav, target_seconds,
                   /*disable_coreml=*/true,
                   /*disable_windowing=*/cache_aware));
-    if (!ggml.parsed || ggml.coreml_available || ggml.coreml_used) {
+    if (!ggml.parsed || ggml.coreml_available || ggml.coreml_planned || ggml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: forced-ggml reference routing is invalid\n");
         return 1;
