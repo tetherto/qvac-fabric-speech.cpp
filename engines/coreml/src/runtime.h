@@ -83,6 +83,12 @@ struct Job {
     // ask (Runtime::cap_blocked_now_locked), never from this cached verdict.
     bool cap_blocked = false;
     std::vector<std::weak_ptr<PoolCore>> pools;  // pools served while running
+    // The registry instance this job was admitted to adopt (run_load publishes
+    // it without loading): retained from admission until publish() or fail()
+    // moves it to a graveyard, so it cannot expire while a pool's place is
+    // waived for it. Null for a job admitted as a fresh load, and always null
+    // while the job is queued.
+    std::shared_ptr<SharedModel> adopt;
     Timings timings;
 
     std::atomic<bool> hinted_at_start{false};
@@ -228,8 +234,12 @@ private:
     bool low_power_locked() const;
     bool hinted(const std::string & hint_path) const;
     int64_t job_w(const Job & j) const;
-    std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
-    PoolVerdict pool_admits_locked(Job & j, Graveyard & gy);
+    // `adopt` receives the instance the picked job was admitted to adopt (see
+    // Job::adopt); `gy` keeps a copy, so dropping it under mu is safe.
+    std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake,
+                                     std::shared_ptr<SharedModel> & adopt, Graveyard & gy);
+    PoolVerdict pool_admits_locked(Job & j, std::shared_ptr<SharedModel> & adopt, Graveyard & gy);
+    std::shared_ptr<SharedModel> adoptable_locked(const Job & j, Graveyard & gy) const;
     void set_cap_blocked_locked(Job & j, bool blocked);
     size_t pool_live_locked(const PoolCore & p, Graveyard & gy) const;
     bool pool_counts_locked(const PoolCore & p, const SharedModel * m, Graveyard & gy) const;

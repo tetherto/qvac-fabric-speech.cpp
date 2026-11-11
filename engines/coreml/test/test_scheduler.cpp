@@ -1469,6 +1469,101 @@ void case_resident_cap_pending_release() {
     g_delete_open = true;
 }
 
+// Releases the final Handle of the instance a job was admitted to adopt, at the
+// moment the worker starts that job: the hook returns once the release
+// returned or is blocked in the native deleter.
+std::atomic<bool> g_drop_now{false};
+std::atomic<bool> g_dropped{false};
+
+void drop_at_start() {
+    g_drop_now = true;
+    wait_for([] { return g_dropped.load() || g_delete_entered.load() > 0; });
+}
+
+// A queued job admitted to adopt another owner's instance that its pool counts
+// only through a unit's Handle. Releasing that final Handle either leaves the
+// instance alive for the adoption (released at the start of the job) or defers
+// a fresh load until the native deleter has finished (released while the job
+// is still queued). The live native models never exceed the cap.
+void case_resident_cap_adopt_expiry() {
+    for (const bool at_start : {true, false}) {
+        reset_world();
+        Env e;
+        const std::string tag = at_start ? "s" : "q";
+        const std::string shared = "gdx" + tag;
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn, bool pooled) {
+            SlotSpec s = e.spec(fn);
+            if (pooled) s.pool = pool;
+            s.load_fn = &gated_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto ext = mk(shared, false);  // another owner, no pool
+        ext->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(ext); }));
+        auto fill = mk("xf" + tag, true);
+        fill->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(fill); }));
+        g_low_power = true;  // keeps the prewarm request queued
+        auto b = mk(shared, true);
+        b->request(Priority::prewarm);
+        CHECK(b->state() == SlotState::queued);
+        fill->evict();
+        auto a = mk(shared, true);
+        a->request(Priority::minimal);  // adopts the registry instance at once
+        CHECK(is_ready(a));
+        Acquired held = a->acquire(Demand::if_ready);
+        CHECK(bool(held));
+        a.reset();
+        ext.reset();  // only the pooled Handle keeps the instance alive
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+        g_delete_entered = 0;
+        g_delete_open = false;
+        g_drop_now = !at_start;
+        g_dropped = false;
+        std::thread dropper([&] {
+            while (!g_drop_now.load()) std::this_thread::sleep_for(1ms);
+            held = Acquired{};
+            g_dropped = true;
+        });
+        int over = 0;
+        auto watch = [&](int ms) {
+            const auto end = Clock::now() + milliseconds(ms);
+            while (Clock::now() < end) {
+                if (g_live_models.load() > base + 1 || pool->live() > 1) ++over;
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        if (at_start) {
+            detail::test_hooks().job_started = &drop_at_start;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            detail::test_hooks().job_started = nullptr;
+            watch(50);
+            CHECK(g_dropped.load());
+            CHECK(g_delete_entered.load() == 0);  // the adopting job kept it alive
+            CHECK(calls(shared) == 1);            // adopted, never loaded again
+        } else {
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            g_low_power = false;
+            e.m->notify();
+            watch(200);
+            CHECK(!is_ready(b));
+            CHECK(calls(shared) == 1);  // the fresh load waits for the deletion
+        }
+        CHECK(over == 0);
+        g_delete_open = true;
+        dropper.join();
+        CHECK(wait_for([&] { return is_ready(b); }));
+        CHECK(calls(shared) == (at_start ? 1 : 2));
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+    }
+}
+
 // The end of a pending release wakes the load worker by itself (§2.9): a
 // replacement waiting for the place starts as soon as the pool is told, not at
 // the next periodic re-check. The release is held after its reference is gone,
@@ -2428,6 +2523,7 @@ const Case kCases[] = {
     {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
     {"resident-cap-adopt-in-flight", case_resident_cap_adopt_in_flight},
     {"resident-cap-pending-release", case_resident_cap_pending_release},
+    {"resident-cap-adopt-expiry", case_resident_cap_adopt_expiry},
     {"resident-cap-release-wakes", case_resident_cap_release_wakes},
     {"resident-cap-shared-release", case_resident_cap_shared_release},
     {"call-wait-pins-nothing", case_call_wait_pins_nothing},
