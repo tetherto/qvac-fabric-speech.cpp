@@ -37,6 +37,14 @@ pcm::Resolved resolve_parakeet_coreml(const CoremlOptions & opts);
 
 pcm::Prewarm to_runtime_prewarm(CoremlOptions::Prewarm scope);
 
+// The resolved compute units as the argument the synchronous loaders take
+// (the TDT decoder bundle and the encoder owner, §2.15): their B.5 name, or
+// null when nothing was set, so the loader keeps its own stage default.
+// Loaders never read the environment themselves (§2.12).
+inline const char * loader_units(const pcm::Resolved & resolved) {
+    return resolved.compute_units ? pcm::to_string(*resolved.compute_units) : nullptr;
+}
+
 // Operations on a loaded encoder model (the SharedModel payload). Plain
 // function pointers, so tests substitute fakes for the Core ML calls.
 struct EncoderModelOps {

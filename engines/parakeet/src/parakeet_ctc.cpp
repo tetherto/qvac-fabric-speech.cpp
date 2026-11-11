@@ -1886,7 +1886,10 @@ static void maybe_init_coreml_decoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: no Core ML decoder at '%s'; using ggml decoder\n", path.c_str());
         return;
     }
-    model.impl->ctx_coreml_dec = parakeet_coreml_decoder_init(path.c_str());
+    // Synchronous (§2.15), but with the resolved units like every other
+    // loader (§2.12): null keeps the decoder's cpu_and_ane default.
+    model.impl->ctx_coreml_dec = parakeet_coreml_decoder_init_with_units(
+        path.c_str(), loader_units(model.impl->coreml->resolved()));
     if (model.impl->ctx_coreml_dec == nullptr) {
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML decoder at '%s'; falling back to ggml decoder\n", path.c_str());
         return;
@@ -1944,8 +1947,7 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     }
     // Synchronous on purpose (§2.15): ownership fixes how the weights are
     // allocated, so it is decided before allocation and never in the background.
-    const char * units = coreml.compute_units ? pcm::to_string(*coreml.compute_units) : nullptr;
-    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(path.c_str(), units);
+    parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(path.c_str(), loader_units(coreml));
     if (ctx == nullptr) {
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'\n", path.c_str());
         return nullptr;

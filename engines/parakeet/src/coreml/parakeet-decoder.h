@@ -55,12 +55,17 @@ extern "C" {
 
 struct parakeet_coreml_decoder;
 
-// Load a compiled Core ML TDT decoder from a `.mlmodelc` directory.
+// Load a compiled Core ML TDT decoder from a `.mlmodelc` directory with the
+// engine's resolved compute units (`all`, `cpu_and_ane`, `cpu_and_gpu`,
+// `cpu_only`; PLAN §2.12: the loader never reads the environment). Null
+// selects `cpu_and_ane`: the graph is exported for the Neural Engine.
 // Returns nullptr on any failure (missing directory, load error, unsupported
 // OS, unexpected model interface) so the caller falls back to ggml.
-struct parakeet_coreml_decoder * parakeet_coreml_decoder_init(const char * path_mlmodelc);
+struct parakeet_coreml_decoder * parakeet_coreml_decoder_init_with_units(const char * path_mlmodelc,
+                                                                         const char * units);
 
-// Release a decoder created by parakeet_coreml_decoder_init. Safe with nullptr.
+// Release a decoder created by parakeet_coreml_decoder_init_with_units. Safe
+// with nullptr.
 void parakeet_coreml_decoder_free(struct parakeet_coreml_decoder * ctx);
 
 // Report the shapes the graph was exported at, so the caller can size its

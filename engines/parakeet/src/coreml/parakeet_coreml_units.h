@@ -1,5 +1,7 @@
 // Compute-unit selection shared by the Core ML encoder, diarizer and decoder
-// wrappers.
+// wrappers. (The MOSS-Transcribe encoder, not yet on the runtime, reads its
+// units from MOSS_COREML_COMPUTE_UNITS through
+// parakeet_coreml_init_with_units_env until it is adopted.)
 //
 // Apple-only, Objective-C++ header: included by the .mm wrappers under
 // PARAKEET_USE_COREML only.
@@ -8,7 +10,6 @@
 
 #import <CoreML/CoreML.h>
 
-#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -49,14 +50,4 @@ inline MLComputeUnits parakeet_coreml_units_for(const char * units,
     }
     *label = "coreml-all";
     return MLComputeUnitsAll;
-}
-
-// The synchronous loaders that stay outside the shared runtime (the TDT
-// decoder bundle and the MOSS-Transcribe encoder) still take their units from
-// an environment variable; this reads it and defers to the function above.
-inline MLComputeUnits parakeet_coreml_requested_units(const char * units_env,
-                                                      bool prefer_neural_engine,
-                                                      std::string * label) {
-    const char * env = units_env != nullptr ? std::getenv(units_env) : nullptr;
-    return parakeet_coreml_units_for(env, prefer_neural_engine, label);
 }

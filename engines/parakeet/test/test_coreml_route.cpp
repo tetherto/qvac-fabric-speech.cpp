@@ -481,6 +481,24 @@ void case_options() {
           "explicit fields resolve");
     CHECK(!resolve_parakeet_coreml(CoremlOptions{}).strict() || std::getenv("PARAKEET_COREML_STRICT"),
           "defaults resolve to automatic");
+
+    // The synchronous loaders (TDT decoder, encoder owner) take the resolved
+    // units as an argument: the explicit option over the environment, the
+    // environment when nothing is set, null (the loader's stage default)
+    // otherwise.
+    const char * saved = std::getenv("PARAKEET_COREML_COMPUTE_UNITS");
+    const std::string saved_value = saved ? saved : "";
+    setenv("PARAKEET_COREML_COMPUTE_UNITS", "all", 1);
+    CoremlOptions explicit_units;
+    explicit_units.compute_units = "cpu_only";
+    const char * arg = loader_units(resolve_parakeet_coreml(explicit_units));
+    CHECK(arg != nullptr && std::string(arg) == "cpu_only", "the explicit option reaches the loader");
+    arg = loader_units(resolve_parakeet_coreml(CoremlOptions{}));
+    CHECK(arg != nullptr && std::string(arg) == "all", "the environment reaches the loader through resolution");
+    unsetenv("PARAKEET_COREML_COMPUTE_UNITS");
+    CHECK(loader_units(resolve_parakeet_coreml(CoremlOptions{})) == nullptr,
+          "unset units leave the loader's own default");
+    if (saved) setenv("PARAKEET_COREML_COMPUTE_UNITS", saved_value.c_str(), 1);
 }
 
 void write_text(const fs::path & p, const std::string & text) {
