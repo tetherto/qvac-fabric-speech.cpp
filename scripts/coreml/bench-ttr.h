@@ -2,6 +2,8 @@
 // free of Core ML and of the runtime so test_bench_ttr.cpp can drive it with
 // fakes on any host.
 //
+//   poll_slots    samples slot states until the group finishes, recording
+//                 per-slot ready times and deferred(memory) time.
 //   run_manual    the hand-built baseline: one prepare thread and one load
 //                 thread, optionally sharing one mutex (the gate by hand).
 //                 Every model that loads is retained until the caller drops
@@ -21,6 +23,72 @@
 #include <vector>
 
 namespace bench_ttr {
+
+enum class Kind { other, deferred_memory, ready };
+
+struct Observation {
+    std::string name;  // the state's display name, recorded on every change
+    Kind kind = Kind::other;
+};
+
+struct Transition {
+    double t_ms;  // since issue
+    size_t slot;
+    std::string state;
+};
+
+struct PollOutcome {
+    std::vector<double> ready_at;     // ms since issue; -1 = never seen ready
+    std::vector<double> deferred_ms;  // time spent in deferred(memory)
+    std::vector<Transition> transitions;
+    bool finished = false;  // the group reported completion (not the deadline)
+};
+
+// sample(i) -> Observation, finished() -> bool, now() -> ms, sleep() -> void.
+//
+// Completion is read *before* the states are sampled, and the loop exits only
+// after that sample: a load that becomes ready between a sample and the
+// completion check is therefore always seen ready.
+template <class Sample, class Finished, class Now, class Sleep>
+PollOutcome poll_slots(size_t n, Sample sample, Finished finished, Now now, Sleep sleep, double t_issue,
+                       double deadline) {
+    PollOutcome o;
+    o.ready_at.assign(n, -1.0);
+    o.deferred_ms.assign(n, 0.0);
+    std::vector<std::string> last(n);
+    double prev = now();
+    while (true) {
+        const bool done = finished();
+        const double t = now();
+        for (size_t i = 0; i < n; ++i) {
+            const Observation s = sample(i);
+            if (s.kind == Kind::deferred_memory) o.deferred_ms[i] += t - prev;
+            if (s.name != last[i]) {
+                o.transitions.push_back({t - t_issue, i, s.name});
+                last[i] = s.name;
+            }
+            if (s.kind == Kind::ready && o.ready_at[i] < 0) o.ready_at[i] = t - t_issue;
+        }
+        prev = t;
+        if (done) {
+            o.finished = true;
+            break;
+        }
+        if (t > deadline) break;
+        sleep();
+    }
+    return o;
+}
+
+// The latest ready time, or -1 when any slot never became ready.
+inline double all_ready_ms(const std::vector<double> & ready_at) {
+    double m = 0;
+    for (double r : ready_at) {
+        if (r < 0) return -1;
+        m = std::max(m, r);
+    }
+    return m;
+}
 
 struct ManualStage {
     std::string stage;

@@ -563,38 +563,26 @@ json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::Compu
     held->group = mgr->issue_group(qc::GroupKind::construction, reqs, /*waited=*/true);
     auto & group = held->group;
     // Poll for state transitions (deferred(memory) time, per-slot ready time).
-    std::vector<std::string> last(slots.size());
-    std::vector<double> ready_at(slots.size(), -1.0);
-    std::vector<double> deferred_ms(slots.size(), 0.0);
+    auto sample = [&](size_t i) {
+        const qc::SlotState s = slots[i]->state();
+        bench_ttr::Observation o{qc::to_string(s), bench_ttr::Kind::other};
+        if (s == qc::SlotState::ready) o.kind = bench_ttr::Kind::ready;
+        if (s == qc::SlotState::deferred_memory) o.kind = bench_ttr::Kind::deferred_memory;
+        return o;
+    };
+    const bench_ttr::PollOutcome polled = bench_ttr::poll_slots(
+        slots.size(), sample, [&] { return group->finished(); }, now_ms,
+        [] { std::this_thread::sleep_for(std::chrono::milliseconds(20)); }, t_issue, t_issue + timeout_s * 1000.0);
+    const std::vector<double> & ready_at = polled.ready_at;
+    const std::vector<double> & deferred_ms = polled.deferred_ms;
     json transitions = json::array();
-    const double deadline = t_issue + timeout_s * 1000.0;
-    double prev = now_ms();
-    while (true) {
-        const double t = now_ms();
-        for (size_t i = 0; i < slots.size(); ++i) {
-            const qc::SlotState s = slots[i]->state();
-            const std::string name = qc::to_string(s);
-            if (s == qc::SlotState::deferred_memory) deferred_ms[i] += t - prev;
-            if (name != last[i]) {
-                transitions.push_back({{"t_ms", t - t_issue},
-                                       {"slot", slots[i]->spec().stage + "/" + slots[i]->spec().function},
-                                       {"state", name}});
-                last[i] = name;
-                if (s == qc::SlotState::ready && ready_at[i] < 0) ready_at[i] = t - t_issue;
-            }
-        }
-        prev = t;
-        if (group->finished() || t > deadline) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (const bench_ttr::Transition & tr : polled.transitions) {
+        transitions.push_back({{"t_ms", tr.t_ms},
+                               {"slot", slots[tr.slot]->spec().stage + "/" + slots[tr.slot]->spec().function},
+                               {"state", tr.state}});
     }
     qc::PrewarmResult res = group->result();
-    ready_ms = 0;
-    bool all_ready = true;
-    for (double r : ready_at) {
-        if (r < 0) all_ready = false;
-        ready_ms = std::max(ready_ms, r);
-    }
-    if (!all_ready) ready_ms = -1;
+    ready_ms = bench_ttr::all_ready_ms(ready_at);
     json per_slot = json::array();
     for (size_t i = 0; i < slots.size(); ++i) {
         per_slot.push_back({{"slot", slots[i]->spec().stage + "/" + slots[i]->spec().function},

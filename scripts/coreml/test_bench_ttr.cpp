@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -95,9 +96,66 @@ void manual_failed_prepare_fails_its_stage() {
     CHECK(bench_ttr::manual_ready_ms(o.results) == -1);
 }
 
+// Fake slots for poll_slots: the clock advances 10 ms per now() call.
+struct FakeGroup {
+    std::vector<bench_ttr::Observation> states;
+    double clock = 0;
+    int finished_calls = 0;
+    int complete_on_call = 3;  // finished() turns true on this call
+};
+
+bench_ttr::Observation obs(bench_ttr::Kind k) {
+    switch (k) {
+        case bench_ttr::Kind::ready: return {"ready", k};
+        case bench_ttr::Kind::deferred_memory: return {"deferred(memory)", k};
+        default: return {"loading", k};
+    }
+}
+
+bench_ttr::PollOutcome poll(FakeGroup & g, double deadline, std::function<void(FakeGroup &)> on_complete) {
+    return bench_ttr::poll_slots(
+        g.states.size(), [&](size_t i) { return g.states[i]; },
+        [&] {
+            if (++g.finished_calls < g.complete_on_call) return false;
+            on_complete(g);
+            return true;
+        },
+        [&] { return g.clock += 10; }, [] {}, 0.0, deadline);
+}
+
+// The last load becomes ready after the previous sample, and the group reports
+// completion in the same instant: the slot must still be seen ready.
+void poll_sees_a_load_that_completes_with_the_group() {
+    FakeGroup g;
+    g.states = {obs(bench_ttr::Kind::ready), obs(bench_ttr::Kind::other)};
+    const bench_ttr::PollOutcome o =
+        poll(g, 1e9, [](FakeGroup & f) { f.states[1] = obs(bench_ttr::Kind::ready); });
+    CHECK(o.finished);
+    CHECK(o.ready_at[0] > 0);
+    CHECK(o.ready_at[1] > 0);
+    CHECK(bench_ttr::all_ready_ms(o.ready_at) == o.ready_at[1]);
+    CHECK(!o.transitions.empty() && o.transitions.back().slot == 1 && o.transitions.back().state == "ready");
+}
+
+// Deferred(memory) time accrues per sample; a slot that never becomes ready
+// fails the run; the deadline ends a group that never finishes.
+void poll_deferred_time_and_deadline() {
+    FakeGroup g;
+    g.complete_on_call = 1 << 30;
+    g.states = {obs(bench_ttr::Kind::deferred_memory), obs(bench_ttr::Kind::ready)};
+    const bench_ttr::PollOutcome o = poll(g, 100, [](FakeGroup &) {});
+    CHECK(!o.finished);
+    CHECK(o.ready_at[0] < 0);
+    CHECK(o.deferred_ms[0] >= 100);
+    CHECK(o.deferred_ms[1] == 0);
+    CHECK(bench_ttr::all_ready_ms(o.ready_at) == -1);
+}
+
 }  // namespace
 
 int main() {
+    poll_sees_a_load_that_completes_with_the_group();
+    poll_deferred_time_and_deadline();
     for (bool generate : {false, true})
         for (bool gated : {false, true}) manual_retains_every_loaded_model(generate, gated);
     manual_failure_is_not_retained();
