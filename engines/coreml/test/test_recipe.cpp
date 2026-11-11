@@ -191,6 +191,59 @@ void case_grammar_errors() {
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(1.0)\nend\n", "f16() takes f32, not weak");
 }
 
+// Shape products that overflow are RecipeErrors, never wrapped counts. The
+// reshape below multiplied 2^32 * 2^32 to 0 and then divided by it.
+void case_shape_overflow() {
+    const std::string w = "source \"w\" f32 [2,3]\n";
+    expect_error(hdr(192, 1) + w + "blob 64 fp16 6 f16(reshape(t(\"w\"), [4294967296,4294967296,-1]))\nend\n",
+                 "reshape() dims shape", 7);
+    expect_error(hdr(192, 1) + w + "blob 64 fp16 6 f16(reshape(t(\"w\"), [4294967296,4294967296]))\nend\n",
+                 "reshape() dims shape");
+    expect_error(hdr(192, 1) + w + "blob 64 fp16 6 f16(reshape(t(\"w\"), [8,1125899906842624,1024,-1]))\nend\n",
+                 "reshape() dims shape");
+    // A source whose dims or element count exceed the bound.
+    expect_error(hdr(192, 1) + "source \"w\" f32 [9999999999999999999]\nblob 64 fp16 6 f16(t(\"w\"))\nend\n",
+                 "is too large");
+    expect_error(hdr(192, 1) + "source \"w\" f32 [4294967296,4294967296]\nblob 64 fp16 6 f16(t(\"w\"))\nend\n",
+                 "source shape [4294967296,4294967296] has more than");
+    // Broadcasting two in-bound shapes to an out-of-bound one.
+    const std::string bc = "source \"r\" f32 [1073741824,1]\nsource \"c\" f32 [1,1073741824]\n";
+    expect_error(hdr(192, 1) + bc + "blob 64 fp16 6 f16(add(t(\"r\"), t(\"c\")))\nend\n",
+                 "shape [1073741824,1073741824] has more than", 8);
+    // The same product as an intermediate whose consumer shrinks it again.
+    expect_error(hdr(192, 1) + bc + "blob 64 fp16 1073741824 f16(take(add(t(\"r\"), t(\"c\")), 0, [0]))\nend\n",
+                 "shape [1073741824,1073741824] has more than", 8);
+    // concat() whose axis length overflows, and whose element count does.
+    const std::string big = "source \"d\" f32 [1152921504606846975]\n";
+    expect_error(hdr(192, 1) + big + "blob 64 fp16 6 f16(concat(0, t(\"d\"), t(\"d\")))\nend\n",
+                 "axis length overflows");
+    expect_error(hdr(192, 1) + "source \"d\" f32 [288230376151711744,1]\n" +
+                     "blob 64 fp16 6 f16(concat(1, t(\"d\"), t(\"d\"), t(\"d\"), t(\"d\"), t(\"d\")))\nend\n",
+                 "shape [288230376151711744,5] has more than");
+    // Four of the largest blobs: the fourth offset needs 20 digits, which the
+    // grammar rejects before any offset arithmetic could wrap.
+    std::string blobs;
+    uint64_t off = milblob::HEADER_BYTES;
+    const uint64_t n = 1152921504606846975ull;  // the largest element count
+    for (int i = 0; i < 4; ++i) {
+        blobs += "blob " + std::to_string(off) + " fp32 " + std::to_string(n) + " f32(t(\"d\"))\n";
+        off = milblob::align_up(off + milblob::METADATA_BYTES + n * 4);
+    }
+    expect_error(hdr(192, 4) + big + blobs + "end\n", "integer too large", 10);
+
+    // The interpreter checks the shapes it is handed too: a Recipe built or
+    // edited outside parse() returns a deterministic error instead of
+    // allocating a wrapped count.
+    recipe::Recipe r = recipe::parse(recipe_text("t", zeros64(), w, {blob("fp32", 6, "f32(reshape(t(\"w\"), [3,2]))")}));
+    for (recipe::Item & it : r.items) {
+        if (it.kind == recipe::Item::Kind::blob) it.expr->args[0]->shape = {4294967296, 4294967296};
+    }
+    MemSource src({TT{"w", T_F32, {2, 3}, {1, 2, 3, 4, 5, 6}}}, {});
+    const Error e = recipe::evaluate(r, src, [](const recipe::BlobOut &) { return Error{}; });
+    CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("more than") != std::string::npos,
+              e.message);
+}
+
 // ---- ops on hand-computed vectors ---------------------------------------------------------
 
 MemSource src_a(const std::vector<float> & a, const std::vector<int64_t> & shape = {2, 3}, uint32_t type = T_F32) {
@@ -847,6 +900,7 @@ int main(int argc, char ** argv) {
                          {"dtype-promotion", case_dtype_promotion},
                          {"op-recip-clip", case_op_recip_clip},
                          {"op-layout", case_op_layout},
+                         {"shape-overflow", case_shape_overflow},
                          {"parler-examples", case_parler_examples},
                          {"liveness-and-observer", case_liveness_and_observer},
                          {"golden-weight-bin", case_golden_weight_bin},

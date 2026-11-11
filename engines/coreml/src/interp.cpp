@@ -8,11 +8,15 @@
 
 #include "milblob.h"
 #include "sha256.h"
+#include "shape.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
 #include <type_traits>
 
@@ -239,6 +243,26 @@ WeightBinCheck verify_weight_bin(const Recipe & r, const uint8_t * ours, size_t 
 
 namespace {
 
+class EvalError {
+public:
+    explicit EvalError(Error e) : err(std::move(e)) {}
+    Error err;
+};
+
+// Product of shape[b, e) (all of it by default). The parser bounds every
+// shape, so this throws only for a Recipe that did not come from parse().
+size_t count_of(const std::vector<int64_t> & shape, size_t b = 0, size_t e = SIZE_MAX) {
+    e = std::min(e, shape.size());
+    const std::vector<int64_t> part(shape.begin() + static_cast<std::ptrdiff_t>(std::min(b, e)),
+                                    shape.begin() + static_cast<std::ptrdiff_t>(e));
+    const std::optional<uint64_t> n = detail::element_count(part);
+    if (!n) {
+        throw EvalError(Error::deterministic("recipe: a shape has more than " + std::to_string(detail::MAX_ELEMENTS) +
+                                             " elements"));
+    }
+    return static_cast<size_t>(*n);
+}
+
 struct Tracker {
     uint64_t live = 0;
     uint64_t peak = 0;
@@ -259,8 +283,7 @@ struct Buf {
     void alloc(DType d, std::vector<int64_t> s) {
         dt = d;
         shape = std::move(s);
-        size_t n = 1;
-        for (int64_t x : shape) n *= static_cast<size_t>(x);
+        const size_t n = count_of(shape);
         if (d == DType::f32) {
             f.assign(n, 0.0f);
             account(n * sizeof(float));
@@ -287,15 +310,9 @@ using V = std::shared_ptr<Buf>;
 
 std::vector<size_t> strides_of(const std::vector<int64_t> & shape) {
     std::vector<size_t> s(shape.size(), 1);
-    for (size_t i = shape.size(); i-- > 1;) s[i - 1] = s[i] * static_cast<size_t>(shape[i]);
+    for (size_t i = shape.size(); i-- > 1;) s[i - 1] = count_of(shape, i);
     return s;
 }
-
-class EvalError {
-public:
-    explicit EvalError(Error e) : err(std::move(e)) {}
-    Error err;
-};
 
 class Interp {
 public:
@@ -444,8 +461,7 @@ private:
     template <class T, class F>
     static void broadcast_loop(const T * a, const std::vector<int64_t> & sa, const T * b, const std::vector<int64_t> & sb,
                                T * out, const std::vector<int64_t> & so, F f) {
-        size_t n = 1;
-        for (int64_t d : so) n *= static_cast<size_t>(d);
+        const size_t n = count_of(so);
         auto same = [&](const std::vector<int64_t> & s) { return s == so; };
         auto scalar = [](const std::vector<int64_t> & s) {
             for (int64_t d : s) {
@@ -542,8 +558,7 @@ private:
         const size_t rank = out_shape.size();
         std::vector<size_t> st(rank);
         for (size_t k = 0; k < rank; ++k) st[k] = is[static_cast<size_t>(axes[k])];
-        size_t n = 1;
-        for (int64_t d : out_shape) n *= static_cast<size_t>(d);
+        const size_t n = count_of(out_shape);
         std::vector<int64_t> idx(rank, 0);
         size_t off = 0;
         for (size_t i = 0; i < n; ++i) {
@@ -584,8 +599,7 @@ private:
         Error err = src_.read_f32(name, o->f, tap);
         if (!err.ok()) throw EvalError(err);
         o->account(o->f.size() * sizeof(float));
-        size_t n = 1;
-        for (int64_t d : s->shape) n *= static_cast<size_t>(d);
+        const size_t n = count_of(s->shape);
         if (o->f.size() != n) {
             throw EvalError(Error::deterministic("recipe: tensor " + name + " read " + std::to_string(o->f.size()) +
                                                  " values, its shape has " + std::to_string(n)));
@@ -653,9 +667,8 @@ private:
             V x = eval(*e.args[0]);
             const size_t axis = static_cast<size_t>(e.args[1]->number);
             const std::vector<int64_t> idx = ints(*e.args[2]);
-            size_t outer = 1, inner = 1;
-            for (size_t d = 0; d < axis; ++d) outer *= static_cast<size_t>(x->shape[d]);
-            for (size_t d = axis + 1; d < x->shape.size(); ++d) inner *= static_cast<size_t>(x->shape[d]);
+            const size_t outer = count_of(x->shape, 0, axis);
+            const size_t inner = count_of(x->shape, axis + 1);
             const size_t dim = static_cast<size_t>(x->shape[axis]);
             return relayout(x, e.shape, [&](const auto * in, auto * out) {
                 size_t w = 0;
@@ -676,9 +689,8 @@ private:
             for (size_t i = 1; i < e.args.size(); ++i) parts.push_back(cast(eval(*e.args[i]), e.dtype));
             V o = fresh();
             o->alloc(e.dtype, e.shape);
-            size_t outer = 1, inner = 1;
-            for (size_t d = 0; d < axis; ++d) outer *= static_cast<size_t>(e.shape[d]);
-            for (size_t d = axis + 1; d < e.shape.size(); ++d) inner *= static_cast<size_t>(e.shape[d]);
+            const size_t outer = count_of(e.shape, 0, axis);
+            const size_t inner = count_of(e.shape, axis + 1);
             size_t w = 0;
             for (size_t ot = 0; ot < outer; ++ot) {
                 for (const V & p : parts) {

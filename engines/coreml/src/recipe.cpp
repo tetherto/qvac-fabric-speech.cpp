@@ -5,6 +5,7 @@
 
 #include "milblob.h"
 #include "sha256.h"
+#include "shape.h"
 
 #include "nlohmann/json.hpp"
 
@@ -12,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <locale>
 #include <map>
 #include <set>
@@ -93,6 +95,9 @@ std::optional<uint32_t> gguf_type_of_mtype(std::string_view m, uint32_t * elem) 
 // ---- Lexing ------------------------------------------------------------------
 
 namespace {
+
+// The largest value Cursor::uint() accepts (19 decimal digits).
+constexpr uint64_t MAX_UINT_LITERAL = 9999999999999999999ull;
 
 struct Line {
     std::string text;
@@ -225,7 +230,7 @@ public:
         size_t b = p_;
         while (p_ < s_.size() && is_digit(s_[p_])) ++p_;
         if (b == p_) fail("expected an unsigned integer at column " + col());
-        if (p_ - b > 19) fail("integer too large");
+        if (p_ - b > 19) fail("integer too large");  // so every value is at most MAX_UINT_LITERAL
         return std::stoull(s_.substr(b, p_ - b));
     }
     bool number_start() {
@@ -333,16 +338,21 @@ const std::map<std::string, std::string> kLaterOps = {
     {"meta_s", "S5"},  {"provided", "S5"},
 };
 
-int64_t elements(const std::vector<int64_t> & shape) {
-    int64_t n = 1;
-    for (int64_t d : shape) n *= d;
-    return n;
-}
-
 std::string shape_str(const std::vector<int64_t> & s) {
     std::string o = "[";
     for (size_t i = 0; i < s.size(); ++i) o += (i ? "," : "") + std::to_string(s[i]);
     return o + "]";
+}
+
+std::string too_many_elements(const std::vector<int64_t> & shape) {
+    return "shape " + shape_str(shape) + " has more than " + std::to_string(detail::MAX_ELEMENTS) + " elements";
+}
+
+// Element count of a shape; throws RecipeError when it exceeds MAX_ELEMENTS.
+int64_t elements(const std::vector<int64_t> & shape, int line) {
+    const std::optional<uint64_t> n = detail::element_count(shape);
+    if (!n) throw RecipeError(line, too_many_elements(shape));
+    return static_cast<int64_t>(*n);
 }
 
 class Checker {
@@ -371,7 +381,10 @@ public:
                 e.ulp = it->second->ulp;
                 return;
             }
-            case Expr::Kind::call: call(e); return;
+            case Expr::Kind::call:
+                call(e);
+                (void) elements(e.shape, e.line);  // every op's result shape is bounded
+                return;
         }
     }
 
@@ -515,15 +528,18 @@ private:
                 } else if (dims[i] <= 0) {
                     throw RecipeError(e.line, "reshape() dims must be positive or -1");
                 } else {
-                    known *= dims[i];
+                    const std::optional<uint64_t> k = detail::mul_elements(static_cast<uint64_t>(known),
+                                                                           static_cast<uint64_t>(dims[i]));
+                    if (!k) throw RecipeError(e.line, "reshape() dims " + too_many_elements(dims));
+                    known = static_cast<int64_t>(*k);
                 }
             }
-            const int64_t n = elements(e.args[0]->shape);
+            const int64_t n = elements(e.args[0]->shape, e.line);
             if (neg >= 0) {
                 if (n % known != 0) throw RecipeError(e.line, "reshape() -1 does not divide " + std::to_string(n));
                 dims[neg] = n / known;
             }
-            if (elements(dims) != n) {
+            if (elements(dims, e.line) != n) {
                 throw RecipeError(e.line, "reshape() " + shape_str(e.args[0]->shape) + " -> " + shape_str(dims) +
                                               " changes the element count");
             }
@@ -593,7 +609,10 @@ private:
                                                           shape_str(a.shape) + " differ off the axis");
                         }
                     }
-                    shape[axis] += a.shape[axis];
+                    const std::optional<uint64_t> sum = detail::add_elements(
+                        static_cast<uint64_t>(shape[axis]), static_cast<uint64_t>(a.shape[axis]));
+                    if (!sum) throw RecipeError(e.line, "concat() axis length overflows");
+                    shape[axis] = static_cast<int64_t>(*sum);
                 }
                 dt = promote(dt, a.dtype);
                 e.ulp = e.ulp || a.ulp;
@@ -714,11 +733,13 @@ Recipe parse(std::string_view text) {
             do {
                 const uint64_t d = c.uint();
                 if (d == 0) c.fail("source dims must be positive");
+                if (d > detail::MAX_ELEMENTS) c.fail("source dim " + std::to_string(d) + " is too large");
                 s.shape.push_back(static_cast<int64_t>(d));
             } while (c.eat(','));
             c.expect(']');
             c.end();
             if (s.shape.size() > 4) c.fail("a GGUF tensor has at most 4 dims");
+            if (!detail::element_count(s.shape)) c.fail("source " + too_many_elements(s.shape));
             r.sources.push_back(std::move(s));
             continue;
         }
@@ -777,7 +798,7 @@ Recipe parse(std::string_view text) {
             c.end();
             checker.blob_top(*it.expr, it.dtype);
             it.ulp = it.expr->ulp;
-            const int64_t n = elements(it.expr->shape);
+            const int64_t n = elements(it.expr->shape, it.line);
             if (static_cast<uint64_t>(n) != it.count) {
                 c.fail("blob declares " + std::to_string(it.count) + " elements, its expression has " +
                        std::to_string(n) + " " + shape_str(it.expr->shape));
@@ -786,6 +807,11 @@ Recipe parse(std::string_view text) {
                 c.fail("blob offset " + std::to_string(it.offset) + " differs from the writer's running offset " +
                        std::to_string(running));
             }
+            // No wrap: offset is a literal of at most 19 digits and count equals a
+            // bounded element count, so data_end and its 64-byte alignment fit.
+            static_assert(MAX_UINT_LITERAL <= std::numeric_limits<uint64_t>::max() - milblob::METADATA_BYTES -
+                                                  4 * detail::MAX_ELEMENTS - milblob::ALIGN,
+                          "a blob's end offset must fit in uint64_t");
             data_end = it.offset + milblob::METADATA_BYTES + it.count * blob_type_size(it.dtype);
             running = milblob::align_up(data_end);
             ++blobs;
