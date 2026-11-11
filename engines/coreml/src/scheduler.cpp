@@ -372,9 +372,21 @@ std::shared_ptr<PoolRef> Runtime::pool_ref_locked(const SlotCore & c) {
     return r;
 }
 
+// The live instance a load job would publish without loading (another owner's,
+// in the registry), or null: run_load() adopts it instead of loading.
+const SharedModel * Runtime::existing_locked(const Job & j, Graveyard & gy) const {
+    if (j.kind != JobKind::load || !j.shareable) return nullptr;
+    auto it = registry_.find(j.model_key);
+    if (it == registry_.end()) return nullptr;
+    std::shared_ptr<SharedModel> m = it->second.lock();
+    gy.keep(m);
+    return m && !m->retired() ? m.get() : nullptr;
+}
+
 size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     // Distinct instances this pool references (see PoolCore), without strong
-    // references to them, plus the load in flight for this pool.
+    // references to them, plus the load in flight for this pool unless that
+    // load brings an instance the pool already counts.
     std::vector<const SharedModel *> seen;
     auto add = [&](const SharedModel * m) {
         if (m && std::find(seen.begin(), seen.end(), m) == seen.end()) seen.push_back(m);
@@ -388,7 +400,10 @@ size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     for (const std::shared_ptr<PoolRef> & r : p.refs) {
         if (r->holds.load() > 0) add(r->model);
     }
-    return running_serves_locked(p) ? seen.size() + 1 : seen.size();
+    if (!running_serves_locked(p)) return seen.size();
+    const SharedModel * existing = existing_locked(*running_, gy);
+    const bool counted = existing && std::find(seen.begin(), seen.end(), existing) != seen.end();
+    return counted ? seen.size() : seen.size() + 1;
 }
 
 bool Runtime::pool_counts_locked(const PoolCore & p, const SharedModel * m, Graveyard & gy) const {
@@ -414,7 +429,8 @@ bool Runtime::pool_takes_locked(const SlotCore & c, const SharedModel * m, Grave
 }
 
 // The running job `j` takes a place in the pool of subscriber `c` when the
-// pool has room (the in-flight load then counts there, see pool_live_locked);
+// pool has room (the in-flight load then counts there, see pool_live_locked)
+// or already counts the instance `j` brings (no second place: it counts once);
 // a full pool reserves nothing and its subscriber goes through admission
 // again when the instance is published.
 void Runtime::reserve_locked(Job & j, const SlotCore & c, Graveyard & gy) {
@@ -424,7 +440,8 @@ void Runtime::reserve_locked(Job & j, const SlotCore & c, Graveyard & gy) {
     for (const auto & wp : j.pools) {
         if (wp.lock() == p) return;
     }
-    if (pool_live_locked(*p, gy) < p->cap) j.pools.push_back(p);
+    const SharedModel * existing = existing_locked(j, gy);
+    if ((existing && pool_counts_locked(*p, existing, gy)) || pool_live_locked(*p, gy) < p->cap) j.pools.push_back(p);
 }
 
 bool Runtime::running_serves_locked(const PoolCore & p) const {
@@ -490,17 +507,21 @@ std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCor
     return victim ? victim->members : std::vector<std::shared_ptr<SlotCore>>{};
 }
 
-// Whether the pool of subscriber `c` denies it the instance `j` brings (§2.9):
-// full, nothing in it evictable for this job, and no load in flight for it
-// (that load may publish an evictable instance: undecided until it does). A
-// pool the running job `j` reserved a place in serves its subscribers.
-bool Runtime::sub_denied_locked(const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
+// Whether the pool of subscriber `c` denies it the instance job `j` brings
+// (§2.9): full, not already counting that instance, nothing in it evictable for
+// this job, and no load in flight for it (that load may publish an evictable
+// instance: undecided until it does). A pool the running job reserved a place
+// in serves its subscribers.
+bool Runtime::sub_denied_locked(const Job & j, const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
                                 Graveyard & gy) const {
     std::shared_ptr<PoolCore> p = c.pool.lock();
     if (!p) return false;
     gy.keep(p);
     if (running_serves_locked(*p)) return false;
     if (pool_live_locked(*p, gy) < p->cap) return false;
+    if (const SharedModel * existing = existing_locked(j, gy); existing && pool_counts_locked(*p, existing, gy)) {
+        return false;
+    }
     return pool_victim_locked(*p, own, gy).empty();
 }
 
@@ -512,7 +533,7 @@ bool Runtime::cap_denied_locked(const Job & j, Graveyard & gy) const {
     job_pools_locked(j, own, pools, gy);
     if (own.empty()) return false;
     for (const std::shared_ptr<SlotCore> & c : own) {
-        if (!sub_denied_locked(*c, own, gy)) return false;
+        if (!sub_denied_locked(j, *c, own, gy)) return false;
     }
     return true;
 }
@@ -523,7 +544,7 @@ bool Runtime::cap_blocked_now_locked(const SlotCore & c, Graveyard & gy) const {
     std::vector<std::shared_ptr<SlotCore>> own;
     std::vector<std::shared_ptr<PoolCore>> pools;
     job_pools_locked(*j, own, pools, gy);
-    return sub_denied_locked(c, own, gy);
+    return sub_denied_locked(*j, c, own, gy);
 }
 
 void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
@@ -539,8 +560,12 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     job_pools_locked(j, own, pools, gy);
     std::vector<std::shared_ptr<PoolCore>> denied;
     std::vector<std::vector<std::shared_ptr<SlotCore>>> victims;
+    // A pool that already counts the instance this job would publish takes it
+    // without a new place: nothing is evicted for it (§2.9).
+    const SharedModel * existing = existing_locked(j, gy);
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p, gy) < p->cap) continue;
+        if (existing && pool_counts_locked(*p, existing, gy)) continue;
         std::vector<std::shared_ptr<SlotCore>> v = pool_victim_locked(*p, own, gy);
         if (v.empty()) {
             denied.push_back(p);

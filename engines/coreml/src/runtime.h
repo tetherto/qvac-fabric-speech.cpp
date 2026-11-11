@@ -221,8 +221,9 @@ private:
     bool pool_takes_locked(const SlotCore & c, const SharedModel * m, Graveyard & gy) const;
     bool running_serves_locked(const PoolCore & p) const;
     void reserve_locked(Job & j, const SlotCore & c, Graveyard & gy);
-    bool sub_denied_locked(const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
+    bool sub_denied_locked(const Job & j, const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
                            Graveyard & gy) const;
+    const SharedModel * existing_locked(const Job & j, Graveyard & gy) const;
     void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
                           std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
     std::vector<std::shared_ptr<SlotCore>> pool_victim_locked(const PoolCore & p,

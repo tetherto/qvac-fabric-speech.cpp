@@ -1176,6 +1176,77 @@ void case_resident_cap_cross_owner() {
     }
 }
 
+// A load queued under the cap becomes redundant when another member of its
+// pool adopts the same registry instance meanwhile (§2.9): the pool already
+// counts it, so the queued subscriber takes it without a second place, an
+// eviction or a load, and call / strict acquisitions are served (§2.10).
+void case_resident_cap_queued_adopt() {
+    int round = 0;
+    for (const bool acquire_it : {true, false}) {
+        for (const bool strict : {false, true}) {
+            if (!acquire_it && strict) continue;
+            reset_world();
+            Env e;
+            const std::string tag = std::to_string(round++);
+            const std::string shared = "qs" + tag;
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(1);
+            auto mk = [&](const std::string & fn, bool s = false) {
+                SlotSpec spec = e.spec(fn);
+                spec.pool = pool;
+                SlotPolicy p = e.policy(Wait::call);
+                p.strict = s;
+                return e.m->make_slot(spec, p);
+            };
+            auto a = mk("qa" + tag);
+            Acquired held = a->acquire(Demand::now);
+            CHECK(held);
+            auto external = e.slot(shared);  // another owner, no pool
+            external->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(external); }));
+            g_low_power = true;  // keeps the prewarm request queued
+            auto b = mk(shared, strict);
+            b->request(Priority::prewarm);
+            CHECK(b->state() == SlotState::queued);
+            a->evict();
+            held = Acquired{};
+            auto c = mk(shared);
+            Acquired hc = c->acquire(Demand::now);  // adopts the registry instance at once
+            CHECK(hc);
+            CHECK(pool->live() == 1);
+            const uint64_t ev0 = e.m->stats().evictions;
+            Acquired hb;
+            std::string threw;
+            if (acquire_it) {
+                must_complete("acquisition of an instance the pool counts", [&] {
+                    try {
+                        hb = b->acquire(Demand::now);
+                    } catch (const CoremlError & err) {
+                        threw = err.what();
+                    }
+                });
+                if (!threw.empty()) std::printf("    round %s: threw '%s'\n", tag.c_str(), threw.c_str());
+                CHECK(threw.empty());
+            } else {
+                // Not held by c: still nothing is evicted, the worker hands the
+                // prewarm subscriber the counted instance.
+                hc = Acquired{};
+                g_low_power = false;
+                CHECK(wait_for([&] { return is_ready(b); }));
+                hb = b->acquire(Demand::if_ready);
+                CHECK(is_ready(c));
+                hc = c->acquire(Demand::if_ready);
+            }
+            CHECK(hb && hc && hb.model.get() == hc.model.get());
+            CHECK(hb && hb.model->as<FakeModel>()->name == shared);
+            CHECK(calls(shared) == 1);
+            CHECK(e.m->stats().evictions == ev0);
+            CHECK(pool->live() == 1);
+            CHECK(g_live_models.load() == base + 1);  // only the shared instance
+        }
+    }
+}
+
 // The pool count drops when an instance is released or evicted, not when the
 // last strong reference is finally gone (§2.9): a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
@@ -1932,6 +2003,7 @@ const Case kCases[] = {
     {"resident-cap-two-pools", case_resident_cap_two_pools},
     {"resident-cap-cross-owner", case_resident_cap_cross_owner},
     {"resident-cap-release-window", case_resident_cap_release_window},
+    {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},
