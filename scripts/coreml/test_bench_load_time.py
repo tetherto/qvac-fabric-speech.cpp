@@ -288,7 +288,6 @@ class AnalysisTest(unittest.TestCase):
         self.assertIn("## Time to ready", doc)
 
 
-@unittest.skipUnless(sys.platform != "win32", "bash")
 class TtrSummaryTest(unittest.TestCase):
     @staticmethod
     def run_record(ttr_ms, live, n=3):
@@ -322,6 +321,7 @@ class NativeTest(unittest.TestCase):
             self.assertIn("test_bench_ttr: ok", run.stdout)
 
 
+@unittest.skipUnless(sys.platform != "win32", "bash")
 class FreshHostTest(unittest.TestCase):
     def run_fh(self, *args, env):
         return subprocess.run(["bash", str(blt.FRESH_HOST), *args], capture_output=True, text=True, env=env)
