@@ -7,13 +7,16 @@
 #       ENABLE is true (the engine's Apple-only <P>_COREML option). <P> is the
 #       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN). Template
 #       embedding (TEMPLATES) arrives with S2b and is rejected until then.
-#   qvac_coreml_add_tests()
+#   qvac_coreml_add_tests([REQUIRE_GGML])
 #       Portable tests (Linux and macOS): test-coreml-scheduler,
 #       test-coreml-recipe, test-coreml-milblob, test-coreml-cache, plus the
 #       host CLI qvac-coreml-tool when a `ggml` target exists (the generator's
 #       GgufSource and the tool need ggml-base; the tests then also cover real
-#       GGUFs). Each engine calls it from its *_BUILD_TESTS block; the first call
-#       wins in the umbrella build.
+#       GGUFs). Each engine calls it from its *_BUILD_TESTS block with
+#       REQUIRE_GGML, so a missing `ggml` target fails configure instead of
+#       silently dropping the GGUF cases and the tool; only the standalone
+#       engines/coreml build leaves them optional. The first call wins in the
+#       umbrella build.
 #   qvac_coreml_add_link_test(TARGETS <libs...>)
 #       macOS umbrella only: test-coreml-link links every listed engine library
 #       and all of their runtime copies into one binary.
@@ -129,8 +132,14 @@ function(qvac_coreml_add_to target)
 endfunction()
 
 function(qvac_coreml_add_tests)
+    cmake_parse_arguments(QAT "REQUIRE_GGML" "" "" ${ARGN})
     if (WIN32 OR TARGET test-coreml-scheduler)
         return()  # Linux and macOS only; registered once per build tree
+    endif()
+    if (QAT_REQUIRE_GGML AND NOT TARGET ggml)
+        message(FATAL_ERROR "qvac_coreml_add_tests(REQUIRE_GGML): no `ggml` target. The engine must define "
+                            "ggml before its tests block; without it qvac-coreml-tool and the GGUF cases of "
+                            "the generator tests would not be built.")
     endif()
     set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
     find_package(Threads REQUIRED)
@@ -197,6 +206,14 @@ function(qvac_coreml_add_tests)
         add_test(NAME test-coreml-${t} COMMAND test-coreml-${t} ${args})
         set_tests_properties(test-coreml-${t} PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 300)
     endforeach()
+
+    # An engine lane without ggml fails configure (REQUIRE_GGML); this case
+    # configures a project that has none and expects that error.
+    add_test(NAME test-coreml-require-ggml
+             COMMAND ${CMAKE_COMMAND} -S "${dir}/test/require_ggml"
+                     -B "${CMAKE_CURRENT_BINARY_DIR}/test-coreml-require-ggml")
+    set_tests_properties(test-coreml-require-ggml PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 120
+                         PASS_REGULAR_EXPRESSION "qvac_coreml_add_tests\\(REQUIRE_GGML\\): no `ggml`")
 
     if (have_ggml)
         # Host CLI (PLAN §2.3): dump | twin | f32 | generate | digest | verify.
