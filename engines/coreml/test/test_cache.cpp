@@ -1053,6 +1053,34 @@ void case_quarantine() {
     CHECK(r.quarantine == 2 && count_files(env.layout().quarantine) == 0);
 }
 
+// A prune killed between moving an artifact to its trash and removing it: the
+// next routine (or `all`) prune removes the trash; another library's stays.
+void case_prune_trash() {
+    Env env;
+    const cache::Layout l = env.layout();
+    const std::string k(32, 'c');
+    auto leftover = [&](const std::string & tid) {
+        const std::string t = cache::prune_trash_path(l, tid + "." + k);
+        CHECK(fs::path(t).parent_path() == fs::path(l.quarantine));
+        write_bytes(t + "/model.mlmodelc/weights/weight.bin", "partly deleted");
+        return t;
+    };
+    cache::PrunePolicy routine = cache::PrunePolicy::routine();
+    routine.tmp_dir = env.td / "tmp";
+    for (const cache::PrunePolicy & p : {routine, cache::PrunePolicy::all()}) {
+        const std::string mine = leftover("toy-dac");
+        const std::string theirs = leftover("other-tpl");
+        cache::PruneReport r = cache::prune(env.cache, p, env.catalog());
+        CHECK(r.quarantine == 1 && !fs::exists(mine) && fs::exists(theirs));
+        fs::remove_all(theirs);
+    }
+    // A real prune leaves no trash behind.
+    const std::string a = env.source("a.gguf");
+    CHECK(ready(env.prepare(a)));
+    cache::PruneReport r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+    CHECK(r.deleted_artifacts.size() == 1 && count_files(l.quarantine) == 0);
+}
+
 // Syntactically valid JSON with wrong-typed fields (another addon's file in a
 // shared cache, or damage): every reader treats it as unreadable, nothing
 // throws, an unreadable artifact is repaired and prune runs to completion.
@@ -1337,6 +1365,7 @@ int main(int argc, char ** argv) {
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},
                          {"quarantine", case_quarantine},
+                         {"prune-trash", case_prune_trash},
                          {"malformed-records", case_malformed_records},
                          {"toctou", case_toctou},
                          {"preflight", case_preflight},

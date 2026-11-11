@@ -12,7 +12,7 @@
 //     used/<key32>                     mtime = last successful load
 //     hints/<hint_id>.json             (S1a); "artifact" attributes it to an artifact here
 //     failed/<key32>[.<fn_units_hash>].json
-//     quarantine/<name>.<pid>/         unusable artifacts moved aside under EX
+//     quarantine/<name>.<pid>[...]/    unusable artifacts moved aside under EX, and prune's trash
 //
 // Locking: every key lock is taken LOCK_NB (jobs run holding the scheduler's
 // admission gate, §2.9). A busy lock is `would_block`: the job releases the
@@ -199,6 +199,11 @@ Adoption adopt(const Layout & l, const std::string & template_id, const std::str
 // LOCK_EX|LOCK_NB, i.e. only when no lease is held. `would_block` when leased.
 KeyLock::Result quarantine(const Layout & l, const std::string & template_id, const std::string & key32,
                            Error * err = nullptr);
+
+// Where prune moves an artifact (`<template-id>.<key32>`) before removing it:
+// quarantine/<template-id>.<key32>.<pid>.prune.<rand>, a quarantine name, so a
+// prune killed mid-delete leaves trash the next routine or `all` prune removes.
+std::string prune_trash_path(const Layout & l, const std::string & artifact_name);
 
 // used/<key32>: touched after every successful load (routine prune's age).
 void touch_used(const Layout & l, const std::string & key32);

@@ -519,6 +519,10 @@ KeyLock::Result quarantine(const Layout & l, const std::string & template_id, co
     return KeyLock::Result::ok;
 }
 
+std::string prune_trash_path(const Layout & l, const std::string & artifact_name) {
+    return l.quarantine + "/" + artifact_name + "." + std::to_string(::getpid()) + ".prune." + rand_hex();
+}
+
 void touch_used(const Layout & l, const std::string & key32) {
     std::error_code ec;
     fs::create_directories(l.used, ec);
@@ -1006,7 +1010,7 @@ struct Pruner {
         const std::string src = l.artifacts + "/" + name;
         std::error_code ec;
         fs::create_directories(l.quarantine, ec);
-        const std::string trash = l.quarantine + "/.prune." + name + "." + std::to_string(::getpid()) + "." + rand_hex();
+        const std::string trash = prune_trash_path(l, name);
         if (std::rename(src.c_str(), trash.c_str()) == 0) {
             remove_tree(trash);
         } else {
