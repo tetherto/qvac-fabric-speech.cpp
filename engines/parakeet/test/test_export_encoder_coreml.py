@@ -3,9 +3,16 @@
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
+
+try:
+    import gguf
+except ModuleNotFoundError:
+    gguf = None
 
 try:
     import torch
@@ -362,6 +369,131 @@ class ExportContractTests(unittest.TestCase):
             Ref(), torch.zeros(1, 5, 2), weights, "conv",
             causal=True, layer_norm=True)
         self.assertEqual(tuple(out.shape), (1, 5, 2))
+
+
+@unittest.skipIf(gguf is None, "gguf is not installed")
+class NativePaddingExportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        fixture_path = Path(__file__).with_name("test_export_coreml_ane.py")
+        spec = importlib.util.spec_from_file_location("coreml_ane_fixtures", fixture_path)
+        cls.fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.fixtures)
+        cls.reference = cls.fixtures.REFERENCE
+
+    def setUp(self):
+        self.weights, self.meta = self.fixtures.toy_encoder_weights()
+        self.meta.update({
+            "parakeet.model.type": "tdt",
+            "parakeet.model_variant": "transcribepsy-250m-eu",
+            "parakeet.eu.adapter_layers": [0, 1],
+            "parakeet.eu.gate_layer": 0,
+        })
+        for index in self.meta["parakeet.eu.adapter_layers"]:
+            for name, shape in (("down.weight", (3, 8)), ("down.bias", (3,)),
+                                ("up.weight", (8, 3)), ("up.bias", (8,))):
+                self.weights[f"eu.adapter.{index}.{name}"] = torch.randn(*shape) * 0.2
+
+    def make_model(self, meta):
+        return EXPORTER.NativePaddingFlexibleEncoder(
+            self.reference, self.weights, meta, flexible=True,
+            pe_table=self.reference.sinusoidal_rel_pe(64, 8)).eval()
+
+    def test_two_input_dynamic_export_matches_native_padding_reference(self):
+        for route in ("en", "other"):
+            meta = dict(self.meta, **{"coreml.eu_route": route})
+            model = self.make_model(meta)
+            exported = EXPORTER.trace_flexible_encoder(model, torch.zeros(8, 32), 9, 409)
+            program = exported.module()
+            for frames, valid in ((9, 1), (17, 8), (33, 17), (399, 398),
+                                  (400, 399), (401, 400), (409, 408)):
+                with self.subTest(route=route, frames=frames, valid=valid), torch.no_grad():
+                    mel = torch.randn(8, frames)
+                    mask = (torch.arange(frames) < valid).float()
+                    expected = self.reference.encoder_forward(
+                        mel, self.weights, meta, mel_valid_len=valid,
+                        eu_use_adapters=route == "other")[0]
+                    torch.testing.assert_close(model(mel, mask), expected)
+                    actual = program(mel, mask)
+                    torch.testing.assert_close(actual, expected)
+                    self.assertEqual(tuple(actual.shape), ((frames + 7) // 8, 8))
+                    changed_padding = mel.clone()
+                    changed_padding[:, valid:] += 100.0
+                    torch.testing.assert_close(program(changed_padding, mask), actual)
+            with self.assertRaises(RuntimeError):
+                program(torch.zeros(8, 17), torch.ones(16))
+            with self.assertRaises(RuntimeError):
+                program(torch.zeros(8, 410), torch.ones(410))
+
+    def test_frontend_extra_row_keeps_projection_bias_and_attends(self):
+        meta = dict(self.meta, **{"coreml.eu_route": "en"})
+        mel = torch.randn(8, 401)
+        mask = (torch.arange(401) < 400).float()
+        projected = EXPORTER.subsampling_shape_generic(mel, self.weights, mask)
+        self.assertEqual(tuple(projected.shape), (1, 51, 8))
+        torch.testing.assert_close(projected[0, -1], self.weights["encoder.subsampling.out.bias"])
+        with torch.no_grad():
+            padded = self.make_model(meta)(mel, mask)
+            expected = self.reference.encoder_forward(mel, self.weights, meta, mel_valid_len=400)[0]
+            trimmed = self.reference.encoder_forward(mel[:, :400], self.weights, meta)[0]
+        torch.testing.assert_close(padded, expected)
+        self.assertEqual(tuple(padded.shape), (51, 8))
+        self.assertGreater(float((padded[:50] - trimmed).abs().max()), 1.0e-5)
+        self.assertGreater(float(padded[-1].abs().max()), 0.1)
+
+    def test_main_gate_route_truncates_graph_and_saved_metadata(self):
+        full_meta = dict(self.meta)
+        expected_meta = dict(self.meta, **{"parakeet.encoder.n_layers": 1})
+        saved_model = types.SimpleNamespace(user_defined_metadata={}, save=mock.Mock())
+
+        def convert_gate(ref, weights, meta, example, *args):
+            self.assertEqual(meta["coreml.eu_route"], "gate")
+            self.assertEqual(meta["parakeet.encoder.n_layers"], 1)
+            with torch.no_grad():
+                actual = self.make_model(meta)(example, torch.ones(example.shape[1]))
+                expected = ref.encoder_forward(example, weights, expected_meta)[0]
+                full = ref.encoder_forward(example, weights, full_meta)[0]
+            torch.testing.assert_close(actual, expected)
+            self.assertGreater(float((actual - full).abs().max()), 0.01)
+            return saved_model
+
+        argv = [str(SCRIPT), "--gguf", "synthetic.gguf", "--out", "gate.mlpackage",
+                "--n-mel-frames", "33", "--flexible", "--eu-route", "gate"]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(EXPORTER, "load_reference_encoder", return_value=self.reference), \
+                mock.patch.object(self.reference, "load_gguf", return_value=(self.weights, self.meta)), \
+                mock.patch.object(EXPORTER, "convert_flexible", side_effect=convert_gate), \
+                mock.patch.object(EXPORTER.ct, "precision", types.SimpleNamespace(
+                    FLOAT16="fp16", FLOAT32="fp32"), create=True), \
+                mock.patch.object(EXPORTER.ct, "target", types.SimpleNamespace(
+                    macOS13=13, macOS15=15), create=True):
+            EXPORTER.main()
+        metadata = saved_model.user_defined_metadata
+        self.assertEqual(metadata["parakeet.eu.route"], "gate")
+        self.assertEqual(metadata["parakeet.encoder.n_layers"], "1")
+        self.assertEqual(metadata["parakeet.encoder.precision"], "fp32")
+        self.assertEqual(metadata["parakeet.eu.native_padding"], "true")
+        saved_model.save.assert_called_once_with("gate.mlpackage")
+
+    def test_gguf_integer_adapter_arrays_round_trip(self):
+        cases = ((gguf.GGUFValueType.INT32, [-1, 0, 1, 2147483647]),
+                 (gguf.GGUFValueType.UINT32, [0, 1, 2147483648, 4294967295]))
+        for element_type, values in cases:
+            with self.subTest(element_type=element_type), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "metadata.gguf"
+                writer = gguf.GGUFWriter(path, "parakeet")
+                writer.add_key_value("parakeet.eu.adapter_layers", values,
+                                     gguf.GGUFValueType.ARRAY, sub_type=element_type)
+                writer.write_header_to_file()
+                writer.write_kv_data_to_file()
+                writer.write_tensors_to_file()
+                writer.close()
+                field = gguf.GGUFReader(path).fields["parakeet.eu.adapter_layers"]
+                self.assertEqual(field.types, [gguf.GGUFValueType.ARRAY, element_type])
+                weights, metadata = self.reference.load_gguf(path)
+                self.assertEqual(weights, {})
+                self.assertEqual(metadata["parakeet.eu.adapter_layers"], values)
+                self.assertTrue(all(type(value) is int for value in metadata["parakeet.eu.adapter_layers"]))
 
 
 if __name__ == "__main__":

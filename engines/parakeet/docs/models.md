@@ -41,9 +41,15 @@ Use `--language en` for known English, `--language other` for known non-English,
 or `--language auto` (also the default) to run the gate on the first 20 seconds
 before transcription. `EngineOptions::language` accepts the same values for
 this model. The gate and adapters are embedded in the GGUF; no extra files are
-needed at inference time. CPU and Metal handle both routes. Full-EU Core ML sidecars accelerate both routes
+needed at inference time. CPU, Metal and Vulkan/Android handle both routes. Full-EU Core ML sidecars accelerate both routes
 and the gate encoder on macOS/iOS; [export the matching full-EU sidecars](transcribepsy-eu-coreml.md).
 EU-sub sidecars do not contain this model's adapters and are rejected for full EU.
+
+Across all backends, full-EU callback and push streaming default to 2000 ms
+chunks when `StreamingOptions::chunk_ms = 0`; explicit positive chunk sizes
+are preserved. Auto push streams buffer the initial 20 seconds for routing, or
+route shorter streams on `finalize()`. Known `en`/`other` streams emit without
+that gate delay. See the [streaming API](api.md).
 
 ```bash
 build-parakeet/parakeet --model engines/parakeet/models/transcribepsy-250m-eu.gguf \

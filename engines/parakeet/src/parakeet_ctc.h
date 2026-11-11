@@ -729,8 +729,9 @@ int         model_coreml_seam_context_frames(const ParakeetCtcModel & m);
 // non-Apple build, and any Apple build without a `<model>-decoder.mlmodelc`).
 ::parakeet_coreml_decoder * model_coreml_decoder(const ParakeetCtcModel & m);
 
-// Decoder compute-backend label, same contract as model_encoder_backend_name.
-std::string model_decoder_backend_name(const ParakeetCtcModel & m);
+// Decoder compute-backend label, including an available Core ML sidecar by default.
+// Pass false when reporting a decode that did not execute the Core ML sidecar.
+std::string model_decoder_backend_name(const ParakeetCtcModel & m, bool include_coreml = true);
 
 // True when the TDT / RNN-T decoder runs on the CPU backend from
 // model.tdt_cpu because the encoder backend (OpenCL) cannot run its graphs.

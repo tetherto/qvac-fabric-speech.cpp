@@ -1,6 +1,7 @@
 // FastConformer encoder ggml graph, GGUF load, CTC head, and encoder execution.
 
 #include "parakeet_ctc.h"
+#include "decoder_backend.h"
 #include "coreml/parakeet_coreml_shape.h"
 #include "long_form.h"
 #include "mel_preprocess.h"
@@ -2021,7 +2022,9 @@ static parakeet_coreml_context * load_eu_coreml_encoder(
     if (!path_is_directory(path)) return nullptr;
     const auto started = std::chrono::steady_clock::now();
     const bool flexible = kind == EuCoremlKind::FlexibleCpu;
-    auto * ctx = flexible ? parakeet_coreml_init_cpu(path.c_str()) :
+    const bool fixed_cpu = kind == EuCoremlKind::FixedAne &&
+        !parakeet::coreml_eu_loads_fixed_auxiliaries(std::getenv("PARAKEET_COREML_COMPUTE_UNITS"));
+    auto * ctx = (flexible || fixed_cpu) ? parakeet_coreml_init_cpu(path.c_str()) :
         kind == EuCoremlKind::PreciseGpu ? parakeet_coreml_init_gpu(path.c_str()) :
                                          parakeet_coreml_init_ane(path.c_str());
     if (!ctx) return nullptr;
@@ -3181,16 +3184,17 @@ int model_coreml_seam_context_frames(const ParakeetCtcModel & m) {
 #endif
 }
 
-std::string model_decoder_backend_name(const ParakeetCtcModel & m) {
+std::string model_decoder_backend_name(const ParakeetCtcModel & m, bool include_coreml) {
+    std::string coreml_backend;
 #ifdef PARAKEET_USE_COREML
     if (m.impl && m.impl->ctx_coreml_dec) {
-        return parakeet_coreml_decoder_backend_label(m.impl->ctx_coreml_dec);
+        coreml_backend = parakeet_coreml_decoder_backend_label(m.impl->ctx_coreml_dec);
     }
 #endif
-    if (model_tdt_decoder_on_cpu(m) && m.impl && m.impl->backend_cpu) {
-        return ggml_backend_name(m.impl->backend_cpu);
-    }
-    return model_active_backend_name(m);
+    const std::string cpu_backend = m.impl && m.impl->backend_cpu
+        ? ggml_backend_name(m.impl->backend_cpu) : "";
+    return resolve_decoder_backend_name(model_active_backend_name(m), cpu_backend,
+        model_tdt_decoder_on_cpu(m), coreml_backend, include_coreml);
 }
 
 bool model_bypass_encoder_on_coreml(const ParakeetCtcModel & m) {

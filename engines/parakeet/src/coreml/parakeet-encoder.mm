@@ -853,7 +853,6 @@ bool parakeet_coreml_matches_eu_route(const struct parakeet_coreml_context * ctx
 }
 
 bool parakeet_coreml_is_fp32(const struct parakeet_coreml_context * ctx) {
-    if (!ctx || !ctx->model) return false;
     @autoreleasepool {
         MLModel * model = (__bridge MLModel *) ctx->model;
         NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
@@ -868,7 +867,6 @@ bool parakeet_coreml_is_fp32(const struct parakeet_coreml_context * ctx) {
 
 bool parakeet_coreml_preserves_encoder_padding(const struct parakeet_coreml_context * ctx) {
     if (ctx == nullptr || ctx->model == nullptr) return false;
-    if (!ctx || !ctx->model) return false;
     MLModel * model = (__bridge MLModel *) ctx->model;
     NSDictionary * metadata = model.modelDescription.metadata[MLModelCreatorDefinedKey];
     return [metadata[@"parakeet.model_variant"] isEqualToString:@"transcribepsy-250m-eu"] &&

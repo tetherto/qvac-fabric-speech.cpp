@@ -161,6 +161,26 @@ private:
     bool had_value_ = false;
 };
 
+void check_initial_placement(const char * path) {
+    EnvironmentScope enabled("PARAKEET_COREML_DISABLE", nullptr);
+    for (const char * owned : {static_cast<const char *>(nullptr), "1"}) {
+        EnvironmentScope ownership("PARAKEET_COREML_ONLY", owned);
+        for (const char * units : {"cpu_only", "cpu_and_gpu", static_cast<const char *>(nullptr)}) {
+            EnvironmentScope policy("PARAKEET_COREML_COMPUTE_UNITS", units);
+            parakeet::ParakeetCtcModel model;
+            require(parakeet::load_from_gguf(path, model, kThreads, 0, false, "cpu") == 0,
+                    "initial placement model failed to load");
+            const std::string expected = units ? "coreml-cpu" : "coreml-ane";
+            const auto actual = parakeet::model_encoder_backend_name(model);
+            require(actual == expected, "initial fixed metadata model has the wrong compute policy");
+            require(parakeet::model_encoder_owned_by_coreml(model) == (owned != nullptr),
+                    "initial placement ownership differs");
+            std::printf("INITIAL_PLACEMENT units=%s owned=%d backend=%s before_encode=1\n",
+                        units ? units : "default", (int) (owned != nullptr), actual.c_str());
+        }
+    }
+}
+
 std::unique_ptr<parakeet::Engine> native_reference(const parakeet::EngineOptions & options) {
     EnvironmentScope disabled("PARAKEET_COREML_DISABLE", "1");
     return std::make_unique<parakeet::Engine>(options);
@@ -375,11 +395,16 @@ int transcribepsy_eu_coreml_test(int argc, char ** argv) {
     if (argc != 4 && !(argc == 5 && (std::string(argv[4]) == "--unwindowed" ||
                                       std::string(argv[4]) == "--context-parity" ||
                                       std::string(argv[4]) == "--explicit-context" ||
-                                      std::string(argv[4]) == "--warm-stream"))) {
-        std::fprintf(stderr, "usage: %s full-eu.gguf english.wav french.wav [--unwindowed|--context-parity|--explicit-context|--warm-stream]\n", argv[0]);
+                                      std::string(argv[4]) == "--warm-stream" ||
+                                      std::string(argv[4]) == "--initial-placement"))) {
+        std::fprintf(stderr, "usage: %s full-eu.gguf english.wav french.wav [--unwindowed|--context-parity|--explicit-context|--warm-stream|--initial-placement]\n", argv[0]);
         return 2;
     }
     try {
+        if (argc == 5 && std::string(argv[4]) == "--initial-placement") {
+            check_initial_placement(argv[1]);
+            return 0;
+        }
         check_encoder_ownership(argv[1]);
         const auto english = read_samples(argv[2]);
         const auto french = read_samples(argv[3]);

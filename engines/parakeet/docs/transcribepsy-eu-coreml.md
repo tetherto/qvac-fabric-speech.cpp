@@ -397,14 +397,14 @@ at 2646 MiB RSS/1132MiB physical footprint; these are different OS measures and
 include both sequentially exercised backends, not one encoder allocation.
 The lazy runtime keeps only one precise main route/capacity handle per Engine.
 
-Validation includes14 distinct relevant CTests (12 initial plus 4 changed-area
+Validation includes 14 distinct relevant CTests (12 initial plus 4 changed-area
 passes with 2 overlap), 132 offline/config cases, 48 first-session stream cases,
-98 tiny-input positives and2 owned missing-flexible rejections,16 default/explicit
-chunk-quality cases,18 explicit-context/load-policy CLI cases,22 automatic/missing
-decoder quality cases,32 focused first/warm streaming sessions,110 compiled FP32
-predictions and18 compiled FP16/six-bit predictions. Fair thermal receipts are
+98 tiny-input positives and 2 owned missing-flexible rejections, 16 default/explicit
+chunk-quality cases, 18 explicit-context/load-policy CLI cases, 22 automatic/missing
+decoder quality cases, 32 focused first/warm streaming sessions, 110 compiled FP32
+predictions and 18 compiled FP16/six-bit predictions. Fair thermal receipts are
 retained separately: final stream samples are nominal; one unchanged native CPU
-French-push row uses its two stable nominal samples (0.2%spread), all other
+French-push row uses its two stable nominal samples (0.2% spread), all other
 stream rows use three. No model/build/cache data belongs in the git change.
 
 

@@ -126,7 +126,10 @@ def main():
     if not args.model.is_file():
         print(f"SKIP: model fixture missing: {args.model}")
         return 77
-    if args.coreml and not (args.model.parent / f"{sidecar_stem(args.model)}-encoder.mlmodelc").is_dir():
+    required_sidecars = ("encoder", "encoder-other", "encoder-gate")
+    if args.coreml and not all(
+            (args.model.parent / f"{sidecar_stem(args.model)}-{suffix}.mlmodelc").is_dir()
+            for suffix in required_sidecars):
         print("SKIP: full-EU Core ML sidecars missing")
         return 77
 

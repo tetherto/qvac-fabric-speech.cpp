@@ -586,6 +586,9 @@ bool transcribe_independent_segments(ParakeetCtcModel & model, TdtRuntimeWeights
     const bool usable_decoder = dec && stepper.usable();
     const bool native_segments = model.model_variant == "transcribepsy-250m-eu" &&
         model_encoder_on_coreml(model);
+    if (dec && stepper.n_width != 1)
+        PARAKEET_LOG_WARN("parakeet: Core ML decoder was exported at width=%lld; only width=1 is driven\n",
+                          (long long) stepper.n_width);
     if (!usable_decoder && !native_segments) return false;
     if (!usable_decoder && env_flag_enabled(kSegmentBatchDecodeEnv))
         PARAKEET_LOG_WARN("parakeet: requested Core ML decoder unavailable; using native segment decode\n");
@@ -2151,6 +2154,7 @@ struct StreamSession::Impl {
     bool finalized = false;
     bool cancelled = false;
     bool eu_route_resolved = false;
+    bool eu_use_adapters = false;
     bool eu_gate_used_coreml = true;
 
     // Optional EnergyVad for CTC/RNN-T/TDT when enable_energy_vad and no native VAD exists.
@@ -2348,6 +2352,9 @@ void StreamSession::Impl::process_window(const float * window_samples, int windo
                                  std::to_string(rc) + ")");
     }
 
+    // Other serialized calls on this Engine can change the shared model route.
+    if (eu_route_resolved) engine_impl->model.eu_use_adapters = eu_use_adapters;
+
     EncoderOutputs enc_out;
     const LongFormPlan plan = resolve_long_form_plan(
         engine_impl->model, engine_impl->opts, n_mel_frames, true);
@@ -2503,6 +2510,7 @@ bool StreamSession::Impl::resolve_eu_route() {
     resolve_transcribepsy_eu_route(model, language, mel.data(), frames,
                                    model.mel_cfg.n_mels, nullptr, nullptr, 0, samples,
                                    &eu_gate_used_coreml, true);
+    eu_use_adapters = model.eu_use_adapters;
     eu_route_resolved = true;
     return true;
 }

@@ -61,6 +61,12 @@ happens before callback/push validation and context calculations;
 `StreamSession::options().chunk_ms` reports the effective value. Nemotron still
 requires one of its trained positive operating points.
 
+Full-EU chunk defaults apply on every backend, including CPU, Metal, Vulkan
+and Android. With `EngineOptions::language = "auto"`, push streams buffer the
+first 20 seconds before selecting the English or adapted route; shorter streams
+select the route on `finalize()`. Known `en`/`other` routes emit without that
+initial gate delay.
+
 Always call `finalize()` to drain the partial tail. Destroying a
 `StreamSession` or `SortformerStreamSession` cancels it and does not finalize
 it. `cancel()` stops future work; `Engine::cancel()` may be called from another
