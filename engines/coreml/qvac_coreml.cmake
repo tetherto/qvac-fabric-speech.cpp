@@ -8,9 +8,12 @@
 #       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN). Template
 #       embedding (TEMPLATES) arrives with S2b and is rejected until then.
 #   qvac_coreml_add_tests()
-#       Portable runtime tests (Linux and macOS): test-coreml-scheduler. Each
-#       engine calls it from its *_BUILD_TESTS block; the first call wins in the
-#       umbrella build.
+#       Portable tests (Linux and macOS): test-coreml-scheduler,
+#       test-coreml-recipe, test-coreml-milblob, test-coreml-cache, plus the
+#       host CLI qvac-coreml-tool when a `ggml` target exists (the generator's
+#       GgufSource and the tool need ggml-base; the tests then also cover real
+#       GGUFs). Each engine calls it from its *_BUILD_TESTS block; the first call
+#       wins in the umbrella build.
 #   qvac_coreml_add_link_test(TARGETS <libs...>)
 #       macOS umbrella only: test-coreml-link links every listed engine library
 #       and all of their runtime copies into one binary.
@@ -32,6 +35,23 @@ function(_qvac_coreml_runtime_sources out_var with_objc)
         list(APPEND srcs "${dir}/src/device_posix.cpp")
     endif()
     set(${out_var} ${srcs} PARENT_SCOPE)
+endfunction()
+
+# The portable generator (S2a, PLAN §2.6-§2.8): recipe parser and interpreter,
+# MILBlob writer, keys, cache and failure records. No ggml. gguf_source.cpp
+# (ggml-base) is separate. Compiled with -ffp-contract=off: the interpreter's
+# arithmetic must be one IEEE operation per op on every host (§2.6).
+function(_qvac_coreml_generator_sources out_var)
+    set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    set(${out_var}
+        "${dir}/src/cache.cpp"
+        "${dir}/src/digest.cpp"
+        "${dir}/src/failed.cpp"
+        "${dir}/src/interp.cpp"
+        "${dir}/src/milblob.cpp"
+        "${dir}/src/recipe.cpp"
+        "${dir}/src/source_stat.cpp"
+        PARENT_SCOPE)
 endfunction()
 
 # Frameworks the Apple device facts need (src/apple/device.mm).
@@ -124,13 +144,24 @@ function(qvac_coreml_add_tests)
         _qvac_coreml_apple_frameworks(fws)
     endif()
 
-    # The tests' own copy of the runtime, in its own namespace.
+    # The tests' own copy of the runtime and the generator, in its own namespace.
     _qvac_coreml_runtime_sources(srcs ${with_objc})
-    add_library(qvac-coreml-test-runtime STATIC ${srcs})
+    _qvac_coreml_generator_sources(gen_srcs)
+    set(have_ggml OFF)
+    if (TARGET ggml)
+        set(have_ggml ON)
+        list(APPEND gen_srcs "${dir}/src/gguf_source.cpp")
+    endif()
+    add_library(qvac-coreml-test-runtime STATIC ${srcs} ${gen_srcs})
     _qvac_coreml_configure_runtime(qvac-coreml-test-runtime qvac_coreml_test ${with_objc})
     # Scheduler test seams (src/test_hooks.h): only in this copy.
     target_compile_definitions(qvac-coreml-test-runtime PRIVATE QVAC_COREML_TEST_HOOKS=1)
+    target_compile_options(qvac-coreml-test-runtime PRIVATE -ffp-contract=off)
     target_link_libraries(qvac-coreml-test-runtime PUBLIC Threads::Threads ${CMAKE_DL_LIBS} ${fws})
+    if (have_ggml)
+        target_link_libraries(qvac-coreml-test-runtime PUBLIC ggml)
+        target_compile_definitions(qvac-coreml-test-runtime PUBLIC QVAC_COREML_HAVE_GGML=1)
+    endif()
 
     # A dlopen-able module with a third copy, for the dlclose lifetime case.
     add_library(qvac-coreml-test-plugin MODULE "${dir}/test/test_plugin.cpp" ${srcs})
@@ -149,6 +180,30 @@ function(qvac_coreml_add_tests)
     # Own label so CI runs it in a dedicated step (no SKIP path exists: any
     # non-zero exit, including 77, is a failure).
     set_tests_properties(test-coreml-scheduler PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 300)
+
+    # The portable generator's tests (S2a): per-test temp dirs, no network, no
+    # Core ML. Same label and no-skip rule as the scheduler test.
+    foreach (t recipe milblob cache)
+        add_executable(test-coreml-${t} "${dir}/test/test_${t}.cpp")
+        target_compile_definitions(test-coreml-${t} PRIVATE QVAC_COREML_NS=qvac_coreml_test)
+        target_include_directories(test-coreml-${t} PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party" "${dir}/test")
+        target_compile_features(test-coreml-${t} PRIVATE cxx_std_17)
+        target_compile_options(test-coreml-${t} PRIVATE -ffp-contract=off)
+        target_link_libraries(test-coreml-${t} PRIVATE qvac-coreml-test-runtime)
+        add_test(NAME test-coreml-${t} COMMAND test-coreml-${t})
+        set_tests_properties(test-coreml-${t} PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 300)
+    endforeach()
+
+    if (have_ggml)
+        # Host CLI (PLAN §2.3): dump | twin | f32 | generate | digest | verify.
+        add_executable(qvac-coreml-tool "${dir}/tools/qvac-coreml-tool.cpp")
+        target_compile_definitions(qvac-coreml-tool PRIVATE QVAC_COREML_NS=qvac_coreml_test)
+        target_include_directories(qvac-coreml-tool PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party")
+        target_compile_features(qvac-coreml-tool PRIVATE cxx_std_17)
+        target_link_libraries(qvac-coreml-tool PRIVATE qvac-coreml-test-runtime)
+    else()
+        message(STATUS "qvac-coreml-tool and the GGUF cases of the generator tests: not built (no ggml target)")
+    endif()
 endfunction()
 
 function(qvac_coreml_add_link_test)
