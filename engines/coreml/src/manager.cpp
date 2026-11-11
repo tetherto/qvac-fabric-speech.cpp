@@ -84,26 +84,33 @@ void SharedModel::retire(const std::string & reason) {
     }
 }
 
-Handle::Handle(std::shared_ptr<SharedModel> m) : m_(std::move(m)) {
-    if (m_) m_->holds_.fetch_add(1);
+Handle::Handle(std::shared_ptr<SharedModel> m) : m_(std::move(m)) {}
+
+Handle::Handle(std::shared_ptr<SharedModel> m, std::shared_ptr<detail::PoolRef> ref)
+    : m_(std::move(m)), ref_(std::move(ref)) {
+    if (m_ && ref_) ref_->holds.fetch_add(1);
 }
 
 Handle & Handle::operator=(Handle && o) noexcept {
     if (this != &o) {
         reset();
         m_ = std::move(o.m_);
+        ref_ = std::move(o.ref_);
     }
     return *this;
 }
 
 void Handle::reset() {
-    if (!m_) return;
     std::shared_ptr<SharedModel> m = std::move(m_);
+    std::shared_ptr<detail::PoolRef> ref = std::move(ref_);
     m_.reset();
-    if (m->holds_.fetch_sub(1) == 1) {
-        // The unit released the model: a resident cap may now evict it.
-        if (std::shared_ptr<detail::Runtime> rt = m->rt_.lock()) rt->notify();
-    }
+    ref_.reset();
+    if (!m || !ref) return;
+    std::shared_ptr<detail::Runtime> rt = m->rt_.lock();
+    // The reference goes before the hold and before the scheduler is woken, so
+    // a worker that sees the release never finds this handle still alive.
+    m.reset();
+    if (ref->holds.fetch_sub(1) == 1 && rt) rt->notify();  // the pool may evict it now
 }
 
 // ---- Slot -----------------------------------------------------------------

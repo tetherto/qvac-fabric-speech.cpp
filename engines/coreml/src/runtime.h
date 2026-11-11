@@ -112,14 +112,25 @@ struct SlotCore {
     std::weak_ptr<PoolCore> pool;
 };
 
+// An instance a pool counts because units retain it: the Handles acquired
+// through the pool's members. It counts while `holds` > 0, whatever happened to
+// those slots meanwhile (evicted, reloaded or destroyed).
+struct PoolRef {
+    const SharedModel * model = nullptr;  // identity only; alive while holds > 0
+    std::atomic<int> holds{0};
+};
+
+// §2.9 resident cap. A pool counts the distinct instances it references: those
+// its live members hold, plus those units retain through it (PoolRef), plus the
+// load in flight for it. Another owner's reference to the same instance never
+// counts here, and an instance a member dropped stops counting at once, even
+// while the last strong reference is still on its way out.
 struct PoolCore {
     size_t cap = 0;
     // (mu)
     std::vector<std::weak_ptr<SlotCore>> members;
     std::vector<std::weak_ptr<SlotCore>> predicted;
-    // Every instance published to a member, until the instance itself dies:
-    // a handle retained after its slot was evicted or destroyed still counts.
-    std::vector<std::weak_ptr<SharedModel>> models;
+    std::vector<std::shared_ptr<PoolRef>> refs;
 };
 
 class Runtime : public std::enable_shared_from_this<Runtime> {
@@ -196,15 +207,16 @@ private:
     std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
     PoolVerdict pool_admits_locked(Job & j, Graveyard & gy);
     void set_cap_blocked_locked(Job & j, bool blocked);
-    size_t pool_live_locked(const PoolCore & p) const;
+    size_t pool_live_locked(const PoolCore & p, Graveyard & gy) const;
     bool running_serves_locked(const PoolCore & p) const;
     void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
                           std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
-    std::shared_ptr<SlotCore> pool_victim_locked(const PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & own,
-                                                 Graveyard & gy) const;
+    std::vector<std::shared_ptr<SlotCore>> pool_victim_locked(const PoolCore & p,
+                                                              const std::vector<std::shared_ptr<SlotCore>> & own,
+                                                              Graveyard & gy) const;
     bool cap_denied_locked(const Job & j, Graveyard & gy) const;
     void screen_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy);
-    void pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m);
+    std::shared_ptr<PoolRef> pool_ref_locked(const SlotCore & c);
     void start_locked(const std::shared_ptr<Job> & j, Clock::time_point now, Graveyard & gy);
     void set_phase(const std::shared_ptr<Job> & j, SlotState st);
     void run_load(const std::shared_ptr<Job> & j);

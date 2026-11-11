@@ -185,7 +185,6 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
             gy.keep(m);
             if (!m->retired()) {
                 c->model = m;
-                pool_record_locked(*c, m);
                 c->state = SlotState::ready;
                 c->last_used = Clock::now();
                 ++c->ready_events;
@@ -347,27 +346,42 @@ int64_t Runtime::job_w(const Job & j) const {
     return -1;
 }
 
-void Runtime::pool_record_locked(const SlotCore & c, const std::shared_ptr<SharedModel> & m) {
+std::shared_ptr<PoolRef> Runtime::pool_ref_locked(const SlotCore & c) {
     std::shared_ptr<PoolCore> p = c.pool.lock();
-    if (!p || !m) return;
-    auto & v = p->models;
-    v.erase(std::remove_if(v.begin(), v.end(), [](const std::weak_ptr<SharedModel> & w) { return w.expired(); }),
+    if (!p || !c.model) return nullptr;
+    auto & v = p->refs;
+    // A ref without holds counts nothing; the handle being built adds its own.
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const std::shared_ptr<PoolRef> & r) {
+                               return r->holds.load() == 0 && r->model != c.model.get();
+                           }),
             v.end());
-    for (const auto & w : v) {
-        if (!w.owner_before(m) && !m.owner_before(w)) return;
+    for (const std::shared_ptr<PoolRef> & r : v) {
+        if (r->model == c.model.get()) return r;
     }
-    v.push_back(m);
+    auto r = std::make_shared<PoolRef>();
+    r->model = c.model.get();
+    v.push_back(r);
+    return r;
 }
 
-size_t Runtime::pool_live_locked(const PoolCore & p) const {
-    // Live instances, tracked independently of slot lifetime and counted
-    // without taking strong references (a strong copy would also defeat the
-    // eviction use_count check), plus the load in flight for this pool.
-    size_t n = 0;
-    for (const auto & w : p.models) {
-        if (!w.expired()) ++n;
+size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
+    // Distinct instances this pool references (see PoolCore), without strong
+    // references to them, plus the load in flight for this pool.
+    std::vector<const SharedModel *> seen;
+    auto add = [&](const SharedModel * m) {
+        if (m && std::find(seen.begin(), seen.end(), m) == seen.end()) seen.push_back(m);
+    };
+    for (const auto & w : p.members) {
+        std::shared_ptr<SlotCore> c = w.lock();
+        if (!c) continue;
+        gy.keep(c);
+        add(c->model.get());
     }
-    return running_serves_locked(p) ? n + 1 : n;
+    for (const std::shared_ptr<PoolRef> & r : p.refs) {
+        if (r->holds.load() > 0) add(r->model);
+    }
+    return running_serves_locked(p) ? seen.size() + 1 : seen.size();
 }
 
 bool Runtime::running_serves_locked(const PoolCore & p) const {
@@ -390,24 +404,43 @@ void Runtime::job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCo
     }
 }
 
-// Least recently used member that no unit holds, the current call does not
-// predict, and that is not part of the job asking for room.
-std::shared_ptr<SlotCore> Runtime::pool_victim_locked(const PoolCore & p,
-                                                      const std::vector<std::shared_ptr<SlotCore>> & own,
-                                                      Graveyard & gy) const {
-    std::shared_ptr<SlotCore> victim;
+// The least recently used instance this pool can drop: no unit retains it
+// through the pool, and every member referencing it is neither predicted for
+// the current call nor part of the job asking for room. Other owners'
+// references do not matter (they count in their own pools). Returns every
+// member referencing it, so evicting them all frees its place; empty if none.
+std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCore & p,
+                                                                   const std::vector<std::shared_ptr<SlotCore>> & own,
+                                                                   Graveyard & gy) const {
+    struct Cand {
+        const SharedModel * model;
+        bool evictable = true;
+        Clock::time_point last_used{};
+        std::vector<std::shared_ptr<SlotCore>> members;
+    };
+    std::vector<Cand> cands;
     for (const auto & w : p.members) {
         std::shared_ptr<SlotCore> m = w.lock();
         if (!m) continue;
         gy.keep(m);
-        if (!m->model || m->model.use_count() != 1 || m->model->holds_.load() != 0) continue;
-        if (std::find(own.begin(), own.end(), m) != own.end()) continue;
+        if (!m->model) continue;
+        auto it = std::find_if(cands.begin(), cands.end(), [&](const Cand & k) { return k.model == m->model.get(); });
+        if (it == cands.end()) it = cands.insert(cands.end(), Cand{m->model.get()});
         bool predicted = false;
         for (const auto & pw : p.predicted) predicted = predicted || same_core(pw, m);
-        if (predicted) continue;
-        if (!victim || m->last_used < victim->last_used) victim = m;
+        if (predicted || std::find(own.begin(), own.end(), m) != own.end()) it->evictable = false;
+        it->last_used = std::max(it->last_used, m->last_used);
+        it->members.push_back(m);
     }
-    return victim;
+    const Cand * victim = nullptr;
+    for (const Cand & k : cands) {
+        if (!k.evictable) continue;
+        bool held = false;
+        for (const std::shared_ptr<PoolRef> & r : p.refs) held = held || (r->model == k.model && r->holds.load() > 0);
+        if (held) continue;
+        if (!victim || k.last_used < victim->last_used) victim = &k;
+    }
+    return victim ? victim->members : std::vector<std::shared_ptr<SlotCore>>{};
 }
 
 bool Runtime::cap_denied_locked(const Job & j, Graveyard & gy) const {
@@ -415,11 +448,11 @@ bool Runtime::cap_denied_locked(const Job & j, Graveyard & gy) const {
     std::vector<std::shared_ptr<PoolCore>> pools;
     job_pools_locked(j, own, pools, gy);
     for (const std::shared_ptr<PoolCore> & p : pools) {
-        if (pool_live_locked(*p) < p->cap) continue;
+        if (pool_live_locked(*p, gy) < p->cap) continue;
         // The load in flight for this pool may publish an evictable model:
         // undecided until it does, so nobody gives up on it yet.
         if (running_serves_locked(*p)) return false;
-        if (!pool_victim_locked(*p, own, gy)) return true;
+        if (pool_victim_locked(*p, own, gy).empty()) return true;
     }
     return false;
 }
@@ -437,13 +470,13 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     job_pools_locked(j, own, pools, gy);
     PoolVerdict verdict = PoolVerdict::admit;
     for (const std::shared_ptr<PoolCore> & p : pools) {
-        if (pool_live_locked(*p) < p->cap) continue;
-        if (std::shared_ptr<SlotCore> victim = pool_victim_locked(*p, own, gy)) {
-            evict_locked(victim, gy);  // the instance is released once mu is unlocked
-            verdict = PoolVerdict::wait_release;
-        } else {
-            return PoolVerdict::blocked;
-        }
+        if (pool_live_locked(*p, gy) < p->cap) continue;
+        const std::vector<std::shared_ptr<SlotCore>> victim = pool_victim_locked(*p, own, gy);
+        if (victim.empty()) return PoolVerdict::blocked;
+        // The pool stops counting the instance at once; it is released once mu
+        // is unlocked, before this job is picked again.
+        for (const std::shared_ptr<SlotCore> & v : victim) evict_locked(v, gy);
+        verdict = PoolVerdict::wait_release;
     }
     return verdict;
 }
@@ -849,7 +882,6 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         if (!c) continue;  // evicted or destroyed meanwhile: never repopulated
         gy.keep(c->model);  // never drop a model under mu
         c->model = m;
-        pool_record_locked(*c, m);
         c->job.reset();
         c->state = SlotState::ready;
         c->reason.clear();
@@ -948,7 +980,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
             if (st == SlotState::ready && c->model) {
                 c->last_used = now;
                 c->queued_behind = false;
-                out.model = Handle(c->model);
+                out.model = Handle(c->model, pool_ref_locked(*c));
                 out.pending = false;
                 return out;
             }
@@ -1157,8 +1189,9 @@ void Runtime::pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr
 }
 
 size_t Runtime::pool_live(const PoolCore & p) {
+    Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    return pool_live_locked(p);
+    return pool_live_locked(p, gy);
 }
 
 }  // namespace detail

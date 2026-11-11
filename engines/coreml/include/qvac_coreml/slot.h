@@ -35,6 +35,7 @@ namespace detail {
 class Runtime;
 struct SlotCore;
 struct PoolCore;
+struct PoolRef;
 }  // namespace detail
 
 using Clock = std::chrono::steady_clock;
@@ -152,7 +153,6 @@ private:
     std::string key_;
     int lease_fd_ = -1;
     std::atomic<bool> retired_{false};
-    std::atomic<int> holds_{0};  // live Handles (a unit retaining the model)
     std::weak_ptr<detail::Runtime> rt_;
 };
 
@@ -164,7 +164,7 @@ public:
     explicit Handle(std::shared_ptr<SharedModel> m);
     Handle(const Handle &) = delete;
     Handle & operator=(const Handle &) = delete;
-    Handle(Handle && o) noexcept : m_(std::move(o.m_)) {}
+    Handle(Handle && o) noexcept : m_(std::move(o.m_)), ref_(std::move(o.ref_)) {}
     Handle & operator=(Handle && o) noexcept;
     ~Handle() { reset(); }
 
@@ -175,7 +175,13 @@ public:
     SharedModel * get() const { return m_.get(); }
 
 private:
+    friend class detail::Runtime;
+    // Acquired through a member of a resident pool: counted in that pool while
+    // this handle lives (§2.9).
+    Handle(std::shared_ptr<SharedModel> m, std::shared_ptr<detail::PoolRef> ref);
+
     std::shared_ptr<SharedModel> m_;
+    std::shared_ptr<detail::PoolRef> ref_;
 };
 
 struct Acquired {

@@ -942,6 +942,96 @@ void case_resident_cap_acquire() {
     CHECK(pool->live() == 1);
 }
 
+// Two engines, one resident pool each, sharing one instance (§2.9): each pool
+// counts only what it references, so either engine can move to another
+// function, and the instance lives on for the other engine.
+void case_resident_cap_two_pools() {
+    for (const bool evict_first : {false, true}) {
+        Env e;
+        const int base = g_live_models.load();
+        const int loads0 = calls("w1");
+        auto p1 = e.m->make_pool(1);
+        auto p2 = e.m->make_pool(1);
+        auto mk = [&](const std::shared_ptr<ResidentPool> & pool, const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            return e.m->make_slot(s, e.policy(Wait::call));
+        };
+        auto e1_w1 = mk(p1, "w1");
+        auto e2_w1 = mk(p2, "w1");
+        e1_w1->request(Priority::minimal);
+        e2_w1->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(e1_w1) && is_ready(e2_w1); }));
+        CHECK(calls("w1") == loads0 + 1);  // one shared instance
+        CHECK(g_live_models.load() == base + 1);
+        CHECK(p1->live() == 1 && p2->live() == 1);
+        Acquired h2 = e2_w1->acquire(Demand::now);  // engine 2 runs a unit on it
+        CHECK(h2);
+        if (evict_first) {
+            e1_w1->evict();
+            CHECK(p1->live() == 0);  // engine 2's references count only in p2
+        }
+        auto e1_w2 = mk(p1, "w2");
+        Acquired a;
+        must_complete("engine 1 moves to w2", [&] { a = e1_w2->acquire(Demand::now); });
+        CHECK(a && a.model->as<FakeModel>()->name == "w2");
+        CHECK(e1_w1->state() == SlotState::idle);
+        CHECK(is_ready(e2_w1));
+        CHECK(h2 && h2.model->as<FakeModel>()->name == "w1");
+        CHECK(g_live_models.load() == base + 2);  // w1 lives on for engine 2
+        CHECK(p1->live() == 1 && p2->live() == 1);
+    }
+}
+
+// The pool count drops when an instance is released or evicted, not when the
+// last strong reference is finally gone (§2.9): a release wakes the replacement
+// at once, never at the periodic recheck, and one replacement evicts once.
+void case_resident_cap_release_window() {
+    Config c = fast_config();
+    c.memory_recheck = 10s;  // a load that waits for the recheck shows up as a stall
+    Env e(c);
+    int slow = 0;
+    int over_evicted = 0;
+    for (int i = 0; i < 40; ++i) {
+        const std::string tag = std::to_string(i);
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto a = mk("xa" + tag);
+        auto b = mk("xb" + tag);
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired held = a->acquire(Demand::now);
+        b->request(Priority::current);
+        std::this_thread::sleep_for(std::chrono::microseconds(100 * (i % 5)));
+        held = Acquired{};
+        if (!wait_for([&] { return is_ready(b); }, 2000)) ++slow;
+
+        auto pool3 = e.m->make_pool(3);
+        std::vector<std::shared_ptr<Slot>> w;
+        for (int k = 0; k < 4; ++k) {
+            SlotSpec s = e.spec("xw" + tag + "_" + std::to_string(k));
+            s.pool = pool3;
+            w.push_back(e.m->make_slot(s, e.policy()));
+        }
+        for (int k = 0; k < 3; ++k) {
+            w[k]->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(w[k]); }));
+        }
+        const uint64_t ev0 = e.m->stats().evictions;
+        w[3]->request(Priority::current);
+        CHECK(wait_for([&] { return is_ready(w[3]); }));
+        std::this_thread::sleep_for(1ms);
+        if (e.m->stats().evictions - ev0 != 1) ++over_evicted;
+        CHECK(pool3->live() == 3);
+    }
+    CHECK(slow == 0);
+    CHECK(over_evicted == 0);
+}
+
 void case_key_lock_requeue() {
     Config cfg = fast_config();
     cfg.backoff_initial = milliseconds(60);  // wide enough that "other" runs inside it
@@ -1625,6 +1715,8 @@ const Case kCases[] = {
     {"resident-cap", case_resident_cap},
     {"resident-cap-retained-handle", case_resident_cap_retained_handle},
     {"resident-cap-acquire", case_resident_cap_acquire},
+    {"resident-cap-two-pools", case_resident_cap_two_pools},
+    {"resident-cap-release-window", case_resident_cap_release_window},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},
