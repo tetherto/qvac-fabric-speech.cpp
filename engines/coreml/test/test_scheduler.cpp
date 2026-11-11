@@ -542,7 +542,7 @@ void case_stale_hint_cooldown() {
     CHECK(h && h->stale_until_s && *h->stale_until_s >= detail::unix_now_s() + 23 * 3600);
     CHECK(h && h->warm_load_ms && *h->warm_load_ms == 20);
     CHECK(s->status().hint && s->status().hint->stale);
-    // Both hint writes name the artifact (prune's ownership, S2a).
+    // Both hint writes name the artifact (the cache prune attributes hints by it).
     auto ends_mlmodelc = [](const std::string & p) {
         return p.size() > 9 && p.compare(p.size() - 9, 9, ".mlmodelc") == 0 && p[0] == '/';
     };

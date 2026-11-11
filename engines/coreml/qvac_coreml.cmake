@@ -40,10 +40,10 @@ function(_qvac_coreml_runtime_sources out_var with_objc)
     set(${out_var} ${srcs} PARENT_SCOPE)
 endfunction()
 
-# The portable generator (S2a, PLAN §2.6-§2.8): recipe parser and interpreter,
+# The portable generator: recipe parser and interpreter,
 # MILBlob writer, keys, cache and failure records. No ggml. gguf_source.cpp
 # (ggml-base) is separate. Compiled with -ffp-contract=off: the interpreter's
-# arithmetic must be one IEEE operation per op on every host (§2.6).
+# arithmetic must be one IEEE operation per op on every host.
 function(_qvac_coreml_generator_sources out_var)
     set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
     set(${out_var}
@@ -190,7 +190,7 @@ function(qvac_coreml_add_tests)
     # non-zero exit, including 77, is a failure).
     set_tests_properties(test-coreml-scheduler PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 300)
 
-    # The portable generator's tests (S2a): per-test temp dirs, no network, no
+    # The portable generator's tests: per-test temp dirs, no network, no
     # Core ML. Same label and no-skip rule as the scheduler test.
     foreach (t recipe milblob cache)
         add_executable(test-coreml-${t} "${dir}/test/test_${t}.cpp")
@@ -216,7 +216,7 @@ function(qvac_coreml_add_tests)
                          PASS_REGULAR_EXPRESSION "qvac_coreml_add_tests\\(REQUIRE_GGML\\): no `ggml`")
 
     if (have_ggml)
-        # Host CLI (PLAN §2.3): dump | twin | f32 | generate | digest | verify.
+        # Host CLI (README.md): dump | twin | f32 | generate | digest | verify.
         add_executable(qvac-coreml-tool "${dir}/tools/qvac-coreml-tool.cpp")
         target_compile_definitions(qvac-coreml-tool PRIVATE QVAC_COREML_NS=qvac_coreml_test)
         target_include_directories(qvac-coreml-tool PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party")

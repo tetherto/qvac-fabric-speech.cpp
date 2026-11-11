@@ -1,4 +1,4 @@
-// Stat helpers (no ggml): the identity tuple of §2.7 step 1 and B.3/B.4.
+// Stat helpers (no ggml): the (size, mtime, inode, device) identity of a source file.
 
 #include "gguf_source.h"
 

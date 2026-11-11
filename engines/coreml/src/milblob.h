@@ -1,8 +1,7 @@
 #pragma once
 
-// MILBlob v2 writer (PLAN §2.2 "Writer", §2.7 step 5): the weights/weight.bin
-// of an .mlpackage, the layout coremltools writes and llm #461/#466's
-// export.h:139-209 asserts.
+// MILBlob v2 writer: the weights/weight.bin of an .mlpackage, in the layout
+// coremltools writes.
 //
 //   [0, 64)    header:   u32le count | u32le version (2) | zeros
 //   per blob:  64-byte metadata at a 64-aligned offset:

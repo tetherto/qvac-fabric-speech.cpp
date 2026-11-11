@@ -3,7 +3,7 @@
 // Shared helpers of the portable generator tests (test-coreml-recipe,
 // test-coreml-milblob, test-coreml-cache): a no-skip check harness, per-test
 // temp dirs, an in-memory and a file-backed TensorSource (no ggml needed),
-// template builders and a fake compile step (§2.7 step 6 is S2b's).
+// template builders and a fake compile step (the Apple compile is not portable).
 
 #include "qvac_coreml/recipe.h"
 
@@ -524,7 +524,7 @@ inline std::shared_ptr<const recipe::Template> make_template(const std::string &
     return recipe::Template::from_dir(dir);
 }
 
-// ---- fake compile (§2.7 step 6 is S2b's) ----------------------------------------------
+// ---- fake compile (the Apple compile is not portable) -----------------------------------
 
 inline std::atomic<int> g_compiles{0};
 inline std::string g_compile_marker_dir;  // cross-process count: one file per compile

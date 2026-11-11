@@ -1,21 +1,20 @@
 #pragma once
 
-// Recipe language, interpreter and templates of the portable Core ML generator
-// (PLAN §2.6, Appendix A, Appendix B.1).
+// Recipe language, interpreter and templates of the portable Core ML generator.
 //
 // A recipe says, blob by blob in weight.bin order, how each weight of a
 // weight-free Core ML template is computed from GGUF tensors. parse() checks
-// the grammar and every static rule of A.1 (known ops, use before `let`, the
+// the grammar and every static rule of the language (known ops, use before `let`, the
 // dtype of the top cast, element counts, offsets against the MILBlob writer,
 // the total size); evaluate() streams the blobs to a sink. The op vocabulary
 // grows with its consumers; this generator version knows Parler's DAC subset:
 //   t f32 f64 f16 add mul div recip clip reshape permute take concat (+ let)
-// `patch`, provided(), meta_f/meta_s and lit() arrive with later PRs (§5.1);
-// the parser rejects them.
+// `patch`, provided(), meta_f/meta_s and lit() belong to later generator
+// versions; the parser rejects them.
 //
 // Arithmetic is IEEE in the operand dtype with no FMA contraction (the
 // interpreter is compiled with -ffp-contract=off). No op of this subset is a
-// reduction, a transcendental or provided(), so every blob is `exact` (A.3);
+// reduction, a transcendental or provided(), so every blob is `exact`;
 // compare_blob() already implements the `ulp` rule later ops flag into.
 
 #include "qvac_coreml/slot.h"
@@ -37,7 +36,7 @@
 
 namespace QVAC_COREML_NS {
 
-// QVAC_COREML_GENERATOR_VERSION (§2.5): covers the interpreter, the MILBlob
+// QVAC_COREML_GENERATOR_VERSION: covers the interpreter, the MILBlob
 // writer and every provided() implementation. Enters every artifact key.
 constexpr uint32_t GENERATOR_VERSION = 1;
 
@@ -79,7 +78,7 @@ struct Source {
     int line = 0;
 };
 
-// GGUF metadata a recipe reads; enters the source digest (B.4).
+// GGUF metadata a recipe reads; enters the source digest.
 struct Meta {
     std::string key;
     std::string mtype;  // u32|i32|f32|f64|bool|str|arr_u32|arr_f32
@@ -95,7 +94,7 @@ struct Item {
     uint64_t count = 0;  // blob: element count
     ExprP expr;
     int line = 0;
-    bool ulp = false;  // blob tolerance class (A.3)
+    bool ulp = false;  // blob tolerance class (see compare_blob)
 };
 
 struct Recipe {
@@ -118,7 +117,7 @@ public:
     int line;
 };
 
-// Grammar and every static check of A.1. Throws RecipeError (a deterministic
+// Grammar and every static check of the language. Throws RecipeError (a deterministic
 // recipe-validation failure).
 Recipe parse(std::string_view text);
 
@@ -162,7 +161,7 @@ public:
     // t(): ggml to_float (ggml_get_type_traits(type)->to_float; F32 copied).
     // `tap`, when set, sees the raw bytes the conversion read.
     virtual Error read_f32(const std::string & name, std::vector<float> & out, const RawTap & tap) = 0;
-    // B.4 canonical metadata value: the gguf type and its little-endian bytes
+    // Canonical metadata value, as the source digest hashes it: the gguf type and its little-endian bytes
     // (strings: str(); arrays: u64le(n) || elements). For arrays,
     // `array_elem_type` (when given) receives the element's gguf type. False
     // when absent.
@@ -191,7 +190,7 @@ struct EvalStats {
 
 // Called after every completed t() read with the SHA-256 of the raw bytes it
 // read, so a generator can prove the bytes it wrote from are the bytes it
-// digested (§2.7 step 5). A non-ok result aborts the evaluation.
+// digested. A non-ok result aborts the evaluation.
 using ReadObserver = std::function<Error(const std::string & name, const std::array<uint8_t, 32> & raw_sha256)>;
 
 // Evaluates every blob in file order. `let` bindings are evaluated on first use
@@ -201,7 +200,7 @@ using ReadObserver = std::function<Error(const std::string & name, const std::ar
 Error evaluate(const Recipe & r, TensorSource & src, const std::function<Error(const BlobOut &)> & sink,
                EvalStats * stats = nullptr, const ReadObserver & observer = nullptr);
 
-// ---- Number formats and tolerance (A.3) ---------------------------------------
+// ---- Number formats and tolerance ---------------------------------------------
 
 // IEEE binary16, round to nearest even (numpy's astype(float16)); overflow
 // gives infinity, NaN stays NaN.
@@ -221,7 +220,7 @@ struct BlobCompare {
     bool pass = false;
 };
 
-// A.3: `exact` blobs must be bit-equal; `ulp` blobs pass per element when
+// Tolerance: `exact` blobs must be bit-equal; `ulp` blobs pass per element when
 // ulp_distance <= 1 or |delta| <= 2^-10 * max|reference blob|. NaN or Inf in
 // either value fails.
 BlobCompare compare_blob(BlobType dt, bool ulp, const uint8_t * ours, const uint8_t * ref, uint64_t count);
@@ -237,17 +236,17 @@ struct WeightBinCheck {
     bool pass = false;
 };
 
-// `qvac-coreml-tool verify` (A.3, §2.4 G1-G3): `ours` against the exporter's
+// `qvac-coreml-tool verify`: `ours` against the exporter's
 // weight.bin `ref`. Both files must have the recipe's blob count, total size,
 // offsets, sizes and MILBlob dtypes; every byte outside the blob payloads
 // (header, metadata, padding) must be equal; each payload passes by
-// compare_blob (exact: byte-equal; ulp: the A.3 rule).
+// compare_blob (exact: byte-equal; ulp: the tolerance rule above).
 WeightBinCheck verify_weight_bin(const Recipe & r, const uint8_t * ours, size_t ours_size, const uint8_t * ref,
                                  size_t ref_size);
 
-// ---- Templates (Appendix B.1) ------------------------------------------------
+// ---- Templates -----------------------------------------------------------------
 
-// One embedded file (S2b's assembler-stub table) or one file read from a
+// One embedded file (from the build's embedded-template table) or one file read from a
 // template directory (Linux tests, qvac-coreml-tool, the dev override).
 struct TemplateFile {
     std::string name;
@@ -287,7 +286,7 @@ public:
     const std::string & id() const { return info_.id; }
     const TemplateInfo & info() const { return info_; }
     const Recipe & recipe() const { return recipe_; }
-    // template_sha256 of B.4.
+    // template_sha256: SHA-256 over every template file's name and digest.
     const std::array<uint8_t, 32> & sha256() const { return sha256_; }
     std::string sha256_hex() const;
     const TemplateFile * file(std::string_view name) const;
@@ -308,7 +307,7 @@ struct MatchResult {
     std::string reason;  // no_template detail when !ok
 };
 
-// template.json `match` (§2.5): general.architecture, the required metadata
+// template.json `match`: general.architecture, the required metadata
 // values, every recipe `source` (name, allowed type, shape) and every `meta`
 // declaration (present, declared type).
 MatchResult match(const Template & t, const TensorSource & src);

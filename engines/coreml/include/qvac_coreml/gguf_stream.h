@@ -1,7 +1,7 @@
 #pragma once
 
 // Streaming GGUF tensor-data access. Shared by tts-cpp's loaders and the Core
-// ML generator (engines/coreml, PLAN §2.3): header-only, in the neutral
+// ML generator (engines/coreml): header-only, in the neutral
 // namespace qvac_gguf, needs only ggml-base.
 //
 // gguf_init_from_file(no_alloc=false) materialises the ENTIRE tensor-data
@@ -11,7 +11,7 @@
 // allocation per model load that coexists with the freshly-allocated
 // backend weight buffer — a 2x peak that gets chatterbox jetsam-killed
 // on iOS.  Loaders that only want a handful of small tensors (voice
-// encoder, CAMPPlus, S3 tokenizer, mel filterbanks) paid the same full-
+// encoder, CAMPPlus, S3Tokenizer, mel filterbanks) paid the same full-
 // file staging cost just to memcpy a few MB out of it.
 //
 // gguf_stream_reader replaces the staging blob with direct file reads:
@@ -65,7 +65,8 @@ public:
     }
 #if !defined(_WIN32)
     // Reads through an already-open descriptor (the Core ML generator reads
-    // every byte through the fd it fstat'ed, PLAN §2.7 step 1). `fd` is
+    // every byte through the fd it fstat'ed, so the bytes it digests are the
+    // file whose identity it checked). `fd` is
     // duplicated; the caller keeps ownership of its own descriptor.
     gguf_stream_reader(const gguf_context * g, int fd) : g_(g), f_(nullptr) {
         const int dup_fd = ::dup(fd);
@@ -96,7 +97,7 @@ public:
         // regardless of `size` (unlike the plain path, which honours it). A
         // chunked partial upload therefore makes it read past the end of the
         // CHUNK-sized scratch; on Adreno that copy lands straight in GPU shared
-        // memory and SIGSEGVs in the driver at model load (QVAC-19557). Upload
+        // memory and SIGSEGVs in the driver at model load. Upload
         // quantized weights whole (peak overhead = largest quantized tensor,
         // still far below the old full-file staging) and keep chunk streaming
         // for f32/f16, where every backend honours (offset, size).

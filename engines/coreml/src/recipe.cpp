@@ -1,5 +1,4 @@
-// Recipe parser, static checker, templates and template matching (PLAN §2.6,
-// Appendix A.1, B.1, B.4 template_sha256).
+// Recipe parser, static checker, templates and template matching.
 
 #include "qvac_coreml/recipe.h"
 
@@ -105,7 +104,7 @@ struct Line {
 };
 
 // Logical lines: `#` comments removed, a newline inside an open `(` or `[` is
-// whitespace (A.1), blank lines dropped.
+// whitespace, blank lines dropped.
 std::vector<Line> logical_lines(std::string_view src) {
     std::vector<Line> out;
     std::string cur;
@@ -327,16 +326,12 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
     return e;
 }
 
-// Ops of this generator version. Later PRs add theirs (A.2).
+// Ops of this generator version. Later generator versions add more.
 const std::set<std::string> kOps = {"t",    "f32",  "f64",     "f16",  "add",    "mul", "div",
                                     "recip", "clip", "reshape", "permute", "take", "concat"};
-// Ops that exist in the language but arrive with a later PR (A.2, §5.1).
-const std::map<std::string, std::string> kLaterOps = {
-    {"sub", "S4"},     {"sqrt", "S4"},   {"slice", "P2"},  {"neg", "P2"},       {"zeros", "P2"},
-    {"ones", "P2"},    {"lit", "P2"},    {"full", "a later PR"}, {"tile", "A1"}, {"exp", "A1"},
-    {"sin", "A1"},     {"cos", "A1"},    {"l2norm", "A1"}, {"matmul", "S6"},    {"meta_f", "S5"},
-    {"meta_s", "S5"},  {"provided", "S5"},
-};
+// Ops that exist in the language but belong to a later generator version.
+const std::set<std::string> kLaterOps = {"sub", "sqrt", "slice", "neg",    "zeros", "ones",   "lit",      "full", "tile",
+                                         "exp", "sin",  "cos",   "l2norm", "matmul", "meta_f", "meta_s", "provided"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
     std::string o = "[";
@@ -459,10 +454,9 @@ private:
     void call(Expr & e) {
         const std::string & op = e.text;
         if (!kOps.count(op)) {
-            if (auto it = kLaterOps.find(op); it != kLaterOps.end()) {
+            if (kLaterOps.count(op)) {
                 throw RecipeError(e.line, "op " + op + "() is not in generator version " +
-                                              std::to_string(GENERATOR_VERSION) + " (it arrives with " + it->second +
-                                              ")");
+                                              std::to_string(GENERATOR_VERSION) + " (a later version adds it)");
             }
             throw RecipeError(e.line, "unknown op " + op + "()");
         }
@@ -820,7 +814,7 @@ Recipe parse(std::string_view text) {
         }
         if (kw == "patch") {
             c.fail("patch lines are not in generator version " + std::to_string(GENERATOR_VERSION) +
-                   " (they arrive with S5)");
+                   " (a later version adds them)");
         }
         c.fail("unknown line '" + kw + "'");
     }
@@ -900,7 +894,7 @@ void Template::init() {
     for (size_t i = 1; i < files_.size(); ++i) {
         if (files_[i].name == files_[i - 1].name) throw std::runtime_error("template: duplicate file " + files_[i].name);
     }
-    // B.4: template_sha256 = H("qvac-coreml-template\0" || for f in sorted(files): str(name) || sha256)
+    // template_sha256 = H("qvac-coreml-template\0" || for f in sorted(files): str(name) || sha256)
     Sha256 h;
     static const char tag[] = "qvac-coreml-template";
     h.update(tag, sizeof(tag));

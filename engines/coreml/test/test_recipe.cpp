@@ -1,4 +1,4 @@
-// test-coreml-recipe (PLAN §2.16, §2.6, Appendix A): grammar and static
+// test-coreml-recipe: grammar and static
 // checks, each op of generator version 1 on hand-computed vectors, dtype
 // promotion, tolerance classes and ULP distance, templates and matching, and
 // (with ggml) GgufSource. Portable: Linux and macOS.
@@ -144,8 +144,8 @@ void case_grammar_errors() {
     expect_error(hdr(192, 1) + kSrcA + "bogus 1\n" + blob + "end\n", "unknown line");
     // Unknown and not-yet-available ops.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(frob(t(\"a\")))\nend\n", "unknown op frob");
-    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "arrives with A1");
-    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "arrives with S5");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "not in generator version 1 (a later version adds it)");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "a later version adds it");
     expect_error(hdr(192, 1) + kSrcA + "patch 10 fp16 1 1.0\n" + blob + "end\n", "patch lines are not");
     // Bindings.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(x)\nlet x = t(\"a\")\nend\n", "used before its let", 7);
@@ -398,7 +398,7 @@ void case_op_layout() {
 }
 
 void case_parler_examples() {
-    // A.4 phase kernel on a small layer: w [IC, OC, 2s]; out[r*OC+o, i, 0] =
+    // Parler DAC phase kernel on a small layer: w [IC, OC, 2s]; out[r*OC+o, i, 0] =
     // w[i,o,r+s], out[r*OC+o, i, 1] = w[i,o,r].
     const int IC = 3, OC = 2, S = 2;
     std::vector<float> w(IC * OC * 2 * S);
@@ -478,8 +478,8 @@ void case_liveness_and_observer() {
 
 void case_golden_weight_bin() {
     // Every op of generator version 1 over awkward values; the weight.bin
-    // bytes are pinned, so Linux and macOS CI prove the same bytes (§2.6:
-    // IEEE per op, no FMA contraction, our own fp16 rounding).
+    // bytes are pinned, so Linux and macOS CI prove the same bytes (IEEE per
+    // op, no FMA contraction, our own fp16 rounding).
     std::vector<float> w(64);
     uint64_t x = 0x9E3779B97F4A7C15ull;
     for (float & v : w) {
@@ -599,7 +599,7 @@ void case_ulp_and_compare() {
     CHECK(cf.pass);
 }
 
-// ---- verify (A.3, the G1-G3 byte-equal rule) ----------------------------------------------
+// ---- verify (layout byte-equal, payloads by tolerance class) ------------------------------
 
 // Two fp16 blobs: 3 elements (payload 6 bytes, then padding) and 1 element.
 TemplateSpec verify_spec() {
@@ -725,7 +725,7 @@ void case_template() {
     CHECK(t->info().export_kind == "toy-v1");
     CHECK(t->info().functions == std::vector<std::string>({"main"}));
     CHECK(t->files().size() == 4);
-    // template_sha256 by hand (B.4).
+    // template_sha256 by hand.
     detail::Sha256 h;
     static const char tag[] = "qvac-coreml-template";
     h.update(tag, sizeof(tag));
@@ -863,7 +863,7 @@ void case_gguf_source() {
     CHECK(got == ref);
     CHECK(src->read_f32("small", got, nullptr).ok() && got == small);
     CHECK(src->read_f32("half", got, nullptr).ok() && got == std::vector<float>({0.0f, 0.5f, 1.0f, 1.5f}));
-    // Metadata, canonical (B.4) and as JSON.
+    // Metadata, canonical (as the source digest hashes it) and as JSON.
     uint32_t type = 0, elem = 0;
     std::vector<uint8_t> bytes;
     CHECK(src->meta_canonical("toy.n", type, bytes, &elem) && type == recipe::GGUF_U32 &&

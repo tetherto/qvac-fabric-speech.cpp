@@ -1,7 +1,7 @@
 #pragma once
 
-// Content keys of Appendix B.4: source_digest, artifact_key and memo_id.
-// template_sha256 is Template::sha256(); hint_id lives in hints.cpp (S1a).
+// Content keys of the generation cache: source_digest, artifact_key and
+// memo_id. template_sha256 is Template::sha256(); hint_id lives in hints.cpp.
 // Every key is SHA-256 over little-endian encodings, identical on every host.
 
 #include "qvac_coreml/recipe.h"
@@ -24,7 +24,7 @@ using Hash = std::array<uint8_t, 32>;
 struct SourceDigest {
     Hash digest{};
     // SHA-256 of each source tensor's raw payload, for the write-time
-    // re-check (§2.7 step 5).
+    // re-check of the bytes the package was written from.
     std::map<std::string, Hash> tensor_sha256;
     uint32_t tensors = 0;
     uint64_t bytes = 0;  // raw tensor bytes hashed

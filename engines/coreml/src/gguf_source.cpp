@@ -1,4 +1,4 @@
-// GgufSource: a GGUF read through one open descriptor (PLAN §2.3, §2.7 step 1).
+// GgufSource: a GGUF read through one open descriptor.
 // ggml-base only: gguf_*, ggml_get_type_traits()->to_float. No ggml-cpu symbol
 // (GGML_BACKEND_DL builds load ggml-cpu as a module).
 

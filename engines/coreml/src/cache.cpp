@@ -1,5 +1,5 @@
 // The generation cache: layout, key locks, memos, artifacts, adoption, the
-// prepare pipeline and prune (PLAN §2.7, §2.8, B.2-B.4).
+// prepare pipeline and prune.
 
 #include "cache.h"
 
@@ -478,7 +478,7 @@ Adoption adopt(const Layout & l, const std::string & template_id, const std::str
     }
     if (memo_id && memo && !memo_present(l, *memo_id, *memo)) {
         // The memo is the persistent reference that keeps the artifact from
-        // prune once this lease is gone (§2.8): no memo, no adoption.
+        // prune once this lease is gone: no memo, no adoption.
         if (Error e = write_memo(l, *memo_id, *memo); !e.ok()) {
             a.lease.release();
             a.kind = Adoption::Kind::error;
@@ -568,7 +568,7 @@ bool fs_supported(const FsFacts & f) {
 #endif
 }
 
-// ---- Writing a package (§2.7 step 5) -------------------------------------------------
+// ---- Writing a package (step 5) ------------------------------------------------------
 
 Error write_package(const recipe::Template & t, recipe::TensorSource & src, const std::string & pkg,
                     recipe::EvalStats * stats, const recipe::ReadObserver & observer) {
@@ -822,7 +822,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
                 mf && mf->memo && mf->memo->template_id == t.id() && mf->memo->artifact_key == mf->key32) {
                 if (in.after_memo_lookup) in.after_memo_lookup();
                 // Re-checks the memo under the lease: a prune may have deleted
-                // it since the lookup (§2.8 adoption step 3).
+                // it since the lookup.
                 Adoption a = adopt(l, t.id(), mf->key32, &out.memo_id, &*mf->memo);
                 if (a.kind == Adoption::Kind::adopted) return ready(a, mf->key32, true, true);
                 if (a.kind == Adoption::Kind::would_block) return would_block();
@@ -892,7 +892,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
             return failed_outcome(out, e, "no_space");  // ~KeyLock releases EX after the record
         }
         if (v == Validity::invalid) {
-            // Unusable artifact: aside, regenerate at the same key (§2.8).
+            // Unusable artifact: aside, regenerate at the same key.
             if (Error qe = quarantine_locked(l, t.id(), key); !qe.ok()) return failed_outcome(out, qe);
         }
         auto [ge, stage] = job.generate(key);

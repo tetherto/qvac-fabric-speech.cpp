@@ -1,4 +1,4 @@
-// test-coreml-milblob (PLAN §2.16): the MILBlob v2 writer's header, alignment,
+// test-coreml-milblob: the MILBlob v2 writer's header, alignment,
 // offsets, size and count assertions. Portable: Linux and macOS.
 
 #include "generator_test_util.h"

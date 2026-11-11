@@ -5,8 +5,8 @@
 //   {"schema": 1, "warm_load_ms": n|null, "cold_load_ms": n|null,
 //    "last_ok": "<iso8601>", "stale_until": "<iso8601>"|null,
 //    "artifact": "<realpath>"}
-// Beyond B.3, "artifact" is the realpath hashed into hint_id; it lets prune
-// (S2a) attribute a hint to a cache artifact and its template id.
+// "artifact" is the realpath hashed into hint_id; it lets the cache's prune
+// attribute a hint to a cache artifact and its template id.
 // A hint records that this host loaded this artifact before; it is not proof
 // that the ANE plan is still cached.
 

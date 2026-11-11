@@ -1,6 +1,6 @@
 #pragma once
 
-// The generator's view of a source GGUF (PLAN §2.3 "Tensor reads", §2.7 step 1).
+// The generator's view of a source GGUF, read through one open descriptor.
 //
 // GgufSource opens the file once (O_RDONLY), fstat's that descriptor, parses
 // the header through it (gguf_init_from_file_ptr, metadata only) and streams
@@ -25,7 +25,7 @@
 namespace QVAC_COREML_NS {
 
 // A TensorSource read through one open descriptor whose identity can be
-// re-checked (§2.7 steps 1 and 5).
+// re-checked when the job opens it and again before it publishes.
 class OpenSource : public recipe::TensorSource {
 public:
     // fstat of the open descriptor (path is left empty).

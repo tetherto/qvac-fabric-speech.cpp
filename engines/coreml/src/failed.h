@@ -1,6 +1,6 @@
 #pragma once
 
-// Failure records (PLAN §2.8 "Failure classes", B.3):
+// Failure records:
 //   failed/<key32>.json                    preparation and compile failures
 //   failed/<key32>.<fn_units_hash>.json    load failures of one (function, units)
 //
@@ -13,7 +13,7 @@
 // resource list (memory, disk, timeout, interruption, XPC), which never
 // promotes.
 //
-// Beyond B.3, a record carries "template" (the template id, so prune can tell
+// A record also carries "template" (the template id, so prune can tell
 // which library owns it) and "process" (who wrote it, so promotion can tell
 // "another process" from a retry in this one).
 
@@ -34,7 +34,7 @@ namespace failed {
 // The generator's own error domain and codes.
 constexpr const char * ERROR_DOMAIN = "qvac.coreml";
 enum Code : int64_t {
-    SOURCE_CHANGED = 1,    // transient: the GGUF changed under the job (§2.7 steps 1 and 5)
+    SOURCE_CHANGED = 1,    // transient: the GGUF changed under the job (open or write-time re-check)
     NO_SPACE = 2,          // transient: statfs below 2 x weight_bin_size
     CACHE_FS = 3,          // unsupported: not a local apfs/hfs volume
     OUT_OF_MEMORY = 4,     // resource
@@ -74,7 +74,7 @@ bool write(const std::string & path, const Record & r);  // atomic (temp + renam
 // This process's token: changes after fork.
 const std::string & process_token();
 
-// Codes that never promote (§2.8; the list lives here).
+// Codes that never promote (the resource list lives here).
 bool is_resource(const std::string & domain, int64_t code);
 
 bool expired(const Record & r, int64_t now_s);
@@ -87,7 +87,7 @@ Record record(const std::string & failed_dir, const std::string & key32, Stage s
               const std::string & function = {}, const std::string & units = {});
 
 // Removes the record for (key, function, units) after a success: promotion
-// counts only consecutive failures (§2.8, "the next attempt ... fails again").
+// counts only consecutive failures.
 // prepare() calls it after generation succeeds or finds the artifact published;
 // the load lane calls it with (function, units) after a successful load.
 void clear(const std::string & failed_dir, const std::string & key32, const std::string & function = {},

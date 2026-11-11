@@ -1,8 +1,8 @@
 #pragma once
 
-// The content-addressed generation cache (PLAN §2.7 steps 1-5 and 7-8, §2.8,
-// B.2-B.4). Portable: everything here runs on Linux; the Apple compile of
-// step 6 is a CompileFn (S2b), and tests pass a fake.
+// The content-addressed generation cache. Portable: everything here runs on
+// Linux; the Apple compile (step 6 of prepare()) is a CompileFn supplied by the
+// caller, and tests pass a fake.
 //
 //   <cache_dir>/qvac-coreml-v1/
 //     sources/<memo_id>.<key32>.json   memo = one reference, written once under the key lock
@@ -10,12 +10,12 @@
 //     locks/<key32>.lock               never deleted
 //     staging/<key32>.<pid>.<rand>/    scratch, never loaded from; `template` holds the owner's template id
 //     used/<key32>                     mtime = last successful load
-//     hints/<hint_id>.json             (S1a); "artifact" attributes it to an artifact here
+//     hints/<hint_id>.json             the scheduler's load hints; "artifact" attributes one to an artifact here
 //     failed/<key32>[.<fn_units_hash>].json
 //     quarantine/<name>.<pid>[...]/    unusable artifacts moved aside under EX, and prune's trash
 //
 // Locking: every key lock is taken LOCK_NB (jobs run holding the scheduler's
-// admission gate, §2.9). A busy lock is `would_block`: the job releases the
+// admission gate, so they must never block on a lock). A busy lock is `would_block`: the job releases the
 // gate and re-queues with backoff. A memo is only ever written holding the
 // key's lock (shared for adoption, exclusive for the generator); prune deletes
 // only holding it exclusively, so a reference cannot appear between prune's
@@ -47,7 +47,7 @@ constexpr const char * ROOT = "qvac-coreml-v1";
 
 // staging/<key32>.<pid>.<rand>/template: the template id that owns a staging
 // directory, written when the directory is created. Prune removes only staging
-// it can attribute to this library (§2.8: unknown owners are left alone).
+// it can attribute to this library; unknown owners are left alone.
 constexpr const char * STAGING_OWNER_FILE = "template";
 
 struct Layout {
@@ -101,7 +101,7 @@ private:
     int fd_ = -1;
 };
 
-// ---- Memos (B.3) ---------------------------------------------------------------
+// ---- Memos ---------------------------------------------------------------------
 
 struct Memo {
     std::string path;  // realpath of the GGUF
@@ -138,7 +138,7 @@ std::vector<MemoFile> all_memos(const Layout & l);
 bool memo_present(const Layout & l, const std::string & memo_id, const Memo & m);
 Error write_memo(const Layout & l, const std::string & memo_id, const Memo & m);
 
-// ---- Artifacts (B.2) -----------------------------------------------------------
+// ---- Artifacts -----------------------------------------------------------------
 
 struct InventoryEntry {
     std::string path;  // relative to the artifact directory, e.g. model.mlmodelc/model.mil
@@ -171,14 +171,14 @@ std::string to_json(const ArtifactInfo & a);
 std::optional<ArtifactInfo> read_artifact_json(const std::string & artifact_dir);
 
 enum class Validity { ok, missing, invalid };
-// The hit check (§2.8 adoption step 2): artifact.json present, schema 1,
+// The hit check of adoption: artifact.json present, schema 1,
 // complete, and every inventory file present at exactly its size.
 Validity validate(const std::string & artifact_dir, std::string * why = nullptr);
 
 // Every regular file under `root`, relative to `base`, sorted.
 std::vector<InventoryEntry> inventory_of(const std::string & base, const std::string & root);
 
-// ---- Adoption (§2.8) -----------------------------------------------------------
+// ---- Adoption ------------------------------------------------------------------
 
 struct Adoption {
     enum class Kind { adopted, missing, invalid, would_block, error };
@@ -208,7 +208,7 @@ std::string prune_trash_path(const Layout & l, const std::string & artifact_name
 // used/<key32>: touched after every successful load (routine prune's age).
 void touch_used(const Layout & l, const std::string & key32);
 
-// ---- The prepare pipeline (§2.7) -------------------------------------------------
+// ---- The prepare pipeline --------------------------------------------------------
 
 struct CompileResult {
     Error error;
@@ -216,7 +216,7 @@ struct CompileResult {
     std::string coremlc;
 };
 // Step 6: compile `mlpackage` and leave the compiled bundle at `mlmodelc_out`
-// (Apple: compileModelAtURL, move with a copy fallback; S2b).
+// (Apple: compileModelAtURL, move with a copy fallback).
 using CompileFn = std::function<CompileResult(const std::string & mlpackage, const std::string & mlmodelc_out)>;
 using OpenFn = std::function<std::unique_ptr<OpenSource>(const std::string & path, Error & err)>;
 
@@ -265,7 +265,9 @@ struct PrepareOutcome {
     uint64_t generation_peak_bytes = 0;
 };
 
-// Steps 1-5 and 7-8, with step 6 through `compile`. Never blocks on a lock.
+// The pipeline: 1 open the source, 2 memo lookup, 3 pre-flight, 4 generate under
+// the key's exclusive lock, 5 write the package, 6 compile through `compile`,
+// 7 publish, 8 adopt. Never blocks on a lock.
 PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx = nullptr);
 
 // Writes the .mlpackage (Manifest.json, Data/com.apple.CoreML/model.mlmodel,
@@ -275,7 +277,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx = nullptr)
 Error write_package(const recipe::Template & t, recipe::TensorSource & src, const std::string & package_dir,
                     recipe::EvalStats * stats = nullptr, const recipe::ReadObserver & observer = nullptr);
 
-// ---- Prune (§2.8) --------------------------------------------------------------
+// ---- Prune ---------------------------------------------------------------------
 
 // What this library owns: the template ids it embeds (with their current
 // template_sha256) and the ids it retired. Unknown ids belong to another addon.
@@ -312,7 +314,7 @@ struct PruneReport {
     size_t hints = 0;
 };
 
-// The three mutually exclusive modes of §2.8. Static: needs no engine
+// The three mutually exclusive modes (scoped, routine, all). Static: needs no engine
 // instance. Never deletes locks/ or the root.
 PruneReport prune(const std::string & cache_dir, const PrunePolicy & policy, const Catalog & catalog);
 

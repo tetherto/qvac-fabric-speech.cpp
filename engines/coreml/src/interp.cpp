@@ -1,4 +1,4 @@
-// Recipe interpreter (PLAN §2.6, Appendix A.1 "Evaluation", A.2, A.3).
+// Recipe interpreter: evaluation, the ops, number formats and blob tolerance.
 //
 // Compiled with -ffp-contract=off (qvac_coreml.cmake): every arithmetic op is
 // one IEEE operation in its operand dtype, with no fused multiply-add, so the
@@ -153,7 +153,7 @@ BlobCompare compare_blob(BlobType dt, bool ulp, const uint8_t * ours, const uint
             d = ulp_distance_f32(static_cast<float>(a), static_cast<float>(b));
         }
         // The bits differ. An exact blob fails on any difference, including
-        // +0 vs -0; only the ulp rule measures +-0 as 0 apart (A.3).
+        // +0 vs -0; only the ulp rule measures +-0 as 0 apart.
         ++c.differing;
         if (c.max_ulp >= 0) c.max_ulp = std::max(c.max_ulp, d);
         if (!ulp || !(d <= 1 || std::fabs(a - b) <= tol)) ok = false;

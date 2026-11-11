@@ -1,5 +1,5 @@
-// test-coreml-cache (PLAN §2.16, §2.7, §2.8, B.2-B.4): the content-addressed
-// cache with a fake compile step (the Apple compile is S2b's). Per-test temp
+// test-coreml-cache: the content-addressed cache with a fake compile step
+// (the Apple compile is not portable). Per-test temp
 // dirs; forked processes for the cross-process cases. Portable: Linux and
 // macOS. Every case runs; there is no skip path.
 
@@ -142,7 +142,7 @@ struct Env {
     cache::Layout layout() const { return cache::Layout(cache); }
 
     // Every routine prune sweeps this test's own temp dir, never the host's
-    // $TMPDIR (where S2b's in-flight qvac-coreml-*.mlmodelc compile outputs live).
+    // $TMPDIR (where the Apple compile's in-flight qvac-coreml-*.mlmodelc outputs live).
     cache::PrunePolicy routine(int64_t later_s = 0) const {
         cache::PrunePolicy p = cache::PrunePolicy::routine();
         p.tmp_dir = td / "tmp";
@@ -190,7 +190,7 @@ void case_golden_keys() {
     };
     auto t = recipe::Template::from_files({file("template.json", tjson), file("recipe.txt", recipe_txt),
                                            file("model.mlmodel", spec), file("Manifest.json", manifest)});
-    // Expected values come from an independent Python implementation of B.4.
+    // Expected values come from an independent Python implementation of the keys.
     CHECK(t->sha256_hex() == "6be7a8664b55e85239cce95152728b8fbe7c5e5a26dd44ea865707b8fbd90d9e");
     MemSource src({TT{"w", T_F32, {2, 2}, {1, 2, 3, 4}}, TT{"b", T_F16, {2}, {0.5f, -1.0f}}},
                   {{"toy.n", "u32", 7}, {"general.architecture", "str", "toy"}});
@@ -1288,7 +1288,7 @@ void case_preflight() {
     CHECK(rec && rec->code == failed::NO_SPACE && rec->cls == ErrorClass::transient);
 }
 
-// ---- EWOULDBLOCK re-queue through the S1a scheduler ----------------------------------------
+// ---- EWOULDBLOCK re-queue through the scheduler ----------------------------------------------
 
 cache::PrepareInputs g_sched_inputs;
 

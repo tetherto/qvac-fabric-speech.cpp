@@ -898,7 +898,7 @@ std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool war
         rec.cold_load_ms = ms;
     }
     rec.last_ok = iso8601_utc(unix_now_s());
-    rec.artifact = j.load.artifact_path;  // prune's ownership (S2a)
+    rec.artifact = j.load.artifact_path;  // lets the cache prune attribute the hint
     // stale_until written meanwhile is preserved (read just above).
     write_hint(j.hint_path, rec);
     {

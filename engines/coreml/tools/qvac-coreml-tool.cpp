@@ -1,5 +1,5 @@
-// qvac-coreml-tool: host CLI of the portable Core ML generator (PLAN §2.3, §2.4,
-// A.3). Built with the engines' *_BUILD_TESTS (and by the standalone
+// qvac-coreml-tool: host CLI of the portable Core ML generator (see
+// engines/coreml/README.md). Built with the engines' *_BUILD_TESTS (and by the standalone
 // engines/coreml build when ggml is found); Linux and macOS.
 //
 //   dump     <gguf> [-o reference-gguf.json]
@@ -18,10 +18,10 @@
 //   generate --template <dir> --gguf <file> -o <out.mlpackage>
 //            Runs the C++ interpreter and MILBlob writer (no compile).
 //   digest   --template <dir> --gguf <file> [--options out=fp16]
-//            template_sha256, source_digest, artifact_key and memo_id (B.4).
+//            template_sha256, source_digest, artifact_key and memo_id.
 //   verify   --template <dir> (--gguf <file> | --ours <weight.bin>) --ref <weight.bin>
-//            Per blob: offset, exact|ulp, differing elements, max ulp distance
-//            (A.3). Exit 1 when any blob fails.
+//            Per blob: offset, exact|ulp, differing elements, max ulp distance.
+//            Exit 1 when any blob fails.
 //
 // The tool links the tests' copy of the runtime (namespace qvac_coreml_test).
 

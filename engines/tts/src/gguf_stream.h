@@ -1,7 +1,7 @@
 #pragma once
 
 // Moved to engines/coreml/include/qvac_coreml/gguf_stream.h: the Core ML
-// generator reads source tensors with the same bounded reader (PLAN §2.3).
+// generator reads source tensors with the same bounded reader.
 // This forwarding header keeps tts-cpp's call sites unchanged; the relative
 // path works for every target that compiles tts sources, with or without
 // tts-cpp's include directories.
