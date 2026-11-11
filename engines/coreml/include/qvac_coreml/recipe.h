@@ -226,6 +226,25 @@ struct BlobCompare {
 // either value fails.
 BlobCompare compare_blob(BlobType dt, bool ulp, const uint8_t * ours, const uint8_t * ref, uint64_t count);
 
+struct BlobCheck {
+    BlobCompare cmp;     // cmp.offset is the recipe's metadata offset
+    std::string layout;  // non-empty: offset, size or dtype differs from the recipe
+};
+
+struct WeightBinCheck {
+    std::vector<std::string> errors;  // file-level: index, total size, blob count, non-payload bytes
+    std::vector<BlobCheck> blobs;     // one per recipe blob, in recipe order
+    bool pass = false;
+};
+
+// `qvac-coreml-tool verify` (A.3, §2.4 G1-G3): `ours` against the exporter's
+// weight.bin `ref`. Both files must have the recipe's blob count, total size,
+// offsets, sizes and MILBlob dtypes; every byte outside the blob payloads
+// (header, metadata, padding) must be equal; each payload passes by
+// compare_blob (exact: byte-equal; ulp: the A.3 rule).
+WeightBinCheck verify_weight_bin(const Recipe & r, const uint8_t * ours, size_t ours_size, const uint8_t * ref,
+                                 size_t ref_size);
+
 // ---- Templates (Appendix B.1) ------------------------------------------------
 
 // One embedded file (S2b's assembler-stub table) or one file read from a

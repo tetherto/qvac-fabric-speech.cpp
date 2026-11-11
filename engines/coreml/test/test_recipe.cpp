@@ -8,6 +8,11 @@
 #include "digest.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <functional>
+
+#include <sys/wait.h>
 
 #if defined(QVAC_COREML_HAVE_GGML)
 #include "ggml.h"
@@ -19,6 +24,7 @@ using recipe::BlobType;
 using recipe::DType;
 
 std::string mutate_dir;  // case_template's rejects() mutates this template dir
+std::string g_tool;      // --tool: qvac-coreml-tool (built and passed whenever ggml is)
 
 namespace {
 
@@ -540,6 +546,110 @@ void case_ulp_and_compare() {
     CHECK(cf.pass);
 }
 
+// ---- verify (A.3, the G1-G3 byte-equal rule) ----------------------------------------------
+
+// Two fp16 blobs: 3 elements (payload 6 bytes, then padding) and 1 element.
+TemplateSpec verify_spec() {
+    TemplateSpec s;
+    s.id = "toy-verify";
+    s.decls = "source \"a\" f32 [3]\nsource \"b\" f32 [1]\n";
+    s.items = {blob("fp16", 3, "f16(t(\"a\"))"), blob("fp16", 1, "f16(t(\"b\"))")};
+    return s;
+}
+
+std::string weight_bin(const recipe::Recipe & r, const std::vector<std::vector<uint16_t>> & blobs) {
+    std::string out;
+    milblob::Writer w(r.blob_count, r.weight_bin_size, [&](const uint8_t * p, size_t n) {
+        out.append(reinterpret_cast<const char *>(p), n);
+        return Error{};
+    });
+    CHECK(w.begin().ok());
+    size_t i = 0;
+    for (const recipe::Item & it : r.items) {
+        if (it.kind != recipe::Item::Kind::blob) continue;
+        const auto & b = blobs[i++];
+        CHECK(w.blob(it.offset, milblob::FLOAT16, reinterpret_cast<const uint8_t *>(b.data()), 2 * b.size()).ok());
+    }
+    CHECK(w.finish().ok());
+    return out;
+}
+
+struct Mutant {
+    const char * name;
+    std::function<void(std::string & ours, std::string & ref)> apply;
+    bool pass;
+};
+
+// Each mutation of a byte-identical pair, and whether verify must pass it.
+std::vector<Mutant> verify_mutants(const recipe::Recipe & r) {
+    const uint64_t b0 = r.items[0].offset, b1 = r.items[1].offset;
+    auto set_u32 = [](std::string & f, uint64_t at, uint32_t v) { std::memcpy(&f[at], &v, 4); };
+    return {
+        {"identical", [](std::string &, std::string &) {}, true},
+        {"exact payload +0 -> -0", [=](std::string & o, std::string &) { o[b1 + 64 + 1] = static_cast<char>(0x80); },
+         false},
+        {"exact payload 1 ulp", [=](std::string & o, std::string &) { o[b0 + 64] ^= 1; }, false},
+        {"dtype tag FLOAT16 -> FLOAT32 in ours", [=](std::string & o, std::string &) { set_u32(o, b0 + 4, 2); },
+         false},
+        {"dtype tag FLOAT32 in both", [=](std::string & o, std::string & f) { set_u32(o, b1 + 4, 2), set_u32(f, b1 + 4, 2); },
+         false},
+        {"reserved header byte", [](std::string & o, std::string &) { o[12] = 1; }, false},
+        {"reserved metadata byte", [=](std::string & o, std::string &) { o[b0 + 40] = 1; }, false},
+        {"padding byte", [=](std::string & o, std::string &) { o[b0 + 64 + 6] = 1; }, false},
+        {"truncated padding", [](std::string & o, std::string &) { o.resize(o.size() - 62); }, false},
+    };
+}
+
+void case_verify_weight_bin() {
+    TempDir td;
+    auto t = make_template(td / "tpl", verify_spec());
+    const recipe::Recipe & r = t->recipe();
+    const std::string base = weight_bin(r, {{0x3c00, 0x0000, 0xbc00}, {0x0000}});
+    CHECK(base.size() == r.weight_bin_size && r.items[0].offset + 64 + 6 < r.items[1].offset);
+    for (const Mutant & m : verify_mutants(r)) {
+        std::string ours = base, ref = base;
+        m.apply(ours, ref);
+        const recipe::WeightBinCheck v = recipe::verify_weight_bin(
+            r, reinterpret_cast<const uint8_t *>(ours.data()), ours.size(), reinterpret_cast<const uint8_t *>(ref.data()),
+            ref.size());
+        CHECK_MSG(v.pass == m.pass, m.name);
+        CHECK_MSG(v.blobs.size() == 2, m.name);
+    }
+    // A ulp blob passes +0 vs -0 (0 ulp apart) and still fails a dtype change.
+    recipe::Recipe ru = r;
+    ru.items[1].ulp = true;
+    std::string ours = base;
+    ours[r.items[1].offset + 64 + 1] = static_cast<char>(0x80);
+    auto v = recipe::verify_weight_bin(ru, reinterpret_cast<const uint8_t *>(ours.data()), ours.size(),
+                                       reinterpret_cast<const uint8_t *>(base.data()), base.size());
+    CHECK(v.pass && v.blobs[1].cmp.differing == 1 && v.blobs[1].cmp.max_ulp == 0);
+    v = recipe::verify_weight_bin(r, reinterpret_cast<const uint8_t *>(ours.data()), ours.size(),
+                                  reinterpret_cast<const uint8_t *>(base.data()), base.size());
+    CHECK(!v.pass && v.blobs[1].cmp.differing == 1 && v.errors.empty());
+
+#if defined(QVAC_COREML_HAVE_GGML)
+    // The CLI: exit status and the PASS/FAIL line for every mutant.
+    CHECK_MSG(!g_tool.empty(), "--tool is required when ggml is available");
+    if (g_tool.empty()) return;
+    for (const Mutant & m : verify_mutants(r)) {
+        std::string ours = base, ref = base;
+        m.apply(ours, ref);
+        write_bytes(td / "ours.bin", ours);
+        write_bytes(td / "ref.bin", ref);
+        const std::string log = td / "verify.log";
+        const std::string cmd = "'" + g_tool + "' verify --template '" + (td / "tpl") + "' --ours '" + (td / "ours.bin") +
+                                "' --ref '" + (td / "ref.bin") + "' > '" + log + "' 2>&1";
+        const int st = std::system(cmd.c_str());
+        CHECK_MSG(WIFEXITED(st) && WEXITSTATUS(st) == (m.pass ? 0 : 1), m.name);
+        std::ifstream in(log);
+        std::string out((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string last = m.pass ? "\nPASS\n" : "\nFAIL\n";
+        CHECK_MSG(out.size() >= last.size() && out.compare(out.size() - last.size(), last.size(), last) == 0,
+                  std::string(m.name) + ": " + out);
+    }
+#endif
+}
+
 // ---- templates and matching ------------------------------------------------------------------
 
 TemplateSpec toy_spec() {
@@ -721,6 +831,9 @@ void case_gguf_source() {
 }  // namespace
 
 int main(int argc, char ** argv) {
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--tool") g_tool = argv[i + 1];
+    }
     return run_cases(argc, argv,
                      {
                          {"grammar-valid", case_grammar_valid},
@@ -735,6 +848,7 @@ int main(int argc, char ** argv) {
                          {"golden-weight-bin", case_golden_weight_bin},
                          {"f16-rounding", case_f16_rounding},
                          {"ulp-and-compare", case_ulp_and_compare},
+                         {"verify-weight-bin", case_verify_weight_bin},
                          {"template", case_template},
                          {"match", case_match},
 #if defined(QVAC_COREML_HAVE_GGML)

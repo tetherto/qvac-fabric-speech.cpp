@@ -6,6 +6,7 @@
 
 #include "qvac_coreml/recipe.h"
 
+#include "milblob.h"
 #include "sha256.h"
 
 #include <algorithm>
@@ -155,6 +156,83 @@ BlobCompare compare_blob(BlobType dt, bool ulp, const uint8_t * ours, const uint
     }
     c.pass = ok;
     return c;
+}
+
+WeightBinCheck verify_weight_bin(const Recipe & r, const uint8_t * ours, size_t ours_size, const uint8_t * ref,
+                                 size_t ref_size) {
+    WeightBinCheck v;
+    std::string err;
+    const auto oi = milblob::read_index(ours, ours_size, &err);
+    if (!oi) v.errors.push_back("ours: " + err);
+    const auto ri = milblob::read_index(ref, ref_size, &err);
+    if (!ri) v.errors.push_back("ref: " + err);
+    if (ours_size != r.weight_bin_size || ref_size != r.weight_bin_size) {
+        v.errors.push_back("size: ours " + std::to_string(ours_size) + ", ref " + std::to_string(ref_size) +
+                           ", recipe " + std::to_string(r.weight_bin_size) + " bytes");
+    }
+    if (oi && ri && (oi->size() != r.blob_count || ri->size() != r.blob_count)) {
+        v.errors.push_back("blob count: ours " + std::to_string(oi->size()) + ", ref " + std::to_string(ri->size()) +
+                           ", recipe " + std::to_string(r.blob_count));
+    }
+    // Every byte outside the recipe's payload ranges must be equal: the
+    // header, each blob's metadata (dtype, reserved fields) and the padding.
+    std::vector<std::pair<uint64_t, uint64_t>> payloads;
+    for (const Item & it : r.items) {
+        if (it.kind != Item::Kind::blob) continue;
+        const uint64_t b = it.offset + milblob::METADATA_BYTES;
+        payloads.emplace_back(b, b + it.count * blob_type_size(it.dtype));
+    }
+    std::sort(payloads.begin(), payloads.end());
+    const uint64_t common = std::min<uint64_t>(ours_size, ref_size);
+    auto first_diff = [&](uint64_t from, uint64_t to) -> int64_t {
+        to = std::min(to, common);
+        for (uint64_t i = from; i < to; ++i) {
+            if (ours[i] != ref[i]) return static_cast<int64_t>(i);
+        }
+        return -1;
+    };
+    uint64_t pos = 0;
+    int64_t diff = -1;
+    for (const auto & pl : payloads) {
+        if (diff < 0 && pl.first > pos) diff = first_diff(pos, pl.first);
+        pos = std::max(pos, pl.second);
+    }
+    if (diff < 0) diff = first_diff(pos, common);
+    if (diff >= 0) v.errors.push_back("non-payload byte differs at offset " + std::to_string(diff));
+
+    size_t bi = 0;
+    for (const Item & it : r.items) {
+        if (it.kind != Item::Kind::blob) continue;
+        BlobCheck bc;
+        bc.cmp.offset = it.offset;
+        bc.cmp.ulp = it.ulp;
+        const milblob::Entry * o = oi && bi < oi->size() ? &(*oi)[bi] : nullptr;
+        const milblob::Entry * f = ri && bi < ri->size() ? &(*ri)[bi] : nullptr;
+        ++bi;
+        const uint64_t bytes = it.count * blob_type_size(it.dtype);
+        const uint32_t dtype = it.dtype == BlobType::fp16 ? milblob::FLOAT16 : milblob::FLOAT32;
+        auto entry_ok = [&](const milblob::Entry * e, const char * who) {
+            if (!e) {
+                bc.layout = std::string(who) + ": missing";
+            } else if (e->offset != it.offset || e->bytes != bytes) {
+                bc.layout = std::string(who) + ": offset " + std::to_string(e->offset) + ", " +
+                            std::to_string(e->bytes) + " bytes";
+            } else if (e->dtype != dtype) {
+                bc.layout = std::string(who) + ": MILBlob dtype " + std::to_string(e->dtype) + ", recipe " +
+                            std::to_string(dtype);
+            }
+            return bc.layout.empty();
+        };
+        if (entry_ok(o, "ours") && entry_ok(f, "ref")) {
+            const uint64_t at = o->data_offset;
+            bc.cmp = compare_blob(it.dtype, it.ulp, ours + at, ref + at, it.count);
+            bc.cmp.offset = it.offset;
+        }
+        v.blobs.push_back(std::move(bc));
+    }
+    v.pass = v.errors.empty();
+    for (const BlobCheck & b : v.blobs) v.pass = v.pass && b.layout.empty() && b.cmp.pass;
+    return v;
 }
 
 // ---- Evaluation ----------------------------------------------------------------

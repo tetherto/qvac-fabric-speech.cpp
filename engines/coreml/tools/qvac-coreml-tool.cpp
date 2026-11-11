@@ -536,34 +536,25 @@ int cmd_verify(const Args & a) {
         if (!e.ok()) die(e.message);
     }
     const std::vector<uint8_t> ref = read_bytes(a.need("--ref"));
-    std::string err;
-    auto oi = milblob::read_index(ours.data(), ours.size(), &err);
-    if (!oi) die("ours: " + err);
-    auto ri = milblob::read_index(ref.data(), ref.size(), &err);
-    if (!ri) die("ref: " + err);
-    bool ok = ours.size() == ref.size() && oi->size() == ri->size();
-    if (!ok) std::printf("layout differs: %zu vs %zu bytes, %zu vs %zu blobs\n", ours.size(), ref.size(), oi->size(), ri->size());
+    const recipe::WeightBinCheck v =
+        recipe::verify_weight_bin(t->recipe(), ours.data(), ours.size(), ref.data(), ref.size());
+    for (const std::string & e : v.errors) std::printf("FAIL %s\n", e.c_str());
     std::printf("%-12s %-5s %-6s %10s %8s %s\n", "offset", "class", "dtype", "differing", "max_ulp", "result");
     size_t bi = 0;
     for (const recipe::Item & it : t->recipe().items) {
         if (it.kind != recipe::Item::Kind::blob) continue;
-        const milblob::Entry * o = bi < oi->size() ? &(*oi)[bi] : nullptr;
-        const milblob::Entry * f = bi < ri->size() ? &(*ri)[bi] : nullptr;
-        ++bi;
-        const size_t bytes = it.count * recipe::blob_type_size(it.dtype);
-        if (!o || !f || o->offset != it.offset || f->offset != it.offset || o->bytes != bytes || f->bytes != bytes) {
-            std::printf("%-12llu %-5s %-6s %10s %8s FAIL (layout)\n", static_cast<unsigned long long>(it.offset),
-                        it.ulp ? "ulp" : "exact", recipe::to_string(it.dtype), "-", "-");
-            ok = false;
+        const recipe::BlobCheck & b = v.blobs[bi++];
+        if (!b.layout.empty()) {
+            std::printf("%-12llu %-5s %-6s %10s %8s FAIL (layout: %s)\n", static_cast<unsigned long long>(it.offset),
+                        it.ulp ? "ulp" : "exact", recipe::to_string(it.dtype), "-", "-", b.layout.c_str());
             continue;
         }
-        const recipe::BlobCompare c =
-            recipe::compare_blob(it.dtype, it.ulp, ours.data() + o->data_offset, ref.data() + f->data_offset, it.count);
         std::printf("%-12llu %-5s %-6s %10llu %8lld %s\n", static_cast<unsigned long long>(it.offset),
-                    it.ulp ? "ulp" : "exact", recipe::to_string(it.dtype), static_cast<unsigned long long>(c.differing),
-                    static_cast<long long>(c.max_ulp), c.pass ? "ok" : "FAIL");
-        ok = ok && c.pass;
+                    it.ulp ? "ulp" : "exact", recipe::to_string(it.dtype),
+                    static_cast<unsigned long long>(b.cmp.differing), static_cast<long long>(b.cmp.max_ulp),
+                    b.cmp.pass ? "ok" : "FAIL");
     }
+    const bool ok = v.pass;
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
