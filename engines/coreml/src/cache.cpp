@@ -863,13 +863,6 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
                                              failed::ERROR_DOMAIN, failed::CACHE_FS);
             return out;
         }
-        if (f.free_bytes < 2 * t.recipe().weight_bin_size) {
-            Error e = Error::transient("no_space: " + std::to_string(f.free_bytes) + " bytes free, need " +
-                                           std::to_string(2 * t.recipe().weight_bin_size),
-                                       failed::ERROR_DOMAIN, failed::NO_SPACE);
-            failed::record(l.failed, key, failed::Stage::prepare, e, t.id(), in.os_build, now);
-            return failed_outcome(out, e, "no_space");
-        }
 
         // Step 4: generate under LOCK_EX|LOCK_NB, re-checking first.
         KeyLock ex;
@@ -888,15 +881,32 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
             ex.release();
             continue;
         }
+        // The space check of the pre-flight runs under EX, so its failure
+        // record is ordered against another process's success like the
+        // generation outcome below (a late record would revive a cleared streak).
+        if (f.free_bytes < 2 * t.recipe().weight_bin_size) {
+            Error e = Error::transient("no_space: " + std::to_string(f.free_bytes) + " bytes free, need " +
+                                           std::to_string(2 * t.recipe().weight_bin_size),
+                                       failed::ERROR_DOMAIN, failed::NO_SPACE);
+            failed::record(l.failed, key, failed::Stage::prepare, e, t.id(), in.os_build, now);
+            return failed_outcome(out, e, "no_space");  // ~KeyLock releases EX after the record
+        }
         if (v == Validity::invalid) {
             // Unusable artifact: aside, regenerate at the same key (§2.8).
             if (Error qe = quarantine_locked(l, t.id(), key); !qe.ok()) return failed_outcome(out, qe);
         }
         auto [ge, stage] = job.generate(key);
-        if (ge.ok()) failed::clear(l.failed, key);  // a success ends the failure streak
-        ex.release();
-        if (!ge.ok()) {
+        // Both outcomes are published under EX, so a failure record and the
+        // clear of a later success are ordered by the key lock: a failure can
+        // never land after another process's success and resurrect a streak.
+        if (ge.ok()) {
+            failed::clear(l.failed, key);  // a success ends the failure streak
+        } else {
             failed::record(l.failed, key, stage, ge, t.id(), in.os_build, now);
+        }
+        ex.release();
+        if (in.after_key_unlock) in.after_key_unlock();
+        if (!ge.ok()) {
             const bool changed = ge.domain == failed::ERROR_DOMAIN && ge.code == failed::SOURCE_CHANGED;
             return failed_outcome(out, ge, changed ? "source_changed" : std::string(failed::to_string(stage)));
         }

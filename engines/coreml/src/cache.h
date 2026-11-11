@@ -242,7 +242,9 @@ struct PrepareInputs {
     OpenFn open;           // default: GgufSource::open (needs ggml)
     FsProbe fs_probe;      // default: default_fs_probe
     int64_t now_s = 0;     // 0: the clock (failure records)
-    std::function<void()> after_memo_lookup;  // tests: runs between the memo lookup and its adoption
+    // Tests only: run inside the windows the cross-process cases exercise.
+    std::function<void()> after_memo_lookup;  // between the memo lookup and its adoption
+    std::function<void()> after_key_unlock;   // after a generation attempt released the key's EX
 };
 
 struct PrepareOutcome {

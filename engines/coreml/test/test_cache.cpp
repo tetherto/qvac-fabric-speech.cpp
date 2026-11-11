@@ -961,6 +961,64 @@ void case_success_clears_failure() {
     CHECK(!fs::exists(fn));
 }
 
+// A's compile fails; A stops right after its generation attempt released the
+// key's EX. B generates successfully in that window. When A resumes, its
+// failure must not land after B's success: no record survives, a later single
+// failure (C) stays transient and a healthy process (D) generates.
+void case_failure_publication_race() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    auto rejecting = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    Pipe unlocked, go;
+    pid_t kid_a = spawn([&] {  // A
+        g_compile_override = rejecting;
+        cache::PrepareInputs in = env.inputs(a);
+        in.after_key_unlock = [&] {
+            unlocked.send('u');
+            go.recv();
+        };
+        CHECK(cache::prepare(in).kind == PrepareOutcome::Kind::failed);
+        return 0;
+    });
+    CHECK(unlocked.recv() == 'u');
+    pid_t kid_b = spawn([&] {  // B, while A is between its unlock and its return
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o) && !o.cache_hit);
+        return 0;
+    });
+    CHECK(reap(kid_b) == 0);
+    go.send('g');
+    CHECK(reap(kid_a) == 0);
+    CHECK(env.artifacts() == 1);
+    const std::string key =
+        fs::directory_iterator(l.artifacts)->path().filename().string().substr(std::string("toy-dac.").size());
+    const std::string rec_path = failed::record_path(l.failed, key);
+    CHECK(!fs::exists(rec_path));  // B's success is the last word
+    // C: one failure after the artifact is damaged stays transient.
+    fs::resize_file(l.artifact_dir("toy-dac", key) + "/model.mlmodelc/weights/weight.bin", 10);
+    pid_t kid_c = spawn([&] {
+        g_compile_override = rejecting;
+        CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+        return 0;
+    });
+    CHECK(reap(kid_c) == 0);
+    auto rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 1);
+    // D: a healthy process retries and generates.
+    pid_t kid_d = spawn([&] {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o) && !o.cache_hit && o.key32 == key);
+        return 0;
+    });
+    CHECK(reap(kid_d) == 0);
+    CHECK(!fs::exists(rec_path));
+}
+
 void case_resource_codes_never_promote() {
     TempDir td;
     const std::string dir = td / "failed";
@@ -1225,6 +1283,9 @@ void case_preflight() {
     o = cache::prepare(in);
     CHECK(o.kind == PrepareOutcome::Kind::failed && o.reason == "no_space" && o.error.cls == ErrorClass::transient);
     CHECK(g_compiles == 0);
+    // Recorded under EX (ordered against a success), as a resource code.
+    auto rec = failed::read(failed::record_path(env.layout().failed, o.key32));
+    CHECK(rec && rec->code == failed::NO_SPACE && rec->cls == ErrorClass::transient);
 }
 
 // ---- EWOULDBLOCK re-queue through the S1a scheduler ----------------------------------------
@@ -1390,6 +1451,7 @@ int main(int argc, char ** argv) {
                          {"adoption-vs-prune-race", case_adoption_vs_prune_race},
                          {"failure-records", case_failure_records},
                          {"success-clears-failure", case_success_clears_failure},
+                         {"failure-publication-race", case_failure_publication_race},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},
