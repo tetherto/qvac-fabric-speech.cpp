@@ -18,6 +18,13 @@ namespace parakeet {
 // unit-tested without Apple frameworks or a model.
 std::string coreml_encoder_sidecar_path(const std::string & gguf_path);
 
+// Full TranscribePsy EU keeps the adapted encoder and gate tap separate from
+// its English encoder. Quantized GGUF variants share the same sidecars.
+std::string coreml_eu_other_sidecar_path(const std::string & gguf_path);
+std::string coreml_eu_gate_sidecar_path(const std::string & gguf_path);
+std::string coreml_eu_precise_sidecar_path(const std::string & gguf_path, bool adapters, int mel_frames);
+std::string coreml_eu_flexible_sidecar_path(const std::string & gguf_path, bool adapters);
+
 // Sortformer v2.1 AOSC sidecar: the subsampling output/cache concatenation is
 // supplied directly, so this bundle contains only the FastConformer block stack.
 std::string coreml_bypass_encoder_sidecar_path(const std::string & gguf_path);

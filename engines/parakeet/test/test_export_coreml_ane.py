@@ -48,6 +48,7 @@ def load(name, module_name):
 ENCODER = load("export-encoder-coreml-ane.py", "export_encoder_coreml_ane")
 DECODER = load("export-decoder-coreml-ane.py", "export_decoder_coreml_ane")
 REFERENCE = load("ref-encoder-from-gguf.py", "ref_encoder_from_gguf")
+GENERIC = load("export-encoder-coreml.py", "export_encoder_coreml")
 
 
 def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, ff_dim=16,
@@ -102,6 +103,78 @@ def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, 
         "parakeet.encoder.pos_emb_max_len": 64,
     }
     return w, meta
+
+
+class EuEncoderTests(unittest.TestCase):
+    def test_fp32_exports_preserve_uncompressed_precision(self):
+        ENCODER.validate_fixed_precision("fp32", 0)
+        ENCODER.validate_fixed_precision("fp16", 6)
+        with self.assertRaisesRegex(ValueError, "--nbits 0"):
+            ENCODER.validate_fixed_precision("fp32", 6)
+
+    def setUp(self):
+        self.weights, self.meta = toy_encoder_weights()
+        self.meta.update({"parakeet.model_variant": ENCODER.EU_VARIANT,
+                          "parakeet.eu.adapter_layers": [0, 1],
+                          "parakeet.eu.gate_layer": 0})
+        for index in range(2):
+            for name, shape in (("down.weight", (3, 8)), ("down.bias", (3,)),
+                                ("up.weight", (8, 3)), ("up.bias", (8,))):
+                self.weights[f"eu.adapter.{index}.{name}"] = torch.randn(*shape) * 0.2
+
+    def test_full_eu_requires_explicit_export_route(self):
+        with self.assertRaisesRegex(ValueError, "requires --eu-route"):
+            ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64)
+        with self.assertRaisesRegex(ValueError, "another model"):
+            ENCODER.validate_eu_route({}, "other")
+        with self.assertRaisesRegex(ValueError, "Invalid"):
+            ENCODER.validate_eu_route(self.meta, "invalid")
+
+    def test_all_routes_match_reference_with_partial_and_full_windows(self):
+        mel = torch.randn(8, 64)
+        outputs = {}
+        for route in ("en", "other", "gate"):
+            model = ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64,
+                                       eu_route=route).eval()
+            self.assertEqual(model.n_layers, 1 if route == "gate" else 2)
+            for valid in (1, 7, 8, 17, 63, 64):
+                with self.subTest(route=route, valid=valid):
+                    want = ENCODER.reference_frames(REFERENCE, self.weights, self.meta,
+                                                     mel, valid, route)
+                    got = ENCODER.ane_encoder_frames(model, mel, valid)
+                    self.assertLess(ENCODER.relative_error(got, want),
+                                    ENCODER.PARITY_REL_TOLERANCE)
+            outputs[route] = ENCODER.ane_encoder_frames(model, mel)
+        self.assertGreater(float((outputs["other"] - outputs["en"]).abs().max()), 0.01)
+        self.assertGreater(float((outputs["gate"] - outputs["en"]).abs().max()), 0.01)
+
+    def test_unwindowed_flexible_routes_match_reference_at_different_lengths(self):
+        self.meta["parakeet.model.type"] = "tdt"
+        for route in ("en", "other"):
+            meta = dict(self.meta, **{"coreml.eu_route": route})
+            self.assertEqual(GENERIC.validate_export_contract(meta, flexible=True, eu_route=route), "tdt")
+            model = GENERIC.EncoderModule(REFERENCE, self.weights, meta, flexible=True,
+                                           pe_table=REFERENCE.sinusoidal_rel_pe(64, 8)).eval()
+            for frames in (9, 17, 33, 64, 129):
+                with self.subTest(route=route, frames=frames), torch.inference_mode():
+                    mel = torch.randn(8, frames)
+                    want = REFERENCE.encoder_forward(mel, self.weights, meta,
+                                                       eu_use_adapters=route == "other")[0]
+                    self.assertLess(ENCODER.relative_error(model(mel), want),
+                                    ENCODER.PARITY_REL_TOLERANCE)
+
+    def test_flexible_export_preserves_numerics_and_input_range(self):
+        meta = dict(self.meta, **{"parakeet.model.type": "tdt", "coreml.eu_route": "other"})
+        model = GENERIC.EncoderModule(REFERENCE, self.weights, meta, flexible=True,
+                                       pe_table=REFERENCE.sinusoidal_rel_pe(64, 8)).eval()
+        exported = GENERIC.trace_flexible_encoder(model, torch.zeros(8, 32), 9, 257)
+        converted = exported.module()
+        for length in (9, 17, 33, 64, 129, 257):
+            mel = torch.randn(8, length)
+            with torch.inference_mode():
+                torch.testing.assert_close(converted(mel), model(mel))
+        with self.assertRaises(RuntimeError):
+            converted(torch.zeros(8, 8))
 
 
 class EncoderHelperTests(unittest.TestCase):
