@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,9 @@ blt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(blt)
 
 MANIFEST = blt.load_manifest(blt.DEFAULT_MANIFEST)
+
+# Plan sections, work-unit ids and ticket ids: none belong in code or docs.
+TASK_ID = re.compile(r"QVAC-[0-9]|PLAN|§|\b(S[0-9][a-c]?|P[0-9]|A1|Q[0-9]|H[0-9]|R[0-9])\b")
 
 
 def errors_of(mutate):
@@ -281,11 +285,17 @@ class AnalysisTest(unittest.TestCase):
                        "| mtl/cfm | 9,000.00 | yes |", "| turbo/cfm | 320.00 | no |",
                        "| turbo | coreml-w7 | 1 | 3,680 | 2,660 | 720 |", "Where each number goes"):
             self.assertIn(needle, doc)
+        self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
 
     def test_report_without_results(self):
         doc = blt.render(blt.summarize([]))
         self.assertIn("Not measured yet", doc)
         self.assertIn("## Time to ready", doc)
+
+    def test_report_cites_no_task_identifiers(self):
+        doc = blt.render(blt.summarize([]))
+        self.assertTrue(doc.startswith("# Core ML load time measurements\n"))
+        self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
 
 
 class TtrSummaryTest(unittest.TestCase):

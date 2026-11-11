@@ -997,11 +997,11 @@ def render(s: dict) -> str:
     env = s["env"]
     L = []
     w = L.append
-    w("# Core ML load time: S1 measurements (QVAC-27561, unit S1c)")
+    w("# Core ML load time measurements")
     w("")
     w("Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in "
-      "`scripts/coreml/bench-manifest.json` (PLAN §5.3). These are the numbers S1b and S6 consume; "
-      "the last section maps each one to the plan item it settles.")
+      "`scripts/coreml/bench-manifest.json`. These numbers set the Chatterbox Core ML runtime's constants "
+      "(Metal cost model, warm-load hints, width set, weight-sharing accounting); the last section says where each one goes.")
     w("")
     if env:
         w(f"- Host: {env.get('chip', '—')}, {(env.get('memsize') or 0) / 2**30:.0f} GB, macOS "
@@ -1011,8 +1011,8 @@ def render(s: dict) -> str:
         w("- Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 "
           "GGUFs; tree digests are in `results.jsonl` (`env.sidecars`).")
     else:
-        w("- Not measured yet: the Benchmark stage runs `bench-load-time.py run` under `lane quiet` and "
-          "regenerates this file with `bench-load-time.py report`.")
+        w("- Not measured yet: run `bench-load-time.py run` on an otherwise idle machine, then regenerate this file "
+          "with `bench-load-time.py report`.")
     w("")
 
     w("Reproduce on an otherwise idle M2 (macOS 15.7.3, AC power), with the sidecars exported as "
@@ -1023,10 +1023,10 @@ def render(s: dict) -> str:
     w("python3 -B scripts/coreml/test_bench_load_time.py     # hermetic, includes --dry-run")
     w("scripts/coreml/bench-load-time.py smoke                # fresh-host.sh identity and e5rt cache clean-up")
     w("scripts/coreml/bench-load-time.py run --tts-cli <build>/tts-cli --out <dir>")
-    w("scripts/coreml/bench-load-time.py report --results <dir> --out docs/COREML-S1-MEASUREMENTS.md")
+    w("scripts/coreml/bench-load-time.py report --results <dir> --out docs/COREML-LOAD-TIME.md")
     w("```")
     w("")
-    w("## Multifunction spec sizes (§2.5)")
+    w("## Multifunction spec sizes")
     w("")
     w("What a template would embed is the program (`model.mil` compiled, `model.mlmodel` in the package), not the "
       "weights. MB = 10^6 bytes.")
@@ -1041,7 +1041,7 @@ def render(s: dict) -> str:
         w("| — | | | | | | | | | | |")
     w("")
 
-    w("## Width set: 3 vs 7 (O8)")
+    w("## Width set: 3 vs 7")
     w("")
     w("Cold = sum of first loads on a fresh identity (ANE compile included), all functions of the set incl. HiFT. "
       "Warm = median per-function load + first prediction in a new process. Synthesis = warm `tts-cli` on the "
@@ -1059,7 +1059,7 @@ def render(s: dict) -> str:
         w("| — | | | | | | |")
     w("")
 
-    w("## `expected_warm_load_ms` per function (§2.9)")
+    w("## `expected_warm_load_ms` per function")
     w("")
     w("A warm load is a new process on an identity whose ANE plans are cached; the hint's `warm_load_ms` is load "
       "plus the warm-up prediction, which is what this column reports. Prediction = median of the later predictions.")
@@ -1077,7 +1077,7 @@ def render(s: dict) -> str:
         w("| — | | | | | | | | |")
     w("")
 
-    w("## Do loaded functions share weight memory? (§2.13)")
+    w("## Do loaded functions share weight memory?")
     w("")
     w(f"All functions of one stage loaded and held in one process, per compute-unit policy. Per metric: the "
       f"increment of the first function, the median of each later one, and the last function loaded alone (MB). "
@@ -1102,7 +1102,7 @@ def render(s: dict) -> str:
         w("| — | | | | | | | | | |")
     w("")
 
-    w("## Per-variant Metal cost constants for `s3gen_estimate_metal_ms` (§3.1.1)")
+    w("## Per-variant Metal cost constants for `s3gen_estimate_metal_ms`")
     w("")
     w("Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen "
       "call per sentence after a discarded warm-up call. Encoder, CFM and the whole pipeline against `T_mu` "
@@ -1121,12 +1121,12 @@ def render(s: dict) -> str:
         w("| — | | | | | | | |")
     w("")
 
-    w("## Time to ready, with and without the admission gate (§2.9, §5.3)")
+    w("## Time to ready, with and without the admission gate")
     w("")
     w("Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one construction group with "
       "`wait=construct`, on a fresh identity with the artifacts at a fresh path. `generate` = a stand-in prepare "
-      "job per artifact (copy the package, `compileModelAtURL`), as on-device generation will; gated = the S1a "
-      "manager, ungated = the same two queues without the gate. Prepare wait = issue to prepare start; "
+      "job per artifact (copy the package, `compileModelAtURL`), as on-device generation will; gated = the shared "
+      "runtime's Manager, ungated = the same two queues without the gate. Prepare wait = issue to prepare start; "
       "load gate wait = artifact available to load start.")
     w("")
     w("| Variant | Config | Runs | All ready | Time to ready median (s) | MAD (s) | Min–max (s) | "
@@ -1146,7 +1146,7 @@ def render(s: dict) -> str:
         w("| — | | | | | | | | | | |")
     w("")
 
-    w("## Available-memory reading under normal load (§2.9 memory admission)")
+    w("## Available-memory reading under normal load")
     w("")
     mem = s["memory"]
     if mem:
@@ -1162,11 +1162,11 @@ def render(s: dict) -> str:
         w("Not measured yet.")
     w("")
 
-    w("## Warm synthesis and encoder-fallback contention (§3.1.1)")
+    w("## Warm synthesis and encoder-fallback contention")
     w("")
     w("`tts-cli`, benchmark prompt, built-in voice, seed 42, q8_0, a new process per run after one priming run. "
       "`coreml-no-encoder` keeps CFM and HiFT on Core ML (so S3Gen still overlaps T3) and the encoder on Metal: "
-      "the T3 slowdown against `coreml-w7` is the contention S1b inherits when the encoder falls back.")
+      "the T3 slowdown against `coreml-w7` is the contention the runtime pays when the encoder falls back.")
     w("")
     w("| Variant | Config | Runs | Wall (ms) | T3 (ms) | S3Gen (ms) | Peak footprint (MB) |")
     w("|---|---|--:|--:|--:|--:|--:|")
@@ -1181,16 +1181,18 @@ def render(s: dict) -> str:
 
     w("## Where each number goes")
     w("")
-    w("| Number | Consumer | Plan |")
-    w("|---|---|---|")
-    w("| Spec sizes | S6 template size budget; LZFSE escape route if over budget | §2.5 |")
-    w("| 3 vs 7 widths (cold total, warm load, synthesis) | S6 width set; O8 sign-off | §3.1.1 Generation, §6.2 O8 |")
-    w("| `expected_warm_load_ms` per function | `template.json` for S6; bounded wait before a hint exists | §2.9 |")
-    w("| Weight sharing verdict | `F_res` charging in the Core ML envelope | §2.13 |")
-    w("| Metal cost constants | `s3gen_estimate_metal_ms` in `chatterbox_coreml.cpp` (S1b) | §3.1.1 |")
-    w("| Time to ready with / without the gate, worst prepare wait | admission-gate decision; S1b \"time to all 15 ready\" | §2.9, §5.3 |")
-    w("| Available-memory reading | confirms memory admission does not defer cold loads on the bench host | §2.9 |")
-    w("| Encoder-fallback contention | S1b overlap expectations | §3.1.1 |")
+    w("| Number | Where it goes |")
+    w("|---|---|")
+    w("| Spec sizes | The multifunction template size budget; LZFSE compression if a template is over it |")
+    w("| 3 vs 7 widths (cold total, warm load, synthesis) | The width set the Chatterbox generation templates ship |")
+    w("| `expected_warm_load_ms` per function | Each template's `template.json`; the bounded wait before a hint "
+      "exists |")
+    w("| Weight sharing verdict | How resident functions are charged against the Core ML memory envelope |")
+    w("| Metal cost constants | `s3gen_estimate_metal_ms` in the Chatterbox Core ML runtime |")
+    w("| Time to ready with / without the gate, worst prepare wait | Whether the admission gate stays on; the "
+      "Chatterbox \"time to all 15 ready\" target |")
+    w("| Available-memory reading | Confirms memory admission does not defer cold loads on the bench host |")
+    w("| Encoder-fallback contention | Expected overlap when the Chatterbox encoder runs on Metal |")
     w("")
     return "\n".join(L)
 
