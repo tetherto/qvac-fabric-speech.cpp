@@ -590,6 +590,9 @@ void case_unknown_ids() {
     failed::record(l.failed, other_key, failed::Stage::prepare, Error::transient("x"), "other-tpl", "TEST1",
                    now_s() - 10 * kDay);
     fs::create_directories(l.quarantine + "/other-tpl." + other_key + ".123");
+    const std::string other_staging = l.staging + "/" + other_key + ".123.abcd";
+    fs::create_directories(other_staging);
+    write_bytes(other_staging + "/" + cache::STAGING_OWNER_FILE, "other-tpl");
     fs::remove(a);
     cache::PrunePolicy later = cache::PrunePolicy::routine();
     later.now_s = now_s() + 31 * kDay;
@@ -601,8 +604,68 @@ void case_unknown_ids() {
         CHECK(fs::exists(l.memo_path(std::string(32, 'f'), std::string(32, '9'))));
         CHECK(fs::exists(failed::record_path(l.failed, other_key)));
         CHECK(fs::exists(l.quarantine + "/other-tpl." + other_key + ".123"));
+        CHECK(fs::exists(other_staging));
     }
     CHECK(!fs::exists(l.artifact_dir("toy-dac", key)));  // ours went
+}
+
+// Staging carries its owner's template id; prune removes only staging owned
+// by this library (embedded or retired ids), lease-free, and (routine) > 1 h old.
+void case_staging_ownership() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    std::string seen_owner;
+    g_compile_gate = [&] {
+        for (const auto & e : fs::directory_iterator(l.staging)) {
+            std::ifstream in((e.path() / cache::STAGING_OWNER_FILE).string());
+            std::getline(in, seen_owner);
+        }
+    };
+    {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+    }
+    g_compile_gate = nullptr;
+    CHECK(seen_owner == "toy-dac");
+    auto make = [&](const std::string & name, const char * owner) {
+        const std::string d = l.staging + "/" + name;
+        fs::create_directories(d + "/qvac-coreml-x.mlpackage");
+        if (owner) write_bytes(d + "/" + cache::STAGING_OWNER_FILE, owner);
+        return d;
+    };
+    const std::string k1(32, '1'), k2(32, '2'), k3(32, '3'), k4(32, '4'), k5(32, '5');
+    auto ours = [&] { return make(k1 + ".1.a", "toy-dac"); };
+    auto retired = [&] { return make(k2 + ".2.b", "old-tpl"); };
+    const std::string unknown = make(k3 + ".3.c", "other-tpl");
+    const std::string no_owner = make(k4 + ".4.d", nullptr);
+    const std::string junk = make("not-a-key.5", "toy-dac");
+    const std::string busy = make(k5 + ".6.e", "toy-dac");
+    std::string d1 = ours(), d2 = retired();
+    cache::KeyLock lease;
+    CHECK(cache::KeyLock::take(l, k5, cache::KeyLock::Mode::shared, lease) == cache::KeyLock::Result::ok);
+    cache::Catalog cat = env.catalog();
+    cat.retired_ids = {"old-tpl"};
+    auto survivors = [&] {
+        return fs::exists(unknown) && fs::exists(no_owner) && fs::exists(junk);
+    };
+    cache::PrunePolicy fresh = cache::PrunePolicy::routine();
+    fresh.tmp_dir = env.td / "tmp";
+    cache::prune(env.cache, fresh, cat);  // nothing is older than 1 h
+    CHECK(fs::exists(d1) && fs::exists(d2) && fs::exists(busy) && survivors());
+    cache::prune(env.cache, cache::PrunePolicy::scoped({a}), cat);  // scoped never touches staging
+    CHECK(fs::exists(d1) && fs::exists(d2) && fs::exists(busy) && survivors());
+    cache::PrunePolicy later = fresh;
+    later.now_s = now_s() + 2 * 3600;
+    CHECK(cache::prune(env.cache, later, cat).staging == 2);
+    CHECK(!fs::exists(d1) && !fs::exists(d2) && fs::exists(busy) && survivors());
+    d1 = ours();
+    d2 = retired();
+    CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), cat).staging == 2);
+    CHECK(!fs::exists(d1) && !fs::exists(d2) && fs::exists(busy) && survivors());
+    lease.release();
+    CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), cat).staging == 1);
+    CHECK(!fs::exists(busy) && survivors());
 }
 
 void case_prune_vs_leases() {
@@ -1138,6 +1201,7 @@ int main(int argc, char ** argv) {
                          {"superseded-and-retired", case_superseded_and_retired},
                          {"dead-memos-of-kept-artifacts", case_dead_memos_of_kept_artifacts},
                          {"unknown-ids", case_unknown_ids},
+                         {"staging-ownership", case_staging_ownership},
                          {"prune-vs-leases", case_prune_vs_leases},
                          {"adoption-vs-prune-race", case_adoption_vs_prune_race},
                          {"failure-records", case_failure_records},

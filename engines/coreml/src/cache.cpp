@@ -660,6 +660,17 @@ struct Job {
         StagingGuard guard;
         guard.dir = l.staging + "/" + key + "." + std::to_string(::getpid()) + "." + rand_hex();
         const std::string pkg = guard.dir + "/qvac-coreml-" + key + ".mlpackage";
+        {
+            std::error_code ec;
+            fs::create_directories(guard.dir, ec);
+            if (ec) {
+                return {Error::transient("create " + guard.dir + ": " + ec.message(), posix_domain(), ec.value()),
+                        failed::Stage::prepare};
+            }
+            // The owner, so prune can tell this library's staging from another addon's.
+            Error oe = write_atomic(guard.dir + "/" + STAGING_OWNER_FILE, t.id());
+            if (!oe.ok()) return {oe, failed::Stage::prepare};
+        }
         phase(PreparePhase::generating);
         auto t0 = std::chrono::steady_clock::now();
         recipe::EvalStats stats;
@@ -1080,9 +1091,15 @@ struct Pruner {
         for (const std::string & n : list_dir(l.staging)) {
             const std::string dir = l.staging + "/" + n;
             if (p.mode == PrunePolicy::Mode::routine && !(mtime_s(dir) >= 0 && now - mtime_s(dir) > 3600)) continue;
+            // <key32>.<pid>.<rand>; anything else has no key lock to take.
             const std::string key = n.substr(0, 32);
+            if (!is_hex32(key) || n.size() <= 32 || n[32] != '.') continue;
             KeyLock ex;
-            if (is_hex32(key) && KeyLock::take(l, key, KeyLock::Mode::exclusive, ex) != KeyLock::Result::ok) continue;
+            if (KeyLock::take(l, key, KeyLock::Mode::exclusive, ex) != KeyLock::Result::ok) continue;  // in use
+            // Under EX: only staging this library owns; an owner that cannot be
+            // established (no or unreadable owner file) is left alone.
+            const std::optional<std::string> owner = read_text(dir + "/" + STAGING_OWNER_FILE);
+            if (!owner || !c.owns(*owner)) continue;
             remove_tree(dir);
             ++rep.staging;
         }

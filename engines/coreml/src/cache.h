@@ -8,7 +8,7 @@
 //     sources/<memo_id>.<key32>.json   memo = one reference, written once under the key lock
 //     artifacts/<template-id>.<key32>/{model.mlmodelc/, artifact.json}   write-once
 //     locks/<key32>.lock               never deleted
-//     staging/<key32>.<pid>.<rand>/    scratch, never loaded from
+//     staging/<key32>.<pid>.<rand>/    scratch, never loaded from; `template` holds the owner's template id
 //     used/<key32>                     mtime = last successful load
 //     hints/<hint_id>.json             (S1a)
 //     failed/<key32>[.<fn_units_hash>].json
@@ -44,6 +44,11 @@ namespace QVAC_COREML_NS {
 namespace cache {
 
 constexpr const char * ROOT = "qvac-coreml-v1";
+
+// staging/<key32>.<pid>.<rand>/template: the template id that owns a staging
+// directory, written when the directory is created. Prune removes only staging
+// it can attribute to this library (§2.8: unknown owners are left alone).
+constexpr const char * STAGING_OWNER_FILE = "template";
 
 struct Layout {
     explicit Layout(const std::string & cache_dir);
