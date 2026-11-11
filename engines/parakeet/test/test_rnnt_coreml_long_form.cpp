@@ -1,9 +1,20 @@
-// Unified RNN-T fixed-capacity Core ML long-form regression gate.
+// Fixed-capacity Core ML long-form regression gate (TDT, Unified RNN-T,
+// Nemotron).
 //
-// The JFK fixture is tiled past the sidecar's mel-frame capacity, then
-// transcribed in separate child processes with Core ML enabled and disabled.
-// An over-capacity result can report encoder_used_coreml only when the Engine
-// selected the fixed-capacity long-form plan and every window used Core ML.
+// The fixture is tiled past (or, when longer, cut to) `target-seconds`, beyond
+// the sidecar's mel-frame capacity, then transcribed in separate child
+// processes with Core ML enabled and disabled. Modes:
+//   ggml-plan              a sidecar next to a full GGUF: the over-capacity
+//                          input must stay on the ggml encoder (one pass, or
+//                          the normal ggml windows) and give the forced-ggml
+//                          tokens, while an input of capacity length or less
+//                          still runs on Core ML;
+//   owner-windowed-coreml  PARAKEET_COREML_ONLY=1, so Core ML owns the encoder:
+//                          every fixed-capacity window must run on Core ML and
+//                          the tokens stay close to the forced-ggml reference;
+//   cache-aware            Nemotron: the over-capacity input takes the
+//                          cache-aware ggml path, not Core ML windows.
+// Exits 3 (skipped) when no Core ML sidecar is active.
 
 #include "parakeet/engine.h"
 #include "test_utils.h"
@@ -46,9 +57,11 @@ std::vector<float> tile_to_seconds(const std::vector<float> & source,
     return samples;
 }
 
+constexpr int kSkipExitCode = 3;
+
 std::string run_child(const std::string & gguf, const std::string & wav,
                       int target_seconds, bool disable_coreml,
-                      bool disable_windowing) {
+                      bool disable_windowing, bool coreml_only = false) {
     int fds[2];
     if (pipe(fds) != 0) return {};
 
@@ -59,6 +72,11 @@ std::string run_child(const std::string & gguf, const std::string & wav,
             setenv("PARAKEET_COREML_DISABLE", "1", 1);
         } else {
             unsetenv("PARAKEET_COREML_DISABLE");
+        }
+        if (coreml_only) {
+            setenv("PARAKEET_COREML_ONLY", "1", 1);
+        } else {
+            unsetenv("PARAKEET_COREML_ONLY");
         }
 
         std::vector<float> source;
@@ -183,9 +201,9 @@ int main(int argc, char ** argv) {
 #else
     if (argc != 7) {
         std::fprintf(stderr,
-            "usage: %s <rnnt.gguf> <wav> <fixed-mel-frames> "
+            "usage: %s <model.gguf> <wav> <fixed-mel-frames> "
             "<target-seconds> <min-token-similarity> "
-            "<windowed-coreml|cache-aware>\n", argv[0]);
+            "<ggml-plan|owner-windowed-coreml|cache-aware>\n", argv[0]);
         return 2;
     }
     const std::string gguf = argv[1];
@@ -195,7 +213,9 @@ int main(int argc, char ** argv) {
     const double minimum_similarity = std::atof(argv[5]);
     const std::string mode = argv[6];
     const bool cache_aware = mode == "cache-aware";
-    if (!cache_aware && mode != "windowed-coreml") {
+    const bool ggml_plan = mode == "ggml-plan";
+    const bool owner = mode == "owner-windowed-coreml";
+    if (!cache_aware && !ggml_plan && !owner) {
         std::fprintf(stderr, "invalid long-form test mode: %s\n", mode.c_str());
         return 2;
     }
@@ -203,7 +223,7 @@ int main(int argc, char ** argv) {
     const ChildResult coreml = parse_result(
         run_child(gguf, wav, target_seconds,
                   /*disable_coreml=*/false,
-                  /*disable_windowing=*/false));
+                  /*disable_windowing=*/false, /*coreml_only=*/owner));
     if (!coreml.parsed) {
         std::fprintf(stderr, "[rnnt-coreml-long-form] FAIL: Core ML child failed\n");
         return 1;
@@ -211,7 +231,7 @@ int main(int argc, char ** argv) {
     if (!coreml.coreml_available) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] SKIP: Core ML sidecar is not active.\n");
-        return 0;
+        return kSkipExitCode;
     }
     if (coreml.mel_frames <= fixed_mel_frames) {
         std::fprintf(stderr,
@@ -219,15 +239,44 @@ int main(int argc, char ** argv) {
             coreml.mel_frames, fixed_mel_frames);
         return 1;
     }
-    if (!cache_aware && !coreml.coreml_used) {
+    if (owner && !coreml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: an over-capacity encoder window fell back to ggml\n");
+        return 1;
+    }
+    if (ggml_plan && coreml.coreml_used) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: an over-capacity input ran fixed Core ML windows "
+            "although Core ML does not own the encoder\n");
         return 1;
     }
     if (cache_aware && coreml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: oversized Nemotron input used independent Core ML windows\n");
         return 1;
+    }
+    if (ggml_plan) {
+        // The longest whole-second input within capacity (16 kHz, 10 ms hop:
+        // 1 + seconds * 100 mel frames) must still run on Core ML.
+        const int short_seconds = (fixed_mel_frames - 1) / 100;
+        const ChildResult fits = parse_result(
+            run_child(gguf, wav, short_seconds,
+                      /*disable_coreml=*/false,
+                      /*disable_windowing=*/false));
+        if (!fits.parsed || fits.mel_frames > fixed_mel_frames) {
+            std::fprintf(stderr,
+                "[rnnt-coreml-long-form] FAIL: %d s child failed or exceeded capacity "
+                "(%d mel frames)\n", short_seconds, fits.mel_frames);
+            return 1;
+        }
+        if (!fits.coreml_used || fits.tokens.empty()) {
+            std::fprintf(stderr,
+                "[rnnt-coreml-long-form] FAIL: a %d s input (%d mel frames) within "
+                "capacity did not run on Core ML\n", short_seconds, fits.mel_frames);
+            return 1;
+        }
+        std::printf("[rnnt-coreml-long-form] %d s input (%d mel frames) ran on Core ML\n",
+                    short_seconds, fits.mel_frames);
     }
 
     const ChildResult ggml = parse_result(
@@ -254,9 +303,16 @@ int main(int argc, char ** argv) {
 
     const double similarity = token_similarity(coreml.tokens, ggml.tokens);
     std::printf(
-        "[rnnt-coreml-long-form] mel=%d coreml_tokens=%zu ggml_tokens=%zu "
+        "[rnnt-coreml-long-form] mode=%s mel=%d coreml_tokens=%zu ggml_tokens=%zu "
         "token_similarity=%.4f\n",
-        coreml.mel_frames, coreml.tokens.size(), ggml.tokens.size(), similarity);
+        mode.c_str(), coreml.mel_frames, coreml.tokens.size(), ggml.tokens.size(),
+        similarity);
+    if (ggml_plan && coreml.tokens != ggml.tokens) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: with the sidecar staged the tokens differ "
+            "from forced ggml\n");
+        return 1;
+    }
     if (similarity < minimum_similarity) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: token similarity %.4f is below %.4f\n",

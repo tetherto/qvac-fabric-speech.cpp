@@ -2095,10 +2095,13 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
             REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
 
-        # Drive Unified RNN-T beyond the 1501-mel-frame sidecar capacity. The
-        # test proves the fixed-capacity long-form plan is selected, every
-        # encoder window stays on Core ML, and its token stream remains close
-        # to the forced-ggml reference.
+        # Inputs beyond the 1501-mel-frame sidecar capacity. With the sidecar
+        # next to a full GGUF they stay on the ggml plan and give the
+        # forced-ggml tokens, while a 15 s input still runs on Core ML
+        # (ggml-plan). The first 60 s of abcdba.wav lost whole sentences on
+        # fixed 15 s windows (318 -> 108 tokens with the registry bundle).
+        # When Core ML owns the encoder (PARAKEET_COREML_ONLY) the
+        # fixed-capacity windows stay on Core ML (owner-windowed-coreml).
         add_executable(test-rnnt-coreml-long-form
             test/test_rnnt_coreml_long_form.cpp)
         target_link_libraries(test-rnnt-coreml-long-form PRIVATE qvac-parakeet)
@@ -2107,8 +2110,20 @@ if (PARAKEET_BUILD_TESTS)
         parakeet_register_test(test-rnnt-coreml-long-form
             LABEL    "fixture"
             ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
-                     "1501" "16" "0.95" "windowed-coreml"
+                     "1501" "16" "0.95" "owner-windowed-coreml"
             REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
+        parakeet_register_test(test-rnnt-coreml-long-form-ggml-plan
+            LABEL    "fixture;coreml"
+            EXE      test-rnnt-coreml-long-form
+            ARGS     "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}"
+                     "1501" "16" "1.0" "ggml-plan"
+            REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_rnnt_coreml}")
+        parakeet_register_test(test-transcribe-coreml-long-form
+            LABEL    "fixture;coreml"
+            EXE      test-rnnt-coreml-long-form
+            ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_abcdba_wav}"
+                     "1501" "60" "1.0" "ggml-plan"
+            REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_abcdba_wav}" "${_qvp_tdt_coreml}")
         parakeet_register_test(test-nemotron-cache-aware-offline
             LABEL    "fixture;coreml"
             EXE      test-rnnt-coreml-long-form
