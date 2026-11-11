@@ -1047,6 +1047,135 @@ void case_resident_cap_two_pools() {
     }
 }
 
+// Another owner's instance enters a capped pool only through that pool's
+// admission (§2.9): a ready registry hit, a late subscriber to a running load
+// and a subscriber joining the other owner's queued job all stay pending while
+// the pool is full with nothing evictable, without delaying the other owner;
+// after a release the slot gets the instance (the same one while the other
+// owner keeps it, a fresh load after it dropped it). With room, both share at
+// once.
+void case_resident_cap_cross_owner() {
+    enum class Join { registry, running, queued };
+    int round = 0;
+    for (const Join join : {Join::registry, Join::running, Join::queued}) {
+        for (const bool drop_owner : {false, true}) {
+            reset_world();  // the previous round's Env released everything
+            Env e;
+            const std::string tag = std::to_string(round++);
+            const std::string shared = "xs" + tag;
+            const std::string gate = "xg" + tag;
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(1);
+            auto mk = [&](const std::string & fn, Wait w) {
+                SlotSpec s = e.spec(fn);
+                s.pool = pool;
+                return e.m->make_slot(s, e.policy(w));
+            };
+            auto a = mk("xh" + tag, Wait::none);
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(held);
+            std::shared_ptr<Slot> gate_slot;
+            if (join == Join::queued) {  // the other owner's job waits behind the gate
+                set_beh(gate, {true});
+                gate_slot = e.slot(gate);
+                gate_slot->request(Priority::minimal);
+                CHECK(wait_for([&] { return in_progress(gate); }));
+            }
+            if (join == Join::running) set_beh(shared, {true});
+            auto external = e.slot(shared);  // another owner, no pool
+            external->request(Priority::minimal);
+            if (join == Join::running) CHECK(wait_for([&] { return in_progress(shared); }));
+            if (join == Join::registry) CHECK(wait_for([&] { return is_ready(external); }));
+            auto b = mk(shared, Wait::call);
+            b->request(Priority::current);
+            Acquired r;
+            if (join == Join::running) {
+                // Denied while the other owner's load runs: no place was reserved.
+                must_complete("call acquisition during the load", [&] { r = b->acquire(Demand::now); });
+                CHECK(!r && r.pending);
+                release(shared);
+            }
+            if (join == Join::queued) release(gate);
+            CHECK(wait_for([&] { return is_ready(external); }));  // the other owner is served
+            std::this_thread::sleep_for(50ms);
+            CHECK(!is_ready(b));
+            CHECK(pool->live() == 1);
+            CHECK(calls(shared) == 1);
+            CHECK(g_live_models.load() == base + (join == Join::queued ? 3 : 2));  // held + external (+ gate)
+            must_complete("call acquisition under the cap", [&] { r = b->acquire(Demand::now); });
+            CHECK(!r && r.pending);
+            {  // strict cannot be served either (§2.10), and gives no place
+                SlotSpec ss = e.spec(shared);
+                ss.pool = pool;
+                SlotPolicy sp = e.policy(Wait::call);
+                sp.strict = true;
+                auto strict = e.m->make_slot(ss, sp);
+                bool threw = false;
+                must_complete("strict acquisition under the cap", [&] {
+                    try {
+                        (void) strict->acquire(Demand::now);
+                    } catch (const CoremlError &) {
+                        threw = true;
+                    }
+                });
+                CHECK(threw);
+                CHECK(pool->live() == 1);
+            }
+            if (drop_owner) {
+                external.reset();
+                CHECK(g_live_models.load() == base + (join == Join::queued ? 2 : 1));  // the capped owner never took it
+                CHECK(pool->live() == 1);
+            }
+            held = Acquired{};
+            must_complete("call acquisition after the release", [&] { r = b->acquire(Demand::now); });
+            CHECK(r && r.model->as<FakeModel>()->name == shared);
+            CHECK(a->state() == SlotState::idle);
+            CHECK(pool->live() == 1);
+            CHECK(calls(shared) == (drop_owner ? 2 : 1));
+            // a's instance died; b's is the external one or its own reload.
+            CHECK(g_live_models.load() == base + 1 + (join == Join::queued ? 1 : 0));
+            r = Acquired{};
+        }
+    }
+    // With room the instance is shared at once: no second load, one place.
+    for (const bool running : {false, true}) {
+        reset_world();
+        Env e;
+        const std::string shared = std::string("xr") + (running ? "1" : "0");
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(2);
+        SlotSpec hs = e.spec("xrh" + shared);
+        hs.pool = pool;
+        auto a = e.m->make_slot(hs, e.policy());
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired held = a->acquire(Demand::if_ready);
+        if (running) set_beh(shared, {true});
+        auto external = e.slot(shared);
+        external->request(Priority::minimal);
+        if (running) {
+            CHECK(wait_for([&] { return in_progress(shared); }));
+        } else {
+            CHECK(wait_for([&] { return is_ready(external); }));
+        }
+        SlotSpec bs = e.spec(shared);
+        bs.pool = pool;
+        auto b = e.m->make_slot(bs, e.policy());
+        b->request(Priority::current);
+        if (running) {
+            CHECK(pool->live() == 2);  // the running load holds the reserved place
+            release(shared);
+        }
+        CHECK(wait_for([&] { return is_ready(b) && is_ready(external); }));
+        CHECK(calls(shared) == 1);
+        CHECK(is_ready(a));
+        CHECK(pool->live() == 2);
+        CHECK(g_live_models.load() == base + 2);
+    }
+}
+
 // The pool count drops when an instance is released or evicted, not when the
 // last strong reference is finally gone (§2.9): a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
@@ -1780,6 +1909,7 @@ const Case kCases[] = {
     {"resident-cap-retained-handle", case_resident_cap_retained_handle},
     {"resident-cap-acquire", case_resident_cap_acquire},
     {"resident-cap-two-pools", case_resident_cap_two_pools},
+    {"resident-cap-cross-owner", case_resident_cap_cross_owner},
     {"resident-cap-release-window", case_resident_cap_release_window},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},

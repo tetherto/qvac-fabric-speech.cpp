@@ -176,10 +176,10 @@ public:
     std::condition_variable state_cv;
     void request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
-    // A queued load the resident cap denies right now (§2.9): acquisitions and
-    // groups do not wait on it. Decided at the call, from the current holds,
-    // predictions and residents.
-    bool cap_blocked_now_locked(const Job & j, Graveyard & gy) const;
+    // The resident cap denies slot `c` the instance its load job brings, right
+    // now (§2.9): acquisitions and groups do not wait on it. Decided at the
+    // call, from the current holds, predictions, residents and reservations.
+    bool cap_blocked_now_locked(const SlotCore & c, Graveyard & gy) const;
 
 private:
     struct WaitPlan {
@@ -213,7 +213,12 @@ private:
     PoolVerdict pool_admits_locked(Job & j, Graveyard & gy);
     void set_cap_blocked_locked(Job & j, bool blocked);
     size_t pool_live_locked(const PoolCore & p, Graveyard & gy) const;
+    bool pool_counts_locked(const PoolCore & p, const SharedModel * m, Graveyard & gy) const;
+    bool pool_takes_locked(const SlotCore & c, const SharedModel * m, Graveyard & gy) const;
     bool running_serves_locked(const PoolCore & p) const;
+    void reserve_locked(Job & j, const SlotCore & c, Graveyard & gy);
+    bool sub_denied_locked(const SlotCore & c, const std::vector<std::shared_ptr<SlotCore>> & own,
+                           Graveyard & gy) const;
     void job_pools_locked(const Job & j, std::vector<std::shared_ptr<SlotCore>> & own,
                           std::vector<std::shared_ptr<PoolCore>> & pools, Graveyard & gy) const;
     std::vector<std::shared_ptr<SlotCore>> pool_victim_locked(const PoolCore & p,
