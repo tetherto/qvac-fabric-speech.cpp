@@ -1,12 +1,12 @@
 #pragma once
 
-// Core ML runtime options and their one-time resolution (PLAN §2.12, B.6).
+// Core ML runtime options and their one-time resolution.
 //
 // Internal header (BUILD_INTERFACE only, never installed). Every engine library
 // compiles its own copy of the runtime inside its own namespace, chosen by
 // qvac_coreml_add_to(... NAMESPACE <ns>), so QVAC_COREML_NS is always defined
 // for code that includes this header. Engines expose their own public
-// CoremlOptions (B.6) and convert it field by field to Options below.
+// CoremlOptions and convert it field by field to Options below.
 
 #include <cstdint>
 #include <optional>
@@ -25,7 +25,7 @@ enum class Generate { unset, never, background };
 enum class Wait { unset, none, construct, call };
 enum class Prewarm { unset, none, minimal, predicted, all };
 
-// Resolved compute-unit vocabulary (B.5). Distinct from the result labels
+// Resolved compute-unit vocabulary. Distinct from the result labels
 // (coreml-all | coreml-ane | coreml-gpu | coreml-cpu | ggml | mixed).
 enum class ComputeUnits { all, cpu_and_ane, cpu_and_gpu, cpu_only };
 
@@ -38,10 +38,10 @@ const char * to_string(ComputeUnits v);
 // Accepts exactly the enum spellings above, as every engine does today.
 std::optional<ComputeUnits> parse_compute_units(std::string_view text);
 
-// all and cpu_and_ane may compile an ANE plan (memory admission, §2.9).
+// all and cpu_and_ane may compile an ANE plan (subject to memory admission).
 bool units_include_ane(ComputeUnits units);
 
-// Internal mirror of the public per-engine CoremlOptions (B.6). Every field is
+// Internal mirror of the public per-engine CoremlOptions. Every field is
 // unset by default.
 struct Options {
     Use use = Use::unset;
@@ -88,7 +88,7 @@ struct Resolved {
 
     bool enabled() const { return use != Use::off; }
     bool strict() const { return use == Use::require; }
-    // Strict behaves like `call` for acquisitions (§2.10).
+    // Strict behaves like `call` for acquisitions.
     Wait acquire_wait() const { return strict() ? Wait::call : wait; }
     ComputeUnits units_or(ComputeUnits stage_default) const {
         return compute_units ? *compute_units : stage_default;
@@ -97,7 +97,7 @@ struct Resolved {
 
 using GetenvFn = const char * (*)(const char * name);
 
-// Resolves the options once (§2.12). `env_prefix` names the model family the
+// Resolves the options once. `env_prefix` names the model family the
 // existing environment variables use (e.g. "CHATTERBOX", "PARLER", "PARAKEET").
 //
 //   <P>_COREML_DISABLE (presence, as today) -> use = off, overriding everything.
@@ -114,7 +114,7 @@ using GetenvFn = const char * (*)(const char * name);
 Resolved resolve_coreml(const Options & opts, std::string_view env_prefix, GetenvFn getenv_fn = nullptr,
                         std::optional<Platform> platform = std::nullopt);
 
-// ---- Fit interface (§2.13: route + memory-degrade only) -------------------
+// ---- Fit interface (route and memory-degrade only) ------------------------
 
 // The engine's two verdicts. coreml_* is the ggml estimate (double residency
 // kept) plus the stage's Core ML envelope.
@@ -125,7 +125,7 @@ struct FitVerdict {
     bool validated = false;
 };
 
-// Memory-degrade (§2.13): only with a budget. When the Core ML-inclusive
+// Memory-degrade: only with a budget. When the Core ML-inclusive
 // verdict fails and the ggml-only verdict passes, the instance resolves
 // use = off (disabled_reason "memory"), so Core ML never turns a working ggml
 // verdict into a refusal. Returns true when it degraded.

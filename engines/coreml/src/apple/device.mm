@@ -1,7 +1,7 @@
 // Device facts on Apple platforms. C and C++ APIs plus Objective-C messages
 // only: no @interface, @implementation or categories in engines/coreml, because
 // the Objective-C runtime has one flat class namespace per process and every
-// engine library carries its own copy of this file (PLAN §2.3).
+// engine library carries its own copy of this file.
 
 #include "../device.h"
 

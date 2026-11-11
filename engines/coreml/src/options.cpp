@@ -116,7 +116,7 @@ Resolved resolve_coreml(const Options & o, std::string_view prefix, GetenvFn get
 
     r.generate = o.generate != Generate::unset ? o.generate : Generate::background;
     r.prewarm = o.prewarm != Prewarm::unset ? o.prewarm : Prewarm::predicted;
-    // iOS keeps today's blocking behaviour until an iOS measurement lands (R8).
+    // iOS keeps today's blocking behaviour until an iOS measurement lands.
     r.wait = o.wait != Wait::unset ? o.wait : (plat == Platform::ios ? Wait::call : Wait::none);
 
     if (o.cache_dir.has_value()) {

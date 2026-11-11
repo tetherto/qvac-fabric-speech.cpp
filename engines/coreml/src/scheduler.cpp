@@ -1,4 +1,4 @@
-// Scheduler (PLAN §2.9): prepare queue + load lane behind one admission gate,
+// Scheduler: prepare queue + load lane behind one admission gate,
 // memory admission for cold ANE loads, would_block re-queue, resident cap,
 // observed-warm hints and the bounded wait.
 
@@ -212,7 +212,7 @@ void Runtime::drop_model_locked(SlotCore & c, Graveyard & gy) {
     }
     // Also when another member or a Handle still counts the instance: that
     // reference may be released first, on another thread, leaving this one
-    // the last (§2.9).
+    // the last.
     p->releasing.push_back(m.get());
     gy.items.push_back(std::make_shared<PendingRelease>(std::move(m), p, weak_from_this()));
 }
@@ -248,7 +248,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
         return;
     }
     // Another owner's live instance is adopted at once only when this slot's
-    // pool already counts it or has room (§2.9). Otherwise a queued job takes
+    // pool already counts it or has room. Otherwise a queued job takes
     // it through admission (evict or stay cap-blocked) and run_load()
     // publishes the existing instance without loading again. The only strong
     // reference taken here becomes the slot's own.
@@ -274,7 +274,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
         c->state = j->started ? j->phase : (j->deferred_memory ? SlotState::deferred_memory : SlotState::queued);
         // A late subscriber to a running load: its pool was not admitted at
         // start. It gets a place if the pool has room; otherwise publish()
-        // hands it a queued job of its own (§2.9).
+        // hands it a queued job of its own.
         if (j->started) reserve_locked(*j, *c, gy);
         return;
     }
@@ -362,7 +362,7 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
     }
     if (c->spec.route == Route::none) return;
     if (cfg.pin_image && pin_state() != PinState::pinned && pin_state() != PinState::main_image) {
-        // §2.9: no asynchronous work from an image that a dlclose could unmap.
+        // No asynchronous work from an image that a dlclose could unmap.
         // pin_for_work() ran before mu was taken; this slot falls back to ggml.
         c->state = SlotState::failed;
         c->error = Error::deterministic("the library image could not be pinned against unload");
@@ -449,10 +449,26 @@ const SharedModel * Runtime::registered_locked(const std::string & key) const {
 }
 
 // The live instance a load job would publish without loading (another owner's,
-// in the registry), or null: run_load() adopts it instead of loading.
+// in the registry), or null. A started job publishes exactly the instance it
+// retained at admission (Job::adopt), and loads when it retained none; a queued
+// job is only compared against the registry, by identity.
 const SharedModel * Runtime::existing_locked(const Job & j) const {
     if (j.kind != JobKind::load || !j.shareable) return nullptr;
+    if (j.started) return j.adopt.get();
     return registered_locked(j.model_key);
+}
+
+// A strong reference to the instance job `j` may adopt, taken at admission so
+// that the identity that waives a pool place stays alive until the job owns it.
+// `gy` keeps a copy: the caller may drop its own under mu.
+std::shared_ptr<SharedModel> Runtime::adoptable_locked(const Job & j, Graveyard & gy) const {
+    if (j.kind != JobKind::load || !j.shareable || retired_.count(j.model_key) != 0) return nullptr;
+    auto it = registry_.find(j.model_key);
+    if (it == registry_.end()) return nullptr;
+    std::shared_ptr<SharedModel> m = it->second.model.lock();
+    if (!m || m->retired()) return nullptr;
+    gy.keep(m);
+    return m;
 }
 
 size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
@@ -581,8 +597,8 @@ std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCor
     return victim ? victim->members : std::vector<std::shared_ptr<SlotCore>>{};
 }
 
-// Whether the pool of subscriber `c` denies it the instance job `j` brings
-// (§2.9): full, not already counting that instance, nothing in it evictable for
+// Whether the pool of subscriber `c` denies it the instance job `j` brings:
+// full, not already counting that instance, nothing in it evictable for
 // this job, and no load in flight for it (that load may publish an evictable
 // instance: undecided until it does). A pool the running job reserved a place
 // in serves its subscribers.
@@ -629,22 +645,26 @@ void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
     state_cv.notify_all();
 }
 
-Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
+Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, std::shared_ptr<SharedModel> & adopt, Graveyard & gy) {
     std::vector<std::shared_ptr<SlotCore>> own;
     std::vector<std::shared_ptr<PoolCore>> pools;
     job_pools_locked(j, own, pools, gy);
     std::vector<std::shared_ptr<PoolCore>> denied;
     std::vector<std::vector<std::shared_ptr<SlotCore>>> victims;
     // A pool that already counts the instance this job would publish takes it
-    // without a new place: nothing is evicted for it (§2.9).
-    const SharedModel * existing = existing_locked(j);
+    // without a new place: nothing is evicted for it. Selecting that instance
+    // and owning it are one step: it is retained here, before its identity
+    // waives a place, and handed to the job on admission. An instance that
+    // already expired is not adoptable, and the job is admitted as a fresh load.
+    std::shared_ptr<SharedModel> found = adoptable_locked(j, gy);
+    const SharedModel * existing = found.get();
     bool releasing = false;
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p, gy) < p->cap) continue;
         if (existing && pool_counts_locked(*p, existing, gy)) continue;
         if (!p->releasing.empty()) {
             // A release is on its way out: wait for it rather than evicting a
-            // second victim meanwhile (§2.9).
+            // second victim meanwhile.
             releasing = true;
             continue;
         }
@@ -663,7 +683,10 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
         served = served || !p || std::find(denied.begin(), denied.end(), p) == denied.end();
     }
     if (!served) return PoolVerdict::blocked;
-    if (victims.empty() && !releasing) return PoolVerdict::admit;
+    if (victims.empty() && !releasing) {
+        adopt = std::move(found);
+        return PoolVerdict::admit;
+    }
     // Each victim counts as a pending release until the reference is released
     // outside mu, which wakes the workers to pick this job again.
     for (const auto & v : victims) {
@@ -711,7 +734,8 @@ void Runtime::screen_locked(Clock::time_point now, Clock::time_point & wake, Gra
     }
 }
 
-std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake, Graveyard & gy) {
+std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake,
+                                          std::shared_ptr<SharedModel> & adopt, Graveyard & gy) {
     screen_locked(now, wake, gy);
     const bool lp = low_power_locked();
     struct Cand {
@@ -739,7 +763,7 @@ std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_poi
     });
     for (const Cand & c : cands) {
         if (c.job->kind != JobKind::load) return c.job;
-        switch (pool_admits_locked(*c.job, gy)) {
+        switch (pool_admits_locked(*c.job, adopt, gy)) {
             case PoolVerdict::admit:
                 set_cap_blocked_locked(*c.job, false);
                 return c.job;
@@ -800,12 +824,14 @@ void Runtime::worker_main(JobKind kind) {
         Clock::time_point wake = now + std::chrono::hours(1);
         const uint64_t seen = gen_;
         std::shared_ptr<Job> job;
+        std::shared_ptr<SharedModel> adopt;  // gy keeps a copy until mu is released
         if (!running_ && !exiting()) {
-            job = pick_locked(now, wake, gy);
+            job = pick_locked(now, wake, adopt, gy);
             if (job && job->kind != kind) {
                 handoff_ = static_cast<int>(job->kind);
                 work_cv.notify_all();
                 job.reset();
+                adopt.reset();  // the other worker admits the job again
             }
         } else if (running_ && !exiting()) {
             // The other worker holds the gate: requests and the periodic
@@ -813,9 +839,11 @@ void Runtime::worker_main(JobKind kind) {
             screen_locked(now, wake, gy);
         }
         if (job) {
+            job->adopt = std::move(adopt);
             start_locked(job, now, gy);
             lk.unlock();
             gy.items.clear();
+            QVAC_COREML_TEST_HOOK(job_started);
             if (kind == JobKind::load) {
                 run_load(job);
             } else {
@@ -855,6 +883,8 @@ void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
     j->done = true;
+    gy.keep(j->adopt);  // released outside mu
+    j->adopt.reset();
     if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
     for (const Sub & s : j->subs) {
         std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
@@ -927,17 +957,20 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
             if (auto r = retired_.find(j->model_key); r != retired_.end()) {
                 retired = true;
                 reason = r->second;
-            } else if (j->shareable) {
-                // The load worker's own reference: no replacement can load
-                // while it lives, since this job holds the gate.
-                if (auto it = registry_.find(j->model_key); it != registry_.end()) existing = it->second.model.lock();
+            } else {
+                // Retained since admission: the instance this job was admitted
+                // to adopt is still alive whoever released it meanwhile. A job
+                // admitted without one loads; it never looks the registry up
+                // again, since a lookup that found nothing would turn an
+                // admitted adoption into a load no pool made room for.
+                existing = j->adopt;
             }
         }
         if (retired) {
             fail(j, Error::deterministic(reason), SlotState::retired);
             return;
         }
-        if (existing && !existing->retired()) {
+        if (existing) {
             // Another owner's model is still alive (e.g. a unit retains it after
             // an eviction): no second instance.
             QVAC_COREML_TEST_HOOK(before_adopt);
@@ -1059,6 +1092,8 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
     std::lock_guard<std::mutex> lk(mu);
     const Clock::time_point now = Clock::now();
     j->done = true;
+    gy.keep(j->adopt);  // released outside mu; subscribers hold `m` from here
+    j->adopt.reset();
     if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
     if (auto r = retired_.find(j->model_key); r != retired_.end()) {
         // Retired while this load ran: deliver nothing.
@@ -1084,7 +1119,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         if (!admitted && !pool_takes_locked(*c, m.get(), gy)) {
             // Its pool was neither admitted at start nor reserved when it
             // joined, and it is full: the instance goes through admission
-            // like any other load (§2.9). The subscriber stays pending.
+            // like any other load. The subscriber stays pending.
             c->job.reset();
             subscribe_load_locked(c, s.prio, s.non_deferrable, gy);
             continue;
@@ -1223,8 +1258,8 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 }
                 if (st == SlotState::idle) return out;  // evicted or cancelled meanwhile
                 if (cap_blocked_now_locked(*c, gy)) {
-                    // §2.9: nothing can be released, so the replacement is not
-                    // loaded and the unit runs with what is ready; §2.10: strict
+                    // Nothing can be released, so the replacement is not
+                    // loaded and the unit runs with what is ready; strict
                     // cannot serve the unit.
                     if (strict) {
                         throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function +
@@ -1247,7 +1282,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 release_graveyard();
                 continue;
             }
-            // none / construct: the bounded wait (§2.9), decided once.
+            // none / construct: the bounded wait, decided once.
             if (!planned) {
                 planned = true;
                 wp = plan_bounded_wait_locked(*c, deadline, now, gy);
@@ -1322,7 +1357,7 @@ void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, G
 
 // One locked section and no strong reference of its own: the slot's reference
 // leaves only through drop_model_locked, so its pool keeps the place until
-// that reference is released (§2.9), never before.
+// that reference is released, never before.
 void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string & reason) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
