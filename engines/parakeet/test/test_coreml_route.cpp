@@ -11,6 +11,9 @@
 //                         chosen, and the call reports "mixed"
 //   next-call-reverts     the next call acquires a null route: ggml plan,
 //                         label "ggml"
+//   cannot-serve          a capacity/shape miss (encode rc 1-4) runs that
+//                         dispatch on ggml, leaves the slot ready and the
+//                         next dispatch on Core ML; only rc 5-7 retire
 //   owner-route           the synchronous owner route returns the error and
 //                         never retires
 //   pending-route         a slot still loading gives the ggml route marked
@@ -91,6 +94,7 @@ constexpr const char * kFakeLabel = "coreml-ane";
 struct FakeEncoder {
     std::atomic<int> encodes{0};
     std::atomic<int> fail_at{-1};  // encode index that fails, -1 never
+    std::atomic<int> fail_rc{7};   // the code it fails with (7: a failed prediction)
 };
 
 std::atomic<int> g_fake_loads{0};
@@ -135,7 +139,7 @@ const char * fake_label(parakeet_coreml_context *) { return kFakeLabel; }
 int fake_encode(void *, parakeet_coreml_context * ctx, int, int, int, const float *, int, int, float *) {
     auto * enc = reinterpret_cast<FakeEncoder *>(ctx);
     const int index = enc->encodes++;
-    return index == enc->fail_at.load() ? 7 : 0;
+    return index == enc->fail_at.load() ? enc->fail_rc.load() : 0;
 }
 
 const EncoderModelOps & fake_ops() {
@@ -275,6 +279,46 @@ void case_window_k_failure_and_next_call() {
     CHECK(!other_route.holds(), "another owner of the retired artifact gets the ggml route");
     CHECK(other->state() == pcm::SlotState::retired, "and its slot reports retired");
     CHECK(g_fake_loads.load() == loads_before, "a retired artifact is never loaded again");
+    fs::remove_all(dir);
+}
+
+void case_cannot_serve_keeps_route() {
+    const fs::path dir = make_temp_dir("cannotserve");
+    auto m = pcm::Manager::create(fast_config());
+    auto slot = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
+
+    // Window 1 of 3 exceeds the handle's capacity: the sidecar returns 2
+    // (parakeet_coreml_encode_valid's capacity / ANE-window code).
+    EncoderRoute route = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(route.usable(), "the call holds the encoder");
+    auto * enc = reinterpret_cast<FakeEncoder *>(route.context());
+    enc->fail_rc = 2;
+    enc->fail_at = 1;
+    const CallOutcome call = run_call(route, 3);
+    CHECK(call.on_coreml.size() == 3 && call.on_coreml[0] && !call.on_coreml[1] && call.on_coreml[2],
+          "only the window the handle cannot serve ran on ggml; the next one ran on Core ML");
+    CHECK(call.ggml_dispatches == 1, "one ggml dispatch");
+    CHECK(route.usable() && !route.failed(), "a capacity miss leaves the route usable");
+    CHECK(slot->state() == pcm::SlotState::ready, "a capacity miss does not retire the slot");
+
+    const EncoderRoute next = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(next.holds(), "the next call still acquires the encoder");
+    CHECK(run_call(next, 2).label == kFakeLabel, "the next call runs on Core ML");
+
+    // Every cannot-serve code keeps the route; every prediction code retires.
+    for (int rc = 1; rc <= 7; ++rc) {
+        CHECK(encode_prediction_failed(rc) == (rc >= 5), "rc 1-4 cannot serve, rc 5-7 failed prediction");
+    }
+    CHECK(!encode_prediction_failed(0) && !encode_prediction_failed(101),
+          "success and the engine's CTC-head codes are not sidecar failures");
+
+    // A real prediction failure on the same slot still retires it.
+    const EncoderRoute last = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    auto * enc2 = reinterpret_cast<FakeEncoder *>(last.context());
+    enc2->fail_rc = 5;
+    enc2->fail_at = enc2->encodes.load() + 1;  // the second window
+    CHECK(run_call(last, 2).label == "mixed", "a failed prediction makes the call mixed");
+    CHECK(slot->state() == pcm::SlotState::retired, "a failed prediction retires the slot");
     fs::remove_all(dir);
 }
 
@@ -531,6 +575,7 @@ void case_fit_stable() {
 int main() {
     case_null_route_plan();
     case_window_k_failure_and_next_call();
+    case_cannot_serve_keeps_route();
     case_owner_route();
     case_pending_route();
     case_sidecar_groups();

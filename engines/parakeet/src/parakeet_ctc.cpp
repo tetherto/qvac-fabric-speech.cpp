@@ -4990,16 +4990,21 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    // A fixed-capacity handle (an offline fixed export or the ANE window)
+    // cannot serve a longer input: that dispatch runs on ggml and the route
+    // stays usable (a capacity miss is not a prediction failure, §2.10).
+    const int capacity = route.geometry().fixed_mel_frames;
+    const bool fits_capacity = capacity <= 0 || n_mel_frames <= capacity;
     if (model.model_type == ParakeetModelType::CTC) {
-        return encoder_is_offline(model.encoder_cfg) &&
+        return fits_capacity && encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
     }
     if (model.model_type == ParakeetModelType::RNNT) {
-        return encoder_is_offline(model.encoder_cfg) &&
+        return fits_capacity && encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
     }
     if (model.model_type == ParakeetModelType::TDT) {
-        return encoder_is_offline(model.encoder_cfg);
+        return fits_capacity && encoder_is_offline(model.encoder_cfg);
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         const int fixed_frames = route.geometry().fixed_mel_frames;
@@ -5385,9 +5390,12 @@ int run_encoder(ParakeetCtcModel   & model,
         route, eligible,
         [&] { return run_encoder_coreml(model, route, mel, n_mel_frames, mel_valid, n_mels, out); },
         [&] {
-            if (coreml_rc != 0) {
+            if (encode_prediction_failed(coreml_rc)) {
                 PARAKEET_LOG_WARN("parakeet: Core ML encoder failed (rc=%d); retired it, "
                                   "falling back to the ggml encoder\n", coreml_rc);
+            } else if (coreml_rc != 0) {
+                PARAKEET_LOG_WARN("parakeet: Core ML encoder cannot serve this call (rc=%d); "
+                                  "running it on the ggml encoder\n", coreml_rc);
             }
             return run_encoder_ggml(model, mel, n_mel_frames, n_mels, out, max_layers,
                                     capture_intermediates, consumer, mel_valid, all_valid);
@@ -5780,10 +5788,16 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                 out.logits.clear();
                 return 0;
             }
-            PARAKEET_LOG_WARN(
-                "parakeet: Core ML bypass encoder failed (rc=%d); "
-                "retiring the sidecar and falling back to ggml encoder\n", rc);
-            model.impl->bypass_slot->retire("prediction failed (rc=" + std::to_string(rc) + ")");
+            if (encode_prediction_failed(rc)) {
+                PARAKEET_LOG_WARN(
+                    "parakeet: Core ML bypass encoder failed (rc=%d); "
+                    "retiring the sidecar and falling back to ggml encoder\n", rc);
+                model.impl->bypass_slot->retire("prediction failed (rc=" + std::to_string(rc) + ")");
+            } else {
+                PARAKEET_LOG_WARN(
+                    "parakeet: Core ML bypass encoder cannot serve this step (rc=%d); "
+                    "running it on the ggml encoder\n", rc);
+            }
         }
     }
 #endif

@@ -10,7 +10,7 @@
 //   - a route that holds a handle runs the unit on Core ML;
 //   - a null route runs it on ggml with exactly today's ggml-only plan, so a
 //     sidecar that is still loading never changes a ggml transcript.
-// A Core ML failure at window k retires the sidecar process-wide (later
+// A failed Core ML prediction at window k retires the sidecar process-wide (later
 // acquisitions return null) and windows k.. of the same unit run on ggml with
 // the plan already chosen; the call then reports "mixed". The next call
 // acquires a null route and reverts to the ggml plan.
@@ -134,9 +134,21 @@ private:
     bool pending_ = false;
 };
 
+// The sidecar encode's return codes (coreml/parakeet-encoder.mm):
+//   0    success;
+//   1-4  the handle cannot serve this call (bad arguments, a shape above its
+//        capacity or window, I/O it cannot bind) and no prediction ran;
+//   5-7  the prediction failed (an error, a missing output, an output that
+//        does not fit).
+// Codes outside 1-7 come from the engine's own post-processing (the CTC head)
+// and are not a sidecar failure either.
+inline bool encode_prediction_failed(int rc) { return rc >= 5 && rc <= 7; }
+
 // One encoder dispatch on a route: Core ML when the route can serve it and
-// the call shape is eligible, otherwise ggml. A Core ML failure retires the
-// sidecar and runs this dispatch on ggml (an owner route returns the error).
+// the call shape is eligible, otherwise ggml. Only a failed prediction retires
+// the sidecar (§2.10); a call the handle cannot serve runs this dispatch on
+// ggml and leaves the route usable for the next one, as before the runtime.
+// An owner route returns any Core ML error (it has no ggml weights).
 // `used_coreml` reports where the dispatch ran.
 template <class CoremlFn, class GgmlFn>
 int dispatch_on_route(const EncoderRoute & route, bool eligible, CoremlFn && run_coreml,
@@ -150,7 +162,7 @@ int dispatch_on_route(const EncoderRoute & route, bool eligible, CoremlFn && run
             return 0;
         }
         if (route.owner()) return rc;
-        route.fail("prediction failed");
+        if (encode_prediction_failed(rc)) route.fail("prediction failed");
     }
     return run_ggml();
 }
