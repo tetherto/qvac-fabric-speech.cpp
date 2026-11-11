@@ -421,7 +421,7 @@ jobs:
             -m models-cache/ggml-tiny.en.bin \
             -f third_party/whisper.cpp/samples/jfk.wav -nt > smoke.txt 2> smoke.log
           grep -i -E "ggml_webgpu|backend|no GPU" smoke.log || true
-          grep -q "ggml_webgpu: .*registering no device" smoke.log \
+          grep -q "ggml_webgpu: .*backend disabled" smoke.log \
             || { echo "::error::the WebGPU backend did not report why it registered no device"; exit 1; }
           if grep -q "using WebGPU backend" smoke.log; then
             echo "::error::whisper ran on a WebGPU device on a runner that has no GPU"; exit 1
