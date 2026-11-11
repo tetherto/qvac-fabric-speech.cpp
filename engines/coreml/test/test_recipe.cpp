@@ -507,11 +507,21 @@ void case_ulp_and_compare() {
         return recipe::compare_blob(BlobType::fp16, ulp, reinterpret_cast<const uint8_t *>(a.data()),
                                     reinterpret_cast<const uint8_t *>(b.data()), a.size());
     };
-    // exact: any differing bit fails (except +0/-0, which are equal values).
+    // exact: any differing bit fails, including +0 vs -0 (byte-equal rule).
     auto c = cmp16(false, {0x3c00, 0x3c01}, {0x3c00, 0x3c00});
     CHECK(!c.pass && c.differing == 1 && c.max_ulp == 1);
     c = cmp16(false, {0x0000}, {0x8000});
-    CHECK(c.pass);
+    CHECK(!c.pass && c.differing == 1 && c.max_ulp == 0);
+    // ulp: +0 vs -0 differ in bits but are 0 ulp apart, so they pass.
+    c = cmp16(true, {0x0000, 0x3c00}, {0x8000, 0x3c00});
+    CHECK(c.pass && c.differing == 1 && c.max_ulp == 0);
+    std::vector<float> za = {0.0f}, zb = {-0.0f};
+    auto cz = recipe::compare_blob(BlobType::fp32, false, reinterpret_cast<const uint8_t *>(za.data()),
+                                   reinterpret_cast<const uint8_t *>(zb.data()), 1);
+    CHECK(!cz.pass && cz.differing == 1);
+    cz = recipe::compare_blob(BlobType::fp32, true, reinterpret_cast<const uint8_t *>(za.data()),
+                              reinterpret_cast<const uint8_t *>(zb.data()), 1);
+    CHECK(cz.pass && cz.max_ulp == 0);
     // ulp: 1 ulp passes; 2 ulp passes only within 2^-10 * max|ref|.
     c = cmp16(true, {0x3c01, 0x4000}, {0x3c00, 0x4000});
     CHECK(c.pass && c.differing == 1 && c.max_ulp == 1);
