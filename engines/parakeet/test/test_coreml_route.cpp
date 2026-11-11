@@ -1,0 +1,541 @@
+// Parakeet's Core ML routing on the shared runtime (PLAN §2.10, §2.13,
+// §3.2.0). Hermetic: fake loaders and a fake encoder, no Core ML, no model.
+// Built against the runtime's test copy (QVAC_COREML_NS=qvac_coreml_test) on
+// Linux and macOS; it has no skip path.
+//
+//   null-route-plan       a null route gives exactly the ggml long-form plan,
+//                         whatever capacity a sidecar has; a held route gives
+//                         the fixed-shape plan (so the check can fail)
+//   window-k-failure      a failure at window k retires the sidecar, windows
+//                         k.. of the call run on ggml with the plan already
+//                         chosen, and the call reports "mixed"
+//   next-call-reverts     the next call acquires a null route: ggml plan,
+//                         label "ggml"
+//   owner-route           the synchronous owner route returns the error and
+//                         never retires
+//   pending-route         a slot still loading gives the ggml route marked
+//                         pending; with wait = call the acquisition waits
+//   sidecar-groups        construction group = the minimal set; prewarm all
+//                         adds the rest; an absent sidecar is skipped
+//   options               public CoremlOptions -> runtime options, resolution
+//   fit-stable            the fit route and envelope never read the cache:
+//                         identical with no hint, a warm hint and a stale hint
+
+#include "coreml/parakeet_coreml_sidecars.h"
+#include "coreml_fit.h"
+#include "encoder_route.h"
+#include "long_form.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+using namespace parakeet;
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+
+#define CHECK(cond, what)                                                          \
+    do {                                                                           \
+        ++g_checks;                                                                \
+        if (!(cond)) {                                                             \
+            ++g_failures;                                                          \
+            std::fprintf(stderr, "FAIL %s:%d: %s (%s)\n", __FILE__, __LINE__, what, #cond); \
+        }                                                                          \
+    } while (0)
+
+uint64_t big_memory() { return uint64_t(1) << 40; }
+bool no_low_power() { return false; }
+
+pcm::Config fast_config() {
+    pcm::Config c;
+    c.available_memory = &big_memory;
+    c.low_power = &no_low_power;
+    c.host_id = "parakeet-route-test";
+    c.os_build = "TEST1";
+    c.memory_recheck = std::chrono::milliseconds(20);
+    c.backoff_initial = std::chrono::milliseconds(10);
+    c.backoff_max = std::chrono::milliseconds(80);
+    c.wait_poll = std::chrono::milliseconds(5);
+    c.pin_image = false;
+    return c;
+}
+
+fs::path make_temp_dir(const char * tag) {
+    const fs::path base = fs::temp_directory_path() /
+                          ("parakeet-coreml-route-" + std::string(tag) + "-" + std::to_string(::getpid()));
+    fs::remove_all(base);
+    fs::create_directories(base);
+    return base;
+}
+
+// ---- fake encoder ---------------------------------------------------------
+
+constexpr int kFixedMelFrames = 1504;  // 188 encoder frames at 8x subsampling
+constexpr int kSeamContext = 16;
+constexpr const char * kFakeLabel = "coreml-ane";
+
+struct FakeEncoder {
+    std::atomic<int> encodes{0};
+    std::atomic<int> fail_at{-1};  // encode index that fails, -1 never
+};
+
+std::atomic<int> g_fake_loads{0};
+
+pcm::LoadResult fake_load(const pcm::LoadRequest &) {
+    ++g_fake_loads;
+    pcm::LoadResult r;
+    r.model = std::make_shared<FakeEncoder>();
+    return r;
+}
+
+// A load that blocks until released (a slow cold ANE compile).
+std::mutex g_gate_mu;
+std::condition_variable g_gate_cv;
+bool g_gate_open = false;
+
+pcm::LoadResult gated_load(const pcm::LoadRequest & req) {
+    std::unique_lock<std::mutex> lock(g_gate_mu);
+    g_gate_cv.wait(lock, [] { return g_gate_open; });
+    return fake_load(req);
+}
+
+void open_gate() {
+    std::lock_guard<std::mutex> lock(g_gate_mu);
+    g_gate_open = true;
+    g_gate_cv.notify_all();
+}
+
+parakeet_coreml_context * fake_context(void * model) {
+    return static_cast<parakeet_coreml_context *>(model);
+}
+
+EncoderRouteGeometry fake_describe(parakeet_coreml_context *, int n_mels) {
+    EncoderRouteGeometry g;
+    g.fixed_mel_frames = n_mels > 0 ? kFixedMelFrames : 0;
+    g.seam_context_frames = kSeamContext;
+    return g;
+}
+
+const char * fake_label(parakeet_coreml_context *) { return kFakeLabel; }
+
+int fake_encode(void *, parakeet_coreml_context * ctx, int, int, int, const float *, int, int, float *) {
+    auto * enc = reinterpret_cast<FakeEncoder *>(ctx);
+    const int index = enc->encodes++;
+    return index == enc->fail_at.load() ? 7 : 0;
+}
+
+const EncoderModelOps & fake_ops() {
+    static const EncoderModelOps ops{&fake_context, &fake_describe, &fake_label, &fake_encode};
+    return ops;
+}
+
+std::shared_ptr<pcm::Slot> make_encoder_slot(pcm::Manager & m, pcm::LoadFn load, pcm::Wait wait,
+                                             const fs::path & dir) {
+    pcm::SlotSpec spec;
+    spec.engine = "parakeet";
+    spec.stage = "encoder";
+    spec.units = pcm::ComputeUnits::cpu_and_ane;
+    spec.route = pcm::Route::prebuilt;
+    spec.artifact_path = (dir / "model-encoder.mlmodelc").string();
+    spec.load_fn = load;
+    pcm::SlotPolicy policy;
+    policy.wait = wait;
+    return m.make_slot(spec, policy);
+}
+
+// A TDT-shaped plan input: 300 s of audio at 10 ms hops, 8x subsampling.
+constexpr long long kLongMel = 30000;
+constexpr int kPosEmbMaxLen = 5000;
+constexpr int kSub = 8;
+
+LongFormPlan ggml_plan(long long n_mel) {
+    return resolve_long_form_plan_frames(0, 0, kPosEmbMaxLen, kSub, n_mel);
+}
+
+LongFormPlan routed_plan(const EncoderRoute & route, long long n_mel,
+                         CoremlShapeKind kind = CoremlShapeKind::fixed, int opts_window = 0) {
+    return choose_long_form_plan(ggml_plan(n_mel), opts_window, 0, kind, route.holds(),
+                                 route.geometry().fixed_mel_frames,
+                                 route.geometry().seam_context_frames, kSub, n_mel);
+}
+
+bool same_plan(const LongFormPlan & a, const LongFormPlan & b) {
+    return a.enabled == b.enabled && a.window_frames == b.window_frames &&
+           a.context_frames == b.context_frames && a.center_frames == b.center_frames &&
+           a.sub == b.sub && a.left_context_frames == b.left_context_frames &&
+           a.right_context_frames == b.right_context_frames &&
+           a.exact_mel_frames == b.exact_mel_frames;
+}
+
+// One call over `windows` dispatches, as run_encoder_windowed drives them.
+struct CallOutcome {
+    std::vector<bool> on_coreml;
+    int ggml_dispatches = 0;
+    std::string label;
+};
+
+CallOutcome run_call(const EncoderRoute & route, int windows) {
+    CallOutcome out;
+    EncoderBackendTally tally;
+    tally.add_route(route);
+    for (int w = 0; w < windows; ++w) {
+        bool used = false;
+        const int rc = dispatch_on_route(
+            route, /*eligible=*/true,
+            [&] { return route.encode(kFixedMelFrames, kFixedMelFrames, 128, nullptr, 188, 1024, nullptr); },
+            [&] { ++out.ggml_dispatches; return 0; }, used);
+        CHECK(rc == 0, "every window succeeds (Core ML or the ggml fallback)");
+        out.on_coreml.push_back(used);
+        tally.add(used, route.coreml_label());
+    }
+    out.label = tally.label();
+    return out;
+}
+
+// ---- cases -----------------------------------------------------------------
+
+void case_null_route_plan() {
+    const EncoderRoute null_route = EncoderRoute::ggml(/*pending=*/true);
+    CHECK(!null_route.holds(), "the ggml route holds no handle");
+    CHECK(same_plan(routed_plan(null_route, kLongMel), ggml_plan(kLongMel)),
+          "null route, long input: exactly the ggml plan");
+    CHECK(same_plan(routed_plan(null_route, 1000), ggml_plan(1000)),
+          "null route, short input: exactly the ggml plan");
+    CHECK(same_plan(routed_plan(null_route, kLongMel, CoremlShapeKind::exact), ggml_plan(kLongMel)),
+          "null route, EOU: the ggml plan");
+
+    // A held route with the same capacity changes the plan: the check above
+    // can fail.
+    FakeEncoder enc;
+    const EncoderRoute held = EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&enc),
+                                                   fake_describe(nullptr, 128), kFakeLabel,
+                                                   nullptr, EncoderRoute::Ops{}, false);
+    const LongFormPlan coreml_plan = routed_plan(held, kLongMel);
+    CHECK(coreml_plan.enabled && coreml_plan.window_frames == kFixedMelFrames / kSub,
+          "a held route tiles the input at the sidecar capacity");
+    CHECK(coreml_plan.left_context_frames == kSeamContext,
+          "the sidecar's seam context applies when the caller left it automatic");
+    CHECK(!same_plan(coreml_plan, ggml_plan(kLongMel)), "the Core ML plan differs from the ggml plan");
+    CHECK(same_plan(routed_plan(held, kLongMel, CoremlShapeKind::fixed, -1), ggml_plan(kLongMel)),
+          "a negative window request keeps the ggml plan even with a handle");
+    CHECK(same_plan(routed_plan(held, kLongMel, CoremlShapeKind::exact), ggml_plan(kLongMel)),
+          "oversized EOU input stays on the ggml plan");
+}
+
+void case_window_k_failure_and_next_call() {
+    const fs::path dir = make_temp_dir("windowk");
+    auto m = pcm::Manager::create(fast_config());
+    auto slot = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
+
+    // Call 1: the slot is ready (wait = call), window 2 of 5 fails.
+    EncoderRoute route = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(route.holds() && route.usable() && !route.pending(), "call 1 holds the encoder");
+    CHECK(route.coreml_label() == kFakeLabel, "the route carries the handle's label");
+    CHECK(route.geometry().fixed_mel_frames == kFixedMelFrames, "capacity comes from the handle");
+    const LongFormPlan call1_plan = routed_plan(route, kLongMel);
+    reinterpret_cast<FakeEncoder *>(route.context())->fail_at = 2;
+
+    const CallOutcome call1 = run_call(route, 5);
+    CHECK(call1.on_coreml.size() == 5, "five windows");
+    CHECK(call1.on_coreml[0] && call1.on_coreml[1], "windows before k ran on Core ML");
+    CHECK(!call1.on_coreml[2] && !call1.on_coreml[3] && !call1.on_coreml[4],
+          "window k and the rest of the call ran on ggml");
+    CHECK(call1.ggml_dispatches == 3, "three ggml dispatches");
+    CHECK(call1.label == "mixed", "the call reports mixed");
+    CHECK(route.failed() && route.holds(), "the route is spent but the plan stays the Core ML plan");
+    CHECK(same_plan(routed_plan(route, kLongMel), call1_plan), "the plan chosen at the start is kept");
+    CHECK(slot->state() == pcm::SlotState::retired, "the failure retired the slot");
+
+    // Call 2: reverts to the ggml plan.
+    const EncoderRoute next = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(!next.holds(), "the next call acquires a null route");
+    CHECK(!next.pending(), "a retired slot is not pending");
+    CHECK(same_plan(routed_plan(next, kLongMel), ggml_plan(kLongMel)), "the next call uses the ggml plan");
+    CHECK(run_call(next, 3).label == "ggml", "the next call reports ggml");
+
+    // A second, independent owner of the same artifact sees the retirement
+    // too (process-wide per (artifact, function, units), §2.9).
+    const int loads_before = g_fake_loads.load();
+    auto other = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
+    const EncoderRoute other_route = route_from_acquired(other->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(!other_route.holds(), "another owner of the retired artifact gets the ggml route");
+    CHECK(other->state() == pcm::SlotState::retired, "and its slot reports retired");
+    CHECK(g_fake_loads.load() == loads_before, "a retired artifact is never loaded again");
+    fs::remove_all(dir);
+}
+
+void case_owner_route() {
+    FakeEncoder enc;
+    enc.fail_at = 0;
+    static std::atomic<int> retires{0};
+    EncoderRoute::Ops ops;
+    ops.encode = &fake_encode;
+    ops.retire = [](void *, const char *) { ++retires; };
+    const EncoderRoute owner = EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&enc),
+                                                    fake_describe(nullptr, 128), kFakeLabel,
+                                                    nullptr, ops, /*owner=*/true);
+    bool used = true;
+    int ggml_runs = 0;
+    const int rc = dispatch_on_route(
+        owner, true, [&] { return owner.encode(1, 1, 128, nullptr, 1, 1, nullptr); },
+        [&] { ++ggml_runs; return 0; }, used);
+    CHECK(rc == 7, "an owner route returns the Core ML error");
+    CHECK(ggml_runs == 0, "an owner route never falls back to ggml (no weights)");
+    CHECK(!used, "the failed dispatch did not run on Core ML");
+    CHECK(retires.load() == 0, "an owner route never retires");
+
+    // Ineligible call shapes (per-stage captures, EOU mismatches) run on ggml
+    // without touching the route.
+    FakeEncoder ok;
+    EncoderRoute::Ops ok_ops;
+    ok_ops.encode = &fake_encode;
+    const EncoderRoute held = EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&ok),
+                                                   fake_describe(nullptr, 128), kFakeLabel, nullptr,
+                                                   ok_ops, false);
+    ggml_runs = 0;
+    dispatch_on_route(held, /*eligible=*/false, [&] { return 0; }, [&] { ++ggml_runs; return 0; }, used);
+    CHECK(ggml_runs == 1 && !used && held.usable(), "an ineligible dispatch runs on ggml, route intact");
+}
+
+void case_pending_route() {
+    const fs::path dir = make_temp_dir("pending");
+    auto m = pcm::Manager::create(fast_config());
+    auto slot = make_encoder_slot(*m, &gated_load, pcm::Wait::none, dir);
+    slot->request(pcm::Priority::minimal);
+
+    const EncoderRoute first = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(!first.holds(), "a slot still loading gives no handle (wait = none never blocks)");
+    CHECK(first.pending(), "the call is marked coreml_pending");
+    CHECK(same_plan(routed_plan(first, kLongMel), ggml_plan(kLongMel)), "pending -> the ggml plan");
+    CHECK(run_call(first, 2).label == "ggml", "pending call reports ggml");
+
+    open_gate();
+    // A unit that asks to wait (wait = call) gets the handle once ready.
+    auto waiting = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
+    const EncoderRoute later = route_from_acquired(waiting->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(later.holds() && !later.pending(), "wait = call returns the ready handle");
+    fs::remove_all(dir);
+}
+
+void case_sidecar_groups() {
+    const fs::path dir = make_temp_dir("groups");
+    fs::create_directories(dir / "m-encoder.mlmodelc" / "weights");
+    {
+        std::ofstream(dir / "m-encoder.mlmodelc" / "weights" / "weight.bin") << std::string(1000, 'x');
+    }
+    auto m = pcm::Manager::create(fast_config());
+    const bool routable = m->platform() != pcm::Platform::other;
+
+    auto request = [&](const char * stage, const char * name, bool present, bool minimal) {
+        SidecarRequest r;
+        r.stage = stage;
+        r.path = (dir / name).string();
+        r.present = present;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &fake_load;
+        r.minimal = minimal;
+        return r;
+    };
+
+    CoremlOptions opts;
+    opts.wait = CoremlOptions::Wait::construct;
+    opts.prewarm = CoremlOptions::Prewarm::predicted;
+    {
+        CoremlSidecars sidecars(opts, m);
+        auto enc = sidecars.add(request("encoder", "m-encoder.mlmodelc", true, true));
+        auto d745 = sidecars.add(request("diarizer-745", "m-diarizer-745.mlmodelc", true, false));
+        auto gone = sidecars.add(request("bypass-encoder", "m-missing.mlmodelc", false, true));
+        CHECK(gone->spec().route == pcm::Route::none, "an absent sidecar has no route");
+        CHECK(enc->spec().route == (routable ? pcm::Route::prebuilt : pcm::Route::none),
+              "a present sidecar is prebuilt on Apple platforms");
+        CHECK(enc->spec().ane_compile_reserve_bytes == (routable ? 1600u : 0u),
+              "cold ANE loads reserve 1.6x the weights");
+        sidecars.start();  // wait = construct: returns after the group finished
+        CHECK(enc->state() == (routable ? pcm::SlotState::ready : pcm::SlotState::unsupported),
+              "the minimal encoder is ready after construction");
+        CHECK(d745->state() == (routable ? pcm::SlotState::idle : pcm::SlotState::unsupported),
+              "a non-minimal capacity is not requested by the predicted scope");
+        const std::string construction = sidecars.construction_json();
+        CHECK(construction.find("\"skipped_route_none\"") != std::string::npos, "group JSON");
+        CHECK(construction.find("bypass-encoder") != std::string::npos,
+              "the absent sidecar is listed as skipped");
+        // Off Apple platforms every route is none: an empty group, which counts
+        // as success (nothing_to_prepare, §2.10).
+        CHECK(sidecars.wait_construction(1000), "the construction group succeeded");
+
+        const pcm::PrewarmResult all = sidecars.prewarm(CoremlOptions::Prewarm::all, /*wait=*/true);
+        CHECK(all.success && all.nothing_to_prepare == !routable, "prewarm all loads every routable sidecar");
+        CHECK(d745->state() == (routable ? pcm::SlotState::ready : pcm::SlotState::unsupported),
+              "prewarm all reaches the larger capacity");
+        const std::string status = sidecars.status_json();
+        CHECK(status.find("\"engine\":\"parakeet\"") != std::string::npos ||
+                  status.find("\"engine\": \"parakeet\"") != std::string::npos,
+              "status names the engine");
+        CHECK(status.find("diarizer-745") != std::string::npos, "status lists every slot");
+    }
+    {
+        CoremlOptions none = opts;
+        none.prewarm = CoremlOptions::Prewarm::none;
+        CoremlSidecars sidecars(none, m);
+        auto enc = sidecars.add(request("encoder", "m-encoder.mlmodelc", true, true));
+        sidecars.start();
+        CHECK(sidecars.construction_json().find("\"nothing_to_prepare\":true") != std::string::npos ||
+                  sidecars.construction_json().find("\"nothing_to_prepare\": true") != std::string::npos,
+              "prewarm none with construct returns at once with an empty group");
+    }
+    {
+        CoremlOptions off = opts;
+        off.use = CoremlOptions::Use::off;
+        CoremlSidecars sidecars(off, m);
+        auto enc = sidecars.add(request("encoder", "m-encoder.mlmodelc", true, true));
+        CHECK(enc->spec().route == pcm::Route::none, "use = off gives no route");
+        CHECK(enc->state() == pcm::SlotState::disabled, "use = off reports disabled");
+    }
+    {
+        CoremlOptions budget = opts;
+        budget.memory_budget_bytes = 1;
+        CoremlSidecars sidecars(budget, m, /*memory_degraded=*/true);
+        CHECK(!sidecars.resolved().enabled() && sidecars.resolved().disabled_reason == "memory",
+              "memory-degrade resolves use = off with reason memory");
+    }
+    fs::remove_all(dir);
+}
+
+void case_options() {
+    CoremlOptions o;
+    o.use = CoremlOptions::Use::require;
+    o.generate = CoremlOptions::Generate::never;
+    o.wait = CoremlOptions::Wait::call;
+    o.prewarm = CoremlOptions::Prewarm::all;
+    o.cache_dir = "/tmp/x";
+    o.compute_units = "cpu_only";
+    o.strict_wait_ms = 5;
+    o.memory_budget_bytes = 9;
+    const pcm::Options r = to_runtime_options(o);
+    CHECK(r.use == pcm::Use::require && r.generate == pcm::Generate::never && r.wait == pcm::Wait::call &&
+              r.prewarm == pcm::Prewarm::all,
+          "enums map member for member");
+    CHECK(r.cache_dir == o.cache_dir && r.compute_units == o.compute_units &&
+              r.strict_wait_ms == o.strict_wait_ms && r.memory_budget_bytes == o.memory_budget_bytes,
+          "optional fields copy through");
+    const pcm::Resolved resolved = resolve_parakeet_coreml(o);
+    CHECK(resolved.strict() && resolved.compute_units == pcm::ComputeUnits::cpu_only,
+          "explicit fields resolve");
+    CHECK(!resolve_parakeet_coreml(CoremlOptions{}).strict() || std::getenv("PARAKEET_COREML_STRICT"),
+          "defaults resolve to automatic");
+}
+
+void write_text(const fs::path & p, const std::string & text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text;
+}
+
+void case_fit_stable() {
+    const fs::path dir = make_temp_dir("fit");
+    const fs::path sidecar = dir / "m-encoder.mlmodelc";
+    write_text(sidecar / "weights" / "weight.bin", std::string(4096, 'w'));
+    const fs::path cache = dir / "cache";
+
+    auto project = [&](const CoremlOptions & o) {
+        const pcm::Resolved resolved = resolve_parakeet_coreml(o);
+        const CoremlEncoderFitRoute route = coreml_encoder_fit_route(sidecar.string(), resolved.enabled());
+        CoremlEncoderEnvelopeInputs in;
+        in.weight_file_bytes = route.weight_file_bytes;
+        in.encoder_parameters = 3000;
+        in.io_bytes = 100;
+        in.ane = true;
+        FitResult r;
+        r.device_free_bytes = 15000;  // ggml-only (10000) fits; + Core ML (9080) does not
+        r.device_shares_host_memory = true;
+        r.coreml_bytes = 50;
+        apply_coreml_verdicts(r, /*required=*/10050, resolved.enabled(), resolved.disabled_reason,
+                              route.prebuilt, route.prebuilt ? coreml_encoder_envelope_bytes(in) : 0);
+        return r;
+    };
+    auto same = [](const FitResult & a, const FitResult & b) {
+        return a.ggml_required_bytes == b.ggml_required_bytes && a.ggml_only_fits == b.ggml_only_fits &&
+               a.coreml.fits == b.coreml.fits && a.coreml.bytes == b.coreml.bytes &&
+               a.coreml.encoder_route == b.coreml.encoder_route &&
+               a.coreml.disabled_reason == b.coreml.disabled_reason;
+    };
+
+    CoremlOptions o;
+    o.cache_dir = cache.string();
+    const FitResult no_hint = project(o);
+    CHECK(no_hint.coreml.encoder_route == "prebuilt", "an adjacent sidecar gives the prebuilt route");
+    // runtime weights max(4096, 2 x 3000) = 6000; I/O 2 x 100; transient 4096/4;
+    // margin x1.25 -> (6000 + 200 + 1024) * 1.25 = 9030; plus the diarizers' 50.
+    CHECK(no_hint.coreml.bytes == 9030 + 50, "envelope arithmetic (§2.13 defaults)");
+    CHECK(no_hint.ggml_required_bytes == 10000, "the ggml-only charge excludes the diarizer sidecars");
+    CHECK(no_hint.ggml_only_fits && !no_hint.coreml.fits, "two verdicts");
+
+    // A real warm hint for this artifact, written by a completed load.
+    {
+        auto m = pcm::Manager::create(fast_config());
+        pcm::SlotSpec spec;
+        spec.engine = "parakeet";
+        spec.stage = "encoder";
+        spec.units = pcm::ComputeUnits::cpu_and_ane;
+        spec.route = pcm::Route::prebuilt;
+        spec.artifact_path = sidecar.string();
+        spec.load_fn = &fake_load;
+        pcm::SlotPolicy policy;
+        policy.wait = pcm::Wait::call;
+        policy.cache_dir = cache.string();
+        auto slot = m->make_slot(spec, policy);
+        CHECK(static_cast<bool>(slot->acquire(pcm::Demand::now).model), "the hinting load completes");
+        CHECK(fs::exists(slot->hint_path()), "the load wrote its hint");
+        const FitResult warm = project(o);
+        CHECK(same(warm, no_hint), "fit with a non-stale hint equals fit with none");
+
+        // Stale it: stale_until a day ahead.
+        std::ifstream in(slot->hint_path());
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto pos = text.find("\"stale_until\"");
+        CHECK(pos != std::string::npos, "hint record has stale_until");
+        if (pos != std::string::npos) {
+            const auto colon = text.find(':', pos);
+            const auto end = text.find_first_of(",}", colon);
+            text.replace(colon + 1, end - colon - 1, "\"2999-01-01T00:00:00Z\"");
+            std::ofstream(slot->hint_path()) << text;
+        }
+        CHECK(slot->hint().has_value() && slot->hint()->stale, "the hint now reads as stale");
+        CHECK(same(project(o), no_hint), "fit with a stale hint equals fit with none");
+    }
+
+    CoremlOptions off = o;
+    off.use = CoremlOptions::Use::off;
+    const FitResult disabled = project(off);
+    CHECK(disabled.coreml.encoder_route == "none" && disabled.coreml.bytes == 0 &&
+              disabled.coreml.disabled_reason == "use=off" && disabled.coreml.fits == disabled.ggml_only_fits,
+          "use = off: no Core ML charge, the ggml verdict");
+    fs::remove_all(dir);
+}
+
+}  // namespace
+
+int main() {
+    case_null_route_plan();
+    case_window_k_failure_and_next_call();
+    case_owner_route();
+    case_pending_route();
+    case_sidecar_groups();
+    case_options();
+    case_fit_stable();
+    std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

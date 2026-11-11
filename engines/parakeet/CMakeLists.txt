@@ -625,6 +625,28 @@ if (PARAKEET_BUILD_TESTS)
         target_link_libraries(${target} PRIVATE ${_ptcr_fws})
     endfunction()
 
+    # Parakeet's Core ML routing (PLAN §3.2.0, §2.13), hermetic, Linux and
+    # macOS: the long-form plan with a null route is the ggml plan; a failure at
+    # window k retires the sidecar and the call reports "mixed"; the next call
+    # acquires a null route and reverts; the fit route never reads the cache.
+    # Built against the runtime's own test copy (fake loaders, no Core ML).
+    if (TARGET qvac-coreml-test-runtime)
+        add_executable(test-parakeet-coreml-route
+            test/test_coreml_route.cpp
+            ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
+        target_compile_definitions(test-parakeet-coreml-route PRIVATE QVAC_COREML_NS=qvac_coreml_test)
+        target_include_directories(test-parakeet-coreml-route PRIVATE
+            src include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+        target_compile_features(test-parakeet-coreml-route PRIVATE cxx_std_17)
+        target_link_libraries(test-parakeet-coreml-route PRIVATE qvac-coreml-test-runtime)
+        parakeet_apply_ccache(test-parakeet-coreml-route)
+        add_test(NAME test-parakeet-coreml-route COMMAND test-parakeet-coreml-route)
+        # Runs in the dedicated Core ML runtime step of every parakeet lane;
+        # it has no skip path (any non-zero exit fails).
+        set_tests_properties(test-parakeet-coreml-route PROPERTIES
+            LABELS "unit;coreml-runtime" TIMEOUT 120)
+    endif()
+
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness
     # ends up surfaced via `ctest` against the build dir, with labels
@@ -3012,6 +3034,24 @@ if (PARAKEET_BUILD_TESTS)
                  "--full-gguf" "${_qvp_transcribepsy_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_transcribepsy_coreml_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
                  "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
+
+    # Background Core ML sidecars on the device (PLAN §3.2.0): a call whose
+    # encoder is still loading runs on ggml with the use = off transcript; the
+    # prebuilt encoder slot loads and the next call runs on Core ML; diarizer
+    # capacities that are not ready fall back to ggml; PARAKEET_COREML_ONLY
+    # with a full GGUF keeps the ggml encoder; an encoder-less GGUF with
+    # use = off fails as today. No skip path.
+    if (PARAKEET_COREML AND TARGET qvac-parakeet)
+        add_executable(test-parakeet-coreml-runtime test/test_parakeet_coreml_runtime.cpp)
+        target_link_libraries(test-parakeet-coreml-runtime PRIVATE qvac-parakeet)
+        target_include_directories(test-parakeet-coreml-runtime PRIVATE include src ggml/include)
+        parakeet_apply_ccache(test-parakeet-coreml-runtime)
+        set(_qvp_nd_q8_gguf "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization.q8_0.gguf")
+        set(_qvp_nd_diarizer "${PARAKEET_TEST_MODEL_DIR}/Nemotron-3-Diarization-diarizer-1125.mlmodelc")
+        set(_qvp_cr_args "--gguf" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}")
+        if (EXISTS "${_qvp_nd_q8_gguf}" AND EXISTS "${_qvp_nd_diarizer}")
+            list(APPEND _qvp_cr_args "--diar-gguf" "${_qvp_nd_q8_gguf}")
+        endif()
         if (EXISTS "${_qvp_transcribepsy_coreml_gguf}")
             list(APPEND _qvp_cr_args "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}")
         endif()
