@@ -591,7 +591,11 @@ std::vector<Mutant> verify_mutants(const recipe::Recipe & r) {
         {"exact payload 1 ulp", [=](std::string & o, std::string &) { o[b0 + 64] ^= 1; }, false},
         {"dtype tag FLOAT16 -> FLOAT32 in ours", [=](std::string & o, std::string &) { set_u32(o, b0 + 4, 2); },
          false},
-        {"dtype tag FLOAT32 in both", [=](std::string & o, std::string & f) { set_u32(o, b1 + 4, 2), set_u32(f, b1 + 4, 2); },
+        {"dtype tag FLOAT32 in both",
+         [=](std::string & o, std::string & f) {
+             set_u32(o, b1 + 4, 2);
+             set_u32(f, b1 + 4, 2);
+         },
          false},
         {"reserved header byte", [](std::string & o, std::string &) { o[12] = 1; }, false},
         {"reserved metadata byte", [=](std::string & o, std::string &) { o[b0 + 40] = 1; }, false},
@@ -609,9 +613,9 @@ void case_verify_weight_bin() {
     for (const Mutant & m : verify_mutants(r)) {
         std::string ours = base, ref = base;
         m.apply(ours, ref);
-        const recipe::WeightBinCheck v = recipe::verify_weight_bin(
-            r, reinterpret_cast<const uint8_t *>(ours.data()), ours.size(), reinterpret_cast<const uint8_t *>(ref.data()),
-            ref.size());
+        const auto * o = reinterpret_cast<const uint8_t *>(ours.data());
+        const auto * f = reinterpret_cast<const uint8_t *>(ref.data());
+        const recipe::WeightBinCheck v = recipe::verify_weight_bin(r, o, ours.size(), f, ref.size());
         CHECK_MSG(v.pass == m.pass, m.name);
         CHECK_MSG(v.blobs.size() == 2, m.name);
     }
@@ -637,8 +641,8 @@ void case_verify_weight_bin() {
         write_bytes(td / "ours.bin", ours);
         write_bytes(td / "ref.bin", ref);
         const std::string log = td / "verify.log";
-        const std::string cmd = "'" + g_tool + "' verify --template '" + (td / "tpl") + "' --ours '" + (td / "ours.bin") +
-                                "' --ref '" + (td / "ref.bin") + "' > '" + log + "' 2>&1";
+        const std::string cmd = "'" + g_tool + "' verify --template '" + (td / "tpl") + "' --ours '" +
+                                (td / "ours.bin") + "' --ref '" + (td / "ref.bin") + "' > '" + log + "' 2>&1";
         const int st = std::system(cmd.c_str());
         CHECK_MSG(WIFEXITED(st) && WEXITSTATUS(st) == (m.pass ? 0 : 1), m.name);
         std::ifstream in(log);

@@ -898,6 +898,7 @@ std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool war
         rec.cold_load_ms = ms;
     }
     rec.last_ok = iso8601_utc(unix_now_s());
+    rec.artifact = j.load.artifact_path;  // prune's ownership (S2a)
     // stale_until written meanwhile is preserved (read just above).
     write_hint(j.hint_path, rec);
     {
@@ -907,11 +908,12 @@ std::optional<HintView> Runtime::record_hint(const Job & j, int64_t ms, bool war
     return HintView{rec.warm_load_ms, rec.cold_load_ms, hint_stale(rec, unix_now_s())};
 }
 
-void Runtime::write_stale(const std::string & path) {
+void Runtime::write_stale(const std::string & path, const std::string & artifact) {
     if (path.empty()) return;
     std::lock_guard<std::mutex> hl(hint_mu_);
     HintRecord rec = read_hint(path).value_or(HintRecord{});
     rec.stale_until_s = unix_now_s() + kStaleSeconds;
+    rec.artifact = artifact;
     write_hint(path, rec);
 }
 
@@ -1161,7 +1163,7 @@ Runtime::WaitPlan Runtime::plan_bounded_wait_locked(SlotCore & c, std::optional<
 Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::optional<Clock::time_point> deadline,
                           const std::atomic<bool> * cancel) {
     Acquired out;
-    std::string stale_path;
+    std::string stale_path, stale_artifact;
     if (d == Demand::now) pin_for_work();
     {
         Graveyard gy;
@@ -1261,6 +1263,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                     // so a cold load is never waited on twice.
                     c->job->wait_expired = true;
                     stale_path = c->hint_path;
+                    stale_artifact = c->artifact_path;
                 } else if (st == SlotState::queued) {
                     c->queued_behind = true;  // hint untouched
                 }
@@ -1270,7 +1273,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
             release_graveyard();
         }
     }
-    write_stale(stale_path);
+    write_stale(stale_path, stale_artifact);
     return out;
 }
 

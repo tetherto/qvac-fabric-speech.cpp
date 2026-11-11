@@ -257,7 +257,7 @@ private:
     void fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st = SlotState::failed);
     void requeue(const std::shared_ptr<Job> & j);
     std::optional<HintView> record_hint(const Job & j, int64_t ms, bool warm);
-    void write_stale(const std::string & path);
+    void write_stale(const std::string & path, const std::string & artifact);
     WaitPlan plan_bounded_wait_locked(SlotCore & c, std::optional<Clock::time_point> deadline,
                                       Clock::time_point now, Graveyard & gy);
 

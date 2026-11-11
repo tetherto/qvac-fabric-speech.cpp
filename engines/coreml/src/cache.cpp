@@ -1135,6 +1135,31 @@ struct Pruner {
         }
     }
 
+    // all: hints for this library's artifacts. A hint names the artifact it
+    // was recorded for (its realpath); hints for prebuilt sidecars, another
+    // cache, unknown template ids or without that field are left alone, and a
+    // hint whose key is leased (a loaded model) is skipped.
+    void hints() {
+        if (p.mode != PrunePolicy::Mode::all) return;
+        const std::string artifacts_real = real_path(l.artifacts);
+        for (const std::string & n : list_dir(l.hints)) {
+            if (n.size() < 6 || n.compare(n.size() - 5, 5, ".json") != 0 || n[0] == '.') continue;
+            const std::string pth = l.hints + "/" + n;
+            const std::optional<detail::HintRecord> h = detail::read_hint(pth);
+            if (!h || h->artifact.empty()) continue;
+            fs::path a(h->artifact);
+            if (a.filename() == "model.mlmodelc") a = a.parent_path();
+            std::string tid, key;
+            if (a.parent_path().string() != artifacts_real || !parse_artifact_name(a.filename().string(), tid, key) ||
+                !c.owns(tid)) {
+                continue;
+            }
+            KeyLock ex;
+            if (KeyLock::take(l, key, KeyLock::Mode::exclusive, ex) != KeyLock::Result::ok) continue;
+            if (::unlink(pth.c_str()) == 0) ++rep.hints;
+        }
+    }
+
     void quarantine_dirs() {
         if (p.mode == PrunePolicy::Mode::scoped) return;
         for (const std::string & n : list_dir(l.quarantine)) {
@@ -1159,6 +1184,7 @@ PruneReport prune(const std::string & cache_dir, const PrunePolicy & policy, con
     pr.staging();
     pr.tmp();
     pr.failed_records();
+    pr.hints();
     pr.quarantine_dirs();
     return pr.rep;
 }

@@ -397,7 +397,8 @@ void case_hit_adoption_memo_io_failure() {
         PrepareOutcome ok = env.prepare(b);
         CHECK(ready(ok) && ok.cache_hit && !ok.memo_hit);
         std::ifstream in(memo_b);
-        auto m = cache::memo_from_json(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto m = cache::memo_from_json(text);
         CHECK(m && m->artifact_key == key && m->path == real);
     }
     fs::remove(a);
@@ -666,6 +667,62 @@ void case_staging_ownership() {
     lease.release();
     CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), cat).staging == 1);
     CHECK(!fs::exists(busy) && survivors());
+}
+
+// prune(all) removes the hints of this library's artifacts (embedded or
+// retired ids), never another library's, a prebuilt sidecar's, another
+// cache's or an unattributable one, and skips a leased key.
+void case_hint_ownership() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    std::string dir;
+    {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        dir = o.artifact_dir;
+    }
+    const std::string k2(32, '2'), k3(32, '3'), k6(32, '6'), k7(32, '7');
+    auto hint = [&](const std::string & name, const std::string & artifact) {
+        if (!artifact.empty()) fs::create_directories(artifact);
+        detail::HintRecord rec;
+        rec.warm_load_ms = 10;
+        rec.last_ok = detail::iso8601_utc(now_s());
+        rec.artifact = artifact;
+        CHECK(detail::write_hint(l.hints + "/" + name + ".json", rec));
+        return l.hints + "/" + name + ".json";
+    };
+    const std::string owned = hint("owned", dir + "/model.mlmodelc");
+    const std::string retired = hint("retired", l.artifact_dir("old-tpl", k2));
+    const std::string busy = hint("busy", l.artifact_dir("toy-dac", k7) + "/model.mlmodelc");
+    const std::vector<std::string> keep = {
+        hint("unknown", l.artifact_dir("other-tpl", k3) + "/model.mlmodelc"),
+        hint("prebuilt", env.td / "models/s3gen.mlmodelc"),
+        hint("other-cache", env.td / ("elsewhere/qvac-coreml-v1/artifacts/toy-dac." + k6)),
+        hint("unattributed", ""),
+    };
+    CHECK(detail::read_hint(owned)->artifact.find("/artifacts/toy-dac.") != std::string::npos);
+    cache::Catalog cat = env.catalog();
+    cat.retired_ids = {"old-tpl"};
+    cache::KeyLock lease;
+    CHECK(cache::KeyLock::take(l, k7, cache::KeyLock::Mode::shared, lease) == cache::KeyLock::Result::ok);
+    auto kept = [&] {
+        bool all = true;
+        for (const std::string & h : keep) all = all && fs::exists(h);
+        return all;
+    };
+    cache::PrunePolicy later = cache::PrunePolicy::routine();
+    later.now_s = now_s() + 400 * kDay;
+    later.tmp_dir = env.td / "tmp";
+    for (const cache::PrunePolicy & p : {later, cache::PrunePolicy::scoped({a, dir})}) {
+        CHECK(cache::prune(env.cache, p, cat).hints == 0);  // only `all` removes hints
+    }
+    CHECK(fs::exists(owned) && fs::exists(retired) && fs::exists(busy) && kept());
+    CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), cat).hints == 2);
+    CHECK(!fs::exists(owned) && !fs::exists(retired) && fs::exists(busy) && kept());
+    lease.release();
+    CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), cat).hints == 1);
+    CHECK(!fs::exists(busy) && kept() && fs::is_directory(l.hints));
 }
 
 void case_prune_vs_leases() {
@@ -986,8 +1043,8 @@ void case_malformed_records() {
     CHECK(!cache::memo_from_json(R"({"schema":"1"})"));
     CHECK(!cache::memo_from_json(R"({"schema":null,"path":"/x"})"));
     for (const char * bad : {R"({"schema":null})", R"({"schema":"1"})", R"({"schema":1,"complete":"yes"})",
-                             R"({"schema":1,"complete":true,"artifact_key":"k","template":{"id":"toy-dac","sha256":"s"},)"
-                             R"("generator_version":1,"inventory":7})"}) {
+                             R"({"schema":1,"complete":true,"artifact_key":"k",)"
+                             R"("template":{"id":"toy-dac","sha256":"s"},"generator_version":1,"inventory":7})"}) {
         write_bytes(dir + "/artifact.json", bad);
         CHECK(!cache::read_artifact_json(dir));
         CHECK(cache::validate(dir) == cache::Validity::invalid);
@@ -1202,6 +1259,7 @@ int main(int argc, char ** argv) {
                          {"dead-memos-of-kept-artifacts", case_dead_memos_of_kept_artifacts},
                          {"unknown-ids", case_unknown_ids},
                          {"staging-ownership", case_staging_ownership},
+                         {"hint-ownership", case_hint_ownership},
                          {"prune-vs-leases", case_prune_vs_leases},
                          {"adoption-vs-prune-race", case_adoption_vs_prune_race},
                          {"failure-records", case_failure_records},

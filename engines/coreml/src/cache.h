@@ -10,7 +10,7 @@
 //     locks/<key32>.lock               never deleted
 //     staging/<key32>.<pid>.<rand>/    scratch, never loaded from; `template` holds the owner's template id
 //     used/<key32>                     mtime = last successful load
-//     hints/<hint_id>.json             (S1a)
+//     hints/<hint_id>.json             (S1a); "artifact" attributes it to an artifact here
 //     failed/<key32>[.<fn_units_hash>].json
 //     quarantine/<name>.<pid>/         unusable artifacts moved aside under EX
 //
@@ -301,6 +301,7 @@ struct PruneReport {
     size_t tmp = 0;
     size_t failed = 0;
     size_t quarantine = 0;
+    size_t hints = 0;
 };
 
 // The three mutually exclusive modes of §2.8. Static: needs no engine
