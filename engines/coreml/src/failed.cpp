@@ -175,6 +175,12 @@ Record record(const std::string & failed_dir, const std::string & key32, Stage s
     return r;
 }
 
+void clear(const std::string & failed_dir, const std::string & key32, const std::string & function,
+           const std::string & units) {
+    std::error_code ec;
+    fs::remove(record_path(failed_dir, key32, function, units), ec);
+}
+
 Verdict check(const std::string & failed_dir, const std::string & key32, const std::string & os_build, int64_t now_s,
               const std::string & function, const std::string & units) {
     Verdict v;

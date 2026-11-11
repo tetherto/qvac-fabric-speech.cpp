@@ -314,6 +314,9 @@ void case_recheck_under_lock() {
             nested = true;
             PrepareOutcome oa = env.prepare(a);
             CHECK(ready(oa) && !oa.cache_hit && g_compiles == 1);
+            // A failure record left at the key: the re-check under EX clears it.
+            failed::record(env.layout().failed, oa.key32, failed::Stage::compile,
+                           Error::transient("x", "com.apple.CoreML", 3), "toy-dac", "TEST1", now_s());
         }
         return cache::default_fs_probe(dir, f);
     };
@@ -322,6 +325,7 @@ void case_recheck_under_lock() {
     CHECK(ready(o) && o.cache_hit);
     CHECK(g_compiles == 1);
     CHECK(env.artifacts() == 1 && env.memos() == 2);
+    CHECK(!fs::exists(failed::record_path(env.layout().failed, o.key32)));
 }
 
 void case_hit_adoption() {
@@ -644,6 +648,57 @@ void case_failure_records() {
     CHECK(ready(o) && g_compiles == 2);
 }
 
+// A success in between clears the record: promotion needs two consecutive
+// failures, so fail (A) -> success (B) -> damage -> fail (C) stays transient
+// and a healthy process D still retries.
+void case_success_clears_failure() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    auto rejecting = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    g_compile_override = rejecting;
+    PrepareOutcome o = env.prepare(a);  // A
+    CHECK(o.kind == PrepareOutcome::Kind::failed);
+    const std::string key = o.key32;
+    const std::string rec_path = failed::record_path(l.failed, key);
+    CHECK(fs::exists(rec_path));
+    pid_t kid = spawn([&] {  // B
+        g_compile_override = nullptr;
+        CHECK(ready(env.prepare(a)));
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    CHECK(!fs::exists(rec_path));
+    fs::resize_file(l.artifact_dir("toy-dac", key) + "/model.mlmodelc/weights/weight.bin", 10);
+    kid = spawn([&] {  // C
+        g_compile_override = rejecting;
+        CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    auto rec = failed::read(rec_path);
+    CHECK(rec && rec->cls == ErrorClass::transient && rec->attempts == 1);
+    kid = spawn([&] {  // D
+        g_compile_override = nullptr;
+        PrepareOutcome k = env.prepare(a);
+        CHECK(ready(k) && !k.cache_hit);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    CHECK(!fs::exists(rec_path));
+    // The load lane clears a per-function record after a successful load.
+    const std::string fn = failed::record_path(l.failed, key, "frames_256", "cpu_and_ane");
+    failed::record(l.failed, key, failed::Stage::load, Error::transient("x", "com.apple.CoreML", 0), "toy-dac", "TEST1",
+                   now_s(), "frames_256", "cpu_and_ane");
+    CHECK(fs::exists(fn));
+    failed::clear(l.failed, key, "frames_256", "cpu_and_ane");
+    CHECK(!fs::exists(fn));
+}
+
 void case_resource_codes_never_promote() {
     TempDir td;
     const std::string dir = td / "failed";
@@ -945,6 +1000,7 @@ int main(int argc, char ** argv) {
                          {"prune-vs-leases", case_prune_vs_leases},
                          {"adoption-vs-prune-race", case_adoption_vs_prune_race},
                          {"failure-records", case_failure_records},
+                         {"success-clears-failure", case_success_clears_failure},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},

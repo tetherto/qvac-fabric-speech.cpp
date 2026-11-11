@@ -850,6 +850,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
         if (v == Validity::ok) {
             // Another process published meanwhile: write our memo, adopt next round.
             (void) write_memo(l, out.memo_id, job.memo);
+            failed::clear(l.failed, key);
             ex.release();
             continue;
         }
@@ -858,6 +859,7 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
             if (Error qe = quarantine_locked(l, t.id(), key); !qe.ok()) return failed_outcome(out, qe);
         }
         auto [ge, stage] = job.generate(key);
+        if (ge.ok()) failed::clear(l.failed, key);  // a success ends the failure streak
         ex.release();
         if (!ge.ok()) {
             failed::record(l.failed, key, stage, ge, t.id(), in.os_build, now);

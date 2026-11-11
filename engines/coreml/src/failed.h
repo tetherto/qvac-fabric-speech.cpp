@@ -86,6 +86,13 @@ Record record(const std::string & failed_dir, const std::string & key32, Stage s
               const std::string & template_id, const std::string & os_build, int64_t now_s,
               const std::string & function = {}, const std::string & units = {});
 
+// Removes the record for (key, function, units) after a success: promotion
+// counts only consecutive failures (§2.8, "the next attempt ... fails again").
+// prepare() calls it after generation succeeds or finds the artifact published;
+// the load lane calls it with (function, units) after a successful load.
+void clear(const std::string & failed_dir, const std::string & key32, const std::string & function = {},
+           const std::string & units = {});
+
 struct Verdict {
     bool blocked = false;
     Record rec;
