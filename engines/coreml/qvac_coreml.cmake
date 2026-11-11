@@ -204,6 +204,10 @@ function(qvac_coreml_add_tests)
         target_compile_definitions(qvac-coreml-tool PRIVATE QVAC_COREML_NS=qvac_coreml_test)
         target_include_directories(qvac-coreml-tool PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party")
         target_compile_features(qvac-coreml-tool PRIVATE cxx_std_17)
+        # `twin` computes mean + sd * normal() itself: no FMA contraction, so
+        # twins stay byte-identical across hosts (x86-64 and arm64), as the
+        # generator's own sources are.
+        target_compile_options(qvac-coreml-tool PRIVATE -ffp-contract=off)
         target_link_libraries(qvac-coreml-tool PRIVATE qvac-coreml-test-runtime)
         # test-coreml-recipe drives `verify` through the CLI as well.
         add_dependencies(test-coreml-recipe qvac-coreml-tool)
