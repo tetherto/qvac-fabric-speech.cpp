@@ -1,6 +1,6 @@
 #pragma once
 
-// Slots, shared models and handles (PLAN §2.9, §2.10).
+// Slots, shared models and handles.
 //
 // Ownership contract:
 //  - An engine owns its slots (std::shared_ptr<Slot>); a Slot holds a
@@ -40,7 +40,7 @@ struct PoolRef;
 
 using Clock = std::chrono::steady_clock;
 
-// Scheduling priorities (§2.9): now > current > minimal > prewarm.
+// Scheduling priorities: now > current > minimal > prewarm.
 enum class Priority : int { prewarm = 0, minimal = 1, current = 2, now = 3 };
 
 const char * to_string(Priority p);
@@ -67,15 +67,15 @@ struct LoadRequest {
     std::string artifact_path;      // .mlmodelc (prebuilt or published)
     std::string function = "main";  // multifunction packages name the function
     ComputeUnits units = ComputeUnits::all;  // resolved; loaders never read the environment
-    const void * tmpl = nullptr;     // static embedded template (S2b); null for prebuilt
+    const void * tmpl = nullptr;     // static embedded template; null for prebuilt
     std::vector<int64_t> geometry;   // what the loader validates, e.g. Parler {latent_dim, hop, rf_frames}
 };
 
 struct LoadResult {
     std::shared_ptr<void> model;  // the engine's MLModel wrapper; null on failure
     Error error;
-    bool would_block = false;  // a key lock was busy: re-queue with backoff (§2.7 step 4)
-    int lease_fd = -1;         // shared lease from adoption (S2a); closed with the model
+    bool would_block = false;  // a key lock was busy: re-queue with backoff
+    int lease_fd = -1;         // shared lease from adoption; closed with the model
 };
 
 using LoadFn = LoadResult (*)(const LoadRequest & req);
@@ -177,7 +177,7 @@ public:
 private:
     friend class detail::Runtime;
     // Acquired through a member of a resident pool: counted in that pool while
-    // this handle lives (§2.9).
+    // this handle lives.
     Handle(std::shared_ptr<SharedModel> m, std::shared_ptr<detail::PoolRef> ref);
 
     std::shared_ptr<SharedModel> m_;
@@ -194,7 +194,7 @@ struct Acquired {
     std::string label() const { return model ? model->label() : "ggml"; }
 };
 
-// Thrown by strict acquisitions (§2.10): a terminal non-ready state, a timeout,
+// Thrown by strict acquisitions: a terminal non-ready state, a timeout,
 // deferred(memory), or a stage that cannot serve the unit (resident cap).
 class CoremlError : public std::runtime_error {
 public:
@@ -247,8 +247,8 @@ public:
     void request(Priority p);
 
     // Acquire once at the start of a unit of work and hold the result for the
-    // whole unit (§2.10). With Demand::now the slot is raised to `now`; then:
-    //  - wait none/construct: the bounded wait of §2.9 against `deadline` (the
+    // whole unit. With Demand::now the slot is raised to `now`; then:
+    //  - wait none/construct: the bounded wait against `deadline` (the
     //    unit's single aggregate deadline), otherwise no blocking;
     //  - wait call: block until ready or terminal; deferred(memory) and a
     //    resident cap with nothing evictable (the caller may hold every
@@ -270,7 +270,7 @@ public:
     SlotState state() const;
     SlotStatus status() const;
     std::optional<HintView> hint() const;
-    // mtime of the hint record in nanoseconds (0 without one): "most recent" (§2.11).
+    // mtime of the hint record in nanoseconds (0 without one): "most recent".
     int64_t hint_mtime_ns() const;
     std::string hint_path() const;
     const SlotSpec & spec() const;
@@ -282,7 +282,7 @@ private:
     std::shared_ptr<detail::SlotCore> core_;
 };
 
-// Cap on live model instances for one engine stage (§2.9 resident cap): ready
+// Cap on live model instances for one engine stage (the resident cap): ready
 // models, handles still retained by a unit, loads in flight and evicted
 // instances whose release has not completed yet. A replacement
 // load is admitted only after an eviction made room; a held function or one

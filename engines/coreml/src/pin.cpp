@@ -1,4 +1,5 @@
-// Image pin (PLAN §2.9 "Library unload"). Pure POSIX: dladdr and
+// Image pin: keeps this image mapped while it has work, so a dlclose cannot
+// unmap code a worker still runs. Pure POSIX: dladdr and
 // RTLD_NOLOAD | RTLD_NODELETE exist in the macOS and iOS SDKs (dlfcn.h) and in
 // glibc and bionic, so the dlclose test runs on the Linux lanes as well.
 

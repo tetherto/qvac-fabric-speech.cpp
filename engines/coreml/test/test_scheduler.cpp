@@ -1,4 +1,4 @@
-// test-coreml-scheduler (PLAN §2.16, §2.9, §2.12): the shared Core ML runtime
+// test-coreml-scheduler: the shared Core ML runtime
 // with fake LoadFn / WarmFn / PrepareFn only. Portable: Linux and macOS.
 //
 //   test-coreml-scheduler --plugin <path-to-qvac-coreml-test-plugin> [--only <case>]
@@ -370,7 +370,7 @@ std::optional<detail::HintRecord> hint_of(const std::shared_ptr<Slot> & s) { ret
 
 bool is_ready(const std::shared_ptr<Slot> & s) { return s->state() == SlotState::ready; }
 
-// ---- scheduler cases (§2.16) --------------------------------------------------
+// ---- scheduler cases --------------------------------------------------
 
 void case_priority_order() {
     Env e;
@@ -396,7 +396,7 @@ void case_priority_order() {
 }
 
 void case_dedup_two_owners() {
-    // Two owners of one artifact (§2.9): one load, one shared model; either owner
+    // Two owners of one artifact: one load, one shared model; either owner
     // dropping leaves the other's model intact.
     Env e;
     const int base = g_live_models.load();
@@ -838,8 +838,8 @@ void case_resident_cap() {
     std::printf("    resident cap 3: max live instances observed %zu\n", max_live.load());
 }
 
-// §2.9 counts handles a unit still retains as live instances, whatever happened
-// to the slot that published them.
+// The resident cap counts handles a unit still retains as live instances,
+// whatever happened to the slot that published them.
 void case_resident_cap_retained_handle() {
     Env e;
     const int base = g_live_models.load();
@@ -880,7 +880,7 @@ void case_resident_cap_retained_handle() {
 
 // The caller itself holds every instance the cap permits: nothing can be
 // released, so call, strict, the bounded wait and construct groups never wait
-// on the replacement (§2.9, §2.10); it loads in the background after a release.
+// on the replacement; it loads in the background after a release.
 void case_resident_cap_acquire() {
     Env e;
     auto pool = e.m->make_pool(1);
@@ -944,7 +944,7 @@ void case_resident_cap_acquire() {
 
     // The denial is decided when the caller asks, not by the last worker
     // screening: an acquisition right after the caller lifts it (releasing its
-    // handle, or narrowing the prediction) waits for the replacement (§2.10).
+    // handle, or narrowing the prediction) waits for the replacement.
     // Each round first acquires under the denial, so a cached verdict exists.
     auto denied_now = [](const std::shared_ptr<Slot> & s, bool strict) {
         bool denied = false;
@@ -1007,7 +1007,7 @@ void case_resident_cap_acquire() {
     }
 }
 
-// Two engines, one resident pool each, sharing one instance (§2.9): each pool
+// Two engines, one resident pool each, sharing one instance: each pool
 // counts only what it references, so either engine can move to another
 // function, and the instance lives on for the other engine.
 void case_resident_cap_two_pools() {
@@ -1049,7 +1049,7 @@ void case_resident_cap_two_pools() {
 }
 
 // Another owner's instance enters a capped pool only through that pool's
-// admission (§2.9): a ready registry hit, a late subscriber to a running load
+// admission: a ready registry hit, a late subscriber to a running load
 // and a subscriber joining the other owner's queued job all stay pending while
 // the pool is full with nothing evictable, without delaying the other owner;
 // after a release the slot gets the instance (the same one while the other
@@ -1107,7 +1107,7 @@ void case_resident_cap_cross_owner() {
             CHECK(g_live_models.load() == base + (join == Join::queued ? 3 : 2));  // held + external (+ gate)
             must_complete("call acquisition under the cap", [&] { r = b->acquire(Demand::now); });
             CHECK(!r && r.pending);
-            {  // strict cannot be served either (§2.10), and gives no place
+            {  // strict cannot be served either, and gives no place
                 SlotSpec ss = e.spec(shared);
                 ss.pool = pool;
                 SlotPolicy sp = e.policy(Wait::call);
@@ -1178,9 +1178,9 @@ void case_resident_cap_cross_owner() {
 }
 
 // A load queued under the cap becomes redundant when another member of its
-// pool adopts the same registry instance meanwhile (§2.9): the pool already
+// pool adopts the same registry instance meanwhile: the pool already
 // counts it, so the queued subscriber takes it without a second place, an
-// eviction or a load, and call / strict acquisitions are served (§2.10).
+// eviction or a load, and call / strict acquisitions are served.
 void case_resident_cap_queued_adopt() {
     int round = 0;
     for (const bool acquire_it : {true, false}) {
@@ -1274,7 +1274,7 @@ struct HookGate {
 
 // While a queued job adopts another owner's instance its pool already counts
 // (run_load publishes it without loading), the pool counts that instance once,
-// not once more for the job in flight (§2.9): a concurrent request into the
+// not once more for the job in flight: a concurrent request into the
 // pool's free place is served at once. When the counting member leaves during
 // the adoption, the job keeps the place it reserved: a concurrent registry
 // adoption into the full pool waits.
@@ -1371,8 +1371,8 @@ LoadResult gated_delete_load(const LoadRequest & r) {
 }
 
 // An instance dropped from a pool on another thread (explicit eviction, slot
-// destruction, retirement) keeps its place until its release completed outside the lock
-// (§2.9): no replacement load, no second eviction, and never more live native
+// destruction, retirement) keeps its place until its release completed outside
+// the lock: no replacement load, no second eviction, and never more live native
 // models than the cap while the deleter runs. A reference another owner keeps
 // stops counting in the pool once the pool's own reference is released.
 void case_resident_cap_pending_release() {
@@ -1564,7 +1564,7 @@ void case_resident_cap_adopt_expiry() {
     }
 }
 
-// The end of a pending release wakes the load worker by itself (§2.9): a
+// The end of a pending release wakes the load worker by itself: a
 // replacement waiting for the place starts as soon as the pool is told, not at
 // the next periodic re-check. The release is held after its reference is gone,
 // so no other wake-up (the instance's own release) comes after the worker went
@@ -1615,7 +1615,7 @@ LoadResult slow_delete_load(const LoadRequest & r) {
 }
 
 // References a pool drops while another member or a Handle still counts the
-// instance are accounted too (§2.9): whichever reference is released last, the
+// instance are accounted too: whichever reference is released last, the
 // place comes back only after the native deleter ran.
 void case_resident_cap_shared_release() {
     // Two members share the victim: the worker evicts both, and the graveyard
@@ -1765,7 +1765,7 @@ void case_call_wait_pins_nothing() {
 }
 
 // The pool count drops when an instance is released or evicted, not when the
-// last strong reference is finally gone (§2.9): a release wakes the replacement
+// last strong reference is finally gone: a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
 void case_resident_cap_release_window() {
     Config c = fast_config();
@@ -2034,7 +2034,7 @@ void case_call_wait_and_cancel() {
     release("cw-block");
 }
 
-// ---- lifetime cases (§2.9) ------------------------------------------------------
+// ---- lifetime cases ------------------------------------------------------
 
 void case_destroy_during_jobs() {
     Env e;
@@ -2253,7 +2253,7 @@ void case_exit_during_load() {
     fs::remove_all(dir, ec);
 }
 
-// ---- options, plan, fit, status (§2.12, §2.13, B.5) -------------------------
+// ---- options, plan, fit, status -------------------------
 
 std::map<std::string, std::string> * g_env = new std::map<std::string, std::string>();
 const char * fake_getenv(const char * name) {
@@ -2271,7 +2271,7 @@ void case_resolve_precedence() {
     CHECK(d.use == Use::automatic && d.generate == Generate::background && d.wait == Wait::none);
     CHECK(d.prewarm == Prewarm::predicted && d.cache_dir.empty() && !d.compute_units);
     CHECK(!d.strict_wait_ms && !d.memory_budget_bytes && d.use_source == Source::default_value);
-    CHECK(resolve(none, {}, Platform::ios).wait == Wait::call);  // iOS keeps blocking (R8)
+    CHECK(resolve(none, {}, Platform::ios).wait == Wait::call);  // iOS keeps blocking
 
     // Kill switch: presence (even "0") overrides an explicit require.
     Options req;
@@ -2485,7 +2485,7 @@ void case_hint_keys() {
     const std::string chunk(1000, 'a');
     for (int i = 0; i < 1000; ++i) h.update(chunk);
     CHECK(to_hex(h.finish()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-    // Appendix B.4 hint_id, checked against an independent implementation.
+    // hint_id, checked against an independent implementation.
     CHECK(detail::hint_id("host", "/a/b.mlmodelc", 123, "main", "all", "24G419") == "beee5eda1b4787deef6745db7228c2a0");
     const int64_t t = 1767225600;  // 2026-01-01T00:00:00Z
     CHECK(detail::iso8601_utc(t) == "2026-01-01T00:00:00Z");

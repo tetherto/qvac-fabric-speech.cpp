@@ -1,7 +1,7 @@
 #pragma once
 
-// SHA-256 (FIPS 180-4). Portable, no platform crypto: the keys of Appendix B.4
-// must be identical on Linux and Apple.
+// SHA-256 (FIPS 180-4). Portable, no platform crypto: the hint and cache keys
+// hashed with it must be identical on Linux and Apple.
 
 #include <array>
 #include <cstddef>
@@ -21,7 +21,7 @@ public:
     Sha256();
     void update(const void * data, size_t len);
     void update(std::string_view s) { update(s.data(), s.size()); }
-    // Appendix B.4 encoders.
+    // Field encoders of the hashed keys (little-endian, length-prefixed strings).
     void u32le(uint32_t v);
     void u64le(uint64_t v);
     void i64le(int64_t v) { u64le(static_cast<uint64_t>(v)); }

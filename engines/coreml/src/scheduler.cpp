@@ -1,4 +1,4 @@
-// Scheduler (PLAN §2.9): prepare queue + load lane behind one admission gate,
+// Scheduler: prepare queue + load lane behind one admission gate,
 // memory admission for cold ANE loads, would_block re-queue, resident cap,
 // observed-warm hints and the bounded wait.
 
@@ -212,7 +212,7 @@ void Runtime::drop_model_locked(SlotCore & c, Graveyard & gy) {
     }
     // Also when another member or a Handle still counts the instance: that
     // reference may be released first, on another thread, leaving this one
-    // the last (§2.9).
+    // the last.
     p->releasing.push_back(m.get());
     gy.items.push_back(std::make_shared<PendingRelease>(std::move(m), p, weak_from_this()));
 }
@@ -248,7 +248,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
         return;
     }
     // Another owner's live instance is adopted at once only when this slot's
-    // pool already counts it or has room (§2.9). Otherwise a queued job takes
+    // pool already counts it or has room. Otherwise a queued job takes
     // it through admission (evict or stay cap-blocked) and run_load()
     // publishes the existing instance without loading again. The only strong
     // reference taken here becomes the slot's own.
@@ -274,7 +274,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
         c->state = j->started ? j->phase : (j->deferred_memory ? SlotState::deferred_memory : SlotState::queued);
         // A late subscriber to a running load: its pool was not admitted at
         // start. It gets a place if the pool has room; otherwise publish()
-        // hands it a queued job of its own (§2.9).
+        // hands it a queued job of its own.
         if (j->started) reserve_locked(*j, *c, gy);
         return;
     }
@@ -362,7 +362,7 @@ void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bo
     }
     if (c->spec.route == Route::none) return;
     if (cfg.pin_image && pin_state() != PinState::pinned && pin_state() != PinState::main_image) {
-        // §2.9: no asynchronous work from an image that a dlclose could unmap.
+        // No asynchronous work from an image that a dlclose could unmap.
         // pin_for_work() ran before mu was taken; this slot falls back to ggml.
         c->state = SlotState::failed;
         c->error = Error::deterministic("the library image could not be pinned against unload");
@@ -597,8 +597,8 @@ std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCor
     return victim ? victim->members : std::vector<std::shared_ptr<SlotCore>>{};
 }
 
-// Whether the pool of subscriber `c` denies it the instance job `j` brings
-// (§2.9): full, not already counting that instance, nothing in it evictable for
+// Whether the pool of subscriber `c` denies it the instance job `j` brings:
+// full, not already counting that instance, nothing in it evictable for
 // this job, and no load in flight for it (that load may publish an evictable
 // instance: undecided until it does). A pool the running job reserved a place
 // in serves its subscribers.
@@ -664,7 +664,7 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, std::shared_ptr<Shared
         if (existing && pool_counts_locked(*p, existing, gy)) continue;
         if (!p->releasing.empty()) {
             // A release is on its way out: wait for it rather than evicting a
-            // second victim meanwhile (§2.9).
+            // second victim meanwhile.
             releasing = true;
             continue;
         }
@@ -1117,7 +1117,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         if (!admitted && !pool_takes_locked(*c, m.get(), gy)) {
             // Its pool was neither admitted at start nor reserved when it
             // joined, and it is full: the instance goes through admission
-            // like any other load (§2.9). The subscriber stays pending.
+            // like any other load. The subscriber stays pending.
             c->job.reset();
             subscribe_load_locked(c, s.prio, s.non_deferrable, gy);
             continue;
@@ -1256,8 +1256,8 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 }
                 if (st == SlotState::idle) return out;  // evicted or cancelled meanwhile
                 if (cap_blocked_now_locked(*c, gy)) {
-                    // §2.9: nothing can be released, so the replacement is not
-                    // loaded and the unit runs with what is ready; §2.10: strict
+                    // Nothing can be released, so the replacement is not
+                    // loaded and the unit runs with what is ready; strict
                     // cannot serve the unit.
                     if (strict) {
                         throw CoremlError("coreml: " + c->spec.stage + "/" + c->spec.function +
@@ -1280,7 +1280,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
                 release_graveyard();
                 continue;
             }
-            // none / construct: the bounded wait (§2.9), decided once.
+            // none / construct: the bounded wait, decided once.
             if (!planned) {
                 planned = true;
                 wp = plan_bounded_wait_locked(*c, deadline, now, gy);
@@ -1354,7 +1354,7 @@ void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, G
 
 // One locked section and no strong reference of its own: the slot's reference
 // leaves only through drop_model_locked, so its pool keeps the place until
-// that reference is released (§2.9), never before.
+// that reference is released, never before.
 void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string & reason) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);

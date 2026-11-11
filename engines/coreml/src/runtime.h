@@ -33,7 +33,7 @@ struct Graveyard {
     }
 };
 
-// The atexit flag (§2.9 "Process exit"): stops new work in this image.
+// The atexit flag: at process exit, stops new work in this image.
 bool exiting();
 void register_atexit_once();
 
@@ -131,7 +131,7 @@ struct PoolRef {
     std::atomic<int> holds{0};
 };
 
-// §2.9 resident cap. A pool counts the distinct instances it references: those
+// Resident cap. A pool counts the distinct instances it references: those
 // its live members hold, plus those units retain through it (PoolRef), plus the
 // load in flight for it, plus the instances its members dropped (evicted,
 // released, retired or replaced) whose strong reference is still on its way
@@ -184,7 +184,7 @@ public:
     void on_pool_released(const std::weak_ptr<PoolCore> & p, const SharedModel * m);
     void notify();
     void stop();
-    // Pins this image (§2.9) before work is requested; never under mu. Every
+    // Pins this image before work is requested; never under mu. Every
     // entry point that reaches request_locked() calls it first.
     void pin_for_work();
     Stats stats_snapshot();
@@ -196,7 +196,7 @@ public:
     void request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     SlotStatus status_locked(SlotCore & c, Clock::time_point now) const;
     // The resident cap denies slot `c` the instance its load job brings, right
-    // now (§2.9): acquisitions and groups do not wait on it. Decided at the
+    // now: acquisitions and groups do not wait on it. Decided at the
     // call, from the current holds, predictions, residents and reservations.
     bool cap_blocked_now_locked(const SlotCore & c, Graveyard & gy) const;
 
@@ -225,7 +225,7 @@ private:
     void evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     // Drops slot `c`'s model into `gy`. A pooled slot's reference always leaves
     // as a pending release: the pool counts the instance until that reference
-    // is released outside mu (§2.9: a replacement is admitted only then),
+    // is released outside mu (a replacement is admitted only then),
     // whether or not another member or a Handle also counts it meanwhile.
     void drop_model_locked(SlotCore & c, Graveyard & gy);
     void retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy);

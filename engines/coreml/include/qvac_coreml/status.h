@@ -1,6 +1,6 @@
 #pragma once
 
-// Slot states, routes, labels and the status JSON (PLAN §2.9, §2.10, B.5).
+// Slot states, routes, labels and the status JSON.
 
 #include "qvac_coreml/options.h"
 
@@ -12,7 +12,7 @@
 
 namespace QVAC_COREML_NS {
 
-// §2.9 slot states. `idle` is a slot whose route is not `none` and for which
+// Slot states. `idle` is a slot whose route is not `none` and for which
 // nothing has been requested (or whose request an eviction cancelled).
 enum class SlotState {
     idle,
@@ -40,14 +40,14 @@ const char * to_string(SlotState s);
 // `unsupported(<reason>)`, `deferred(memory)`, otherwise to_string().
 std::string state_label(SlotState s, std::string_view reason);
 
-// Terminal states return immediately from every wait (§2.10).
+// Terminal states return immediately from every wait.
 bool is_terminal(SlotState s);
 
 enum class ErrorClass { none, deterministic, transient };
 
 const char * to_string(ErrorClass c);
 
-// plan() vocabulary (§2.13). Whether an artifact was cached or generated
+// plan() vocabulary. Whether an artifact was cached or generated
 // appears only in status (StatusRoute).
 enum class Route { none, prebuilt, generate };
 enum class StatusRoute { none, prebuilt, cached, generated };
@@ -55,7 +55,7 @@ enum class StatusRoute { none, prebuilt, cached, generated };
 const char * to_string(Route r);
 const char * to_string(StatusRoute r);
 
-// Today's result labels (§2.10): coreml-all | coreml-ane | coreml-gpu | coreml-cpu.
+// Today's result labels: coreml-all | coreml-ane | coreml-gpu | coreml-cpu.
 const char * label_for(ComputeUnits units);
 
 // Per-call aggregation: equal labels stay, anything else is "mixed"; an empty

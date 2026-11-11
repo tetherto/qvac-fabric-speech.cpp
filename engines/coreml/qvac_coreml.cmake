@@ -1,4 +1,4 @@
-# Shared Core ML runtime (PLAN §2.3). Folded into each engine library under its
+# Shared Core ML runtime. Folded into each engine library under its
 # own namespace; no new library is installed and the headers under include/
 # are BUILD_INTERFACE only.
 #
@@ -6,7 +6,7 @@
 #       Compiles the runtime into <engine-lib> with QVAC_COREML_NS=<ns> when
 #       ENABLE is true (the engine's Apple-only <P>_COREML option). <P> is the
 #       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN). Template
-#       embedding (TEMPLATES) arrives with S2b and is rejected until then.
+#       embedding (TEMPLATES) is not implemented yet and is rejected.
 #   qvac_coreml_add_tests()
 #       Portable runtime tests (Linux and macOS): test-coreml-scheduler. Each
 #       engine calls it from its *_BUILD_TESTS block; the first call wins in the
@@ -70,7 +70,7 @@ function(qvac_coreml_add_to target)
         message(FATAL_ERROR "qvac_coreml_add_to(${target}): NAMESPACE and PREFIX are required")
     endif()
     if (QCA_TEMPLATES)
-        message(FATAL_ERROR "qvac_coreml_add_to(${target}): template embedding (TEMPLATES) is not available yet (S2b)")
+        message(FATAL_ERROR "qvac_coreml_add_to(${target}): template embedding (TEMPLATES) is not available yet")
     endif()
     if (NOT QCA_ENABLE)
         return()  # no Core ML in this build: nothing compiled, no behaviour change
@@ -86,7 +86,7 @@ function(qvac_coreml_add_to target)
     _qvac_coreml_configure_runtime(${rt} ${QCA_NAMESPACE} ON)
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:${rt}>)
 
-    # Engine sources that adopt the runtime (S1b, P1, A1) see the same
+    # Engine sources that adopt the runtime see the same
     # namespace and headers; nothing in the engine uses them yet.
     target_compile_definitions(${target} PRIVATE QVAC_COREML_NS=${QCA_NAMESPACE})
     target_include_directories(${target} PRIVATE $<BUILD_INTERFACE:${dir}/include>)
