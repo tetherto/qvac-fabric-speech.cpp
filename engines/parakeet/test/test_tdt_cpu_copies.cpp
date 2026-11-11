@@ -86,7 +86,7 @@ std::string transcribe(ParakeetCtcModel & model, const std::string & wav) {
     int n_frames = 0;
     if (compute_log_mel(samples.data(), (int) samples.size(), model.mel_cfg, mel, n_frames) != 0) return "";
     EncoderOutputs enc;
-    if (run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, enc, -1, false) != 0) return "";
+    if (run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, enc, parakeet::EncoderRoute::ggml(), -1, false) != 0) return "";
     TdtRuntimeWeights rt;
     if (tdt_prepare_runtime(model, rt) != 0) return "";
     TdtDecodeResult result;

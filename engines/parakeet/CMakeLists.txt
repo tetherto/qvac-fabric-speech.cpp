@@ -43,6 +43,11 @@ set(PARAKEET_COREML_OBJC_SOURCES
     src/coreml/parakeet-encoder.mm
     src/coreml/parakeet-decoder.mm
     src/coreml/parakeet-diarizer.mm)
+# Parakeet's adoption of the shared Core ML runtime (engines/coreml): C++
+# compiled with the runtime's namespace (QVAC_COREML_NS=parakeet_coreml).
+set(PARAKEET_COREML_RUNTIME_GLUE_SOURCES
+    src/coreml/parakeet_coreml_sidecars.cpp)
+set(PARAKEET_COREML_RUNTIME_NS parakeet_coreml)
 
 # ccache shaves ~30 % off iterative rebuild time on developer machines.
 # Opt-out via -DPARAKEET_CCACHE=OFF for clean reproducibility runs.
@@ -455,8 +460,13 @@ if (PARAKEET_BUILD_LIBRARY)
         parakeet_apply_ccache(parakeet.coreml)
         target_include_directories(parakeet.coreml PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include
         )
+        # The diarizer wrapper registers its capacities as runtime slots.
+        target_compile_definitions(parakeet.coreml PRIVATE
+            QVAC_COREML_NS=${PARAKEET_COREML_RUNTIME_NS})
         # The diarizer wrapper logs through parakeet_log.h, which includes
         # ggml.h; a system ggml (the vcpkg superbuild) has no ggml/ subtree.
         target_link_libraries(parakeet.coreml PRIVATE ggml)
@@ -466,7 +476,8 @@ if (PARAKEET_BUILD_LIBRARY)
             XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
         )
 
-        target_sources(qvac-parakeet PRIVATE $<TARGET_OBJECTS:parakeet.coreml>)
+        target_sources(qvac-parakeet PRIVATE $<TARGET_OBJECTS:parakeet.coreml>
+                                             ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
         target_compile_definitions(qvac-parakeet PRIVATE PARAKEET_USE_COREML)
         target_link_libraries(qvac-parakeet PUBLIC
             ${PARAKEET_FOUNDATION_FRAMEWORK}
@@ -475,10 +486,10 @@ if (PARAKEET_BUILD_LIBRARY)
         message(STATUS "parakeet: Core ML encoder and TDT decoder sidecars enabled (PARAKEET_USE_COREML)")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libqvac-parakeet
-    # under its own namespace when PARAKEET_COREML is on. No engine source uses
-    # it yet.
+    # under its own namespace when PARAKEET_COREML is on. The encoder, bypass
+    # encoder and diarizer sidecars load through its slots (PLAN §3.2.0).
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_to(qvac-parakeet NAMESPACE parakeet_coreml PREFIX PARAKEET ENABLE ${PARAKEET_COREML})
+    qvac_coreml_add_to(qvac-parakeet NAMESPACE ${PARAKEET_COREML_RUNTIME_NS} PREFIX PARAKEET ENABLE ${PARAKEET_COREML})
 
     set_target_properties(qvac-parakeet PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -594,6 +605,25 @@ if (PARAKEET_BUILD_TESTS)
     # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_tests()
+
+    # Test harnesses that compile the engine sources themselves with
+    # PARAKEET_USE_COREML (instead of linking libqvac-parakeet) need their own
+    # copy of the runtime, in the library's namespace, plus the routing glue.
+    function(parakeet_test_use_coreml_runtime target)
+        if (NOT TARGET parakeet-test-coreml-runtime)
+            _qvac_coreml_runtime_sources(_ptcr_srcs ON)
+            add_library(parakeet-test-coreml-runtime OBJECT ${_ptcr_srcs})
+            _qvac_coreml_configure_runtime(parakeet-test-coreml-runtime ${PARAKEET_COREML_RUNTIME_NS} ON)
+            parakeet_apply_ccache(parakeet-test-coreml-runtime)
+        endif()
+        _qvac_coreml_apple_frameworks(_ptcr_fws)
+        target_sources(${target} PRIVATE
+            $<TARGET_OBJECTS:parakeet-test-coreml-runtime>
+            ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
+        target_compile_definitions(${target} PRIVATE QVAC_COREML_NS=${PARAKEET_COREML_RUNTIME_NS})
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include)
+        target_link_libraries(${target} PRIVATE ${_ptcr_fws})
+    endfunction()
 
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness
@@ -1537,6 +1567,8 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
         src/parakeet_diarization_v3.cpp
+        # Core ML memory-degrade in the engine projects fit (PLAN §2.13).
+        src/parakeet_fit.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
         src/energy_vad.cpp)
@@ -1610,6 +1642,7 @@ if (PARAKEET_BUILD_TESTS)
         target_sources(test-moss-transcribe-coreml-parity PRIVATE ${PARAKEET_COREML_OBJC_SOURCES})
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES} PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-moss-transcribe-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-moss-transcribe-coreml-parity)
         target_link_libraries(test-moss-transcribe-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1629,6 +1662,7 @@ if (PARAKEET_BUILD_TESTS)
     if (PARAKEET_COREML)
         target_sources(bench-moss-transcribe-coreml PRIVATE ${PARAKEET_COREML_OBJC_SOURCES})
         target_compile_definitions(bench-moss-transcribe-coreml PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(bench-moss-transcribe-coreml)
         target_link_libraries(bench-moss-transcribe-coreml PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1745,6 +1779,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-encoder-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-encoder-coreml-parity)
         target_link_libraries(test-encoder-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1788,6 +1823,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-encoder-coreml-bypass-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-encoder-coreml-bypass-parity)
         target_link_libraries(test-encoder-coreml-bypass-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1814,6 +1850,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-nemotron-diarization-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-nemotron-diarization-coreml-parity)
         target_link_libraries(test-nemotron-diarization-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1842,6 +1879,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-sortformer-diarizer-coreml-parity PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-sortformer-diarizer-coreml-parity)
         target_link_libraries(test-sortformer-diarizer-coreml-parity PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -1870,6 +1908,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-coreml-diarizer-fallback PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-coreml-diarizer-fallback)
         target_link_libraries(test-coreml-diarizer-fallback PRIVATE ggml parakeet-backend-defs
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
         target_include_directories(test-coreml-diarizer-fallback PRIVATE include src ggml/include)
@@ -2145,6 +2184,7 @@ if (PARAKEET_BUILD_TESTS)
             set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
                 PROPERTIES COMPILE_FLAGS "-fobjc-arc")
             target_compile_definitions(test-fit-coreml-diarizers PRIVATE PARAKEET_USE_COREML)
+            parakeet_test_use_coreml_runtime(test-fit-coreml-diarizers)
             target_link_libraries(test-fit-coreml-diarizers PRIVATE ggml parakeet-backend-defs
                 ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
             target_include_directories(test-fit-coreml-diarizers PRIVATE include src ggml/include)
@@ -2411,7 +2451,7 @@ if (PARAKEET_BUILD_TESTS)
     # Load-time [w_ih | w_hh] row stacking, independent of any GGUF fixture.
     add_executable(test-lstm-input-concat test/test_lstm_input_concat.cpp)
     target_link_libraries(test-lstm-input-concat PRIVATE ggml)
-    target_include_directories(test-lstm-input-concat PRIVATE src ggml/include)
+    target_include_directories(test-lstm-input-concat PRIVATE src include ggml/include)
     parakeet_apply_ccache(test-lstm-input-concat)
     parakeet_register_test(test-lstm-input-concat LABEL "unit")
 
@@ -2613,6 +2653,7 @@ if (PARAKEET_BUILD_TESTS)
     # registered once per model family fixture present.
     add_executable(test-fit-params
         test/test_fit_params.cpp
+        src/parakeet_coreml_path.cpp
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
@@ -2679,6 +2720,7 @@ if (PARAKEET_BUILD_TESTS)
     add_executable(test-fit-cli
         test/test_fit_cli.cpp
         src/fit_main.cpp
+        src/parakeet_coreml_path.cpp
         src/parakeet_ctc.cpp
         src/parakeet_fit.cpp
         src/parakeet_log.cpp
@@ -2955,6 +2997,7 @@ if (PARAKEET_BUILD_TESTS)
         set_source_files_properties(${PARAKEET_COREML_OBJC_SOURCES}
             PROPERTIES COMPILE_FLAGS "-fobjc-arc")
         target_compile_definitions(test-coreml-encoder-owner PRIVATE PARAKEET_USE_COREML)
+        parakeet_test_use_coreml_runtime(test-coreml-encoder-owner)
         target_link_libraries(test-coreml-encoder-owner PRIVATE
             ${PARAKEET_FOUNDATION_FRAMEWORK} ${PARAKEET_COREML_FRAMEWORK})
     endif()
@@ -2969,6 +3012,14 @@ if (PARAKEET_BUILD_TESTS)
                  "--full-gguf" "${_qvp_transcribepsy_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_transcribepsy_coreml_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
                  "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
+        if (EXISTS "${_qvp_transcribepsy_coreml_gguf}")
+            list(APPEND _qvp_cr_args "--encoderless-gguf" "${_qvp_transcribepsy_coreml_gguf}")
+        endif()
+        parakeet_register_test(test-parakeet-coreml-runtime
+            LABEL    "fixture;coreml"
+            ARGS     ${_qvp_cr_args}
+            REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+    endif()
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel
     # parity (also from a worker thread), the 60 s / 25 % long-form windows

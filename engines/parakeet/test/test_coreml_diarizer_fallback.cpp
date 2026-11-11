@@ -6,6 +6,7 @@
 // symlinks to the real Nemotron 3 Diarization and Sortformer v2.1 bundles in a
 // temporary directory; exits 77 when they are missing.
 
+#include "coreml_test_options.h"
 #include "coreml/coreml_diarizers.h"
 #include "mel_preprocess.h"
 #include "parakeet_coreml_path.h"
@@ -94,7 +95,7 @@ Comparison compare(const std::vector<float> & actual, const std::vector<float> &
 
 bool load_model(const std::string & path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
     if (disable_coreml) setenv(kDisableEnv, "1", 1);
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options());
     if (disable_coreml) unsetenv(kDisableEnv);
     return status == 0;
 }

@@ -367,7 +367,7 @@ int main(int argc, char ** argv) {
         std::vector<float> zero_mel((size_t) n_mel_frames * n_mels, 0.0f);
         parakeet::EncoderOutputs enc_out;
         if (parakeet::run_encoder(model, zero_mel.data(), n_mel_frames, n_mels,
-                                  enc_out, /*max_layers=*/-1,
+                                  enc_out, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1,
                                   /*capture_intermediates=*/false) != 0) {
             fail("real run_encoder failed");
             return g_failures;

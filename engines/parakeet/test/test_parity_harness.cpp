@@ -107,7 +107,8 @@ int compute_log_mel(const float *, int, const MelConfig &, std::vector<float> & 
 }
 
 int run_encoder(ParakeetCtcModel &, const float * mel, int frames, int width,
-                EncoderOutputs & output, int, bool, bool, const EncoderOutputConsumer &) {
+                EncoderOutputs & output, const EncoderRoute &, int, bool, bool,
+                const EncoderOutputConsumer &) {
     if (frames != kFrames || width != kWidth || mel[0] != kValue) return 1;
     output.n_enc_frames = kFrames;
     output.d_model = output.vocab_size = kWidth;

@@ -10,6 +10,7 @@
 #include "parakeet/fit.h"
 
 #include "backend_util.h"
+#include "coreml_fit.h"
 #include "fit_util.h"
 #include "long_form.h"
 #include "parakeet_coreml_path.h"
@@ -21,6 +22,8 @@
 #include "parakeet_tdt.h"
 #ifdef PARAKEET_USE_COREML
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet-encoder.h"
+#include "coreml/parakeet_coreml_sidecars.h"
 #endif
 
 #include "ggml-alloc.h"
@@ -30,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -192,6 +196,72 @@ uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
 #endif
 }
 
+// Core ML enablement for the projection: resolved from FitOptions::coreml
+// exactly as an Engine would (PARAKEET_COREML_DISABLE, use = off, ...).
+bool coreml_fit_enabled(const FitOptions & opts, std::string & disabled_reason) {
+#ifdef PARAKEET_USE_COREML
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    disabled_reason = resolved.enabled() ? std::string() : resolved.disabled_reason;
+    return resolved.enabled();
+#else
+    (void) opts;
+    disabled_reason = "build";
+    return false;
+#endif
+}
+
+uint64_t gguf_encoder_parameters(const ParakeetCtcModel & model) {
+    uint64_t n = 0;
+    ggml_context * ctx = model.weights_ctx();
+    if (ctx == nullptr) return 0;
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+        if (std::strncmp(ggml_get_name(t), "encoder.", 8) == 0) n = sat_add(n, (uint64_t) ggml_nelements(t));
+    }
+    return n;
+}
+
+// Encoder sidecar envelope for the worst window (0 with no encoder route).
+uint64_t coreml_encoder_fit_bytes(const ParakeetCtcModel & model, const FitOptions & opts,
+                                  bool enabled, long long window_mel, int window_enc,
+                                  bool & prebuilt) {
+    prebuilt = false;
+    const bool supported =
+        model.model_type == ParakeetModelType::CTC || model.model_type == ParakeetModelType::RNNT ||
+        model.model_type == ParakeetModelType::TDT || model.model_type == ParakeetModelType::EOU ||
+        model.model_type == ParakeetModelType::NEMOTRON ||
+        (model.model_type == ParakeetModelType::SORTFORMER &&
+         model.model_variant == "sortformer-streaming-v2.1-aosc");
+    if (!supported) return 0;
+    const std::string sidecar = coreml_encoder_sidecar_path(opts.model_gguf_path);
+    const CoremlEncoderFitRoute route = coreml_encoder_fit_route(sidecar, enabled);
+    if (!route.prebuilt) return 0;
+    prebuilt = true;
+    CoremlEncoderEnvelopeInputs in;
+    in.weight_file_bytes = route.weight_file_bytes;
+    in.encoder_parameters = gguf_encoder_parameters(model);
+    in.io_bytes = f32_bytes(sat_add(sat_mul((uint64_t) std::max<long long>(window_mel, 0),
+                                            (uint64_t) model.mel_cfg.n_mels),
+                                    sat_mul((uint64_t) std::max(window_enc, 0),
+                                            (uint64_t) model.encoder_cfg.d_model)));
+#ifdef PARAKEET_USE_COREML
+    const auto resolved = resolve_parakeet_coreml(opts.coreml);
+    in.ane = resolved.units_or(parakeet_coreml_encoder_prefers_ane(sidecar.c_str())
+                                   ? pcm::ComputeUnits::cpu_and_ane
+                                   : pcm::ComputeUnits::all) == pcm::ComputeUnits::cpu_and_ane;
+#endif
+    return coreml_encoder_envelope_bytes(in);
+}
+
+std::string coreml_fit_report(const FitResult & r) {
+    char line[kReportLineBytes];
+    std::snprintf(line, sizeof(line),
+                  "coreml:   %s; encoder route %s; envelope %s; with Core ML %s, ggml only %s\n",
+                  r.coreml.disabled_reason.empty() ? "enabled" : r.coreml.disabled_reason.c_str(),
+                  r.coreml.encoder_route.c_str(), fmt_mib(r.coreml.bytes).c_str(),
+                  r.coreml.fits ? "fits" : "does not fit", r.ggml_only_fits ? "fits" : "does not fit");
+    return line;
+}
+
 struct DiarizationGraphShape {
     int mel_frames = 0;
     int state_frames = 0;
@@ -297,9 +367,13 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
                                            nemotron_coreml_ranges(graphs, long_form));
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
+    std::string disabled_reason;
+    const bool enabled = coreml_fit_enabled(opts, disabled_reason);
+    apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0);
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
-                                        "every diarization graph shares one buffer");
+                                        "every diarization graph shares one buffer") +
+               coreml_fit_report(r);
 }
 
 }  // namespace
@@ -633,6 +707,14 @@ FitResult fit_params(const FitOptions & opts) {
                 sat_add(r.device.decoder_state_bytes, r.device.decoder_compute_bytes));
 
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
+    {
+        std::string disabled_reason;
+        const bool enabled = coreml_fit_enabled(opts, disabled_reason);
+        bool encoder_prebuilt = false;
+        const uint64_t envelope = coreml_encoder_fit_bytes(model, opts, enabled, window_mel,
+                                                           window_enc, encoder_prebuilt);
+        apply_coreml_verdicts(r, required, enabled, disabled_reason, encoder_prebuilt, envelope);
+    }
 
     // ── Report ─────────────────────────────────────────────────────────────
     {
@@ -656,6 +738,7 @@ FitResult fit_params(const FitOptions & opts) {
         std::snprintf(line, sizeof(line), "%zu resident graph%s",
                       resident_mel.size(), resident_mel.size() == 1 ? "" : "s");
         s += device_projection_report(r, opts.margin_bytes, required, line);
+        s += coreml_fit_report(r);
         r.report = std::move(s);
     }
 

@@ -4,6 +4,7 @@
 
 #import "coreml/parakeet-diarizer.h"
 #include "coreml/coreml_diarizers.h"
+#include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml/parakeet_coreml_units.h"
 #include "parakeet_coreml_path.h"
 #include "parakeet_log.h"
@@ -263,12 +264,18 @@ bool read_outputs(id<MLFeatureProvider> result, const parakeet_coreml_rows_out *
 
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * path_mlmodelc,
                                                                 const char * units_env) {
+    return parakeet_coreml_diarizer_init_with_units(
+        path_mlmodelc, units_env != nullptr ? std::getenv(units_env) : nullptr);
+}
+
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
+                                                                           const char * units) {
     if (path_mlmodelc == nullptr) return nullptr;
     @autoreleasepool {
         std::string label;
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = parakeet_coreml_requested_units(
-            units_env, /*prefer_neural_engine=*/true, &label);
+        config.computeUnits = parakeet_coreml_units_for(
+            units, /*prefer_neural_engine=*/true, &label);
         NSError * error = nil;
         NSURL * url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path_mlmodelc]];
         MLModel * model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
@@ -394,95 +401,151 @@ std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string
     return bundles;
 }
 
-CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities)
-    : gguf_path_(std::move(gguf_path)), slots_(capacities.size()) {
-    std::transform(capacities.begin(), capacities.end(), slots_.begin(),
-                   [](int capacity) { return Slot{capacity, nullptr, false}; });
-}
+namespace {
 
-CoremlDiarizers::~CoremlDiarizers() {
-    std::for_each(slots_.begin(), slots_.end(),
-                  [](Slot & slot) { parakeet_coreml_diarizer_free(slot.context); });
-}
-
-CoremlDiarizers::Slot * CoremlDiarizers::slot_for(int frames) {
-    for (Slot & slot : slots_) {
-        if (!slot.failed && slot.capacity >= frames) return &slot;
-    }
-    return nullptr;
-}
-
-bool CoremlDiarizers::load(Slot & slot) {
-    if (slot.context != nullptr) return true;
-    const std::string path = coreml_diarizer_sidecar_path(gguf_path_, slot.capacity);
-    slot.context = parakeet_coreml_diarizer_init(path.c_str(), kCoremlDiarizerUnitsEnv);
-    if (slot.context == nullptr ||
-        parakeet_coreml_diarizer_capacity(slot.context) != slot.capacity) {
+// Runs on the runtime's load lane with the resolved units (§2.9): never reads
+// the environment. The capacity the bundle reports must match its file name.
+pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
+    pcm::LoadResult result;
+    const int64_t capacity = request.geometry.empty() ? 0 : request.geometry.front();
+    parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units(
+        request.artifact_path.c_str(), pcm::to_string(request.units));
+    if (context == nullptr || parakeet_coreml_diarizer_capacity(context) != capacity) {
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML diarizer at '%s'; using ggml\n",
-                          path.c_str());
-        quarantine(slot);
-        return false;
+                          request.artifact_path.c_str());
+        parakeet_coreml_diarizer_free(context);
+        result.error = pcm::Error::deterministic("failed to load Core ML diarizer", "parakeet", capacity);
+        return result;
     }
-    label_ = parakeet_coreml_diarizer_label(slot.context);
-    PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", path.c_str());
-    return true;
+    PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", request.artifact_path.c_str());
+    result.model = std::shared_ptr<void>(context, [](void * p) {
+        parakeet_coreml_diarizer_free(static_cast<parakeet_coreml_diarizer *>(p));
+    });
+    return result;
 }
 
-void CoremlDiarizers::quarantine(Slot & slot) {
-    parakeet_coreml_diarizer_free(slot.context);
-    slot.context = nullptr;
-    slot.failed = true;
+// Failed, retired or never routable (disabled, absent): the next covering
+// capacity or ggml serves the pass.
+bool unusable(pcm::SlotState state) { return pcm::is_terminal(state); }
+
+}  // namespace
+
+struct CoremlDiarizers::State {
+    struct Capacity {
+        int frames = 0;
+        std::shared_ptr<pcm::Slot> slot;
+    };
+    std::string gguf_path;
+    std::vector<Capacity> capacities;  // ascending
+    std::mutex mutex;                  // label and call stats
+    std::string label;
+    CoremlDiarizerCallStats stats;
+};
+
+CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities,
+                                 CoremlSidecars & sidecars)
+    : state_(std::make_unique<State>()) {
+    state_->gguf_path = std::move(gguf_path);
+    std::sort(capacities.begin(), capacities.end());
+    for (int capacity : capacities) {
+        SidecarRequest request;
+        request.stage = "diarizer-" + std::to_string(capacity);
+        request.path = coreml_diarizer_sidecar_path(state_->gguf_path, capacity);
+        request.present = true;
+        request.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        request.load_fn = &load_diarizer;
+        request.geometry = {capacity};
+        // §2.11: the smallest capacity is the minimal set; larger ones are
+        // requested by the call that needs them (or by prewarm = all).
+        request.minimal = state_->capacities.empty();
+        state_->capacities.push_back(State::Capacity{capacity, sidecars.add(request)});
+    }
 }
 
-CoremlDiarizers::Slot * CoremlDiarizers::loaded_slot_for(int frames) {
-    for (Slot * slot = slot_for(frames); slot != nullptr; slot = slot_for(frames)) {
-        if (load(*slot)) return slot;
-    }
-    return nullptr;
-}
+CoremlDiarizers::~CoremlDiarizers() = default;
 
 bool CoremlDiarizers::covers(int frames) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return frames > 0 && slot_for(frames) != nullptr;
+    if (frames <= 0) return false;
+    for (const State::Capacity & c : state_->capacities) {
+        if (c.frames >= frames && !unusable(c.slot->state())) return true;
+    }
+    return false;
 }
 
 bool CoremlDiarizers::prepare(int frames) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return frames > 0 && loaded_slot_for(frames) != nullptr;
+    if (frames <= 0) return false;
+    for (const State::Capacity & c : state_->capacities) {
+        if (c.frames < frames || unusable(c.slot->state())) continue;
+        c.slot->request(pcm::Priority::current);
+        return c.slot->state() == pcm::SlotState::ready;
+    }
+    return false;
 }
 
 int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows * inputs, int n_inputs,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Slot * slot = valid_frames > 0 ? loaded_slot_for(valid_frames) : nullptr;
-    if (slot == nullptr) return kNoSidecar;
-    const int status = parakeet_coreml_diarizer_run(slot->context, valid_frames,
-                                                    inputs, n_inputs, outputs, n_outputs);
-    if (status != 0) {
-        PARAKEET_LOG_WARN("parakeet: Core ML diarizer (%d frames) failed (rc=%d); "
-                          "quarantining it and using ggml\n", slot->capacity, status);
-        quarantine(*slot);
+    if (valid_frames <= 0) return kNoSidecar;
+    for (const State::Capacity & c : state_->capacities) {
+        if (c.frames < valid_frames || unusable(c.slot->state())) continue;
+        // One acquisition per pass (a chunk or block is the unit, §3.2.0).
+        pcm::Acquired acquired = c.slot->acquire(pcm::Demand::now);
+        if (!acquired.model) {
+            // Failed while this pass waited (wait = call): try the next capacity.
+            if (unusable(acquired.state)) continue;
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            ++state_->stats.not_ready;
+            return kNoSidecar;
+        }
+        auto * context = acquired.model->as<parakeet_coreml_diarizer>();
+        int status = 0;
+        {
+            auto prediction = acquired.model->lock_for_prediction();
+            status = parakeet_coreml_diarizer_run(context, valid_frames, inputs, n_inputs,
+                                                  outputs, n_outputs);
+        }
+        if (status != 0) {
+            PARAKEET_LOG_WARN("parakeet: Core ML diarizer (%d frames) failed (rc=%d); "
+                              "quarantining it and using ggml\n", c.frames, status);
+            c.slot->retire("prediction failed (rc=" + std::to_string(status) + ")");
+            return status;
+        }
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->label = parakeet_coreml_diarizer_label(context);
+        ++state_->stats.coreml;
+        state_->stats.label = state_->label;
+        return 0;
     }
-    return status;
+    return kNoSidecar;
 }
 
 std::string CoremlDiarizers::label() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return label_.empty() ? parakeet_coreml_diarizer_label(nullptr) : label_;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->label.empty() ? parakeet_coreml_diarizer_label(nullptr) : state_->label;
 }
 
 std::vector<int> CoremlDiarizers::capacities() const {
-    std::vector<int> result(slots_.size());
-    std::transform(slots_.begin(), slots_.end(), result.begin(),
-                   [](const Slot & slot) { return slot.capacity; });
+    std::vector<int> result;
+    result.reserve(state_->capacities.size());
+    for (const State::Capacity & c : state_->capacities) result.push_back(c.frames);
     return result;
 }
 
-std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path) {
+void CoremlDiarizers::reset_call_stats() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->stats = CoremlDiarizerCallStats{};
+}
+
+CoremlDiarizerCallStats CoremlDiarizers::call_stats() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->stats;
+}
+
+std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
+                                                           CoremlSidecars & sidecars) {
     std::vector<int> capacities = scan_capacities(gguf_path);
     if (capacities.empty()) return nullptr;
-    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities));
+    return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities), sidecars);
 }
 
 }

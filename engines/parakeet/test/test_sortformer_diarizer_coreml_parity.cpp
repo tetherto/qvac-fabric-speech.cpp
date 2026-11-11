@@ -1,3 +1,4 @@
+#include "coreml_test_options.h"
 #include "mel_preprocess.h"
 #include "parakeet_ctc.h"
 #include "parakeet_sortformer.h"
@@ -81,7 +82,7 @@ void unset_env(const char * name) {
 
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
     if (disable_coreml) set_env(kDisableEnv, "1");
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false);
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options());
     if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }
@@ -118,7 +119,7 @@ bool defaults_to_neural_engine(const parakeet::ParakeetCtcModel & model) {
 bool diarizer_env_hides_sidecars(const char * path) {
     set_env(kDiarizerDisableEnv, "1");
     parakeet::ParakeetCtcModel model;
-    const bool loaded = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false) == 0;
+    const bool loaded = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options()) == 0;
     unset_env(kDiarizerDisableEnv);
     const bool hidden = loaded && largest_capacity(model) == 0;
     std::printf("[%s] diarizer-disable-env: coreml=%d\n", hidden ? "ok  " : "FAIL", hidden ? 0 : 1);
@@ -156,7 +157,7 @@ bool batch_case(parakeet::ParakeetCtcModel & accelerated, parakeet::ParakeetCtcM
     const bool routed = parakeet::sortformer_diarize_mel_coreml(accelerated, mel.data(), mel_frames, {}, actual);
     parakeet::EncoderOutputs encoded;
     parakeet::SortformerDiarizationResult expected;
-    if (parakeet::run_encoder(reference, mel.data(), mel_frames, reference.mel_cfg.n_mels, encoded,
+    if (parakeet::run_encoder(reference, mel.data(), mel_frames, reference.mel_cfg.n_mels, encoded, parakeet::EncoderRoute::ggml(),
                               -1, false, false) != 0 ||
         parakeet::sortformer_diarize_ggml(reference, encoded.encoder_out.data(), encoded.n_enc_frames,
                                           encoded.d_model, {}, expected) != 0) {

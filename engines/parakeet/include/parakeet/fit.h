@@ -45,6 +45,7 @@
 //              registry is always Error, never Success: a projection made
 //              against a machine the fitter cannot see is worse than none.
 
+#include "coreml_options.h"
 #include "export.h"
 
 #include <cstdint>
@@ -116,6 +117,26 @@ struct FitOptions {
     // projects for that backend and reports "no-backend-device" when it is
     // unavailable.
     std::string backend = "auto";
+
+    // Same semantics as EngineOptions::coreml: decides the Core ML route the
+    // projection charges (FitResult::coreml). Only presence of the adjacent
+    // sidecars and these options matter; the projection never reads the
+    // Core ML cache or warm hints, so it is identical before and after the
+    // first load (PLAN §2.13).
+    CoremlOptions coreml;
+};
+
+// The Core ML-inclusive verdict (PLAN §2.13). The ggml estimate (whose
+// weights stay resident for the fallback) plus the Core ML envelope of the
+// routes the engine would activate: the encoder sidecar (its fp16 runtime
+// weights, I/O and one load transient, with a 1.25 margin until a measured
+// envelope replaces the defaults) and the diarizer sidecars (`coreml_bytes`).
+struct FitCoreml {
+    bool        fits = false;
+    uint64_t    bytes = 0;            // Core ML envelope charged on top of ggml_required_bytes
+    bool        validated = false;    // the envelope was measured (memory.validated_for)
+    std::string disabled_reason;      // "" when Core ML is enabled; "build", "use=off", PARAKEET_COREML_DISABLE, ...
+    std::string encoder_route;        // "prebuilt" | "none"
 };
 
 // Projected bytes on the resolved compute device.
@@ -178,6 +199,12 @@ struct FitResult {
     // sidecars, without a covering capacity, or with
     // PARAKEET_COREML_DISABLE / PARAKEET_COREML_DIARIZER_DISABLE set.
     uint64_t coreml_bytes = 0;
+
+    // Bytes the ggml-only verdict charges against device_free_bytes: device
+    // buffers + margin, plus host_bytes when device_shares_host_memory.
+    uint64_t ggml_required_bytes = 0;
+    bool     ggml_only_fits = false;
+    FitCoreml coreml;
 
     // Human-readable projection table (multi-line, suitable for logging).
     std::string report;
