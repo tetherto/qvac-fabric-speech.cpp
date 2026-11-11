@@ -229,6 +229,15 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
             ? sidecar_context
             : opts.long_form_context_frames;
 
+    // Fixed-capacity windows cost TDT 0.6B-v3 whole sentences on inputs over
+    // the capacity (select_long_form_plan), so they are used only when there
+    // is no ggml encoder to run the normal plan on. Full TranscribePsy EU keeps
+    // them: its fixed windows were validated on long recordings
+    // (docs/transcribepsy-eu-coreml.md, "Measured offline latency").
+    const bool fixed_windows_allowed =
+        model_encoder_owned_by_coreml(model) ||
+        model.model_variant == "transcribepsy-250m-eu";
+
     LongFormPlan coreml;
     if (model.model_type == ParakeetModelType::CTC ||
         model.model_type == ParakeetModelType::RNNT ||
@@ -248,13 +257,7 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
             n_mel_frames);
     }
 
-    // Respect a smaller user/model long-form limit, but force fixed-shape
-    // windowing when that is the only way the complete input fits the sidecar.
-    if (coreml.enabled &&
-        (!normal.enabled || coreml.window_frames < normal.window_frames)) {
-        return coreml;
-    }
-    return normal;
+    return select_long_form_plan(normal, coreml, fixed_windows_allowed);
 }
 
 // Bounded-memory replacement for a single full-length run_encoder() call on long
@@ -313,7 +316,7 @@ int run_encoder_windowed(ParakeetCtcModel & model,
     const std::vector<LongFormWindow> windows =
         plan_long_form_windows_asymmetric(
             n_mel_frames, center_mel, left_ctx_mel, right_ctx_mel,
-            plan.exact_mel_frames);
+            plan.exact_mel_frames, plan.sub);
 
     out = EncoderOutputs{};
     SingleEncoderGraphScope one_graph(model);

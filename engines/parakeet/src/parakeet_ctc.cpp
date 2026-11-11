@@ -4984,22 +4984,27 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
     if (!all_valid && !allow_coreml_padded &&
         model.model_variant != "transcribepsy-250m-eu") return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
+    // A fixed-capacity sidecar cannot take a longer input. Such inputs run on
+    // ggml unless the long-form plan cut them into capacity-sized windows
+    // (Core ML owns the encoder, or full TranscribePsy EU).
+    const int64_t fixed_capacity = parakeet_coreml_fixed_mel_frames(ctx, model.mel_cfg.n_mels);
+    const bool fits_capacity = fixed_capacity <= 0 || n_mel_frames <= fixed_capacity;
     if (model.model_type == ParakeetModelType::CTC) {
         return encoder_is_offline(model.encoder_cfg) &&
-               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
+               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm &&
+               fits_capacity;
     }
     if (model.model_type == ParakeetModelType::RNNT) {
         return encoder_is_offline(model.encoder_cfg) &&
-               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
+               model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm &&
+               fits_capacity;
     }
     if (model.model_type == ParakeetModelType::TDT) {
-        const int64_t capacity = parakeet_coreml_fixed_mel_frames(ctx, model.mel_cfg.n_mels);
         const bool padding_fits = model.model_variant == "transcribepsy-250m-eu" &&
             parakeet_coreml_preserves_encoder_padding(ctx) &&
             coreml_encoder_out_frames(model.encoder_cfg, n_mel_frames) <=
-                coreml_encoder_out_frames(model.encoder_cfg, capacity);
-        return encoder_is_offline(model.encoder_cfg) &&
-            (capacity <= 0 || n_mel_frames <= capacity || padding_fits);
+                coreml_encoder_out_frames(model.encoder_cfg, fixed_capacity);
+        return encoder_is_offline(model.encoder_cfg) && (fits_capacity || padding_fits);
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         const int fixed_frames = model_coreml_fixed_mel_frames(model);

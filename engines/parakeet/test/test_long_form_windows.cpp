@@ -20,7 +20,13 @@
 //      the encoder sees a single input shape (one compute graph);
 //   7. the CLI's --window-sec / --overlap conversions reject windows below 256
 //      encoder frames or above pos_emb_max_len, and 0 % overlap reaches the
-//      engine as -1 (no context), never 0 (auto).
+//      engine as -1 (no context), never 0 (auto);
+//   8. with the subsampling factor as alignment, every window starts on the
+//      encoder-frame grid (window_start % sub == 0), so the stitched frames are
+//      exactly the single-pass frames, whatever the input length;
+//   9. a fixed-capacity Core ML plan is chosen for an input over the sidecar's
+//      capacity only when windows are allowed (Core ML owns the encoder);
+//      otherwise the input keeps the normal ggml plan.
 //
 // Exit 0 on success; non-zero (with a FAIL line per broken invariant) otherwise.
 
@@ -30,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using parakeet::LongFormWindow;
@@ -43,6 +50,7 @@ using parakeet::plan_long_form_windows_asymmetric;
 using parakeet::resolve_coreml_exact_shape_plan;
 using parakeet::resolve_coreml_fixed_shape_plan;
 using parakeet::resolve_long_form_window_frames;
+using parakeet::select_long_form_plan;
 using parakeet::should_use_nemotron_cache_aware_offline;
 
 namespace {
@@ -428,6 +436,155 @@ void check_stitch_uniform(int n_mel, int center_mel, int ctx_mel, int sub) {
     expect(repeats <= 1, tag + ": more than one repeated frame");
 }
 
+// Every window of an aligned plan starts on the `sub` grid, keeps the coverage
+// invariants, is at most `sub - 1` units shorter than the full window, and
+// stitches back into exactly the frames a single pass would produce: frame i of
+// the result is global encoder frame i, for floor(n_mel / sub) frames.
+void check_plan_aligned(int n_mel, int center_mel, int left_mel, int right_mel, int sub) {
+    const std::string tag = "aligned n_mel=" + std::to_string(n_mel) +
+                            " center_mel=" + std::to_string(center_mel) +
+                            " ctx_mel=" + std::to_string(left_mel) + "/" +
+                            std::to_string(right_mel) + " sub=" + std::to_string(sub);
+    const std::vector<LongFormWindow> ws = plan_long_form_windows_asymmetric(
+        n_mel, center_mel, left_mel, right_mel, 0, sub);
+
+    expect(!ws.empty(), tag + ": expected at least one window");
+    if (ws.empty()) return;
+    expect(ws.front().center_start == 0, tag + ": first centre must start at 0");
+    expect(ws.back().center_end == n_mel, tag + ": last centre must end at n_units");
+
+    const int bound = std::min(center_mel + left_mel + right_mel, n_mel);
+    std::vector<float> stitched;
+    for (size_t i = 0; i < ws.size(); ++i) {
+        const LongFormWindow & w = ws[i];
+        const std::string wtag = tag + " window[" + std::to_string(i) + "]";
+        if (w.window_start % sub != 0) {
+            fail(wtag + ": window_start " + std::to_string(w.window_start) +
+                 " is off the encoder-frame grid");
+            return;
+        }
+        expect(w.window_start <= w.center_start, wtag + ": window_start after centre");
+        expect(w.window_start + w.window_len <= n_mel, wtag + ": window runs past n_units");
+        expect(w.window_start + w.window_len >= w.center_end,
+               wtag + ": window ends before centre");
+        expect(w.window_len <= bound && w.window_len > bound - sub,
+               wtag + ": window length " + std::to_string(w.window_len) +
+               " outside (" + std::to_string(bound - sub) + ", " + std::to_string(bound) + "]");
+        if (i + 1 < ws.size()) {
+            expect(w.center_end == ws[i + 1].center_start,
+                   wtag + ": centres not contiguous (gap or overlap at seam)");
+        }
+
+        const int t_enc = w.window_len / sub;  // synthetic subsampling
+        std::vector<float> win_enc((size_t) t_enc);
+        for (int j = 0; j < t_enc; ++j) {
+            win_enc[(size_t) j] = (float) (w.window_start / sub + j);
+        }
+        const WindowTrim trim = compute_window_trim(w, t_enc, sub);
+        expect(append_committed_frames(stitched, win_enc,
+                                       trim.left_drop, trim.center_cnt, 1),
+               wtag + ": append_committed_frames failed for a valid range");
+    }
+
+    expect((int) stitched.size() == n_mel / sub,
+           tag + ": stitched " + std::to_string(stitched.size()) + " frames, expected " +
+           std::to_string(n_mel / sub));
+    for (size_t i = 0; i < stitched.size(); ++i) {
+        if (stitched[i] != (float) i) {
+            fail(tag + ": frame " + std::to_string(i) + " holds global frame " +
+                 std::to_string((long long) stitched[i]));
+            break;
+        }
+    }
+}
+
+// The grid invariant over every residue of n_mel modulo sub, for the plans the
+// engine builds: the 15 s fixed Core ML plan (95/46 encoder frames), the same
+// without context, the Neural Engine export's 16-frame seam, TranscribePsy's
+// 60 s / 25 % windows and the balanced automatic plan.
+void check_window_grid() {
+    constexpr int kSub = 8;
+    struct Geometry { int center, left, right; };
+    const Geometry geometries[] = {
+        {95, 46, 46}, {187, 0, 0}, {155, 16, 16}, {562, 94, 94}, {2000, 256, 256},
+    };
+    for (const Geometry & g : geometries) {
+        const int center = g.center * kSub, left = g.left * kSub, right = g.right * kSub;
+        const int bound = center + left + right;
+        for (const int base : {1, bound - kSub, bound + center / 2, 2 * bound + 3, 3 * bound}) {
+            for (int residue = 0; residue < 2 * kSub; ++residue) {
+                check_plan_aligned(base + residue, center, left, right, kSub);
+            }
+        }
+    }
+
+    // 60 s on the 15 s Core ML plan: the final window used to start at mel 4505,
+    // placing its committed frames one encoder frame late.
+    const std::vector<LongFormWindow> a60 =
+        plan_long_form_windows_asymmetric(6001, 95 * kSub, 46 * kSub, 46 * kSub, 0, kSub);
+    expect(a60.size() == 8 && a60.back().window_start == 4512 &&
+               a60.back().window_len == 6001 - 4512,
+           "grid: 60 s on the 15 s plan -> final window snaps from mel 4505 to 4512");
+    const std::vector<LongFormWindow> a60_unaligned =
+        plan_long_form_windows_asymmetric(6001, 95 * kSub, 46 * kSub, 46 * kSub);
+    expect(a60_unaligned.size() == 8 && a60_unaligned.back().window_start == 4505,
+           "grid: the planner without alignment is unchanged");
+
+    // 320 s on the automatic ggml plan (two balanced 2512-frame windows).
+    const parakeet::LongFormPlan auto320 =
+        parakeet::resolve_long_form_plan_frames(0, 0, 5000, kSub, 31993);
+    const std::vector<LongFormWindow> m320 = plan_long_form_windows_asymmetric(
+        31993, auto320.center_frames * kSub, auto320.left_context_frames * kSub,
+        auto320.right_context_frames * kSub, 0, kSub);
+    expect(auto320.enabled && m320.size() == 2 && m320.back().window_start == 11904,
+           "grid: 320 s automatic plan -> final window snaps from mel 11897 to 11904");
+}
+
+// Which plan an input gets with a fixed 1501-mel-frame (15 s) sidecar.
+void check_long_form_plan_selection() {
+    using parakeet::LongFormPlan;
+    constexpr int kSub = 8, kPosEmb = 5000, kCapacity = 1501;
+    const auto plans = [&](long long n_mel) {
+        return std::make_pair(
+            parakeet::resolve_long_form_plan_frames(0, 0, kPosEmb, kSub, n_mel),
+            resolve_coreml_fixed_shape_plan(kCapacity, 0, kSub, n_mel));
+    };
+
+    // 60 s: over the capacity, under the 300 s automatic window.
+    const auto a60 = plans(6001);
+    expect(a60.second.enabled, "select: 60 s exceeds the fixed capacity");
+    expect(!select_long_form_plan(a60.first, a60.second, false).enabled,
+           "select: 60 s with a sidecar that does not own the encoder -> one ggml pass");
+    const LongFormPlan a60_owner = select_long_form_plan(a60.first, a60.second, true);
+    expect(a60_owner.enabled && a60_owner.window_frames == 187 && a60_owner.center_frames == 95,
+           "select: 60 s with Core ML owning the encoder -> fixed 15 s windows");
+
+    // 320 s: the normal plan windows too, at its own (much larger) size.
+    const auto m320 = plans(32001);
+    const LongFormPlan m320_shared = select_long_form_plan(m320.first, m320.second, false);
+    expect(m320_shared.enabled && m320_shared.window_frames == m320.first.window_frames &&
+               m320_shared.window_frames > 187,
+           "select: 320 s without ownership -> the normal ggml windows");
+    expect(select_long_form_plan(m320.first, m320.second, true).window_frames == 187,
+           "select: 320 s with ownership -> fixed windows");
+
+    // 15 s and shorter: neither plan windows, so the whole input goes to Core ML.
+    for (const long long n_mel : {1101LL, 1501LL}) {
+        const auto fits = plans(n_mel);
+        expect(!select_long_form_plan(fits.first, fits.second, false).enabled &&
+                   !select_long_form_plan(fits.first, fits.second, true).enabled,
+               "select: an input within capacity is never windowed");
+    }
+
+    // A normal window smaller than the fixed one (a model with a short
+    // positional range) wins even with ownership.
+    const LongFormPlan short_range =
+        parakeet::resolve_long_form_plan_frames(0, 0, 150, kSub, 6001);
+    const LongFormPlan short_owner = select_long_form_plan(short_range, a60.second, true);
+    expect(short_range.enabled && short_owner.window_frames == 150,
+           "select: a smaller normal window wins over the fixed windows");
+}
+
 // --window-sec -> encoder frames, at the shipped 80 ms frame and
 // TranscribePsy's pos_emb_max_len of 5000.
 void check_seconds_conversion() {
@@ -592,6 +749,9 @@ int main() {
     check_seconds_conversion();
     check_overlap_conversion();
     check_shared_final_span();
+
+    check_window_grid();
+    check_long_form_plan_selection();
 
     if (g_failures == 0) {
         std::printf("test-long-form-windows: OK\n");

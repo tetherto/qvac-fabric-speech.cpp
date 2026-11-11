@@ -53,17 +53,26 @@ struct LongFormWindow {
 //   - each window fully contains its committed centre
 //     (window_start <= center_start && window_start + window_len >= center_end);
 //   - normally window_len <= center_units + 2 * ctx_units; callers supplying
-//     `exact_window_units` instead get that fixed bound for sidecar routing.
+//     `exact_window_units` instead get that fixed bound for sidecar routing;
+//   - with `align_units` > 1 (the subsampling factor, when units are mel
+//     frames) and centres on that grid, every window_start is a multiple of
+//     `align_units`, so a window's encoder frames line up with the single-pass
+//     encoder's. A window that borrowed context from the left would otherwise
+//     start off the grid and place its committed frames one encoder frame late.
+//     Snapping moves the start right by less than `align_units` and never past
+//     the centre, so the window only gets shorter.
 inline std::vector<LongFormWindow>
 plan_long_form_windows_asymmetric(int n_units, int center_units,
                                   int left_ctx_units, int right_ctx_units,
-                                  int exact_window_units = 0) {
+                                  int exact_window_units = 0,
+                                  int align_units = 1) {
     std::vector<LongFormWindow> windows;
     if (n_units <= 0 || center_units <= 0) {
         return windows;
     }
     if (left_ctx_units < 0) left_ctx_units = 0;
     if (right_ctx_units < 0) right_ctx_units = 0;
+    if (align_units < 1) align_units = 1;
 
     for (int center_start = 0; center_start < n_units; center_start += center_units) {
         int center_end = center_start + center_units;
@@ -101,6 +110,12 @@ plan_long_form_windows_asymmetric(int n_units, int center_units,
             }
         }
 
+        const int off_grid = window_start % align_units;
+        if (off_grid != 0) {
+            window_start += align_units - off_grid;
+            if (window_start > center_start) window_start = center_start;
+        }
+
         LongFormWindow w;
         w.window_start = window_start;
         w.window_len   = window_end - window_start;
@@ -114,9 +129,10 @@ plan_long_form_windows_asymmetric(int n_units, int center_units,
 
 inline std::vector<LongFormWindow>
 plan_long_form_windows(int n_units, int center_units, int ctx_units,
-                       int exact_window_units = 0) {
+                       int exact_window_units = 0, int align_units = 1) {
     return plan_long_form_windows_asymmetric(
-        n_units, center_units, ctx_units, ctx_units, exact_window_units);
+        n_units, center_units, ctx_units, ctx_units, exact_window_units,
+        align_units);
 }
 
 // Resolve the effective per-window encoder-frame ceiling from the requested
@@ -414,6 +430,28 @@ inline LongFormPlan resolve_long_form_plan_frames(int requested_window_frames,
     plan.left_context_frames  = context_frames;
     plan.right_context_frames = context_frames;
     return plan;
+}
+
+// Picks between the normal plan (resolve_long_form_plan_frames) and a
+// fixed-capacity Core ML plan (resolve_coreml_fixed_shape_plan) for one input.
+//
+// Fixed-capacity windows are much shorter than the normal plan (a 1501-mel-frame
+// sidecar gives 15 s windows that commit 7.6 s each, where the normal plan
+// encodes up to 300 s in one pass), and TDT 0.6B-v3 drops whole sentences on
+// such windows whichever backend runs them. So the fixed plan is taken only
+// when `fixed_windows_allowed`: Core ML owns the encoder (no ggml encoder to
+// fall back to) or the model's fixed windows passed a long-form gate. Otherwise
+// an input over the sidecar's capacity keeps the normal plan and runs on ggml;
+// an input that fits is not windowed by either plan and still runs on Core ML.
+// A smaller user/model window than the fixed one still wins.
+inline LongFormPlan select_long_form_plan(const LongFormPlan & normal,
+                                          const LongFormPlan & coreml,
+                                          bool fixed_windows_allowed) {
+    if (fixed_windows_allowed && coreml.enabled &&
+        (!normal.enabled || coreml.window_frames < normal.window_frames)) {
+        return coreml;
+    }
+    return normal;
 }
 
 struct WindowTrim {
