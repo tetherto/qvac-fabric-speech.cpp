@@ -16,6 +16,7 @@ import pathlib
 SCHEMA_VERSION = 1
 MS_PER_SECOND = 1000.0
 STATUS_OK = "ok"
+CONTENDED_BUSY_PERCENT = 10.0
 STATUS_NOT_RUN = "not-run"
 STATUS_BUILD_FAILED = "build-failed"
 STATUS_PARTIAL = "partial"
@@ -60,6 +61,16 @@ def parse_sample(line):
 
 def parse_samples(text):
     return [sample for sample in map(parse_sample, text.splitlines()) if sample is not None]
+
+
+def host_load(run_dir, backend, family):
+    path = run_dir / "results" / backend / f"{family}.load.json"
+    if not path.is_file():
+        return {"busy_before_pct": None, "load1_before": None, "contended": False}
+    sample = load_optional_json(path)
+    busy = sample.get("busy_before_pct")
+    return {"busy_before_pct": busy, "load1_before": sample.get("load1_before"),
+            "contended": busy is not None and busy >= CONTENDED_BUSY_PERCENT}
 
 
 def gpu_memory(run_dir, backend, family):
@@ -107,11 +118,12 @@ def unrun_row(backend, family, spec, status):
     row.update({"status": status, "observed_backend": None, "runner": None, "wall_ms_median": None, "wall_ms_min": None,
                 "wall_ms_max": None, "rtf_median": None, "audio_seconds": None, "speed_x": None, "peak_rss_mib": None,
                 "gpu_memory_peak_mib": None, "gpu_memory_rise_mib": None, "gpu_util_max": None, "quality": None, "runs": 0,
+                "busy_before_pct": None, "load1_before": None, "contended": False,
                 "notes": "", "encoder_backend": None, "baseline_inference_ms_median": None})
     return row
 
 
-def measured_row(backend, family, spec, result, gpu):
+def measured_row(backend, family, spec, result, gpu, load=None):
     row = base_row(backend, family, spec)
     seconds = audio_seconds(spec, result)
     row.update({"status": result.get("status", "unknown"), "observed_backend": result.get("backend"),
@@ -122,7 +134,12 @@ def measured_row(backend, family, spec, result, gpu):
                 "quality": quality(result), "runs": result.get("runs", 0), "notes": result.get("notes", ""),
                 "encoder_backend": result.get("encoder_backend"), "baseline_inference_ms_median": result.get("baseline_inference_ms_median")})
     row.update(gpu)
+    row.update(load or host_load_unknown())
     return row
+
+
+def host_load_unknown():
+    return {"busy_before_pct": None, "load1_before": None, "contended": False}
 
 
 def row_for(run_dir, backend, family, spec, build_failed):
@@ -131,7 +148,7 @@ def row_for(run_dir, backend, family, spec, build_failed):
     result = read_result(run_dir, backend, family)
     if result is None:
         return unrun_row(backend, family, spec, STATUS_NOT_RUN)
-    return measured_row(backend, family, spec, result, gpu_memory(run_dir, backend, family))
+    return measured_row(backend, family, spec, result, gpu_memory(run_dir, backend, family), host_load(run_dir, backend, family))
 
 
 def family_runs_on_backend(spec, backend):
@@ -165,9 +182,14 @@ def row_problem(row):
     return f"{label} {row['status']}{note}"
 
 
+def contention_problem(row):
+    return f"{row['family']} on {row['backend']} measured under load: {row['busy_before_pct']:.0f}% of the CPUs were busy with other work just before the cell"
+
+
 def problems(rows, build_failures):
     found = [f"build failed on {backend}" for backend in build_failures]
     found += [row_problem(row) for row in rows if row["status"] != STATUS_OK]
+    found += [contention_problem(row) for row in rows if row.get("contended")]
     return found
 
 

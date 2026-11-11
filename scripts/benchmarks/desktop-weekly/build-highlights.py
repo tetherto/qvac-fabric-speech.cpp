@@ -322,10 +322,17 @@ def build_machine(folder, entry, hub_url, skipped):
     return (machine_html(machine, cards) if cards else "", drawn)
 
 
+def machine_has_data(folder, host):
+    return (pathlib.Path(folder) / host / MACHINE_FILE).is_file()
+
+
 def build(folder, config):
     hub = load_json(pathlib.Path(folder) / HUB_FILE)
     sections, drawn, skipped = [], [], []
     for entry in config["machines"]:
+        if not machine_has_data(folder, entry["host"]):
+            skipped.append(f"{entry['host']} (no data for this machine)")
+            continue
         section, rows = build_machine(folder, entry, hub.get("hub_url", ""), skipped)
         sections.append(section)
         drawn.extend(rows)

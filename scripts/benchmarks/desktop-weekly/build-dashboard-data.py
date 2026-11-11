@@ -230,6 +230,12 @@ def baseline_note(row):
     return f"The same process forced to the ggml encoder: {baseline:.1f} ms median."
 
 
+def contention_note(row):
+    if not row.get("contended"):
+        return ""
+    return f"Measured under load: {row['busy_before_pct']:.0f}% of the CPUs were busy with other work just before the cell, so the time can be slower than the machine's own."
+
+
 def stale_note(summary, newest_name):
     if run_name(summary) == newest_name:
         return ""
@@ -249,7 +255,7 @@ def weekly_row(summary, row, families, newest_name):
     engine = engine_of(row["family"], families)
     accepted = row.get("status") == "ok"
     speed = row.get("speed_x") or None
-    caveats = " ".join(x for x in [row.get("notes", ""), baseline_note(row), stale_note(summary, newest_name)] if x)
+    caveats = " ".join(x for x in [row.get("notes", ""), baseline_note(row), contention_note(row), stale_note(summary, newest_name)] if x)
     return {"id": f"w-{row['backend']}-{row['family']}", "host": host, "machine": machine_label(host), "task": task,
             "dashboard": TASK_KEYS.get(task, "asr"), "family": row["family"], "model": model,
             "model_detail": row.get("weights", ""), "required_family": True, "engine": engine, "is_qvac": engine == QVAC,
@@ -257,6 +263,7 @@ def weekly_row(summary, row, families, newest_name):
             "precision": row.get("weights", ""), "precision_source": "families.json", "scenario": scenario, "scenario_label": scenario_label,
             "timing_class": timing_class, "timing_label": timing_label, "timing_includes": timing_includes, "comparison_set": "weekly",
             "status": "measured" if accepted else "failed", "status_detail": row.get("status", ""), "accepted": accepted,
+            "contended": bool(row.get("contended")), "busy_before_pct": row.get("busy_before_pct"),
             "latency_ms": row.get("wall_ms_median"), "min_ms": row.get("wall_ms_min"), "max_ms": row.get("wall_ms_max"), "samples_ms": "",
             "audio_s": row.get("audio_seconds"), "speed_x": speed, "rtf": None if not speed else 1 / speed, "load_ms": None,
             "rss_mib": row.get("peak_rss_mib"), "gpu_mib": gpu_mib, "gpu_kind": gpu_kind, "gpu_note": gpu_note,
@@ -588,6 +595,18 @@ def failure_items(runs):
     return items
 
 
+def contention_items(runs):
+    under_load = [r for r in runs if r["comparison_set"] == "weekly" and r.get("contended")]
+    items = []
+    for key in task_keys():
+        cells = [f"{r['model']} ({r['variant']}) on {backend_name(r['backend'])}, {r['busy_before_pct']:.0f}% busy" for r in under_load if r["dashboard"] == key]
+        if cells:
+            items.append((key, "Cells under load", f"{join_words(cells)}: other work was running on the machine just before the cell, so the time can be slower than the machine's own."))
+    if under_load:
+        items.insert(0, (SUMMARY, "Cells under load", f"{len(under_load)} weekly cells were measured while other work kept the CPUs busy; each task tab names them with the busy share."))
+    return items
+
+
 def baseline_runs(host_summaries):
     return [s for s in host_summaries[:-1] if QUICK_MARK not in run_name(s)]
 
@@ -648,7 +667,7 @@ def report_item(runs):
 
 def commentary_rows(host_summaries, runs, families):
     newest = host_summaries[-1]
-    items = fastest_items(runs) + campaign_items(runs) + report_item(runs) + failure_items(runs) + move_items(host_summaries, runs)
+    items = fastest_items(runs) + campaign_items(runs) + report_item(runs) + failure_items(runs) + contention_items(runs) + move_items(host_summaries, runs)
     items += [coverage_item(host_summaries, runs, families), pins_item(newest)]
     items += [(GENERAL, topic, text) for topic, text in RULES]
     sources = {GENERAL: "comparison rules of the weekly bench"}

@@ -89,6 +89,16 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(summary["counts"], {"expected": 2, "ok": 1, "failed": 1})
         self.assertEqual(summary["problems"], ["tts on cpu not-run"])
 
+    def test_a_cell_sampled_under_load_is_flagged_and_listed_as_a_problem(self):
+        (self.run_dir / "results" / "cuda" / "asr.load.json").write_text(json.dumps({"busy_before_pct": 35.2, "load1_before": 9.8, "cpu_count": 28}))
+        (self.run_dir / "results" / "cuda" / "tts.load.json").write_text(json.dumps({"busy_before_pct": 3.1, "load1_before": 1.9, "cpu_count": 28}))
+        summary = summarize.build_summary(self.run_dir, self.specs(), ["cuda"], ["asr", "tts"], "")
+        asr, tts = summary["results"]
+        self.assertEqual((asr["contended"], asr["busy_before_pct"], asr["load1_before"]), (True, 35.2, 9.8))
+        self.assertEqual((tts["contended"], tts["busy_before_pct"]), (False, 3.1))
+        self.assertEqual(summary["run"]["status"], "ok")
+        self.assertEqual(summary["problems"], ["asr on cuda measured under load: 35% of the CPUs were busy with other work just before the cell"])
+
     def test_build_failure_marks_every_family_on_that_backend(self):
         (self.run_dir / "build-failures.txt").write_text("cpu\n")
         summary = summarize.build_summary(self.run_dir, self.specs(), ["cuda", "cpu"], ["asr", "tts"], "")
