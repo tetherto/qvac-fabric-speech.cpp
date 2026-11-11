@@ -114,6 +114,12 @@ contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar)
 and, for MOSS-Transcribe-Diarize, in
 [docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
 
+A fixed-capacity encoder sidecar next to a full GGUF serves inputs up to its
+capacity (15 s for the published exports); longer inputs run on the ggml
+encoder, because short Core ML windows drop whole sentences on TDT 0.6B-v3.
+Fixed windows are used only when Core ML owns the encoder, and for full
+TranscribePsy EU.
+
 Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
 runtime. Legacy single-input sidecars remain loadable but need re-exporting to
 isolate padding; updating runtime code alone does not fix those old artifacts.
