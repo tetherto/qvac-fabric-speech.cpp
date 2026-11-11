@@ -1247,6 +1247,119 @@ void case_resident_cap_queued_adopt() {
     }
 }
 
+// A native model whose deleter waits for the test (functions "gd*").
+std::atomic<int> g_delete_entered{0};
+std::atomic<bool> g_delete_open{true};
+
+LoadResult gated_delete_load(const LoadRequest & r) {
+    LoadResult out = fake_load(r);
+    if (!out.model || r.function.rfind("gd", 0) != 0) return out;
+    auto inner = std::static_pointer_cast<FakeModel>(out.model);
+    out.model = std::shared_ptr<FakeModel>(new FakeModel(inner->name), [](FakeModel * m) {
+        ++g_delete_entered;
+        while (!g_delete_open.load()) std::this_thread::sleep_for(1ms);
+        delete m;
+    });
+    return out;
+}
+
+// An instance dropped from a pool on another thread (explicit eviction, slot
+// destruction) keeps its place until its release completed outside the lock
+// (§2.9): no replacement load, no second eviction, and never more live native
+// models than the cap while the deleter runs. A reference another owner keeps
+// stops counting in the pool once the pool's own reference is released.
+void case_resident_cap_pending_release() {
+    for (const bool destroy : {false, true}) {
+        for (const size_t cap : {size_t(1), size_t(2)}) {
+            reset_world();
+            Env e;
+            const std::string tag = std::string(destroy ? "d" : "e") + std::to_string(cap);
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(cap);
+            auto mk = [&](const std::string & fn) {
+                SlotSpec s = e.spec(fn);
+                s.pool = pool;
+                s.load_fn = &gated_delete_load;
+                return e.m->make_slot(s, e.policy());
+            };
+            std::shared_ptr<Slot> keep;  // cap 2: a second resident that must survive
+            if (cap == 2) {
+                keep = mk("pk" + tag);
+                keep->request(Priority::minimal);
+                CHECK(wait_for([&] { return is_ready(keep); }));
+            }
+            auto a = mk("gd" + tag);
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            CHECK(pool->live() == cap);
+            const uint64_t ev0 = e.m->stats().evictions;
+            g_delete_entered = 0;
+            g_delete_open = false;
+            std::thread dropper([&] {
+                if (destroy) {
+                    a.reset();
+                } else {
+                    a->evict();
+                }
+            });
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            const std::string repl = "pr" + tag;
+            auto b = mk(repl);
+            b->request(Priority::current);
+            const auto end = Clock::now() + 200ms;
+            int over = 0;
+            while (Clock::now() < end) {
+                if (calls(repl) != 0 || is_ready(b) || g_live_models.load() > base + int(cap) || pool->live() != cap) {
+                    ++over;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+            CHECK(over == 0);
+            CHECK(calls(repl) == 0);
+            CHECK(!keep || is_ready(keep));  // no second victim while the release runs
+            CHECK(e.m->stats().evictions - ev0 == (destroy ? 0u : 1u));
+            g_delete_open = true;
+            dropper.join();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            CHECK(!keep || is_ready(keep));  // the release made the room
+            CHECK(e.m->stats().evictions - ev0 == (destroy ? 0u : 1u));
+            CHECK(pool->live() == cap);
+            CHECK(g_live_models.load() == base + int(cap));
+        }
+    }
+    // Another owner keeps the evicted instance alive: the pool's own release
+    // completes at once and the replacement loads without waiting for it.
+    reset_world();
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        s.load_fn = &gated_delete_load;
+        return e.m->make_slot(s, e.policy());
+    };
+    auto a = mk("gdo");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    SlotSpec os = e.spec("gdo");
+    os.load_fn = &gated_delete_load;
+    auto other = e.m->make_slot(os, e.policy());  // no pool: adopts a's instance
+    other->request(Priority::minimal);
+    CHECK(is_ready(other));
+    g_delete_entered = 0;
+    g_delete_open = false;
+    a->evict();
+    CHECK(pool->live() == 0);
+    auto b = mk("pro");
+    b->request(Priority::current);
+    CHECK(wait_for([&] { return is_ready(b); }));
+    CHECK(g_delete_entered.load() == 0);
+    CHECK(pool->live() == 1);
+    CHECK(g_live_models.load() == base + 2);  // the other owner's and the replacement
+    g_delete_open = true;
+}
+
 // The pool count drops when an instance is released or evicted, not when the
 // last strong reference is finally gone (§2.9): a release wakes the replacement
 // at once, never at the periodic recheck, and one replacement evicts once.
@@ -2004,6 +2117,7 @@ const Case kCases[] = {
     {"resident-cap-cross-owner", case_resident_cap_cross_owner},
     {"resident-cap-release-window", case_resident_cap_release_window},
     {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
+    {"resident-cap-pending-release", case_resident_cap_pending_release},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},

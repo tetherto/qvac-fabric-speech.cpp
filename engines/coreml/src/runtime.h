@@ -127,15 +127,18 @@ struct PoolRef {
 
 // §2.9 resident cap. A pool counts the distinct instances it references: those
 // its live members hold, plus those units retain through it (PoolRef), plus the
-// load in flight for it. Another owner's reference to the same instance never
-// counts here, and an instance a member dropped stops counting at once, even
-// while the last strong reference is still on its way out.
+// load in flight for it, plus the instances its members dropped (evicted,
+// released, retired or replaced) whose strong reference is still on its way
+// out (`releasing`). Another owner's reference to the same instance never
+// counts here: a dropped instance stops counting once this pool's reference is
+// released, whoever else still holds it.
 struct PoolCore {
     size_t cap = 0;
     // (mu)
     std::vector<std::weak_ptr<SlotCore>> members;
     std::vector<std::weak_ptr<SlotCore>> predicted;
     std::vector<std::shared_ptr<PoolRef>> refs;
+    size_t releasing = 0;  // pending releases (Runtime::drop_model_locked)
 };
 
 class Runtime : public std::enable_shared_from_this<Runtime> {
@@ -167,6 +170,8 @@ public:
     void pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & cores);
     size_t pool_live(const PoolCore & p);
     void on_model_released(const std::string & key);
+    // A pending release of pool `p` (drop_model_locked) completed outside mu.
+    void on_pool_released(const std::weak_ptr<PoolCore> & p);
     void notify();
     void stop();
     // Pins this image (§2.9) before work is requested; never under mu. Every
@@ -208,6 +213,10 @@ private:
     void cancel_locked(const std::shared_ptr<Job> & j);
     void unsubscribe_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
     void evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy);
+    // Drops slot `c`'s model into `gy`. When its pool stops counting the
+    // instance, the pool keeps a pending-release place until the reference is
+    // released outside mu (§2.9: a replacement is admitted only then).
+    void drop_model_locked(SlotCore & c, Graveyard & gy);
     void subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     void subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd);
     bool low_power_locked() const;

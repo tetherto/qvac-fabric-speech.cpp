@@ -283,7 +283,8 @@ private:
 };
 
 // Cap on live model instances for one engine stage (§2.9 resident cap): ready
-// models, handles still retained by a unit and loads in flight. A replacement
+// models, handles still retained by a unit, loads in flight and evicted
+// instances whose release has not completed yet. A replacement
 // load is admitted only after an eviction made room; a held function or one
 // predicted for the current call is never evicted.
 class ResidentPool {

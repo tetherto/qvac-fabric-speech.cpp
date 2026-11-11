@@ -42,6 +42,23 @@ int64_t * timing_slot(Timings & t, SlotState phase) {
 
 constexpr int64_t kStaleSeconds = 24 * 60 * 60;
 
+// A pool's reference to an instance one of its members dropped, kept in a
+// Graveyard: destroyed outside mu, it releases the reference first and then
+// gives the pool its place back (Runtime::drop_model_locked).
+struct PendingRelease {
+    std::shared_ptr<SharedModel> model;
+    std::weak_ptr<PoolCore> pool;
+    std::weak_ptr<Runtime> rt;
+    PendingRelease(std::shared_ptr<SharedModel> m, std::weak_ptr<PoolCore> p, std::weak_ptr<Runtime> r)
+        : model(std::move(m)), pool(std::move(p)), rt(std::move(r)) {}
+    PendingRelease(const PendingRelease &) = delete;
+    PendingRelease & operator=(const PendingRelease &) = delete;
+    ~PendingRelease() {
+        model.reset();  // may run the engine's deleter (takes mu itself)
+        if (std::shared_ptr<Runtime> r = rt.lock()) r->on_pool_released(pool);
+    }
+};
+
 }  // namespace
 
 std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
@@ -161,9 +178,30 @@ void Runtime::unsubscribe_locked(const std::shared_ptr<SlotCore> & c, Graveyard 
     if (!j->started && !j->done && !view_locked(*j, gy).live) cancel_locked(j);
 }
 
+void Runtime::drop_model_locked(SlotCore & c, Graveyard & gy) {
+    std::shared_ptr<SharedModel> m = std::move(c.model);
+    c.model.reset();
+    if (!m) return;
+    std::shared_ptr<PoolCore> p = c.pool.lock();
+    if (!p || pool_counts_locked(*p, m.get(), gy)) {
+        gy.keep(m);  // no pool, or another member / a retained handle still counts it
+        return;
+    }
+    ++p->releasing;
+    gy.items.push_back(std::make_shared<PendingRelease>(std::move(m), p, weak_from_this()));
+}
+
+void Runtime::on_pool_released(const std::weak_ptr<PoolCore> & wp) {
+    std::shared_ptr<PoolCore> p = wp.lock();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (p && p->releasing > 0) --p->releasing;
+        bump_locked();  // admission may take the place now
+    }
+}
+
 void Runtime::evict_locked(const std::shared_ptr<SlotCore> & c, Graveyard & gy) {
-    gy.keep(c->model);
-    c->model.reset();
+    drop_model_locked(*c, gy);
     ++c->epoch;
     unsubscribe_locked(c, gy);
     if (!is_terminal(c->state)) c->state = SlotState::idle;
@@ -270,8 +308,7 @@ void Runtime::subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Prio
 void Runtime::request_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy) {
     if (stopping_ || exiting()) return;
     if (c->model && c->model->retired()) {
-        gy.keep(c->model);
-        c->model.reset();
+        drop_model_locked(*c, gy);
         c->state = SlotState::retired;
         if (auto r = retired_.find(model_key(c->artifact_path, c->spec.function, c->spec.units)); r != retired_.end()) {
             c->reason = r->second;
@@ -400,10 +437,11 @@ size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     for (const std::shared_ptr<PoolRef> & r : p.refs) {
         if (r->holds.load() > 0) add(r->model);
     }
-    if (!running_serves_locked(p)) return seen.size();
+    const size_t live = seen.size() + p.releasing;
+    if (!running_serves_locked(p)) return live;
     const SharedModel * existing = existing_locked(*running_, gy);
     const bool counted = existing && std::find(seen.begin(), seen.end(), existing) != seen.end();
-    return counted ? seen.size() : seen.size() + 1;
+    return counted ? live : live + 1;
 }
 
 bool Runtime::pool_counts_locked(const PoolCore & p, const SharedModel * m, Graveyard & gy) const {
@@ -519,6 +557,7 @@ bool Runtime::sub_denied_locked(const Job & j, const SlotCore & c, const std::ve
     gy.keep(p);
     if (running_serves_locked(*p)) return false;
     if (pool_live_locked(*p, gy) < p->cap) return false;
+    if (p->releasing > 0) return false;  // undecided until the pending release completes
     if (const SharedModel * existing = existing_locked(j, gy); existing && pool_counts_locked(*p, existing, gy)) {
         return false;
     }
@@ -563,9 +602,16 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
     // A pool that already counts the instance this job would publish takes it
     // without a new place: nothing is evicted for it (§2.9).
     const SharedModel * existing = existing_locked(j, gy);
+    bool releasing = false;
     for (const std::shared_ptr<PoolCore> & p : pools) {
         if (pool_live_locked(*p, gy) < p->cap) continue;
         if (existing && pool_counts_locked(*p, existing, gy)) continue;
+        if (p->releasing > 0) {
+            // A release is on its way out: wait for it rather than evicting a
+            // second victim meanwhile (§2.9).
+            releasing = true;
+            continue;
+        }
         std::vector<std::shared_ptr<SlotCore>> v = pool_victim_locked(*p, own, gy);
         if (v.empty()) {
             denied.push_back(p);
@@ -581,9 +627,9 @@ Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, Graveyard & gy) {
         served = served || !p || std::find(denied.begin(), denied.end(), p) == denied.end();
     }
     if (!served) return PoolVerdict::blocked;
-    if (victims.empty()) return PoolVerdict::admit;
-    // The pool stops counting each victim at once; it is released once mu is
-    // unlocked, before this job is picked again.
+    if (victims.empty() && !releasing) return PoolVerdict::admit;
+    // Each victim counts as a pending release until the reference is released
+    // outside mu, which wakes the workers to pick this job again.
     for (const auto & v : victims) {
         for (const std::shared_ptr<SlotCore> & c : v) evict_locked(c, gy);
     }
@@ -1002,7 +1048,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
             subscribe_load_locked(c, s.prio, s.non_deferrable, gy);
             continue;
         }
-        gy.keep(c->model);  // never drop a model under mu
+        if (c->model != m) drop_model_locked(*c, gy);  // never drop a model under mu
         c->model = m;
         c->job.reset();
         c->state = SlotState::ready;
@@ -1093,8 +1139,7 @@ Acquired Runtime::acquire(const std::shared_ptr<SlotCore> & c, Demand d, std::op
         for (;;) {
             const Clock::time_point now = Clock::now();
             if (c->model && c->model->retired()) {
-                gy.keep(c->model);
-                c->model.reset();
+                drop_model_locked(*c, gy);
                 c->state = SlotState::retired;
             }
             const SlotState st = c->state;
@@ -1191,8 +1236,7 @@ void Runtime::evict(const std::shared_ptr<SlotCore> & c) {
 void Runtime::release_slot(const std::shared_ptr<SlotCore> & c) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
-    gy.keep(c->model);
-    c->model.reset();
+    drop_model_locked(*c, gy);
     ++c->epoch;
     unsubscribe_locked(c, gy);
     if (!is_terminal(c->state)) c->state = SlotState::idle;
@@ -1210,8 +1254,7 @@ void Runtime::retire_model(SharedModel & m, const std::string & reason) {
         if (!c) continue;
         gy.keep(c);
         if (c->model.get() != &m) continue;
-        gy.keep(c->model);
-        c->model.reset();
+        drop_model_locked(*c, gy);
         c->state = SlotState::retired;
         c->reason = reason;
     }
