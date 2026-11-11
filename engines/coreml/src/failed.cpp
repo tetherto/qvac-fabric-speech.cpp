@@ -43,27 +43,34 @@ std::optional<Record> read(const std::string & path) {
     std::stringstream ss;
     ss << in.rdbuf();
     const nlohmann::json j = nlohmann::json::parse(ss.str(), nullptr, false);
-    if (!j.is_object() || j.value("schema", 0) != 1) return std::nullopt;
-    Record r;
-    const std::string cls = j.value("class", std::string());
-    if (cls == "deterministic") {
-        r.cls = ErrorClass::deterministic;
-    } else if (cls == "transient") {
-        r.cls = ErrorClass::transient;
-    } else {
+    if (!j.is_object()) return std::nullopt;
+    // A wrong-typed field (another writer's file in a shared cache) makes the
+    // record unreadable, which callers treat as no record.
+    try {
+        if (j.value("schema", 0) != 1) return std::nullopt;
+        Record r;
+        const std::string cls = j.value("class", std::string());
+        if (cls == "deterministic") {
+            r.cls = ErrorClass::deterministic;
+        } else if (cls == "transient") {
+            r.cls = ErrorClass::transient;
+        } else {
+            return std::nullopt;
+        }
+        r.attempts = j.value("attempts", 1);
+        r.domain = j.value("domain", std::string());
+        r.code = j.value("code", int64_t{0});
+        r.os_build = j.value("os_build", std::string());
+        if (j.contains("function") && j["function"].is_string()) r.function = j["function"];
+        if (j.contains("units") && j["units"].is_string()) r.units = j["units"];
+        r.last_at = detail::parse_iso8601_utc(j.value("last_at", std::string())).value_or(0);
+        r.template_id = j.value("template", std::string());
+        r.process = j.value("process", std::string());
+        r.message = j.value("message", std::string());
+        return r;
+    } catch (const nlohmann::json::exception &) {
         return std::nullopt;
     }
-    r.attempts = j.value("attempts", 1);
-    r.domain = j.value("domain", std::string());
-    r.code = j.value("code", int64_t{0});
-    r.os_build = j.value("os_build", std::string());
-    if (j.contains("function") && j["function"].is_string()) r.function = j["function"];
-    if (j.contains("units") && j["units"].is_string()) r.units = j["units"];
-    r.last_at = detail::parse_iso8601_utc(j.value("last_at", std::string())).value_or(0);
-    r.template_id = j.value("template", std::string());
-    r.process = j.value("process", std::string());
-    r.message = j.value("message", std::string());
-    return r;
 }
 
 bool write(const std::string & path, const Record & r) {

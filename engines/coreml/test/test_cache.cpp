@@ -821,6 +821,61 @@ void case_quarantine() {
     CHECK(r.quarantine == 2 && count_files(env.layout().quarantine) == 0);
 }
 
+// Syntactically valid JSON with wrong-typed fields (another addon's file in a
+// shared cache, or damage): every reader treats it as unreadable, nothing
+// throws, an unreadable artifact is repaired and prune runs to completion.
+void case_malformed_records() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    std::string key, dir, memo_file;
+    {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        key = o.key32;
+        dir = o.artifact_dir;
+        memo_file = l.memo_path(o.memo_id, key);
+    }
+    CHECK(!cache::memo_from_json(R"({"schema":"1"})"));
+    CHECK(!cache::memo_from_json(R"({"schema":null,"path":"/x"})"));
+    for (const char * bad : {R"({"schema":null})", R"({"schema":"1"})", R"({"schema":1,"complete":"yes"})",
+                             R"({"schema":1,"complete":true,"artifact_key":"k","template":{"id":"toy-dac","sha256":"s"},)"
+                             R"("generator_version":1,"inventory":7})"}) {
+        write_bytes(dir + "/artifact.json", bad);
+        CHECK(!cache::read_artifact_json(dir));
+        CHECK(cache::validate(dir) == cache::Validity::invalid);
+    }
+    write_bytes(memo_file, R"({"schema":"1"})");
+    const std::string rec = failed::record_path(l.failed, key);
+    fs::create_directories(l.failed);
+    for (const char * bad : {R"({"schema":1,"class":"transient","attempts":"two"})", R"({"schema":[1]})",
+                             R"({"schema":1,"class":7})", R"({"schema":1,"class":"deterministic","code":"3"})"}) {
+        write_bytes(rec, bad);
+        CHECK(!failed::read(rec));
+        CHECK(!failed::check(l.failed, key, "TEST1", now_s()).blocked);
+    }
+    // prepare: the unreadable memo is a miss, the record is no record, the
+    // unreadable artifact is quarantined and regenerated at the same key.
+    PrepareOutcome o = env.prepare(a);
+    CHECK(ready(o) && !o.cache_hit && o.key32 == key && g_compiles == 2);
+    CHECK(count_files(l.quarantine) == 1 && cache::validate(dir) == cache::Validity::ok);
+    o.lease.release();
+    // Prune in every mode with wrong-typed memos, artifact.json and records.
+    const std::string other = std::string(32, 'c');
+    write_bytes(l.memo_path(std::string(32, 'd'), other), R"({"schema":null})");
+    write_bytes(l.memo_path(std::string(32, 'e'), key), R"({"schema":"1","template_id":3})");
+    write_bytes(failed::record_path(l.failed, other), R"({"schema":1,"class":"transient","attempts":"two"})");
+    fs::create_directories(l.artifact_dir("toy-dac", other));
+    write_bytes(l.artifact_dir("toy-dac", other) + "/artifact.json", R"({"schema":null})");
+    cache::PrunePolicy routine = cache::PrunePolicy::routine();
+    routine.now_s = now_s() + 400 * kDay;
+    routine.tmp_dir = env.td / "tmp";
+    cache::prune(env.cache, routine, env.catalog());
+    cache::prune(env.cache, cache::PrunePolicy::scoped({a}), env.catalog());
+    cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+    CHECK(env.artifacts() == 0);
+}
+
 void case_toctou() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1005,6 +1060,7 @@ int main(int argc, char ** argv) {
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},
                          {"quarantine", case_quarantine},
+                         {"malformed-records", case_malformed_records},
                          {"toctou", case_toctou},
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},

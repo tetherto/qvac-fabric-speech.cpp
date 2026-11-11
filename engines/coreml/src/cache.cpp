@@ -274,8 +274,10 @@ std::string to_json(const Memo & m) {
 
 std::optional<Memo> memo_from_json(const std::string & text) {
     const json j = json::parse(text, nullptr, false);
-    if (!j.is_object() || j.value("schema", 0) != 1) return std::nullopt;
+    if (!j.is_object()) return std::nullopt;
+    // Any type error (another writer's file in a shared cache) is "unreadable".
     try {
+        if (j.value("schema", 0) != 1) return std::nullopt;
         Memo m;
         m.path = j.at("path").get<std::string>();
         m.size = j.at("size").get<uint64_t>();
@@ -375,8 +377,9 @@ std::optional<ArtifactInfo> read_artifact_json(const std::string & dir) {
     auto t = read_text(dir + "/artifact.json");
     if (!t) return std::nullopt;
     const json j = json::parse(*t, nullptr, false);
-    if (!j.is_object() || j.value("schema", 0) != 1) return std::nullopt;
+    if (!j.is_object()) return std::nullopt;
     try {
+        if (j.value("schema", 0) != 1) return std::nullopt;
         ArtifactInfo a;
         a.complete = j.at("complete").get<bool>();
         a.artifact_key = j.at("artifact_key").get<std::string>();
