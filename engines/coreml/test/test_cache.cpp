@@ -407,6 +407,34 @@ void case_hit_adoption_memo_io_failure() {
     CHECK(g_compiles == 1);
 }
 
+// A prune deletes the memo between the hot path's lookup and its adoption (the
+// artifact stays): the adoption re-checks the memo under SH and writes it back,
+// so a ready source always has its reference on disk.
+void case_memo_hit_recheck() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    std::string key, memo_file;
+    {
+        PrepareOutcome o = env.prepare(a);
+        CHECK(ready(o));
+        key = o.key32;
+        memo_file = l.memo_path(o.memo_id, key);
+    }
+    CHECK(fs::is_regular_file(memo_file));
+    cache::PrepareInputs in = env.inputs(a);
+    int hits = 0;
+    in.after_memo_lookup = [&] {
+        ++hits;
+        fs::remove(memo_file);
+    };
+    const int reads = g_file_raw_reads;
+    PrepareOutcome o = cache::prepare(in);
+    CHECK(hits == 1 && ready(o) && o.memo_hit && o.key32 == key);
+    CHECK(g_file_raw_reads == reads && g_compiles == 1);  // still the hot path
+    CHECK(fs::is_regular_file(memo_file) && env.memos() == 1 && env.memos_consistent());
+}
+
 // The same failure under EX: the re-check finds the artifact another process
 // published, and the memo write fails; prepare fails transiently and holds no lock.
 void case_recheck_memo_io_failure() {
@@ -1291,6 +1319,7 @@ int main(int argc, char ** argv) {
                          {"recheck-under-lock", case_recheck_under_lock},
                          {"hit-adoption", case_hit_adoption},
                          {"hit-adoption-memo-io-failure", case_hit_adoption_memo_io_failure},
+                         {"memo-hit-recheck", case_memo_hit_recheck},
                          {"recheck-memo-io-failure", case_recheck_memo_io_failure},
                          {"relocation", case_relocation},
                          {"scope", case_scope},

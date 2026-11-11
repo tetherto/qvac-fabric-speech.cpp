@@ -237,6 +237,7 @@ struct PrepareInputs {
     OpenFn open;           // default: GgufSource::open (needs ggml)
     FsProbe fs_probe;      // default: default_fs_probe
     int64_t now_s = 0;     // 0: the clock (failure records)
+    std::function<void()> after_memo_lookup;  // tests: runs between the memo lookup and its adoption
 };
 
 struct PrepareOutcome {

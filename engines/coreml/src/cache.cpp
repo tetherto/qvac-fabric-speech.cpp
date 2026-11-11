@@ -814,8 +814,12 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
     for (int round = 0; round < 4; ++round) {
         // Step 2: memo lookup (the hot path: no hashing).
         if (!digested) {
-            if (std::optional<MemoFile> mf = find_memo(l, out.memo_id); mf && mf->memo && mf->memo->template_id == t.id()) {
-                Adoption a = adopt(l, t.id(), mf->key32);
+            if (std::optional<MemoFile> mf = find_memo(l, out.memo_id);
+                mf && mf->memo && mf->memo->template_id == t.id() && mf->memo->artifact_key == mf->key32) {
+                if (in.after_memo_lookup) in.after_memo_lookup();
+                // Re-checks the memo under the lease: a prune may have deleted
+                // it since the lookup (§2.8 adoption step 3).
+                Adoption a = adopt(l, t.id(), mf->key32, &out.memo_id, &*mf->memo);
                 if (a.kind == Adoption::Kind::adopted) return ready(a, mf->key32, true, true);
                 if (a.kind == Adoption::Kind::would_block) return would_block();
                 if (a.kind == Adoption::Kind::error) return failed_outcome(out, a.error);
