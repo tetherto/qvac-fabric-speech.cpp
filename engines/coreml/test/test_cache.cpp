@@ -1238,6 +1238,46 @@ void case_would_block_requeue() {
     CHECK(g_compiles == 0);  // this process never generated
 }
 
+// The hint every normal load writes (Runtime::record_hint, never staled) names
+// <cache>/artifacts/<id>.<key>/model.mlmodelc, so prune(all) owns and removes it.
+void case_scheduler_hint_pruned() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    g_sched_inputs = env.inputs(a);
+    std::string hint_path, key;
+    {
+        Config cfg;
+        cfg.pin_image = false;
+        cfg.available_memory = [] { return uint64_t{1} << 40; };
+        auto mgr = Manager::create(cfg);
+        SlotSpec gen;
+        gen.engine = "toy";
+        gen.stage = "dac";
+        gen.units = ComputeUnits::cpu_only;
+        gen.route = Route::generate;
+        gen.prepare.key = "toy-dac:" + a;
+        gen.prepare.template_id = "toy-dac";
+        gen.prepare_fn = sched_prepare;
+        gen.load_fn = sched_load;
+        SlotPolicy pol;
+        pol.cache_dir = env.cache;
+        auto s = mgr->make_slot(gen, pol);
+        CHECK(!fs::exists(l.hints));  // the first load starts with no hint file
+        s->request(Priority::now);
+        CHECK(wait_state(s, SlotState::ready));
+        key = s->status().artifact_key;
+        hint_path = s->hint_path();
+    }
+    CHECK(key.size() == 32 && !hint_path.empty());
+    CHECK(fs::path(hint_path).parent_path() == fs::path(l.hints));
+    const auto rec = detail::read_hint(hint_path);
+    CHECK(rec && rec->cold_load_ms.has_value() && !rec->stale_until_s.has_value());
+    CHECK(rec && rec->artifact == fs::canonical(l.artifact_dir("toy-dac", key) + "/model.mlmodelc").string());
+    CHECK(cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog()).hints == 1);
+    CHECK(!fs::exists(hint_path));
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -1272,6 +1312,7 @@ int main(int argc, char ** argv) {
                          {"toctou", case_toctou},
                          {"preflight", case_preflight},
                          {"would-block-requeue", case_would_block_requeue},
+                         {"scheduler-hint-pruned", case_scheduler_hint_pruned},
                      },
                      "test-coreml-cache");
 }
