@@ -501,7 +501,7 @@ void case_fit_stable() {
         in.weight_file_bytes = route.weight_file_bytes;
         in.encoder_parameters = 3000;
         in.io_bytes = 100;
-        in.ane = true;
+        in.units = CoremlFitUnits::cpu_and_ane;
         FitResult r;
         r.device_free_bytes = 15000;  // ggml-only (10000) fits; + Core ML (9080) does not
         r.device_shares_host_memory = true;
@@ -526,6 +526,27 @@ void case_fit_stable() {
     CHECK(no_hint.coreml.bytes == 9030 + 50, "envelope arithmetic (§2.13 defaults)");
     CHECK(no_hint.ggml_required_bytes == 10000, "the ggml-only charge excludes the diarizer sidecars");
     CHECK(no_hint.ggml_only_fits && !no_hint.coreml.fits, "two verdicts");
+
+    // Non-ANE units charge a 1.0x load transient (§2.13 update 2026-11-11):
+    // (6000 + 200 + 4096) * 1.25 = 12870 for all, cpu_and_gpu and cpu_only.
+    for (CoremlFitUnits units : {CoremlFitUnits::all, CoremlFitUnits::cpu_and_gpu, CoremlFitUnits::cpu_only}) {
+        CoremlEncoderEnvelopeInputs in;
+        in.weight_file_bytes = 4096;
+        in.encoder_parameters = 3000;
+        in.io_bytes = 100;
+        in.units = units;
+        CHECK(coreml_encoder_envelope_bytes(in) == 12870, "non-ANE envelope charges 1.0x weight.bin");
+    }
+    // The fp16 TDT 0.6B case the update measured: weight.bin 1.2 GB, about
+    // 1.2 GB resident + 1.08 GiB transient. The all-units envelope covers it.
+    {
+        CoremlEncoderEnvelopeInputs in;
+        in.weight_file_bytes = 1200000000ull;
+        in.units = CoremlFitUnits::all;
+        const uint64_t measured = 1200000000ull + 1080ull * 1024 * 1024 * 1024 / 1000;
+        CHECK(coreml_encoder_envelope_bytes(in) >= measured,
+              "the all-units envelope is not below the measured fp16 peak");
+    }
 
     // A real warm hint for this artifact, written by a completed load.
     {

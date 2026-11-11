@@ -245,9 +245,14 @@ uint64_t coreml_encoder_fit_bytes(const ParakeetCtcModel & model, const FitOptio
                                             (uint64_t) model.encoder_cfg.d_model)));
 #ifdef PARAKEET_USE_COREML
     const auto resolved = resolve_parakeet_coreml(opts.coreml);
-    in.ane = resolved.units_or(parakeet_coreml_encoder_prefers_ane(sidecar.c_str())
-                                   ? pcm::ComputeUnits::cpu_and_ane
-                                   : pcm::ComputeUnits::all) == pcm::ComputeUnits::cpu_and_ane;
+    switch (resolved.units_or(parakeet_coreml_encoder_prefers_ane(sidecar.c_str())
+                                  ? pcm::ComputeUnits::cpu_and_ane
+                                  : pcm::ComputeUnits::all)) {
+        case pcm::ComputeUnits::all: in.units = CoremlFitUnits::all; break;
+        case pcm::ComputeUnits::cpu_and_ane: in.units = CoremlFitUnits::cpu_and_ane; break;
+        case pcm::ComputeUnits::cpu_and_gpu: in.units = CoremlFitUnits::cpu_and_gpu; break;
+        case pcm::ComputeUnits::cpu_only: in.units = CoremlFitUnits::cpu_only; break;
+    }
 #endif
     return coreml_encoder_envelope_bytes(in);
 }

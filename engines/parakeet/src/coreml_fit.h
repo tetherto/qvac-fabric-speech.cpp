@@ -16,20 +16,42 @@
 
 namespace parakeet {
 
+// The resolved compute units of the encoder load (the runtime's
+// ComputeUnits, mirrored here so the projection stays portable).
+enum class CoremlFitUnits { all, cpu_and_ane, cpu_and_gpu, cpu_only };
+
 // Inputs of the encoder sidecar envelope.
 struct CoremlEncoderEnvelopeInputs {
-    uint64_t weight_file_bytes = 0;    // <sidecar>/weights/weight.bin
-    uint64_t encoder_parameters = 0;   // encoder.* parameters in the GGUF
-    uint64_t io_bytes = 0;             // worst-window input + output, f32
-    bool     ane = false;              // cpu_and_ane units
+    uint64_t       weight_file_bytes = 0;   // <sidecar>/weights/weight.bin
+    uint64_t       encoder_parameters = 0;  // encoder.* parameters in the GGUF
+    uint64_t       io_bytes = 0;            // worst-window input + output, f32
+    CoremlFitUnits units = CoremlFitUnits::all;
 };
+
+// The client-side load transient (`load_peak`) by compute-unit class, until
+// the model's PR measures its own (§2.13):
+//  - cpu_and_ane: 0.25 x weight file (cold ANE load peaked at 0.19x);
+//  - all, cpu_and_gpu: 1.0 x weight file (update 2026-11-11: Parakeet TDT
+//    0.6B fp16 measured +1.08 GiB over a 1.2 GB weight file, ~0.9x, and the
+//    palettized prebuilt ~0.95x);
+//  - cpu_only: 1.0 x as well. The CPU load builds the same expanded weights
+//    and nothing has measured it lower, so it is charged like `all`.
+inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, CoremlFitUnits units) {
+    switch (units) {
+        case CoremlFitUnits::cpu_and_ane: return weight_file_bytes / 4;
+        case CoremlFitUnits::all:
+        case CoremlFitUnits::cpu_and_gpu:
+        case CoremlFitUnits::cpu_only: return weight_file_bytes;
+    }
+    return weight_file_bytes;
+}
 
 // §2.13 defaults until the model's PR measures them:
 //  - resident runtime weights at their expanded fp16 geometry (a palettized
 //    prebuilt is never charged at its compressed file size): the larger of
 //    the weight file and 2 bytes per GGUF encoder parameter;
 //  - I/O backing, input and output: 2 x io_bytes;
-//  - one load transient: 0.25 x weight file on cpu_and_ane, 0.5 x otherwise;
+//  - one load transient by unit class (above);
 //  - margin x1.25 on resident + transient.
 inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs & in) {
     using fitutil::sat_add;
@@ -37,7 +59,7 @@ inline uint64_t coreml_encoder_envelope_bytes(const CoremlEncoderEnvelopeInputs 
     const uint64_t runtime_weights =
         std::max(in.weight_file_bytes, sat_mul(in.encoder_parameters, (uint64_t) 2));
     const uint64_t resident = sat_add(runtime_weights, sat_mul(in.io_bytes, (uint64_t) 2));
-    const uint64_t transient = in.ane ? in.weight_file_bytes / 4 : in.weight_file_bytes / 2;
+    const uint64_t transient = coreml_encoder_load_transient_bytes(in.weight_file_bytes, in.units);
     const uint64_t total = sat_add(resident, transient);
     return sat_add(total, total / 4);
 }
