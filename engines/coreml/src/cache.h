@@ -129,6 +129,8 @@ std::optional<MemoFile> find_memo(const Layout & l, const std::string & memo_id)
 std::vector<MemoFile> memos_for_key(const Layout & l, const std::string & key32);
 std::vector<MemoFile> all_memos(const Layout & l);
 // Atomic: sources/.tmp.<pid>.<rand>, fsync, rename. The caller holds the key lock.
+// Whether sources/<memo_id>.<m.artifact_key>.json is readable and equal to `m`.
+bool memo_present(const Layout & l, const std::string & memo_id, const Memo & m);
 Error write_memo(const Layout & l, const std::string & memo_id, const Memo & m);
 
 // ---- Artifacts (B.2) -----------------------------------------------------------
@@ -182,7 +184,9 @@ struct Adoption {
 };
 
 // Takes LOCK_SH|LOCK_NB, validates the inventory, writes `memo` under the lease
-// if this source's memo is missing, and keeps the lease.
+// unless this source's memo is present and equal to it, and keeps the lease. A
+// failed memo write is an error (the lease is released): the memo is the
+// reference that protects the artifact from prune after unload.
 Adoption adopt(const Layout & l, const std::string & template_id, const std::string & key32,
                const std::string * memo_id = nullptr, const Memo * memo = nullptr);
 

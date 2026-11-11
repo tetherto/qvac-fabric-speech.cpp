@@ -337,6 +337,13 @@ std::vector<MemoFile> all_memos(const Layout & l) {
     return out;
 }
 
+bool memo_present(const Layout & l, const std::string & memo_id, const Memo & m) {
+    const std::optional<std::string> t = read_text(l.memo_path(memo_id, m.artifact_key));
+    if (!t) return false;
+    const std::optional<Memo> on_disk = memo_from_json(*t);
+    return on_disk && to_json(*on_disk) == to_json(m);
+}
+
 Error write_memo(const Layout & l, const std::string & memo_id, const Memo & m) {
     std::error_code ec;
     fs::create_directories(l.sources, ec);
@@ -469,10 +476,15 @@ Adoption adopt(const Layout & l, const std::string & template_id, const std::str
         a.error = Error::transient("artifact " + a.dir + ": " + why, failed::ERROR_DOMAIN, failed::INVALID_ARTIFACT);
         return a;
     }
-    if (memo_id && memo && !exists(l.memo_path(*memo_id, key32))) {
-        // A failed memo write only weakens GC protection once unloaded; the
-        // lease protects the loaded model either way.
-        (void) write_memo(l, *memo_id, *memo);
+    if (memo_id && memo && !memo_present(l, *memo_id, *memo)) {
+        // The memo is the persistent reference that keeps the artifact from
+        // prune once this lease is gone (§2.8): no memo, no adoption.
+        if (Error e = write_memo(l, *memo_id, *memo); !e.ok()) {
+            a.lease.release();
+            a.kind = Adoption::Kind::error;
+            a.error = std::move(e);
+            return a;
+        }
     }
     a.kind = Adoption::Kind::adopted;
     return a;
@@ -852,8 +864,8 @@ PrepareOutcome prepare(const PrepareInputs & in, PrepareContext * ctx) {
         const Validity v = validate(dir);
         if (v == Validity::ok) {
             // Another process published meanwhile: write our memo, adopt next round.
-            (void) write_memo(l, out.memo_id, job.memo);
             failed::clear(l.failed, key);
+            if (Error me = write_memo(l, out.memo_id, job.memo); !me.ok()) return failed_outcome(out, me);
             ex.release();
             continue;
         }

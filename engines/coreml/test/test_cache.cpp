@@ -353,6 +353,90 @@ void case_hit_adoption() {
     CHECK(g_compiles == 1 && g_file_raw_reads == reads);  // no regeneration, no hashing
 }
 
+// Hit adoption whose memo write fails (I/O): no adoption, no lease; nothing
+// may count as a reference that is not on disk. Blocking the memo's name with
+// a directory makes the rename fail for every user, root included.
+void case_hit_adoption_memo_io_failure() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const std::string b = env.source("b.gguf");  // same bytes, another file
+    const cache::Layout l = env.layout();
+    std::string key;
+    {
+        PrepareOutcome oa = env.prepare(a);
+        CHECK(ready(oa));
+        key = oa.key32;
+    }
+    SourceStat st;
+    CHECK(stat_path(b, st));
+    const std::string real = fs::canonical(b).string();
+    const std::string memo_b = l.memo_path(digest::memo_id(real, st.size, st.mtime_ns, st.ino, st.dev,
+                                                           env.tpl->sha256(), GENERATOR_VERSION,
+                                                           digest::DEFAULT_OPTIONS),
+                                           key);
+    fs::create_directories(memo_b + "/blocker");
+    PrepareOutcome ob = env.prepare(b);
+    CHECK(ob.kind == PrepareOutcome::Kind::failed && ob.error.cls == ErrorClass::transient && !ob.lease.held());
+    int readable = 0;
+    for (const cache::MemoFile & m : cache::all_memos(l)) readable += m.memo ? 1 : 0;
+    CHECK(readable == 1 && fs::is_directory(memo_b));  // only A's memo
+    // No lease is left behind: prune can take EX on the key.
+    {
+        cache::KeyLock ex;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::exclusive, ex) == cache::KeyLock::Result::ok);
+    }
+    // Once the write can succeed, B adopts and its memo protects K from A's scoped prune.
+    fs::remove_all(memo_b);
+    {
+        PrepareOutcome ok = env.prepare(b);
+        CHECK(ready(ok) && ok.cache_hit && ok.key32 == key && fs::is_regular_file(memo_b));
+    }
+    // A memo that is present but unreadable is rewritten, not trusted.
+    write_bytes(memo_b, R"({"schema":1})");
+    {
+        PrepareOutcome ok = env.prepare(b);
+        CHECK(ready(ok) && ok.cache_hit && !ok.memo_hit);
+        std::ifstream in(memo_b);
+        auto m = cache::memo_from_json(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        CHECK(m && m->artifact_key == key && m->path == real);
+    }
+    fs::remove(a);
+    cache::PruneReport r = cache::prune(env.cache, cache::PrunePolicy::scoped({a}), env.catalog());
+    CHECK(r.deleted_artifacts.empty() && env.artifacts() == 1);
+    CHECK(g_compiles == 1);
+}
+
+// The same failure under EX: the re-check finds the artifact another process
+// published, and the memo write fails; prepare fails transiently and holds no lock.
+void case_recheck_memo_io_failure() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const std::string b = env.source("b.gguf");
+    const cache::Layout l = env.layout();
+    cache::PrepareInputs in = env.inputs(b);
+    SourceStat st;
+    CHECK(stat_path(b, st));
+    const std::string memo_id = digest::memo_id(fs::canonical(b).string(), st.size, st.mtime_ns, st.ino, st.dev,
+                                                env.tpl->sha256(), GENERATOR_VERSION, digest::DEFAULT_OPTIONS);
+    std::string key;
+    bool nested = false;
+    in.fs_probe = [&](const std::string & dir, cache::FsFacts & f) {
+        if (!nested) {
+            nested = true;
+            PrepareOutcome oa = env.prepare(a);
+            CHECK(ready(oa));
+            key = oa.key32;
+            fs::create_directories(l.memo_path(memo_id, key) + "/blocker");
+        }
+        return cache::default_fs_probe(dir, f);
+    };
+    PrepareOutcome o = cache::prepare(in);
+    CHECK(nested && o.kind == PrepareOutcome::Kind::failed && o.error.cls == ErrorClass::transient);
+    CHECK(!o.lease.held() && g_compiles == 1);
+    cache::KeyLock ex;
+    CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::exclusive, ex) == cache::KeyLock::Result::ok);
+}
+
 void case_relocation() {
     Env env;
     const std::string a = env.source("a.gguf");
@@ -1046,6 +1130,8 @@ int main(int argc, char ** argv) {
                          {"publish-race", case_publish_race},
                          {"recheck-under-lock", case_recheck_under_lock},
                          {"hit-adoption", case_hit_adoption},
+                         {"hit-adoption-memo-io-failure", case_hit_adoption_memo_io_failure},
+                         {"recheck-memo-io-failure", case_recheck_memo_io_failure},
                          {"relocation", case_relocation},
                          {"scope", case_scope},
                          {"used-age", case_used_age},
