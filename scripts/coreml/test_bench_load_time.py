@@ -292,6 +292,14 @@ class AnalysisTest(unittest.TestCase):
         self.assertIn("Not measured yet", doc)
         self.assertIn("## Time to ready", doc)
 
+    def test_readme_links_the_setup_and_usage_section(self):
+        doc = blt.render(blt.summarize([]))
+        self.assertIn("\n## Setup and usage\n", doc)
+        self.assertIn("docs/COREML-LOAD-TIME.md#setup-and-usage", (blt.REPO / "README.md").read_text())
+        for cmd in ("--dry-run --check-models", "build-driver", "smoke", "run --tts-cli", "report --results",
+                    "cleanup"):
+            self.assertIn(cmd, doc)
+
     def test_report_cites_no_task_identifiers(self):
         doc = blt.render(blt.summarize([]))
         self.assertTrue(doc.startswith("# Core ML load time measurements\n"))

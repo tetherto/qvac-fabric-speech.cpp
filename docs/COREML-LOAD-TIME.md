@@ -4,15 +4,29 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 
 - Not measured yet: run `bench-load-time.py run` on an otherwise idle machine, then regenerate this file with `bench-load-time.py report`.
 
-Reproduce on an otherwise idle M2 (macOS 15.7.3, AC power), with the sidecars exported as `bench-manifest.json` `exporter` describes and a `tts-cli` built with `-DTTS_CPP_COREML=ON`:
+## Setup and usage
+
+Requirements:
+
+- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses battery power unless `--allow-battery` is given.
+- The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.
+- The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with `engines/tts/scripts/export-chatterbox-coreml.py` as `exporter` in the manifest describes (`--frames` selects the widths, `--compile` writes the `.mlmodelc` next to the `.mlpackage`).
+- A `tts-cli` built with `-DTTS_CPP_COREML=ON` (see `engines/tts/docs/chatterbox.md`).
+
+Commands:
 
 ```bash
+python3 -B scripts/coreml/test_bench_load_time.py     # hermetic tests, no Core ML needed
+scripts/coreml/bench-load-time.py --dry-run --check-models   # manifest, pinned files and the run plan
 scripts/coreml/bench-load-time.py build-driver
-python3 -B scripts/coreml/test_bench_load_time.py     # hermetic, includes --dry-run
 scripts/coreml/bench-load-time.py smoke                # fresh-host.sh identity and e5rt cache clean-up
-scripts/coreml/bench-load-time.py run --tts-cli <build>/tts-cli --out <dir>
+scripts/coreml/bench-load-time.py run --tts-cli <build>/tts-cli --out <dir>   # all measurements
+scripts/coreml/bench-load-time.py run ttr --variant turbo --out <dir>   # one measurement, one variant
 scripts/coreml/bench-load-time.py report --results <dir> --out docs/COREML-LOAD-TIME.md
+scripts/coreml/bench-load-time.py cleanup              # remove leftover bench identities and caches
 ```
+
+`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders this file from it. Cold runs use a fresh `fresh-host.sh` identity and a fresh copy of the sidecars, and delete both afterwards.
 
 ## Multifunction spec sizes
 

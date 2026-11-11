@@ -143,6 +143,13 @@ enabled sidecars are present, rather than undercounting their resident memory.
 Re-export CosyVoice3 LM sidecars with the current exporter to preserve cache
 feedback on macOS 15 and 26; see the [Core ML guide](engines/tts/docs/cosyvoice3.md#core-ml-sidecars).
 
+`scripts/coreml/bench-load-time.py` measures Core ML load time for the
+Chatterbox sidecars: first-load compile on a fresh host identity, warm load,
+time until every function is ready with and without the admission gate, and
+whether loaded functions share weight memory. The
+[Core ML load time measurements](docs/COREML-LOAD-TIME.md#setup-and-usage)
+list its requirements, the commands to run it and the recorded results.
+
 ### Hexagon NPU (Snapdragon)
 
 Selected models run on the Hexagon HTP accelerator via `--backend hexagon`

@@ -1015,16 +1015,36 @@ def render(s: dict) -> str:
           "with `bench-load-time.py report`.")
     w("")
 
-    w("Reproduce on an otherwise idle M2 (macOS 15.7.3, AC power), with the sidecars exported as "
-      "`bench-manifest.json` `exporter` describes and a `tts-cli` built with `-DTTS_CPP_COREML=ON`:")
+    w("## Setup and usage")
+    w("")
+    w("Requirements:")
+    w("")
+    w("- Apple silicon, macOS 15 or later, Xcode command-line tools (`xcrun clang++`) and Python 3.9 or later. "
+      "The published numbers come from an otherwise idle M2 on macOS 15.7.3; `run` refuses battery power unless "
+      "`--allow-battery` is given.")
+    w("- The Chatterbox GGUFs pinned in `bench-manifest.json` (`variants`, with SHA-256 and Hugging Face "
+      "revisions) under the models root: `--models-root DIR`, or `QVAC_BENCH_MODELS`.")
+    w("- The Core ML sidecars for each width set in `sidecar_sets`, exported from the pinned f32 GGUFs with "
+      "`engines/tts/scripts/export-chatterbox-coreml.py` as `exporter` in the manifest describes "
+      "(`--frames` selects the widths, `--compile` writes the `.mlmodelc` next to the `.mlpackage`).")
+    w("- A `tts-cli` built with `-DTTS_CPP_COREML=ON` (see `engines/tts/docs/chatterbox.md`).")
+    w("")
+    w("Commands:")
     w("")
     w("```bash")
+    w("python3 -B scripts/coreml/test_bench_load_time.py     # hermetic tests, no Core ML needed")
+    w("scripts/coreml/bench-load-time.py --dry-run --check-models   # manifest, pinned files and the run plan")
     w("scripts/coreml/bench-load-time.py build-driver")
-    w("python3 -B scripts/coreml/test_bench_load_time.py     # hermetic, includes --dry-run")
     w("scripts/coreml/bench-load-time.py smoke                # fresh-host.sh identity and e5rt cache clean-up")
-    w("scripts/coreml/bench-load-time.py run --tts-cli <build>/tts-cli --out <dir>")
+    w("scripts/coreml/bench-load-time.py run --tts-cli <build>/tts-cli --out <dir>   # all measurements")
+    w("scripts/coreml/bench-load-time.py run ttr --variant turbo --out <dir>   # one measurement, one variant")
     w("scripts/coreml/bench-load-time.py report --results <dir> --out docs/COREML-LOAD-TIME.md")
+    w("scripts/coreml/bench-load-time.py cleanup              # remove leftover bench identities and caches")
     w("```")
+    w("")
+    w("`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders this file from it. "
+      "Cold runs use a fresh `fresh-host.sh` identity and a fresh copy of the sidecars, and delete both "
+      "afterwards.")
     w("")
     w("## Multifunction spec sizes")
     w("")
