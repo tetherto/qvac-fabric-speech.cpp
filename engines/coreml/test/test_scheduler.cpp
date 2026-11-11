@@ -1517,6 +1517,27 @@ void case_stateful_isolation() {
     Acquired a1 = o1->acquire(Demand::if_ready);
     Acquired a2 = o2->acquire(Demand::if_ready);
     CHECK(a1 && a2 && a1.model.get() != a2.model.get());
+
+    // A new owner never joins a destroyed owner's load still in flight, even
+    // when its slot lands at the destroyed slot's address: its own load runs.
+    SlotSpec r = e.spec("state-reload");
+    r.shareable = false;
+    set_beh("state-reload", {true});
+    auto first = e.m->make_slot(r, e.policy());
+    const void * first_core = &first->spec();
+    first->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("state-reload"); }));
+    first.reset();
+    std::shared_ptr<Slot> next;
+    for (int i = 0; i < 1000; ++i) {  // try for the same allocation
+        next = e.m->make_slot(r, e.policy());
+        if (&next->spec() == first_core) break;
+    }
+    next->request(Priority::minimal);
+    CHECK(next->state() == SlotState::queued);  // not the running job's phase
+    release("state-reload");
+    CHECK(wait_for([&] { return is_ready(next); }));
+    CHECK(calls("state-reload") == 2);
 }
 
 // Child process: one dlclose scenario on a freshly loaded (unpinned) plugin.

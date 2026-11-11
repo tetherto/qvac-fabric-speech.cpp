@@ -93,6 +93,10 @@ struct SlotCore {
     SlotSpec spec;
     SlotPolicy policy;
     std::shared_ptr<Runtime> rt;
+    // Runtime-local identity, set once by Runtime::add_slot: the dedup key of
+    // its non-shareable jobs. Kept across evictions; a new slot never reuses
+    // it, even at the same address while a destroyed slot's job still runs.
+    uint64_t id = 0;
 
     // (mu)
     SlotState state = SlotState::idle;
@@ -249,6 +253,7 @@ private:
     std::unordered_map<std::string, std::string> retired_;
     std::vector<std::weak_ptr<SlotCore>> slots_;
     uint64_t seq_ = 0;
+    uint64_t slot_ids_ = 0;
     uint64_t gen_ = 0;
     int handoff_ = -1;  // JobKind the other worker must take
     bool stopping_ = false;

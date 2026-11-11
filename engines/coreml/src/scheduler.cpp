@@ -198,7 +198,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
     }
     // Stateful templates never share a model; the same slot may still rejoin
     // its own running job after an eviction.
-    const std::string dedup = c->spec.shareable ? key : key + "#" + std::to_string(reinterpret_cast<uintptr_t>(c.get()));
+    const std::string dedup = c->spec.shareable ? key : key + "#" + std::to_string(c->id);
     if (auto it = inflight_.find(dedup); it != inflight_.end() && !it->second->done) {
         std::shared_ptr<Job> j = it->second;
         j->subs.push_back(Sub{c, c->epoch, p, nd});
@@ -240,7 +240,7 @@ void Runtime::subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priorit
 
 void Runtime::subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd) {
     const std::string dedup = c->spec.prepare.key.empty()
-                                  ? "prepare#" + std::to_string(reinterpret_cast<uintptr_t>(c.get()))
+                                  ? "prepare#" + std::to_string(c->id)
                                   : "prepare\n" + c->spec.prepare.key;
     if (auto it = inflight_.find(dedup); it != inflight_.end() && !it->second->done) {
         std::shared_ptr<Job> j = it->second;
@@ -1267,6 +1267,7 @@ void Runtime::add_slot(const std::shared_ptr<SlotCore> & c) {
     std::lock_guard<std::mutex> lk(mu);
     slots_.erase(std::remove_if(slots_.begin(), slots_.end(), [](const std::weak_ptr<SlotCore> & w) { return w.expired(); }),
                  slots_.end());
+    c->id = ++slot_ids_;
     slots_.push_back(c);
 }
 
