@@ -1609,7 +1609,8 @@ void case_resident_cap_shared_release() {
 
 // A pooled wait=call acquisition queued behind a long load keeps nothing alive
 // while it waits: when the only owner of the registry instance it would adopt
-// goes away, that instance is released at once, not when the waiter returns.
+// goes away, that instance is released at once, not when the waiter returns;
+// a slot that subscribed to the same job and went away is released too.
 void case_call_wait_pins_nothing() {
     reset_world();
     Env e;
@@ -1642,6 +1643,24 @@ void case_call_wait_pins_nothing() {
     CHECK(g_live_models.load() == base + 2);
     x.reset();  // the only owner of the shared instance goes away
     CHECK(wait_for([&] { return g_live_models.load() == base + 1; }, 1000));
+    CHECK(!done.load());
+    // A subscriber of the same job, in another pool, comes and goes while b
+    // waits: each poll sees its slot state, but the wait keeps none of it (its
+    // spec's pool handle is released with it, not when b returns).
+    auto pool2 = e.m->make_pool(1);
+    std::shared_ptr<Slot> z;
+    {
+        SlotSpec zs = e.spec("wps");
+        zs.pool = pool2;
+        z = e.m->make_slot(zs, e.policy());
+    }
+    z->request(Priority::minimal);
+    CHECK(z->state() == SlotState::queued);
+    std::this_thread::sleep_for(30ms);  // several polls of b's wait see z
+    const std::weak_ptr<ResidentPool> wpool2 = pool2;
+    pool2.reset();
+    z.reset();
+    CHECK(wait_for([&] { return wpool2.expired(); }, 1000));
     CHECK(!done.load());
     release("wpl");
     acq.join();
