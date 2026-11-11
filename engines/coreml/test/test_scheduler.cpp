@@ -1264,16 +1264,18 @@ LoadResult gated_delete_load(const LoadRequest & r) {
 }
 
 // An instance dropped from a pool on another thread (explicit eviction, slot
-// destruction) keeps its place until its release completed outside the lock
+// destruction, retirement) keeps its place until its release completed outside the lock
 // (§2.9): no replacement load, no second eviction, and never more live native
 // models than the cap while the deleter runs. A reference another owner keeps
 // stops counting in the pool once the pool's own reference is released.
 void case_resident_cap_pending_release() {
-    for (const bool destroy : {false, true}) {
+    enum class Drop { evict, destroy, retire };
+    for (const Drop how : {Drop::evict, Drop::destroy, Drop::retire}) {
         for (const size_t cap : {size_t(1), size_t(2)}) {
             reset_world();
             Env e;
-            const std::string tag = std::string(destroy ? "d" : "e") + std::to_string(cap);
+            const std::string tag = std::string(how == Drop::evict ? "e" : how == Drop::destroy ? "d" : "r") +
+                                    std::to_string(cap);
             const int base = g_live_models.load();
             auto pool = e.m->make_pool(cap);
             auto mk = [&](const std::string & fn) {
@@ -1296,10 +1298,10 @@ void case_resident_cap_pending_release() {
             g_delete_entered = 0;
             g_delete_open = false;
             std::thread dropper([&] {
-                if (destroy) {
-                    a.reset();
-                } else {
-                    a->evict();
+                switch (how) {
+                    case Drop::evict: a->evict(); break;
+                    case Drop::destroy: a.reset(); break;
+                    case Drop::retire: a->retire("test"); break;  // no handle outstanding
                 }
             });
             CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
@@ -1317,12 +1319,12 @@ void case_resident_cap_pending_release() {
             CHECK(over == 0);
             CHECK(calls(repl) == 0);
             CHECK(!keep || is_ready(keep));  // no second victim while the release runs
-            CHECK(e.m->stats().evictions - ev0 == (destroy ? 0u : 1u));
+            CHECK(e.m->stats().evictions - ev0 == (how == Drop::evict ? 1u : 0u));
             g_delete_open = true;
             dropper.join();
             CHECK(wait_for([&] { return is_ready(b); }));
             CHECK(!keep || is_ready(keep));  // the release made the room
-            CHECK(e.m->stats().evictions - ev0 == (destroy ? 0u : 1u));
+            CHECK(e.m->stats().evictions - ev0 == (how == Drop::evict ? 1u : 0u));
             CHECK(pool->live() == cap);
             CHECK(g_live_models.load() == base + int(cap));
         }

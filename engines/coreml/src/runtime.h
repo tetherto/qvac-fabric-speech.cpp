@@ -217,6 +217,7 @@ private:
     // instance, the pool keeps a pending-release place until the reference is
     // released outside mu (§2.9: a replacement is admitted only then).
     void drop_model_locked(SlotCore & c, Graveyard & gy);
+    void retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy);
     void subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     void subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd);
     bool low_power_locked() const;

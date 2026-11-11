@@ -1246,6 +1246,12 @@ void Runtime::release_slot(const std::shared_ptr<SlotCore> & c) {
 void Runtime::retire_model(SharedModel & m, const std::string & reason) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    retire_model_locked(m, reason, gy);
+}
+
+// `m` stays alive until `gy` is released: every slot reference to it moves
+// there through drop_model_locked (a pending release of its pool).
+void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy) {
     m.retired_ = true;
     retired_[m.key_] = reason;
     registry_.erase(m.key_);
@@ -1262,18 +1268,16 @@ void Runtime::retire_model(SharedModel & m, const std::string & reason) {
     bump_locked();
 }
 
+// One locked section and no strong reference of its own: the slot's reference
+// leaves only through drop_model_locked, so its pool keeps the place until
+// that reference is released (§2.9), never before.
 void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string & reason) {
-    std::shared_ptr<SharedModel> m;
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        m = c->model;
-    }
-    if (m) {
-        retire_model(*m, reason);
-        return;
-    }
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    if (c->model) {
+        retire_model_locked(*c->model, reason, gy);
+        return;
+    }
     unsubscribe_locked(c, gy);
     c->state = SlotState::retired;
     c->reason = reason;
