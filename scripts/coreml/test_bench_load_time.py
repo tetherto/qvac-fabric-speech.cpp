@@ -101,6 +101,7 @@ class ManifestTest(unittest.TestCase):
              "coreml-no-encoder"),
             ("unknown set", lambda m: m["measurements"]["load"].update(sets=["w5"]), "unknown sidecar set"),
             ("units", lambda m: m["protocol"].update(units="ane"), "protocol.units"),
+            ("sharing units", lambda m: m["measurements"]["load"].update(sharing_units=["gpu"]), "sharing_units"),
         ]
         for name, mutate, needle in cases:
             with self.subTest(name):
@@ -248,8 +249,10 @@ class AnalysisTest(unittest.TestCase):
              "load_ms": 300.0, "predict_ms": [40.0, 30.0, 31.0]},
             {"kind": "load_warm", "variant": "turbo", "set": "w7", "stage": "cfm", "function": "frames_512",
              "load_ms": 320.0, "predict_ms": [42.0, 32.0, 33.0]},
-            {"kind": "sharing", "variant": "turbo", "set": "w7", "stage": "cfm", "increments": [210e6, 5e6, 6e6],
-             "weight_bytes": 200_000_000, "single_increment": 205e6, "verdict": "shared"},
+            {"kind": "sharing", "variant": "turbo", "set": "w7", "stage": "cfm", "units": "cpu_and_ane",
+             "weight_bytes": 200_000_000, "metrics": {
+                 "footprint": {"increments": [10e6, 5e6, 6e6], "alone": 9e6, "verdict": "shared"},
+                 "wired": {"increments": [210e6, 190e6, 200e6], "alone": 205e6, "verdict": "not shared"}}},
             {"kind": "metal_cost", "variant": "turbo", "T_mu": 600, "T_mel": 600, "enc_ms": 60.0, "cfm_ms": 200.0,
              "hift_ms": 400.0, "pipeline_ms": 700.0},
             {"kind": "metal_cost", "variant": "turbo", "T_mu": 1200, "T_mel": 1200, "enc_ms": 80.0, "cfm_ms": 300.0,
@@ -271,7 +274,8 @@ class AnalysisTest(unittest.TestCase):
         doc = blt.render(s)
         for needle in ("Apple M2", "| turbo | w7 | cfm | 7 | 2.00 |", "| turbo | w7 | 1 | 12.0 | 351 |",
                        "| turbo | w7 | cfm | frames_512 | 12,000 | 310 | 351 | 362 | 31.5 |",
-                       "| shared |", "| turbo | pipeline | 300.0 | 0.6667 | 1.0000 | 2 |",
+                       "| turbo | w7 | cfm | cpu_and_ane | 200.00 | footprint | 10.00 | 5.50 | 9.00 | shared |",
+                       "| turbo | w7 | cfm | cpu_and_ane | 200.00 | wired | 210.00 | 195.00 | 205.00 | not shared |", "| turbo | pipeline | 300.0 | 0.6667 | 1.0000 | 2 |",
                        "| turbo | generate-gated | 2 | 1/2 | 200.0 |", "| 30.0 | 5.0 | 2.0 | 9.00 |",
                        "| mtl/cfm | 9,000.00 | yes |", "| turbo/cfm | 320.00 | no |",
                        "| turbo | coreml-w7 | 1 | 3,680 | 2,660 | 720 |", "Where each number goes"):

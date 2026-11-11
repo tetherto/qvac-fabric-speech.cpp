@@ -40,15 +40,15 @@ A warm load is a new process on an identity whose ANE plans are cached; the hint
 
 ## Do loaded functions share weight memory? (§2.13)
 
-All functions of one stage loaded and held in one process; footprint increment after each load + prediction. 'shared' when functions 2..n add less than 25% of a weight.bin each.
+All functions of one stage loaded and held in one process, per compute-unit policy. Per metric: the increment of the first function, the median of each later one, and the last function loaded alone (MB). `footprint` = phys_footprint (what fit charges); `resident` adds file-backed weight pages; `wired` = host wired memory, where the ANE keeps a loaded program; `available` = the host's available-memory drop (noisy). 'shared' when functions 2..n add less than 25% of a weight.bin each.
 
-| Variant | Set | Stage | weight.bin (MB) | First function (MB) | Each later function, median (MB) | One function alone (MB) | Verdict |
-|---|---|---|--:|--:|--:|--:|---|
-| — | | | | | | | |
+| Variant | Set | Stage | Units | weight.bin (MB) | Metric | First | Each later | Alone | Verdict |
+|---|---|---|---|--:|---|--:|--:|--:|---|
+| — | | | | | | | | | |
 
 ## Per-variant Metal cost constants for `s3gen_estimate_metal_ms` (§3.1.1)
 
-Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen call per sentence after a discarded warm-up call. Encoder against `T_mu`, the rest against `T_mel`. Worst ratio = the largest measured / fitted.
+Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen call per sentence after a discarded warm-up call. Encoder, CFM and the whole pipeline against `T_mu` (prompt + new frames), HiFT against `T_mel` (new frames). Worst ratio = the largest measured / fitted.
 
 | Variant | Stage | a (ms) | b (ms/frame) | R² | Points | Frames | Worst ratio |
 |---|---|--:|--:|--:|--:|---|--:|

@@ -74,6 +74,8 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Loaded functions are counted as sharing weights when the extra footprint of
 # functions 2..n stays below this fraction of one weight.bin per function.
 SHARED_FRACTION = 0.25
+# Driver load fields compared per function: +1 grows, -1 shrinks with a load.
+SHARING_METRICS = {"footprint": 1, "resident": 1, "wired": 1, "available": -1}
 
 
 class ManifestError(Exception):
@@ -339,6 +341,8 @@ def validate(m: dict, repo: Path = REPO, models: Path | None = None, check_model
                 errors.append(f"{w}: unknown sidecar set {s!r}")
         if cfg.get("workload") is not None and cfg["workload"] not in wl:
             errors.append(f"{w}: unknown workload {cfg['workload']!r}")
+        if "sharing_units" in cfg and (not cfg["sharing_units"] or any(u not in UNITS for u in cfg["sharing_units"])):
+            errors.append(f"{w}.sharing_units must be a non-empty subset of {UNITS}")
         for k in ("runs", "warm_runs", "predictions", "sharing_runs", "samples", "interval_ms"):
             if k in cfg and (not isinstance(cfg[k], int) or cfg[k] < 1):
                 errors.append(f"{w}.{k} must be a positive integer")
@@ -431,7 +435,8 @@ def plan(m: dict, selected, variants_filter=None) -> list:
                     steps.append((name, f"{v}/{s}: fresh identity; cold load of {n} functions "
                                         f"({', '.join(st for st, _ in fns)}); {cfg['warm_runs']} x {n} warm "
                                         f"processes (load + {cfg['predictions']} predictions); "
-                                        f"{cfg['sharing_runs']} weight-sharing runs per multi-function stage"))
+                                        f"{cfg['sharing_runs']} weight-sharing runs per multi-function stage and units "
+                                        f"{cfg.get('sharing_units', [m['protocol']['units']])}"))
         elif name == "ttr":
             for v in vs(cfg):
                 for c in cfg["configs"]:
@@ -661,8 +666,9 @@ class Runner:
                     os_build=ident.get("os_build"), os_version=ident.get("os_version"),
                     ac_power="AC Power" in power, units=self.units, sidecars=digests,
                     models_root=str(self.models))
-        if "AC Power" not in power:
-            print("warning: not on AC power (§5.3)", file=sys.stderr)
+        if "AC Power" not in power and not self.args.allow_battery:
+            raise SystemExit("bench-load-time: §5.3 runs on AC power (pmset reports battery); "
+                             "pass --allow-battery only for a smoke run")
 
     # ---- sizes ----
     def sizes(self, cfg):
@@ -743,30 +749,40 @@ class Runner:
                                 self.record("load_warm", **common, run=i, stage=st, function=n, load_ms=fr["load_ms"],
                                             predict_ms=fr.get("predict_ms"), error=fr.get("error"),
                                             footprint_max=r["footprint_max"])
-                    for i in range(self.runs(cfg["sharing_runs"])):
-                        for st, names in fns:
-                            if len(names) < 2:
-                                continue
-                            model = d / sidecar(self.m, self.models, v, s, st).name
-                            r = run_json([host, "load", "--model", model, "--units", self.units, "--predict", "1",
-                                          "--keep", *sum((["--function", n] for n in names), [])])
-                            single = run_json([host, "load", "--model", model, "--units", self.units, "--predict",
-                                               "1", "--function", names[-1]])
-                            base = r["footprint_base"]
-                            prev, inc = base, []
-                            for fr in r["functions"]:
-                                if fr.get("error"):
-                                    raise RuntimeError(f"sharing {v}/{s}/{st}: {fr['function']}: {fr['error']}")
-                                inc.append(fr["footprint_after_predict"] - prev)
-                                prev = fr["footprint_after_predict"]
-                            weight = (model / "weights" / "weight.bin").stat().st_size
-                            self.record("sharing", **common, run=i, stage=st, functions=names, increments=inc,
-                                        weight_bytes=weight, footprint_end=r["footprint_end"] - base,
-                                        footprint_max=r["footprint_max"],
-                                        single_increment=single["functions"][0]["footprint_after_predict"]
-                                        - single["footprint_base"],
-                                        verdict=sharing_verdict(inc, weight))
+                    for units in cfg.get("sharing_units", [self.units]):
+                        for i in range(self.runs(cfg["sharing_runs"])):
+                            for st, names in fns:
+                                if len(names) < 2:
+                                    continue
+                                model = d / sidecar(self.m, self.models, v, s, st).name
+                                self.record("sharing", **{**common, "units": units}, run=i, stage=st,
+                                            **self._sharing(host, model, names, units))
                     shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _sharing(host, model: Path, names, units: str) -> dict:
+        """Every function of a stage loaded and held in one process. Per metric,
+        the increment after each load + prediction and for the last function
+        loaded alone. phys_footprint is what fit charges but misses file-backed
+        weights (resident) and what the ANE keeps wired outside the process
+        (host wired); host available memory is the noisy catch-all."""
+        r = run_json([host, "load", "--model", model, "--units", units, "--predict", "1", "--keep",
+                      *sum((["--function", n] for n in names), [])])
+        single = run_json([host, "load", "--model", model, "--units", units, "--predict", "1", "--function",
+                           names[-1]])
+        for fr in r["functions"] + single["functions"]:
+            if fr.get("error"):
+                raise RuntimeError(f"sharing {model.name} {fr['function']} ({units}): {fr['error']}")
+        weight = (model / "weights" / "weight.bin").stat().st_size
+        out = {"functions": names, "weight_bytes": weight, "footprint_max": r["footprint_max"], "metrics": {}}
+        for metric, sign in SHARING_METRICS.items():
+            prev, inc = r[f"{metric}_base"], []
+            for fr in r["functions"]:
+                inc.append(sign * (fr[f"{metric}_after_predict"] - prev))
+                prev = fr[f"{metric}_after_predict"]
+            alone = sign * (single["functions"][0][f"{metric}_after_predict"] - single[f"{metric}_base"])
+            out["metrics"][metric] = {"increments": inc, "alone": alone, "verdict": sharing_verdict(inc, weight)}
+        return out
 
     # ---- time to ready ----
     def ttr(self, cfg):
@@ -934,7 +950,7 @@ def summarize(recs: list) -> dict:
 
     shar = {}
     for r in by.get("sharing", []):
-        shar.setdefault((r["variant"], r["set"], r["stage"]), []).append(r)
+        shar.setdefault((r["variant"], r["set"], r["stage"], r.get("units", "—")), []).append(r)
     s["sharing"] = shar
 
     ttr = {}
@@ -952,7 +968,9 @@ def summarize(recs: list) -> dict:
         pts.setdefault(r["variant"], []).append(r)
     for v, rows in pts.items():
         fits[v] = {}
-        for stage, x in (("enc_ms", "T_mu"), ("cfm_ms", "T_mel"), ("hift_ms", "T_mel"), ("pipeline_ms", "T_mel")):
+        # The encoder and CFM run over the whole mel (voice prompt + new frames,
+        # T_mu); HiFT only over the new frames (T_mel = T_mu - prompt).
+        for stage, x in (("enc_ms", "T_mu"), ("cfm_ms", "T_mu"), ("hift_ms", "T_mel"), ("pipeline_ms", "T_mu")):
             xs = [p[x] for p in rows]
             ys = [p[stage] for p in rows]
             try:
@@ -1058,27 +1076,34 @@ def render(s: dict) -> str:
 
     w("## Do loaded functions share weight memory? (§2.13)")
     w("")
-    w(f"All functions of one stage loaded and held in one process; footprint increment after each load + "
-      f"prediction. 'shared' when functions 2..n add less than {SHARED_FRACTION:.0%} of a weight.bin each.")
+    w(f"All functions of one stage loaded and held in one process, per compute-unit policy. Per metric: the "
+      f"increment of the first function, the median of each later one, and the last function loaded alone (MB). "
+      f"`footprint` = phys_footprint (what fit charges); `resident` adds file-backed weight pages; `wired` = "
+      f"host wired memory, where the ANE keeps a loaded program; `available` = the host's available-memory drop "
+      f"(noisy). 'shared' when functions 2..n add less than {SHARED_FRACTION:.0%} of a weight.bin each.")
     w("")
-    w("| Variant | Set | Stage | weight.bin (MB) | First function (MB) | Each later function, median (MB) | "
-      "One function alone (MB) | Verdict |")
-    w("|---|---|---|--:|--:|--:|--:|---|")
+    w("| Variant | Set | Stage | Units | weight.bin (MB) | Metric | First | Each later | Alone | Verdict |")
+    w("|---|---|---|---|--:|---|--:|--:|--:|---|")
     for key in sorted(s["sharing"]):
         rows = s["sharing"][key]
-        first = median([r["increments"][0] for r in rows])
-        later = median([x for r in rows for x in r["increments"][1:]])
-        verdicts = sorted({r["verdict"] for r in rows})
-        w(f"| {' | '.join(key)} | {_mb(rows[0]['weight_bytes'])} | {_mb(first)} | {_mb(later)} | "
-          f"{_mb(median([r['single_increment'] for r in rows]))} | {', '.join(verdicts)} |")
+        for metric in SHARING_METRICS:
+            ms = [r["metrics"][metric] for r in rows if metric in r.get("metrics", {})]
+            if not ms:
+                continue
+            verdict = ", ".join(sorted({x["verdict"] for x in ms}))
+            w(f"| {' | '.join(key)} | {_mb(rows[0]['weight_bytes'])} | {metric} | "
+              f"{_mb(median([x['increments'][0] for x in ms]))} | "
+              f"{_mb(median([y for x in ms for y in x['increments'][1:]]))} | "
+              f"{_mb(median([x['alone'] for x in ms]))} | {verdict} |")
     if not s["sharing"]:
-        w("| — | | | | | | | |")
+        w("| — | | | | | | | | | |")
     w("")
 
     w("## Per-variant Metal cost constants for `s3gen_estimate_metal_ms` (§3.1.1)")
     w("")
     w("Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen "
-      "call per sentence after a discarded warm-up call. Encoder against `T_mu`, the rest against `T_mel`. "
+      "call per sentence after a discarded warm-up call. Encoder, CFM and the whole pipeline against `T_mu` "
+      "(prompt + new frames), HiFT against `T_mel` (new frames). "
       "Worst ratio = the largest measured / fitted.")
     w("")
     w("| Variant | Stage | a (ms) | b (ms/frame) | R² | Points | Frames | Worst ratio |")
@@ -1291,6 +1316,7 @@ def main(argv=None) -> int:
     r.add_argument("--units", choices=UNITS)
     r.add_argument("--runs", type=int, help="override every run count (smoke tests only)")
     r.add_argument("--no-quiet-check", action="store_true", help="skip the ANECompilerService wait (smoke only)")
+    r.add_argument("--allow-battery", action="store_true", help="run on battery power (smoke only, not §5.3)")
     rp = sub.add_parser("report", help="render the measurements doc from results")
     rp.add_argument("--results", required=True)
     rp.add_argument("--out")

@@ -213,7 +213,8 @@
       "sets": ["w7", "w3"],
       "warm_runs": 5,
       "predictions": 5,
-      "sharing_runs": 3
+      "sharing_runs": 3,
+      "sharing_units": ["cpu_and_ane", "cpu_only"]
     },
     "ttr": {
       "what": "Time until every function is ready (§5.3 time-to-ready), with and without the admission gate (§2.9), the worst-case prepare-queue wait, and cached startup with the same identity.",

@@ -15,8 +15,9 @@
 //       the function names of a compiled model.
 //   load --model X.mlmodelc [--units U] [--function F]... [--predict N] [--keep]
 //       loads each function in order in this process: load time, N zero-input
-//       predictions, phys_footprint after each step. --keep holds every model
-//       (weight-sharing measurement); otherwise each is released first.
+//       predictions, then phys_footprint, resident size, host wired memory and
+//       the host's available memory after each step. --keep holds every model (weight-sharing measurement); otherwise
+//       each is released first.
 //   ttr --mode manager|manual-gated|ungated --route prebuilt|generate
 //       --artifact STAGE=PATH:FN[,FN...] ... --work-dir DIR [--cache-dir DIR]
 //       [--units U] [--memory-admission] [--timeout-s S]
@@ -72,6 +73,23 @@ uint64_t phys_footprint() {
     mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &n) != KERN_SUCCESS) return 0;
     return info.phys_footprint;
+}
+
+uint64_t resident_size() {
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &n) != KERN_SUCCESS) return 0;
+    return info.resident_size;
+}
+
+// Host-wide wired memory: where the ANE keeps a loaded program's weights,
+// outside this process's footprint.
+uint64_t host_wired() {
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t n = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &n) != KERN_SUCCESS)
+        return 0;
+    return (uint64_t) vm.wire_count * (uint64_t) vm_kernel_page_size;
 }
 
 uint64_t lifetime_max_footprint() {
@@ -408,6 +426,9 @@ int cmd_load(const Args & a) {
     if (!error.empty()) die(error);
 
     const uint64_t base = phys_footprint();
+    const uint64_t available_base = qc::detail::device_available_memory();
+    const uint64_t resident_base = resident_size();
+    const uint64_t wired_base = host_wired();
     std::vector<MLModel *> held;
     json out = json::array();
     for (const std::string & fn : fns) {
@@ -434,6 +455,9 @@ int cmd_load(const Args & a) {
         }
         rec["predict_ms"] = pms;
         rec["footprint_after_predict"] = phys_footprint();
+        rec["available_after_predict"] = qc::detail::device_available_memory();
+        rec["resident_after_predict"] = resident_size();
+        rec["wired_after_predict"] = host_wired();
         out.push_back(rec);
         if (keep) held.push_back(m);
         m = nil;
@@ -445,6 +469,9 @@ int cmd_load(const Args & a) {
           {"footprint_base", base},
           {"footprint_end", phys_footprint()},
           {"footprint_max", lifetime_max_footprint()},
+          {"available_base", available_base},
+          {"resident_base", resident_base},
+          {"wired_base", wired_base},
           {"functions", out}});
     held.clear();
     return 0;
