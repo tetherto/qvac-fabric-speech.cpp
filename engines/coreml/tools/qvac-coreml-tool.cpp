@@ -32,6 +32,7 @@
 #include "gguf_source.h"
 #include "milblob.h"
 #include "sha256.h"
+#include "shape.h"
 
 #include "ggml.h"
 #include "gguf.h"
@@ -388,8 +389,9 @@ int cmd_twin(const Args & a) {
         uint64_t s = seed;
         for (int b = 0; b < 8; ++b) s ^= static_cast<uint64_t>(d[b]) << (8 * b);
         Rng rng{s};
-        const int64_t n = p.ne[0] * p.ne[1] * p.ne[2] * p.ne[3];
-        std::vector<float> v(static_cast<size_t>(n));
+        const std::optional<uint64_t> n = detail::element_count({p.ne[0], p.ne[1], p.ne[2], p.ne[3]});
+        if (!n) die("tensor " + p.name + " has more than " + std::to_string(detail::MAX_ELEMENTS) + " elements");
+        std::vector<float> v(static_cast<size_t>(*n));
         for (float & x : v) {
             double y = p.mean + p.sd * rng.normal();
             y = std::min(std::max(y, p.lo), p.hi);
