@@ -6,6 +6,7 @@
 
 #include "device.h"
 #include "hints.h"
+#include "test_hooks.h"
 
 #include <algorithm>
 #include <functional>
@@ -42,6 +43,17 @@ int64_t * timing_slot(Timings & t, SlotState phase) {
 
 constexpr int64_t kStaleSeconds = 24 * 60 * 60;
 
+#ifdef QVAC_COREML_TEST_HOOKS
+#define QVAC_COREML_TEST_HOOK(name)                              \
+    do {                                                         \
+        if (void (*hook_)() = test_hooks().name.load()) hook_(); \
+    } while (0)
+#else
+#define QVAC_COREML_TEST_HOOK(name) \
+    do {                            \
+    } while (0)
+#endif
+
 // A pool's reference to an instance one of its members dropped, kept in a
 // Graveyard: destroyed outside mu, it releases the reference first and then
 // removes its entry from the pool's pending releases (drop_model_locked). The
@@ -58,11 +70,19 @@ struct PendingRelease {
     PendingRelease & operator=(const PendingRelease &) = delete;
     ~PendingRelease() {
         model.reset();  // may run the engine's deleter (takes mu itself)
+        QVAC_COREML_TEST_HOOK(pending_released);
         if (std::shared_ptr<Runtime> r = rt.lock()) r->on_pool_released(pool, id);
     }
 };
 
 }  // namespace
+
+#ifdef QVAC_COREML_TEST_HOOKS
+TestHooks & test_hooks() {
+    static TestHooks h;
+    return h;
+}
+#endif
 
 std::string model_key(const std::string & artifact, const std::string & function, ComputeUnits units) {
     return artifact + '\n' + function + '\n' + to_string(units);
@@ -918,6 +938,7 @@ void Runtime::run_load(const std::shared_ptr<Job> & j) {
         if (existing && !existing->retired()) {
             // Another owner's model is still alive (e.g. a unit retains it after
             // an eviction): no second instance.
+            QVAC_COREML_TEST_HOOK(before_adopt);
             publish(j, existing, false, std::nullopt);
             return;
         }

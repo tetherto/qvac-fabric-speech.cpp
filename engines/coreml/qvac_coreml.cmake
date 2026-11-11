@@ -128,6 +128,8 @@ function(qvac_coreml_add_tests)
     _qvac_coreml_runtime_sources(srcs ${with_objc})
     add_library(qvac-coreml-test-runtime STATIC ${srcs})
     _qvac_coreml_configure_runtime(qvac-coreml-test-runtime qvac_coreml_test ${with_objc})
+    # Scheduler test seams (src/test_hooks.h): only in this copy.
+    target_compile_definitions(qvac-coreml-test-runtime PRIVATE QVAC_COREML_TEST_HOOKS=1)
     target_link_libraries(qvac-coreml-test-runtime PUBLIC Threads::Threads ${CMAKE_DL_LIBS} ${fws})
 
     # A dlopen-able module with a third copy, for the dlclose lifetime case.
