@@ -456,7 +456,7 @@ std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCor
                                                                    const std::vector<std::shared_ptr<SlotCore>> & own,
                                                                    Graveyard & gy) const {
     struct Cand {
-        const SharedModel * model;
+        const SharedModel * model = nullptr;
         bool evictable = true;
         Clock::time_point last_used{};
         std::vector<std::shared_ptr<SlotCore>> members;
@@ -468,7 +468,11 @@ std::vector<std::shared_ptr<SlotCore>> Runtime::pool_victim_locked(const PoolCor
         gy.keep(m);
         if (!m->model) continue;
         auto it = std::find_if(cands.begin(), cands.end(), [&](const Cand & k) { return k.model == m->model.get(); });
-        if (it == cands.end()) it = cands.insert(cands.end(), Cand{m->model.get()});
+        if (it == cands.end()) {
+            Cand k;
+            k.model = m->model.get();
+            it = cands.insert(cands.end(), std::move(k));
+        }
         bool predicted = false;
         for (const auto & pw : p.predicted) predicted = predicted || same_core(pw, m);
         if (predicted || std::find(own.begin(), own.end(), m) != own.end()) it->evictable = false;
