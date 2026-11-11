@@ -16,6 +16,11 @@
 //                         next dispatch on Core ML; only rc 5-7 retire
 //   owner-route           the synchronous owner route returns the error and
 //                         never retires
+//   strict-route          use = require: an input over the fixed capacity
+//                         (long-form windowing disabled) throws CoremlError
+//                         instead of running on ggml and leaves the slot
+//                         ready; a cannot-serve code throws without retiring;
+//                         a failed prediction retires and throws
 //   pending-route         a slot still loading gives the ggml route marked
 //                         pending; with wait = call the acquisition waits
 //   sidecar-groups        construction group = the minimal set; prewarm all
@@ -199,7 +204,7 @@ CallOutcome run_call(const EncoderRoute & route, int windows) {
     for (int w = 0; w < windows; ++w) {
         bool used = false;
         const int rc = dispatch_on_route(
-            route, /*eligible=*/true,
+            route, EncoderEligibility::coreml,
             [&] { return route.encode(kFixedMelFrames, kFixedMelFrames, 128, nullptr, 188, 1024, nullptr); },
             [&] { ++out.ggml_dispatches; return 0; }, used);
         CHECK(rc == 0, "every window succeeds (Core ML or the ggml fallback)");
@@ -335,7 +340,7 @@ void case_owner_route() {
     bool used = true;
     int ggml_runs = 0;
     const int rc = dispatch_on_route(
-        owner, true, [&] { return owner.encode(1, 1, 128, nullptr, 1, 1, nullptr); },
+        owner, EncoderEligibility::coreml, [&] { return owner.encode(1, 1, 128, nullptr, 1, 1, nullptr); },
         [&] { ++ggml_runs; return 0; }, used);
     CHECK(rc == 7, "an owner route returns the Core ML error");
     CHECK(ggml_runs == 0, "an owner route never falls back to ggml (no weights)");
@@ -351,8 +356,97 @@ void case_owner_route() {
                                                    fake_describe(nullptr, 128), kFakeLabel, nullptr,
                                                    ok_ops, false);
     ggml_runs = 0;
-    dispatch_on_route(held, /*eligible=*/false, [&] { return 0; }, [&] { ++ggml_runs; return 0; }, used);
+    dispatch_on_route(held, EncoderEligibility::ggml, [&] { return 0; }, [&] { ++ggml_runs; return 0; }, used);
     CHECK(ggml_runs == 1 && !used && held.usable(), "an ineligible dispatch runs on ggml, route intact");
+}
+
+// One dispatch of `n_mel` frames as run_encoder drives it: the capacity check
+// first (coreml_encoder_eligibility), then the route.
+struct StrictOutcome {
+    bool threw = false;
+    pcm::SlotState error_state = pcm::SlotState::idle;
+    pcm::ErrorClass error_class = pcm::ErrorClass::none;
+    int ggml_runs = 0;
+    bool used = false;
+};
+
+StrictOutcome dispatch_strict(const EncoderRoute & route, int n_mel) {
+    StrictOutcome out;
+    const EncoderEligibility e = route_fits_capacity(route, n_mel) ? EncoderEligibility::coreml
+                                                                   : EncoderEligibility::cannot_serve;
+    try {
+        dispatch_on_route(
+            route, e, [&] { return route.encode(n_mel, n_mel, 128, nullptr, n_mel / kSub, 1024, nullptr); },
+            [&] { ++out.ggml_runs; return 0; }, out.used);
+    } catch (const pcm::CoremlError & err) {
+        out.threw = true;
+        out.error_state = err.state;
+        out.error_class = err.cls;
+    }
+    return out;
+}
+
+void case_strict_route() {
+    const fs::path dir = make_temp_dir("strict");
+    auto m = pcm::Manager::create(fast_config());
+    auto slot = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
+
+    // Long-form windowing disabled (a negative window request): the plan is
+    // one pass over the whole input, even with a held fixed-capacity route.
+    EncoderRoute route = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128,
+                                             /*strict=*/true);
+    CHECK(route.usable() && route.strict(), "a strict acquisition gives a strict route");
+    const LongFormPlan single = routed_plan(route, kLongMel, CoremlShapeKind::fixed, -1);
+    CHECK(!single.enabled, "windowing disabled: one pass over the whole input");
+    CHECK(!route_fits_capacity(route, (int) kLongMel), "the single pass exceeds the fixed capacity");
+
+    const StrictOutcome over = dispatch_strict(route, (int) kLongMel);
+    CHECK(over.threw, "strict: an over-capacity input throws instead of falling back");
+    CHECK(over.ggml_runs == 0 && !over.used, "strict: nothing ran on ggml");
+    CHECK(over.error_state == pcm::SlotState::ready && over.error_class == pcm::ErrorClass::deterministic,
+          "strict: a capacity miss is a deterministic error on a ready slot");
+    CHECK(route.usable() && slot->state() == pcm::SlotState::ready,
+          "strict: a capacity miss does not retire the slot");
+
+    // The same input on a non-strict route of the same slot runs on ggml.
+    const EncoderRoute relaxed = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
+    CHECK(!relaxed.strict(), "the default route is not strict");
+    const StrictOutcome fallback = dispatch_strict(relaxed, (int) kLongMel);
+    CHECK(!fallback.threw && fallback.ggml_runs == 1 && !fallback.used,
+          "automatic: the over-capacity input runs on ggml");
+
+    // An input that fits runs on Core ML.
+    const StrictOutcome fits = dispatch_strict(route, kFixedMelFrames);
+    CHECK(!fits.threw && fits.used && fits.ggml_runs == 0, "strict: an input that fits runs on Core ML");
+
+    // The handle refuses the shape (rc 1-4): throws, the slot stays ready.
+    auto * enc = reinterpret_cast<FakeEncoder *>(route.context());
+    enc->fail_rc = 2;
+    enc->fail_at = enc->encodes.load();
+    const StrictOutcome refused = dispatch_strict(route, kFixedMelFrames);
+    CHECK(refused.threw && refused.ggml_runs == 0, "strict: a cannot-serve code throws");
+    CHECK(slot->state() == pcm::SlotState::ready, "strict: a cannot-serve code does not retire");
+
+    // A failed prediction (rc 5-7): retires, then throws.
+    enc->fail_rc = 6;
+    enc->fail_at = enc->encodes.load();
+    const StrictOutcome failed = dispatch_strict(route, kFixedMelFrames);
+    CHECK(failed.threw && failed.ggml_runs == 0, "strict: a failed prediction throws");
+    CHECK(failed.error_state == pcm::SlotState::retired && failed.error_class == pcm::ErrorClass::transient,
+          "strict: the error reports the retirement");
+    CHECK(slot->state() == pcm::SlotState::retired, "strict: a failed prediction retires the slot");
+
+    // The owner route keeps its own contract: it returns the error.
+    FakeEncoder owned;
+    EncoderRoute::Ops ops;
+    ops.encode = &fake_encode;
+    const EncoderRoute owner = EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&owned),
+                                                    fake_describe(nullptr, 128), kFakeLabel, nullptr, ops,
+                                                    /*owner=*/true, /*strict=*/true);
+    const StrictOutcome owner_over = dispatch_strict(owner, (int) kLongMel);
+    CHECK(!owner_over.threw && owner_over.ggml_runs == 1,
+          "an owner route hands an over-capacity input to the ggml path, which reports the error");
+    fs::remove_all(dir);
 }
 
 void case_pending_route() {
@@ -616,6 +710,7 @@ int main() {
     case_window_k_failure_and_next_call();
     case_cannot_serve_keeps_route();
     case_owner_route();
+    case_strict_route();
     case_pending_route();
     case_sidecar_groups();
     case_options();

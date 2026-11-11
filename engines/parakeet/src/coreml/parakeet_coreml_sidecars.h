@@ -56,8 +56,11 @@ struct EncoderModelOps {
 
 // The unit's route from one acquisition: a handle gives a Core ML route whose
 // failure retires the model process-wide; no handle gives the ggml route,
-// marked pending when the slot was not ready yet.
-EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels);
+// marked pending when the slot was not ready yet. `strict` (use = require):
+// a dispatch the handle cannot serve throws pcm::CoremlError instead of
+// running on ggml.
+EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels,
+                                 bool strict = false);
 
 // Bytes ANECompilerService needs for a cold compile of `mlmodelc` (B.1
 // default: 1.6 x weights/weight.bin), or 0 when `units` cannot use the ANE.

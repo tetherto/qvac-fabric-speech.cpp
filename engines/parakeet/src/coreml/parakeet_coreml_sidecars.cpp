@@ -37,6 +37,13 @@ std::unique_lock<std::mutex> lock_handle(void * hold) {
     return (*handle)->lock_for_prediction();
 }
 
+[[noreturn]] void refuse_strict(void *, const std::string & reason, bool prediction_failed) {
+    if (prediction_failed) {
+        throw pcm::CoremlError(reason, pcm::SlotState::retired, pcm::ErrorClass::transient);
+    }
+    throw pcm::CoremlError(reason, pcm::SlotState::ready, pcm::ErrorClass::deterministic);
+}
+
 }  // namespace
 
 pcm::Options to_runtime_options(const CoremlOptions & o) {
@@ -66,7 +73,8 @@ pcm::Prewarm to_runtime_prewarm(CoremlOptions::Prewarm scope) {
     return map_enum<CoremlOptions::Prewarm, pcm::Prewarm>(scope);
 }
 
-EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels) {
+EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOps & ops, int n_mels,
+                                 bool strict) {
     if (!acquired.model || ops.context == nullptr) return EncoderRoute::ggml(acquired.pending);
     parakeet_coreml_context * ctx = ops.context(acquired.model->get());
     if (ctx == nullptr) return EncoderRoute::ggml(acquired.pending);
@@ -77,8 +85,9 @@ EncoderRoute route_from_acquired(pcm::Acquired && acquired, const EncoderModelOp
     route_ops.retire = &retire_handle;
     route_ops.lock = &lock_handle;
     route_ops.encode = ops.encode;
+    route_ops.refuse = &refuse_strict;
     return EncoderRoute::coreml(ctx, geometry, label != nullptr ? label : "coreml", std::move(hold),
-                                route_ops, /*owner=*/false);
+                                route_ops, /*owner=*/false, strict);
 }
 
 uint64_t ane_compile_reserve_bytes(const std::string & mlmodelc, pcm::ComputeUnits units) {

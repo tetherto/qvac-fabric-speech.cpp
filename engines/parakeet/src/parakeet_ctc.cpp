@@ -1923,7 +1923,7 @@ static bool gguf_encoder_is_offline(const gguf_context * g) {
 
 // Loads the encoder sidecar before weight allocation so the `encoder.*`
 // tensors can be skipped. Only the offline fixed-capacity families qualify
-// (the same ones should_use_coreml_encoder pads and windows); returns null,
+// (the same ones coreml_encoder_eligibility pads and windows); returns null,
 // after logging why, when the sidecar cannot take over the encoder.
 static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g,
                                                           const std::string & gguf_path,
@@ -3148,7 +3148,7 @@ EncoderRoute ready_encoder_route(const ParakeetCtcModel & m) {
     if (m.impl->ctx_coreml != nullptr) return owner_route(m);
     if (!m.impl->encoder_slot) return {};
     return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::if_ready), encoder_ops(),
-                               m.mel_cfg.n_mels);
+                               m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
 }
 
 }  // namespace
@@ -3162,7 +3162,7 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m, const std::atomic<bool>
     // One acquisition per unit: raised to `now`, then the resolved wait mode
     // (none: no blocking; call: until ready or terminal; strict throws).
     return route_from_acquired(m.impl->encoder_slot->acquire(pcm::Demand::now, std::nullopt, cancel),
-                               encoder_ops(), m.mel_cfg.n_mels);
+                               encoder_ops(), m.mel_cfg.n_mels, m.impl->coreml->resolved().strict());
 #else
     (void) m;
     (void) cancel;
@@ -4976,12 +4976,12 @@ static bool encoder_is_offline(const EncoderConfig & enc) {
         && !enc.causal_downsampling;
 }
 
-static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
-                                      const EncoderRoute & route,
-                                      int n_mel_frames,
-                                      bool all_valid,
-                                      bool capture_intermediates,
-                                      bool allow_coreml_padded) {
+static bool coreml_encoder_takes_shape(const ParakeetCtcModel & model,
+                                       const EncoderRoute & route,
+                                       int n_mel_frames,
+                                       bool all_valid,
+                                       bool capture_intermediates,
+                                       bool allow_coreml_padded) {
     if (model.model_variant == "transcribepsy-250m-eu") return false;
     if (!model.impl || !route.usable()) return false;
     if (model.model_type != ParakeetModelType::CTC &&
@@ -4992,21 +4992,18 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         model.model_type != ParakeetModelType::SORTFORMER) return false;
     if (!all_valid && !allow_coreml_padded) return false;
     if (capture_intermediates) return false;  // per-stage parity harnesses stay on ggml
-    // A fixed-capacity handle (an offline fixed export or the ANE window)
-    // cannot serve a longer input: that dispatch runs on ggml and the route
-    // stays usable (a capacity miss is not a prediction failure, §2.10).
-    const int capacity = route.geometry().fixed_mel_frames;
-    const bool fits_capacity = capacity <= 0 || n_mel_frames <= capacity;
+    // CTC, RNN-T and TDT: the capacity is checked by the caller
+    // (coreml_encoder_eligibility), so a longer input is "cannot serve".
     if (model.model_type == ParakeetModelType::CTC) {
-        return fits_capacity && encoder_is_offline(model.encoder_cfg) &&
+        return encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
     }
     if (model.model_type == ParakeetModelType::RNNT) {
-        return fits_capacity && encoder_is_offline(model.encoder_cfg) &&
+        return encoder_is_offline(model.encoder_cfg) &&
                model.encoder_cfg.conv_norm_type == ConvNormType::BatchNorm;
     }
     if (model.model_type == ParakeetModelType::TDT) {
-        return fits_capacity && encoder_is_offline(model.encoder_cfg);
+        return encoder_is_offline(model.encoder_cfg);
     }
     if (model.model_type == ParakeetModelType::SORTFORMER) {
         const int fixed_frames = route.geometry().fixed_mel_frames;
@@ -5029,6 +5026,31 @@ static bool should_use_coreml_encoder(const ParakeetCtcModel & model,
         && enc.att_chunked_limited
         && enc.att_context_left >= 0
         && enc.att_context_right >= 0;
+}
+
+// Where one encoder dispatch may run. A fixed-capacity handle (an offline
+// fixed export or the ANE window) cannot serve a longer CTC, RNN-T or TDT
+// input: that dispatch is "cannot serve", which runs on ggml and leaves the
+// route usable (a capacity miss is not a prediction failure), or throws on a
+// strict route. EOU, Nemotron and the AOSC bypass need the exact compiled
+// shape, so any other length is simply a ggml dispatch.
+static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & model,
+                                                     const EncoderRoute & route,
+                                                     int n_mel_frames,
+                                                     bool all_valid,
+                                                     bool capture_intermediates,
+                                                     bool allow_coreml_padded) {
+    if (!coreml_encoder_takes_shape(model, route, n_mel_frames, all_valid,
+                                    capture_intermediates, allow_coreml_padded)) {
+        return EncoderEligibility::ggml;
+    }
+    const bool capacity_bound = model.model_type == ParakeetModelType::CTC ||
+                                model.model_type == ParakeetModelType::RNNT ||
+                                model.model_type == ParakeetModelType::TDT;
+    if (capacity_bound && !route_fits_capacity(route, n_mel_frames)) {
+        return EncoderEligibility::cannot_serve;
+    }
+    return EncoderEligibility::coreml;
 }
 
 static int run_coreml_ctc_head(ParakeetCtcModel & model,
@@ -5384,12 +5406,12 @@ int run_encoder(ParakeetCtcModel   & model,
     // FastConformer encoder hands encoder_out back to the ggml decoder or
     // diarization head. A failure retires the sidecar; this dispatch and the
     // rest of the unit run on ggml with the plan already chosen.
-    const bool eligible = should_use_coreml_encoder(model, route, n_mel_frames, all_valid,
-                                                    capture_intermediates, allow_coreml_padded);
+    const EncoderEligibility eligibility = coreml_encoder_eligibility(
+        model, route, n_mel_frames, all_valid, capture_intermediates, allow_coreml_padded);
     bool used_coreml = false;
     int coreml_rc = 0;
     const int rc = dispatch_on_route(
-        route, eligible,
+        route, eligibility,
         [&] { return run_encoder_coreml(model, route, mel, n_mel_frames, mel_valid, n_mels, out); },
         [&] {
             if (encode_prediction_failed(coreml_rc)) {
@@ -5767,6 +5789,13 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
         pcm::Acquired acquired = model.impl->bypass_slot->acquire(pcm::Demand::now);
         auto * ctx = acquired.model ? acquired.model->as<parakeet_coreml_context>() : nullptr;
         const int fixed_frames = ctx ? (int) parakeet_coreml_fixed_mel_frames(ctx, d_model) : 0;
+        const bool strict = model.impl->coreml->resolved().strict();
+        if (strict && ctx != nullptr && !(fixed_frames > 0 && n_pre_encode_frames <= fixed_frames)) {
+            throw pcm::CoremlError("the Core ML bypass encoder cannot serve this step (" +
+                                       std::to_string(n_pre_encode_frames) +
+                                       " frames) and Core ML is required",
+                                   pcm::SlotState::ready, pcm::ErrorClass::deterministic);
+        }
         if (fixed_frames > 0 && n_pre_encode_frames <= fixed_frames) {
             out.n_enc_frames = n_pre_encode_frames;
             out.d_model = d_model;
@@ -5795,10 +5824,18 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
                     "parakeet: Core ML bypass encoder failed (rc=%d); "
                     "retiring the sidecar and falling back to ggml encoder\n", rc);
                 model.impl->bypass_slot->retire("prediction failed (rc=" + std::to_string(rc) + ")");
-            } else {
+            } else if (!strict) {
                 PARAKEET_LOG_WARN(
                     "parakeet: Core ML bypass encoder cannot serve this step (rc=%d); "
                     "running it on the ggml encoder\n", rc);
+            }
+            if (strict) {
+                const bool failed = encode_prediction_failed(rc);
+                throw pcm::CoremlError("the Core ML bypass encoder " +
+                                           std::string(failed ? "prediction failed" : "cannot serve this step") +
+                                           " (rc=" + std::to_string(rc) + ") and Core ML is required",
+                                       failed ? pcm::SlotState::retired : pcm::SlotState::ready,
+                                       failed ? pcm::ErrorClass::transient : pcm::ErrorClass::deterministic);
             }
         }
     }

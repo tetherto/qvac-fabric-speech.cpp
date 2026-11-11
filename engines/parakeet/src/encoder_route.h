@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 struct parakeet_coreml_context;
@@ -43,11 +44,16 @@ public:
     using EncodeFn = int (*)(void * hold, parakeet_coreml_context * ctx,
                              int n_mel_frames, int mel_valid, int n_mels, const float * mel,
                              int n_enc_frames, int d_model, float * encoder_out);
+    // Strict routes: raises the runtime's error for a dispatch the handle
+    // could not serve. `prediction_failed`: the sidecar ran and failed (it
+    // was retired); otherwise it could not take the input at all.
+    using RefuseFn = void (*)(void * hold, const std::string & reason, bool prediction_failed);
 
     struct Ops {
         RetireFn retire = nullptr;  // called once, on the unit's first failure
         LockFn   lock   = nullptr;  // one in-flight prediction per model instance
         EncodeFn encode = nullptr;  // the sidecar forward pass
+        RefuseFn refuse = nullptr;  // strict routes; null throws std::runtime_error
     };
 
     // The ggml route: today's ggml-only plan. `pending` records that the
@@ -62,10 +68,11 @@ public:
     // A route that holds a Core ML encoder for one unit. `hold` keeps the
     // model alive (a runtime handle, or the owner context's lifetime token).
     // `owner`: the sidecar owns the encoder (no ggml weights), so a failure is
-    // an error instead of a fallback.
+    // an error instead of a fallback. `strict` (use = require): a dispatch the
+    // handle cannot serve throws instead of running on ggml.
     static EncoderRoute coreml(parakeet_coreml_context * ctx, EncoderRouteGeometry geometry,
                                std::string label, std::shared_ptr<void> hold, Ops ops,
-                               bool owner) {
+                               bool owner, bool strict = false) {
         EncoderRoute r;
         r.s_ = std::make_shared<State>();
         r.s_->ctx = ctx;
@@ -74,6 +81,7 @@ public:
         r.s_->hold = std::move(hold);
         r.s_->ops = ops;
         r.s_->owner = owner;
+        r.s_->strict = strict;
         return r;
     }
 
@@ -84,6 +92,7 @@ public:
     bool usable() const { return s_ != nullptr && !s_->failed; }
     bool failed() const { return s_ != nullptr && s_->failed; }
     bool owner() const { return s_ != nullptr && s_->owner; }
+    bool strict() const { return s_ != nullptr && s_->strict; }
     bool pending() const { return pending_; }
 
     parakeet_coreml_context * context() const { return s_ ? s_->ctx : nullptr; }
@@ -120,6 +129,14 @@ public:
         if (!s_->owner && s_->ops.retire != nullptr) s_->ops.retire(s_->hold.get(), reason);
     }
 
+    // A strict route refuses a dispatch it could not serve: never returns.
+    [[noreturn]] void refuse(const std::string & reason, bool prediction_failed) const {
+        if (s_ != nullptr && s_->ops.refuse != nullptr) {
+            s_->ops.refuse(s_->hold.get(), reason, prediction_failed);
+        }
+        throw std::runtime_error(reason);
+    }
+
 private:
     struct State {
         parakeet_coreml_context * ctx = nullptr;
@@ -128,6 +145,7 @@ private:
         std::shared_ptr<void> hold;
         Ops ops;
         bool owner = false;
+        bool strict = false;
         bool failed = false;
     };
     std::shared_ptr<State> s_;
@@ -144,17 +162,42 @@ private:
 // and are not a sidecar failure either.
 inline bool encode_prediction_failed(int rc) { return rc >= 5 && rc <= 7; }
 
-// One encoder dispatch on a route: Core ML when the route can serve it and
-// the call shape is eligible, otherwise ggml. Only a failed prediction retires
-// the sidecar (§2.10); a call the handle cannot serve runs this dispatch on
-// ggml and leaves the route usable for the next one, as before the runtime.
-// An owner route returns any Core ML error (it has no ggml weights).
+// Whether one dispatch can go to the held encoder.
+//   ggml          the engine keeps this call on ggml whatever the handle can
+//                 do (a per-stage capture harness, a model family or shape the
+//                 sidecar does not cover);
+//   coreml        the handle can take it;
+//   cannot_serve  the call is one the sidecar is meant for, but the handle
+//                 cannot take it (an input longer than a fixed capacity).
+enum class EncoderEligibility { ggml, coreml, cannot_serve };
+
+// The input fits the handle's fixed capacity (always true for a flexible
+// or unknown capacity, or for the ggml route).
+inline bool route_fits_capacity(const EncoderRoute & route, int n_mel_frames) {
+    const int capacity = route.geometry().fixed_mel_frames;
+    return capacity <= 0 || n_mel_frames <= capacity;
+}
+
+// One encoder dispatch on a route: Core ML when the route can serve it,
+// otherwise ggml. Only a failed prediction retires the sidecar; a call the
+// handle cannot serve runs this dispatch on ggml and leaves the route usable
+// for the next one. A strict route (use = require) throws instead of running
+// on ggml whenever the handle could not serve the dispatch: a cannot_serve
+// call, or any Core ML error (a failed prediction still retires first). An
+// owner route returns any Core ML error (it has no ggml weights).
 // `used_coreml` reports where the dispatch ran.
 template <class CoremlFn, class GgmlFn>
-int dispatch_on_route(const EncoderRoute & route, bool eligible, CoremlFn && run_coreml,
-                      GgmlFn && run_ggml, bool & used_coreml, int * coreml_rc = nullptr) {
+int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility,
+                      CoremlFn && run_coreml, GgmlFn && run_ggml, bool & used_coreml,
+                      int * coreml_rc = nullptr) {
     used_coreml = false;
-    if (eligible && route.usable()) {
+    if (eligibility == EncoderEligibility::cannot_serve && route.usable() && route.strict() &&
+        !route.owner()) {
+        route.refuse("the Core ML encoder cannot serve this input (longer than its fixed "
+                     "capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
+                     " mel frames) and Core ML is required", false);
+    }
+    if (eligibility == EncoderEligibility::coreml && route.usable()) {
         const int rc = run_coreml();
         if (coreml_rc != nullptr) *coreml_rc = rc;
         if (rc == 0) {
@@ -162,7 +205,14 @@ int dispatch_on_route(const EncoderRoute & route, bool eligible, CoremlFn && run
             return 0;
         }
         if (route.owner()) return rc;
-        if (encode_prediction_failed(rc)) route.fail("prediction failed");
+        const bool prediction_failed = encode_prediction_failed(rc);
+        if (prediction_failed) route.fail("prediction failed");
+        if (route.strict()) {
+            route.refuse("the Core ML encoder " +
+                         std::string(prediction_failed ? "prediction failed" : "cannot serve this call") +
+                         " (rc=" + std::to_string(rc) + ") and Core ML is required",
+                         prediction_failed);
+        }
     }
     return run_ggml();
 }

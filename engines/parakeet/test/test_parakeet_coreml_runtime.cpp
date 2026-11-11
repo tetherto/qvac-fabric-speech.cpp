@@ -10,6 +10,9 @@
 //                         than the fixed encoder's capacity runs that call on
 //                         ggml and leaves the slot ready; the next call that
 //                         fits runs on Core ML (a capacity miss never retires)
+//   strict-over-capacity  the same over-capacity call with use = require
+//                         throws instead of running on ggml, and
+//                         the slot stays ready
 //   diarizer-pending      a diarizer capacity that is not ready -> kNoSidecar
 //                         -> ggml; ready after prewarm all -> Core ML
 //   coreml-only-full      PARAKEET_COREML_ONLY with a full GGUF keeps the ggml
@@ -29,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -211,6 +215,24 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
     std::printf("       next call: backend=%s\n", next.encoder_backend.c_str());
     expect(next.encoder_used_coreml && next.encoder_backend.rfind("coreml-", 0) == 0,
            "capacity-miss: the next call that fits runs on Core ML");
+
+    // use = require: the call the sidecar cannot serve is an error.
+    CoremlOptions strict = coreml_ready_options();
+    strict.use = CoremlOptions::Use::require;
+    parakeet::EngineOptions so = engine_options(gguf, strict);
+    so.long_form_window_frames = -1;
+    parakeet::Engine strict_engine(so);
+    expect(strict_engine.encoder_on_coreml(), "strict-over-capacity: the encoder is ready");
+    bool threw = false;
+    try {
+        (void) strict_engine.transcribe_samples(long_input.data(), (int) long_input.size(), rate);
+    } catch (const std::runtime_error & e) {
+        threw = has(e.what(), "Core ML is required");
+        std::printf("       strict over-capacity call threw: %s\n", e.what());
+    }
+    expect(threw, "strict-over-capacity: the call throws instead of running on ggml");
+    expect(!has(strict_engine.coreml_status_json(), "\"retired\"") && strict_engine.encoder_on_coreml(),
+           "strict-over-capacity: the encoder slot is still ready");
 }
 
 int main(int argc, char ** argv) {
