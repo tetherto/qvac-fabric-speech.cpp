@@ -2025,6 +2025,10 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_compiled_precision_cli.py")
         set_property(TEST test-compiled-precision-cli PROPERTY LABELS "unit")
         set_property(TEST test-compiled-precision-cli PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        add_test(NAME test-ios-coreml-package
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_ios_coreml_package.py")
+        set_property(TEST test-ios-coreml-package PROPERTY LABELS "unit")
         foreach(padding_test IN ITEMS test_coreml_padding test_coreml_padding_runtime)
             add_test(NAME ${padding_test}
                 COMMAND ${Python3_EXECUTABLE}

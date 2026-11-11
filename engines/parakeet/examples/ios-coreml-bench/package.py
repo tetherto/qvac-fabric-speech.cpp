@@ -33,7 +33,7 @@ def write_signing_files(args):
 
 def package(args):
     args.output.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(args.binary, args.output / EXECUTABLE_NAME)
+    shutil.copy(args.binary, args.output / EXECUTABLE_NAME)
     info = {
         "CFBundleIdentifier": args.bundle_id,
         "CFBundleExecutable": EXECUTABLE_NAME,
