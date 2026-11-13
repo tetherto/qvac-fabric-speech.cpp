@@ -79,8 +79,8 @@ def load_gguf(gguf_path):
                 meta[name] = bytes(
                     int(field.parts[di][0]) for di in field.data
                 )
-            else:
-                pass
+            elif elt in (gguf.GGUFValueType.INT32, gguf.GGUFValueType.UINT32):
+                meta[name] = [int(field.parts[di][0]) for di in field.data]
     return tensors, meta
 
 
@@ -267,7 +267,8 @@ def conformer_block(x, pos_emb, W, i, n_heads):
     return x
 
 
-def encoder_forward(mel, W, meta, mel_valid_len=None, captures=None):
+def encoder_forward(mel, W, meta, mel_valid_len=None, captures=None,
+                    eu_use_adapters=False):
     d_model  = meta["parakeet.encoder.d_model"]
     n_layers = meta["parakeet.encoder.n_layers"]
     n_heads  = meta["parakeet.encoder.n_heads"]
@@ -292,6 +293,12 @@ def encoder_forward(mel, W, meta, mel_valid_len=None, captures=None):
 
     for i in range(n_layers):
         x = conformer_block(x, pos_emb, W, i, n_heads)
+        if eu_use_adapters and i in meta.get("parakeet.eu.adapter_layers", []):
+            index = meta["parakeet.eu.adapter_layers"].index(i)
+            prefix = f"eu.adapter.{index}"
+            y = F.linear(x, W[f"{prefix}.down.weight"], W[f"{prefix}.down.bias"])
+            y = F.gelu(y, approximate="none")
+            x = x + F.linear(y, W[f"{prefix}.up.weight"], W[f"{prefix}.up.bias"])
         if captures is not None and i == 0:
             captures["block_0_out"] = x[0].clone()
         if captures is not None and i == n_layers - 1:

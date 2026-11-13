@@ -18,13 +18,13 @@ option(TTS_CPP_BUILD_SHARED      "tts-cpp: build tts-cpp as a SHARED library (ot
 option(TTS_CPP_BUILD_EXECUTABLES "tts-cpp: build tts-cli, mel2wav, CosyVoice, Supertonic, Parler, LavaSR, and Audio8 command-line tools" ${TTS_CPP_STANDALONE_DEFAULT})
 option(TTS_CPP_BUILD_TESTS       "tts-cpp: build per-stage numerical validation harnesses"   ${TTS_CPP_STANDALONE_DEFAULT})
 option(TTS_CPP_INSTALL           "tts-cpp: generate install rules"                           ON)
-option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add_subdirectory(ggml). Defaults to ON for qvac-fabric-speech.cpp and vcpkg builds. OFF requires an engines/tts/ggml checkout of qvac-ext-ggml@speech, staged via scripts/setup-ggml.sh (or by hand); no patches overlay — the speech branch is patched at the commit level." ON)
+option(TTS_CPP_USE_SYSTEM_GGML   "tts-cpp: use find_package(ggml) instead of add_subdirectory(ggml). Defaults to ON for qvac-fabric-speech.cpp and vcpkg builds. OFF requires engines/tts/ggml to be the ggml/ tree of qvac-fabric-llm.cpp, staged via scripts/setup-ggml.sh (or by hand); no patches overlay — that tree is patched at the commit level." ON)
 # Note: the standalone chatterbox.cpp repo carries a TTS_CPP_GGML_LIB_PREFIX
 # option here that controls renaming of bundled libggml-*.so to
 # libspeech-ggml-*.so when add_subdirectory(ggml) builds it locally. This
-# in-tree package can consume a locally staged speech-branch checkout but
-# does not expose the standalone filename-prefix option; the speech branch or
-# `ggml-speech` vcpkg port already emits the integrated filenames.
+# in-tree package can consume a locally staged fabric ggml checkout but
+# does not expose the standalone filename-prefix option; the fabric ggml
+# names its runtime-loaded backends qvac-ggml-* itself.
 option(TTS_CPP_CCACHE            "tts-cpp: use ccache as compiler launcher if available"     ON)
 option(TTS_CPP_COREML            "tts-cpp: enable Apple Core ML sidecars for Audio8, Supertonic, Chatterbox S3Gen, Pocket FlowLM/Mimi, CosyVoice3, Parler-TTS, MOSS and explicit LavaSR denoiser/enhancer models (Apple-only)." OFF)
 
@@ -165,28 +165,28 @@ if (NOT TARGET ggml)
         if (NOT ggml_FOUND)
             message(FATAL_ERROR
                 "tts-cpp: system-installed GGML library not found.  Install the "
-                "qvac speech-stack `ggml-speech` vcpkg port (qvac-ext-ggml/speech "
-                "branch) and re-run cmake.")
+                "`qvac-fabric` vcpkg port (the ggml of qvac-fabric-llm.cpp) "
+                "and re-run cmake.")
         endif()
         add_library(ggml ALIAS ggml::ggml)
     else()
         # Bundled-ggml dev build path (TTS_CPP_USE_SYSTEM_GGML=OFF).
-        # Expects `tts-cpp/ggml/` to be a checkout of the
-        # tetherto/qvac-ext-ggml repo on the `speech` branch — the QVAC
-        # fork carrying every infrastructure patch + the Supertonic 2
-        # fused custom op family as commits (not as a patches/ overlay).
+        # Expects `tts-cpp/ggml/` to be the ggml/ tree of
+        # tetherto/qvac-fabric-llm.cpp — the shared QVAC ggml carrying every
+        # infrastructure patch + the fused speech op family as commits (not
+        # as a patches/ overlay).
         #
-        # Stage the checkout with `scripts/setup-ggml.sh`, which clones the
-        # pinned speech ref into `engines/tts/ggml/` and is idempotent on
-        # re-run. No patches/ directory is consulted: the speech branch is
-        # already patched at the commit level.
+        # Stage it with `scripts/setup-ggml.sh`, which fetches the pinned
+        # commit into `engines/tts/ggml-src/` and links `engines/tts/ggml/`
+        # to its ggml/ tree; idempotent on re-run. No patches/ directory is
+        # consulted: the tree is already patched at the commit level.
         if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ggml/CMakeLists.txt")
             message(FATAL_ERROR
                 "tts-cpp: bundled-ggml build requires engines/tts/ggml/ to be "
-                "a checkout of tetherto/qvac-ext-ggml@speech. Run "
+                "the ggml/ tree of tetherto/qvac-fabric-llm.cpp. Run "
                 "scripts/setup-ggml.sh to stage it, or pass "
-                "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the QVAC "
-                "speech-stack `ggml-speech` vcpkg port.")
+                "-DTTS_CPP_USE_SYSTEM_GGML=ON to consume the "
+                "`qvac-fabric` vcpkg port.")
         endif()
         # tinyBLAS rationale and measurements: docs/build.md.
         if (NOT DEFINED GGML_LLAMAFILE_DEFAULT)
@@ -250,8 +250,8 @@ endif()
 # block (helper function, tts_cpp_apply_ggml_prefix loop, and
 # GGML_BACKEND_DL_PROJECT_PREFIX define). This in-tree package does not expose
 # that rename surface. System builds consume filenames and macros installed by
-# the ggml-speech port; bundled builds use the filenames produced by the
-# locally staged speech-branch checkout (scripts/setup-ggml.sh).
+# the qvac-fabric port; bundled builds use the filenames produced by the
+# locally staged fabric ggml checkout (scripts/setup-ggml.sh).
 
 option(TTS_CPP_OPENMP "tts-cpp: enable OpenMP for the tts-cpp target" ON)
 if (WIN32 AND NOT MINGW AND TTS_CPP_OPENMP AND NOT DEFINED CACHE{TTS_CPP_OPENMP_USER_OVERRIDE})
@@ -753,6 +753,7 @@ endif()
 if (TTS_CPP_BUILD_TESTS)
     enable_testing()
     include(CTest)
+    include(cmake/tts-cpp-test-environment.cmake)
 
     # Roots that the test registrations below resolve fixture paths against.
     # All three are CACHE PATHs so CI / package builds can point them at
@@ -811,20 +812,7 @@ if (TTS_CPP_BUILD_TESTS)
         if (DEFINED TCRT_PASS_REGEX)
             set_property(TEST ${target} PROPERTY PASS_REGULAR_EXPRESSION "${TCRT_PASS_REGEX}")
         endif()
-        if (WIN32)
-            # When ggml builds as shared (the MSVC default), test exes
-            # link against import libs and need to find speech-ggml-*.dll
-            # at runtime.  Windows has no rpath, so we prepend the
-            # build-tree DLL output dirs to PATH.  Both `bin/` (Ninja /
-            # single-config) and `bin/<Config>/` (Visual Studio /
-            # multi-config) are listed because the generator type isn't
-            # known at configure time on a fresh checkout; the
-            # generator-expression $<CONFIG> resolves to the active
-            # config at test time.  Without this, ctest sees
-            # STATUS_DLL_NOT_FOUND (0xc0000135) before main() runs.
-            set_property(TEST ${target} PROPERTY ENVIRONMENT
-                "PATH=${CMAKE_BINARY_DIR}/bin/$<CONFIG>\;${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
-        endif()
+        tts_cpp_set_test_runtime_environment(${target})
         set(_tcrt_missing "")
         foreach (_tcrt_req IN LISTS TCRT_REQUIRES)
             if (NOT EXISTS "${_tcrt_req}")
@@ -1224,11 +1212,16 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-mel-thread-safety)
     tts_cpp_register_test(test-mel-thread-safety LABEL "unit")
 
-    # Branch coverage for assemble-cosyvoice3-model.py (add-on name
-    # validation, inputs already at their destination, copy + symlink modes).
+    # Model-free CTest environment and Python conversion checks.
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        add_test(NAME test-runtime-environment
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_runtime_environment.py"
+                    "${CMAKE_COMMAND}" "${CMAKE_CTEST_COMMAND}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tts-cpp-test-environment.cmake")
+        set_tests_properties(test-runtime-environment PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         if (Python3_VERSION VERSION_GREATER_EQUAL "3.10")
             add_test(NAME test-moss-validated-cloning
                      COMMAND "${Python3_EXECUTABLE}"
@@ -2933,6 +2926,17 @@ if (TTS_CPP_BUILD_TESTS)
             REQUIRES "${_tcb_t3_mtl_gguf}" "${_tcb_s3gen_mtl_gguf}")
     endif()
 
+    add_executable(test-parity-checks test/test_parity_checks.cpp)
+    target_include_directories(test-parity-checks PRIVATE src)
+    tts_cpp_apply_ccache(test-parity-checks)
+    tts_cpp_register_test(test-parity-checks LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/parity reference.npy")
+
+    set(_tcb_campplus_ref "${TTS_CPP_TEST_REF_DIR}/campplus-ref")
+    set(_tcb_tokenizer_ref "${TTS_CPP_TEST_REF_DIR}/s3tokenizer-ref")
+
+    set(_tcb_voice_features_ref "${TTS_CPP_TEST_REF_DIR}/voice-features-ref")
+
     add_executable(test-voice-features
         test/test_voice_features.cpp
         src/voice_features.cpp
@@ -2943,8 +2947,18 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-voice-features)
     tts_cpp_register_test(test-voice-features
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_jfk_wav}" "${_tcb_s3gen_ref}/prompt_feat.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_jfk_wav}" "${_tcb_s3gen_ref}/prompt_feat.npy")
+        ARGS     "${_tcb_voice_features_ref}/filterbank.gguf"
+                 "${_tcb_voice_features_ref}/reference.wav" "${_tcb_voice_features_ref}/prompt_feat.npy"
+        REQUIRES "${_tcb_voice_features_ref}/filterbank.gguf"
+                 "${_tcb_voice_features_ref}/reference.wav" "${_tcb_voice_features_ref}/prompt_feat.npy")
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-voice-features-reference
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_voice_features_reference.py"
+                    $<TARGET_FILE:test-voice-features>)
+        set_tests_properties(test-voice-features-reference PROPERTIES
+            LABELS "unit" SKIP_RETURN_CODE 77 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        tts_cpp_set_test_runtime_environment(test-voice-features-reference)
+    endif()
 
     add_executable(test-resample
         test/test_resample.cpp
@@ -2982,8 +2996,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-campplus)
     tts_cpp_register_test(test-campplus
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/fbank.npy" "${_tcb_s3gen_ref}/embedding.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/fbank.npy" "${_tcb_s3gen_ref}/embedding.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/fbank.npy" "${_tcb_campplus_ref}/embedding.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/fbank.npy" "${_tcb_campplus_ref}/embedding.npy")
 
     add_executable(test-fbank
         test/test_fbank.cpp
@@ -2995,8 +3009,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-fbank)
     tts_cpp_register_test(test-fbank
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/fbank.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/fbank.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/fbank_raw.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/fbank_raw.npy")
 
     add_executable(test-voice-embedding
         test/test_voice_embedding.cpp
@@ -3012,8 +3026,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-voice-embedding)
     tts_cpp_register_test(test-voice-embedding
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/embedding.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/embedding.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/embedding.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/embedding.npy")
 
     add_executable(test-s3tokenizer
         test/test_s3tokenizer.cpp
@@ -3024,8 +3038,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-s3tokenizer)
     tts_cpp_register_test(test-s3tokenizer
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/log_mel.npy" "${_tcb_s3gen_ref}/speech_tokens.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/log_mel.npy" "${_tcb_s3gen_ref}/speech_tokens.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_tokenizer_ref}/wav_16k.npy" "${_tcb_tokenizer_ref}/log_mel.npy" "${_tcb_tokenizer_ref}/tokens.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_tokenizer_ref}/wav_16k.npy" "${_tcb_tokenizer_ref}/log_mel.npy" "${_tcb_tokenizer_ref}/tokens.npy")
 
     # Attention-free end-of-speech stop controller.  Pure host
     # logic with no model / ggml dependency, so it links only its own source
@@ -3435,7 +3449,18 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-tts-streaming
         LABEL    "fixture"
         ARGS     "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}")
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}/speech_tokens.npy"
+                 "${_tcb_streaming_ref}/chunk_01_tokens.npy"
+                 "${_tcb_streaming_ref}/chunk_01_mels_new.npy"
+                 "${_tcb_streaming_ref}/chunk_01_step0_x_in.npy")
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-streaming-fixture-validation
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_streaming_validation.py"
+                    $<TARGET_FILE:test-tts-streaming>)
+        set_tests_properties(test-streaming-fixture-validation PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        tts_cpp_set_test_runtime_environment(test-streaming-fixture-validation)
+    endif()
 
     # Pure sentence-splitter unit test (no model/fixture) -- always runs.
     # Pins split_text_for_tts after it was lifted into the shared
@@ -4298,16 +4323,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-capability-cache)
     tts_cpp_register_test(test-supertonic-capability-cache LABEL "unit")
 
-    # follow-up — Engine::warm_up + EngineOptions::prewarm_text
-    # API-surface lockdown.  CPU-only compile-time + runtime contract test;
-    # the Vulkan-side first-synth-latency reduction is exercised by the
-    # fixture-bound integration tests on a Vulkan-capable host.
-    add_executable(test-supertonic-warm-up-api
-        test/test_supertonic_warm_up_api.cpp)
-    target_link_libraries(test-supertonic-warm-up-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-warm-up-api PRIVATE include)
-    tts_cpp_apply_ccache(test-supertonic-warm-up-api)
-    tts_cpp_register_test(test-supertonic-warm-up-api LABEL "unit")
+    # Consolidated API/default checks and nested K/V dispatch restoration.
+    add_executable(test-supertonic-api test/test_supertonic_api.cpp)
+    target_link_libraries(test-supertonic-api PRIVATE tts-cpp)
+    target_include_directories(test-supertonic-api PRIVATE src include)
+    tts_cpp_apply_ccache(test-supertonic-api)
+    tts_cpp_register_test(test-supertonic-api LABEL "unit")
 
     # round 3 — multi-device Vulkan auto-pick policy
     # (--vulkan-device -1 → pick device with most free VRAM).
@@ -4322,22 +4343,6 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-vulkan-device-select)
     tts_cpp_register_test(test-supertonic-vulkan-device-select LABEL "unit")
 
-    # round 6 — F16-weights deny-list API surface
-    # (EngineOptions::f16_weights_deny_list + load_supertonic_gguf
-    # 7th parameter + 2-arg should_materialise_f16_weight overload).
-    # CPU-only compile-time SFINAE + runtime defaults check; the
-    # predicate-level behaviour is covered by the existing
-    # test-supertonic-f16-weights TU.  The fixture-level shape /
-    # dtype check (loads model with deny-list, verifies a denied
-    # tensor stays F32) runs under the same fixture as the
-    # baseline F16-weights test on hosts with the GGUF available.
-    add_executable(test-supertonic-f16-deny-list-api
-        test/test_supertonic_f16_deny_list_api.cpp)
-    target_link_libraries(test-supertonic-f16-deny-list-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-f16-deny-list-api PRIVATE ggml/include src include)
-    tts_cpp_apply_ccache(test-supertonic-f16-deny-list-api)
-    tts_cpp_register_test(test-supertonic-f16-deny-list-api LABEL "unit")
-
     # round 4 — multi-dtype K/V flash-attention dispatch
     # resolver (`resolve_kv_attn_type`) — pure-logic policy split
     # from the Vulkan-only dispatch site so the behaviour matrix
@@ -4348,17 +4353,6 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-supertonic-kv-attn-type PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-supertonic-kv-attn-type)
     tts_cpp_register_test(test-supertonic-kv-attn-type LABEL "unit")
-
-    # round 4 — API-surface lockdown for the new
-    # EngineOptions::kv_attn_type field, supertonic_model field,
-    # supertonic_kv_attn_type() thread-local accessor, and the
-    # dispatch-scope `prev_kv_attn_type` for RAII teardown.
-    add_executable(test-supertonic-kv-attn-type-api
-        test/test_supertonic_kv_attn_type_api.cpp)
-    target_link_libraries(test-supertonic-kv-attn-type-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-kv-attn-type-api PRIVATE ggml/include src include)
-    tts_cpp_apply_ccache(test-supertonic-kv-attn-type-api)
-    tts_cpp_register_test(test-supertonic-kv-attn-type-api LABEL "unit")
 
     # Supertonic v3 language-coverage contract.
     # Pins the runtime language validator against the v3 bundle

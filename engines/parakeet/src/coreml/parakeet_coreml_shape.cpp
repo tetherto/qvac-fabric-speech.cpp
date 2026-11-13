@@ -3,10 +3,36 @@
 #include <algorithm>
 
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 
 namespace parakeet {
+
+bool coreml_eu_requires_cpu_precision(const char * units) {
+    return units && (std::strcmp(units, "cpu_only") == 0 ||
+                     std::strcmp(units, "cpu_and_gpu") == 0);
+}
+
+bool coreml_eu_loads_fixed_auxiliaries(const char * units) {
+    return !coreml_eu_requires_cpu_precision(units);
+}
+
+bool coreml_eu_allows_gpu_precision(const char * units, bool mobile) {
+    return !mobile && (!units ||
+        (std::strcmp(units, "cpu_only") != 0 && std::strcmp(units, "cpu_and_ane") != 0));
+}
+
+bool coreml_features_are_finite(const float * values, size_t count) {
+    constexpr uint32_t kFloatExponentMask = 0x7f800000u;
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t bits;
+        std::memcpy(&bits, values + i, sizeof(bits));
+        if ((bits & kFloatExponentMask) == kFloatExponentMask) return false;
+    }
+    return true;
+}
+
 namespace {
 
 bool shape_is_concrete(const std::vector<int64_t> & dims) {
