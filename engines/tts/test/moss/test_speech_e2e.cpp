@@ -1,6 +1,9 @@
-// Full-checkpoint GPU regression: two replies on the same engine must fit
-// without retaining the first turn's LM/decoder device allocations.
+// Full-checkpoint GPU regression: two replies on the same engine must fit,
+// whether it keeps the LM and decoder resident together or stages them per
+// turn, and a long voice prompt with a short reply must release resident
+// stages sized for the default voice.
 #include "tts-cpp/moss/speech.h"
+#include "chatterbox_tts_test_hooks.h"
 #include "voice_features.h"
 #include "dr_wav.h"
 #include "../test_env_portable.h"
@@ -34,6 +37,15 @@ static void write_reply(const std::filesystem::path & path,
     const auto written = drwav_write_pcm_frames(&wav, pcm.size(), pcm.data());
     drwav_uninit(&wav);
     if (written != pcm.size()) throw std::runtime_error("cannot write reply WAV");
+}
+
+static std::vector<float> long_voice(const std::vector<float> & audio, int sample_rate) {
+    const size_t target = (size_t) sample_rate * 59;
+    std::vector<float> voice;
+    while (!audio.empty() && voice.size() < target) {
+        voice.insert(voice.end(), audio.begin(), audio.begin() + (std::ptrdiff_t) std::min(audio.size(), target - voice.size()));
+    }
+    return voice;
 }
 
 int main(int argc, char ** argv) {
@@ -71,6 +83,24 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "reply %d: %d codes, %.2f seconds, prefill %.0f ms, generate %.0f ms, decode %.0f ms\n",
                          turn + 1, result.reply_tokens, (double) result.pcm.size() / result.sample_rate,
                          result.prefill_ms, result.generate_ms, result.decode_ms);
+        }
+        namespace hooks = tts_cpp::chatterbox::test_hooks;
+        const bool resident = hooks::s3gen_cached_weights_bytes() > 0;
+        // A 59 s voice and a 20 s reply outgrow the plan (the ~36 s default
+        // voice and a 30 s reply) although the reply is under 30 s.
+        request.voice = long_voice(request.messages.front().audio, request.messages.front().sample_rate);
+        request.voice_sample_rate = request.messages.front().sample_rate;
+        request.max_new_tokens = 512;
+        request.max_reply_seconds = 20;
+        const auto result = engine.respond(request);
+        write_reply(std::filesystem::path(argv[5]) / "reply-long-voice.wav", result);
+        std::fprintf(stderr, "long-voice reply: %d codes, decode %.0f ms, decoder %s\n", result.reply_tokens,
+                     result.decode_ms, resident ? "was resident" : "was staged");
+        if (result.reply_tokens < 200) {
+            throw std::runtime_error("the long-voice reply is too short to outgrow the plan");
+        }
+        if (resident && hooks::s3gen_cached_weights_bytes() != 0) {
+            throw std::runtime_error("a long voice prompt kept the decoder resident beyond its plan");
         }
         return 0;
     } catch (const std::exception & error) {

@@ -85,6 +85,8 @@ public:
     // Also release device weights between LM and codec stages. Metadata and
     // backend identity remain valid; begin() reloads weights on the next turn.
     void release_weights();
+    // Free memory of the LM's device; 0 when the backend cannot report it.
+    uint64_t free_device_bytes() const;
     int position() const;
     int context() const;
     SpeechLogits prefill(const std::vector<SpeechRow> & rows, int batch_tokens, const SpeechStop & stop = {});
