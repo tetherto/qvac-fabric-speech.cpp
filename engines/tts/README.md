@@ -138,9 +138,17 @@ speech tokenizer. Export, routing, fallback, and per-call status are documented 
 [Parler-TTS](docs/parler.md#core-ml-dac-sidecar-apple-neural-engine), and
 [MOSS](docs/backends.md#apple-core-ml-sidecars).
 
+The Parler-TTS DAC sidecar can also be generated on the device from the GGUF
+itself: with `EngineOptions::coreml.cache_dir` (or `QVAC_COREML_CACHE_DIR`)
+set, macOS 15 or later and no prebuilt sidecar next to the GGUF, the engine
+builds it from an embedded template, compiles it and keeps it in the cache;
+synthesis runs on the ggml DAC until it is ready. See
+[Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
+
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
-Pocket TTS, CosyVoice3 or Parler-TTS sidecars present, `fit_params` returns `Error` with
+Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
+A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope.
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).
 
