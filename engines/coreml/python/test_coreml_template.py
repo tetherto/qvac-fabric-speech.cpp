@@ -106,7 +106,7 @@ class ExplainTest(unittest.TestCase):
     def test_scalar_multiple_and_negation(self):
         self.assertEqual(ctpl.explain_blob(blob_of(self.v * np.float32(0.5)), self.tensors)[0],
                          'f16(mul(t("v"), 0.5))')
-        self.assertEqual(ctpl.explain_blob(blob_of(-self.w), self.tensors)[0], 'f16(mul(t("w"), -1))')
+        self.assertEqual(ctpl.explain_blob(blob_of(-self.w), self.tensors)[0], 'f16(neg(t("w")))')
         k = np.float32(0.31830987)  # 1/pi in f32, as an exporter's constant
         got = ctpl.explain_blob(blob_of(self.v * k), self.tensors)[0]
         self.assertTrue(got.startswith('f16(mul(t("v"), '), got)
@@ -235,6 +235,117 @@ class SpecDiffTest(unittest.TestCase):
         c.description.metadata.userDefined["same"] = "x"
         c.description.metadata.userDefined["k"] = "1"
         self.assertEqual(a.SerializeToString(deterministic=True), c.SerializeToString(deterministic=True))
+
+
+def mil_spec(consts):
+    """A minimal ML program spec: one const op per (name, MIL dtype, payload kind, values)."""
+    from coremltools.proto import Model_pb2
+
+    m = Model_pb2.Model()
+    m.specificationVersion = 9
+    block = m.mlProgram.functions["main"].block_specializations["CoreML8"]
+    for name, dtype, kind, values in consts:
+        op = block.operations.add()
+        op.type = "const"
+        op.outputs.add().name = name
+        a = op.attributes["val"]
+        a.type.tensorType.dataType = dtype
+        if kind == "bytes":
+            a.immediateValue.tensor.bytes.values = np.asarray(values, dtype="<f2").tobytes()
+        else:
+            a.immediateValue.tensor.floats.values.extend(float(v) for v in values)
+        name_attr = op.attributes["name"]
+        name_attr.immediateValue.tensor.strings.values.append(name)
+    return m
+
+
+class PatchSiteTest(unittest.TestCase):
+    @needs(HAVE_CT, "coremltools")
+    def test_sites_for_weight_dependent_constants(self):
+        fixed = ("eps", ctpl.MIL_TYPE_FP16, "bytes", [1e-5])
+        a = mil_spec([fixed, ("bias", ctpl.MIL_TYPE_FP16, "bytes", [0.5, -1.0, 2.0]),
+                      ("scale", ctpl.MIL_TYPE_FP32, "floats", [3.0, 4.0])])
+        b = mil_spec([fixed, ("bias", ctpl.MIL_TYPE_FP16, "bytes", [0.25, 1.0, 2.0]),
+                      ("scale", ctpl.MIL_TYPE_FP32, "floats", [5.0, 4.0])])
+        sites = ctpl.differing_constants(a, b)
+        self.assertEqual([(p.split("/")[-1], d) for p, _, d in sites], [("bias.val", "fp16"), ("scale.val", "fp32")])
+        spec, out = ctpl.patch_spec(a, b)
+        data = spec.SerializeToString(deterministic=True)
+        self.assertEqual(len(data), len(a.SerializeToString(deterministic=True)))
+        found = ctpl.find_sites(data, [(p, sent) for p, sent, _, _ in out])
+        self.assertEqual([f["len"] for f in found], [6, 8])
+        for f, (_, sent, dtype, payload) in zip(found, out):
+            self.assertEqual(bytes.fromhex(f["sentinel_hex"]), sent)
+            self.assertEqual(data[f["spec_offset"]:f["spec_offset"] + f["len"]], sent)
+        # A's own values come back with the payload, for the patch-line drafts.
+        self.assertEqual(out[0][3], np.asarray([0.5, -1.0, 2.0], dtype="<f2").tobytes())
+        # Writing A's values at the sites gives A's deterministic bytes back.
+        restored = bytearray(data)
+        for f, (_, _, _, payload) in zip(found, out):
+            restored[f["spec_offset"]:f["spec_offset"] + f["len"]] = payload
+        self.assertEqual(bytes(restored), a.SerializeToString(deterministic=True))
+        # Sentinels are deterministic, and finite for fp32.
+        self.assertEqual(ctpl.sentinel_bytes("p", 8, "fp32"), ctpl.sentinel_bytes("p", 8, "fp32"))
+        for i in range(64):
+            v = np.frombuffer(ctpl.sentinel_bytes(f"p{i}", 64, "fp32"), dtype="<f4")
+            self.assertTrue(np.all(np.isfinite(v)))
+
+    @needs(HAVE_CT, "coremltools")
+    def test_unpatchable_differences(self):
+        a = mil_spec([("idx", 21, "bytes", [1.0])])  # int8: not a patchable dtype
+        b = mil_spec([("idx", 21, "bytes", [2.0])])
+        with self.assertRaisesRegex(ctpl.TemplateError, "cannot be patched"):
+            ctpl.differing_constants(a, b)
+        a = mil_spec([("x", ctpl.MIL_TYPE_FP16, "bytes", [1.0])])
+        b = mil_spec([("y", ctpl.MIL_TYPE_FP16, "bytes", [1.0])])
+        with self.assertRaisesRegex(ctpl.TemplateError, "same inline constants"):
+            ctpl.differing_constants(a, b)
+        b = mil_spec([("x", ctpl.MIL_TYPE_FP16, "bytes", [1.0])])
+        b.specificationVersion = 8
+        with self.assertRaisesRegex(ctpl.TemplateError, "specificationVersion"):
+            ctpl.patch_spec(a, b)
+        with self.assertRaisesRegex(ctpl.TemplateError, "occurs never"):
+            ctpl.find_sites(b"abc", [("p", b"zz")])
+        with self.assertRaisesRegex(ctpl.TemplateError, "occurs twice"):
+            ctpl.find_sites(b"zz.zz", [("p", b"zz")])
+
+
+class PatchDraftTest(unittest.TestCase):
+    def test_add_patch_drafts(self):
+        text = 'mlrecipe 1\nblob 64 fp16 2 f16(t("a"))\npatch 10 fp16 1 f16(t("b"))\nend\n'
+        drafts = [(10, 'patch 10 fp16 1 f16(t("b"))', "p1"), (40, 'patch 40 fp16 2 f16(neg(t("c")))', "p2"),
+                  (90, "patch 90 fp32 1 ???", "p3")]
+        out, added = ctpl.add_patch_drafts(text, drafts)
+        self.assertEqual([a[0] for a in added], [40])
+        self.assertTrue(out.endswith('patch 40 fp16 2 f16(neg(t("c")))\nend\n'), out)
+        self.assertIn("# drafted by extract from twin A (p2)", out)
+        self.assertEqual(ctpl.add_patch_drafts(out, drafts)[1], [])
+
+
+class LiteralTest(unittest.TestCase):
+    def test_extract_literals(self):
+        rope = np.cos(np.arange(12, dtype=np.float64)).astype(np.float16)
+        w_a = np.ones(5, np.float16)
+        a = ctpl.read_weight_bin(weight_bin([w_a, rope]))
+        b = ctpl.read_weight_bin(weight_bin([w_a * 2, rope]))
+        decl = [{"id": "rope", "dtype": "fp16", "shape": [3, 4], "exporter_blob": a[1].offset}]
+        data, entries = ctpl.extract_literals(decl, a, b)
+        self.assertEqual(entries[0]["offset"], 0)
+        self.assertEqual(entries[0]["exporter_blob"], a[1].offset)
+        self.assertEqual(data, rope.astype("<f2").tobytes())
+        two = decl + [{"id": "again", "dtype": "fp16", "shape": [12], "exporter_blob": a[1].offset}]
+        data, entries = ctpl.extract_literals(two, a, b)
+        self.assertEqual([e["offset"] for e in entries], [0, 64])
+        self.assertIsNone(ctpl.extract_literals([], a, b))
+        for bad, msg in [
+            ([{"id": "w", "dtype": "fp16", "shape": [5], "exporter_blob": a[0].offset}], "depends on the weights"),
+            ([{"id": "r", "dtype": "fp32", "shape": [12], "exporter_blob": a[1].offset}], "dtype"),
+            ([{"id": "r", "dtype": "fp16", "shape": [2, 4], "exporter_blob": a[1].offset}], "elements"),
+            ([{"id": "r", "dtype": "fp16", "shape": [12], "exporter_blob": 7}], "no weight.bin blob"),
+            ([{"id": "r", "dtype": "fp16", "shape": [12]}], "exporter_blob"),
+        ]:
+            with self.assertRaisesRegex(ctpl.TemplateError, msg):
+                ctpl.extract_literals(bad, a, b)
 
 
 class ToySuggestTest(unittest.TestCase):

@@ -19,7 +19,9 @@ engines share:
   (`src/templates.h`);
 - `python/coreml_template.py`, which makes templates from an unchanged
   exporter and checks them against it, and `python/golden.py`, the
-  generator tripwire.
+  generator tripwire;
+- the generation glue engines use (`include/qvac_coreml/generation.h`,
+  below).
 
 No library is installed: the headers under `include/` are build-interface
 only.
@@ -66,6 +68,40 @@ another process on the same OS build marks the artifact deterministic (not
 retried until the OS build or the generator version changes). A missing
 package or a failed move or copy is an I/O error: it is retried by the next
 process and is never promoted, however often it repeats.
+
+## Generating a stage's sidecar in an engine
+
+`include/qvac_coreml/generation.h` is what an engine calls to give a stage
+route `generate`:
+
+1. `generation::probe(ids, gguf, resolved)` looks the templates up (embedded,
+   or under the development override) and matches each against the GGUF:
+   `general.architecture`, `match.metadata` and every recipe `source` (name,
+   allowed type, shape). It reads the GGUF's header only, never the cache. A
+   `Candidate` carries the template, its match result and its `memory` section.
+2. `plan()` gets `generation_built`, `template_available`,
+   `template_matched` and the template's `validated_for` units in its
+   `PlanInput`. With no adjacent prebuilt it returns `generate` when the
+   build has the generator, the GGUF matches, a cache directory is set,
+   `generate` is not `never`, the OS is macOS 15 or later and the resolved
+   units are validated.
+3. The slot's `SlotSpec` gets `prepare = generation::prepare_request(...)`
+   (the template, the GGUF's stat tuple from `generation::source_stat`, the
+   cache directory), `prepare_fn = generation::prepare` (the cache pipeline
+   with the on-device compile) and `tmpl`. Its `artifact_path` stays empty:
+   the prepare job supplies the published bundle.
+4. The stage's `LoadFn` calls `generation::begin_load` before loading and
+   `generation::end_load` after: a generated bundle loads under the shared
+   lease of its cache entry, and `used/<key>` is touched after a successful
+   load. Both do nothing for a prebuilt bundle.
+
+Fit charges a generated stage with `generation::envelope_bytes(memory,
+units)`: resident (runtime weights, twice the function I/O, state,
+workspace) plus one transient (the larger of `generation_peak_bytes + 8 MiB +
+compile_peak_bytes` and the unit class's `load_peak`), times the margin.
+`ane_compile_reserve_bytes` gives the memory admission reserve of a cold ANE
+load. Tests replace the Core ML compile with
+`generation::set_compile_override`.
 
 ## Building the tests and the tool
 
@@ -132,7 +168,8 @@ gguf-py, coremltools), the exporter's own requirements and a built
    comment; a blob that several tensors explain gets an `AMBIGUOUS` comment.
    Suggested constants come from the twin's values: confirm them against the
    exporter.
-3. Complete `recipe.txt` by hand (the recipe language: `include/qvac_coreml/recipe.h`).
+3. Complete `recipe.txt` by hand (the recipe language: `include/qvac_coreml/recipe.h`
+   and the vocabulary below).
 4. Write `template.json` with the fields only the author knows (`family`,
    `stage`, `export_kind`, `match.metadata`, `exporter` with `{gguf}` and
    `{out}` in its `args`, `default_compute_units`, `memory`), then extract:
@@ -141,14 +178,23 @@ gguf-py, coremltools), the exporter's own requirements and a built
    python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool extract --template-dir <dir>
    ```
 
-   `extract` runs the exporter on twins A and B (seeds 1 and 2), fails when
-   their specs differ anywhere (a weight-dependent value in the spec needs
-   patches, which this generator version lacks) or when their `weight.bin`
-   layouts differ, then writes `model.mlmodel` (A's spec, deterministically
-   serialised), `Manifest.json` and the computed `template.json` fields
-   (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`, the
-   exporter's sha256, the toolchain versions), and refreshes the header of
-   `recipe.txt`.
+   `extract` runs the exporter on twins A and B (seeds 1 and 2) and compares
+   the two specs field by field. An inline fp16 or fp32 constant whose value
+   differs between A and B (a weight the compiler folded into the program,
+   such as a bias it negated) becomes a patch site: `model.mlmodel` holds a
+   deterministic sentinel there, `template.json` `patches` records
+   `{spec_offset, len, sentinel_hex}`, and `extract` adds a drafted `patch`
+   line to `recipe.txt` for every site it can explain from twin A. Any other
+   difference between the specs, or between the two `weight.bin` layouts,
+   fails the extraction. Literals declared in `template.json` `literals`
+   with an `exporter_blob` (a `weight.bin` blob offset) are copied from that
+   blob into `literals.bin`, 64-byte aligned, after checking that A and B
+   agree on it, so a literal never depends on the weights. `extract` then
+   writes `model.mlmodel` (A's spec, deterministically serialised, sentinels
+   in place), `Manifest.json` and the computed `template.json` fields
+   (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`,
+   `patches`, the literals' offsets, the exporter's sha256, the toolchain
+   versions), and refreshes the header of `recipe.txt`.
 5. Check it against the exporter:
 
    ```sh
@@ -156,12 +202,39 @@ gguf-py, coremltools), the exporter's own requirements and a built
    ```
 
    For twins A and B (f32) and Q (`--quant-types`, default `q8_0`; the
-   exporter gets `qvac-coreml-tool f32` of it), `report` compares the
-   exporter's `weight.bin` blob by blob with the C++ generator's
-   (`qvac-coreml-tool verify`) and the exporter's spec with the template's.
-   `--all` checks every template under `engines/*/coreml-templates/`.
+   exporter gets `qvac-coreml-tool f32` of it), `report` generates the
+   package with the C++ generator (`qvac-coreml-tool generate`), compares its
+   `weight.bin` blob by blob with the exporter's (`qvac-coreml-tool verify`)
+   and its spec, patches applied, with the exporter's. `--all` checks every
+   template under `engines/*/coreml-templates/`.
+
+   On a production GGUF the same comparison is the real-weights gate:
+
+   ```sh
+   python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+       --gguf models/Nemotron-3-Diarization.q8_0.gguf --template-dir <dir> [--template-dir <dir> ...]
+   ```
 6. Add the template's golden line:
    `python3 engines/coreml/python/golden.py update --tool build/qvac-coreml-tool`.
+
+### Recipe vocabulary
+
+This generator version knows `t f32 f64 f16 add mul div recip clip reshape
+permute take concat`, `let` bindings, and:
+
+| Op | Semantics |
+|---|---|
+| `slice(x, axis, begin, end[, step])` | half-open, `0 <= begin < end <= dim`, `step >= 1` |
+| `neg(x)` | IEEE negation (`neg(0)` is `-0`) |
+| `zeros([d...])`, `ones([d...])` | f32 constants |
+| `lit("id")` | a `template.json` `literals` entry `{id, dtype, shape, offset}`: bytes of `literals.bin` (fp16 or fp32, numpy order), as f32 |
+
+`patch <spec_offset> fp16|fp32 <count> <expr>` lines write `count` values
+into `model.mlmodel` at `spec_offset`, replacing the sentinel that
+`template.json` `patches` records there. Patch lines come in spec offset
+order and must not overlap; each lies on a declared patch site of exactly its
+length, and every site has a line. `patch ... str`, `provided()`, `meta_f`
+and `meta_s` belong to a later generator version.
 
 ### Gates in CI
 
