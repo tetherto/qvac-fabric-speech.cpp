@@ -68,6 +68,7 @@
 //     Nemotron Mode 3). Always call `finalize()` if you care about those.
 
 #include "export.h"
+#include "coreml_options.h"
 #include "streaming.h"
 #include "diarization.h"
 
@@ -223,6 +224,17 @@ struct EngineOptions {
     // fails construction if unavailable or initialization fails. Individual
     // unsupported operations can still use the existing CPU scheduler.
     std::string backend = "auto";
+
+    // Apple Core ML sidecars (PARAKEET_COREML builds; ignored elsewhere). An
+    // adjacent `<model>-encoder.mlmodelc`, `-encoder-bypass-pre-encode` or
+    // `-diarizer-<frames>.mlmodelc` loads in the background; until it is
+    // ready every call runs on ggml with exactly the ggml-only plan, and the
+    // result reports `coreml_pending`. The backend is chosen once per call
+    // (one transcription, one diarization, one streaming window). Two loads
+    // stay synchronous: the TDT decoder sidecar, and an encoder sidecar that
+    // owns the encoder (a GGUF without encoder weights, or
+    // PARAKEET_COREML_ONLY). See coreml_options.h.
+    CoremlOptions coreml;
 };
 
 // Resolved compute device the Engine is actually running on, after
@@ -266,6 +278,15 @@ struct EngineResult {
     // this transcription. Unlike Engine::encoder_on_coreml(), this reports
     // actual per-call routing rather than sidecar availability.
     bool encoder_used_coreml = false;
+
+    // Per-call encoder backend: "ggml", the Core ML label ("coreml-ane",
+    // "coreml-all", "coreml-cpu-gpu", "coreml-cpu"), or "mixed" when some
+    // windows ran on Core ML and others on ggml (a Core ML failure part-way
+    // through a call retires the sidecar and finishes the call on ggml).
+    std::string encoder_backend = "ggml";
+    // True when the call ran on ggml only because its Core ML sidecar was
+    // still loading.
+    bool coreml_pending = false;
 
     double preprocess_ms = 0.0;
     double encoder_ms    = 0.0;
@@ -377,9 +398,9 @@ public:
     // the lifetime of the Engine.
     std::string backend_name() const;
 
-    // Reports whether an Apple Core ML encoder or diarizer sidecar loaded for
-    // this model. Returns the sidecar's compute label (for example
-    // "coreml-all") when loaded; otherwise identical to backend_name().
+    // Reports whether an Apple Core ML encoder or diarizer sidecar is ready
+    // for this model. Returns the sidecar's compute label (for example
+    // "coreml-all") when ready; otherwise identical to backend_name().
     // Encoder sidecars cover CTC/IndicConformer, Unified RNN-T, TDT, EOU,
     // Nemotron, and Sortformer v2.1; their decoders, and the Sortformer speaker
     // head without a diarizer sidecar, run on the ggml backend reported by
@@ -387,10 +408,12 @@ public:
     // or Sortformer v2.1 network after feature stacking or subsampling.
     std::string encoder_backend() const;
 
-    // True when an Apple Core ML encoder or diarizer sidecar was found. This
+    // True when an Apple Core ML encoder or diarizer sidecar is loaded and
+    // ready now. Sidecars load in the background, so this is false while a
+    // load is still in flight (see coreml_status_json / coreml_wait). This
     // is a load-status query, not a guarantee that every call shape uses Core
-    // ML; the per-call truth is EngineResult::encoder_used_coreml and
-    // DiarizationResult::encoder_used_coreml.
+    // ML; the per-call truth is EngineResult::encoder_used_coreml /
+    // encoder_backend and the same fields of DiarizationResult.
     // CTC/IndicConformer, Unified RNN-T, and TDT pad shorter inputs to the
     // compiled capacity. Longer TDT inputs use ggml unless the sidecar supplies
     // a validated seam policy; CTC and Unified RNN-T use overlapping windows.
@@ -401,6 +424,25 @@ public:
     // largest compiled capacity and leave larger calls on ggml.
     // Always false on non-Apple builds and when no sidecar is present.
     bool encoder_on_coreml() const;
+
+    // Core ML sidecar status as JSON: one entry per sidecar with
+    // its state (queued, loading, ready, failed, retired, ...), route,
+    // compute units, label, timings and warm hint. "{}" on builds without
+    // PARAKEET_COREML.
+    std::string coreml_status_json() const;
+
+    // Requests the sidecars of `scope` (minimal / predicted / all) as a
+    // prewarm group and, with `wait`, blocks until every one is ready or has
+    // failed. Returns the group result as JSON (each sidecar's final state).
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
+
+    // The construction group's result as JSON (wait = construct exposes the
+    // finished result; otherwise its state when called).
+    std::string coreml_construction_json() const;
+
+    // Waits until the construction group has finished, up to `timeout_ms`
+    // (< 0: no limit). Returns true when every sidecar in it reached ready.
+    bool coreml_wait(int64_t timeout_ms = -1);
 
     // True when a GPU was detected but the engine fell back to CPU because the
     // available path is known-bad (currently Adreno 6xx OpenCL without the

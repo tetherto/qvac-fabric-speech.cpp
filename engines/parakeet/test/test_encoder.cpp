@@ -123,7 +123,7 @@ int encoder_parity_main(int argc, char ** argv) {
     }
 
     EncoderOutputs enc_out;
-    if (int rc = run_encoder(model, mel_in.data(), n_mel_frames, n_mels, enc_out); rc != 0) {
+    if (int rc = run_encoder(model, mel_in.data(), n_mel_frames, n_mels, enc_out, parakeet::EncoderRoute::ggml()); rc != 0) {
         std::fprintf(stderr, "run_encoder failed (rc=%d)\n", rc);
         return rc;
     }

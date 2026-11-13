@@ -720,32 +720,48 @@ bool prepare_cached_masked_io(parakeet_coreml_context * ctx, MLModel * model,
 }  // namespace
 
 enum class CoremlPlacement { Automatic, Cpu, NeuralEngine, Gpu };
-static parakeet_coreml_context * init_coreml_model(const char *, const char *, CoremlPlacement);
+// `units`: resolved compute units for the automatic placement (null: the
+// export's own default); the fixed placements ignore them.
+static parakeet_coreml_context * init_coreml_model(const char *, const char * units, CoremlPlacement);
 
 struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Automatic);
+    return init_coreml_model(path_mlmodelc, std::getenv(kComputeUnitsEnv), CoremlPlacement::Automatic);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_ane(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::NeuralEngine);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::NeuralEngine);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_gpu(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Gpu);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::Gpu);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_cpu(const char * path_mlmodelc) {
-    return init_coreml_model(path_mlmodelc, kComputeUnitsEnv, CoremlPlacement::Cpu);
+    return init_coreml_model(path_mlmodelc, nullptr, CoremlPlacement::Cpu);
 }
 
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env) {
-    return init_coreml_model(path_mlmodelc, units_env, CoremlPlacement::Automatic);
+    if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
+    return init_coreml_model(path_mlmodelc, std::getenv(units_env), CoremlPlacement::Automatic);
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
+                                                                 const char * units) {
+    return init_coreml_model(path_mlmodelc, units, CoremlPlacement::Automatic);
+}
+
+bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return false;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        return path != nil && mlmodelc_declares_ane_inputs(path);
+    }
 }
 
 static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
-                                                  const char * units_env, CoremlPlacement placement) {
-    if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
+                                                  const char * units, CoremlPlacement placement) {
+    if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
         NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
@@ -757,8 +773,8 @@ static parakeet_coreml_context * init_coreml_model(const char * path_mlmodelc,
         // fall back to the CPU and erase the encoder speedup.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         std::string label;
-        config.computeUnits = parakeet_coreml_requested_units(
-            units_env, mlmodelc_declares_ane_inputs(path), &label);
+        config.computeUnits = parakeet_coreml_units_for(
+            units, mlmodelc_declares_ane_inputs(path), &label);
         if (placement == CoremlPlacement::NeuralEngine) {
             config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
             label = "coreml-ane";

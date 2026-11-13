@@ -145,7 +145,7 @@ int sortformer_parity_main(int argc, char ** argv) {
 
     EncoderOutputs enc_out;
     // Use the reference mel so trailing-frame preprocessing differences cannot hide encoder shape regressions.
-    if (int rc = run_encoder(model, mel_ref_tf.data(), reference_frames, model.mel_cfg.n_mels, enc_out); rc != 0) return 6;
+    if (int rc = run_encoder(model, mel_ref_tf.data(), reference_frames, model.mel_cfg.n_mels, enc_out, parakeet::EncoderRoute::ggml()); rc != 0) return 6;
     std::fprintf(stderr, "[sf-parity] encoder: cpp frames=%d d_model=%d\n",
                  enc_out.n_enc_frames, enc_out.d_model);
 

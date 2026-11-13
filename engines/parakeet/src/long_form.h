@@ -441,6 +441,65 @@ inline LongFormPlan resolve_long_form_plan_frames(int requested_window_frames,
     return plan;
 }
 
+// Which Core ML shape contract the model's encoder sidecar follows.
+enum class CoremlShapeKind {
+    none,                   // no long-form Core ML plan (Nemotron, Sortformer, ...)
+    fixed,                  // CTC / RNN-T: pads shorter windows, tiles longer input
+    fixed_validated_seams,  // TDT: pads shorter windows; tiles longer input only when
+                            // the sidecar supplies a validated seam context, else
+                            // the ggml plan (resolve_coreml_tdt_shape_plan)
+    exact,                  // EOU: exact-shape calls only; oversized input stays on ggml
+};
+
+// Route-aware long-form choice. `normal` is the ggml
+// plan from resolve_long_form_plan_frames. The Core ML fixed-shape plan is
+// considered only when the unit's route holds a handle: with a null route the
+// result is exactly the ggml-only plan, whatever sidecar exists or is still
+// loading. `route_fixed_mel_frames` / `route_seam_context_frames` come from
+// the acquired handle (its I/O after load).
+inline LongFormPlan choose_long_form_plan(const LongFormPlan & normal,
+                                          int opts_window_frames,
+                                          int opts_context_frames,
+                                          CoremlShapeKind kind,
+                                          bool route_holds,
+                                          int route_fixed_mel_frames,
+                                          int route_seam_context_frames,
+                                          int subsampling_factor,
+                                          long long n_mel_frames) {
+    // A negative window request explicitly disables automatic windowing. An
+    // oversized fixed-shape Core ML call will then fail its capacity check and
+    // run_encoder() keeps the ggml single-pass path.
+    if (!route_holds || opts_window_frames < 0 || kind == CoremlShapeKind::none) {
+        return normal;
+    }
+
+    LongFormPlan coreml;
+    if (kind == CoremlShapeKind::fixed || kind == CoremlShapeKind::fixed_validated_seams) {
+        // A sidecar validated with its own seam context (the fixed-window
+        // Neural Engine export) supplies it when the caller left it automatic.
+        const int context = opts_context_frames == 0 && route_seam_context_frames > 0
+            ? route_seam_context_frames
+            : opts_context_frames;
+        coreml = kind == CoremlShapeKind::fixed
+            ? resolve_coreml_fixed_shape_plan(route_fixed_mel_frames, context,
+                                              subsampling_factor, n_mel_frames)
+            : resolve_coreml_tdt_shape_plan(route_fixed_mel_frames, context, subsampling_factor,
+                                            n_mel_frames, route_seam_context_frames);
+    } else {
+        // Exact-shape EOU calls may use Core ML directly, but oversized inputs
+        // stay on ggml until windowed causal/chunked attention parity is proven.
+        coreml = resolve_coreml_exact_shape_plan(route_fixed_mel_frames, opts_context_frames,
+                                                 subsampling_factor, n_mel_frames);
+    }
+
+    // Respect a smaller user/model long-form limit, but force fixed-shape
+    // windowing when that is the only way the complete input fits the sidecar.
+    if (coreml.enabled && (!normal.enabled || coreml.window_frames < normal.window_frames)) {
+        return coreml;
+    }
+    return normal;
+}
+
 struct WindowTrim {
     int left_drop;   // leading encoder frames (left context) to discard
     int center_cnt;  // committed encoder frames to keep

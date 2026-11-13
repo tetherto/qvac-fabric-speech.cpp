@@ -1,5 +1,7 @@
 #pragma once
 
+#include "encoder_route.h"
+
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -37,13 +39,16 @@ struct IndependentSegmentsOutcome {
     int encoder_frames = 0;
     bool used_coreml = false;
     bool decoder_used_coreml = false;
+    EncoderBackendTally tally;  // per-segment encoder backends (the result label)
     double encoder_ms = 0.0, decode_ms = 0.0, segment_plan_ms = 0.0, assemble_ms = 0.0;
 };
 
 #ifdef PARAKEET_USE_COREML
 // Shared by Engine and CLI so their full-EU encoder, segment planner and
 // batched decoder execute the same path. False retains the normal context plan.
+// `route` is the call's encoder route: it caps the segments and encodes them.
 bool transcribe_independent_segments(ParakeetCtcModel & model, TdtRuntimeWeights & runtime,
+                                     const EncoderRoute & route,
                                      const float * mel, int frames, int bins, bool verbose,
                                      std::atomic<bool> & cancel,
                                      IndependentSegmentsOutcome & result);

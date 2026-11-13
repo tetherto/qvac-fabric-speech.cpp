@@ -198,6 +198,18 @@ void print_usage(const char * argv0) {
         "                       against mel.npy. n_mels is read from the loaded\n"
         "                       GGUF (80 for CTC; 128 for RNN-T/TDT/EOU/Sortformer); the\n"
         "                       actual shape is logged at dump time.\n"
+        "  --coreml-use MODE            Core ML sidecars: auto (default; ggml until a\n"
+        "                               sidecar is ready), off, or require (throw\n"
+        "                               instead of falling back)\n"
+        "  --coreml-wait MODE           none (default: never block), construct (load\n"
+        "                               waits for the sidecars), or call (each call\n"
+        "                               waits for its sidecar)\n"
+        "  --coreml-prewarm SCOPE       none, minimal, predicted (default) or all\n"
+        "  --coreml-compute-units U     all, cpu_and_ane, cpu_and_gpu or cpu_only\n"
+        "  --coreml-cache-dir DIR       Core ML cache and warm hints (default\n"
+        "                               ~/Library/Application Support/qvac-speech/coreml)\n"
+        "  --coreml-status-json PATH    write the Core ML sidecar status (JSON) to PATH\n"
+        "                               on exit; '-' writes to stdout\n"
         "  --version            print version and exit\n"
         "  --help               this help text\n",
         argv0);
@@ -291,6 +303,8 @@ struct ExtraCliOpts {
     int         bench_warmup  = 2;
     std::string bench_json_path;
     bool        require_coreml = false;
+    parakeet::CoremlOptions coreml;
+    std::string coreml_status_json_path;
     bool        profile       = false;
     int         profile_runs  = 5;
     int         profile_warmup = 2;
@@ -496,6 +510,79 @@ void log_cli_long_form(const parakeet::ParakeetCtcModel & model, const parakeet:
                       100.0 * 2.0 * context_frames / window_frames);
 }
 
+bool parse_coreml_use(const std::string & v, parakeet::CoremlOptions::Use & out) {
+    using U = parakeet::CoremlOptions::Use;
+    if (v == "auto") out = U::automatic;
+    else if (v == "off") out = U::off;
+    else if (v == "require") out = U::require;
+    else {
+        PARAKEET_LOG_ERROR("error: --coreml-use must be auto, off or require (got '%s')\n", v.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool parse_coreml_wait(const std::string & v, parakeet::CoremlOptions::Wait & out) {
+    using W = parakeet::CoremlOptions::Wait;
+    if (v == "none") out = W::none;
+    else if (v == "construct") out = W::construct;
+    else if (v == "call") out = W::call;
+    else {
+        PARAKEET_LOG_ERROR("error: --coreml-wait must be none, construct or call (got '%s')\n", v.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool parse_coreml_prewarm(const std::string & v, parakeet::CoremlOptions::Prewarm & out) {
+    using P = parakeet::CoremlOptions::Prewarm;
+    if (v == "none") out = P::none;
+    else if (v == "minimal") out = P::minimal;
+    else if (v == "predicted") out = P::predicted;
+    else if (v == "all") out = P::all;
+    else {
+        PARAKEET_LOG_ERROR("error: --coreml-prewarm must be none, minimal, predicted or all (got '%s')\n",
+                           v.c_str());
+        return false;
+    }
+    return true;
+}
+
+// CLIs keep warm hints under Application Support (Library/Caches can
+// be purged, and a purge means a new path and a cold ANE compile).
+void apply_cli_coreml_defaults(parakeet::CoremlOptions & coreml) {
+#if defined(__APPLE__)
+    const char * shared = std::getenv("QVAC_COREML_CACHE_DIR");
+    const char * home = std::getenv("HOME");
+    if (!coreml.cache_dir && (shared == nullptr || *shared == '\0') && home != nullptr && *home != '\0') {
+        coreml.cache_dir = std::string(home) + "/Library/Application Support/qvac-speech/coreml";
+    }
+#else
+    (void) coreml;
+#endif
+}
+
+// Writes the Core ML status on every exit path once the model has loaded.
+struct CoremlStatusOnExit {
+    const parakeet::ParakeetCtcModel & model;
+    std::string path;
+    ~CoremlStatusOnExit() {
+        if (path.empty()) return;
+        const std::string json = parakeet::model_coreml_status_json(model);
+        if (path == "-") {
+            std::printf("%s\n", json.c_str());
+            return;
+        }
+        if (FILE * fp = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(json.data(), 1, json.size(), fp);
+            std::fputc('\n', fp);
+            std::fclose(fp);
+        } else {
+            PARAKEET_LOG_ERROR("error: cannot write --coreml-status-json '%s'\n", path.c_str());
+        }
+    }
+};
+
 // Private CLI options struct -- this binary's parsed flags only. The
 // public C++ API (parakeet::EngineOptions) doesn't carry the wav
 // path because it's a property of each transcribe() call, not the
@@ -513,7 +600,7 @@ struct CliOpts {
 
 }
 
-extern "C" int parakeet_cli_main(int argc, char ** argv) {
+static int parakeet_cli_run(int argc, char ** argv) {
     CliOpts      opts;
     ExtraCliOpts extra;
 
@@ -605,6 +692,18 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.attributed_min_segment_ms = std::max(0, std::atoi(argv[++i]));
         } else if (a == "--diarization-pad-segment-ms" && i + 1 < argc) {
             extra.attributed_pad_segment_ms = std::max(0, std::atoi(argv[++i]));
+        } else if (a == "--coreml-use" && i + 1 < argc) {
+            if (!parse_coreml_use(argv[++i], extra.coreml.use)) return 2;
+        } else if (a == "--coreml-wait" && i + 1 < argc) {
+            if (!parse_coreml_wait(argv[++i], extra.coreml.wait)) return 2;
+        } else if (a == "--coreml-prewarm" && i + 1 < argc) {
+            if (!parse_coreml_prewarm(argv[++i], extra.coreml.prewarm)) return 2;
+        } else if (a == "--coreml-compute-units" && i + 1 < argc) {
+            extra.coreml.compute_units = argv[++i];
+        } else if (a == "--coreml-cache-dir" && i + 1 < argc) {
+            extra.coreml.cache_dir = argv[++i];
+        } else if (a == "--coreml-status-json" && i + 1 < argc) {
+            extra.coreml_status_json_path = argv[++i];
         } else if (a == "--window-sec" && i + 1 < argc) {
             extra.window_sec_arg = argv[++i];
         } else if (a == "--overlap" && i + 1 < argc) {
@@ -648,13 +747,26 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         set_backends_directory(extra.backends_dir);
     }
 
+    apply_cli_coreml_defaults(extra.coreml);
+    // --require-coreml benchmarks the sidecar, so the load waits for it.
+    if (extra.require_coreml && extra.coreml.wait == CoremlOptions::Wait::unset) {
+        extra.coreml.wait = CoremlOptions::Wait::construct;
+    }
+
     const auto t_load = clock::now();
     ParakeetCtcModel model;
-    if (int rc = load_from_gguf(opts.model_gguf_path, model, opts.n_threads, opts.n_gpu_layers, opts.verbose, opts.backend); rc != 0) {
-        PARAKEET_LOG_ERROR("error: failed to load %s (rc=%d)\n", opts.model_gguf_path.c_str(), rc);
-        return 3;
+    try {
+        if (int rc = load_from_gguf(opts.model_gguf_path, model, opts.n_threads, opts.n_gpu_layers,
+                                    opts.verbose, opts.backend, extra.coreml); rc != 0) {
+            PARAKEET_LOG_ERROR("error: failed to load %s (rc=%d)\n", opts.model_gguf_path.c_str(), rc);
+            return 3;
+        }
+    } catch (const std::exception & error) {
+        PARAKEET_LOG_ERROR("error: %s\n", error.what());
+        return 2;
     }
     const double load_ms = ms_since(t_load);
+    CoremlStatusOnExit coreml_status{model, extra.coreml_status_json_path};
 
     if (extra.require_coreml) {
         if (!extra.bench) {
@@ -759,6 +871,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         asr_opts.n_threads       = opts.n_threads;
         asr_opts.verbose         = opts.verbose;
         asr_opts.language        = opts.language;
+        asr_opts.coreml          = extra.coreml;
         Engine asr_engine(asr_opts);
 
         AttributedTranscriptionOptions topts;
@@ -813,6 +926,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
+        eopts.coreml          = extra.coreml;
         Engine engine(eopts);
 
         const std::string emit_fmt = extra.emit_format;
@@ -947,13 +1061,16 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.dump_mel_path.clear();
         }
 
+        // One encoder route per top-level call, shared by the plan
+        // and every encoder dispatch of this run.
+        const EncoderRoute route = acquire_encoder_route(model);
         EncoderOutputs enc_out;
         const bool precise_continuity = needs_precise_eu_continuity(
             model.model_variant == "transcribepsy-250m-eu",
             long_form_opts.long_form_window_frames, long_form_opts.long_form_context_frames,
-            n_frames, model_coreml_fixed_mel_frames(model));
+            n_frames, route.geometry().fixed_mel_frames);
         const LongFormPlan long_form =
-            resolve_long_form_plan(model, long_form_opts, n_frames, precise_continuity);
+            resolve_long_form_plan(model, long_form_opts, n_frames, route, precise_continuity);
 
         static TdtRuntimeWeights rt;
         static bool rt_ready = false;
@@ -969,7 +1086,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             }
             std::atomic<bool> cancel{false};
             IndependentSegmentsOutcome result;
-            if (transcribe_independent_segments(model, rt, mel.data(), n_frames,
+            if (transcribe_independent_segments(model, rt, route, mel.data(), n_frames,
                                                 model.mel_cfg.n_mels, opts.verbose, cancel, result)) {
                 text_out = std::move(result.text);
                 ids_out = std::move(result.ids);
@@ -1018,7 +1135,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                 options, device_result, device_decode_ms);
         }
 
-        const int exact_mel_frames = model_coreml_fixed_mel_frames(model);
+        const int exact_mel_frames = route.geometry().fixed_mel_frames;
         const bool cache_aware_nemotron =
             model.model_type == ParakeetModelType::NEMOTRON &&
             should_use_nemotron_cache_aware_offline(
@@ -1080,12 +1197,12 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             WindowedEncoderStats stats;
             if (int rc = run_encoder_windowed(
                     model, mel.data(), n_frames, model.mel_cfg.n_mels,
-                    long_form, cancel_flag, enc_out, stats, precise_continuity); rc != 0) return rc;
+                    long_form, route, cancel_flag, enc_out, stats, precise_continuity); rc != 0) return rc;
             times.enc_ms = stats.encoder_ms;
         } else {
             const auto t2 = clock::now();
             if (int rc = run_encoder(
-                    model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
+                    model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out, route,
                     /*max_layers=*/-1,
                     /*capture_intermediates=*/false,
                     /*allow_coreml_padded=*/true, device_consumer, 0, precise_continuity); rc != 0) return rc;
@@ -1318,7 +1435,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             EncoderOutputs tmp_out;
             for (int w = 0; w < extra.profile_warmup; ++w) {
                 if (int rc = run_encoder(model, mel_buf.data(), n_frames_tmp,
-                                         model.mel_cfg.n_mels, tmp_out, nl); rc != 0) {
+                                         model.mel_cfg.n_mels, tmp_out, EncoderRoute::ggml(),
+                                         nl); rc != 0) {
                     PARAKEET_LOG_ERROR("profile: run_encoder failed rc=%d at nl=%d\n", rc, nl);
                     return 21;
                 }
@@ -1326,7 +1444,8 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             for (int r = 0; r < extra.profile_runs; ++r) {
                 const auto t0 = std::chrono::steady_clock::now();
                 if (int rc = run_encoder(model, mel_buf.data(), n_frames_tmp,
-                                         model.mel_cfg.n_mels, tmp_out, nl); rc != 0) {
+                                         model.mel_cfg.n_mels, tmp_out, EncoderRoute::ggml(),
+                                         nl); rc != 0) {
                     PARAKEET_LOG_ERROR("profile: run_encoder failed rc=%d at nl=%d\n", rc, nl);
                     return 22;
                 }
@@ -1422,6 +1541,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         eopts.n_threads       = opts.n_threads;
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
+        eopts.coreml          = extra.coreml;
 
         // The full-EU Engine loads three encoder sidecars of its own. Release
         // the CLI's inspection model before constructing the streaming engine.
@@ -1688,4 +1808,21 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     }
 
     return 0;
+}
+
+// Exit status when an exception ends the run (use = require refusing a
+// call, for example). No other exit path returns 1.
+constexpr int kExitException = 1;
+
+// The C entry point never lets an exception escape: it prints the reason and
+// returns a non-zero status instead of terminating the host process.
+extern "C" int parakeet_cli_main(int argc, char ** argv) {
+    try {
+        return parakeet_cli_run(argc, argv);
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "error: unknown exception\n");
+    }
+    return kExitException;
 }

@@ -72,7 +72,12 @@ void unset_env(const char * name) {
 }
 
 int load(const std::string & gguf, ParakeetCtcModel & model) {
-    return load_from_gguf(gguf, model, /*n_threads=*/0, /*n_gpu_layers=*/0, /*verbose=*/false);
+    // Ownership is synchronous; a full GGUF's background sidecar is awaited
+    // so the checks below see it loaded.
+    CoremlOptions coreml;
+    coreml.wait = CoremlOptions::Wait::construct;
+    return load_from_gguf(gguf, model, /*n_threads=*/0, /*n_gpu_layers=*/0, /*verbose=*/false,
+                          "auto", coreml);
 }
 
 void check_rejected_without_sidecar(const std::string & coreml_gguf) {
@@ -116,7 +121,7 @@ void check_owned_encoder_runs(const std::string & coreml_gguf, const std::string
     const std::vector<float> mel = mel_of(model, wav, n_frames);
 
     EncoderOutputs out;
-    expect(run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, out,
+    expect(run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, out, parakeet::acquire_encoder_route(model),
                        /*max_layers=*/-1, /*capture_intermediates=*/false,
                        /*allow_coreml_padded=*/true) == 0 && out.n_enc_frames > 0 && out.used_coreml,
            "the owned encoder must run on Core ML");
@@ -124,7 +129,7 @@ void check_owned_encoder_runs(const std::string & coreml_gguf, const std::string
     // capture_intermediates routes every model to the ggml encoder, whose
     // weights were never allocated: the request must fail, not read them.
     EncoderOutputs refused;
-    expect(run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, refused,
+    expect(run_encoder(model, mel.data(), n_frames, model.mel_cfg.n_mels, refused, parakeet::acquire_encoder_route(model),
                        /*max_layers=*/-1, /*capture_intermediates=*/true) != 0,
            "a ggml encoder request must be refused when Core ML owns the encoder");
 }
@@ -216,7 +221,8 @@ void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
     mel.resize(static_cast<size_t>(frames) * retained.mel_cfg.n_mels, 0.0f);
     EncoderOutputs out;
     expect(run_encoder(retained, mel.data(), frames, retained.mel_cfg.n_mels, out,
-                       -1, false, true) == 0 && out.n_enc_frames > 0 && !out.used_coreml,
+                       parakeet::acquire_encoder_route(retained), -1, false, true) == 0 &&
+               out.n_enc_frames > 0 && !out.used_coreml,
            "oversized TDT input must execute the retained native encoder");
     check_standard_tdt_rejects_encoderless(gguf);
 }

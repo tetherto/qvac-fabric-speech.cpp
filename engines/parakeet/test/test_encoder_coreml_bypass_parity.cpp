@@ -1,5 +1,6 @@
 // Sortformer v2.1 AOSC Core ML block-stack parity against the ggml bypass path.
 
+#include "coreml_test_options.h"
 #include "parakeet_ctc.h"
 
 #include <cmath>
@@ -81,7 +82,7 @@ int main(int argc, char ** argv) {
     const double min_cos = argc > 2 ? std::atof(argv[2]) : 0.99;
 
     parakeet::ParakeetCtcModel model;
-    if (parakeet::load_from_gguf(argv[1], model, 0, 999, true) != 0) return 3;
+    if (parakeet::load_from_gguf(argv[1], model, 0, 999, true, "auto", coreml_ready_options()) != 0) return 3;
     if (!parakeet::model_bypass_encoder_on_coreml(model)) {
         std::fprintf(stderr, "[coreml-bypass-parity] SKIP: bypass sidecar inactive\n");
         return 0;

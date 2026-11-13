@@ -39,6 +39,17 @@ bool parakeet_coreml_preserves_encoder_padding(const struct parakeet_coreml_cont
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env);
 
+// Loads with resolved compute units (`all`, `cpu_and_ane`, `cpu_and_gpu`,
+// `cpu_only`; null selects the export's own default, see
+// parakeet_coreml_encoder_prefers_ane). Never reads the environment.
+struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
+                                                                 const char * units);
+
+// True when the bundle is the fixed-window Neural Engine export (its
+// metadata declares the pad_mask / key_bias inputs), read without loading
+// it: its default compute units are cpu_and_ane, every other export's are all.
+bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc);
+
 // Release a context created by parakeet_coreml_init. Safe to call with nullptr.
 void parakeet_coreml_free(struct parakeet_coreml_context * ctx);
 
