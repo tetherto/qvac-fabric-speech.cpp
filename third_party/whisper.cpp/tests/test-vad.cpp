@@ -63,6 +63,9 @@ int main() {
     // Load the VAD model
     struct whisper_vad_context_params ctx_params = whisper_vad_default_context_params();
     assert_default_context_params(ctx_params);
+    // Small VAD graphs spend more time synchronizing workers than computing.
+    constexpr int kVadTestThreads = 1;
+    ctx_params.n_threads = kVadTestThreads;
 
     struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(
             vad_model_path.c_str(),
@@ -72,7 +75,7 @@ int main() {
     struct whisper_vad_params params = whisper_vad_default_params();
     assert_default_params(params);
 
-    // Test speech probabilites
+    // Test speech probabilities
     test_detect_speech(vctx, params, pcmf32.data(), pcmf32.size());
 
     // Test speech timestamps (uses speech probabilities from above)

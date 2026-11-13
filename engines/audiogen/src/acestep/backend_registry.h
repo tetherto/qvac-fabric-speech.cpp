@@ -3,7 +3,7 @@
 // ACE-Step backend acquisition via the ggml backend registry.
 //
 // WHY THIS EXISTS (not just `ggml_backend_cpu_init()`):
-// On desktop x86-64 / Apple the ggml-speech port static-links the CPU backend,
+// On desktop x86-64 / Apple the qvac-fabric port static-links the CPU backend,
 // so `ggml_backend_cpu_init` / `ggml_backend_cpu_set_n_threads` are defined in
 // the addon's `.bare`. On arm64 (Android + Linux) the port builds the CPU
 // backend as per-microarch dlopen MODULE .so files

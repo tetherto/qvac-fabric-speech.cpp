@@ -18,6 +18,8 @@
 // Exit 0 on success; non-zero (with a FAIL line per broken invariant) otherwise.
 
 #include "independent_segments.h"
+#include "coreml_tdt_segments.h"
+#include "streaming_defaults.h"
 #include "parakeet_tdt.h"
 
 #include <algorithm>
@@ -366,6 +368,38 @@ void check_geometry_mismatch() {
 }  // namespace
 
 int main() {
+    using parakeet::resolve_transcription_chunk_ms;
+    if (resolve_transcription_chunk_ms(0, true) != 2000 ||
+        resolve_transcription_chunk_ms(0, false) != 1000 ||
+        resolve_transcription_chunk_ms(1000, true) != 1000 ||
+        resolve_transcription_chunk_ms(2000, false) != 2000 ||
+        resolve_transcription_chunk_ms(-1, true) != -1)
+        fail("automatic model-specific streaming chunk resolution");
+    using parakeet::allows_independent_eu_decoder;
+    if (!allows_independent_eu_decoder(0, 0) ||
+        allows_independent_eu_decoder(750, 0) ||
+        allows_independent_eu_decoder(0, 25) ||
+        allows_independent_eu_decoder(750, 25) ||
+        allows_independent_eu_decoder(-1, 0) ||
+        allows_independent_eu_decoder(0, -1))
+        fail("full-EU independent decoder must preserve explicit window and context");
+    using parakeet::needs_precise_eu_continuity;
+    if (!needs_precise_eu_continuity(true, 0, 0, 1501, 1500) ||
+        needs_precise_eu_continuity(true, 0, 0, 1500, 1500) ||
+        needs_precise_eu_continuity(false, 0, 0, 1501, 1500) ||
+        needs_precise_eu_continuity(true, 750, 25, 1501, 1500) ||
+        needs_precise_eu_continuity(true, -1, 0, 1501, 1500) ||
+        needs_precise_eu_continuity(true, 0, 0, 1501, 0))
+        fail("automatic full-EU continuity requires a precise encoder beyond fixed capacity");
+    using parakeet::should_batch_eu_decoder;
+    if (should_batch_eu_decoder(3, "coreml-cpu", false, false) ||
+        !should_batch_eu_decoder(4, "coreml-cpu", false, false) ||
+        should_batch_eu_decoder(7, "coreml-ane", true, false) ||
+        !should_batch_eu_decoder(8, "coreml-ane", true, false) ||
+        should_batch_eu_decoder(16, "coreml-ane", false, false) ||
+        should_batch_eu_decoder(16, "coreml-cpu", true, false) ||
+        !should_batch_eu_decoder(1, "coreml-ane", false, true))
+        fail("full-EU decoder placement/crossover policy");
     check_energy();
     check_planner();
     check_lanes_match_sequential(1);

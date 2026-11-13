@@ -59,6 +59,24 @@ std::string coreml_encoder_sidecar_path(const std::string & gguf_path) {
     return coreml_sidecar_base(gguf_path) + "-encoder.mlmodelc";
 }
 
+std::string coreml_eu_other_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder-other.mlmodelc";
+}
+
+std::string coreml_eu_gate_sidecar_path(const std::string & gguf_path) {
+    return coreml_sidecar_base(gguf_path) + "-encoder-gate.mlmodelc";
+}
+
+std::string coreml_eu_precise_sidecar_path(const std::string & gguf_path, bool adapters, int mel_frames) {
+    return coreml_sidecar_base(gguf_path) + (adapters ? "-encoder-other-fp32-" : "-encoder-fp32-") +
+        std::to_string(mel_frames) + kSidecarExtension;
+}
+
+std::string coreml_eu_flexible_sidecar_path(const std::string & gguf_path, bool adapters) {
+    return coreml_sidecar_base(gguf_path) +
+        (adapters ? "-encoder-other-flexible.mlmodelc" : "-encoder-flexible.mlmodelc");
+}
+
 std::string coreml_bypass_encoder_sidecar_path(const std::string & gguf_path) {
     return coreml_sidecar_base(gguf_path) + "-encoder-bypass-pre-encode.mlmodelc";
 }

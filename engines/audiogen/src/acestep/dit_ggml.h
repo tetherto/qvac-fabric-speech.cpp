@@ -6,7 +6,7 @@
 // per-layer sliding-window / full alternation, cross-attention to the text
 // encoder states, SwiGLU MLP) run as a ggml graph, one forward per flow-matching
 // step. Ported from acestep.cpp/src/dit*.h. Every op it needs already exists in
-// the ggml-speech fork (rms_norm, mul_mat, rope_ext, flash_attn_ext /
+// the fabric ggml (rms_norm, mul_mat, rope_ext, flash_attn_ext /
 // soft_max_ext, swiglu[_split], timestep_embedding, conv_transpose_1d) — no new
 // custom op, unlike the VAE. On CPU, attention uses the F32 soft_max_ext path
 // (flash_attn_ext accumulates in F16 and drifts over 24 layers x 8 steps).

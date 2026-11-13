@@ -143,6 +143,24 @@ static void test_streaming_resampler() {
             std::printf("    (streamed=%zu batch=%zu)\n", streamed.size(), batch.size());
         }
     }
+    for (int target : {8000, 16000, 44100, 48000}) {
+        for (size_t count : {size_t{0}, size_t{1}, size_t{16}, size_t{17}, size_t{97}}) {
+            const std::vector<float> tiny(sig.begin(), sig.begin() + count);
+            CHECK(stream_all(tiny, 24000, target, {1, 2, 7}, 0) ==
+                      resample_for_output(tiny, 24000, target),
+                  "short inputs and tiny chunks match batch including tail");
+        }
+        OutputResampler empty(24000, target);
+        CHECK(empty.process({}).empty(), "empty chunk emits nothing");
+        CHECK(empty.finish().empty(), "empty stream has no tail");
+        const auto prefix = empty.process(sig);
+        CHECK(!prefix.empty(), "long input emits samples before finish");
+        const auto tail = empty.finish();
+        CHECK(prefix.size() + tail.size() == resample_for_output(sig, 24000, target).size(),
+              "finish emits exactly the remaining samples");
+        CHECK(empty.finish().empty(), "repeated finish does not duplicate tail");
+    }
+
 }
 
 int main(int argc, char ** argv) {
@@ -151,9 +169,9 @@ int main(int argc, char ** argv) {
     test_output_helpers();
     test_streaming_resampler();
 
-    // 4 seconds of a multi-tone signal at 24 kHz.
+    // A short multi-tone signal is sufficient to measure the steady-state filter.
     const int sr = 24000;
-    const int N = 4 * sr;
+    const int N = 4096;
     std::vector<float> in(N);
     for (int i = 0; i < N; ++i) {
         double t = (double)i / sr;
@@ -173,8 +191,11 @@ int main(int argc, char ** argv) {
     printf("back: samples=%zu sr=24000 (expected ~%zu)\n", back.size(), in.size());
 
     // Compare middle region (skip the half-filter-length boundary).
-    const size_t N_ = std::min(in.size(), back.size());
     const size_t skip = 64;
+    CHECK(up.size() == 2 * in.size(), "round-trip upsample length");
+    CHECK(back.size() == in.size(), "round-trip restores exact length");
+    if (back.size() != in.size() || back.size() <= 2 * skip) return 1;
+    const size_t N_ = in.size();
     float in_rms = 0, diff_rms = 0, diff_max = 0;
     for (size_t i = skip; i < N_ - skip; ++i) {
         in_rms   += in[i] * in[i];

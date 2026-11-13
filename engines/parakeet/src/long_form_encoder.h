@@ -21,7 +21,8 @@ struct WindowedEncoderStats {
 LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
                                     const EngineOptions & opts,
                                     int n_mel_frames,
-                                    const EncoderRoute & route);
+                                    const EncoderRoute & route,
+                                    bool preserve_eu_context = false);
 
 int run_encoder_windowed(ParakeetCtcModel & model,
                          const float * mel, int n_mel_frames, int n_mels,
@@ -29,6 +30,6 @@ int run_encoder_windowed(ParakeetCtcModel & model,
                          const EncoderRoute & route,
                          std::atomic<bool> & cancel_flag,
                          EncoderOutputs & out,
-                         WindowedEncoderStats & stats);
+                         WindowedEncoderStats & stats, bool prefer_precise_eu = false);
 
 }  // namespace parakeet

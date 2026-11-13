@@ -4,7 +4,7 @@
 //   ./build/test-fbank S3GEN.gguf WAV_16K.npy FBANK_RAW.npy
 
 #include "voice_features.h"
-#include "npy.h"
+#include "parity_test.h"
 #include "ggml.h"
 #include "gguf.h"
 
@@ -42,8 +42,8 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[2/3] loading 16 kHz wav %s\n", wav_path.c_str());
     npy_array wav_npy = npy_load(wav_path);
-    std::vector<float> wav((const float*)wav_npy.data.data(),
-                           (const float*)wav_npy.data.data() + wav_npy.n_elements());
+    std::vector<float> wav(npy_as_f32(wav_npy),
+                           npy_as_f32(wav_npy) + wav_npy.n_elements());
     fprintf(stderr, "      %zu samples (%.2f s)\n", wav.size(), (double)wav.size() / 16000.0);
 
     fprintf(stderr, "[3/3] running fbank_kaldi_80\n");
@@ -53,30 +53,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "      output (T=%d, 80)\n", T);
 
     npy_array ref = npy_load(ref_path);
-    const float * r_dbg = (const float *)ref.data.data();
-    fprintf(stderr, "  C++ fb[0, :8]:");
-    for (int j = 0; j < 8; ++j) fprintf(stderr, " %.4f", fb_cpp[j]);
-    fprintf(stderr, "\n  Py  fb[0, :8]:");
-    for (int j = 0; j < 8; ++j) fprintf(stderr, " %.4f", r_dbg[j]);
-    fprintf(stderr, "\n  C++ fb[100, :8]:");
-    for (int j = 0; j < 8; ++j) fprintf(stderr, " %.4f", fb_cpp[100*80 + j]);
-    fprintf(stderr, "\n  Py  fb[100, :8]:");
-    for (int j = 0; j < 8; ++j) fprintf(stderr, " %.4f", r_dbg[100*80 + j]);
-    fprintf(stderr, "\n");
-    const size_t n = std::min(fb_cpp.size(), ref.n_elements());
-    const float * r = (const float *)ref.data.data();
-    float ma = 0.0f, rsum = 0.0f, mref = 0.0f;
-    for (size_t i = 0; i < n; ++i) {
-        float d = fb_cpp[i] - r[i];
-        ma = std::max(ma, std::fabs(d));
-        rsum += d * d;
-        mref = std::max(mref, std::fabs(r[i]));
-    }
-    double rms = std::sqrt(rsum / n);
-    double rel = ma / std::max(mref, 1e-12f);
-    fprintf(stderr,
-        "\n[result] C++ vs Python fbank:\n"
-        "    n=%zu  max_abs=%.4e  rms=%.4e  max|ref|=%.4e  rel=%.4e\n",
-        n, (double)ma, rms, (double)mref, rel);
-    return 0;
+    // Relative max error against the complete, finite float32 reference.
+    constexpr double kRelativeTolerance = 2e-3;
+    const bool passed = tts_test::check_f32("fbank", fb_cpp, {T, 80}, ref,
+                                             kRelativeTolerance);
+    return passed ? 0 : 1;
 }
