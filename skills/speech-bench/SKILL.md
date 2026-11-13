@@ -7,7 +7,7 @@ argument-hint: collect | publish | run <linux|mac> [quick] | deploy <linux|mac>
 # Speech weekly benchmark on the shared Tailscale machines
 
 Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmarks/desktop-weekly/weekly.sh`
-under the installing user's own account: it updates the engine `master` and ggml `speech` heads, provisions the
+under the installing user's own account: it updates the engine `master` head and the ggml commit that head pins (the ggml of qvac-fabric-llm.cpp), provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
 machine is involved in the measurement. The Speech Bench hub and its per-machine dashboards, linked from the team channel's canvas,

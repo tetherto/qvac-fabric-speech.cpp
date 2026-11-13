@@ -1,7 +1,7 @@
 # Weekly desktop benchmark on the shared Tailscale machines
 
 `weekly.sh` benchmarks the speech engines every Sunday evening on the team's shared machines, without any
-developer laptop in the loop: cron on each machine builds the current engine and ggml heads for every backend the
+developer laptop in the loop: cron on each machine builds the current engine head, with the ggml commit that head pins (the ggml of qvac-fabric-llm.cpp), for every backend the
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the

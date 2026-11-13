@@ -374,6 +374,42 @@ check_previous_and_prune() {
   ok "previous_summary and prune_old_runs walk runs/ newest first"
 }
 
+check_ggml_source() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    local pin_file="$ENGINE_SRC/$ENGINE_GGML_PIN_FILE" origin="$TMP/ggml-origin" first second
+    [ "$GGML_REPO" = "https://github.com/tetherto/qvac-fabric-llm.cpp.git" ] || { echo "default ggml repository: $GGML_REPO" >&2; exit 1; }
+    make_repo "$origin"
+    mkdir -p "$origin/ggml" && echo "project(ggml)" > "$origin/ggml/CMakeLists.txt"
+    git -C "$origin" add -A && git -C "$origin" -c user.name=test -c user.email=test@example.com commit -q -m first
+    first="$(git -C "$origin" rev-parse HEAD)"
+    git -C "$origin" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m second
+    second="$(git -C "$origin" rev-parse HEAD)"
+    git -C "$origin" config uploadpack.allowAnySHA1InWant true
+    [ -z "$(ggml_ref)" ] || { echo "a ggml ref without any pin: $(ggml_ref)" >&2; exit 1; }
+    update_ggml > /dev/null && { echo "update_ggml ran without a ggml commit" >&2; exit 1; }
+    mkdir -p "$(dirname "$pin_file")"
+    printf 'GGML_REPO_URL="x"\nGGML_REF="%s"   # the pin\n' "$first" > "$pin_file"
+    [ "$(ggml_ref)" = "$first" ] || { echo "engine pin not read: $(ggml_ref)" >&2; exit 1; }
+    GGML_REPO="file://$origin"; GGML_SRC="$TMP/ggml-checkout"
+    update_ggml || { echo "update_ggml failed at the engine pin" >&2; exit 1; }
+    [ "$(repo_sha "$GGML_SRC")" = "$first" ] || { echo "checkout is not at the engine pin" >&2; exit 1; }
+    [ "$(ggml_cmake_source)" = "$GGML_SRC/ggml" ] || { echo "cmake source: $(ggml_cmake_source)" >&2; exit 1; }
+    git -C "$GGML_SRC" remote set-url origin "file://$TMP/moved-away"
+    printf 'GGML_REF="%s"\n' "$second" > "$pin_file"
+    update_ggml || { echo "update_ggml did not follow a moved pin or repository" >&2; exit 1; }
+    [ "$(repo_sha "$GGML_SRC")" = "$second" ] || { echo "checkout did not move to the new engine pin" >&2; exit 1; }
+    GGML_BRANCH="some-branch"
+    [ "$(ggml_ref)" = "some-branch" ] && [ "$(ggml_ref_source)" = "branch some-branch" ] || { echo "GGML_BRANCH does not override the engine pin" >&2; exit 1; }
+    GGML_PIN="$first"
+    [ "$(ggml_ref)" = "$first" ] && [ "$(ggml_ref_source)" = "GGML_PIN" ] || { echo "GGML_PIN does not override the branch" >&2; exit 1; }
+    GGML_SRC="$TMP/flat-ggml"; mkdir -p "$GGML_SRC"
+    [ "$(ggml_cmake_source)" = "$GGML_SRC" ] || { echo "cmake source of a flat ggml tree: $(ggml_cmake_source)" >&2; exit 1; }
+  ) || fail "ggml source"
+  ok "ggml is built from qvac-fabric-llm.cpp at the commit the engine pins, follows a moved pin, and GGML_PIN or GGML_BRANCH override it"
+}
+
 check_build_marker() {
   mkdir -p "$BUILDS_DIR/cpu"
   if build_is_current cpu; then fail "build_is_current without a marker"; fi
@@ -576,6 +612,7 @@ main() {
   check_lib_deadline
   check_failed_result
   check_previous_and_prune
+  check_ggml_source
   check_build_marker
   check_fetch_models_offline
   check_fetch_models_reprovisions_on_origin_change
