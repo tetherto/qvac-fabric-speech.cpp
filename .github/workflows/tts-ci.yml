@@ -429,7 +429,9 @@ jobs:
     needs: [runner_names, authorize]
     if: needs.authorize.outputs.allowed == 'true' && github.event.inputs.run_moss_e2e != 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    # 90: a cold Chatterbox Turbo fixture build (download, conversion, export)
+    # plus the Neural Engine compile of the runtime checks.
+    timeout-minutes: 90
     steps:
       - name: Manual Workspace Cleanup
         run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
@@ -541,10 +543,12 @@ jobs:
       # Snake spellings, and a Core ML conversion of a reduced encoder, all on
       # random weights (no download). Then tiny sidecars declaring each
       # feature larger than the runtime packs it, which the runtime must
-      # reject before the shared runner copies anything (a skip, 77, fails the
-      # step). Stage parity and the Engine sentence overlap on the real
-      # checkpoints are test-chatterbox-coreml-stages / -engine
-      # (CHATTERBOX_COREML_TEST_S3GEN, CHATTERBOX_COREML_TEST_T3).
+      # reject before the shared runner copies anything, and tiny multi-width
+      # sidecars for background loading and routing (pending calls, width
+      # choice, load order, bounded waits, the resident cap, retirement,
+      # destruction mid-load). A skip, 77, fails the step. Stage parity, the
+      # Engine overlap and the slow-load checks on the real Turbo checkpoint
+      # are the next steps.
       - name: Test (Core ML Chatterbox S3Gen exporter and feature shapes)
         if: runner.os == 'macOS'
         env:
@@ -559,6 +563,72 @@ jobs:
             --out chatterbox-coreml-shapes
           CHATTERBOX_COREML_TEST_SHAPES="$PWD/chatterbox-coreml-shapes" \
             ./build/test-chatterbox-coreml --shape-fixture
+          CHATTERBOX_COREML_TEST_SHAPES="$PWD/chatterbox-coreml-shapes" \
+            ./build/test-chatterbox-coreml --pending-fixture
+
+      # Chatterbox Turbo for the Core ML runtime checks: T3 and S3Gen q8_0
+      # GGUFs converted from the pinned Hugging Face revision, and S3Gen
+      # sidecars exported with two widths (768 and 1024 frames hold every
+      # sentence of the checks, and keep each run's cold Neural Engine compile
+      # short). Cache key: revision + script hashes.
+      - name: Cache Chatterbox Turbo Core ML fixture
+        if: runner.os == 'macOS'
+        id: chatterbox-turbo-cache
+        uses: actions/cache@v4
+        with:
+          path: chatterbox-turbo-fixture
+          key: chatterbox-turbo-coreml-${{ runner.os }}-${{ runner.arch }}-749d1c1a-${{ hashFiles('engines/tts/scripts/convert-t3-turbo-to-gguf.py', 'engines/tts/scripts/convert-s3gen-to-gguf.py', 'engines/tts/scripts/export-chatterbox-coreml.py', 'engines/tts/scripts/chatterbox_coreml_models.py', 'engines/parakeet/scripts/requirements-coreml.txt') }}
+
+      - name: Build Chatterbox Turbo Core ML fixture
+        if: runner.os == 'macOS' && steps.chatterbox-turbo-cache.outputs.cache-hit != 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          rev=749d1c1a46eb10492095d68fbcf55691ccf137cd
+          hf=chatterbox-turbo-checkpoint
+          mkdir -p "$hf" chatterbox-turbo-fixture
+          for f in t3_turbo_v1.safetensors s3gen_meanflow.safetensors conds.pt ve.safetensors vocab.json \
+                   merges.txt added_tokens.json special_tokens_map.json tokenizer_config.json; do
+            curl -sSfL --retry 3 -o "$hf/$f" "https://huggingface.co/ResembleAI/chatterbox-turbo/resolve/$rev/$f"
+          done
+          echo "fcf1f8c1d651bb7e3acd69ee5be269b4ac10c02980b7708213d598bc9f7cdf87  $hf/t3_turbo_v1.safetensors" | shasum -a 256 -c -
+          echo "d65cb687a2ed581ee6cc297e919ffefa63386944f42364ae13b78a594945514f  $hf/s3gen_meanflow.safetensors" | shasum -a 256 -c -
+          echo "b1852099306fd6a7814eb9d0bd10186caba7249596cc23868f78a0eefbfa5033  $hf/conds.pt" | shasum -a 256 -c -
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-chatterbox-turbo
+          py=.venv-chatterbox-turbo/bin/python
+          "$py" -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
+            'safetensors==0.8.0' 'huggingface_hub==1.31.0'
+          "$py" engines/tts/scripts/convert-t3-turbo-to-gguf.py --ckpt-dir "$hf" --quant q8_0 \
+            --out chatterbox-turbo-fixture/chatterbox-t3-turbo-q8_0.gguf
+          "$py" engines/tts/scripts/convert-s3gen-to-gguf.py --variant turbo --ckpt-dir "$hf" --quant q8_0 \
+            --out chatterbox-turbo-fixture/chatterbox-s3gen-q8_0.gguf
+          "$py" engines/tts/scripts/convert-s3gen-to-gguf.py --variant turbo --ckpt-dir "$hf" --quant f32 \
+            --out "$hf/chatterbox-s3gen-f32.gguf"
+          "$py" engines/tts/scripts/export-chatterbox-coreml.py --gguf "$hf/chatterbox-s3gen-f32.gguf" \
+            --frames 768,1024 --output chatterbox-turbo-fixture --compile
+          rm -rf chatterbox-turbo-fixture/*.mlpackage "$hf"
+
+      # The Chatterbox Core ML runtime on the staged Turbo checkpoint, run
+      # once with no skip (a skip, 77, fails the step): the first synthesis
+      # while every function is still loading equals a use = off run sample
+      # for sample, through the Engine and through tts-cli, and later calls
+      # run on Core ML; the Engine sentence overlap against sequential
+      # synthesis, cancellation, strict mode, a CFM failure rolled back to a
+      # whole ggml integration and a worker failure rendered again; then
+      # per-stage parity against ggml.
+      - name: Test (Core ML Chatterbox runtime on staged Turbo)
+        if: runner.os == 'macOS'
+        env:
+          CHATTERBOX_COREML_TEST_T3: ${{ github.workspace }}/chatterbox-turbo-fixture/chatterbox-t3-turbo-q8_0.gguf
+          CHATTERBOX_COREML_TEST_S3GEN: ${{ github.workspace }}/chatterbox-turbo-fixture/chatterbox-s3gen-q8_0.gguf
+          CHATTERBOX_COREML_TEST_CLI: ${{ github.workspace }}/build/tts-cli
+        run: |
+          set -euo pipefail
+          sw_vers -productVersion
+          ./build/test-chatterbox-coreml --engine-fixture --slow-load
+          ./build/test-chatterbox-coreml --stages-fixture
 
       # Pocket Core ML FlowLM step and Mimi decoder, all on random weights (no
       # download): frame-by-frame decoding through the stateful step against a
