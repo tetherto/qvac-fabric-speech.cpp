@@ -196,6 +196,61 @@ uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
 #endif
 }
 
+// The Nemotron diarizer capacities the engine would generate (route generate
+// from plan(): a matching template, a cache directory, generate != never,
+// macOS 15, validated units; never the cache's contents), charged at their
+// templates' Core ML envelope: the resident part of every capacity the
+// ranges can load plus one transient, with the templates' margin.
+uint64_t coreml_generated_diarizer_bytes(const FitOptions & opts, const std::vector<CoremlFrameRange> & ranges) {
+#ifdef PARAKEET_USE_COREML
+    if (coreml_diarizers_disabled()) return 0;
+    CoremlSidecars sidecars(opts.coreml);
+    if (!sidecars.generation_status().supported) return 0;
+    std::vector<int> capacities;
+    for (const CoremlDiarizerBundle & b : list_coreml_diarizer_bundles(opts.model_gguf_path)) {
+        capacities.push_back(b.capacity);
+    }
+    const std::vector<CoremlDiarizerTemplate> & templates = nemotron_diarizer_templates();
+    std::vector<std::string> ids;
+    for (const CoremlDiarizerTemplate & t : templates) ids.emplace_back(t.template_id);
+    const std::vector<pcm::generation::Candidate> probed =
+        pcm::generation::probe(ids, opts.model_gguf_path, sidecars.resolved());
+    struct Generated {
+        int frames;
+        const pcm::generation::Candidate * candidate;
+        pcm::ComputeUnits units;
+    };
+    std::vector<Generated> generated;
+    for (size_t i = 0; i < templates.size() && i < probed.size(); ++i) {
+        if (std::find(capacities.begin(), capacities.end(), templates[i].frames) != capacities.end()) continue;
+        SidecarRequest request;
+        request.present = false;
+        request.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        request.generated = &probed[i];
+        if (sidecars.plan(request).route != pcm::Route::generate) continue;
+        generated.push_back({templates[i].frames, &probed[i], sidecars.resolved().units_or(request.stage_default)});
+        capacities.push_back(templates[i].frames);
+    }
+    if (generated.empty()) return 0;
+    std::sort(capacities.begin(), capacities.end());
+    const std::vector<int> loaded = coreml_diarizer_loaded_capacities(capacities, ranges);
+    uint64_t resident = 0, transient = 0;
+    double margin = 1.0;
+    for (const Generated & g : generated) {
+        if (std::find(loaded.begin(), loaded.end(), g.frames) == loaded.end()) continue;
+        resident = sat_add(resident, pcm::generation::resident_bytes(g.candidate->memory));
+        transient = std::max(transient, pcm::generation::transient_bytes(g.candidate->memory, g.units));
+        margin = std::max(margin, g.candidate->memory.margin);
+    }
+    const uint64_t total = sat_add(resident, transient);
+    return total == 0 ? 0 : sat_u64_from_double(std::ceil((double) total * margin));
+#else
+    (void) opts;
+    (void) ranges;
+    return 0;
+#endif
+}
+
 // Core ML enablement for the projection: resolved from FitOptions::coreml
 // exactly as an Engine would (PARAKEET_COREML_DISABLE, use = off, ...).
 bool coreml_fit_enabled(const FitOptions & opts, std::string & disabled_reason) {
@@ -369,12 +424,13 @@ void project_nemotron_diarization(const ParakeetCtcModel & model, const GgufLoad
     r.device.total_bytes = sat_add(r.device.weights_bytes, r.device.encoder_compute_bytes);
     r.host_bytes = nemotron_diarization_host_bytes(
         model, opts, total_mel, offline_frames, largest_host_input_bytes(graphs));
-    r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path,
-                                           nemotron_coreml_ranges(graphs, long_form));
+    const std::vector<CoremlFrameRange> ranges = nemotron_coreml_ranges(graphs, long_form);
+    r.coreml_bytes = coreml_diarizer_bytes(opts.model_gguf_path, ranges);
     const uint64_t required = apply_fit_verdict(r, opts.margin_bytes);
     std::string disabled_reason;
     const bool enabled = coreml_fit_enabled(opts, disabled_reason);
-    apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0);
+    apply_coreml_verdicts(r, required, enabled, disabled_reason, /*encoder_prebuilt=*/false, 0,
+                          coreml_generated_diarizer_bytes(opts, ranges));
     r.report = model_device_report(r) + nemotron_diarization_report(graphs, long_form) +
                device_projection_report(r, opts.margin_bytes, required,
                                         "every diarization graph shares one buffer") +

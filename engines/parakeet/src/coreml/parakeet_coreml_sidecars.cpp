@@ -110,14 +110,32 @@ CoremlSidecars::CoremlSidecars(const CoremlOptions & opts, std::shared_ptr<pcm::
 
 CoremlSidecars::~CoremlSidecars() = default;
 
-std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
+namespace {
+
+pcm::PlanInput plan_input(const SidecarRequest & request, const pcm::Resolved & resolved, const pcm::Manager & m) {
     pcm::PlanInput in;
     in.coreml_built = true;
-    in.generation_built = false;  // prebuilt sidecars only: Parakeet ships no generation templates yet
+    in.generation_built = pcm::generation::built();
     in.prebuilt_present = request.present;
-    in.units = resolved_.units_or(request.stage_default);
-    in.platform = manager_->platform();
-    in.os = manager_->os_version();
+    if (request.generated != nullptr) {
+        in.template_available = request.generated->available;
+        in.template_matched = request.generated->matched;
+        in.validated_units = request.generated->memory.validated_units;
+    }
+    in.units = resolved.units_or(request.stage_default);
+    in.platform = m.platform();
+    in.os = m.os_version();
+    return in;
+}
+
+}  // namespace
+
+pcm::Plan CoremlSidecars::plan(const SidecarRequest & request) const {
+    return pcm::plan(plan_input(request, resolved_, *manager_), resolved_);
+}
+
+std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
+    const pcm::PlanInput in = plan_input(request, resolved_, *manager_);
     const pcm::Plan plan = pcm::plan(in, resolved_);
 
     pcm::SlotSpec spec;
@@ -127,14 +145,40 @@ std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
     spec.route = plan.route;
     spec.none_state = plan.none_state;
     spec.none_reason = plan.reason;
-    spec.artifact_path = request.path;
     spec.load_fn = request.load_fn;
     spec.geometry = request.geometry;
-    spec.ane_compile_reserve_bytes =
-        plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
+    if (plan.route == pcm::Route::generate) {
+        // The artifact path comes from the prepare job (the published bundle).
+        spec.prepare = pcm::generation::prepare_request(*request.generated, request.source, resolved_);
+        spec.prepare_fn = &pcm::generation::prepare;
+        spec.tmpl = request.generated->tmpl;
+        spec.ane_compile_reserve_bytes = pcm::generation::ane_compile_reserve_bytes(request.generated->memory, in.units);
+    } else {
+        spec.artifact_path = request.path;
+        spec.ane_compile_reserve_bytes =
+            plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
+    }
     auto slot = manager_->make_slot(std::move(spec), pcm::SlotPolicy::from(resolved_));
     entries_.push_back(Entry{slot, request.minimal});
     return slot;
+}
+
+pcm::GenerationStatus CoremlSidecars::generation_status() const {
+    pcm::GenerationStatus g;
+    if (!pcm::generation::built()) {
+        g.reason = "build";
+    } else if (!resolved_.enabled()) {
+        g.reason = resolved_.disabled_reason.empty() ? "use=off" : resolved_.disabled_reason;
+    } else if (resolved_.generate == pcm::Generate::never) {
+        g.reason = "generate=never";
+    } else if (resolved_.cache_dir.empty()) {
+        g.reason = "no_cache_dir";
+    } else if (manager_->platform() != pcm::Platform::macos || !pcm::os_at_least(manager_->os_version(), 15, 0)) {
+        g.reason = "os";
+    } else {
+        g.supported = true;
+    }
+    return g;
 }
 
 std::vector<pcm::GroupRequest> CoremlSidecars::requests(pcm::Prewarm scope, pcm::GroupKind kind,
@@ -184,10 +228,7 @@ std::string CoremlSidecars::construction_json() const {
 }
 
 std::string CoremlSidecars::status_json() const {
-    pcm::GenerationStatus generation;
-    generation.supported = false;
-    generation.reason = "no_template";
-    return pcm::to_json(manager_->status(kEngine, resolved_.cache_dir, slots(), generation));
+    return pcm::to_json(manager_->status(kEngine, resolved_.cache_dir, slots(), generation_status()));
 }
 
 std::vector<std::shared_ptr<pcm::Slot>> CoremlSidecars::slots() const {

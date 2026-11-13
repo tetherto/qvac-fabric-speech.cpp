@@ -84,13 +84,16 @@ inline CoremlEncoderFitRoute coreml_encoder_fit_route(const std::string & sideca
 }
 
 // Fills the two verdicts from today's verdict. `required` is what today's
-// verdict charged (it includes the diarizer sidecars when the device shares
-// host memory); `encoder_envelope` is the encoder sidecar's envelope (0 with
-// no route). The top-level `fits` is left as it is: prebuilt routes keep
-// today's fit results until their model's PR validates them.
+// verdict charged (it includes the prebuilt diarizer sidecars when the device
+// shares host memory); `encoder_envelope` is the encoder sidecar's envelope (0
+// with no route); `generated_diarizers` is the Core ML envelope of the
+// diarizer capacities on route generate (validated templates only). The
+// top-level `fits` is left as it is: prebuilt routes keep today's fit results
+// until their model's PR validates them, and a generated route never turns a
+// working ggml verdict into a refusal (memory-degrade resolves use = off).
 inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_enabled,
                                   const std::string & disabled_reason, bool encoder_prebuilt,
-                                  uint64_t encoder_envelope) {
+                                  uint64_t encoder_envelope, uint64_t generated_diarizers = 0) {
     using fitutil::sat_add;
     const uint64_t diarizers = r.device_shares_host_memory ? r.coreml_bytes : 0;
     r.ggml_required_bytes = required >= diarizers ? required - diarizers : 0;
@@ -104,7 +107,8 @@ inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_
         return;
     }
     r.coreml.disabled_reason.clear();
-    r.coreml.bytes = sat_add(diarizers, encoder_prebuilt ? encoder_envelope : 0);
+    r.coreml.bytes = sat_add(sat_add(diarizers, encoder_prebuilt ? encoder_envelope : 0), generated_diarizers);
+    r.coreml.validated = generated_diarizers > 0;
     r.coreml.fits = sat_add(r.ggml_required_bytes, r.coreml.bytes) <= r.device_free_bytes;
 }
 

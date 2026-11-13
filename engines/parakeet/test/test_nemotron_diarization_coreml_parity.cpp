@@ -85,9 +85,16 @@ void unset_env(const char * name) {
 #endif
 }
 
+// --cache-dir: the diarizers are generated from the GGUF into this cache
+// directory (no adjacent bundle may exist), and the test fails unless every
+// capacity is generated or adopted from that cache.
+std::string g_cache_dir;
+
 bool load_model(const char * path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
     if (disable_coreml) set_env(kDisableEnv, "1");
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options());
+    parakeet::CoremlOptions options = coreml_ready_options();
+    if (!g_cache_dir.empty()) options.cache_dir = g_cache_dir;
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", options);
     if (disable_coreml) unset_env(kDisableEnv);
     return status == 0;
 }
@@ -183,14 +190,50 @@ bool run_cases(const parakeet::ParakeetCtcModel & accelerated, const parakeet::P
 
 }
 
+// Every diarizer stage of the status JSON came from the generation cache.
+bool every_diarizer_generated(const std::string & status) {
+    int stages = 0;
+    for (size_t at = status.find("\"stage\":\"diarizer-"); at != std::string::npos;
+         at = status.find("\"stage\":\"diarizer-", at + 1)) {
+        ++stages;
+        const size_t end = status.find('}', at);
+        const std::string stage = status.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (stage.find("\"route\":\"generated\"") == std::string::npos &&
+            stage.find("\"route\":\"cached\"") == std::string::npos) {
+            return false;
+        }
+    }
+    return stages > 0;
+}
+
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s MODEL.gguf AUDIO.wav\n", argv[0]);
+    std::vector<const char *> positional;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--cache-dir" && i + 1 < argc) {
+            g_cache_dir = argv[++i];
+        } else {
+            positional.push_back(argv[i]);
+        }
+    }
+    if (positional.size() != 2) {
+        std::fprintf(stderr, "usage: %s MODEL.gguf AUDIO.wav [--cache-dir DIR]\n", argv[0]);
         return 2;
     }
+    argv[1] = const_cast<char *>(positional[0]);
+    argv[2] = const_cast<char *>(positional[1]);
     parakeet::ParakeetCtcModel accelerated;
     parakeet::ParakeetCtcModel reference;
     if (!load_model(argv[1], false, accelerated)) return 1;
+    if (!g_cache_dir.empty()) {
+        // A generated run never skips: no diarizer, or one that is not from the
+        // cache, fails.
+        const std::string status = parakeet::model_coreml_status_json(accelerated);
+        std::printf("coreml status: %s\n", status.c_str());
+        if (!has_sidecars(accelerated) || !every_diarizer_generated(status)) {
+            std::printf("[FAIL] the diarizers were not generated into %s\n", g_cache_dir.c_str());
+            return 1;
+        }
+    }
     if (!has_sidecars(accelerated)) {
         std::printf("SKIP: no Core ML diarizer beside %s\n", argv[1]);
         return kSkip;

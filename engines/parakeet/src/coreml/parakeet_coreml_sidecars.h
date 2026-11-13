@@ -5,7 +5,9 @@
 // Every background-loaded sidecar of one model gets a slot: the encoder, the
 // Sortformer bypass encoder, and one per diarizer capacity. Slots load on the
 // runtime's load lane, in priority order, with memory admission for cold ANE
-// compiles; until a slot is ready its stage runs on ggml. The TDT decoder
+// compiles; until a slot is ready its stage runs on ggml. A stage with no
+// adjacent sidecar whose embedded template matches the GGUF is generated
+// into the cache directory first (route `generate`, prepare queue). The TDT decoder
 // bundle and an encoder that owns the encoder (encoder-less GGUF or
 // PARAKEET_COREML_ONLY) stay synchronous and are not slots.
 //
@@ -15,6 +17,7 @@
 
 #include "encoder_route.h"
 #include "parakeet/coreml_options.h"
+#include "qvac_coreml/generation.h"
 #include "qvac_coreml/manager.h"
 
 #include <atomic>
@@ -74,6 +77,10 @@ struct SidecarRequest {
     pcm::LoadFn load_fn = nullptr;
     std::vector<int64_t> geometry;  // validated by the loader (diarizer capacity)
     bool minimal = false;       // part of the minimal (construction) set
+    // Route generate: the stage's template as probed against the GGUF (null:
+    // prebuilt only) and the GGUF's stat tuple, taken when the model loaded.
+    const pcm::generation::Candidate * generated = nullptr;
+    pcm::SourceStat source;
 };
 
 // The sidecar slots of one loaded model.
@@ -93,10 +100,20 @@ public:
     const pcm::Resolved & resolved() const { return resolved_; }
     pcm::Manager & manager() const { return *manager_; }
 
-    // Registers a slot. Its route comes from plan(): `prebuilt` when the
-    // bundle is present and Core ML is enabled, otherwise `none` (disabled,
-    // absent), reported in status and listed as skipped in groups.
+    // The route plan() gives `request`: `prebuilt` when the bundle is present
+    // and Core ML is enabled; `generate` when there is none and its matched
+    // template can be generated (generator built, cache directory set,
+    // generate != never, macOS 15, the resolved units validated); otherwise
+    // `none` (disabled, absent, no_template, unsupported).
+    pcm::Plan plan(const SidecarRequest & request) const;
+
+    // Registers a slot with the route plan() gives it; a `none` route is
+    // reported in status and listed as skipped in groups.
     std::shared_ptr<pcm::Slot> add(const SidecarRequest & request);
+
+    // Whether this instance can generate sidecars, and why not (status
+    // "generation").
+    pcm::GenerationStatus generation_status() const;
 
     // Issues the construction group for the resolved prewarm scope; with
     // wait = construct, blocks until it finished. Call once, after every add().

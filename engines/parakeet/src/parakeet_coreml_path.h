@@ -56,4 +56,8 @@ struct CoremlFrameRange {
 uint64_t coreml_diarizer_resident_bytes(const std::vector<CoremlDiarizerBundle> & bundles,
                                         const std::vector<CoremlFrameRange> & ranges);
 
+// The capacities (ascending) that calls in `ranges` can load, by the same rule.
+std::vector<int> coreml_diarizer_loaded_capacities(const std::vector<int> & sorted_capacities,
+                                                   const std::vector<CoremlFrameRange> & ranges);
+
 }  // namespace parakeet

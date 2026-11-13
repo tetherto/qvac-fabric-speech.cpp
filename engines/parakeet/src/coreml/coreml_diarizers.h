@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coreml/parakeet-diarizer.h"
+#include "coreml/parakeet_coreml_sidecars.h"
 #include "parakeet_coreml_path.h"
 
 #include <memory>
@@ -33,9 +34,19 @@ struct CoremlDiarizerCallStats {
 // pcm::CoremlError instead; a pass longer than every capacity runs on ggml.
 class CoremlDiarizers {
 public:
+    // One capacity: an adjacent prebuilt bundle, or a template the runtime
+    // generates the bundle from (route generate), or both (prebuilt wins).
+    // `generated` is read only by the constructor.
+    struct Capacity {
+        int frames = 0;
+        bool prebuilt = false;
+        const pcm::generation::Candidate * generated = nullptr;
+    };
+
     // Registers one slot per capacity with `sidecars`; the smallest capacity
     // is in the minimal (construction) set.
     CoremlDiarizers(std::string gguf_path, std::vector<int> capacities, CoremlSidecars & sidecars);
+    CoremlDiarizers(std::string gguf_path, std::vector<Capacity> capacities, CoremlSidecars & sidecars);
     ~CoremlDiarizers();
     CoremlDiarizers(const CoremlDiarizers &) = delete;
     CoremlDiarizers & operator=(const CoremlDiarizers &) = delete;
@@ -66,7 +77,20 @@ bool coreml_diarizers_disabled();
 
 std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string & gguf_path);
 
+// A diarizer capacity the library can generate from an embedded template.
+struct CoremlDiarizerTemplate {
+    int frames = 0;
+    const char * template_id = nullptr;
+};
+
+// The Nemotron 3 Diarization templates (capacities 358, 745 and 1125).
+const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates();
+
+// The diarizer capacities of a model: every adjacent prebuilt bundle, plus
+// every template in `templates` whose route is generate (it matches the GGUF
+// and this instance can generate). Null when there is none.
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
-                                                           CoremlSidecars & sidecars);
+                                                           CoremlSidecars & sidecars,
+                                                           const std::vector<CoremlDiarizerTemplate> & templates = {});
 
 }

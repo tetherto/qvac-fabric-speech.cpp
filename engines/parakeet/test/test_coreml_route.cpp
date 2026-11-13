@@ -27,19 +27,35 @@
 //   options               public CoremlOptions -> runtime options, resolution
 //   fit-stable            the fit route and envelope never read the cache:
 //                         identical with no hint, a warm hint and a stale hint
+//   generated-sidecar     a stage with no adjacent bundle and a matching
+//                         template is generated into the cache (route
+//                         generate, fake compile), loads under the artifact's
+//                         lease and reports "generated", then "cached" in the
+//                         next instance; a GGUF the template does not match,
+//                         unvalidated units or no cache directory give no
+//                         route; the generated envelope and route are the
+//                         same before and after generation (fit-stable)
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
 #include "encoder_route.h"
 #include "long_form.h"
+#include "qvac_coreml/generation.h"
+
+#if defined(QVAC_COREML_HAVE_GGML)
+#include "ggml.h"
+#include "gguf.h"
+#endif
 
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -704,6 +720,182 @@ void case_fit_stable() {
 
 }  // namespace
 
+
+#if defined(QVAC_COREML_HAVE_GGML)
+// ---- generated sidecar ----------------------------------------------------------------
+
+// The fake on-device compile: a "bundle" holding the package's weights.
+std::string fake_compile(const std::string & pkg, const std::string & out) {
+    std::error_code ec;
+    fs::create_directories(fs::path(out) / "weights", ec);
+    fs::copy_file(fs::path(pkg) / "Data/com.apple.CoreML/weights/weight.bin", fs::path(out) / "weights/weight.bin", ec);
+    if (ec) return ec.message();
+    write_text(fs::path(out) / "model.mil", "fake program");
+    write_text(fs::path(out) / "coremldata.bin", "fake");
+    return {};
+}
+
+std::atomic<int> g_generated_loads{0};
+std::atomic<int> g_generated_leases{0};
+
+// Loads like an engine's LoadFn: under the artifact's lease, and the
+// "bundle" must hold the generated weights.
+pcm::LoadResult generated_load(const pcm::LoadRequest & req) {
+    pcm::LoadResult r;
+    if (!pcm::generation::begin_load(req, r)) return r;
+    if (r.lease_fd >= 0) ++g_generated_leases;
+    if (fs::file_size(fs::path(req.artifact_path) / "weights/weight.bin") == 4064) {
+        ++g_generated_loads;
+        r.model = std::make_shared<FakeEncoder>();
+    } else {
+        r.error = pcm::Error::deterministic("not the generated bundle");
+    }
+    pcm::generation::end_load(req, r);
+    return r;
+}
+
+// The toy-stateless template's GGUF: architecture qvac-toy, kind stateless.
+void write_toy_gguf(const fs::path & path, const char * kind, float scale) {
+    gguf_context * g = gguf_init_empty();
+    gguf_set_val_str(g, "general.architecture", "qvac-toy");
+    gguf_set_val_str(g, "qvac_toy.kind", kind);
+    ggml_init_params p{ggml_tensor_overhead() * 8 + 64 * 1024, nullptr, false};
+    ggml_context * ctx = ggml_init(p);
+    auto add = [&](const char * name, int64_t ne0, int64_t ne1) {
+        ggml_tensor * t = ne1 > 1 ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1)
+                                  : ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne0);
+        ggml_set_name(t, name);
+        float * d = static_cast<float *>(t->data);
+        for (int64_t i = 0; i < ggml_nelements(t); ++i) d[i] = scale * static_cast<float>((i % 17) - 8) / 16.0f;
+        gguf_add_tensor(g, t);
+    };
+    add("toy.w1", 8, 32);
+    add("toy.b1", 32, 1);
+    add("toy.w2", 48, 32);
+    add("toy.b2", 48, 1);
+    gguf_write_to_file(g, path.c_str(), false);
+    gguf_free(g);
+    ggml_free(ctx);
+}
+
+void case_generated_sidecar() {
+    const fs::path dir = make_temp_dir("generated");
+    // The toy template, validated for cpu_and_ane, under a development template directory.
+    const fs::path templates = dir / "templates";
+    fs::create_directories(templates);
+    fs::copy(fs::path(QVAC_COREML_TOY_TEMPLATES) / "toy-stateless", templates / "toy-stateless");
+    {
+        std::ifstream in(templates / "toy-stateless" / "template.json");
+        std::string j((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string from = "\"validated_for\": []";
+        const size_t at = j.find(from);
+        CHECK(at != std::string::npos, "the toy template lists validated_for");
+        if (at == std::string::npos) return;
+        j.replace(at, from.size(), "\"validated_for\": [{\"units\": \"cpu_and_ane\", \"os\": \"test\", \"chip\": \"test\"}]");
+        write_text(templates / "toy-stateless" / "template.json", j);
+    }
+    ::setenv("QVAC_COREML_TEMPLATE_DIR", templates.c_str(), 1);
+    const fs::path gguf = dir / "m.gguf";
+    write_toy_gguf(gguf, "stateless", 1.0f);
+    const fs::path other = dir / "other.gguf";
+    write_toy_gguf(other, "multi", 1.0f);
+    pcm::generation::set_compile_override(&fake_compile);
+
+    pcm::Config cfg = fast_config();
+    cfg.platform = pcm::Platform::macos;
+    cfg.os = pcm::OsVersion{15, 7, 0};
+    auto m = pcm::Manager::create(cfg);
+
+    CoremlOptions opts;
+    opts.cache_dir = (dir / "cache").string();
+    opts.wait = CoremlOptions::Wait::construct;
+    opts.prewarm = CoremlOptions::Prewarm::all;
+
+    auto request_for = [&](const pcm::generation::Candidate * c, const fs::path & model) {
+        SidecarRequest r;
+        r.stage = "diarizer-358";
+        r.path = (dir / "m-diarizer-358.mlmodelc").string();  // absent: no prebuilt
+        r.present = false;
+        r.stage_default = pcm::ComputeUnits::cpu_and_ane;
+        r.load_fn = &generated_load;
+        r.geometry = {358};
+        r.minimal = true;
+        r.generated = c;
+        pcm::generation::source_stat(model.string(), r.source);
+        return r;
+    };
+
+    std::vector<pcm::generation::Candidate> probed;
+    uint64_t envelope_before = 0;
+    {
+        CoremlSidecars sidecars(opts, m);
+        CHECK(sidecars.generation_status().supported, "generation is supported with a cache directory on macOS 15");
+        probed = pcm::generation::probe({"toy-stateless", "no-such-template"}, gguf.string(), sidecars.resolved());
+        CHECK(probed.size() == 2 && probed[0].available && probed[0].matched, "the template matches its GGUF");
+        CHECK(probed.size() == 2 && !probed[1].available, "an unknown template is unavailable");
+        if (probed.size() != 2 || !probed[0].matched) return;
+        CHECK(probed[0].memory.weight_bin_size == 4064 && probed[0].memory.validated_units.size() == 1,
+              "the template's memory section is read");
+        envelope_before = pcm::generation::envelope_bytes(probed[0].memory, pcm::ComputeUnits::cpu_and_ane);
+        // resident 4064 + 2 x (8 + 48) x 4 = 4512; transient max(generation peak + 8 MiB + 2032, 1016); x1.25.
+        const double transient = static_cast<double>(probed[0].memory.generation_peak_bytes) + 8388608.0 + 2032.0;
+        CHECK(envelope_before == static_cast<uint64_t>(std::ceil((4512.0 + transient) * 1.25)),
+              "envelope arithmetic (default factors)");
+        auto slot = sidecars.add(request_for(&probed[0], gguf));
+        CHECK(slot->spec().route == pcm::Route::generate, "no prebuilt and a matching template: route generate");
+        CHECK(slot->spec().artifact_path.empty() && slot->spec().prepare_fn != nullptr, "the prepare job supplies the path");
+        CHECK(slot->spec().ane_compile_reserve_bytes == static_cast<uint64_t>(std::ceil(4064 * 1.6)),
+              "the cold-compile reserve comes from the template");
+        sidecars.start();
+        CHECK(slot->state() == pcm::SlotState::ready, "generated, compiled and loaded during construction");
+        const pcm::SlotStatus st = slot->status();
+        CHECK(st.route == pcm::StatusRoute::generated, "status route generated");
+        CHECK(st.path.find("qvac-coreml-v1/artifacts/toy-stateless.") != std::string::npos, "the artifact is in the cache");
+        CHECK(g_generated_loads == 1 && g_generated_leases == 1, "the load held the artifact's lease");
+        CHECK(sidecars.status_json().find("\"generated\"") != std::string::npos, "status JSON");
+
+        // Unvalidated units and a mismatching GGUF give no route.
+        CoremlOptions gpu = opts;
+        gpu.compute_units = "cpu_and_gpu";
+        CoremlSidecars gpu_sidecars(gpu, m);
+        CHECK(gpu_sidecars.plan(request_for(&probed[0], gguf)).route == pcm::Route::none &&
+                  gpu_sidecars.plan(request_for(&probed[0], gguf)).reason == "unvalidated_units",
+              "units the template was not validated for suppress generation");
+        const std::vector<pcm::generation::Candidate> mismatch =
+            pcm::generation::probe({"toy-stateless"}, other.string(), sidecars.resolved());
+        CHECK(!mismatch.empty() && mismatch[0].available && !mismatch[0].matched, "another GGUF does not match");
+        CHECK(!mismatch.empty() && sidecars.plan(request_for(&mismatch[0], other)).none_state == pcm::SlotState::no_template,
+              "a mismatching GGUF reports no_template");
+        CoremlOptions no_cache = opts;
+        no_cache.cache_dir = "";
+        CoremlSidecars no_cache_sidecars(no_cache, m);
+        CHECK(!no_cache_sidecars.generation_status().supported &&
+                  no_cache_sidecars.generation_status().reason == "no_cache_dir",
+              "no cache directory, no generation");
+        CHECK(no_cache_sidecars.plan(request_for(&probed[0], gguf)).route == pcm::Route::none, "and no route");
+    }
+    {
+        // The next instance finds the artifact: route generate again (plan()
+        // never reads the cache), status route cached, nothing compiled.
+        CoremlSidecars sidecars(opts, m);
+        const std::vector<pcm::generation::Candidate> again =
+            pcm::generation::probe({"toy-stateless"}, gguf.string(), sidecars.resolved());
+        CHECK(!again.empty() && again[0].matched, "the template still matches");
+        if (again.empty()) return;
+        CHECK(pcm::generation::envelope_bytes(again[0].memory, pcm::ComputeUnits::cpu_and_ane) == envelope_before,
+              "fit-stable: the generated envelope is the same once the artifact exists");
+        auto slot = sidecars.add(request_for(&again[0], gguf));
+        CHECK(slot->spec().route == pcm::Route::generate, "fit-stable: the route is the same once the artifact exists");
+        sidecars.start();
+        CHECK(slot->state() == pcm::SlotState::ready && slot->status().route == pcm::StatusRoute::cached,
+              "the second instance adopts the cached artifact");
+        CHECK(g_generated_loads == 2, "loaded again from the cache");
+    }
+    pcm::generation::set_compile_override(nullptr);
+    ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
+}
+#endif
+
 int main() {
     case_null_route_plan();
     case_window_k_failure_and_next_call();
@@ -714,6 +906,9 @@ int main() {
     case_sidecar_groups();
     case_options();
     case_fit_stable();
+#if defined(QVAC_COREML_HAVE_GGML)
+    case_generated_sidecar();
+#endif
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

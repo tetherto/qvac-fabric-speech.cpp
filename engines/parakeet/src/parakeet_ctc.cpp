@@ -1960,11 +1960,22 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
                                         ParakeetCtcModel  & model,
                                         bool                verbose) {
     if (std::getenv(kCoremlDiarizerDisableEnv) != nullptr) return;
-    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml);
+    // Nemotron 3 Diarization capacities without an adjacent bundle are
+    // generated from the library's templates (when this instance can).
+    static const std::vector<CoremlDiarizerTemplate> kNoTemplates;
+    const std::vector<CoremlDiarizerTemplate> & templates =
+        model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
+    model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates);
     if (model.impl->coreml_diarizers) {
         for (int capacity : model.impl->coreml_diarizers->capacities()) {
-            PARAKEET_LOG_INFO("parakeet: Core ML diarizer available for %d frames at '%s'\n",
-                capacity, coreml_diarizer_sidecar_path(gguf_path, capacity).c_str());
+            const std::string path = coreml_diarizer_sidecar_path(gguf_path, capacity);
+            if (path_is_directory(path)) {
+                PARAKEET_LOG_INFO("parakeet: Core ML diarizer available for %d frames at '%s'\n", capacity,
+                                  path.c_str());
+            } else {
+                PARAKEET_LOG_INFO("parakeet: Core ML diarizer for %d frames is generated from the GGUF into '%s'\n",
+                                  capacity, model.impl->coreml->resolved().cache_dir.c_str());
+            }
         }
     } else if (verbose) {
         PARAKEET_LOG_INFO("parakeet: no Core ML diarizer beside '%s'; using ggml\n",

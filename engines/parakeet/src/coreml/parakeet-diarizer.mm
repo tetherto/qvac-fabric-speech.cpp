@@ -406,8 +406,10 @@ namespace {
 
 // Runs on the runtime's load lane with the resolved units: never reads
 // the environment. The capacity the bundle reports must match its file name.
+// A generated bundle (request.tmpl set) loads under its cache entry's lease.
 pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
+    if (!pcm::generation::begin_load(request, result)) return result;
     const int64_t capacity = request.geometry.empty() ? 0 : request.geometry.front();
     parakeet_coreml_diarizer * context = parakeet_coreml_diarizer_init_with_units(
         request.artifact_path.c_str(), pcm::to_string(request.units));
@@ -416,12 +418,14 @@ pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
                           request.artifact_path.c_str());
         parakeet_coreml_diarizer_free(context);
         result.error = pcm::Error::deterministic("failed to load Core ML diarizer", "parakeet", capacity);
+        pcm::generation::end_load(request, result);
         return result;
     }
     PARAKEET_LOG_INFO("parakeet: Core ML diarizer loaded from '%s'\n", request.artifact_path.c_str());
     result.model = std::shared_ptr<void>(context, [](void * p) {
         parakeet_coreml_diarizer_free(static_cast<parakeet_coreml_diarizer *>(p));
     });
+    pcm::generation::end_load(request, result);
     return result;
 }
 
@@ -444,24 +448,53 @@ struct CoremlDiarizers::State {
     CoremlDiarizerCallStats stats;
 };
 
+namespace {
+
+std::vector<CoremlDiarizers::Capacity> prebuilt_only(const std::vector<int> & capacities) {
+    std::vector<CoremlDiarizers::Capacity> out;
+    for (int capacity : capacities) out.push_back(CoremlDiarizers::Capacity{capacity, true, nullptr});
+    return out;
+}
+
+SidecarRequest diarizer_request(const std::string & gguf_path, const CoremlDiarizers::Capacity & c,
+                                const pcm::SourceStat & source) {
+    SidecarRequest request;
+    request.stage = "diarizer-" + std::to_string(c.frames);
+    request.path = coreml_diarizer_sidecar_path(gguf_path, c.frames);
+    request.present = c.prebuilt;
+    request.stage_default = pcm::ComputeUnits::cpu_and_ane;
+    request.load_fn = &load_diarizer;
+    request.geometry = {c.frames};
+    request.generated = c.generated;
+    request.source = source;
+    return request;
+}
+
+}  // namespace
+
 CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacities,
+                                 CoremlSidecars & sidecars)
+    : CoremlDiarizers(std::move(gguf_path), prebuilt_only(capacities), sidecars) {}
+
+CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<Capacity> capacities,
                                  CoremlSidecars & sidecars)
     : state_(std::make_unique<State>()) {
     state_->gguf_path = std::move(gguf_path);
     state_->strict = sidecars.resolved().strict();
-    std::sort(capacities.begin(), capacities.end());
-    for (int capacity : capacities) {
-        SidecarRequest request;
-        request.stage = "diarizer-" + std::to_string(capacity);
-        request.path = coreml_diarizer_sidecar_path(state_->gguf_path, capacity);
-        request.present = true;
-        request.stage_default = pcm::ComputeUnits::cpu_and_ane;
-        request.load_fn = &load_diarizer;
-        request.geometry = {capacity};
+    std::sort(capacities.begin(), capacities.end(),
+              [](const Capacity & a, const Capacity & b) { return a.frames < b.frames; });
+    pcm::SourceStat source;
+    for (const Capacity & c : capacities) {
+        if (c.generated != nullptr && !c.prebuilt && source.path.empty()) {
+            pcm::generation::source_stat(state_->gguf_path, source);
+        }
+    }
+    for (const Capacity & c : capacities) {
+        SidecarRequest request = diarizer_request(state_->gguf_path, c, source);
         // The smallest capacity is the minimal set; larger ones are
         // requested by the call that needs them (or by prewarm = all).
         request.minimal = state_->capacities.empty();
-        state_->capacities.push_back(State::Capacity{capacity, sidecars.add(request)});
+        state_->capacities.push_back(State::Capacity{c.frames, sidecars.add(request)});
     }
 }
 
@@ -566,9 +599,42 @@ CoremlDiarizerCallStats CoremlDiarizers::call_stats() {
     return state_->stats;
 }
 
+const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates() {
+    static const std::vector<CoremlDiarizerTemplate> templates = {
+        {358, "nemotron-diar-f358"}, {745, "nemotron-diar-f745"}, {1125, "nemotron-diar-f1125"}};
+    return templates;
+}
+
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
-                                                           CoremlSidecars & sidecars) {
-    std::vector<int> capacities = scan_capacities(gguf_path);
+                                                           CoremlSidecars & sidecars,
+                                                           const std::vector<CoremlDiarizerTemplate> & templates) {
+    std::vector<CoremlDiarizers::Capacity> capacities = prebuilt_only(scan_capacities(gguf_path));
+    // Templates are probed (the GGUF's metadata and tensor shapes) only when
+    // this instance can generate at all. The candidates are read only while
+    // the slots are registered below.
+    std::vector<pcm::generation::Candidate> probed;
+    if (!templates.empty() && sidecars.generation_status().supported) {
+        std::vector<std::string> ids;
+        for (const CoremlDiarizerTemplate & t : templates) ids.emplace_back(t.template_id);
+        probed = pcm::generation::probe(ids, gguf_path, sidecars.resolved());
+        pcm::SourceStat source;
+        pcm::generation::source_stat(gguf_path, source);
+        for (size_t i = 0; i < templates.size() && i < probed.size(); ++i) {
+            auto found = std::find_if(capacities.begin(), capacities.end(), [&](const CoremlDiarizers::Capacity & c) {
+                return c.frames == templates[i].frames;
+            });
+            if (found != capacities.end()) continue;  // an adjacent prebuilt bundle wins
+            const CoremlDiarizers::Capacity c{templates[i].frames, false, &probed[i]};
+            const pcm::Plan plan = sidecars.plan(diarizer_request(gguf_path, c, source));
+            if (plan.route != pcm::Route::generate) {
+                PARAKEET_LOG_INFO("parakeet: no Core ML diarizer for %d frames is generated (%s: %s)\n",
+                                  c.frames, probed[i].template_id.c_str(),
+                                  probed[i].matched ? plan.reason.c_str() : probed[i].reason.c_str());
+                continue;
+            }
+            capacities.push_back(c);
+        }
+    }
     if (capacities.empty()) return nullptr;
     return std::make_unique<CoremlDiarizers>(gguf_path, std::move(capacities), sidecars);
 }
