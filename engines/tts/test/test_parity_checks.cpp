@@ -1,6 +1,7 @@
 // Model-free checks that the fixture harnesses reject corrupt output.
 #include "parity_test.h"
 
+#include <filesystem>
 #include <limits>
 
 namespace {
@@ -72,10 +73,44 @@ void test_token_parity() {
     check(!passes(tokens), "wrong token dtype fails");
 }
 
+void expect_truncated_file(const std::filesystem::path & path, uintmax_t size, const char * field) {
+    std::filesystem::resize_file(path, size);
+    try {
+        const auto ref = npy_load(path.string());
+        const bool passed = tts_test::check_f32("truncated file", {1.0f, -2.0f, 0.0f},
+                                                {3}, ref, kTolerance);
+        check(!passed, "a zero-filled truncated reference must not pass parity");
+        check(false, "loading a truncated file must throw");
+    } catch (const std::runtime_error & error) {
+        check(std::string(error.what()).find(std::string("truncated ") + field) != std::string::npos,
+              "truncation identifies the incomplete field");
+    }
+}
+
+void test_npy_payload_reads(const std::filesystem::path & path) {
+    const std::vector<float> values = {1.0f, -2.0f, 0.0f};
+    npy_save_f32(path.string(), {3}, values.data());
+    const auto full_size = std::filesystem::file_size(path);
+    check(tts_test::check_f32("complete file", values, {3}, npy_load(path.string()), kTolerance),
+          "complete on-disk reference including a zero tail passes");
+    expect_truncated_file(path, full_size - 1, "payload");
+    expect_truncated_file(path, full_size - sizeof(float), "payload");
+    expect_truncated_file(path, full_size - values.size() * sizeof(float), "payload");
+    expect_truncated_file(path, full_size - values.size() * sizeof(float) - 1, "header");
+    expect_truncated_file(path, 9, "header length");
+    expect_truncated_file(path, 7, "version");
+    expect_truncated_file(path, 5, "magic");
+    npy_save_f32(path.string(), {0}, values.data());
+    check(npy_load(path.string()).data.empty(), "complete empty payload remains readable");
+    std::filesystem::remove(path);
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    if (argc != 2) { std::fprintf(stderr, "usage: %s REFERENCE.npy\n", argv[0]); return 1; }
     test_float_parity();
     test_token_parity();
+    test_npy_payload_reads(argv[1]);
     return failures == 0 ? 0 : 1;
 }

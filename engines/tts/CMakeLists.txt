@@ -2928,10 +2928,13 @@ if (TTS_CPP_BUILD_TESTS)
     add_executable(test-parity-checks test/test_parity_checks.cpp)
     target_include_directories(test-parity-checks PRIVATE src)
     tts_cpp_apply_ccache(test-parity-checks)
-    tts_cpp_register_test(test-parity-checks LABEL "unit")
+    tts_cpp_register_test(test-parity-checks LABEL "unit"
+        ARGS "${CMAKE_CURRENT_BINARY_DIR}/parity reference.npy")
 
     set(_tcb_campplus_ref "${TTS_CPP_TEST_REF_DIR}/campplus-ref")
     set(_tcb_tokenizer_ref "${TTS_CPP_TEST_REF_DIR}/s3tokenizer-ref")
+
+    set(_tcb_voice_features_ref "${TTS_CPP_TEST_REF_DIR}/voice-features-ref")
 
     add_executable(test-voice-features
         test/test_voice_features.cpp
@@ -2943,8 +2946,17 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-voice-features)
     tts_cpp_register_test(test-voice-features
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_jfk_wav}" "${_tcb_s3gen_ref}/prompt_feat.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_jfk_wav}" "${_tcb_s3gen_ref}/prompt_feat.npy")
+        ARGS     "${_tcb_voice_features_ref}/filterbank.gguf"
+                 "${_tcb_voice_features_ref}/reference.wav" "${_tcb_voice_features_ref}/prompt_feat.npy"
+        REQUIRES "${_tcb_voice_features_ref}/filterbank.gguf"
+                 "${_tcb_voice_features_ref}/reference.wav" "${_tcb_voice_features_ref}/prompt_feat.npy")
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-voice-features-reference
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_voice_features_reference.py"
+                    $<TARGET_FILE:test-voice-features>)
+        set_tests_properties(test-voice-features-reference PROPERTIES
+            LABELS "unit" SKIP_RETURN_CODE 77 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
 
     add_executable(test-resample
         test/test_resample.cpp

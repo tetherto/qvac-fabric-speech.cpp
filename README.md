@@ -290,7 +290,8 @@ uses this gate.
 
 TTS's [test guide](engines/tts/docs/testing.md) separates model-free checks
 from optional numerical fixtures and documents how to generate independent
-CAMPPlus and speech-tokenizer references. Chatterbox preprocessing and streaming
+WAV/mel, CAMPPlus and speech-tokenizer references. WAV/mel fixtures need no model
+checkpoint, and NPY loading rejects truncated files. Chatterbox preprocessing and streaming
 parity harnesses reject numerical mismatches, non-finite values and incomplete
 output.
 

@@ -50,15 +50,19 @@ harnesses enforce a maximum relative error below `2e-3` (maximum absolute error
 divided by the reference peak; absolute error when that peak is zero).
 S3TokenizerV2 uses the same bound for log-mel features and requires exact token
 agreement. All require nonempty output, exact shape, float32/int32 reference
-types and finite compared values. These initial bounds still require calibration
+types and finite compared values. The model-dependent bounds still require calibration
 on staged model/reference fixtures; compiling the harnesses does not establish
 numerical parity.
 
 Keep the reference generators in separate directories: `embedding.npy` and
 `wav_16k.npy` have different meanings across dumps. Generate these references
-with the Chatterbox Python dependencies installed, from `engines/tts`:
+from `engines/tts`. The voice-features generator needs `gguf`, `librosa`,
+`numpy`, `scipy` and `torch`, without a model checkpoint. The other generators
+need the Chatterbox Python dependencies:
 
 ```bash
+python scripts/dump-voice-features-reference.py test/reference-audio/jfk.wav \
+  --out artifacts/voice-features-ref
 python scripts/dump-campplus-reference.py test/reference-audio/jfk.wav \
   --out artifacts/campplus-ref
 python scripts/dump-s3tokenizer-reference.py test/reference-audio/jfk.wav \
@@ -74,10 +78,14 @@ pipeline catches preprocessing and composition errors. `test-s3tokenizer` uses
 `s3tokenizer-ref/tokens.npy`, not the T3-generated `speech_tokens.npy` from
 `s3gen-ref`. Reconfigure CMake after staging these files.
 
-The WAV-based voice-features and VoiceEncoder checks require references made
-from the exact input WAV and the same preprocessing. The default conditioning
-saved by `dump-s3gen-reference.py` is not a reference for an arbitrary WAV;
-copying those arrays into place does not create a valid fixture pair.
+`test-voice-features` consumes only the matched `voice-features-ref` bundle:
+`reference.wav`, `filterbank.gguf` and `prompt_feat.npy`. Its generator resamples
+the supplied WAV to 24 kHz and saves float32 samples before computing the
+reference with torch STFT and the librosa filterbank. The harness reads that
+exact saved waveform; its gate covers WAV loading and mel extraction.
+`test-resample` covers resampling separately. The packaged conditionals from
+`dump-s3gen-reference.py` are not references for JFK and are not used here.
+VoiceEncoder references must also match their input WAV and preprocessing.
 
 `test-tts-streaming` requires each chunk's saved `step0_x_in` noise, enforces
 mel shape and numerical parity at `2e-3`, and rejects zero chunks, incomplete
@@ -87,6 +95,10 @@ This test does not establish waveform parity or perceptual speech quality.
 
 Model-free `test-parity-checks` exercises the rejection criteria (including
 matching prefixes with missing tails and NaN/infinity in either operand).
+It also writes real NPY files and verifies that short payload/header reads throw,
+including a missing final zero sample. `test-voice-features-reference` generates
+a matched WAV/mel bundle and checks that the C++ harness accepts it and rejects
+a reference from different audio; it skips when its Python dependencies are absent.
 `test-streaming-fixture-validation` checks malformed fixture rejection through
 the streaming executable without a model. `test-supertonic-api` consolidates
 warm-up, deny-list and K/V API/default contracts and checks nested dispatch-scope
