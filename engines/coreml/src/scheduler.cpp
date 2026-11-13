@@ -889,9 +889,14 @@ void Runtime::set_phase(const std::shared_ptr<Job> & j, SlotState st) {
 void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    fail_locked(j, e, st, gy);
+}
+
+void Runtime::fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy) {
     j->done = true;
     gy.keep(j->adopt);  // released outside mu
     j->adopt.reset();
+    queue_.erase(std::remove(queue_.begin(), queue_.end(), j), queue_.end());  // a job not started yet
     if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
     for (const Sub & s : j->subs) {
         std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
@@ -909,6 +914,11 @@ void Runtime::fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st
 void Runtime::requeue(const std::shared_ptr<Job> & j) {
     Graveyard gy;
     std::lock_guard<std::mutex> lk(mu);
+    if (auto r = retired_.find(j->model_key); j->kind == JobKind::load && r != retired_.end()) {
+        // Retired while it ran: a retired key never has a queued load.
+        fail_locked(j, Error::deterministic(r->second), SlotState::retired, gy);
+        return;
+    }
     const Clock::time_point now = Clock::now();
     const int64_t initial = cfg.backoff_initial.count();
     const int64_t maxb = cfg.backoff_max.count();
@@ -1103,7 +1113,10 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
     j->adopt.reset();
     if (auto f = inflight_.find(j->dedup_key); f != inflight_.end() && f->second == j) inflight_.erase(f);
     if (auto r = retired_.find(j->model_key); r != retired_.end()) {
-        // Retired while this load ran: deliver nothing.
+        // Retired while this load ran: deliver nothing. The instance is
+        // released when the caller drops it, and reports the retirement
+        // meanwhile, like every instance of the key.
+        m->retired_ = true;
         for (const Sub & s : j->subs) {
             std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
             if (!c) continue;
@@ -1115,6 +1128,7 @@ void Runtime::publish(const std::shared_ptr<Job> & j, const std::shared_ptr<Shar
         return;
     }
     if (j->shareable) registry_[j->model_key] = RegEntry{m, m.get()};
+    if (loaded) instances_[j->model_key].push_back(m.get());  // an adopted instance is listed already
     const std::vector<Sub> subs = j->subs;  // a subscriber may move to a new job below
     for (const Sub & s : subs) {
         std::shared_ptr<SlotCore> c = live_core(s, *j, gy);
@@ -1343,20 +1357,39 @@ void Runtime::retire_model(SharedModel & m, const std::string & reason) {
     retire_model_locked(m, reason, gy);
 }
 
-// `m` stays alive until `gy` is released: every slot reference to it moves
-// there through drop_model_locked (a pending release of its pool).
+// Retirement is by key, not by instance: a stateful template has one instance
+// per owner, and retiring through one owner's failure path reaches the
+// others'. Every instance of the key reports retired(), including one that only
+// a unit's Handle still holds (the unit finishes with it). Every slot holding
+// one drops it through drop_model_locked, so a pooled slot's reference leaves
+// as a pending release of its pool and the place is kept until the native
+// deleter has run. `m` and the dropped instances stay alive until `gy` is
+// released. A load of the key not started yet ends now, before its admission
+// could evict a resident for it; one already running completes without
+// delivering anything (publish()).
 void Runtime::retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy) {
+    const std::string key = m.key_;
     m.retired_ = true;
-    retired_[m.key_] = reason;
-    registry_.erase(m.key_);
+    retired_[key] = reason;
+    registry_.erase(key);
+    if (auto it = instances_.find(key); it != instances_.end()) {
+        for (SharedModel * i : it->second) i->retired_ = true;
+    }
     for (const auto & w : slots_) {
         std::shared_ptr<SlotCore> c = w.lock();
         if (!c) continue;
         gy.keep(c);
-        if (c->model.get() != &m) continue;
+        if (!c->model || c->model->key_ != key) continue;
         drop_model_locked(*c, gy);
         c->state = SlotState::retired;
         c->reason = reason;
+    }
+    std::vector<std::shared_ptr<Job>> unstarted;
+    for (const std::shared_ptr<Job> & q : queue_) {
+        if (q->kind == JobKind::load && q->model_key == key) unstarted.push_back(q);
+    }
+    for (const std::shared_ptr<Job> & q : unstarted) {
+        fail_locked(q, Error::deterministic(reason), SlotState::retired, gy);
     }
     event_locked("retire:" + m.req_.stage + "/" + m.req_.function + ":" + reason);
     bump_locked();
@@ -1378,9 +1411,14 @@ void Runtime::retire_slot(const std::shared_ptr<SlotCore> & c, const std::string
     bump_locked();
 }
 
-void Runtime::on_model_released(const std::string & key) {
+void Runtime::on_model_released(const std::string & key, const SharedModel * m) {
     std::lock_guard<std::mutex> lk(mu);
     if (auto it = registry_.find(key); it != registry_.end() && it->second.model.expired()) registry_.erase(it);
+    if (auto it = instances_.find(key); it != instances_.end()) {
+        std::vector<SharedModel *> & v = it->second;
+        v.erase(std::remove(v.begin(), v.end(), m), v.end());
+        if (v.empty()) instances_.erase(it);
+    }
     bump_locked();
 }
 
