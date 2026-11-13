@@ -117,6 +117,75 @@ they run 1.4-2.7x faster than ggml Metal. On an M3 Ultra, whose GPU is faster,
 they only tie with it (0.70-1.17x), so leave them out on Max and Ultra
 machines; see [the diarizer guide](docs/backends.md#core-ml-diarizer-sidecars).
 
+### Background loading, waiting and status
+
+Encoder, bypass-encoder and diarizer sidecars load in the background. The
+`Engine` constructor returns as soon as the GGUF is loaded. Until a sidecar
+is ready, every call runs on ggml with the same plan as a ggml-only build, and
+the result reports `coreml_pending = true`. The backend is chosen once per call
+(one transcription, one diarization or one streaming window), so a sidecar
+that becomes ready part-way through a call is used from the next call. A
+prediction that fails retires the sidecar for the rest of the process, and the
+call finishes on ggml (`encoder_backend` is `"mixed"` when some windows had
+already run on Core ML). An input the sidecar cannot take, such as one longer
+than a fixed capacity, runs that call on ggml and keeps the sidecar. Two loads
+still happen inside the constructor: the TDT decoder sidecar, and an encoder
+sidecar that owns the encoder (a GGUF without encoder weights, or
+`PARAKEET_COREML_ONLY`).
+
+`EngineOptions::coreml` (`parakeet::CoremlOptions`, in
+`include/parakeet/coreml_options.h`) controls this. Every field is unset by
+default and resolves, in order, from the field, the environment, then the
+default. `PARAKEET_COREML_DISABLE` forces `use = off` and overrides
+everything.
+
+| Field | Values (default first) | Meaning |
+|---|---|---|
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled), the sidecar rejects the shape, or a prediction fails. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
+| `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
+| `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. |
+| `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where warm-load hints are kept. Without it no hints are kept. |
+| `strict_wait_ms` | unbounded | Upper bound on the wait under `use = require`. |
+| `memory_budget_bytes` | none | The memory budget the caller checked with `parakeet-fit-params`. When it is set, and the ggml-only fit passes but the fit including the Core ML sidecars does not, the sidecars are disabled for this engine and it runs on ggml. |
+
+The engine reports progress through these methods:
+
+- `Engine::coreml_status_json()` returns one JSON entry per sidecar: `stage`,
+  `state` (`queued`, `loading`, `ready`, `failed`, `retired`, ...), `route`
+  (`prebuilt`, `cached`, `generated` or `none`), `compute_units`, `label`,
+  `path`, timings and the warm hint. It returns `{}` on builds without
+  `PARAKEET_COREML`.
+- `Engine::coreml_wait(timeout_ms)` blocks until the construction group has
+  finished (no limit when `timeout_ms < 0`), and returns true when every
+  sidecar in it is ready.
+- `Engine::coreml_prewarm(scope, wait)` requests more sidecars (for example
+  every diarizer capacity) and, with `wait`, blocks until they finish.
+- `Engine::coreml_construction_json()` returns the construction group's result.
+- `Engine::encoder_on_coreml()` reports whether a sidecar is ready now. It is
+  false while a load is in flight.
+- `EngineResult::encoder_used_coreml`, `encoder_backend` and `coreml_pending`
+  report where each call ran. `DiarizationResult` has the same fields.
+
+The `parakeet` CLI exposes the same controls:
+
+| Flag | Values |
+|---|---|
+| `--coreml-use MODE` | `auto` (default), `off` or `require` |
+| `--coreml-wait MODE` | `none` (default), `construct` or `call` |
+| `--coreml-prewarm SCOPE` | `none`, `minimal`, `predicted` (default) or `all` |
+| `--coreml-compute-units U` | `all`, `cpu_and_ane`, `cpu_and_gpu` or `cpu_only` |
+| `--coreml-cache-dir DIR` | default `QVAC_COREML_CACHE_DIR`, else `~/Library/Application Support/qvac-speech/coreml` |
+| `--coreml-status-json PATH` | writes the status JSON on exit; `-` writes to stdout |
+
+```bash
+parakeet --model tdt-0.6b-v3-q8_0.gguf --wav talk.wav \
+    --coreml-wait construct --coreml-prewarm all --coreml-status-json -
+```
+
+`--require-coreml` (benchmark mode) implies `--coreml-wait construct`, so the
+benchmark measures the sidecar and not the ggml calls made while it loads.
+
 ## Backend selection
 
 `parakeet --backend NAME` and `EngineOptions::backend` select the runtime device
