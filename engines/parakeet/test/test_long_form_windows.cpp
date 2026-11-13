@@ -218,6 +218,16 @@ void check_window_resolution() {
 
 void check_coreml_fixed_shape_resolution() {
     using parakeet::LongFormPlan;
+    using parakeet::resolve_coreml_tdt_shape_plan;
+
+    for (const int frames : {1000, 1501, 1502, 2331, 9001}) {
+        expect(!resolve_coreml_tdt_shape_plan(1501, 0, 8, frames, 0).enabled,
+               "legacy TDT sidecars must not force short encoder windows");
+    }
+    expect(resolve_coreml_tdt_shape_plan(1500, 16, 8, 9001, 16).enabled,
+           "validated masked TDT sidecars retain their seam policy");
+    expect(!resolve_coreml_tdt_shape_plan(1500, 16, 8, 1500, 16).enabled,
+           "validated TDT inputs within capacity stay single-pass");
 
     expect(!resolve_coreml_fixed_shape_plan(0, 0, 8, 5000).enabled,
            "coreml resolve: unknown/flexible capacity stays disabled");

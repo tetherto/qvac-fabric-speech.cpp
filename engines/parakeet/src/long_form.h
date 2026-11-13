@@ -332,6 +332,19 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     return plan;
 }
 
+// Legacy TDT sidecars have no validated seam policy. Their short windows can
+// leave the decoder emitting blanks or repetitions for whole phrases. Keep the
+// normal ggml plan for oversized inputs; masked ANE exports supply seam context.
+inline LongFormPlan resolve_coreml_tdt_shape_plan(int fixed_mel_frames,
+                                                 int requested_context_frames,
+                                                 int subsampling_factor,
+                                                 long long n_mel_frames,
+                                                 int validated_seam_context_frames) {
+    if (validated_seam_context_frames <= 0) return LongFormPlan{};
+    return resolve_coreml_fixed_shape_plan(fixed_mel_frames, requested_context_frames,
+                                           subsampling_factor, n_mel_frames);
+}
+
 inline bool should_use_nemotron_cache_aware_offline(
         int exact_mel_frames,
         int requested_window_frames,

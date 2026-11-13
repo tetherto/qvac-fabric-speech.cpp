@@ -230,9 +230,12 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
             : opts.long_form_context_frames;
 
     LongFormPlan coreml;
-    if (model.model_type == ParakeetModelType::CTC ||
-        model.model_type == ParakeetModelType::RNNT ||
-        model.model_type == ParakeetModelType::TDT) {
+    if (model.model_type == ParakeetModelType::TDT) {
+        coreml = resolve_coreml_tdt_shape_plan(
+            model_coreml_fixed_mel_frames(model), coreml_context_frames,
+            model.encoder_cfg.subsampling_factor, n_mel_frames, sidecar_context);
+    } else if (model.model_type == ParakeetModelType::CTC ||
+               model.model_type == ParakeetModelType::RNNT) {
         coreml = resolve_coreml_fixed_shape_plan(
             model_coreml_fixed_mel_frames(model),
             coreml_context_frames,
@@ -2777,7 +2780,11 @@ void StreamSession::cancel() {
 
 std::unique_ptr<StreamSession> Engine::stream_start(const StreamingOptions & requested,
                                                     StreamingCallback on_segment) {
-    const auto opts = resolve_transcription_stream_options(pimpl_->model, requested);
+    auto opts = resolve_transcription_stream_options(pimpl_->model, requested);
+    if (pimpl_->model.model_type == ParakeetModelType::TDT &&
+        pimpl_->model.model_variant != "transcribepsy-250m-eu") {
+        opts.chunk_ms = resolve_tdt_push_chunk_ms(requested.chunk_ms);
+    }
     if (opts.sample_rate != pimpl_->model.mel_cfg.sample_rate) {
         throw std::runtime_error(
             "Engine::stream_start: opts.sample_rate=" + std::to_string(opts.sample_rate) +
