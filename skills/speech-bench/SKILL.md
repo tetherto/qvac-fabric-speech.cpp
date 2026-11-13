@@ -6,7 +6,7 @@ argument-hint: collect | publish | run <linux|mac> [quick] | deploy <linux|mac>
 
 # Speech weekly benchmark on the shared Tailscale machines
 
-Every Sunday from 18:00 CET, cron on each shared machine runs `scripts/benchmarks/desktop-weekly/weekly.sh`
+Every Sunday from 11:00 CET, cron on each shared machine runs `scripts/benchmarks/desktop-weekly/weekly.sh`
 under the installing user's own account: it updates the engine `master` head and the ggml commit that head pins (the ggml of qvac-fabric-llm.cpp), provisions the
 pinned models, builds every backend the machine has, drives `scripts/benchmarks/run-family.sh` over the matrix
 in `families.json`, and writes `~/speech-bench/runs/<date>/summary.json` plus `report.md`. No developer
@@ -43,8 +43,8 @@ disturbing each other on the same hardware.
 `qvac-dev-strix-0` has the same hardware as `qvac-dev-strix-1` and ran the bench until 2026-11-04 (`build-dashboard-data.py` lists it in `RETIRED_HOSTS` and skips its summaries); the results show one
 Strix Halo, so it is not part of the weekly set.
 
-Every machine runs the speech bench on Sunday from 18:00 CET (17:00 on the UTC clocks: `install.sh --hour 17`
-there, `--hour 18` on the Macs), about 6 to 7 hours. The fabric-llm bench (Aman's `engine-bench`) owns Saturday
+Every machine runs the speech bench on Sunday from 11:00 CET (10:00 on the UTC clocks: `install.sh --hour 10`
+there, `--hour 11` on the Macs, `--hour 15 --minute 30` on the Jetson's India time), about 6 to 7 hours. The fabric-llm bench (Aman's `engine-bench`) owns Saturday
 from 18:00 CET on the Mac Studio, the Strix Halo and the DGX Spark. The bench folder is `~/speech-bench` everywhere,
 with runs in `runs/<date>` and models in `models/` unless `MODELS_DIR` says otherwise.
 
@@ -163,7 +163,7 @@ same date (it resumes, keeping the ok cells and rebuilding nothing when the comm
 
 ```sh
 scp -r scripts/benchmarks/desktop-weekly <host>:speech-bench-src
-ssh <host> 'bash speech-bench-src/install.sh --hour 18 && rm -rf speech-bench-src'   # --hour 17 on linux (UTC)
+ssh <host> 'bash speech-bench-src/install.sh --hour 11 && rm -rf speech-bench-src'   # --hour 10 on linux (UTC)
 ```
 
 Then set the machine's keys in `~/speech-bench/config.env` (see the machines table) and try
