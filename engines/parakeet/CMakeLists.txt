@@ -831,6 +831,15 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-parakeet-streaming
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+    if (PARAKEET_COREML)
+        parakeet_register_test(test-streaming-tdt-coreml-owner
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-streaming
+            ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+        set_property(TEST test-streaming-tdt-coreml-owner APPEND PROPERTY
+            ENVIRONMENT "PARAKEET_COREML_ONLY=1")
+    endif()
 
     # Quantized TDT and EOU decoded on Hexagon HTP0. Hexagon GET_ROWS accepts
     # F32 only, so backend_runs_embedding_lookup() rejects the Q8_0
@@ -2104,6 +2113,14 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}"
                      "1101" "16" "0.85" "cache-aware"
             REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
+        foreach(_qvp_tdt_seconds 16 24 90)
+            parakeet_register_test(test-tdt-coreml-native-context-${_qvp_tdt_seconds}s
+                LABEL    "fixture;coreml"
+                EXE      test-rnnt-coreml-long-form
+                ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
+                         "1501" "${_qvp_tdt_seconds}" "1.0" "native-context"
+                REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_coreml}")
+        endforeach()
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity
@@ -2973,6 +2990,11 @@ if (PARAKEET_BUILD_TESTS)
                  "--full-gguf" "${_qvp_transcribepsy_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_transcribepsy_coreml_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
                  "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-coreml-encoder-owner-standard-tdt
+        LABEL    "fixture;coreml"
+        EXE      test-coreml-encoder-owner
+        ARGS     "--standard-tdt" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel
     # parity (also from a worker thread), the 60 s / 25 % long-form windows
