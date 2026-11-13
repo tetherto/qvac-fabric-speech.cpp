@@ -2,7 +2,8 @@
 
 Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `scripts/coreml/bench-manifest.json`. These numbers set the Chatterbox Core ML runtime's constants (Metal cost model, warm-load hints, width set, weight-sharing accounting); the last section says where each one goes.
 
-- Host: Apple M2, 24 GB, macOS 15.7.3 (24G419), AC power: True.
+- Host: Apple M2, 24 GB, macOS 15.7.3 (24G419), Low Power Mode off.
+- Power: the run started on AC power, but the machine was on battery from 12:35 to 14:41 UTC (`pmset -g log`). That stretch covers the second Turbo load pass, every Multilingual load row and every time-to-ready row; the sizes, memory, first Turbo load pass, Metal cost and synthesis rows ran on AC. A re-run on AC of every Multilingual load row and of one Turbo time-to-ready run per configuration matched to within 1 % (AC/battery: cold-load sum of medians 0.991, warm-load 0.996, time to ready 0.992–0.998, cached startup 0.993–0.996), so the battery stretch did not move the numbers.
 - Commit `42ebde209e7f`, manifest sha256 `051eaea968c57763…`, compute units `cpu_and_ane`.
 - Sidecars exported locally with `engines/tts/scripts/export-chatterbox-coreml.py` from the pinned f32 GGUFs; tree digests are in `results.jsonl` (`env.sidecars`).
 
