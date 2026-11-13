@@ -725,6 +725,20 @@ struct parakeet_coreml_context * parakeet_coreml_init(const char * path_mlmodelc
 struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char * path_mlmodelc,
                                                                      const char * units_env) {
     if (path_mlmodelc == nullptr || units_env == nullptr) return nullptr;
+    return parakeet_coreml_init_with_units(path_mlmodelc, std::getenv(units_env));
+}
+
+bool parakeet_coreml_encoder_prefers_ane(const char * path_mlmodelc) {
+    if (path_mlmodelc == nullptr) return false;
+    @autoreleasepool {
+        NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
+        return path != nil && mlmodelc_declares_ane_inputs(path);
+    }
+}
+
+struct parakeet_coreml_context * parakeet_coreml_init_with_units(const char * path_mlmodelc,
+                                                                 const char * units) {
+    if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
         NSString * path = [[NSString alloc] initWithUTF8String:path_mlmodelc];
@@ -736,8 +750,8 @@ struct parakeet_coreml_context * parakeet_coreml_init_with_units_env(const char 
         // fall back to the CPU and erase the encoder speedup.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         std::string label;
-        config.computeUnits = parakeet_coreml_requested_units(
-            units_env, mlmodelc_declares_ane_inputs(path), &label);
+        config.computeUnits = parakeet_coreml_units_for(
+            units, mlmodelc_declares_ane_inputs(path), &label);
 
         NSError * err   = nil;
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]

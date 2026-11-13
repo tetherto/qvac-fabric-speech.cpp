@@ -113,7 +113,7 @@ int main(int argc, char ** argv) {
     // Run 1: capture=true (test-encoder default).
     EncoderOutputs out_capture;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_capture, /*max_layers=*/-1,
+                             out_capture, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1,
                              /*capture_intermediates=*/true); rc != 0) {
         std::fprintf(stderr, "[test-encoder-capture-parity] run_encoder(capture=true) rc=%d\n", rc);
         return 1;
@@ -126,7 +126,7 @@ int main(int argc, char ** argv) {
     // differs.
     EncoderOutputs out_nocapture;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_nocapture, /*max_layers=*/-1,
+                             out_nocapture, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1,
                              /*capture_intermediates=*/false); rc != 0) {
         std::fprintf(stderr, "[test-encoder-capture-parity] run_encoder(capture=false) rc=%d\n", rc);
         return 1;

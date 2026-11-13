@@ -27,6 +27,11 @@ struct parakeet_coreml_rows_out {
 struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init(const char * path_mlmodelc,
                                                                 const char * units_env);
 
+// Loads with resolved compute units (`all`, `cpu_and_ane`, `cpu_and_gpu`,
+// `cpu_only`; null selects cpu_and_ane). Never reads the environment.
+struct parakeet_coreml_diarizer * parakeet_coreml_diarizer_init_with_units(const char * path_mlmodelc,
+                                                                           const char * units);
+
 void parakeet_coreml_diarizer_free(struct parakeet_coreml_diarizer * ctx);
 
 int64_t parakeet_coreml_diarizer_capacity(const struct parakeet_coreml_diarizer * ctx);

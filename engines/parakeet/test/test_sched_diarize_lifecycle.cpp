@@ -87,7 +87,7 @@ int diarize_once(parakeet::ParakeetCtcModel & model,
     }
     EncoderOutputs enc;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             enc, /*max_layers=*/-1, /*capture_intermediates=*/false); rc != 0) {
+                             enc, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1, /*capture_intermediates=*/false); rc != 0) {
         std::fprintf(stderr, "  run_encoder rc=%d\n", rc);
         return rc;
     }

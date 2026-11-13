@@ -1,6 +1,7 @@
 // Short-input Sortformer batch diarization must remain on ggml when an
 // unmasked fixed-capacity Core ML sidecar is present.
 
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 
 #include <exception>
@@ -74,6 +75,7 @@ std::string diarize_in_child(const std::string & gguf, bool disable_coreml) {
         std::string payload;
         try {
             parakeet::EngineOptions options;
+            options.coreml = coreml_ready_options();
             options.model_gguf_path = gguf;
             options.n_gpu_layers = 999;
             parakeet::Engine engine(options);

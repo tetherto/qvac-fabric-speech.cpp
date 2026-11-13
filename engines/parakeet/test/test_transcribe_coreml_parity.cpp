@@ -10,10 +10,12 @@
 // PARAKEET_COREML_DISABLE set (forcing the ggml encoder). The parent compares
 // the two transcripts.
 //
-// Skips (exit 0) when the Core ML sidecar is not active (non-Apple build,
-// PARAKEET_COREML off, or no `<model>-encoder.mlmodelc`), so it is a no-op on CI
-// without Apple hardware and a real gate on Apple with a sidecar present.
+// The Core ML child waits for every sidecar at construction (sidecars load in
+// the background otherwise, and the call would run on ggml). Skips (exit 0)
+// only when no sidecar is planned (non-Apple build, PARAKEET_COREML off, or no
+// `<model>-encoder.mlmodelc`); a planned sidecar that is not active fails.
 
+#include "coreml_test_options.h"
 #include "parakeet/engine.h"
 
 #include <cstdio>
@@ -55,6 +57,7 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
         opts.model_gguf_path = gguf;
         opts.n_gpu_layers    = 999;
         opts.language        = language;
+        if (!disable) opts.coreml = coreml_ready_options();
         parakeet::Engine engine(opts);
         std::vector<parakeet::StreamingSegment> segments;
         std::vector<parakeet::StreamEvent> events;
@@ -100,6 +103,8 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
         }
         const std::string payload = std::string("coreml_available=") +
                                     (engine.encoder_on_coreml() ? "1" : "0") +
+                                    "\ncoreml_planned=" +
+                                    (coreml_sidecar_planned(engine.coreml_status_json()) ? "1" : "0") +
                                     "\ncoreml_used=" +
                                     (result.encoder_used_coreml ? "1" : "0") +
                                     "\n" + body.str();
@@ -124,26 +129,26 @@ std::string transcribe_in_child(const std::string & gguf, const std::string & wa
     return out;
 }
 
-bool parse_child(const std::string & raw, bool & coreml_available,
+// Reads one `key=0|1` header line at `pos` and advances past it.
+bool parse_flag(const std::string & raw, size_t & pos, const char * key, bool & value) {
+    const std::string prefix = std::string(key) + '=';
+    if (raw.compare(pos, prefix.size(), prefix) != 0) return false;
+    const size_t nl = raw.find('\n', pos);
+    if (nl == std::string::npos) return false;
+    value = raw.substr(pos + prefix.size(), nl - pos - prefix.size()) == "1";
+    pos = nl + 1;
+    return true;
+}
+
+bool parse_child(const std::string & raw, bool & coreml_available, bool & coreml_planned,
                  bool & coreml_used, std::string & body) {
-    const std::string prefix = "coreml_available=";
-    if (raw.rfind(prefix, 0) != 0) {
+    size_t pos = 0;
+    if (!parse_flag(raw, pos, "coreml_available", coreml_available) ||
+        !parse_flag(raw, pos, "coreml_planned", coreml_planned) ||
+        !parse_flag(raw, pos, "coreml_used", coreml_used)) {
         return false;
     }
-    const size_t first_nl = raw.find('\n');
-    const std::string used_prefix = "coreml_used=";
-    if (first_nl == std::string::npos ||
-        raw.compare(first_nl + 1, used_prefix.size(), used_prefix) != 0) {
-        return false;
-    }
-    const size_t second_nl = raw.find('\n', first_nl + 1);
-    if (second_nl == std::string::npos) {
-        return false;
-    }
-    coreml_available = raw.substr(prefix.size(), first_nl - prefix.size()) == "1";
-    const size_t used_start = first_nl + 1 + used_prefix.size();
-    coreml_used = raw.substr(used_start, second_nl - used_start) == "1";
-    body = raw.substr(second_nl + 1);
+    body = raw.substr(pos);
     return true;
 }
 
@@ -151,12 +156,19 @@ bool compare_mode(const std::string & gguf, const std::string & wav,
                   const std::string & language, bool streaming) {
     const char * mode = streaming ? "streaming" : "batch";
     bool coreml_available = false;
+    bool coreml_planned = false;
     bool coreml_used = false;
     std::string coreml_body;
     if (!parse_child(transcribe_in_child(
                          gguf, wav, language, /*disable=*/false, streaming),
-                     coreml_available, coreml_used, coreml_body)) {
+                     coreml_available, coreml_planned, coreml_used, coreml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from Core ML %s child\n", mode);
+        return false;
+    }
+    if (!coreml_available && coreml_planned) {
+        std::fprintf(stderr,
+            "[transcribe-coreml-parity] FAIL: a Core ML sidecar is planned but was not "
+            "active after waiting at construction (%s)\n", mode);
         return false;
     }
     if (!coreml_available) {
@@ -173,15 +185,16 @@ bool compare_mode(const std::string & gguf, const std::string & wav,
     }
 
     bool ggml_available = true;
+    bool ggml_planned = true;
     bool ggml_used = true;
     std::string ggml_body;
     if (!parse_child(transcribe_in_child(
                          gguf, wav, language, /*disable=*/true, streaming),
-                     ggml_available, ggml_used, ggml_body)) {
+                     ggml_available, ggml_planned, ggml_used, ggml_body)) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: no output from ggml %s child\n", mode);
         return false;
     }
-    if (ggml_available || ggml_used) {
+    if (ggml_available || ggml_planned || ggml_used) {
         std::fprintf(stderr, "[transcribe-coreml-parity] FAIL: PARAKEET_COREML_DISABLE ignored\n");
         return false;
     }

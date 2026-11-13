@@ -251,7 +251,8 @@ bool decoder_geometry_ok(const std::vector<int64_t> & embed_d, const std::vector
 
 }  // namespace
 
-struct parakeet_coreml_decoder * parakeet_coreml_decoder_init(const char * path_mlmodelc) {
+struct parakeet_coreml_decoder * parakeet_coreml_decoder_init_with_units(const char * path_mlmodelc,
+                                                                         const char * units) {
     if (path_mlmodelc == nullptr) return nullptr;
 
     @autoreleasepool {
@@ -259,12 +260,11 @@ struct parakeet_coreml_decoder * parakeet_coreml_decoder_init(const char * path_
         if (path == nil) return nullptr;
 
         // The graph is exported for the Neural Engine, so it is pinned to CPU
-        // and Neural Engine unless PARAKEET_COREML_COMPUTE_UNITS says otherwise;
+        // and Neural Engine unless the engine's resolved units say otherwise;
         // MLComputeUnitsAll is only a preference and may land it on the GPU.
         MLModelConfiguration * config = [[MLModelConfiguration alloc] init];
         std::string label;
-        config.computeUnits = parakeet_coreml_requested_units(
-            "PARAKEET_COREML_COMPUTE_UNITS", /*prefer_neural_engine=*/true, &label);
+        config.computeUnits = parakeet_coreml_units_for(units, /*prefer_neural_engine=*/true, &label);
 
         NSError * err   = nil;
         MLModel * model = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:path]

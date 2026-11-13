@@ -4,8 +4,10 @@
 //
 // Holds shared configuration and tensor handles for CTC, RNN-T, TDT, EOU, and Sortformer GGUFs.
 
+#include "encoder_route.h"
 #include "ggml.h"
 #include "mel_preprocess.h"
+#include "parakeet/coreml_options.h"
 #include "sentencepiece_bpe.h"
 
 #include <atomic>
@@ -567,6 +569,17 @@ int load_from_gguf(const std::string & gguf_path,
                    int n_threads, int n_gpu_layers, bool verbose,
                    const std::string & backend);
 
+// With Core ML options (EngineOptions::coreml). The overloads above use
+// default options: every field unset, resolved from the PARAKEET_COREML_*
+// environment. `memory_degraded` resolves use = off with the reason "memory"
+// (the Core ML-inclusive fit failed where the ggml-only one passed).
+int load_from_gguf(const std::string & gguf_path,
+                   ParakeetCtcModel & out_model,
+                   int n_threads, int n_gpu_layers, bool verbose,
+                   const std::string & backend,
+                   const CoremlOptions & coreml,
+                   bool memory_degraded = false);
+
 // ── Memory-fit measurement (see include/parakeet/fit.h) ───────────────────
 
 // Byte totals collected by load_from_gguf_metadata_only.
@@ -704,9 +717,44 @@ std::string model_active_backend_name(const ParakeetCtcModel & m);
 std::string model_active_device_name(const ParakeetCtcModel & m);
 ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 
-// True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
-// instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
+// True when a Core ML encoder or diarizer sidecar is ready right now (or the
+// sidecar owns the encoder). A sidecar still loading in the background reports
+// false. Always false on non-Apple / non-Core ML builds. Per-call routing is
+// the EncoderRoute a call acquires, not this.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+
+// ── Core ML routing ──────────────────────────────────
+//
+// A top-level call (offline transcribe, diarize, each streaming window)
+// acquires its encoder route once, at its start, and passes it to
+// resolve_long_form_plan and every run_encoder of that call. With the default
+// wait mode this never blocks: a sidecar that is not ready gives the ggml
+// route (pending). wait = call blocks until the sidecar is ready or failed;
+// use = require throws when it cannot serve the call. `cancel` interrupts a
+// wait. Builds without Core ML always return the ggml route.
+EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
+                                   const std::atomic<bool> * cancel = nullptr);
+// The route only if the sidecar is ready now; requests nothing, never waits
+// (the ggml prewarm pass).
+EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
+
+// Status and prewarm of the model's background sidecars (status JSON; "{}" on
+// builds without Core ML).
+std::string model_coreml_status_json(const ParakeetCtcModel & m);
+std::string model_coreml_construction_json(const ParakeetCtcModel & m);
+std::string model_coreml_prewarm(ParakeetCtcModel & m, CoremlOptions::Prewarm scope, bool wait,
+                                 const std::atomic<bool> * cancel = nullptr);
+// Waits for the construction group; true when every sidecar in it is ready.
+bool        model_coreml_wait(ParakeetCtcModel & m, int64_t timeout_ms,
+                              const std::atomic<bool> * cancel = nullptr);
+// Resets / reads the per-call diarizer tally (result labels).
+void        model_coreml_reset_call_stats(ParakeetCtcModel & m);
+struct CoremlCallStats {
+    int coreml_passes = 0;
+    int pending_passes = 0;
+    std::string label;
+};
+CoremlCallStats model_coreml_call_stats(ParakeetCtcModel & m);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);
@@ -824,11 +872,17 @@ using EncoderOutputConsumer = std::function<int(ggml_tensor *, ggml_backend_t)>;
 constexpr int kEncoderOutputHost = 0;
 constexpr int kEncoderOutputConsumed = 1;
 
+// `route` is required (no default): the unit's acquired route. Pass
+// EncoderRoute::ggml() for paths that always run on ggml (per-stage parity
+// harnesses, partial-layer taps such as the TranscribePsy EU gate). A Core ML
+// failure on a held route retires the sidecar and this and every later
+// dispatch of the unit run on ggml (an owner route returns the error).
 int run_encoder(ParakeetCtcModel   & model,
                 const float        * mel,
                 int                  n_mel_frames,
                 int                  n_mels,
                 EncoderOutputs     & out,
+                const EncoderRoute & route,
                 int                  max_layers = -1,
                 bool                 capture_intermediates = true,
                 bool                 allow_coreml_padded = false,

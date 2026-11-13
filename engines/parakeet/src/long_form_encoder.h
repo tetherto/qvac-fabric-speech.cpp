@@ -1,5 +1,6 @@
 #pragma once
 
+#include "encoder_route.h"
 #include "long_form.h"
 #include "parakeet/engine.h"
 #include "parakeet_ctc.h"
@@ -14,13 +15,18 @@ struct WindowedEncoderStats {
     int ggml_windows = 0;
 };
 
+// The long-form plan for one unit of work. The Core ML fixed-shape plan is
+// used only when `route` holds a handle; with a null route the plan is the
+// ggml-only plan, so ggml transcripts never change because a sidecar exists.
 LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
                                     const EngineOptions & opts,
-                                    int n_mel_frames);
+                                    int n_mel_frames,
+                                    const EncoderRoute & route);
 
 int run_encoder_windowed(ParakeetCtcModel & model,
                          const float * mel, int n_mel_frames, int n_mels,
                          const LongFormPlan & plan,
+                         const EncoderRoute & route,
                          std::atomic<bool> & cancel_flag,
                          EncoderOutputs & out,
                          WindowedEncoderStats & stats);

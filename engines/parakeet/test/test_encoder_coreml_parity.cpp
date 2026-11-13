@@ -76,7 +76,11 @@ int main(int argc, char ** argv) {
     using namespace parakeet;
 
     ParakeetCtcModel model;
-    if (int rc = load_from_gguf(model_path, model, /*n_threads=*/0, n_gpu_layers, /*verbose=*/true); rc != 0) {
+    // The sidecar loads in the background; this parity check waits for it.
+    CoremlOptions coreml;
+    coreml.wait = CoremlOptions::Wait::construct;
+    if (int rc = load_from_gguf(model_path, model, /*n_threads=*/0, n_gpu_layers, /*verbose=*/true,
+                                "auto", coreml); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] load_from_gguf rc=%d\n", rc);
         return 1;
     }
@@ -112,7 +116,8 @@ int main(int argc, char ** argv) {
     // attention relative to an unpadded ggml encode and is covered separately by
     // test-transcribe-coreml-parity. Extend/crop this fixture to the sidecar's
     // declared capacity, repeating real mel rows rather than adding padding.
-    const int fixed_mel_frames = model_coreml_fixed_mel_frames(model);
+    const EncoderRoute coreml_route = acquire_encoder_route(model);
+    const int fixed_mel_frames = coreml_route.geometry().fixed_mel_frames;
     if (fixed_mel_frames > 0 && fixed_mel_frames != n_mel_frames) {
         const int original_frames = n_mel_frames;
         const int n_mels = model.mel_cfg.n_mels;
@@ -129,7 +134,7 @@ int main(int argc, char ** argv) {
 
     EncoderOutputs out_ggml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_ggml, /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
+                             out_ggml, parakeet::EncoderRoute::ggml(), /*max_layers=*/-1, /*capture_intermediates=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] ggml run_encoder rc=%d\n", rc);
         return 1;
     }
@@ -141,7 +146,7 @@ int main(int argc, char ** argv) {
 
     EncoderOutputs out_coreml;
     if (int rc = run_encoder(model, mel.data(), n_mel_frames, model.mel_cfg.n_mels,
-                             out_coreml, /*max_layers=*/-1,
+                             out_coreml, coreml_route, /*max_layers=*/-1,
                              /*capture_intermediates=*/false,
                              /*allow_coreml_padded=*/true); rc != 0) {
         std::fprintf(stderr, "[coreml-parity] Core ML run_encoder rc=%d\n", rc);
@@ -166,7 +171,7 @@ int main(int argc, char ** argv) {
             }
             EncoderOutputs mismatch_out;
             if (int rc = run_encoder(model, mismatch.data(), mismatch_frames,
-                                     model.mel_cfg.n_mels, mismatch_out,
+                                     model.mel_cfg.n_mels, mismatch_out, coreml_route,
                                      /*max_layers=*/-1,
                                      /*capture_intermediates=*/false,
                                      /*allow_coreml_padded=*/true); rc != 0) {
