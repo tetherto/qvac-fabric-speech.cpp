@@ -180,7 +180,7 @@ int decode_transducer(const ParakeetCtcModel & model,
 
 }  // namespace
 
-// Per-call encoder backend label and pending flag (§2.10): "ggml" when no
+// Per-call encoder backend label and pending flag: "ggml" when no
 // dispatch ran on Core ML, the route's label when all did, "mixed" otherwise.
 template <class Result>
 void set_encoder_backend(Result & result, const EncoderRoute & route,
@@ -733,7 +733,7 @@ static void prewarm_encoder(ParakeetCtcModel & model, float audio_seconds) {
     // graph topology identical to a real call so the kernel
     // pipeline cache hit is real.
     // The ggml pass also warms the Metal pipelines the fallback needs, so it
-    // runs on ggml while the Core ML encoder is not ready yet (§3.2.0); the
+    // runs on ggml while the Core ML encoder is not ready yet; the
     // Core ML request was issued alongside it by the construction group.
     if (int rc = run_encoder(model, zeros.data(), n_frames, n_mels, out,
                              encoder_route_if_ready(model),
@@ -749,7 +749,7 @@ static void prewarm_encoder(ParakeetCtcModel & model, float audio_seconds) {
     }
 }
 
-// Memory-degrade (§2.13): with a budget, an instance whose Core ML-inclusive
+// Memory-degrade: with a budget, an instance whose Core ML-inclusive
 // fit fails where the ggml-only fit passes resolves use = off ("memory"), so
 // Core ML never turns a working ggml verdict into a refusal. Without a budget
 // (direct engine users, modelFitPolicy 'off') the options apply as given.
@@ -807,7 +807,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(std::make_unique<Impl>()) {
         set_opencl_cache_dir(opts.opencl_cache_dir);
     }
 
-    // Core ML sidecars load in the background (§3.2.0): construction does not
+    // Core ML sidecars load in the background: construction does not
     // wait for an ANE compile unless coreml.wait = construct asks it to.
     const int rc = load_from_gguf(opts.model_gguf_path,
                                   pimpl_->model,
@@ -1097,7 +1097,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
                                    precomputed.eu_gate_frames, n_samples);
     const double gate_ms = ms_since(t_gate);
 
-    // One encoder route for the whole call, acquired at its start (§2.10):
+    // One encoder route for the whole call, acquired at its start:
     // the window plan, the segment cap and the Nemotron switch below all come
     // from it, so a sidecar that becomes ready mid-call never changes them.
     const EncoderRoute route = acquire_encoder_route(pimpl_->model, &pimpl_->cancel_flag);
@@ -1444,7 +1444,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
                                    eu_gate_mel.data(), eu_gate_frames, n_samples);
     const double gate_ms = ms_since(t_gate);
 
-    // One route for the whole call (§2.10).
+    // One route for the whole call.
     const EncoderRoute route = acquire_encoder_route(pimpl_->model, &pimpl_->cancel_flag);
     double encoder_ms = gate_ms;
     EncoderOutputs enc_out;
@@ -1682,7 +1682,7 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
         dres.decode_ms = 0.0;
     } else {
         // The diarizer sidecar did not serve this call: one encoder route for
-        // the call (§2.10).
+        // the call.
         route = acquire_encoder_route(impl.model, &impl.cancel_flag);
         EncoderOutputs enc_out;
         if (int rc = run_encoder(impl.model, mel.data(), n_mel_frames,
@@ -2039,7 +2039,7 @@ static bool nemotron_offline_uses_long_form(
         nemotron_diarization_mel_frames(impl.model, n_samples));
 }
 
-// Folds the call's diarizer passes into the result labels (§2.10): passes on
+// Folds the call's diarizer passes into the result labels: passes on
 // a diarizer sidecar give its label, a mix with ggml passes gives "mixed",
 // and a pass that ran on ggml because its capacity was loading sets
 // coreml_pending.
@@ -2386,7 +2386,7 @@ void StreamSession::Impl::process_window(const float * window_samples, int windo
                                  std::to_string(rc) + ")");
     }
 
-    // Each streaming window is its own unit (§2.10): it acquires its route
+    // Each streaming window is its own unit: it acquires its route
     // here, so a sidecar that becomes ready is picked up at the next window.
     const EncoderRoute route = acquire_encoder_route(engine_impl->model);
     EncoderOutputs enc_out;

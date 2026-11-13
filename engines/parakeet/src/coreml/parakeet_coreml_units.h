@@ -13,11 +13,11 @@
 #include <cstring>
 #include <string>
 
-// Maps resolved compute units (PLAN B.5 vocabulary: `all`, `cpu_and_ane`,
+// Maps resolved compute units (`all`, `cpu_and_ane`,
 // `cpu_and_gpu`, `cpu_only`) to MLComputeUnits and writes the matching stats
 // label. The engine resolves the units once (CoremlOptions::compute_units,
 // then PARAKEET_COREML_COMPUTE_UNITS, then the stage default) and passes them
-// here; loaders never read the environment themselves (§2.9, §2.12).
+// here; loaders never read the environment themselves.
 //
 // `units` null or unrecognised selects `prefer_neural_engine ? cpu_and_ane :
 // all`: the graphs exported for the Neural Engine (the fixed-window encoder,

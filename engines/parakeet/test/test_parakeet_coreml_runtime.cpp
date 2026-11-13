@@ -1,4 +1,4 @@
-// Parakeet Core ML runtime adoption on the device (PLAN §3.2.0, §2.15).
+// Parakeet Core ML runtime adoption on the device.
 // Needs a TDT GGUF with its adjacent `-encoder.mlmodelc` and a wav; the
 // diarizer and encoder-less cases run when their fixtures are given.
 //

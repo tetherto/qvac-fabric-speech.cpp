@@ -122,11 +122,11 @@ struct FitOptions {
     // projection charges (FitResult::coreml). Only presence of the adjacent
     // sidecars and these options matter; the projection never reads the
     // Core ML cache or warm hints, so it is identical before and after the
-    // first load (PLAN §2.13).
+    // first load.
     CoremlOptions coreml;
 };
 
-// The Core ML-inclusive verdict (PLAN §2.13). The ggml estimate (whose
+// The Core ML-inclusive verdict. The ggml estimate (whose
 // weights stay resident for the fallback) plus the Core ML envelope of the
 // routes the engine would activate: the encoder sidecar (its fp16 runtime
 // weights, I/O and one load transient, with a 1.25 margin until a measured

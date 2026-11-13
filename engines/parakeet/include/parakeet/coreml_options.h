@@ -1,6 +1,6 @@
 #pragma once
 
-// Core ML options for the Parakeet engine (PLAN §2.12, Appendix B.6).
+// Core ML options for the Parakeet engine.
 //
 // Every field is unset by default. The engine resolves them once, at
 // construction, in this order per field: the explicit field, then the

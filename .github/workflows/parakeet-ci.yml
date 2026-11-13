@@ -256,7 +256,7 @@ jobs:
   coreml_authorize:
     uses: ./.github/workflows/reusable-authorize-self-hosted.yml
 
-  # Core ML PR lane (PLAN §2.16, §3.2.0), built from the dispatch-only Mosaic
+  # Core ML PR lane, built from the dispatch-only Mosaic
   # job: PARAKEET_COREML=ON against a Metal ggml on the self-hosted Apple
   # runner. Builds every Core ML harness and runs the Core ML runtime and
   # routing tests; the step fails when any selected test is skipped, disabled

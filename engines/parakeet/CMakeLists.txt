@@ -487,7 +487,7 @@ if (PARAKEET_BUILD_LIBRARY)
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libqvac-parakeet
     # under its own namespace when PARAKEET_COREML is on. The encoder, bypass
-    # encoder and diarizer sidecars load through its slots (PLAN §3.2.0).
+    # encoder and diarizer sidecars load through its slots.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
     qvac_coreml_add_to(qvac-parakeet NAMESPACE ${PARAKEET_COREML_RUNTIME_NS} PREFIX PARAKEET ENABLE ${PARAKEET_COREML})
 
@@ -625,7 +625,7 @@ if (PARAKEET_BUILD_TESTS)
         target_link_libraries(${target} PRIVATE ${_ptcr_fws})
     endfunction()
 
-    # Parakeet's Core ML routing (PLAN §3.2.0, §2.13), hermetic, Linux and
+    # Parakeet's Core ML routing, hermetic, Linux and
     # macOS: the long-form plan with a null route is the ggml plan; a failure at
     # window k retires the sidecar and the call reports "mixed"; the next call
     # acquires a null route and reverts; the fit route never reads the cache.
@@ -1589,7 +1589,7 @@ if (PARAKEET_BUILD_TESTS)
         src/parakeet_eou.cpp
         src/parakeet_sortformer.cpp
         src/parakeet_diarization_v3.cpp
-        # Core ML memory-degrade in the engine projects fit (PLAN §2.13).
+        # Core ML memory-degrade in the engine projects fit.
         src/parakeet_fit.cpp
         src/mel_preprocess.cpp
         src/sentencepiece_bpe.cpp
@@ -3035,7 +3035,7 @@ if (PARAKEET_BUILD_TESTS)
         REQUIRES "${_qvp_transcribepsy_coreml_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
                  "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
 
-    # Background Core ML sidecars on the device (PLAN §3.2.0): a call whose
+    # Background Core ML sidecars on the device: a call whose
     # encoder is still loading runs on ggml with the use = off transcript; the
     # prebuilt encoder slot loads and the next call runs on Core ML; diarizer
     # capacities that are not ready fall back to ggml; PARAKEET_COREML_ONLY

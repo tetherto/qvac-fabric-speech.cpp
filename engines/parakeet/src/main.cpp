@@ -545,7 +545,7 @@ bool parse_coreml_prewarm(const std::string & v, parakeet::CoremlOptions::Prewar
     return true;
 }
 
-// §2.12: CLIs keep warm hints under Application Support (Library/Caches can
+// CLIs keep warm hints under Application Support (Library/Caches can
 // be purged, and a purge means a new path and a cold ANE compile).
 void apply_cli_coreml_defaults(parakeet::CoremlOptions & coreml) {
 #if defined(__APPLE__)
@@ -1056,7 +1056,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             extra.dump_mel_path.clear();
         }
 
-        // One encoder route per top-level call (§2.10), shared by the plan
+        // One encoder route per top-level call, shared by the plan
         // and every encoder dispatch of this run.
         const EncoderRoute route = acquire_encoder_route(model);
         EncoderOutputs enc_out;

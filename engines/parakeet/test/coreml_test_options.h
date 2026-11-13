@@ -1,7 +1,7 @@
 #pragma once
 
 // Device tests that compare a Core ML sidecar against ggml wait for every
-// sidecar at construction. Sidecars load in the background (PLAN §3.2.0), so
+// sidecar at construction. Sidecars load in the background, so
 // without this the first calls would run on ggml while the load is in flight.
 
 #include "parakeet/coreml_options.h"

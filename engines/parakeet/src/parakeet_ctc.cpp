@@ -327,7 +327,7 @@ struct ParakeetCtcModel::Impl {
     std::unique_ptr<CtcHeadGraph> ctc_head_graph;
 
 #ifdef PARAKEET_USE_COREML
-    // Background Core ML sidecars (PLAN §3.2.0): one runtime slot each for the
+    // Background Core ML sidecars: one runtime slot each for the
     // encoder (`<model>-encoder.mlmodelc`), the Sortformer v2.1 AOSC bypass
     // encoder (`-encoder-bypass-pre-encode`) and every diarizer capacity. They
     // load on the runtime's lane; each call acquires its route at its start
@@ -335,7 +335,7 @@ struct ParakeetCtcModel::Impl {
     std::unique_ptr<CoremlSidecars> coreml;
     std::shared_ptr<pcm::Slot> encoder_slot;
     std::shared_ptr<pcm::Slot> bypass_slot;
-    // Synchronous encoder sidecar that owns the encoder (§2.15): loaded before
+    // Synchronous encoder sidecar that owns the encoder: loaded before
     // weight allocation when the GGUF has no encoder weights or
     // PARAKEET_COREML_ONLY is set. Never a slot; a failure is an error.
     parakeet_coreml_context * ctx_coreml = nullptr;
@@ -355,7 +355,7 @@ struct ParakeetCtcModel::Impl {
 
     ~Impl() {
 #ifdef PARAKEET_USE_COREML
-        // Slots never wait (§2.9): a load in flight finishes on the runtime's
+        // Slots never wait: a load in flight finishes on the runtime's
         // lane and is released there.
         coreml_diarizers.reset();
         encoder_slot.reset();
@@ -1886,8 +1886,8 @@ static void maybe_init_coreml_decoder(const std::string & gguf_path,
         if (verbose) PARAKEET_LOG_INFO("parakeet: no Core ML decoder at '%s'; using ggml decoder\n", path.c_str());
         return;
     }
-    // Synchronous (§2.15), but with the resolved units like every other
-    // loader (§2.12): null keeps the decoder's cpu_and_ane default.
+    // Synchronous, but with the resolved units like every other
+    // loader: null keeps the decoder's cpu_and_ane default.
     model.impl->ctx_coreml_dec = parakeet_coreml_decoder_init_with_units(
         path.c_str(), loader_units(model.impl->coreml->resolved()));
     if (model.impl->ctx_coreml_dec == nullptr) {
@@ -1945,7 +1945,7 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
         PARAKEET_LOG_WARN("parakeet: no Core ML encoder at '%s'\n", path.c_str());
         return nullptr;
     }
-    // Synchronous on purpose (§2.15): ownership fixes how the weights are
+    // Synchronous on purpose: ownership fixes how the weights are
     // allocated, so it is decided before allocation and never in the background.
     parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(path.c_str(), loader_units(coreml));
     if (ctx == nullptr) {
@@ -1972,7 +1972,7 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
     }
 }
 
-// Runs on the runtime's load lane with the resolved compute units (§2.9).
+// Runs on the runtime's load lane with the resolved compute units.
 static pcm::LoadResult load_encoder_sidecar(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
     parakeet_coreml_context * ctx = parakeet_coreml_init_with_units(
@@ -2008,7 +2008,7 @@ static SidecarRequest encoder_sidecar_request(const char * stage, const std::str
 }
 
 // Registers the encoder sidecar slots. Presence-driven and additive, as
-// before, but the load is a background job (§2.15 rule 2): the model is usable
+// before, but the load is a background job: the model is usable
 // on ggml at once, and a missing, disabled or failed sidecar leaves ggml.
 static void maybe_init_coreml_encoder(const std::string & gguf_path,
                                       ParakeetCtcModel  & model,
@@ -2037,7 +2037,7 @@ static void maybe_init_coreml_encoder(const std::string & gguf_path,
                           model.impl->coreml->resolved().disabled_reason.c_str());
     }
 
-    // §2.11: a diarizer sidecar is the Sortformer minimal set; otherwise the
+    // A diarizer sidecar is the Sortformer minimal set; otherwise the
     // encoder is.
     if (supported_sortformer) maybe_init_coreml_diarizers(gguf_path, model, verbose);
     const bool encoder_minimal = model.impl->coreml_diarizers == nullptr;
@@ -2418,7 +2418,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                                bool memory_degraded = false) {
     auto impl = std::make_shared<ParakeetCtcModel::Impl>();
 #ifdef PARAKEET_USE_COREML
-    // Resolved once (§2.12); a metadata-only load never touches Core ML.
+    // Resolved once; a metadata-only load never touches Core ML.
     if (!measure) impl->coreml = std::make_unique<CoremlSidecars>(coreml, nullptr, memory_degraded);
 #else
     (void) coreml;
@@ -2959,7 +2959,7 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         maybe_init_coreml_encoder(gguf_path, out_model, verbose);
         maybe_init_coreml_decoder(gguf_path, out_model, verbose);
         // The construction group: the minimal set, requested once the ggml
-        // upload completed (§2.11); with wait = construct this blocks.
+        // upload completed; with wait = construct this blocks.
         impl->coreml->start();
     }
 #endif
@@ -3132,7 +3132,7 @@ const EncoderModelOps & encoder_ops() {
     return ops;
 }
 
-// The synchronous owner context (§2.15) as a route: it never retires, and a
+// The synchronous owner context as a route: it never retires, and a
 // failure is an error (there are no ggml encoder weights to fall back to).
 EncoderRoute owner_route(const ParakeetCtcModel & m) {
     EncoderRoute::Ops ops;
@@ -5401,7 +5401,7 @@ int run_encoder(ParakeetCtcModel   & model,
     if (mel_valid == 0) mel_valid = n_mel_frames;
     const bool all_valid = (mel_valid == n_mel_frames);
 
-    // Core ML sidecar on the unit's route (§2.10): a validated CTC/
+    // Core ML sidecar on the unit's route: a validated CTC/
     // IndicConformer, Unified RNN-T, TDT, EOU, Nemotron, or Sortformer
     // FastConformer encoder hands encoder_out back to the ggml decoder or
     // diarization head. A failure retires the sidecar; this dispatch and the
@@ -5719,7 +5719,7 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
     const EuGateMel input = prepare_eu_gate_mel(
         model, mel, n_mel_frames, n_mels, cropped_mel, cropped_mel_frames);
     EncoderOutputs tap;
-    // Partial layers: always the ggml route (§3.2.0).
+    // Partial layers: always the ggml route.
     const int rc = run_encoder(model, input.data(), input.frames, n_mels, tap,
                                EncoderRoute::ggml(), gate.layer + 1,
                                /*capture_intermediates=*/false);
@@ -5781,7 +5781,7 @@ int run_encoder_bypass_pre_encode(ParakeetCtcModel & model,
     // zero-padded and accompanied by an attention-validity mask inside the
     // Core ML wrapper; oversized/custom geometries keep the ggml path. One
     // AOSC step is the unit: it acquires the slot once, runs on ggml while the
-    // slot is loading, and a failure retires the sidecar (§3.2.0).
+    // slot is loading, and a failure retires the sidecar.
     if (model.impl->bypass_slot != nullptr &&
         model.model_type == ParakeetModelType::SORTFORMER &&
         model.model_variant == "sortformer-streaming-v2.1-aosc" &&

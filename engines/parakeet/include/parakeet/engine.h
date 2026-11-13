@@ -419,7 +419,7 @@ public:
     // Always false on non-Apple builds and when no sidecar is present.
     bool encoder_on_coreml() const;
 
-    // Core ML sidecar status as JSON (PLAN B.5): one entry per sidecar with
+    // Core ML sidecar status as JSON: one entry per sidecar with
     // its state (queued, loading, ready, failed, retired, ...), route,
     // compute units, label, timings and warm hint. "{}" on builds without
     // PARAKEET_COREML.
@@ -427,7 +427,7 @@ public:
 
     // Requests the sidecars of `scope` (minimal / predicted / all) as a
     // prewarm group and, with `wait`, blocks until every one is ready or has
-    // failed. Returns the group result as JSON (B.5 PrewarmResult).
+    // failed. Returns the group result as JSON (each sidecar's final state).
     std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
 
     // The construction group's result as JSON (wait = construct exposes the

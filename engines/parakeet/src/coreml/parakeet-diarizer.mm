@@ -403,7 +403,7 @@ std::vector<CoremlDiarizerBundle> list_coreml_diarizer_bundles(const std::string
 
 namespace {
 
-// Runs on the runtime's load lane with the resolved units (§2.9): never reads
+// Runs on the runtime's load lane with the resolved units: never reads
 // the environment. The capacity the bundle reports must match its file name.
 pcm::LoadResult load_diarizer(const pcm::LoadRequest & request) {
     pcm::LoadResult result;
@@ -455,7 +455,7 @@ CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacit
         request.stage_default = pcm::ComputeUnits::cpu_and_ane;
         request.load_fn = &load_diarizer;
         request.geometry = {capacity};
-        // §2.11: the smallest capacity is the minimal set; larger ones are
+        // The smallest capacity is the minimal set; larger ones are
         // requested by the call that needs them (or by prewarm = all).
         request.minimal = state_->capacities.empty();
         state_->capacities.push_back(State::Capacity{capacity, sidecars.add(request)});
@@ -488,7 +488,7 @@ int CoremlDiarizers::run(int valid_frames,
     if (valid_frames <= 0) return kNoSidecar;
     for (const State::Capacity & c : state_->capacities) {
         if (c.frames < valid_frames || unusable(c.slot->state())) continue;
-        // One acquisition per pass (a chunk or block is the unit, §3.2.0).
+        // One acquisition per pass (a chunk or block is the unit).
         pcm::Acquired acquired = c.slot->acquire(pcm::Demand::now);
         if (!acquired.model) {
             // Failed while this pass waited (wait = call): try the next capacity.

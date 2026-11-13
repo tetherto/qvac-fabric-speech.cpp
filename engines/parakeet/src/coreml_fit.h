@@ -1,6 +1,6 @@
 #pragma once
 
-// Core ML part of the Parakeet fit projection (PLAN §2.13). Pure and
+// Core ML part of the Parakeet fit projection. Pure and
 // portable: the route comes only from options and adjacent sidecar presence,
 // never from the Core ML cache or warm hints, so the projection is identical
 // before and after the first load (test-parakeet-coreml-route "fit-stable").
@@ -29,7 +29,7 @@ struct CoremlEncoderEnvelopeInputs {
 };
 
 // The client-side load transient (`load_peak`) by compute-unit class, until
-// the model's PR measures its own (§2.13):
+// the model's own measurement replaces it:
 //  - cpu_and_ane: 0.25 x weight file (cold ANE load peaked at 0.19x);
 //  - all, cpu_and_gpu: 1.0 x weight file (update 2026-11-11: Parakeet TDT
 //    0.6B fp16 measured +1.08 GiB over a 1.2 GB weight file, ~0.9x, and the
@@ -46,7 +46,7 @@ inline uint64_t coreml_encoder_load_transient_bytes(uint64_t weight_file_bytes, 
     return weight_file_bytes;
 }
 
-// §2.13 defaults until the model's PR measures them:
+// Defaults until the model's own measurements replace them:
 //  - resident runtime weights at their expanded fp16 geometry (a palettized
 //    prebuilt is never charged at its compressed file size): the larger of
 //    the weight file and 2 bytes per GGUF encoder parameter;
@@ -87,7 +87,7 @@ inline CoremlEncoderFitRoute coreml_encoder_fit_route(const std::string & sideca
 // verdict charged (it includes the diarizer sidecars when the device shares
 // host memory); `encoder_envelope` is the encoder sidecar's envelope (0 with
 // no route). The top-level `fits` is left as it is: prebuilt routes keep
-// today's fit results until their model's PR validates them (§2.13).
+// today's fit results until their model's PR validates them.
 inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_enabled,
                                   const std::string & disabled_reason, bool encoder_prebuilt,
                                   uint64_t encoder_envelope) {

@@ -1,7 +1,7 @@
 #pragma once
 
 // EncoderRoute: the Core ML encoder handle one unit of work acquires once, at
-// its start, and holds until it ends (PLAN §2.10, §3.2.0).
+// its start, and holds until it ends.
 //
 // A unit is one top-level call: an offline transcription, a diarization, one
 // streaming window. Every plan that depends on the sidecar (the long-form
@@ -29,7 +29,7 @@ struct parakeet_coreml_context;
 namespace parakeet {
 
 // What the long-form plan reads from the acquired handle: the encoder's I/O
-// after load (§3.2.0 "Capacity"), so no pre-load descriptor is needed.
+// after load, so no pre-load descriptor is needed.
 struct EncoderRouteGeometry {
     int  fixed_mel_frames    = 0;      // 0: flexible or unknown capacity
     int  seam_context_frames = 0;      // 0: the engine default
@@ -218,7 +218,7 @@ int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility
 }
 
 // Per-call backend label: "ggml" when nothing ran on Core ML, the Core ML
-// label when everything did, "mixed" otherwise (§2.10 labels).
+// label when everything did, "mixed" otherwise.
 struct EncoderBackendTally {
     int coreml = 0;
     int ggml = 0;

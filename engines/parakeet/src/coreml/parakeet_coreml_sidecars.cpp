@@ -12,8 +12,8 @@ namespace {
 constexpr const char * kEngine = "parakeet";
 constexpr const char * kEnvPrefix = "PARAKEET";
 constexpr const char * kWeightsFile = "/weights/weight.bin";
-// B.1 default ane_compile_reserve_bytes: ANECompilerService peaked at about
-// 1.6x the weights compiling a 199 MB model (platform-feasibility §4).
+// Default ane_compile_reserve_bytes: ANECompilerService peaked at about
+// 1.6x the weights compiling a 199 MB model.
 constexpr double kAneCompileReserveFactor = 1.6;
 
 uint64_t file_bytes(const std::string & path) {
@@ -47,7 +47,7 @@ std::unique_lock<std::mutex> lock_handle(void * hold) {
 }  // namespace
 
 pcm::Options to_runtime_options(const CoremlOptions & o) {
-    // The public enums mirror the runtime's member for member (B.6).
+    // The public enums mirror the runtime's member for member.
     static_assert(static_cast<int>(CoremlOptions::Use::require) == static_cast<int>(pcm::Use::require), "Use");
     static_assert(static_cast<int>(CoremlOptions::Generate::background) ==
                       static_cast<int>(pcm::Generate::background), "Generate");
@@ -113,7 +113,7 @@ CoremlSidecars::~CoremlSidecars() = default;
 std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
     pcm::PlanInput in;
     in.coreml_built = true;
-    in.generation_built = false;  // P1: prebuilt sidecars only; templates arrive with P2-P4
+    in.generation_built = false;  // prebuilt sidecars only: Parakeet ships no generation templates yet
     in.prebuilt_present = request.present;
     in.units = resolved_.units_or(request.stage_default);
     in.platform = manager_->platform();
@@ -148,7 +148,8 @@ std::vector<pcm::GroupRequest> CoremlSidecars::requests(pcm::Prewarm scope, pcm:
             continue;
         }
         // The construction-time minimal set is `minimal`; `all` extras and
-        // later prewarm groups are `prewarm` (§2.9 priorities).
+        // later prewarm groups are `prewarm`, which loads after every minimal
+        // request.
         const bool minimal = kind == pcm::GroupKind::construction && e.minimal;
         out.push_back(pcm::GroupRequest{e.slot, minimal ? pcm::Priority::minimal : pcm::Priority::prewarm});
     }

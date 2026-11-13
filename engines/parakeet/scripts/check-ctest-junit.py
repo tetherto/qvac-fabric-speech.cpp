@@ -3,7 +3,7 @@
 
 A green CTest step does not prove a test ran: disabled tests (missing
 fixtures), "Not Run" tests and SKIP_RETURN_CODE skips all leave it green. The
-Core ML lanes (PLAN §2.16) must fail on any of them.
+Core ML lanes must fail on any of them.
 
     check-ctest-junit.py REPORT.xml [--require NAME ...]
 """

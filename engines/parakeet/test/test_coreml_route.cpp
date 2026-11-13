@@ -1,5 +1,4 @@
-// Parakeet's Core ML routing on the shared runtime (PLAN §2.10, §2.13,
-// §3.2.0). Hermetic: fake loaders and a fake encoder, no Core ML, no model.
+// Parakeet's Core ML routing on the shared runtime. Hermetic: fake loaders and a fake encoder, no Core ML, no model.
 // Built against the runtime's test copy (QVAC_COREML_NS=qvac_coreml_test) on
 // Linux and macOS; it has no skip path.
 //
@@ -277,7 +276,7 @@ void case_window_k_failure_and_next_call() {
     CHECK(run_call(next, 3).label == "ggml", "the next call reports ggml");
 
     // A second, independent owner of the same artifact sees the retirement
-    // too (process-wide per (artifact, function, units), §2.9).
+    // too (process-wide per (artifact, function, units)).
     const int loads_before = g_fake_loads.load();
     auto other = make_encoder_slot(*m, &fake_load, pcm::Wait::call, dir);
     const EncoderRoute other_route = route_from_acquired(other->acquire(pcm::Demand::now), fake_ops(), 128);
@@ -512,7 +511,7 @@ void case_sidecar_groups() {
         CHECK(construction.find("bypass-encoder") != std::string::npos,
               "the absent sidecar is listed as skipped");
         // Off Apple platforms every route is none: an empty group, which counts
-        // as success (nothing_to_prepare, §2.10).
+        // as success (nothing_to_prepare).
         CHECK(sidecars.wait_construction(1000), "the construction group succeeded");
 
         const pcm::PrewarmResult all = sidecars.prewarm(CoremlOptions::Prewarm::all, /*wait=*/true);
@@ -635,11 +634,11 @@ void case_fit_stable() {
     CHECK(no_hint.coreml.encoder_route == "prebuilt", "an adjacent sidecar gives the prebuilt route");
     // runtime weights max(4096, 2 x 3000) = 6000; I/O 2 x 100; transient 4096/4;
     // margin x1.25 -> (6000 + 200 + 1024) * 1.25 = 9030; plus the diarizers' 50.
-    CHECK(no_hint.coreml.bytes == 9030 + 50, "envelope arithmetic (§2.13 defaults)");
+    CHECK(no_hint.coreml.bytes == 9030 + 50, "envelope arithmetic (default factors)");
     CHECK(no_hint.ggml_required_bytes == 10000, "the ggml-only charge excludes the diarizer sidecars");
     CHECK(no_hint.ggml_only_fits && !no_hint.coreml.fits, "two verdicts");
 
-    // Non-ANE units charge a 1.0x load transient (§2.13 update 2026-11-11):
+    // Non-ANE units charge a 1.0x load transient (measured on TDT 0.6B fp16):
     // (6000 + 200 + 4096) * 1.25 = 12870 for all, cpu_and_gpu and cpu_only.
     for (CoremlFitUnits units : {CoremlFitUnits::all, CoremlFitUnits::cpu_and_gpu, CoremlFitUnits::cpu_only}) {
         CoremlEncoderEnvelopeInputs in;

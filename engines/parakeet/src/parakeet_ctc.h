@@ -572,7 +572,7 @@ int load_from_gguf(const std::string & gguf_path,
 // With Core ML options (EngineOptions::coreml). The overloads above use
 // default options: every field unset, resolved from the PARAKEET_COREML_*
 // environment. `memory_degraded` resolves use = off with the reason "memory"
-// (§2.13: the Core ML-inclusive fit failed where the ggml-only one passed).
+// (the Core ML-inclusive fit failed where the ggml-only one passed).
 int load_from_gguf(const std::string & gguf_path,
                    ParakeetCtcModel & out_model,
                    int n_threads, int n_gpu_layers, bool verbose,
@@ -723,7 +723,7 @@ ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 // the EncoderRoute a call acquires, not this.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
 
-// ── Core ML routing (PLAN §2.10, §3.2.0) ──────────────────────────────────
+// ── Core ML routing ──────────────────────────────────
 //
 // A top-level call (offline transcribe, diarize, each streaming window)
 // acquires its encoder route once, at its start, and passes it to
@@ -735,10 +735,10 @@ bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
 EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
                                    const std::atomic<bool> * cancel = nullptr);
 // The route only if the sidecar is ready now; requests nothing, never waits
-// (the ggml prewarm pass, §3.2.0 "Prewarm").
+// (the ggml prewarm pass).
 EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
 
-// Status and prewarm of the model's background sidecars (B.5 JSON; "{}" on
+// Status and prewarm of the model's background sidecars (status JSON; "{}" on
 // builds without Core ML).
 std::string model_coreml_status_json(const ParakeetCtcModel & m);
 std::string model_coreml_construction_json(const ParakeetCtcModel & m);

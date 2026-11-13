@@ -15,15 +15,15 @@ constexpr const char * kCoremlDiarizerUnitsEnv = "PARAKEET_COREML_COMPUTE_UNITS"
 constexpr const char * kCoremlDiarizerDisableEnv = "PARAKEET_COREML_DIARIZER_DISABLE";
 constexpr const char * kCoremlDisableEnv = "PARAKEET_COREML_DISABLE";
 
-// Per-call tally of diarizer passes, for the result labels (§2.10).
+// Per-call tally of diarizer passes, for the result labels.
 struct CoremlDiarizerCallStats {
     int coreml = 0;      // passes that ran on a diarizer sidecar
     int not_ready = 0;   // passes that ran on ggml because the capacity was loading
     std::string label;   // Core ML label of the passes that ran on a sidecar
 };
 
-// The diarizer sidecars of one model, one runtime slot per capacity
-// (PLAN §3.2.0). Each pass acquires the smallest covering capacity that has
+// The diarizer sidecars of one model, one runtime slot per capacity.
+// Each pass acquires the smallest covering capacity that has
 // not failed; while that capacity is still loading, run() returns kNoSidecar
 // and the pass runs on ggml. A load or prediction failure retires the
 // capacity for the process (quarantine), and later passes use the next

@@ -423,7 +423,7 @@ enum class CoremlShapeKind {
     exact,  // EOU: exact-shape calls only; oversized input stays on ggml
 };
 
-// Route-aware long-form choice (PLAN §2.10, §3.2.0). `normal` is the ggml
+// Route-aware long-form choice. `normal` is the ggml
 // plan from resolve_long_form_plan_frames. The Core ML fixed-shape plan is
 // considered only when the unit's route holds a handle: with a null route the
 // result is exactly the ggml-only plan, whatever sidecar exists or is still
