@@ -597,7 +597,7 @@ struct CliOpts {
 
 }
 
-extern "C" int parakeet_cli_main(int argc, char ** argv) {
+static int parakeet_cli_run(int argc, char ** argv) {
     CliOpts      opts;
     ExtraCliOpts extra;
 
@@ -1736,4 +1736,21 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     }
 
     return 0;
+}
+
+// Exit status when an exception ends the run (use = require refusing a
+// call, for example). No other exit path returns 1.
+constexpr int kExitException = 1;
+
+// The C entry point never lets an exception escape: it prints the reason and
+// returns a non-zero status instead of terminating the host process.
+extern "C" int parakeet_cli_main(int argc, char ** argv) {
+    try {
+        return parakeet_cli_run(argc, argv);
+    } catch (const std::exception & e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "error: unknown exception\n");
+    }
+    return kExitException;
 }

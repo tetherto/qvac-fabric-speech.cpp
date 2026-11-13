@@ -186,6 +186,9 @@ parakeet --model tdt-0.6b-v3-q8_0.gguf --wav talk.wav \
 `--require-coreml` (benchmark mode) implies `--coreml-wait construct`, so the
 benchmark measures the sidecar and not the ggml calls made while it loads.
 
+When `--coreml-use require` refuses a call, the CLI prints `error: <reason>`
+to stderr and exits with status 1.
+
 ## Backend selection
 
 `parakeet --backend NAME` and `EngineOptions::backend` select the runtime device

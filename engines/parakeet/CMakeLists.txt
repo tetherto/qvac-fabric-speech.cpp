@@ -2242,6 +2242,8 @@ if (PARAKEET_BUILD_TESTS)
 
     # CLI-level Core ML gate: --require-coreml must prove every measured encoder
     # invocation used the expected ASR sidecar while the decoder remains on ggml.
+    # The TDT registration also checks that --coreml-use require without an
+    # adjacent sidecar exits with an error status and message, not a crash.
     if (PARAKEET_COREML AND Python3_Interpreter_FOUND AND TARGET parakeet-cli)
         add_test(
             NAME test-cli-coreml-bench
@@ -2249,7 +2251,8 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_cli_coreml_bench.py"
                     "--binary" "$<TARGET_FILE:parakeet-cli>"
                     "--model" "${_qvp_tdt_q8_gguf}"
-                    "--wav" "${_qvp_jfk_wav}")
+                    "--wav" "${_qvp_jfk_wav}"
+                    "--check-require-without-sidecar")
         set_property(TEST test-cli-coreml-bench PROPERTY LABELS "fixture;coreml")
         if (NOT EXISTS "${_qvp_tdt_q8_gguf}" OR
             NOT EXISTS "${_qvp_jfk_wav}" OR
