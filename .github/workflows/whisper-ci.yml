@@ -155,7 +155,9 @@ jobs:
 
       # Excludes gpu/perf (runner limits), medium/large (the committed
       # weightless stubs still burn minutes of zero-weight encode at those
-      # sizes), and test-vad-full (the one whisper test that needs a real
+      # sizes), coreml-runtime (the shared Core ML runtime tests run once per
+      # lane in the engine workflows, which filter on engines/coreml/**), and
+      # test-vad-full (the one whisper test that needs a real
       # downloaded model, ggml-base.en.bin). The tiny/base/small
       # test-whisper-cli-* arms need NO download: their for-tests-ggml-*.bin
       # fixtures are committed (correct hparams + vocab, zero tensor payload)
@@ -163,7 +165,7 @@ jobs:
       - name: Tests (non-GPU, committed fixtures only)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf|medium|large' -E '^test-vad-full$' --output-on-failure --timeout 600
+        run: ctest --test-dir build -LE 'gpu|perf|medium|large|coreml-runtime' -E '^test-vad-full$' --output-on-failure --timeout 600
 
       # GNU --wrap observes calls in the static Whisper library. This separate
       # target exercises cleanup after failed backend initialization without
@@ -393,7 +395,7 @@ jobs:
       - name: Tests (non-GPU, committed fixtures only)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf|medium|large' -E '^test-vad-full$' --output-on-failure --timeout 900
+        run: ctest --test-dir build -LE 'gpu|perf|medium|large|coreml-runtime' -E '^test-vad-full$' --output-on-failure --timeout 900
 
       - name: Cache whisper tiny model
         id: model-cache
