@@ -54,14 +54,17 @@ embedded copy. Elsewhere `template_dir` is ignored with a warning.
 
 **On-device compile.** `apple::compile_package()` calls
 `+[MLModel compileModelAtURL:completionHandler:]`. Core ML writes the bundle
-to `$TMPDIR/<package name>.mlmodelc`; the pipeline names packages
-`qvac-coreml-<key>.mlpackage`, so a process killed mid-compile leaves
-`$TMPDIR/qvac-coreml-<key>.mlmodelc`, which a routine prune removes after an
-hour. The bundle is then renamed into staging, or copied when `$TMPDIR` is on
-another volume. `artifact.json` records the OS build and the `coremlc`
-version read from the compiled `model.mil`. Generation needs macOS 15.
-When Core ML rejects the package, the failure is recorded as a compile
-failure: it is retried by the next process, and the same error code from
+to `$TMPDIR/<package name>.mlmodelc`, a directory every process and every
+cache directory shares. The pipeline gives each attempt its own package name,
+`qvac-coreml-<key>-<pid>-<random>.mlpackage`, so prepares of the same weights
+into different cache directories (each with its own key lock) can compile at
+the same time without meeting there. A process killed mid-compile leaves
+`$TMPDIR/qvac-coreml-<key>-<pid>-<random>.mlmodelc`, which a routine prune
+removes after an hour. The bundle is then renamed into staging, or copied when
+`$TMPDIR` is on another volume. `artifact.json` records the OS build and the
+`coremlc` version read from the compiled `model.mil`. Generation needs
+macOS 15. When Core ML rejects the package, the failure is recorded as a
+compile failure: it is retried by the next process, and the same error code from
 another process on the same OS build marks the artifact deterministic (not
 retried until the OS build or the generator version changes). A missing
 package or a failed move or copy is an I/O error: it is retried by the next
@@ -193,8 +196,11 @@ compile, load and predict for each toy, compared with the same arithmetic on
 the GGUF's weights (CPU, and all compute units for the stateless toy);
 `artifact.json`; the user metadata of an on-device-compiled bundle; the
 memo hit on a second preparation; the compile output naming and the copy
-fallback; and the repair of an unusable artifact (moved to `quarantine/`,
-regenerated, compiled again). It prints `compile_peak_bytes` per toy.
+fallback; the repair of an unusable artifact (moved to `quarantine/`,
+regenerated, compiled again); and two preparations of the same weights into
+two cache directories whose compiles run at the same time, each of which must
+publish a bundle of its own that loads and predicts. It prints
+`compile_peak_bytes` per toy.
 
 ```sh
 ctest --test-dir build-coreml -L coreml-toy --output-on-failure

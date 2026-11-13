@@ -662,8 +662,15 @@ struct Job {
     // Under EX: steps 5-7. Returns the failing stage with the error.
     std::pair<Error, failed::Stage> generate(const std::string & key) {
         StagingGuard guard;
-        guard.dir = l.staging + "/" + key + "." + std::to_string(::getpid()) + "." + rand_hex();
-        const std::string pkg = guard.dir + "/qvac-coreml-" + key + ".mlpackage";
+        const std::string pid = std::to_string(::getpid());
+        const std::string nonce = rand_hex();
+        guard.dir = l.staging + "/" + key + "." + pid + "." + nonce;
+        // Core ML compiles into <user temp>/<package stem>.mlmodelc, which every
+        // process and cache directory shares, while the key lock covers only
+        // this cache directory: the stem is unique to this attempt so that
+        // concurrent prepares of the same key never meet there. The
+        // qvac-coreml- prefix lets routine prune sweep a killed compile's output.
+        const std::string pkg = guard.dir + "/qvac-coreml-" + key + "-" + pid + "-" + nonce + ".mlpackage";
         {
             std::error_code ec;
             fs::create_directories(guard.dir, ec);

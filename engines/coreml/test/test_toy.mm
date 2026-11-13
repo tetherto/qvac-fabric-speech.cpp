@@ -7,7 +7,8 @@
 //   publish, adopt) -> MLModel load -> predict, compared with the same math on
 //   the GGUF's weights; artifact.json; user metadata of an on-device-compiled
 //   bundle; the hot path on a second prepare(); repair of an unusable artifact
-//   (quarantine, regenerate, recompile).
+//   (quarantine, regenerate, recompile); two prepares of the same weights into
+//   two cache roots compiling at the same time.
 //
 // Toys: stateless (2 linear layers), multi (two functions sharing weights),
 // state (an MLState accumulator). Needs macOS 15 (MLState, functionName, the
@@ -29,10 +30,14 @@
 #import <Foundation/Foundation.h>
 
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <sys/stat.h>
@@ -279,8 +284,8 @@ void case_embedded_table() {
 
 void case_compile_naming() {
     // compileModelAtURL leaves the bundle at $TMPDIR/<package stem>.mlmodelc;
-    // the pipeline's packages are named qvac-coreml-<key>.mlpackage, so a
-    // killed compile leaves $TMPDIR/qvac-coreml-<key>.mlmodelc, which routine
+    // the pipeline's packages are named qvac-coreml-<key>-<pid>-<random>.mlpackage,
+    // so a killed compile leaves a qvac-coreml-*.mlmodelc there, which routine
     // prune sweeps. Then the move (rename, and the copy fallback).
     TempDir td;
     auto t = templates::embedded("toy-stateless");
@@ -450,6 +455,68 @@ void case_quarantine_repair() {
     }
 }
 
+void case_concurrent_prepare() {
+    // Two prepares of identical weights into two cache roots at once. Each
+    // root has its own key lock, so neither waits for the other, and Core ML
+    // compiles both packages into the one user temp directory. In every round
+    // the two compiles are released together, and each prepare must compile,
+    // move and publish a bundle of its own that loads and predicts.
+    if (@available(macOS 15.0, *)) {
+        TempDir td;
+        auto t = templates::embedded("toy-stateless");
+        CHECK(t != nullptr);
+        if (!t) return;
+        const std::string gguf = twin(td, "toy-stateless", 31);
+        std::string key;
+        constexpr int ROUNDS = 12;
+        for (int round = 0; round < ROUNDS; ++round) {
+            std::mutex mu;
+            std::condition_variable cv;
+            int arrived = 0;
+            bool together = true;
+            auto compile = [&](const std::string & pkg, const std::string & out) {
+                {
+                    std::unique_lock<std::mutex> lk(mu);
+                    ++arrived;
+                    cv.notify_all();
+                    together &= cv.wait_for(lk, std::chrono::seconds(30), [&] { return arrived == 2; });
+                }
+                return apple::compile_package(pkg, out);
+            };
+            cache::PrepareOutcome o[2];
+            std::thread th[2];
+            for (int i = 0; i < 2; ++i) {
+                cache::PrepareInputs in =
+                    inputs_for(td / ("cache-" + std::to_string(round) + "-" + std::to_string(i)), t, gguf);
+                in.compile = compile;
+                th[i] = std::thread([&o, i, in] { o[i] = cache::prepare(in); });
+            }
+            for (std::thread & x : th) x.join();
+            CHECK(together);
+            for (int i = 0; i < 2; ++i) {
+                const std::string what = "round " + std::to_string(round) + ", prepare " + std::to_string(i);
+                CHECK_MSG(o[i].kind == cache::PrepareOutcome::Kind::ready, what + ": " + o[i].error.message);
+                if (o[i].kind != cache::PrepareOutcome::Kind::ready) continue;
+                CHECK(!o[i].cache_hit);
+                CHECK_MSG(cache::validate(o[i].artifact_dir) == cache::Validity::ok, what);
+                check_predictions("toy-stateless", o[i].model_path, gguf);
+            }
+            CHECK(o[0].key32 == o[1].key32 && o[0].artifact_dir != o[1].artifact_dir);
+            key = o[0].key32;
+        }
+        // Every compiled bundle was moved out of the user temp directory.
+        int left = 0;
+        std::error_code ec;
+        for (fs::directory_iterator it(NSTemporaryDirectory().UTF8String, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            left += it->path().filename().string().rfind("qvac-coreml-" + key, 0) == 0;
+        }
+        CHECK_MSG(!key.empty() && left == 0, std::to_string(left) + " compile output(s) of the key left behind");
+    } else {
+        CHECK_MSG(false, "macOS 15 required");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -466,6 +533,7 @@ int main(int argc, char ** argv) {
                       {"embedded-table", case_embedded_table},
                       {"compile-naming", case_compile_naming},
                       {"generate-load-predict", case_generate_load_predict},
-                      {"quarantine-repair", case_quarantine_repair}},
+                      {"quarantine-repair", case_quarantine_repair},
+                      {"concurrent-prepare", case_concurrent_prepare}},
                      "test-coreml-toy");
 }
