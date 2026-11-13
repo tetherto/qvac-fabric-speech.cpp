@@ -178,6 +178,9 @@ methods live in [docs/performance.md](docs/performance.md).
 
 ## Documentation
 
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
+
 Run model-free checks with `ctest --test-dir build-parakeet -L unit --output-on-failure`.
 For model coverage, use `scripts/run-fixture-tests.py` and require the relevant test
 names; missing fixtures and runtime skips cannot satisfy a required test. See

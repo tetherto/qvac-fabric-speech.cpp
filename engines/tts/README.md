@@ -150,6 +150,8 @@ Hebrew, Russian, Chinese and Hindi need external preprocessing. See
 
 Backend selection and model-specific validation are documented in
 [docs/backends.md](docs/backends.md) and [docs/testing.md](docs/testing.md).
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
 The test guide includes a model-free matched WAV/mel fixture generator,
 reference-generation commands for CAMPPlus and S3TokenizerV2, and truncated-NPY
 rejection checks, plus the failure criteria for voice-cloning and streaming
