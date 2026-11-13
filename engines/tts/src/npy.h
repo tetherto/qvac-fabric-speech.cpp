@@ -23,30 +23,37 @@ struct npy_array {
     }
 };
 
+inline void npy_read_exact(std::istream & stream, char * data, size_t size,
+                           const char * field, const std::string & path) {
+    if (size != 0 && !stream.read(data, size)) {
+        throw std::runtime_error(std::string("npy_load: truncated ") + field + " in " + path);
+    }
+}
+
 inline npy_array npy_load(const std::string & path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("npy_load: cannot open " + path);
 
     char magic[6];
-    f.read(magic, 6);
+    npy_read_exact(f, magic, sizeof(magic), "magic", path);
     if (std::memcmp(magic, "\x93NUMPY", 6) != 0)
         throw std::runtime_error("npy_load: bad magic in " + path);
 
     uint8_t v_major, v_minor;
-    f.read((char*)&v_major, 1);
-    f.read((char*)&v_minor, 1);
+    npy_read_exact(f, (char*)&v_major, sizeof(v_major), "version", path);
+    npy_read_exact(f, (char*)&v_minor, sizeof(v_minor), "version", path);
 
     uint32_t header_len;
     if (v_major == 1) {
         uint16_t h;
-        f.read((char*)&h, 2);
+        npy_read_exact(f, (char*)&h, sizeof(h), "header length", path);
         header_len = h;
     } else {
-        f.read((char*)&header_len, 4);
+        npy_read_exact(f, (char*)&header_len, sizeof(header_len), "header length", path);
     }
 
     std::string header(header_len, 0);
-    f.read(&header[0], header_len);
+    npy_read_exact(f, header.data(), header.size(), "header", path);
 
     npy_array a;
 
@@ -107,7 +114,7 @@ inline npy_array npy_load(const std::string & path) {
     else if (a.dtype == "|i1" || a.dtype == "|u1") elem_size = 1;
 
     a.data.resize(n_elem * elem_size);
-    f.read((char*)a.data.data(), a.data.size());
+    npy_read_exact(f, (char*)a.data.data(), a.data.size(), "payload", path);
     return a;
 }
 

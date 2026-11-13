@@ -1,6 +1,6 @@
 // Regression coverage for the streaming VAD API added by upstream
 // ggml-org/whisper.cpp PR #3677 (commit 166c20b4) and pulled into the
-// tetherto fork via QVAC-18991. The upstream change did not ship a test,
+// tetherto fork. The upstream change did not ship a test,
 // so we add one here to lock the contract:
 //
 //   1. whisper_vad_detect_speech is idempotent (reset is implicit).
@@ -50,21 +50,10 @@ static void assert_probs_near(const std::vector<float> & a,
     assert(worst <= tol);
 }
 
-int main() {
-    const std::string vad_model_path = VAD_MODEL_PATH;
-    const std::string sample_path    = SAMPLE_PATH;
+constexpr int kSileroWindow = 512;
 
-    std::vector<float> pcmf32;
-    std::vector<std::vector<float>> pcmf32s;
-    assert(read_audio_data(sample_path.c_str(), pcmf32, pcmf32s, false));
-    assert(pcmf32.size() > 0);
-
-    struct whisper_vad_context_params ctx_params = whisper_vad_default_context_params();
-    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(
-            vad_model_path.c_str(), ctx_params);
-    assert(vctx != nullptr);
-
-    // --- Test 1: detect_speech is idempotent (implicit reset). -----------
+static std::vector<float> test_idempotent(whisper_vad_context * vctx, const std::vector<float> & pcmf32) {
+    // Detection resets state implicitly.
     assert(whisper_vad_detect_speech(vctx, pcmf32.data(), (int)pcmf32.size()));
     const auto probs_first = snapshot_probs(vctx);
 
@@ -74,7 +63,12 @@ int main() {
     assert_probs_near(probs_first, probs_second, 0.0f,
                       "Test1 detect_speech idempotent");
 
-    // --- Test 2: reset_state restores initial LSTM state. ----------------
+    return probs_first;
+}
+
+static void test_reset_state(whisper_vad_context * vctx, const std::vector<float> & pcmf32,
+                             const std::vector<float> & probs_first) {
+    // Resetting restores the initial LSTM state.
     whisper_vad_reset_state(vctx);
     assert(whisper_vad_detect_speech_no_reset(vctx, pcmf32.data(), (int)pcmf32.size()));
     const auto probs_no_reset_a = snapshot_probs(vctx);
@@ -91,13 +85,14 @@ int main() {
     // when starting from a clean state.
     assert_probs_near(probs_first, probs_no_reset_a, 0.0f,
                       "Test2b detect_speech == reset+no_reset");
+}
 
-    // --- Test 3: streaming carries LSTM state across calls. --------------
+static void test_chunked(whisper_vad_context * vctx, const std::vector<float> & pcmf32,
+                         const std::vector<float> & probs_first) {
     // Split exactly on a chunk boundary so we don't introduce mid-stream
     // zero padding. The Silero v6.2.0 VAD model fixture uses a fixed
     // 512-sample window at 16 kHz (32 ms); the chunk count is
     // ceil(n_samples / 512), with the last chunk zero-padded if short.
-    constexpr int kSileroWindow = 512;
     const int total_chunks   = (int)probs_first.size();
     assert(total_chunks == ((int)pcmf32.size() + kSileroWindow - 1) / kSileroWindow);
     const int half_chunks    = total_chunks / 2;
@@ -127,7 +122,37 @@ int main() {
     // across scheduler resets, bump the tolerance — but never silently.
     assert_probs_near(probs_first, probs_stitched, 0.0f,
                       "Test3 streaming == single-shot");
+}
 
+static void test_streaming(const std::vector<float> & pcmf32, int n_threads) {
+    const std::string vad_model_path = VAD_MODEL_PATH;
+    struct whisper_vad_context_params ctx_params = whisper_vad_default_context_params();
+    ctx_params.n_threads = n_threads;
+    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(
+            vad_model_path.c_str(), ctx_params);
+    assert(vctx != nullptr);
+
+    const auto probs_first = test_idempotent(vctx, pcmf32);
+    test_reset_state(vctx, pcmf32, probs_first);
+    test_chunked(vctx, pcmf32, probs_first);
     whisper_vad_free(vctx);
+}
+
+int main() {
+    std::vector<float> pcmf32;
+    std::vector<std::vector<float>> pcmf32s;
+    assert(read_audio_data(SAMPLE_PATH, pcmf32, pcmf32s, false));
+    assert(!pcmf32.empty());
+
+    // Keep every chunk and reset assertion without per-node worker synchronization.
+    constexpr int kSerialThreads = 1;
+    test_streaming(pcmf32, kSerialThreads);
+
+    // Retain the default multi-threaded contract on a short, partially padded input.
+    constexpr int kThreadedChunks = 4;
+    constexpr int kThreadedSamples = kThreadedChunks * kSileroWindow + 1;
+    assert(pcmf32.size() >= kThreadedSamples);
+    const std::vector<float> threaded_samples(pcmf32.begin(), pcmf32.begin() + kThreadedSamples);
+    test_streaming(threaded_samples, whisper_vad_default_context_params().n_threads);
     return 0;
 }

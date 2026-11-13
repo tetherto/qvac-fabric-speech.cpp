@@ -59,10 +59,11 @@ using StreamEventCallback = std::function<void(const StreamEvent &)>;
 
 struct StreamingOptions {
     int sample_rate  = 16000;
-    // Nemotron accepts its five trained cache-aware operating points only:
-    // 80, 160, 320, 560, or 1120 ms. Other model families accept any
-    // positive value.
-    int chunk_ms     = 1000;
+    // Zero selects the model default: 2000 ms for full TranscribePsy EU,
+    // 1000 ms for other transcription families. Positive values are explicit.
+    // Nemotron accepts only 80, 160, 320, 560, or 1120 ms operating points.
+    static constexpr int automatic_chunk_ms = 0;
+    int chunk_ms = automatic_chunk_ms;
 
     // Used by the sliding-window implementation. Nemotron maintains its
     // trained 56-frame attention cache and ignores these two window knobs.
@@ -124,6 +125,9 @@ struct StreamingSegment {
 
     double encoder_ms = 0.0;
     double decode_ms  = 0.0;
+    // Actual dispatch for this segment. Sequential streaming decoders stay
+    // native; the encoder can still run through its Core ML sidecar.
+    bool encoder_used_coreml = false;
 };
 
 using StreamingCallback = std::function<void(const StreamingSegment &)>;
