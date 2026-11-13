@@ -288,6 +288,20 @@ pull request and holds the multi-frame cases to 54 dB
 one-frame decode is held to 45 dB. With `--ref-dir`, the HF reference check
 uses `--min-speech-snr` (default 45 dB).
 
+`--units-sweep` also prints the same artifact's SNR for every compute-unit
+policy (report only). Random codes, 265 / 42 / 1 frames, vs ggml CPU:
+
+| Host | `cpu_only` | `cpu_and_gpu` | `cpu_and_ane` | `all` |
+|---|--:|--:|--:|--:|
+| M2, macOS 15.7.3 (24G419) | 44.9 / 45.1 / 44.5 dB | 68.3 / 69.2 / 67.7 dB | 56.2 / 56.4 / 53.3 dB | 56.2 / 56.4 / 53.3 dB |
+| M4 Max, macOS 26.7.2 (25G332) | 45.0 / 45.2 / 44.6 dB | 68.3 / 69.2 / 67.7 dB | 54.8 / 55.0 / 54.2 dB | 51.3 / 51.4 / 51.8 dB |
+
+The ggml reference is the same on both hosts (the `cpu_and_gpu` figures
+match to 0.01 dB). On the M2, `all` runs on the Neural Engine. On the
+M4 Max with macOS 26, `all` measures below both the Neural Engine and the GPU
+alone, so Core ML places the graph differently there; the multi-frame cases
+miss the 54 dB CI gate on that host.
+
 | Environment | Effect |
 |---|---|
 | `PARLER_COREML_DISABLE` | never open the sidecar (the DAC runs on ggml) |
