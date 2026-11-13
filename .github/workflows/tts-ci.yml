@@ -681,8 +681,8 @@ jobs:
             py=.venv-parler-coreml/bin/python
           fi
           gguf=parler-mini/parler-mini-v1-q8_0.gguf
-          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool report \
-            --template-dir engines/tts/coreml-templates/parler-dac-w128 --real-gguf "$gguf"
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
           rm -rf parler-dac-cache
           ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
             --min-snr 54 --require-coreml
