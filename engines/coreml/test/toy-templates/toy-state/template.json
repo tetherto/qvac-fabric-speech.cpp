@@ -6,7 +6,7 @@
   "export_kind": "qvac-toy-state-v1",
   "exporter": {
     "path": "engines/coreml/test/toy/export_toy.py",
-    "sha256": "aa6d46cd8ba394963bcb12d945b3fc79836f84e6ec3f6b43c3fa0a4123532c2d",
+    "sha256": "4c2e739f9c0e6837776b9b1e13286b9d46e3e0f12047a3ea3a7aad3e343aef57",
     "args": [
       "--kind",
       "state",

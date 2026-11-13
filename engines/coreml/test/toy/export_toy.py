@@ -144,6 +144,17 @@ def export(kind, gguf_path, out_dir):
             desc.add_function(str(p), src_function_name="main", target_function_name=name)
         desc.default_function_name = "main"
         ct.utils.save_multifunction(desc, str(pkg))
+    # save_multifunction writes a fresh spec without the functions' user
+    # metadata: set it on the combined spec (a fixed-size change; the
+    # weights and the manifest are untouched).
+    from coremltools.proto import Model_pb2
+
+    spec_path = pkg / "Data" / "com.apple.CoreML" / "model.mlmodel"
+    spec = Model_pb2.Model()
+    spec.ParseFromString(spec_path.read_bytes())
+    for k, v in models[0][1].user_defined_metadata.items():
+        spec.description.metadata.userDefined[k] = v
+    spec_path.write_bytes(spec.SerializeToString(deterministic=True))
     return pkg
 
 

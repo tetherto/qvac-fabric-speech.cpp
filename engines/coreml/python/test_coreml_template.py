@@ -11,6 +11,7 @@ requirement fails instead.
 """
 
 import importlib.util
+import json
 import os
 import struct
 import subprocess
@@ -186,6 +187,21 @@ class TemplateJsonTest(unittest.TestCase):
         self.assertFalse(j["shareable"])  # a stateful model gets one instance per owner
 
 
+class ManifestTest(unittest.TestCase):
+    def test_equivalent_modulo_identifiers(self):
+        def manifest(ids, path="com.apple.CoreML/model.mlmodel"):
+            return json.dumps({"fileFormatVersion": "1.0.0", "rootModelIdentifier": ids[1], "itemInfoEntries": {
+                ids[0]: {"author": "com.apple.CoreML", "name": "weights", "path": "com.apple.CoreML/weights"},
+                ids[1]: {"author": "com.apple.CoreML", "name": "model.mlmodel", "path": path}}})
+        a = manifest(["A1", "A2"])
+        self.assertTrue(ctpl.manifest_equivalent(a, manifest(["B1", "B2"])))
+        self.assertFalse(ctpl.manifest_equivalent(a, manifest(["B1", "B2"], "com.apple.CoreML/other.mlmodel")))
+        wrong_root = json.loads(manifest(["B1", "B2"]))
+        wrong_root["rootModelIdentifier"] = "B1"  # the weights item
+        self.assertFalse(ctpl.manifest_equivalent(a, json.dumps(wrong_root)))
+        self.assertFalse(ctpl.manifest_equivalent(a, "not json"))
+
+
 class SpecDiffTest(unittest.TestCase):
     @needs(HAVE_CT, "coremltools")
     def test_spec_diff(self):
@@ -205,6 +221,14 @@ class SpecDiffTest(unittest.TestCase):
         self.assertIn("specificationVersion", d)
         self.assertIn("description.metadata.userDefined['k']", d)
         self.assertIn("description.metadata.userDefined['extra'] (only in B)", d)
+        # coremltools' conversion date is not a difference.
+        b.CopyFrom(a)
+        a.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"] = "2026-11-13"
+        b.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"] = "2026-11-14"
+        self.assertEqual(ctpl.spec_diff(a, b), [])
+        del a.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"]
+        self.assertEqual(ctpl.spec_diff(a, b), [])
+        del b.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"]
         # Deterministic serialisation is independent of map insertion order.
         c = Model_pb2.Model()
         c.specificationVersion = 9
@@ -230,7 +254,11 @@ class ToySuggestTest(unittest.TestCase):
                                 "--id", "toy-stateless", "-o", str(out)], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("0 unexplained, 0 ambiguous", p.stderr)
-            self.assertEqual(out.read_text(), (toy / "recipe.txt").read_text())
+            # spec_sha256 hashes the exporter's spec, which carries the
+            # conversion date: everything else must match.
+            def body(text):
+                return [line for line in text.splitlines() if not line.startswith("spec_sha256 ")]
+            self.assertEqual(body(out.read_text()), body((toy / "recipe.txt").read_text()))
 
 
 if __name__ == "__main__":

@@ -139,8 +139,31 @@ def canonical_spec_bytes(path):
     return load_spec(path).SerializeToString(deterministic=True)
 
 
+# Spec metadata coremltools stamps on every conversion that does not depend
+# on the weights: ignored when two specs are compared (an export on another
+# day is the same model).
+VOLATILE_METADATA = ("com.github.apple.coremltools.conversion_date",)
+
+
+def manifest_equivalent(a, b):
+    """Two Manifest.json texts that differ at most in their random item identifiers."""
+    def norm(text):
+        j = json.loads(text)
+        items = j.get("itemInfoEntries", {})
+        root = items.get(j.get("rootModelIdentifier"), {})
+        return (j.get("fileFormatVersion"), root.get("path"),
+                sorted(tuple(sorted(v.items())) for v in items.values()))
+    try:
+        return norm(a) == norm(b)
+    except (ValueError, AttributeError):
+        return False
+
+
 def spec_diff(a, b, path="", out=None, limit=50):
-    """Paths at which two protobuf messages differ (field by field, maps by key)."""
+    """Paths at which two protobuf messages differ (field by field, maps by key).
+
+    The user metadata keys in VOLATILE_METADATA are ignored.
+    """
     from google.protobuf.descriptor import FieldDescriptor
 
     out = [] if out is None else out
@@ -157,6 +180,9 @@ def spec_diff(a, b, path="", out=None, limit=50):
         if repeated:
             if is_msg and fd.message_type.GetOptions().map_entry:
                 ka, kb = set(va.keys()), set(vb.keys())
+                if name.endswith("metadata.userDefined"):
+                    ka -= set(VOLATILE_METADATA)
+                    kb -= set(VOLATILE_METADATA)
                 for k in sorted(ka ^ kb, key=str):
                     out.append(f"{name}[{k!r}] (only in {'A' if k in ka else 'B'})")
                 vf = fd.message_type.fields_by_name["value"]
@@ -583,8 +609,18 @@ def cmd_extract(a):
             raise TemplateError("extract: weight.bin layout differs between twin A and twin B "
                                 "(blob count, offsets, dtypes or sizes)")
         spec_bytes = spec_a.SerializeToString(deterministic=True)
-        (out / "model.mlmodel").write_bytes(spec_bytes)
-        shutil.copyfile(pa["manifest"], out / "Manifest.json")
+        # Keep an unchanged spec and manifest byte for byte (the manifest's
+        # item identifiers and the conversion date are random per export), so
+        # re-extracting an unchanged template leaves its template_sha256 alone.
+        old_spec = out / "model.mlmodel"
+        if old_spec.is_file() and not spec_diff(load_spec(old_spec), spec_a):
+            spec_bytes = old_spec.read_bytes()
+        else:
+            old_spec.write_bytes(spec_bytes)
+        new_manifest = pa["manifest"].read_text()
+        old_manifest = out / "Manifest.json"
+        if not (old_manifest.is_file() and manifest_equivalent(old_manifest.read_text(), new_manifest)):
+            old_manifest.write_text(new_manifest)
         functions, stateful = spec_summary(spec_a)
         spec_sha = hashlib.sha256(spec_bytes).hexdigest()
         script = Path(exporter["path"])
