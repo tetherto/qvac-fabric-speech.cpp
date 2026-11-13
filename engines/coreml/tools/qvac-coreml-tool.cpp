@@ -100,6 +100,162 @@ std::unique_ptr<GgufSource> open_gguf(const std::string & path) {
     return src;
 }
 
+// ---- tensor dimension counts as a GGUF file records them -------------------------
+//
+// ggml's GGUF reader reports, and its writer records, ggml_n_dims(): the
+// dimension count without trailing 1s. gguf-py writes the numpy rank instead,
+// so a [1, 96, 7] tensor is 3-D in a converted GGUF and 2-D in a file ggml
+// wrote. Exporters read the rank through gguf-py, so `dump` records the
+// file's count and every GGUF this tool writes keeps it.
+
+class HeaderReader {
+public:
+    explicit HeaderReader(const std::string & path) : f_(std::fopen(path.c_str(), "rb")), path_(path) {
+        if (!f_) die("cannot open " + path);
+    }
+    explicit HeaderReader(const std::vector<uint8_t> & bytes) : buf_(&bytes) {}
+    ~HeaderReader() {
+        if (f_) std::fclose(f_);
+    }
+    HeaderReader(const HeaderReader &) = delete;
+    HeaderReader & operator=(const HeaderReader &) = delete;
+
+    void bytes(void * out, size_t n) {
+        if (f_) {
+            if (n > 0 && std::fread(out, 1, n, f_) != n) die("truncated GGUF header in " + path_);
+        } else {
+            if (n > buf_->size() - off_) die("truncated GGUF header");
+            if (n > 0) std::memcpy(out, buf_->data() + off_, n);
+        }
+        off_ += n;
+    }
+    void skip(uint64_t n) {
+        std::vector<uint8_t> tmp(static_cast<size_t>(std::min<uint64_t>(n, uint64_t{1} << 20)));
+        while (n > 0) {
+            const size_t k = static_cast<size_t>(std::min<uint64_t>(n, tmp.size()));
+            bytes(tmp.data(), k);
+            n -= k;
+        }
+    }
+    template <class T> T get() {
+        T v{};
+        bytes(&v, sizeof(v));
+        return v;
+    }
+    std::string str() {
+        const uint64_t n = get<uint64_t>();
+        if (n > (uint64_t{1} << 30)) die("implausible string length in a GGUF header");
+        std::string s(static_cast<size_t>(n), '\0');
+        bytes(s.data(), s.size());
+        return s;
+    }
+    size_t offset() const { return off_; }
+
+private:
+    FILE * f_ = nullptr;
+    const std::vector<uint8_t> * buf_ = nullptr;
+    std::string path_;
+    size_t off_ = 0;
+};
+
+size_t gguf_scalar_size(uint32_t type) {
+    switch (type) {
+        case GGUF_TYPE_UINT8:
+        case GGUF_TYPE_INT8:
+        case GGUF_TYPE_BOOL: return 1;
+        case GGUF_TYPE_UINT16:
+        case GGUF_TYPE_INT16: return 2;
+        case GGUF_TYPE_UINT32:
+        case GGUF_TYPE_INT32:
+        case GGUF_TYPE_FLOAT32: return 4;
+        case GGUF_TYPE_UINT64:
+        case GGUF_TYPE_INT64:
+        case GGUF_TYPE_FLOAT64: return 8;
+        default: return 0;
+    }
+}
+
+// Reads the fixed header and the key/value section; returns the tensor count.
+uint64_t skip_gguf_kv(HeaderReader & r) {
+    char magic[4];
+    r.bytes(magic, 4);
+    if (std::memcmp(magic, "GGUF", 4) != 0) die("not a GGUF file");
+    if (r.get<uint32_t>() < 2) die("GGUF version 1 is not supported");
+    const uint64_t n_tensors = r.get<uint64_t>();
+    const uint64_t n_kv = r.get<uint64_t>();
+    auto skip_values = [&](uint32_t t, uint64_t count) {
+        if (t == GGUF_TYPE_STRING) {
+            for (uint64_t k = 0; k < count; ++k) r.str();
+            return;
+        }
+        const size_t sz = gguf_scalar_size(t);
+        if (sz == 0) die("unknown GGUF value type " + std::to_string(t));
+        r.skip(sz * count);
+    };
+    for (uint64_t i = 0; i < n_kv; ++i) {
+        r.str();
+        const uint32_t type = r.get<uint32_t>();
+        if (type == GGUF_TYPE_ARRAY) {
+            const uint32_t elem = r.get<uint32_t>();
+            skip_values(elem, r.get<uint64_t>());
+        } else {
+            skip_values(type, 1);
+        }
+    }
+    return n_tensors;
+}
+
+// tensor name -> the dimension count the file records.
+std::map<std::string, int> file_tensor_dims(const std::string & path) {
+    HeaderReader r(path);
+    const uint64_t n = skip_gguf_kv(r);
+    std::map<std::string, int> dims;
+    for (uint64_t i = 0; i < n; ++i) {
+        std::string name = r.str();
+        const uint32_t n_dims = r.get<uint32_t>();
+        if (n_dims > 4) die("tensor " + name + " has more than 4 dimensions");
+        r.skip(8ull * n_dims + 4 + 8);  // ne, type, offset
+        dims[std::move(name)] = static_cast<int>(n_dims);
+    }
+    return dims;
+}
+
+// The header ggml serialised (`meta`, tensor infos at ggml_n_dims) with
+// tensor i recorded as `dims[i]`-dimensional (extra trailing ne of 1) and
+// padded to `alignment`. Tensor offsets are relative to the data section, so
+// they stay valid.
+std::vector<uint8_t> with_file_dims(const std::vector<uint8_t> & meta, const std::vector<int> & dims,
+                                    size_t alignment) {
+    HeaderReader r(meta);
+    const uint64_t n = skip_gguf_kv(r);
+    if (n != dims.size()) die("tensor count mismatch while writing a GGUF header");
+    std::vector<uint8_t> out(meta.begin(), meta.begin() + static_cast<std::ptrdiff_t>(r.offset()));
+    auto put = [&](const void * p, size_t k) {
+        const auto * b = static_cast<const uint8_t *>(p);
+        out.insert(out.end(), b, b + k);
+    };
+    for (uint64_t i = 0; i < n; ++i) {
+        const std::string name = r.str();
+        const uint32_t have = r.get<uint32_t>();
+        if (have > 4) die("tensor " + name + " has more than 4 dimensions");
+        int64_t ne[4] = {1, 1, 1, 1};
+        for (uint32_t d = 0; d < have; ++d) ne[d] = r.get<int64_t>();
+        const uint32_t type = r.get<uint32_t>();
+        const uint64_t offset = r.get<uint64_t>();
+        const uint32_t want = static_cast<uint32_t>(std::max<int>(dims[i], static_cast<int>(have)));
+        if (want > 4) die("tensor " + name + " has more than 4 dimensions");
+        const uint64_t len = name.size();
+        put(&len, 8);
+        put(name.data(), name.size());
+        put(&want, 4);
+        put(ne, 8ull * want);
+        put(&type, 4);
+        put(&offset, 8);
+    }
+    out.resize((out.size() + alignment - 1) / alignment * alignment, 0);
+    return out;
+}
+
 void write_text(const std::string & path, const std::string & text) {
     if (path.empty() || path == "-") {
         std::fwrite(text.data(), 1, text.size(), stdout);
@@ -136,13 +292,15 @@ int cmd_dump(const Args & a) {
         meta.push_back(e);
     }
     j["metadata"] = meta;
+    const std::map<std::string, int> dims = file_tensor_dims(a.pos[0]);
     json tensors = json::array();
     for (const recipe::TensorInfo & ti : src->tensors()) {
         json t;
         t["name"] = ti.name;
         t["type"] = ggml_type_name(static_cast<ggml_type>(ti.type));
         t["ne"] = std::vector<int64_t>(ti.ne.begin(), ti.ne.end());
-        t["n_dims"] = ti.n_dims;
+        const auto d = dims.find(ti.name);
+        t["n_dims"] = d != dims.end() ? std::max(d->second, ti.n_dims) : ti.n_dims;
         std::vector<float> v;
         Error e = src->read_f32(ti.name, v, nullptr);
         if (e.ok() && !v.empty()) {
@@ -179,20 +337,25 @@ public:
         if (ctx_) ggml_free(ctx_);
     }
 
+    // `n_dims` is the count the file records (see with_file_dims).
     void add(const std::string & name, ggml_type type, int n_dims, const int64_t * ne) {
         ggml_tensor * t = ggml_new_tensor(ctx_, type, n_dims, ne);
         ggml_set_name(t, name.c_str());
         gguf_add_tensor(g_, t);
         order_.push_back(t);
+        dims_.push_back(n_dims);
     }
 
     // Meta, then `fill(i, bytes)` for every tensor in order.
     template <class Fill>
     void write(Fill fill) {
-        if (!gguf_write_to_file(g_, path_.c_str(), /*only_meta=*/true)) die("cannot write " + path_);
-        FILE * f = std::fopen(path_.c_str(), "ab");
-        if (!f) die("cannot append to " + path_);
         const size_t align = gguf_get_alignment(g_);
+        std::vector<uint8_t> meta(gguf_get_meta_size(g_));
+        gguf_get_meta_data(g_, meta.data());
+        meta = with_file_dims(meta, dims_, align);
+        FILE * f = std::fopen(path_.c_str(), "wb");
+        if (!f) die("cannot write " + path_);
+        if (std::fwrite(meta.data(), 1, meta.size(), f) != meta.size()) die("short write to " + path_);
         std::vector<uint8_t> bytes;
         for (size_t i = 0; i < order_.size(); ++i) {
             bytes.clear();
@@ -210,6 +373,7 @@ private:
     std::string path_;
     ggml_context * ctx_ = nullptr;
     std::vector<ggml_tensor *> order_;
+    std::vector<int> dims_;
 };
 
 std::vector<uint8_t> encode(ggml_type type, const std::vector<float> & v, int64_t ne0) {
@@ -412,13 +576,16 @@ int cmd_f32(const Args & a) {
     gguf_set_kv(g, static_cast<const gguf_context *>(src->gguf()));
     gguf_remove_key(g, GGUF_KEY_GENERAL_ALIGNMENT);
     StreamWriter w(g, a.need("-o"));
+    const std::map<std::string, int> dims = file_tensor_dims(a.pos[0]);
     std::vector<bool> raw;
     for (const recipe::TensorInfo & ti : src->tensors()) {
         const auto type = static_cast<ggml_type>(ti.type);
         const ggml_type_traits * tr = ggml_get_type_traits(type);
         const bool convert = type == GGML_TYPE_F32 || (tr && tr->to_float);
         raw.push_back(!convert);
-        w.add(ti.name, convert ? GGML_TYPE_F32 : type, ti.n_dims, ti.ne.data());
+        const auto d = dims.find(ti.name);
+        w.add(ti.name, convert ? GGML_TYPE_F32 : type, d != dims.end() ? std::max(d->second, ti.n_dims) : ti.n_dims,
+              ti.ne.data());
     }
     w.write([&](size_t i, ggml_tensor *, std::vector<uint8_t> & bytes) {
         const recipe::TensorInfo & ti = src->tensors()[i];

@@ -307,7 +307,10 @@ qvac-coreml-tool dump <model.gguf> [-o <manifest.json>]
 
 Writes a shape manifest: every metadata key with its GGUF type and value, and
 every tensor's name, type, `n_dims`, `ne` and value statistics (min, max,
-mean, std). `twin` reads it.
+mean, std). `twin` reads it. `n_dims` is the count the file records: ggml's
+GGUF API drops trailing dimensions of 1 (a `[1, 96, 7]` weight reads as 2-D),
+while exporters read the rank through gguf-py, so `dump` reads it from the
+file header and every GGUF the tool writes (`twin`, `f32`) records it too.
 
 ```sh
 qvac-coreml-tool dump models/mimi.gguf -o mimi-manifest.json
