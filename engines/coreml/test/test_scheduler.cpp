@@ -101,7 +101,7 @@ struct Behaviour {
     int delay_ms = 0;
     bool fail = false;
     ErrorClass cls = ErrorClass::transient;
-    int would_block = 0;      // first N calls report a busy key lock
+    int would_block = 0;      // first N calls report a busy key lock (after the wait, with `block`)
     bool warm_block = false;  // WarmFn waits for release("warm:<fn>")
     bool warm_fail = false;
 };
@@ -223,12 +223,12 @@ LoadResult fake_load(const LoadRequest & r) {
     int n = 0;
     const Behaviour b = enter(key, "load:" + key, n);
     LoadResult out;
+    if (b.block) block_on(key);
     if (n <= b.would_block) {
         leave(key);
         out.would_block = true;
         return out;
     }
-    if (b.block) block_on(key);
     if (b.delay_ms > 0) std::this_thread::sleep_for(milliseconds(b.delay_ms));
     leave(key);
     if (b.fail) {
@@ -2199,6 +2199,195 @@ void case_retire() {
     CHECK(s4->state() == SlotState::retired);
 }
 
+// Retirement is process-wide for the key (artifact, function, units), whoever
+// owns its instances. A stateful template keeps one instance per owner:
+// retiring through one owner's failure path (its Handle or its Slot) reaches
+// every owner's instance, including one that only a unit's Handle still holds.
+// Instances of other keys (another function, other units) stay ready.
+void case_retire_every_owner() {
+    enum class Path { handle, slot };
+    for (const bool shareable : {false, true}) {
+        for (const Path path : {Path::handle, Path::slot}) {
+            reset_world();
+            Env e;
+            const std::string tag = std::string(shareable ? "s" : "u") + (path == Path::handle ? "h" : "s");
+            const std::string fn = "re" + tag;
+            const int base = g_live_models.load();
+            auto mk = [&](const std::string & f, ComputeUnits u = ComputeUnits::cpu_and_gpu) {
+                SlotSpec s = e.spec(f, u);
+                s.shareable = shareable;
+                return e.m->make_slot(s, e.policy());
+            };
+            auto a = mk(fn);
+            auto b = mk(fn);
+            auto c = mk(fn);
+            auto other_fn = mk("ro" + tag);
+            auto other_units = mk(fn, ComputeUnits::cpu_only);
+            const std::vector<std::shared_ptr<Slot>> all = {a, b, c, other_fn, other_units};
+            for (const auto & s : all) s->request(Priority::minimal);
+            CHECK(wait_for([&] { return std::all_of(all.begin(), all.end(), is_ready); }));
+            const int loads = calls(fn);
+            CHECK(loads == (shareable ? 2 : 4));  // other_units shares the function name
+            Acquired ha = a->acquire(Demand::if_ready);
+            Acquired hb = b->acquire(Demand::if_ready);  // the other owner's unit in progress
+            Acquired hc = c->acquire(Demand::if_ready);
+            CHECK(ha && hb && hc);
+            CHECK((ha.model.get() == hb.model.get()) == shareable);
+            c->evict();  // only hc holds c's instance now
+            if (path == Path::handle) {
+                ha.model->retire("prediction failed");
+            } else {
+                a->retire("prediction failed");
+            }
+            for (const auto & s : {a, b}) {
+                CHECK(s->state() == SlotState::retired);
+                const SlotStatus st = s->status();
+                CHECK(st.state == SlotState::retired && st.reason == "prediction failed");
+                Acquired later = s->acquire(Demand::now);
+                CHECK(!later && !later.pending && later.state == SlotState::retired);
+            }
+            // Units already holding an instance finish with it and see the retirement.
+            for (const Acquired * h : {&ha, &hb, &hc}) {
+                CHECK(h->model->retired() && h->model->as<FakeModel>()->name == fn);
+            }
+            // The evicted owner and a new owner of the key are refused; nothing loads again.
+            c->request(Priority::minimal);
+            CHECK(c->state() == SlotState::retired);
+            auto d = mk(fn);
+            CHECK(!d->acquire(Demand::now));
+            CHECK(d->state() == SlotState::retired);
+            CHECK(calls(fn) == loads);
+            for (const auto & s : {other_fn, other_units}) {
+                CHECK(s->status().state == SlotState::ready);
+                Acquired h = s->acquire(Demand::if_ready);
+                CHECK(h && !h.model->retired());
+            }
+            ha = Acquired{};
+            hb = Acquired{};
+            hc = Acquired{};
+            CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));  // other_fn's and other_units'
+        }
+    }
+}
+
+// Another owner's retired instance leaves through its pool's pending release:
+// the pool keeps the place until the native deleter has run, so nothing
+// replaces it meanwhile.
+void case_retire_every_owner_pool() {
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    SlotSpec s = e.spec("gdre");
+    s.shareable = false;
+    s.load_fn = &gated_delete_load;
+    auto a = e.m->make_slot(s, e.policy());  // first owner, no pool
+    SlotSpec ps = s;
+    ps.pool = pool;
+    auto b = e.m->make_slot(ps, e.policy());  // second owner, pooled
+    a->request(Priority::minimal);
+    b->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a) && is_ready(b); }));
+    CHECK(calls("gdre") == 2 && pool->live() == 1);
+    g_delete_entered = 0;
+    g_delete_open = false;
+    std::thread retirer([&] { a->retire("prediction failed"); });  // no handle outstanding
+    CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+    CHECK(b->state() == SlotState::retired);
+    SlotSpec rs = e.spec("prre");
+    rs.pool = pool;
+    auto repl = e.m->make_slot(rs, e.policy());
+    repl->request(Priority::current);
+    const auto end = Clock::now() + 200ms;
+    int over = 0;
+    while (Clock::now() < end) {
+        if (calls("prre") != 0 || is_ready(repl) || pool->live() != 1) ++over;
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(over == 0);
+    CHECK(e.m->stats().evictions == 0);
+    g_delete_open = true;
+    retirer.join();
+    CHECK(g_delete_entered.load() == 2);  // both owners' instances
+    CHECK(wait_for([&] { return is_ready(repl); }));
+    CHECK(pool->live() == 1);
+    CHECK(g_live_models.load() == base + 1);
+}
+
+// Other owners' loads of a retired key: one already running completes without
+// repopulating its slot; a queued one ends at once, so its pool admission never
+// evicts a resident for it; one that reports a busy key lock after the
+// retirement is not queued again.
+void case_retire_every_owner_jobs() {
+    Env e;
+    const int base = g_live_models.load();
+    auto stateful = [&](const std::string & fn, std::shared_ptr<ResidentPool> pool = nullptr) {
+        SlotSpec s = e.spec(fn);
+        s.shareable = false;
+        s.pool = std::move(pool);
+        return e.m->make_slot(s, e.policy());
+    };
+    auto pool = e.m->make_pool(1);
+    SlotSpec rs = e.spec("rjr");
+    rs.pool = pool;
+    auto resident = e.m->make_slot(rs, e.policy());  // evictable: neither held nor predicted
+    resident->request(Priority::minimal);
+    auto a = stateful("rj");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(resident) && is_ready(a); }));
+    set_beh("rj", {true});
+    auto running = stateful("rj");
+    running->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("rj"); }));
+    auto queued = stateful("rj", pool);  // behind the running load; its pool is full
+    queued->request(Priority::minimal);
+    CHECK(queued->state() == SlotState::queued);
+    const Stats s0 = e.m->stats();
+    a->retire("prediction failed");
+    CHECK(queued->state() == SlotState::retired);
+    CHECK(queued->status().reason == "prediction failed");
+    Acquired hq = queued->acquire(Demand::now);
+    CHECK(!hq && !hq.pending);
+    CHECK(running->state() == SlotState::loading);  // runs on
+    release("rj");
+    CHECK(wait_for([&] { return running->state() == SlotState::retired; }));
+    // The load lane is serial: once a later load is ready, nothing queued
+    // before it is left.
+    auto later = e.slot("rjz");
+    later->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(later); }));
+    CHECK(is_ready(resident));
+    CHECK(e.m->stats().evictions == s0.evictions);
+    CHECK(pool->live() == 1);
+    CHECK(calls("rj") == 2);  // a's and the running one's
+    CHECK(running->status().reason == "prediction failed");
+    Acquired hr = running->acquire(Demand::now);
+    CHECK(!hr && !hr.pending);
+    CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));  // resident's and later's
+
+    // Busy key lock reported after the retirement (through a Handle this time).
+    auto a2 = stateful("rk");
+    a2->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a2); }));
+    Behaviour busy;
+    busy.block = true;
+    busy.would_block = 2;  // the next call waits, then finds the key lock busy
+    set_beh("rk", busy);
+    auto requeued = stateful("rk");
+    requeued->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("rk"); }));
+    const uint64_t rq0 = e.m->stats().requeues;
+    {
+        Acquired h = a2->acquire(Demand::if_ready);
+        CHECK(h);
+        h.model->retire("prediction failed");
+    }
+    release("rk");
+    CHECK(wait_for([&] { return requeued->state() == SlotState::retired; }));
+    CHECK(e.m->stats().requeues == rq0);
+    CHECK(calls("rk") == 2);
+    CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));
+}
+
 void case_call_wait_and_cancel() {
     Env e;
     set_beh("cw", {false, 40});
@@ -2732,6 +2921,9 @@ const Case kCases[] = {
     {"evicted-after-ready-group", case_evicted_after_ready_group},
     {"strict", case_strict},
     {"retire", case_retire},
+    {"retire-every-owner", case_retire_every_owner},
+    {"retire-every-owner-pool", case_retire_every_owner_pool},
+    {"retire-every-owner-jobs", case_retire_every_owner_jobs},
     {"call-wait-and-cancel", case_call_wait_and_cancel},
     {"destroy-during-prepare-load-warm", case_destroy_during_jobs},
     {"reload-during-load", case_reload_during_load},

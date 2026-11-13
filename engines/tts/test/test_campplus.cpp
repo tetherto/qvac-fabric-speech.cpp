@@ -4,7 +4,7 @@
 //   ./build/test-campplus S3GEN.gguf FBANK.npy EMBEDDING.npy
 
 #include "campplus.h"
-#include "npy.h"
+#include "parity_test.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,8 +38,8 @@ int main(int argc, char ** argv) {
     }
     const int T = (int)fb.shape[0];
     fprintf(stderr, "      fbank (T=%d, C=%d)\n", T, (int)fb.shape[1]);
-    std::vector<float> fbank_flat((const float *)fb.data.data(),
-                                  (const float *)fb.data.data() + fb.n_elements());
+    std::vector<float> fbank_flat(npy_as_f32(fb),
+                                  npy_as_f32(fb) + fb.n_elements());
 
     fprintf(stderr, "[3/3] running CAMPPlus forward\n");
     auto t0 = std::chrono::steady_clock::now();
@@ -50,26 +50,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "      forward pass: %.1f ms  out=%zu\n", ms, emb.size());
 
     npy_array ref = npy_load(embn);
-    size_t n = std::min(emb.size(), ref.n_elements());
-    const float * r = (const float *)ref.data.data();
-    float ma = 0.0f, rsum = 0.0f, mref = 0.0f;
-    double dot = 0.0, n_sq_c = 0.0, n_sq_r = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        float d = emb[i] - r[i];
-        ma = std::max(ma, std::fabs(d));
-        rsum += d * d;
-        mref = std::max(mref, std::fabs(r[i]));
-        dot   += (double)emb[i] * (double)r[i];
-        n_sq_c += (double)emb[i] * (double)emb[i];
-        n_sq_r += (double)r[i]   * (double)r[i];
-    }
-    double rms = std::sqrt(rsum / n);
-    double rel = ma / std::max(mref, 1e-12f);
-    double cos = dot / (std::sqrt(n_sq_c) * std::sqrt(n_sq_r) + 1e-30);
-    fprintf(stderr,
-        "\n[result] C++ vs Python embedding:\n"
-        "    n=%zu  max_abs=%.4e  rms=%.4e  max|ref|=%.4e  rel=%.4e\n"
-        "    cosine similarity = %.6f\n",
-        n, (double)ma, rms, (double)mref, rel, cos);
-    return 0;
+    // Relative max error against the complete, finite float32 reference.
+    constexpr double kRelativeTolerance = 2e-3;
+    const bool passed = tts_test::check_f32("embedding", emb, {w.embedding_size}, ref,
+                                             kRelativeTolerance);
+    return passed ? 0 : 1;
 }

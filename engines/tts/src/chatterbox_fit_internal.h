@@ -50,17 +50,25 @@ struct s3gen_fit_measure {
     int  T_mel          = 0;
     bool meanflow       = true;
     bool used_b2        = false;
+    bool on_cpu         = true;   // the resolved backend is the CPU
+};
+
+// Conditioning lengths of a caller-supplied voice.  Negative fields use the
+// GGUF's built-in voice tensors, which MOSS-Speech codecs do not carry.
+struct s3gen_fit_prompt {
+    int n_prompt_token     = -1;
+    int prompt_feat_frames = -1;
 };
 
 // Project one s3gen_synthesize_to_wav of `n_speech_tokens` speech tokens
 // (batch path: +3 lookahead-silence tokens, built-in-voice conditioning
-// lengths) against the S3Gen GGUF at `gguf_path`, without reading weight
-// data.  Resolves the backend with the same policy a real load applies.
-// Returns false with `error` set when the model is unreadable or a graph
-// cannot be priced.
+// lengths unless `prompt` supplies them) against the S3Gen GGUF at
+// `gguf_path`, without reading weight data.  Resolves the backend with the
+// same policy a real load applies.  Returns false with `error` set when the
+// model is unreadable or a graph cannot be priced.
 bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
                        const std::string & backend,
                        int n_speech_tokens, s3gen_fit_measure & out,
-                       std::string * error);
+                       std::string * error, const s3gen_fit_prompt & prompt = {});
 
 }  // namespace tts_cpp::chatterbox::detail

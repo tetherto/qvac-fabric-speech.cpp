@@ -4,8 +4,8 @@
 //
 // Encoder (audio -> 64-ch latent) and decoder (latent -> 48 kHz stereo audio)
 // as ggml graphs. The decoder's transposed convolutions use ggml_col2im_1d and
-// every stage uses ggml_snake -- the two custom ops landed in the ggml-speech
-// fork. Everything else is stock ggml. F32 activations, bf16 weights fused to F16.
+// every stage uses ggml_snake -- the two custom ops landed in the fabric
+// ggml. Everything else is stock ggml. F32 activations, bf16 weights fused to F16.
 //
 // Downsample / upsample factor is 1920 (= 2*4*4*6*10). Memory scales with the
 // audio length, so callers should decode/encode bounded windows on CPU.

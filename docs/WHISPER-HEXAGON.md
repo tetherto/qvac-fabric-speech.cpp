@@ -1,11 +1,16 @@
 # Native Whisper on Snapdragon Hexagon
 
-Whisper uses the Hexagon backend from the external shared
-[`qvac-ext-ggml` speech branch](https://github.com/tetherto/qvac-ext-ggml/tree/speech).
-Build the host backend and its DSP skeletons from one immutable revision.
-The revision below includes the paired quantized REPACK and physical-buffer
-accounting fixes validated with Whisper; earlier revisions do not provide
-those contracts.
+Whisper uses the Hexagon backend from the shared fabric ggml, the `ggml/`
+tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp).
+Build the host backend and its DSP skeletons from one immutable revision. The
+Hexagon kernels were ported there from the former ggml-speech branch; the
+whisper measurements below predate that port and are due for a re-run on the
+fabric ggml.
+The former ggml-speech pin that the whisper measurements were taken on also
+carried the paired quantized REPACK storage gate and physical-buffer
+accounting fixes validated with Whisper (qvac-ext-ggml speech 2ff1f34c and
+72b70271); the fabric pin must carry their ports before Whisper on Hexagon is
+re-validated.
 The `third_party/whisper.cpp/ggml` copy is not the Speech dependency and must
 remain unchanged. This guide covers native Fabric builds and validation.
 
@@ -21,11 +26,13 @@ desktop OpenCL library cannot be used for this cross build.
 From the Speech repository root:
 
 ```sh
-git clone --branch speech https://github.com/tetherto/qvac-ext-ggml ggml-src
-git -C ggml-src checkout d1b3e16c0c3b2da178c9c0d04685240bf69d7df5
+GGML_REF=<commit from .github/workflows/whisper-ci.yml>
+git init -q ggml-src
+git -C ggml-src fetch --depth 1 https://github.com/tetherto/qvac-fabric-llm.cpp "$GGML_REF"
+git -C ggml-src checkout -q FETCH_HEAD
 git -C ggml-src rev-parse HEAD
 
-cmake -S ggml-src -B build-ggml-android \
+cmake -S ggml-src/ggml -B build-ggml-android \
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \

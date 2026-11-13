@@ -53,7 +53,7 @@ main() {
   local families="${1:-}"
   [ -n "$families" ] || families="$(all_families | tr '\n' ',')"
   jq -n --argjson engine "$(repo_json "$ENGINE_SRC" "$ENGINE_REPO" "$ENGINE_BRANCH" "${ENGINE_PIN:-}")" \
-    --argjson ggml "$(repo_json "$GGML_SRC" "$GGML_REPO" "$GGML_BRANCH" "${GGML_PIN:-}")" \
+    --argjson ggml "$(repo_json "$GGML_SRC" "$GGML_REPO" "$GGML_BRANCH" "$(ggml_ref)")" \
     --argjson models "$(models_json "$families")" --argjson asr_scorer "$(asr_scorer_json)" \
     --arg cuda_arch "$(cuda_arch_in_use)" --arg registry_client "$(registry_client_version)" --arg venv "$(venv_packages)" \
     --arg families_sha256 "$( (sha256sum "$FAMILIES_JSON" 2>/dev/null || shasum -a 256 "$FAMILIES_JSON") | cut -d' ' -f1)" \

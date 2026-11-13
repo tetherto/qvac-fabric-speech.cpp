@@ -1,7 +1,11 @@
 #pragma once
 
 #include "ggml-backend.h"
+// The fabric ggml installs ggml-hexagon.h only when it builds the Hexagon
+// backend; without it there is no Hexagon metadata to price.
+#if __has_include("ggml-hexagon.h")
 #include "ggml-hexagon.h"
+#endif
 
 #include <cstdint>
 #include <cstring>
@@ -81,6 +85,11 @@ inline whisper_fit_memory_info whisper_fit_query_memory(ggml_backend_dev_t dev) 
 // sessions, including sessions used by a VAD context.
 inline bool whisper_fit_query_backend_overhead(ggml_backend_t backend, uint64_t max_graph_nodes, uint64_t & bytes) {
     bytes = 0;
+#if !defined(GGML_HEXAGON_RUNTIME_INFO_VERSION)
+    (void) backend;
+    (void) max_graph_nodes;
+    return true;
+#else
     ggml_backend_dev_t dev = ggml_backend_get_device(backend);
     ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
     auto query = reg ? reinterpret_cast<ggml_backend_hexagon_get_runtime_info_v1_t>(
@@ -102,4 +111,5 @@ inline bool whisper_fit_query_backend_overhead(ggml_backend_t backend, uint64_t 
     bytes = shared > std::numeric_limits<uint64_t>::max() - host ?
         std::numeric_limits<uint64_t>::max() : host + shared;
     return true;
+#endif
 }

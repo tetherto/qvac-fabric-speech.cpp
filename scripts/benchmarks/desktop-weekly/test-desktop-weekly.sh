@@ -374,6 +374,102 @@ check_previous_and_prune() {
   ok "previous_summary and prune_old_runs walk runs/ newest first"
 }
 
+check_ggml_source() {
+  (
+    . "$HERE/lib.sh"
+    load_config
+    local pin_file="$ENGINE_SRC/$ENGINE_GGML_PIN_FILE" origin="$TMP/ggml-origin" first second
+    [ "$GGML_REPO" = "https://github.com/tetherto/qvac-fabric-llm.cpp.git" ] || { echo "default ggml repository: $GGML_REPO" >&2; exit 1; }
+    make_repo "$origin"
+    mkdir -p "$origin/ggml" && echo "project(ggml)" > "$origin/ggml/CMakeLists.txt"
+    git -C "$origin" add -A && git -C "$origin" -c user.name=test -c user.email=test@example.com commit -q -m first
+    first="$(git -C "$origin" rev-parse HEAD)"
+    git -C "$origin" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m second
+    second="$(git -C "$origin" rev-parse HEAD)"
+    git -C "$origin" config uploadpack.allowAnySHA1InWant true
+    [ -z "$(ggml_ref)" ] || { echo "a ggml ref without any pin: $(ggml_ref)" >&2; exit 1; }
+    update_ggml > /dev/null && { echo "update_ggml ran without a ggml commit" >&2; exit 1; }
+    mkdir -p "$(dirname "$pin_file")"
+    printf 'GGML_REPO_URL="x"\nGGML_REF="%s"   # the pin\n' "$first" > "$pin_file"
+    [ "$(ggml_ref)" = "$first" ] || { echo "engine pin not read: $(ggml_ref)" >&2; exit 1; }
+    GGML_REPO="file://$origin"; GGML_SRC="$TMP/ggml-checkout"
+    update_ggml || { echo "update_ggml failed at the engine pin" >&2; exit 1; }
+    [ "$(repo_sha "$GGML_SRC")" = "$first" ] || { echo "checkout is not at the engine pin" >&2; exit 1; }
+    [ "$(ggml_cmake_source)" = "$GGML_SRC/ggml" ] || { echo "cmake source: $(ggml_cmake_source)" >&2; exit 1; }
+    BUILDS_DIR="$TMP/ggml-builds"
+    mkdir -p "$BUILDS_DIR/cpu/ggml" "$BUILDS_DIR/cuda/ggml"
+    echo "CMAKE_HOME_DIRECTORY:INTERNAL=$GGML_SRC" > "$BUILDS_DIR/cpu/ggml/CMakeCache.txt"
+    echo "CMAKE_HOME_DIRECTORY:INTERNAL=$GGML_SRC/ggml" > "$BUILDS_DIR/cuda/ggml/CMakeCache.txt"
+    discard_ggml_build_of_another_source cpu; discard_ggml_build_of_another_source cuda; discard_ggml_build_of_another_source vulkan
+    [ ! -e "$BUILDS_DIR/cpu/ggml" ] || { echo "a ggml build of the old source layout was kept" >&2; exit 1; }
+    [ -f "$BUILDS_DIR/cuda/ggml/CMakeCache.txt" ] || { echo "a ggml build of the current source was discarded" >&2; exit 1; }
+    git -C "$GGML_SRC" remote set-url origin "file://$TMP/moved-away"
+    printf 'GGML_REF="%s"\n' "$second" > "$pin_file"
+    update_ggml || { echo "update_ggml did not follow a moved pin or repository" >&2; exit 1; }
+    [ "$(repo_sha "$GGML_SRC")" = "$second" ] || { echo "checkout did not move to the new engine pin" >&2; exit 1; }
+    GGML_BRANCH="some-branch"
+    [ "$(ggml_ref)" = "some-branch" ] && [ "$(ggml_ref_source)" = "branch some-branch" ] || { echo "GGML_BRANCH does not override the engine pin" >&2; exit 1; }
+    GGML_PIN="$first"
+    [ "$(ggml_ref)" = "$first" ] && [ "$(ggml_ref_source)" = "GGML_PIN" ] || { echo "GGML_PIN does not override the branch" >&2; exit 1; }
+    GGML_SRC="$TMP/flat-ggml"; mkdir -p "$GGML_SRC"
+    [ "$(ggml_cmake_source)" = "$GGML_SRC" ] || { echo "cmake source of a flat ggml tree: $(ggml_cmake_source)" >&2; exit 1; }
+  ) || fail "ggml source"
+  ok "ggml is built from qvac-fabric-llm.cpp at the commit the engine pins, follows a moved pin, and GGML_PIN or GGML_BRANCH override it"
+}
+
+check_gpu_lease() {
+  (
+    . "$HERE/weekly.sh"
+    export HOME="$TMP/lease-home" LOCK_WAIT_HOURS=2
+    mkdir -p "$HOME/.local/bin"
+    load_config
+    BACKENDS="cpu,cuda"
+    needs_gpu_lease && { echo "a lease is needed without the lease tool" >&2; exit 1; }
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/lease-args"\n' "$TMP" > "$HOME/.local/bin/gpu-run"
+    chmod +x "$HOME/.local/bin/gpu-run"
+    PATH="$HOME/.local/bin:$PATH"
+    needs_gpu_lease || { echo "no lease asked for a cuda run on a host with the lease tool" >&2; exit 1; }
+    BACKENDS="cpu"
+    needs_gpu_lease && { echo "a cpu-only run asked for a lease" >&2; exit 1; }
+    BACKENDS="cpu,vulkan"; GPU_INDEX=1
+    export_gpu_selection
+    [ "$CUDA_VISIBLE_DEVICES" = 1 ] && [ "$GGML_VK_VISIBLE_DEVICES" = 1 ] || { echo "the configured GPU is not selected outside a lease" >&2; exit 1; }
+    ( BENCH_HOME="$TMP/home" CONFIG_FILE="$TMP/none" bash "$HERE/weekly.sh" --no-update --no-mail --backends vulkan --label lease > /dev/null 2>&1 & echo $! > "$TMP/lease-pid"; wait )
+    [ -s "$TMP/lease-args" ] || { kill "$(cat "$TMP/lease-pid")" 2> /dev/null; echo "the run did not go through the lease tool" >&2; exit 1; }
+    [ "$(cat "$TMP/lease-args")" = "-n 1 --timeout 7200 -- /bin/bash $HERE/weekly.sh --no-update --no-mail --backends vulkan --label lease" ] || { echo "lease command: $(cat "$TMP/lease-args")" >&2; exit 1; }
+    [ ! -d "$TMP/home/runs/$(date +%F)-lease" ] || { echo "the run started outside the lease" >&2; exit 1; }
+    export GPU_RUN_LEASE=7 CUDA_VISIBLE_DEVICES="GPU-uuid"
+    needs_gpu_lease && { echo "a second lease asked for inside a lease" >&2; exit 1; }
+    GPU_INDEX=1; load_config; export_gpu_selection
+    [ "$GPU_INDEX" = 0 ] && [ "$CUDA_VISIBLE_DEVICES" = "GPU-uuid" ] && [ -z "${GGML_VK_VISIBLE_DEVICES:-}" ] && [ "$GPU_LOCK_QUIET" = 1 ] ||
+      { echo "inside a lease: index $GPU_INDEX cuda $CUDA_VISIBLE_DEVICES vk ${GGML_VK_VISIBLE_DEVICES:-}" >&2; exit 1; }
+    cat > "$HOME/.local/bin/nvidia-smi" <<'FAKE'
+#!/bin/sh
+echo "$*" >> "$SMI_CALLS"
+case "$*" in
+  *"-i 0 --query-compute-apps"*) echo 4242 ;;
+  *"-i GPU-leased-1 --query-compute-apps"*) ;;
+  *"-i GPU-leased-1 --query-gpu=timestamp"*) echo "2026/11/15 10:00:00.000, 2048, 37" ;;
+  *"-i GPU-leased-1 --query-gpu=name"*) echo "RTX leased" ;;
+  *"--query-gpu"*) echo "RTX busy neighbour" ;;
+esac
+FAKE
+    chmod +x "$HOME/.local/bin/nvidia-smi"
+    export SMI_CALLS="$TMP/smi-calls" CUDA_VISIBLE_DEVICES="GPU-leased-1" GPU_RUN_GPUS=1
+    [ "$(gpu_monitor_target)" = "GPU-leased-1" ] && [ "$(gpu_physical_index)" = 1 ] || { echo "leased GPU 1 is monitored as $(gpu_monitor_target), index $(gpu_physical_index)" >&2; exit 1; }
+    gpu_busy_linux && { echo "GPU 0's job of another user counted as busy while GPU 1 is leased" >&2; exit 1; }
+    MEMORY_SAMPLER=auto
+    start_gpu_sampler "$TMP/lease-gpu.csv"; sleep 1; stop_gpu_sampler
+    grep -q "2048, 37" "$TMP/lease-gpu.csv" || { echo "the sampler did not read the leased GPU: $(cat "$TMP/lease-gpu.csv")" >&2; exit 1; }
+    [ "$(bash "$HERE/machine-info.sh" | jq -r '[.gpu.name, .gpu.index] | join("|")')" = "RTX leased|1" ] || { echo "machine info names another GPU: $(bash "$HERE/machine-info.sh" | jq -c .gpu)" >&2; exit 1; }
+    grep -q -- "-i 0 " "$SMI_CALLS" && { echo "nvidia-smi was asked about index 0 inside a lease: $(grep -- "-i 0 " "$SMI_CALLS" | head -n 1)" >&2; exit 1; }
+    unset GPU_RUN_LEASE; GPU_INDEX=0
+    [ "$(gpu_monitor_target)" = 0 ] && [ "$(gpu_physical_index)" = 0 ] || { echo "outside a lease the configured index is not monitored" >&2; exit 1; }
+    gpu_busy_linux || { echo "a busy configured GPU is not seen outside a lease" >&2; exit 1; }
+  ) || fail "gpu lease"
+  ok "on a host with gpu-run a GPU run takes one lease for itself, and busy checks, sampling and machine info follow the leased GPU by its UUID"
+}
+
 check_build_marker() {
   mkdir -p "$BUILDS_DIR/cpu"
   if build_is_current cpu; then fail "build_is_current without a marker"; fi
@@ -576,6 +672,8 @@ main() {
   check_lib_deadline
   check_failed_result
   check_previous_and_prune
+  check_ggml_source
+  check_gpu_lease
   check_build_marker
   check_fetch_models_offline
   check_fetch_models_reprovisions_on_origin_change

@@ -91,6 +91,7 @@ Example:
 import argparse
 import importlib.util
 import math
+import re
 import subprocess
 import wave
 from pathlib import Path
@@ -133,7 +134,22 @@ def model_type(meta):
     return str(meta.get("parakeet.model.type", "ctc"))
 
 
-def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
+def resolve_export_precision(meta, requested, flexible):
+    if flexible and meta.get("parakeet.model_variant") == "transcribepsy-250m-eu":
+        if requested not in (None, "fp32"):
+            raise ValueError("Full TranscribePsy EU flexible exports require --precision fp32; "
+                             "FP16 flexible execution produces non-finite encoder features")
+        return "fp32"
+    return requested or "fp16"
+
+
+def validate_export_contract(meta, flexible=False, bypass_pre_encode=False, eu_route=None):
+    full_eu = meta.get("parakeet.model_variant") == "transcribepsy-250m-eu"
+    if full_eu and (eu_route not in ("en", "other", "gate") or not flexible):
+        raise ValueError("Full TranscribePsy EU requires --flexible --eu-route en, other or gate; "
+                         "use export-encoder-coreml-ane.py for fixed ANE sidecars")
+    if not full_eu and eu_route is not None:
+        raise ValueError("--eu-route requires full TranscribePsy EU")
     kind = model_type(meta)
     if kind not in ("ctc", "rnnt", "tdt", "eou", "nemotron", "sortformer"):
         raise ValueError(
@@ -152,9 +168,9 @@ def validate_export_contract(meta, flexible=False, bypass_pre_encode=False):
             raise ValueError(
                 f"{family} Core ML export requires non-causal convolution")
         if str(meta.get(
-                "parakeet.encoder.conv_norm_type", "batch_norm")) != "batch_norm":
+                "parakeet.encoder.conv_norm_type", "batch_norm")) != ("layer_norm" if full_eu else "batch_norm"):
             raise ValueError(
-                f"{family} Core ML export requires batch-normalized convolution")
+                f"{family} Core ML export requires {'layer' if full_eu else 'batch'}-normalized convolution")
         left = int(meta.get("parakeet.encoder.att_context_size_left", -1))
         right = int(meta.get("parakeet.encoder.att_context_size_right", -1))
         if left >= 0 or right >= 0:
@@ -372,27 +388,41 @@ def encoder_forward(ref, mel, weights, meta):
     return conformer_stack_forward(ref, x, weights, meta)
 
 
-def subsampling_shape_generic(mel, weights):
-    # ref.subsampling masks each conv stage to a valid length derived from
-    # torch.arange(T), which bakes the traced mel length into the graph. For the
-    # full-valid offline input those masks are all-ones (a no-op), so drop them
-    # here to keep the stride-2 conv stack polymorphic in the time axis -- the
-    # prerequisite for a dynamic-length (RangeDim) export.
+def subsampling_shape_generic(mel, weights, mel_valid_mask=None):
+    # Preserve the frontend's frame grid while excluding its padded samples
+    # from each convolution. The output projection bias remains in extra rows,
+    # matching the native pre-projection padding contract.
     x = mel.unsqueeze(0).transpose(1, 2).unsqueeze(1)
+    mask = None if mel_valid_mask is None else mel_valid_mask.reshape(1, 1, -1, 1)
+    if mask is not None:
+        x = x * mask
     x = F.conv2d(x, weights["encoder.subsampling.conv0.weight"],
                  bias=weights["encoder.subsampling.conv0.bias"], stride=2, padding=1)
+    if mask is not None:
+        mask = mask[:, :, ::2, :]
+        x = x * mask
     x = F.relu(x)
     x = F.conv2d(x, weights["encoder.subsampling.conv1_dw.weight"],
                  bias=weights["encoder.subsampling.conv1_dw.bias"],
                  stride=2, padding=1, groups=x.size(1))
+    if mask is not None:
+        mask = mask[:, :, ::2, :]
+        x = x * mask
     x = F.conv2d(x, weights["encoder.subsampling.conv1_pw.weight"],
                  bias=weights["encoder.subsampling.conv1_pw.bias"], stride=1, padding=0)
+    if mask is not None:
+        x = x * mask
     x = F.relu(x)
     x = F.conv2d(x, weights["encoder.subsampling.conv2_dw.weight"],
                  bias=weights["encoder.subsampling.conv2_dw.bias"],
                  stride=2, padding=1, groups=x.size(1))
+    if mask is not None:
+        mask = mask[:, :, ::2, :]
+        x = x * mask
     x = F.conv2d(x, weights["encoder.subsampling.conv2_pw.weight"],
                  bias=weights["encoder.subsampling.conv2_pw.bias"], stride=1, padding=0)
+    if mask is not None:
+        x = x * mask
     x = F.relu(x)
     x = x.permute(0, 2, 1, 3).flatten(2)
     return F.linear(x, weights["encoder.subsampling.out.weight"],
@@ -412,15 +442,16 @@ def encoder_frames_for_mel(ref, meta, n_mel_frames):
 
 
 def rel_shift_gather(matrix_bd, T):
-    # Transformer-XL rel-shift + crop to T key positions as a single int32 gather:
+    # Transformer-XL rel-shift + crop to T key positions as a single gather:
     # out[.., i, j] = matrix_bd[.., i, (j - i) + (T - 1)]. Equivalent to the ref
     # pad/reshape rel_shift followed by [:, :, :, :T], but with no double-dynamic
     # reshape (which coremltools cannot build a shape tensor for).
     i = torch.arange(T, device=matrix_bd.device).unsqueeze(1)
     j = torch.arange(T, device=matrix_bd.device).unsqueeze(0)
     idx = (j - i + (T - 1)).to(torch.int32)
-    idx = idx.unsqueeze(0).unsqueeze(0).expand(1, matrix_bd.size(1), -1, -1)
-    return torch.gather(matrix_bd, 3, idx)
+    idx = idx.unsqueeze(0).unsqueeze(0).repeat(1, matrix_bd.size(1), 1, 1)
+    # Torch gather requires int64 indices; Core ML lowers them to int32.
+    return torch.gather(matrix_bd, 3, idx.to(torch.int64))
 
 
 def rel_pos_mha_flex(x, pos_emb, W, prefix, n_heads):
@@ -453,7 +484,7 @@ def rel_pos_mha_flex(x, pos_emb, W, prefix, n_heads):
     return F.linear(ctx, W[f"{prefix}.out.weight"], W[f"{prefix}.out.bias"])
 
 
-def conformer_block_flex(ref, x, pos_emb, weights, index, n_heads):
+def conformer_block_flex(ref, x, pos_emb, weights, index, n_heads, conv_layer_norm=False):
     p = f"encoder.blk.{index}"
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff1.weight"], weights[f"{p}.norm_ff1.bias"]),
@@ -463,14 +494,14 @@ def conformer_block_flex(ref, x, pos_emb, weights, index, n_heads):
         pos_emb, weights, f"{p}.attn", n_heads)
     x = x + conformer_conv(ref,
         ref.layer_norm(x, weights[f"{p}.norm_conv.weight"], weights[f"{p}.norm_conv.bias"]),
-        weights, f"{p}.conv")
+        weights, f"{p}.conv", layer_norm=conv_layer_norm)
     x = x + 0.5 * ref.conformer_ff(
         ref.layer_norm(x, weights[f"{p}.norm_ff2.weight"], weights[f"{p}.norm_ff2.bias"]),
         weights, f"{p}.ff2")
     return ref.layer_norm(x, weights[f"{p}.norm_out.weight"], weights[f"{p}.norm_out.bias"])
 
 
-def encoder_forward_flexible(ref, mel, weights, meta, pe_table):
+def encoder_forward_flexible(ref, mel, weights, meta, pe_table, mel_valid_mask=None):
     # Variable-length forward: masking-free subsampling + a precomputed relative
     # positional buffer gathered by the symbolic sequence length, feeding an
     # export-friendly attention (rel_pos_mha_flex) whose only dynamic-shape ops
@@ -478,7 +509,7 @@ def encoder_forward_flexible(ref, mel, weights, meta, pe_table):
     d_model = meta["parakeet.encoder.d_model"]
     n_layers = meta["parakeet.encoder.n_layers"]
     n_heads = meta["parakeet.encoder.n_heads"]
-    x = subsampling_shape_generic(mel, weights)
+    x = subsampling_shape_generic(mel, weights, mel_valid_mask)
     if meta.get("parakeet.encoder.xscaling", True):
         x = x * math.sqrt(d_model)
     length = x.size(1)
@@ -492,7 +523,14 @@ def encoder_forward_flexible(ref, mel, weights, meta, pe_table):
     pos_index = (center - length + offsets).to(torch.int32)
     pos_emb = pe_table.index_select(1, pos_index)
     for index in range(n_layers):
-        x = conformer_block_flex(ref, x, pos_emb, weights, index, n_heads)
+        x = conformer_block_flex(ref, x, pos_emb, weights, index, n_heads,
+                                 meta.get("parakeet.encoder.conv_norm_type") == "layer_norm")
+        if meta.get("coreml.eu_route") == "other" and index in meta["parakeet.eu.adapter_layers"]:
+            adapter = meta["parakeet.eu.adapter_layers"].index(index)
+            prefix = f"eu.adapter.{adapter}"
+            y = F.gelu(F.linear(x, weights[f"{prefix}.down.weight"],
+                                weights[f"{prefix}.down.bias"]), approximate="none")
+            x = x + F.linear(y, weights[f"{prefix}.up.weight"], weights[f"{prefix}.up.bias"])
     return x
 
 
@@ -517,6 +555,16 @@ class EncoderModule(torch.nn.Module):
         if self.flexible:
             return encoder_forward_flexible(self.ref, mel, weights, self.meta, self.pe_table)[0]
         return encoder_forward(self.ref, mel, weights, self.meta)[0]
+
+
+class NativePaddingFlexibleEncoder(EncoderModule):
+    """Keep native sequence length and mask only frontend subsampling padding."""
+
+    def forward(self, mel, mel_valid_mask):
+        weights = BiasTolerantWeights(
+            (key, getattr(self, self._buffers_by_key[key])) for key in self._keys)
+        return encoder_forward_flexible(self.ref, mel, weights, self.meta,
+                                        self.pe_table, mel_valid_mask)[0]
 
 
 class MaskedEncoderModule(EncoderModule):
@@ -582,14 +630,14 @@ def compile_mlmodelc(mlpackage_path, compile_dir):
     return compiled
 
 
-def report_compute_placement(mlmodelc_path):
+def report_compute_placement(mlmodelc_path, cpu_only=False):
     # Report Core ML op placement (Neural Engine / GPU / CPU) so a CPU-bound export
     # -- which runs far slower than the ggml-Metal encoder -- is caught here instead
     # of silently shipping a slow sidecar. Requires macOS 14.4+ / coremltools>=8.
     try:
         import coremltools as ct
         from coremltools.models.compute_plan import MLComputePlan
-        plan = MLComputePlan.load_from_path(str(mlmodelc_path), compute_units=ct.ComputeUnit.ALL)
+        plan = MLComputePlan.load_from_path(str(mlmodelc_path), compute_units=ct.ComputeUnit.CPU_ONLY if cpu_only else ct.ComputeUnit.ALL)
     except Exception as exc:
         print(f"[export] compute-plan check skipped ({type(exc).__name__}: {exc})")
         return
@@ -618,8 +666,8 @@ def report_compute_placement(mlmodelc_path):
     print(f"[export] compute-plan op placement: {summary}")
     if compute_ops > 0 and counts.get("NeuralEngine", 0) == 0:
         print("[export] WARNING: 0 ops on the Apple Neural Engine -- this model will run on "
-              "CPU and be much slower than the ggml-Metal encoder. Flexible/dynamic shapes "
-              "force Core ML onto CPU; export a fixed single length for ANE acceleration.")
+              "CPU/GPU according to the reported placement. Export a fixed single length "
+              "for ANE acceleration.")
 
 
 def palettize_encoder(mlmodel, bits, group_size):
@@ -689,21 +737,47 @@ def convert_bypass_fixed(ref, weights, meta, example, d_model, n_encoder_frames,
     )
 
 
-def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
-                     min_frames, max_frames, precision, io_dtype, deployment_target):
-    min_frames = min_frames if min_frames is not None else 1
-    max_frames = max(max_frames if max_frames is not None else n_mel_frames, n_mel_frames)
-    pos_emb_max_len = int(meta.get("parakeet.encoder.pos_emb_max_len", 5000))
-    pe_len = max(pos_emb_max_len, encoder_frames_for_mel(ref, meta, max_frames))
-    pe_table = ref.sinusoidal_rel_pe(pe_len, d_model)
+def remove_redundant_flexible_expands(exported):
+    graph = exported.graph_module.graph
+    for node in list(graph.nodes):
+        if node.target != torch.ops.aten.expand.default:
+            continue
+        source = node.args[0]
+        original = source.meta.get("val")
+        expanded = node.meta.get("val")
+        if original is not None and expanded is not None and \
+                tuple(map(str, original.shape)) == tuple(map(str, expanded.shape)):
+            node.replace_all_uses_with(source)
+            graph.erase_node(node)
 
-    model = EncoderModule(ref, weights, meta, flexible=True, pe_table=pe_table).eval()
-    with torch.inference_mode():
-        reference_out = model(example)
-    print(f"[export] flexible n_mels={n_mels} d_model={d_model} "
-          f"mel_frames=[{min_frames},{max_frames}] traced={n_mel_frames} "
-          f"encoder_frames={reference_out.shape[0]} pe_len={pe_len}")
 
+def remove_trivial_flexible_guards(exported, min_frames):
+    # For T >= 9, subsampling gives E = floor((T-1)/8)+1 >= 2.
+    # Both 1%E != 0 and 1%(2*E-1) != 0 are therefore tautologies.
+    # Torch 2.7 cannot prove these broadcast guards; Core ML cannot lower
+    # their scalar modulo nodes. Remove only these two proven guards.
+    if min_frames < 9:
+        return
+    proven = {
+        "Ne(Mod(1, (((s - 1)//8)) + 1), 0)",
+        "Ne(Mod(1, 2*(((s - 1)//8)) + 1), 0)",
+    }
+    graph = exported.graph_module.graph
+    for node in list(graph.nodes):
+        if node.target == torch.ops.aten._assert_tensor_metadata.default:
+            graph.erase_node(node)
+        elif node.target == torch.ops.aten._assert_scalar.default:
+            message = str(node.args[1])
+            expression = message.partition("expression ")[2].partition(" on node")[0]
+            expression = re.sub(r"\bs\d+\b", "s", expression)
+            if expression in proven:
+                graph.erase_node(node)
+    graph.eliminate_dead_code()
+    graph.lint()
+    exported.graph_module.recompile()
+
+
+def trace_flexible_encoder(model, example, min_frames, max_frames):
     # torch.export keeps the time axis symbolic (unlike jit.trace, which bakes it),
     # so the dynamic pos-emb slice survives conversion. strict=False uses the
     # non-strict tracer, which tolerates the Python-level weights dict.
@@ -719,36 +793,97 @@ def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
     fx_config.backed_size_oblivious = True
     time_dim = torch.export.Dim("mel_t", min=min_frames, max=max_frames)
     dynamic_shapes = {"mel": {1: time_dim}}
+    examples = (example,)
+    if isinstance(model, NativePaddingFlexibleEncoder):
+        examples = (example, torch.ones(example.shape[1]))
+        dynamic_shapes["mel_valid_mask"] = {0: time_dim}
     try:
-        exported = torch.export.export(model, (example,), dynamic_shapes=dynamic_shapes,
+        exported = torch.export.export(model, examples, dynamic_shapes=dynamic_shapes,
                                        strict=False)
     except Exception as exc:
         print(f"[export] export guard violation ({type(exc).__name__}); "
-              f"retrying via draft_export")
-        exported = torch.export.draft_export(model, (example,), dynamic_shapes=dynamic_shapes)
+              "retrying with runtime shape assertions")
+        if hasattr(torch.export, "draft_export"):
+            exported = torch.export.draft_export(model, examples, dynamic_shapes=dynamic_shapes)
+        else:
+            # Torch 2.7 exposes this mechanism through its pinned private API.
+            from torch.export._trace import _export
+            exported = _export(model, examples, dynamic_shapes=dynamic_shapes,
+                               strict=False, allow_complex_guards_as_runtime_asserts=True)
         if isinstance(exported, tuple):
             exported = exported[0]
     # torch>=2.5 export produces a TRAINING-dialect program; coremltools converts
     # only core ATen / EDGE, so lower it first.
     exported = exported.run_decompositions({})
-    return ct.convert(
-        exported,
-        inputs=[ct.TensorType(
+    remove_redundant_flexible_expands(exported)
+    remove_trivial_flexible_guards(exported, min_frames)
+    exported.graph_module.recompile()
+    return exported
+
+
+def convert_flexible(ref, weights, meta, example, n_mels, n_mel_frames, d_model,
+                     min_frames, max_frames, precision, io_dtype, deployment_target):
+    full_eu = meta.get("parakeet.model_variant") == "transcribepsy-250m-eu"
+    min_frames = min_frames if min_frames is not None else 1
+    # Torch's broadcast guards specialize dimensions of size one. Trace a
+    # nondegenerate range, then expose the mathematically valid single-row
+    # shapes to Core ML; compiled predictions are tested at every 1–8 mel length.
+    trace_min = max(9, min_frames) if full_eu else min_frames
+    max_frames = max(max_frames if max_frames is not None else n_mel_frames, n_mel_frames, trace_min)
+    trace_frames = max(n_mel_frames, trace_min)
+    if trace_frames != n_mel_frames:
+        example = torch.zeros(n_mels, trace_frames, dtype=example.dtype)
+    pos_emb_max_len = int(meta.get("parakeet.encoder.pos_emb_max_len", 5000))
+    pe_len = max(pos_emb_max_len, encoder_frames_for_mel(ref, meta, max_frames))
+    pe_table = ref.sinusoidal_rel_pe(pe_len, d_model)
+
+    model_class = NativePaddingFlexibleEncoder if full_eu else EncoderModule
+    model = model_class(ref, weights, meta, flexible=True, pe_table=pe_table).eval()
+    with torch.inference_mode():
+        reference_out = model(example, torch.ones(trace_frames)) if full_eu else model(example)
+    print(f"[export] flexible n_mels={n_mels} d_model={d_model} "
+          f"mel_frames=[{min_frames},{max_frames}] traced={n_mel_frames} "
+          f"encoder_frames={reference_out.shape[0]} pe_len={pe_len}")
+
+    exported = trace_flexible_encoder(model, example, trace_min, max_frames)
+    inputs = [ct.TensorType(
             name="mel",
             shape=ct.Shape(shape=(n_mels, ct.RangeDim(
-                lower_bound=min_frames, upper_bound=max_frames, default=n_mel_frames))),
-            dtype=io_dtype)],
+                lower_bound=trace_min, upper_bound=max_frames, default=trace_frames))),
+            dtype=io_dtype)]
+    if full_eu:
+        inputs.append(ct.TensorType(name="mel_valid_mask", shape=ct.Shape(shape=(
+            ct.RangeDim(lower_bound=trace_min, upper_bound=max_frames,
+                        default=trace_frames),)), dtype=io_dtype))
+    converted = ct.convert(exported, inputs=inputs,
         outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
-        compute_units=ct.ComputeUnit.ALL,
-        compute_precision=precision,
-        minimum_deployment_target=deployment_target,
-    )
+        compute_units=ct.ComputeUnit.ALL, compute_precision=precision,
+        minimum_deployment_target=deployment_target)
+    if min_frames < trace_min:
+        spec = converted.get_spec()
+        set_flexible_input_minimum(spec, min_frames)
+        converted = ct.models.MLModel(spec, weights_dir=converted.weights_dir,
+                                     compute_units=ct.ComputeUnit.CPU_ONLY, skip_model_load=True)
+    return converted
+
+
+def set_flexible_input_minimum(spec, minimum):
+    feature = next(value for value in spec.description.input if value.name == "mel")
+    ranges = feature.type.multiArrayType.shapeRange.sizeRanges
+    if len(ranges) != 2 or minimum < 1 or minimum > ranges[1].upperBound:
+        raise ValueError("Invalid flexible mel input range")
+    ranges[1].lowerBound = minimum
+    for feature in spec.description.input:
+        if feature.name == "mel_valid_mask":
+            feature.type.multiArrayType.shapeRange.sizeRanges[0].lowerBound = minimum
 
 
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", type=Path, required=True)
+    ap.add_argument("--eu-route", choices=["en", "other", "gate"],
+                    help="full-EU unwindowed flexible encoder route; use the ANE exporter for fixed windows")
     ap.add_argument("--out", type=Path, required=True,
                     help="output .mlpackage path")
     ap.add_argument("--scripts", type=Path, default=Path(__file__).resolve().parent)
@@ -761,7 +896,8 @@ def main():
     ap.add_argument("--bypass-pre-encode", action="store_true",
                     help="export the Sortformer v2.1 conformer stack without subsampling; "
                          "input is a fixed (d_model, n_encoder_frames) embedding slab")
-    ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    ap.add_argument("--precision", choices=["fp16", "fp32"], default=None,
+                    help="default fp16; full-EU flexible exports require fp32 for finite activations")
     ap.add_argument("--palettize-bits", type=int, choices=[4, 6, 8], default=None,
                     help="optionally compress fixed-export weights into grouped-channel LUTs; "
                          "6 matches the ANE-oriented Voz layout and requires macOS 15 / iOS 18")
@@ -771,8 +907,8 @@ def main():
                     help="if set, compile the .mlpackage to a .mlmodelc here via coremlc")
     ap.add_argument("--flexible", action="store_true",
                     help="export a variable-length (Core ML RangeDim) encoder via "
-                         "torch.export. CORRECTNESS-ONLY: runs on CPU (0 ANE ops, ~8x slower "
-                         "than ggml-Metal); export a fixed single length for ANE acceleration. "
+                         "torch.export. Uses CPU/GPU rather than ANE; full EU requires "
+                         "FP32 Core ML CPU. Export fixed windows for ANE acceleration. "
                          "Needs coremltools>=8 / torch>=2.3")
     ap.add_argument("--min-frames", type=int, default=None,
                     help="[--flexible] minimum mel length the RangeDim accepts (default 1)")
@@ -795,7 +931,16 @@ def main():
     weights, meta = ref.load_gguf(args.gguf)
     try:
         kind = validate_export_contract(meta, flexible=args.flexible,
-                                        bypass_pre_encode=args.bypass_pre_encode)
+                                        bypass_pre_encode=args.bypass_pre_encode,
+                                        eu_route=args.eu_route)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if args.eu_route is not None:
+        meta["coreml.eu_route"] = args.eu_route
+        if args.eu_route == "gate":
+            meta["parakeet.encoder.n_layers"] = int(meta["parakeet.eu.gate_layer"]) + 1
+    try:
+        args.precision = resolve_export_precision(meta, args.precision, args.flexible)
     except ValueError as exc:
         ap.error(str(exc))
 
@@ -829,13 +974,20 @@ def main():
     if args.palettize_bits is not None:
         mlmodel = palettize_encoder(mlmodel, args.palettize_bits,
                                     args.palettize_group_size)
+    if args.eu_route is not None:
+        mlmodel.user_defined_metadata["parakeet.model_variant"] = "transcribepsy-250m-eu"
+        mlmodel.user_defined_metadata["parakeet.eu.route"] = args.eu_route
+        mlmodel.user_defined_metadata["parakeet.encoder.n_layers"] = str(meta["parakeet.encoder.n_layers"])
+        mlmodel.user_defined_metadata["parakeet.eu.flexible"] = "true"
+        mlmodel.user_defined_metadata["parakeet.eu.native_padding"] = "true"
+        mlmodel.user_defined_metadata["parakeet.encoder.precision"] = args.precision
     mlmodel.save(str(args.out))
     print(f"[export] saved {args.out}")
 
     if args.compile_dir is not None:
         compiled = compile_mlmodelc(args.out, args.compile_dir)
         print(f"[export] compiled .mlmodelc into {args.compile_dir}")
-        report_compute_placement(compiled)
+        report_compute_placement(compiled, cpu_only=args.eu_route is not None)
 
 
 if __name__ == "__main__":

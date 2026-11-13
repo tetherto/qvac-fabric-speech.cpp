@@ -31,28 +31,30 @@ static std::string strip_spaces(const std::string & s) {
 }
 
 int main() {
-    // 1) Empty text -> one (empty) segment.
-    {
-        auto segs = split_text_for_tts("", 180);
-        CHECK(segs.size() == 1, "empty text -> 1 segment");
-        CHECK(segs[0].empty(), "empty text -> empty segment");
-    }
-
-    // 2) max_chars <= 0 disables splitting: text returned unchanged.
-    {
-        const std::string t = "One. Two. Three.";
-        auto segs = split_text_for_tts(t, 0);
-        CHECK(segs.size() == 1, "max_chars=0 -> single segment");
-        CHECK(segs[0] == t, "max_chars=0 -> text unchanged");
-        auto segs2 = split_text_for_tts(t, -5);
-        CHECK(segs2.size() == 1 && segs2[0] == t, "max_chars<0 -> text unchanged");
-    }
-
-    // 3) Short text under max_chars -> a single segment (greedy merge keeps
-    //    short sentences together).
-    {
-        auto segs = split_text_for_tts("Hi there. How are you?", 200);
-        CHECK(segs.size() == 1, "short multi-sentence under max -> merged to 1");
+    struct Case {
+        const char * text;
+        int budget;
+        std::vector<std::string> expected;
+    };
+    const Case cases[] = {
+        {"", 180, {""}},
+        {"One. Two. Three.", 0, {"One. Two. Three."}},
+        {"One. Two. Three.", -5, {"One. Two. Three."}},
+        {"Hi there. How are you?", 200, {"Hi there. How are you?"}},
+        {"One. Two.", 9, {"One. Two."}},
+        {"One. Two.", 8, {"One.", "Two."}},
+        {"One! Two? Three.", 8, {"One!", "Two?", "Three."}},
+        {"one two three", 8, {"one two", "three"}},
+        {"abcde, fghij; klmno", 10, {"abcde,", "fghij;", "klmno"}},
+        {"Hi.\tBye.\n", 8, {"Hi.", "Bye."}},
+    };
+    for (const auto & c : cases) {
+        const auto got = split_text_for_tts(c.text, c.budget);
+        CHECK(got == c.expected, "exact sentence boundaries and content");
+        if (got != c.expected) {
+            std::fprintf(stderr, "  input='%s' budget=%d\n", c.text, c.budget);
+            for (const auto & segment : got) std::fprintf(stderr, "  got='%s'\n", segment.c_str());
+        }
     }
 
     // 4) Multi-sentence text with a small budget -> multiple segments, each
@@ -83,8 +85,12 @@ int main() {
         const int max_chars = 60;
         auto segs = split_text_for_tts(t, max_chars);
         CHECK(segs.size() > 1, "over-long unbroken run -> hard-broken");
-        for (const auto & s : segs)
+        for (const auto & s : segs) {
+            CHECK(!s.empty(), "hard-break produces no empty segments");
             CHECK((int)s.size() <= max_chars, "hard-break within max_chars");
+        }
+        CHECK(std::accumulate(segs.begin(), segs.end(), std::string{}) == t,
+              "hard-break preserves every character");
     }
 
     if (g_failures == 0) {

@@ -33,7 +33,7 @@ memory_gib() {
 
 nvidia_field() {
   command -v nvidia-smi > /dev/null || { echo ""; return; }
-  nvidia-smi -i "$GPU_INDEX" --query-gpu="$1" --format=csv,noheader,nounits 2>/dev/null | head -1 | sed 's/^ *//'
+  nvidia-smi -i "$(gpu_monitor_target)" --query-gpu="$1" --format=csv,noheader,nounits 2>/dev/null | head -1 | sed 's/^ *//'
 }
 
 nvcc_binary() {
@@ -66,7 +66,7 @@ gpu_json() {
     jq -n --arg name "$(cpu_model)" --arg cores "$(darwin_gpu_cores)" '{name:$name, gpu_cores:$cores, unified_memory:true}'
   else
     jq -n --arg name "$(nvidia_field name)" --arg memory "$(nvidia_field memory.total)" --arg driver "$(nvidia_field driver_version)" \
-      --arg cuda "$(nvcc_release)" --arg vulkan "$(vulkan_summary)" --arg index "$GPU_INDEX" \
+      --arg cuda "$(nvcc_release)" --arg vulkan "$(vulkan_summary)" --arg index "$(gpu_physical_index)" \
       '{name:$name, memory_mib:$memory, driver:$driver, cuda_toolkit:$cuda, vulkan:$vulkan, index:$index, unified_memory:false}'
   fi
 }

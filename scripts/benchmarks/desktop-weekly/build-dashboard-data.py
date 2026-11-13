@@ -85,7 +85,7 @@ PAIR_SEPARATOR = "/"
 NO_RATIO = "no ratio recorded"
 NOT_RECORDED = "not recorded"
 RULES = [
-    ("Weekly rows and campaign rows are separate", "The weekly rows come from the Sunday run at the engine master and ggml speech heads; the campaign rows keep the build, inputs and dates of the report they come from. Each chart compares rows of one source only: a weekly chart holds QVAC variants, a campaign chart holds QVAC and its competitors as the campaign measured them."),
+    ("Weekly rows and campaign rows are separate", "The weekly rows come from the Sunday run at the engine master head and the ggml commit it pins; the campaign rows keep the build, inputs and dates of the report they come from. Each chart compares rows of one source only: a weekly chart holds QVAC variants, a campaign chart holds QVAC and its competitors as the campaign measured them."),
     ("Timing scopes", "ASR, Supertonic and Nemotron rows time inference only. Audio8, MOSS-TTS and ACE-Step rows are whole fresh processes including model load, so their speed is a throughput figure, not a latency. Rows of different scopes are never in one chart."),
     ("Competitor ÷ QVAC time", "In a campaign chart, the competitor's time divided by QVAC's time on the same device, backend and input; above 1 means QVAC took less time. The campaign measured its own QVAC build, so the ratio describes that build, not this week's."),
     ("Reading a move", "A slower cell with unchanged engine and ggml commits points at load from another user that night; a changed commit names what to look at."),
@@ -145,7 +145,7 @@ def short_sha(pins, key):
 def pins_text(summary):
     pins = summary.get("pins", {})
     engine, ggml = pins.get("engine") or {}, pins.get("ggml") or {}
-    return f"qvac {short_sha(pins, 'engine')} ({engine.get('commit_date', '')}), ggml speech {short_sha(pins, 'ggml')} ({ggml.get('commit_date', '')})"
+    return f"qvac {short_sha(pins, 'engine')} ({engine.get('commit_date', '')}), ggml {short_sha(pins, 'ggml')} ({ggml.get('commit_date', '')})"
 
 
 def variant_label(row):

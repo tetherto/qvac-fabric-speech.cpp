@@ -1,4 +1,4 @@
-// Regression coverage for VAD with use_gpu enabled (QVAC-24420).
+// Regression coverage for VAD with use_gpu enabled.
 //
 // whisper_vad_init_with_params places the model weights via a buffer-type
 // list that honors params.use_gpu, but whisper_vad_init_context used to
@@ -60,6 +60,8 @@ static void assert_probs_near(const std::vector<float> & a,
 
 static struct whisper_vad_context * init_vad_context(const std::string & model_path, bool use_gpu) {
     struct whisper_vad_context_params ctx_params = whisper_vad_default_context_params();
+    constexpr int kVadTestThreads = 1;
+    ctx_params.n_threads = kVadTestThreads;
     ctx_params.use_gpu = use_gpu;
     return whisper_vad_init_from_file_with_params(model_path.c_str(), ctx_params);
 }

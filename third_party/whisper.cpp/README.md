@@ -864,6 +864,10 @@ let package = Package(
 ```
 
 ## Voice Activity Detection (VAD)
+
+The fork's [CI guide](../../docs/CI.md) documents the full-input VAD contract
+tests and their additional default-thread-count streaming coverage.
+
 Support for Voice Activity Detection (VAD) can be enabled using the `--vad`
 argument to `whisper-cli`. In addition to this option a VAD model is also
 required.

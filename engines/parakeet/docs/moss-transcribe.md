@@ -268,12 +268,12 @@ machines, or leave the sidecar out.
 ## Hexagon NPU
 
 `--backend hexagon` (API: `TranscribeOptions::backend = "hexagon"`) runs the
-encoder, the adaptor and the decoder on the HTP0 session of a ggml-speech built
+encoder, the adaptor and the decoder on the HTP0 session of a fabric ggml built
 with `GGML_HEXAGON=ON`. On a Galaxy S25 (Snapdragon 8 Elite, Hexagon v79) every
 encoder and decoder graph is a single HTP0 split, so no operation falls back
 to the CPU. Requirements:
 
-- ggml-speech with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
+- A fabric ggml with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
   skeletons staged next to the host backends. `backends_dir` is prepended to
   FastRPC's `DSP_LIBRARY_PATH` (see [backends](backends.md)). The measurements
   below use qvac-ext-ggml `speech` at `6bb85ad6`, whose HTP `q8_0` activation
@@ -347,8 +347,8 @@ engine and the memory projection).
 ## Adreno OpenCL
 
 `--backend opencl` runs the encoder, the adaptor and the decoder on Adreno
-OpenCL with the unfused graph. It needs ggml-speech 2026-10-19 or later
-(qvac-ext-ggml `speech` at `1bb92ec5`,
+OpenCL with the unfused graph. It needs the Adreno image-kernel tile fix
+(ggml-speech 2026-10-19, qvac-ext-ggml `speech` at `1bb92ec5`,
 [tetherto/qvac-ext-ggml#126](https://github.com/tetherto/qvac-ext-ggml/pull/126)):
 older builds run attention batches of 32 or more query tokens through
 Adreno matrix kernels that ignore the tails of their 16 by 64 tiles, so on an

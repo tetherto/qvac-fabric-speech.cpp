@@ -113,6 +113,20 @@ class PageTest(unittest.TestCase):
         self.assertIn('href="https://example.test/hub" target="_blank" rel="noopener">full Speech Bench hub</a>', page)
         self.assertEqual(skipped, ["spark-d9ca cuda ASR Nemotron 3.5 ASR Streaming 0.6B abcba resident_api report"])
 
+    def test_a_machine_without_data_is_skipped_and_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = pathlib.Path(tmp)
+            (folder / "hub.json").write_text(json.dumps(HUB), encoding="utf-8")
+            (folder / "spark-d9ca").mkdir()
+            (folder / "spark-d9ca" / "machine.json").write_text(json.dumps(MACHINE), encoding="utf-8")
+            (folder / "spark-d9ca" / "runs.json").write_text(json.dumps(ROWS), encoding="utf-8")
+            config = {**CONFIG, "machines": [{"host": "qvac-dev-strix-1", "backend": "vulkan", "cards": [CARD]},
+                                             {"host": "spark-d9ca", "backend": "cuda", "cards": [CARD]}]}
+            page, skipped = highlights.build(str(folder), config)
+        self.assertIn("<h2>DGX Spark</h2>", page)
+        self.assertNotIn("Strix", page)
+        self.assertEqual(skipped, ["qvac-dev-strix-1 (no data for this machine)"])
+
 
 if __name__ == "__main__":
     unittest.main()

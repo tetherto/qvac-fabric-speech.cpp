@@ -8,6 +8,7 @@
 #include "coreml/parakeet_coreml_shape.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -99,9 +100,37 @@ void check_ane_valid_lengths() {
 }
 
 int main() {
+    for (const char * units : {"all", "cpu_and_gpu", "cpu_and_ane", "cpu_only"}) {
+        if (parakeet::coreml_eu_allows_gpu_precision(units, true)) return 1;
+    }
+    if (parakeet::coreml_eu_allows_gpu_precision(nullptr, true)) return 1;
+    if (parakeet::coreml_eu_loads_fixed_auxiliaries("cpu_only") ||
+        parakeet::coreml_eu_loads_fixed_auxiliaries("cpu_and_gpu") ||
+        !parakeet::coreml_eu_loads_fixed_auxiliaries("all") ||
+        !parakeet::coreml_eu_loads_fixed_auxiliaries("cpu_and_ane") ||
+        !parakeet::coreml_eu_loads_fixed_auxiliaries(nullptr)) return 1;
     const int64_t N_MELS = 128;
 
     check_ane_valid_lengths();
+    if (!parakeet::coreml_eu_requires_cpu_precision("cpu_only") ||
+        !parakeet::coreml_eu_requires_cpu_precision("cpu_and_gpu") ||
+        parakeet::coreml_eu_requires_cpu_precision("all") ||
+        parakeet::coreml_eu_requires_cpu_precision("cpu_and_ane") ||
+        parakeet::coreml_eu_requires_cpu_precision(nullptr)) ++g_failures;
+    if (!parakeet::coreml_eu_allows_gpu_precision(nullptr) ||
+        !parakeet::coreml_eu_allows_gpu_precision("all") ||
+        !parakeet::coreml_eu_allows_gpu_precision("cpu_and_gpu") ||
+        parakeet::coreml_eu_allows_gpu_precision("cpu_only") ||
+        parakeet::coreml_eu_allows_gpu_precision("cpu_and_ane")) ++g_failures;
+    const float finite[] = {0.0f, -1.0f, std::numeric_limits<float>::max()};
+    const float nan[] = {0.0f, std::numeric_limits<float>::quiet_NaN()};
+    const float positive_infinity[] = {std::numeric_limits<float>::infinity()};
+    const float negative_infinity[] = {-std::numeric_limits<float>::infinity()};
+    if (!parakeet::coreml_features_are_finite(finite, 3) ||
+        !parakeet::coreml_features_are_finite(nullptr, 0) ||
+        parakeet::coreml_features_are_finite(nan, 2) ||
+        parakeet::coreml_features_are_finite(positive_infinity, 1) ||
+        parakeet::coreml_features_are_finite(negative_infinity, 1)) ++g_failures;
 
     // Fixed model already sized to the input -> honoured verbatim (no rebuild).
     expect("fixed features-major exact", {1, N_MELS, 1101}, 1101, N_MELS, {1, N_MELS, 1101}, true);

@@ -477,7 +477,7 @@ def jump_links(hosts):
 def page_header(hosts, built_at):
     tiles = "".join(status_tile(latest_run(runs)) for runs in hosts.values())
     return (f'<header><h1>{PAGE_TITLE}</h1>'
-            f'<p>Every Sunday from 18:00 CET, cron on the shared Tailscale machines benchmarks the qvac-fabric-speech.cpp engines on the '
+            f'<p>Every Sunday from 11:00 CET, cron on the shared Tailscale machines benchmarks the qvac-fabric-speech.cpp engines on the '
             f'current engine and ggml heads: Parakeet TDT and Unified, TranscribePsy, Nemotron 3.5 ASR, Supertonic 3, the Audio8 LM and codec '
             f'grid with voice cloning, MOSS-TTS v1.5 F16 and Q8_0 with cloning, and the ACE-Step 1.5 Turbo, SFT and Base DiTs. One table per '
             f'task, one column per machine and backend; the fabric-llm engine bench owns Saturday on the same machines. Rebuilt from each '

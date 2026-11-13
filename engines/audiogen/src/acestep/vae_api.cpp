@@ -103,7 +103,7 @@ std::unique_ptr<Vae> Vae::load(const std::string & gguf_path, const VaeOptions &
     std::unique_ptr<Vae> v(new Vae());
 
     // The two custom ops (col2im_1d, snake) have CPU, Metal and Vulkan kernels
-    // in the ggml-speech fork, so the decode/encode graph can run on a GPU
+    // in the fabric ggml, so the decode/encode graph can run on a GPU
     // backend. n_gpu_layers > 0 opts in (Metal on Apple, Vulkan elsewhere);
     // falls back to CPU when no GPU backend is registered/available. Backends are
     // acquired through the ggml registry (see backend_registry.h) so the CPU path

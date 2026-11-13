@@ -35,7 +35,7 @@ Vulkan devices keep the LM on CPU because testing showed code collapse and
 early termination. HIP/MUSA register as `ROCm`/`MUSA` and remain outside the
 allowlists until measured.
 
-CUDA requires the `ggml-speech` fork's `snake` / `col2im_1d` VAE kernels and
+CUDA requires the fabric ggml's (`qvac-fabric` port) `snake` / `col2im_1d` VAE kernels and
 `GGML_PREC_F32` matmul support. Hexagon requires the matching HTP activation
 quantizer described [below](#hexagon-npu). Recorded comparisons and the
 F32-dequantized reference protocol are in
@@ -106,9 +106,9 @@ matching XRT, amdxdna and kernel artifacts. Follow the
 [shared XDNA runtime setup](../../parakeet/docs/backends.md#amd-xdna-npu), then
 build AudioGen with `CMAKE_PREFIX_PATH` pointing to that GGML installation as
 in the [build guide](build.md). There is no ONNX conversion or ONNX Runtime
-in this path. The currently published `ggml-speech` dependency does not contain
-XDNA; ordinary package CI validates regression compatibility separately from
-native NPU hardware execution.
+in this path. The published `qvac-fabric` port carries XDNA as a feature since
+11739.0.0#1; ordinary package CI validates regression compatibility separately
+from native NPU hardware execution.
 
 Use the existing stage GGUFs, selecting a BF16 turbo DiT for the validated
 NPU matmuls. Quantized weights can take XDNA's host path and are not covered by
@@ -143,14 +143,14 @@ confirmed real NPU command submission. Validation used
 ## Hexagon NPU
 
 `backend = "hexagon"` runs every stage on the HTP0 session of the
-ggml-speech Hexagon backend: the DiT, the VAE, both encoders, the FSQ
+fabric ggml Hexagon backend: the DiT, the VAE, both encoders, the FSQ
 detokenizer and the LM. `lm_backend = "cpu"` or `"opencl"` moves only the LM
 off the NPU. Requirements:
 
-- ggml-speech built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
+- A fabric ggml built with `GGML_HEXAGON=ON`, with the `libggml-htp-v*.so` DSP
   skeletons staged next to the host backends. `backends_dir` is prepended to
   FastRPC's `DSP_LIBRARY_PATH` before the HTP session opens.
-- A ggml-speech whose HTP `q8_0` activation quantizer matches the CPU's
+- A fabric ggml whose HTP `q8_0` activation quantizer matches the CPU's
   (an F32 scale per 32 activations). Older skeletons scale 128 activations at
   a time in F16: the LM's prompt logits then land 6x further from the F32
   reference than CPU Q8_0, its greedy decode leaves the reference at the first

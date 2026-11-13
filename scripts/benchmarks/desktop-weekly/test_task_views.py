@@ -18,7 +18,7 @@ views = load_module("task_views", "task_views.py")
 
 QVAC = "qvac-fabric-speech.cpp"
 MACHINE = {"host": "spark-d9ca", "machine": "DGX Spark", "url": "https://example.test/spark", "date": "2026-11-08",
-           "newest_run": "2026-11-08", "pins": "qvac abc, ggml speech def"}
+           "newest_run": "2026-11-08", "pins": "qvac abc, ggml def"}
 
 
 def weekly(**overrides):
@@ -175,7 +175,7 @@ class PageTest(unittest.TestCase):
         self.assertIn('<span class="cur">ASR</span>', html)
         self.assertIn('<a href="#dgx-spark-tts">TTS and voice cloning</a>', html)
         self.assertIn('<a href="https://example.test/spark" target="_blank" rel="noopener">DGX Spark dashboard</a>', html)
-        self.assertIn("QVAC from the weekly run 2026-11-08 at qvac abc, ggml speech def: 1 model on CPU.", html)
+        self.assertIn("QVAC from the weekly run 2026-11-08 at qvac abc, ggml def: 1 model on CPU.", html)
 
     def test_not_measured_groups_backends_and_marks_failures(self):
         coverage = [{"task": "ASR", "status": "not attempted", "model": "Nemotron", "engine": QVAC, "backend": b, "reason": "Skipped"} for b in ("cuda", "cpu")]

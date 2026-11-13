@@ -73,7 +73,7 @@ SharedModel::SharedModel(std::shared_ptr<void> impl, LoadRequest req, std::strin
 SharedModel::~SharedModel() {
     impl_.reset();  // the engine's MLModel wrapper goes first
     if (lease_fd_ >= 0) ::close(lease_fd_);
-    if (std::shared_ptr<detail::Runtime> rt = rt_.lock()) rt->on_model_released(key_);
+    if (std::shared_ptr<detail::Runtime> rt = rt_.lock()) rt->on_model_released(key_, this);
 }
 
 void SharedModel::retire(const std::string & reason) {

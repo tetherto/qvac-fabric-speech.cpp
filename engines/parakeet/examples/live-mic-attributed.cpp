@@ -65,7 +65,7 @@ void print_usage(const char * argv0) {
         "  --asr-n-gpu-layers N           ASR engine GPU offload (Metal/CUDA build)\n"
         "  --diar-n-gpu-layers N          Sortformer engine GPU offload\n"
         "  --threads N                    CPU threads per engine (0 = hardware_concurrency)\n"
-        "  --asr-chunk-ms N               transcription stride in ms (default 1000)\n"
+        "  --asr-chunk-ms N               transcription stride in ms (model default)\n"
         "  --asr-left-context-ms N        left context per chunk in ms (default 5000)\n"
         "  --asr-right-lookahead-ms N     right lookahead per chunk in ms (default 1000)\n"
         "  --diar-chunk-ms N              diarization stride in ms (default 2000)\n"
@@ -90,7 +90,7 @@ struct Args {
     int  asr_n_gpu_layers   = 0;
     int  diar_n_gpu_layers  = 0;
     int  n_threads          = 0;
-    int  asr_chunk_ms       = 1000;
+    int  asr_chunk_ms       = parakeet::StreamingOptions::automatic_chunk_ms;
     int  asr_left_ms        = 5000;
     int  asr_right_ms       = 1000;
     int  diar_chunk_ms      = 2000;
@@ -325,6 +325,7 @@ int main(int argc, char ** argv) {
     tx_sopts.left_context_ms    = args.asr_left_ms;
     tx_sopts.right_lookahead_ms = args.asr_right_ms;
     auto tx_sess = asr_engine.stream_start(tx_sopts, on_tx);
+    args.asr_chunk_ms = tx_sess->options().chunk_ms;
 
     SortformerStreamingOptions diar_sopts;
     diar_sopts.sample_rate    = 16000;

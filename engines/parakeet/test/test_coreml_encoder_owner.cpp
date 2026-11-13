@@ -5,6 +5,7 @@
 // Usage:
 //   test-coreml-encoder-owner --coreml-gguf <encoder-less.gguf>
 //                             [--full-gguf <q8.gguf> --wav <input.wav>]
+//   test-coreml-encoder-owner --standard-tdt <q8.gguf> --wav <input.wav>
 //
 // On every platform it asserts that the encoder-less GGUF is rejected with
 // the documented code when no sidecar can take the encoder over (Core ML
@@ -18,17 +19,22 @@
 // GGUF skips the encoder weights (a smaller weights buffer) while the same
 // GGUF without the switch loads them. Without the sidecar that part exits 3
 // (skipped).
+// Standard TDT sidecars without validated seams must retain native weights
+// under PARAKEET_COREML_ONLY and reject encoder-less GGUFs even with a sidecar.
 //
 // Exit 0 on success; non-zero on failure or invalid arguments.
 
 #include "mel_preprocess.h"
 #include "parakeet_coreml_path.h"
 #include "parakeet_ctc.h"
+#include "gguf.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -166,16 +172,80 @@ void check_coreml_only_skips_encoder_weights(const std::string & full_gguf,
     std::filesystem::remove_all(staged.parent_path());
 }
 
+void check_standard_tdt_rejects_encoderless(const std::string & gguf) {
+    const gguf_init_params params = {true, nullptr};
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> source(
+        gguf_init_from_file(gguf.c_str(), params), gguf_free);
+    expect(source != nullptr, "read standard TDT metadata");
+    if (!source) return;
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> stripped(gguf_init_empty(), gguf_free);
+    gguf_set_kv(stripped.get(), source.get());
+
+    const auto dir = std::filesystem::temp_directory_path() / "parakeet-standard-tdt-owner-test";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "encoderless.gguf";
+    expect(gguf_write_to_file(stripped.get(), path.string().c_str(), false),
+           "write encoder-less standard TDT fixture");
+    std::filesystem::create_directory_symlink(
+        std::filesystem::absolute(coreml_encoder_sidecar_path(gguf)),
+        coreml_encoder_sidecar_path(path.string()));
+    ParakeetCtcModel rejected;
+    expect(load(path.string(), rejected) == kGgufLoadNoEncoderWeights,
+           "standard TDT without encoder weights must reject an unvalidated sidecar");
+    std::filesystem::remove_all(dir);
+}
+
+void check_standard_tdt_keeps_encoder_weights(const std::string & gguf,
+                                              const std::string & wav) {
+    unset_env(kOnlyEnv);
+    ParakeetCtcModel full;
+    expect(load(gguf, full) == 0, "standard TDT must load without the ownership switch");
+    if (!full.impl) return;
+    expect(full.model_type == ParakeetModelType::TDT && model_coreml_seam_context_frames(full) == 0,
+           "ownership regression requires standard TDT without validated seams");
+    expect(model_encoder_on_coreml(full), "standard TDT sidecar must be loaded");
+
+    set_env(kOnlyEnv, "1");
+    ParakeetCtcModel retained;
+    expect(load(gguf, retained) == 0, "standard TDT must load with PARAKEET_COREML_ONLY=1");
+    unset_env(kOnlyEnv);
+    if (!retained.impl) return;
+    expect(!model_encoder_owned_by_coreml(retained), "standard TDT must retain its native encoder");
+    expect(model_encoder_on_coreml(retained), "retaining weights must keep the sidecar available");
+    expect(model_weights_buffer_bytes(retained) == model_weights_buffer_bytes(full),
+           "ownership switch must not reduce standard TDT encoder weights");
+
+    int frames = 0;
+    std::vector<float> mel = mel_of(retained, wav, frames);
+    frames = std::max(frames, model_coreml_fixed_mel_frames(retained) + 1);
+    mel.resize(static_cast<size_t>(frames) * retained.mel_cfg.n_mels, 0.0f);
+    EncoderOutputs out;
+    expect(run_encoder(retained, mel.data(), frames, retained.mel_cfg.n_mels, out,
+                       parakeet::acquire_encoder_route(retained), -1, false, true) == 0 &&
+               out.n_enc_frames > 0 && !out.used_coreml,
+           "oversized TDT input must execute the retained native encoder");
+    check_standard_tdt_rejects_encoderless(gguf);
+}
+
 #endif  // PARAKEET_USE_COREML
 
 }  // namespace
 
 int main(int argc, char ** argv) {
-    std::string coreml_gguf, full_gguf, wav;
+    std::string coreml_gguf, full_gguf, standard_tdt, wav;
     for (int i = 1; i + 1 < argc; i += 2) {
         if (std::strcmp(argv[i], "--coreml-gguf") == 0) coreml_gguf = argv[i + 1];
         else if (std::strcmp(argv[i], "--full-gguf") == 0) full_gguf = argv[i + 1];
         else if (std::strcmp(argv[i], "--wav") == 0) wav = argv[i + 1];
+        else if (std::strcmp(argv[i], "--standard-tdt") == 0) standard_tdt = argv[i + 1];
+    }
+    if (!standard_tdt.empty() && !wav.empty()) {
+#ifdef PARAKEET_USE_COREML
+        check_standard_tdt_keeps_encoder_weights(standard_tdt, wav);
+        return g_failures == 0 ? 0 : 1;
+#else
+        return kSkipExitCode;
+#endif
     }
     if (coreml_gguf.empty()) {
         std::fprintf(stderr, "usage: test-coreml-encoder-owner --coreml-gguf <gguf> "

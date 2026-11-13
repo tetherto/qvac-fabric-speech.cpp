@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <new>
 #include <random>
 #include <string>
 #include <vector>
@@ -462,6 +463,76 @@ void test_cache_memory_guard() {
                    "a KV cache larger than the free memory is refused");
 }
 
+void test_stage_residency_policy() {
+    constexpr uint64_t GIB = 1024ull * 1024 * 1024;
+    constexpr uint64_t MIB = 1024ull * 1024;
+    check(speech_stages_fit(14 * GIB, 4 * GIB), "a decoder that leaves room for a turn fits beside the LM");
+    check(!speech_stages_fit(3 * GIB, 4 * GIB), "a decoder larger than the free memory does not fit");
+    check(!speech_stages_fit(4 * GIB + 100 * MIB, 4 * GIB), "a decoder that leaves no room for a turn does not fit");
+    check(!speech_stages_fit(UNKNOWN_FREE_BYTES, 4 * GIB), "unknown free memory does not fit");
+    check(!speech_stages_fit(14 * GIB, std::numeric_limits<uint64_t>::max()), "a failed projection does not fit");
+    check(speech_decode_within_plan(4 * GIB, 4 * GIB), "a decode the stages were sized for stays resident");
+    check(!speech_decode_within_plan(4 * GIB, 4 * GIB + 1), "a decode beyond the plan releases the stages");
+    check(!speech_decode_within_plan(4 * GIB, std::numeric_limits<uint64_t>::max()),
+          "a failed decode projection releases the stages");
+}
+
+void test_stage_release_retries_prefill() {
+    const auto path = write_lm("speech-retry", WEIGHT_SEED);
+    SpeechLM lm(path.string(), {}, 1);
+    const std::vector<SpeechRow> prompt = mixed_rows();
+    const int n_ctx = (int) prompt.size() + 8;
+    lm.begin(n_ctx);
+    const SpeechLogits expected = lm.prefill(prompt, 4);
+
+    int begins = 0, prefills = 0, releases = 0;
+    // The KV cache allocates, then the first prefill fails partway through.
+    auto attempt = [&] {
+        lm.begin(n_ctx);
+        ++begins;
+        if (prefills++ == 0) {
+            lm.prefill({prompt.front()}, 4);
+            throw std::runtime_error("graph allocation failed");
+        }
+        return lm.prefill(prompt, 4);
+    };
+    const SpeechLogits logits = retry_after_releasing_stages(true, attempt, [&] { ++releases; });
+    check(begins == 2 && releases == 1, "a failed prefill releases the stages and retries once");
+    check(logits.text == expected.text && logits.audio == expected.audio,
+          "the retry replays the prompt from a fresh KV cache");
+
+    prefills = 0;
+    releases = 0;
+    bool threw = false;
+    try {
+        retry_after_releasing_stages(false, attempt, [&] { ++releases; });
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    check(threw && releases == 0, "a staged engine reports a failed prefill");
+
+    releases = 0;
+    threw = false;
+    try {
+        retry_after_releasing_stages(true, []() -> int { throw std::runtime_error("graph allocation failed"); },
+                                     [&] { ++releases; });
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    check(threw && releases == 1, "a failure after releasing the stages is reported");
+}
+
+void test_stage_planning_failures_keep_staging() {
+    int releases = 0;
+    auto release = [&] { ++releases; };
+    check(try_hold_stages([] { return true; }, release) && releases == 0, "a plan that fits holds the stages");
+    check(!try_hold_stages([] { return false; }, release) && releases == 0, "a plan that does not fit stays staged");
+    check(!try_hold_stages([]() -> bool { throw std::runtime_error("graph allocation failed"); }, release) &&
+          releases == 1, "a failed plan releases what it held and stays staged");
+    check(!try_hold_stages([]() -> bool { throw std::bad_alloc(); }, release) && releases == 2,
+          "running out of memory while planning stays staged");
+}
+
 void test_generation_loop() {
     const auto path = write_lm("speech-loop", WEIGHT_SEED);
     SpeechLM lm(path.string(), {}, 1);
@@ -788,6 +859,9 @@ int main() {
         test_lm_skips_the_text_head();
         test_lm_weight_tiers();
         test_cache_memory_guard();
+        test_stage_residency_policy();
+        test_stage_release_retries_prefill();
+        test_stage_planning_failures_keep_staging();
         test_options_keep_their_field_order();
         test_generation_loop();
         test_segment_arithmetic();

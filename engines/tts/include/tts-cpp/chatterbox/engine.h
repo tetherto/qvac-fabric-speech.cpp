@@ -119,8 +119,8 @@ struct EngineOptions {
 
     // Sets `$GGML_OPENCL_CACHE_DIR` before the first backend init so
     // ggml-opencl persists `clCreateProgramWithBinary` blobs across
-    // process restarts (see the program-binary-cache patch on
-    // qvac-ext-ggml@speech). Strongly recommended on Android where
+    // process restarts (see the program-binary-cache commit in the
+    // fabric ggml). Strongly recommended on Android where
     // the cold `clBuildProgram` cost dominates first-utterance
     // latency; pass a writable per-app directory (typically the
     // app's `cacheDir` from the host platform).

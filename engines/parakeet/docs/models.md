@@ -34,15 +34,30 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --hf-repo qvac/TranscribePsy-250M-EU \
   --eu-adapters engines/parakeet/models/adapters.safetensors \
   --eu-gate engines/parakeet/models/language_gate.safetensors \
-  --out engines/parakeet/models/transcribepsy-250m-eu.gguf --quant q8_0
+  --out engines/parakeet/models/transcribepsy-250m-eu.gguf --quant q8_0 \
+  --description "TranscribePsy-250M-EU, FastConformer-TDT speech recognition (Apache-2.0)" \
+  --long-form-window-sec 60 --long-form-overlap 0.25
 ```
 
 Use `--language en` for known English, `--language other` for known non-English,
 or `--language auto` (also the default) to run the gate on the first 20 seconds
 before transcription. `EngineOptions::language` accepts the same values for
 this model. The gate and adapters are embedded in the GGUF; no extra files are
-needed at inference time. The native ggml encoder handles both routes; the
-EU-sub Core ML sidecars do not contain the full model's adapters.
+needed at inference time. CPU, Metal and Vulkan/Android handle both routes. Full-EU Core ML sidecars accelerate both routes
+and the gate encoder on macOS/iOS; [export the matching full-EU sidecars](transcribepsy-eu-coreml.md).
+EU-sub sidecars do not contain this model's adapters and are rejected for full EU.
+
+Full-EU conversion defaults to TranscribePsy provenance with the Apache-2.0
+license and a 60-second long-form window with 25% overlap. The explicit options
+above also make those settings visible in the conversion command. Older full-EU
+GGUFs with a generic description use the same window default through their model
+variant; explicit model hints and caller window options take precedence.
+
+Across all backends, full-EU callback and push streaming default to 2000 ms
+chunks when `StreamingOptions::chunk_ms = 0`; explicit positive chunk sizes
+are preserved. Auto push streams buffer the initial 20 seconds for routing, or
+route shorter streams on `finalize()`. Known `en`/`other` streams emit without
+that gate delay. See the [streaming API](api.md).
 
 ```bash
 build-parakeet/parakeet --model engines/parakeet/models/transcribepsy-250m-eu.gguf \
@@ -92,6 +107,24 @@ python engines/parakeet/scripts/convert-nemo-to-gguf.py \
   --out  engines/parakeet/models/transcribepsy-250m-eu-sub.gguf --quant q8_0 \
   --description "TranscribePsy-250M-EU-sub, FastConformer-TDT speech recognition"
 ```
+
+To produce the encoder-less EU-sub GGUF for Core ML deployment, export the
+encoder and decoder sidecars from the full GGUF first, then strip its encoder
+tensors:
+
+```bash
+python engines/parakeet/scripts/strip-encoder-gguf.py \
+  --gguf engines/parakeet/models/transcribepsy-250m-eu-sub.gguf \
+  --out engines/parakeet/models/transcribepsy-250m-eu-sub-coreml.gguf
+```
+
+This preserves metadata and the retained tensor bytes, including quantized
+weights, while removing every `encoder.*` tensor. It refuses an existing output.
+Deploy the result beside sidecars named
+`transcribepsy-250m-eu-sub-coreml-encoder.mlmodelc` and
+`transcribepsy-250m-eu-sub-coreml-decoder.mlmodelc`. Export those names explicitly
+or rename the compiled directories after export. The stripped file requires its
+Core ML encoder and cannot fall back to a native encoder.
 
 The converter reads the TDT durations from `model_defaults`, as NeMo's released
 checkpoints keep them, or from `loss.tdt_kwargs` / `decoding`, where some

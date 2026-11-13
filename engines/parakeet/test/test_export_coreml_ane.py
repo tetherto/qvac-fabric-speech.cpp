@@ -8,8 +8,10 @@ export-decoder-coreml-ane.py against its scalar reference on random weights.
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -48,6 +50,7 @@ def load(name, module_name):
 ENCODER = load("export-encoder-coreml-ane.py", "export_encoder_coreml_ane")
 DECODER = load("export-decoder-coreml-ane.py", "export_decoder_coreml_ane")
 REFERENCE = load("ref-encoder-from-gguf.py", "ref_encoder_from_gguf")
+GENERIC = load("export-encoder-coreml.py", "export_encoder_coreml")
 
 
 def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, ff_dim=16,
@@ -102,6 +105,78 @@ def toy_encoder_weights(d_model=8, n_layers=2, n_heads=2, n_mels=8, channels=4, 
         "parakeet.encoder.pos_emb_max_len": 64,
     }
     return w, meta
+
+
+class EuEncoderTests(unittest.TestCase):
+    def test_fp32_exports_preserve_uncompressed_precision(self):
+        ENCODER.validate_fixed_precision("fp32", 0)
+        ENCODER.validate_fixed_precision("fp16", 6)
+        with self.assertRaisesRegex(ValueError, "--nbits 0"):
+            ENCODER.validate_fixed_precision("fp32", 6)
+
+    def setUp(self):
+        self.weights, self.meta = toy_encoder_weights()
+        self.meta.update({"parakeet.model_variant": ENCODER.EU_VARIANT,
+                          "parakeet.eu.adapter_layers": [0, 1],
+                          "parakeet.eu.gate_layer": 0})
+        for index in range(2):
+            for name, shape in (("down.weight", (3, 8)), ("down.bias", (3,)),
+                                ("up.weight", (8, 3)), ("up.bias", (8,))):
+                self.weights[f"eu.adapter.{index}.{name}"] = torch.randn(*shape) * 0.2
+
+    def test_full_eu_requires_explicit_export_route(self):
+        with self.assertRaisesRegex(ValueError, "requires --eu-route"):
+            ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64)
+        with self.assertRaisesRegex(ValueError, "another model"):
+            ENCODER.validate_eu_route({}, "other")
+        with self.assertRaisesRegex(ValueError, "Invalid"):
+            ENCODER.validate_eu_route(self.meta, "invalid")
+
+    def test_all_routes_match_reference_with_partial_and_full_windows(self):
+        mel = torch.randn(8, 64)
+        outputs = {}
+        for route in ("en", "other", "gate"):
+            model = ENCODER.AneEncoder(REFERENCE, self.weights, self.meta, 64,
+                                       eu_route=route).eval()
+            self.assertEqual(model.n_layers, 1 if route == "gate" else 2)
+            for valid in (1, 7, 8, 17, 63, 64):
+                with self.subTest(route=route, valid=valid):
+                    want = ENCODER.reference_frames(REFERENCE, self.weights, self.meta,
+                                                     mel, valid, route)
+                    got = ENCODER.ane_encoder_frames(model, mel, valid)
+                    self.assertLess(ENCODER.relative_error(got, want),
+                                    ENCODER.PARITY_REL_TOLERANCE)
+            outputs[route] = ENCODER.ane_encoder_frames(model, mel)
+        self.assertGreater(float((outputs["other"] - outputs["en"]).abs().max()), 0.01)
+        self.assertGreater(float((outputs["gate"] - outputs["en"]).abs().max()), 0.01)
+
+    def test_unwindowed_flexible_routes_match_reference_at_different_lengths(self):
+        self.meta["parakeet.model.type"] = "tdt"
+        for route in ("en", "other"):
+            meta = dict(self.meta, **{"coreml.eu_route": route})
+            self.assertEqual(GENERIC.validate_export_contract(meta, flexible=True, eu_route=route), "tdt")
+            model = GENERIC.EncoderModule(REFERENCE, self.weights, meta, flexible=True,
+                                           pe_table=REFERENCE.sinusoidal_rel_pe(64, 8)).eval()
+            for frames in (9, 17, 33, 64, 129):
+                with self.subTest(route=route, frames=frames), torch.inference_mode():
+                    mel = torch.randn(8, frames)
+                    want = REFERENCE.encoder_forward(mel, self.weights, meta,
+                                                       eu_use_adapters=route == "other")[0]
+                    self.assertLess(ENCODER.relative_error(model(mel), want),
+                                    ENCODER.PARITY_REL_TOLERANCE)
+
+    def test_flexible_export_preserves_numerics_and_input_range(self):
+        meta = dict(self.meta, **{"parakeet.model.type": "tdt", "coreml.eu_route": "other"})
+        model = GENERIC.EncoderModule(REFERENCE, self.weights, meta, flexible=True,
+                                       pe_table=REFERENCE.sinusoidal_rel_pe(64, 8)).eval()
+        exported = GENERIC.trace_flexible_encoder(model, torch.zeros(8, 32), 9, 257)
+        converted = exported.module()
+        for length in (9, 17, 33, 64, 129, 257):
+            mel = torch.randn(8, length)
+            with torch.inference_mode():
+                torch.testing.assert_close(converted(mel), model(mel))
+        with self.assertRaises(RuntimeError):
+            converted(torch.zeros(8, 8))
 
 
 class EncoderHelperTests(unittest.TestCase):
@@ -238,6 +313,76 @@ class DecoderExporterTests(unittest.TestCase):
     def test_default_lanes_and_width(self):
         self.assertEqual(DECODER.DEFAULT_LANES, 16)
         self.assertEqual(DECODER.DEFAULT_WIDTH, 1)
+
+
+class DecoderPalettizationTests(unittest.TestCase):
+    def test_joint_output_group_divides_real_and_other_channel_counts(self):
+        for channels, preferred, expected in ((8198, 32, 2), (8198, 16, 2),
+                                               (640, 16, 16), (8199, 16, 1)):
+            self.assertEqual(DECODER.joint_out_group_size(channels, preferred), expected)
+        for channels, preferred in ((0, 16), (8198, 0), (-1, 16)):
+            with self.assertRaises(ValueError):
+                DECODER.joint_out_group_size(channels, preferred)
+
+    @staticmethod
+    def make_model():
+        torch.manual_seed(10)
+        model = torch.nn.Sequential(torch.nn.Conv2d(64, 64, 1), torch.nn.ReLU(),
+                                    torch.nn.Conv2d(64, 70, 1)).eval()
+        traced = torch.jit.trace(model, torch.zeros(1, 64, 1, 1))
+        return DECODER.ct.convert(
+            traced, inputs=[DECODER.ct.TensorType(shape=(1, 64, 1, 1))],
+            compute_precision=DECODER.ct.precision.FLOAT16,
+            minimum_deployment_target=DECODER.ct.target.iOS18, skip_model_load=True)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_grouped_quantization_reaches_joint_output(self):
+        model = self.make_model()
+        result, names, group = DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        self.assertEqual(group, 2)
+        DECODER.verify_joint_out_palettization(result, names, 6, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 4-bit"):
+            DECODER.verify_joint_out_palettization(result, names, 4, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 6-bit/group 4"):
+            DECODER.verify_joint_out_palettization(result, names, 6, 4)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_output_only_and_fp16_output_modes(self):
+        for nbits, nbits_out in ((0, 6), (6, 0)):
+            with self.subTest(nbits=nbits, nbits_out=nbits_out):
+                result, names, group = DECODER.palettize_decoder_weights(
+                    self.make_model(), 70, nbits, nbits_out, 16)
+                DECODER.verify_joint_out_palettization(result, names, nbits_out, group)
+                other = [op for func in result._mil_program.functions.values()
+                         for op in func.operations if op.op_type == "conv" and op.name not in names]
+                self.assertEqual(len(other), 1)
+                self.assertEqual(other[0].weight.op.op_type,
+                                 "const" if nbits == 0 else "constexpr_lut_to_dense")
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_cli_output_only_option_emits_a_compressed_package(self):
+        weights, meta = toy_tdt_weights(h_pred=64, h_joint=64, d_enc=64,
+                                       vocab=66, n_durations=3, layers=1)
+        reference = types.SimpleNamespace(load_gguf=lambda path: (weights, meta))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "decoder.mlpackage"
+            argv = ["export-decoder", "--gguf", "unused.gguf", "--out", str(output),
+                    "--lanes", "1", "--nbits", "0", "--nbits-out", "6"]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(DECODER, "_load_sibling", side_effect=[ENCODER, reference]):
+                self.assertEqual(DECODER.main(), 0)
+            model = DECODER.ct.models.MLModel(str(output), skip_model_load=True)
+            block = next(iter(model.get_spec().mlProgram.functions["main"].block_specializations.values()))
+            self.assertEqual(sum(op.type == "constexpr_lut_to_dense" for op in block.operations), 1)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_silently_skipped_or_missing_projection_fails(self):
+        model = self.make_model()
+        with mock.patch("coremltools.optimize.coreml.palettize_weights", return_value=model):
+            with self.assertRaisesRegex(RuntimeError, "was not palettized"):
+                DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        with self.assertRaisesRegex(RuntimeError, "projection missing"):
+            DECODER.palettize_decoder_weights(model, 71, 6, 6, 16)
 
 
 if __name__ == "__main__":

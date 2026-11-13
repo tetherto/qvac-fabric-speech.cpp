@@ -58,6 +58,18 @@ import coremltools as ct
 
 # 15 s at hop 160, matching the subsampling stack's 8x decimation to 188 frames.
 DEFAULT_WINDOW_MEL_FRAMES = 1500
+EU_VARIANT = "transcribepsy-250m-eu"
+EU_GATE_WINDOW_MEL_FRAMES = 2001
+
+
+def validate_eu_route(meta, route):
+    full_eu = meta.get("parakeet.model_variant") == EU_VARIANT
+    if full_eu != (route is not None):
+        raise ValueError("Full TranscribePsy EU requires --eu-route en, other, or gate; "
+                         "--eu-route cannot be used with another model")
+    if route is not None and route not in ("en", "other", "gate"):
+        raise ValueError("Invalid TranscribePsy EU route")
+    return route
 
 # Additive mask for invalid attention keys. fp16 -inf would poison the softmax
 # denominator for an all-pad row; -1e4 saturates the softmax just as hard while
@@ -101,11 +113,16 @@ def channel_norm(x, gamma, beta, eps):
 class AneEncoder(torch.nn.Module):
     """FastConformer encoder over a fixed window, in [1, C, 1, T] throughout."""
 
-    def __init__(self, ref, weights, meta, window_mel_frames, eps=1e-5):
+    def __init__(self, ref, weights, meta, window_mel_frames, eps=1e-5, eu_route=None):
         super().__init__()
+        self.eu_route = validate_eu_route(meta, eu_route)
         self.ref = ref
         self.d_model = int(meta["parakeet.encoder.d_model"])
         self.n_layers = int(meta["parakeet.encoder.n_layers"])
+        if eu_route == "gate":
+            self.n_layers = int(meta["parakeet.eu.gate_layer"]) + 1
+        self.adapter_layers = (list(meta["parakeet.eu.adapter_layers"])
+                               if eu_route == "other" else [])
         self.n_heads = int(meta["parakeet.encoder.n_heads"])
         self.head_dim = self.d_model // self.n_heads
         self.eps = float(eps)
@@ -121,6 +138,11 @@ class AneEncoder(torch.nn.Module):
         self._register_subsampling(weights, meta)
         for i in range(self.n_layers):
             self._register_block(weights, i)
+        for index, layer in enumerate(self.adapter_layers):
+            prefix = f"eu.adapter.{index}"
+            for projection in ("down", "up"):
+                self._conv1x1(f"eu{layer}_{projection}", weights[f"{prefix}.{projection}.weight"],
+                              weights[f"{prefix}.{projection}.bias"])
 
     # -- weight staging ----------------------------------------------------
     # Everything is staged as a buffer in its final runtime shape so the traced
@@ -321,6 +343,9 @@ class AneEncoder(torch.nn.Module):
         x = self.subsample(mel, mel_mask) * pad_mask
         for i in range(self.n_layers):
             x = self.block(x, pad_mask, key_bias, i)
+            if i in self.adapter_layers:
+                y = F.gelu(self._conv(x, f"eu{i}_down"), approximate="none")
+                x = x + self._conv(y, f"eu{i}_up")
         return x
 
 
@@ -362,18 +387,20 @@ def relative_error(got, want):
     return float(torch.sqrt((diff * diff).sum() / (want.double() ** 2).sum()))
 
 
-def reference_frames(ref, weights, meta, mel_2d, valid_mel=None):
+def reference_frames(ref, weights, meta, mel_2d, valid_mel=None, eu_route=None):
     """Reference encoder frames for the audio frames of `mel_2d` (all of them,
     or the first `valid_mel`), as [T, d_model]."""
     audio = mel_2d if valid_mel is None else mel_2d[:, :valid_mel]
+    if eu_route == "gate":
+        meta = dict(meta, **{"parakeet.encoder.n_layers": int(meta["parakeet.eu.gate_layer"]) + 1})
     with torch.inference_mode():
-        return ref.encoder_forward(audio, weights, meta)[0]
+        return ref.encoder_forward(audio, weights, meta, eu_use_adapters=eu_route == "other")[0]
 
 
 def compare_with_reference(model, ref, weights, meta, mel_2d, label, valid_mel=None):
     """True when the graph's valid frames match the reference on the audio
     frames of `mel_2d` (all of them, or the first `valid_mel`)."""
-    want = reference_frames(ref, weights, meta, mel_2d, valid_mel)
+    want = reference_frames(ref, weights, meta, mel_2d, valid_mel, model.eu_route)
     got = ane_encoder_frames(model, mel_2d, valid_mel)
     if got.shape != want.shape:
         print(f"[check] FAIL {label} shape: ane={tuple(got.shape)} ref={tuple(want.shape)}")
@@ -403,7 +430,7 @@ def check_parity(model, ref, weights, meta, seed=0):
     return ok
 
 
-def palettize(mlmodel, nbits):
+def palettize(mlmodel, nbits, workers=1):
     from coremltools.optimize.coreml import (
         OpPalettizerConfig, OptimizationConfig, palettize_weights,
     )
@@ -414,6 +441,7 @@ def palettize(mlmodel, nbits):
             mode="kmeans",
             granularity="per_grouped_channel",
             group_size=PALETTIZE_GROUP_SIZE,
+            num_kmeans_workers=workers,
         )
     )
     return palettize_weights(mlmodel, config)
@@ -472,28 +500,49 @@ def report_compute_placement(mlmodelc_path):
                   "here.")
 
 
+def validate_fixed_precision(precision, nbits):
+    if precision == "fp32" and nbits:
+        raise ValueError("FP32 correctness exports require --nbits 0")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", type=Path, required=True)
+    ap.add_argument("--eu-route", choices=["en", "other", "gate"],
+                    help="required for full TranscribePsy EU: bare trunk, CAFE adapters, or gate tap")
     ap.add_argument("--out", type=Path, required=True, help="output .mlpackage path")
     ap.add_argument("--scripts", type=Path, default=Path(__file__).resolve().parent)
     ap.add_argument("--window-mel-frames", type=int, default=DEFAULT_WINDOW_MEL_FRAMES,
                     help=f"fixed mel length of one window (default {DEFAULT_WINDOW_MEL_FRAMES}, "
                          "= 15 s at hop 160)")
+    ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16",
+                    help="fp16 for ANE; fp32 for masked CPU/GPU correctness exports")
     ap.add_argument("--nbits", type=int, default=6, choices=[0, 2, 3, 4, 6, 8],
-                    help="weight palettization bit width; 0 exports fp16 weights (default 6)")
+                    help="weight palettization bit width; 0 keeps uncompressed weights (default 6)")
+    ap.add_argument("--palettize-workers", type=int, default=1,
+                    help="parallel k-means workers (default 1; more workers use more RAM)")
     ap.add_argument("--compile-dir", type=Path, default=None,
                     help="if set, compile the .mlpackage to a .mlmodelc here and report op placement")
     ap.add_argument("--check", action="store_true",
                     help="verify the ANE graph against the reference encoder before converting, "
                          "and stop if it does not match")
     args = ap.parse_args()
+    if args.palettize_workers <= 0:
+        ap.error("--palettize-workers must be positive")
+
+    try:
+        validate_fixed_precision(args.precision, args.nbits)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     ref = load_reference_encoder(args.scripts)
     weights, meta = ref.load_gguf(args.gguf)
+    validate_eu_route(meta, args.eu_route)
+    if args.eu_route == "gate" and args.window_mel_frames < EU_GATE_WINDOW_MEL_FRAMES:
+        args.window_mel_frames = EU_GATE_WINDOW_MEL_FRAMES
 
-    model = AneEncoder(ref, weights, meta, args.window_mel_frames).eval()
+    model = AneEncoder(ref, weights, meta, args.window_mel_frames, eu_route=args.eu_route).eval()
     print(f"[export] d_model={model.d_model} layers={model.n_layers} heads={model.n_heads} "
           f"head_dim={model.head_dim} n_mels={model.n_mels} "
           f"conv_norm={'layer_norm' if model.conv_layer_norm else 'batch_norm'}")
@@ -513,25 +562,33 @@ def main():
         out = model(*example)
     print(f"[export] traced output: {tuple(out.shape)}")
 
+    io_dtype = np.float32 if args.precision == "fp32" else np.float16
+    precision = ct.precision.FLOAT32 if args.precision == "fp32" else ct.precision.FLOAT16
     traced = torch.jit.trace(model, example, check_trace=False)
     mlmodel = ct.convert(
         traced,
         inputs=[
-            ct.TensorType(name="mel", shape=mel.shape, dtype=np.float16),
-            ct.TensorType(name="mel_mask", shape=mel_mask.shape, dtype=np.float16),
-            ct.TensorType(name="pad_mask", shape=pad_mask.shape, dtype=np.float16),
-            ct.TensorType(name="key_bias", shape=key_bias.shape, dtype=np.float16),
+            ct.TensorType(name="mel", shape=mel.shape, dtype=io_dtype),
+            ct.TensorType(name="mel_mask", shape=mel_mask.shape, dtype=io_dtype),
+            ct.TensorType(name="pad_mask", shape=pad_mask.shape, dtype=io_dtype),
+            ct.TensorType(name="key_bias", shape=key_bias.shape, dtype=io_dtype),
         ],
-        outputs=[ct.TensorType(name="encoder_out", dtype=np.float16)],
+        outputs=[ct.TensorType(name="encoder_out", dtype=io_dtype)],
         compute_units=ct.ComputeUnit.ALL,
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=precision,
         minimum_deployment_target=ct.target.iOS18,
     )
 
     if args.nbits:
-        mlmodel = palettize(mlmodel, args.nbits)
+        mlmodel = palettize(mlmodel, args.nbits, args.palettize_workers)
         print(f"[export] palettized weights to {args.nbits}-bit "
               f"(per_grouped_channel, group_size={PALETTIZE_GROUP_SIZE})")
+
+    if args.eu_route is not None:
+        mlmodel.user_defined_metadata["parakeet.model_variant"] = EU_VARIANT
+        mlmodel.user_defined_metadata["parakeet.eu.route"] = args.eu_route
+        mlmodel.user_defined_metadata["parakeet.encoder.precision"] = args.precision
+        mlmodel.user_defined_metadata["parakeet.encoder.n_layers"] = str(model.n_layers)
 
     mlmodel.save(str(args.out))
     print(f"[export] saved {args.out}")

@@ -1,7 +1,7 @@
 # Weekly desktop benchmark on the shared Tailscale machines
 
 `weekly.sh` benchmarks the speech engines every Sunday evening on the team's shared machines, without any
-developer laptop in the loop: cron on each machine builds the current engine and ggml heads for every backend the
+developer laptop in the loop: cron on each machine builds the current engine head, with the ggml commit that head pins (the ggml of qvac-fabric-llm.cpp), for every backend the
 machine has, provisions the pinned models, runs the matrix in `families.json` through
 `scripts/benchmarks/run-family.sh`, and writes a Markdown report with the numbers, the memory peaks, the exact
 machine and toolchain versions and the sha256 of every model file. The results everyone reads are the
@@ -11,14 +11,14 @@ summaries every Monday (see
 
 | machine | host | backends | schedule |
 | --- | --- | --- | --- |
-| DGX Spark GB10 | `spark-d9ca` | cpu, cuda | Sunday 18:00 CET (17:00 on the UTC clock) |
-| Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
-| Strix Halo | `qvac-dev-strix-1` | cpu, vulkan | Sunday 18:00 CET (17:00 on the UTC clock) |
-| Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 18:00 CET |
-| Mac mini M4 | `mac-mini-m4-gpu` | cpu, metal | Sunday 18:00 CET |
+| DGX Spark GB10 | `spark-d9ca` | cpu, cuda | Sunday 11:00 CET (10:00 on the UTC clock) |
+| Linux x64, 2x RTX 5090 | `qvac-dev-linux-x64` | cpu, cuda, vulkan | Sunday 11:00 CET (10:00 on the UTC clock) |
+| Strix Halo | `qvac-dev-strix-1` | cpu, vulkan | Sunday 11:00 CET (10:00 on the UTC clock) |
+| Mac Studio M3 Ultra | `qvac-dev-mac-arm64` | cpu, metal | Sunday 11:00 CET |
+| Mac mini M4 | `mac-mini-m4-gpu` | cpu, metal | Sunday 11:00 CET |
 
 The two weekly benches on the shared machines run on different days so that neither disturbs the other: the
-fabric-llm engine bench on Saturday from 18:00 CET, the speech bench on Sunday from 18:00 CET (a full run takes
+fabric-llm engine bench on Saturday from 18:00 CET, the speech bench on Sunday from 11:00 CET (a full run takes
 about 6 to 7 hours). Both also hold the same `/tmp/gpu-bench.lock` on the Mac; this run waits for the lock (up to
 `LOCK_WAIT_HOURS`, 12 by default) and for every other GPU job to end before it starts, then holds the lock while it
 benchmarks. See [`skills/speech-bench/SKILL.md`](../../../skills/speech-bench/SKILL.md) for the coordination rules
@@ -154,7 +154,7 @@ On each machine, as your own user (nothing needs root):
 
 ```sh
 scp -r scripts/benchmarks/desktop-weekly <host>:speech-bench-src
-ssh <host> 'bash speech-bench-src/install.sh --hour 18'   # --hour 17 on the UTC Linux box
+ssh <host> 'bash speech-bench-src/install.sh --hour 11'   # --hour 10 on a UTC machine, --hour 15 --minute 30 on the Jetson (India time)
 ```
 
 `install.sh` copies the tools to `~/speech-bench/tools`, seeds `~/speech-bench/config.env` and installs the cron
