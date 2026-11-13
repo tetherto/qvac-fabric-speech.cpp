@@ -145,6 +145,13 @@ repository provides an encoder-stripping tool and decoder output-projection
 palettization with `--nbits-out`; see the
 [conversion guide](engines/parakeet/docs/models.md#transcribepsy).
 
+Chatterbox loads its sidecar functions in the background through the shared
+Core ML runtime (`engines/coreml`): construction and synthesis never wait for a
+Neural Engine compile, each sentence runs on Metal until the functions it needs
+are ready, and `tts_cpp::CoremlOptions` (`EngineOptions::coreml`, `tts-cli
+--coreml-*`) selects what loads up front, whether to wait, and where warm-load
+hints live; see [Chatterbox loading, fallback and options](engines/tts/docs/chatterbox.md#loading-fallback-and-options).
+
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
 `coreml_compute_units`; the separate flag does not enable automatic ACE-Step

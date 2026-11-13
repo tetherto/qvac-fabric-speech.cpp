@@ -106,30 +106,106 @@ convolutions on the CPU (they are respelled as undilated/blocked convolutions)
 and miscomputes native transposed convolutions (respelled in phase form), as
 for the Parler and Audio8 sidecars.
 
-`CHATTERBOX_COREML_COMPUTE_UNITS` (or `EngineOptions::coreml_compute_units`)
-accepts `cpu_and_ane` (default), `all`, `cpu_and_gpu` and `cpu_only`;
-`cpu_and_ane` measured fastest for every stage and keeps the GPU for T3.
-`CHATTERBOX_COREML_DISABLE` keeps every stage on ggml. Before each prediction
-every input and output shape the sidecar declares is checked against what the
-call packs; a sidecar that declares another shape (an incompatible export, or
-the other variant's sidecar) or fails a prediction is retired and ggml takes
-over. `CHATTERBOX_COREML_STRICT` (or `EngineOptions::coreml_strict`) makes
-that, or an input past the widest function, an error instead. `SynthesisResult::s3gen_backend` reports `ggml`,
-the sidecar label (`coreml-ane`, ...) when every stage of the call ran on
-Core ML, or `mixed`.
+#### Loading, fallback and options
 
-With the CFM and HiFT sidecars present, S3Gen no longer needs the GPU, so the
-batch path vocodes sentence *i* while T3 decodes sentence *i + 1* (`tts-cli`
-and `Engine` with `max_sentence_chars`; the CLI's default 180 splits). On one
-GPU the two only contend, which is why the ggml path stays sequential.
+Every encoder and CFM function and HiFT is a slot of the shared Core ML
+runtime (`engines/coreml`): functions load in the background, one at a time
+and in priority order, and a stage runs on ggml until its function is ready.
+Neither construction nor synthesis waits for a load by default.
 
-The Neural Engine compiles each function on its first use by an executable
-(seconds to tens of seconds per function; the OS caches the result per
-executable). After that, loading a function costs about 0.1 to 1 s per process,
-growing with the whole multi-function program, so a background thread loads
-HiFT and the encoder and CFM functions each sentence (or streamed chunk) is
-expected to need, from its text length, while T3 decodes; an input outside the
-prediction loads its function on demand.
+- **One backend per S3Gen call.** Each call (a batch sentence, or a streamed
+  chunk) acquires its models once, before it starts: the narrowest *loaded*
+  encoder and CFM functions that cover its exact token and frame counts (a
+  wider loaded function serves it with the padding masked) and HiFT. The
+  exact function is requested at once if it is not loaded. A stage without a
+  model runs that whole call on ggml, so readiness never changes a backend
+  mid-call. `SynthesisResult::coreml_pending` reports a call that ran on ggml
+  only because a function was still loading. The first call of a cold process
+  therefore runs on Metal and matches a `CHATTERBOX_COREML_DISABLE` run sample
+  for sample.
+- **What loads when** (`CoremlOptions::prewarm`, `--coreml-prewarm`):
+  `predicted` (default) loads HiFT plus the encoder and CFM widths this host
+  loaded most recently (warm hints, at most three per stage) at construction,
+  and each `synthesize()` (each `tts-cli` text) requests the widths its
+  sentences need, estimated from the text length, ahead of the remaining
+  construction loads; `minimal` stops after construction; `all` loads every
+  function; `none` loads only on demand. Outside `all`, at most three encoder
+  and three CFM functions stay loaded; the least recently used one that no
+  running call holds and the current request does not need is released first.
+- **Waiting** (`CoremlOptions::wait`, `--coreml-wait`): `none` (default) never
+  blocks, except for a bounded wait when this host loaded the function quickly
+  before (a warm hint, kept in `cache_dir`): the call waits while the load
+  should finish within the sentence's estimated Metal time, never longer. A
+  hinted load that runs past 1.5x its usual time marks the hint stale for 24
+  hours, so a cold compile is never waited on twice. `construct` makes the
+  constructor wait for its construction group (`{prewarm: all, wait:
+  construct}` loads all 15 functions first); `call` makes every call wait for
+  its functions. `Engine::coreml_wait()`, `coreml_prewarm()` and
+  `coreml_status()` (`--coreml-status-json PATH`) expose the same.
+- **Cache directory** (`CoremlOptions::cache_dir`, `QVAC_COREML_CACHE_DIR`,
+  `--coreml-cache-dir`): where warm hints live. Without one there are no hints,
+  hence no bounded wait and no hinted widths at construction; `tts-cli`
+  defaults to `~/Library/Application Support/qvac-speech/coreml`.
+- **Compute units** (`CoremlOptions::compute_units`,
+  `CHATTERBOX_COREML_COMPUTE_UNITS`, `--coreml-compute-units`): `cpu_and_ane`
+  (default), `all`, `cpu_and_gpu` or `cpu_only`; `cpu_and_ane` measured fastest
+  for every stage and keeps the GPU for T3.
+- **Off and strict** (`CoremlOptions::use`, `--coreml-use`): `off` (or
+  `CHATTERBOX_COREML_DISABLE`) keeps every stage on ggml; `require` (or
+  `CHATTERBOX_COREML_STRICT`) waits like `call` and makes a sidecar that cannot
+  serve a call (failed load or prediction, an input past the widest function)
+  an error instead of a fallback. The older `EngineOptions::coreml_compute_units`
+  / `coreml_strict` and `s3gen_synthesize_opts::coreml_compute_units` /
+  `coreml_strict` / `coreml_disabled` remain as aliases that fill unset fields.
+- **Failures.** Before each prediction every input and output shape the
+  sidecar declares is checked against what the call packs. A function that
+  declares another shape (an incompatible export, or the other variant's
+  sidecar) or fails a prediction is retired for the process and ggml takes
+  over. The CFM trajectory never mixes backends: a failure at any Euler step
+  restores the initial noise and integrates every step again on ggml (no step
+  draws random numbers, so the result equals a whole ggml integration).
+- **Destruction never waits**: dropping an Engine cancels its unstarted loads;
+  a started one finishes in the background (a Neural Engine compile cannot be
+  interrupted) and only records its warm hint.
+
+`SynthesisResult::s3gen_backend` reports `ggml`, the sidecar label
+(`coreml-ane`, ...) when every stage of the call ran on Core ML, or `mixed`.
+
+#### Sentence overlap
+
+When a sentence's plan holds Core ML CFM and HiFT models on `cpu_and_ane`, its
+S3Gen leaves the GPU to T3, so the batch path vocodes sentence *i* on a worker
+thread while T3 decodes sentence *i + 1* (`Engine` with `max_sentence_chars`;
+`tts-cli`, whose default 180 splits, prefetches the next sentence's T3 instead).
+The decision is made per sentence from the models it acquired: a sentence
+whose CFM or HiFT runs on ggml (or on units that may use the GPU) renders
+inline, as the two would only contend. A Core ML failure on the worker does not
+run ggml there: the segment is handed back and rendered again on the
+dispatching thread. With the encoder alone on Metal, overlapped T3 measured
+about 9 % slower on Turbo.
+
+#### First use and the plan cache
+
+The Neural Engine compiles each function on its first load (3-4 s per encoder
+function, 20-30 s per CFM function, about 10 s for HiFT on an M2; about 200 s
+for all 15 functions, in the background). The compiled plan is cached by the
+OS under a key that includes the sidecar's **path** and the host binary's
+code-signing identifier (for ad-hoc-signed binaries, the executable's name),
+so moving or copying the sidecars, or running them from a differently named
+binary, compiles again. The per-executable
+`~/Library/Caches/<identifier>/com.apple.e5rt.e5bundlecache` directory holds
+only the CPU and GPU bundles; the Neural Engine cache cannot be inspected or
+cleared from there. After that, a function loads in 0.1 to 1.5 s per process,
+growing with the whole multi-function program (a seven-width CFM function about
+1.1 s, a three-width one 0.5 s).
+
+**Width set.** The exporter keeps seven widths by default. Three widths
+(`--frames 512,1024,1536`) cut the cold compile of all functions about 2.5x
+(Turbo 201 s to 78 s, Multilingual 236 s to 98 s) and halve each CFM load,
+but long Multilingual sentences then pad to 1536 frames and warm synthesis
+loses about 9 % (Turbo) and 6 % (Multilingual), which takes Multilingual below
+a 30 % gain over Metal. See [`docs/COREML-LOAD-TIME.md`](../../../docs/COREML-LOAD-TIME.md)
+for the measurements.
 
 Measured on an Apple M2 (macOS 15.7, 10-core GPU), `q8_0` T3 and S3Gen, the
 built-in voice, seed 42, `tts-cli` with the benchmark prompt (three sentences
@@ -175,23 +251,39 @@ seeds 1-4; `base.en` heard one word differently on one Multilingual run.
 When Core ML is compiled in and any S3Gen sidecar is enabled, `fit_params`
 returns `FitStatus::Error` with reason `coreml-memory-estimate-unavailable`:
 the native projection cannot account for resident Core ML models and
-prediction buffers. `CHATTERBOX_COREML_DISABLE=1` restores it.
+prediction buffers. The verdict depends only on the sidecars' presence and the
+options, never on what has loaded, so it is the same before and after the
+first load. `FitOptions::coreml.use = off` or `CHATTERBOX_COREML_DISABLE=1`
+restores the ggml projection unchanged.
 
-`test-chatterbox-coreml` covers the policy, naming, function selection, the
-HiFT window plan and the fit refusal without models;
-`test/test_export_chatterbox_coreml.py` checks the rebuild on random weights
-(padding equivalence, the window walk against a whole decode, the respelled
-convolutions and Snake). `test-chatterbox-coreml-shapes` loads tiny sidecars
-from `test/prepare_chatterbox_coreml_shape_fixture.py`
-(`CHATTERBOX_COREML_TEST_SHAPES`) and checks that one declaring any feature
-larger than the runtime packs it is rejected before prediction.
+`test-chatterbox-coreml` covers the options and their aliases, naming,
+function selection, the HiFT window plan, call shapes and the Metal estimate,
+the CFM rollback with stand-in steps and the fit verdict (including `use =
+off`) without models; `test/test_export_chatterbox_coreml.py` checks the
+rebuild on random weights (padding equivalence, the window walk against a
+whole decode, the respelled convolutions and Snake). Both fixtures below load
+tiny sidecars from `test/prepare_chatterbox_coreml_shape_fixture.py`
+(`CHATTERBOX_COREML_TEST_SHAPES`): `test-chatterbox-coreml-shapes` checks that
+one declaring any feature larger than the runtime packs it is rejected before
+prediction, and `test-chatterbox-coreml-pending` drives background loading on
+multi-width sidecars: a call while its functions load runs on ggml without
+blocking, a ready short width and a pending long one, a call longer than
+predicted, a ready wider function serving a narrower call, the call's own
+width loading right after the one in flight, a stale hint never holding a call
+past its deadline, retirement, the resident cap keeping held and predicted
+widths, and destruction mid-load returning in under 100 ms.
 `test-chatterbox-coreml-stages` reads `CHATTERBOX_COREML_TEST_S3GEN` (an S3Gen
 GGUF with its exported sidecars); `test-chatterbox-coreml-engine` also reads
-`CHATTERBOX_COREML_TEST_T3` and checks the `Engine` sentence overlap: PCM
+`CHATTERBOX_COREML_TEST_T3` and checks the `Engine` sentence overlap (PCM
 identical to the segments synthesized one call at a time and crossfaded in
-order, the aggregated backend, cancellation mid-request, and a worker's
-strict-mode error reaching the caller. Each reports a skip without its inputs.
-The macOS CI lane runs the exporter and shape checks.
+order, the aggregated backend, cancellation mid-request, strict mode, a
+failure on the worker rendered again), and the real CFM rollback equal to a
+ggml run. `test-chatterbox-coreml-engine-slow-load` (`--slow-load`, also
+`CHATTERBOX_COREML_TEST_CLI`, a `tts-cli`) delays every load and checks that the
+first synthesis, through the `Engine` and through `tts-cli`, equals a `use =
+off` run sample for sample, and that later calls run on Core ML. Each reports a
+skip without its inputs. The macOS CI lane runs the exporter, shape and pending
+checks, and the engine fixtures on staged Turbo GGUFs.
 
 ### Adreno OpenCL
 

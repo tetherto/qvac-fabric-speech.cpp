@@ -1,22 +1,37 @@
 // Chatterbox S3Gen Core ML sidecars.
 //
-//   test-chatterbox-coreml                  policy, naming, function buckets,
-//                                           HiFT window plan, fit refusal
-//   test-chatterbox-coreml --stages-fixture each sidecar against ggml on the
-//                                           same tokens, one stage at a time,
-//                                           then all three; routing past the
-//                                           widest function and strict mode
-//   test-chatterbox-coreml --shape-fixture  every feature shape a sidecar
-//                                           declares is checked before
-//                                           predicting
-//   test-chatterbox-coreml --engine-fixture Engine sentence overlap against
-//                                           in-order sequential synthesis,
-//                                           cancellation, worker errors
+//   test-chatterbox-coreml                   options and their legacy aliases,
+//                                            naming, function buckets, HiFT
+//                                            window plan, call shapes and the
+//                                            Metal estimate, the CFM rollback
+//                                            with stand-in steps, fit
+//   test-chatterbox-coreml --stages-fixture  each sidecar against ggml on the
+//                                            same tokens, one stage at a time,
+//                                            then all three; routing past the
+//                                            widest function and strict mode
+//   test-chatterbox-coreml --shape-fixture   every feature shape a sidecar
+//                                            declares is checked before
+//                                            predicting
+//   test-chatterbox-coreml --pending-fixture background loading and routing
+//                                            on tiny multi-width sidecars:
+//                                            pending calls, width choice,
+//                                            load order, bounded waits, the
+//                                            resident cap, retirement and
+//                                            destruction mid-load
+//   test-chatterbox-coreml --engine-fixture  Engine sentence overlap against
+//                 [--slow-load]              in-order sequential synthesis,
+//                                            cancellation, worker errors, the
+//                                            CFM rollback; with --slow-load,
+//                                            the first synthesis while every
+//                                            function is still loading equals
+//                                            a use = off run, through the
+//                                            Engine and tts-cli
 //
 // The stages fixture reads CHATTERBOX_COREML_TEST_S3GEN (an S3Gen GGUF with
 // the exported `<stem>-{encoder,cfm,hift}.mlmodelc` next to it); the engine
-// fixture also reads CHATTERBOX_COREML_TEST_T3 (the matching T3 GGUF); the
-// shape fixture reads CHATTERBOX_COREML_TEST_SHAPES (the directory
+// fixture also reads CHATTERBOX_COREML_TEST_T3 (the matching T3 GGUF) and,
+// with --slow-load, CHATTERBOX_COREML_TEST_CLI (a tts-cli binary); the shape
+// and pending fixtures read CHATTERBOX_COREML_TEST_SHAPES (the directory
 // prepare_chatterbox_coreml_shape_fixture.py writes). Each reports a skip
 // (77) without its inputs or without Core ML.
 
@@ -30,18 +45,26 @@
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef TTS_CPP_USE_COREML
+#include <sys/wait.h>
+#endif
 
 namespace cb = tts_cpp::chatterbox::detail;
 namespace fs = std::filesystem;
@@ -83,33 +106,65 @@ struct temp_dir {
     }
 };
 
-void check_policy() {
-    env_guard units(cb::COREML_UNITS_ENV), strict(cb::COREML_STRICT_ENV), disabled(cb::COREML_DISABLE_ENV);
-    unsetenv(cb::COREML_UNITS_ENV);
-    unsetenv(cb::COREML_STRICT_ENV);
-    unsetenv(cb::COREML_DISABLE_ENV);
-    auto policy = cb::resolve_coreml_policy();
-    require(policy.compute_units == "cpu_and_ane" && !policy.strict && !policy.disabled, "default policy");
+using tts_cpp::CoremlOptions;
 
-    setenv(cb::COREML_UNITS_ENV, "all", 1);
-    setenv(cb::COREML_STRICT_ENV, "0", 1);  // presence means strict, as for Parler
-    policy = cb::resolve_coreml_policy();
-    require(policy.compute_units == "all" && policy.strict, "inherited policy");
-    policy = cb::resolve_coreml_policy("cpu_only", false);
-    require(policy.compute_units == "cpu_only" && !policy.strict, "explicit policy overrides the environment");
+double max_abs_vec(const std::vector<float> & a, const std::vector<float> & b) {
+    double m = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) m = std::max(m, (double) std::fabs(a[i] - b[i]));
+    return m;
+}
 
-    setenv(cb::COREML_UNITS_ENV, "gpu_please", 1);
-    require(cb::resolve_coreml_policy().compute_units == "cpu_and_ane", "invalid inherited units keep the default");
-    bool threw = false;
+template <class E, class F> bool throws(F && f) {
     try {
-        cb::resolve_coreml_policy("gpu_please");
-    } catch (const std::runtime_error &) {
-        threw = true;
+        f();
+    } catch (const E &) {
+        return true;
     }
-    require(threw, "invalid explicit units throw");
+    return false;
+}
 
-    setenv(cb::COREML_DISABLE_ENV, "1", 1);
-    require(cb::resolve_coreml_policy().disabled, "CHATTERBOX_COREML_DISABLE");
+void check_options() {
+    // The legacy s3gen_synthesize_opts / EngineOptions fields are aliases:
+    // each fills its CoremlOptions field only when that is unset.
+    CoremlOptions none;
+    auto merged = cb::merge_legacy_coreml(none, "cpu_only", 1, false);
+    require(merged.compute_units == std::string("cpu_only") && merged.use == CoremlOptions::Use::require,
+            "legacy units and strict fill unset fields");
+    merged = cb::merge_legacy_coreml(none, "", 0, false);
+    require(!merged.compute_units && merged.use == CoremlOptions::Use::automatic,
+            "an explicit non-strict alias overrides the strict environment variable");
+    require(cb::merge_legacy_coreml(none, "", -1, false).use == CoremlOptions::Use::unset,
+            "an unset strict alias leaves use unset");
+    CoremlOptions set;
+    set.compute_units = "all";
+    set.use = CoremlOptions::Use::automatic;
+    merged = cb::merge_legacy_coreml(set, "cpu_only", 1, false);
+    require(merged.compute_units == std::string("all") && merged.use == CoremlOptions::Use::automatic,
+            "explicit CoremlOptions fields win over the aliases");
+    require(cb::merge_legacy_coreml(set, "", 1, true).use == CoremlOptions::Use::off, "coreml_disabled is use = off");
+
+    s3gen_synthesize_opts sopts;
+    sopts.coreml_compute_units = "cpu_and_gpu";
+    sopts.coreml_strict = 1;
+    merged = cb::call_coreml_options(sopts);
+    require(merged.compute_units == std::string("cpu_and_gpu") && merged.use == CoremlOptions::Use::require,
+            "a call's options fold its aliases in");
+
+    CoremlOptions bad;
+    bad.compute_units = "gpu_please";
+    require(throws<std::invalid_argument>([&] { cb::validate_coreml_options(bad); }),
+            "invalid explicit units throw in every build");
+    require(throws<std::invalid_argument>([&] { cb::merge_legacy_coreml(none, "gpu_please", -1, false);
+                                                cb::validate_coreml_options(
+                                                    cb::merge_legacy_coreml(none, "gpu_please", -1, false)); }),
+            "an invalid legacy unit throws once folded in");
+    CoremlOptions negative;
+    negative.strict_wait_ms = -1;
+    require(throws<std::invalid_argument>([&] { cb::validate_coreml_options(negative); }),
+            "a negative strict wait throws");
+    for (const char * units : {"all", "cpu_and_ane", "cpu_and_gpu", "cpu_only"}) {
+        require(cb::coreml_valid_units(units), std::string("valid units ") + units);
+    }
 }
 
 void check_naming() {
@@ -151,6 +206,107 @@ void check_windows() {
     }
 }
 
+void check_shapes_and_estimate() {
+    // A batch call: prompt + speech + 3 lookahead tokens, two frames each.
+    auto batch = cb::s3gen_shape(250, 120, 2, true, true);
+    require(batch.tokens == 373 && batch.frames == 746, "batch call shape");
+    // A non-final streaming chunk: no lookahead, the last 6 frames trimmed.
+    auto chunk = cb::s3gen_shape(250, 25, 2, false, false);
+    require(chunk.tokens == 275 && chunk.frames == 544, "streaming chunk shape");
+
+    // The call shape follows the call's own prompt precedence and drops
+    // tokens outside the speech vocabulary, as s3gen_synthesize_to_wav does.
+    cb::s3gen_gguf_facts facts;
+    facts.builtin_prompt_tokens = 250;
+    facts.speech_vocab = 6561;
+    s3gen_synthesize_opts sopts;
+    const std::vector<int32_t> tokens = {1, 2, 6561, 7000, -1, 3};
+    require(cb::s3gen_call_shape_for(sopts, tokens, facts).tokens == 250 + 3 + 3, "built-in voice prompt");
+    const std::vector<int32_t> prompt(40, 5);
+    sopts.prompt_token_view_data = prompt.data();
+    sopts.prompt_token_view_size = prompt.size();
+    require(cb::s3gen_call_shape_for(sopts, tokens, facts).tokens == 40 + 3 + 3, "a prompt view replaces it");
+    s3gen_synthesize_opts embedding_only;
+    embedding_only.embedding_override.assign(192, 0.0f);
+    require(cb::s3gen_call_shape_for(embedding_only, tokens, facts).tokens == 0 + 3 + 3,
+            "conditioning without a prompt has no prompt tokens");
+
+    // The Metal estimate is the measured per-variant line, never negative.
+    require(cb::s3gen_estimate_metal_ms_frames(true, 0) == 0.0 && cb::s3gen_estimate_metal_ms_frames(false, 0) == 0.0,
+            "the estimate is clamped at zero");
+    const double turbo = cb::s3gen_estimate_metal_ms_frames(true, 1000);
+    const double mtl = cb::s3gen_estimate_metal_ms_frames(false, 1000);
+    require(std::fabs(turbo - (-1347.8 + 2.9867 * 1000)) < 1e-6 && std::fabs(mtl - (-1992.6 + 9.2146 * 1000)) < 1e-6,
+            "per-variant Metal cost lines");
+    require(cb::s3gen_estimate_metal_ms_frames(true, 1200) > turbo, "the estimate grows with the frames");
+}
+
+// The CFM integration with stand-in steps: a Core ML failure at a later step
+// restores the initial noise and integrates every step on ggml, so the result
+// equals a whole ggml integration; nothing in it draws random numbers.
+void check_cfm_rollback() {
+    std::mt19937 rng(11);
+    std::normal_distribution<float> gauss(0.0f, 1.0f);
+    std::vector<float> z0(64);
+    for (float & v : z0) v = gauss(rng);
+    const size_t steps = 4;
+    // The two backends differ slightly, as fp16 Core ML and ggml do.
+    auto make_step = [&](int fail_at, std::vector<std::pair<size_t, bool>> & trace) {
+        return [fail_at, &trace](size_t s, std::vector<float> & z, bool on_coreml) -> int {
+            trace.emplace_back(s, on_coreml);
+            if (on_coreml && (int) s == fail_at) throw cb::coreml_stage_failure("stand-in failure");
+            const float rate = on_coreml ? 0.251f : 0.25f;
+            for (size_t i = 0; i < z.size(); ++i) z[i] += rate * std::sin(z[i] + (float) s);
+            return 0;
+        };
+    };
+    std::vector<std::pair<size_t, bool>> ggml_trace;
+    std::vector<float> ggml_z = z0;
+    require(cb::cfm_integrate(ggml_z, steps, false, make_step(-1, ggml_trace), [](auto &, size_t) {
+                throw std::runtime_error("no failure expected");
+            }) == 0,
+            "ggml integration");
+
+    std::vector<std::pair<size_t, bool>> coreml_trace;
+    std::vector<float> coreml_z = z0;
+    cb::cfm_integrate(coreml_z, steps, true, make_step(-1, coreml_trace), [](auto &, size_t) {});
+    require(max_abs_vec(coreml_z, ggml_z) > 0.0, "the stand-in backends differ");
+
+    for (int fail_at : {1, 2, 3}) {
+        std::vector<std::pair<size_t, bool>> trace;
+        std::vector<float> z = z0;
+        int failures = 0;
+        size_t failed_step = 0;
+        const int rc = cb::cfm_integrate(z, steps, true, make_step(fail_at, trace),
+                                         [&](const cb::coreml_stage_failure &, size_t s) {
+                                             ++failures;
+                                             failed_step = s;
+                                         });
+        require(rc == 0 && failures == 1 && failed_step == (size_t) fail_at, "one failure, reported at its step");
+        require(z == ggml_z, "a failure at step " + std::to_string(fail_at + 1) +
+                                 " gives exactly the whole ggml integration from the initial noise");
+        // Core ML for steps 0..fail_at, then every step again on ggml.
+        size_t i = 0;
+        for (; i <= (size_t) fail_at; ++i) require(trace[i] == std::make_pair(i, true), "Core ML until the failure");
+        for (size_t s = 0; s < steps; ++s, ++i) require(trace[i] == std::make_pair(s, false), "then ggml from step 0");
+        require(trace.size() == i, "nothing after the ggml pass");
+    }
+
+    // A failure handler that stops the call (strict) propagates; a step's
+    // non-zero result (a cancel) stops the integration.
+    std::vector<std::pair<size_t, bool>> trace;
+    std::vector<float> z = z0;
+    require(throws<std::runtime_error>([&] {
+                cb::cfm_integrate(z, steps, true, make_step(1, trace),
+                                  [](const cb::coreml_stage_failure & e, size_t) { throw std::runtime_error(e.what()); });
+            }),
+            "strict stops the integration");
+    require(cb::cfm_integrate(z, steps, false,
+                              [](size_t s, std::vector<float> &, bool) { return s == 1 ? 2 : 0; },
+                              [](auto &, size_t) {}) == 2,
+            "a step's result stops the integration");
+}
+
 void check_warm_estimates() {
     require(cb::coreml_expected_speech_tokens(0) == 0 && cb::coreml_expected_speech_tokens(100) == 115,
             "speech-token estimate");
@@ -160,6 +316,11 @@ void check_warm_estimates() {
     require(cb::coreml_stream_windows(60, 10, 25, 25) == std::vector<int>{10, 35, 50}, "left-context windows");
     require(cb::coreml_stream_windows(0, 10, 25, 0).empty() && cb::coreml_stream_windows(5, 0, 0, 0).empty(),
             "no windows");
+}
+
+bool same_fit(const tts_cpp::FitResult & a, const tts_cpp::FitResult & b) {
+    return a.status == b.status && a.fits == b.fits && a.reason == b.reason && a.model_variant == b.model_variant &&
+           a.device_name == b.device_name && a.report == b.report;
 }
 
 void check_fit_and_detection() {
@@ -172,26 +333,36 @@ void check_fit_and_detection() {
     options.backend = "cpu";
     const auto plain = tts_cpp::chatterbox::fit_params(options);
     require(plain.reason != "coreml-memory-estimate-unavailable", "no sidecar, no Core ML refusal");
-    require(!cb::coreml_sidecars_enabled(options.s3gen_gguf_path, cb::resolve_coreml_policy()), "nothing to detect");
+    require(!cb::coreml_prebuilt_route(options.s3gen_gguf_path, {}), "nothing to detect");
 
     for (const char * suffix : {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX}) {
         const std::string sidecar = cb::coreml_stage_path(options.s3gen_gguf_path, suffix);
         fs::create_directory(sidecar);
         const auto result = tts_cpp::chatterbox::fit_params(options);
 #ifdef TTS_CPP_USE_COREML
-        require(cb::coreml_sidecars_enabled(options.s3gen_gguf_path, cb::resolve_coreml_policy()), "sidecar detected");
+        require(cb::coreml_prebuilt_route(options.s3gen_gguf_path, {}), "sidecar detected");
         require(result.status == tts_cpp::FitStatus::Error && !result.fits &&
                     result.reason == "coreml-memory-estimate-unavailable" && !result.report.empty(),
                 std::string("fit refuses with an enabled ") + suffix + " sidecar");
+        // The verdict depends on presence and options only, never on loads.
+        require(same_fit(tts_cpp::chatterbox::fit_params(options), result), "fit is stable");
 #else
         require(result.reason != "coreml-memory-estimate-unavailable", "no Core ML refusal without Core ML");
 #endif
+        // use = off: exactly the fit without any sidecar.
+        auto off = options;
+        off.coreml.use = CoremlOptions::Use::off;
+        require(same_fit(tts_cpp::chatterbox::fit_params(off), plain), "fit with use = off is unchanged");
+        auto legacy = options;
         setenv(cb::COREML_DISABLE_ENV, "1", 1);
-        require(tts_cpp::chatterbox::fit_params(options).reason != "coreml-memory-estimate-unavailable",
+        require(same_fit(tts_cpp::chatterbox::fit_params(legacy), plain),
                 "CHATTERBOX_COREML_DISABLE restores the native projection");
         unsetenv(cb::COREML_DISABLE_ENV);
         fs::remove(sidecar);
     }
+    auto bad = options;
+    bad.coreml.compute_units = "gpu_please";
+    require(tts_cpp::chatterbox::fit_params(bad).reason == "invalid-arguments", "invalid Core ML options");
 }
 
 // ---------------------------------------------------------------- fixture --
@@ -354,8 +525,19 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> SHAPE_FEATUR
     {"hift", {"mel", "source", "valid", "spectrum"}},
 };
 
+// Shape-fixture sidecars on the CPU, each acquisition waiting for its load.
+CoremlOptions fixture_options() {
+    CoremlOptions o;
+    o.compute_units = "cpu_only";
+    o.wait = CoremlOptions::Wait::call;
+    o.prewarm = CoremlOptions::Prewarm::none;
+    return o;
+}
+
 // One call of `stage` on inputs narrower than its function; true when served.
-bool serve(cb::s3gen_coreml & sidecars, const std::string & stage) {
+bool serve(cb::s3gen_sidecars & sidecars, const std::string & stage) {
+    const auto plan = sidecars.acquire({6, 12}, std::chrono::steady_clock::now());
+    require(plan != nullptr, "a plan");
     std::mt19937 rng(3);
     std::normal_distribution<float> noise(0.0f, 1.0f);
     auto random = [&](size_t n) {
@@ -366,7 +548,7 @@ bool serve(cb::s3gen_coreml & sidecars, const std::string & stage) {
     if (stage == "encoder") {
         constexpr int tokens = 6;
         std::vector<float> mu;
-        const bool ok = sidecars.encode(random((size_t) tokens * 512), tokens, 2, mu);
+        const bool ok = cb::plan_encode(*plan, random((size_t) tokens * 512), tokens, 2, mu);
         require(!ok || mu.size() == (size_t) tokens * 2 * 80, "encoder output size");
         return ok;
     }
@@ -376,7 +558,7 @@ bool serve(cb::s3gen_coreml & sidecars, const std::string & stage) {
         const auto spks = random(80), t_emb = random(1024);
         std::vector<std::vector<float>> out;
         // Like the pipeline: the CFG pair, of which a batch-1 sidecar uses the first.
-        const bool ok = sidecars.velocity(1, frames, {x.data(), x.data()}, {mu.data(), mu.data()},
+        const bool ok = cb::plan_velocity(*plan, 0, 1, frames, {x.data(), x.data()}, {mu.data(), mu.data()},
                                           {cond.data(), cond.data()}, {spks.data(), spks.data()},
                                           {t_emb.data(), t_emb.data()}, out);
         require(!ok || (out.size() == 1 && out[0].size() == (size_t) 80 * frames), "CFM output size");
@@ -385,7 +567,8 @@ bool serve(cb::s3gen_coreml & sidecars, const std::string & stage) {
     constexpr int frames = 40;  // two HiFT windows
     const size_t stft = (size_t) frames * cb::HIFT_STFT_PER_FRAME + 1;
     std::vector<float> spectrum;
-    const bool ok = sidecars.vocode(random((size_t) 80 * frames), frames, random(cb::HIFT_STFT_BINS * stft), spectrum);
+    const bool ok = cb::plan_vocode(*plan, random((size_t) 80 * frames), frames, random(cb::HIFT_STFT_BINS * stft),
+                                    spectrum);
     require(!ok || spectrum.size() == cb::HIFT_STFT_BINS * stft, "HiFT output size");
     return ok;
 }
@@ -402,9 +585,10 @@ int shape_fixture() {
     }
     const fs::path dir = env;
     {
-        cb::s3gen_coreml good((dir / "good-s3gen.gguf").string(), "cpu_only");
+        auto good = cb::s3gen_sidecars::create((dir / "good-s3gen.gguf").string(), fixture_options());
+        require(good != nullptr, "the good sidecars are found");
         for (const auto & [stage, features] : SHAPE_FEATURES) {
-            require(serve(good, stage), "the matching " + stage + " sidecar serves");
+            require(serve(*good, stage), "the matching " + stage + " sidecar serves");
         }
     }
     // The shared runner copies each feature by its declared shape, so every
@@ -414,10 +598,11 @@ int shape_fixture() {
         for (const std::string & feature : features) {
             const std::string stem = stage + "-" + feature + "-s3gen";
             require(fs::exists(dir / (stem + "-" + stage + ".mlmodelc")), "fixture has " + stem);
-            cb::s3gen_coreml sidecars((dir / (stem + ".gguf")).string(), "cpu_only");
+            auto sidecars = cb::s3gen_sidecars::create((dir / (stem + ".gguf")).string(), fixture_options());
+            require(sidecars != nullptr, "the " + stem + " sidecar is found");
             std::string error;
             try {
-                serve(sidecars, stage);
+                serve(*sidecars, stage);
             } catch (const std::runtime_error & e) {
                 error = e.what();
             }
@@ -425,6 +610,325 @@ int shape_fixture() {
             require(error.find("declares " + feature + " ") != std::string::npos,
                     stage + " rejects a sidecar declaring a larger " + feature);
         }
+    }
+    return 0;
+#endif
+}
+
+// -------------------------------------------------------- pending fixture --
+
+#ifdef TTS_CPP_USE_COREML
+using steady = std::chrono::steady_clock;
+
+double ms_since(steady::time_point t0) {
+    return std::chrono::duration<double, std::milli>(steady::now() - t0).count();
+}
+
+bool wait_for(const std::function<bool()> & done, int timeout_ms) {
+    const auto until = steady::now() + std::chrono::milliseconds(timeout_ms);
+    while (!done()) {
+        if (steady::now() > until) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return true;
+}
+
+// No function of the set is queued, loading or warming.
+bool settled(const cb::s3gen_sidecars & set) {
+    const std::string json = set.status_json();
+    for (const char * busy : {"\"state\":\"queued\"", "\"state\":\"loading\"", "\"state\":\"warming\"",
+                              "\"state\":\"deferred(memory)\""}) {
+        if (json.find(busy) != std::string::npos) return false;
+    }
+    return true;
+}
+
+void settle(const cb::s3gen_sidecars & set, const std::string & what) {
+    if (!wait_for([&] { return settled(set); }, 30000)) {
+        std::printf("%s\n", set.status_json().c_str());
+        throw std::runtime_error(what + ": the loads finish");
+    }
+}
+
+// A directory holding links to the named routing-fixture sidecars under a
+// fresh path (its own registry entries); returns the GGUF path the sidecars
+// sit next to (the GGUF itself need not exist).
+std::string routing_case(const fs::path & fixture, const fs::path & root, const std::string & name,
+                         const std::vector<const char *> & suffixes) {
+    const fs::path dir = root / name;
+    fs::create_directories(dir);
+    for (const char * suffix : suffixes) {
+        fs::create_directory_symlink(fs::absolute(fixture / (std::string("routing-s3gen") + suffix + ".mlmodelc")),
+                                     dir / (std::string("routing-s3gen") + suffix + ".mlmodelc"));
+    }
+    return (dir / "routing-s3gen.gguf").string();
+}
+
+CoremlOptions routing_options(const std::string & cache_dir = {},
+                              CoremlOptions::Prewarm prewarm = CoremlOptions::Prewarm::none) {
+    CoremlOptions o;
+    o.compute_units = "cpu_only";
+    o.wait = CoremlOptions::Wait::none;
+    o.prewarm = prewarm;
+    if (!cache_dir.empty()) o.cache_dir = cache_dir;
+    return o;
+}
+
+cb::s3gen_call_shape shape(int tokens) {
+    return cb::s3gen_call_shape{tokens, 2 * tokens};
+}
+
+cb::plan_stage_view view(const std::shared_ptr<S3genCoremlPlan> & plan, cb::s3gen_stage stage) {
+    return cb::plan_view(*plan, stage);
+}
+#endif
+
+int pending_fixture() {
+#ifndef TTS_CPP_USE_COREML
+    std::puts("SKIP: built without TTS_CPP_COREML");
+    return SKIP;
+#else
+    const char * env = std::getenv("CHATTERBOX_COREML_TEST_SHAPES");
+    if (!env || !*env) {
+        std::puts("SKIP: CHATTERBOX_COREML_TEST_SHAPES is not set");
+        return SKIP;
+    }
+    const fs::path fixture = env;
+    for (const char * suffix : {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX}) {
+        if (!fs::exists(fixture / (std::string("routing-s3gen") + suffix + ".mlmodelc"))) {
+            std::printf("SKIP: the fixture has no routing-s3gen%s.mlmodelc (rerun "
+                        "prepare_chatterbox_coreml_shape_fixture.py)\n", suffix);
+            return SKIP;
+        }
+    }
+    env_guard units(cb::COREML_UNITS_ENV), strict(cb::COREML_STRICT_ENV), disabled(cb::COREML_DISABLE_ENV);
+    env_guard cache("QVAC_COREML_CACHE_DIR");
+    unsetenv(cb::COREML_UNITS_ENV);
+    unsetenv(cb::COREML_STRICT_ENV);
+    unsetenv(cb::COREML_DISABLE_ENV);
+    unsetenv("QVAC_COREML_CACHE_DIR");
+    temp_dir root("pending");
+    const std::vector<const char *> all = {cb::COREML_ENCODER_SUFFIX, cb::COREML_CFM_SUFFIX, cb::COREML_HIFT_SUFFIX};
+    auto & hooks = cb::coreml_test();
+    using S = cb::s3gen_stage;
+
+    // 1. A call whose functions are still loading runs every stage on ggml,
+    //    marked pending, without blocking; a later call gets the models.
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "pending", all), routing_options());
+        require(set && set->buckets(S::cfm) == std::vector<int>{16, 24, 32, 40} &&
+                    set->buckets(S::encoder) == std::vector<int>{8, 12, 16, 20} && set->has(S::hift),
+                "the routing sidecars list their widths");
+        hooks.load_delay_ms = 1000;
+        const auto t0 = steady::now();
+        auto plan = set->acquire(shape(8), steady::now() + std::chrono::milliseconds(10));
+        const double took = ms_since(t0);
+        for (S s : {S::encoder, S::cfm, S::hift}) {
+            require(!view(plan, s).model && view(plan, s).pending && view(plan, s).label == cb::GGML_STAGE_BACKEND,
+                    std::string("pending ") + cb::to_string(s) + " runs on ggml");
+        }
+        require(cb::plan_pending(*plan) && took < 200, "a pending call is marked and never blocks");
+        hooks.load_delay_ms = 0;
+        settle(*set, "pending");
+        plan = set->acquire(shape(8), steady::now());
+        require(view(plan, S::encoder).bucket == 8 && view(plan, S::cfm).bucket == 16 && view(plan, S::hift).model &&
+                    view(plan, S::cfm).label == "coreml-cpu" && !cb::plan_pending(*plan),
+                "the next call runs on the loaded functions");
+        std::printf("[pending] acquired in %.1f ms, all three on ggml; the next call on Core ML\n", took);
+    }
+
+    // 2. A short sentence whose widths are ready, then a longer one whose
+    //    widths are still loading: the first runs on Core ML, the second on
+    //    ggml (a narrower ready function never serves a wider call).
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "short-long", all), routing_options());
+        set->predict({shape(8)});
+        settle(*set, "short-long");
+        hooks.load_delay_ms = 800;
+        auto short_plan = set->acquire(shape(8), steady::now());
+        auto long_plan = set->acquire(shape(12), steady::now());
+        require(view(short_plan, S::cfm).bucket == 16 && view(short_plan, S::encoder).bucket == 8,
+                "the short sentence runs on its ready widths");
+        require(!view(long_plan, S::cfm).model && view(long_plan, S::cfm).pending && !view(long_plan, S::encoder).model,
+                "the longer sentence runs on ggml while its widths load");
+        require(view(long_plan, S::hift).model, "HiFT serves every length");
+        hooks.load_delay_ms = 0;
+        settle(*set, "short-long");
+        std::printf("[short-long] ready widths served, the longer sentence on ggml\n");
+    }
+
+    // 3. The actual length exceeds the prediction: the predicted width is
+    //    loaded, the call needs a wider one; that one is requested at once
+    //    and the call runs on ggml meanwhile.
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "longer", all), routing_options());
+        set->predict({shape(8)});
+        settle(*set, "longer");
+        hooks.clear_loads();
+        hooks.load_delay_ms = 500;
+        auto plan = set->acquire(shape(16), steady::now());
+        require(!view(plan, S::cfm).model && !view(plan, S::encoder).model, "the longer call runs on ggml");
+        hooks.load_delay_ms = 0;
+        settle(*set, "longer");
+        const auto loads = hooks.loads();
+        require(std::find(loads.begin(), loads.end(), "cfm/frames_32") != loads.end() &&
+                    std::find(loads.begin(), loads.end(), "encoder/tokens_16") != loads.end(),
+                "the actual widths are loaded");
+        require(set->state(S::cfm, 32) == "ready", "and ready for the next call");
+        std::printf("[longer] actual widths loaded after the call\n");
+    }
+
+    // 4. A CFM failure at a later Euler step (stand-in steps; the real
+    //    pipeline is the engine fixture's).
+    check_cfm_rollback();
+    std::printf("[cfm-rollback] a later-step failure equals a whole ggml integration from z0\n");
+
+    // 5. A failure during an overlapped call: the plan defers it (the worker
+    //    hands the call back), the function is retired process-wide, and the
+    //    redo's fresh plan no longer uses it (here a wider ready function).
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "retire", all), routing_options());
+        set->predict({shape(8), shape(12)});
+        settle(*set, "retire");
+        auto plan = set->acquire(shape(8), steady::now());
+        require(view(plan, S::cfm).bucket == 16, "the overlapped call holds frames_16");
+        cb::defer_coreml_failures(*plan);
+        require(cb::coreml_failures_deferred(*plan), "the worker's plan defers failures");
+        hooks.fail_stage = (int) S::cfm;
+        std::vector<float> x(80 * 16, 0.0f), spks(80, 0.0f), t_emb(1024, 0.0f);
+        std::vector<std::vector<float>> out;
+        bool failed = false;
+        try {
+            cb::plan_velocity(*plan, 0, 1, 16, {x.data()}, {x.data()}, {x.data()}, {spks.data()}, {t_emb.data()}, out);
+        } catch (const cb::coreml_stage_failure &) {
+            failed = true;
+        }
+        require(failed && hooks.fail_stage == -1, "the injected prediction failure surfaces as a stage failure");
+        cb::plan_retire(*plan, S::cfm, "injected");
+        plan.reset();
+        auto redo = set->acquire(shape(8), steady::now());
+        require(view(redo, S::cfm).bucket == 24 && view(redo, S::encoder).bucket == 8,
+                "the redo runs CFM on the next ready width, the other stages unchanged");
+        require(set->state(S::cfm, 16) == "retired", "the failed function is retired");
+        std::printf("[retire] frames_16 retired; the redo runs on frames_24\n");
+    }
+
+    // 6. Dropping the sidecars while a load is in flight returns at once.
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "destroy", all), routing_options());
+        hooks.clear_loads();
+        hooks.load_delay_ms = 1500;
+        set->predict({shape(8)});
+        require(wait_for([&] { return !hooks.loads().empty(); }, 5000), "a load is in flight");
+        const auto t0 = steady::now();
+        set.reset();
+        const double took = ms_since(t0);
+        std::printf("[destroy] dropped mid-load in %.2f ms\n", took);
+        require(took < 100.0, "destruction mid-load returns in under 100 ms");
+        hooks.load_delay_ms = 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1700));  // let the started load end
+    }
+
+    // 7. The exact width is still loading and a wider one is ready: the wider
+    //    one serves the call (padding masked).
+    {
+        auto set = cb::s3gen_sidecars::create(routing_case(fixture, root.path, "wider", all), routing_options());
+        set->predict({shape(20)});
+        settle(*set, "wider");
+        hooks.load_delay_ms = 800;
+        auto plan = set->acquire(shape(12), steady::now());
+        require(view(plan, S::cfm).bucket == 40 && view(plan, S::encoder).bucket == 20 && !cb::plan_pending(*plan),
+                "a ready wider function serves the call");
+        hooks.load_delay_ms = 0;
+        settle(*set, "wider");
+        require(set->state(S::cfm, 24) == "ready", "the exact width loaded meanwhile");
+        std::printf("[wider] frames_40 served a 24-frame call\n");
+    }
+
+    // 8. The hinted widths are loading at construction and the first call
+    //    needs another one: it is the next load, right after the one in
+    //    flight.
+    {
+        const std::string cache_dir = (root.path / "order-cache").string();
+        const std::string gguf = routing_case(fixture, root.path, "order", {cb::COREML_CFM_SUFFIX});
+        {
+            auto set = cb::s3gen_sidecars::create(gguf, routing_options(cache_dir));
+            set->predict({shape(8), shape(12), shape(16)});
+            settle(*set, "order (hints)");
+        }
+        hooks.clear_loads();
+        hooks.load_delay_ms = 400;
+        auto set = cb::s3gen_sidecars::create(gguf, routing_options(cache_dir, CoremlOptions::Prewarm::minimal));
+        set->start_construction();
+        require(wait_for([&] { return hooks.loads().size() == 1; }, 5000), "a construction load is in flight");
+        auto plan = set->acquire(shape(20), steady::now());
+        require(!view(plan, S::cfm).model, "the call runs on ggml");
+        hooks.load_delay_ms = 0;
+        settle(*set, "order");
+        const auto loads = hooks.loads();
+        std::string order;
+        for (const auto & l : loads) order += (order.empty() ? "" : " ") + l;
+        std::printf("[order] %s\n", order.c_str());
+        const std::set<std::string> hinted = {"cfm/frames_16", "cfm/frames_24", "cfm/frames_32"};
+        require(loads.size() == 4 && hinted.count(loads[0]) == 1 && loads[1] == "cfm/frames_40",
+                "the call's width loads second, right after the one in flight");
+        require(std::set<std::string>(loads.begin() + 2, loads.end()).size() == 2, "then the other hinted widths");
+    }
+
+    // 9. A stale hint: the slow load is waited for only until the deadline,
+    //    the hint cools down, and the next call does not wait at all.
+    {
+        const std::string cache_dir = (root.path / "stale-cache").string();
+        const std::string gguf = routing_case(fixture, root.path, "stale", {cb::COREML_CFM_SUFFIX});
+        // Two processes' worth of loads: the first records a cold load, the
+        // second (hinted) an observed warm load time.
+        for (int round = 0; round < 2; ++round) {
+            auto set = cb::s3gen_sidecars::create(gguf, routing_options(cache_dir));
+            set->predict({shape(8)});
+            settle(*set, "stale (hint)");
+        }
+        hooks.load_delay_ms = 2000;
+        auto set = cb::s3gen_sidecars::create(gguf, routing_options(cache_dir));
+        auto t0 = steady::now();
+        auto plan = set->acquire(shape(8), t0 + std::chrono::milliseconds(300));
+        const double first = ms_since(t0);
+        t0 = steady::now();
+        auto again = set->acquire(shape(8), t0 + std::chrono::milliseconds(300));
+        const double second = ms_since(t0);
+        std::printf("[stale] first call waited %.0f ms (deadline 300), the next %.0f ms\n", first, second);
+        require(!view(plan, S::cfm).model && first >= 250 && first < 450,
+                "the warm-hinted slow load is waited for until the deadline, not beyond");
+        require(!view(again, S::cfm).model && second < 100, "the stale hint gives the next call no wait");
+        hooks.load_delay_ms = 0;
+        settle(*set, "stale");
+    }
+
+    // 10. The resident cap never releases a held or a predicted width.
+    {
+        const std::string gguf = routing_case(fixture, root.path, "cap", {cb::COREML_CFM_SUFFIX});
+        auto set = cb::s3gen_sidecars::create(gguf, routing_options());
+        set->predict({shape(8)});
+        settle(*set, "cap");
+        auto held = set->acquire(shape(8), steady::now());
+        require(view(held, S::cfm).bucket == 16, "a call holds frames_16");
+        set->predict({shape(12)});
+        settle(*set, "cap");
+        size_t most = 0;
+        for (int tokens : {16, 20, 16, 20}) {
+            set->acquire(shape(tokens), steady::now());
+            require(wait_for([&] {
+                        most = std::max(most, set->live(S::cfm));
+                        return settled(*set);
+                    }, 30000),
+                    "cap: the loads finish");
+            require(set->state(S::cfm, 2 * tokens) == "ready", "the requested width loads");
+            require(set->state(S::cfm, 16) == "ready" && set->state(S::cfm, 24) == "ready",
+                    "the held and the predicted widths stay loaded");
+        }
+        std::printf("[cap] at most %zu CFM functions live; frames_16 (held) and frames_24 (predicted) kept\n", most);
+        require(most <= cb::COREML_RESIDENT_CAP && set->live(S::cfm) <= cb::COREML_RESIDENT_CAP,
+                "never more live functions than the cap");
+        set->end_call();
     }
     return 0;
 #endif
@@ -453,8 +957,140 @@ bool same_pcm(const std::vector<float> & a, const std::vector<float> & b) {
     return a.size() == b.size() && !a.empty() && max_abs(a, b) == 0.0;
 }
 
-int engine_fixture() {
+#ifdef TTS_CPP_USE_COREML
+// The Engine's Core ML functions are all loaded (none queued or loading).
+bool engine_settled(const Engine & engine) {
+    const std::string json = engine.coreml_status();
+    for (const char * busy : {"\"state\":\"queued\"", "\"state\":\"loading\"", "\"state\":\"warming\"",
+                              "\"state\":\"deferred(memory)\""}) {
+        if (json.find(busy) != std::string::npos) return false;
+    }
+    return true;
+}
+
+std::string read_file(const fs::path & path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Runs tts-cli on the overlap text; returns its exit code.
+int run_cli(const std::string & cli, const std::string & t3, const std::string & s3gen, const fs::path & wav,
+            const fs::path & log, const std::string & extra) {
+    const std::string cmd = "'" + cli + "' --model '" + t3 + "' --s3gen-gguf '" + s3gen + "' --text '" +
+                            OVERLAP_TEXT + "' --out '" + wav.string() + "' --seed 42 --n-gpu-layers 99 " +
+                            "--max-sentence-chars " + std::to_string(OVERLAP_SENTENCE_CHARS) + " --verbose " + extra +
+                            " 2> '" + log.string() + "'";
+    const int status = std::system(cmd.c_str());
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Stage labels tts-cli reported ("[encoder] 12.3 ms (coreml-ane)", ...).
+std::set<std::string> cli_labels(const std::string & log) {
+    std::set<std::string> labels;
+    std::istringstream lines(log);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const bool stage = line.find("[encoder]") != std::string::npos || line.find("[cfm_step") != std::string::npos ||
+                           line.find("[hift_decode]") != std::string::npos;
+        const size_t open = line.rfind('('), close = line.rfind(')');
+        if (stage && open != std::string::npos && close != std::string::npos && close > open) {
+            labels.insert(line.substr(open + 1, close - open - 1));
+        }
+    }
+    return labels;
+}
+
+// While every function is still loading (held, or delayed past the whole
+// run for tts-cli: a slow, cold load), the first
+// synthesis runs entirely on ggml and equals a use = off run with the same
+// seed, sample for sample; once loaded, later calls run on Core ML. Through
+// the Engine and through tts-cli.
+void slow_load_checks(const std::string & t3, const std::string & s3gen, const std::string & cli,
+                      const fs::path & root) {
+    auto & hooks = cb::coreml_test();
+    EngineOptions off_opts = engine_options(t3, s3gen);
+    off_opts.coreml.use = CoremlOptions::Use::off;
+    const SynthesisResult reference = Engine(off_opts).synthesize(OVERLAP_TEXT);
+    require(reference.s3gen_backend == cb::GGML_STAGE_BACKEND, "use = off runs on ggml");
+
+    hooks.hold_loads = true;
+    EngineOptions slow_opts = engine_options(t3, s3gen);
+    slow_opts.coreml.cache_dir = (root / "engine-cache").string();
+    Engine engine(slow_opts);
+    const SynthesisResult first = engine.synthesize(OVERLAP_TEXT);
+    std::printf("[slow-load engine] first call: backend=%s pending=%d, max |first - use=off| = %.3e\n",
+                first.s3gen_backend.c_str(), (int) first.coreml_pending,
+                first.pcm.size() == reference.pcm.size() ? max_abs(first.pcm, reference.pcm) : -1.0);
+    require(first.s3gen_backend == cb::GGML_STAGE_BACKEND && first.coreml_pending,
+            "the first call runs on ggml while the functions load");
+    require(same_pcm(first.pcm, reference.pcm), "the first call equals a use = off run with the same seed");
+    hooks.hold_loads = false;
+    require(wait_for([&] { return engine_settled(engine); }, 900000), "the requested functions load");
+    const SynthesisResult later = engine.synthesize(OVERLAP_TEXT);
+    std::printf("[slow-load engine] later call: backend=%s pending=%d\n", later.s3gen_backend.c_str(),
+                (int) later.coreml_pending);
+    require(later.s3gen_backend == "coreml-ane" && !later.coreml_pending, "later calls run on Core ML");
+
+    // tts-cli runs its own sentence loop.
+    const fs::path off_wav = root / "cli-off.wav", slow_wav = root / "cli-slow.wav", warm_wav = root / "cli-warm.wav";
+    const std::string cache = " --coreml-cache-dir '" + (root / "cli-cache").string() + "'";
+    require(run_cli(cli, t3, s3gen, off_wav, root / "cli-off.log", "--coreml-use off") == 0, "tts-cli use = off");
+    require(run_cli(cli, t3, s3gen, slow_wav, root / "cli-slow.log", "--coreml-slow-load-ms 120000" + cache) == 0,
+            "tts-cli with slow loads");
+    const std::set<std::string> slow_labels = cli_labels(read_file(root / "cli-slow.log"));
+    require(slow_labels == std::set<std::string>{cb::GGML_STAGE_BACKEND}, "tts-cli's first call runs on ggml");
+    require(!read_file(off_wav).empty() && read_file(off_wav) == read_file(slow_wav),
+            "tts-cli's first call equals its use = off run");
+    require(run_cli(cli, t3, s3gen, warm_wav, root / "cli-warm.log", "--coreml-wait call" + cache) == 0,
+            "tts-cli once loaded");
+    const std::set<std::string> warm_labels = cli_labels(read_file(root / "cli-warm.log"));
+    std::printf("[slow-load cli] first call ggml and equal to use = off; loaded call labels:");
+    for (const auto & l : warm_labels) std::printf(" %s", l.c_str());
+    std::printf("\n");
+    require(warm_labels == std::set<std::string>{"coreml-ane"}, "tts-cli runs every stage on Core ML once loaded");
+}
+
+// The real CFM latch: a Core ML failure at the second Euler step restores the
+// initial noise and integrates on ggml, so the call equals use = off sample
+// for sample (only the CFM sidecar is present, so the encoder and HiFT run
+// on ggml in both).
+void cfm_rollback_check(const std::string & s3gen, const fs::path & root) {
+    const fs::path dir = stage_dir(root, s3gen, {cb::COREML_CFM_SUFFIX}, "cfm-rollback");
+    const std::string gguf = (dir / fs::path(s3gen).filename()).string();
+    const std::vector<int32_t> tokens = fixture_tokens(90);
+    auto run = [&](const CoremlOptions & coreml) {
+        s3gen_synthesize_opts opts;
+        opts.s3gen_gguf_path = gguf;
+        opts.n_gpu_layers = 99;
+        opts.seed = 42;
+        opts.coreml = coreml;
+        run_result r;
+        opts.pcm_out = &r.wav;
+        opts.s3gen_backend_out = &r.backend;
+        require(s3gen_synthesize_to_wav(tokens, opts) == 0, "s3gen_synthesize_to_wav");
+        return r;
+    };
+    CoremlOptions off;
+    off.use = CoremlOptions::Use::off;
+    const run_result reference = run(off);
+    CoremlOptions waited;
+    waited.wait = CoremlOptions::Wait::call;  // the CFM function is loaded before the call
+    waited.compute_units = "cpu_only";
+    const run_result served = run(waited);
+    require(served.backend == cb::MIXED_STAGE_BACKEND, "CFM runs on Core ML");
+    cb::coreml_test().fail_cfm_step = 1;
+    const run_result rolled = run(waited);
+    require(cb::coreml_test().fail_cfm_step == -1, "the failure was injected");
+    std::printf("[cfm-rollback] backend=%s, max |rolled back - use=off| = %.3e\n", rolled.backend.c_str(),
+                rolled.wav.size() == reference.wav.size() ? max_abs(rolled.wav, reference.wav) : -1.0);
+    require(rolled.backend == cb::GGML_STAGE_BACKEND, "after the failure the whole call ran on ggml");
+    require(same_pcm(rolled.wav, reference.wav), "a CFM failure at step 2 equals a whole ggml integration from z0");
+}
+#endif
+
+int engine_fixture(bool slow_load) {
 #ifndef TTS_CPP_USE_COREML
+    (void) slow_load;
     std::puts("SKIP: built without TTS_CPP_COREML");
     return SKIP;
 #else
@@ -462,6 +1098,11 @@ int engine_fixture() {
     const char * s3gen_env = std::getenv("CHATTERBOX_COREML_TEST_S3GEN");
     if (!t3_env || !*t3_env || !s3gen_env || !*s3gen_env) {
         std::puts("SKIP: CHATTERBOX_COREML_TEST_T3 / CHATTERBOX_COREML_TEST_S3GEN are not set");
+        return SKIP;
+    }
+    const char * cli_env = std::getenv("CHATTERBOX_COREML_TEST_CLI");
+    if (slow_load && (!cli_env || !*cli_env || !fs::exists(cli_env))) {
+        std::puts("SKIP: --slow-load needs CHATTERBOX_COREML_TEST_CLI (a tts-cli binary)");
         return SKIP;
     }
     const std::string t3 = t3_env, s3gen = s3gen_env;
@@ -472,20 +1113,27 @@ int engine_fixture() {
         }
     }
     env_guard units(cb::COREML_UNITS_ENV), strict(cb::COREML_STRICT_ENV), disabled(cb::COREML_DISABLE_ENV);
+    env_guard cache("QVAC_COREML_CACHE_DIR");
     unsetenv(cb::COREML_UNITS_ENV);
     unsetenv(cb::COREML_STRICT_ENV);
     unsetenv(cb::COREML_DISABLE_ENV);
+    unsetenv("QVAC_COREML_CACHE_DIR");
     temp_dir root("engine");
     const auto segments = tts_cpp::chatterbox::text_preprocess::split_text_for_tts(OVERLAP_TEXT,
                                                                                    OVERLAP_SENTENCE_CHARS);
     require(segments.size() == 3, "the overlap text splits into three segments");
-    require(cb::coreml_offloads_s3gen(s3gen, cb::resolve_coreml_policy("", std::nullopt)),
-            "the sidecars enable the sentence overlap");
+
+    // First, before anything is loaded in this process.
+    if (slow_load) slow_load_checks(t3, s3gen, cli_env, root.path);
 
     // Overlapped synthesis equals the segments synthesized one call at a time
     // (one segment never overlaps) and crossfaded in order, sample for sample:
     // T3 and the CFM noise are seeded per segment, so only order can differ.
-    Engine engine(engine_options(t3, s3gen));
+    // wait = call: every sentence waits for its functions, so each one
+    // overlaps.
+    EngineOptions waited_opts = engine_options(t3, s3gen);
+    waited_opts.coreml.wait = CoremlOptions::Wait::call;
+    Engine engine(waited_opts);
     const SynthesisResult overlapped = engine.synthesize(OVERLAP_TEXT);
     // Timed again once every function is compiled and loaded, so the cancel
     // points below fall inside a warm request.
@@ -535,10 +1183,9 @@ int engine_fixture() {
     require(same_pcm(engine.synthesize(OVERLAP_TEXT).pcm, overlapped.pcm), "a cancelled engine synthesizes again");
 
     // A CFM sidecar that cannot serve (here, a package without frames_*
-    // functions) still enables the overlap, so its failures surface on the
-    // worker: strict mode must rethrow the worker's error from synthesize(),
-    // and without strict the segments fall back to ggml CFM and aggregate
-    // as mixed.
+    // functions): strict mode refuses the call, and without strict the
+    // segments run CFM on ggml (so they do not overlap) and aggregate as
+    // mixed.
     const fs::path broken = stage_dir(root.path, s3gen, {cb::COREML_ENCODER_SUFFIX, cb::COREML_HIFT_SUFFIX}, "broken");
     const std::string broken_gguf = (broken / fs::path(s3gen).filename()).string();
     fs::create_directory_symlink(fs::absolute(cb::coreml_stage_path(s3gen, cb::COREML_HIFT_SUFFIX)),
@@ -558,7 +1205,21 @@ int engine_fixture() {
     const SynthesisResult mixed = Engine(lenient_opts).synthesize(OVERLAP_TEXT);
     std::printf("[fallback] %zu samples, backend=%s\n", mixed.pcm.size(), mixed.s3gen_backend.c_str());
     require(!mixed.pcm.empty() && mixed.s3gen_backend == cb::MIXED_STAGE_BACKEND,
-            "a CFM fallback on the worker aggregates as mixed");
+            "a CFM fallback aggregates as mixed");
+
+    cfm_rollback_check(s3gen, root.path);
+
+    // A prediction failure on the worker during the overlap: the worker hands
+    // the segment back, the dispatching thread renders it again, and the
+    // result equals a later run with the same function retired (last: the
+    // retirement is process-wide).
+    cb::coreml_test().fail_stage = (int) cb::s3gen_stage::cfm;
+    const SynthesisResult redone = engine.synthesize(OVERLAP_TEXT);
+    require(cb::coreml_test().fail_stage == -1, "the worker's CFM prediction failed");
+    const SynthesisResult after = engine.synthesize(OVERLAP_TEXT);
+    std::printf("[overlap retire] redone backend=%s, later backend=%s\n", redone.s3gen_backend.c_str(),
+                after.s3gen_backend.c_str());
+    require(same_pcm(redone.pcm, after.pcm), "the redone segment equals a run with the function retired");
     s3gen_unload();
     return 0;
 #endif
@@ -570,12 +1231,17 @@ int main(int argc, char ** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--stages-fixture") return stages_fixture();
         if (argc > 1 && std::string(argv[1]) == "--shape-fixture") return shape_fixture();
-        if (argc > 1 && std::string(argv[1]) == "--engine-fixture") return engine_fixture();
-        check_policy();
+        if (argc > 1 && std::string(argv[1]) == "--pending-fixture") return pending_fixture();
+        if (argc > 1 && std::string(argv[1]) == "--engine-fixture") {
+            return engine_fixture(argc > 2 && std::string(argv[2]) == "--slow-load");
+        }
+        check_options();
         check_naming();
         check_buckets();
         check_windows();
         check_warm_estimates();
+        check_shapes_and_estimate();
+        check_cfm_rollback();
         check_fit_and_detection();
         std::puts("test-chatterbox-coreml: ok");
         return 0;
