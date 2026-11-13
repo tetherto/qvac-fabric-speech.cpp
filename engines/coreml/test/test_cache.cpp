@@ -1019,6 +1019,92 @@ void case_failure_publication_race() {
     CHECK(!fs::exists(rec_path));
 }
 
+// A routine prune reads an expired failure record and decides to delete it.
+// Before it acts, a preparation of the same key fails again and replaces the
+// record. The prune must keep the replacement: it holds this process's
+// backoff, or (after a second process failed the same way) the
+// deterministic suppression. A key someone holds is skipped, not waited for.
+void case_prune_vs_fresh_failure_record() {
+    auto rejecting = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    // An expired transient record for the key of `a`: a compile failure eight days ago.
+    auto expired_record = [&](Env & env, const std::string & a) {
+        cache::PrepareInputs in = env.inputs(a);
+        in.now_s = now_s() - 8 * kDay;
+        PrepareOutcome o = cache::prepare(in);
+        CHECK(o.kind == PrepareOutcome::Kind::failed);
+        auto rec = failed::read(failed::record_path(env.layout().failed, o.key32));
+        CHECK(rec && failed::expired(*rec, now_s()));
+        return o.key32;
+    };
+    {
+        // The replacement is this process's own failure: its backoff survives.
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_compile_override = rejecting;
+        const std::string key = expired_record(env, a);
+        const std::string rec_path = failed::record_path(env.layout().failed, key);
+        CHECK(g_compiles == 1);
+        cache::PrunePolicy p = env.routine();
+        int scans = 0;
+        p.after_failed_scan = [&] {
+            ++scans;
+            CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);  // the expired record does not block
+        };
+        cache::PruneReport r = cache::prune(env.cache, p, env.catalog());
+        CHECK(scans == 1 && g_compiles == 2);
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted the fresh record");
+        auto rec = failed::read(rec_path);
+        CHECK(rec && !failed::expired(*rec, now_s()) && rec->process == failed::process_token());
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && g_compiles == 2);  // backing off: no third compile
+    }
+    {
+        // Two other processes fail the same way meanwhile: the second promotes
+        // the record, and the promotion survives the prune.
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_compile_override = rejecting;
+        const std::string key = expired_record(env, a);
+        const cache::Layout l = env.layout();
+        const std::string rec_path = failed::record_path(l.failed, key);
+        cache::PrunePolicy p = env.routine();
+        int scans = 0;
+        p.after_failed_scan = [&] {
+            ++scans;
+            for (int i = 0; i < 2; ++i) {
+                pid_t kid = spawn([&] {
+                    CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+                    return 0;
+                });
+                CHECK(reap(kid) == 0);
+            }
+        };
+        cache::PruneReport r = cache::prune(env.cache, p, env.catalog());
+        CHECK(scans == 1);
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted the promoted record");
+        auto rec = failed::read(rec_path);
+        CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+        const int compiles = g_compiles;
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && o.error.cls == ErrorClass::deterministic &&
+              g_compiles == compiles);
+
+        // While the key is held, prune leaves its record alone and returns
+        // at once; the next prune deletes it.
+        cache::KeyLock held;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::exclusive, held) == cache::KeyLock::Result::ok);
+        r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted a record of a held key");
+        held.release();
+        r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK(r.failed == 1 && !fs::exists(rec_path));
+    }
+}
+
 // The process token tells a retry in this process from another process's
 // failure. Threads of a new process that ask for it at the same moment (or
 // record failures for different keys at once) all see one complete token,
@@ -1517,6 +1603,7 @@ int main(int argc, char ** argv) {
                          {"failure-records", case_failure_records},
                          {"success-clears-failure", case_success_clears_failure},
                          {"failure-publication-race", case_failure_publication_race},
+                         {"prune-vs-fresh-failure-record", case_prune_vs_fresh_failure_record},
                          {"process-token-first-use", case_process_token_first_use},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
