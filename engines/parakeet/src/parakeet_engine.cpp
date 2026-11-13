@@ -3062,6 +3062,10 @@ void SortformerStreamSession::Impl::process_chunk(int64_t window_start_sample,
     if (diar.n_frames > 0) {
         ++network_passes;
         if (diar.encoder_used_coreml) ++coreml_passes;
+        if (engine_impl->opts.verbose) {
+            PARAKEET_LOG_INFO("diarization-route: pass=%d coreml=%d frames=%d\n",
+                             network_passes, diar.encoder_used_coreml ? 1 : 0, diar.n_frames);
+        }
     }
 
     if (probability_sink && cache_active) {
