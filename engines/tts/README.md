@@ -150,6 +150,10 @@ Hebrew, Russian, Chinese and Hindi need external preprocessing. See
 
 Backend selection and model-specific validation are documented in
 [docs/backends.md](docs/backends.md) and [docs/testing.md](docs/testing.md).
+The test guide includes a model-free matched WAV/mel fixture generator,
+reference-generation commands for CAMPPlus and S3TokenizerV2, and truncated-NPY
+rejection checks, plus the failure criteria for voice-cloning and streaming
+parity. Model-free checks run without downloading checkpoints.
 Metadata-only memory preflight covers MOSS Delay/TTSD and MOSS-SoundEffect,
 including text/diffusion/decode workloads for sound effects. Entry points are indexed in
 [docs/api.md](docs/api.md#memory-fit-preflight). Every fit result names its device
