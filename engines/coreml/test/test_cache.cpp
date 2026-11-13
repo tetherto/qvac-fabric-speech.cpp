@@ -1019,6 +1019,71 @@ void case_failure_publication_race() {
     CHECK(!fs::exists(rec_path));
 }
 
+// The process token tells a retry in this process from another process's
+// failure. Threads of a new process that ask for it at the same moment (or
+// record failures for different keys at once) all see one complete token,
+// and it is that process's own: a child after fork never keeps its parent's.
+void case_process_token_first_use() {
+    TempDir td;
+    const std::string parent = failed::process_token();
+    auto well_formed = [](const std::string & tok) {
+        const std::string prefix = std::to_string(::getpid()) + "-";
+        return tok.size() == prefix.size() + 16 && tok.compare(0, prefix.size(), prefix) == 0;
+    };
+    CHECK(well_formed(parent));
+    constexpr int kRounds = 100;
+    constexpr int kThreads = 8;
+    int bad_rounds = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        // Even rounds ask for the token; odd rounds record two compile
+        // failures per key, which must stay transient (one process).
+        const bool via_records = round % 2 != 0;
+        const std::string dir = td / ("failed-" + std::to_string(round));
+        pid_t kid = spawn([&] {
+            std::atomic<int> waiting{0};
+            std::atomic<bool> go{false};
+            std::vector<std::string> got(kThreads);
+            std::vector<std::thread> threads;
+            const Error err = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+            auto key_of = [](int i) { return std::string(31, 'a') + static_cast<char>('0' + i); };
+            for (int i = 0; i < kThreads; ++i) {
+                threads.emplace_back([&, i] {
+                    waiting.fetch_add(1);
+                    while (!go.load()) {
+                    }
+                    if (via_records) {
+                        for (int n = 0; n < 2; ++n) {
+                            failed::record(dir, key_of(i), failed::Stage::compile, err, "toy-dac", "TEST1", now_s());
+                        }
+                    } else {
+                        got[i] = failed::process_token();
+                    }
+                });
+            }
+            while (waiting.load() < kThreads) {
+            }
+            go.store(true);
+            for (std::thread & t : threads) t.join();
+            const std::string mine = failed::process_token();
+            CHECK_MSG(well_formed(mine), "'" + mine + "'");
+            CHECK(mine != parent);
+            for (int i = 0; i < kThreads; ++i) {
+                if (via_records) {
+                    auto rec = failed::read(failed::record_path(dir, key_of(i)));
+                    CHECK_MSG(rec && rec->process == mine && rec->attempts == 2 && rec->cls == ErrorClass::transient,
+                              rec ? "'" + rec->process + "' " + to_string(rec->cls) : std::string("no record"));
+                } else {
+                    CHECK_MSG(got[i] == mine, "'" + got[i] + "' vs '" + mine + "'");
+                }
+            }
+            return 0;
+        });
+        bad_rounds += reap(kid) != 0;
+    }
+    CHECK_MSG(bad_rounds == 0, std::to_string(bad_rounds) + " of " + std::to_string(kRounds) + " rounds");
+    CHECK(failed::process_token() == parent);
+}
+
 void case_resource_codes_never_promote() {
     TempDir td;
     const std::string dir = td / "failed";
@@ -1452,6 +1517,7 @@ int main(int argc, char ** argv) {
                          {"failure-records", case_failure_records},
                          {"success-clears-failure", case_success_clears_failure},
                          {"failure-publication-race", case_failure_publication_race},
+                         {"process-token-first-use", case_process_token_first_use},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},
