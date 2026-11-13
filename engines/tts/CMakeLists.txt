@@ -749,6 +749,7 @@ endif()
 if (TTS_CPP_BUILD_TESTS)
     enable_testing()
     include(CTest)
+    include(cmake/tts-cpp-test-environment.cmake)
 
     # Roots that the test registrations below resolve fixture paths against.
     # All three are CACHE PATHs so CI / package builds can point them at
@@ -803,20 +804,7 @@ if (TTS_CPP_BUILD_TESTS)
         if (DEFINED TCRT_PASS_REGEX)
             set_property(TEST ${target} PROPERTY PASS_REGULAR_EXPRESSION "${TCRT_PASS_REGEX}")
         endif()
-        if (WIN32)
-            # When ggml builds as shared (the MSVC default), test exes
-            # link against import libs and need to find speech-ggml-*.dll
-            # at runtime.  Windows has no rpath, so we prepend the
-            # build-tree DLL output dirs to PATH.  Both `bin/` (Ninja /
-            # single-config) and `bin/<Config>/` (Visual Studio /
-            # multi-config) are listed because the generator type isn't
-            # known at configure time on a fresh checkout; the
-            # generator-expression $<CONFIG> resolves to the active
-            # config at test time.  Without this, ctest sees
-            # STATUS_DLL_NOT_FOUND (0xc0000135) before main() runs.
-            set_property(TEST ${target} PROPERTY ENVIRONMENT
-                "PATH=${CMAKE_BINARY_DIR}/bin/$<CONFIG>\;${CMAKE_BINARY_DIR}/bin\;$ENV{PATH}")
-        endif()
+        tts_cpp_set_test_runtime_environment(${target})
         set(_tcrt_missing "")
         foreach (_tcrt_req IN LISTS TCRT_REQUIRES)
             if (NOT EXISTS "${_tcrt_req}")
@@ -1216,11 +1204,16 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-mel-thread-safety)
     tts_cpp_register_test(test-mel-thread-safety LABEL "unit")
 
-    # Branch coverage for assemble-cosyvoice3-model.py (add-on name
-    # validation, inputs already at their destination, copy + symlink modes).
+    # Model-free CTest environment and Python conversion checks.
     # Registered only when a Python interpreter is available.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
+        add_test(NAME test-runtime-environment
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_runtime_environment.py"
+                    "${CMAKE_COMMAND}" "${CMAKE_CTEST_COMMAND}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tts-cpp-test-environment.cmake")
+        set_tests_properties(test-runtime-environment PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         if (Python3_VERSION VERSION_GREATER_EQUAL "3.10")
             add_test(NAME test-moss-validated-cloning
                      COMMAND "${Python3_EXECUTABLE}"
@@ -2956,6 +2949,7 @@ if (TTS_CPP_BUILD_TESTS)
                     $<TARGET_FILE:test-voice-features>)
         set_tests_properties(test-voice-features-reference PROPERTIES
             LABELS "unit" SKIP_RETURN_CODE 77 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        tts_cpp_set_test_runtime_environment(test-voice-features-reference)
     endif()
 
     add_executable(test-resample
@@ -3457,6 +3451,7 @@ if (TTS_CPP_BUILD_TESTS)
                     $<TARGET_FILE:test-tts-streaming>)
         set_tests_properties(test-streaming-fixture-validation PROPERTIES
             LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+        tts_cpp_set_test_runtime_environment(test-streaming-fixture-validation)
     endif()
 
     # Pure sentence-splitter unit test (no model/fixture) -- always runs.
