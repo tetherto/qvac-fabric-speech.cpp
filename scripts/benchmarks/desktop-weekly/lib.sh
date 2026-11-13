@@ -79,6 +79,22 @@ adopt_gpu_lease() {
   fi
 }
 
+leased_gpu_uuid() {
+  case "${CUDA_VISIBLE_DEVICES:-}" in GPU-*) echo "${CUDA_VISIBLE_DEVICES%%,*}" ;; *) echo "" ;; esac
+}
+
+gpu_monitor_target() {
+  local leased=""
+  if inside_gpu_lease; then leased="$(leased_gpu_uuid)"; fi
+  echo "${leased:-$GPU_INDEX}"
+}
+
+gpu_physical_index() {
+  local leased=""
+  if inside_gpu_lease; then leased="${GPU_RUN_GPUS:-}"; fi
+  echo "${leased:-$GPU_INDEX}"
+}
+
 gpu_backends_requested() {
   case ",$(resolve_backends)," in *",cuda,"*|*",vulkan,"*) return 0 ;; *) return 1 ;; esac
 }
@@ -154,7 +170,7 @@ cmake_generator() {
 
 gpu_busy_linux() {
   command -v nvidia-smi > /dev/null || return 1
-  [ -n "$(nvidia-smi -i "$GPU_INDEX" --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]
+  [ -n "$(nvidia-smi -i "$(gpu_monitor_target)" --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]
 }
 
 gpu_busy_darwin() {
@@ -456,7 +472,7 @@ start_gpu_sampler() {
   GPU_SAMPLER_PID=""
   case "$(memory_sampler_kind)" in
     nvidia-smi)
-      nvidia-smi -i "$GPU_INDEX" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
+      nvidia-smi -i "$(gpu_monitor_target)" --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader,nounits \
         -lms "$GPU_SAMPLE_MS" > "$1" 2>/dev/null & ;;
     meminfo) sample_system_memory > "$1" & ;;
     *) return 0 ;;

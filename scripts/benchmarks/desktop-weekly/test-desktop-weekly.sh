@@ -443,8 +443,31 @@ check_gpu_lease() {
     GPU_INDEX=1; load_config; export_gpu_selection
     [ "$GPU_INDEX" = 0 ] && [ "$CUDA_VISIBLE_DEVICES" = "GPU-uuid" ] && [ -z "${GGML_VK_VISIBLE_DEVICES:-}" ] && [ "$GPU_LOCK_QUIET" = 1 ] ||
       { echo "inside a lease: index $GPU_INDEX cuda $CUDA_VISIBLE_DEVICES vk ${GGML_VK_VISIBLE_DEVICES:-}" >&2; exit 1; }
+    cat > "$HOME/.local/bin/nvidia-smi" <<'FAKE'
+#!/bin/sh
+echo "$*" >> "$SMI_CALLS"
+case "$*" in
+  *"-i 0 --query-compute-apps"*) echo 4242 ;;
+  *"-i GPU-leased-1 --query-compute-apps"*) ;;
+  *"-i GPU-leased-1 --query-gpu=timestamp"*) echo "2026/11/15 10:00:00.000, 2048, 37" ;;
+  *"-i GPU-leased-1 --query-gpu=name"*) echo "RTX leased" ;;
+  *"--query-gpu"*) echo "RTX busy neighbour" ;;
+esac
+FAKE
+    chmod +x "$HOME/.local/bin/nvidia-smi"
+    export SMI_CALLS="$TMP/smi-calls" CUDA_VISIBLE_DEVICES="GPU-leased-1" GPU_RUN_GPUS=1
+    [ "$(gpu_monitor_target)" = "GPU-leased-1" ] && [ "$(gpu_physical_index)" = 1 ] || { echo "leased GPU 1 is monitored as $(gpu_monitor_target), index $(gpu_physical_index)" >&2; exit 1; }
+    gpu_busy_linux && { echo "GPU 0's job of another user counted as busy while GPU 1 is leased" >&2; exit 1; }
+    MEMORY_SAMPLER=auto
+    start_gpu_sampler "$TMP/lease-gpu.csv"; sleep 1; stop_gpu_sampler
+    grep -q "2048, 37" "$TMP/lease-gpu.csv" || { echo "the sampler did not read the leased GPU: $(cat "$TMP/lease-gpu.csv")" >&2; exit 1; }
+    [ "$(bash "$HERE/machine-info.sh" | jq -r '[.gpu.name, .gpu.index] | join("|")')" = "RTX leased|1" ] || { echo "machine info names another GPU: $(bash "$HERE/machine-info.sh" | jq -c .gpu)" >&2; exit 1; }
+    grep -q -- "-i 0 " "$SMI_CALLS" && { echo "nvidia-smi was asked about index 0 inside a lease: $(grep -- "-i 0 " "$SMI_CALLS" | head -n 1)" >&2; exit 1; }
+    unset GPU_RUN_LEASE; GPU_INDEX=0
+    [ "$(gpu_monitor_target)" = 0 ] && [ "$(gpu_physical_index)" = 0 ] || { echo "outside a lease the configured index is not monitored" >&2; exit 1; }
+    gpu_busy_linux || { echo "a busy configured GPU is not seen outside a lease" >&2; exit 1; }
   ) || fail "gpu lease"
-  ok "on a host with gpu-run a GPU run takes one lease for itself and uses the leased GPU instead of the configured index"
+  ok "on a host with gpu-run a GPU run takes one lease for itself, and busy checks, sampling and machine info follow the leased GPU by its UUID"
 }
 
 check_build_marker() {
