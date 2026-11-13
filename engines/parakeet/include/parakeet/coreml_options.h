@@ -33,8 +33,9 @@ struct CoremlOptions {
     // instead of falling back to ggml: a sidecar that failed to load or timed
     // out, an input longer than a fixed-capacity encoder (for example with
     // long-form windowing disabled), a shape the sidecar rejects, or a failed
-    // prediction (which also retires the sidecar). Calls the engine keeps on
-    // ggml by design (per-stage capture harnesses, model families or shapes
+    // prediction (which also retires the sidecar). A diarization pass throws
+    // when every diarizer capacity that covers it failed; a pass longer than
+    // every capacity runs on ggml. Calls the engine keeps on ggml by design (per-stage capture harnesses, model families or shapes
     // with no sidecar) still run on ggml.
     Use use = Use::unset;
     Generate generate = Generate::unset;

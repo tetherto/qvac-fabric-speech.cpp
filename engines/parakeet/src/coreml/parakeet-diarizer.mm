@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -436,6 +437,7 @@ struct CoremlDiarizers::State {
         std::shared_ptr<pcm::Slot> slot;
     };
     std::string gguf_path;
+    bool strict = false;               // use = require
     std::vector<Capacity> capacities;  // ascending
     std::mutex mutex;                  // label and call stats
     std::string label;
@@ -446,6 +448,7 @@ CoremlDiarizers::CoremlDiarizers(std::string gguf_path, std::vector<int> capacit
                                  CoremlSidecars & sidecars)
     : state_(std::make_unique<State>()) {
     state_->gguf_path = std::move(gguf_path);
+    state_->strict = sidecars.resolved().strict();
     std::sort(capacities.begin(), capacities.end());
     for (int capacity : capacities) {
         SidecarRequest request;
@@ -467,7 +470,8 @@ CoremlDiarizers::~CoremlDiarizers() = default;
 bool CoremlDiarizers::covers(int frames) {
     if (frames <= 0) return false;
     for (const State::Capacity & c : state_->capacities) {
-        if (c.frames >= frames && !unusable(c.slot->state())) return true;
+        // Under strict a failed capacity still covers, so run() refuses the pass.
+        if (c.frames >= frames && (state_->strict || !unusable(c.slot->state()))) return true;
     }
     return false;
 }
@@ -486,10 +490,24 @@ int CoremlDiarizers::run(int valid_frames,
                          const parakeet_coreml_rows * inputs, int n_inputs,
                          const parakeet_coreml_rows_out * outputs, int n_outputs) {
     if (valid_frames <= 0) return kNoSidecar;
+    const bool strict = state_->strict;
+    // Strict: why the covering capacities tried so far could not serve the pass.
+    std::optional<pcm::CoremlError> refused;
     for (const State::Capacity & c : state_->capacities) {
-        if (c.frames < valid_frames || unusable(c.slot->state())) continue;
+        if (c.frames < valid_frames) continue;
+        // Strict acquisitions of a failed capacity throw; others skip it.
+        if (!strict && unusable(c.slot->state())) continue;
         // One acquisition per pass (a chunk or block is the unit).
-        pcm::Acquired acquired = c.slot->acquire(pcm::Demand::now);
+        pcm::Acquired acquired;
+        try {
+            acquired = c.slot->acquire(pcm::Demand::now);
+        } catch (const pcm::CoremlError & error) {
+            // A failed capacity gives way to the next covering one; a timeout
+            // or a memory deferral refuses the pass at once.
+            if (!pcm::is_terminal(error.state)) throw;
+            if (!refused) refused = error;
+            continue;
+        }
         if (!acquired.model) {
             // Failed while this pass waited (wait = call): try the next capacity.
             if (unusable(acquired.state)) continue;
@@ -505,9 +523,15 @@ int CoremlDiarizers::run(int valid_frames,
                                                   outputs, n_outputs);
         }
         if (status != 0) {
+            const std::string reason = "prediction failed (rc=" + std::to_string(status) + ")";
             PARAKEET_LOG_WARN("parakeet: Core ML diarizer (%d frames) failed (rc=%d); "
-                              "quarantining it and using ggml\n", c.frames, status);
-            c.slot->retire("prediction failed (rc=" + std::to_string(status) + ")");
+                              "quarantining it%s\n", c.frames, status, strict ? "" : " and using ggml");
+            c.slot->retire(reason);
+            if (strict) {
+                throw pcm::CoremlError("coreml: " + c.slot->spec().stage + " " + reason +
+                                           " and Core ML is required",
+                                       pcm::SlotState::retired, pcm::ErrorClass::transient);
+            }
             return status;
         }
         std::lock_guard<std::mutex> lock(state_->mutex);
@@ -516,6 +540,7 @@ int CoremlDiarizers::run(int valid_frames,
         state_->stats.label = state_->label;
         return 0;
     }
+    if (refused) throw *refused;
     return kNoSidecar;
 }
 

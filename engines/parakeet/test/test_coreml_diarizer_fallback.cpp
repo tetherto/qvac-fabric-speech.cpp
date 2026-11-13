@@ -2,7 +2,9 @@
 // quarantined for the model's lifetime: the call that hit it runs on the
 // next covering capacity or on ggml, and later calls never retry it. The
 // wrapper refuses a call that leaves a model input unsupplied, so a bundle
-// with other input names falls back instead of diarizing zeros. Stages
+// with other input names falls back instead of diarizing zeros. Under
+// use = require the same failures throw instead of falling back, while a
+// failed capacity with a working covering one still runs on Core ML. Stages
 // symlinks to the real Nemotron 3 Diarization and Sortformer v2.1 bundles in a
 // temporary directory; exits 77 when they are missing.
 
@@ -13,6 +15,7 @@
 #include "parakeet_ctc.h"
 #include "parakeet_diarization_v3.h"
 #include "parakeet_log.h"
+#include "qvac_coreml/slot.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,9 +96,12 @@ Comparison compare(const std::vector<float> & actual, const std::vector<float> &
     return result;
 }
 
-bool load_model(const std::string & path, bool disable_coreml, parakeet::ParakeetCtcModel & model) {
+bool load_model(const std::string & path, bool disable_coreml, parakeet::ParakeetCtcModel & model,
+                bool strict = false) {
+    parakeet::CoremlOptions options = coreml_ready_options();
+    if (strict) options.use = parakeet::CoremlOptions::Use::require;
     if (disable_coreml) setenv(kDisableEnv, "1", 1);
-    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", coreml_ready_options());
+    const int status = parakeet::load_from_gguf(path, model, kThreads, kGpuLayers, false, "auto", options);
     if (disable_coreml) unsetenv(kDisableEnv);
     return status == 0;
 }
@@ -170,6 +176,30 @@ Calls run_calls(const parakeet::ParakeetCtcModel & model, const std::vector<floa
     return calls;
 }
 
+// Every call must throw the runtime's strict error and none may fall back.
+struct StrictCalls {
+    int thrown = 0;
+    int other = 0;  // returned (on any backend) or threw something else
+};
+
+StrictCalls run_strict_calls(const parakeet::ParakeetCtcModel & model,
+                             const std::vector<float> & mel, int mel_frames) {
+    StrictCalls calls;
+    for (int call = 0; call < kCalls; ++call) {
+        parakeet::NemotronDiarizationChunk chunk;
+        try {
+            parakeet::run_nemotron_diarization_chunk(model, mel.data(), mel_frames, nullptr, 0, chunk);
+            ++calls.other;
+        } catch (const QVAC_COREML_NS::CoremlError & error) {
+            std::printf("       threw: %s\n", error.what());
+            ++calls.thrown;
+        } catch (...) {
+            ++calls.other;
+        }
+    }
+    return calls;
+}
+
 bool quarantined(const parakeet::ParakeetCtcModel & model, int frames) {
     parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
     return diarizers != nullptr && !diarizers->covers(frames);
@@ -182,8 +212,8 @@ bool load_failure_uses_next_capacity(const fs::path & root, const std::string & 
     broken_bundle(model_path, kFailingCapacity);
     link_bundle(model_path, first_capacity(gguf), first_bundle(gguf));
     parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
     if (!check(load_model(model_path.string(), false, model), "next-capacity: model loads")) return false;
-    reset_warnings();
     const Calls calls = run_calls(model, mel, mel_frames, expected);
     bool passed = check(calls.ran && calls.coreml, "next-capacity: every call runs on the covering bundle");
     passed = check(calls.worst.maximum_error <= kMaximumProbabilityError &&
@@ -198,8 +228,8 @@ bool load_failure_uses_ggml(const fs::path & root, const std::string & gguf,
     const fs::path model_path = staged_model(root, "load-failure", gguf);
     broken_bundle(model_path, first_capacity(gguf));
     parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
     if (!check(load_model(model_path.string(), false, model), "load-failure: model loads")) return false;
-    reset_warnings();
     const Calls calls = run_calls(model, mel, mel_frames, expected);
     bool passed = check(calls.ran && calls.ggml, "load-failure: every call runs on ggml");
     passed = check(calls.worst.maximum_error <= kSameGraphError, "load-failure: probabilities equal ggml") && passed;
@@ -214,8 +244,8 @@ bool run_failure_uses_ggml(const fs::path & root, const std::string & gguf,
     const fs::path model_path = staged_model(root, "run-failure", gguf);
     link_bundle(model_path, foreign_capacity, foreign_bundle);
     parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
     if (!check(load_model(model_path.string(), false, model), "run-failure: model loads")) return false;
-    reset_warnings();
     const Calls calls = run_calls(model, mel, mel_frames, expected);
     bool passed = check(calls.ran && calls.ggml, "run-failure: every call runs on ggml");
     passed = check(calls.worst.maximum_error <= kSameGraphError,
@@ -223,6 +253,61 @@ bool run_failure_uses_ggml(const fs::path & root, const std::string & gguf,
     passed = check(g_load_warnings == 0 && g_run_warnings == 1,
                    "run-failure: the bundle loads and fails once") && passed;
     return check(quarantined(model, frames), "run-failure: the capacity stays quarantined") && passed;
+}
+
+bool strict_next_capacity(const fs::path & root, const std::string & gguf,
+                          const std::vector<float> & mel, int mel_frames,
+                          const parakeet::NemotronDiarizationChunk & expected) {
+    const fs::path model_path = staged_model(root, "strict-next-capacity", gguf);
+    broken_bundle(model_path, kFailingCapacity);
+    link_bundle(model_path, first_capacity(gguf), first_bundle(gguf));
+    parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
+    if (!check(load_model(model_path.string(), false, model, true), "strict-next-capacity: model loads")) {
+        return false;
+    }
+    Calls calls;
+    try {
+        calls = run_calls(model, mel, mel_frames, expected);
+    } catch (const std::exception & error) {
+        std::printf("       threw: %s\n", error.what());
+        calls.ran = false;
+    }
+    bool passed = check(calls.ran && calls.coreml,
+                        "strict-next-capacity: every call runs on the covering bundle");
+    return check(g_load_warnings == 1, "strict-next-capacity: the broken bundle is tried once") && passed;
+}
+
+bool strict_load_failure_throws(const fs::path & root, const std::string & gguf,
+                                const std::vector<float> & mel, int mel_frames) {
+    const fs::path model_path = staged_model(root, "strict-load-failure", gguf);
+    broken_bundle(model_path, first_capacity(gguf));
+    parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
+    if (!check(load_model(model_path.string(), false, model, true), "strict-load-failure: model loads")) {
+        return false;
+    }
+    const StrictCalls calls = run_strict_calls(model, mel, mel_frames);
+    bool passed = check(calls.thrown == kCalls && calls.other == 0,
+                        "strict-load-failure: every call throws instead of running on ggml");
+    return check(g_load_warnings == 1, "strict-load-failure: the bundle is tried once") && passed;
+}
+
+bool strict_run_failure_throws(const fs::path & root, const std::string & gguf,
+                               const std::string & foreign_bundle, int foreign_capacity,
+                               const std::vector<float> & mel, int mel_frames) {
+    const fs::path model_path = staged_model(root, "strict-run-failure", gguf);
+    link_bundle(model_path, foreign_capacity, foreign_bundle);
+    parakeet::ParakeetCtcModel model;
+    reset_warnings();  // bundles load while the model is constructed
+    if (!check(load_model(model_path.string(), false, model, true), "strict-run-failure: model loads")) {
+        return false;
+    }
+    const StrictCalls calls = run_strict_calls(model, mel, mel_frames);
+    bool passed = check(calls.thrown == kCalls && calls.other == 0,
+                        "strict-run-failure: every call throws instead of running on ggml");
+    return check(g_load_warnings == 0 && g_run_warnings == 1,
+                 "strict-run-failure: the bundle fails once and is retired") && passed;
 }
 
 int run_with_input(parakeet_coreml_diarizer * context, int capacity, const char * name,
@@ -292,6 +377,10 @@ int main(int argc, char ** argv) {
     passed = load_failure_uses_ggml(root, nemotron, mel, mel_frames, frames, expected) && passed;
     passed = run_failure_uses_ggml(root, nemotron, sortformer_bundle, sortformer_capacity,
                                           mel, mel_frames, frames, expected) && passed;
+    passed = strict_next_capacity(root, nemotron, mel, mel_frames, expected) && passed;
+    passed = strict_load_failure_throws(root, nemotron, mel, mel_frames) && passed;
+    passed = strict_run_failure_throws(root, nemotron, sortformer_bundle, sortformer_capacity,
+                                       mel, mel_frames) && passed;
     std::error_code ignored;
     fs::remove_all(root, ignored);
     std::printf("[coreml-diarizer-fallback] %s\n", passed ? "PASS" : "FAIL");

@@ -1913,8 +1913,9 @@ if (PARAKEET_BUILD_TESTS)
     set_property(TEST test-sortformer-diarizer-coreml-parity PROPERTY SKIP_RETURN_CODE 77)
 
     # Diarizer failure handling: a bundle that fails to load or to run is
-    # quarantined, its calls run on the next capacity or on ggml, and calls
-    # that leave a model input unsupplied are refused. Skips (77) unless both
+    # quarantined, its calls run on the next capacity or on ggml (under
+    # use = require they throw instead), and calls that leave a model input
+    # unsupplied are refused. Skips (77) unless both
     # models' bundles are staged.
     if (PARAKEET_COREML)
         add_executable(test-coreml-diarizer-fallback

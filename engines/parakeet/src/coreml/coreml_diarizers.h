@@ -27,7 +27,10 @@ struct CoremlDiarizerCallStats {
 // not failed; while that capacity is still loading, run() returns kNoSidecar
 // and the pass runs on ggml. A load or prediction failure retires the
 // capacity for the process (quarantine), and later passes use the next
-// covering capacity or ggml.
+// covering capacity or ggml. Under use = require a pass that a covering
+// capacity cannot serve (every covering capacity failed, a timeout, or a
+// failed prediction, which still retires the capacity) throws
+// pcm::CoremlError instead; a pass longer than every capacity runs on ggml.
 class CoremlDiarizers {
 public:
     // Registers one slot per capacity with `sidecars`; the smallest capacity
@@ -37,7 +40,9 @@ public:
     CoremlDiarizers(const CoremlDiarizers &) = delete;
     CoremlDiarizers & operator=(const CoremlDiarizers &) = delete;
 
-    // A capacity that has not failed covers `frames` (independent of readiness).
+    // A capacity that has not failed covers `frames` (independent of
+    // readiness). Under use = require a failed capacity still covers, so
+    // run() refuses the pass rather than the caller falling back to ggml.
     bool covers(int frames);
     // Requests the covering capacity now; true when it is ready.
     bool prepare(int frames);
