@@ -149,6 +149,21 @@ void check_long_form_hint() {
     expect(!long_form_hint_for_model(0, 0, "NVIDIA Parakeet-TDT FastConformer ASR", window, context) &&
            window == 0 && context == 0,
            "hint: other models recommend nothing");
+    expect(long_form_hint_for_model(0, 0, "NVIDIA Parakeet-TDT FastConformer ASR", window, context,
+                                    kTranscribePsyEuVariant) && window == 750 && context == 94,
+           "hint: full EU uses its variant even with an old incorrect description");
+    expect(long_form_hint_for_model(0, 0, "", window, context, kTranscribePsyEuVariant) &&
+           window == 750 && context == 94,
+           "hint: full EU does not require a description");
+    expect(long_form_hint_for_model(1000, 100, "", window, context, kTranscribePsyEuVariant) &&
+           window == 1000 && context == 100,
+           "hint: explicit GGUF keys win over the full-EU variant");
+    expect(long_form_hint_for_model(1000, 0, "", window, context, kTranscribePsyEuVariant) &&
+           window == 1000 && context == 0,
+           "hint: a full-EU window key preserves its zero context");
+    expect(!long_form_hint_for_model(0, 0, "", window, context, "another-model") &&
+           window == 0 && context == 0,
+           "hint: unrelated variants do not inherit full-EU defaults");
 
     int w = 0, c = 0;
     apply_long_form_hint(750, 94, w, c);
@@ -473,6 +488,16 @@ void check_seconds_conversion() {
 // never 0 (auto); 50 % clamps to window / 4.
 void check_overlap_conversion() {
     int c = 0;
+    expect(parakeet::long_form_context_frames_for_model(0.25, 0, 750, 5000, c) && c == 94,
+           "overlap alone uses the model's recommended 60-second window");
+    expect(parakeet::long_form_context_frames_for_model(0.25, 1500, 750, 5000, c) && c == 188,
+           "an explicit window wins over the model's overlap window");
+    expect(parakeet::long_form_context_frames_for_model(0.25, 0, 750, 512, c) && c == 64,
+           "overlap respects the model's positional limit");
+    expect(parakeet::long_form_context_frames_for_model(0.25, 0, 0, 5000, c) && c == 469,
+           "overlap without a model hint keeps the generic automatic window");
+    expect(parakeet::long_form_context_frames_for_model(0.0, 0, 750, 5000, c) && c == -1,
+           "zero overlap with a model hint still disables context");
     expect(long_form_context_frames_from_overlap(0.25, 750, c) && c == 94,
            "overlap: 25 % of 750 -> 94 frames each side");
     expect(long_form_context_frames_from_overlap(0.0, 750, c) && c == -1,

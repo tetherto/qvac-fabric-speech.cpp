@@ -80,7 +80,7 @@ void print_usage(const char * argv0) {
         "                       partial layer offload is not implemented.\n"
         "                       Adreno 6xx OpenCL is skipped unless explicitly enabled\n"
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
-        "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
+        "                       are commits in the fabric ggml, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
         "                       hexagon (HTP0), xdna (XDNA0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
@@ -96,7 +96,7 @@ void print_usage(const char * argv0) {
         "                                     Empty => ggml's default search path.\n"
         "  --opencl-cache-dir DIR             persistent OpenCL kernel binary cache directory\n"
         "                                     (sets $GGML_OPENCL_CACHE_DIR; consumed by the\n"
-        "                                     qvac-ext-ggml@speech OpenCL backend).\n"
+        "                                     fabric ggml OpenCL backend).\n"
         "                                     Omitted or empty leaves the process environment\n"
         "                                     unchanged; without an existing variable, no\n"
         "                                     Parakeet cache directory is configured.\n"
@@ -320,7 +320,7 @@ struct ExtraCliOpts {
     // OpenCL CLI surface: ggml-opencl's runtime knobs are exposed through
     // CLI flags so bench scripts can A/B them without `env VAR=… ./binary`.
     // All four are read by ggml-opencl via getenv() and (for the cache
-    // dir) by the qvac-ext-ggml@speech OpenCL backend. Applied
+    // dir) by the fabric ggml OpenCL backend. Applied
     // via `setenv()` BEFORE any parakeet API call so the backend
     // init cascade picks them up. Empty string for any field => leave
     // the existing process-env value untouched (do not setenv).
@@ -460,12 +460,10 @@ bool resolve_cli_overlap(const parakeet::ParakeetCtcModel & model, const std::st
                          parakeet::EngineOptions & long_form_opts) {
     if (arg.empty() || long_form_opts.long_form_window_frames < 0) return true;
     double overlap = 0.0;
-    const int window_frames = parakeet::resolve_long_form_window_frames(
-        long_form_opts.long_form_window_frames, model.encoder_cfg.pos_emb_max_len,
-        parakeet::kLongFormAutoWindowFrames, parakeet::kLongFormMinWindowFrames);
     if (!parse_finite_double(arg, overlap) ||
-        !parakeet::long_form_context_frames_from_overlap(overlap, window_frames,
-                                               long_form_opts.long_form_context_frames)) {
+        !parakeet::long_form_context_frames_for_model(overlap,
+            long_form_opts.long_form_window_frames, model.encoder_cfg.long_form_window_hint,
+            model.encoder_cfg.pos_emb_max_len, long_form_opts.long_form_context_frames)) {
         PARAKEET_LOG_ERROR("error: --overlap expects a fraction from 0 to 0.5 (got '%s')\n",
                            arg.c_str());
         return false;

@@ -1,6 +1,6 @@
 # qvac-fabric-speech.cpp
 
-On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-ext-ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
+On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qvac-fabric-llm.cpp/tree/master/ggml): speech-to-text, speaker diarization, end-of-utterance detection, text-to-speech, voice cloning, sound effects, speech-to-speech, enhancement, and music generation.
 
 | Property | Value |
 |---|---|
@@ -10,7 +10,7 @@ On-device speech and audio AI in C++17 on [ggml](https://github.com/tetherto/qva
 | Desktop | Linux, macOS, Windows |
 | Mobile | Android arm64-v8a, iOS arm64; model and backend coverage varies by engine |
 | Backends | CPU, Metal, Vulkan, OpenCL, CUDA, WebGPU (Dawn, opt-in; see [WebGPU](#webgpu-dawn)); selected models also support explicit Hexagon placement or optional Apple Core ML sidecars |
-| Shared ggml | One `ggml-speech` dependency from [qvac-ext-ggml@speech](https://github.com/tetherto/qvac-ext-ggml/tree/speech) |
+| Shared ggml | One `qvac-fabric` dependency: the `ggml/` tree of [qvac-fabric-llm.cpp](https://github.com/tetherto/qvac-fabric-llm.cpp), the same ggml the LLM stack ships |
 
 ## Supported models
 
@@ -130,6 +130,12 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
+TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
+and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
+repository provides an encoder-stripping tool and decoder output-projection
+palettization with `--nbits-out`; see the
+[conversion guide](engines/parakeet/docs/models.md#transcribepsy).
+
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
 `coreml_compute_units`; the separate flag does not enable automatic ACE-Step
@@ -161,8 +167,7 @@ and OpenCL on the same device.
 
 ### WebGPU (Dawn)
 
-`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` / `ggml-speech`
-ports) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
+`GGML_WEBGPU=ON` (the `webgpu` feature of the `speech-cpp` port) adds ggml's WebGPU backend on Google Dawn, driven natively inside the
 process; no browser is involved. It registers as `WebGPU`, ranks with Vulkan
 and Metal in every engine's automatic GPU selection (CUDA still wins on the
 same NVIDIA card), and is selected explicitly with `--backend webgpu` or
@@ -187,8 +192,10 @@ Parler, CosyVoice3 and Audio8 sample their tokens, so their WebGPU and CPU
 renders diverge after the first differing token the way any two backends do;
 the transcripts are the check. They rely on ggml-webgpu computing the matmul
 and flash-attention ops they mark `GGML_PREC_F32` with f32 activations and
-f32 accumulation, which ggml-speech provides from 2026-10-27; with an older
-ggml-speech their decoders overflow f16 and produce NaN logits, silence or
+f32 accumulation, which the fabric ggml provides since qvac-fabric-llm.cpp
+`be6e387b` (ported from ggml-speech 2026-10-27) and on the temp-11739 line
+since its base `ee1ccf4e3`; with an older ggml their
+decoders overflow f16 and produce NaN logits, silence or
 noise.
 
 ## Getting started
@@ -276,10 +283,20 @@ and model-specific exceptions.
 
 ## Documentation
 
+The [CI guide](docs/CI.md) describes engine-specific cross-platform job selection,
+Windows compiler caching, and the VAD contract tests.
+
 Parakeet's [test guide](engines/parakeet/docs/testing.md) separates model-free
 unit tests from fixture coverage. Its fixture runner rejects runs with no executed
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane
 uses this gate.
+
+TTS's [test guide](engines/tts/docs/testing.md) separates model-free checks
+from optional numerical fixtures and documents how to generate independent
+WAV/mel, CAMPPlus and speech-tokenizer references. WAV/mel fixtures need no model
+checkpoint, and NPY loading rejects truncated files. Chatterbox preprocessing and streaming
+parity harnesses reject numerical mismatches, non-finite values and incomplete
+output.
 
 AudioGen's [test guide](engines/audiogen/docs/testing.md) documents independent
 model-free suites and required model-backed CI coverage. The macOS lane stages

@@ -5,7 +5,7 @@
 
 #include "voice_encoder.h"
 #include "voice_features.h"
-#include "npy.h"
+#include "parity_test.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,25 +49,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "      C++ speaker_emb size=%zu\n", emb.size());
 
     npy_array ref = npy_load(ref_path);
-    fprintf(stderr, "      Python speaker_emb size=%zu\n", ref.n_elements());
-
-    size_t n = std::min(emb.size(), ref.n_elements());
-    const float * r = (const float *)ref.data.data();
-    float ma = 0.0f, rsum = 0.0f, max_ref = 0.0f;
-    double dot = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        float d = emb[i] - r[i];
-        ma = std::max(ma, std::fabs(d));
-        rsum += d * d;
-        max_ref = std::max(max_ref, std::fabs(r[i]));
-        dot += (double)emb[i] * (double)r[i];
-    }
-    const double rms = std::sqrt(rsum / (double)n);
-    const double rel = ma / std::max(max_ref, 1e-12f);
-    fprintf(stderr,
-        "\n[result] C++ vs Python speaker_emb:\n"
-        "    n=%zu  max_abs=%.4e  rms=%.4e  max|ref|=%.4e  rel=%.4e\n"
-        "    cosine similarity = %.6f\n",
-        n, (double)ma, rms, (double)max_ref, rel, dot);
-    return 0;
+    // Relative max error against the complete, finite float32 reference.
+    constexpr double kRelativeTolerance = 2e-3;
+    const bool passed = tts_test::check_f32("speaker_emb", emb, {w.embedding}, ref,
+                                             kRelativeTolerance);
+    return passed ? 0 : 1;
 }
