@@ -3,6 +3,7 @@
 #include "moss/gguf_metadata.h"
 
 #include "campplus.h"
+#include "chatterbox_fit_internal.h"
 #include "voice_features.h"
 
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace tts_cpp::moss::detail {
@@ -117,6 +119,7 @@ struct SpeechCodec::Impl {
     size_t speaker_dim = 0;
     campplus_weights speaker;
     std::unique_ptr<SpeechVoice> cached_default;
+    bool decoder_held = false;
 
     void read_assets() {
         GgufFile handle;
@@ -231,8 +234,8 @@ struct SpeechCodec::Impl {
             return {};
         }
         // Match every acquired cache reference, including exceptions and
-        // cancellation. The decoder must not remain resident when the next
-        // Speech turn reloads the LM. Other owners' references are preserved.
+        // cancellation. Unless held, the decoder must not remain resident when
+        // the next Speech turn reloads the LM. Other owners' references are preserved.
         struct DecoderLease {
             bool acquired = false;
             ~DecoderLease() { if (acquired) ::s3gen_unload(); }
@@ -252,6 +255,50 @@ struct SpeechCodec::Impl {
             fail("token-to-wave decoding failed");
         }
         return pcm;
+    }
+
+    uint64_t decoder_device_bytes(size_t n_codes, const SpeechVoiceSize & size) const {
+        if (!decoder_gpu || n_codes == 0) {
+            return 0;
+        }
+        ::tts_cpp::chatterbox::detail::s3gen_fit_measure measure;
+        const ::tts_cpp::chatterbox::detail::s3gen_fit_prompt prompt{(int) size.tokens, size.feat_frames};
+        if (n_codes > (size_t) std::numeric_limits<int>::max() ||
+            !::tts_cpp::chatterbox::detail::s3gen_measure_fit(path, 1, {}, (int) n_codes, measure, nullptr, prompt)) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return measure.on_cpu ? 0 : measure.weights_bytes + measure.device_compute_bytes;
+    }
+
+    SpeechVoiceSize default_voice_size() const {
+        if (cached_default) {
+            return {cached_default->tokens.size(), cached_default->feat_frames};
+        }
+        // voice() keeps at most frames / token_mel_ratio tokens.
+        const size_t frames = prompt_feat(resampled(default_audio, default_rate, OUTPUT_SAMPLE_RATE)).size() / MEL_BANDS;
+        const size_t tokens = frames / (size_t) token_mel_ratio;
+        return {tokens, (int) (tokens * (size_t) token_mel_ratio)};
+    }
+
+    void hold_decoder() {
+        if (decoder_held) {
+            return;
+        }
+        if (::s3gen_preload(path, decoder_gpu ? 1 : 0) != 0) {
+            fail("token-to-wave decoder load failed");
+        }
+        decoder_held = true;
+    }
+
+    void release_decoder_hold() {
+        if (decoder_held) {
+            ::s3gen_unload();
+            decoder_held = false;
+        }
+    }
+
+    ~Impl() {
+        release_decoder_hold();
     }
 };
 
@@ -293,5 +340,19 @@ std::vector<float> SpeechCodec::decode(const std::vector<int32_t> & codes, const
                                        const SpeechDecodeOptions & options) {
     return impl_->decode(codes, voice, options);
 }
+
+uint64_t SpeechCodec::decoder_device_bytes(size_t n_codes, const SpeechVoice & voice) const {
+    return impl_->decoder_device_bytes(n_codes, {voice.tokens.size(), voice.feat_frames});
+}
+
+uint64_t SpeechCodec::decoder_device_bytes(size_t n_codes, const SpeechVoiceSize & size) const {
+    return impl_->decoder_device_bytes(n_codes, size);
+}
+
+SpeechVoiceSize SpeechCodec::default_voice_size() const { return impl_->default_voice_size(); }
+bool SpeechCodec::decodes_on_gpu() const { return impl_->decoder_gpu; }
+
+void SpeechCodec::hold_decoder() { impl_->hold_decoder(); }
+void SpeechCodec::release_decoder_hold() { impl_->release_decoder_hold(); }
 
 } // namespace tts_cpp::moss::detail

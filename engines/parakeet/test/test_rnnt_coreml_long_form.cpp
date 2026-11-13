@@ -1,4 +1,4 @@
-// Unified RNN-T fixed-capacity Core ML long-form regression gate.
+// Transducer fixed-capacity Core ML long-form regression gate.
 //
 // The JFK fixture is tiled past the sidecar's mel-frame capacity, then
 // transcribed in separate child processes with Core ML enabled and disabled.
@@ -48,7 +48,7 @@ std::vector<float> tile_to_seconds(const std::vector<float> & source,
 
 std::string run_child(const std::string & gguf, const std::string & wav,
                       int target_seconds, bool disable_coreml,
-                      bool disable_windowing) {
+                      bool disable_windowing, bool deterministic_cpu = false) {
     int fds[2];
     if (pipe(fds) != 0) return {};
 
@@ -75,6 +75,13 @@ std::string run_child(const std::string & gguf, const std::string & wav,
             parakeet::EngineOptions opts;
             opts.model_gguf_path = gguf;
             opts.n_gpu_layers = 999;
+            if (deterministic_cpu) {
+                // Exact token equality needs a stable reduction order in both
+                // children; other modes exercise the GPU with a similarity gate.
+                constexpr int kReferenceThreads = 2;
+                opts.n_gpu_layers = 0;
+                opts.n_threads = kReferenceThreads;
+            }
             if (disable_windowing) {
                 opts.long_form_window_frames = -1;
             }
@@ -185,7 +192,7 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr,
             "usage: %s <rnnt.gguf> <wav> <fixed-mel-frames> "
             "<target-seconds> <min-token-similarity> "
-            "<windowed-coreml|cache-aware>\n", argv[0]);
+            "<windowed-coreml|cache-aware|native-context>\n", argv[0]);
         return 2;
     }
     const std::string gguf = argv[1];
@@ -195,7 +202,8 @@ int main(int argc, char ** argv) {
     const double minimum_similarity = std::atof(argv[5]);
     const std::string mode = argv[6];
     const bool cache_aware = mode == "cache-aware";
-    if (!cache_aware && mode != "windowed-coreml") {
+    const bool native_context = mode == "native-context";
+    if (!cache_aware && !native_context && mode != "windowed-coreml") {
         std::fprintf(stderr, "invalid long-form test mode: %s\n", mode.c_str());
         return 2;
     }
@@ -203,7 +211,7 @@ int main(int argc, char ** argv) {
     const ChildResult coreml = parse_result(
         run_child(gguf, wav, target_seconds,
                   /*disable_coreml=*/false,
-                  /*disable_windowing=*/false));
+                  /*disable_windowing=*/false, native_context));
     if (!coreml.parsed) {
         std::fprintf(stderr, "[rnnt-coreml-long-form] FAIL: Core ML child failed\n");
         return 1;
@@ -219,7 +227,7 @@ int main(int argc, char ** argv) {
             coreml.mel_frames, fixed_mel_frames);
         return 1;
     }
-    if (!cache_aware && !coreml.coreml_used) {
+    if (!cache_aware && !native_context && !coreml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: an over-capacity encoder window fell back to ggml\n");
         return 1;
@@ -229,11 +237,16 @@ int main(int argc, char ** argv) {
             "[rnnt-coreml-long-form] FAIL: oversized Nemotron input used independent Core ML windows\n");
         return 1;
     }
+    if (native_context && coreml.coreml_used) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: oversized TDT input used unvalidated Core ML seams\n");
+        return 1;
+    }
 
     const ChildResult ggml = parse_result(
         run_child(gguf, wav, target_seconds,
                   /*disable_coreml=*/true,
-                  /*disable_windowing=*/cache_aware));
+                  /*disable_windowing=*/cache_aware, native_context));
     if (!ggml.parsed || ggml.coreml_available || ggml.coreml_used) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: forced-ggml reference routing is invalid\n");
@@ -242,6 +255,15 @@ int main(int argc, char ** argv) {
     if (coreml.tokens.empty() || ggml.tokens.empty()) {
         std::fprintf(stderr,
             "[rnnt-coreml-long-form] FAIL: transcription returned no tokens\n");
+        return 1;
+    }
+    if (native_context && (coreml.tokens != ggml.tokens ||
+                           coreml.encoder_frames != ggml.encoder_frames)) {
+        std::fprintf(stderr,
+            "[rnnt-coreml-long-form] FAIL: TDT fallback differs from native reference "
+            "(frames %d/%d, tokens %zu/%zu, similarity %.4f)\n",
+            coreml.encoder_frames, ggml.encoder_frames, coreml.tokens.size(),
+            ggml.tokens.size(), token_similarity(coreml.tokens, ggml.tokens));
         return 1;
     }
     if (cache_aware && coreml.encoder_frames != ggml.encoder_frames) {
