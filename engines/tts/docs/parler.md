@@ -224,14 +224,20 @@ adopt the cached artifact, and a warm load takes about 0.1 s.
 | `prewarm` | `none` (nothing until the first call) or `minimal` / `predicted` / `all` (the DAC is requested at construction: the default) |
 | `compute_units` | as `coreml_compute_units`; unset falls back to it, then to `PARLER_COREML_COMPUTE_UNITS`, then `all` |
 | `strict_wait_ms` | longest wait of a `use = require` call; unset waits without limit |
-| `memory_budget_bytes` | the budget fit was assessed against; when only the ggml projection fits it, the DAC stays on ggml (memory-degrade) |
+| `memory_budget_bytes` | the budget fit was assessed against; when only the ggml projection fits within the budget or the free memory, whichever is smaller, the DAC stays on ggml (memory-degrade) instead of fit refusing the model |
 
 `coreml_strict` maps to `use` (`true` -> `require`, `false` -> `automatic`)
 when `use` is unset. `PARLER_COREML_DISABLE` still overrides everything.
 `Engine::coreml_status()` returns the stage's state as JSON (`route`
 `prebuilt`, `generated` or `cached`; `state`; compute units; timings of the
 digest, write, compile, load and warm-up; the artifact key and path; the
-error and its class), and `Engine::coreml_wait(ms)` blocks until it is ready.
+error and its class), and `Engine::coreml_wait(ms)` blocks until it is ready
+or has failed; it returns false at once while nothing has requested the DAC
+(`prewarm = none` before the first call) or its load waits for memory.
+`Engine::cancel()` also interrupts a call that waits for the sidecar
+(`wait = call` or `use = require`): the synthesis fails as cancelled. With
+`prewarm = none` the constructor issues nothing, so `wait = construct` does
+not wait and `use = require` fails only when a call cannot be served.
 
 ```cpp
 tts_cpp::parler::EngineOptions options;
