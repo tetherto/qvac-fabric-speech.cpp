@@ -4,7 +4,8 @@
 The pure parts (MILBlob parsing, blob matching, recipe drafting, header
 refresh, exporter arguments, template.json merging) need only numpy. The spec
 comparison needs coremltools' protobuf classes, and the end-to-end `suggest`
-on a toy exporter also needs gguf-py and qvac-coreml-tool ($QVAC_COREML_TOOL).
+and `extract` cases on the toy exporter also need gguf-py and
+qvac-coreml-tool ($QVAC_COREML_TOOL).
 Those cases are skipped when their requirements are missing, unless
 QVAC_COREML_REQUIRE_COREMLTOOLS=1 (the template CI job), where a missing
 requirement fails instead.
@@ -13,6 +14,7 @@ requirement fails instead.
 import importlib.util
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -237,28 +239,179 @@ class SpecDiffTest(unittest.TestCase):
         self.assertEqual(a.SerializeToString(deterministic=True), c.SerializeToString(deterministic=True))
 
 
+TOY_DIR = HERE.parent / "test" / "toy"
+TOY_STATELESS = HERE.parent / "test" / "toy-templates" / "toy-stateless"
+TOY_ARGS = ["--kind", "stateless", "--gguf", "{gguf}", "--output", "{out}"]
+NEEDS_TOY = needs(HAVE_CT and HAVE_GGUF and TOOL and Path(TOOL).is_file(), "coremltools, gguf and $QVAC_COREML_TOOL")
+
+
+def run_ctpl(*args):
+    return subprocess.run([sys.executable, str(HERE / "coreml_template.py"), "--tool", TOOL] + [str(a) for a in args],
+                          capture_output=True, text=True)
+
+
+def exporter_args(args):
+    return [f"--exporter-arg={a}" for a in args]
+
+
+def recipe_body(text):
+    """A recipe without its spec_sha256, which hashes the exporter's spec and
+    so its conversion date."""
+    return [line for line in text.splitlines() if not line.startswith("spec_sha256 ")]
+
+
+def snapshot(d):
+    return {f.name: f.read_bytes() for f in sorted(Path(d).iterdir()) if f.is_file()}
+
+
 class ToySuggestTest(unittest.TestCase):
     """`suggest` on the toy exporter explains every blob, and the draft equals
     the committed toy recipe (whose blobs were all suggested)."""
 
-    @needs(HAVE_CT and HAVE_GGUF and TOOL and Path(TOOL).is_file(), "coremltools, gguf and $QVAC_COREML_TOOL")
+    def suggest(self, tmp, exporter, *root):
+        out = Path(tmp) / "recipe.txt"
+        p = run_ctpl(*root, "suggest", "--manifest", TOY_STATELESS / "reference-gguf.json", "--exporter", exporter,
+                     *exporter_args(TOY_ARGS), "--id", "toy-stateless", "-o", out)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("0 unexplained, 0 ambiguous", p.stderr)
+        self.assertEqual(recipe_body(out.read_text()), recipe_body((TOY_STATELESS / "recipe.txt").read_text()))
+
+    @NEEDS_TOY
     def test_suggest_stateless_toy(self):
-        toy = HERE.parent / "test" / "toy-templates" / "toy-stateless"
-        exporter = HERE.parent / "test" / "toy" / "export_toy.py"
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "recipe.txt"
-            p = subprocess.run([sys.executable, str(HERE / "coreml_template.py"), "--tool", TOOL, "suggest",
-                                "--manifest", str(toy / "reference-gguf.json"), "--exporter", str(exporter),
-                                "--exporter-arg=--kind", "--exporter-arg=stateless", "--exporter-arg=--gguf",
-                                "--exporter-arg={gguf}", "--exporter-arg=--output", "--exporter-arg={out}",
-                                "--id", "toy-stateless", "-o", str(out)], capture_output=True, text=True)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertIn("0 unexplained, 0 ambiguous", p.stderr)
-            # spec_sha256 hashes the exporter's spec, which carries the
-            # conversion date: everything else must match.
-            def body(text):
-                return [line for line in text.splitlines() if not line.startswith("spec_sha256 ")]
-            self.assertEqual(body(out.read_text()), body((toy / "recipe.txt").read_text()))
+            self.suggest(tmp, TOY_DIR / "export_toy.py")
+
+    @NEEDS_TOY
+    def test_suggest_resolves_exporter_under_root(self):
+        # A relative exporter path is looked up under --root, not under the
+        # checkout this script lives in (which has no such file).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "other-checkout"
+            rel = Path("exporters") / "export_toy_elsewhere.py"
+            (root / rel).parent.mkdir(parents=True)
+            shutil.copyfile(TOY_DIR / "export_toy.py", root / rel)
+            self.assertFalse((ctpl.repo_root() / rel).exists())
+            self.suggest(tmp, rel, "--root", root)
+
+
+# An exporter around the toy one, for the cases `extract` must refuse:
+#   spec    a spec value computed from the weights (a user metadata entry),
+#           so twin A's spec differs from twin B's;
+#   layout  every export after the first carries one more fp16 blob in
+#           weight.bin (counted in a state file), so the layouts differ.
+VARIANT_EXPORTER = """
+import struct
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import export_toy  # noqa: E402
+
+mode, gguf, out, state = sys.argv[2:6]
+pkg = export_toy.export("stateless", gguf, out)
+data = pkg / "Data" / "com.apple.CoreML"
+if mode == "spec":
+    from coremltools.proto import Model_pb2
+
+    spec = Model_pb2.Model()
+    spec.ParseFromString((data / "model.mlmodel").read_bytes())
+    w1 = export_toy.read_weights(gguf, "stateless")["toy.w1"]
+    spec.description.metadata.userDefined["qvac.toy.w1_sum"] = repr(float(w1.sum()))
+    (data / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+elif mode == "layout":
+    n = int(Path(state).read_text()) if Path(state).is_file() else 0
+    Path(state).write_text(str(n + 1))
+    if n:
+        wb = bytearray((data / "weights" / "weight.bin").read_bytes())
+        wb += bytes((-len(wb)) % 64)
+        blob = bytes(16)  # eight fp16 zeros
+        meta = len(wb)
+        wb += struct.pack("<IIQQ", 0xDEADBEEF, 1, len(blob), meta + 64) + bytes(40) + blob
+        wb += bytes((-len(wb)) % 64)
+        struct.pack_into("<I", wb, 0, struct.unpack_from("<I", wb, 0)[0] + 1)
+        (data / "weights" / "weight.bin").write_bytes(bytes(wb))
+print(pkg)
+"""
+
+
+class ToyExtractTest(unittest.TestCase):
+    """`extract` on the toy exporter: it refuses an exporter whose spec or
+    weight.bin layout depends on the weights, and an unchanged second
+    extraction leaves every template file, and so the template's identity,
+    as it was."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.tdir = self.tmp / "toy-stateless"
+        shutil.copytree(TOY_STATELESS, self.tdir)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def template_sha256(self):
+        twin = self.tmp / "identity-twin.gguf"
+        subprocess.run([TOOL, "twin", "--manifest", self.tdir / "reference-gguf.json", "--seed", "1", "--types", "f32",
+                        "-o", twin], check=True, capture_output=True)
+        p = subprocess.run([TOOL, "generate", "--template", self.tdir, "--gguf", twin, "-o",
+                            self.tmp / "identity.mlpackage"], check=True, capture_output=True, text=True)
+        shutil.rmtree(self.tmp / "identity.mlpackage")
+        return json.loads(p.stdout)["template_sha256"]
+
+    def extract_variant(self, mode):
+        script = self.tmp / "export_variant.py"
+        script.write_text(VARIANT_EXPORTER)
+        args = [TOY_DIR, mode, "{gguf}", "{out}", self.tmp / f"{mode}.state"]
+        return run_ctpl("extract", "--template-dir", self.tdir, "--exporter", script, *exporter_args(args))
+
+    @NEEDS_TOY
+    def test_rejects_spec_that_differs_between_twins(self):
+        before = snapshot(self.tdir)
+        p = self.extract_variant("spec")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("spec differs between twin A and twin B", p.stderr)
+        self.assertIn("userDefined['qvac.toy.w1_sum']", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)  # nothing written
+
+    @NEEDS_TOY
+    def test_rejects_weight_layout_that_differs_between_twins(self):
+        before = snapshot(self.tdir)
+        p = self.extract_variant("layout")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("weight.bin layout differs between twin A and twin B", p.stderr)
+        self.assertEqual((self.tmp / "layout.state").read_text(), "2")  # both twins were exported
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
+    def test_unchanged_reextraction_keeps_template_bytes(self):
+        from coremltools.proto import Model_pb2
+
+        # A spec converted on another day: only the conversion date differs
+        # from what the exporter writes today, so it must be kept as it is.
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        self.assertIn("com.github.apple.coremltools.conversion_date", spec.description.metadata.userDefined)
+        spec.description.metadata.userDefined["com.github.apple.coremltools.conversion_date"] = "2000-01-01"
+        old_spec = spec.SerializeToString(deterministic=True)
+        (self.tdir / "model.mlmodel").write_bytes(old_spec)
+        old_manifest = (self.tdir / "Manifest.json").read_bytes()
+
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((self.tdir / "model.mlmodel").read_bytes(), old_spec)
+        self.assertEqual((self.tdir / "Manifest.json").read_bytes(), old_manifest)  # item identifiers kept
+        first = snapshot(self.tdir)
+        self.assertEqual(recipe_body(first["recipe.txt"].decode()),
+                         recipe_body((TOY_STATELESS / "recipe.txt").read_text()))
+        identity = self.template_sha256()
+
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        second = snapshot(self.tdir)
+        self.assertEqual(sorted(second), sorted(first))
+        for name in first:
+            self.assertEqual(second[name], first[name], f"{name} changed on an unchanged extraction")
+        self.assertEqual(self.template_sha256(), identity)
 
 
 if __name__ == "__main__":

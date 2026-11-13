@@ -116,7 +116,10 @@ exporter (`engines/*/scripts/export-*-coreml.py`) is never modified; it stays
 the numerical reference. `python/coreml_template.py` needs the coremltools
 venv pinned by `engines/parakeet/scripts/requirements-coreml.txt` (numpy,
 gguf-py, coremltools), the exporter's own requirements and a built
-`qvac-coreml-tool` (`--tool`, or `$QVAC_COREML_TOOL`).
+`qvac-coreml-tool` (`--tool`, or `$QVAC_COREML_TOOL`). A relative exporter
+path, on the command line or in `template.json`, is resolved against
+`--root` (every command takes it; the default is the checkout that holds the
+script).
 
 1. Write the shape manifest of a real GGUF:
    `qvac-coreml-tool dump model.gguf -o <dir>/reference-gguf.json`.
@@ -151,7 +154,12 @@ gguf-py, coremltools), the exporter's own requirements and a built
    serialised), `Manifest.json` and the computed `template.json` fields
    (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`, the
    exporter's sha256, the toolchain versions), and refreshes the header of
-   `recipe.txt`.
+   `recipe.txt`. A rejected extraction leaves the template's files
+   untouched. A `model.mlmodel` that equals the new spec (the coremltools
+   conversion date aside) and a `Manifest.json` that differs only in its
+   random item identifiers are kept byte for byte, so extracting an unchanged
+   template again leaves its files, and so its `template_sha256`, as they
+   were.
 5. Check it against the exporter:
 
    ```sh

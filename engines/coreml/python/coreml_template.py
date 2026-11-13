@@ -556,7 +556,7 @@ def cmd_suggest(a):
     manifest = load_manifest(a.manifest)
     with tempfile.TemporaryDirectory(prefix="qvac-coreml-suggest-") as tmp:
         twin = make_twin(tool, a.manifest, SEED_A, "f32", Path(tmp) / "twin-a.gguf")
-        pkg = run_exporter(exporter_from_args(a), twin, Path(tmp) / "export-a", a.python)
+        pkg = run_exporter(exporter_from_args(a), twin, Path(tmp) / "export-a", a.python, a.root)
         parts = package_parts(pkg)
         data = parts["weights"].read_bytes()
         blobs = read_weight_bin(data)
