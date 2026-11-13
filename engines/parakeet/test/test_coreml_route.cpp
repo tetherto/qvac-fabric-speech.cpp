@@ -27,6 +27,9 @@
 //   options               public CoremlOptions -> runtime options, resolution
 //   fit-stable            the fit route and envelope never read the cache:
 //                         identical with no hint, a warm hint and a stale hint
+//   generated-envelope    the generated-diarizer fit charge: capacities a
+//                         range loads (prebuilt ones shape the selection),
+//                         resident sum + one transient, largest margin
 //   generated-sidecar     a stage with no adjacent bundle and a matching
 //                         template is generated into the cache (route
 //                         generate, fake compile), loads under the artifact's
@@ -38,7 +41,8 @@
 //                         (no_template, unsupported(unvalidated_units),
 //                         generation.reason unvalidated_units); the
 //                         generated envelope and route are the same before
-//                         and after generation (fit-stable)
+//                         and after generation (fit-stable); a
+//                         memory-degraded instance has no generate route
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -722,6 +726,36 @@ void case_fit_stable() {
     fs::remove_all(dir);
 }
 
+// The generated-diarizer charge: which capacities a range loads (prebuilt
+// ones included in the selection, never charged), resident sum, one
+// transient, the largest margin among the loaded ones.
+void case_generated_diarizer_envelope() {
+    auto gen = [](int frames, uint64_t resident, uint64_t transient, double margin) {
+        return CoremlDiarizerCharge{frames, true, resident, transient, margin};
+    };
+    const std::vector<CoremlDiarizerCharge> caps = {
+        gen(1125, 300, 40, 1.5), CoremlDiarizerCharge{200}, gen(358, 100, 30, 1.25), gen(745, 200, 50, 1.25)};
+    auto env = [&](std::vector<CoremlFrameRange> ranges) { return coreml_generated_diarizer_envelope(caps, ranges); };
+
+    CHECK(env({}) == 0, "no ranges, no charge");
+    CHECK(env({{1, 150}}) == 0, "a range only the prebuilt capacity covers charges nothing");
+    // 200 (prebuilt) and 358: (100 + 30) x 1.25 = 162.5 -> 163.
+    CHECK(env({{1, 358}}) == 163, "one generated capacity: resident + transient, margin, rounded up");
+    // 358, 745, 1125: (100 + 200 + 300 + max(30, 50, 40)) x 1.5 = 975.
+    CHECK(env({{300, 900}}) == 975, "resident sum, one transient, the largest margin");
+    // Above every capacity: from the first covering capacity to the largest.
+    CHECK(env({{400, 5000}}) == 825, "a range over the largest capacity loads every larger one");
+    // Two ranges: 200 (prebuilt) and 745 -> (200 + 50) x 1.25 = 312.5 -> 313.
+    CHECK(env({{1, 150}, {700, 745}}) == 313, "ranges are unioned; capacities between them are not loaded");
+    // The prebuilt capacity shifts the selection: without it a 1..150 range loads 358.
+    const std::vector<CoremlDiarizerCharge> generated_only = {caps[0], caps[2], caps[3]};
+    CHECK(coreml_generated_diarizer_envelope(generated_only, {{1, 150}}) == 163,
+          "without the prebuilt capacity the smallest generated one covers the range");
+    // Saturates instead of wrapping.
+    const std::vector<CoremlDiarizerCharge> huge = {gen(358, UINT64_MAX - 1, UINT64_MAX - 1, 1.25)};
+    CHECK(coreml_generated_diarizer_envelope(huge, {{1, 358}}) == UINT64_MAX, "saturating arithmetic");
+}
+
 }  // namespace
 
 
@@ -917,6 +951,26 @@ void case_generated_sidecar() {
                   no_cache_sidecars.generation_status().reason == "no_cache_dir",
               "no cache directory, no generation");
         CHECK(no_cache_sidecars.plan(request_for(&probed[0], gguf)).route == pcm::Route::none, "and no route");
+
+        // Near the budget: the ggml-only fit passes and the Core ML-inclusive
+        // one does not, so the instance is memory-degraded (use = off).
+        CoremlOptions budgeted = opts;
+        budgeted.memory_budget_bytes = int64_t(1) << 30;
+        CHECK(CoremlSidecars(budgeted, m).generation_status().supported, "a budget alone leaves generation on");
+        CoremlSidecars degraded(budgeted, m, /*memory_degraded=*/true);
+        CHECK(!degraded.generation_status().supported && degraded.generation_status().reason == "memory",
+              "memory-degraded: generation is off, reason memory");
+        CHECK(degraded.plan(request_for(&probed[0], gguf)).route == pcm::Route::none &&
+                  degraded.plan(request_for(&probed[0], gguf)).none_state == pcm::SlotState::disabled,
+              "memory-degraded: no generate route");
+
+        // The fit's per-capacity charge equals the template's envelope when one capacity loads.
+        const pcm::generation::TemplateMemory & mem = probed[0].memory;
+        const std::vector<CoremlDiarizerCharge> one = {
+            {358, true, pcm::generation::resident_bytes(mem),
+             pcm::generation::transient_bytes(mem, pcm::ComputeUnits::cpu_and_ane), mem.margin}};
+        CHECK(coreml_generated_diarizer_envelope(one, {{1, 358}}) == envelope_before,
+              "the fit charge of one generated capacity is the template's envelope");
     }
     {
         // The next instance finds the artifact: route generate again (plan()
@@ -950,6 +1004,7 @@ int main() {
     case_sidecar_groups();
     case_options();
     case_fit_stable();
+    case_generated_diarizer_envelope();
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
 #endif

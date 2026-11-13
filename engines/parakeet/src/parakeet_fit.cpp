@@ -206,44 +206,32 @@ uint64_t coreml_generated_diarizer_bytes(const FitOptions & opts, const std::vec
     if (coreml_diarizers_disabled()) return 0;
     CoremlSidecars sidecars(opts.coreml);
     if (!sidecars.generation_status().supported) return 0;
-    std::vector<int> capacities;
+    std::vector<CoremlDiarizerCharge> capacities;
     for (const CoremlDiarizerBundle & b : list_coreml_diarizer_bundles(opts.model_gguf_path)) {
-        capacities.push_back(b.capacity);
+        capacities.push_back({b.capacity});
     }
     const std::vector<CoremlDiarizerTemplate> & templates = nemotron_diarizer_templates();
     std::vector<std::string> ids;
     for (const CoremlDiarizerTemplate & t : templates) ids.emplace_back(t.template_id);
     const std::vector<pcm::generation::Candidate> probed =
         pcm::generation::probe(ids, opts.model_gguf_path, sidecars.resolved());
-    struct Generated {
-        int frames;
-        const pcm::generation::Candidate * candidate;
-        pcm::ComputeUnits units;
-    };
-    std::vector<Generated> generated;
     for (size_t i = 0; i < templates.size() && i < probed.size(); ++i) {
-        if (std::find(capacities.begin(), capacities.end(), templates[i].frames) != capacities.end()) continue;
+        const int frames = templates[i].frames;
+        if (std::any_of(capacities.begin(), capacities.end(),
+                        [&](const CoremlDiarizerCharge & c) { return c.frames == frames; })) {
+            continue;  // an adjacent prebuilt bundle wins
+        }
         SidecarRequest request;
         request.present = false;
         request.stage_default = pcm::ComputeUnits::cpu_and_ane;
         request.generated = &probed[i];
         if (sidecars.plan(request).route != pcm::Route::generate) continue;
-        generated.push_back({templates[i].frames, &probed[i], sidecars.resolved().units_or(request.stage_default)});
-        capacities.push_back(templates[i].frames);
+        const pcm::generation::TemplateMemory & memory = probed[i].memory;
+        const pcm::ComputeUnits units = sidecars.resolved().units_or(request.stage_default);
+        capacities.push_back({frames, true, pcm::generation::resident_bytes(memory),
+                              pcm::generation::transient_bytes(memory, units), memory.margin});
     }
-    if (generated.empty()) return 0;
-    std::sort(capacities.begin(), capacities.end());
-    const std::vector<int> loaded = coreml_diarizer_loaded_capacities(capacities, ranges);
-    uint64_t resident = 0, transient = 0;
-    double margin = 1.0;
-    for (const Generated & g : generated) {
-        if (std::find(loaded.begin(), loaded.end(), g.frames) == loaded.end()) continue;
-        resident = sat_add(resident, pcm::generation::resident_bytes(g.candidate->memory));
-        transient = std::max(transient, pcm::generation::transient_bytes(g.candidate->memory, g.units));
-        margin = std::max(margin, g.candidate->memory.margin);
-    }
-    const uint64_t total = sat_add(resident, transient);
-    return total == 0 ? 0 : sat_u64_from_double(std::ceil((double) total * margin));
+    return coreml_generated_diarizer_envelope(capacities, ranges);
 #else
     (void) opts;
     (void) ranges;

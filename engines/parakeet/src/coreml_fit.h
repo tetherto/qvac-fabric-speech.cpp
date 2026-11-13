@@ -7,12 +7,15 @@
 
 #include "fit_util.h"
 #include "parakeet/fit.h"
+#include "parakeet_coreml_path.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace parakeet {
 
@@ -81,6 +84,44 @@ inline CoremlEncoderFitRoute coreml_encoder_fit_route(const std::string & sideca
         std::filesystem::path(sidecar_dir) / "weights" / "weight.bin", ec);
     if (!ec) r.weight_file_bytes = static_cast<uint64_t>(size);
     return r;
+}
+
+// One diarizer capacity of the generated-diarizer charge. A prebuilt
+// capacity (generated = false) only shapes which capacities a range loads
+// (coreml_diarizer_bytes charges it); a generated one carries its
+// template's unmargined parts for the resolved units.
+struct CoremlDiarizerCharge {
+    int      frames = 0;
+    bool     generated = false;
+    uint64_t resident_bytes = 0;
+    uint64_t transient_bytes = 0;
+    double   margin = 1.0;
+};
+
+// The Core ML envelope of the generated capacities that calls in `ranges`
+// can load, selected over every capacity (prebuilt and generated) by
+// coreml_diarizer_loaded_capacities: the sum of their resident parts plus the
+// largest single transient (prepares and loads run one at a time), times the
+// largest margin among them. 0 when no generated capacity is loaded.
+inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiarizerCharge> & capacities,
+                                                   const std::vector<CoremlFrameRange> & ranges) {
+    using fitutil::sat_add;
+    std::vector<int> sorted;
+    sorted.reserve(capacities.size());
+    for (const CoremlDiarizerCharge & c : capacities) sorted.push_back(c.frames);
+    std::sort(sorted.begin(), sorted.end());
+    const std::vector<int> loaded = coreml_diarizer_loaded_capacities(sorted, ranges);
+    uint64_t resident = 0;
+    uint64_t transient = 0;
+    double margin = 1.0;
+    for (const CoremlDiarizerCharge & c : capacities) {
+        if (!c.generated || std::find(loaded.begin(), loaded.end(), c.frames) == loaded.end()) continue;
+        resident = sat_add(resident, c.resident_bytes);
+        transient = std::max(transient, c.transient_bytes);
+        margin = std::max(margin, c.margin);
+    }
+    const uint64_t total = sat_add(resident, transient);
+    return total == 0 ? 0 : fitutil::sat_u64_from_double(std::ceil(static_cast<double>(total) * margin));
 }
 
 // Fills the two verdicts from today's verdict. `required` is what today's

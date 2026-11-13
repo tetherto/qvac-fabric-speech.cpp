@@ -660,6 +660,7 @@ if (PARAKEET_BUILD_TESTS)
     if (TARGET qvac-coreml-test-runtime)
         add_executable(test-parakeet-coreml-route
             test/test_coreml_route.cpp
+            src/parakeet_coreml_path.cpp
             ${PARAKEET_COREML_RUNTIME_GLUE_SOURCES})
         target_compile_definitions(test-parakeet-coreml-route PRIVATE QVAC_COREML_NS=qvac_coreml_test
             QVAC_COREML_TOY_TEMPLATES="${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test/toy-templates")
@@ -1924,6 +1925,19 @@ if (PARAKEET_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/samples/diarization-sample-16k.wav"
                     --cache-dir "${_qvp_gen_cache}")
         set_tests_properties(test-nemotron-diarization-coreml-generated-parity PROPERTIES
+            LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
+        # fit_params charges the generated capacities the same with an empty
+        # and a full cache; a budget between the ggml-only and Core ML-inclusive
+        # totals turns Core ML off for memory; compute units the templates were
+        # not validated for report every capacity unsupported. Never skips.
+        add_executable(test-fit-coreml-generated-diarizers test/test_fit_coreml_generated_diarizers.cpp)
+        target_link_libraries(test-fit-coreml-generated-diarizers PRIVATE qvac-parakeet)
+        target_include_directories(test-fit-coreml-generated-diarizers PRIVATE include)
+        parakeet_apply_ccache(test-fit-coreml-generated-diarizers)
+        add_test(NAME test-fit-coreml-generated-diarizers
+            COMMAND test-fit-coreml-generated-diarizers "${PARAKEET_TEST_NEMOTRON_GENERATED_GGUF}"
+                    "${CMAKE_CURRENT_BINARY_DIR}/coreml-generated-fit-cache")
+        set_tests_properties(test-fit-coreml-generated-diarizers PROPERTIES
             LABELS "fixture;coreml;coreml-generated" TIMEOUT 1800)
     endif()
 

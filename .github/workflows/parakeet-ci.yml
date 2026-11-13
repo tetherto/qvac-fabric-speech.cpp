@@ -348,14 +348,17 @@ jobs:
       # The generated diarizers on the device: an empty cache, the staged
       # GGUF alone, and the Core ML / ggml parity gate on every capacity the
       # sample covers. The test fails (never skips) unless every diarizer was
-      # generated.
+      # generated. The fit test checks the generated charge is the same with
+      # an empty and a full cache, the memory-degrade near the budget, and the
+      # status of compute units the templates were not validated for.
       - name: Test (generated Nemotron diarizers on the device, no skips)
         run: |
-          ctest --test-dir build-coreml -R '^test-nemotron-diarization-coreml-generated-parity$' --no-tests=error \
+          ctest --test-dir build-coreml -L coreml-generated --no-tests=error \
             --output-on-failure --timeout 1800 --output-junit coreml-generated-results.xml
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-generated-results.xml \
-            --require test-nemotron-diarization-coreml-generated-parity
+            --require test-nemotron-diarization-coreml-generated-parity \
+            --require test-fit-coreml-generated-diarizers
 
       # Real-weights gate: for each Nemotron template, the unchanged exporter on
       # the staged GGUF dequantised by ggml against the C++ generator on the
