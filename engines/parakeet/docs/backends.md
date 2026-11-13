@@ -524,8 +524,11 @@ python engines/parakeet/scripts/bench-encoder-coreml.py \
 
 The default export uses Float16 input, output, weights, and intermediates.
 CTC/IndicConformer, Unified RNN-T, and TDT shorter inputs are zero-padded to the
-exported mel-frame capacity, while longer offline inputs are automatically
-divided into overlapping windows that fit that capacity. EOU uses exact-shape
+exported mel-frame capacity. Longer CTC and Unified RNN-T offline inputs use
+overlapping windows. Standard TDT sidecars fall back to ggml beyond capacity:
+forcing their 15-second windows can truncate or corrupt the transcript. TDT
+Core ML windowing requires an export with a validated seam-context policy,
+such as the masked Neural Engine export described below. EOU uses exact-shape
 routing because padding future frames can change token and end-of-turn
 decisions: only calls at the compiled mel-frame count use Core ML. Shorter
 inputs, longer offline inputs, and mismatching streaming windows use ggml: EOU
@@ -723,7 +726,8 @@ Neural Engine path never reads, is not loaded.
 
 | Family | Contract | Inputs the sidecar does not take |
 |---|---|---|
-| CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
+| CTC (English, IndicConformer), Unified RNN-T | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
+| TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded; oversized inputs use ggml to preserve encoder context | standard TDT push streams require at least 30000 ms chunks; small PCM writes remain supported |
 | Full TranscribePsy EU | fixed ANE English/adapted/gate programs for offline encoding; native-context FP32 CPU/GPU programs for streaming and true unwindowed calls | all public transcription modes execute Core ML with the matching sidecar family; iOS precise programs use Core ML CPU; optional decoder batches offline calls only |
 | TDT with a fixed-window Neural Engine encoder (TranscribePsy EU-sub) | fixed window with padding masks: shorter inputs are padded and masked, longer offline inputs are split into overlapping windows with 16 frames of seam context, or into pause-cut independent segments when the TDT decoder sidecar is present | streaming runs on ggml; the decoder sidecar serves only the engine's offline transcribe path |
 | EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |

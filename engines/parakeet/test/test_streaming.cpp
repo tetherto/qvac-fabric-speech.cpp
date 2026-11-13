@@ -197,6 +197,9 @@ int main(int argc, char ** argv) {
         const std::string model_type = engine.model_type();
         const bool is_tdt = model_type == "tdt";
         const bool is_rnnt = model_type == "rnnt";
+        auto automatic_session = engine.stream_start(StreamingOptions{}, nullptr);
+        const bool guarded_tdt = is_tdt && automatic_session->options().chunk_ms == 30000;
+        automatic_session->cancel();
         std::vector<float> pcm;
         {
             FILE * f = std::fopen(opts.wav_path.c_str(), "rb");
@@ -216,6 +219,7 @@ int main(int argc, char ** argv) {
             {1000, 2000,  500,  5, 40, 10},
             {2000, 2000, 1000,  5,  5, 10},
             {2000, 5000, 2000,  5,  5,  5},
+            {30000, 10000, 2000, 5, 5, 5},
         };
 
         for (const auto & c : configs) {
@@ -224,6 +228,20 @@ int main(int argc, char ** argv) {
             sopts.chunk_ms          = c.chunk_ms;
             sopts.left_context_ms   = c.left_ms;
             sopts.right_lookahead_ms= c.right_ms;
+
+            if (guarded_tdt && c.chunk_ms < 30000) {
+                bool rejected = false;
+                try {
+                    engine.stream_start(sopts, nullptr);
+                } catch (const std::runtime_error & error) {
+                    rejected = std::string(error.what()).find("chunk_ms >= 30000") != std::string::npos;
+                }
+                if (!rejected) {
+                    std::fprintf(stderr, "[test-streaming] FAIL unsafe TDT chunk=%d was accepted\n", c.chunk_ms);
+                    ++failures;
+                }
+                continue;
+            }
 
             int n_segments = 0;
             double last_end_s = 0.0;
@@ -305,7 +323,7 @@ int main(int argc, char ** argv) {
         {
             StreamingOptions sopts;
             sopts.sample_rate       = 16000;
-            sopts.chunk_ms          = 2000;
+            sopts.chunk_ms          = guarded_tdt ? 30000 : 2000;
             sopts.left_context_ms   = 2000;
             sopts.right_lookahead_ms= 1000;
             int callbacks = 0;
@@ -324,7 +342,7 @@ int main(int argc, char ** argv) {
         {
             StreamingOptions sopts;
             sopts.sample_rate        = 16000;
-            sopts.chunk_ms           = 2000;
+            sopts.chunk_ms           = guarded_tdt ? 30000 : 2000;
             sopts.left_context_ms    = 2000;
             sopts.right_lookahead_ms = 1000;
             sopts.enable_energy_vad  = true;

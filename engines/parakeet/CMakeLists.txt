@@ -2095,6 +2095,14 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}"
                      "1101" "16" "0.85" "cache-aware"
             REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
+        foreach(_qvp_tdt_seconds 16 24 90)
+            parakeet_register_test(test-tdt-coreml-native-context-${_qvp_tdt_seconds}s
+                LABEL    "fixture;coreml"
+                EXE      test-rnnt-coreml-long-form
+                ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
+                         "1501" "${_qvp_tdt_seconds}" "1.0" "native-context"
+                REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_coreml}")
+        endforeach()
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity
