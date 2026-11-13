@@ -1926,7 +1926,13 @@ if (TTS_CPP_BUILD_TESTS)
     target_link_libraries(test-parler-fit-stable PRIVATE tts-cpp)
     target_include_directories(test-parler-fit-stable PRIVATE src)
     if (TTS_CPP_COREML)
-        target_compile_definitions(test-parler-fit-stable PRIVATE TTS_CPP_USE_COREML)
+        # The hint cases write records where the runtime looks for them, so
+        # the test uses the runtime's hint-path helper (same namespace).
+        get_target_property(_tcb_coreml_ns tts-cpp QVAC_COREML_NS)
+        target_compile_definitions(test-parler-fit-stable PRIVATE TTS_CPP_USE_COREML
+                                   QVAC_COREML_NS=${_tcb_coreml_ns})
+        target_include_directories(test-parler-fit-stable PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/include ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/src)
     endif()
     tts_cpp_apply_ccache(test-parler-fit-stable)
     if (TARGET qvac-coreml-tool)
