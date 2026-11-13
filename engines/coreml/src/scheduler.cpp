@@ -458,19 +458,6 @@ const SharedModel * Runtime::existing_locked(const Job & j) const {
     return registered_locked(j.model_key);
 }
 
-// A strong reference to the instance job `j` may adopt, taken at admission so
-// that the identity that waives a pool place stays alive until the job owns it.
-// `gy` keeps a copy: the caller may drop its own under mu.
-std::shared_ptr<SharedModel> Runtime::adoptable_locked(const Job & j, Graveyard & gy) const {
-    if (j.kind != JobKind::load || !j.shareable || retired_.count(j.model_key) != 0) return nullptr;
-    auto it = registry_.find(j.model_key);
-    if (it == registry_.end()) return nullptr;
-    std::shared_ptr<SharedModel> m = it->second.model.lock();
-    if (!m || m->retired()) return nullptr;
-    gy.keep(m);
-    return m;
-}
-
 size_t Runtime::pool_live_locked(const PoolCore & p, Graveyard & gy) const {
     // Distinct instances this pool references (see PoolCore), without strong
     // references to them, plus the load in flight for this pool unless that
@@ -645,54 +632,70 @@ void Runtime::set_cap_blocked_locked(Job & j, bool blocked) {
     state_cv.notify_all();
 }
 
-Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, std::shared_ptr<SharedModel> & adopt, Graveyard & gy) {
+Runtime::PoolVerdict Runtime::pool_admits_locked(Job & j, bool retain, std::shared_ptr<SharedModel> & adopt,
+                                                 Graveyard & gy) {
     std::vector<std::shared_ptr<SlotCore>> own;
     std::vector<std::shared_ptr<PoolCore>> pools;
     job_pools_locked(j, own, pools, gy);
-    std::vector<std::shared_ptr<PoolCore>> denied;
-    std::vector<std::vector<std::shared_ptr<SlotCore>>> victims;
-    // A pool that already counts the instance this job would publish takes it
-    // without a new place: nothing is evicted for it. Selecting that instance
-    // and owning it are one step: it is retained here, before its identity
-    // waives a place, and handed to the job on admission. An instance that
-    // already expired is not adoptable, and the job is admitted as a fresh load.
-    std::shared_ptr<SharedModel> found = adoptable_locked(j, gy);
-    const SharedModel * existing = found.get();
-    bool releasing = false;
-    for (const std::shared_ptr<PoolCore> & p : pools) {
-        if (pool_live_locked(*p, gy) < p->cap) continue;
-        if (existing && pool_counts_locked(*p, existing, gy)) continue;
-        if (!p->releasing.empty()) {
-            // A release is on its way out: wait for it rather than evicting a
-            // second victim meanwhile.
-            releasing = true;
-            continue;
+    // At most two passes: the second runs only when the instance the first one
+    // admitted the job to adopt expired before it could be retained.
+    for (;;) {
+        std::vector<std::shared_ptr<PoolCore>> denied;
+        std::vector<std::vector<std::shared_ptr<SlotCore>>> victims;
+        // A pool that already counts the instance this job would publish takes
+        // it without a new place: nothing is evicted for it. The scan compares
+        // identities only and takes no strong reference, so a scan that does
+        // not admit the job (blocked, waiting for a release, or handed to the
+        // other worker) can never hold the last reference to a model and run
+        // its deleter outside every pool's count.
+        const SharedModel * existing = existing_locked(j);
+        bool releasing = false;
+        for (const std::shared_ptr<PoolCore> & p : pools) {
+            if (pool_live_locked(*p, gy) < p->cap) continue;
+            if (existing && pool_counts_locked(*p, existing, gy)) continue;
+            if (!p->releasing.empty()) {
+                // A release is on its way out: wait for it rather than evicting
+                // a second victim meanwhile.
+                releasing = true;
+                continue;
+            }
+            std::vector<std::shared_ptr<SlotCore>> v = pool_victim_locked(*p, own, gy);
+            if (v.empty()) {
+                denied.push_back(p);
+            } else {
+                victims.push_back(std::move(v));
+            }
         }
-        std::vector<std::shared_ptr<SlotCore>> v = pool_victim_locked(*p, own, gy);
-        if (v.empty()) {
-            denied.push_back(p);
-        } else {
-            victims.push_back(std::move(v));
+        // A denied pool holds back only its own subscribers: they get no place
+        // when the job starts and stay pending after it publishes (publish()).
+        bool served = own.empty();
+        for (const std::shared_ptr<SlotCore> & c : own) {
+            std::shared_ptr<PoolCore> p = c->pool.lock();
+            served = served || !p || std::find(denied.begin(), denied.end(), p) == denied.end();
         }
+        if (!served) return PoolVerdict::blocked;
+        if (victims.empty() && !releasing) {
+            // Only the worker that starts the job takes the instance, under this
+            // same lock, and the caller moves it into Job::adopt before mu is
+            // released: selecting the instance and owning it are one step. The
+            // prepare worker only hands the job off; the load worker admits it
+            // again. If the instance expired since its identity was read, the
+            // job is evaluated again as a fresh load.
+            if (existing && retain) {
+                auto it = registry_.find(j.model_key);
+                std::shared_ptr<SharedModel> m = it != registry_.end() ? it->second.model.lock() : nullptr;
+                if (!m) continue;
+                adopt = std::move(m);
+            }
+            return PoolVerdict::admit;
+        }
+        // Each victim counts as a pending release until the reference is
+        // released outside mu, which wakes the workers to pick this job again.
+        for (const auto & v : victims) {
+            for (const std::shared_ptr<SlotCore> & c : v) evict_locked(c, gy);
+        }
+        return PoolVerdict::wait_release;
     }
-    // A denied pool holds back only its own subscribers: they get no place when
-    // the job starts and stay pending after it publishes (publish()).
-    bool served = own.empty();
-    for (const std::shared_ptr<SlotCore> & c : own) {
-        std::shared_ptr<PoolCore> p = c->pool.lock();
-        served = served || !p || std::find(denied.begin(), denied.end(), p) == denied.end();
-    }
-    if (!served) return PoolVerdict::blocked;
-    if (victims.empty() && !releasing) {
-        adopt = std::move(found);
-        return PoolVerdict::admit;
-    }
-    // Each victim counts as a pending release until the reference is released
-    // outside mu, which wakes the workers to pick this job again.
-    for (const auto & v : victims) {
-        for (const std::shared_ptr<SlotCore> & c : v) evict_locked(c, gy);
-    }
-    return PoolVerdict::wait_release;
 }
 
 // Admission screening, separate from job selection so it also runs while
@@ -734,7 +737,7 @@ void Runtime::screen_locked(Clock::time_point now, Clock::time_point & wake, Gra
     }
 }
 
-std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake,
+std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_point & wake, bool retain,
                                           std::shared_ptr<SharedModel> & adopt, Graveyard & gy) {
     screen_locked(now, wake, gy);
     const bool lp = low_power_locked();
@@ -763,7 +766,7 @@ std::shared_ptr<Job> Runtime::pick_locked(Clock::time_point now, Clock::time_poi
     });
     for (const Cand & c : cands) {
         if (c.job->kind != JobKind::load) return c.job;
-        switch (pool_admits_locked(*c.job, adopt, gy)) {
+        switch (pool_admits_locked(*c.job, retain, adopt, gy)) {
             case PoolVerdict::admit:
                 set_cap_blocked_locked(*c.job, false);
                 return c.job;
@@ -824,14 +827,17 @@ void Runtime::worker_main(JobKind kind) {
         Clock::time_point wake = now + std::chrono::hours(1);
         const uint64_t seen = gen_;
         std::shared_ptr<Job> job;
-        std::shared_ptr<SharedModel> adopt;  // gy keeps a copy until mu is released
+        // Set only when this (load) worker admitted a job to adopt a registry
+        // instance; moved into the job below without releasing mu.
+        std::shared_ptr<SharedModel> adopt;
+        bool handed_off = false;
         if (!running_ && !exiting()) {
-            job = pick_locked(now, wake, adopt, gy);
+            job = pick_locked(now, wake, kind == JobKind::load, adopt, gy);
             if (job && job->kind != kind) {
                 handoff_ = static_cast<int>(job->kind);
                 work_cv.notify_all();
-                job.reset();
-                adopt.reset();  // the other worker admits the job again
+                job.reset();  // the other worker admits the job again
+                handed_off = true;
             }
         } else if (running_ && !exiting()) {
             // The other worker holds the gate: requests and the periodic
@@ -854,8 +860,9 @@ void Runtime::worker_main(JobKind kind) {
             bump_locked();
             continue;
         }
-        if (!gy.items.empty()) {
+        if (handed_off || !gy.items.empty()) {
             lk.unlock();
+            if (handed_off) QVAC_COREML_TEST_HOOK(handed_off);
             gy.items.clear();
             lk.lock();
             if (gen_ != seen) continue;

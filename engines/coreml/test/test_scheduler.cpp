@@ -1470,8 +1470,8 @@ void case_resident_cap_pending_release() {
 }
 
 // Releases the final Handle of the instance a job was admitted to adopt, at the
-// moment the worker starts that job: the hook returns once the release
-// returned or is blocked in the native deleter.
+// moment the worker starts that job (or hands it to the other worker): the hook
+// returns once the release returned or is blocked in the native deleter.
 std::atomic<bool> g_drop_now{false};
 std::atomic<bool> g_dropped{false};
 
@@ -1561,6 +1561,187 @@ void case_resident_cap_adopt_expiry() {
         CHECK(calls(shared) == (at_start ? 1 : 2));
         CHECK(pool->live() == 1);
         CHECK(g_live_models.load() == base + 1);
+    }
+}
+
+// Steers job selection to the prepare worker: while armed, every other thread
+// sees low power, so only the prepare worker picks a prewarm load. Disarmed
+// once a gated native deleter has started.
+std::atomic<bool> g_steer{false};
+
+bool steer_low_power() {
+    if (g_low_power.load()) return true;
+    if (!g_steer.load() || g_delete_entered.load() > 0) return false;
+    std::lock_guard<std::mutex> lk(g_tid_mu);
+    return std::this_thread::get_id() != g_prepare_tid;
+}
+
+// Admission scans hold no model alive. A load job that is not admitted (cap
+// blocked, waiting for a release) or that the prepare worker only hands to the
+// load worker must not keep another owner's instance alive after the last
+// counted reference is gone: its native deleter would then run with no pool
+// counting it, and the load worker could start a replacement meanwhile.
+// Selection is steered to the prepare worker, which then blocks in a gated
+// native deleter while the load worker is free to load.
+//   blocked: a job queued in a full pool on a key whose instance is another
+//     pool's only resident; a request in that pool evicts it. No replacement
+//     loads before the evicted instance's deleter has finished.
+//   wait_release: a queued adoption by two pools evicts one pool's filler
+//     (gated). Its subscribers and the other pool's final Handle go away; a
+//     replacement in that pool loads only once the shared instance is gone.
+//   handoff: the prepare worker admits an adoption and hands it off; the final
+//     Handle is released before the prepare worker lets go of its scan. The
+//     job must not start a fresh load while the instance's deleter runs.
+// Every variant checks the live native models and the pool's count.
+void case_resident_cap_scan_pins_nothing() {
+    enum class Path { blocked, wait_release, handoff };
+    for (const Path path : {Path::blocked, Path::wait_release, Path::handoff}) {
+        reset_world();
+        g_steer = false;
+        g_delete_entered = 0;
+        g_delete_open = true;
+        Config cfg = fast_config();
+        cfg.low_power = &steer_low_power;
+        Env e(cfg);
+        {
+            auto dummy = e.generated("spn-dummy", "spn-dummy");  // records the prepare worker's thread
+            dummy->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(dummy); }));
+        }
+        CHECK(wait_for([] { return g_live_models.load() == 0; }));
+        const int base = g_live_models.load();
+        auto p = e.m->make_pool(1);
+        auto q = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn, const std::shared_ptr<ResidentPool> & pool) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &gated_delete_load;  // functions "gd*" get a gated deleter
+            return e.m->make_slot(s, e.policy());
+        };
+        int over = 0;
+        auto watch = [&](int ms, int live_max, const std::string & no_load, int loads) {
+            const auto end = Clock::now() + milliseconds(ms);
+            while (Clock::now() < end) {
+                if (g_live_models.load() > base + live_max || p->live() > 1 || q->live() > 1 ||
+                    calls(no_load) != loads) {
+                    ++over;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        if (path == Path::blocked) {
+            auto a = mk("gdb", p);  // the instance the queued job's scan looks at
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            auto qf = mk("spnqf", q);
+            qf->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(qf); }));
+            Acquired hq = qf->acquire(Demand::if_ready);  // q is full, nothing in it is evictable
+            CHECK(bool(hq));
+            auto b = mk("gdb", q);
+            b->request(Priority::prewarm);
+            CHECK(wait_for([&] {
+                const std::vector<std::string> ev = e.m->events();
+                return std::find(ev.begin(), ev.end(), "blocked:cap:stage/gdb") != ev.end();
+            }));
+            CHECK(b->state() == SlotState::queued);
+            CHECK(g_live_models.load() == base + 2);
+            g_delete_open = false;
+            g_steer = true;
+            auto r = mk("spnr", p);
+            r->request(Priority::prewarm);  // the prepare worker's scan evicts `a`
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            watch(150, 2, "spnr", 0);  // q's instance and the one being deleted
+            CHECK(!is_ready(r));
+            g_delete_open = true;
+            CHECK(wait_for([&] { return is_ready(r); }));
+            CHECK(calls("spnr") == 1);
+            CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));
+            CHECK(b->state() == SlotState::queued);
+        } else if (path == Path::wait_release) {
+            auto ext = mk("spnw", nullptr);  // another owner, no pool
+            ext->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(ext); }));
+            auto fill = mk("spnwf", p);
+            fill->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(fill); }));
+            auto qf = mk("gdw", q);  // evicted by the adoption's admission
+            qf->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(qf); }));
+            g_low_power = true;  // keeps the prewarm requests queued
+            auto b = mk("spnw", p);
+            b->request(Priority::prewarm);
+            auto b2 = mk("spnw", q);
+            b2->request(Priority::prewarm);
+            fill->evict();
+            auto a = mk("spnw", p);
+            a->request(Priority::minimal);  // adopts the registry instance at once
+            CHECK(is_ready(a));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(bool(held));
+            a.reset();
+            ext.reset();  // only p's Handle keeps the shared instance alive
+            CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));
+            CHECK(p->live() == 1);
+            g_delete_open = false;
+            g_steer = true;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            b.reset();
+            b2.reset();
+            held = Acquired{};  // nothing needs the shared instance any more
+            auto repl = mk("spnwr", p);
+            repl->request(Priority::now);
+            CHECK(wait_for([&] { return is_ready(repl); }, 1000));
+            watch(50, 2, "spnwr", 1);  // q's filler being deleted and the replacement
+            CHECK(calls("spnw") == 1);
+            g_delete_open = true;
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+        } else {
+            auto ext = mk("gdh", nullptr);
+            ext->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(ext); }));
+            auto fill = mk("spnhf", p);
+            fill->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(fill); }));
+            g_low_power = true;  // keeps the prewarm request queued
+            auto b = mk("gdh", p);
+            b->request(Priority::prewarm);
+            fill->evict();
+            auto a = mk("gdh", p);
+            a->request(Priority::minimal);  // adopts the registry instance at once
+            CHECK(is_ready(a));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(bool(held));
+            a.reset();
+            ext.reset();  // only p's Handle keeps the instance alive
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+            CHECK(p->live() == 1);
+            g_delete_open = false;
+            g_drop_now = false;
+            g_dropped = false;
+            std::thread dropper([&] {
+                while (!g_drop_now.load()) std::this_thread::sleep_for(1ms);
+                held = Acquired{};
+                g_dropped = true;
+            });
+            detail::test_hooks().handed_off = &drop_at_start;
+            g_steer = true;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            detail::test_hooks().handed_off = nullptr;
+            watch(150, 1, "gdh", 1);  // only the instance being deleted; no fresh load
+            CHECK(!is_ready(b));
+            g_delete_open = true;
+            dropper.join();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            CHECK(calls("gdh") == 2);
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+        }
+        CHECK(over == 0);
+        g_steer = false;
     }
 }
 
@@ -2524,6 +2705,7 @@ const Case kCases[] = {
     {"resident-cap-adopt-in-flight", case_resident_cap_adopt_in_flight},
     {"resident-cap-pending-release", case_resident_cap_pending_release},
     {"resident-cap-adopt-expiry", case_resident_cap_adopt_expiry},
+    {"resident-cap-scan-pins-nothing", case_resident_cap_scan_pins_nothing},
     {"resident-cap-release-wakes", case_resident_cap_release_wakes},
     {"resident-cap-shared-release", case_resident_cap_shared_release},
     {"call-wait-pins-nothing", case_call_wait_pins_nothing},
