@@ -188,6 +188,99 @@ python scripts/parler/export-dac-coreml.py \
 # check the rebuild first: --parity-dir artifacts/parler-ref --no-export
 ```
 
+### Generated sidecar and background loading
+
+Without a prebuilt sidecar the engine can build the same sidecar itself from
+the GGUF it loads: set a cache directory (`EngineOptions::coreml.cache_dir`,
+or `QVAC_COREML_CACHE_DIR`). On macOS 15 or later, in a build with
+`TTS_CPP_COREML=ON` and `TTS_CPP_COREML_GENERATE=ON` (the macOS default; iOS
+builds embed no template), the engine checks the GGUF against the embedded
+template `parler-dac-w128` (`coreml-templates/parler-dac-w128/`: the
+exporter's weight-free graph for a 128-frame window plus a recipe), writes
+the sidecar's `weight.bin` from the GGUF's `dac.dec.*` tensors, compiles the
+package on the device and publishes it into the cache. Nothing is downloaded
+and no Python runs. The weights are byte-identical to the exporter's fp16
+export of the same GGUF, so a generated sidecar decodes exactly like the
+prebuilt one. Every quantization of a model shares one artifact, since the
+cache key covers only the DAC tensors (F32 in every tier); mini and Indic
+share the template (large-v1's DAC geometry is unverified, and a GGUF that
+does not match runs on ggml with state `no_template`).
+
+The sidecar, generated or prebuilt, loads in the background. Until it is
+ready every DAC call decodes on ggml and `SynthesisResult::coreml_pending`
+is true; each `parler_dac_decode` call takes its backend once, at its start,
+so one call never mixes backends (a stream whose sidecar becomes ready
+between chunks reports `mixed`). On an M2 (macOS 15.7.3) the first
+generation of the mini DAC takes about 3 s (digest 1.6 s, write 1.4 s,
+compile 0.12 s) and the first Neural Engine load 8.1 s; later processes
+adopt the cached artifact, and a warm load takes about 0.1 s.
+
+| `EngineOptions::coreml` field | Effect |
+|---|---|
+| `cache_dir` | where generated sidecars and warm-load hints live; unset -> `QVAC_COREML_CACHE_DIR` -> none (no generation) |
+| `use` | `automatic` (default); `off` (ggml only); `require`: like `wait = call`, and a sidecar that cannot serve a call (failed to generate or load, a failed prediction) is an error |
+| `generate` | `background` (default) or `never` (prebuilt sidecars only) |
+| `wait` | `none` (default on macOS: never block, apart from a short bounded wait for a load this host finished quickly before); `construct` (the constructor waits until the DAC is ready or failed); `call` (each call waits) |
+| `prewarm` | `none` (nothing until the first call) or `minimal` / `predicted` / `all` (the DAC is requested at construction: the default) |
+| `compute_units` | as `coreml_compute_units`; unset falls back to it, then to `PARLER_COREML_COMPUTE_UNITS`, then `all` |
+| `strict_wait_ms` | longest wait of a `use = require` call; unset waits without limit |
+| `memory_budget_bytes` | the budget fit was assessed against; when only the ggml projection fits it, the DAC stays on ggml (memory-degrade) |
+
+`coreml_strict` maps to `use` (`true` -> `require`, `false` -> `automatic`)
+when `use` is unset. `PARLER_COREML_DISABLE` still overrides everything.
+`Engine::coreml_status()` returns the stage's state as JSON (`route`
+`prebuilt`, `generated` or `cached`; `state`; compute units; timings of the
+digest, write, compile, load and warm-up; the artifact key and path; the
+error and its class), and `Engine::coreml_wait(ms)` blocks until it is ready.
+
+```cpp
+tts_cpp::parler::EngineOptions options;
+options.model_gguf_path = "models/parler-mini-v1-q8_0.gguf";
+options.coreml.cache_dir = "/Users/me/Library/Application Support/qvac-speech/coreml";
+tts_cpp::parler::Engine engine(options);   // returns at once; the DAC builds in the background
+auto first = engine.synthesize("Hello.", "A calm voice.");  // ggml DAC, first.coreml_pending
+engine.coreml_wait(-1);
+auto next = engine.synthesize("Hello.", "A calm voice.");   // next.dac_backend == "coreml-all"
+```
+
+With a generated route, `parler::fit_params` (with `FitOptions::coreml` set
+like the engine's) adds the template's Core ML envelope to the projection
+and reports it in `FitResult::coreml` (`route`, `bytes`, `validated`,
+`disabled_reason`, `ggml_only_fits`). The ggml DAC stays resident, since it
+serves every call until the sidecar is ready. The envelope is the sidecar's
+resident weights, I/O buffers and the host quantizer copy, plus the larger
+of the generation and the load transients, with a 1.25 margin; it was
+validated on an M2 for the `all` compute units (see below), and other
+compute-unit policies are not generated until validated. The route never
+reads the cache, so fit is the same before and after the first generation.
+
+Memory validation (M2, 24 GB, macOS 15.7.3, compute units `all`,
+`test-parler-dac-coreml --memory-schedule`): ggml DAC decodes ran on the
+calling thread while the sidecar was generated, compiled, loaded and warmed
+in the background from an empty cache. Over three runs the process footprint
+rose at most 229 MiB above the warm ggml baseline, against a charged envelope
+of 475 MiB. `ANECompilerService` peaked at 372 MiB during the cold Neural
+Engine compile, 3.6 times the 103 MiB `weight.bin`, so the template sets
+`ane_compile_reserve_bytes` to 380 MiB: the runtime starts a cold Neural
+Engine load only while that much memory is available, and the DAC stays on
+ggml (state `deferred(memory)`) until it is.
+
+Generated-sidecar accuracy (mini `q8_0`, compute units `all`, fp16, on an
+empty cache; the generated `weight.bin` is byte-identical to the exporter's
+export of the same GGUF):
+
+| Check | SNR | max abs |
+|---|--:|--:|
+| random codes, 265 frames (3 windows), vs ggml CPU | 56.2 dB | 1.7e-3 |
+| random codes, 42 frames (one partial window), vs ggml CPU | 56.4 dB | 1.2e-3 |
+| random codes, 1 frame, vs ggml CPU | 53.3 dB | 1.5e-3 |
+
+CI generates the sidecar from a staged `parler-mini-v1-q8_0.gguf` on every
+pull request and holds the multi-frame cases to 54 dB
+(`test-parler-dac-coreml --cache-dir DIR --min-snr 54 --require-coreml`); a
+one-frame decode is held to 45 dB. With `--ref-dir`, the HF reference check
+uses `--min-speech-snr` (default 45 dB).
+
 | Environment | Effect |
 |---|---|
 | `PARLER_COREML_DISABLE` | never open the sidecar (the DAC runs on ggml) |
@@ -225,19 +318,19 @@ options.coreml_decoder = true; // remains false by default; separate opt-in
 tts_cpp::parler::Engine engine(options);
 ```
 
-`Engine::dac_on_coreml()` reports whether the sidecar is attached;
+`Engine::dac_on_coreml()` reports whether the sidecar is ready;
 `SynthesisResult::dac_backend` reports where each call's DAC ran (`ggml`, the
 `coreml-*` compute label, or `mixed` across streamed chunks). `parler-cli`
 prints it after synthesis and `parler-bench` on its `dac:` line and as
 `dac_backend` in `--json-out` (the bench attaches the sidecar like the Engine;
 `PARLER_COREML_DISABLE=1` benchmarks the ggml DAC). A sidecar whose
-prediction fails is retired for the engine's lifetime and the call's whole
-range is decoded again on ggml, so no output mixes a failed call's windows;
-chunks already streamed are kept. Under the captured strict policy that call and
-every later one fail instead. With an enabled sidecar present,
-`parler::fit_params` returns `Error` with `coreml-memory-estimate-unavailable`
-(Core ML resident memory cannot be projected); `PARLER_COREML_DISABLE=1`
-projects the ggml DAC.
+prediction fails is retired (for every engine using it in the process) and
+the call's whole range is decoded again on ggml, so no output mixes a failed
+call's windows; chunks already streamed are kept. Under the captured strict
+policy that call and every later one fail instead. With an enabled prebuilt
+sidecar present, `parler::fit_params` returns `Error` with
+`coreml-memory-estimate-unavailable` (its resident memory is not projected
+until validated); `PARLER_COREML_DISABLE=1` projects the ggml DAC.
 
 How the sidecar decodes: the engine walks the utterance in fixed windows of
 the exported width (128 frames, 1.49 s, by default) with
