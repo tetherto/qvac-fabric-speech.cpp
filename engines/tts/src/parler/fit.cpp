@@ -81,9 +81,18 @@ FitResult fit_params(const FitOptions & opts) {
     }
 #endif
 
-    // An enabled Core ML DAC sidecar runs outside ggml: its resident model and
-    // prediction buffers cannot be projected (CosyVoice's rule).
-    if (detail::parler_dac_sidecar_enabled(opts.model_gguf_path)) {
+    // A prebuilt Core ML DAC sidecar runs outside ggml: its resident model and
+    // prediction buffers are not projected (CosyVoice's rule) until its
+    // envelope is validated. The route never reads the cache.
+    detail::parler_dac_route dac_route;
+    try {
+        dac_route = detail::parler_dac_plan_route(opts.model_gguf_path, opts.coreml, 0);
+    } catch (const std::invalid_argument &) {
+        r.reason = "invalid-arguments";
+        return r;
+    }
+    r.coreml.route = dac_route.route;
+    if (dac_route.route == "prebuilt") {
         r.reason = "coreml-memory-estimate-unavailable";
         r.report = "The Core ML DAC sidecar's resident model and prediction buffers cannot be "
                    "projected; set PARLER_COREML_DISABLE=1 to project the ggml DAC instead.\n";
@@ -286,7 +295,28 @@ FitResult fit_params(const FitOptions & opts) {
     if (r.device_shares_host_memory) {
         required = sat_add(required, r.host_bytes);
     }
-    r.fits   = required <= r.device_free_bytes;
+    // Core ML-inclusive verdict for a generated DAC: the ggml projection keeps
+    // its DAC residency (the ggml DAC serves calls until the sidecar is ready)
+    // plus the template's envelope, which includes the host quantizer copy.
+    if (dac_route.route == "generate") {
+        const detail::parler_dac_route with_adapter = detail::parler_dac_plan_route(
+            opts.model_gguf_path, opts.coreml, detail::parler_dac_rvq_bytes(m.model));
+        r.coreml.bytes = with_adapter.envelope_bytes;
+        r.coreml.validated = with_adapter.validated;
+    }
+    const uint64_t with_coreml = sat_add(required, r.coreml.bytes);
+    r.coreml.ggml_only_fits = required <= r.device_free_bytes;
+    r.coreml.fits = with_coreml <= r.device_free_bytes;
+    bool degraded = false;
+    if (dac_route.route == "generate" && opts.coreml.memory_budget_bytes) {
+        const uint64_t budget = (uint64_t) *opts.coreml.memory_budget_bytes;
+        if (with_coreml > budget && required <= budget) {
+            degraded = true;
+            r.coreml.disabled_reason = "memory";
+        }
+    }
+    const uint64_t charged = dac_route.route == "generate" && !degraded ? with_coreml : required;
+    r.fits   = charged <= r.device_free_bytes;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
 
@@ -332,12 +362,18 @@ FitResult fit_params(const FitOptions & opts) {
         std::snprintf(line, sizeof(line), "margin:          %14s\n",
                       fmt_mib(opts.margin_bytes).c_str());
         s += line;
+        if (dac_route.route == "generate") {
+            std::snprintf(line, sizeof(line), "core ml DAC:     %14s (generated sidecar envelope%s%s)\n",
+                          fmt_mib(r.coreml.bytes).c_str(), r.coreml.validated ? ", validated" : "",
+                          degraded ? "; memory-degrade: ggml only" : "");
+            s += line;
+        }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - required).c_str());
+                          fmt_mib(r.device_free_bytes - charged).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(required - r.device_free_bytes).c_str());
+                          fmt_mib(charged - r.device_free_bytes).c_str());
         }
         s += line;
         r.report = std::move(s);

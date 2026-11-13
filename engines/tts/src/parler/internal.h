@@ -177,6 +177,9 @@ struct parler_model {
     mutable bool dac_sidecar_retired = false;  // a failure retired it (STRICT keeps failing)
     bool dac_coreml_strict = false;           // captured at attachment, not read at decode time
     parler_dac_rvq dac_rvq;
+    // The DAC on the shared Core ML runtime (parler_dac_coreml) or a test
+    // double: acquired once per decode call when no sidecar is attached.
+    std::shared_ptr<parler_dac_pending> dac_pending;
 
     // decoder self-attention KV cache (token-major slab, one per K/V):
     // [d_model, n_ctx] rows per layer, stacked layer-major.
@@ -416,10 +419,13 @@ ggml_cgraph * parler_build_dac_fit_graph(const parler_model & model, int n_frame
 // is bit-identical to decoding the whole sequence and slicing.
 // latent_out (optional, tests): summed RVQ latent for the same frame range,
 // [latent_dim, T] ggml layout (element (c, t) at t*latent_dim + c).
-// With a Core ML sidecar attached (model.dac_sidecar) the windows run on it;
-// a failing sidecar is retired and the whole range is redone on ggml, unless
-// the captured Core ML strict policy is enabled, which fails the call instead. backend_out
-// (optional) receives where the range ran: "ggml" or the sidecar's label.
+// With a Core ML sidecar attached (model.dac_sidecar), or one acquired at
+// entry from model.dac_pending, the windows run on it; a failing sidecar is
+// retired and the whole range is redone on ggml, unless the captured Core ML
+// strict policy is enabled, which fails the call instead. backend_out
+// (optional) receives where the range ran: "ggml" or the sidecar's label;
+// pending_out (optional) whether it ran on ggml only because the sidecar was
+// not ready yet.
 bool parler_dac_decode(const parler_model & model,
                        const int32_t * codes, int n_frames,
                        int n_threads,
@@ -427,7 +433,8 @@ bool parler_dac_decode(const parler_model & model,
                        std::vector<float> * latent_out = nullptr,
                        int out_begin = 0, int out_end = -1,
                        std::string * err_out = nullptr,
-                       std::string * backend_out = nullptr);
+                       std::string * backend_out = nullptr,
+                       bool * pending_out = nullptr);
 
 } // namespace detail
 } // namespace parler

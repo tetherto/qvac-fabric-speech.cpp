@@ -2,6 +2,14 @@
 
 // Core ML sidecar for Parler's DAC decoder (scripts/parler/export-dac-coreml.py).
 //
+// The Engine loads the DAC sidecar through the shared Core ML runtime
+// (parler_dac_coreml below): a prebuilt `<gguf stem minus quant tag>-dac.mlmodelc`
+// next to the GGUF loads in the background; without one, and with a cache
+// directory, the sidecar is generated from the GGUF's own DAC tensors
+// (template parler-dac-w128) on macOS 15 or later. Until it is ready every
+// decode call runs on ggml; each parler_dac_decode call takes its backend once,
+// at entry, so a call never mixes backends.
+//
 // The sidecar is `<gguf stem minus quant tag>-dac.mlmodelc` next to the GGUF.
 // It decodes one fixed window of summed RVQ latents, latent [1, latent_dim, W]
 // plus a 0/1 frame mask valid [1, 1, W], to pcm [1, 1, W * hop]; frames past
@@ -19,9 +27,12 @@
 //   PARLER_COREML_COMPUTE_UNITS  all | cpu_and_ane | cpu_and_gpu | cpu_only
 
 #include "coreml_policy.h"
+#include "tts-cpp/coreml_options.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -98,11 +109,98 @@ bool parler_attach_dac_sidecar(parler_model & model, const std::string & gguf_pa
 bool parler_attach_dac_sidecar(parler_model & model, const std::string & gguf_path,
                                const parler_coreml_policy & policy);
 
-// The sidecar decode of frames [out_begin, out_end) (see parler_dac_decode).
+// The decode of frames [out_begin, out_end) on `sidecar` (see parler_dac_decode).
 // False on any sidecar failure; pcm_out / latent_out are then unspecified.
-bool parler_dac_decode_sidecar(const parler_model & model, const int32_t * codes, int n_frames,
-                               std::vector<float> & pcm_out, std::vector<float> * latent_out,
+bool parler_dac_decode_sidecar(const parler_model & model, parler_dac_sidecar & sidecar, const int32_t * codes,
+                               int n_frames, std::vector<float> & pcm_out, std::vector<float> * latent_out,
                                int out_begin, int out_end);
+
+// ---- the DAC on the shared Core ML runtime ----------------------------------------
+
+// What one parler_dac_decode call runs on, acquired once at its entry and held
+// for the whole call.
+struct parler_dac_call {
+    std::shared_ptr<parler_dac_sidecar> sidecar;  // null: this call runs on ggml
+    bool pending = false;  // on ggml only because the sidecar was not ready yet
+    // A prediction failed: retire the sidecar (for every engine on it). The
+    // call is then redone on ggml, or fails under strict.
+    std::function<void(const std::string & reason)> retire;
+};
+
+// The seam parler_dac_decode acquires from when the model has no statically
+// attached sidecar (model.dac_pending). The Engine installs parler_dac_coreml;
+// tests install fakes.
+class parler_dac_pending {
+public:
+    virtual ~parler_dac_pending() = default;
+    // Once per decode call of `out_frames` output frames. Throws
+    // std::runtime_error when use = require and the sidecar cannot serve the
+    // call (failed, retired, timed out).
+    virtual parler_dac_call acquire(int out_frames) = 0;
+    virtual bool strict() const = 0;
+};
+
+// Bytes of the host copy of the quantizer (parler_dac_rvq) for `model`;
+// computed from tensor shapes, so it works on a metadata-only load.
+uint64_t parler_dac_rvq_bytes(const parler_model & model);
+
+// The DAC stage's route, decided from options, OS, build, template match and
+// the presence of a prebuilt sidecar, never from the cache, so it is the same
+// before and after the first generation. For the generated route it carries
+// the Core ML memory envelope fit charges.
+struct parler_dac_route {
+    std::string route = "none";  // prebuilt | generate | none
+    std::string state;           // when none: unsupported | disabled | absent | no_template
+    std::string reason;
+    std::string compute_units;   // resolved
+    bool strict = false;
+    bool validated = false;      // generate: the envelope is validated for compute_units
+    uint64_t envelope_bytes = 0; // generate: (resident + one transient) x margin
+};
+
+// `adapter_bytes`: engine-side copies the stage keeps (parler_dac_rvq_bytes).
+// Throws std::invalid_argument for invalid explicit options.
+parler_dac_route parler_dac_plan_route(const std::string & gguf_path, const CoremlOptions & options,
+                                       uint64_t adapter_bytes);
+
+// The DAC stage of one Engine on the shared Core ML runtime: the resolved
+// options, the route, the slot, the construction group and status.
+class parler_dac_coreml final : public parler_dac_pending {
+public:
+    // Resolves `options` (with the PARLER_* environment) and plans the route.
+    // Unless the route is none it builds model.dac_rvq on this thread, creates
+    // the slot and issues the construction group (prewarm none: nothing until
+    // the first call), waiting for it with wait = construct. `memory_degrade`
+    // resolves use = off (fit's memory-degrade). Returns null in builds
+    // without TTS_CPP_COREML. Throws std::invalid_argument for invalid
+    // options and std::runtime_error when use = require cannot be met.
+    static std::shared_ptr<parler_dac_coreml> create(parler_model & model, const std::string & gguf_path,
+                                                     const CoremlOptions & options, bool memory_degrade = false);
+    ~parler_dac_coreml() override;
+
+    parler_dac_call acquire(int out_frames) override;
+    bool strict() const override;
+
+    const parler_dac_route & route() const;
+    // Whether a slot exists (route != none).
+    bool active() const;
+    // The status JSON (schema 1: engine, cache_dir, generation, stages).
+    std::string status_json() const;
+    // The construction group's result JSON ("{}" before or without one).
+    std::string construction_json() const;
+    // Blocks until the DAC is ready or terminal, or `timeout_ms` (< 0: no
+    // limit). True when it is ready.
+    bool wait(int64_t timeout_ms) const;
+
+    struct impl;
+private:
+    explicit parler_dac_coreml(std::unique_ptr<impl> p);
+    std::unique_ptr<impl> p_;
+};
+
+// Label merge across the calls of one synthesis: equal labels stay, anything
+// else is "mixed" (an empty accumulator takes the next label).
+std::string parler_merge_dac_backend(const std::string & acc, const std::string & next);
 
 } // namespace detail
 } // namespace parler
