@@ -283,6 +283,9 @@ and model-specific exceptions.
 
 ## Documentation
 
+The [CI guide](docs/CI.md) describes engine-specific cross-platform job selection,
+Windows compiler caching, and the VAD contract tests.
+
 Parakeet's [test guide](engines/parakeet/docs/testing.md) separates model-free
 unit tests from fixture coverage. Its fixture runner rejects runs with no executed
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane

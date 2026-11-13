@@ -50,6 +50,9 @@ and MiniMax model preparation and transfer. Diagnostics do not gate quality.
 
 ## Documentation
 
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
+
 Model-free tests run as separate math, tokenizer, backend, loading,
 quantization, audio, and generation-policy suites. The macOS CI lane also
 requires real ACE-Step and MiniMax generation with pinned fixtures, including
