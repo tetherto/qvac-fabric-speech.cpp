@@ -91,8 +91,8 @@ std::string model_key(const std::string & artifact, const std::string & function
 Runtime::Runtime(Config c) : cfg(std::move(c)) {
     host_id = cfg.host_id.empty() ? device_host_id() : cfg.host_id;
     os_build = cfg.os_build.empty() ? device_os_build() : cfg.os_build;
-    os = device_os_version();
-    platform = device_platform();
+    os = cfg.os ? *cfg.os : device_os_version();
+    platform = cfg.platform ? *cfg.platform : device_platform();
 }
 
 Runtime::~Runtime() {
