@@ -98,7 +98,7 @@ class WeeklyRowsTest(unittest.TestCase):
         self.assertEqual((row["gpu_mib"], row["gpu_kind"]), (512.0, "sampled rise"))
         self.assertEqual((row["wer_pct"], row["wer_kind"]), (1.25, "ASR ground truth"))
         self.assertEqual(row["hashes"], "parakeet.gguf 0123456789")
-        self.assertEqual(row["pins"], "qvac abcdef1234 (2026-11-01), ggml speech fedcba0987 (2026-11-01)")
+        self.assertEqual(row["pins"], "qvac abcdef1234 (2026-11-01), ggml fedcba0987 (2026-11-01)")
         self.assertEqual(row["caveats"], "note parakeet-tdt")
 
     def test_a_cell_measured_under_load_carries_the_flag_a_caveat_and_a_comment(self):
