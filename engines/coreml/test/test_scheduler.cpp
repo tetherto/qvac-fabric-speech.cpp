@@ -1,4 +1,4 @@
-// test-coreml-scheduler (PLAN §2.16, §2.9, §2.12): the shared Core ML runtime
+// test-coreml-scheduler: the shared Core ML runtime
 // with fake LoadFn / WarmFn / PrepareFn only. Portable: Linux and macOS.
 //
 //   test-coreml-scheduler --plugin <path-to-qvac-coreml-test-plugin> [--only <case>]
@@ -10,6 +10,7 @@
 
 #include "hints.h"
 #include "sha256.h"
+#include "test_hooks.h"
 
 #include "nlohmann/json.hpp"
 
@@ -369,7 +370,7 @@ std::optional<detail::HintRecord> hint_of(const std::shared_ptr<Slot> & s) { ret
 
 bool is_ready(const std::shared_ptr<Slot> & s) { return s->state() == SlotState::ready; }
 
-// ---- scheduler cases (§2.16) --------------------------------------------------
+// ---- scheduler cases --------------------------------------------------
 
 void case_priority_order() {
     Env e;
@@ -395,7 +396,7 @@ void case_priority_order() {
 }
 
 void case_dedup_two_owners() {
-    // Two owners of one artifact (§2.9): one load, one shared model; either owner
+    // Two owners of one artifact: one load, one shared model; either owner
     // dropping leaves the other's model intact.
     Env e;
     const int base = g_live_models.load();
@@ -837,8 +838,8 @@ void case_resident_cap() {
     std::printf("    resident cap 3: max live instances observed %zu\n", max_live.load());
 }
 
-// §2.9 counts handles a unit still retains as live instances, whatever happened
-// to the slot that published them.
+// The resident cap counts handles a unit still retains as live instances,
+// whatever happened to the slot that published them.
 void case_resident_cap_retained_handle() {
     Env e;
     const int base = g_live_models.load();
@@ -879,7 +880,7 @@ void case_resident_cap_retained_handle() {
 
 // The caller itself holds every instance the cap permits: nothing can be
 // released, so call, strict, the bounded wait and construct groups never wait
-// on the replacement (§2.9, §2.10); it loads in the background after a release.
+// on the replacement; it loads in the background after a release.
 void case_resident_cap_acquire() {
     Env e;
     auto pool = e.m->make_pool(1);
@@ -940,6 +941,1057 @@ void case_resident_cap_acquire() {
     CHECK(a->state() == SlotState::idle);
     CHECK(calls("cb") == 1);
     CHECK(pool->live() == 1);
+
+    // The denial is decided when the caller asks, not by the last worker
+    // screening: an acquisition right after the caller lifts it (releasing its
+    // handle, or narrowing the prediction) waits for the replacement.
+    // Each round first acquires under the denial, so a cached verdict exists.
+    auto denied_now = [](const std::shared_ptr<Slot> & s, bool strict) {
+        bool denied = false;
+        must_complete("acquisition under the cap", [&] {
+            try {
+                denied = s->acquire(Demand::now).pending;
+            } catch (const CoremlError &) {
+                denied = strict;
+            }
+        });
+        return denied;
+    };
+    for (int round = 0; round < 8; ++round) {
+        for (const bool strict : {false, true}) {
+            for (const bool via_predicted : {false, true}) {
+                const std::string tag = std::to_string(round) + (strict ? "s" : "c") + (via_predicted ? "p" : "r");
+                auto rp = e.m->make_pool(1);
+                auto mk2 = [&](const std::string & fn, bool s) {
+                    SlotSpec spec = e.spec(fn);
+                    spec.pool = rp;
+                    SlotPolicy p = e.policy(Wait::call);
+                    p.strict = s;
+                    return e.m->make_slot(spec, p);
+                };
+                auto ra = mk2("la" + tag, false);
+                ra->request(Priority::minimal);
+                CHECK(wait_for([&] { return is_ready(ra); }));
+                Acquired rheld = ra->acquire(Demand::now);
+                CHECK(rheld);
+                auto rb = mk2("lb" + tag, strict);
+                CHECK(denied_now(rb, strict));
+                if (via_predicted) {
+                    rp->set_predicted({ra});
+                    rheld = Acquired{};
+                    CHECK(denied_now(rb, strict));
+                }
+                Acquired got;
+                std::string threw;
+                must_complete("acquisition right after the denial was lifted", [&] {
+                    // Lift and acquire on one thread, before a worker re-screens.
+                    if (via_predicted) {
+                        rp->set_predicted({rb});  // narrowed: ra is evictable now
+                    } else {
+                        rheld = Acquired{};  // released: ra is evictable now
+                    }
+                    try {
+                        got = rb->acquire(Demand::now);
+                    } catch (const CoremlError & err) {
+                        threw = err.what();
+                    }
+                });
+                if (!got || !threw.empty()) {
+                    std::printf("    round %s: pending=%d threw='%s'\n", tag.c_str(), int(got.pending), threw.c_str());
+                }
+                CHECK(got && !got.pending && threw.empty());
+                CHECK(got && got.model->as<FakeModel>()->name == "lb" + tag);
+                CHECK(rp->live() == 1);
+            }
+        }
+    }
+}
+
+// Two engines, one resident pool each, sharing one instance: each pool
+// counts only what it references, so either engine can move to another
+// function, and the instance lives on for the other engine.
+void case_resident_cap_two_pools() {
+    for (const bool evict_first : {false, true}) {
+        Env e;
+        const int base = g_live_models.load();
+        const int loads0 = calls("w1");
+        auto p1 = e.m->make_pool(1);
+        auto p2 = e.m->make_pool(1);
+        auto mk = [&](const std::shared_ptr<ResidentPool> & pool, const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            return e.m->make_slot(s, e.policy(Wait::call));
+        };
+        auto e1_w1 = mk(p1, "w1");
+        auto e2_w1 = mk(p2, "w1");
+        e1_w1->request(Priority::minimal);
+        e2_w1->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(e1_w1) && is_ready(e2_w1); }));
+        CHECK(calls("w1") == loads0 + 1);  // one shared instance
+        CHECK(g_live_models.load() == base + 1);
+        CHECK(p1->live() == 1 && p2->live() == 1);
+        Acquired h2 = e2_w1->acquire(Demand::now);  // engine 2 runs a unit on it
+        CHECK(h2);
+        if (evict_first) {
+            e1_w1->evict();
+            CHECK(p1->live() == 0);  // engine 2's references count only in p2
+        }
+        auto e1_w2 = mk(p1, "w2");
+        Acquired a;
+        must_complete("engine 1 moves to w2", [&] { a = e1_w2->acquire(Demand::now); });
+        CHECK(a && a.model->as<FakeModel>()->name == "w2");
+        CHECK(e1_w1->state() == SlotState::idle);
+        CHECK(is_ready(e2_w1));
+        CHECK(h2 && h2.model->as<FakeModel>()->name == "w1");
+        CHECK(g_live_models.load() == base + 2);  // w1 lives on for engine 2
+        CHECK(p1->live() == 1 && p2->live() == 1);
+    }
+}
+
+// Another owner's instance enters a capped pool only through that pool's
+// admission: a ready registry hit, a late subscriber to a running load
+// and a subscriber joining the other owner's queued job all stay pending while
+// the pool is full with nothing evictable, without delaying the other owner;
+// after a release the slot gets the instance (the same one while the other
+// owner keeps it, a fresh load after it dropped it). With room, both share at
+// once.
+void case_resident_cap_cross_owner() {
+    enum class Join { registry, running, queued };
+    int round = 0;
+    for (const Join join : {Join::registry, Join::running, Join::queued}) {
+        for (const bool drop_owner : {false, true}) {
+            reset_world();  // the previous round's Env released everything
+            Env e;
+            const std::string tag = std::to_string(round++);
+            const std::string shared = "xs" + tag;
+            const std::string gate = "xg" + tag;
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(1);
+            auto mk = [&](const std::string & fn, Wait w) {
+                SlotSpec s = e.spec(fn);
+                s.pool = pool;
+                return e.m->make_slot(s, e.policy(w));
+            };
+            auto a = mk("xh" + tag, Wait::none);
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(held);
+            std::shared_ptr<Slot> gate_slot;
+            if (join == Join::queued) {  // the other owner's job waits behind the gate
+                set_beh(gate, {true});
+                gate_slot = e.slot(gate);
+                gate_slot->request(Priority::minimal);
+                CHECK(wait_for([&] { return in_progress(gate); }));
+            }
+            if (join == Join::running) set_beh(shared, {true});
+            auto external = e.slot(shared);  // another owner, no pool
+            external->request(Priority::minimal);
+            if (join == Join::running) CHECK(wait_for([&] { return in_progress(shared); }));
+            if (join == Join::registry) CHECK(wait_for([&] { return is_ready(external); }));
+            auto b = mk(shared, Wait::call);
+            b->request(Priority::current);
+            Acquired r;
+            if (join == Join::running) {
+                // Denied while the other owner's load runs: no place was reserved.
+                must_complete("call acquisition during the load", [&] { r = b->acquire(Demand::now); });
+                CHECK(!r && r.pending);
+                release(shared);
+            }
+            if (join == Join::queued) release(gate);
+            CHECK(wait_for([&] { return is_ready(external); }));  // the other owner is served
+            std::this_thread::sleep_for(50ms);
+            CHECK(!is_ready(b));
+            CHECK(pool->live() == 1);
+            CHECK(calls(shared) == 1);
+            CHECK(g_live_models.load() == base + (join == Join::queued ? 3 : 2));  // held + external (+ gate)
+            must_complete("call acquisition under the cap", [&] { r = b->acquire(Demand::now); });
+            CHECK(!r && r.pending);
+            {  // strict cannot be served either, and gives no place
+                SlotSpec ss = e.spec(shared);
+                ss.pool = pool;
+                SlotPolicy sp = e.policy(Wait::call);
+                sp.strict = true;
+                auto strict = e.m->make_slot(ss, sp);
+                bool threw = false;
+                must_complete("strict acquisition under the cap", [&] {
+                    try {
+                        (void) strict->acquire(Demand::now);
+                    } catch (const CoremlError &) {
+                        threw = true;
+                    }
+                });
+                CHECK(threw);
+                CHECK(pool->live() == 1);
+            }
+            if (drop_owner) {
+                external.reset();
+                CHECK(g_live_models.load() == base + (join == Join::queued ? 2 : 1));  // the capped owner never took it
+                CHECK(pool->live() == 1);
+            }
+            held = Acquired{};
+            must_complete("call acquisition after the release", [&] { r = b->acquire(Demand::now); });
+            CHECK(r && r.model->as<FakeModel>()->name == shared);
+            CHECK(a->state() == SlotState::idle);
+            CHECK(pool->live() == 1);
+            CHECK(calls(shared) == (drop_owner ? 2 : 1));
+            // a's instance died; b's is the external one or its own reload.
+            CHECK(g_live_models.load() == base + 1 + (join == Join::queued ? 1 : 0));
+            r = Acquired{};
+        }
+    }
+    // With room the instance is shared at once: no second load, one place.
+    for (const bool running : {false, true}) {
+        reset_world();
+        Env e;
+        const std::string shared = std::string("xr") + (running ? "1" : "0");
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(2);
+        SlotSpec hs = e.spec("xrh" + shared);
+        hs.pool = pool;
+        auto a = e.m->make_slot(hs, e.policy());
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired held = a->acquire(Demand::if_ready);
+        if (running) set_beh(shared, {true});
+        auto external = e.slot(shared);
+        external->request(Priority::minimal);
+        if (running) {
+            CHECK(wait_for([&] { return in_progress(shared); }));
+        } else {
+            CHECK(wait_for([&] { return is_ready(external); }));
+        }
+        SlotSpec bs = e.spec(shared);
+        bs.pool = pool;
+        auto b = e.m->make_slot(bs, e.policy());
+        b->request(Priority::current);
+        if (running) {
+            CHECK(pool->live() == 2);  // the running load holds the reserved place
+            release(shared);
+        }
+        CHECK(wait_for([&] { return is_ready(b) && is_ready(external); }));
+        CHECK(calls(shared) == 1);
+        CHECK(is_ready(a));
+        CHECK(pool->live() == 2);
+        CHECK(g_live_models.load() == base + 2);
+    }
+}
+
+// A load queued under the cap becomes redundant when another member of its
+// pool adopts the same registry instance meanwhile: the pool already
+// counts it, so the queued subscriber takes it without a second place, an
+// eviction or a load, and call / strict acquisitions are served.
+void case_resident_cap_queued_adopt() {
+    int round = 0;
+    for (const bool acquire_it : {true, false}) {
+        for (const bool strict : {false, true}) {
+            if (!acquire_it && strict) continue;
+            reset_world();
+            Env e;
+            const std::string tag = std::to_string(round++);
+            const std::string shared = "qs" + tag;
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(1);
+            auto mk = [&](const std::string & fn, bool s = false) {
+                SlotSpec spec = e.spec(fn);
+                spec.pool = pool;
+                SlotPolicy p = e.policy(Wait::call);
+                p.strict = s;
+                return e.m->make_slot(spec, p);
+            };
+            auto a = mk("qa" + tag);
+            Acquired held = a->acquire(Demand::now);
+            CHECK(held);
+            auto external = e.slot(shared);  // another owner, no pool
+            external->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(external); }));
+            g_low_power = true;  // keeps the prewarm request queued
+            auto b = mk(shared, strict);
+            b->request(Priority::prewarm);
+            CHECK(b->state() == SlotState::queued);
+            a->evict();
+            held = Acquired{};
+            auto c = mk(shared);
+            Acquired hc = c->acquire(Demand::now);  // adopts the registry instance at once
+            CHECK(hc);
+            CHECK(pool->live() == 1);
+            const uint64_t ev0 = e.m->stats().evictions;
+            Acquired hb;
+            std::string threw;
+            if (acquire_it) {
+                must_complete("acquisition of an instance the pool counts", [&] {
+                    try {
+                        hb = b->acquire(Demand::now);
+                    } catch (const CoremlError & err) {
+                        threw = err.what();
+                    }
+                });
+                if (!threw.empty()) std::printf("    round %s: threw '%s'\n", tag.c_str(), threw.c_str());
+                CHECK(threw.empty());
+            } else {
+                // Not held by c: still nothing is evicted, the worker hands the
+                // prewarm subscriber the counted instance.
+                hc = Acquired{};
+                g_low_power = false;
+                CHECK(wait_for([&] { return is_ready(b); }));
+                hb = b->acquire(Demand::if_ready);
+                CHECK(is_ready(c));
+                hc = c->acquire(Demand::if_ready);
+            }
+            CHECK(hb && hc && hb.model.get() == hc.model.get());
+            CHECK(hb && hb.model->as<FakeModel>()->name == shared);
+            CHECK(calls(shared) == 1);
+            CHECK(e.m->stats().evictions == ev0);
+            CHECK(pool->live() == 1);
+            CHECK(g_live_models.load() == base + 1);  // only the shared instance
+        }
+    }
+}
+
+// The load worker holds at a test seam (detail::TestHooks); the test opens it.
+std::atomic<int> g_hook_entered{0};
+std::atomic<bool> g_hook_open{true};
+
+void gate_hook() {
+    ++g_hook_entered;
+    while (!g_hook_open.load()) std::this_thread::sleep_for(1ms);
+}
+
+// Arms one seam for a scope. Declared after the Env so it is destroyed first:
+// the gate opens before the workers are joined.
+struct HookGate {
+    std::atomic<void (*)()> & hook;
+    explicit HookGate(std::atomic<void (*)()> & h) : hook(h) {
+        g_hook_entered = 0;
+        g_hook_open = false;
+        hook = &gate_hook;
+    }
+    ~HookGate() {
+        hook = nullptr;
+        g_hook_open = true;
+    }
+};
+
+// While a queued job adopts another owner's instance its pool already counts
+// (run_load publishes it without loading), the pool counts that instance once,
+// not once more for the job in flight: a concurrent request into the
+// pool's free place is served at once. When the counting member leaves during
+// the adoption, the job keeps the place it reserved: a concurrent registry
+// adoption into the full pool waits.
+void case_resident_cap_adopt_in_flight() {
+    for (const bool member_leaves : {false, true}) {
+        reset_world();
+        Env e;
+        const std::string tag = member_leaves ? "l" : "s";
+        const std::string shared = "ai" + tag;
+        const std::string other = "ax" + tag;
+        const size_t cap = member_leaves ? 1 : 2;
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(cap);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec spec = e.spec(fn);
+            spec.pool = pool;
+            return e.m->make_slot(spec, e.policy());
+        };
+        auto ext = e.slot(shared);  // other owners, no pool
+        auto ext2 = e.slot(other);
+        ext->request(Priority::minimal);
+        ext2->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(ext) && is_ready(ext2); }));
+        std::vector<std::shared_ptr<Slot>> fill;
+        for (size_t i = 0; i < cap; ++i) {
+            fill.push_back(mk("af" + tag + std::to_string(i)));
+            fill.back()->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(fill.back()); }));
+        }
+        g_low_power = true;  // keeps the prewarm request queued
+        auto b = mk(shared);
+        b->request(Priority::prewarm);  // full pool, not counting the instance: a queued job
+        CHECK(b->state() == SlotState::queued);
+        for (auto & f : fill) f->evict();
+        auto c = mk(shared);
+        c->request(Priority::minimal);  // adopts the registry instance at once
+        CHECK(is_ready(c));
+        CHECK(pool->live() == 1);
+        const uint64_t ev0 = e.m->stats().evictions;
+        {
+            HookGate gate(detail::test_hooks().before_adopt);
+            g_low_power = false;
+            CHECK(wait_for([] { return g_hook_entered.load() == 1; }));
+            CHECK(pool->live() == 1);  // counted once: c's instance is the one in flight
+            if (member_leaves) {
+                c->evict();
+                CHECK(pool->live() == 1);  // the place b's job reserved
+            }
+            auto d = mk(other);
+            d->request(Priority::current);  // registry instance: adopted at once if the pool takes it
+            if (member_leaves) {
+                CHECK(!is_ready(d));
+                CHECK(pool->live() == 1);
+                d.reset();
+            } else {
+                CHECK(is_ready(d));
+                CHECK(pool->live() == 2);
+            }
+            CHECK(calls(shared) == 1 && calls(other) == 1);  // nothing loads while the gate holds
+            g_hook_open = true;
+            CHECK(wait_for([&] { return is_ready(b); }));
+            CHECK(g_hook_entered.load() == 1);  // one adoption, no second job
+            Acquired hb = b->acquire(Demand::if_ready);
+            CHECK(hb && hb.model->as<FakeModel>()->name == shared);
+            if (!member_leaves) {
+                Acquired hc = c->acquire(Demand::if_ready);
+                CHECK(hb && hc && hb.model.get() == hc.model.get());
+                CHECK(is_ready(d));
+            }
+            CHECK(e.m->stats().evictions - ev0 == (member_leaves ? 1u : 0u));  // c's explicit eviction only
+            CHECK(pool->live() == (member_leaves ? 1u : 2u));
+            CHECK(calls(shared) == 1 && calls(other) == 1);
+            hb = Acquired{};
+            d.reset();
+        }
+        CHECK(g_live_models.load() == base + 2);  // the two shared instances
+    }
+}
+
+// A native model whose deleter waits for the test (functions "gd*").
+std::atomic<int> g_delete_entered{0};
+std::atomic<bool> g_delete_open{true};
+
+LoadResult gated_delete_load(const LoadRequest & r) {
+    LoadResult out = fake_load(r);
+    if (!out.model || r.function.rfind("gd", 0) != 0) return out;
+    auto inner = std::static_pointer_cast<FakeModel>(out.model);
+    out.model = std::shared_ptr<FakeModel>(new FakeModel(inner->name), [](FakeModel * m) {
+        ++g_delete_entered;
+        while (!g_delete_open.load()) std::this_thread::sleep_for(1ms);
+        delete m;
+    });
+    return out;
+}
+
+// An instance dropped from a pool on another thread (explicit eviction, slot
+// destruction, retirement) keeps its place until its release completed outside
+// the lock: no replacement load, no second eviction, and never more live native
+// models than the cap while the deleter runs. A reference another owner keeps
+// stops counting in the pool once the pool's own reference is released.
+void case_resident_cap_pending_release() {
+    enum class Drop { evict, destroy, retire };
+    for (const Drop how : {Drop::evict, Drop::destroy, Drop::retire}) {
+        for (const size_t cap : {size_t(1), size_t(2)}) {
+            reset_world();
+            Env e;
+            const std::string tag = std::string(how == Drop::evict ? "e" : how == Drop::destroy ? "d" : "r") +
+                                    std::to_string(cap);
+            const int base = g_live_models.load();
+            auto pool = e.m->make_pool(cap);
+            auto mk = [&](const std::string & fn) {
+                SlotSpec s = e.spec(fn);
+                s.pool = pool;
+                s.load_fn = &gated_delete_load;
+                return e.m->make_slot(s, e.policy());
+            };
+            std::shared_ptr<Slot> keep;  // cap 2: a second resident that must survive
+            if (cap == 2) {
+                keep = mk("pk" + tag);
+                keep->request(Priority::minimal);
+                CHECK(wait_for([&] { return is_ready(keep); }));
+            }
+            auto a = mk("gd" + tag);
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            CHECK(pool->live() == cap);
+            const uint64_t ev0 = e.m->stats().evictions;
+            g_delete_entered = 0;
+            g_delete_open = false;
+            std::thread dropper([&] {
+                switch (how) {
+                    case Drop::evict: a->evict(); break;
+                    case Drop::destroy: a.reset(); break;
+                    case Drop::retire: a->retire("test"); break;  // no handle outstanding
+                }
+            });
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            const std::string repl = "pr" + tag;
+            auto b = mk(repl);
+            b->request(Priority::current);
+            const auto end = Clock::now() + 200ms;
+            int over = 0;
+            while (Clock::now() < end) {
+                if (calls(repl) != 0 || is_ready(b) || g_live_models.load() > base + int(cap) || pool->live() != cap) {
+                    ++over;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+            CHECK(over == 0);
+            CHECK(calls(repl) == 0);
+            CHECK(!keep || is_ready(keep));  // no second victim while the release runs
+            CHECK(e.m->stats().evictions - ev0 == (how == Drop::evict ? 1u : 0u));
+            g_delete_open = true;
+            dropper.join();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            CHECK(!keep || is_ready(keep));  // the release made the room
+            CHECK(e.m->stats().evictions - ev0 == (how == Drop::evict ? 1u : 0u));
+            CHECK(pool->live() == cap);
+            CHECK(g_live_models.load() == base + int(cap));
+        }
+    }
+    // Another owner keeps the evicted instance alive: the pool's own release
+    // completes at once and the replacement loads without waiting for it.
+    reset_world();
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        s.load_fn = &gated_delete_load;
+        return e.m->make_slot(s, e.policy());
+    };
+    auto a = mk("gdo");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    SlotSpec os = e.spec("gdo");
+    os.load_fn = &gated_delete_load;
+    auto other = e.m->make_slot(os, e.policy());  // no pool: adopts a's instance
+    other->request(Priority::minimal);
+    CHECK(is_ready(other));
+    g_delete_entered = 0;
+    g_delete_open = false;
+    a->evict();
+    CHECK(pool->live() == 0);
+    auto b = mk("pro");
+    b->request(Priority::current);
+    CHECK(wait_for([&] { return is_ready(b); }));
+    CHECK(g_delete_entered.load() == 0);
+    CHECK(pool->live() == 1);
+    CHECK(g_live_models.load() == base + 2);  // the other owner's and the replacement
+    g_delete_open = true;
+}
+
+// Releases the final Handle of the instance a job was admitted to adopt, at the
+// moment the worker starts that job (or hands it to the other worker): the hook
+// returns once the release returned or is blocked in the native deleter.
+std::atomic<bool> g_drop_now{false};
+std::atomic<bool> g_dropped{false};
+
+void drop_at_start() {
+    g_drop_now = true;
+    wait_for([] { return g_dropped.load() || g_delete_entered.load() > 0; });
+}
+
+// A queued job admitted to adopt another owner's instance that its pool counts
+// only through a unit's Handle. Releasing that final Handle either leaves the
+// instance alive for the adoption (released at the start of the job) or defers
+// a fresh load until the native deleter has finished (released while the job
+// is still queued). The live native models never exceed the cap.
+void case_resident_cap_adopt_expiry() {
+    for (const bool at_start : {true, false}) {
+        reset_world();
+        Env e;
+        const std::string tag = at_start ? "s" : "q";
+        const std::string shared = "gdx" + tag;
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn, bool pooled) {
+            SlotSpec s = e.spec(fn);
+            if (pooled) s.pool = pool;
+            s.load_fn = &gated_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto ext = mk(shared, false);  // another owner, no pool
+        ext->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(ext); }));
+        auto fill = mk("xf" + tag, true);
+        fill->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(fill); }));
+        g_low_power = true;  // keeps the prewarm request queued
+        auto b = mk(shared, true);
+        b->request(Priority::prewarm);
+        CHECK(b->state() == SlotState::queued);
+        fill->evict();
+        auto a = mk(shared, true);
+        a->request(Priority::minimal);  // adopts the registry instance at once
+        CHECK(is_ready(a));
+        Acquired held = a->acquire(Demand::if_ready);
+        CHECK(bool(held));
+        a.reset();
+        ext.reset();  // only the pooled Handle keeps the instance alive
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+        g_delete_entered = 0;
+        g_delete_open = false;
+        g_drop_now = !at_start;
+        g_dropped = false;
+        std::thread dropper([&] {
+            while (!g_drop_now.load()) std::this_thread::sleep_for(1ms);
+            held = Acquired{};
+            g_dropped = true;
+        });
+        int over = 0;
+        auto watch = [&](int ms) {
+            const auto end = Clock::now() + milliseconds(ms);
+            while (Clock::now() < end) {
+                if (g_live_models.load() > base + 1 || pool->live() > 1) ++over;
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        if (at_start) {
+            detail::test_hooks().job_started = &drop_at_start;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            detail::test_hooks().job_started = nullptr;
+            watch(50);
+            CHECK(g_dropped.load());
+            CHECK(g_delete_entered.load() == 0);  // the adopting job kept it alive
+            CHECK(calls(shared) == 1);            // adopted, never loaded again
+        } else {
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            g_low_power = false;
+            e.m->notify();
+            watch(200);
+            CHECK(!is_ready(b));
+            CHECK(calls(shared) == 1);  // the fresh load waits for the deletion
+        }
+        CHECK(over == 0);
+        g_delete_open = true;
+        dropper.join();
+        CHECK(wait_for([&] { return is_ready(b); }));
+        CHECK(calls(shared) == (at_start ? 1 : 2));
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+    }
+}
+
+// Steers job selection to the prepare worker: while armed, every other thread
+// sees low power, so only the prepare worker picks a prewarm load. Disarmed
+// once a gated native deleter has started.
+std::atomic<bool> g_steer{false};
+
+bool steer_low_power() {
+    if (g_low_power.load()) return true;
+    if (!g_steer.load() || g_delete_entered.load() > 0) return false;
+    std::lock_guard<std::mutex> lk(g_tid_mu);
+    return std::this_thread::get_id() != g_prepare_tid;
+}
+
+// Admission scans hold no model alive. A load job that is not admitted (cap
+// blocked, waiting for a release) or that the prepare worker only hands to the
+// load worker must not keep another owner's instance alive after the last
+// counted reference is gone: its native deleter would then run with no pool
+// counting it, and the load worker could start a replacement meanwhile.
+// Selection is steered to the prepare worker, which then blocks in a gated
+// native deleter while the load worker is free to load.
+//   blocked: a job queued in a full pool on a key whose instance is another
+//     pool's only resident; a request in that pool evicts it. No replacement
+//     loads before the evicted instance's deleter has finished.
+//   wait_release: a queued adoption by two pools evicts one pool's filler
+//     (gated). Its subscribers and the other pool's final Handle go away; a
+//     replacement in that pool loads only once the shared instance is gone.
+//   handoff: the prepare worker admits an adoption and hands it off; the final
+//     Handle is released before the prepare worker lets go of its scan. The
+//     job must not start a fresh load while the instance's deleter runs.
+// Every variant checks the live native models and the pool's count.
+void case_resident_cap_scan_pins_nothing() {
+    enum class Path { blocked, wait_release, handoff };
+    for (const Path path : {Path::blocked, Path::wait_release, Path::handoff}) {
+        reset_world();
+        g_steer = false;
+        g_delete_entered = 0;
+        g_delete_open = true;
+        Config cfg = fast_config();
+        cfg.low_power = &steer_low_power;
+        Env e(cfg);
+        {
+            auto dummy = e.generated("spn-dummy", "spn-dummy");  // records the prepare worker's thread
+            dummy->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(dummy); }));
+        }
+        CHECK(wait_for([] { return g_live_models.load() == 0; }));
+        const int base = g_live_models.load();
+        auto p = e.m->make_pool(1);
+        auto q = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn, const std::shared_ptr<ResidentPool> & pool) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &gated_delete_load;  // functions "gd*" get a gated deleter
+            return e.m->make_slot(s, e.policy());
+        };
+        int over = 0;
+        auto watch = [&](int ms, int live_max, const std::string & no_load, int loads) {
+            const auto end = Clock::now() + milliseconds(ms);
+            while (Clock::now() < end) {
+                if (g_live_models.load() > base + live_max || p->live() > 1 || q->live() > 1 ||
+                    calls(no_load) != loads) {
+                    ++over;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        if (path == Path::blocked) {
+            auto a = mk("gdb", p);  // the instance the queued job's scan looks at
+            a->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(a); }));
+            auto qf = mk("spnqf", q);
+            qf->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(qf); }));
+            Acquired hq = qf->acquire(Demand::if_ready);  // q is full, nothing in it is evictable
+            CHECK(bool(hq));
+            auto b = mk("gdb", q);
+            b->request(Priority::prewarm);
+            CHECK(wait_for([&] {
+                const std::vector<std::string> ev = e.m->events();
+                return std::find(ev.begin(), ev.end(), "blocked:cap:stage/gdb") != ev.end();
+            }));
+            CHECK(b->state() == SlotState::queued);
+            CHECK(g_live_models.load() == base + 2);
+            g_delete_open = false;
+            g_steer = true;
+            auto r = mk("spnr", p);
+            r->request(Priority::prewarm);  // the prepare worker's scan evicts `a`
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            watch(150, 2, "spnr", 0);  // q's instance and the one being deleted
+            CHECK(!is_ready(r));
+            g_delete_open = true;
+            CHECK(wait_for([&] { return is_ready(r); }));
+            CHECK(calls("spnr") == 1);
+            CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));
+            CHECK(b->state() == SlotState::queued);
+        } else if (path == Path::wait_release) {
+            auto ext = mk("spnw", nullptr);  // another owner, no pool
+            ext->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(ext); }));
+            auto fill = mk("spnwf", p);
+            fill->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(fill); }));
+            auto qf = mk("gdw", q);  // evicted by the adoption's admission
+            qf->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(qf); }));
+            g_low_power = true;  // keeps the prewarm requests queued
+            auto b = mk("spnw", p);
+            b->request(Priority::prewarm);
+            auto b2 = mk("spnw", q);
+            b2->request(Priority::prewarm);
+            fill->evict();
+            auto a = mk("spnw", p);
+            a->request(Priority::minimal);  // adopts the registry instance at once
+            CHECK(is_ready(a));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(bool(held));
+            a.reset();
+            ext.reset();  // only p's Handle keeps the shared instance alive
+            CHECK(wait_for([&] { return g_live_models.load() == base + 2; }));
+            CHECK(p->live() == 1);
+            g_delete_open = false;
+            g_steer = true;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            b.reset();
+            b2.reset();
+            held = Acquired{};  // nothing needs the shared instance any more
+            auto repl = mk("spnwr", p);
+            repl->request(Priority::now);
+            CHECK(wait_for([&] { return is_ready(repl); }, 1000));
+            watch(50, 2, "spnwr", 1);  // q's filler being deleted and the replacement
+            CHECK(calls("spnw") == 1);
+            g_delete_open = true;
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+        } else {
+            auto ext = mk("gdh", nullptr);
+            ext->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(ext); }));
+            auto fill = mk("spnhf", p);
+            fill->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(fill); }));
+            g_low_power = true;  // keeps the prewarm request queued
+            auto b = mk("gdh", p);
+            b->request(Priority::prewarm);
+            fill->evict();
+            auto a = mk("gdh", p);
+            a->request(Priority::minimal);  // adopts the registry instance at once
+            CHECK(is_ready(a));
+            Acquired held = a->acquire(Demand::if_ready);
+            CHECK(bool(held));
+            a.reset();
+            ext.reset();  // only p's Handle keeps the instance alive
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+            CHECK(p->live() == 1);
+            g_delete_open = false;
+            g_drop_now = false;
+            g_dropped = false;
+            std::thread dropper([&] {
+                while (!g_drop_now.load()) std::this_thread::sleep_for(1ms);
+                held = Acquired{};
+                g_dropped = true;
+            });
+            detail::test_hooks().handed_off = &drop_at_start;
+            g_steer = true;
+            g_low_power = false;
+            e.m->notify();
+            CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+            detail::test_hooks().handed_off = nullptr;
+            watch(150, 1, "gdh", 1);  // only the instance being deleted; no fresh load
+            CHECK(!is_ready(b));
+            g_delete_open = true;
+            dropper.join();
+            CHECK(wait_for([&] { return is_ready(b); }));
+            CHECK(calls("gdh") == 2);
+            CHECK(wait_for([&] { return g_live_models.load() == base + 1; }));
+        }
+        CHECK(over == 0);
+        g_steer = false;
+    }
+}
+
+// The end of a pending release wakes the load worker by itself: a
+// replacement waiting for the place starts as soon as the pool is told, not at
+// the next periodic re-check. The release is held after its reference is gone,
+// so no other wake-up (the instance's own release) comes after the worker went
+// back to sleep.
+void case_resident_cap_release_wakes() {
+    reset_world();
+    Config cfg = fast_config();
+    cfg.memory_recheck = std::chrono::seconds(30);  // no periodic wake inside the window
+    Env e(cfg);
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        return e.m->make_slot(s, e.policy());
+    };
+    auto a = mk("rwa");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    std::shared_ptr<Slot> b;
+    {
+        HookGate gate(detail::test_hooks().pending_released);
+        std::thread dropper([&] { a->evict(); });
+        CHECK(wait_for([] { return g_hook_entered.load() == 1; }));
+        b = mk("rwb");
+        b->request(Priority::current);
+        std::this_thread::sleep_for(50ms);  // the worker screens b, then sleeps
+        CHECK(calls("rwb") == 0);
+        CHECK(pool->live() == 1);
+        const auto t0 = Clock::now();
+        g_hook_open = true;
+        dropper.join();
+        CHECK(wait_for([&] { return is_ready(b); }, 2000));
+        CHECK(Clock::now() - t0 < 1s);
+    }
+    CHECK(pool->live() == 1);
+}
+
+// A native model whose deleter takes 3 ms (functions "sd*").
+LoadResult slow_delete_load(const LoadRequest & r) {
+    LoadResult out = fake_load(r);
+    if (!out.model || r.function.rfind("sd", 0) != 0) return out;
+    auto inner = std::static_pointer_cast<FakeModel>(out.model);
+    out.model = std::shared_ptr<FakeModel>(new FakeModel(inner->name), [](FakeModel * m) {
+        std::this_thread::sleep_for(3ms);
+        delete m;
+    });
+    return out;
+}
+
+// References a pool drops while another member or a Handle still counts the
+// instance are accounted too: whichever reference is released last, the
+// place comes back only after the native deleter ran.
+void case_resident_cap_shared_release() {
+    // Two members share the victim: the worker evicts both, and the graveyard
+    // releases their references in either order.
+    {
+        reset_world();
+        Env e;
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &gated_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto b = mk("gds");
+        b->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(b); }));
+        auto c = mk("gds");
+        c->request(Priority::minimal);
+        CHECK(is_ready(c));  // adopts b's instance: one place
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+        g_delete_entered = 0;
+        g_delete_open = false;
+        auto d = mk("srr");
+        d->request(Priority::current);  // the worker evicts b and c
+        CHECK(wait_for([] { return g_delete_entered.load() == 1; }));
+        const auto end = Clock::now() + 200ms;
+        int over = 0;
+        while (Clock::now() < end) {
+            if (calls("srr") != 0 || is_ready(d) || g_live_models.load() > base + 1 || pool->live() != 1) ++over;
+            std::this_thread::sleep_for(1ms);
+        }
+        CHECK(over == 0);
+        CHECK(calls("srr") == 0);
+        g_delete_open = true;
+        CHECK(wait_for([&] { return is_ready(d); }));
+        CHECK(pool->live() == 1);
+        CHECK(g_live_models.load() == base + 1);
+    }
+    // An explicit eviction of a held instance races the Handle's release, both
+    // started together; the native deleter is slow. Whichever reference goes
+    // last, the replacement never overlaps it.
+    int over_rounds = 0;
+    for (int i = 0; i < 60; ++i) {
+        reset_world();
+        Env e;
+        const std::string tag = std::to_string(i);
+        const int base = g_live_models.load();
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            s.load_fn = &slow_delete_load;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto a = mk("sd" + tag);
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired h = a->acquire(Demand::now);
+        CHECK(h);
+        auto b = mk("sr" + tag);
+        b->request(Priority::current);  // cap-blocked: a's instance is held
+        std::atomic<bool> go{false};
+        std::thread t1([&] {
+            while (!go.load()) std::this_thread::yield();
+            a->evict();
+        });
+        std::thread t2([&] {
+            while (!go.load()) std::this_thread::yield();
+            h = Acquired{};
+        });
+        go = true;
+        int max_live = 0;
+        const auto end = Clock::now() + 12ms;
+        while (Clock::now() < end) max_live = std::max(max_live, g_live_models.load() - base);
+        t1.join();
+        t2.join();
+        CHECK(wait_for([&] { return is_ready(b); }));
+        max_live = std::max(max_live, g_live_models.load() - base);
+        if (max_live > 1) ++over_rounds;
+    }
+    CHECK(over_rounds == 0);
+}
+
+// A pooled wait=call acquisition queued behind a long load keeps nothing alive
+// while it waits: when the only owner of the registry instance it would adopt
+// goes away, that instance is released at once, not when the waiter returns;
+// a slot that subscribed to the same job and went away is released too.
+void case_call_wait_pins_nothing() {
+    reset_world();
+    Env e;
+    const int base = g_live_models.load();
+    auto pool = e.m->make_pool(1);
+    auto mk = [&](const std::string & fn) {
+        SlotSpec s = e.spec(fn);
+        s.pool = pool;
+        return e.m->make_slot(s, e.policy(Wait::call));
+    };
+    auto a = mk("wpa");
+    a->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(a); }));
+    auto x = e.slot("wps");  // another owner of the shared instance, no pool
+    x->request(Priority::minimal);
+    CHECK(wait_for([&] { return is_ready(x); }));
+    set_beh("wpl", {true});
+    auto l = e.slot("wpl");  // a long load holding the gate
+    l->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("wpl"); }));
+    auto b = mk("wps");  // full pool: a queued job, not an adoption
+    std::atomic<bool> done{false};
+    Acquired hb;
+    std::thread acq([&] {
+        hb = b->acquire(Demand::now);
+        done = true;
+    });
+    CHECK(wait_for([&] { return b->state() == SlotState::queued; }));
+    std::this_thread::sleep_for(30ms);  // several polls of the wait
+    CHECK(g_live_models.load() == base + 2);
+    x.reset();  // the only owner of the shared instance goes away
+    CHECK(wait_for([&] { return g_live_models.load() == base + 1; }, 1000));
+    CHECK(!done.load());
+    // A subscriber of the same job, in another pool, comes and goes while b
+    // waits: each poll sees its slot state, but the wait keeps none of it (its
+    // spec's pool handle is released with it, not when b returns).
+    auto pool2 = e.m->make_pool(1);
+    std::shared_ptr<Slot> z;
+    {
+        SlotSpec zs = e.spec("wps");
+        zs.pool = pool2;
+        z = e.m->make_slot(zs, e.policy());
+    }
+    z->request(Priority::minimal);
+    CHECK(z->state() == SlotState::queued);
+    std::this_thread::sleep_for(30ms);  // several polls of b's wait see z
+    const std::weak_ptr<ResidentPool> wpool2 = pool2;
+    pool2.reset();
+    z.reset();
+    CHECK(wait_for([&] { return wpool2.expired(); }, 1000));
+    CHECK(!done.load());
+    release("wpl");
+    acq.join();
+    CHECK(hb);
+    CHECK(calls("wps") == 2);  // the instance died: a fresh load
+    CHECK(pool->live() == 1);
+}
+
+// The pool count drops when an instance is released or evicted, not when the
+// last strong reference is finally gone: a release wakes the replacement
+// at once, never at the periodic recheck, and one replacement evicts once.
+void case_resident_cap_release_window() {
+    Config c = fast_config();
+    c.memory_recheck = 10s;  // a load that waits for the recheck shows up as a stall
+    Env e(c);
+    int slow = 0;
+    int over_evicted = 0;
+    for (int i = 0; i < 40; ++i) {
+        const std::string tag = std::to_string(i);
+        auto pool = e.m->make_pool(1);
+        auto mk = [&](const std::string & fn) {
+            SlotSpec s = e.spec(fn);
+            s.pool = pool;
+            return e.m->make_slot(s, e.policy());
+        };
+        auto a = mk("xa" + tag);
+        auto b = mk("xb" + tag);
+        a->request(Priority::minimal);
+        CHECK(wait_for([&] { return is_ready(a); }));
+        Acquired held = a->acquire(Demand::now);
+        b->request(Priority::current);
+        std::this_thread::sleep_for(std::chrono::microseconds(100 * (i % 5)));
+        held = Acquired{};
+        if (!wait_for([&] { return is_ready(b); }, 2000)) ++slow;
+
+        auto pool3 = e.m->make_pool(3);
+        std::vector<std::shared_ptr<Slot>> w;
+        for (int k = 0; k < 4; ++k) {
+            SlotSpec s = e.spec("xw" + tag + "_" + std::to_string(k));
+            s.pool = pool3;
+            w.push_back(e.m->make_slot(s, e.policy()));
+        }
+        for (int k = 0; k < 3; ++k) {
+            w[k]->request(Priority::minimal);
+            CHECK(wait_for([&] { return is_ready(w[k]); }));
+        }
+        const uint64_t ev0 = e.m->stats().evictions;
+        w[3]->request(Priority::current);
+        CHECK(wait_for([&] { return is_ready(w[3]); }));
+        std::this_thread::sleep_for(1ms);
+        if (e.m->stats().evictions - ev0 != 1) ++over_evicted;
+        CHECK(pool3->live() == 3);
+    }
+    CHECK(slow == 0);
+    CHECK(over_evicted == 0);
 }
 
 void case_key_lock_requeue() {
@@ -1163,7 +2215,7 @@ void case_call_wait_and_cancel() {
     release("cw-block");
 }
 
-// ---- lifetime cases (§2.9) ------------------------------------------------------
+// ---- lifetime cases ------------------------------------------------------
 
 void case_destroy_during_jobs() {
     Env e;
@@ -1234,6 +2286,27 @@ void case_stateful_isolation() {
     Acquired a1 = o1->acquire(Demand::if_ready);
     Acquired a2 = o2->acquire(Demand::if_ready);
     CHECK(a1 && a2 && a1.model.get() != a2.model.get());
+
+    // A new owner never joins a destroyed owner's load still in flight, even
+    // when its slot lands at the destroyed slot's address: its own load runs.
+    SlotSpec r = e.spec("state-reload");
+    r.shareable = false;
+    set_beh("state-reload", {true});
+    auto first = e.m->make_slot(r, e.policy());
+    const void * first_core = &first->spec();
+    first->request(Priority::minimal);
+    CHECK(wait_for([] { return in_progress("state-reload"); }));
+    first.reset();
+    std::shared_ptr<Slot> next;
+    for (int i = 0; i < 1000; ++i) {  // try for the same allocation
+        next = e.m->make_slot(r, e.policy());
+        if (&next->spec() == first_core) break;
+    }
+    next->request(Priority::minimal);
+    CHECK(next->state() == SlotState::queued);  // not the running job's phase
+    release("state-reload");
+    CHECK(wait_for([&] { return is_ready(next); }));
+    CHECK(calls("state-reload") == 2);
 }
 
 // Child process: one dlclose scenario on a freshly loaded (unpinned) plugin.
@@ -1361,7 +2434,7 @@ void case_exit_during_load() {
     fs::remove_all(dir, ec);
 }
 
-// ---- options, plan, fit, status (§2.12, §2.13, B.5) -------------------------
+// ---- options, plan, fit, status -------------------------
 
 std::map<std::string, std::string> * g_env = new std::map<std::string, std::string>();
 const char * fake_getenv(const char * name) {
@@ -1379,7 +2452,7 @@ void case_resolve_precedence() {
     CHECK(d.use == Use::automatic && d.generate == Generate::background && d.wait == Wait::none);
     CHECK(d.prewarm == Prewarm::predicted && d.cache_dir.empty() && !d.compute_units);
     CHECK(!d.strict_wait_ms && !d.memory_budget_bytes && d.use_source == Source::default_value);
-    CHECK(resolve(none, {}, Platform::ios).wait == Wait::call);  // iOS keeps blocking (R8)
+    CHECK(resolve(none, {}, Platform::ios).wait == Wait::call);  // iOS keeps blocking
 
     // Kill switch: presence (even "0") overrides an explicit require.
     Options req;
@@ -1593,7 +2666,7 @@ void case_hint_keys() {
     const std::string chunk(1000, 'a');
     for (int i = 0; i < 1000; ++i) h.update(chunk);
     CHECK(to_hex(h.finish()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-    // Appendix B.4 hint_id, checked against an independent implementation.
+    // hint_id, checked against an independent implementation.
     CHECK(detail::hint_id("host", "/a/b.mlmodelc", 123, "main", "all", "24G419") == "beee5eda1b4787deef6745db7228c2a0");
     const int64_t t = 1767225600;  // 2026-01-01T00:00:00Z
     CHECK(detail::iso8601_utc(t) == "2026-01-01T00:00:00Z");
@@ -1625,6 +2698,17 @@ const Case kCases[] = {
     {"resident-cap", case_resident_cap},
     {"resident-cap-retained-handle", case_resident_cap_retained_handle},
     {"resident-cap-acquire", case_resident_cap_acquire},
+    {"resident-cap-two-pools", case_resident_cap_two_pools},
+    {"resident-cap-cross-owner", case_resident_cap_cross_owner},
+    {"resident-cap-release-window", case_resident_cap_release_window},
+    {"resident-cap-queued-adopt", case_resident_cap_queued_adopt},
+    {"resident-cap-adopt-in-flight", case_resident_cap_adopt_in_flight},
+    {"resident-cap-pending-release", case_resident_cap_pending_release},
+    {"resident-cap-adopt-expiry", case_resident_cap_adopt_expiry},
+    {"resident-cap-scan-pins-nothing", case_resident_cap_scan_pins_nothing},
+    {"resident-cap-release-wakes", case_resident_cap_release_wakes},
+    {"resident-cap-shared-release", case_resident_cap_shared_release},
+    {"call-wait-pins-nothing", case_call_wait_pins_nothing},
     {"key-lock-requeue", case_key_lock_requeue},
     {"memory-admission", case_memory_admission},
     {"memory-behind-gate", case_memory_behind_gate},

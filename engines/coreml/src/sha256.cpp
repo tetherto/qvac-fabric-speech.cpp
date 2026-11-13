@@ -23,9 +23,9 @@ inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 }  // namespace
 
 Sha256::Sha256() {
-    static constexpr uint32_t H0[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    static constexpr uint32_t kInitialHash[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
                                        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    std::memcpy(h_, H0, sizeof(h_));
+    std::memcpy(h_, kInitialHash, sizeof(h_));
 }
 
 void Sha256::block(const uint8_t * p) {
@@ -41,12 +41,12 @@ void Sha256::block(const uint8_t * p) {
     }
     uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3], e = h_[4], f = h_[5], g = h_[6], h = h_[7];
     for (int i = 0; i < 64; ++i) {
-        const uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const uint32_t sigma1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         const uint32_t ch = (e & f) ^ (~e & g);
-        const uint32_t t1 = h + S1 + ch + K[i] + w[i];
-        const uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const uint32_t t1 = h + sigma1 + ch + K[i] + w[i];
+        const uint32_t sigma0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
         const uint32_t mj = (a & b) ^ (a & c) ^ (b & c);
-        const uint32_t t2 = S0 + mj;
+        const uint32_t t2 = sigma0 + mj;
         h = g;
         g = f;
         f = e;

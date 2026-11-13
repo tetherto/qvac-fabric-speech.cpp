@@ -1,4 +1,4 @@
-// test-coreml-link (PLAN §2.3, §2.16): tts-cpp, qvac-parakeet and audiogen
+// test-coreml-link: tts-cpp, qvac-parakeet and audiogen
 // in one binary, together with every engine's copy of the Core ML runtime.
 // The link itself is the main assertion (a symbol that escaped its namespace,
 // or an Objective-C class, is a duplicate); at run time each copy works and

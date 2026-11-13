@@ -1,6 +1,6 @@
 #pragma once
 
-// Observed-warm hint records (PLAN §2.9, B.3, B.4):
+// Observed-warm hint records:
 //   <cache_dir>/qvac-coreml-v1/hints/<hint_id>.json
 //   {"schema": 1, "warm_load_ms": n|null, "cold_load_ms": n|null,
 //    "last_ok": "<iso8601>", "stale_until": "<iso8601>"|null}
@@ -24,7 +24,7 @@ struct HintRecord {
     std::optional<int64_t> cold_load_ms;
     std::string last_ok;                    // ISO 8601 UTC
     std::optional<int64_t> stale_until_s;   // unix seconds; nullopt = not stale
-    int64_t mtime_ns = 0;                   // file mtime ("most recent", §2.11)
+    int64_t mtime_ns = 0;                   // file mtime: the most recent record wins
 };
 
 // hint_id = hex(H("qvac-coreml-hint\0" || str(host_id) || str(artifact_realpath) ||

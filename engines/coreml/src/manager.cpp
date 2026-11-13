@@ -1,6 +1,6 @@
 // Facades over the scheduler (runtime.h): Manager, Slot, Group, ResidentPool,
-// SharedModel and Handle; route planning (§2.13); the per-image instance and
-// the atexit flag (§2.9).
+// SharedModel and Handle; route planning; the per-image instance and
+// the atexit flag.
 
 #include "qvac_coreml/manager.h"
 
@@ -84,26 +84,33 @@ void SharedModel::retire(const std::string & reason) {
     }
 }
 
-Handle::Handle(std::shared_ptr<SharedModel> m) : m_(std::move(m)) {
-    if (m_) m_->holds_.fetch_add(1);
+Handle::Handle(std::shared_ptr<SharedModel> m) : m_(std::move(m)) {}
+
+Handle::Handle(std::shared_ptr<SharedModel> m, std::shared_ptr<detail::PoolRef> ref)
+    : m_(std::move(m)), ref_(std::move(ref)) {
+    if (m_ && ref_) ref_->holds.fetch_add(1);
 }
 
 Handle & Handle::operator=(Handle && o) noexcept {
     if (this != &o) {
         reset();
         m_ = std::move(o.m_);
+        ref_ = std::move(o.ref_);
     }
     return *this;
 }
 
 void Handle::reset() {
-    if (!m_) return;
     std::shared_ptr<SharedModel> m = std::move(m_);
+    std::shared_ptr<detail::PoolRef> ref = std::move(ref_);
     m_.reset();
-    if (m->holds_.fetch_sub(1) == 1) {
-        // The unit released the model: a resident cap may now evict it.
-        if (std::shared_ptr<detail::Runtime> rt = m->rt_.lock()) rt->notify();
-    }
+    ref_.reset();
+    if (!m || !ref) return;
+    std::shared_ptr<detail::Runtime> rt = m->rt_.lock();
+    // The reference goes before the hold and before the scheduler is woken, so
+    // a worker that sees the release never finds this handle still alive.
+    m.reset();
+    if (ref->holds.fetch_sub(1) == 1 && rt) rt->notify();  // the pool may evict it now
 }
 
 // ---- Slot -----------------------------------------------------------------
@@ -168,7 +175,7 @@ PrewarmResult Group::collect(bool & finished, detail::Graveyard & gy) const {
         gy.keep(c);
         if (c && !e.reached_ready && c->ready_events > e.baseline) {
             // It reached ready since the group was issued: record that result,
-            // even if the engine evicts the slot afterwards (§2.10).
+            // even if the engine evicts the slot afterwards.
             e.reached_ready = true;
             e.last = c->ready_snapshot;
         }
@@ -178,7 +185,7 @@ PrewarmResult Group::collect(bool & finished, detail::Graveyard & gy) const {
                 e.last = rt_->status_locked(*c, now);
                 const SlotState st = e.last.state;
                 const bool done = is_terminal(st) || st == SlotState::deferred_memory || st == SlotState::idle ||
-                                  (c->job && c->job->cap_blocked);
+                                  rt_->cap_blocked_now_locked(*c, gy);
                 if (!done) finished = false;
             }
         }
@@ -225,7 +232,7 @@ Manager::~Manager() {
 }
 
 std::shared_ptr<Manager> Manager::instance() {
-    // Leaked on purpose (§2.9): in-flight Core ML calls are abandoned at exit,
+    // Leaked on purpose: in-flight Core ML calls are abandoned at exit,
     // never joined, and the scheduler outlives static destruction.
     static std::shared_ptr<Manager> * inst = [] {
         detail::register_atexit_once();
@@ -253,7 +260,7 @@ std::shared_ptr<Slot> Manager::make_slot(SlotSpec spec, SlotPolicy policy) {
         if (c->spec.route == Route::prebuilt) {
             c->status_route = StatusRoute::prebuilt;
             c->artifact_path = c->spec.artifact_path;
-            // Prebuilt sidecars get hints keyed by their realpath (§2.9).
+            // Prebuilt sidecars get hints keyed by their realpath.
             c->hint_path = detail::hint_path_for(c->policy.cache_dir, rt_->host_id, c->artifact_path,
                                                  c->spec.function, to_string(c->spec.units), rt_->os_build);
         }
@@ -332,7 +339,7 @@ Plan plan(const PlanInput & in, const Resolved & r) {
     if (!in.coreml_built) return none(SlotState::unsupported, "build");
     if (r.use == Use::off) return none(SlotState::disabled, r.disabled_reason.empty() ? "use=off" : r.disabled_reason);
     if (in.platform == Platform::other) return none(SlotState::unsupported, "platform");
-    // §2.15: an adjacent prebuilt wins over the cache and generation, keeps
+    // An adjacent prebuilt wins over the cache and generation, keeps
     // today's OS support and fit, and is never suppressed by validation.
     if (in.prebuilt_present) {
         Plan p;

@@ -1,7 +1,7 @@
 #pragma once
 
 // The per-library-image Core ML manager: scheduler, model registry, request
-// groups and route planning (PLAN §2.9, §2.10, §2.11, §2.13).
+// groups and route planning.
 //
 // Scheduler (one per manager):
 //  - a prepare queue (1 thread, QOS_CLASS_UTILITY) and a load lane (1 thread),
@@ -65,7 +65,7 @@ struct Stats {
     uint64_t hint_writes = 0;
 };
 
-// ---- Route planning (§2.13, §2.14, §2.15) ---------------------------------
+// ---- Route planning ---------------------------------
 
 struct PlanInput {
     bool coreml_built = false;        // <E>_COREML compiled in
@@ -94,7 +94,7 @@ struct Plan {
 // routes are never suppressed by validation.
 Plan plan(const PlanInput & in, const Resolved & resolved);
 
-// ---- Request groups (§2.10) -----------------------------------------------
+// ---- Request groups -----------------------------------------------
 
 enum class GroupKind { construction, prewarm };
 
