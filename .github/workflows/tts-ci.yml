@@ -598,8 +598,10 @@ jobs:
           coreml_python="$(command -v python3.11 || command -v python3)"
           "$coreml_python" -m venv .venv-chatterbox-turbo
           py=.venv-chatterbox-turbo/bin/python
+          # librosa builds the mel filterbanks both converters embed; numba is
+          # pinned to a release that accepts the requirements' numpy 1.26.4.
           "$py" -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
-            'safetensors==0.8.0' 'huggingface_hub==1.31.0'
+            'safetensors==0.8.0' 'huggingface_hub==1.31.0' 'librosa==0.10.2.post1' 'numba==0.68.1'
           "$py" engines/tts/scripts/convert-t3-turbo-to-gguf.py --ckpt-dir "$hf" --quant q8_0 \
             --out chatterbox-turbo-fixture/chatterbox-t3-turbo-q8_0.gguf
           "$py" engines/tts/scripts/convert-s3gen-to-gguf.py --variant turbo --ckpt-dir "$hf" --quant q8_0 \
