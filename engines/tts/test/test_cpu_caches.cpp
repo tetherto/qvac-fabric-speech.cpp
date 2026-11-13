@@ -30,6 +30,7 @@
 
 #include "tts-cpp/chatterbox/s3gen_pipeline.h"
 #include "chatterbox_tts_test_hooks.h"
+#include "shape_result_cache.h"
 #include "npy.h"
 
 #include <cstdint>
@@ -70,6 +71,21 @@ double now_ms() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double, std::milli>(
         clock::now().time_since_epoch()).count();
+}
+
+// Length-keyed result caches stay bounded while the decoder is kept loaded.
+void test_shape_result_cache_bounded() {
+    fprintf(stderr, "=== bounded shape-result cache ===\n");
+    tts_cpp::detail::shape_result_cache<int64_t> cache(2);
+    const auto first = cache.insert(1, {1.0f});
+    CHECK(cache.insert(1, {9.0f}) == first, "an existing length is reused, not recomputed");
+    cache.insert(2, {2.0f});
+    cache.insert(3, {3.0f});
+    CHECK(cache.size() == 2, "the cache keeps at most its capacity (saw %zu)", cache.size());
+    CHECK(!cache.find(1) && cache.find(2) && cache.find(3), "the oldest length is evicted first");
+    CHECK(first->size() == 1 && (*first)[0] == 1.0f, "an evicted entry stays valid for its holder");
+    cache.clear();
+    CHECK(cache.size() == 0 && !cache.find(3), "clear() empties the cache");
 }
 
 // ---------------- 1. cache-key bit-cast tests ----------------
@@ -682,6 +698,7 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "test-cpu-caches: CPU-side persistent-cache validation\n");
 
     test_cache_keys();
+    test_shape_result_cache_bounded();
     test_initial_state();
 
     if (argc < 2) {
