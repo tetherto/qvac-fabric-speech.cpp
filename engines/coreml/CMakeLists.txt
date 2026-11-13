@@ -10,5 +10,13 @@ if (APPLE)
 endif()
 
 enable_testing()
+# Optional: with a ggml install on CMAKE_PREFIX_PATH (e.g. the ggml-speech
+# port), qvac-coreml-tool and the GGUF cases of the generator tests build too.
+if (NOT TARGET ggml)
+    find_package(ggml CONFIG QUIET)
+    if (ggml_FOUND)
+        add_library(ggml ALIAS ggml::ggml)
+    endif()
+endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/qvac_coreml.cmake)
 qvac_coreml_add_tests()

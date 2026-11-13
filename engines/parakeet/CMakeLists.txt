@@ -573,7 +573,7 @@ if (PARAKEET_BUILD_TESTS)
 
     # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_tests()
+    qvac_coreml_add_tests(REQUIRE_GGML)
 
     # Helper: register a built test target with CTest. Same shape as
     # the standard llama-style `llama_test()` macro: every harness

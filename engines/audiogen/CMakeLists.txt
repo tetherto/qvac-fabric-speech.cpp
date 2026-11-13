@@ -310,7 +310,7 @@ if (AUDIOGEN_BUILD_TESTS)
 
     # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_tests()
+    qvac_coreml_add_tests(REQUIRE_GGML)
 
     add_executable(test-audiogen-parity-checks test/test_parity_checks.cpp)
     audiogen_register_test(test-audiogen-parity-checks)
