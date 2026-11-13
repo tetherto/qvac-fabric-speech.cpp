@@ -299,12 +299,13 @@
     if (!m || !m.length) return dash0(el);
     const x = m[0];
     const backends = String(x.backends || '').split(',').map((s) => s.trim()).filter(Boolean);
-    el.replaceChildren(
+    el.replaceChildren(...[
       h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } }, ...backends.map((b) => h('span', { class: 'chip', text: b })),
         h('span', { class: 'pill ok', text: fmtInt(num(x.accepted)) + ' accepted' }), num(x.failed) ? h('span', { class: 'pill bad', text: fmtInt(num(x.failed)) + ' failed' }) : null),
       h('p', { class: 'small', text: x.work }),
       h('p', { class: 'small muted', text: 'Host ' + x.host + ' · state at collection: ' + x.status }),
-      x.conditions ? h('p', { class: 'note small', text: x.conditions }) : null);
+      x.conditions ? h('p', { class: 'note small', text: x.conditions }) : null,
+    ].filter(Boolean));
   });
 
   dash.draw('gaps', (el) => {
