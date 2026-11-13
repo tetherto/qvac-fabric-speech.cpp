@@ -672,7 +672,10 @@ op); the lookup converts one row at a time from the GGUF's own embedding table,
 so the engine holds no dequantised copy of it, and the sequential ggml decoder
 is built only when a call needs it (see below). The published model keeps the
 joint output projection at 6 bits too (`--nbits-out 6`); the exporter's
-default leaves it fp16.
+default leaves it fp16. The exporter chooses an output-channel group size that
+divides the projection width: 2 for TranscribePsy's 8198 output channels. It
+verifies that the requested output projection was actually palettized before
+reporting success; `--nbits 0 --nbits-out 6` compresses only that projection.
 
 ```bash
 python engines/parakeet/scripts/export-decoder-coreml-ane.py \
@@ -680,6 +683,10 @@ python engines/parakeet/scripts/export-decoder-coreml-ane.py \
   --out  engines/parakeet/models/transcribepsy-250m-eu-sub-decoder.mlpackage \
   --compile-dir engines/parakeet/models --nbits-out 6 --check
 ```
+
+To create the encoder-less EU-sub GGUF accompanying these sidecars, use
+[`strip-encoder-gguf.py`](models.md#transcribepsy) after exporting from the full
+GGUF. Match the compiled sidecar basenames to the stripped GGUF's basename.
 
 With the decoder sidecar loaded, `Engine::transcribe*` on a TDT model takes the
 **independent-segment path**: the mel is cut into segments no longer than the

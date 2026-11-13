@@ -325,9 +325,13 @@ metadata are retained in [the compact results](transcribepsy-eu-coreml-results.j
 Automatic **language** and automatic **window/context** are separate settings.
 These rows leave both window/context at 0 and exercise the default independent
 encoder policy. They are reported without a speedup ratio against unmatched
-native explicit-window baselines. The converted GGUF has no optional long-form
-hints and a generic description: native auto uses a 3750-frame ceiling with 256
-context (the 300 s example balances to 2388-frame windows), rather than 750/94.
+native explicit-window baselines. These historical measurements used a converted
+GGUF with no optional long-form hints and a generic description. At that
+revision, native auto used a 3750-frame ceiling with 256 context (the 300 s
+example balanced to 2388-frame windows). Conversion now records the correct
+TranscribePsy provenance and 750/94-frame hints (60 seconds / 25% overlap);
+the runtime also recognizes older full-EU files through their model variant.
+The historical auto rows below do not measure the corrected native default.
 
 | Device / audio | Core ML ms | RTF | Actual decoder | WER |
 |---|---:|---:|---|---:|
@@ -428,8 +432,9 @@ Compiled program sizes, measured with `du -sk`:
 Together the three encoder programs shrink about 60.1%. The tested `models6`
 **TDT decoder is entirely FP16**, including its joint output projection, and is
 identical to the 17.87 MiB FP16 decoder in `models`. Decoder palettization is
-exportable (`--nbits`, plus separate `--nbits-out`) but was not validated in this
-full-EU evaluation. A Q8_0 GGUF paired with FP16 Core ML sidecars is a hybrid:
+exportable (`--nbits`, plus separate `--nbits-out`) but was not validated in that
+2026-11-11 full-EU evaluation; the focused decoder checks below are separate.
+A Q8_0 GGUF paired with FP16 Core ML sidecars is a hybrid:
 it does not make the Core ML encoder Q8.
 
 The four long six-bit rows were refreshed on 2026-11-11 against the final explicit
@@ -459,3 +464,35 @@ has a small observed long-English quality cost; it is not transcript-identical
 to FP16 on every case. Current raw receipts are in
 `quant6-refresh-20261111/` under the retained artifact directory, and the four
 records replace their superseded entries in the compact and durable final summaries.
+
+### Conversion and decoder regression checks, 2026-11-13
+
+These checks ran on the Mac only. The decoder exporter now chooses a group size
+that divides the output width (2 for 8198 channels) and verifies the emitted
+LUT indices and group size before reporting success. A real
+`--nbits 6 --nbits-out 6` export produced six-bit output indices and compiled
+successfully. The compiled decoder decreased from 18,724,224 to 7,622,918 bytes
+(59.3%). JFK, short French and 51.10-second French transcripts matched the FP16
+decoder with the same encoder/configuration and actual Core ML decoder dispatch.
+Five random 16-lane prediction batches were finite, but quantization changes
+numerical outputs: token argmax matched 78/80 slots and duration argmax 80/80.
+These checks establish working compression and sample transcript parity, not
+bit parity or a speedup. Artifacts are retained in
+`artifacts/transcribepsy-eu-coreml-20261113/decoder-palette/`.
+
+For an older full-EU Q8_0 GGUF with the generic NVIDIA description and no window
+hints, native automatic windows, explicit `--window-sec 60 --overlap 0.25`, and
+`--overlap 0.25` alone all selected 750-frame windows with 94-frame context and
+produced identical 440-word output on 300-second English. Core ML automatic and
+explicit requests also matched all 440 normalized words; automatic requests
+retain independent segments, while explicit requests use the overlapping
+encoder plan. Receipts are in
+`artifacts/transcribepsy-eu-coreml-20261113/default-runtime/`.
+
+The encoder-stripping tool also reproduced the published EU-sub Core ML GGUF
+byte for byte: 948 encoder tensors removed, 13 retained, 17,313,056 output bytes.
+The output and published file both have SHA256
+`9b7a82f33891a8f55917333b58b920878fdcca3d29a1e92d4748c228ba6eb882`.
+A stripped full-EU Q8_0 model additionally passed Mac inference with Core ML
+required. Source revisions, comparison receipts and inference results are in
+`artifacts/transcribepsy-eu-coreml-20261113/strip-validation/`.

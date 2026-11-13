@@ -8,8 +8,10 @@ export-decoder-coreml-ane.py against its scalar reference on random weights.
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -311,6 +313,76 @@ class DecoderExporterTests(unittest.TestCase):
     def test_default_lanes_and_width(self):
         self.assertEqual(DECODER.DEFAULT_LANES, 16)
         self.assertEqual(DECODER.DEFAULT_WIDTH, 1)
+
+
+class DecoderPalettizationTests(unittest.TestCase):
+    def test_joint_output_group_divides_real_and_other_channel_counts(self):
+        for channels, preferred, expected in ((8198, 32, 2), (8198, 16, 2),
+                                               (640, 16, 16), (8199, 16, 1)):
+            self.assertEqual(DECODER.joint_out_group_size(channels, preferred), expected)
+        for channels, preferred in ((0, 16), (8198, 0), (-1, 16)):
+            with self.assertRaises(ValueError):
+                DECODER.joint_out_group_size(channels, preferred)
+
+    @staticmethod
+    def make_model():
+        torch.manual_seed(10)
+        model = torch.nn.Sequential(torch.nn.Conv2d(64, 64, 1), torch.nn.ReLU(),
+                                    torch.nn.Conv2d(64, 70, 1)).eval()
+        traced = torch.jit.trace(model, torch.zeros(1, 64, 1, 1))
+        return DECODER.ct.convert(
+            traced, inputs=[DECODER.ct.TensorType(shape=(1, 64, 1, 1))],
+            compute_precision=DECODER.ct.precision.FLOAT16,
+            minimum_deployment_target=DECODER.ct.target.iOS18, skip_model_load=True)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_grouped_quantization_reaches_joint_output(self):
+        model = self.make_model()
+        result, names, group = DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        self.assertEqual(group, 2)
+        DECODER.verify_joint_out_palettization(result, names, 6, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 4-bit"):
+            DECODER.verify_joint_out_palettization(result, names, 4, 2)
+        with self.assertRaisesRegex(RuntimeError, "requested 6-bit/group 4"):
+            DECODER.verify_joint_out_palettization(result, names, 6, 4)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_output_only_and_fp16_output_modes(self):
+        for nbits, nbits_out in ((0, 6), (6, 0)):
+            with self.subTest(nbits=nbits, nbits_out=nbits_out):
+                result, names, group = DECODER.palettize_decoder_weights(
+                    self.make_model(), 70, nbits, nbits_out, 16)
+                DECODER.verify_joint_out_palettization(result, names, nbits_out, group)
+                other = [op for func in result._mil_program.functions.values()
+                         for op in func.operations if op.op_type == "conv" and op.name not in names]
+                self.assertEqual(len(other), 1)
+                self.assertEqual(other[0].weight.op.op_type,
+                                 "const" if nbits == 0 else "constexpr_lut_to_dense")
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_cli_output_only_option_emits_a_compressed_package(self):
+        weights, meta = toy_tdt_weights(h_pred=64, h_joint=64, d_enc=64,
+                                       vocab=66, n_durations=3, layers=1)
+        reference = types.SimpleNamespace(load_gguf=lambda path: (weights, meta))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "decoder.mlpackage"
+            argv = ["export-decoder", "--gguf", "unused.gguf", "--out", str(output),
+                    "--lanes", "1", "--nbits", "0", "--nbits-out", "6"]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(DECODER, "_load_sibling", side_effect=[ENCODER, reference]):
+                self.assertEqual(DECODER.main(), 0)
+            model = DECODER.ct.models.MLModel(str(output), skip_model_load=True)
+            block = next(iter(model.get_spec().mlProgram.functions["main"].block_specializations.values()))
+            self.assertEqual(sum(op.type == "constexpr_lut_to_dense" for op in block.operations), 1)
+
+    @unittest.skipUnless(hasattr(DECODER.ct, "convert"), "coremltools is not installed")
+    def test_silently_skipped_or_missing_projection_fails(self):
+        model = self.make_model()
+        with mock.patch("coremltools.optimize.coreml.palettize_weights", return_value=model):
+            with self.assertRaisesRegex(RuntimeError, "was not palettized"):
+                DECODER.palettize_decoder_weights(model, 70, 6, 6, 16)
+        with self.assertRaisesRegex(RuntimeError, "projection missing"):
+            DECODER.palettize_decoder_weights(model, 71, 6, 6, 16)
 
 
 if __name__ == "__main__":

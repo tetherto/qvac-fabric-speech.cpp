@@ -1609,7 +1609,7 @@ if (PARAKEET_BUILD_TESTS)
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint
                                 test_fixture_coverage test_verify_gguf_roundtrip
-                                test_transcribepsy_eu_skip_guard)
+                                test_transcribepsy_eu_skip_guard test_strip_encoder_gguf)
             add_test(NAME ${script}
                 COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/${script}.py")
             set_tests_properties(${script} PROPERTIES LABELS "unit"

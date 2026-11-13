@@ -2781,7 +2781,8 @@ static int load_from_gguf_impl(const std::string & gguf_path,
                              get_u32(g, "parakeet.long_form.context_frames", 0),
                              get_str(g, "general.description", ""),
                              out_model.encoder_cfg.long_form_window_hint,
-                             out_model.encoder_cfg.long_form_context_hint);
+                             out_model.encoder_cfg.long_form_context_hint,
+                             out_model.model_variant);
     if (out_model.model_type == ParakeetModelType::NEMOTRON) {
         load_nemotron_metadata(g, out_model);
     }

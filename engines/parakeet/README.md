@@ -46,7 +46,8 @@ English-only without those features. TranscribePsy EU-sub is a 254M FastConforme
 distilled from TDT 0.6B-v3 for eight European languages and published as
 ready-made GGUF and Core ML files; the separate full EU model adds CAFE adapters
 and an English/non-English gate for 25 languages. The engine treats both as TDT checkpoints, and
-`--window-sec 60 --overlap 0.25` is the long-form setting validated on phones
+60-second windows with 25% overlap are the automatic long-form defaults
+(explicitly selectable with `--window-sec 60 --overlap 0.25`)
 (see [CLI](docs/cli.md#long-form-window-flags)). IndicConformer exports CTC by default,
 with an optional RNN-T branch; CTC requires a language selection. Use the
 [model acquisition and format guide](docs/models.md) for each family's
@@ -124,7 +125,11 @@ sidecar (`<model>-decoder.mlmodelc`). With the decoder sidecar the engine cuts
 long recordings at pauses into independent segments and decodes 16 of them per
 Neural Engine dispatch, and it allocates the sequential ggml decoder only when a
 call needs it. A GGUF without encoder weights, such as the published
-TranscribePsy Core ML distribution, loads only with its encoder sidecar; see
+TranscribePsy Core ML distribution, loads only with its encoder sidecar. Create
+that GGUF from the full EU-sub file with `scripts/strip-encoder-gguf.py`; metadata
+and retained quantized weights are preserved. The decoder exporter supports
+separate `--nbits-out` compression for the output projection, including its
+8198-channel shape. See [conversion and stripping](docs/models.md#transcribepsy) and
 [Neural Engine sidecars](docs/backends.md#neural-engine-fixed-window-encoder-and-tdt-decoder-sidecars).
 
 Nemotron 3 Diarization and Sortformer v2.1 can also run their whole network,
