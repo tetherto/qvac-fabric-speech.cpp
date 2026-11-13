@@ -281,6 +281,10 @@ struct EngineResult {
     int sample_rate      = 16000;
     int mel_frames       = 0;
     int encoder_frames   = 0;
+
+    // True only after the batched Core ML TDT decoder actually issued a
+    // prediction. Sequential/streaming decode and native fallback report false.
+    bool decoder_used_coreml = false;
 };
 
 class PARAKEET_API Engine {

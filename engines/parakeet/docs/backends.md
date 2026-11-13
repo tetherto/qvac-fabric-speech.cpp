@@ -615,6 +615,11 @@ validate accuracy on representative long recordings before production use.
 
 ## Neural Engine fixed-window encoder and TDT decoder sidecars
 
+Full TranscribePsy EU additionally needs separate English/adapted encoders and a
+gate-tap encoder, with validated route metadata. Its offline, callback and
+push-PCM paths support Core ML on macOS/iOS; [the full-EU guide](transcribepsy-eu-coreml.md)
+contains export commands, streaming gate semantics and measured decoder dispatch policy.
+
 TDT models can run on the Apple Neural Engine end to end with two sidecars that
 TranscribePsy publishes ready-made
 ([qvac/TranscribePsy-250M-EU-sub-coreml](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub-coreml);
@@ -712,7 +717,8 @@ Neural Engine path never reads, is not loaded.
 | Family | Contract | Inputs the sidecar does not take |
 |---|---|---|
 | CTC (English, IndicConformer), Unified RNN-T, TDT 0.6B-v3 / 1.1B | fixed capacity: shorter inputs are zero-padded to the compiled shape, longer offline inputs are split into overlapping windows | Unified RNN-T cache-aware streaming runs on ggml |
-| TDT with a fixed-window Neural Engine encoder (TranscribePsy) | fixed window with padding masks: shorter inputs are padded and masked, longer offline inputs are split into overlapping windows with 16 frames of seam context, or into pause-cut independent segments when the TDT decoder sidecar is present | streaming runs on ggml; the decoder sidecar serves only the engine's offline transcribe path |
+| Full TranscribePsy EU | fixed ANE English/adapted/gate programs for offline encoding; native-context FP32 CPU/GPU programs for streaming and true unwindowed calls | all public transcription modes execute Core ML with the matching sidecar family; iOS precise programs use Core ML CPU; optional decoder batches offline calls only |
+| TDT with a fixed-window Neural Engine encoder (TranscribePsy EU-sub) | fixed window with padding masks: shorter inputs are padded and masked, longer offline inputs are split into overlapping windows with 16 frames of seam context, or into pause-cut independent segments when the TDT decoder sidecar is present | streaming runs on ggml; the decoder sidecar serves only the engine's offline transcribe path |
 | EOU | exact compiled shape only | every other length, including mismatched streaming windows, runs on ggml; EOU never pads |
 | Nemotron | exact compiled shape only | longer offline inputs and streaming take the cache-aware ggml path |
 | Sortformer v2.1 (`sortformer-streaming-v2.1-aosc`) | masked whole-network diarizer sidecars for batch inputs and AOSC slabs up to their capacity; otherwise the exact-shape batch encoder sidecar plus a masked AOSC encoder sidecar | larger batch inputs and AOSC slabs, and every call without a sidecar, run on ggml |
