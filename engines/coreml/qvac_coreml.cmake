@@ -37,6 +37,7 @@ option(QVAC_COREML_DEV "Compile the Core ML template_dir / QVAC_COREML_TEMPLATE_
 function(_qvac_coreml_runtime_sources out_var with_objc)
     set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
     set(srcs
+        "${dir}/src/generation.cpp"
         "${dir}/src/hints.cpp"
         "${dir}/src/manager.cpp"
         "${dir}/src/options.cpp"
@@ -269,7 +270,7 @@ function(qvac_coreml_add_to target)
         # The interpreter's arithmetic is one IEEE operation per op on every host.
         target_compile_options(${rt} PRIVATE -ffp-contract=off)
         target_link_libraries(${rt} PRIVATE ggml)
-        target_compile_definitions(${rt} PRIVATE QVAC_COREML_GENERATE=1)
+        target_compile_definitions(${rt} PRIVATE QVAC_COREML_GENERATE=1 QVAC_COREML_APPLE_COMPILE=1)
         target_compile_definitions(${target} PRIVATE QVAC_COREML_GENERATE=1)
     endif()
     if (dev)
@@ -348,6 +349,9 @@ function(qvac_coreml_add_tests)
     if (have_ggml)
         target_link_libraries(qvac-coreml-test-runtime PUBLIC ggml)
         target_compile_definitions(qvac-coreml-test-runtime PUBLIC QVAC_COREML_HAVE_GGML=1)
+        # The generation glue (src/generation.cpp) with the portable pipeline;
+        # tests replace the on-device compile (generation::set_compile_override).
+        target_compile_definitions(qvac-coreml-test-runtime PRIVATE QVAC_COREML_GENERATE=1)
     endif()
 
     # A dlopen-able module with a third copy, for the dlclose lifetime case.
