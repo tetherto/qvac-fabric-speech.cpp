@@ -49,11 +49,6 @@ struct Engine::Impl {
     chatterbox_model     model{};
     ggml_gallocr_t       allocr = nullptr;
     std::thread          s3gen_preload_thread;
-    // Loads the S3Gen Core ML sidecar functions a synthesize() call will need
-    // in the background while T3 decodes (see s3gen_coreml::warm).  Each
-    // warm-up waits for the previous one, so they never load concurrently.
-    std::future<void>    coreml_warm;
-    std::atomic<bool>    coreml_warm_stop{false};
 
     // Baked voice-conditioning state.  Populated at construction when
     // `reference_audio` or `voice_dir` is set, then reused by every
@@ -75,10 +70,17 @@ struct Engine::Impl {
     mtl_tokenizer        mtl_tok;
 
     std::atomic<bool>    cancel_flag{false};
-    detail::coreml_policy coreml_policy;
+    // Core ML options (the legacy fields folded in) and the S3Gen sidecar
+    // slots they select; null when Core ML is not built, off or absent. The
+    // slots load in the background; dropping them never waits.
+    CoremlOptions        coreml;
+    std::shared_ptr<detail::s3gen_sidecars> sidecars;
     // S3Gen stage backends reported by every s3gen_synthesize_to_wav call of
     // the current synthesize(); folded into SynthesisResult::s3gen_backend.
     std::set<std::string> s3gen_backends;
+    // Some call of the current synthesize() ran a stage on ggml only because
+    // its Core ML function was still loading.
+    bool                 coreml_pending = false;
 
     explicit Impl(const EngineOptions & o)
         : opts(o) {
@@ -104,7 +106,10 @@ struct Engine::Impl {
         }
         // fail fast on an unsupported output frequency.
         validate_output_sample_rate(opts.output_sample_rate, "chatterbox::Engine");
-        coreml_policy = detail::resolve_coreml_policy(opts.coreml_compute_units, opts.coreml_strict);
+        coreml = detail::merge_legacy_coreml(opts.coreml, opts.coreml_compute_units,
+                                             opts.coreml_strict ? (*opts.coreml_strict ? 1 : 0) : -1,
+                                             /*disabled=*/false);
+        detail::validate_coreml_options(coreml);
 
         ggml_time_init();
         g_log_verbose = opts.verbose ? 1 : 0;
@@ -241,25 +246,40 @@ struct Engine::Impl {
         // preload thread concurrent with construction-time teardown.
         wait_for_preload(s3gen_preload_thread);
 
-        start_coreml_warm({});
+        // The construction group: HiFT plus the widths this host loaded most
+        // recently (prewarm minimal / predicted), every function (all) or
+        // nothing (none). Loads run in the background unless wait = construct.
+        sidecars = detail::s3gen_sidecars::get(opts.s3gen_gguf_path, coreml);
+        if (sidecars) sidecars->start_construction(&cancel_flag);
     }
 
-    // Warms the sidecars for S3Gen calls on these speech-token counts (HiFT
-    // only when empty).  The voice prompt length is the baked one, else the
-    // GGUF's.
-    void start_coreml_warm(std::vector<int> speech_tokens) {
-        if (!detail::coreml_sidecars_enabled(opts.s3gen_gguf_path, coreml_policy)) return;
-        const int prompt_tokens = s3gen_prompt_token.empty() ? -1 : (int) s3gen_prompt_token.size();
-        coreml_warm = std::async(std::launch::async, [this, previous = std::move(coreml_warm),
-                                                      tokens = std::move(speech_tokens), prompt_tokens]() mutable {
-            if (previous.valid()) previous.wait();
-            detail::s3gen_coreml_warm(opts.s3gen_gguf_path, coreml_policy, tokens, prompt_tokens, &coreml_warm_stop);
-        });
+    // The voice prompt length every S3Gen call of this Engine starts with.
+    int prompt_tokens() const {
+        return !s3gen_prompt_token.empty() ? (int) s3gen_prompt_token.size()
+                                           : (sidecars ? sidecars->facts().builtin_prompt_tokens : 0);
+    }
+
+    // Acquires the Core ML models of one S3Gen call, once, before it starts:
+    // the deadline is now plus the call's estimated ggml time, so a bounded
+    // wait for a warm-hinted load never makes the sentence slower than ggml.
+    std::shared_ptr<const S3genCoremlPlan> acquire_plan(const s3gen_synthesize_opts & sopts,
+                                                        const std::vector<int32_t> & speech_tokens) {
+        if (!sidecars) return nullptr;
+        const detail::s3gen_call_shape shape = detail::s3gen_call_shape_for(sopts, speech_tokens, sidecars->facts());
+        const auto budget = std::chrono::duration<double, std::milli>(
+            detail::s3gen_estimate_metal_ms_frames(sidecars->facts().meanflow, shape.frames));
+        auto plan = sidecars->acquire(
+            shape, std::chrono::steady_clock::now() +
+                       std::chrono::duration_cast<std::chrono::steady_clock::duration>(budget),
+            &cancel_flag);
+        if (plan && detail::plan_pending(*plan)) coreml_pending = true;
+        return plan;
     }
 
     ~Impl() {
-        coreml_warm_stop.store(true, std::memory_order_relaxed);
-        if (coreml_warm.valid()) coreml_warm.wait();
+        // Dropping the slots never waits: unstarted loads are cancelled and a
+        // started one finishes in the background with nothing to publish to.
+        sidecars.reset();
         wait_for_preload(s3gen_preload_thread);
         // Release the S3Gen cache (which holds its own backend + buffers)
         // BEFORE freeing the T3 backend.  If we don't, the cache's
@@ -633,9 +653,7 @@ struct Engine::Impl {
         sopts.n_gpu_layers    = opts.n_gpu_layers;
         sopts.backend         = opts.backend;
         sopts.cfg_rate        = opts.s3gen_cfg_rate;
-        sopts.coreml_compute_units = coreml_policy.compute_units;
-        sopts.coreml_strict        = coreml_policy.strict ? 1 : 0;
-        sopts.coreml_disabled      = coreml_policy.disabled;
+        sopts.coreml          = coreml;
 
         // Use the non-owning view fields rather than the *_override
         // vectors so the streaming path doesn't pay a per-chunk MB-
@@ -668,24 +686,17 @@ struct Engine::Impl {
         std::string        backend;
         double             s3gen_ms = 0.0;
         int                tokens   = 0;
+        // A Core ML stage failed on the worker: nothing was rendered, and the
+        // dispatching thread renders the segment again (redo_tokens).
+        bool                 redo = false;
+        std::vector<int32_t> redo_tokens;
     };
 
-    // Renders ONE segment in batch (non-streaming) mode and appends it (see
-    // append_batch_segment).  All per-segment s3gen state is local to this
-    // call, so consecutive calls reset naturally.
-    void synthesize_batch_segment(const std::vector<int32_t> & speech_tokens,
-                                  SynthesisResult & result) {
-        append_batch_segment(render_batch_segment(speech_tokens), result);
-    }
-
-    // S3Gen + HiFT of one batch segment.  Touches no Engine state but the
-    // read-only options and voice views, so it can run on a worker thread
-    // while T3 decodes the next segment.
-    rendered_segment render_batch_segment(const std::vector<int32_t> & speech_tokens) {
+    // The batch-segment options of this Engine (no plan yet).
+    s3gen_synthesize_opts batch_segment_opts() {
         s3gen_synthesize_opts sopts;
         fill_common_s3gen_opts(sopts);
         sopts.cfm_steps = opts.cfm_steps;
-
         // apply_trim_fade defaults to true at the s3gen layer to mask
         // reference-audio bleed-through across the prompt-feat / first
         // synthesized-mel boundary -- the prompt audio context can leak
@@ -701,9 +712,29 @@ struct Engine::Impl {
         // with zero leading silence. Gate on the actual presence of a
         // reference-audio source so the existing reference-audio path is
         // unaffected.
-        const bool has_voice_override =
-            !opts.reference_audio.empty() || !opts.voice_dir.empty();
-        sopts.apply_trim_fade = has_voice_override;
+        sopts.apply_trim_fade = !opts.reference_audio.empty() || !opts.voice_dir.empty();
+        return sopts;
+    }
+
+    // Renders ONE segment in batch (non-streaming) mode on this thread with
+    // `plan` and appends it (see append_batch_segment).  All per-segment
+    // s3gen state is local to this call, so consecutive calls reset
+    // naturally.
+    void synthesize_batch_segment(const std::vector<int32_t> & speech_tokens,
+                                  std::shared_ptr<const S3genCoremlPlan> plan,
+                                  SynthesisResult & result) {
+        append_batch_segment(render_batch_segment(speech_tokens, std::move(plan)), result);
+    }
+
+    // S3Gen + HiFT of one batch segment on the models in `plan`.  Touches no
+    // Engine state but the read-only options and voice views, so it can run
+    // on a worker thread while T3 decodes the next segment; with a plan
+    // marked defer_coreml_failures, a Core ML failure returns `redo` instead
+    // of running ggml there.
+    rendered_segment render_batch_segment(const std::vector<int32_t> & speech_tokens,
+                                          std::shared_ptr<const S3genCoremlPlan> plan) {
+        s3gen_synthesize_opts sopts = batch_segment_opts();
+        sopts.coreml_plan = std::move(plan);
 
         rendered_segment seg;
         sopts.pcm_out = &seg.pcm;
@@ -712,6 +743,11 @@ struct Engine::Impl {
         const auto s3_t0 = std::chrono::steady_clock::now();
         const int rc = s3gen_synthesize_to_wav(speech_tokens, sopts);
         const auto s3_t1 = std::chrono::steady_clock::now();
+        if (rc == detail::S3GEN_RC_COREML_REDO) {
+            seg.redo = true;
+            seg.redo_tokens = speech_tokens;
+            return seg;
+        }
         if (rc == 2) {
             throw std::runtime_error("Engine: synthesis cancelled during S3Gen+HiFT");
         }
@@ -725,8 +761,15 @@ struct Engine::Impl {
     }
 
     // Folds a rendered segment into result.pcm (crossfaded into the previous
-    // segment's tail when not the first) and accumulates its stats.
+    // segment's tail when not the first) and accumulates its stats.  A
+    // segment the worker handed back (a Core ML failure there) is rendered
+    // again here first, on this thread and so in sequence with T3, with a
+    // fresh plan (the failed function is retired, so that stage is on ggml).
     void append_batch_segment(rendered_segment && seg, SynthesisResult & result) {
+        if (seg.redo) {
+            const std::vector<int32_t> tokens = std::move(seg.redo_tokens);
+            seg = render_batch_segment(tokens, acquire_plan(batch_segment_opts(), tokens));
+        }
         s3gen_backends.insert(seg.backend);
         // First segment: result.pcm is empty, so this is a plain append.
         // Later segments: raised-cosine crossfade the seam (a no-op when
@@ -828,6 +871,9 @@ struct Engine::Impl {
             copts.source_tail_samples       = 480;
             copts.cfm_steps                 = opts.stream_cfm_steps;
             copts.streaming = true;  // floor CFM steps for standard CFM
+            // Each chunk is one S3Gen call: its own Core ML plan, acquired
+            // before it starts. Streaming never overlaps T3.
+            copts.coreml_plan = acquire_plan(copts, toks);
 
             const auto s3_t0 = std::chrono::steady_clock::now();
             const int rc = s3gen_synthesize_to_wav(toks, copts);
@@ -900,23 +946,31 @@ struct Engine::Impl {
         wait_for_preload(s3gen_preload_thread);
 
         const bool use_streaming = on_chunk && opts.stream_chunk_tokens > 0;
-        {
-            // The S3Gen calls this request is expected to make, in order.
-            std::vector<int> calls;
+        coreml_pending = false;
+        if (sidecars) {
+            // The S3Gen calls this request is expected to make, from the text
+            // length: their widths load at `current` priority, ahead of
+            // unstarted construction loads, and the resident cap keeps them.
+            const detail::s3gen_gguf_facts & facts = sidecars->facts();
+            std::vector<detail::s3gen_call_shape> calls;
             for (size_t si = 0; si < segments.size(); ++si) {
                 const int speech = detail::coreml_expected_speech_tokens(segments[si].size());
                 if (!use_streaming) {
-                    calls.push_back(speech);
+                    calls.push_back(detail::s3gen_shape(prompt_tokens(), speech, facts.token_mel_ratio, true, true));
                     continue;
                 }
                 for (int window : detail::coreml_stream_windows(speech, si == 0 ? opts.stream_first_chunk_tokens : 0,
                                                                 opts.stream_chunk_tokens,
                                                                 opts.stream_left_context_tokens)) {
-                    calls.push_back(window);
+                    calls.push_back(detail::s3gen_shape(prompt_tokens(), window, facts.token_mel_ratio, false, true));
                 }
             }
-            start_coreml_warm(std::move(calls));
+            sidecars->predict(calls);
         }
+        struct predicted_guard {
+            detail::s3gen_sidecars * sidecars;
+            ~predicted_guard() { if (sidecars) sidecars->end_call(); }
+        } predicted{sidecars.get()};
 
         // resolve the output rate once. 0 keeps the native
         // 24 kHz.  Streaming flows every chunk through a single utterance-
@@ -932,13 +986,12 @@ struct Engine::Impl {
         int global_chunk_idx = 0;  // monotonic across all segments
         s3gen_backends.clear();
 
-        // With S3Gen's CFM and HiFT on Core ML sidecars, the GPU is free for T3
-        // while a sentence is vocoded, so the batch path renders sentence i
-        // on a worker thread while T3 decodes sentence i + 1 (one in flight;
-        // the PCM is still appended in order).  On a shared GPU the two only
-        // contend, so every other configuration stays sequential.
-        const bool overlap_s3gen = !use_streaming && segments.size() > 1 &&
-                                   detail::coreml_offloads_s3gen(opts.s3gen_gguf_path, coreml_policy);
+        // Each sentence's S3Gen models are acquired after its T3. When they
+        // put CFM and HiFT on the CPU and Neural Engine, the GPU is free for
+        // T3, so the batch path renders sentence i on a worker thread while
+        // T3 decodes sentence i + 1 (one in flight; the PCM is still appended
+        // in order).  Otherwise (ggml stages, or Core ML units that may use
+        // the GPU) the sentence renders inline, as the two would only contend.
         std::future<rendered_segment> in_flight;
 
         for (size_t si = 0; si < segments.size(); ++si) {
@@ -958,13 +1011,20 @@ struct Engine::Impl {
                     /*is_first_segment=*/si == 0,
                     /*is_last_segment=*/si + 1 == segments.size(),
                     global_chunk_idx, out_resampler);
-            } else if (overlap_s3gen) {
-                if (in_flight.valid()) append_batch_segment(in_flight.get(), result);
-                in_flight = std::async(std::launch::async, [this, tokens = std::move(speech_tokens)] {
-                    return render_batch_segment(tokens);
-                });
+                continue;
+            }
+            std::shared_ptr<const S3genCoremlPlan> plan = acquire_plan(batch_segment_opts(), speech_tokens);
+            if (in_flight.valid()) append_batch_segment(in_flight.get(), result);
+            if (segments.size() > 1 && plan && s3gen_coreml_plan_offloads(*plan)) {
+                // The worker never runs ggml: a Core ML failure there hands
+                // the segment back to be rendered on this thread.
+                detail::defer_coreml_failures(*plan);
+                in_flight = std::async(std::launch::async,
+                                       [this, tokens = std::move(speech_tokens), plan = std::move(plan)]() mutable {
+                                           return render_batch_segment(tokens, std::move(plan));
+                                       });
             } else {
-                synthesize_batch_segment(speech_tokens, result);
+                synthesize_batch_segment(speech_tokens, std::move(plan), result);
             }
         }
         if (in_flight.valid()) append_batch_segment(in_flight.get(), result);
@@ -982,6 +1042,7 @@ struct Engine::Impl {
         } else if (s3gen_backends.size() > 1) {
             result.s3gen_backend = detail::MIXED_STAGE_BACKEND;
         }
+        result.coreml_pending = coreml_pending;
         return result;
     }
 
@@ -1036,6 +1097,22 @@ BackendDevice Engine::backend_device() const {
 
 bool Engine::gpu_unsupported() const {
     return pimpl_ && pimpl_->model.gpu_unsupported;
+}
+
+std::string Engine::coreml_status() const {
+    return pimpl_ && pimpl_->sidecars ? pimpl_->sidecars->status_json() : std::string("{}");
+}
+
+bool Engine::coreml_wait(int64_t timeout_ms) {
+    if (!pimpl_ || !pimpl_->sidecars) return false;
+    pimpl_->cancel_flag.store(false, std::memory_order_relaxed);
+    return pimpl_->sidecars->wait(timeout_ms, &pimpl_->cancel_flag);
+}
+
+std::string Engine::coreml_prewarm(CoremlOptions::Prewarm scope, bool wait) {
+    if (!pimpl_ || !pimpl_->sidecars) return "{}";
+    pimpl_->cancel_flag.store(false, std::memory_order_relaxed);
+    return pimpl_->sidecars->prewarm(scope, wait, &pimpl_->cancel_flag);
 }
 
 } // namespace tts_cpp::chatterbox

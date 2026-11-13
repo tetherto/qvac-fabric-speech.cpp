@@ -39,13 +39,18 @@
 // to the S3Gen GGUF (`chatterbox-s3gen-q8_0.gguf` ->
 // `chatterbox-s3gen-{encoder,cfm,hift}.mlmodelc`, the quant tag dropped), the
 // S3Gen encoder, CFM estimator and HiFT decoder run on them (the Neural Engine
-// by default) whatever the `backend` option; T3, the voice frontend and the
-// rest of S3Gen stay on ggml. See docs/chatterbox.md "Core ML sidecars".
+// by default) whatever the `backend` option, once loaded; T3, the voice
+// frontend and the rest of S3Gen stay on ggml. Loading never blocks
+// construction or synthesis by default: the functions load in the
+// background, and each sentence runs on ggml until the ones it needs are
+// ready. See `EngineOptions::coreml` and docs/chatterbox.md "Core ML
+// sidecars".
 //
 // Implemented in src/chatterbox_engine.cpp on top of the library-internal
 // helpers in src/chatterbox_t3_internal.h.
 
 #include "tts-cpp/backend.h"
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <cstdint>
@@ -280,17 +285,22 @@ struct EngineOptions {
     // valid.
     std::string backend;
 
-    // Core ML sidecar policy for this Engine, resolved once at construction
-    // without modifying process environment variables. Empty inherits
-    // CHATTERBOX_COREML_COMPUTE_UNITS (default "cpu_and_ane"). Explicit values
-    // must be all, cpu_and_ane, cpu_and_gpu or cpu_only; invalid values throw
-    // even in builds without Core ML.
+    // Legacy aliases of `coreml` below: each fills the matching field when
+    // that is unset. coreml_compute_units -> coreml.compute_units (all,
+    // cpu_and_ane, cpu_and_gpu or cpu_only; invalid values throw even in builds
+    // without Core ML); coreml_strict true -> coreml.use = require, false ->
+    // automatic (so CHATTERBOX_COREML_STRICT is ignored).
     std::string coreml_compute_units;
-    // Unset inherits CHATTERBOX_COREML_STRICT (presence means true, even "0").
-    // True makes a present sidecar that cannot serve a call (failed
-    // prediction, input longer than its widest function) an error instead of
-    // a ggml fallback. CHATTERBOX_COREML_DISABLE keeps every stage on ggml.
     std::optional<bool> coreml_strict;
+
+    // Core ML options (tts-cpp/coreml_options.h), resolved once at
+    // construction without modifying process environment variables.
+    // CHATTERBOX_COREML_DISABLE keeps every stage on ggml. With the defaults
+    // the constructor requests HiFT plus the widths this host loaded most
+    // recently and never waits; each synthesize() requests the widths its
+    // sentences need and runs each sentence's stages on Core ML only when their
+    // functions are ready at the start of that sentence.
+    CoremlOptions coreml;
 };
 
 // Per-chunk PCM callback.  Receives a pointer to `samples` consecutive
@@ -325,6 +335,10 @@ struct SynthesisResult {
     // ...) when every stage of every segment and chunk ran on Core ML, or
     // "mixed". A sidecar that fails a prediction is retired and ggml takes over.
     std::string s3gen_backend = "ggml";
+
+    // True when some stage ran on ggml only because its Core ML function was
+    // still loading (it will serve a later call).
+    bool coreml_pending = false;
 };
 
 class TTS_CPP_API Engine {
@@ -405,6 +419,21 @@ public:
     // True iff a GPU was present but declined by policy (vendor off the validated
     // allowlist, e.g. Mali), so we fell back to CPU. Distinguishes this from a GPU-less host.
     bool gpu_unsupported() const;
+
+    // Core ML sidecar status as JSON: per function its state ("queued",
+    // "loading", "ready", "failed", ...), route, compute units, label, warm
+    // hint and load timings. "{}" when no sidecar is in use.
+    std::string coreml_status() const;
+
+    // Waits until the construction group (the functions requested at
+    // construction) finished; timeout_ms < 0 waits without limit. True when
+    // every one of them is ready. Engine::cancel() interrupts it.
+    bool coreml_wait(int64_t timeout_ms = -1);
+
+    // Requests another group of functions (scope minimal or predicted: the
+    // minimal set; all: every function) and, with `wait`, blocks until it
+    // finished. Returns the group's result as JSON ("{}" without sidecars).
+    std::string coreml_prewarm(CoremlOptions::Prewarm scope, bool wait);
 
 private:
     struct Impl;
