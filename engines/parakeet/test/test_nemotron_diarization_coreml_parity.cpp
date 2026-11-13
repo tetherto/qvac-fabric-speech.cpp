@@ -191,13 +191,16 @@ bool run_cases(const parakeet::ParakeetCtcModel & accelerated, const parakeet::P
 }
 
 // Every diarizer stage of the status JSON came from the generation cache.
+// Stage objects have sorted keys, so each starts at its "artifact_key".
 bool every_diarizer_generated(const std::string & status) {
+    const std::string start = "{\"artifact_key\"";
     int stages = 0;
-    for (size_t at = status.find("\"stage\":\"diarizer-"); at != std::string::npos;
-         at = status.find("\"stage\":\"diarizer-", at + 1)) {
+    for (size_t at = status.find(start); at != std::string::npos;) {
+        const size_t next = status.find(start, at + 1);
+        const std::string stage = status.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        at = next;
+        if (stage.find("\"stage\":\"diarizer-") == std::string::npos) continue;
         ++stages;
-        const size_t end = status.find('}', at);
-        const std::string stage = status.substr(at, end == std::string::npos ? std::string::npos : end - at);
         if (stage.find("\"route\":\"generated\"") == std::string::npos &&
             stage.find("\"route\":\"cached\"") == std::string::npos) {
             return false;
