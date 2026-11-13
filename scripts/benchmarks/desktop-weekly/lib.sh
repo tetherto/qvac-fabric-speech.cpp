@@ -16,6 +16,8 @@ readonly DEADLINE_POLL_SECONDS="${DEADLINE_POLL_SECONDS:-5}"
 readonly KILL_GRACE_SECONDS="${KILL_GRACE_SECONDS:-15}"
 readonly GPU_SAMPLE_MS=250
 readonly HOST_LOAD_WINDOW_SECONDS=1
+readonly GPU_LEASE_TOOL="gpu-run"
+readonly LEASED_GPU_INDEX=0
 readonly ENGINE_GGML_PIN_FILE="engines/tts/scripts/setup-ggml.sh"
 readonly HOST_LOAD_SUFFIX=".load.json"
 readonly MEMORY_SAMPLE_SECONDS=0.25
@@ -64,7 +66,32 @@ load_config() {
   GGML_SRC="$SRC_DIR/ggml"
   REGISTRY_CLIENT_DIR="$BENCH_HOME/registry-client"
   MODELS_VENV="$BENCH_HOME/venv"
+  adopt_gpu_lease
   export BENCH_HOME CONFIG_FILE MODELS_DIR FAMILIES_JSON BACKENDS
+}
+
+inside_gpu_lease() { [ -n "${GPU_RUN_LEASE:-}" ]; }
+
+adopt_gpu_lease() {
+  if inside_gpu_lease; then
+    GPU_INDEX="$LEASED_GPU_INDEX"
+    export GPU_LOCK_QUIET=1
+  fi
+}
+
+gpu_backends_requested() {
+  case ",$(resolve_backends)," in *",cuda,"*|*",vulkan,"*) return 0 ;; *) return 1 ;; esac
+}
+
+needs_gpu_lease() {
+  ! inside_gpu_lease && command -v "$GPU_LEASE_TOOL" > /dev/null 2>&1 && gpu_backends_requested
+}
+
+gpu_lease_timeout_seconds() { echo $(( LOCK_WAIT_HOURS * SECONDS_PER_HOUR )); }
+
+export_gpu_selection() {
+  if inside_gpu_lease; then unset GGML_VK_VISIBLE_DEVICES; return 0; fi
+  export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
 }
 
 setup_path() {
@@ -321,8 +348,17 @@ cmake_prefix_path() {
   echo "$own${own:+${CMAKE_PREFIX_PATH:+;}}$CMAKE_PREFIX_PATH"
 }
 
+cached_cmake_source() { sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null; }
+
+discard_ggml_build_of_another_source() {
+  local build="${BUILDS_DIR:?}/${1:?}/ggml" cached
+  cached="$(cached_cmake_source "$build")"
+  if [ -n "$cached" ] && [ "$cached" != "$(ggml_cmake_source)" ]; then rm -rf "$build"; fi
+}
+
 configure_ggml() {
   local backend="$1" dir="$BUILDS_DIR/$1" log_dir="$2"
+  discard_ggml_build_of_another_source "$backend"
   cmake -S "$(ggml_cmake_source)" -B "$dir/ggml" -G "$(cmake_generator)" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_CCACHE=OFF \
     -DCMAKE_INSTALL_PREFIX="$dir/ggml-install" -DCMAKE_PREFIX_PATH="$(cmake_prefix_path)" $(ggml_backend_options "$backend") \
@@ -369,7 +405,7 @@ export_backend_environment() {
   local lib="$BUILDS_DIR/$1/ggml-install/lib"
   export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH="$lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-  export CUDA_VISIBLE_DEVICES="$GPU_INDEX" GGML_VK_VISIBLE_DEVICES="$GPU_INDEX"
+  export_gpu_selection
   export_coreml_python
 }
 
