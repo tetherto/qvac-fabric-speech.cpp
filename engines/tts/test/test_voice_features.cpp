@@ -11,7 +11,7 @@
 
 #include "ggml.h"
 #include "gguf.h"
-#include "npy.h"
+#include "parity_test.h"
 
 #include <algorithm>
 #include <cmath>
@@ -68,31 +68,11 @@ int main(int argc, char ** argv) {
     // Load the Python reference.
     fprintf(stderr, "[4/4] loading reference %s\n", ref_path.c_str());
     npy_array ref = npy_load(ref_path);
-    fprintf(stderr, "      Python prompt_feat shape=(%lld, %lld)  n=%zu\n",
-            (long long)ref.shape[0], (long long)ref.shape[1], ref.n_elements());
-
-    size_t n = std::min(feat.size(), ref.n_elements());
-    if (n == 0) { fprintf(stderr, "empty comparison\n"); return 1; }
-
-    const float * r = (const float *)ref.data.data();
-    float ma = 0.0f, rsum = 0.0f, max_ref = 0.0f, sum_abs = 0.0f;
-    for (size_t i = 0; i < n; ++i) {
-        float d = feat[i] - r[i];
-        float ad = std::fabs(d);
-        ma = std::max(ma, ad);
-        rsum += d * d;
-        sum_abs += ad;
-        max_ref = std::max(max_ref, std::fabs(r[i]));
-    }
-    const double rms = std::sqrt(rsum / (double)n);
-    const double mean_abs = sum_abs / (double)n;
-    const double rel = ma / std::max(max_ref, 1e-12f);
-    fprintf(stderr,
-        "\n[result] C++ vs Python prompt_feat:\n"
-        "    n=%zu  max_abs=%.4e  mean_abs=%.4e  rms=%.4e  max|ref|=%.4e  rel=%.4e\n",
-        n, (double)ma, mean_abs, rms, (double)max_ref, rel);
-
+    // Relative max error against the complete, finite float32 reference.
+    constexpr double kRelativeTolerance = 2e-3;
+    const bool passed = tts_test::check_f32("prompt_feat", feat, {T, n_mels}, ref,
+                                             kRelativeTolerance);
     gguf_free(g);
     if (tmp_ctx) ggml_free(tmp_ctx);
-    return 0;
+    return passed ? 0 : 1;
 }

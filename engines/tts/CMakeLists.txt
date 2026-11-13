@@ -2925,6 +2925,14 @@ if (TTS_CPP_BUILD_TESTS)
             REQUIRES "${_tcb_t3_mtl_gguf}" "${_tcb_s3gen_mtl_gguf}")
     endif()
 
+    add_executable(test-parity-checks test/test_parity_checks.cpp)
+    target_include_directories(test-parity-checks PRIVATE src)
+    tts_cpp_apply_ccache(test-parity-checks)
+    tts_cpp_register_test(test-parity-checks LABEL "unit")
+
+    set(_tcb_campplus_ref "${TTS_CPP_TEST_REF_DIR}/campplus-ref")
+    set(_tcb_tokenizer_ref "${TTS_CPP_TEST_REF_DIR}/s3tokenizer-ref")
+
     add_executable(test-voice-features
         test/test_voice_features.cpp
         src/voice_features.cpp
@@ -2974,8 +2982,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-campplus)
     tts_cpp_register_test(test-campplus
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/fbank.npy" "${_tcb_s3gen_ref}/embedding.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/fbank.npy" "${_tcb_s3gen_ref}/embedding.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/fbank.npy" "${_tcb_campplus_ref}/embedding.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/fbank.npy" "${_tcb_campplus_ref}/embedding.npy")
 
     add_executable(test-fbank
         test/test_fbank.cpp
@@ -2987,8 +2995,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-fbank)
     tts_cpp_register_test(test-fbank
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/fbank.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/fbank.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/fbank_raw.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/fbank_raw.npy")
 
     add_executable(test-voice-embedding
         test/test_voice_embedding.cpp
@@ -3004,8 +3012,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-voice-embedding)
     tts_cpp_register_test(test-voice-embedding
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/embedding.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/embedding.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/embedding.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_campplus_ref}/wav_16k.npy" "${_tcb_campplus_ref}/embedding.npy")
 
     add_executable(test-s3tokenizer
         test/test_s3tokenizer.cpp
@@ -3016,8 +3024,8 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-s3tokenizer)
     tts_cpp_register_test(test-s3tokenizer
         LABEL    "fixture"
-        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/log_mel.npy" "${_tcb_s3gen_ref}/speech_tokens.npy"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_s3gen_ref}/wav_16k.npy" "${_tcb_s3gen_ref}/log_mel.npy" "${_tcb_s3gen_ref}/speech_tokens.npy")
+        ARGS     "${_tcb_s3gen_gguf}" "${_tcb_tokenizer_ref}/wav_16k.npy" "${_tcb_tokenizer_ref}/log_mel.npy" "${_tcb_tokenizer_ref}/tokens.npy"
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_tokenizer_ref}/wav_16k.npy" "${_tcb_tokenizer_ref}/log_mel.npy" "${_tcb_tokenizer_ref}/tokens.npy")
 
     # Attention-free end-of-speech stop controller.  Pure host
     # logic with no model / ggml dependency, so it links only its own source
@@ -3427,7 +3435,17 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-tts-streaming
         LABEL    "fixture"
         ARGS     "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}"
-        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}")
+        REQUIRES "${_tcb_s3gen_gguf}" "${_tcb_streaming_ref}/speech_tokens.npy"
+                 "${_tcb_streaming_ref}/chunk_01_tokens.npy"
+                 "${_tcb_streaming_ref}/chunk_01_mels_new.npy"
+                 "${_tcb_streaming_ref}/chunk_01_step0_x_in.npy")
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME test-streaming-fixture-validation
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/test_streaming_validation.py"
+                    $<TARGET_FILE:test-tts-streaming>)
+        set_tests_properties(test-streaming-fixture-validation PROPERTIES
+            LABELS "unit" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    endif()
 
     # Pure sentence-splitter unit test (no model/fixture) -- always runs.
     # Pins split_text_for_tts after it was lifted into the shared
@@ -4290,16 +4308,12 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-capability-cache)
     tts_cpp_register_test(test-supertonic-capability-cache LABEL "unit")
 
-    # follow-up — Engine::warm_up + EngineOptions::prewarm_text
-    # API-surface lockdown.  CPU-only compile-time + runtime contract test;
-    # the Vulkan-side first-synth-latency reduction is exercised by the
-    # fixture-bound integration tests on a Vulkan-capable host.
-    add_executable(test-supertonic-warm-up-api
-        test/test_supertonic_warm_up_api.cpp)
-    target_link_libraries(test-supertonic-warm-up-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-warm-up-api PRIVATE include)
-    tts_cpp_apply_ccache(test-supertonic-warm-up-api)
-    tts_cpp_register_test(test-supertonic-warm-up-api LABEL "unit")
+    # Consolidated API/default checks and nested K/V dispatch restoration.
+    add_executable(test-supertonic-api test/test_supertonic_api.cpp)
+    target_link_libraries(test-supertonic-api PRIVATE tts-cpp)
+    target_include_directories(test-supertonic-api PRIVATE src include)
+    tts_cpp_apply_ccache(test-supertonic-api)
+    tts_cpp_register_test(test-supertonic-api LABEL "unit")
 
     # round 3 — multi-device Vulkan auto-pick policy
     # (--vulkan-device -1 → pick device with most free VRAM).
@@ -4314,22 +4328,6 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_apply_ccache(test-supertonic-vulkan-device-select)
     tts_cpp_register_test(test-supertonic-vulkan-device-select LABEL "unit")
 
-    # round 6 — F16-weights deny-list API surface
-    # (EngineOptions::f16_weights_deny_list + load_supertonic_gguf
-    # 7th parameter + 2-arg should_materialise_f16_weight overload).
-    # CPU-only compile-time SFINAE + runtime defaults check; the
-    # predicate-level behaviour is covered by the existing
-    # test-supertonic-f16-weights TU.  The fixture-level shape /
-    # dtype check (loads model with deny-list, verifies a denied
-    # tensor stays F32) runs under the same fixture as the
-    # baseline F16-weights test on hosts with the GGUF available.
-    add_executable(test-supertonic-f16-deny-list-api
-        test/test_supertonic_f16_deny_list_api.cpp)
-    target_link_libraries(test-supertonic-f16-deny-list-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-f16-deny-list-api PRIVATE ggml/include src include)
-    tts_cpp_apply_ccache(test-supertonic-f16-deny-list-api)
-    tts_cpp_register_test(test-supertonic-f16-deny-list-api LABEL "unit")
-
     # round 4 — multi-dtype K/V flash-attention dispatch
     # resolver (`resolve_kv_attn_type`) — pure-logic policy split
     # from the Vulkan-only dispatch site so the behaviour matrix
@@ -4340,17 +4338,6 @@ if (TTS_CPP_BUILD_TESTS)
     target_include_directories(test-supertonic-kv-attn-type PRIVATE ggml/include src include)
     tts_cpp_apply_ccache(test-supertonic-kv-attn-type)
     tts_cpp_register_test(test-supertonic-kv-attn-type LABEL "unit")
-
-    # round 4 — API-surface lockdown for the new
-    # EngineOptions::kv_attn_type field, supertonic_model field,
-    # supertonic_kv_attn_type() thread-local accessor, and the
-    # dispatch-scope `prev_kv_attn_type` for RAII teardown.
-    add_executable(test-supertonic-kv-attn-type-api
-        test/test_supertonic_kv_attn_type_api.cpp)
-    target_link_libraries(test-supertonic-kv-attn-type-api PRIVATE tts-cpp)
-    target_include_directories(test-supertonic-kv-attn-type-api PRIVATE ggml/include src include)
-    tts_cpp_apply_ccache(test-supertonic-kv-attn-type-api)
-    tts_cpp_register_test(test-supertonic-kv-attn-type-api LABEL "unit")
 
     # Supertonic v3 language-coverage contract.
     # Pins the runtime language validator against the v3 bundle

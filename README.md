@@ -288,6 +288,12 @@ unit tests from fixture coverage. Its fixture runner rejects runs with no execut
 tests and can require specific model-family tests to pass; the opt-in GPU CI lane
 uses this gate.
 
+TTS's [test guide](engines/tts/docs/testing.md) separates model-free checks
+from optional numerical fixtures and documents how to generate independent
+CAMPPlus and speech-tokenizer references. Chatterbox preprocessing and streaming
+parity harnesses reject numerical mismatches, non-finite values and incomplete
+output.
+
 AudioGen's [test guide](engines/audiogen/docs/testing.md) documents independent
 model-free suites and required model-backed CI coverage. The macOS lane stages
 pinned ACE-Step and MiniMax fixtures and fails if generation tests skip.
