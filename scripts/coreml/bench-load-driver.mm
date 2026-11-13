@@ -27,8 +27,10 @@
 //       on-device generation will. manager = the runtime's Manager (gated);
 //       manual-gated = one thread per queue sharing one mutex (the gate by
 //       hand); ungated = the same two threads without the mutex.
-//       Every model that loads stays resident until the final readings;
-//       detail.models_live counts them.
+//       available_bytes_at_start and footprint_base are read before anything
+//       loads. Every model that loads stays resident until the final readings
+//       (footprint_end, footprint_max), and models_live counts the models
+//       still alive when they are taken.
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
@@ -157,7 +159,16 @@ std::string ns_error(NSError * e) {
     return e ? std::string(e.localizedDescription.UTF8String ?: "error") : std::string("unknown error");
 }
 
+// Loaded runtime models alive in this process. `ttr` reports it beside
+// footprint_end, so a model released before the final readings is not counted.
+std::atomic<long> g_models_live{0};
+
 struct BenchModel {
+    explicit BenchModel(MLModel * m) : model(m) { ++g_models_live; }
+    ~BenchModel() { --g_models_live; }
+    BenchModel(const BenchModel &) = delete;
+    BenchModel & operator=(const BenchModel &) = delete;
+
     MLModel * model = nil;
 };
 
@@ -277,7 +288,7 @@ qc::LoadResult bench_load_fn(const qc::LoadRequest & req) {
         r.error = qc::Error::deterministic(error, "MLModel");
         return r;
     }
-    auto * bm = new BenchModel{m};
+    auto * bm = new BenchModel(m);
     r.model = std::shared_ptr<void>(bm, [](void * p) { delete static_cast<BenchModel *>(p); });
     return r;
 }
@@ -592,12 +603,9 @@ json ttr_manager(const std::vector<ArtifactArg> & arts, bool generate, qc::Compu
                             {"deferred_memory_ms", deferred_ms[i]},
                             {"status", json::parse(qc::to_json(slots[i]->status()))}});
     }
-    size_t live = 0;
-    for (const auto & slot : slots) live += slot->state() == qc::SlotState::ready ? 1 : 0;
     const qc::Stats st = mgr->stats();
     keep = held;
     return {{"t_issue_ms", t_issue},
-            {"models_live", live},
             {"group", json::parse(qc::to_json(res))},
             {"slots", per_slot},
             {"transitions", transitions},
@@ -642,9 +650,8 @@ json ttr_manual(const std::vector<ArtifactArg> & arts, bool generate, qc::Comput
     json slots = json::array();
     for (const bench_ttr::ManualResult & r : out->results)
         slots.push_back({{"slot", r.slot}, {"ready_ms", r.ready_ms}, {"ok", r.ok}});
-    const size_t live = out->retained.size();
     keep = out;
-    return {{"t_issue_ms", t_issue}, {"slots", slots}, {"models_live", live}};
+    return {{"t_issue_ms", t_issue}, {"slots", slots}};
 }
 
 int cmd_ttr(const Args & a) {
@@ -661,31 +668,37 @@ int cmd_ttr(const Args & a) {
     [NSFileManager.defaultManager createDirectoryAtPath:@(work.c_str()) withIntermediateDirectories:YES
                                              attributes:nil error:nil];
 
-    const uint64_t base = phys_footprint();
-    double ready_ms = -1;
-    json detail;
-    // Holds every loaded model until after the final readings below.
-    std::shared_ptr<void> keep;
-    if (mode == "manager") {
-        detail = ttr_manager(arts, generate, units, work, cache, a.flag("--memory-admission"), timeout_s, ready_ms,
-                             keep);
-    } else if (mode == "manual-gated" || mode == "ungated") {
-        detail = ttr_manual(arts, generate, units, work, mode == "manual-gated", ready_ms, keep);
-    } else {
+    if (mode != "manager" && mode != "manual-gated" && mode != "ungated")
         die("--mode must be manager, manual-gated or ungated");
-    }
-    emit({{"mode", mode},
-          {"route", route},
-          {"units", qc::to_string(units)},
-          {"host_id", qc::detail::device_host_id()},
-          {"memory_admission", a.flag("--memory-admission")},
-          {"available_bytes_at_start", qc::detail::device_available_memory()},
-          {"time_to_ready_ms", ready_ms},
-          {"footprint_base", base},
-          {"footprint_end", phys_footprint()},
-          {"footprint_max", lifetime_max_footprint()},
-          {"timeline", timeline_json()},
-          {"detail", detail}});
+
+    double ready_ms = -1;
+    const auto r = bench_ttr::with_readings(
+        [] {
+            return json{{"footprint_base", phys_footprint()},
+                        {"available_bytes_at_start", qc::detail::device_available_memory()}};
+        },
+        [&](std::shared_ptr<void> & keep) {
+            if (mode == "manager")
+                return ttr_manager(arts, generate, units, work, cache, a.flag("--memory-admission"), timeout_s,
+                                   ready_ms, keep);
+            return ttr_manual(arts, generate, units, work, mode == "manual-gated", ready_ms, keep);
+        },
+        [] {
+            return json{{"footprint_end", phys_footprint()},
+                        {"footprint_max", lifetime_max_footprint()},
+                        {"models_live", g_models_live.load()}};
+        });
+    json out = {{"mode", mode},
+                {"route", route},
+                {"units", qc::to_string(units)},
+                {"host_id", qc::detail::device_host_id()},
+                {"memory_admission", a.flag("--memory-admission")},
+                {"time_to_ready_ms", ready_ms},
+                {"timeline", timeline_json()},
+                {"detail", r.run}};
+    for (const json & readings : {r.start, r.end})
+        for (const auto & kv : readings.items()) out[kv.key()] = kv.value();
+    emit(out);
     return ready_ms < 0 ? 3 : 0;
 }
 

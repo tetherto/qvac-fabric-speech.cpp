@@ -100,8 +100,11 @@ remove_tree() { # refuses anything that is not a qvac-bench-* directory
 cmd_cleanup() {
   [ $# -eq 1 ] || usage
   local id; id=$(resolve_id "$1")
-  local removed=0 p
-  for p in "$HOSTS_DIR/$id" $(caches_of "$id"); do
+  local removed=0 p paths=()
+  paths+=("$HOSTS_DIR/$id")
+  # One path per line: a path may contain spaces.
+  while IFS= read -r p; do paths+=("$p"); done < <(caches_of "$id")
+  for p in "${paths[@]}"; do
     [ -e "$p" ] || continue
     remove_tree "$p"; removed=$((removed + 1))
   done

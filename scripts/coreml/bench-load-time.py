@@ -807,9 +807,16 @@ class Runner:
                             cmd.append("--memory-admission")
                         waited = wait_quiet(self.proto, self.quiet)
                         r = run_json(cmd, timeout=cfg.get("timeout_s", 1800) + 120, ok_codes=(0, 3))
+                        summary = self._ttr_summary(r)
                         self.record("ttr", variant=v, config=c["name"], route=c["route"], mode=c["mode"], set=c["set"],
-                                    run=i, identity=ident["id"], quiet_wait_s=waited, **self._ttr_summary(r))
-                        for j in range(c.get("cached_startup_runs", 0) if c["route"] == "prebuilt" else 0):
+                                    run=i, identity=ident["id"], quiet_wait_s=waited, **summary)
+                        # Cached startup needs every plan of the priming run in the cache.
+                        cached = c.get("cached_startup_runs", 0) if c["route"] == "prebuilt" else 0
+                        if cached and not summary["all_ready"]:
+                            print(f"[ttr] {v}/{c['name']} run {i}: not every function was ready; "
+                                  "skipping cached startup", flush=True)
+                            cached = 0
+                        for j in range(cached):
                             r2 = run_json(cmd, timeout=cfg.get("timeout_s", 1800) + 120, ok_codes=(0, 3))
                             self.record("ttr_cached", variant=v, config=c["name"], set=c["set"], run=i, rep=j,
                                         identity=ident["id"], **self._ttr_summary(r2))
@@ -818,8 +825,9 @@ class Runner:
     @staticmethod
     def _ttr_summary(r: dict) -> dict:
         slots = r.get("detail", {}).get("slots", [])
-        # Ready means every model is loaded, warmed and still resident when the run ends.
-        live = r.get("detail", {}).get("models_live")
+        # Ready means every model is loaded, warmed and still resident when the
+        # final readings are taken (the driver counts them then).
+        live = r.get("models_live")
         all_ready = r["time_to_ready_ms"] >= 0 and live == len(slots)
         return {"time_to_ready_ms": r["time_to_ready_ms"], "all_ready": all_ready, "models_live": live,
                 "available_bytes_at_start": r.get("available_bytes_at_start"),
@@ -880,7 +888,8 @@ class Runner:
                         ident = stack.enter_context(fresh_identity(self.tts_cli, self.hosts))
                         binary, identity = Path(ident["binary"]), ident["id"]
                         d = self.stage_dir(v, c["set"], stages, "mlmodelc")
-                        gguf = resolve(var["s3gen"], self.models)
+                        # Absolute target: a relative one would resolve inside d.
+                        gguf = resolve(var["s3gen"], self.models).resolve()
                         (d / gguf.name).symlink_to(gguf)
                         s3gen = d / gguf.name
                         waited = wait_quiet(self.proto, self.quiet)
@@ -931,15 +940,26 @@ def summarize(recs: list) -> dict:
         by.setdefault(r["kind"], []).append(r)
     s: dict = {"env": (by.get("env") or [{}])[-1]}
 
-    s["sizes"] = by.get("sizes", [])
+    # Results appended by several runs into one --out: one row per artifact.
+    s["sizes"] = list({(r["variant"], r["set"], r["stage"]): r for r in by.get("sizes", [])}.values())
 
     mem = by.get("memory", [])
     s["memory"] = mem[-1] if mem else None
 
+    # A cold total is per identity (one fresh-identity run of the set); several
+    # runs into one --out give one total each, reported as their median.
     cold = {}
     for r in by.get("load_cold", []):
-        cold.setdefault((r["variant"], r["set"]), []).append(r)
-    s["cold"] = {k: {"total_ms": sum(x["load_ms"] for x in v), "functions": v} for k, v in cold.items()}
+        cold.setdefault((r["variant"], r["set"]), {}).setdefault(r.get("identity"), []).append(r)
+    s["cold"] = {}
+    for k, runs in cold.items():
+        per_fn = {}
+        for rows in runs.values():
+            for x in rows:
+                per_fn.setdefault((x["stage"], x["function"]), []).append(x["load_ms"])
+        s["cold"][k] = {"total_ms": median([sum(x["load_ms"] for x in rows) for rows in runs.values()]),
+                        "runs": len(runs), "functions": sorted(per_fn),
+                        "load_ms": {fn: median(ms) for fn, ms in per_fn.items()}}
 
     warm = {}
     for r in by.get("load_warm", []):
@@ -999,6 +1019,16 @@ def render(s: dict) -> str:
     env = s["env"]
     L = []
     w = L.append
+
+    # Each generated section sits between <!-- report:NAME --> and
+    # <!-- /report:NAME -->; `report --out` on an existing file replaces only these.
+    def begin(name):
+        w(f"<!-- report:{name} -->")
+
+    def end(name):
+        w(f"<!-- /report:{name} -->")
+        w("")
+
     w("# Core ML load time measurements")
     w("")
     w("Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in "
@@ -1017,6 +1047,7 @@ def render(s: dict) -> str:
           "with `bench-load-time.py report`.")
     w("")
 
+    begin("setup")
     w("## Setup and usage")
     w("")
     w("Requirements:")
@@ -1044,10 +1075,17 @@ def render(s: dict) -> str:
     w("scripts/coreml/bench-load-time.py cleanup              # remove leftover bench identities and caches")
     w("```")
     w("")
-    w("`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders this file from it. "
+    w("`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders the measurements from it. "
       "Cold runs use a fresh `fresh-host.sh` identity and a fresh copy of the sidecars, and delete both "
       "afterwards.")
     w("")
+    w("`report --out` on a new file writes the whole document. On an existing file it replaces only the generated "
+      "sections, each between a `<!-- report:NAME -->` and a `<!-- /report:NAME -->` line, and keeps everything "
+      "else (the header and the hand-written reading of the numbers); it refuses a file without those markers.")
+    w("")
+    end("setup")
+
+    begin("sizes")
     w("## Multifunction spec sizes")
     w("")
     w("What a template would embed is the program (`model.mil` compiled, `model.mlmodel` in the package), not the "
@@ -1062,12 +1100,14 @@ def render(s: dict) -> str:
     if not s["sizes"]:
         w("| — | | | | | | | | | | |")
     w("")
+    end("sizes")
 
+    begin("width-set")
     w("## Width set: 3 vs 7")
     w("")
-    w("Cold = sum of first loads on a fresh identity (ANE compile included), all functions of the set incl. HiFT. "
-      "Warm = median per-function load + first prediction in a new process. Synthesis = warm `tts-cli` on the "
-      "benchmark prompt (median of the runs).")
+    w("Cold = sum of first loads on a fresh identity (ANE compile included), all functions of the set incl. HiFT; "
+      "with several cold runs, the median of their sums. Warm = median per-function load + first prediction in a "
+      "new process. Synthesis = warm `tts-cli` on the benchmark prompt (median of the runs).")
     w("")
     w("| Variant | Set | Functions | Cold total (s) | Warm load+predict, median over functions (ms) | "
       "Synthesis wall (ms) | S3Gen (ms) |")
@@ -1080,7 +1120,9 @@ def render(s: dict) -> str:
     if not s["cold"]:
         w("| — | | | | | | |")
     w("")
+    end("width-set")
 
+    begin("warm-load")
     w("## `expected_warm_load_ms` per function")
     w("")
     w("A warm load is a new process on an identity whose ANE plans are cached; the hint's `warm_load_ms` is load "
@@ -1089,8 +1131,7 @@ def render(s: dict) -> str:
     w("| Variant | Set | Stage | Function | Cold load (ms) | Warm load (ms) | expected_warm_load_ms (median) | Max | "
       "Prediction (ms) |")
     w("|---|---|---|---|--:|--:|--:|--:|--:|")
-    cold_fn = {(r["variant"], r["set"], r["stage"], r["function"]): r["load_ms"]
-               for c in s["cold"].values() for r in c["functions"]}
+    cold_fn = {(v, st, *fn): ms for (v, st), c in s["cold"].items() for fn, ms in c["load_ms"].items()}
     for key in sorted(s["warm"]):
         e = s["warm"][key]
         w(f"| {' | '.join(key)} | {_f(cold_fn.get(key))} | {_f(median(e['load']))} | {_f(median(e['warm']))} | "
@@ -1098,7 +1139,9 @@ def render(s: dict) -> str:
     if not s["warm"]:
         w("| — | | | | | | | | |")
     w("")
+    end("warm-load")
 
+    begin("sharing")
     w("## Do loaded functions share weight memory?")
     w("")
     w(f"All functions of one stage loaded and held in one process, per compute-unit policy. Per metric: the "
@@ -1123,7 +1166,9 @@ def render(s: dict) -> str:
     if not s["sharing"]:
         w("| — | | | | | | | | | |")
     w("")
+    end("sharing")
 
+    begin("metal-cost")
     w("## Per-variant Metal cost constants for `s3gen_estimate_metal_ms`")
     w("")
     w("Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen "
@@ -1142,7 +1187,9 @@ def render(s: dict) -> str:
     if not s["metal_fit"]:
         w("| — | | | | | | | |")
     w("")
+    end("metal-cost")
 
+    begin("ttr")
     w("## Time to ready, with and without the admission gate")
     w("")
     w("Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one construction group with "
@@ -1167,7 +1214,9 @@ def render(s: dict) -> str:
     if not s["ttr"]:
         w("| — | | | | | | | | | | |")
     w("")
+    end("ttr")
 
+    begin("memory")
     w("## Available-memory reading under normal load")
     w("")
     mem = s["memory"]
@@ -1183,7 +1232,9 @@ def render(s: dict) -> str:
     else:
         w("Not measured yet.")
     w("")
+    end("memory")
 
+    begin("synthesis")
     w("## Warm synthesis and encoder-fallback contention")
     w("")
     w("`tts-cli`, benchmark prompt, built-in voice, seed 42, q8_0, a new process per run after one priming run. "
@@ -1200,7 +1251,9 @@ def render(s: dict) -> str:
     if not s["synthesis"]:
         w("| — | | | | | | |")
     w("")
+    end("synthesis")
 
+    begin("destinations")
     w("## Where each number goes")
     w("")
     w("| Number | Where it goes |")
@@ -1216,6 +1269,7 @@ def render(s: dict) -> str:
     w("| Available-memory reading | Confirms memory admission does not defer cold loads on the bench host |")
     w("| Encoder-fallback contention | Expected overlap when the Chatterbox encoder runs on Metal |")
     w("")
+    end("destinations")
     return "\n".join(L)
 
 
@@ -1301,7 +1355,7 @@ def cmd_smoke(args, m) -> int:
                               m["protocol"]["units"], "--predict", "1"])
                 checks["cold_load_ok"] = not r["functions"][0].get("error")
                 caches = subprocess.run(["bash", str(FRESH_HOST), "caches", ident["id"]], capture_output=True,
-                                        text=True, env=env).stdout.split()
+                                        text=True, env=env).stdout.splitlines()
                 checks["e5rt_cache_created"] = any((Path(c) / "com.apple.e5rt.e5bundlecache").exists()
                                                    for c in caches)
                 cache_dir = Path(ident["cache"])
@@ -1315,13 +1369,44 @@ def cmd_smoke(args, m) -> int:
     return 0 if checks and all(checks.values()) else 1
 
 
+REPORT_BLOCK_RE = re.compile(r"^<!-- report:([a-z0-9-]+) -->\n.*?^<!-- /report:\1 -->$", re.S | re.M)
+
+
+class ReportError(Exception):
+    pass
+
+
+def merge_report(existing: str, rendered: str) -> str:
+    """`existing` with each generated block replaced by the same block of
+    `rendered`; text outside the blocks is kept as it is."""
+    new = {m.group(1): m.group(0) for m in REPORT_BLOCK_RE.finditer(rendered)}
+    old = [m.group(1) for m in REPORT_BLOCK_RE.finditer(existing)]
+    if not old:
+        raise ReportError("no generated sections (<!-- report:NAME --> ... <!-- /report:NAME -->); refusing to "
+                          "replace hand-written text. Write the report to a new file instead")
+    dup = sorted({n for n in old if old.count(n) > 1})
+    missing = [n for n in new if n not in old]
+    unknown = [n for n in old if n not in new]
+    if dup or missing or unknown:
+        raise ReportError(f"generated sections do not match the report: duplicated {dup}, missing {missing}, "
+                          f"unknown {unknown}; add or remove the markers by hand")
+    return REPORT_BLOCK_RE.sub(lambda m: new[m.group(1)], existing)
+
+
 def cmd_report(args) -> int:
-    text = render(summarize(read_results(Path(args.results))))
-    if args.out:
-        Path(args.out).write_text(text + "\n")
-        print(f"wrote {args.out}")
-    else:
-        print(text)
+    text = render(summarize(read_results(Path(args.results)))) + "\n"
+    if not args.out:
+        print(text, end="")
+        return 0
+    out = Path(args.out)
+    if out.exists():
+        try:
+            text = merge_report(out.read_text(), text)
+        except ReportError as e:
+            print(f"report: {out}: {e}", file=sys.stderr)
+            return 1
+    out.write_text(text)
+    print(f"wrote {out}")
     return 0
 
 
@@ -1346,7 +1431,8 @@ def main(argv=None) -> int:
     r.add_argument("--allow-battery", action="store_true", help="run on battery power (smoke runs only; numbers are not comparable)")
     rp = sub.add_parser("report", help="render the measurements doc from results")
     rp.add_argument("--results", required=True)
-    rp.add_argument("--out")
+    rp.add_argument("--out", help="a new file gets the whole document; an existing one keeps its text and has only "
+                                  "the generated sections between <!-- report:NAME --> markers replaced")
     sub.add_parser("cleanup", help="delete every qvac-bench-* identity copy and cache")
     sm = sub.add_parser("smoke", help="fresh-host.sh identity smoke and e5rt cache cleanup (needs Core ML)")
     sm.add_argument("--driver")

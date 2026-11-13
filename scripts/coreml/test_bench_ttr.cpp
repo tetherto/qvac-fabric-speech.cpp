@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bench-ttr.h"
@@ -151,9 +152,42 @@ void poll_deferred_time_and_deadline() {
     CHECK(bench_ttr::all_ready_ms(o.ready_at) == -1);
 }
 
+// The start readings come before the run loads anything, the end readings
+// while every model it loaded is still held, and the models are released only
+// after the end readings. A fake available-memory reading drops by 100 per
+// live model, so a start reading taken after the run would read 600, and an
+// end reading taken after the release would see no live models.
+void readings_bracket_the_run() {
+    std::vector<std::string> order;
+    auto available = [] { return 1000 - 100 * g_live.load(); };
+    const auto r = bench_ttr::with_readings(
+        [&] {
+            order.push_back("start");
+            return available();
+        },
+        [&](std::shared_ptr<void> & keep) {
+            order.push_back("run");
+            auto held = std::make_shared<std::vector<std::shared_ptr<Counted>>>();
+            for (int i = 0; i < 4; ++i) held->push_back(std::make_shared<Counted>());
+            keep = held;
+            return 4;
+        },
+        [&] {
+            order.push_back("end");
+            return std::make_pair(g_live.load(), available());
+        });
+    CHECK((order == std::vector<std::string>{"start", "run", "end"}));
+    CHECK(r.start == 1000);
+    CHECK(r.run == 4);
+    CHECK(r.end.first == 4);
+    CHECK(r.end.second == 600);
+    CHECK(g_live.load() == 0);
+}
+
 }  // namespace
 
 int main() {
+    readings_bracket_the_run();
     poll_sees_a_load_that_completes_with_the_group();
     poll_deferred_time_and_deadline();
     for (bool generate : {false, true})

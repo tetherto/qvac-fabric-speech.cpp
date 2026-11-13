@@ -9,6 +9,9 @@
 //                 Every model that loads is retained until the caller drops
 //                 the outcome, so both baselines measure the same resident
 //                 workload as the Manager, whose slots hold their models.
+//   with_readings the order of a run's readings: start readings before the
+//                 run loads anything, end readings while every model it
+//                 loaded is still held, then the models are released.
 
 #pragma once
 
@@ -20,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace bench_ttr {
@@ -174,6 +178,25 @@ inline double manual_ready_ms(const std::vector<ManualResult> & results) {
         m = std::max(m, r.ready_ms);
     }
     return m;
+}
+
+template <class S, class R, class E>
+struct Readings {
+    S start;  // taken before the run
+    R run;    // what the run returned
+    E end;    // taken while the run's models are still held
+};
+
+// start() -> S; run(std::shared_ptr<void> & keep) -> R, which hands every model
+// it loaded to `keep`; end() -> E. `keep` is released after end().
+template <class Start, class Run, class End>
+auto with_readings(Start start, Run run, End end) {
+    auto s = start();
+    std::shared_ptr<void> keep;
+    auto r = run(keep);
+    auto e = end();
+    keep.reset();
+    return Readings<decltype(s), decltype(r), decltype(e)>{std::move(s), std::move(r), std::move(e)};
 }
 
 }  // namespace bench_ttr

@@ -4,6 +4,7 @@
   python3 -B scripts/coreml/test_bench_load_time.py
 """
 
+import argparse
 import contextlib
 import copy
 import hashlib
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("bench_load_time", HERE / "bench-load-time.py")
@@ -289,6 +291,29 @@ class AnalysisTest(unittest.TestCase):
             self.assertIn(needle, doc)
         self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
 
+    def test_two_cold_runs_into_one_results_file(self):
+        # Two `run load` passes with the same --out: two identities, each with
+        # its own cold load of the same functions.
+        def cold(identity, fn, ms):
+            return {"kind": "load_cold", "variant": "turbo", "set": "w3", "stage": "cfm", "function": fn,
+                    "load_ms": ms, "identity": identity}
+
+        sizes = {"kind": "sizes", "variant": "turbo", "set": "w3", "stage": "cfm", "functions": 3,
+                 "mil_bytes": 3_940_000, "mil_zlib": 330_000, "weight_bytes": 139_900_000, "mlmodelc_bytes": 1}
+        recs = [cold("id-a", "frames_512", 10000.0), cold("id-a", "frames_1024", 20000.0),
+                cold("id-b", "frames_512", 12000.0), cold("id-b", "frames_1024", 22000.0),
+                {"kind": "load_warm", "variant": "turbo", "set": "w3", "stage": "cfm", "function": "frames_512",
+                 "load_ms": 470.0, "predict_ms": [40.0, 23.0]}, sizes, dict(sizes)]
+        s = blt.summarize(recs)
+        c = s["cold"][("turbo", "w3")]
+        self.assertEqual(c["total_ms"], 32000.0)  # median of the per-identity totals 30 s and 34 s
+        self.assertEqual(c["runs"], 2)
+        self.assertEqual(len(c["functions"]), 2)
+        doc = blt.render(s)
+        self.assertIn("| turbo | w3 | 2 | 32.0 | 510 |", doc)
+        self.assertIn("| turbo | w3 | cfm | frames_512 | 11,000 | 470 | 510 |", doc)
+        self.assertEqual(doc.count("| turbo | w3 | cfm | 3 |"), 1)
+
     def test_report_without_results(self):
         doc = blt.render(blt.summarize([]))
         self.assertIn("Not measured yet", doc)
@@ -319,19 +344,308 @@ class AnalysisTest(unittest.TestCase):
         self.assertIsNone(TASK_ID.search(doc), TASK_ID.search(doc))
 
 
+class ReportMergeTest(unittest.TestCase):
+    @staticmethod
+    def results(d: Path, cold_ms: float) -> Path:
+        d.mkdir()
+        (d / "results.jsonl").write_text(json.dumps(
+            {"kind": "load_cold", "variant": "turbo", "set": "w7", "stage": "cfm", "function": "frames_512",
+             "load_ms": cold_ms, "identity": "id-a"}) + "\n")
+        return d
+
+    @staticmethod
+    def report(*args):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = blt.main(["report", *map(str, args)])
+        return rc, err.getvalue()
+
+    def test_report_keeps_the_hand_written_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, b = self.results(Path(d) / "a", 12000.0), self.results(Path(d) / "b", 30000.0)
+            doc = Path(d) / "doc.md"
+            self.assertEqual(self.report("--results", a, "--out", doc)[0], 0)
+            first = doc.read_text()
+            self.assertIn("| turbo | w7 | 1 | 12.0 |", first)
+            # Hand edits outside the generated blocks: a reading of the numbers
+            # and a corrected host line.
+            i = first.index("<!-- report:")
+            edited = (first[:i] + "## Reading the numbers\n\nWritten by hand.\n\n" + first[i:]).replace(
+                "- Not measured yet", "- Power: on battery for part of the run")
+            doc.write_text(edited)
+            self.assertEqual(self.report("--results", b, "--out", doc)[0], 0)
+            second = doc.read_text()
+            self.assertIn("## Reading the numbers\n\nWritten by hand.\n", second)
+            self.assertIn("- Power: on battery for part of the run", second)
+            self.assertIn("| turbo | w7 | 1 | 30.0 |", second)
+            self.assertNotIn("| turbo | w7 | 1 | 12.0 |", second)
+            # Same results again: nothing changes.
+            self.assertEqual(self.report("--results", b, "--out", doc)[0], 0)
+            self.assertEqual(doc.read_text(), second)
+
+    def test_report_refuses_a_file_without_generated_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.results(Path(d) / "a", 12000.0)
+            doc = Path(d) / "notes.md"
+            doc.write_text("# Notes\n\nWritten by hand.\n")
+            rc, err = self.report("--results", a, "--out", doc)
+            self.assertEqual(rc, 1)
+            self.assertIn("generated", err)
+            self.assertEqual(doc.read_text(), "# Notes\n\nWritten by hand.\n")
+
+    def test_committed_doc_keeps_its_text_on_regeneration(self):
+        committed = (blt.REPO / "docs" / "COREML-LOAD-TIME.md").read_text()
+        merged = blt.merge_report(committed, blt.render(blt.summarize([])) + "\n")
+        for kept in ("## Reading the numbers", "Limits of this run", "on battery from 12:35 to 14:41"):
+            self.assertIn(kept, merged)
+        self.assertIn("Not measured yet.", merged)
+
+
+class DriverSourceTest(unittest.TestCase):
+    """The ttr readings the driver emits go through bench_ttr::with_readings
+    (sampling order tested in test_bench_ttr.cpp), not straight into the output."""
+
+    def test_ttr_readings_are_taken_around_the_run(self):
+        src = blt.DRIVER_SRC.read_text()
+        body = src[src.index("int cmd_ttr("):]
+        body = body[:body.index("\n}\n")]
+        call = body.find("bench_ttr::with_readings(")
+        self.assertGreaterEqual(call, 0, "cmd_ttr takes its readings through bench_ttr::with_readings")
+        depth, end = 0, None
+        for i in range(body.index("(", call), len(body)):
+            depth += {"(": 1, ")": -1}.get(body[i], 0)
+            if depth == 0:
+                end = i
+                break
+        outside = body[:call] + body[end + 1:]
+        for reading in ("phys_footprint()", "lifetime_max_footprint()", "device_available_memory()",
+                        "g_models_live"):
+            self.assertIn(reading, body[call:end])
+            self.assertNotIn(reading, outside)
+        for helper in ("json ttr_manager(", "json ttr_manual("):
+            fn = src[src.index(helper):]
+            self.assertNotIn("models_live", fn[:fn.index("\n}\n")], helper)
+
+
 class TtrSummaryTest(unittest.TestCase):
     @staticmethod
     def run_record(ttr_ms, live, n=3):
         slots = [{"slot": f"cfm/f{i}", "ready_ms": 10.0 * i} for i in range(n)]
-        return {"time_to_ready_ms": ttr_ms, "detail": {"t_issue_ms": 0.0, "slots": slots, "models_live": live}}
+        return {"time_to_ready_ms": ttr_ms, "models_live": live, "available_bytes_at_start": 11_000_000_000,
+                "detail": {"t_issue_ms": 0.0, "slots": slots}}
 
     def test_ready_needs_every_model_resident_at_the_end(self):
         s = blt.Runner._ttr_summary(self.run_record(30.0, 3))
         self.assertTrue(s["all_ready"])
         self.assertEqual(s["models_live"], 3)
+        self.assertEqual(s["available_bytes_at_start"], 11_000_000_000)
         self.assertFalse(blt.Runner._ttr_summary(self.run_record(30.0, 0))["all_ready"])
         self.assertFalse(blt.Runner._ttr_summary(self.run_record(30.0, None))["all_ready"])
         self.assertFalse(blt.Runner._ttr_summary(self.run_record(-1, 3))["all_ready"])
+
+
+@contextlib.contextmanager
+def chdir(path: Path):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+
+class RunnerFixture:
+    """A Runner over fake sidecars and GGUFs with the device-facing calls
+    (fresh-host.sh identities, the driver, tts-cli) replaced by recorders."""
+
+    def __init__(self, root: Path, models: str = "models"):
+        self.root = root
+        self.models = Path(models) if Path(models).is_absolute() else root / models
+        for v in MANIFEST["variants"]:
+            for s, spec in MANIFEST["sidecar_sets"].items():
+                for st in spec["stages"]:
+                    for kind in ("mlmodelc", "mlpackage"):
+                        p = blt.sidecar(MANIFEST, self.models, v, s, st, kind)
+                        (p / "weights").mkdir(parents=True, exist_ok=True)
+                        (p / "weights" / "weight.bin").write_text(s)  # which set a clone came from
+            gguf = blt.resolve(MANIFEST["variants"][v]["s3gen"], self.models)
+            gguf.parent.mkdir(parents=True, exist_ok=True)
+            gguf.write_bytes(b"GGUF")
+        for exe in ("bench-load-driver", "tts-cli"):
+            (root / exe).write_text("#!/bin/sh\n")
+        self.args = argparse.Namespace(
+            models_root=models, out="out", driver=str(root / "bench-load-driver"), tts_cli=str(root / "tts-cli"),
+            units=None, no_quiet_check=True, runs=None, variant=["turbo"], manifest=blt.DEFAULT_MANIFEST,
+            allow_battery=False)
+        self.identities = []  # [{"id", "binary", "open"}]
+        self.calls = []       # driver calls: {"cmd", "identity", "artifacts"}
+        self.ready = lambda call: True
+
+    @contextlib.contextmanager
+    def fresh_identity(self, binary, hosts_dir):
+        ident = {"id": f"qvac-bench-{len(self.identities):08x}", "binary": str(self.root / "host"), "open": True}
+        self.identities.append(ident)
+        try:
+            yield ident
+        finally:
+            ident["open"] = False
+
+    def run_json(self, cmd, env=None, timeout=3600, ok_codes=(0,)):
+        cmd = [str(c) for c in cmd]
+        arts = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--artifact"]
+        parsed = []
+        for a in arts:
+            stage, rest = a.split("=", 1)
+            path, fns = rest.rsplit(":", 1)
+            weight = Path(path) / "weights" / "weight.bin"
+            parsed.append({"stage": stage, "path": path, "functions": fns.split(","), "exists": Path(path).is_dir(),
+                           "origin": weight.read_text() if weight.is_file() else None})
+        call = {"cmd": cmd, "identity": self.identities[-1]["id"], "open": self.identities[-1]["open"],
+                "artifacts": parsed, "timeout": timeout, "ok_codes": ok_codes}
+        self.calls.append(call)
+        slots = [{"slot": f"{p['stage']}/{f}", "ready_ms": 1.0} for p in parsed for f in p["functions"]]
+        ok = self.ready(call)
+        return {"time_to_ready_ms": 1000.0 if ok else -1.0, "models_live": len(slots) if ok else 0,
+                "available_bytes_at_start": 11_000_000_000, "footprint_max": 1, "timeline": [],
+                "detail": {"t_issue_ms": 0.0, "slots": slots}}
+
+    def runner(self):
+        with chdir(self.root):
+            return blt.Runner(self.args, MANIFEST)
+
+    def records(self, runner, kind=None):
+        recs = blt.read_results(self.root / runner.results)
+        return [r for r in recs if kind is None or r["kind"] == kind]
+
+    def patched(self):
+        stack = contextlib.ExitStack()
+        stack.enter_context(chdir(self.root))
+        stack.enter_context(mock.patch.object(blt, "fresh_identity", self.fresh_identity))
+        stack.enter_context(mock.patch.object(blt, "run_json", self.run_json))
+        return stack
+
+
+class TtrRunnerTest(unittest.TestCase):
+    CFG = {"memory_admission": True, "timeout_s": 60, "configs": [
+        {"name": "prebuilt-gated-w3", "route": "prebuilt", "mode": "manager", "set": "w3", "runs": 2,
+         "cached_startup_runs": 2},
+        {"name": "generate-ungated", "route": "generate", "mode": "ungated", "set": "w7", "runs": 1}]}
+
+    def run_ttr(self, cfg, ready=None):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fx = RunnerFixture(Path(d.name))
+        if ready:
+            fx.ready = ready
+        r = fx.runner()
+        with fx.patched():
+            r.ttr(cfg)
+        return fx, r
+
+    @staticmethod
+    def arg(cmd, name):
+        return cmd[cmd.index(name) + 1]
+
+    def test_each_run_gets_a_fresh_identity_and_path(self):
+        fx, r = self.run_ttr(self.CFG)
+        self.assertEqual(len(fx.identities), 3)  # 2 prebuilt runs + 1 generate run
+        self.assertEqual(len({i["id"] for i in fx.identities}), 3)
+        self.assertTrue(all(not i["open"] for i in fx.identities), "every identity is cleaned up")
+        dirs = {c["identity"]: Path(c["artifacts"][0]["path"]).parent for c in fx.calls}
+        self.assertEqual(len(set(dirs.values())), 3, "every run clones the artifacts to a new path")
+        dirs = set(dirs.values())
+        for c in fx.calls:
+            self.assertTrue(c["open"], "the driver runs while its identity exists")
+            self.assertTrue(all(a["exists"] for a in c["artifacts"]), c["artifacts"])
+            self.assertEqual(self.arg(c["cmd"], "--work-dir"), str(Path(c["artifacts"][0]["path"]).parent / "work"))
+            self.assertEqual(self.arg(c["cmd"], "--cache-dir"), str(Path(c["artifacts"][0]["path"]).parent / "cache"))
+        for p in dirs:
+            self.assertFalse((fx.root / p).exists(), f"{p} is removed after its run")
+        recs = fx.records(r, "ttr")
+        self.assertEqual([x["identity"] for x in recs], [i["id"] for i in fx.identities])
+        self.assertEqual([x["run"] for x in recs], [0, 1, 0])
+
+    def test_artifacts_follow_the_route_and_set(self):
+        fx, _ = self.run_ttr(self.CFG)
+        for c in fx.calls:
+            route = self.arg(c["cmd"], "--route")
+            mode = self.arg(c["cmd"], "--mode")
+            want = blt.set_functions(MANIFEST, "turbo", "w3" if route == "prebuilt" else "w7")
+            self.assertEqual([(a["stage"], a["functions"]) for a in c["artifacts"]], want)
+            suffix = ".mlmodelc" if route == "prebuilt" else ".mlpackage"
+            self.assertTrue(all(a["path"].endswith(suffix) for a in c["artifacts"]), c["artifacts"])
+            self.assertEqual(mode, "manager" if route == "prebuilt" else "ungated")
+            names = [Path(a["path"]).name for a in c["artifacts"]]
+            self.assertEqual(names, [f"chatterbox-s3gen-{st}{suffix}" for st, _ in want])
+            self.assertEqual(self.arg(c["cmd"], "--units"), MANIFEST["protocol"]["units"])
+            self.assertEqual(self.arg(c["cmd"], "--timeout-s"), "60")
+            self.assertEqual(c["timeout"], 180)
+            self.assertEqual(c["ok_codes"], (0, 3))
+            # w3 has no HiFT of its own: it is cloned from w7's.
+            origin = "w3" if route == "prebuilt" else "w7"
+            self.assertEqual([a["origin"] for a in c["artifacts"]],
+                             [origin if st != "hift" else "w7" for st, _ in want])
+
+    def test_memory_admission_flag_follows_the_config(self):
+        fx, _ = self.run_ttr(self.CFG)
+        self.assertTrue(all("--memory-admission" in c["cmd"] for c in fx.calls))
+        fx, _ = self.run_ttr({**self.CFG, "memory_admission": False})
+        self.assertTrue(fx.calls)
+        self.assertFalse(any("--memory-admission" in c["cmd"] for c in fx.calls))
+
+    def test_cached_startup_reuses_the_identity_after_a_ready_run(self):
+        fx, r = self.run_ttr(self.CFG)
+        by_id = {}
+        for c in fx.calls:
+            by_id.setdefault(c["identity"], []).append(c["cmd"])
+        counts = sorted(len(v) for v in by_id.values())
+        self.assertEqual(counts, [1, 3, 3])  # generate: no cached startup; prebuilt: 1 + 2
+        for cmds in by_id.values():
+            self.assertTrue(all(cmd == cmds[0] for cmd in cmds), "cached startup reruns the same command")
+        cached = fx.records(r, "ttr_cached")
+        self.assertEqual([(x["run"], x["rep"]) for x in cached], [(0, 0), (0, 1), (1, 0), (1, 1)])
+        prime_ids = [x["identity"] for x in fx.records(r, "ttr") if x["config"] == "prebuilt-gated-w3"]
+        self.assertEqual([x["identity"] for x in cached], [prime_ids[0]] * 2 + [prime_ids[1]] * 2)
+
+    def test_no_cached_startup_after_a_run_that_was_not_ready(self):
+        # The first prebuilt run never gets every function ready; the second does.
+        seen = []
+
+        def ready(call):
+            seen.append(call["identity"])
+            return len(set(seen)) != 1
+
+        fx, r = self.run_ttr(self.CFG, ready)
+        ttr = fx.records(r, "ttr")
+        self.assertEqual([x["all_ready"] for x in ttr], [False, True, True])
+        cached = fx.records(r, "ttr_cached")
+        self.assertEqual([x["identity"] for x in cached], [ttr[1]["identity"]] * 2)
+        self.assertEqual(sum(1 for c in fx.calls if c["identity"] == ttr[0]["identity"]), 1)
+
+
+class SynthesisRunnerTest(unittest.TestCase):
+    def test_relative_models_root_links_the_gguf(self):
+        with tempfile.TemporaryDirectory() as d:
+            fx = RunnerFixture(Path(d), models="models")
+            r = fx.runner()
+            seen = []
+
+            def tts(binary, v, text, max_chars, s3gen, coreml, tag):
+                p = Path(s3gen)
+                seen.append({"name": p.name, "coreml": coreml, "readable": p.is_file() and p.read_bytes() == b"GGUF",
+                             "beside_sidecars": (p.parent / "chatterbox-s3gen-cfm.mlmodelc").is_dir()})
+                labels = {"encoder": ["coreml-ane"], "cfm": ["coreml-ane"], "hift": ["coreml-ane"]}
+                return {"labels": labels, "wall_ms": 1.0, "t3_infer_ms": [1], "s3gen_infer_ms": [1],
+                        "t3_load_ms": [1], "s3gen_load_ms": [1], "chunks": [], "peak_footprint": 1, "max_rss": 1}
+
+            cfg = {"workload": "benchmark-prompt", "runs": 1, "configs": [
+                {"name": "coreml-w7", "coreml": True, "set": "w7", "stages": ["encoder", "cfm", "hift"]}]}
+            with fx.patched(), mock.patch.object(r, "tts", tts):
+                r.synthesis(cfg)
+            # The priming run and one measured run, both on the GGUF linked beside
+            # the cloned sidecars (the engine finds the sidecars from that path).
+            want = {"name": "chatterbox-s3gen-q8_0.gguf", "coreml": True, "readable": True, "beside_sidecars": True}
+            self.assertEqual(seen, [want, want])
+            self.assertEqual(len(fx.records(r, "synthesis")), 1)
 
 
 class NativeTest(unittest.TestCase):
@@ -383,6 +697,23 @@ class FreshHostTest(unittest.TestCase):
             self.assertEqual(json.loads(r.stdout)["removed"], 1)
             self.assertFalse((caches / other).exists())
             self.assertTrue((caches / "tts-cli").exists())
+
+    def test_cleanup_with_spaces_in_the_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            hosts, caches = Path(d) / "bench hosts", Path(d) / "cache root"
+            ident = "qvac-bench-0123abcd-0000-4000-8000-0123456789ab"
+            (hosts / ident).mkdir(parents=True)
+            (hosts / ident / ident).write_text("bin")
+            (caches / ident / "com.apple.e5rt.e5bundlecache").mkdir(parents=True)
+            env = dict(os.environ, QVAC_BENCH_HOSTS=str(hosts), QVAC_BENCH_CACHES=str(caches))
+            r = self.run_fh("caches", ident, env=env)
+            self.assertEqual(r.stdout.splitlines(), [str(caches / ident)])
+            r = self.run_fh("cleanup", str(hosts / ident / ident), env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["removed"], 2)
+            self.assertFalse((caches / ident).exists())
+            self.assertFalse((hosts / ident).exists())
+            self.assertTrue(caches.is_dir())
 
     def test_new_rejects_a_non_executable(self):
         with tempfile.TemporaryDirectory() as d:

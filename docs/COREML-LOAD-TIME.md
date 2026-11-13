@@ -9,7 +9,7 @@ Measured with `scripts/coreml/bench-load-time.py` on the workloads pinned in `sc
 
 ## Reading the numbers
 
-Written by hand from the tables below (the `report` command regenerates only the tables). Spreads are MAD; N is in each table. Synthesis rows are N=3 warm runs, so treat differences under about 5 % as noise.
+Written by hand from the tables below (`report` regenerates only the sections between `<!-- report:NAME -->` markers and keeps this text). Spreads are MAD; N is in each table. Synthesis rows are N=3 warm runs, so treat differences under about 5 % as noise.
 
 - **Warm synthesis against Metal** (median wall, benchmark prompt):
 
@@ -37,6 +37,7 @@ Written by hand from the tables below (the `report` command regenerates only the
 
 Limits of this run: the generate route is a stand-in (copy and compile), not template-driven generation; the bytes of the e5rt CPU and GPU bundles are not measured (the ANE cache is not measurable); and the first-function wired and available readings are noisy at N=3.
 
+<!-- report:setup -->
 ## Setup and usage
 
 Requirements:
@@ -59,8 +60,13 @@ scripts/coreml/bench-load-time.py report --results <dir> --out docs/COREML-LOAD-
 scripts/coreml/bench-load-time.py cleanup              # remove leftover bench identities and caches
 ```
 
-`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders this file from it. Cold runs use a fresh `fresh-host.sh` identity and a fresh copy of the sidecars, and delete both afterwards.
+`run` writes one JSON object per line to `<dir>/results.jsonl`; `report` renders the measurements from it. Cold runs use a fresh `fresh-host.sh` identity and a fresh copy of the sidecars, and delete both afterwards.
 
+`report --out` on a new file writes the whole document. On an existing file it replaces only the generated sections, each between a `<!-- report:NAME -->` and a `<!-- /report:NAME -->` line, and keeps everything else (the header and the hand-written reading of the numbers); it refuses a file without those markers.
+
+<!-- /report:setup -->
+
+<!-- report:sizes -->
 ## Multifunction spec sizes
 
 What a template would embed is the program (`model.mil` compiled, `model.mlmodel` in the package), not the weights. MB = 10^6 bytes.
@@ -78,9 +84,12 @@ What a template would embed is the program (`model.mil` compiled, `model.mlmodel
 | mtl | w3 | encoder | 3 | 0.51 | 0.04 | 0.04 | 0.48 | 0.05 | 0.04 | 114.53 |
 | mtl | w3 | cfm | 3 | 3.94 | 0.33 | 0.41 | 3.89 | 0.36 | 0.40 | 139.90 |
 
+<!-- /report:sizes -->
+
+<!-- report:width-set -->
 ## Width set: 3 vs 7
 
-Cold = sum of first loads on a fresh identity (ANE compile included), all functions of the set incl. HiFT. Warm = median per-function load + first prediction in a new process. Synthesis = warm `tts-cli` on the benchmark prompt (median of the runs).
+Cold = sum of first loads on a fresh identity (ANE compile included), all functions of the set incl. HiFT; with several cold runs, the median of their sums. Warm = median per-function load + first prediction in a new process. Synthesis = warm `tts-cli` on the benchmark prompt (median of the runs).
 
 | Variant | Set | Functions | Cold total (s) | Warm load+predict, median over functions (ms) | Synthesis wall (ms) | S3Gen (ms) |
 |---|---|--:|--:|--:|--:|--:|
@@ -89,6 +98,9 @@ Cold = sum of first loads on a fresh identity (ANE compile included), all functi
 | turbo | w3 | 7 | 78.4 | 234 | 3,590 | 989 |
 | turbo | w7 | 15 | 201.5 | 318 | 3,295 | 855 |
 
+<!-- /report:width-set -->
+
+<!-- report:warm-load -->
 ## `expected_warm_load_ms` per function
 
 A warm load is a new process on an identity whose ANE plans are cached; the hint's `warm_load_ms` is load plus the warm-up prediction, which is what this column reports. Prediction = median of the later predictions.
@@ -140,6 +152,9 @@ A warm load is a new process on an identity whose ANE plans are cached; the hint
 | turbo | w7 | encoder | tokens_768 | 4,241 | 171 | 318 | 337 | 146.4 |
 | turbo | w7 | hift | main | 9,648 | 73 | 118 | 141 | 42.6 |
 
+<!-- /report:warm-load -->
+
+<!-- report:sharing -->
 ## Do loaded functions share weight memory?
 
 All functions of one stage loaded and held in one process, per compute-unit policy. Per metric: the increment of the first function, the median of each later one, and the last function loaded alone (MB). `footprint` = phys_footprint (what fit charges); `resident` adds file-backed weight pages; `wired` = host wired memory, where the ANE keeps a loaded program; `available` = the host's available-memory drop (noisy). 'shared' when functions 2..n add less than 25% of a weight.bin each.
@@ -211,6 +226,9 @@ All functions of one stage loaded and held in one process, per compute-unit poli
 | turbo | w7 | encoder | cpu_only | 165.87 | wired | 37.63 | 0.00 | -17.69 | shared |
 | turbo | w7 | encoder | cpu_only | 165.87 | available | 23.67 | 0.00 | -67.52 | shared |
 
+<!-- /report:sharing -->
+
+<!-- report:metal-cost -->
 ## Per-variant Metal cost constants for `s3gen_estimate_metal_ms`
 
 Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX_COREML_DISABLE=1`), one S3Gen call per sentence after a discarded warm-up call. Encoder, CFM and the whole pipeline against `T_mu` (prompt + new frames), HiFT against `T_mel` (new frames). Worst ratio = the largest measured / fitted.
@@ -226,6 +244,9 @@ Least-squares `ms = a + b × frames` over the length sweep on Metal (`CHATTERBOX
 | turbo | hift | -2.5 | 2.4405 | 0.9957 | 18 | T_mel 66–700 | 1.09 |
 | turbo | pipeline | -1347.8 | 2.9867 | 0.9964 | 18 | T_mu 566–1200 | 1.06 |
 
+<!-- /report:metal-cost -->
+
+<!-- report:ttr -->
 ## Time to ready, with and without the admission gate
 
 Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one construction group with `wait=construct`, on a fresh identity with the artifacts at a fresh path. `generate` = a stand-in prepare job per artifact (copy the package, `compileModelAtURL`), as on-device generation will; gated = the shared runtime's Manager, ungated = the same two queues without the gate. Prepare wait = issue to prepare start; load gate wait = artifact available to load start.
@@ -241,6 +262,9 @@ Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one 
 | turbo | prebuilt-gated | 5 | 5/5 | 202.5 | 2.0 | 200.2–209.6 | — | 200.0 | 0.0 | 9.88 |
 | turbo | prebuilt-gated-w3 | 3 | 3/3 | 79.5 | 0.1 | 79.5–81.5 | — | 71.8 | 0.0 | 2.33 |
 
+<!-- /report:ttr -->
+
+<!-- report:memory -->
 ## Available-memory reading under normal load
 
 120 samples of free + inactive + purgeable + speculative pages (`host_statistics64`, the runtime's own reading): min 11,305.47 MB, median 11,377.08 MB, max 11,429.90 MB; low power False.
@@ -254,6 +278,9 @@ Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one 
 | turbo/encoder | 265.39 | no |
 | turbo/hift | 56.77 | no |
 
+<!-- /report:memory -->
+
+<!-- report:synthesis -->
 ## Warm synthesis and encoder-fallback contention
 
 `tts-cli`, benchmark prompt, built-in voice, seed 42, q8_0, a new process per run after one priming run. `coreml-no-encoder` keeps CFM and HiFT on Core ML (so S3Gen still overlaps T3) and the encoder on Metal: the T3 slowdown against `coreml-w7` is the contention the runtime pays when the encoder falls back.
@@ -269,6 +296,9 @@ Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one 
 | turbo | coreml-w7 | 3 | 3,295 | 2,386 | 855 | 1,599.31 |
 | turbo | metal | 3 | 6,014 | 2,996 | 2,502 | 1,610.34 |
 
+<!-- /report:synthesis -->
+
+<!-- report:destinations -->
 ## Where each number goes
 
 | Number | Where it goes |
@@ -281,4 +311,6 @@ Every function (encoder and CFM widths plus HiFT) requested at `minimal` in one 
 | Time to ready with / without the gate, worst prepare wait | Whether the admission gate stays on; the Chatterbox "time to all 15 ready" target |
 | Available-memory reading | Confirms memory admission does not defer cold loads on the bench host |
 | Encoder-fallback contention | Expected overlap when the Chatterbox encoder runs on Metal |
+
+<!-- /report:destinations -->
 
