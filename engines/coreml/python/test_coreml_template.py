@@ -193,7 +193,7 @@ class ManifestTest(unittest.TestCase):
             return json.dumps({"fileFormatVersion": "1.0.0", "rootModelIdentifier": ids[1], "itemInfoEntries": {
                 ids[0]: {"author": "com.apple.CoreML", "name": "weights", "path": "com.apple.CoreML/weights"},
                 ids[1]: {"author": "com.apple.CoreML", "name": "model.mlmodel", "path": path}}})
-        a = manifest(["A1", "A2"])
+        a = manifest(["U1", "U2"])
         self.assertTrue(ctpl.manifest_equivalent(a, manifest(["B1", "B2"])))
         self.assertFalse(ctpl.manifest_equivalent(a, manifest(["B1", "B2"], "com.apple.CoreML/other.mlmodel")))
         wrong_root = json.loads(manifest(["B1", "B2"]))
