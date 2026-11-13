@@ -115,6 +115,15 @@ contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar)
 and, for MOSS-Transcribe-Diarize, in
 [docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
 
+Standard TDT sidecars use ggml for audio beyond their compiled capacity (typically
+15 seconds), preserving native encoder context. Only exports with a validated
+seam policy use short Core ML windows. Standard TDT sidecars retain native
+weights even with `PARAKEET_COREML_ONLY=1`, and encoder-less GGUFs paired with
+these sidecars are rejected at load time. TDT push streams, except full TranscribePsy
+EU, default to 30-second chunks and reject smaller explicit chunks to prevent
+phrase loss. PCM writes can still be arbitrarily small; `finalize()` processes
+the remaining audio. See the [streaming contract](docs/api.md).
+
 Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
 runtime. Legacy single-input sidecars remain loadable but need re-exporting to
 isolate padding; updating runtime code alone does not fix those old artifacts.
@@ -177,6 +186,9 @@ multi-machine campaigns, GPU diarization, accuracy, build pins and timing
 methods live in [docs/performance.md](docs/performance.md).
 
 ## Documentation
+
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
 
 Run model-free checks with `ctest --test-dir build-parakeet -L unit --output-on-failure`.
 For model coverage, use `scripts/run-fixture-tests.py` and require the relevant test

@@ -392,7 +392,9 @@ public:
     // ML; the per-call truth is EngineResult::encoder_used_coreml and
     // DiarizationResult::encoder_used_coreml.
     // CTC/IndicConformer, Unified RNN-T, and TDT pad shorter inputs to the
-    // compiled capacity and window longer offline inputs. EOU and Nemotron use
+    // compiled capacity. Longer TDT inputs use ggml unless the sidecar supplies
+    // a validated seam policy; CTC and Unified RNN-T use overlapping windows.
+    // EOU and Nemotron use
     // Core ML only at the exact compiled shape: shorter calls are never padded,
     // longer EOU inputs run on ggml, and longer Nemotron inputs take the
     // cache-aware ggml path. Diarizer sidecars take any call up to their

@@ -43,6 +43,70 @@ PARLER_TEST_REPORT_ONLY=1 ./build/test-parler-decoder MODEL.gguf REF_DIR
 
 Do not treat `ctest -N` or disabled fixture registrations as executed tests.
 
+### Voice-cloning and streaming parity
+
+The voice-features, fbank, VoiceEncoder, CAMPPlus and end-to-end voice-embedding
+harnesses enforce a maximum relative error below `2e-3` (maximum absolute error
+divided by the reference peak; absolute error when that peak is zero).
+S3TokenizerV2 uses the same bound for log-mel features and requires exact token
+agreement. All require nonempty output, exact shape, float32/int32 reference
+types and finite compared values. The model-dependent bounds still require calibration
+on staged model/reference fixtures; compiling the harnesses does not establish
+numerical parity.
+
+Keep the reference generators in separate directories: `embedding.npy` and
+`wav_16k.npy` have different meanings across dumps. Generate these references
+from `engines/tts`. The voice-features generator needs `gguf`, `librosa`,
+`numpy`, `scipy` and `torch`, without a model checkpoint. The other generators
+need the Chatterbox Python dependencies:
+
+```bash
+python scripts/dump-voice-features-reference.py test/reference-audio/jfk.wav \
+  --out artifacts/voice-features-ref
+python scripts/dump-campplus-reference.py test/reference-audio/jfk.wav \
+  --out artifacts/campplus-ref
+python scripts/dump-s3tokenizer-reference.py test/reference-audio/jfk.wav \
+  --out artifacts/s3tokenizer-ref
+python scripts/dump-streaming-reference.py test/reference-audio/jfk.wav \
+  --out artifacts/streaming-ref
+```
+
+`test-fbank` consumes `campplus-ref/fbank_raw.npy`; `test-campplus` consumes
+its mean-centered `fbank.npy`. `test-voice-embedding` exercises both stages.
+Keep these tests separate: the stage checks locate errors, while the complete
+pipeline catches preprocessing and composition errors. `test-s3tokenizer` uses
+`s3tokenizer-ref/tokens.npy`, not the T3-generated `speech_tokens.npy` from
+`s3gen-ref`. Reconfigure CMake after staging these files.
+
+`test-voice-features` consumes only the matched `voice-features-ref` bundle:
+`reference.wav`, `filterbank.gguf` and `prompt_feat.npy`. Its generator resamples
+the supplied WAV to 24 kHz and saves float32 samples before computing the
+reference with torch STFT and the librosa filterbank. The harness reads that
+exact saved waveform; its gate covers WAV loading and mel extraction.
+`test-resample` covers resampling separately. The packaged conditionals from
+`dump-s3gen-reference.py` are not references for JFK and are not used here.
+VoiceEncoder references must also match their input WAV and preprocessing.
+
+`test-tts-streaming` requires each chunk's saved `step0_x_in` noise, enforces
+mel shape and numerical parity at `2e-3`, and rejects zero chunks, incomplete
+token coverage, invalid token prefixes and empty WAV output. Waveform error is
+informational because Python and C++ use different HiFT noise generators.
+This test does not establish waveform parity or perceptual speech quality.
+
+Model-free `test-parity-checks` exercises the rejection criteria (including
+matching prefixes with missing tails and NaN/infinity in either operand).
+It also writes real NPY files and verifies that short payload/header reads throw,
+including a missing final zero sample. `test-voice-features-reference` generates
+a matched WAV/mel bundle and checks that the C++ harness accepts it and rejects
+a reference from different audio; it skips when its Python dependencies are absent.
+`test-streaming-fixture-validation` checks malformed fixture rejection through
+the streaming executable without a model. `test-supertonic-api` consolidates
+warm-up, deny-list and K/V API/default contracts and checks nested dispatch-scope
+restoration; it does not measure warm-up latency or test real model loading.
+The splitter checks exact boundaries and content preservation. The resampler
+covers tiny/empty inputs, irregular chunks, flushing and batch equivalence,
+with a short steady-state round-trip signal to avoid unnecessary filter work.
+
 ### Optional: validate against Python references
 
 Every stage of the pipeline has a numerical regression test against
