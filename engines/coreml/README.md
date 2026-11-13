@@ -13,10 +13,53 @@ engines share:
   (`src/cache.cpp`, `src/failed.cpp`). Given a template directory and a GGUF,
   it writes the `weight.bin` of an `.mlpackage` byte for byte the same on
   Linux and macOS;
-- `qvac-coreml-tool`, the host CLI for that generator (below).
+- `qvac-coreml-tool`, the host CLI for that generator (below);
+- on Apple, the on-device compile of a generated package
+  (`src/apple/compile.mm`) and the templates embedded in each engine library
+  (`src/templates.h`);
+- `python/coreml_template.py`, which makes templates from an unchanged
+  exporter and checks them against it, and `python/golden.py`, the
+  generator tripwire.
 
 No library is installed: the headers under `include/` are build-interface
 only.
+
+## Engine build options
+
+`qvac_coreml_add_to(<engine-lib> NAMESPACE <ns> PREFIX <P> ENABLE <bool> [TEMPLATES <dirs>])`
+in `qvac_coreml.cmake` folds the runtime into an engine library when the
+engine's Core ML option (`TTS_CPP_COREML`, `PARAKEET_COREML`,
+`AUDIOGEN_COREML`) is on. With it come these cache options:
+
+| Option | Default | Effect |
+|---|---|---|
+| `<P>_COREML_GENERATE` (`TTS_CPP_COREML_GENERATE`, `PARAKEET_COREML_GENERATE`, `AUDIOGEN_COREML_GENERATE`) | `ON` on macOS, `OFF` on iOS | Compiles the generator (recipe interpreter, MILBlob writer, `GgufSource`, cache, on-device compile) into the library and embeds the template directories passed as `TEMPLATES`. Needs the `ggml` target. With `OFF`, only the runtime half (background loads of prebuilt sidecars) is compiled and no template is embedded. |
+| `QVAC_COREML_TEMPLATE_BUDGET_MB` | `32` | The most template bytes (uncompressed) one library may embed. Configure fails above it with `the embedded Core ML templates take N bytes, over QVAC_COREML_TEMPLATE_BUDGET_MB=…`. |
+| `QVAC_COREML_DEV` | `OFF` | Compiles the template override (below) into a release build. Test builds (`<P>_BUILD_TESTS=ON`) always have it. |
+
+**Embedding.** Each file of each template (`Manifest.json`, `model.mlmodel`,
+`recipe.txt`, `template.json` and an optional `literals.bin`; never the
+test-only `reference-gguf.json`) becomes one generated assembler stub that
+places it uncompressed in `__TEXT,__const` with `.incbin`, so the bytes are
+paged in only when a package is written. A generated table lists
+`{template id, file, begin, end, sha256}`; CMake computes each `sha256`, so
+`template_sha256` (part of every cache key) is known without reading the
+files. Editing a template file reconfigures the build. A template directory
+must be named after its `template.json` `id`. Linux builds embed nothing.
+
+**Template override.** Where compiled in, the `template_dir` option
+(`Options::template_dir`) or the `QVAC_COREML_TEMPLATE_DIR` environment
+variable makes the generator read `<dir>/<template-id>/` instead of the
+embedded copy. Elsewhere `template_dir` is ignored with a warning.
+
+**On-device compile.** `apple::compile_package()` calls
+`+[MLModel compileModelAtURL:completionHandler:]`. Core ML writes the bundle
+to `$TMPDIR/<package name>.mlmodelc`; the pipeline names packages
+`qvac-coreml-<key>.mlpackage`, so a process killed mid-compile leaves
+`$TMPDIR/qvac-coreml-<key>.mlmodelc`, which a routine prune removes after an
+hour. The bundle is then renamed into staging, or copied when `$TMPDIR` is on
+another volume. `artifact.json` records the OS build and the `coremlc`
+version read from the compiled `model.mil`. Generation needs macOS 15.
 
 ## Building the tests and the tool
 
@@ -56,6 +99,109 @@ ctest --test-dir build-tts -L coreml-runtime
 The tool and the generator are compiled with `-ffp-contract=off`, so no
 floating-point expression is fused into an FMA and the output does not
 depend on the host CPU (x86-64 or arm64).
+
+## Making a template
+
+Templates live in `engines/<engine>/coreml-templates/<template-id>/`. The
+exporter (`engines/*/scripts/export-*-coreml.py`) is never modified; it stays
+the numerical reference. `python/coreml_template.py` needs the coremltools
+venv pinned by `engines/parakeet/scripts/requirements-coreml.txt` (numpy,
+gguf-py, coremltools), the exporter's own requirements and a built
+`qvac-coreml-tool` (`--tool`, or `$QVAC_COREML_TOOL`).
+
+1. Write the shape manifest of a real GGUF:
+   `qvac-coreml-tool dump model.gguf -o <dir>/reference-gguf.json`.
+2. Draft the recipe from the exporter run on twin A (seed 1, f32):
+
+   ```sh
+   python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool suggest \
+       --manifest <dir>/reference-gguf.json --id <template-id> -o <dir>/recipe.txt \
+       --exporter engines/tts/scripts/parler/export-dac-coreml.py \
+       --exporter-arg=--gguf --exporter-arg={gguf} --exporter-arg=--output --exporter-arg={out}
+   ```
+
+   Every `weight.bin` blob is matched against `f16(t(name))`, transposes,
+   scalar multiples, negation, `zeros` and `ones`. A blob it cannot explain is
+   written as `blob <offset> <dtype> <count> ???` under an `UNEXPLAINED`
+   comment; a blob that several tensors explain gets an `AMBIGUOUS` comment.
+   Suggested constants come from the twin's values: confirm them against the
+   exporter.
+3. Complete `recipe.txt` by hand (the recipe language: `include/qvac_coreml/recipe.h`).
+4. Write `template.json` with the fields only the author knows (`family`,
+   `stage`, `export_kind`, `match.metadata`, `exporter` with `{gguf}` and
+   `{out}` in its `args`, `default_compute_units`, `memory`), then extract:
+
+   ```sh
+   python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool extract --template-dir <dir>
+   ```
+
+   `extract` runs the exporter on twins A and B (seeds 1 and 2), fails when
+   their specs differ anywhere (a weight-dependent value in the spec needs
+   patches, which this generator version lacks) or when their `weight.bin`
+   layouts differ, then writes `model.mlmodel` (A's spec, deterministically
+   serialised), `Manifest.json` and the computed `template.json` fields
+   (`functions`, `stateful`, `weight_bin_size`, `generation_peak_bytes`, the
+   exporter's sha256, the toolchain versions), and refreshes the header of
+   `recipe.txt`.
+5. Check it against the exporter:
+
+   ```sh
+   python engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool report --template-dir <dir>
+   ```
+
+   For twins A and B (f32) and Q (`--quant-types`, default `q8_0`; the
+   exporter gets `qvac-coreml-tool f32` of it), `report` compares the
+   exporter's `weight.bin` blob by blob with the C++ generator's
+   (`qvac-coreml-tool verify`) and the exporter's spec with the template's.
+   `--all` checks every template under `engines/*/coreml-templates/`.
+6. Add the template's golden line:
+   `python3 engines/coreml/python/golden.py update --tool build/qvac-coreml-tool`.
+
+### Gates in CI
+
+`.github/workflows/coreml-templates-ci.yml` runs on changes to the exporters,
+the templates, `engines/coreml` and the venv pin, on the self-hosted
+Apple-silicon lane: the `coreml_template.py` unit checks, `report` on the toy
+templates (a harness self-check), `report --all` (the extraction and
+cross-seed gates) and `golden.py check`.
+
+`engines/coreml/test/golden.txt` holds, per template, the generator version,
+`template_sha256` and the sha256 of the `weight.bin` generated from twin A.
+`golden.py check` (also the `test-coreml-golden` ctest on Linux and macOS)
+fails when the generated bytes change while the generator version and the
+template stay the same: a generator change that alters output must bump
+`GENERATOR_VERSION` (`include/qvac_coreml/recipe.h`). A version or template
+change, a template without a line or a line without a template also fail
+until `golden.py update` is run and `golden.txt` committed.
+
+### Toy templates
+
+`test/toy-templates/` holds three test-only templates made by
+`test/toy/export_toy.py` with coremltools' MIL builder: `toy-stateless`,
+`toy-multi` (two functions sharing weights) and `toy-state` (an MLState
+accumulator). They are routing and lifetime fixtures, never a gate on a
+model. `test-coreml-toy` (label `coreml-toy`, macOS 15 or later) embeds them
+in a test library through `qvac_coreml_add_to(... TEMPLATES ...)` and checks,
+on the device: the embedded table against the source files; generate,
+compile, load and predict for each toy, compared with the same arithmetic on
+the GGUF's weights (CPU, and all compute units for the stateless toy);
+`artifact.json`; the user metadata of an on-device-compiled bundle; the
+memo hit on a second preparation; the compile output naming and the copy
+fallback; and the repair of an unusable artifact (moved to `quarantine/`,
+regenerated, compiled again). It prints `compile_peak_bytes` per toy.
+
+```sh
+ctest --test-dir build-coreml -L coreml-toy --output-on-failure
+```
+
+To rebuild the toys after changing `export_toy.py`:
+
+```sh
+python engines/coreml/test/toy/export_toy.py --kind stateless --init seed.gguf
+qvac-coreml-tool dump seed.gguf -o engines/coreml/test/toy-templates/toy-stateless/reference-gguf.json
+python engines/coreml/python/coreml_template.py --tool qvac-coreml-tool extract \
+    --template-dir engines/coreml/test/toy-templates/toy-stateless
+```
 
 ## qvac-coreml-tool
 
