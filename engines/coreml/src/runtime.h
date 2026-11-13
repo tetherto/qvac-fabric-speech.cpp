@@ -234,12 +234,13 @@ private:
     bool low_power_locked() const;
     bool hinted(const std::string & hint_path) const;
     int64_t job_w(const Job & j) const;
-    // `adopt` receives the instance the picked job was admitted to adopt (see
-    // Job::adopt); `gy` keeps a copy, so dropping it under mu is safe.
-    std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake,
+    // With `retain` (only the load worker, which starts what it picks),
+    // `adopt` receives a strong reference to the instance the picked job was
+    // admitted to adopt (see Job::adopt); the caller moves it into the job
+    // before releasing mu. Without it, admission takes no strong reference.
+    std::shared_ptr<Job> pick_locked(Clock::time_point now, Clock::time_point & wake, bool retain,
                                      std::shared_ptr<SharedModel> & adopt, Graveyard & gy);
-    PoolVerdict pool_admits_locked(Job & j, std::shared_ptr<SharedModel> & adopt, Graveyard & gy);
-    std::shared_ptr<SharedModel> adoptable_locked(const Job & j, Graveyard & gy) const;
+    PoolVerdict pool_admits_locked(Job & j, bool retain, std::shared_ptr<SharedModel> & adopt, Graveyard & gy);
     void set_cap_blocked_locked(Job & j, bool blocked);
     size_t pool_live_locked(const PoolCore & p, Graveyard & gy) const;
     bool pool_counts_locked(const PoolCore & p, const SharedModel * m, Graveyard & gy) const;

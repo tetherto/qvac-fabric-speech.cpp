@@ -14,6 +14,9 @@ struct TestHooks {
     // worker_main(): after a job was admitted and started, before the worker
     // runs it.
     std::atomic<void (*)()> job_started{nullptr};
+    // worker_main(): after this worker handed the job it picked to the other
+    // worker, before it releases what its scan collected.
+    std::atomic<void (*)()> handed_off{nullptr};
     // run_load(): before the load worker publishes another owner's live
     // instance instead of loading (the job holds the gate meanwhile).
     std::atomic<void (*)()> before_adopt{nullptr};
