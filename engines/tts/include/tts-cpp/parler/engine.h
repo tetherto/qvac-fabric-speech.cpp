@@ -15,15 +15,21 @@
 // Streaming: the synthesize(...on_chunk) overload emits audio in chunks by
 // re-decoding the growing DAC-code prefix, holding back a right margin for seams.
 //
-// Core ML (Apple, TTS_CPP_COREML builds): when the DAC sidecar sits next to the
-// GGUF (`parler-mini-v1-q8_0.gguf` -> `parler-mini-v1-dac.mlmodelc`, the quant
-// tag dropped), the DAC decode runs on it on the compute units Core ML picks
-// (the Neural Engine on Apple silicon), whatever the `backend` option; the T5
-// encoder and decoder LM stay on ggml by default. coreml_decoder opts into
-// decoder steps on a separate -decoder.mlmodelc sidecar (macOS 15 / iOS 18);
-// T5 and prompt prefill still run on ggml.
+// Core ML (Apple, TTS_CPP_COREML builds): the DAC decode runs on a Core ML
+// sidecar, on the compute units Core ML picks (the Neural Engine on Apple
+// silicon), whatever the `backend` option. The sidecar is either prebuilt next
+// to the GGUF (`parler-mini-v1-q8_0.gguf` -> `parler-mini-v1-dac.mlmodelc`, the
+// quant tag dropped) or, with EngineOptions::coreml.cache_dir set and macOS 15
+// or later, generated from the GGUF's own DAC weights into that cache. Either
+// loads in the background: until it is ready each call decodes on ggml
+// (SynthesisResult::coreml_pending), and coreml.wait = construct makes the
+// constructor wait instead. The T5 encoder and decoder LM stay on ggml by
+// default. coreml_decoder opts into decoder steps on a separate
+// -decoder.mlmodelc sidecar (macOS 15 / iOS 18); T5 and prompt prefill still
+// run on ggml.
 
 #include "tts-cpp/backend.h"
+#include "tts-cpp/coreml_options.h"
 #include "tts-cpp/export.h"
 
 #include <cstddef>
@@ -105,6 +111,13 @@ struct EngineOptions {
     // Explicit false permits fallback even when that environment variable is
     // set. PARLER_COREML_DISABLE overrides both stages at construction.
     std::optional<bool> coreml_strict;
+
+    // The DAC sidecar on the shared Core ML runtime (tts-cpp/coreml_options.h):
+    // cache_dir enables generation, wait / prewarm choose when it loads, use =
+    // require makes a sidecar that cannot serve a call an error. Unset fields
+    // fall back to coreml_compute_units / coreml_strict above, then to the
+    // PARLER_COREML_* environment. Parler's minimal set is the DAC.
+    CoremlOptions coreml;
 };
 
 struct SynthesisResult {
@@ -123,6 +136,10 @@ struct SynthesisResult {
     // Prefill currently runs on ggml. "mixed" means successful Core ML steps
     // were followed by ggml after a sidecar failure.
     std::string decoder_backend = "ggml";
+
+    // True when a DAC call of this synthesis ran on ggml only because its Core
+    // ML sidecar was not ready yet (still generating, compiling or loading).
+    bool coreml_pending = false;
 };
 
 // Per-chunk PCM callback: consecutive float32 mono samples (engine-owned, do not
@@ -173,6 +190,16 @@ public:
     // failing sidecar is retired.
     bool dac_on_coreml() const;
     bool decoder_on_coreml() const;
+
+    // Core ML status of the DAC stage as JSON (schema 1: engine, cache_dir,
+    // generation, stages with state, route, compute units, label, artifact
+    // key, timings and error); "{}" in builds without TTS_CPP_COREML.
+    std::string coreml_status() const;
+    // Waits until the DAC sidecar is ready or has failed, or `timeout_ms`
+    // passes (< 0: no limit). True when it is ready. Returns false at once
+    // while nothing has requested the sidecar (prewarm none before the first
+    // synthesis) or it waits for memory (deferred).
+    bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:
     struct Impl;

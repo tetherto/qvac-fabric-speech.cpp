@@ -8,7 +8,9 @@
 #include "../cosyvoice_mmap.h"
 #include "dac_coreml.h"
 
+#include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -177,6 +179,9 @@ struct parler_model {
     mutable bool dac_sidecar_retired = false;  // a failure retired it (STRICT keeps failing)
     bool dac_coreml_strict = false;           // captured at attachment, not read at decode time
     parler_dac_rvq dac_rvq;
+    // The DAC on the shared Core ML runtime (parler_dac_coreml) or a test
+    // double: acquired once per decode call when no sidecar is attached.
+    std::shared_ptr<parler_dac_pending> dac_pending;
 
     // decoder self-attention KV cache (token-major slab, one per K/V):
     // [d_model, n_ctx] rows per layer, stacked layer-major.
@@ -416,10 +421,14 @@ ggml_cgraph * parler_build_dac_fit_graph(const parler_model & model, int n_frame
 // is bit-identical to decoding the whole sequence and slicing.
 // latent_out (optional, tests): summed RVQ latent for the same frame range,
 // [latent_dim, T] ggml layout (element (c, t) at t*latent_dim + c).
-// With a Core ML sidecar attached (model.dac_sidecar) the windows run on it;
-// a failing sidecar is retired and the whole range is redone on ggml, unless
-// the captured Core ML strict policy is enabled, which fails the call instead. backend_out
-// (optional) receives where the range ran: "ggml" or the sidecar's label.
+// With a Core ML sidecar attached (model.dac_sidecar), or one acquired at
+// entry from model.dac_pending, the windows run on it; a failing sidecar is
+// retired and the whole range is redone on ggml, unless the captured Core ML
+// strict policy is enabled, which fails the call instead. backend_out
+// (optional) receives where the range ran: "ggml" or the sidecar's label;
+// pending_out (optional) whether it ran on ggml only because the sidecar was
+// not ready yet. cancel (optional) interrupts a wait for the sidecar: once it
+// is set the call fails with "cancelled" and decodes nothing.
 bool parler_dac_decode(const parler_model & model,
                        const int32_t * codes, int n_frames,
                        int n_threads,
@@ -427,7 +436,29 @@ bool parler_dac_decode(const parler_model & model,
                        std::vector<float> * latent_out = nullptr,
                        int out_begin = 0, int out_end = -1,
                        std::string * err_out = nullptr,
-                       std::string * backend_out = nullptr);
+                       std::string * backend_out = nullptr,
+                       bool * pending_out = nullptr,
+                       const std::atomic<bool> * cancel = nullptr);
+
+// ---- fit.cpp ----
+// Fit's two verdicts for the generated DAC and memory-degrade. `required` is
+// the ggml-only projection (margin and, on unified memory, host extras
+// included); `coreml_bytes` the stage's Core ML envelope, charged only when
+// `generate`. Both verdicts compare against `device_free`. With a budget,
+// memory-degrade drops Core ML when the Core ML-inclusive projection exceeds
+// the capacity the verdict uses, min(device_free, budget), and the ggml one
+// fits it, so Core ML never turns a working ggml verdict into a refusal. No
+// budget, no memory-degrade.
+struct parler_coreml_fit_verdict {
+    bool ggml_only_fits = false;
+    bool coreml_fits    = false;
+    bool degraded       = false;  // memory-degrade: use = off, reason "memory"
+    bool fits           = false;  // the verdict for what the engine will run
+    uint64_t charged    = 0;      // what `fits` compares with device_free
+};
+parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
+                                                   uint64_t device_free,
+                                                   const std::optional<int64_t> & budget);
 
 } // namespace detail
 } // namespace parler

@@ -1,7 +1,7 @@
 // test-coreml-recipe: grammar and static
-// checks, each op of generator version 1 on hand-computed vectors, dtype
-// promotion, tolerance classes and ULP distance, templates and matching, and
-// (with ggml) GgufSource. Portable: Linux and macOS.
+// checks, each op of generator version 1 on hand-computed vectors, literals
+// and spec patches, dtype promotion, tolerance classes and ULP distance,
+// templates and matching, and (with ggml) GgufSource. Portable: Linux and macOS.
 
 #include "generator_test_util.h"
 
@@ -147,7 +147,7 @@ void case_grammar_errors() {
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(frob(t(\"a\")))\nend\n", "unknown op frob");
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(tile(t(\"a\"), 0, 1))\nend\n", "not in generator version 1 (a later version adds it)");
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(provided(\"k\", [t(\"a\")]))\nend\n", "a later version adds it");
-    expect_error(hdr(192, 1) + kSrcA + "patch 10 fp16 1 1.0\n" + blob + "end\n", "patch lines are not");
+    expect_error(hdr(192, 1) + kSrcA + "patch 10 str 4 \"abcd\"\n" + blob + "end\n", "patch str lines are not");
     // Bindings.
     expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(x)\nlet x = t(\"a\")\nend\n", "used before its let", 7);
     expect_error(hdr(192, 1) + kSrcA + "let x = t(\"a\")\nlet x = t(\"a\")\n" + blob + "end\n", "already defined");
@@ -708,6 +708,280 @@ void case_verify_weight_bin() {
 #endif
 }
 
+
+// ---- slice, neg, zeros, ones ----------------------------------------------------------------
+
+void case_op_slice_neg_consts() {
+    MemSource s = src_a({1, 2, 3, 4, 5, 6});
+    auto out = run(recipe_text("t", zeros64(), kSrcA,
+                               {blob("fp32", 4, "f32(slice(t(\"a\"), 1, 1, 3))"),
+                                blob("fp32", 4, "f32(slice(t(\"a\"), 1, 0, 3, 2))"),
+                                blob("fp32", 3, "f32(slice(t(\"a\"), 0, 1, 2))"),
+                                blob("fp32", 2, "f32(slice(t(\"a\"), 1, 2, 3, 5))"),
+                                blob("fp32", 6, "f32(neg(t(\"a\")))"),
+                                blob("fp32", 6, "f32(neg(f64(t(\"a\"))))"),
+                                blob("fp32", 2, "f32(neg(zeros([2])))"),
+                                blob("fp32", 6, "f32(zeros([2,3]))"),
+                                blob("fp16", 3, "f16(ones([3]))"),
+                                blob("fp32", 3, "f32(mul(slice(t(\"a\"), 0, 0, 1, 1), neg(0.5)))")}),
+                   s);
+    CHECK(out.size() == 10);
+    if (out.size() != 10) return;
+    CHECK(f32s(out[0]) == std::vector<float>({2, 3, 5, 6}));
+    CHECK(f32s(out[1]) == std::vector<float>({1, 3, 4, 6}));
+    CHECK(f32s(out[2]) == std::vector<float>({4, 5, 6}));
+    CHECK(f32s(out[3]) == std::vector<float>({3, 6}));  // a step past the end takes one element
+    CHECK(f32s(out[4]) == std::vector<float>({-1, -2, -3, -4, -5, -6}));
+    CHECK(out[5] == out[4]);
+    // IEEE negation: -0 has the sign bit, unlike 0 - x.
+    const auto nz = f32s(out[6]);
+    CHECK(bits(nz[0]) == 0x80000000u && bits(nz[1]) == 0x80000000u);
+    const auto z = f32s(out[7]);
+    for (float v : z) CHECK(bits(v) == 0u);
+    CHECK(f16s(out[8]) == std::vector<uint16_t>({0x3c00, 0x3c00, 0x3c00}));
+    CHECK(f32s(out[9]) == std::vector<float>({-0.5f, -1.0f, -1.5f}));
+
+    const std::string b6 = "\nend\n";
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, 2, 2))" + b6, "begin < end");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, 0, 4))" + b6, "end <= 3");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, -1, 2))" + b6, "begin < end");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, 0, 3, 0))" + b6, "step must be");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 2, 0, 1))" + b6, "axis out of range");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, 0))" + b6, "slice() takes");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(slice(t(\"a\"), 1, 0.5, 2))" + b6, "integer literal");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(zeros([]))" + b6, "1 to 8 dims");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(ones([6,0]))" + b6, "must be positive");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(zeros(t(\"a\")))" + b6, "must be a list");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(neg(t(\"a\"), 1))" + b6, "takes 1 argument");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(lit(\"r\"))" + b6, "not declared in template.json literals");
+    expect_error(hdr(192, 1) + kSrcA + "blob 64 fp16 6 f16(lit(r))" + b6, "lit() takes a literal id string");
+    // No op of this vocabulary is ulp.
+    const recipe::Recipe r = recipe::parse(recipe_text(
+        "t", zeros64(), kSrcA, {blob("fp16", 2, "f16(neg(slice(t(\"a\"), 1, 0, 1)))"), blob("fp16", 6, "f16(ones([6]))")}));
+    for (const recipe::Item & it : r.items) CHECK(!it.ulp);
+}
+
+// ---- lit --------------------------------------------------------------------------------------
+
+void case_op_lit() {
+    // literals.bin: "rope" fp16 [2,2] at 0, "f" fp32 [3] at 8.
+    const std::vector<uint16_t> rope = {0x3c00, 0xbc00, 0x3555, 0x0001};  // 1, -1, ~1/3, smallest subnormal
+    const std::vector<float> f = {0.25f, -3.0f, 1.0e-30f};
+    std::vector<uint8_t> bin(8 + 12);
+    std::memcpy(bin.data(), rope.data(), 8);
+    std::memcpy(bin.data() + 8, f.data(), 12);
+    recipe::ParseContext ctx;
+    ctx.literals.push_back(recipe::Literal{"rope", BlobType::fp16, {2, 2}, 0, bin.data()});
+    ctx.literals.push_back(recipe::Literal{"f", BlobType::fp32, {3}, 8, bin.data() + 8});
+    const std::string text = recipe_text("t", zeros64(), kSrcA,
+                                         {blob("fp16", 4, "f16(lit(\"rope\"))"),
+                                          blob("fp32", 4, "f32(lit(\"rope\"))"),
+                                          blob("fp32", 3, "f32(neg(lit(\"f\")))"),
+                                          blob("fp16", 2, "f16(slice(lit(\"rope\"), 0, 1, 2))")});
+    MemSource s = src_a({1, 2, 3, 4, 5, 6});
+    std::vector<std::vector<uint8_t>> out;
+    try {
+        const recipe::Recipe r = recipe::parse(text, ctx);
+        CHECK(r.items[0].expr->shape == std::vector<int64_t>({2, 2}));
+        CHECK(r.literals.size() == 2 && r.find_literal("f") != nullptr);
+        const Error e = recipe::evaluate(r, s, [&](const recipe::BlobOut & b) {
+            out.emplace_back(b.data, b.data + b.bytes);
+            return Error{};
+        });
+        CHECK_MSG(e.ok(), e.message);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+    }
+    CHECK(out.size() == 4);
+    if (out.size() != 4) return;
+    CHECK(f16s(out[0]) == rope);  // fp16 -> f32 -> fp16 is the identity
+    CHECK(f32s(out[1])[0] == 1.0f && f32s(out[1])[1] == -1.0f && f32s(out[1])[3] == std::ldexp(1.0f, -24));
+    CHECK(f32s(out[2]) == std::vector<float>({-0.25f, 3.0f, -1.0e-30f}));
+    CHECK(f16s(out[3]) == std::vector<uint16_t>({0x3555, 0x0001}));
+
+    // Declarations without bytes parse, and evaluating them is a deterministic error.
+    recipe::ParseContext decl;
+    decl.literals.push_back(recipe::Literal{"rope", BlobType::fp16, {2, 2}, 0, nullptr});
+    const recipe::Recipe r = recipe::parse(recipe_text("t", zeros64(), kSrcA, {blob("fp16", 4, "f16(lit(\"rope\"))")}), decl);
+    const Error e = recipe::evaluate(r, s, [](const recipe::BlobOut &) { return Error{}; });
+    CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("no bytes") != std::string::npos, e.message);
+    // Duplicate ids and bad shapes.
+    recipe::ParseContext dup = decl;
+    dup.literals.push_back(decl.literals[0]);
+    try {
+        recipe::parse(recipe_text("t", zeros64(), kSrcA, {blob("fp16", 6, "f16(t(\"a\"))")}), dup);
+        CHECK_MSG(false, "duplicate literal accepted");
+    } catch (const recipe::RecipeError & ex) {
+        CHECK_MSG(std::string(ex.what()).find("duplicate literal") != std::string::npos, ex.what());
+    }
+    recipe::ParseContext zero;
+    zero.literals.push_back(recipe::Literal{"z", BlobType::fp32, {2, 0}, 0, nullptr});
+    try {
+        recipe::parse(recipe_text("t", zeros64(), kSrcA, {blob("fp16", 6, "f16(t(\"a\"))")}), zero);
+        CHECK_MSG(false, "zero-sized literal accepted");
+    } catch (const recipe::RecipeError & ex) {
+        CHECK_MSG(std::string(ex.what()).find("must be positive") != std::string::npos, ex.what());
+    }
+}
+
+// ---- patches ------------------------------------------------------------------------------------
+
+// A fake spec of 64 bytes: a 4-byte fp16 sentinel at 16 and an 8-byte fp32 one at 40.
+std::string patch_spec() {
+    std::string spec(64, 'x');
+    spec.replace(16, 4, "\xa5\x5a\xa5\x5a", 4);
+    spec.replace(40, 8, "\x5a\xa5\x5a\xa5\x5a\xa5\x5a\xa5", 8);
+    return spec;
+}
+
+recipe::ParseContext patch_ctx(const std::string & spec) {
+    recipe::ParseContext ctx;
+    ctx.spec = reinterpret_cast<const uint8_t *>(spec.data());
+    ctx.spec_size = spec.size();
+    ctx.patches = {recipe::PatchSite{16, 4, "a55aa55a"}, recipe::PatchSite{40, 8, "5aa55aa55aa55aa5"}};
+    return ctx;
+}
+
+void expect_patch_error(const std::string & text, const recipe::ParseContext & ctx, const std::string & needle) {
+    try {
+        recipe::parse(text, ctx);
+        CHECK_MSG(false, "parsed, expected an error containing '" + needle + "'");
+    } catch (const recipe::RecipeError & e) {
+        CHECK_MSG(std::string(e.what()).find(needle) != std::string::npos,
+                  std::string("error '") + e.what() + "' lacks '" + needle + "'");
+    }
+}
+
+void case_patches() {
+    const std::string spec = patch_spec();
+    const recipe::ParseContext ctx = patch_ctx(spec);
+    const std::string decls = "source \"a\" f32 [2,3]\nsource \"b\" f32 [2]\n";
+    MemSource s({TT{"a", T_F32, {2, 3}, {1, 2, 3, 4, 5, 6}}, TT{"b", T_F32, {2}, {0.5f, -0.0f}}}, {});
+    const std::string text =
+        recipe_text("t", zeros64(), decls,
+                    {patch_(16, "fp16", 2, "f16(neg(t(\"b\")))"), blob("fp16", 6, "f16(t(\"a\"))"),
+                     patch_(40, "fp32", 2, "f32(mul(t(\"b\"), 4))")});
+    try {
+        const recipe::Recipe r = recipe::parse(text, ctx);
+        CHECK(r.patch_count() == 2 && r.blob_count == 1);
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> got;
+        Error e = recipe::evaluate_patches(r, s, [&](const recipe::PatchOut & p) {
+            got.emplace_back(p.offset, std::vector<uint8_t>(p.data, p.data + p.bytes));
+            return Error{};
+        });
+        CHECK_MSG(e.ok(), e.message);
+        CHECK(got.size() == 2 && got[0].first == 16 && got[1].first == 40);
+        if (got.size() == 2) {
+            CHECK(f16s(got[0].second) == std::vector<uint16_t>({0xb800, 0x0000}));  // -0.5, -(-0) = +0
+            CHECK(f32s(got[1].second) == std::vector<float>({2.0f, -0.0f}));
+        }
+        // evaluate() writes only the blobs.
+        int blobs = 0;
+        e = recipe::evaluate(r, s, [&](const recipe::BlobOut &) {
+            ++blobs;
+            return Error{};
+        });
+        CHECK(e.ok() && blobs == 1);
+        std::vector<uint8_t> out;
+        e = recipe::patched_spec(r, s, ctx.spec, ctx.spec_size, out);
+        CHECK_MSG(e.ok(), e.message);
+        std::string want = spec;
+        want.replace(16, 4, std::string("\x00\xb8\x00\x00", 4));
+        const float w2[2] = {2.0f, -0.0f};
+        want.replace(40, 8, std::string(reinterpret_cast<const char *>(w2), 8));
+        CHECK(std::string(out.begin(), out.end()) == want);
+        // The observer sees the patch reads.
+        int seen = 0;
+        e = recipe::evaluate_patches(
+            r, s, [](const recipe::PatchOut &) { return Error{}; },
+            [&](const std::string & n, const std::array<uint8_t, 32> &) {
+                seen += n == "b" ? 1 : 0;
+                return Error{};
+            });
+        CHECK(e.ok() && seen >= 1);
+        // A non-finite patch value is deterministic, as for blobs.
+        MemSource inf({TT{"a", T_F32, {2, 3}, {1, 2, 3, 4, 5, 6}}, TT{"b", T_F32, {2}, {1.0e30f, 0.0f}}}, {});
+        e = recipe::evaluate_patches(r, inf, [](const recipe::PatchOut &) { return Error{}; });
+        CHECK_MSG(!e.ok() && e.cls == ErrorClass::deterministic && e.message.find("non-finite") != std::string::npos,
+                  e.message);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+    }
+    // Without a spec (a recipe on its own) only order and overlap are checked.
+    try {
+        recipe::parse(text);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+    }
+    const std::string b = "blob 64 fp16 6 f16(t(\"a\"))\n";
+    const std::string h = hdr(192, 1) + decls;
+    expect_patch_error(h + "patch 40 fp32 2 f32(t(\"b\"))\npatch 16 fp16 2 f16(t(\"b\"))\n" + b + "end\n", {},
+                       "spec offset order");
+    expect_patch_error(h + "patch 16 fp32 2 f32(t(\"b\"))\npatch 20 fp16 2 f16(t(\"b\"))\n" + b + "end\n", {},
+                       "overlaps");
+    expect_patch_error(h + "patch 16 fp16 2 t(\"b\")\n" + b + "end\n", {}, "must end in f16");
+    expect_patch_error(h + "patch 16 fp16 3 f16(t(\"b\"))\n" + b + "end\n", {}, "declares 3 elements");
+    expect_patch_error(h + "patch 16 bf16 2 f16(t(\"b\"))\n" + b + "end\n", {}, "fp16 or fp32");
+    // Against the spec and its sites.
+    expect_patch_error(h + "patch 16 fp16 2 f16(t(\"b\"))\n" + b + "end\n", ctx, "patch at spec offset 40 has no patch line");
+    expect_patch_error(h + "patch 60 fp16 2 f16(t(\"b\"))\n" + b + "end\n", ctx, "has no template.json patches entry");
+    expect_patch_error(h + "patch 62 fp16 2 f16(t(\"b\"))\n" + b + "end\n", ctx, "outside the 64-byte spec");
+    expect_patch_error(h + "patch 16 fp32 2 f32(t(\"b\"))\n" + b + "end\n", ctx, "has len 4");
+    std::string bad = spec;
+    bad[17] = 'y';
+    expect_patch_error(text, patch_ctx(bad), "not the patch's sentinel");
+}
+
+// A template with literals.bin and patches: Template::from_dir reads both and
+// write_package() writes the patched spec.
+void case_template_literals_patches() {
+    TempDir td;
+    TemplateSpec ts;
+    ts.id = "toy-lit";
+    ts.decls = "source \"a\" f32 [2,3]\nsource \"b\" f32 [2]\n";
+    ts.items = {patch_(16, "fp16", 2, "f16(neg(t(\"b\")))"), blob("fp16", 4, "f16(lit(\"rope\"))"),
+                blob("fp16", 6, "f16(t(\"a\"))"), patch_(40, "fp32", 2, "f32(t(\"b\"))")};
+    ts.spec_bytes = patch_spec();
+    const std::vector<uint16_t> rope = {0x3c00, 0xbc00, 0x3555, 0x0001};
+    ts.literals_bin = std::string("pad!") + std::string(reinterpret_cast<const char *>(rope.data()), 8);
+    ts.extra = {{"literals", json::array({{{"id", "rope"}, {"dtype", "fp16"}, {"shape", {2, 2}}, {"offset", 4}}})},
+                {"patches", json::array({{{"spec_offset", 16}, {"len", 4}, {"sentinel_hex", "a55aa55a"}},
+                                         {{"spec_offset", 40}, {"len", 8}, {"sentinel_hex", "5aa55aa55aa55aa5"}}})}};
+    std::shared_ptr<const recipe::Template> t;
+    try {
+        t = make_template(td / "tpl", ts);
+    } catch (const std::exception & e) {
+        CHECK_MSG(false, e.what());
+        return;
+    }
+    CHECK(t->recipe().patch_count() == 2 && t->file("literals.bin") != nullptr);
+    MemSource s({TT{"a", T_F32, {2, 3}, {1, 2, 3, 4, 5, 6}}, TT{"b", T_F32, {2}, {0.5f, 2.0f}}}, {});
+    Error e = cache::write_package(*t, s, td / "out.mlpackage");
+    CHECK_MSG(e.ok(), e.message);
+    const std::string written = read_bytes(td / "out.mlpackage/Data/com.apple.CoreML/model.mlmodel");
+    std::string want = patch_spec();
+    want.replace(16, 4, std::string("\x00\xb8\x00\xc0", 4));  // -0.5, -2
+    const float w2[2] = {0.5f, 2.0f};
+    want.replace(40, 8, std::string(reinterpret_cast<const char *>(w2), 8));
+    CHECK(written == want);
+    const std::string wb = read_bytes(td / "out.mlpackage/Data/com.apple.CoreML/weights/weight.bin");
+    auto idx = milblob::read_index(reinterpret_cast<const uint8_t *>(wb.data()), wb.size(), nullptr);
+    CHECK(idx && idx->size() == 2);
+    if (idx && idx->size() == 2) {
+        CHECK(std::memcmp(wb.data() + (*idx)[0].data_offset, rope.data(), 8) == 0);
+    }
+    // Sentinel bytes changed in the spec: the template no longer loads.
+    std::string spec2 = patch_spec();
+    spec2[41] = 0;
+    write_bytes(td / "tpl/model.mlmodel", spec2);
+    try {
+        recipe::Template::from_dir(td / "tpl");
+        CHECK_MSG(false, "a template whose sentinel changed loaded");
+    } catch (const std::exception & ex) {
+        CHECK_MSG(std::string(ex.what()).find("sentinel") != std::string::npos, ex.what());
+    }
+}
+
 // ---- templates and matching ------------------------------------------------------------------
 
 TemplateSpec toy_spec() {
@@ -772,7 +1046,36 @@ void case_template() {
             j["patches"] = json::array({{{"spec_offset", 1}}});
             write_bytes(mutate_dir + "/template.json", j.dump());
         },
-        "patches is not supported");
+        "needs spec_offset, len and sentinel_hex");
+    rejects(
+        [] {
+            json j = json::parse(read_bytes(mutate_dir + "/template.json"));
+            j["patches"] = json::array({{{"spec_offset", 1}, {"len", 2}, {"sentinel_hex", "616b"}}});
+            write_bytes(mutate_dir + "/template.json", j.dump());
+        },
+        "has no patch line");
+    rejects(
+        [] {
+            json j = json::parse(read_bytes(mutate_dir + "/template.json"));
+            j["literals"] = json::array({{{"id", "x"}, {"dtype", "fp16"}, {"shape", {2}}, {"offset", 0}}});
+            write_bytes(mutate_dir + "/template.json", j.dump());
+        },
+        "needs literals.bin");
+    rejects(
+        [] {
+            json j = json::parse(read_bytes(mutate_dir + "/template.json"));
+            j["literals"] = json::array({{{"id", "x"}, {"dtype", "fp16"}, {"shape", {2}}, {"offset", 0}}});
+            write_bytes(mutate_dir + "/template.json", j.dump());
+            write_bytes(mutate_dir + "/literals.bin", "abc");
+        },
+        "lies outside literals.bin");
+    rejects(
+        [] {
+            json j = json::parse(read_bytes(mutate_dir + "/template.json"));
+            j["provided"] = json::array({"k"});
+            write_bytes(mutate_dir + "/template.json", j.dump());
+        },
+        "provided is not supported");
     rejects([] { fs::remove(mutate_dir + "/Manifest.json"); }, "missing Manifest.json");
 }
 
@@ -957,6 +1260,10 @@ int main(int argc, char ** argv) {
                          {"dtype-promotion", case_dtype_promotion},
                          {"op-recip-clip", case_op_recip_clip},
                          {"op-layout", case_op_layout},
+                         {"op-slice-neg-consts", case_op_slice_neg_consts},
+                         {"op-lit", case_op_lit},
+                         {"patches", case_patches},
+                         {"template-literals-patches", case_template_literals_patches},
                          {"shape-overflow", case_shape_overflow},
                          {"parler-examples", case_parler_examples},
                          {"liveness-and-observer", case_liveness_and_observer},

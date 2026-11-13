@@ -576,12 +576,26 @@ Error write_package(const recipe::Template & t, recipe::TensorSource & src, cons
     std::error_code ec;
     fs::create_directories(data + "/weights", ec);
     if (ec) return Error::transient("create " + data + ": " + ec.message(), posix_domain(), ec.value());
+    // The spec with its patches applied (inline constants computed from the
+    // GGUF); a template without patch lines is written as it is.
+    const recipe::TemplateFile * spec = t.file("model.mlmodel");
+    std::vector<uint8_t> patched;
+    if (t.recipe().patch_count() > 0) {
+        Error pe = recipe::patched_spec(t.recipe(), src, spec->data, spec->size, patched, observer);
+        if (!pe.ok()) return pe;
+    }
     for (const auto & [name, dst] : {std::pair<const char *, std::string>{"Manifest.json", pkg + "/Manifest.json"},
                                      std::pair<const char *, std::string>{"model.mlmodel", data + "/model.mlmodel"}}) {
         const recipe::TemplateFile * f = t.file(name);
+        const uint8_t * bytes = f->data;
+        size_t size = f->size;
+        if (f == spec && !patched.empty()) {
+            bytes = patched.data();
+            size = patched.size();
+        }
         const int fd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (fd < 0) return io_error("create " + dst, errno);
-        Error e = write_all(fd, f->data, f->size, dst);
+        Error e = write_all(fd, bytes, size, dst);
         if (e.ok() && ::fsync(fd) != 0) e = io_error("fsync " + dst, errno);
         ::close(fd);
         if (!e.ok()) return e;

@@ -618,6 +618,7 @@ void parler_free_model(parler_model & model) {
     model.dac_sidecar_retired = false;
     model.dac_coreml_strict = false;
     model.dac_rvq = {};
+    model.dac_pending.reset();
     if (model.buffer_dac_derived) {
         ggml_backend_buffer_free(model.buffer_dac_derived);
         model.buffer_dac_derived = nullptr;

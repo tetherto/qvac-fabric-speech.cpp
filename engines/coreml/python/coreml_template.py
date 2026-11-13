@@ -16,12 +16,22 @@ compares is written by the C++ interpreter through `qvac-coreml-tool`).
             structurally equal and that their weight.bin layouts agree, then
             writes model.mlmodel (deterministic serialisation of A's spec),
             Manifest.json and template.json, and refreshes the header of an
-            existing recipe.txt.
+            existing recipe.txt. Inline spec constants whose values differ
+            between A and B (weights folded into the spec) become patch sites:
+            model.mlmodel holds a sentinel there and template.json `patches`
+            records it; the recipe's patch lines compute the values. Literals
+            declared in template.json with an `exporter_blob` offset are copied
+            from that weight.bin blob into literals.bin, once A and B agree on it.
   report    The extraction and cross-seed gates: for each template, runs the
             exporter on twin A (f32), twin B (f32) and twin Q (quantised; the
-            exporter sees `qvac-coreml-tool f32 Q`), generates weight.bin with
-            the C++ generator and compares blob by blob (`qvac-coreml-tool
-            verify`); the exporter's spec must equal the template's.
+            exporter sees `qvac-coreml-tool f32 Q`), generates the package with
+            the C++ generator (`qvac-coreml-tool generate`) and compares its
+            weight.bin blob by blob (`qvac-coreml-tool verify`); the generated
+            spec, patches applied, must equal the exporter's.
+  real      The real-weights gate on one GGUF (a production model): the
+            exporter runs on `qvac-coreml-tool f32` of it, the C++ generator
+            reads the GGUF itself, and the two packages are compared as in
+            `report`.
 
 Twins come from the template's reference-gguf.json (`qvac-coreml-tool dump`
 of a real GGUF) through `qvac-coreml-tool twin`. The exporter is described by
@@ -39,6 +49,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -55,7 +66,10 @@ MIL_FP16, MIL_FP32 = 1, 2
 REQUIRED_FILES = ("Manifest.json", "model.mlmodel", "recipe.txt", "template.json")
 # Keys of template.json that `extract` recomputes; everything else is the author's.
 COMPUTED_KEYS = ("schema", "id", "exporter", "toolchain", "functions", "stateful", "weight_bin_size",
-                 "generation_peak_bytes")
+                 "generation_peak_bytes", "patches")
+# MIL DataType values of the inline constants a patch can rewrite.
+MIL_TYPE_FP16, MIL_TYPE_FP32 = 10, 11
+SENTINEL_TAG = b"qvac-coreml-sentinel\0"
 
 
 class TemplateError(RuntimeError):
@@ -247,6 +261,140 @@ def spec_summary(spec):
     return functions, stateful
 
 
+# ---- inline constants and patch sites ------------------------------------------------------
+
+
+def inline_constants(spec):
+    """(path, attribute) of every op attribute whose tensor value is inline in an ML program spec.
+
+    `path` names the function, block specialisation, op output and attribute,
+    so it is the same in two exports of one graph.
+    """
+    out = []
+    if spec.WhichOneof("Type") != "mlProgram":
+        return out
+
+    def walk(block, where):
+        for i, op in enumerate(block.operations):
+            name = op.outputs[0].name if len(op.outputs) else f"#{i}"
+            for k in sorted(op.attributes):
+                a = op.attributes[k]
+                if a.WhichOneof("value") == "immediateValue" and a.immediateValue.WhichOneof("value") == "tensor":
+                    out.append((f"{where}/{name}.{k}", a))
+            for j, b in enumerate(op.blocks):
+                walk(b, f"{where}/{name}[{j}]")
+
+    prog = spec.mlProgram
+    for fname in sorted(prog.functions):
+        fn = prog.functions[fname]
+        for bname in sorted(fn.block_specializations):
+            walk(fn.block_specializations[bname], f"{fname}:{bname}")
+    return out
+
+
+def _tensor_payload(attr):
+    t = attr.immediateValue.tensor
+    kind = t.WhichOneof("value")
+    if kind == "bytes":
+        return kind, bytes(t.bytes.values)
+    if kind == "floats":
+        return kind, struct.pack(f"<{len(t.floats.values)}f", *t.floats.values)
+    return kind, getattr(t, kind).SerializeToString(deterministic=True) if kind else b""
+
+
+def differing_constants(spec_a, spec_b):
+    """The inline constants of A whose values differ in B: [(path, attribute of A, 'fp16'|'fp32')].
+
+    Raises TemplateError when one of them is not an fp16 or fp32 tensor (a
+    patch rewrites only those) or when the two specs do not list the same
+    inline constants.
+    """
+    ca, cb = inline_constants(spec_a), inline_constants(spec_b)
+    if [p for p, _ in ca] != [p for p, _ in cb]:
+        raise TemplateError("extract: twin A and twin B do not have the same inline constants")
+    sites = []
+    for (path, va), (_, vb) in zip(ca, cb):
+        ka, pa = _tensor_payload(va)
+        kb, pb = _tensor_payload(vb)
+        if ka == kb and pa == pb:
+            continue
+        dt = va.type.tensorType.dataType
+        if ka == "bytes" and kb == "bytes" and dt == MIL_TYPE_FP16 and len(pa) == len(pb):
+            sites.append((path, va, "fp16"))
+        elif ka == "floats" and kb == "floats" and dt == MIL_TYPE_FP32 and len(pa) == len(pb):
+            sites.append((path, va, "fp32"))
+        else:
+            raise TemplateError(f"extract: the weight-dependent inline constant {path} (MIL dtype {dt}, {ka}) "
+                                "cannot be patched (only fp16 and fp32 tensors can)")
+    return sites
+
+
+def sentinel_bytes(path, n, dtype):
+    """Deterministic, path-specific bytes for a patch site; finite values for fp32."""
+    out, c = b"", 0
+    while len(out) < n:
+        out += hashlib.sha256(SENTINEL_TAG + path.encode() + struct.pack("<I", c)).digest()
+        c += 1
+    out = bytearray(out[:n])
+    if dtype == "fp32":
+        for i in range(3, n, 4):
+            if out[i] & 0x7F == 0x7F and out[i - 1] & 0x80:
+                out[i] &= 0xBF  # an all-ones exponent would be Inf or NaN
+    return bytes(out)
+
+
+def _set_payload(attr, data, dtype):
+    t = attr.immediateValue.tensor
+    if dtype == "fp16":
+        t.bytes.values = data
+    else:
+        del t.floats.values[:]
+        t.floats.values.extend(struct.unpack(f"<{len(data) // 4}f", data))
+
+
+def find_sites(spec_bytes, sentinels):
+    """[{spec_offset, len, sentinel_hex}] for (path, sentinel) pairs; each must occur once."""
+    sites = []
+    for path, sent in sentinels:
+        at = spec_bytes.find(sent)
+        if at < 0 or spec_bytes.find(sent, at + 1) >= 0:
+            raise TemplateError(f"extract: the sentinel of {path} occurs {'never' if at < 0 else 'twice'} in the spec")
+        sites.append({"spec_offset": at, "len": len(sent), "sentinel_hex": sent.hex()})
+    return sorted(sites, key=lambda p: p["spec_offset"])
+
+
+def patch_spec(spec_a, spec_b):
+    """A's spec with a sentinel at every weight-dependent inline constant.
+
+    Returns (spec message, [(path, sentinel bytes, dtype, A's payload)]). The
+    sentinel spec must equal B structurally once B gets the same sentinels;
+    otherwise the graphs differ and TemplateError is raised.
+    """
+    from coremltools.proto import Model_pb2
+
+    sites = differing_constants(spec_a, spec_b)
+    sa, sb = Model_pb2.Model(), Model_pb2.Model()
+    sa.CopyFrom(spec_a)
+    sb.CopyFrom(spec_b)
+    ca, cb = dict(inline_constants(sa)), dict(inline_constants(sb))
+    out = []
+    for path, attr, dtype in sites:
+        _, payload = _tensor_payload(attr)
+        sent = sentinel_bytes(path, len(payload), dtype)
+        _set_payload(ca[path], sent, dtype)
+        _set_payload(cb[path], sent, dtype)
+        out.append((path, sent, dtype, payload))
+    diff = spec_diff(sa, sb)
+    if diff:
+        raise TemplateError("extract: the exporter's spec differs between twin A and twin B at\n  " +
+                            "\n  ".join(diff) + "\n(beyond inline fp16/fp32 constants, which become patches)")
+    plain = spec_a.SerializeToString(deterministic=True)
+    patched = sa.SerializeToString(deterministic=True)
+    if len(plain) != len(patched):
+        raise TemplateError("extract: a sentinel changed the spec's framing")
+    return sa, out
+
+
 # ---- qvac-coreml-tool and GGUFs ---------------------------------------------------------
 
 
@@ -418,9 +566,9 @@ def explain_blob(blob, tensors, max_candidates=8):
     out = []
     # Compiler-synthesised constants.
     if not np.any(b.view(np.uint16 if blob.dtype == MIL_FP16 else np.uint32)):
-        out.append(f"{cast}(zeros([{blob.count}]))  # needs zeros(), a later generator version")
+        out.append(f"{cast}(zeros([{blob.count}]))")
     elif np.all(b == 1):
-        out.append(f"{cast}(ones([{blob.count}]))  # needs ones(), a later generator version")
+        out.append(f"{cast}(ones([{blob.count}]))")
     for name, (_, arr) in tensors.items():
         if arr is None or arr.size != blob.count:
             continue
@@ -428,7 +576,7 @@ def explain_blob(blob, tensors, max_candidates=8):
             if _equal(b, lay, blob.dtype):
                 out.append(f"{cast}({_expr_t(name, perm)})")
             elif _equal(b, -lay, blob.dtype):
-                out.append(f"{cast}(mul({_expr_t(name, perm)}, -1))")
+                out.append(f"{cast}(neg({_expr_t(name, perm)}))")
             else:
                 k = _scalar_multiple(b, lay.reshape(-1).astype(np.float32), blob.dtype)
                 if k is not None:
@@ -578,6 +726,71 @@ def _export_twin(tool, tdir_manifest, exporter, seed, types, work, python, root,
     return twin, pkg
 
 
+def extract_literals(declared, blobs_a, blobs_b):
+    """literals.bin bytes and the template.json `literals` entries, or None when none is declared.
+
+    Each declared literal {id, dtype, shape, exporter_blob} is copied from the
+    exporter's weight.bin blob at metadata offset `exporter_blob`. The blob
+    must be byte-identical in twins A and B: a literal never depends on the
+    weights. Literals are laid out in declaration order, 64-byte aligned.
+    """
+    if not declared:
+        return None
+    by_a = {b.offset: b for b in blobs_a}
+    by_b = {b.offset: b for b in blobs_b}
+    data, entries = bytearray(), []
+    for lit in declared:
+        lid, src = lit.get("id"), lit.get("exporter_blob")
+        if not isinstance(lid, str) or not isinstance(src, int):
+            raise TemplateError(f"extract: literal {lid!r} needs an id and an `exporter_blob` weight.bin offset")
+        ba, bb = by_a.get(src), by_b.get(src)
+        if ba is None or bb is None:
+            raise TemplateError(f"extract: literal {lid}: no weight.bin blob at offset {src}")
+        if ba.raw != bb.raw:
+            raise TemplateError(f"extract: literal {lid}: blob {src} differs between twin A and twin B, "
+                                "so it depends on the weights")
+        if lit.get("dtype") != ba.dtype_name:
+            raise TemplateError(f"extract: literal {lid}: dtype {lit.get('dtype')!r}, blob {src} is {ba.dtype_name}")
+        shape = lit.get("shape") or []
+        if int(np.prod(shape)) != ba.count:
+            raise TemplateError(f"extract: literal {lid}: shape {shape} has {int(np.prod(shape))} elements, "
+                                f"blob {src} has {ba.count}")
+        data += bytes((-len(data)) % 64)
+        entry = dict(lit)
+        entry["offset"] = len(data)
+        data += ba.raw
+        entries.append(entry)
+    return bytes(data), entries
+
+
+def patch_drafts(sites, patch_sites, tensors):
+    """Draft patch lines, explained against twin A like `suggest`: [(spec_offset, line)]."""
+    by_sent = {p["sentinel_hex"]: p for p in patch_sites}
+    drafts = []
+    for path, sent, dtype, payload in sites:
+        site = by_sent[sent.hex()]
+        blob = Blob(site["spec_offset"], MIL_FP16 if dtype == "fp16" else MIL_FP32, len(payload), 0, payload)
+        cands = explain_blob(blob, tensors)
+        expr = cands[0] if cands else "???"
+        drafts.append((site["spec_offset"], f"patch {site['spec_offset']} {dtype} {blob.count} {expr}", path))
+    return sorted(drafts)
+
+
+def add_patch_drafts(text, drafts):
+    """The recipe with a drafted line for every patch site it lacks (explained drafts only), before `end`."""
+    have = {int(m.group(1)) for m in re.finditer(r"^patch (\d+) ", text, re.M)}
+    add = [(off, line, path) for off, line, path in drafts if off not in have and not line.endswith("???")]
+    if not add:
+        return text, []
+    lines = text.rstrip("\n").split("\n")
+    end = max(i for i, l in enumerate(lines) if l.strip() == "end")
+    ins = []
+    for _, line, path in add:
+        ins += [f"# drafted by extract from twin A ({path}): confirm against the exporter", line]
+    lines[end:end] = ins
+    return "\n".join(lines) + "\n", add
+
+
 def cmd_extract(a):
     tool = find_tool(a.tool)
     out = Path(a.template_dir)
@@ -598,13 +811,12 @@ def cmd_extract(a):
         _, pkg_b = _export_twin(tool, manifest_path, exporter, SEED_B, "f32", work, a.python, root, "b")
         pa, pb = package_parts(pkg_a), package_parts(pkg_b)
         spec_a, spec_b = load_spec(pa["spec"]), load_spec(pb["spec"])
-        diff = spec_diff(spec_a, spec_b)
-        if diff:
-            raise TemplateError("extract: the exporter's spec differs between twin A and twin B at\n  " +
-                                "\n  ".join(diff) + "\nValues in the spec that depend on the weights need "
-                                "patches, which this generator version does not support.")
+        # Weight-dependent inline constants become patch sites (sentinels in
+        # the template's spec); any other difference fails the extraction.
+        spec_a, sites = patch_spec(spec_a, spec_b)
         wa, wb = pa["weights"].read_bytes(), pb["weights"].read_bytes()
-        la, lb = layout_of(read_weight_bin(wa)), layout_of(read_weight_bin(wb))
+        blobs_a, blobs_b = read_weight_bin(wa), read_weight_bin(wb)
+        la, lb = layout_of(blobs_a), layout_of(blobs_b)
         if la != lb or len(wa) != len(wb):
             raise TemplateError("extract: weight.bin layout differs between twin A and twin B "
                                 "(blob count, offsets, dtypes or sizes)")
@@ -613,10 +825,20 @@ def cmd_extract(a):
         # item identifiers and the conversion date are random per export), so
         # re-extracting an unchanged template leaves its template_sha256 alone.
         old_spec = out / "model.mlmodel"
+        sentinels = [(path, sent) for path, sent, _, _ in sites]
+        reuse = False
         if old_spec.is_file() and not spec_diff(load_spec(old_spec), spec_a):
+            try:
+                find_sites(old_spec.read_bytes(), sentinels)
+                reuse = True
+            except TemplateError:
+                reuse = False
+        if reuse:
             spec_bytes = old_spec.read_bytes()
         else:
             old_spec.write_bytes(spec_bytes)
+        patch_sites = find_sites(spec_bytes, sentinels)
+        literals_bin = extract_literals(existing.get("literals", []), blobs_a, blobs_b)
         new_manifest = pa["manifest"].read_text()
         old_manifest = out / "Manifest.json"
         if not (old_manifest.is_file() and manifest_equivalent(old_manifest.read_text(), new_manifest)):
@@ -629,12 +851,26 @@ def cmd_extract(a):
                     "exporter": {"path": exporter["path"], "sha256": file_sha256(exp_abs),
                                  "args": exporter.get("args", [])},
                     "toolchain": toolchain_versions(), "functions": functions, "stateful": stateful,
-                    "weight_bin_size": len(wa)}
+                    "weight_bin_size": len(wa), "patches": patch_sites}
         recipe = out / "recipe.txt"
         if recipe.is_file():
             recipe.write_text(refresh_recipe_header(recipe.read_text(), template_id, spec_sha, len(wa), len(la)))
         j = merge_template_json(existing, computed, manifest)
         j.setdefault("generation_peak_bytes", 0)
+        if literals_bin is not None:
+            data, entries = literals_bin
+            (out / "literals.bin").write_bytes(data)
+            j["literals"] = entries
+        if sites:
+            drafts = patch_drafts(sites, patch_sites, gguf_tensors(work / "twin-a.gguf"))
+            print(f"extract: {len(sites)} weight-dependent inline constant(s) become patch sites:", file=sys.stderr)
+            for _, line, path in drafts:
+                print(f"  {line}   # {path}", file=sys.stderr)
+            if recipe.is_file():
+                text, added = add_patch_drafts(recipe.read_text(), drafts)
+                if added:
+                    recipe.write_text(text)
+                    print(f"extract: added {len(added)} drafted patch line(s) to {recipe}", file=sys.stderr)
         (out / "template.json").write_text(json.dumps(j, indent=2) + "\n")
         if recipe.is_file():
             # Generate from twin A once: the recipe must parse and match; the
@@ -661,7 +897,6 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
     exporter = tj.get("exporter")
     if not exporter:
         raise TemplateError(f"{tdir}: template.json has no exporter")
-    template_spec = load_spec(tdir / "model.mlmodel")
     results = []
     cases = [("A", SEED_A, "f32"), ("B", SEED_B, "f32"), ("Q", SEED_Q, quant_types)]
     owned = work is None
@@ -671,19 +906,69 @@ def check_template(tool, tdir, python=None, root=None, quant_types="q8_0", work=
             r = {"template": tj.get("id", tdir.name), "twin": label, "seed": seed, "types": types}
             twin, pkg = _export_twin(tool, tdir / "reference-gguf.json", exporter, seed, types, work, python, root,
                                      label.lower())
-            parts = package_parts(pkg)
-            r["spec_diff"] = spec_diff(template_spec, load_spec(parts["spec"]))
-            p = subprocess.run([tool, "verify", "--template", str(tdir), "--gguf", str(twin), "--ref",
-                                str(parts["weights"])], capture_output=True, text=True)
-            r["verify_exit"] = p.returncode
-            r["verify"] = p.stdout.strip().splitlines()
-            r["verify_stderr"] = p.stderr.strip()
-            r["pass"] = p.returncode == 0 and not r["spec_diff"]
+            r.update(compare_packages(tool, tdir, twin, pkg, work, label.lower()))
             results.append(r)
     finally:
         if owned:
             shutil.rmtree(work, ignore_errors=True)
     return results
+
+
+def compare_packages(tool, tdir, gguf, pkg, work, label):
+    """Generates `tdir` from `gguf` and compares it with the exporter's package `pkg`."""
+    parts = package_parts(pkg)
+    gen = Path(work) / f"gen-{label}.mlpackage"
+    run([tool, "generate", "--template", tdir, "--gguf", gguf, "-o", gen], f"generate ({label})")
+    gen_parts = package_parts(gen)
+    r = {"spec_diff": spec_diff(load_spec(gen_parts["spec"]), load_spec(parts["spec"]))}
+    p = subprocess.run([tool, "verify", "--template", str(tdir), "--ours", str(gen_parts["weights"]),
+                        "--ref", str(parts["weights"])], capture_output=True, text=True)
+    r["verify_exit"] = p.returncode
+    r["verify"] = p.stdout.strip().splitlines()
+    r["verify_stderr"] = p.stderr.strip()
+    r["pass"] = p.returncode == 0 and not r["spec_diff"]
+    return r
+
+
+def check_real(tool, tdir, gguf, python=None, root=None, work=None):
+    """The real-weights gate: the exporter on f32(gguf) against the generator on gguf."""
+    tdir = Path(tdir)
+    tj = json.loads((tdir / "template.json").read_text())
+    owned = work is None
+    work = Path(work or tempfile.mkdtemp(prefix="qvac-coreml-real-"))
+    try:
+        feed = work / "real-f32.gguf"
+        run([tool, "f32", gguf, "-o", feed], "f32 of the real GGUF")
+        pkg = run_exporter(tj["exporter"], feed, work / "export-real", python, root)
+        r = compare_packages(tool, tdir, gguf, pkg, work, "real")
+        r.update({"template": tj.get("id", tdir.name), "twin": "real", "types": Path(gguf).name})
+        return r
+    finally:
+        if owned:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def cmd_real(a):
+    tool = find_tool(a.tool)
+    root = Path(a.root) if a.root else repo_root()
+    ok, results = True, []
+    for d in a.template_dir:
+        try:
+            r = check_real(tool, d, a.gguf, a.python, root)
+        except TemplateError as e:
+            r = {"template": Path(d).name, "twin": "real", "pass": False, "error": str(e)}
+        ok &= r["pass"]
+        extra = r.get("error") or (f"spec differs at {r['spec_diff'][:3]}" if r.get("spec_diff") else
+                                   (r["verify"][-1] if r.get("verify") else r.get("verify_stderr", "")))
+        print(f"{'PASS' if r['pass'] else 'FAIL'} {r['template']} on {Path(a.gguf).name}: {extra}")
+        for line in r.get("verify", []):
+            if "FAIL" in line:
+                print(f"    {line}")
+        results.append(r)
+    if a.json:
+        Path(a.json).write_text(json.dumps(results, indent=1) + "\n")
+    print(f"real: {len(results)} template(s), {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
 
 
 def find_templates(root):
@@ -752,6 +1037,12 @@ def build_parser():
     r.add_argument("--quant-types", default="q8_0", help="twin Q block types (default q8_0)")
     r.add_argument("--json", help="also write the results as JSON")
     r.set_defaults(fn=cmd_report)
+
+    g = sub.add_parser("real", help="real-weights gate: the exporter on f32(GGUF) against the generator on the GGUF")
+    g.add_argument("--template-dir", action="append", required=True, help="repeatable")
+    g.add_argument("--gguf", required=True, help="a production GGUF the templates match")
+    g.add_argument("--json", help="also write the results as JSON")
+    g.set_defaults(fn=cmd_real)
     return ap
 
 

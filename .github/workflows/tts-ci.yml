@@ -418,7 +418,7 @@ jobs:
     needs: [runner_names, authorize]
     if: needs.authorize.outputs.allowed == 'true' && github.event.inputs.run_moss_e2e != 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - name: Manual Workspace Cleanup
         run: rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
@@ -617,9 +617,104 @@ jobs:
             --fallback-gguf parler-coreml-fixture-fallback/parler-tiny-f32.gguf \
             --min-snr 60 --require-coreml
 
+      # Parler mini q8_0, converted by the repo's converter from the pinned
+      # checkpoint revision and checked against a pinned SHA-256: the
+      # real-weights inputs of the generated DAC sidecar (template
+      # parler-dac-w128; the DAC tensors are F32 in every tier). The
+      # converter records the checkpoint directory's name as parler.variant,
+      # so the download goes to a directory named after the Hugging Face
+      # repository. Cache key: checkpoint revision + converter hash.
+      - name: Cache Parler mini q8_0
+        if: runner.os == 'macOS'
+        id: parler-mini-cache
+        uses: actions/cache@v4
+        with:
+          path: parler-mini
+          key: parler-mini-v1-q8_0-0392b945-${{ hashFiles('engines/tts/scripts/parler/convert-to-gguf.py') }}
+
+      - name: Stage Parler mini q8_0
+        if: runner.os == 'macOS' && steps.parler-mini-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rev=0392b9451a601e528fd863bbb0598431fee810d9
+          mkdir -p parler-mini parler-tts-mini-v1
+          for f in config.json generation_config.json tokenizer.json model.safetensors; do
+            curl -sSfL --retry 3 -o "parler-tts-mini-v1/$f" \
+              "https://huggingface.co/parler-tts/parler-tts-mini-v1/resolve/$rev/$f"
+          done
+          echo "bc430eb6752b96ffb3f67036d1a6e207fbd031575a775716ffa64ef1eeb03692  parler-tts-mini-v1/model.safetensors" \
+            | shasum -a 256 -c -
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-parler-mini
+          .venv-parler-mini/bin/python -m pip install --upgrade pip
+          .venv-parler-mini/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
+            safetensors==0.8.0 huggingface_hub==1.31.0
+          .venv-parler-mini/bin/python engines/tts/scripts/parler/convert-to-gguf.py \
+            --model-id parler-tts-mini-v1 --reference-repo "parler-tts/parler-tts-mini-v1@$rev" \
+            --dtype q8_0 --out parler-mini/parler-mini-v1-q8_0.gguf
+          shasum -a 256 parler-mini/parler-mini-v1-q8_0.gguf
+          echo "e450872b4a1a0d8979970c2a804c508b9fdca2877ef9f94d03ee471991921f5f  parler-mini/parler-mini-v1-q8_0.gguf" \
+            | shasum -a 256 -c -
+          rm -rf parler-tts-mini-v1
+
+      # The generated Parler DAC sidecar on real weights:
+      # - the real-weights gate: the C++ generator on the staged GGUF is
+      #   byte-equal to the unchanged exporter run on its f32 copy, and the
+      #   specs match;
+      # - generated from the GGUF alone into an empty cache, compiled and
+      #   loaded on the device, then parity against the ggml DAC on random
+      #   codes at 54 dB (fp16 on the Neural Engine measures 56.2-56.4 dB),
+      #   the Engine, fit's envelope and near-budget memory-degrade;
+      # - the same artifact's SNR per compute-unit policy (report only), so
+      #   the log records which path `all` takes on this host.
+      # The binaries run directly and --require-coreml fails the step if a
+      # Core ML gate would skip. The cache stays for the fit step below.
+      - name: Test (Core ML Parler DAC generated sidecar, staged mini q8_0)
+        id: parler-dac-generated
+        if: runner.os == 'macOS'
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          sw_vers
+          py=.venv-parler-coreml/bin/python
+          if [ ! -x "$py" ]; then py=.venv-cosyvoice-coreml/bin/python; fi
+          if [ ! -x "$py" ]; then
+            coreml_python="$(command -v python3.11 || command -v python3)"
+            "$coreml_python" -m venv .venv-parler-coreml
+            .venv-parler-coreml/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+            py=.venv-parler-coreml/bin/python
+          fi
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
+            --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
+          rm -rf parler-dac-cache
+          ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
+            --min-snr 54 --require-coreml --units-sweep
+
+      # fit is the same with an empty cache and with the cache the step above
+      # populated, whose hints are also rewritten stale and non-stale. It runs
+      # whenever the step above ran, so a parity failure does not hide it.
+      - name: Test (Parler fit with an empty and a populated Core ML cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          status=0
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit || status=1
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit --cache-dir "$PWD/parler-dac-cache" || status=1
+          rm -rf parler-dac-cache
+          exit "$status"
+
+      # Runs whenever the generated-sidecar step ran, so a failure there does
+      # not hide the decoder results.
       - name: Test (Core ML Parler decoder state and recovery)
         id: parler-decoder-runtime
-        if: runner.os == 'macOS'
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PARLER_REQUIRE_HF_CAPTURE: '1'
