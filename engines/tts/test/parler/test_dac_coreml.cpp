@@ -2,7 +2,7 @@
 //
 //   test-parler-dac-coreml --gguf MODEL.gguf [--fallback-gguf MODEL.gguf]
 //                          [--ref-dir parler-ref] [--min-snr 45] [--min-speech-snr 45]
-//                          [--cache-dir DIR] [--require-coreml]
+//                          [--cache-dir DIR [--units-sweep]] [--require-coreml]
 //
 // Every build (fake sidecars, no Core ML needed):
 //   * the host quantizer the sidecar decodes from equals ggml's latent;
@@ -40,7 +40,9 @@
 //   * the same --min-snr / --min-speech-snr gates as above on the generated
 //     sidecar, and the Engine reports it per call;
 //   * fit charges the generated envelope (route generate, validated); a
-//     budget only the ggml projection fits resolves use = off (fit and Engine).
+//     budget only the ggml projection fits resolves use = off (fit and Engine);
+//   * --units-sweep (report only): the generated artifact's SNR against ggml
+//     for each compute-unit policy, for recording per-host parity figures.
 // --memory-schedule DIR (TTS_CPP_COREML, generated route): ggml decodes run
 // while the sidecar is generated, compiled, loaded and warmed into DIR; the
 // footprint increment over the warm ggml baseline must stay within the
@@ -589,6 +591,72 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
     }
 }
 
+// --units-sweep (report only): the SNR of the generated artifact in the cache
+// against the ggml CPU decode for every compute-unit policy, on the parity
+// cases' codes. It shows which path `all` takes on the host and whether a
+// parity shortfall comes from the Neural Engine, the GPU or the reference.
+// The artifact is opened through the prebuilt-sidecar loader by a symlink.
+void units_sweep(parler_model & model, const std::string & cache_dir) {
+    namespace fs = std::filesystem;
+    fprintf(stderr, "compute-unit sweep (report only)\n");
+    std::error_code ec;
+    std::string artifact;
+    for (fs::recursive_directory_iterator it(cache_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_directory() && it->path().filename() == "model.mlmodelc" &&
+            it->path().string().find("/artifacts/") != std::string::npos) {
+            artifact = it->path().string();
+            break;
+        }
+    }
+    if (artifact.empty()) {
+        fprintf(stderr, "  no generated artifact under %s\n", cache_dir.c_str());
+        return;
+    }
+    const fs::path dir = fs::temp_directory_path() /
+                         ("parler-units-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(dir, ec);
+    const std::string fake_gguf = (dir / "parler-sweep.gguf").string();
+    fs::create_directory_symlink(artifact, parler_dac_sidecar_path(fake_gguf), ec);
+    if (ec) {
+        fprintf(stderr, "  cannot link %s: %s\n", artifact.c_str(), ec.message().c_str());
+        return;
+    }
+    fprintf(stderr, "  artifact %s\n", artifact.c_str());
+    auto saved_pending = model.dac_pending;
+    model.dac_pending.reset();
+    const parler_hparams & hp = model.hparams;
+    for (const char * units : {"cpu_only", "cpu_and_gpu", "cpu_and_ane", "all"}) {
+        const parler_coreml_policy policy = parler_resolve_coreml_policy(units, false);
+        std::string why;
+        auto sidecar = parler_open_dac_sidecar(fake_gguf, model, policy, &why);
+        if (!sidecar || !parler_attach_dac_sidecar(model, sidecar, policy, &why)) {
+            fprintf(stderr, "  units %-11s: not loaded (%s)\n", units, why.c_str());
+            continue;
+        }
+        const int window = sidecar->window();
+        const int keep = window - 2 * parler_dac_rf_frames(model);
+        std::string line;
+        for (const int n_frames : {2 * keep + keep / 2, window / 3, 1}) {
+            const std::vector<int32_t> codes = random_codes(hp, n_frames, 100 + n_frames);
+            model.dac_sidecar.reset();
+            std::vector<float> ref, pcm;
+            decode(model, codes, n_frames, ref);
+            model.dac_sidecar = sidecar;
+            std::string backend;
+            const bool ok = decode(model, codes, n_frames, pcm, nullptr, 0, -1, &backend);
+            double max_abs = 0;
+            const double snr = ok && pcm.size() == ref.size() ? snr_db(pcm, ref, max_abs) : NAN;
+            char buf[96];
+            snprintf(buf, sizeof buf, "  %d frames %.2f dB (max_abs %.2e)", n_frames, snr, max_abs);
+            line += buf;
+        }
+        fprintf(stderr, "  units %-11s:%s\n", units, line.c_str());
+        parler_attach_dac_sidecar(model, std::shared_ptr<parler_dac_sidecar>{}, policy);
+    }
+    model.dac_pending = saved_pending;
+    fs::remove_all(dir, ec);
+}
+
 bool contains(const std::string & s, const std::string & needle) { return s.find(needle) != std::string::npos; }
 
 // prewarm none issues an empty construction group and leaves the slot idle
@@ -863,6 +931,7 @@ int main(int argc, char ** argv) {
     double min_snr = 45.0;
     double min_speech_snr = 45.0;
     bool require_coreml = false;
+    bool sweep = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -874,6 +943,7 @@ int main(int argc, char ** argv) {
         else if (a == "--cache-dir") cache_dir = next();
         else if (a == "--memory-schedule") memory_dir = next();
         else if (a == "--require-coreml") require_coreml = true;
+        else if (a == "--units-sweep") sweep = true;
     }
     if (gguf.empty() || !std::ifstream(gguf).good()) {
         fprintf(stderr, "SKIP: no --gguf model (%s)\n", gguf.c_str());
@@ -896,6 +966,7 @@ int main(int argc, char ** argv) {
     if (!memory_dir.empty()) memory_schedule(model, gguf, memory_dir);
     if (!cache_dir.empty()) {
         generated_gates(model, gguf, cache_dir, ref_dir, min_snr, min_speech_snr);
+        if (sweep) units_sweep(model, cache_dir);
     } else if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {
         coreml_gates(model, gguf, ref_dir, min_snr, min_speech_snr);
         engine_gates(gguf);
@@ -911,6 +982,7 @@ int main(int argc, char ** argv) {
     (void) cache_dir;
     (void) memory_dir;
     (void) fallback;
+    (void) sweep;
     fprintf(stderr, "built without TTS_CPP_COREML: Core ML gates skipped\n");
     check(!require_coreml, "--require-coreml: built with TTS_CPP_COREML");
 #endif

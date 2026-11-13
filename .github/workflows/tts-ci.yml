@@ -665,10 +665,12 @@ jobs:
       #   loaded on the device, then parity against the ggml DAC on random
       #   codes at 54 dB (fp16 on the Neural Engine measures 56.2-56.4 dB),
       #   the Engine, fit's envelope and near-budget memory-degrade;
-      # - fit is the same with an empty cache and with the populated one.
+      # - the same artifact's SNR per compute-unit policy (report only), so
+      #   the log records which path `all` takes on this host.
       # The binaries run directly and --require-coreml fails the step if a
-      # Core ML gate would skip.
+      # Core ML gate would skip. The cache stays for the fit step below.
       - name: Test (Core ML Parler DAC generated sidecar, staged mini q8_0)
+        id: parler-dac-generated
         if: runner.os == 'macOS'
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -688,14 +690,31 @@ jobs:
             --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
           rm -rf parler-dac-cache
           ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
-            --min-snr 54 --require-coreml
-          ./build/test-parler-fit-stable --gguf "$gguf" --fit
-          ./build/test-parler-fit-stable --gguf "$gguf" --fit --cache-dir "$PWD/parler-dac-cache"
-          rm -rf parler-dac-cache
+            --min-snr 54 --require-coreml --units-sweep
 
+      # fit is the same with an empty cache and with the cache the step above
+      # populated, whose hints are also rewritten stale and non-stale. It runs
+      # whenever the step above ran, so a parity failure does not hide it.
+      - name: Test (Parler fit with an empty and a populated Core ML cache)
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          gguf=parler-mini/parler-mini-v1-q8_0.gguf
+          status=0
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit || status=1
+          ./build/test-parler-fit-stable --gguf "$gguf" --fit --cache-dir "$PWD/parler-dac-cache" || status=1
+          rm -rf parler-dac-cache
+          exit "$status"
+
+      # Runs whenever the generated-sidecar step ran, so a failure there does
+      # not hide the decoder results.
       - name: Test (Core ML Parler decoder state and recovery)
         id: parler-decoder-runtime
-        if: runner.os == 'macOS'
+        if: >-
+          !cancelled() && runner.os == 'macOS' &&
+          (steps.parler-dac-generated.outcome == 'success' || steps.parler-dac-generated.outcome == 'failure')
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PARLER_REQUIRE_HF_CAPTURE: '1'
