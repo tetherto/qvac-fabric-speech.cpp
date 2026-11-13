@@ -32,7 +32,7 @@ changes only its Metal single-token graph (see above).
 | `nvidia/parakeet-tdt-0.6b-v3` | TDT | 128 | 1024 × 24 | 8192 | 600 M | 715 MiB q8_0 / 1.34 GiB f16 | 0.006 q8_0 Metal | About 25 languages, with punctuation and capitalization; optional Core ML offline encoder |
 | `nvidia/parakeet-tdt-1.1b` | TDT | 80 | 1024 × 42 | 1024 | 1.1 B | 1225 MiB q8_0 | 0.027–0.079 Metal | English only; no punctuation or capitalization; optional Core ML offline encoder |
 | `qvac/TranscribePsy-250M-EU-sub` ([GGUF](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub-gguf), [Core ML](https://huggingface.co/qvac/TranscribePsy-250M-EU-sub-coreml)) | TDT | 128 | 640 × 24 | 8192 | 254 M | 291 MiB q8_0 / 17 MiB encoder-less + 186 MiB Core ML | 0.016 q8_0 CPU (8 threads, x86-64) / 0.024 q8_0 Hexagon (Galaxy S25, 191 s) | Eight European languages (nl, en, fr, de, it, pl, pt, es) with punctuation and capitalization, distilled from TDT 0.6B-v3; published GGUF loads as a TDT model; Neural Engine encoder and batched TDT decoder sidecars, see [Neural Engine sidecars](docs/backends.md#neural-engine-fixed-window-encoder-and-tdt-decoder-sidecars); Hexagon NPU, see [Hexagon NPU](docs/backends.md#hexagon-npu) |
-| [`qvac/TranscribePsy-250M-EU`](https://huggingface.co/qvac/TranscribePsy-250M-EU) | TDT + CAFE adapters + language gate | 128 | 640 × 24 | 8192 | 254 M trunk | 293 MiB q8_0 / 546 MiB f16 | — | Full 25-language model; `--language en` selects the bare trunk, `other` the adapters, and `auto` (default) the gate; convert the checkpoint and both safetensors into one GGUF ([instructions](docs/models.md#transcribepsy)) |
+| [`qvac/TranscribePsy-250M-EU`](https://huggingface.co/qvac/TranscribePsy-250M-EU) | TDT + CAFE adapters + language gate | 128 | 640 × 24 | 8192 | 254 M trunk | 293 MiB q8_0 / 546 MiB f16 | — | Full 25-language model with CPU, Metal, Vulkan/Android and macOS/iOS Core ML backends ([export, streaming and measurements](docs/transcribepsy-eu-coreml.md)); `--language en` selects the bare trunk, `other` the adapters, and `auto` (default) the gate; convert the checkpoint and both safetensors into one GGUF ([instructions](docs/models.md#transcribepsy)) |
 | `nvidia/parakeet_realtime_eou_120m-v1` | RNN-T + `<EOU>` | 128 | 512 × 17 | 1027 | 120 M | 246 MiB f16 / 132 MiB q8_0 | 0.0052 Vulkan | English ASR and native end-of-turn token; Core ML exact-shape encoder |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | Prompt-conditioned RNN-T | 128 | 1024 × 24 | 13087 | 600 M | ~1.3 GiB f16 | 0.108 CPU | Locale-conditioned ASR; empty language selects `auto`; emitted locale tags such as `<en-US>` are dropped from transcript text but kept in token IDs; cache-aware streaming at 80/160/320/560/1120 ms; Core ML exact-shape offline encoder |
 | `nvidia/diar_sortformer_4spk-v1` | Sortformer | 80 | 512 × 18 | n/a | 123 M | 263 MiB f16 / 141 MiB q8_0 / 75 MiB q4_0 | 0.0020 Vulkan | Up to four speakers; offline and sliding-history streaming |
@@ -46,11 +46,21 @@ English-only without those features. TranscribePsy EU-sub is a 254M FastConforme
 distilled from TDT 0.6B-v3 for eight European languages and published as
 ready-made GGUF and Core ML files; the separate full EU model adds CAFE adapters
 and an English/non-English gate for 25 languages. The engine treats both as TDT checkpoints, and
-`--window-sec 60 --overlap 0.25` is the long-form setting validated on phones
+60-second windows with 25% overlap are the automatic long-form defaults
+(explicitly selectable with `--window-sec 60 --overlap 0.25`)
 (see [CLI](docs/cli.md#long-form-window-flags)). IndicConformer exports CTC by default,
 with an optional RNN-T branch; CTC requires a language selection. Use the
 [model acquisition and format guide](docs/models.md) for each family's
 download and conversion path.
+
+Full **TranscribePsy-250M-EU** streaming uses the same defaults on all backends,
+including CPU, Metal, Vulkan and Android. It defaults to 2000 ms chunks
+(`StreamingOptions::chunk_ms = 0` selects the model default); an explicit
+1000 ms request is preserved. Other ASR models retain their previous 1000 ms
+default. Auto push streams buffer the first 20 seconds for the model's gate,
+or gate shorter streams on `finalize()`; known `en`/`other` streams emit without
+that delay.
+See the [streaming API](docs/api.md) for the backend-independent contract.
 
 Nemotron 3 Diarization can also be converted to F16, BF16, Q6_K, Q5_K,
 Q4_K, MXFP4, and NVFP4 with `scripts/convert_nemotron_diarization.py --outtype`.
@@ -85,7 +95,16 @@ Offline TDT is the evaluated scope; packed-affine substage profiling is not
 supported. Preserve the recipe/tensor receipts and consult the linked evidence
 before interpreting size, timing or accuracy comparisons as deployment results.
 
+
 ## Core ML sidecars
+
+Full **TranscribePsy-250M-EU** supports the English trunk, non-English CAFE adapters,
+and automatic language gate on macOS and physical iOS devices. Offline and precomputed-mel calls use fixed ANE sidecars. Callback/push streaming
+and true unwindowed inference use additional FP32 programs that preserve native
+context: static GPU on macOS where fitting, flexible Core ML CPU on iOS or larger
+contexts. See the [full-EU guide](docs/transcribepsy-eu-coreml.md)
+for export commands, actual dispatch reporting, startup cost and CPU/Metal/Core ML measurements.
+
 
 Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,
 TDT, EOU, Nemotron 3.5 ASR and Sortformer v2.1 encoder paths, and the
@@ -95,6 +114,15 @@ incompatible sidecars fall back to ggml. Export, placement and routing
 contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar)
 and, for MOSS-Transcribe-Diarize, in
 [docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
+
+Standard TDT sidecars use ggml for audio beyond their compiled capacity (typically
+15 seconds), preserving native encoder context. Only exports with a validated
+seam policy use short Core ML windows. Standard TDT sidecars retain native
+weights even with `PARAKEET_COREML_ONLY=1`, and encoder-less GGUFs paired with
+these sidecars are rejected at load time. TDT push streams, except full TranscribePsy
+EU, default to 30-second chunks and reject smaller explicit chunks to prevent
+phrase loss. PCM writes can still be arbitrarily small; `finalize()` processes
+the remaining audio. See the [streaming contract](docs/api.md).
 
 Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
 runtime. Legacy single-input sidecars remain loadable but need re-exporting to
@@ -106,7 +134,11 @@ sidecar (`<model>-decoder.mlmodelc`). With the decoder sidecar the engine cuts
 long recordings at pauses into independent segments and decodes 16 of them per
 Neural Engine dispatch, and it allocates the sequential ggml decoder only when a
 call needs it. A GGUF without encoder weights, such as the published
-TranscribePsy Core ML distribution, loads only with its encoder sidecar; see
+TranscribePsy Core ML distribution, loads only with its encoder sidecar. Create
+that GGUF from the full EU-sub file with `scripts/strip-encoder-gguf.py`; metadata
+and retained quantized weights are preserved. The decoder exporter supports
+separate `--nbits-out` compression for the output projection, including its
+8198-channel shape. See [conversion and stripping](docs/models.md#transcribepsy) and
 [Neural Engine sidecars](docs/backends.md#neural-engine-fixed-window-encoder-and-tdt-decoder-sidecars).
 
 Nemotron 3 Diarization and Sortformer v2.1 can also run their whole network,
@@ -154,6 +186,9 @@ multi-machine campaigns, GPU diarization, accuracy, build pins and timing
 methods live in [docs/performance.md](docs/performance.md).
 
 ## Documentation
+
+Cross-platform CI selects affected engines and caches Windows compiler outputs;
+see the [CI guide](../../docs/CI.md).
 
 Run model-free checks with `ctest --test-dir build-parakeet -L unit --output-on-failure`.
 For model coverage, use `scripts/run-fixture-tests.py` and require the relevant test

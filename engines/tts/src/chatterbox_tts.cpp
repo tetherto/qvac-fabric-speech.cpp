@@ -36,6 +36,7 @@
 #include "ggml-cpu.h"
 #include "gguf.h"
 #include "npy.h"
+#include "shape_result_cache.h"
 #include "chatterbox_tts_test_hooks.h"
 
 // The per-backend `#include "ggml-{cuda,metal,vulkan,opencl}.h"`
@@ -836,11 +837,14 @@ static graph_cache                                                       g_f0_gr
 static std::vector<std::pair<std::string, const ggml_tensor *>>          g_hift_inv_alpha_entries;
 
 // Round 2 result caches (pure-compute scaffolding).
-static std::unordered_map<int64_t, std::vector<float>>                   g_pos_emb_results;
+// Length-keyed caches keep only their latest entries: a decoder kept loaded
+// across replies would otherwise retain one per distinct reply length.
+constexpr size_t SHAPE_CACHE_ENTRIES = 8;
+static ::tts_cpp::detail::shape_result_cache<int64_t>                    g_pos_emb_results{SHAPE_CACHE_ENTRIES};
 static std::unordered_map<const ggml_tensor *, std::vector<float>>       g_inv_alpha_results;
 static std::unordered_map<int, std::vector<float>>                       g_hann_window_cache;
 static std::unordered_map<int, std::vector<float>>                       g_istft_kernel_cache;
-static std::unordered_map<int64_t, std::vector<float>>                   g_window_sum_cache;
+static ::tts_cpp::detail::shape_result_cache<int64_t>                    g_window_sum_cache{SHAPE_CACHE_ENTRIES};
 
 // Round 5 (PROGRESS.md §3.36): STFT graph + analysis-kernel caches.
 // `run_stft` runs once per synth as part of the HiFT path (between
@@ -1048,12 +1052,12 @@ static ggml_tensor * conformer_block(ggml_context * ctx, const conformer_w & w,
 // underlying build_* functions are visible).  Declared up here so the
 // graph-build sites that consume them (run_encoder, run_f0_predictor,
 // run_hift_decode) compile.
-static const std::vector<float> & cached_pos_emb(int T, int D);
+static std::shared_ptr<const std::vector<float>> cached_pos_emb(int T, int D);
 static const std::vector<float> & cached_inv_alpha(const model_ctx & m,
                                                    const std::string & name);
 static const std::vector<float> & cached_hann_window(int n_fft);
 static const std::vector<float> & cached_istft_kernel(int n_fft);
-static const std::vector<float> & cached_window_sum(int T_stft, int n_fft, int hop);
+static std::shared_ptr<const std::vector<float>> cached_window_sum(int T_stft, int n_fft, int hop);
 
 static void compute_pos_emb(std::vector<float> & pe, int T, int D) {
     int L = 2 * T - 1;
@@ -1084,18 +1088,16 @@ static void compute_pos_emb(std::vector<float> & pe, int T, int D) {
 // chatterbox D is constant=512 and T is determined by the encoder
 // input length.  Streaming chunks at the same T after the first
 // synth pay zero compute_pos_emb work.
-static const std::vector<float> & cached_pos_emb(int T, int D) {
+static std::shared_ptr<const std::vector<float>> cached_pos_emb(int T, int D) {
     const int64_t key = ((int64_t) T << 32) | (uint32_t) D;
     {
         std::lock_guard<std::mutex> lk(g_synth_caches_mu);
-        auto it = g_pos_emb_results.find(key);
-        if (it != g_pos_emb_results.end()) return it->second;
+        if (auto hit = g_pos_emb_results.find(key)) return hit;
     }
     std::vector<float> pe;
     compute_pos_emb(pe, T, D);
     std::lock_guard<std::mutex> lk(g_synth_caches_mu);
-    auto [it, inserted] = g_pos_emb_results.try_emplace(key, std::move(pe));
-    return it->second;
+    return g_pos_emb_results.insert(key, std::move(pe));
 }
 
 // Run the full S3Gen encoder: input (T, D=512) -> mu (2T, 80)
@@ -1229,8 +1231,10 @@ static std::vector<float> run_encoder(const model_ctx & m, const std::vector<flo
     // synth at the same chunk size.  compute_pos_emb is ~T*D*5 trig ops
     // per call; for multilingual T=350+ at D=512 that's a real wedge of
     // per-synth host time.
-    const std::vector<float> & pe1 = cached_pos_emb(T,  D);
-    const std::vector<float> & pe2 = cached_pos_emb(T2, D);
+    const auto pe1_entry = cached_pos_emb(T,  D);
+    const auto pe2_entry = cached_pos_emb(T2, D);
+    const std::vector<float> & pe1 = *pe1_entry;
+    const std::vector<float> & pe2 = *pe2_entry;
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pos1"), pe1.data(), 0, pe1.size()*sizeof(float));
     ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pos2"), pe2.data(), 0, pe2.size()*sizeof(float));
     s3gen_compute_graph(m, gf, direct);
@@ -2082,7 +2086,7 @@ static const std::vector<float> & cached_stft_kernel(int n_fft) {
     return it->second;
 }
 
-static const std::vector<float> & cached_window_sum(int T_stft, int n_fft, int hop) {
+static std::shared_ptr<const std::vector<float>> cached_window_sum(int T_stft, int n_fft, int hop) {
     // Pack (n_fft, hop, T_stft) into a single int64 key — n_fft and
     // hop are constants on the chatterbox path but encoding them
     // makes the cache safe against future variant additions.
@@ -2092,13 +2096,11 @@ static const std::vector<float> & cached_window_sum(int T_stft, int n_fft, int h
         (int64_t)(uint32_t) T_stft;
     {
         std::lock_guard<std::mutex> lk(g_synth_caches_mu);
-        auto it = g_window_sum_cache.find(key);
-        if (it != g_window_sum_cache.end()) return it->second;
+        if (auto hit = g_window_sum_cache.find(key)) return hit;
     }
     auto ws = build_window_sum(T_stft, n_fft, hop, cached_hann_window(n_fft));
     std::lock_guard<std::mutex> lk(g_synth_caches_mu);
-    auto [it, inserted] = g_window_sum_cache.try_emplace(key, std::move(ws));
-    return it->second;
+    return g_window_sum_cache.insert(key, std::move(ws));
 }
 
 static ggml_tensor * snake(ggml_context * ctx, ggml_tensor * x,
@@ -2469,11 +2471,11 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
 
     // Cached scaffolding sizes — pure functions of (n_fft, hop, T_stft).
     // Build the input-tensor declarations against the cached vector sizes.
-    const std::vector<float> & ws_for_size = cached_window_sum(T_stft, n_fft, hop);
+    const auto ws_for_size = cached_window_sum(T_stft, n_fft, hop)->size();
 
     ggml_tensor * istft_k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_fft, 1, 2 * F);
     ggml_set_name(istft_k, "istft_k"); ggml_set_input(istft_k);
-    ggml_tensor * ws_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (int)ws_for_size.size(), 1);
+    ggml_tensor * ws_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (int)ws_for_size, 1);
     ggml_set_name(ws_in, "w_sum"); ggml_set_input(ws_in);
 
     ggml_tensor * y = transposed_conv_columns
@@ -2481,7 +2483,7 @@ static void build_hift_graph_nodes(graph_cache & cache, const model_ctx & m,
         : ggml_conv_transpose_1d(ctx, istft_k, spec, hop, 0, 1);
     y = ggml_div(ctx, y, ws_in);
     int pad_amt = n_fft / 2;
-    int L_wav = (int)ws_for_size.size() - n_fft;
+    int L_wav = (int)ws_for_size - n_fft;
     // Drop the trailing ggml_cont.  The view's only consumer is
     // ggml_clamp (element-wise, accepts strided src0); clamp's output
     // is a fresh contiguous tensor allocated by the gallocator.
@@ -2517,7 +2519,8 @@ static std::vector<float> run_hift_decode(const model_ctx & m,
     // is reused, ik / ws data still need to be staged into the input
     // tensors).  cached_* helpers are O(1) on hits.
     const std::vector<float> & ik_data = cached_istft_kernel(n_fft);
-    const std::vector<float> & ws_data = cached_window_sum(T_stft, n_fft, hop);
+    const auto ws_entry = cached_window_sum(T_stft, n_fft, hop);
+    const std::vector<float> & ws_data = *ws_entry;
 
     // The scheduler path exists for CONV_TRANSPOSE_1D, which ggml-opencl and
     // ggml-vulkan lack; backends that run the whole graph (Metal, CUDA, CPU,
@@ -2565,7 +2568,8 @@ static std::vector<float> run_hift_decode(const model_ctx & m,
 static std::vector<float> hift_istft_host(const std::vector<float> & conv_post, int T_stft) {
     const int n_fft = 16, hop = 4, F = n_fft / 2 + 1;
     const std::vector<float> & kernel = cached_istft_kernel(n_fft);
-    const std::vector<float> & window_sum = cached_window_sum(T_stft, n_fft, hop);
+    const auto window_sum_entry = cached_window_sum(T_stft, n_fft, hop);
+    const std::vector<float> & window_sum = *window_sum_entry;
     std::vector<float> frame(2 * F);
     std::vector<float> y(window_sum.size(), 0.0f);
     for (int t = 0; t < T_stft; ++t) {
@@ -3612,7 +3616,7 @@ namespace tts_cpp::chatterbox::detail {
 bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
                        const std::string & backend,
                        int n_speech_tokens, s3gen_fit_measure & out,
-                       std::string * error) {
+                       std::string * error, const s3gen_fit_prompt & prompt) {
     using ::tts_cpp::fitutil::sat_add;
     out = s3gen_fit_measure{};
     if (n_speech_tokens <= 0) {
@@ -3635,19 +3639,24 @@ bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
         } guard{m};
         out.weights_bytes = weights;
         out.meanflow      = m.meanflow;
+        out.on_cpu        = ::tts_cpp::detail::backend_is_cpu(m.backend);
 
         // Workload shapes, exactly as s3gen_synthesize_to_wav derives them on
         // the batch path (finalize=true appends 3 lookahead-silence tokens).
-        // Conditioning lengths come from the built-in voice tensors;
-        // reference-audio conditioning is capped to the same lengths
-        // (10 s -> 250 prompt tokens / 500 prompt_feat frames).
-        ggml_tensor * t_pt = find_tensor(m, "s3gen/builtin/prompt_token");
-        ggml_tensor * t_pf = find_tensor(m, "s3gen/builtin/prompt_feat");
+        // Conditioning lengths come from the caller's voice when given, else
+        // from the built-in voice tensors; reference-audio conditioning is
+        // capped to the same lengths (10 s -> 250 prompt tokens / 500
+        // prompt_feat frames).
         const int pre_lookahead_len = 3;  // Chatterbox default (s3gen_synthesize_to_wav)
-        out.n_prompt_token = (int) ggml_nelements(t_pt);
-        out.mel_len1       = (int) t_pf->ne[1];
+        if (prompt.n_prompt_token >= 0 && prompt.prompt_feat_frames >= 0) {
+            out.n_prompt_token = prompt.n_prompt_token;
+            out.mel_len1       = prompt.prompt_feat_frames;
+        } else {
+            out.n_prompt_token = (int) ggml_nelements(find_tensor(m, "s3gen/builtin/prompt_token"));
+            out.mel_len1       = (int) find_tensor(m, "s3gen/builtin/prompt_feat")->ne[1];
+        }
         out.n_total        = out.n_prompt_token + n_speech_tokens + pre_lookahead_len;
-        out.T_mu           = 2 * out.n_total;
+        out.T_mu           = m.token_mel_ratio * out.n_total;
         if (out.T_mu <= out.mel_len1) {
             if (error) *error = "s3gen_measure_fit: workload shorter than the conditioning prompt";
             return false;

@@ -14,6 +14,8 @@
 #include "mel_preprocess.h"
 #include "long_form_encoder.h"
 #include "encoder_device_decode.h"
+#include "coreml_tdt_segments.h"
+#include "streaming_defaults.h"
 
 #include "ggml-backend.h"
 
@@ -78,7 +80,7 @@ void print_usage(const char * argv0) {
         "                       partial layer offload is not implemented.\n"
         "                       Adreno 6xx OpenCL is skipped unless explicitly enabled\n"
         "                       with PARAKEET_ALLOW_ADRENO_6XX=1. Backend support changes\n"
-        "                       are commits on qvac-ext-ggml@speech, not local patches.\n"
+        "                       are commits in the fabric ggml, not local patches.\n"
         "  --backend NAME       auto (default), cpu, cuda, vulkan, opencl, webgpu,\n"
         "                       hexagon (HTP0), xdna (XDNA0), or exact ggml device name. Explicit\n"
         "                       selection overrides --n-gpu-layers and fails if\n"
@@ -94,7 +96,7 @@ void print_usage(const char * argv0) {
         "                                     Empty => ggml's default search path.\n"
         "  --opencl-cache-dir DIR             persistent OpenCL kernel binary cache directory\n"
         "                                     (sets $GGML_OPENCL_CACHE_DIR; consumed by the\n"
-        "                                     qvac-ext-ggml@speech OpenCL backend).\n"
+        "                                     fabric ggml OpenCL backend).\n"
         "                                     Omitted or empty leaves the process environment\n"
         "                                     unchanged; without an existing variable, no\n"
         "                                     Parakeet cache directory is configured.\n"
@@ -144,7 +146,8 @@ void print_usage(const char * argv0) {
         "                       right_lookahead_ms. Typical WER: ~0 %% on short clean\n"
         "                       speech, ~4 %% on long sci-fi narration at the default\n"
         "                       context budget. Requires --stream.\n"
-        "  --stream-chunk-ms N  segment window stride in ms (default 1000; Nemotron\n"
+        "  --stream-chunk-ms N  segment stride in ms (TDT duplex default/minimum 30000;\n"
+        "                       full EU default 2000, others 1000; Nemotron\n"
         "                       defaults to 320 and supports 80, 160, 320, 560, 1120)\n"
         "                       2000 Mode 3 recommended; snaps to the encoder frame\n"
         "                       stride, which is 80 ms on every shipped GGUF -- a\n"
@@ -298,6 +301,7 @@ struct ExtraCliOpts {
 
     bool        stream            = false;
     int         stream_chunk_ms   = 1000;
+    bool        stream_chunk_explicit = false;
     int         stream_left_ms    = -1;
     int         stream_right_ms   = -1;
     bool        stream_duplex     = false;
@@ -317,7 +321,7 @@ struct ExtraCliOpts {
     // OpenCL CLI surface: ggml-opencl's runtime knobs are exposed through
     // CLI flags so bench scripts can A/B them without `env VAR=… ./binary`.
     // All four are read by ggml-opencl via getenv() and (for the cache
-    // dir) by the qvac-ext-ggml@speech OpenCL backend. Applied
+    // dir) by the fabric ggml OpenCL backend. Applied
     // via `setenv()` BEFORE any parakeet API call so the backend
     // init cascade picks them up. Empty string for any field => leave
     // the existing process-env value untouched (do not setenv).
@@ -373,6 +377,7 @@ struct RunTimes {
     int    tokens         = 0;
     int    encoder_frames = 0;
     bool   encoder_coreml = false;
+    bool   decoder_coreml = false;
 };
 
 struct AggStats {
@@ -456,12 +461,10 @@ bool resolve_cli_overlap(const parakeet::ParakeetCtcModel & model, const std::st
                          parakeet::EngineOptions & long_form_opts) {
     if (arg.empty() || long_form_opts.long_form_window_frames < 0) return true;
     double overlap = 0.0;
-    const int window_frames = parakeet::resolve_long_form_window_frames(
-        long_form_opts.long_form_window_frames, model.encoder_cfg.pos_emb_max_len,
-        parakeet::kLongFormAutoWindowFrames, parakeet::kLongFormMinWindowFrames);
     if (!parse_finite_double(arg, overlap) ||
-        !parakeet::long_form_context_frames_from_overlap(overlap, window_frames,
-                                               long_form_opts.long_form_context_frames)) {
+        !parakeet::long_form_context_frames_for_model(overlap,
+            long_form_opts.long_form_window_frames, model.encoder_cfg.long_form_window_hint,
+            model.encoder_cfg.pos_emb_max_len, long_form_opts.long_form_context_frames)) {
         PARAKEET_LOG_ERROR("error: --overlap expects a fraction from 0 to 0.5 (got '%s')\n",
                            arg.c_str());
         return false;
@@ -583,6 +586,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             // stride would silently round up here; revisit when we
             // actually ship one.
             extra.stream_chunk_ms = std::max(80, std::atoi(argv[++i]));
+            extra.stream_chunk_explicit = true;
         } else if (a == "--stream-left-context-ms" && i + 1 < argc) {
             extra.stream_left_ms = std::max(0, std::atoi(argv[++i]));
         } else if (a == "--stream-right-lookahead-ms" && i + 1 < argc) {
@@ -915,11 +919,12 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         }
 
         const auto t_gate = clock::now();
+        bool gate_coreml = true;
         try {
             resolve_transcribepsy_eu_route(model, opts.language, mel.data(), n_frames,
                                            model.mel_cfg.n_mels, nullptr,
                                            eu_gate_mel.data(), eu_gate_frames,
-                                           (int) samples.size());
+                                           (int) samples.size(), &gate_coreml);
         } catch (const std::exception & error) {
             PARAKEET_LOG_ERROR("error: %s\n", error.what());
             return 2;
@@ -943,11 +948,45 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         }
 
         EncoderOutputs enc_out;
+        const bool precise_continuity = needs_precise_eu_continuity(
+            model.model_variant == "transcribepsy-250m-eu",
+            long_form_opts.long_form_window_frames, long_form_opts.long_form_context_frames,
+            n_frames, model_coreml_fixed_mel_frames(model));
         const LongFormPlan long_form =
-            resolve_long_form_plan(model, long_form_opts, n_frames);
+            resolve_long_form_plan(model, long_form_opts, n_frames, precise_continuity);
 
         static TdtRuntimeWeights rt;
         static bool rt_ready = false;
+
+#ifdef PARAKEET_USE_COREML
+        if (model.model_variant == "transcribepsy-250m-eu" &&
+            (model_coreml_decoder(model) || model_encoder_on_coreml(model)) &&
+            allows_independent_eu_decoder(long_form_opts.long_form_window_frames,
+                                          long_form_opts.long_form_context_frames)) {
+            if (!rt_ready) {
+                if (tdt_prepare_runtime_deferred(model, rt) != 0) return 20;
+                rt_ready = true;
+            }
+            std::atomic<bool> cancel{false};
+            IndependentSegmentsOutcome result;
+            if (transcribe_independent_segments(model, rt, mel.data(), n_frames,
+                                                model.mel_cfg.n_mels, opts.verbose, cancel, result)) {
+                text_out = std::move(result.text);
+                ids_out = std::move(result.ids);
+                n_frames_out = n_frames;
+                times.enc_ms = result.encoder_ms + gate_ms;
+                times.dec_ms = result.decode_ms;
+                times.inference_ms = times.mel_ms + times.enc_ms + times.dec_ms +
+                    result.segment_plan_ms + result.assemble_ms;
+                times.encoder_frames = result.encoder_frames;
+                times.tokens = (int) ids_out.size();
+                times.encoder_coreml = result.used_coreml && gate_coreml;
+                times.decoder_coreml = result.decoder_used_coreml;
+                if (extra.require_coreml && !times.encoder_coreml) return 31;
+                return 0;
+            }
+        }
+#endif
 
         TdtDecodeResult device_result;
         double device_decode_ms = 0.0;
@@ -1041,7 +1080,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             WindowedEncoderStats stats;
             if (int rc = run_encoder_windowed(
                     model, mel.data(), n_frames, model.mel_cfg.n_mels,
-                    long_form, cancel_flag, enc_out, stats); rc != 0) return rc;
+                    long_form, cancel_flag, enc_out, stats, precise_continuity); rc != 0) return rc;
             times.enc_ms = stats.encoder_ms;
         } else {
             const auto t2 = clock::now();
@@ -1049,11 +1088,11 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model, mel.data(), n_frames, model.mel_cfg.n_mels, enc_out,
                     /*max_layers=*/-1,
                     /*capture_intermediates=*/false,
-                    /*allow_coreml_padded=*/true, device_consumer); rc != 0) return rc;
+                    /*allow_coreml_padded=*/true, device_consumer, 0, precise_continuity); rc != 0) return rc;
             times.enc_ms = ms_since(t2) - device_decode_ms;
         }
         times.encoder_frames = enc_out.n_enc_frames;
-        times.encoder_coreml = enc_out.used_coreml;
+        times.encoder_coreml = enc_out.used_coreml && gate_coreml;
         times.enc_ms += gate_ms;
 
         if (extra.require_coreml && !times.encoder_coreml) {
@@ -1167,7 +1206,13 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model.encoder_cfg.rnnt_max_symbols_per_step;
             }
             TdtDecodeResult  dres;
-            const int rc = model.model_type == ParakeetModelType::NEMOTRON &&
+            bool coreml_decoded = false;
+#ifdef PARAKEET_USE_COREML
+            coreml_decoded = model.model_variant == "transcribepsy-250m-eu" &&
+                decode_coreml_tdt_sequence(model, rt, decoder_input,
+                                             enc_out.n_enc_frames, enc_out.d_model, dres);
+#endif
+            const int rc = coreml_decoded ? 0 : model.model_type == ParakeetModelType::NEMOTRON &&
                            long_form.enabled
                 ? rnnt_greedy_decode_chunked(
                     model, rt, decoder_input,
@@ -1181,6 +1226,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     model, rt, decoder_input,
                     enc_out.n_enc_frames, enc_out.d_model, dopts, dres);
             if (rc != 0) return rc;
+            times.decoder_coreml = coreml_decoded;
             ids_out  = std::move(dres.token_ids);
             text_out = std::move(dres.text);
         } else if (model.model_type == ParakeetModelType::EOU) {
@@ -1377,14 +1423,18 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         eopts.verbose         = opts.verbose;
         eopts.language        = opts.language;
 
+        // The full-EU Engine loads three encoder sidecars of its own. Release
+        // the CLI's inspection model before constructing the streaming engine.
+        const bool full_eu = model.model_variant == "transcribepsy-250m-eu";
+        if (full_eu) model = ParakeetCtcModel{};
         Engine engine(eopts);
 
         StreamingOptions sopts;
         sopts.sample_rate       = sr;
-        sopts.chunk_ms          = engine.model_type() == "nemotron" &&
-                                  extra.stream_chunk_ms == 1000
-                                ? 320
-                                : extra.stream_chunk_ms;
+        sopts.chunk_ms = engine.model_type() == "nemotron" && extra.stream_chunk_ms == 1000
+            ? 320 : resolve_transcription_chunk_ms(
+                extra.stream_chunk_explicit ? extra.stream_chunk_ms : StreamingOptions::automatic_chunk_ms,
+                full_eu);
         if (extra.stream_left_ms  >= 0) sopts.left_context_ms    = extra.stream_left_ms;
         if (extra.stream_right_ms >= 0) sopts.right_lookahead_ms = extra.stream_right_ms;
 
@@ -1392,12 +1442,23 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         const auto t_stream = clock::now();
 
         if (extra.stream_duplex) {
+            if (!extra.stream_chunk_explicit && engine.model_type() == "tdt" && !full_eu) {
+                sopts.chunk_ms = StreamingOptions::automatic_chunk_ms;
+            }
             int segment_count = 0;
-            auto sess = engine.stream_start(sopts,
-                [&](const StreamingSegment & seg) {
-                    emit_segment(seg, emit_fmt);
-                    ++segment_count;
-                });
+            bool all_coreml = true;
+            std::unique_ptr<StreamSession> sess;
+            try {
+                sess = engine.stream_start(sopts,
+                    [&](const StreamingSegment & seg) {
+                        emit_segment(seg, emit_fmt);
+                        all_coreml = all_coreml && seg.encoder_used_coreml;
+                        ++segment_count;
+                    });
+            } catch (const std::exception & error) {
+                PARAKEET_LOG_ERROR("error: %s\n", error.what());
+                return 2;
+            }
 
             const int feed_bytes = extra.stream_feed_bytes > 0
                                  ? extra.stream_feed_bytes
@@ -1416,10 +1477,12 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
                     "[stream-duplex] load=%.1fms audio=%.2fs samples=%zu@%dHz\n"
                     "[stream-duplex] chunk_ms=%d left=%dms right=%dms segments=%d total=%.1fms RTF=%.3f\n",
                     load_ms, audio_ms / 1000.0, samples.size(), sr,
-                    sopts.chunk_ms, sopts.left_context_ms, sopts.right_lookahead_ms,
+                    sess->options().chunk_ms, sopts.left_context_ms, sopts.right_lookahead_ms,
                     segment_count, stream_ms, stream_ms / audio_ms);
             }
-            return 0;
+            PARAKEET_LOG_INFO("[stream-duplex] encoder_backend=%s decoder_backend=native\n",
+                              engine.encoder_backend().c_str());
+            return extra.require_coreml && !all_coreml ? 31 : 0;
         }
 
         auto result = engine.transcribe_samples_stream(
@@ -1427,6 +1490,9 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             [&](const StreamingSegment & seg) {
                 emit_segment(seg, emit_fmt);
             });
+        PARAKEET_LOG_INFO("[stream] encoder_backend=%s decoder_backend=native\n",
+                          engine.encoder_backend().c_str());
+        if (extra.require_coreml && !result.encoder_used_coreml) return 31;
 
         const double stream_ms = ms_since(t_stream);
         if (opts.verbose) {
@@ -1482,6 +1548,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     inf_v.reserve(extra.bench_runs);
     bool any_coreml = false;
     bool all_coreml = true;
+    bool all_decoder_coreml = true;
 
     int enc_frames_last = 0;
     for (int r = 0; r < extra.bench_runs; ++r) {
@@ -1494,6 +1561,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
         enc_frames_last = t.encoder_frames;
         any_coreml = any_coreml || t.encoder_coreml;
         all_coreml = all_coreml && t.encoder_coreml;
+        all_decoder_coreml = all_decoder_coreml && t.decoder_coreml;
         PARAKEET_LOG_INFO("[bench] run %d/%d    mel=%.1fms enc=%.1fms dec=%.1fms inference=%.1fms  RTF=%.3f\n",
                      r + 1, extra.bench_runs, t.mel_ms, t.enc_ms, t.dec_ms,
                      t.inference_ms, t.inference_ms / audio_ms);
@@ -1518,7 +1586,7 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
     PARAKEET_LOG_INFO(
         "[bench] encoder_backend=%s  decoder_backend=%s\n",
         encoder_backend.c_str(),
-        model_decoder_backend_name(model).c_str());
+        model_decoder_backend_name(model, all_decoder_coreml).c_str());
 
     PARAKEET_LOG_INFO(
         "[bench] ----------- summary (%d timed runs, warmup excluded) -----------\n"
@@ -1584,10 +1652,14 @@ extern "C" int parakeet_cli_main(int argc, char ** argv) {
             backend_label = "ggml-cpu";
         }
         std::fprintf(fp, "  \"backend\": \"%s\",\n", backend_label.c_str());
+        std::fprintf(fp, "  \"encoder_owned_by_coreml\": %s,\n",
+                     model_encoder_owned_by_coreml(model) ? "true" : "false");
         std::fprintf(fp, "  \"encoder_backend\": \"%s\",\n",
                      encoder_backend.c_str());
         std::fprintf(fp, "  \"encoder_coreml_all_runs\": %s,\n",
                      all_coreml ? "true" : "false");
+        std::fprintf(fp, "  \"decoder_coreml_all_runs\": %s,\n",
+                     all_decoder_coreml ? "true" : "false");
         std::fprintf(fp, "  \"n_gpu_layers\": %d,\n", opts.n_gpu_layers);
         std::fprintf(fp, "  \"threads\": %d,\n",    opts.n_threads);
         std::fprintf(fp, "  \"warmup_runs\": %d,\n", extra.bench_warmup);

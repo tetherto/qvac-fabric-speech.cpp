@@ -9,7 +9,7 @@
 
 #include "campplus.h"
 #include "voice_features.h"
-#include "npy.h"
+#include "parity_test.h"
 #include "ggml.h"
 #include "gguf.h"
 
@@ -48,8 +48,8 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[3/5] loading wav %s\n", wav_path.c_str());
     npy_array wav_npy = npy_load(wav_path);
-    std::vector<float> wav((const float*)wav_npy.data.data(),
-                           (const float*)wav_npy.data.data() + wav_npy.n_elements());
+    std::vector<float> wav(npy_as_f32(wav_npy),
+                           npy_as_f32(wav_npy) + wav_npy.n_elements());
     fprintf(stderr, "      %zu samples (%.2f s)\n", wav.size(), (double)wav.size() / 16000.0);
 
     fprintf(stderr, "[4/5] fbank → mean-subtract → CAMPPlus\n");
@@ -59,6 +59,8 @@ int main(int argc, char ** argv) {
     const int T = (int)(fb_cpp.size() / 80);
     fprintf(stderr, "      fbank (T=%d, 80)  %.1f ms\n", T,
             std::chrono::duration<double, std::milli>(t1 - t0).count());
+
+    if (T == 0) { fprintf(stderr, "empty fbank output\n"); return 1; }
 
     // Mean-subtract over T (per channel) — matches extract_feature().
     std::vector<float> col_mean(80, 0.0f);
@@ -79,26 +81,9 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[5/5] comparing against %s\n", ref_path.c_str());
     npy_array ref = npy_load(ref_path);
-    const size_t n = std::min(emb.size(), ref.n_elements());
-    const float * r = (const float *)ref.data.data();
-    float ma = 0.0f, rsum = 0.0f, mref = 0.0f;
-    double dot = 0.0, n_sq_c = 0.0, n_sq_r = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        float d = emb[i] - r[i];
-        ma = std::max(ma, std::fabs(d));
-        rsum += d * d;
-        mref = std::max(mref, std::fabs(r[i]));
-        dot   += (double)emb[i] * (double)r[i];
-        n_sq_c += (double)emb[i] * (double)emb[i];
-        n_sq_r += (double)r[i]   * (double)r[i];
-    }
-    double rms = std::sqrt(rsum / n);
-    double rel = ma / std::max(mref, 1e-12f);
-    double cos = dot / (std::sqrt(n_sq_c) * std::sqrt(n_sq_r) + 1e-30);
-    fprintf(stderr,
-        "\n[result] C++ wav→embedding vs Python:\n"
-        "    n=%zu  max_abs=%.4e  rms=%.4e  max|ref|=%.4e  rel=%.4e\n"
-        "    cosine similarity = %.6f\n",
-        n, (double)ma, rms, (double)mref, rel, cos);
-    return 0;
+    // Relative max error against the complete, finite float32 reference.
+    constexpr double kRelativeTolerance = 2e-3;
+    const bool passed = tts_test::check_f32("wav_to_embedding", emb, {w.embedding_size}, ref,
+                                             kRelativeTolerance);
+    return passed ? 0 : 1;
 }

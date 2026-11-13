@@ -139,21 +139,24 @@ plan_long_form_windows(int n_units, int center_units, int ctx_units,
 constexpr int kTranscribePsyWindowFrames  = 750;
 constexpr int kTranscribePsyContextFrames = 94;
 constexpr const char * kTranscribePsyDescriptionMark = "TranscribePsy";
+constexpr const char * kTranscribePsyEuVariant = "transcribepsy-250m-eu";
 
 // The window a model recommends for the automatic long-form plan: the GGUF's
 // parakeet.long_form.window_frames / context_frames keys when it carries
-// them, or TranscribePsy's validated setting for a GGUF whose description
-// names the model (the published file predates the keys). Returns false,
+// them, or TranscribePsy's validated setting identified by its full-EU variant
+// or legacy description. Returns false,
 // with both outputs 0, when the model recommends nothing.
 inline bool long_form_hint_for_model(int window_key, int context_key,
                                      const std::string & description,
-                                     int & window, int & context) {
+                                     int & window, int & context,
+                                     const std::string & model_variant = "") {
     if (window_key > 0) {
         window  = window_key;
         context = context_key > 0 ? context_key : 0;
         return true;
     }
-    if (description.find(kTranscribePsyDescriptionMark) != std::string::npos) {
+    if (model_variant == kTranscribePsyEuVariant ||
+        description.find(kTranscribePsyDescriptionMark) != std::string::npos) {
         window  = kTranscribePsyWindowFrames;
         context = kTranscribePsyContextFrames;
         return true;
@@ -264,6 +267,15 @@ constexpr int kLongFormAutoContextFrames = 256;
 // Floor so a pathologically small pos_emb_max_len can't collapse the centre.
 constexpr int kLongFormMinWindowFrames   = 256;
 
+inline bool long_form_context_frames_for_model(double overlap, int requested_window,
+                                               int hint_window, int pos_emb_max_len,
+                                               int & context) {
+    const int requested = requested_window == 0 && hint_window > 0 ? hint_window : requested_window;
+    const int window = resolve_long_form_window_frames(requested, pos_emb_max_len,
+        kLongFormAutoWindowFrames, kLongFormMinWindowFrames);
+    return long_form_context_frames_from_overlap(overlap, window, context);
+}
+
 struct LongFormPlan {
     bool enabled        = false;
     int  window_frames  = 0;  // encoder-frame capacity of each window
@@ -318,6 +330,19 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     plan.right_context_frames = context_frames;
     plan.sub            = sub;
     return plan;
+}
+
+// Legacy TDT sidecars have no validated seam policy. Their short windows can
+// leave the decoder emitting blanks or repetitions for whole phrases. Keep the
+// normal ggml plan for oversized inputs; masked ANE exports supply seam context.
+inline LongFormPlan resolve_coreml_tdt_shape_plan(int fixed_mel_frames,
+                                                 int requested_context_frames,
+                                                 int subsampling_factor,
+                                                 long long n_mel_frames,
+                                                 int validated_seam_context_frames) {
+    if (validated_seam_context_frames <= 0) return LongFormPlan{};
+    return resolve_coreml_fixed_shape_plan(fixed_mel_frames, requested_context_frames,
+                                           subsampling_factor, n_mel_frames);
 }
 
 inline bool should_use_nemotron_cache_aware_offline(

@@ -20,7 +20,6 @@ option(PARAKEET_BUILD_EXAMPLES    "parakeet: build standalone examples (live-mic
 option(PARAKEET_INSTALL           "parakeet: generate install rules"                                 ON)
 option(PARAKEET_USE_SYSTEM_GGML   "parakeet: use system-installed GGML library"                      OFF)
 option(PARAKEET_CCACHE            "parakeet: use ccache as compiler launcher if available"           ON)
-option(PARAKEET_GGML_LIB_PREFIX   "parakeet: rename bundled ggml libraries to libspeech-ggml-* (filename only; CMake target names and C symbols are unchanged). Prevents shared-library filename collisions with other ggml consumers in the same host process; the `speech-` prefix is shared with the rest of the QVAC speech stack (whisper, parakeet, chatterbox, supertonic, ...) so they vendor a single ggml file set. Has no effect when PARAKEET_USE_SYSTEM_GGML=ON." ON)
 option(PARAKEET_COREML            "parakeet: enable the Apple Core ML (Neural Engine) encoder and TDT decoder sidecars (Apple-only, additive; the FastConformer encoder runs on a <model>-encoder.mlmodelc and the TDT decoder on a <model>-decoder.mlmodelc when present, else the engine falls back to ggml)." OFF)
 
 # Enable Objective-C and Objective-C++ up front (before add_subdirectory(ggml))
@@ -177,29 +176,10 @@ if (WIN32 AND NOT MINGW)
     endif()
 endif()
 
-# Bundled-ggml library filename prefix. qvac-ext-ggml's `speech` branch
-# exposes `GGML_LIB_OUTPUT_PREFIX` (commit 4cec2d3a) which handles both
-# the OUTPUT_NAME rename for every ggml target (core + per-backend
-# .so/.dll/.a) AND the runtime loader's filename prefix
-# (`GGML_BACKEND_DL_PROJECT_PREFIX` compile define on ggml-base), so
-# the renamed `libspeech-ggml-{vulkan,opencl,cpu-*}.so` files are
-# actually discovered by `ggml_backend_load_all_from_path()` at
-# runtime.
-#
-# Setting `GGML_LIB_OUTPUT_PREFIX` here (as a cache variable, before
-# `add_subdirectory(ggml)`) is the supported way to override the
-# branch default (`qvac-speech-`) on a per-consumer basis without
-# editing the ggml subtree. The `speech-` prefix is shared across the
-# QVAC speech stack (whisper, parakeet, chatterbox, supertonic, ...)
-# so they can vendor a single ggml file set side-by-side without
-# colliding with the `qvac-` prefix used by the llm fork.
-if (PARAKEET_GGML_LIB_PREFIX AND NOT PARAKEET_USE_SYSTEM_GGML)
-    if (NOT DEFINED CACHE{GGML_LIB_OUTPUT_PREFIX})
-        set(GGML_LIB_OUTPUT_PREFIX "speech-" CACHE STRING
-            "ggml: prefix for built ggml library filenames (parakeet default)" FORCE)
-    endif()
-    message(STATUS "parakeet: bundled ggml libraries will be emitted with prefix '${GGML_LIB_OUTPUT_PREFIX}' (set PARAKEET_GGML_LIB_PREFIX=OFF to use the qvac-ext-ggml@speech default, or override -DGGML_LIB_OUTPUT_PREFIX=<other>)")
-endif()
+# The fabric ggml names its runtime-loaded backend modules `qvac-ggml-*`
+# itself (the loader's compiled-in prefix), so the bundled build needs no
+# filename-prefix override; the speech stack and the LLM stack share one
+# ggml file set.
 
 if (NOT TARGET ggml)
     if (PARAKEET_USE_SYSTEM_GGML)
@@ -851,6 +831,15 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-parakeet-streaming
         ARGS     "--model" "${_qvp_rnnt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_rnnt_q8_gguf}" "${_qvp_jfk_wav}")
+    if (PARAKEET_COREML)
+        parakeet_register_test(test-streaming-tdt-coreml-owner
+            LABEL    "fixture;coreml"
+            EXE      test-parakeet-streaming
+            ARGS     "--model" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+            REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+        set_property(TEST test-streaming-tdt-coreml-owner APPEND PROPERTY
+            ENVIRONMENT "PARAKEET_COREML_ONLY=1")
+    endif()
 
     # Quantized TDT and EOU decoded on Hexagon HTP0. Hexagon GET_ROWS accepts
     # F32 only, so backend_runs_embedding_lookup() rejects the Q8_0
@@ -1637,7 +1626,8 @@ if (PARAKEET_BUILD_TESTS)
     if (Python3_Interpreter_FOUND)
         foreach(script IN ITEMS test_converter_args test_dump_nemotron_reference
                                 test_dump_unified_reference test_inspect_nemotron_checkpoint
-                                test_fixture_coverage test_verify_gguf_roundtrip)
+                                test_fixture_coverage test_verify_gguf_roundtrip
+                                test_transcribepsy_eu_skip_guard test_strip_encoder_gguf)
             add_test(NAME ${script}
                 COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/${script}.py")
             set_tests_properties(${script} PROPERTIES LABELS "unit"
@@ -1660,6 +1650,15 @@ if (PARAKEET_BUILD_TESTS)
                     "--model" "${_qvp_transcribepsy_eu_gguf}")
             set_tests_properties(test-transcribepsy-eu PROPERTIES
                 LABELS "fixture" SKIP_RETURN_CODE 77)
+            if (PARAKEET_COREML)
+                add_test(NAME test-transcribepsy-eu-coreml-cli
+                    COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/test/test_transcribepsy_eu.py"
+                        "--binary" "$<TARGET_FILE:parakeet-cli>"
+                        "--model" "${_qvp_transcribepsy_eu_gguf}" "--coreml")
+                set_tests_properties(test-transcribepsy-eu-coreml-cli
+                    PROPERTIES LABELS "fixture;coreml" SKIP_RETURN_CODE 77)
+            endif()
         endif()
         add_test(
             NAME test-converter-moss-transcribe
@@ -2007,6 +2006,11 @@ if (PARAKEET_BUILD_TESTS)
         set_tests_properties(test-packed-affine-python PROPERTIES LABELS "unit" SKIP_REGULAR_EXPRESSION "SKIP: ")
     endif()
 
+    add_executable(test-decoder-backend test/test_decoder_backend.cpp)
+    target_include_directories(test-decoder-backend PRIVATE src)
+    parakeet_apply_ccache(test-decoder-backend)
+    parakeet_register_test(test-decoder-backend LABEL "unit")
+
     add_executable(test-coreml-shapes
         test/test_coreml_shapes.cpp
         src/coreml/parakeet_coreml_shape.cpp)
@@ -2020,6 +2024,15 @@ if (PARAKEET_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/test/test_export_encoder_coreml.py")
         set_property(TEST test-export-encoder-coreml PROPERTY LABELS "unit")
+        add_test(NAME test-compiled-precision-cli
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_compiled_precision_cli.py")
+        set_property(TEST test-compiled-precision-cli PROPERTY LABELS "unit")
+        set_property(TEST test-compiled-precision-cli PROPERTY SKIP_REGULAR_EXPRESSION "SKIP: ")
+        add_test(NAME test-ios-coreml-package
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/test/test_ios_coreml_package.py")
+        set_property(TEST test-ios-coreml-package PROPERTY LABELS "unit")
         foreach(padding_test IN ITEMS test_coreml_padding test_coreml_padding_runtime)
             add_test(NAME ${padding_test}
                 COMMAND ${Python3_EXECUTABLE}
@@ -2100,6 +2113,14 @@ if (PARAKEET_BUILD_TESTS)
             ARGS     "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}"
                      "1101" "16" "0.85" "cache-aware"
             REQUIRES "${_qvp_nemotron_f16_gguf}" "${_qvp_jfk_wav}" "${_qvp_nemotron_coreml}")
+        foreach(_qvp_tdt_seconds 16 24 90)
+            parakeet_register_test(test-tdt-coreml-native-context-${_qvp_tdt_seconds}s
+                LABEL    "fixture;coreml"
+                EXE      test-rnnt-coreml-long-form
+                ARGS     "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}"
+                         "1501" "${_qvp_tdt_seconds}" "1.0" "native-context"
+                REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_jfk_wav}" "${_qvp_tdt_coreml}")
+        endforeach()
         parakeet_register_test(test-transcribe-coreml-parity-eou
             LABEL    "fixture"
             EXE      test-transcribe-coreml-parity
@@ -2969,6 +2990,11 @@ if (PARAKEET_BUILD_TESTS)
                  "--full-gguf" "${_qvp_transcribepsy_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_transcribepsy_coreml_gguf}" "${_qvp_transcribepsy_coreml_encoder}"
                  "${_qvp_transcribepsy_gguf}" "${_qvp_jfk_wav}")
+    parakeet_register_test(test-coreml-encoder-owner-standard-tdt
+        LABEL    "fixture;coreml"
+        EXE      test-coreml-encoder-owner
+        ARGS     "--standard-tdt" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
+        REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
 
     # TranscribePsy on the engine API: expected transcript, precomputed-mel
     # parity (also from a worker thread), the 60 s / 25 % long-form windows
@@ -2984,6 +3010,70 @@ if (PARAKEET_BUILD_TESTS)
     add_executable(test-transcribepsy-eu-api test/test_transcribepsy_eu_api.cpp)
     target_link_libraries(test-transcribepsy-eu-api PRIVATE qvac-parakeet)
     parakeet_apply_ccache(test-transcribepsy-eu-api)
+    if (PARAKEET_COREML)
+        add_executable(test-transcribepsy-eu-coreml test/test_transcribepsy_eu_coreml.cpp)
+        target_link_libraries(test-transcribepsy-eu-coreml PRIVATE qvac-parakeet ggml)
+        parakeet_apply_ccache(test-transcribepsy-eu-coreml)
+        parakeet_register_test(test-transcribepsy-eu-coreml
+            LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-coreml-initial-placement
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--initial-placement"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml-initial-placement PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-sidecar-selection
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--sidecar-selection"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-decoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-sidecar-selection PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-coreml-unwindowed
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--unwindowed"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml-unwindowed PROPERTIES SKIP_RETURN_CODE 77)
+        parakeet_register_test(test-transcribepsy-eu-coreml-owned
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--unwindowed"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+        set_tests_properties(test-transcribepsy-eu-coreml-owned PROPERTIES
+            SKIP_RETURN_CODE 77 ENVIRONMENT "PARAKEET_COREML_ONLY=1")
+        parakeet_register_test(test-transcribepsy-eu-explicit-context
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--explicit-context"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-decoder.mlmodelc")
+        parakeet_register_test(test-transcribepsy-eu-stream-precision
+            EXE test-transcribepsy-eu-coreml LABEL "fixture;coreml"
+            ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}" "--context-parity"
+            REQUIRES "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-other-flexible.mlmodelc"
+                     "${PARAKEET_TEST_MODEL_DIR}/transcribepsy-250m-eu-encoder-gate-flexible.mlmodelc")
+    endif()
     parakeet_register_test(test-transcribepsy-eu-api
         LABEL "fixture"
         ARGS "${_qvp_transcribepsy_eu_gguf}" "${_qvp_jfk_wav}" "${_qvp_fr_multipiece_wav}"
@@ -3145,7 +3235,7 @@ if (PARAKEET_BUILD_EXAMPLES)
 endif()
 
 if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
-    # Bundled qvac-ext-ggml owns ggml-targets and its ggml:: namespace.
+    # A bundled fabric ggml owns ggml-targets and its ggml:: namespace.
     # Registering those targets here as well duplicates the same export set
     # and makes a fresh bundled build fail during CMake generation.
     # Export the parakeet target via an install(EXPORT ...) set so the
@@ -3230,18 +3320,25 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
     # pkg-config linkage.
     #
     # ggml: derived from the actual ggml targets rather than from a
-    # hardcoded name list, because every QVAC ggml build renames its
-    # libraries via GGML_LIB_OUTPUT_PREFIX (the ggml-speech vcpkg port
-    # uses `qvac-speech-`, the bundled build above sets `speech-`) and
-    # a system ggml may live in a different prefix than ours. For an
-    # imported (system) ggml we read IMPORTED_LOCATION and emit both
-    # the containing -L and the real library stem; for the bundled
-    # in-tree build we read OUTPUT_NAME and rely on our own ${libdir}
-    # (GGML owns its install rules). Deliberately NOT
-    # `Requires: ggml`: the qvac-ext-ggml@speech ggml.pc advertises an
-    # unprefixed `-lggml` that no install actually produces and omits
-    # ggml-base entirely, so inheriting it would under-link. Revisit
-    # once that .pc is fixed upstream in the fork.
+    # hardcoded name list, because a system ggml may live in a different
+    # prefix than ours. For an imported (system) ggml we read
+    # IMPORTED_LOCATION and emit both the containing -L and the real
+    # library stem; for the bundled in-tree build we read OUTPUT_NAME and
+    # rely on our own ${libdir} (GGML owns its install rules). Deliberately
+    # NOT `Requires: ggml`: the fabric ggml.pc omits the CPU backend and
+    # every other statically linked backend archive, so inheriting it
+    # would under-link a static build.
+    # An ALIAS target (the in-tree ggml::ggml) carries no OUTPUT_NAME of its
+    # own; the library name must come from the target it points at.
+    function(parakeet_resolve_alias_target target out_var)
+        get_target_property(_aliased ${target} ALIASED_TARGET)
+        if (_aliased)
+            set(${out_var} ${_aliased} PARENT_SCOPE)
+        else()
+            set(${out_var} ${target} PARENT_SCOPE)
+        endif()
+    endfunction()
+
     set(_pk_pc_ggml_libs "")
     set(_pk_pc_ggml_libdirs "")
     # Static registry references require the linked backend archives too.
@@ -3258,10 +3355,11 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
         endforeach()
     endforeach()
     list(APPEND _pk_ggml_pc_targets ggml::ggml-base ggml-base)
-    foreach (_pk_ggml_tgt IN LISTS _pk_ggml_pc_targets)
-        if (NOT TARGET ${_pk_ggml_tgt})
+    foreach (_pk_ggml_alias IN LISTS _pk_ggml_pc_targets)
+        if (NOT TARGET ${_pk_ggml_alias})
             continue()
         endif()
+        parakeet_resolve_alias_target(${_pk_ggml_alias} _pk_ggml_tgt)
         get_target_property(_pk_ggml_imported ${_pk_ggml_tgt} IMPORTED)
         set(_pk_ggml_libname "")
         if (_pk_ggml_imported)
@@ -3292,20 +3390,20 @@ if (PARAKEET_INSTALL AND PARAKEET_BUILD_LIBRARY)
             endif()
         endif()
         # Namespaced and plain spellings of the same target both appear in
-        # the loop (only one exists per acquisition path, but the bundled
-        # build aliases ggml::ggml -> ggml); de-duplicate on the resolved
-        # library name so the .pc never lists a library twice.
+        # the loop (the bundled fabric build aliases ggml::ggml -> ggml);
+        # de-duplicate on the resolved library name so the .pc never lists
+        # a library twice.
         if (_pk_ggml_libname AND NOT "-l${_pk_ggml_libname}" IN_LIST _pk_pc_ggml_libs)
             list(APPEND _pk_pc_ggml_libs "-l${_pk_ggml_libname}")
         endif()
     endforeach()
     if (NOT _pk_pc_ggml_libs)
         # Nothing resolvable (e.g. a hand-rolled ggml import with no
-        # location): fall back to the prefix-derived names so the .pc is
-        # still populated rather than silently empty.
-        set(_pk_pc_ggml_libs "-l${GGML_LIB_OUTPUT_PREFIX}ggml" "-l${GGML_LIB_OUTPUT_PREFIX}ggml-base")
+        # location): fall back to the fabric ggml's own library names so
+        # the .pc is still populated rather than silently empty.
+        set(_pk_pc_ggml_libs "-lggml" "-lggml-base")
         message(WARNING "parakeet: could not resolve ggml library files for qvac-parakeet.pc; "
-                        "falling back to prefix-derived names (${_pk_pc_ggml_libs})")
+                        "falling back to the default names (${_pk_pc_ggml_libs})")
     endif()
     list(REMOVE_DUPLICATES _pk_pc_ggml_libdirs)
     string(JOIN " " PARAKEET_PC_GGML_LIBS ${_pk_pc_ggml_libdirs} ${_pk_pc_ggml_libs})

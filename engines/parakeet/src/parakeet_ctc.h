@@ -704,9 +704,11 @@ std::string model_active_backend_name(const ParakeetCtcModel & m);
 std::string model_active_device_name(const ParakeetCtcModel & m);
 ggml_backend_t model_active_backend(ParakeetCtcModel & m);
 
-// True when the FastConformer encoder runs on the Apple Core ML sidecar (ANE/GPU)
-// instead of the ggml backend. Always false on non-Apple / non-Core ML builds.
+// True when a compatible encoder sidecar is available. Full-EU lazy programs
+// are validated on demand. Always false on non-Apple / non-Core ML builds.
 bool        model_encoder_on_coreml(const ParakeetCtcModel & m);
+// Validate the encoder selected for the current EU route and input shape.
+bool        model_selected_encoder_on_coreml(const ParakeetCtcModel & m, int n_mel_frames);
 #ifdef PARAKEET_USE_COREML
 class CoremlDiarizers;
 CoremlDiarizers * model_coreml_diarizers(const ParakeetCtcModel & m);
@@ -729,8 +731,9 @@ int         model_coreml_seam_context_frames(const ParakeetCtcModel & m);
 // non-Apple build, and any Apple build without a `<model>-decoder.mlmodelc`).
 ::parakeet_coreml_decoder * model_coreml_decoder(const ParakeetCtcModel & m);
 
-// Decoder compute-backend label, same contract as model_encoder_backend_name.
-std::string model_decoder_backend_name(const ParakeetCtcModel & m);
+// Decoder compute-backend label, including an available Core ML sidecar by default.
+// Pass false when reporting a decode that did not execute the Core ML sidecar.
+std::string model_decoder_backend_name(const ParakeetCtcModel & m, bool include_coreml = true);
 
 // True when the TDT / RNN-T decoder runs on the CPU backend from
 // model.tdt_cpu because the encoder backend (OpenCL) cannot run its graphs.
@@ -832,7 +835,9 @@ int run_encoder(ParakeetCtcModel   & model,
                 int                  max_layers = -1,
                 bool                 capture_intermediates = true,
                 bool                 allow_coreml_padded = false,
-                const EncoderOutputConsumer & consumer = {});
+                const EncoderOutputConsumer & consumer = {},
+                int valid_mel_frames_override = 0,
+                bool prefer_precise_eu = false);
 
 bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     const std::string & language,
@@ -840,7 +845,9 @@ bool resolve_transcribepsy_eu_route(ParakeetCtcModel & model,
                                     float * p_non_english = nullptr,
                                     const float * cropped_mel = nullptr,
                                     int cropped_mel_frames = 0,
-                                    int audio_samples = 0);
+                                    int audio_samples = 0,
+                                    bool * encoder_used_coreml = nullptr,
+                                    bool prefer_precise_eu = false);
 
 // The ggml encoder keeps one compiled graph per input shape, least recently
 // used first out, up to a limit of 3 by default. Each graph holds a compute

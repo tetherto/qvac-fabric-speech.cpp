@@ -18,6 +18,12 @@ struct SpeechVoice {
     std::vector<float> embedding;
 };
 
+// The conditioning lengths a voice sizes the decoder's stage buffers by.
+struct SpeechVoiceSize {
+    size_t tokens = 0;
+    int feat_frames = 0;
+};
+
 struct SpeechDecodeOptions {
     std::vector<float> noise;
     const std::atomic<bool> * cancel = nullptr;
@@ -45,6 +51,19 @@ public:
     const SpeechVoice & default_voice();
     std::vector<float> decode(const std::vector<int32_t> & codes, const SpeechVoice & voice,
                               const SpeechDecodeOptions & options = {});
+    // Device bytes the token-to-wave decoder holds while decoding `n_codes`
+    // with `voice` (weights plus stage arenas); 0 when it decodes on the CPU
+    // and UINT64_MAX when the projection fails.
+    uint64_t decoder_device_bytes(size_t n_codes, const SpeechVoice & voice) const;
+    uint64_t decoder_device_bytes(size_t n_codes, const SpeechVoiceSize & size) const;
+    // Upper bound on default_voice()'s conditioning lengths, from its mel
+    // frames alone: the speech tokenizer does not run.
+    SpeechVoiceSize default_voice_size() const;
+    bool decodes_on_gpu() const;
+    // Load the decoder now and keep it resident across decode() calls, until
+    // release_decoder_hold() or destruction.
+    void hold_decoder();
+    void release_decoder_hold();
 
 private:
     struct Impl;

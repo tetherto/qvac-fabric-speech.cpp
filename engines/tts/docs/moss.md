@@ -79,10 +79,9 @@ checks are still needed to establish that the model speaks the requested text.
 The TTS case also gates every expected batch/stream/reuse WAV and its CPU
 reference with the existing Whisper CPU intelligibility scorer. The reference
 model is pinned by revision and SHA-256 (the benchmark's Whisper Tiny), and
-the ASR executable is a separate static CPU build of the vendored Whisper with
-ggml pinned to `380c5f9f3e1811dfd88adeb1c19ab887bcf8ab3e`. This supplies the
-fork's scheduler/memory-fit APIs and isolates its CLI dependencies from the GPU
-test pin. The artifact records the ASR runtime pin in `asr-ggml-commit.txt`.
+the ASR executable is a separate static CPU build of the vendored Whisper
+against the same pinned fabric ggml as the run under test (`ggml-commit.txt`
+in the artifact), so it cannot load the GPU runtime being tested.
 The synthesis text is never provided as an ASR prompt. Missing/unavailable
 scores, non-finite scores, or word error rate above 25% fail the case. This
 tolerates limited reference-ASR errors while rejecting the observed wrong-text
@@ -533,8 +532,8 @@ no fallback: construction fails when HTP0 is missing, and `--gpu` never selects
 it. The backbone's transformer layers and audio heads run on the NPU, and so
 does the codec (the decoder, and the encoder for cloning and dialogue); the
 host embeds each row, samples it, and projects the whole text head on the few
-steps that need it. It needs a `qvac-ext-ggml@speech` build with the Hexagon
-backend (measured at `6bb85ad6`).
+steps that need it. It needs a fabric ggml build with the Hexagon
+backend (measured on ggml-speech `6bb85ad6`).
 
 Weights go into the Hexagon repack buffer type. HTP multiplies `f32`, `f16`,
 `q8_0` and `q4_0` weights; the backbone and the codec refuse other types for
@@ -1013,8 +1012,8 @@ crashing the process. The loader takes `f32`, `f16`,
 refused at load, so all three validated GGUFs run, including the
 [4-bit one](#4-bit-weights).
 
-It needs a `qvac-ext-ggml@speech` build with the Hexagon backend at `d85713da`
-or later, which carries the DSP buffer remapping fix
+It needs a fabric ggml build whose Hexagon backend carries the DSP buffer
+remapping fix (ggml-speech `d85713da` or later,
 ([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124));
 the numbers below were measured at that commit. Without it the first DiT pass maps more 1 GiB weight
 buffers than the DSP's address space or its 16 mapping slots can hold, the
@@ -1150,16 +1149,29 @@ embedding. The decoder is the same S3Gen stack Chatterbox uses, so the engine
 reuses it; the codec only changes the token-to-mel ratio and the speech
 vocabulary, which the S3Gen loader now reads from the GGUF.
 
-Speech replies with the LM on a GPU or on the
-[Hexagon NPU](#hexagon-npu-speech-to-speech) run the LM and S3Gen decoder in
+When the LM and the S3Gen decoder both run on a GPU, the engine projects the
+decoder's weights and stage buffers for a 30 s reply with the default voice.
+If that fits in the free device memory, with 2 GiB to spare for a turn's KV
+cache and graphs, the engine loads the decoder and holds it for its lifetime.
+The LM weights then stay loaded across replies, so a loaded engine uses more
+device memory than before its first reply.
+
+Otherwise, speech replies with the LM on a GPU or on the
+[Hexagon NPU](#hexagon-npu-speech-to-speech) run the LM and decoder in
 separate memory phases. After token generation, the engine releases LM weights
 and KV/graph buffers before decoding audio, while retaining tokenizer metadata
 and backend identity. A GPU decoder holds a matched S3Gen cache reference only
 for that decode; other cache owners retain their references. The next request
 reloads LM weights from the same GGUF, so keep the model file available. This
-reduces peak GPU memory, and on a 12 GB phone keeps the request within the
-host's memory, at the cost of loading weights again between spoken replies. An
-LM on the CPU keeps its resident weights.
+reduces peak memory, and on a 12 GB phone keeps the request within the host's
+memory, at the cost of loading weights again between spoken replies. An LM on
+the CPU keeps its resident weights.
+
+A resident engine switches to separate phases, for the rest of its lifetime,
+when a reply exceeds the 30 s plan, when a custom reply voice needs more
+decoder memory than the plan, or when a prompt's KV cache or prefill fails to
+allocate. A failed prefill is retried from the start after the decoder is
+released.
 
 **Status — CPU and Metal, validated against the reference pipeline.** Every
 stage matches the PyTorch pipeline on a real question: the log-mel features
@@ -1335,7 +1347,7 @@ when requested explicitly: `SpeechOptions::backend = "hexagon"` or `moss-cli
 construction fails when HTP0 is missing. The reply decoder (the S3Gen flow
 decoder and HiFT shared with Chatterbox) does not run on the NPU: add `--gpu`
 (`use_gpu`) to decode on the Adreno GPU through OpenCL, otherwise it runs on the
-CPU. CAM++ always runs on the CPU. It needs a `qvac-ext-ggml@speech` build with the Hexagon
+CPU. CAM++ always runs on the CPU. It needs a fabric ggml build with the Hexagon
 backend; the generated-model tests also pass without the DSP buffer remapping
 fix ([tetherto/qvac-ext-ggml#124](https://github.com/tetherto/qvac-ext-ggml/pull/124)),
 and the full-model measurements below were taken with it.

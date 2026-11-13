@@ -54,6 +54,28 @@ streaming. Unified selects trained chunk/right-context values and ignores
 `left_context_ms`; Nemotron selects its operating point from `chunk_ms` and
 ignores both sliding-window context knobs.
 
+`StreamingOptions::chunk_ms = 0` (the default) resolves to 2000 ms for full
+TranscribePsy EU, 30000 ms for other TDT push streams, and 1000 ms for other
+ASR families and encode-once callback streams. Standard TDT push streams reject
+explicit chunks below 30000 ms: short sliding windows can silently lose entire
+phrases, even with Core ML disabled. Keep the default 10000 ms left context and
+2000 ms right lookahead for this conservative operating point. This is a guard
+against the known failure, not a guarantee of identical offline transcripts.
+For lower latency use a cache-aware streaming model such as Unified RNN-T.
+
+The chunk size controls processing, not individual PCM write size. Arbitrarily
+small writes remain supported, and `finalize()` transcribes a tail shorter than
+one chunk. First output normally requires a chunk plus its right lookahead;
+short recordings produce output on finalization. Resolution happens before
+validation and context calculations; `StreamSession::options().chunk_ms` reports
+the effective value. Nemotron requires a trained positive operating point.
+
+Full-EU chunk defaults apply on every backend, including CPU, Metal, Vulkan
+and Android. With `EngineOptions::language = "auto"`, push streams buffer the
+first 20 seconds before selecting the English or adapted route; shorter streams
+select the route on `finalize()`. Known `en`/`other` routes emit without that
+initial gate delay.
+
 Always call `finalize()` to drain the partial tail. Destroying a
 `StreamSession` or `SortformerStreamSession` cancels it and does not finalize
 it. `cancel()` stops future work; `Engine::cancel()` may be called from another

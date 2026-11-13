@@ -154,6 +154,21 @@ int main() {
                     "models/Nemotron-3-Diarization-diarizer-99999999999.mlmodelc", 0);
     expect_capacity("Nemotron-3-Diarization.gguf",
                     "Nemotron-3-Diarization-diarizer-1125.mlmodelc", 1125);
+    if (parakeet::coreml_eu_other_sidecar_path("models/eu.q8_0.gguf") !=
+            "models/eu-encoder-other.mlmodelc" ||
+        parakeet::coreml_eu_gate_sidecar_path("models/eu-f16.gguf") !=
+            "models/eu-encoder-gate.mlmodelc" ||
+        parakeet::coreml_eu_flexible_sidecar_path("models/eu.q8_0.gguf", false) !=
+            "models/eu-encoder-flexible.mlmodelc" ||
+        parakeet::coreml_eu_flexible_sidecar_path("models/eu.q8_0.gguf", true) !=
+            "models/eu-encoder-other-flexible.mlmodelc") {
+        std::printf("FAIL: full-EU sidecars must share quantization-independent stems\n");
+        ++g_failures;
+    }
+    if (parakeet::coreml_eu_precise_sidecar_path("models/eu.f16.gguf", false, 1500) !=
+            "models/eu-encoder-fp32-1500.mlmodelc" ||
+        parakeet::coreml_eu_precise_sidecar_path("models/eu.q8_0.gguf", true, 6000) !=
+            "models/eu-encoder-other-fp32-6000.mlmodelc") ++g_failures;
     expect_ladder(0, 0);
     expect_ladder(1, 358);
     expect_ladder(358, 358);
