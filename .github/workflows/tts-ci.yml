@@ -620,8 +620,10 @@ jobs:
       # Parler mini q8_0, converted by the repo's converter from the pinned
       # checkpoint revision and checked against a pinned SHA-256: the
       # real-weights inputs of the generated DAC sidecar (template
-      # parler-dac-w128; the DAC tensors are F32 in every tier). Cache key:
-      # checkpoint revision + converter hash.
+      # parler-dac-w128; the DAC tensors are F32 in every tier). The
+      # converter records the checkpoint directory's name as parler.variant,
+      # so the download goes to a directory named after the Hugging Face
+      # repository. Cache key: checkpoint revision + converter hash.
       - name: Cache Parler mini q8_0
         if: runner.os == 'macOS'
         id: parler-mini-cache
@@ -635,12 +637,12 @@ jobs:
         run: |
           set -euo pipefail
           rev=0392b9451a601e528fd863bbb0598431fee810d9
-          mkdir -p parler-mini parler-mini-checkpoint
+          mkdir -p parler-mini parler-tts-mini-v1
           for f in config.json generation_config.json tokenizer.json model.safetensors; do
-            curl -sSfL --retry 3 -o "parler-mini-checkpoint/$f" \
+            curl -sSfL --retry 3 -o "parler-tts-mini-v1/$f" \
               "https://huggingface.co/parler-tts/parler-tts-mini-v1/resolve/$rev/$f"
           done
-          echo "bc430eb6752b96ffb3f67036d1a6e207fbd031575a775716ffa64ef1eeb03692  parler-mini-checkpoint/model.safetensors" \
+          echo "bc430eb6752b96ffb3f67036d1a6e207fbd031575a775716ffa64ef1eeb03692  parler-tts-mini-v1/model.safetensors" \
             | shasum -a 256 -c -
           coreml_python="$(command -v python3.11 || command -v python3)"
           "$coreml_python" -m venv .venv-parler-mini
@@ -648,11 +650,12 @@ jobs:
           .venv-parler-mini/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt \
             safetensors==0.8.0 huggingface_hub==1.31.0
           .venv-parler-mini/bin/python engines/tts/scripts/parler/convert-to-gguf.py \
-            --model-id parler-mini-checkpoint --reference-repo "parler-tts/parler-tts-mini-v1@$rev" \
+            --model-id parler-tts-mini-v1 --reference-repo "parler-tts/parler-tts-mini-v1@$rev" \
             --dtype q8_0 --out parler-mini/parler-mini-v1-q8_0.gguf
-          echo "fa7a26ea6a17b2cbe80e3c64792aa8aab3b2f83de1aed7455d52e38667d6d0bf  parler-mini/parler-mini-v1-q8_0.gguf" \
+          shasum -a 256 parler-mini/parler-mini-v1-q8_0.gguf
+          echo "e450872b4a1a0d8979970c2a804c508b9fdca2877ef9f94d03ee471991921f5f  parler-mini/parler-mini-v1-q8_0.gguf" \
             | shasum -a 256 -c -
-          rm -rf parler-mini-checkpoint
+          rm -rf parler-tts-mini-v1
 
       # The generated Parler DAC sidecar on real weights:
       # - the real-weights gate: the C++ generator on the staged GGUF is
