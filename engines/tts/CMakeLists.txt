@@ -1918,6 +1918,28 @@ if (TTS_CPP_BUILD_TESTS)
         ARGS --gguf "${_tcb_parler_gguf}" --ref-dir "${_tcb_parler_ref}")
     set_property(TEST test-parler-dac-coreml PROPERTY SKIP_RETURN_CODE 77)
 
+    # The DAC's Core ML route never reads the cache, so fit is the same before
+    # and after a generation, with and without warm hints. Checked on a twin of
+    # the parler-dac-w128 template's reference manifest (DAC tensors only),
+    # written by qvac-coreml-tool; CI also runs it with --fit on a full GGUF.
+    add_executable(test-parler-fit-stable test/parler/test_fit_stable.cpp)
+    target_link_libraries(test-parler-fit-stable PRIVATE tts-cpp)
+    target_include_directories(test-parler-fit-stable PRIVATE src)
+    if (TTS_CPP_COREML)
+        target_compile_definitions(test-parler-fit-stable PRIVATE TTS_CPP_USE_COREML)
+    endif()
+    tts_cpp_apply_ccache(test-parler-fit-stable)
+    if (TARGET qvac-coreml-tool)
+        set(_parler_dac_twin "${CMAKE_CURRENT_BINARY_DIR}/parler-dac-w128-twin.gguf")
+        add_test(NAME test-parler-fit-stable-twin
+                 COMMAND qvac-coreml-tool twin
+                         --manifest "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128/reference-gguf.json"
+                         --seed 1 --types f32 -o "${_parler_dac_twin}")
+        set_tests_properties(test-parler-fit-stable-twin PROPERTIES LABELS "unit" FIXTURES_SETUP parler-dac-twin)
+        add_test(NAME test-parler-fit-stable COMMAND test-parler-fit-stable --gguf "${_parler_dac_twin}")
+        set_tests_properties(test-parler-fit-stable PROPERTIES LABELS "unit" FIXTURES_REQUIRED parler-dac-twin)
+    endif()
+
     # Not a test: times each staged MOSS sidecar against the ggml GPU stage
     # (median of 5 after a warm-up) and prints a markdown table.
     add_executable(bench-moss-coreml test/moss/bench_coreml.cpp)
