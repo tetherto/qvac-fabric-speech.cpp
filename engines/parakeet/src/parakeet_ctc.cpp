@@ -1946,6 +1946,19 @@ static bool coreml_must_own_encoder(bool gguf_has_encoder) {
     return !gguf_has_encoder || std::getenv(kCoremlOnlyEnv) != nullptr;
 }
 
+static bool coreml_can_own_encoder(const gguf_context * g,
+                                   parakeet_coreml_context * ctx) {
+    if (!ctx) return false;
+    const bool needs_native_tdt = get_str(g, "parakeet.model.type", "ctc") == "tdt" &&
+        get_str(g, "parakeet.model_variant", "") != "transcribepsy-250m-eu" &&
+        parakeet_coreml_seam_context_frames(ctx) <= 0;
+    if (needs_native_tdt) {
+        PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
+                          "weights are required for oversized inputs and push streaming\n");
+    }
+    return !needs_native_tdt;
+}
+
 // Reads the offline-encoder test straight off GGUF metadata, for the early
 // sidecar load that runs before the authoritative parse into EncoderConfig.
 static bool gguf_encoder_is_offline(const gguf_context * g) {
@@ -1958,10 +1971,6 @@ static bool gguf_encoder_is_offline(const gguf_context * g) {
         && !get_bool(g, "parakeet.encoder.causal_downsampling", false);
 }
 
-// Loads the encoder sidecar before weight allocation so the `encoder.*`
-// tensors can be skipped. Only the offline fixed-capacity families qualify
-// (the same ones coreml_encoder_eligibility pads and windows); returns null,
-// after logging why, when the sidecar cannot take over the encoder.
 constexpr int kTranscribePsyEuMelBins = 128;
 enum class EuCoremlKind { FixedAne, FlexibleCpu, PreciseGpu };
 // `units`: the resolved compute units (CoremlOptions::compute_units, then
@@ -1999,6 +2008,11 @@ static parakeet_coreml_context * init_eu_coreml_owner(
     return english;
 }
 
+// Loads the encoder sidecar before weight allocation so the `encoder.*`
+// tensors can be skipped. Only the offline fixed-capacity families qualify
+// (the same ones coreml_encoder_eligibility pads); returns null, after logging
+// why, when no sidecar loads. coreml_can_own_encoder then decides whether the
+// loaded sidecar may own the encoder.
 static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g,
                                                           const std::string & gguf_path,
                                                           const pcm::Resolved & coreml,
@@ -2029,7 +2043,7 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
         PARAKEET_LOG_WARN("parakeet: failed to load Core ML encoder at '%s'\n", path.c_str());
         return nullptr;
     }
-    if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s' and owns the encoder\n", path.c_str());
+    if (verbose) PARAKEET_LOG_INFO("parakeet: Core ML encoder loaded from '%s'\n", path.c_str());
     return ctx;
 }
 
@@ -2670,20 +2684,28 @@ static int load_from_gguf_impl(const std::string & gguf_path,
 
     // A Parakeet GGUF without encoder weights (the Core ML distributions) runs
     // only with its encoder sidecar, which then has to load before allocation
-    // so the `encoder.*` tensors get no memory. PARAKEET_COREML_ONLY asks for the same
-    // with a full GGUF. The memory-fit projection never loads Core ML, so it
-    // cannot project such a model.
+    // so the `encoder.*` tensors get no memory. PARAKEET_COREML_ONLY requests the
+    // same for a full GGUF when its sidecar preserves the required routing.
+    // The memory-fit projection never loads Core ML and cannot project an
+    // encoder-less GGUF.
     const bool gguf_has_encoder = gguf_has_encoder_weights(g);
 #ifdef PARAKEET_USE_COREML
     if (!measure && coreml_must_own_encoder(gguf_has_encoder)) {
         impl->ctx_coreml = init_coreml_only_encoder(g, gguf_path, impl->coreml->resolved(), verbose,
                                                     impl.get());
-        impl->coreml_owns_encoder = impl->ctx_coreml != nullptr;
+        impl->coreml_owns_encoder = coreml_can_own_encoder(g, impl->ctx_coreml);
+        if (impl->ctx_coreml != nullptr && !impl->coreml_owns_encoder) {
+            // A sidecar that may not own the encoder stays an ordinary one:
+            // the encoder slot loads it in the background like any full
+            // GGUF's, so it follows the resolved wait and use policy.
+            parakeet_coreml_free(impl->ctx_coreml);
+            impl->ctx_coreml = nullptr;
+        }
     }
 #endif
     if (!gguf_has_encoder && !impl->coreml_owns_encoder) {
-        PARAKEET_LOG_ERROR("gguf: %s holds no encoder weights; it runs only with its "
-                           "%s sidecar on an Apple build with PARAKEET_COREML=ON\n",
+        PARAKEET_LOG_ERROR("gguf: %s holds no encoder weights; it requires a compatible "
+                           "encoder-owning %s sidecar on an Apple build with PARAKEET_COREML=ON\n",
                            gguf_path.c_str(), "-encoder.mlmodelc");
         return kGgufLoadNoEncoderWeights;
     }

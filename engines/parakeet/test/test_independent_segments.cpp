@@ -368,6 +368,21 @@ void check_geometry_mismatch() {
 }  // namespace
 
 int main() {
+    using parakeet::resolve_tdt_push_chunk_ms;
+    if (resolve_tdt_push_chunk_ms(0) != 30000 ||
+        resolve_tdt_push_chunk_ms(30000) != 30000 ||
+        resolve_tdt_push_chunk_ms(60000) != 60000) {
+        fail("standard TDT push streams select a supported chunk size");
+    }
+    for (const int chunk_ms : {-1, 1, 1000, 5000, 10000, 29999}) {
+        bool rejected = false;
+        try {
+            resolve_tdt_push_chunk_ms(chunk_ms);
+        } catch (const std::runtime_error & error) {
+            rejected = std::string(error.what()).find("chunk_ms >= 30000") != std::string::npos;
+        }
+        if (!rejected) fail("unsafe TDT push chunk must fail with an actionable error");
+    }
     using parakeet::resolve_transcription_chunk_ms;
     if (resolve_transcription_chunk_ms(0, true) != 2000 ||
         resolve_transcription_chunk_ms(0, false) != 1000 ||

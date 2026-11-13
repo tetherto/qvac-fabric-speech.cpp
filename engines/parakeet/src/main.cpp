@@ -146,7 +146,8 @@ void print_usage(const char * argv0) {
         "                       right_lookahead_ms. Typical WER: ~0 %% on short clean\n"
         "                       speech, ~4 %% on long sci-fi narration at the default\n"
         "                       context budget. Requires --stream.\n"
-        "  --stream-chunk-ms N  segment stride in ms (full EU default 2000, others 1000; Nemotron\n"
+        "  --stream-chunk-ms N  segment stride in ms (TDT duplex default/minimum 30000;\n"
+        "                       full EU default 2000, others 1000; Nemotron\n"
         "                       defaults to 320 and supports 80, 160, 320, 560, 1120)\n"
         "                       2000 Mode 3 recommended; snaps to the encoder frame\n"
         "                       stride, which is 80 ms on every shipped GGUF -- a\n"
@@ -1561,14 +1562,23 @@ static int parakeet_cli_run(int argc, char ** argv) {
         const auto t_stream = clock::now();
 
         if (extra.stream_duplex) {
+            if (!extra.stream_chunk_explicit && engine.model_type() == "tdt" && !full_eu) {
+                sopts.chunk_ms = StreamingOptions::automatic_chunk_ms;
+            }
             int segment_count = 0;
             bool all_coreml = true;
-            auto sess = engine.stream_start(sopts,
-                [&](const StreamingSegment & seg) {
-                    emit_segment(seg, emit_fmt);
-                    all_coreml = all_coreml && seg.encoder_used_coreml;
-                    ++segment_count;
-                });
+            std::unique_ptr<StreamSession> sess;
+            try {
+                sess = engine.stream_start(sopts,
+                    [&](const StreamingSegment & seg) {
+                        emit_segment(seg, emit_fmt);
+                        all_coreml = all_coreml && seg.encoder_used_coreml;
+                        ++segment_count;
+                    });
+            } catch (const std::exception & error) {
+                PARAKEET_LOG_ERROR("error: %s\n", error.what());
+                return 2;
+            }
 
             const int feed_bytes = extra.stream_feed_bytes > 0
                                  ? extra.stream_feed_bytes
@@ -1587,7 +1597,7 @@ static int parakeet_cli_run(int argc, char ** argv) {
                     "[stream-duplex] load=%.1fms audio=%.2fs samples=%zu@%dHz\n"
                     "[stream-duplex] chunk_ms=%d left=%dms right=%dms segments=%d total=%.1fms RTF=%.3f\n",
                     load_ms, audio_ms / 1000.0, samples.size(), sr,
-                    sopts.chunk_ms, sopts.left_context_ms, sopts.right_lookahead_ms,
+                    sess->options().chunk_ms, sopts.left_context_ms, sopts.right_lookahead_ms,
                     segment_count, stream_ms, stream_ms / audio_ms);
             }
             PARAKEET_LOG_INFO("[stream-duplex] encoder_backend=%s decoder_backend=native\n",

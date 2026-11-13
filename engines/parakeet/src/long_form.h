@@ -332,6 +332,19 @@ inline LongFormPlan resolve_coreml_fixed_shape_plan(int fixed_mel_frames,
     return plan;
 }
 
+// Legacy TDT sidecars have no validated seam policy. Their short windows can
+// leave the decoder emitting blanks or repetitions for whole phrases. Keep the
+// normal ggml plan for oversized inputs; masked ANE exports supply seam context.
+inline LongFormPlan resolve_coreml_tdt_shape_plan(int fixed_mel_frames,
+                                                 int requested_context_frames,
+                                                 int subsampling_factor,
+                                                 long long n_mel_frames,
+                                                 int validated_seam_context_frames) {
+    if (validated_seam_context_frames <= 0) return LongFormPlan{};
+    return resolve_coreml_fixed_shape_plan(fixed_mel_frames, requested_context_frames,
+                                           subsampling_factor, n_mel_frames);
+}
+
 inline bool should_use_nemotron_cache_aware_offline(
         int exact_mel_frames,
         int requested_window_frames,
@@ -430,9 +443,12 @@ inline LongFormPlan resolve_long_form_plan_frames(int requested_window_frames,
 
 // Which Core ML shape contract the model's encoder sidecar follows.
 enum class CoremlShapeKind {
-    none,   // no long-form Core ML plan (Nemotron, Sortformer, ...)
-    fixed,  // CTC / RNN-T / TDT: pads shorter windows, tiles longer input
-    exact,  // EOU: exact-shape calls only; oversized input stays on ggml
+    none,                   // no long-form Core ML plan (Nemotron, Sortformer, ...)
+    fixed,                  // CTC / RNN-T: pads shorter windows, tiles longer input
+    fixed_validated_seams,  // TDT: pads shorter windows; tiles longer input only when
+                            // the sidecar supplies a validated seam context, else
+                            // the ggml plan (resolve_coreml_tdt_shape_plan)
+    exact,                  // EOU: exact-shape calls only; oversized input stays on ggml
 };
 
 // Route-aware long-form choice. `normal` is the ggml
@@ -458,14 +474,17 @@ inline LongFormPlan choose_long_form_plan(const LongFormPlan & normal,
     }
 
     LongFormPlan coreml;
-    if (kind == CoremlShapeKind::fixed) {
+    if (kind == CoremlShapeKind::fixed || kind == CoremlShapeKind::fixed_validated_seams) {
         // A sidecar validated with its own seam context (the fixed-window
         // Neural Engine export) supplies it when the caller left it automatic.
         const int context = opts_context_frames == 0 && route_seam_context_frames > 0
             ? route_seam_context_frames
             : opts_context_frames;
-        coreml = resolve_coreml_fixed_shape_plan(route_fixed_mel_frames, context,
-                                                 subsampling_factor, n_mel_frames);
+        coreml = kind == CoremlShapeKind::fixed
+            ? resolve_coreml_fixed_shape_plan(route_fixed_mel_frames, context,
+                                              subsampling_factor, n_mel_frames)
+            : resolve_coreml_tdt_shape_plan(route_fixed_mel_frames, context, subsampling_factor,
+                                            n_mel_frames, route_seam_context_frames);
     } else {
         // Exact-shape EOU calls may use Core ML directly, but oversized inputs
         // stay on ggml until windowed causal/chunked attention parity is proven.

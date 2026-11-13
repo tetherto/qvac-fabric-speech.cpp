@@ -244,6 +244,42 @@ void case_null_route_plan() {
           "oversized EOU input stays on the ggml plan");
 }
 
+// TDT tiles an oversized input into Core ML windows only when the handle
+// reports a validated seam context. A standard TDT sidecar keeps the ggml
+// plan, so its oversized dispatch is a capacity miss (ggml, or a refusal
+// under use = require), never a short Core ML window.
+void case_tdt_plan_needs_validated_seams() {
+    FakeEncoder enc;
+    const auto held = [&](int seam_context_frames) {
+        EncoderRouteGeometry g = fake_describe(nullptr, 128);
+        g.seam_context_frames = seam_context_frames;
+        return EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&enc), g, kFakeLabel,
+                                    nullptr, EncoderRoute::Ops{}, false);
+    };
+    const EncoderRoute standard = held(0);
+    const EncoderRoute validated = held(kSeamContext);
+    constexpr CoremlShapeKind kTdt = CoremlShapeKind::fixed_validated_seams;
+
+    CHECK(same_plan(routed_plan(standard, kLongMel, kTdt), ggml_plan(kLongMel)),
+          "standard TDT sidecar: an oversized input keeps the ggml plan");
+    CHECK(routed_plan(standard, kLongMel, CoremlShapeKind::fixed).enabled &&
+              !same_plan(routed_plan(standard, kLongMel, CoremlShapeKind::fixed), ggml_plan(kLongMel)),
+          "the same handle tiles a CTC or RNN-T input at its capacity");
+    CHECK(same_plan(routed_plan(standard, 1000, kTdt), ggml_plan(1000)),
+          "standard TDT sidecar: an input within capacity keeps the single pass");
+    CHECK(!route_fits_capacity(standard, (int) kLongMel),
+          "a whole oversized TDT input does not fit the standard sidecar");
+
+    const LongFormPlan tdt = routed_plan(validated, kLongMel, kTdt);
+    CHECK(tdt.enabled && tdt.window_frames == kFixedMelFrames / kSub &&
+              tdt.left_context_frames == kSeamContext,
+          "validated TDT sidecar: tiles at its capacity with its seam context");
+    CHECK(same_plan(tdt, routed_plan(validated, kLongMel, CoremlShapeKind::fixed)),
+          "validated TDT sidecar: the same windows as CTC and RNN-T");
+    CHECK(same_plan(routed_plan(validated, kLongMel, kTdt, -1), ggml_plan(kLongMel)),
+          "a negative window request keeps the ggml plan for TDT too");
+}
+
 void case_window_k_failure_and_next_call() {
     const fs::path dir = make_temp_dir("windowk");
     auto m = pcm::Manager::create(fast_config());
@@ -706,6 +742,7 @@ void case_fit_stable() {
 
 int main() {
     case_null_route_plan();
+    case_tdt_plan_needs_validated_seams();
     case_window_k_failure_and_next_call();
     case_cannot_serve_keeps_route();
     case_owner_route();

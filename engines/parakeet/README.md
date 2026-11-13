@@ -115,6 +115,15 @@ contracts are in [docs/backends.md](docs/backends.md#core-ml-encoder-sidecar)
 and, for MOSS-Transcribe-Diarize, in
 [docs/moss-transcribe.md](docs/moss-transcribe.md#core-ml-encoder-sidecar).
 
+Standard TDT sidecars use ggml for audio beyond their compiled capacity (typically
+15 seconds), preserving native encoder context. Only exports with a validated
+seam policy use short Core ML windows. Standard TDT sidecars retain native
+weights even with `PARAKEET_COREML_ONLY=1`, and encoder-less GGUFs paired with
+these sidecars are rejected at load time. TDT push streams, except full TranscribePsy
+EU, default to 30-second chunks and reject smaller explicit chunks to prevent
+phrase loss. PCM writes can still be arbitrarily small; `finalize()` processes
+the remaining audio. See the [streaming contract](docs/api.md).
+
 Fixed TDT exports now accept `mel` plus `mel_valid_mask` and require this updated
 runtime. Legacy single-input sidecars remain loadable but need re-exporting to
 isolate padding; updating runtime code alone does not fix those old artifacts.
@@ -154,7 +163,9 @@ already run on Core ML). An input the sidecar cannot take, such as one longer
 than a fixed capacity, runs that call on ggml and keeps the sidecar. Two loads
 still happen inside the constructor: the TDT decoder sidecar, and an encoder
 sidecar that owns the encoder (a GGUF without encoder weights, or
-`PARAKEET_COREML_ONLY`). Full TranscribePsy-250M-EU keeps its own Core ML
+`PARAKEET_COREML_ONLY`). A standard TDT sidecar without a validated seam
+policy never owns the encoder: with `PARAKEET_COREML_ONLY` it loads in the
+background like any other, and the GGUF keeps its encoder weights. Full TranscribePsy-250M-EU keeps its own Core ML
 programs outside this background runtime: its English, other-language and
 gate programs load in the constructor, its precise programs on first use, and
 a program that cannot serve a call falls back to ggml, also under
@@ -169,7 +180,7 @@ everything.
 
 | Field | Values (default first) | Meaning |
 |---|---|---|
-| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled), the sidecar rejects the shape, or a prediction fails. A diarization pass throws when every diarizer capacity that covers it failed; a pass longer than every capacity runs on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. A diarization pass throws when every diarizer capacity that covers it failed; a pass longer than every capacity runs on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
 | `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
 | `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
