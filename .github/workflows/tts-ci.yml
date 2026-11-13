@@ -386,7 +386,7 @@ jobs:
       - name: Test (non-GPU)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime' --output-on-failure --timeout 600
+        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime|coreml-toy' --output-on-failure --timeout 600
 
       # Shared Core ML runtime (engines/coreml): portable scheduler, lifetime
       # and option tests with fake loaders. --no-tests=error fails the step
@@ -485,13 +485,22 @@ jobs:
       - name: Test (non-GPU)
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/ggml-install/lib
-        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime' --output-on-failure --timeout 600
+        run: ctest --test-dir build -LE 'gpu|perf|coreml-runtime|coreml-toy' --output-on-failure --timeout 600
 
       # Shared Core ML runtime (engines/coreml): portable scheduler, lifetime
       # and option tests with fake loaders. --no-tests=error fails the step
       # when the test is not registered; the test has no skip path.
       - name: Test (Core ML runtime, portable)
         run: ctest --test-dir build -L coreml-runtime --no-tests=error --output-on-failure --timeout 300
+
+      # Generation end to end on the device with the test-only toy templates
+      # (stateless, two-function, MLState): embedded table, generate, on-device
+      # compile, load, predict, artifact.json, user metadata, quarantine
+      # repair. Needs macOS 15; the test fails, never skips, below it.
+      - name: Test (Core ML toy templates, on device)
+        run: |
+          sw_vers
+          ctest --test-dir build -L coreml-toy --no-tests=error --output-on-failure --timeout 600
 
       - name: Test (Metal kernel parity)
         run: |
