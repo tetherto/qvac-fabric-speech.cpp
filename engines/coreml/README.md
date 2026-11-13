@@ -60,6 +60,12 @@ to `$TMPDIR/<package name>.mlmodelc`; the pipeline names packages
 hour. The bundle is then renamed into staging, or copied when `$TMPDIR` is on
 another volume. `artifact.json` records the OS build and the `coremlc`
 version read from the compiled `model.mil`. Generation needs macOS 15.
+When Core ML rejects the package, the failure is recorded as a compile
+failure: it is retried by the next process, and the same error code from
+another process on the same OS build marks the artifact deterministic (not
+retried until the OS build or the generator version changes). A missing
+package or a failed move or copy is an I/O error: it is retried by the next
+process and is never promoted, however often it repeats.
 
 ## Building the tests and the tool
 
