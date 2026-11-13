@@ -1,9 +1,16 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 
 namespace parakeet {
+
+// Reject NaN and infinities without floating-point comparisons or fast-math assumptions.
+bool coreml_features_are_finite(const float * values, size_t count);
+bool coreml_eu_loads_fixed_auxiliaries(const char * compute_units);
+bool coreml_eu_requires_cpu_precision(const char * compute_units);
+bool coreml_eu_allows_gpu_precision(const char * compute_units, bool mobile = false);
 
 // Result of matching the trailing two dims of a Core ML tensor shape against an
 // unordered (rows, cols) pair. `transpose` is false for a [.., rows, cols] layout

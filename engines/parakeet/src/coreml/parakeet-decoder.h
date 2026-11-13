@@ -59,6 +59,8 @@ struct parakeet_coreml_decoder;
 // Returns nullptr on any failure (missing directory, load error, unsupported
 // OS, unexpected model interface) so the caller falls back to ggml.
 struct parakeet_coreml_decoder * parakeet_coreml_decoder_init(const char * path_mlmodelc);
+struct parakeet_coreml_decoder * parakeet_coreml_decoder_init_with_cpu_default(
+    const char * path_mlmodelc, bool prefer_cpu);
 
 // Release a decoder created by parakeet_coreml_decoder_init. Safe with nullptr.
 void parakeet_coreml_decoder_free(struct parakeet_coreml_decoder * ctx);

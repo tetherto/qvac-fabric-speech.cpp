@@ -15,6 +15,7 @@ namespace {
 
 constexpr int kFrames = 2;
 constexpr int kWidth = 2;
+constexpr int kAutomaticValidMelFrames = 0;
 constexpr float kValue = 1.0f;
 constexpr float kLogProbability = -0.69314718056f;
 constexpr int kSampleRate = 16000;
@@ -107,7 +108,9 @@ int compute_log_mel(const float *, int, const MelConfig &, std::vector<float> & 
 }
 
 int run_encoder(ParakeetCtcModel &, const float * mel, int frames, int width,
-                EncoderOutputs & output, int, bool, bool, const EncoderOutputConsumer &) {
+                EncoderOutputs & output, int, bool, bool, const EncoderOutputConsumer &,
+                int valid_mel_frames_override, bool prefer_precise_eu) {
+    if (valid_mel_frames_override != kAutomaticValidMelFrames || prefer_precise_eu) return 1;
     if (frames != kFrames || width != kWidth || mel[0] != kValue) return 1;
     output.n_enc_frames = kFrames;
     output.d_model = output.vocab_size = kWidth;
