@@ -23,10 +23,11 @@ namespace apple {
 // leftovers of a process killed here). It is moved to `mlmodelc_out` with
 // rename, or copied and removed when the two are on different volumes.
 //
-// Errors: a compile failure carries Core ML's NSError domain and code and is
-// transient (a second failure with the same code on the same OS build is
-// promoted by the failure records); a missing package, a failed move or copy
-// is a transient I/O error. On success `os_build` (kern.osversion), `coremlc`
+// Errors: a compile failure carries Core ML's NSError domain and code and
+// `stage` compile: transient, and a second failure with the same code from
+// another process on the same OS build is promoted by the failure records. A
+// missing package or a failed move or copy is an I/O error with `stage`
+// prepare: transient and never promoted. On success `os_build` (kern.osversion), `coremlc`
 // (from the compiled model.mil) and `compile_peak_bytes` (growth of the
 // process's physical footprint peak during the compile) are filled.
 cache::CompileResult compile_package(const std::string & mlpackage, const std::string & mlmodelc_out);

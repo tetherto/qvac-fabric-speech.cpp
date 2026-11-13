@@ -711,7 +711,7 @@ struct Job {
         CompileResult cr = in.compile(pkg, publish + "/model.mlmodelc");
         out.compile_ms = ms_since(t0);
         out.compile_peak_bytes = cr.compile_peak_bytes;
-        if (!cr.error.ok()) return {cr.error, failed::Stage::compile};
+        if (!cr.error.ok()) return {cr.error, cr.stage};
 
         ArtifactInfo a;
         a.artifact_key = key;

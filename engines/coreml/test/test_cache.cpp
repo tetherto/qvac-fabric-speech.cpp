@@ -1019,6 +1019,68 @@ void case_failure_publication_race() {
     CHECK(!fs::exists(rec_path));
 }
 
+// An I/O error around the compile (the CompileFn reports stage prepare: a
+// missing package, a failed move or copy) stays transient however often other
+// processes repeat it; a compiler rejection still promotes.
+void case_compile_io_failure_stays_transient() {
+    Env env;
+    const std::string a = env.source("a.gguf");
+    const cache::Layout l = env.layout();
+    const std::pair<std::string, int64_t> io_errors[] = {{"NSPOSIXErrorDomain", EACCES}, {"NSCocoaErrorDomain", 513}};
+    for (const auto & [domain, code] : io_errors) {
+        g_compile_override = [domain = domain, code = code] {
+            cache::CompileResult r;
+            r.error = Error::transient("move the compiled bundle: permission denied", domain, code);
+            r.stage = failed::Stage::prepare;
+            return r;
+        };
+        g_compiles = 0;
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && o.error.code == code);
+        const std::string rec_path = failed::record_path(l.failed, o.key32);
+        auto rec = failed::read(rec_path);
+        CHECK_MSG(rec && rec->cls == ErrorClass::transient && rec->attempts == 1, domain);
+        // A second process hits the same error: still transient, attempts 2.
+        pid_t kid = spawn([&] {
+            PrepareOutcome k = env.prepare(a);
+            CHECK(k.kind == PrepareOutcome::Kind::failed && k.error.cls == ErrorClass::transient && g_compiles == 2);
+            return 0;
+        });
+        CHECK(reap(kid) == 0);
+        rec = failed::read(rec_path);
+        CHECK_MSG(rec && rec->cls == ErrorClass::transient && rec->attempts == 2 && rec->domain == domain &&
+                      rec->code == code,
+                  domain);
+        // The next process retries; with the environment repaired it generates.
+        kid = spawn([&] {
+            g_compile_override = nullptr;
+            PrepareOutcome k = env.prepare(a);
+            CHECK(ready(k) && !k.cache_hit && g_compiles == 2);
+            return 0;
+        });
+        CHECK(reap(kid) == 0);
+        CHECK(!fs::exists(rec_path));
+        cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK(env.artifacts() == 0);
+    }
+    // A Core ML rejection (stage compile, the default) from two processes promotes.
+    g_compile_override = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    PrepareOutcome o = env.prepare(a);
+    CHECK(o.kind == PrepareOutcome::Kind::failed);
+    pid_t kid = spawn([&] {
+        CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+        return 0;
+    });
+    CHECK(reap(kid) == 0);
+    auto rec = failed::read(failed::record_path(l.failed, o.key32));
+    CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+    g_compile_override = nullptr;
+}
+
 void case_resource_codes_never_promote() {
     TempDir td;
     const std::string dir = td / "failed";
@@ -1452,6 +1514,7 @@ int main(int argc, char ** argv) {
                          {"failure-records", case_failure_records},
                          {"success-clears-failure", case_success_clears_failure},
                          {"failure-publication-race", case_failure_publication_race},
+                         {"compile-io-failure-stays-transient", case_compile_io_failure_stays_transient},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},

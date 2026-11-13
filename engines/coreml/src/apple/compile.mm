@@ -143,6 +143,7 @@ cache::CompileResult compile_package(const std::string & mlpackage, const std::s
         NSURL * in = [NSURL fileURLWithPath:@(mlpackage.c_str()) isDirectory:YES];
         if (![NSFileManager.defaultManager fileExistsAtPath:in.path]) {
             r.error = Error::transient("compile: " + mlpackage + " does not exist", "NSPOSIXErrorDomain", ENOENT);
+            r.stage = failed::Stage::prepare;
             return r;
         }
         __block NSURL * out = nil;
@@ -165,6 +166,7 @@ cache::CompileResult compile_package(const std::string & mlpackage, const std::s
     }
     r.error = move_bundle(r.tmp_output, mlmodelc_out, false);
     if (!r.error.ok()) {
+        r.stage = failed::Stage::prepare;
         @autoreleasepool {
             [NSFileManager.defaultManager removeItemAtPath:@(r.tmp_output.c_str()) error:nil];
         }

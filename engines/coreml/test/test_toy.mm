@@ -321,9 +321,11 @@ void case_compile_naming() {
     Error me = apple::move_bundle(td / "absent.mlmodelc", td / "x.mlmodelc", false);
     CHECK(!me.ok() && me.code == ENOENT);
 
-    // A package that does not exist fails transiently with ENOENT.
+    // A package that does not exist fails transiently with ENOENT, as an I/O
+    // error (stage prepare) that the failure records never promote.
     cache::CompileResult missing = apple::compile_package(td / "absent.mlpackage", td / "y.mlmodelc");
     CHECK(!missing.error.ok() && missing.error.cls == ErrorClass::transient && missing.error.code == ENOENT);
+    CHECK(missing.stage == failed::Stage::prepare);
 }
 
 void case_generate_load_predict() {

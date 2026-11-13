@@ -26,6 +26,7 @@
 #include "qvac_coreml/slot.h"
 
 #include "digest.h"
+#include "failed.h"
 #include "gguf_source.h"
 
 #include <cstdint>
@@ -216,6 +217,11 @@ struct CompileResult {
     std::string coremlc;
     std::string tmp_output;           // where the compiler left the bundle before the move
     uint64_t compile_peak_bytes = 0;  // footprint growth during the compile (measurement only)
+    // Which failure record `error` belongs to. `compile` is a compiler
+    // rejection: transient, promoted when another process repeats it.
+    // `prepare` is an I/O error around the compile (the package is missing,
+    // moving or copying the bundle failed): transient, never promoted.
+    failed::Stage stage = failed::Stage::compile;
 };
 // Step 6: compile `mlpackage` and leave the compiled bundle at `mlmodelc_out`
 // (Apple: compileModelAtURL, move with a copy fallback).
