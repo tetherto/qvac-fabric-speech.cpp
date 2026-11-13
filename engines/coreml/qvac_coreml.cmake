@@ -484,6 +484,16 @@ function(_qvac_coreml_add_template_tests dir with_objc)
         # needs macOS 15, so CI runs it in a dedicated step on the supported
         # OS. It fails, never skips, below that floor.
         set_tests_properties(test-coreml-toy PROPERTIES LABELS "coreml-toy" TIMEOUT 600)
+
+        # Embedded templates stay alive through exit-time static destructors.
+        # No Core ML call, so it runs with the hermetic runtime tests.
+        add_executable(test-coreml-template-lifetime "${dir}/test/test_template_lifetime.cpp")
+        target_compile_definitions(test-coreml-template-lifetime PRIVATE QVAC_COREML_NS=qvac_coreml_toy)
+        target_include_directories(test-coreml-template-lifetime PRIVATE "${dir}/include" "${dir}/src")
+        target_compile_features(test-coreml-template-lifetime PRIVATE cxx_std_17)
+        target_link_libraries(test-coreml-template-lifetime PRIVATE qvac-coreml-toy)
+        add_test(NAME test-coreml-template-lifetime COMMAND test-coreml-template-lifetime)
+        set_tests_properties(test-coreml-template-lifetime PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 60)
     endif()
 endfunction()
 
