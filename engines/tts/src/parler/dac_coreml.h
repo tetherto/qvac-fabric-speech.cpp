@@ -29,6 +29,7 @@
 #include "coreml_policy.h"
 #include "tts-cpp/coreml_options.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -133,10 +134,11 @@ struct parler_dac_call {
 class parler_dac_pending {
 public:
     virtual ~parler_dac_pending() = default;
-    // Once per decode call of `out_frames` output frames. Throws
+    // Once per decode call of `out_frames` output frames. A wait for the
+    // sidecar returns early once `cancel` (optional) is set. Throws
     // std::runtime_error when use = require and the sidecar cannot serve the
     // call (failed, retired, timed out).
-    virtual parler_dac_call acquire(int out_frames) = 0;
+    virtual parler_dac_call acquire(int out_frames, const std::atomic<bool> * cancel) = 0;
     virtual bool strict() const = 0;
 };
 
@@ -178,7 +180,7 @@ public:
                                                      const CoremlOptions & options, bool memory_degrade = false);
     ~parler_dac_coreml() override;
 
-    parler_dac_call acquire(int out_frames) override;
+    parler_dac_call acquire(int out_frames, const std::atomic<bool> * cancel) override;
     bool strict() const override;
 
     const parler_dac_route & route() const;
@@ -188,9 +190,11 @@ public:
     std::string status_json() const;
     // The construction group's result JSON ("{}" before or without one).
     std::string construction_json() const;
-    // Blocks until the DAC is ready or terminal, or `timeout_ms` (< 0: no
-    // limit). True when it is ready.
-    bool wait(int64_t timeout_ms) const;
+    // Blocks until the DAC is ready or terminal, `timeout_ms` passes (< 0: no
+    // limit) or `cancel` (optional) is set. True when it is ready. Returns
+    // false at once while nothing has requested the sidecar (idle: prewarm
+    // none before the first call) or it is deferred(memory).
+    bool wait(int64_t timeout_ms, const std::atomic<bool> * cancel = nullptr) const;
 
     struct impl;
 private:

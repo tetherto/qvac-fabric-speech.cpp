@@ -70,6 +70,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -296,13 +297,22 @@ void fake_sidecar_gates(parler_model & model) {
 }
 
 // A pending seam: `ready_after` calls return nothing (pending), then the
-// sidecar; `strict` makes acquire throw while pending.
+// sidecar; `strict` makes acquire throw while pending. `block_until_cancel`
+// makes acquire wait, like a Core ML load that is never ready, until the
+// caller's cancel flag is set.
 class fake_pending final : public parler_dac_pending {
 public:
     fake_pending(std::shared_ptr<parler_dac_sidecar> sidecar, int ready_after, bool strict)
         : sidecar_(std::move(sidecar)), ready_after_(ready_after), strict_(strict) {}
-    parler_dac_call acquire(int) override {
+    parler_dac_call acquire(int, const std::atomic<bool> * cancel) override {
         ++acquires;
+        if (block_until_cancel) {
+            saw_cancel_flag = cancel != nullptr;
+            const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            while (cancel && !cancel->load() && std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
         parler_dac_call call;
         if (retired || acquires <= ready_after_) {
             if (strict_) throw std::runtime_error("fake: not ready; strict");
@@ -319,6 +329,8 @@ public:
     bool strict() const override { return strict_; }
     int acquires = 0;
     bool retired = false;
+    bool block_until_cancel = false;
+    bool saw_cancel_flag = false;
     std::string retire_reason;
 
 private:
@@ -401,6 +413,30 @@ void pending_seam_gates(parler_model & model) {
     check(!parler_dac_decode(model, codes.data(), n_frames, 2, pcm, nullptr, 0, -1, &err, &backend) &&
               pcm.empty() && seam4->retired && err.find(PARLER_COREML_STRICT_ENV) != std::string::npos,
           "strict: a failing sidecar is retired and the call fails");
+
+    // cancellation interrupts a wait for the sidecar: the call returns soon
+    // after the flag is set, reports cancellation and decodes nothing
+    const int sidecar_calls = sidecar->calls;
+    auto blocking = std::make_shared<fake_pending>(sidecar, 1 << 30, false);
+    blocking->block_until_cancel = true;
+    model.dac_pending = blocking;
+    std::atomic<bool> cancel{false};
+    std::thread canceller([&cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel.store(true);
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    err.clear();
+    pcm.assign(4, 1.0f);
+    const bool ok_cancel = parler_dac_decode(model, codes.data(), n_frames, 2, pcm, nullptr, 0, -1, &err, &backend,
+                                             &pending, &cancel);
+    const double cancel_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    canceller.join();
+    check(!ok_cancel && blocking->saw_cancel_flag && err == "cancelled" && pcm.empty() && cancel_ms < 5000 &&
+              sidecar->calls == sidecar_calls,
+          "cancel: a blocked acquisition returns once cancelled, the call reports '" + err + "' after " +
+              std::to_string((int) cancel_ms) + " ms");
     model.dac_pending.reset();
 }
 
@@ -510,7 +546,7 @@ void engine_gates(const std::string & gguf) {
 void pending_parity_gates(parler_model & model, const std::string & ref_dir, double min_snr,
                           double min_speech_snr) {
     auto seam = model.dac_pending;
-    const parler_dac_call probe = seam->acquire(1);
+    const parler_dac_call probe = seam->acquire(1, nullptr);
     if (!probe.sidecar) {
         check(false, "the generated sidecar is ready");
         return;
@@ -554,6 +590,57 @@ void pending_parity_gates(parler_model & model, const std::string & ref_dir, dou
 }
 
 bool contains(const std::string & s, const std::string & needle) { return s.find(needle) != std::string::npos; }
+
+// prewarm none issues an empty construction group and leaves the slot idle
+// until the first call: wait = construct with use = require returns without
+// throwing, and wait() returns false at once instead of polling an idle slot.
+// Nothing is generated or loaded (a scratch cache stays empty).
+void idle_slot_gates(parler_model & model, const std::string & gguf) {
+    fprintf(stderr, "prewarm none gates\n");
+    if (::tts_cpp::detail::coreml_sidecar_exists(parler_dac_sidecar_path(gguf))) {
+        fprintf(stderr, "  a prebuilt sidecar is next to the GGUF: skipped\n");
+        return;
+    }
+    const std::string cache =
+        (std::filesystem::temp_directory_path() /
+         ("parler-dac-idle-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+            .string();
+    tts_cpp::CoremlOptions opts;
+    opts.cache_dir = cache;
+    opts.use = tts_cpp::CoremlOptions::Use::require;
+    opts.wait = tts_cpp::CoremlOptions::Wait::construct;
+    opts.prewarm = tts_cpp::CoremlOptions::Prewarm::none;
+    const parler_dac_route route = parler_dac_plan_route(gguf, opts, parler_dac_rvq_bytes(model));
+    if (route.route != "generate") {
+        fprintf(stderr, "  route %s (%s: %s): skipped\n", route.route.c_str(), route.state.c_str(),
+                route.reason.c_str());
+        return;
+    }
+    model.dac_sidecar.reset();
+    model.dac_pending.reset();
+    std::shared_ptr<parler_dac_coreml> dac;
+    std::string what;
+    try {
+        dac = parler_dac_coreml::create(model, gguf, opts);
+    } catch (const std::exception & e) {
+        what = e.what();
+    }
+    check(dac != nullptr, "{use: require, wait: construct, prewarm: none} constructs" +
+                              (what.empty() ? std::string() : ": " + what));
+    if (dac) {
+        const std::string status = dac->status_json();
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ready = dac->wait(-1);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        check(contains(status, "\"state\":\"idle\"") && !ready && ms < 1000,
+              "an idle slot: wait(-1) returns false after " + std::to_string((int) ms) + " ms; " +
+                  status.substr(0, std::min<size_t>(status.size(), 200)));
+    }
+    model.dac_pending.reset();
+    dac.reset();
+    std::error_code ec;
+    std::filesystem::remove_all(cache, ec);
+}
 
 void generated_gates(parler_model & model, const std::string & gguf, const std::string & cache_dir,
                      const std::string & ref_dir, double min_snr, double min_speech_snr) {
@@ -618,6 +705,21 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
     check(degraded.coreml.disabled_reason == "memory" && kept.coreml.disabled_reason.empty(),
           "near-budget memory-degrade: '" + degraded.coreml.disabled_reason + "' below, '" +
               kept.coreml.disabled_reason + "' with room");
+    // Near the free memory with a budget far above it: a margin that leaves
+    // room for ggml but not for ggml + Core ML degrades on the free memory,
+    // and the fit stands.
+    const uint64_t ggml_no_margin = ggml_need - fit.margin_bytes;
+    if (fr.device_free_bytes > ggml_no_margin + fr.coreml.bytes) {
+        tts_cpp::parler::FitOptions tight = fit;
+        tight.coreml.memory_budget_bytes = (int64_t) 1 << 50;
+        tight.margin_bytes = fr.device_free_bytes - ggml_no_margin - fr.coreml.bytes / 2;
+        const tts_cpp::FitResult t = tts_cpp::parler::fit_params(tight);
+        check(t.coreml.disabled_reason == "memory" && t.status == tts_cpp::FitStatus::Success &&
+                  t.coreml.ggml_only_fits && !t.coreml.fits,
+              "near the free memory, huge budget: '" + t.coreml.disabled_reason + "', " + t.reason);
+    } else {
+        check(false, "free memory too small for the near-free-memory memory-degrade case");
+    }
 
     tts_cpp::parler::EngineOptions eo;
     eo.model_gguf_path = gguf;
@@ -790,6 +892,7 @@ int main(int argc, char ** argv) {
     fake_sidecar_gates(model);
     pending_seam_gates(model);
 #ifdef TTS_CPP_USE_COREML
+    idle_slot_gates(model, gguf);
     if (!memory_dir.empty()) memory_schedule(model, gguf, memory_dir);
     if (!cache_dir.empty()) {
         generated_gates(model, gguf, cache_dir, ref_dir, min_snr, min_speech_snr);

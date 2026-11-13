@@ -62,6 +62,26 @@ bool price_graph(const detail::parler_model & model, ggml_cgraph * gf,
 
 }  // namespace
 
+namespace detail {
+
+parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
+                                                   uint64_t device_free,
+                                                   const std::optional<int64_t> & budget) {
+    parler_coreml_fit_verdict v;
+    const uint64_t with_coreml = sat_add(required, generate ? coreml_bytes : 0);
+    v.ggml_only_fits = required <= device_free;
+    v.coreml_fits    = with_coreml <= device_free;
+    if (generate && budget.has_value()) {
+        const uint64_t cap = std::min(device_free, (uint64_t) std::max<int64_t>(*budget, 0));
+        v.degraded = with_coreml > cap && required <= cap;
+    }
+    v.charged = generate && !v.degraded ? with_coreml : required;
+    v.fits = v.charged <= device_free;
+    return v;
+}
+
+}  // namespace detail
+
 FitResult fit_params(const FitOptions & opts) {
     FitResult r;
     r.model_variant = "parler";
@@ -304,19 +324,13 @@ FitResult fit_params(const FitOptions & opts) {
         r.coreml.bytes = with_adapter.envelope_bytes;
         r.coreml.validated = with_adapter.validated;
     }
-    const uint64_t with_coreml = sat_add(required, r.coreml.bytes);
-    r.coreml.ggml_only_fits = required <= r.device_free_bytes;
-    r.coreml.fits = with_coreml <= r.device_free_bytes;
-    bool degraded = false;
-    if (dac_route.route == "generate" && opts.coreml.memory_budget_bytes) {
-        const uint64_t budget = (uint64_t) *opts.coreml.memory_budget_bytes;
-        if (with_coreml > budget && required <= budget) {
-            degraded = true;
-            r.coreml.disabled_reason = "memory";
-        }
-    }
-    const uint64_t charged = dac_route.route == "generate" && !degraded ? with_coreml : required;
-    r.fits   = charged <= r.device_free_bytes;
+    const detail::parler_coreml_fit_verdict v = detail::parler_decide_coreml_fit(
+        required, r.coreml.bytes, dac_route.route == "generate", r.device_free_bytes,
+        opts.coreml.memory_budget_bytes);
+    r.coreml.ggml_only_fits = v.ggml_only_fits;
+    r.coreml.fits = v.coreml_fits;
+    if (v.degraded) r.coreml.disabled_reason = "memory";
+    r.fits   = v.fits;
     r.status = r.fits ? FitStatus::Success : FitStatus::Failure;
     r.reason = r.fits ? "fits" : "does-not-fit";
 
@@ -365,15 +379,15 @@ FitResult fit_params(const FitOptions & opts) {
         if (dac_route.route == "generate") {
             std::snprintf(line, sizeof(line), "core ml DAC:     %14s (generated sidecar envelope%s%s)\n",
                           fmt_mib(r.coreml.bytes).c_str(), r.coreml.validated ? ", validated" : "",
-                          degraded ? "; memory-degrade: ggml only" : "");
+                          v.degraded ? "; memory-degrade: ggml only" : "");
             s += line;
         }
         if (r.fits) {
             std::snprintf(line, sizeof(line), "verdict: FITS (headroom %s)\n",
-                          fmt_mib(r.device_free_bytes - charged).c_str());
+                          fmt_mib(r.device_free_bytes - v.charged).c_str());
         } else {
             std::snprintf(line, sizeof(line), "verdict: DOES NOT FIT (short by %s)\n",
-                          fmt_mib(charged - r.device_free_bytes).c_str());
+                          fmt_mib(v.charged - r.device_free_bytes).c_str());
         }
         s += line;
         r.report = std::move(s);

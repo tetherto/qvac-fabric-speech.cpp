@@ -596,8 +596,11 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & mode
     p->construction = p->manager->issue_group(pcm::GroupKind::construction, requests, waited);
     auto out = std::shared_ptr<parler_dac_coreml>(new parler_dac_coreml(std::move(p)));
     if (waited) {
-        out->p_->construction->wait();
-        if (out->p_->resolved.strict() && out->p_->slot->state() != pcm::SlotState::ready) {
+        // With prewarm none the group is empty and nothing waits; strict
+        // throws only for a slot of the group that ended non-ready (terminal,
+        // deferred(memory) or cancelled).
+        const pcm::PrewarmResult result = out->p_->construction->wait();
+        if (out->p_->resolved.strict() && !requests.empty() && !result.success) {
             const pcm::SlotStatus st = out->p_->slot->status();
             throw std::runtime_error("parler: the Core ML DAC sidecar is not ready after construction (" +
                                      pcm::state_label(st.state, st.reason) + (st.error.empty() ? "" : ": " + st.error) +
@@ -612,7 +615,7 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model & mode
 parler_dac_coreml::parler_dac_coreml(std::unique_ptr<impl> p) : p_(std::move(p)) {}
 parler_dac_coreml::~parler_dac_coreml() = default;
 
-parler_dac_call parler_dac_coreml::acquire(int out_frames) {
+parler_dac_call parler_dac_coreml::acquire(int out_frames, const std::atomic<bool> * cancel) {
     parler_dac_call call;
     if (!p_->slot) return call;
     const int64_t budget_ms =
@@ -620,7 +623,7 @@ parler_dac_call parler_dac_coreml::acquire(int out_frames) {
     const auto deadline = pcm::Clock::now() + std::chrono::milliseconds(budget_ms);
     pcm::Acquired got;
     try {
-        got = p_->slot->acquire(pcm::Demand::now, deadline);
+        got = p_->slot->acquire(pcm::Demand::now, deadline, cancel);
     } catch (const pcm::CoremlError & e) {
         throw std::runtime_error(std::string("parler: the Core ML DAC sidecar cannot serve this call (") + e.what() +
                                  "); Core ML strict policy is enabled (use = require / " + PARLER_COREML_STRICT_ENV +
@@ -660,13 +663,18 @@ std::string parler_dac_coreml::construction_json() const {
     return p_->construction ? pcm::to_json(p_->construction->result()) : std::string("{}");
 }
 
-bool parler_dac_coreml::wait(int64_t timeout_ms) const {
+bool parler_dac_coreml::wait(int64_t timeout_ms, const std::atomic<bool> * cancel) const {
     if (!p_->slot) return false;
     const auto start = pcm::Clock::now();
     for (;;) {
         const pcm::SlotState st = p_->slot->state();
         if (st == pcm::SlotState::ready) return true;
-        if (pcm::is_terminal(st)) return false;
+        // Terminal, or nothing will move it without a request: idle (prewarm
+        // none before the first call, or evicted) and deferred(memory).
+        if (pcm::is_terminal(st) || st == pcm::SlotState::idle || st == pcm::SlotState::deferred_memory) {
+            return false;
+        }
+        if (cancel && cancel->load()) return false;
         if (timeout_ms >= 0 && pcm::Clock::now() - start >= std::chrono::milliseconds(timeout_ms)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -694,13 +702,13 @@ std::shared_ptr<parler_dac_coreml> parler_dac_coreml::create(parler_model &, con
 
 parler_dac_coreml::parler_dac_coreml(std::unique_ptr<impl> p) : p_(std::move(p)) {}
 parler_dac_coreml::~parler_dac_coreml() = default;
-parler_dac_call parler_dac_coreml::acquire(int) { return {}; }
+parler_dac_call parler_dac_coreml::acquire(int, const std::atomic<bool> *) { return {}; }
 bool parler_dac_coreml::strict() const { return false; }
 const parler_dac_route & parler_dac_coreml::route() const { return p_->route; }
 bool parler_dac_coreml::active() const { return false; }
 std::string parler_dac_coreml::status_json() const { return "{}"; }
 std::string parler_dac_coreml::construction_json() const { return "{}"; }
-bool parler_dac_coreml::wait(int64_t) const { return false; }
+bool parler_dac_coreml::wait(int64_t, const std::atomic<bool> *) const { return false; }
 
 #endif
 

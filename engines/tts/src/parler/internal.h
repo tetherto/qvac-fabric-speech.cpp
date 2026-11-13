@@ -8,7 +8,9 @@
 #include "../cosyvoice_mmap.h"
 #include "dac_coreml.h"
 
+#include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -425,7 +427,8 @@ ggml_cgraph * parler_build_dac_fit_graph(const parler_model & model, int n_frame
 // strict policy is enabled, which fails the call instead. backend_out
 // (optional) receives where the range ran: "ggml" or the sidecar's label;
 // pending_out (optional) whether it ran on ggml only because the sidecar was
-// not ready yet.
+// not ready yet. cancel (optional) interrupts a wait for the sidecar: once it
+// is set the call fails with "cancelled" and decodes nothing.
 bool parler_dac_decode(const parler_model & model,
                        const int32_t * codes, int n_frames,
                        int n_threads,
@@ -434,7 +437,28 @@ bool parler_dac_decode(const parler_model & model,
                        int out_begin = 0, int out_end = -1,
                        std::string * err_out = nullptr,
                        std::string * backend_out = nullptr,
-                       bool * pending_out = nullptr);
+                       bool * pending_out = nullptr,
+                       const std::atomic<bool> * cancel = nullptr);
+
+// ---- fit.cpp ----
+// Fit's two verdicts for the generated DAC and memory-degrade. `required` is
+// the ggml-only projection (margin and, on unified memory, host extras
+// included); `coreml_bytes` the stage's Core ML envelope, charged only when
+// `generate`. Both verdicts compare against `device_free`. With a budget,
+// memory-degrade drops Core ML when the Core ML-inclusive projection exceeds
+// the capacity the verdict uses, min(device_free, budget), and the ggml one
+// fits it, so Core ML never turns a working ggml verdict into a refusal. No
+// budget, no memory-degrade.
+struct parler_coreml_fit_verdict {
+    bool ggml_only_fits = false;
+    bool coreml_fits    = false;
+    bool degraded       = false;  // memory-degrade: use = off, reason "memory"
+    bool fits           = false;  // the verdict for what the engine will run
+    uint64_t charged    = 0;      // what `fits` compares with device_free
+};
+parler_coreml_fit_verdict parler_decide_coreml_fit(uint64_t required, uint64_t coreml_bytes, bool generate,
+                                                   uint64_t device_free,
+                                                   const std::optional<int64_t> & budget);
 
 } // namespace detail
 } // namespace parler

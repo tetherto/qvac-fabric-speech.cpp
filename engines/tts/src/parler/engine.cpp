@@ -167,7 +167,9 @@ struct Engine::Impl {
             std::string dac_err, dac_backend;
             bool dac_pending = false;
             if (!parler_dac_decode(model, c.data(), nf, n_threads, pcm, nullptr,
-                                   emitted_frames, emit_end, &dac_err, &dac_backend, &dac_pending)) {
+                                   emitted_frames, emit_end, &dac_err, &dac_backend, &dac_pending,
+                                   &cancel_requested)) {
+                check_cancel();
                 throw std::runtime_error("parler: DAC decode failed: " + dac_err);
             }
             note_dac_backend(dac_backend, dac_pending);
@@ -215,7 +217,9 @@ struct Engine::Impl {
         std::string dac_err, dac_backend;
         bool dac_pending = false;
         if (!parler_dac_decode(model, codes.data(), n_frames, n_threads, res.pcm,
-                               nullptr, 0, -1, &dac_err, &dac_backend, &dac_pending)) {
+                               nullptr, 0, -1, &dac_err, &dac_backend, &dac_pending,
+                               &cancel_requested)) {
+            check_cancel();
             throw std::runtime_error("parler: DAC decode failed: " + dac_err);
         }
         note_dac_backend(dac_backend, dac_pending);
@@ -234,6 +238,23 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
     if (!opts.backends_dir.empty()) {
         ::tts_cpp::detail::set_backends_directory(opts.backends_dir);
     }
+#ifdef TTS_CPP_USE_COREML
+    // Fit's memory-degrade: with a budget, Core ML is dropped when only the
+    // ggml verdict fits. Decided before the weights load, so it reads the
+    // same free memory fit_params reports.
+    const CoremlOptions dac_options = parler_merge_legacy_coreml(opts);
+    bool degrade = false;
+    if (dac_options.memory_budget_bytes) {
+        FitOptions fit;
+        fit.model_gguf_path = opts.model_gguf_path;
+        fit.n_gpu_layers = opts.n_gpu_layers;
+        fit.backend = opts.backend;
+        fit.backends_dir = opts.backends_dir;
+        fit.max_frames = opts.max_frames;
+        fit.coreml = dac_options;
+        degrade = fit_params(fit).coreml.disabled_reason == "memory";
+    }
+#endif
     std::string err;
     if (!parler_load_gguf(opts.model_gguf_path, pimpl_->model, opts.n_gpu_layers, &err, opts.backend)) {
         throw std::runtime_error("parler: " + err);
@@ -250,23 +271,7 @@ Engine::Engine(const EngineOptions & opts) : pimpl_(new Impl()) {
         throw std::runtime_error("parler: prompt tokenizer load failed");
     }
 #ifdef TTS_CPP_USE_COREML
-    {
-        const CoremlOptions dac_options = parler_merge_legacy_coreml(opts);
-        bool degrade = false;
-        if (dac_options.memory_budget_bytes) {
-            // Fit's memory-degrade: with a budget, Core ML is dropped when only
-            // the ggml verdict fits it.
-            FitOptions fit;
-            fit.model_gguf_path = opts.model_gguf_path;
-            fit.n_gpu_layers = opts.n_gpu_layers;
-            fit.backend = opts.backend;
-            fit.backends_dir = opts.backends_dir;
-            fit.max_frames = opts.max_frames;
-            fit.coreml = dac_options;
-            degrade = fit_params(fit).coreml.disabled_reason == "memory";
-        }
-        pimpl_->dac_coreml = parler_dac_coreml::create(pimpl_->model, opts.model_gguf_path, dac_options, degrade);
-    }
+    pimpl_->dac_coreml = parler_dac_coreml::create(pimpl_->model, opts.model_gguf_path, dac_options, degrade);
 #else
     parler_dac_plan_route(opts.model_gguf_path, parler_merge_legacy_coreml(opts), 0);  // validates the options
     parler_attach_dac_sidecar(pimpl_->model, opts.model_gguf_path, coreml_policy);

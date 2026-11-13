@@ -394,7 +394,8 @@ bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_
                        int n_threads, std::vector<float> & pcm_out,
                        std::vector<float> * latent_out,
                        int out_begin, int out_end, std::string * err_out,
-                       std::string * backend_out, bool * pending_out) {
+                       std::string * backend_out, bool * pending_out,
+                       const std::atomic<bool> * cancel) {
     std::string err;
     if (pending_out) *pending_out = false;
     const parler_hparams & hp = model.hparams;
@@ -434,13 +435,20 @@ bool parler_dac_decode(const parler_model & model, const int32_t * codes, int n_
         call.sidecar = model.dac_sidecar;
     } else if (model.dac_pending) {
         try {
-            call = model.dac_pending->acquire(out_end - out_begin);
+            call = model.dac_pending->acquire(out_end - out_begin, cancel);
         } catch (const std::exception & e) {
             err = e.what();
             fprintf(stderr, "%s: %s\n", __func__, err.c_str());
             pcm_out.clear();
             if (latent_out) latent_out->clear();
             if (err_out) *err_out = err;
+            return false;
+        }
+        if (cancel && cancel->load()) {
+            // the wait for the sidecar was interrupted: decode nothing
+            pcm_out.clear();
+            if (latent_out) latent_out->clear();
+            if (err_out) *err_out = "cancelled";
             return false;
         }
         if (pending_out) *pending_out = call.pending;

@@ -196,7 +196,9 @@ public:
     // key, timings and error); "{}" in builds without TTS_CPP_COREML.
     std::string coreml_status() const;
     // Waits until the DAC sidecar is ready or has failed, or `timeout_ms`
-    // passes (< 0: no limit). True when it is ready.
+    // passes (< 0: no limit). True when it is ready. Returns false at once
+    // while nothing has requested the sidecar (prewarm none before the first
+    // synthesis) or it waits for memory (deferred).
     bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:
