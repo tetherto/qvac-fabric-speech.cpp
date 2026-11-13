@@ -62,6 +62,18 @@ constexpr int64_t kVocoderTileShift = 64;
 // and 0.999996 on Vulkan, while a misplaced or cropped tile falls far below.
 constexpr double kMinTiledCorrelation = 0.9999;
 
+// Final-latent std bounds. The lower one separates a healthy trajectory from
+// the stalled ones described above. The upper one catches a blow-up; the Q4
+// pair lands higher than f16 (3.08-3.23 across ggml builds on Metal, against
+// 2.1-2.2), so it gets its own.
+constexpr double kMinFinalLatentStd = 1.7;
+constexpr double kMaxFinalLatentStdF16 = 3.2;
+constexpr double kMaxFinalLatentStdQ4 = 3.6;
+
+double max_final_latent_std(bool q4_run) {
+    return q4_run ? kMaxFinalLatentStdQ4 : kMaxFinalLatentStdF16;
+}
+
 bool decode_vocoder_window(const MM3Model & model, const std::vector<float> & latents, int64_t L,
                            std::vector<float> & audio, std::string * error) {
     const int64_t channels = (int64_t) model.synth_cfg.voc.channels;
@@ -275,9 +287,10 @@ int main(int argc, char ** argv) {
     // the historical velocity-sign and stale-condition bugs both stalled near
     // the noise distribution (std ~1.4).
     const double std_dev = latent_std(result.window_latents[0]);
-    std::fprintf(stderr, "[quality] final latent std %.4f (healthy ~1.9-2.4, broken ~1.4)\n", std_dev);
-    CHECK(std_dev > 1.7);
-    CHECK(std_dev < 3.2);
+    std::fprintf(stderr, "[quality] final latent std %.4f (accepted %.1f-%.1f, broken ~1.4)\n", std_dev,
+                 kMinFinalLatentStd, max_final_latent_std(q4_run));
+    CHECK(std_dev > kMinFinalLatentStd);
+    CHECK(std_dev < max_final_latent_std(q4_run));
 
     mm3_unload(&model);
     if (failures != 0) {

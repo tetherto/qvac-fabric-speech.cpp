@@ -77,7 +77,7 @@ inline HexagonRuntime hexagon_runtime(ggml_backend_t backend) {
         }
     }
 #endif
-    throw BackendUnavailable("Pocket TTS: Hexagon runtime-info v1 unavailable or invalid; update ggml-speech");
+    throw BackendUnavailable("Pocket TTS: Hexagon runtime-info v1 unavailable or invalid; update the fabric ggml");
 }
 
 inline bool supported_backend(ggml_backend_t backend) {
@@ -108,7 +108,7 @@ inline Backend select_backend(bool use_gpu, const std::string & requested) {
     }
     if (!backend) {
         if (choice == "hexagon") throw BackendUnavailable("Pocket TTS: requested Hexagon HTP0 backend unavailable; install matching ggml-hexagon and DSP runtime libraries");
-        if (wants_webgpu) throw BackendUnavailable("Pocket TTS: requested WebGPU backend unavailable; install a ggml-speech build with the WebGPU (Dawn) backend");
+        if (wants_webgpu) throw BackendUnavailable("Pocket TTS: requested WebGPU backend unavailable; install a fabric ggml build with the WebGPU (Dawn) backend");
         throw BackendUnavailable(choice == "cpu" || (!wants_opencl && !use_gpu)
             ? "Pocket TTS: CPU backend unavailable"
             : wants_opencl ? "Pocket TTS: requested OpenCL backend unavailable; install a supported ggml-opencl backend"

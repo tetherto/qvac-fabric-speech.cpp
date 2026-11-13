@@ -164,7 +164,7 @@ missing, and the automatic `--n-gpu-layers` walk never selects it. Weights are
 uploaded into the Hexagon repack buffer type. On Android the
 `EngineOptions::backends_dir` directory is prepended to `DSP_LIBRARY_PATH`, so
 FastRPC finds the `libggml-htp-v*.so` skeletons staged next to the ggml
-backends. It needs a `qvac-ext-ggml@speech` build with the Hexagon GELU_ERF,
+backends. It needs a fabric ggml build with the Hexagon GELU_ERF,
 transpose and fused depthwise-convolution kernels.
 
 Galaxy S25 (Snapdragon 8 Elite, Hexagon v79), `supertonic3` `q8_0`, voice `M1`,

@@ -11,7 +11,7 @@ project matches the validation build and avoids ignored stale local headers:
 
 ```bash
 export SPEECH_SOURCE="$PWD/engines/parakeet"
-export GGML_SOURCE="/path/to/current/qvac-ext-ggml"
+export GGML_SOURCE="/path/to/current/qvac-fabric-llm.cpp/ggml"
 DRIVER_DIR=/tmp/eu-desktop-driver
 mkdir -p "$DRIVER_DIR"
 cat > "$DRIVER_DIR/CMakeLists.txt" <<'CMAKE'
@@ -59,7 +59,7 @@ xcrun devicectl device copy from --device "$DEVICE_ID" \
   --source Documents/bench.json --destination /tmp/bench.json
 ```
 
-`GGML_SOURCE` is a current `qvac-ext-ggml` checkout on its `speech` branch.
+`GGML_SOURCE` is the `ggml/` tree of a current `qvac-fabric-llm.cpp` checkout.
 `MODEL_DIR` contains the GGUF and exported `.mlmodelc` sidecars from the
 [full-EU guide](../../docs/transcribepsy-eu-coreml.md). Packaging copies only
 GGUFs and compiled models, excluding checkpoints and `.mlpackage` intermediates.
