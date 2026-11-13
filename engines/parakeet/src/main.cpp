@@ -460,12 +460,10 @@ bool resolve_cli_overlap(const parakeet::ParakeetCtcModel & model, const std::st
                          parakeet::EngineOptions & long_form_opts) {
     if (arg.empty() || long_form_opts.long_form_window_frames < 0) return true;
     double overlap = 0.0;
-    const int window_frames = parakeet::resolve_long_form_window_frames(
-        long_form_opts.long_form_window_frames, model.encoder_cfg.pos_emb_max_len,
-        parakeet::kLongFormAutoWindowFrames, parakeet::kLongFormMinWindowFrames);
     if (!parse_finite_double(arg, overlap) ||
-        !parakeet::long_form_context_frames_from_overlap(overlap, window_frames,
-                                               long_form_opts.long_form_context_frames)) {
+        !parakeet::long_form_context_frames_for_model(overlap,
+            long_form_opts.long_form_window_frames, model.encoder_cfg.long_form_window_hint,
+            model.encoder_cfg.pos_emb_max_len, long_form_opts.long_form_context_frames)) {
         PARAKEET_LOG_ERROR("error: --overlap expects a fraction from 0 to 0.5 (got '%s')\n",
                            arg.c_str());
         return false;

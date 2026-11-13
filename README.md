@@ -130,6 +130,12 @@ contracts; see the engine guides before exporting or deploying one.
 | AudioGen | ACE-Step VAE decoder | [AudioGen backends](engines/audiogen/docs/backends.md#core-ml-vae-decoder-sidecar) |
 | AudioGen | MiniMax conditioner projection, or explicit full-network Core ML (`coreml_profile_dir` + `coreml_compute_units`, macOS 15+) | [MiniMax Core ML](engines/audiogen/docs/backends.md#minimax-core-ml-conditioner) |
 
+TranscribePsy conversion uses 60-second windows with 25% overlap for full EU
+and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
+repository provides an encoder-stripping tool and decoder output-projection
+palettization with `--nbits-out`; see the
+[conversion guide](engines/parakeet/docs/models.md#transcribepsy).
+
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
 `coreml_compute_units`; the separate flag does not enable automatic ACE-Step
