@@ -7,6 +7,7 @@
 
 #include "digest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -883,6 +884,62 @@ void case_gguf_source() {
     CHECK(GgufSource::open(td / "bad.gguf", err) == nullptr && err.cls == ErrorClass::deterministic);
     CHECK(GgufSource::open(td / "absent.gguf", err) == nullptr && err.cls == ErrorClass::transient);
 }
+
+// `twin --types`: every encoding it accepts is written, and ggml reads it
+// back. An encoding it cannot write (ggml has no quantiser for f64 or q8_k,
+// and cannot read q8_1 back) is a usage error, exit 2, raised before the
+// output file exists, never an abort.
+void case_twin_types() {
+    CHECK_MSG(!g_tool.empty(), "--tool is required when ggml is available");
+    if (g_tool.empty()) return;
+    TempDir td;
+    const json stats = {{"min", -1.0}, {"max", 1.0}, {"mean", 0.0}, {"std", 0.5}};
+    // "w" is quantised in the original, and its rows are a multiple of every
+    // block size; "b" is f32 and stays f32.
+    const json manifest = {
+        {"schema", 1},
+        {"metadata", json::array({{{"key", "general.architecture"}, {"gguf_type", GGUF_TYPE_STRING}, {"value", "toy"}}})},
+        {"tensors", json::array({{{"name", "w"}, {"type", "q8_0"}, {"ne", {256, 2, 1, 1}}, {"n_dims", 2}, {"stats", stats}},
+                                 {{"name", "b"}, {"type", "f32"}, {"ne", {2, 1, 1, 1}}, {"n_dims", 1}, {"stats", stats}}})},
+    };
+    write_bytes(td / "manifest.json", manifest.dump());
+    auto twin = [&](const std::string & types, const std::string & out, std::string & log) {
+        const std::string log_path = td / "twin.log";
+        const std::string cmd = "'" + g_tool + "' twin --manifest '" + (td / "manifest.json") + "' --seed 7 --types '" +
+                                types + "' -o '" + out + "' > '" + log_path + "' 2>&1";
+        const int st = std::system(cmd.c_str());
+        log = read_bytes(log_path);
+        return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    };
+    const std::string supported = "f32, f16, q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k, iq4_nl, iq4_xs, bf16";
+    std::string log;
+    for (size_t b = 0, e; b < supported.size(); b = e + 2) {
+        e = std::min(supported.find(", ", b), supported.size());
+        const std::string t = supported.substr(b, e - b);
+        const std::string out = td / ("twin-" + t + ".gguf");
+        CHECK_MSG(twin(t, out, log) == 0, t + ": " + log);
+        Error err;
+        std::unique_ptr<GgufSource> src = GgufSource::open(out, err);
+        CHECK_MSG(src, t + ": " + err.message);
+        if (!src) continue;
+        const recipe::TensorInfo * w = src->tensor("w");
+        CHECK_MSG(w && w->type == *recipe::ggml_type_from_name(t), t);
+        CHECK(src->tensor("b") && src->tensor("b")->type == GGML_TYPE_F32);
+        std::vector<float> v;
+        CHECK_MSG(src->read_f32("w", v, nullptr).ok() && v.size() == 512, t);
+    }
+    for (const std::string types : {"f64", "q8_k", "q8_1", "q8_0,f64"}) {
+        const std::string out = td / "rejected.gguf";
+        const int rc = twin(types, out, log);
+        CHECK_MSG(rc == 2, types + ": exit " + std::to_string(rc) + ": " + log);
+        CHECK_MSG(log.find("cannot write") != std::string::npos &&
+                      log.find("(supported: " + supported + ")") != std::string::npos,
+                  types + ": " + log);
+        CHECK_MSG(!fs::exists(out), types + ": the output file was created");
+    }
+    CHECK(twin("q9_9", td / "unknown.gguf", log) == 2 && log.find("unknown type q9_9") != std::string::npos);
+    CHECK(!fs::exists(td / "unknown.gguf"));
+}
 #endif
 
 }  // namespace
@@ -911,6 +968,7 @@ int main(int argc, char ** argv) {
                          {"match", case_match},
 #if defined(QVAC_COREML_HAVE_GGML)
                          {"gguf-source", case_gguf_source},
+                         {"twin-types", case_twin_types},
 #endif
                      },
                      "test-coreml-recipe");

@@ -105,6 +105,21 @@ metadata value (overriding the manifest's) and may be repeated. The same manifes
 seed and types give the same file on every host, so tests can use a twin in
 place of a production model they cannot ship.
 
+`--types` takes the types ggml can both write and read back, so a twin is
+always a GGUF that the generator and `f32` can read:
+
+| | `--types` values |
+|---|---|
+| float | `f32`, `f16`, `bf16` |
+| legacy quants | `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0` |
+| k-quants | `q2_k`, `q3_k`, `q4_k`, `q5_k`, `q6_k` |
+| non-linear quants | `iq4_nl`, `iq4_xs` |
+
+Any other type, for example `f64` or `q8_k` (ggml has no quantiser for them)
+or `q8_1` (ggml cannot read it back), fails with
+`--types: cannot write <type> (supported: ...)` and exit status 2. This
+happens before the manifest is read, so no output file is created.
+
 ```sh
 qvac-coreml-tool twin --manifest mimi-manifest.json --seed 7 --types q8_0,f16 -o mimi-twin.gguf
 ```
