@@ -27,6 +27,8 @@ for routing, fallback and validation coverage.
 
 Parakeet TDT uses the native encoder beyond a standard Core ML sidecar's input
 capacity; short Core ML windows require an export with a validated seam policy.
+These standard TDT sidecars retain native weights even with
+`PARAKEET_COREML_ONLY=1`; incompatible encoder-less GGUFs fail at load time.
 Standard TDT push streams default to 30-second chunks and reject smaller explicit
 chunks to prevent phrase loss. Small PCM writes and final tail flushing remain
 supported; full TranscribePsy EU retains its separate streaming policy. See the

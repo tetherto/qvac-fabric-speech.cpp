@@ -117,7 +117,9 @@ and, for MOSS-Transcribe-Diarize, in
 
 Standard TDT sidecars use ggml for audio beyond their compiled capacity (typically
 15 seconds), preserving native encoder context. Only exports with a validated
-seam policy use short Core ML windows. TDT push streams, except full TranscribePsy
+seam policy use short Core ML windows. Standard TDT sidecars retain native
+weights even with `PARAKEET_COREML_ONLY=1`, and encoder-less GGUFs paired with
+these sidecars are rejected at load time. TDT push streams, except full TranscribePsy
 EU, default to 30-second chunks and reject smaller explicit chunks to prevent
 phrase loss. PCM writes can still be arbitrarily small; `finalize()` processes
 the remaining audio. See the [streaming contract](docs/api.md).

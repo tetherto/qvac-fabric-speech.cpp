@@ -722,6 +722,13 @@ sidecars work next to a full GGUF renamed to match them; set
 `PARAKEET_COREML_ONLY=1` so the ggml copy of the encoder weights, which the
 Neural Engine path never reads, is not loaded.
 
+Standard TDT sidecars without a validated seam policy retain the full GGUF's
+native encoder weights even with `PARAKEET_COREML_ONLY=1`: oversized offline
+inputs and push streams still need the native encoder. An encoder-less GGUF
+paired with such a sidecar is rejected at load time with
+`kGgufLoadNoEncoderWeights`. Validated Neural Engine exports and full
+TranscribePsy EU keep their existing ownership behavior.
+
 ## Core ML family routing
 
 | Family | Contract | Inputs the sidecar does not take |
