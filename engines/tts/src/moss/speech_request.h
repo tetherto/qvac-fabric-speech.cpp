@@ -18,6 +18,18 @@ bool speech_stages_fit(uint64_t device_free_bytes, uint64_t decoder_bytes);
 // stages were sized for. A failed projection (UINT64_MAX) never does.
 bool speech_decode_within_plan(uint64_t planned_bytes, uint64_t decode_bytes);
 
+// Runs the optional residency `plan`; if it throws, calls `release` and
+// reports the stages as staged instead of failing the engine.
+template <typename Plan, typename Release>
+bool try_hold_stages(Plan && plan, Release && release) {
+    try {
+        return plan();
+    } catch (const std::exception &) {
+        release();
+        return false;
+    }
+}
+
 // Runs `attempt`; if it fails while the stages are resident, calls `release`
 // and runs it once more. `attempt` must start its work from scratch.
 template <typename Attempt, typename Release>

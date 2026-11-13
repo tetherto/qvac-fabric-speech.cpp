@@ -191,8 +191,12 @@ int main(int argc, char ** argv) {
         uint64_t projected = 0;
         {
             SpeechCodec codec(argv[2], {}, 2);
+            const SpeechVoiceSize bound = codec.default_voice_size();
             voice = codec.default_voice();
             ratio = codec.token_mel_ratio();
+            std::printf("default voice: %zu tokens, bound %zu\n", voice.tokens.size(), bound.tokens);
+            require(bound.tokens >= voice.tokens.size() && bound.feat_frames >= voice.feat_frames,
+                    "the default voice size bound is below the encoded voice");
         } // Release the tokenizer/CAM++ before loading the decoder.
         voice.tokens.resize(std::min<size_t>(32, voice.tokens.size()));
         voice.feat_frames = (int) voice.tokens.size() * ratio;

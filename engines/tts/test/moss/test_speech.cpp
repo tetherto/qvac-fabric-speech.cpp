@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <new>
 #include <random>
 #include <string>
 #include <vector>
@@ -521,6 +522,17 @@ void test_stage_release_retries_prefill() {
     check(threw && releases == 1, "a failure after releasing the stages is reported");
 }
 
+void test_stage_planning_failures_keep_staging() {
+    int releases = 0;
+    auto release = [&] { ++releases; };
+    check(try_hold_stages([] { return true; }, release) && releases == 0, "a plan that fits holds the stages");
+    check(!try_hold_stages([] { return false; }, release) && releases == 0, "a plan that does not fit stays staged");
+    check(!try_hold_stages([]() -> bool { throw std::runtime_error("graph allocation failed"); }, release) &&
+          releases == 1, "a failed plan releases what it held and stays staged");
+    check(!try_hold_stages([]() -> bool { throw std::bad_alloc(); }, release) && releases == 2,
+          "running out of memory while planning stays staged");
+}
+
 void test_generation_loop() {
     const auto path = write_lm("speech-loop", WEIGHT_SEED);
     SpeechLM lm(path.string(), {}, 1);
@@ -849,6 +861,7 @@ int main() {
         test_cache_memory_guard();
         test_stage_residency_policy();
         test_stage_release_retries_prefill();
+        test_stage_planning_failures_keep_staging();
         test_options_keep_their_field_order();
         test_generation_loop();
         test_segment_arithmetic();

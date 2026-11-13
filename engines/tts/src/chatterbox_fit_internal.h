@@ -50,6 +50,7 @@ struct s3gen_fit_measure {
     int  T_mel          = 0;
     bool meanflow       = true;
     bool used_b2        = false;
+    bool on_cpu         = true;   // the resolved backend is the CPU
 };
 
 // Conditioning lengths of a caller-supplied voice.  Negative fields use the

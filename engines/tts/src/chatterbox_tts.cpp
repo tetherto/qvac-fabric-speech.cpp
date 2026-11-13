@@ -3629,6 +3629,7 @@ bool s3gen_measure_fit(const std::string & gguf_path, int n_gpu_layers,
         } guard{m};
         out.weights_bytes = weights;
         out.meanflow      = m.meanflow;
+        out.on_cpu        = ::tts_cpp::detail::backend_is_cpu(m.backend);
 
         // Workload shapes, exactly as s3gen_synthesize_to_wav derives them on
         // the batch path (finalize=true appends 3 lookahead-silence tokens).

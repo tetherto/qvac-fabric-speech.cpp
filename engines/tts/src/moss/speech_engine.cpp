@@ -185,15 +185,18 @@ struct SpeechEngine::Impl {
     // turn. Upload the decoder now: uploading it beside an LM that has already
     // run measured ~50x slower on NVIDIA Vulkan.
     void hold_stages_together() {
-        if (lm->runs_on_cpu()) {
+        if (lm->runs_on_cpu() || !codec->decodes_on_gpu()) {
             return;
         }
-        const uint64_t decoder = codec->decoder_device_bytes(planned_reply_codes(), codec->default_voice());
-        if (decoder > 0 && detail::speech_stages_fit(lm->free_device_bytes(), decoder)) {
+        stages_resident = detail::try_hold_stages([this] {
+            const uint64_t decoder = codec->decoder_device_bytes(planned_reply_codes(), codec->default_voice_size());
+            if (decoder == 0 || !detail::speech_stages_fit(lm->free_device_bytes(), decoder)) {
+                return false;
+            }
             codec->hold_decoder();
-            stages_resident = true;
             planned_decoder_bytes = decoder;
-        }
+            return true;
+        }, [this] { codec->release_decoder_hold(); });
     }
 
     // The plan covers the default voice up to planned_reply_codes(); a custom
