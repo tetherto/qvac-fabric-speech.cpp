@@ -52,7 +52,16 @@ struct Options {
     std::optional<std::string> compute_units;       // all | cpu_and_ane | cpu_and_gpu | cpu_only
     std::optional<int64_t>     strict_wait_ms;      // unset -> unbounded
     std::optional<int64_t>     memory_budget_bytes; // unset -> no budget, no memory-degrade
+    // Development override: generate from <template_dir>/<template-id> instead
+    // of the embedded template. Honoured only by builds with
+    // QVAC_COREML_DEV (an engine's *_BUILD_TESTS=ON or QVAC_COREML_DEV=ON);
+    // elsewhere it is ignored with a warning.
+    std::optional<std::string> template_dir;        // unset -> QVAC_COREML_TEMPLATE_DIR (dev builds) -> ""
 };
+
+// Whether this library honours Options::template_dir and
+// QVAC_COREML_TEMPLATE_DIR.
+bool template_dir_override_compiled();
 
 enum class Platform { macos, ios, other };
 
@@ -78,6 +87,7 @@ struct Resolved {
     std::optional<ComputeUnits> compute_units;  // nullopt -> the stage's own default
     std::optional<int64_t> strict_wait_ms;      // nullopt -> unbounded
     std::optional<int64_t> memory_budget_bytes; // nullopt -> no budget, no memory-degrade
+    std::string template_dir;                   // "" = the embedded templates (always "" without QVAC_COREML_DEV)
 
     std::string disabled_reason;        // why use == off: "<P>_COREML_DISABLE", "use=off" or "memory"
     std::vector<std::string> warnings;  // inherited values that were ignored

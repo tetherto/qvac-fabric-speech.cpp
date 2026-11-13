@@ -214,6 +214,8 @@ struct CompileResult {
     Error error;
     std::string os_build;
     std::string coremlc;
+    std::string tmp_output;           // where the compiler left the bundle before the move
+    uint64_t compile_peak_bytes = 0;  // footprint growth during the compile (measurement only)
 };
 // Step 6: compile `mlpackage` and leave the compiled bundle at `mlmodelc_out`
 // (Apple: compileModelAtURL, move with a copy fallback).
@@ -263,6 +265,7 @@ struct PrepareOutcome {
     int64_t write_ms = 0;
     int64_t compile_ms = 0;
     uint64_t generation_peak_bytes = 0;
+    uint64_t compile_peak_bytes = 0;  // from the CompileFn (measurement only)
 };
 
 // The pipeline: 1 open the source, 2 memo lookup, 3 pre-flight, 4 generate under

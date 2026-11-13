@@ -5,8 +5,16 @@
 #   qvac_coreml_add_to(<engine-lib> NAMESPACE <ns> PREFIX <P> ENABLE <bool> [TEMPLATES <dirs>])
 #       Compiles the runtime into <engine-lib> with QVAC_COREML_NS=<ns> when
 #       ENABLE is true (the engine's Apple-only <P>_COREML option). <P> is the
-#       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN). Template
-#       embedding (TEMPLATES) is not implemented yet and is rejected.
+#       engine's CMake option prefix (TTS_CPP, PARAKEET, AUDIOGEN).
+#       With <P>_COREML_GENERATE (default ON on macOS, OFF on iOS) the
+#       generator is compiled in too (recipe interpreter, MILBlob writer,
+#       GgufSource, cache, on-device compile; needs the `ggml` target) and
+#       every template directory in TEMPLATES is embedded uncompressed: one
+#       .incbin assembler stub per file in __TEXT,__const plus a generated
+#       {id, file, begin, end, sha256} table (src/templates.h). Configure fails
+#       when the embedded files exceed QVAC_COREML_TEMPLATE_BUDGET_MB (default
+#       32) per library. The template_dir / QVAC_COREML_TEMPLATE_DIR override is
+#       compiled in only with <P>_BUILD_TESTS or QVAC_COREML_DEV.
 #   qvac_coreml_add_tests([REQUIRE_GGML])
 #       Portable tests (Linux and macOS): test-coreml-scheduler,
 #       test-coreml-recipe, test-coreml-milblob, test-coreml-cache, plus the
@@ -21,6 +29,10 @@
 #       macOS umbrella only: test-coreml-link links every listed engine library
 #       and all of their runtime copies into one binary.
 include_guard(GLOBAL)
+
+set(QVAC_COREML_TEMPLATE_BUDGET_MB 32 CACHE STRING
+    "Most Core ML template bytes (uncompressed, MiB) one library may embed; configure fails above it")
+option(QVAC_COREML_DEV "Compile the Core ML template_dir / QVAC_COREML_TEMPLATE_DIR override into release builds" OFF)
 
 function(_qvac_coreml_runtime_sources out_var with_objc)
     set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
@@ -54,13 +66,23 @@ function(_qvac_coreml_generator_sources out_var)
         "${dir}/src/milblob.cpp"
         "${dir}/src/recipe.cpp"
         "${dir}/src/source_stat.cpp"
+        "${dir}/src/templates.cpp"
         PARENT_SCOPE)
 endfunction()
 
-# Frameworks the Apple device facts need (src/apple/device.mm).
+# Frameworks the Apple device facts need (src/apple/device.mm), plus Core ML
+# for the on-device compile (src/apple/compile.mm) when `with_coreml`.
 function(_qvac_coreml_apple_frameworks out_var)
+    set(with_coreml OFF)
+    if (ARGC GREATER 1)
+        set(with_coreml ${ARGV1})
+    endif()
     find_library(QVAC_COREML_FOUNDATION_FRAMEWORK Foundation REQUIRED)
     set(fws "${QVAC_COREML_FOUNDATION_FRAMEWORK}")
+    if (with_coreml)
+        find_library(QVAC_COREML_COREML_FRAMEWORK CoreML REQUIRED)
+        list(APPEND fws "${QVAC_COREML_COREML_FRAMEWORK}")
+    endif()
     if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         # SecCodeCopySelf (host identity for hints) is macOS-only.
         find_library(QVAC_COREML_SECURITY_FRAMEWORK Security REQUIRED)
@@ -84,6 +106,118 @@ function(_qvac_coreml_configure_runtime target ns with_objc)
     endif()
 endfunction()
 
+# Writes one .incbin stub per template file and the {id, file, begin, end,
+# sha256} table, and fails configure over QVAC_COREML_TEMPLATE_BUDGET_MB.
+# Sets <out_var> to the generated sources. `dirs` may be empty (empty table).
+function(_qvac_coreml_embed_templates target ns gen out_var)
+    set(dirs ${ARGN})
+    file(MAKE_DIRECTORY "${gen}")
+    set(srcs "")
+    set(decls "")
+    set(rows "")
+    set(total 0)
+    set(ids "")
+    set(n 0)
+    foreach (tdir IN LISTS dirs)
+        get_filename_component(tdir "${tdir}" ABSOLUTE)
+        get_filename_component(id "${tdir}" NAME)
+        if (NOT EXISTS "${tdir}/template.json")
+            message(FATAL_ERROR "qvac_coreml_add_to(${target}): ${tdir} is not a template directory (no template.json)")
+        endif()
+        file(READ "${tdir}/template.json" tjson)
+        string(JSON json_id ERROR_VARIABLE json_err GET "${tjson}" id)
+        if (json_err OR NOT json_id STREQUAL id)
+            message(FATAL_ERROR "qvac_coreml_add_to(${target}): ${tdir}/template.json id must be the directory name '${id}'")
+        endif()
+        if (id IN_LIST ids)
+            message(FATAL_ERROR "qvac_coreml_add_to(${target}): template id '${id}' is listed twice")
+        endif()
+        list(APPEND ids "${id}")
+        # The embedded files: what recipe::Template::from_dir reads. The shape
+        # manifest (reference-gguf.json) is test-only and never embedded.
+        set(files Manifest.json model.mlmodel recipe.txt template.json)
+        if (EXISTS "${tdir}/literals.bin")
+            list(APPEND files literals.bin)
+        endif()
+        foreach (f IN LISTS files)
+            set(path "${tdir}/${f}")
+            if (NOT EXISTS "${path}")
+                message(FATAL_ERROR "qvac_coreml_add_to(${target}): template ${id} lacks ${f}")
+            endif()
+            if (path MATCHES "[\"\\\\]")
+                message(FATAL_ERROR "qvac_coreml_add_to(${target}): cannot embed ${path} (quote or backslash in the path)")
+            endif()
+            file(SIZE "${path}" size)
+            math(EXPR total "${total} + ${size}")
+            file(SHA256 "${path}" sha)
+            # A changed template file reconfigures, so the table's sha256 and
+            # the stub (which carries it) are rewritten.
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+            string(MAKE_C_IDENTIFIER "qvac_tpl_${ns}_${n}_${id}_${f}" sym)
+            set(stub "${gen}/${sym}.cpp")
+            file(CONFIGURE OUTPUT "${stub}" CONTENT
+"// Generated by qvac_coreml.cmake: ${f} of Core ML template ${id}, embedded
+// uncompressed in __TEXT,__const for ${target}.
+static_assert(sizeof(\"sha256:${sha}\") > 1, \"the stub changes with its file\");
+__asm__(
+    \".section __TEXT,__const\\n\"
+    \".globl _${sym}\\n\"
+    \".private_extern _${sym}\\n\"
+    \".p2align 4\\n\"
+    \"_${sym}:\\n\"
+    \".incbin \\\"${path}\\\"\\n\"
+    \".globl _${sym}_end\\n\"
+    \".private_extern _${sym}_end\\n\"
+    \"_${sym}_end:\\n\");
+" @ONLY)
+            set_source_files_properties("${stub}" PROPERTIES OBJECT_DEPENDS "${path}")
+            list(APPEND srcs "${stub}")
+            string(APPEND decls "extern \"C\" const uint8_t ${sym}[];\nextern \"C\" const uint8_t ${sym}_end[];\n")
+            string(APPEND rows "    {\"${id}\", \"${f}\", ${sym}, ${sym}_end, \"${sha}\"},\n")
+            math(EXPR n "${n} + 1")
+        endforeach()
+    endforeach()
+
+    set(budget_mb "${QVAC_COREML_TEMPLATE_BUDGET_MB}")
+    if (NOT budget_mb MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "QVAC_COREML_TEMPLATE_BUDGET_MB must be a whole number of MiB (got '${budget_mb}')")
+    endif()
+    math(EXPR budget "${budget_mb} * 1048576")
+    if (total GREATER budget)
+        message(FATAL_ERROR "qvac_coreml_add_to(${target}): the embedded Core ML templates take ${total} bytes, over "
+                            "QVAC_COREML_TEMPLATE_BUDGET_MB=${budget_mb} (${budget} bytes) for one library. "
+                            "Drop a template or compress it offline (LZFSE).")
+    endif()
+
+    if (n EQUAL 0)
+        set(table_body "const EmbeddedFile * embedded_files(size_t & count) {\n    count = 0;\n    return nullptr;\n}\n")
+    else()
+        set(table_body "namespace {\nconst EmbeddedFile FILES[] = {\n${rows}};\n}  // namespace\n\nconst EmbeddedFile * embedded_files(size_t & count) {\n    count = sizeof(FILES) / sizeof(FILES[0]);\n    return FILES;\n}\n")
+    endif()
+    file(CONFIGURE OUTPUT "${gen}/qvac_coreml_templates.cpp" CONTENT
+"// Generated by qvac_coreml.cmake: the Core ML templates embedded in ${target}.
+#include \"templates.h\"
+
+${decls}
+namespace ${ns} {
+namespace templates {
+
+${table_body}
+}  // namespace templates
+}  // namespace ${ns}
+" @ONLY)
+    list(APPEND srcs "${gen}/qvac_coreml_templates.cpp")
+    if (TARGET ${target})
+        set_property(TARGET ${target} PROPERTY QVAC_COREML_TEMPLATE_IDS "${ids}")
+        set_property(TARGET ${target} PROPERTY QVAC_COREML_TEMPLATE_BYTES "${total}")
+    endif()
+    set(${out_var} ${srcs} PARENT_SCOPE)
+    list(LENGTH ids n_ids)
+    if (n_ids GREATER 0)
+        message(STATUS "${target}: ${n_ids} Core ML template(s) embedded (${total} bytes): ${ids}")
+    endif()
+endfunction()
+
 function(qvac_coreml_add_to target)
     cmake_parse_arguments(QCA "" "NAMESPACE;PREFIX;ENABLE" "TEMPLATES" ${ARGN})
     if (NOT TARGET ${target})
@@ -92,9 +226,6 @@ function(qvac_coreml_add_to target)
     if (NOT QCA_NAMESPACE OR NOT QCA_PREFIX)
         message(FATAL_ERROR "qvac_coreml_add_to(${target}): NAMESPACE and PREFIX are required")
     endif()
-    if (QCA_TEMPLATES)
-        message(FATAL_ERROR "qvac_coreml_add_to(${target}): template embedding (TEMPLATES) is not available yet")
-    endif()
     if (NOT QCA_ENABLE)
         return()  # no Core ML in this build: nothing compiled, no behaviour change
     endif()
@@ -102,20 +233,57 @@ function(qvac_coreml_add_to target)
         message(FATAL_ERROR "qvac_coreml_add_to(${target}): the Core ML runtime is Apple-only")
     endif()
 
+    # Generation (templates, recipe interpreter, on-device compile) defaults to
+    # OFF on iOS: no templates are embedded there and only the runtime half
+    # (background loads of prebuilt sidecars) is compiled.
+    set(gen_default ON)
+    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(gen_default OFF)
+    endif()
+    option(${QCA_PREFIX}_COREML_GENERATE "Compile the Core ML generator and embed its templates into ${target}" ${gen_default})
+    set(generate ${${QCA_PREFIX}_COREML_GENERATE})
+    set(dev OFF)
+    if (QVAC_COREML_DEV OR ${QCA_PREFIX}_BUILD_TESTS)
+        set(dev ON)
+    endif()
+
     set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
     set(rt ${target}.qvac-coreml)
     _qvac_coreml_runtime_sources(srcs ON)
+    if (generate)
+        if (NOT TARGET ggml)
+            message(FATAL_ERROR "qvac_coreml_add_to(${target}): ${QCA_PREFIX}_COREML_GENERATE needs the `ggml` target "
+                                "(GgufSource reads and dequantises through ggml-base); define it first or set "
+                                "${QCA_PREFIX}_COREML_GENERATE=OFF")
+        endif()
+        _qvac_coreml_generator_sources(gen_srcs)
+        _qvac_coreml_embed_templates(${target} ${QCA_NAMESPACE} "${CMAKE_CURRENT_BINARY_DIR}/qvac-coreml-${target}"
+                                     tpl_srcs ${QCA_TEMPLATES})
+        list(APPEND srcs ${gen_srcs} "${dir}/src/gguf_source.cpp" "${dir}/src/apple/compile.mm" ${tpl_srcs})
+    elseif (QCA_TEMPLATES)
+        message(STATUS "${target}: ${QCA_PREFIX}_COREML_GENERATE is OFF; no Core ML template is embedded")
+    endif()
     add_library(${rt} OBJECT ${srcs})
     _qvac_coreml_configure_runtime(${rt} ${QCA_NAMESPACE} ON)
+    if (generate)
+        # The interpreter's arithmetic is one IEEE operation per op on every host.
+        target_compile_options(${rt} PRIVATE -ffp-contract=off)
+        target_link_libraries(${rt} PRIVATE ggml)
+        target_compile_definitions(${rt} PRIVATE QVAC_COREML_GENERATE=1)
+        target_compile_definitions(${target} PRIVATE QVAC_COREML_GENERATE=1)
+    endif()
+    if (dev)
+        target_compile_definitions(${rt} PRIVATE QVAC_COREML_DEV=1)
+    endif()
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:${rt}>)
 
     # Engine sources that adopt the runtime see the same
-    # namespace and headers; nothing in the engine uses them yet.
+    # namespace and headers.
     target_compile_definitions(${target} PRIVATE QVAC_COREML_NS=${QCA_NAMESPACE})
     target_include_directories(${target} PRIVATE $<BUILD_INTERFACE:${dir}/include>)
 
     # PUBLIC like each engine's own Core ML frameworks, for static consumers.
-    _qvac_coreml_apple_frameworks(fws)
+    _qvac_coreml_apple_frameworks(fws ${generate})
     target_link_libraries(${target} PUBLIC ${fws})
     set(pc_libs "")
     foreach (fw IN LISTS fws)
@@ -126,9 +294,14 @@ function(qvac_coreml_add_to target)
     set_property(TARGET ${target} PROPERTY QVAC_COREML_NS ${QCA_NAMESPACE})
     set_property(TARGET ${target} PROPERTY QVAC_COREML_PREFIX ${QCA_PREFIX})
     set_property(TARGET ${target} PROPERTY QVAC_COREML_RUNTIME ${rt})
+    set_property(TARGET ${target} PROPERTY QVAC_COREML_GENERATE ${generate})
     # For engines that write a pkg-config Libs.private (qvac-parakeet.pc).
     set_property(TARGET ${target} PROPERTY QVAC_COREML_PKGCONFIG_LIBS "${pc_libs}")
-    message(STATUS "${target}: Core ML runtime compiled in (namespace ${QCA_NAMESPACE})")
+    if (generate)
+        message(STATUS "${target}: Core ML runtime and generator compiled in (namespace ${QCA_NAMESPACE})")
+    else()
+        message(STATUS "${target}: Core ML runtime compiled in (namespace ${QCA_NAMESPACE})")
+    endif()
 endfunction()
 
 function(qvac_coreml_add_tests)
@@ -161,10 +334,15 @@ function(qvac_coreml_add_tests)
         set(have_ggml ON)
         list(APPEND gen_srcs "${dir}/src/gguf_source.cpp")
     endif()
-    add_library(qvac-coreml-test-runtime STATIC ${srcs} ${gen_srcs})
+    # Test builds embed no template (tests read template directories from
+    # the source tree): an empty table.
+    _qvac_coreml_embed_templates(qvac-coreml-test-runtime qvac_coreml_test
+                                 "${CMAKE_CURRENT_BINARY_DIR}/qvac-coreml-test-runtime" test_tpl)
+    add_library(qvac-coreml-test-runtime STATIC ${srcs} ${gen_srcs} ${test_tpl})
     _qvac_coreml_configure_runtime(qvac-coreml-test-runtime qvac_coreml_test ${with_objc})
-    # Scheduler test seams (src/test_hooks.h): only in this copy.
-    target_compile_definitions(qvac-coreml-test-runtime PRIVATE QVAC_COREML_TEST_HOOKS=1)
+    # Scheduler test seams (src/test_hooks.h) and the template_dir override:
+    # only in this copy.
+    target_compile_definitions(qvac-coreml-test-runtime PRIVATE QVAC_COREML_TEST_HOOKS=1 QVAC_COREML_DEV=1)
     target_compile_options(qvac-coreml-test-runtime PRIVATE -ffp-contract=off)
     target_link_libraries(qvac-coreml-test-runtime PUBLIC Threads::Threads ${CMAKE_DL_LIBS} ${fws})
     if (have_ggml)
@@ -228,8 +406,80 @@ function(qvac_coreml_add_tests)
         target_link_libraries(qvac-coreml-tool PRIVATE qvac-coreml-test-runtime)
         # test-coreml-recipe drives `verify` through the CLI as well.
         add_dependencies(test-coreml-recipe qvac-coreml-tool)
+        _qvac_coreml_add_template_tests("${dir}" ${with_objc})
     else()
         message(STATUS "qvac-coreml-tool and the GGUF cases of the generator tests: not built (no ggml target)")
+    endif()
+
+    if (APPLE)
+        # Over the budget, configure fails (a project that embeds a toy
+        # template under QVAC_COREML_TEMPLATE_BUDGET_MB=0).
+        add_test(NAME test-coreml-template-budget
+                 COMMAND ${CMAKE_COMMAND} -S "${dir}/test/template_budget"
+                         -B "${CMAKE_CURRENT_BINARY_DIR}/test-coreml-template-budget"
+                         -DQVAC_COREML_TEMPLATE_BUDGET_MB=0)
+        set_tests_properties(test-coreml-template-budget PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 120
+                             PASS_REGULAR_EXPRESSION "over[ \n]+QVAC_COREML_TEMPLATE_BUDGET_MB=0")
+    endif()
+endfunction()
+
+# The toy-template, golden (generator tripwire) and coreml_template.py tests. Needs
+# qvac-coreml-tool (a `ggml` target).
+function(_qvac_coreml_add_template_tests dir with_objc)
+    set(root "${dir}/../..")
+    get_filename_component(root "${root}" ABSOLUTE)
+    set(toys "${dir}/test/toy-templates/toy-stateless" "${dir}/test/toy-templates/toy-multi"
+             "${dir}/test/toy-templates/toy-state")
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+        # Tripwire: every template in the tree has a golden weight.bin digest for
+        # the current generator version (stdlib only).
+        add_test(NAME test-coreml-golden
+                 COMMAND ${Python3_EXECUTABLE} -B "${dir}/python/golden.py" check
+                         --tool $<TARGET_FILE:qvac-coreml-tool> --root "${root}" --golden "${dir}/test/golden.txt")
+        add_test(NAME test-coreml-golden-selftest
+                 COMMAND ${Python3_EXECUTABLE} -B "${dir}/python/test_golden.py"
+                         --tool $<TARGET_FILE:qvac-coreml-tool> --toy "${dir}/test/toy-templates/toy-stateless")
+        set_tests_properties(test-coreml-golden test-coreml-golden-selftest PROPERTIES
+                             LABELS "unit;coreml-runtime" TIMEOUT 300)
+        # coreml_template.py unit checks need numpy (the template CI job runs them
+        # in the pinned coremltools venv as well).
+        execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy"
+                        RESULT_VARIABLE numpy_rc OUTPUT_QUIET ERROR_QUIET)
+        if (numpy_rc EQUAL 0)
+            add_test(NAME test-coreml-template-py
+                     COMMAND ${Python3_EXECUTABLE} -B "${dir}/python/test_coreml_template.py")
+            set_tests_properties(test-coreml-template-py PROPERTIES LABELS "unit;coreml-runtime" TIMEOUT 300)
+        else()
+            message(STATUS "test-coreml-template-py: not registered (${Python3_EXECUTABLE} has no numpy)")
+        endif()
+    else()
+        message(STATUS "test-coreml-golden: not registered (no Python 3 interpreter)")
+    endif()
+
+    if (APPLE AND with_objc)
+        # Toy templates embedded through the engines' own path (stubs, table,
+        # generator, on-device compile) in a test-only library; macOS 15+.
+        add_library(qvac-coreml-toy STATIC "${dir}/test/toy/toy_lib.cpp")
+        set(QVAC_COREML_TOY_COREML_GENERATE ON CACHE BOOL "test-only toy template library: always generates" FORCE)
+        set(QVAC_COREML_TOY_BUILD_TESTS ON)  # the template_dir override is compiled in
+        qvac_coreml_add_to(qvac-coreml-toy NAMESPACE qvac_coreml_toy PREFIX QVAC_COREML_TOY ENABLE ON
+                           TEMPLATES ${toys})
+        target_link_libraries(qvac-coreml-toy PUBLIC ggml)
+        add_executable(test-coreml-toy "${dir}/test/test_toy.mm")
+        target_compile_definitions(test-coreml-toy PRIVATE QVAC_COREML_NS=qvac_coreml_toy)
+        target_include_directories(test-coreml-toy PRIVATE "${dir}/include" "${dir}/src" "${dir}/third_party" "${dir}/test")
+        target_compile_features(test-coreml-toy PRIVATE cxx_std_17)
+        target_compile_options(test-coreml-toy PRIVATE -fobjc-arc)
+        target_link_libraries(test-coreml-toy PRIVATE qvac-coreml-toy)
+        add_dependencies(test-coreml-toy qvac-coreml-tool)
+        add_test(NAME test-coreml-toy
+                 COMMAND test-coreml-toy --tool $<TARGET_FILE:qvac-coreml-tool> --toys "${dir}/test/toy-templates")
+        # Own label: it runs Core ML (generate, compile, load, predict) and
+        # needs macOS 15, so CI runs it in a dedicated step on the supported
+        # OS. It fails, never skips, below that floor.
+        set_tests_properties(test-coreml-toy PROPERTIES LABELS "coreml-toy" TIMEOUT 600)
     endif()
 endfunction()
 

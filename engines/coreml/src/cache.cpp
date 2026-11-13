@@ -710,6 +710,7 @@ struct Job {
         t0 = std::chrono::steady_clock::now();
         CompileResult cr = in.compile(pkg, publish + "/model.mlmodelc");
         out.compile_ms = ms_since(t0);
+        out.compile_peak_bytes = cr.compile_peak_bytes;
         if (!cr.error.ok()) return {cr.error, failed::Stage::compile};
 
         ArtifactInfo a;

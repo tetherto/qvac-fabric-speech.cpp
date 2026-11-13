@@ -2512,6 +2512,17 @@ void case_resolve_precedence() {
     CHECK(resolve(no_cache, {{"QVAC_COREML_CACHE_DIR", "/env"}}).cache_dir.empty());
     CHECK(resolve(none, {{"X_COREML_CACHE_DIR", "/nope"}}).cache_dir.empty());  // no per-engine cache var
 
+    // Template override: compiled into this (test) copy; explicit >
+    // QVAC_COREML_TEMPLATE_DIR > "" (an explicit "" wins).
+    CHECK(template_dir_override_compiled());
+    CHECK(resolve(none, {}).template_dir.empty());
+    CHECK(resolve(none, {{"QVAC_COREML_TEMPLATE_DIR", "/tpl-env"}}).template_dir == "/tpl-env");
+    Options tpl;
+    tpl.template_dir = "/tpl";
+    CHECK(resolve(tpl, {{"QVAC_COREML_TEMPLATE_DIR", "/tpl-env"}}).template_dir == "/tpl");
+    tpl.template_dir = "";
+    CHECK(resolve(tpl, {{"QVAC_COREML_TEMPLATE_DIR", "/tpl-env"}}).template_dir.empty());
+
     // Remaining fields.
     Options all;
     all.generate = Generate::never;
