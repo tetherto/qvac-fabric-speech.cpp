@@ -56,11 +56,30 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                 if test["name"] in WRAPPERS:
                     self.assertEqual(environment.pop("PYTHONDONTWRITEBYTECODE"), "1")
                 if windows:
-                    expected_path = (f"{build.as_posix()}/bin/Release;{build.as_posix()}/bin;"
-                                     f"{INHERITED_WINDOWS_PATH}")
-                    self.assertEqual(environment, {"PATH": expected_path})
+                    self.assert_windows_environment(environment, build)
                 else:
                     self.assertEqual(environment, {})
+
+    def assert_windows_environment(self, environment, build):
+        self.assertEqual(set(environment), {"PATH"})
+        entries = environment["PATH"].split(";")
+        self.assertEqual(entries[2:], INHERITED_WINDOWS_PATH.split(";"))
+        # CMake may expand Windows 8.3 aliases in the temporary directory.
+        self.assertEqual([Path(entry).resolve() for entry in entries[:2]],
+                         [(build / "bin" / "Release").resolve(), (build / "bin").resolve()])
+
+    def test_equivalent_build_directory_spellings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "alias-parent").mkdir()
+            build = root / "build with spaces"
+            build.mkdir()
+            alias = root / "alias-parent" / ".." / build.name
+            environment = {"PATH": (f"{build.as_posix()}/bin/Release;{build.as_posix()}/bin;"
+                                     f"{INHERITED_WINDOWS_PATH}")}
+            self.assert_windows_environment(environment, alias)
+            with self.assertRaises(AssertionError):
+                self.assert_windows_environment(environment, root / "different build")
 
     def test_windows_single_config(self):
         self.check_environment(True, "Ninja" if shutil.which("ninja") else None)
