@@ -5,6 +5,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <filesystem>
@@ -110,17 +111,39 @@ bool write(const std::string & path, const Record & r) {
     return true;
 }
 
+namespace {
+
+// A process's token. Published once and then never changed or freed, so the
+// reference process_token() returns stays valid. A child after fork still
+// sees its parent's token (another pid) and publishes its own; `prev` keeps
+// the parent's reachable.
+struct ProcessToken {
+    pid_t pid;
+    std::string text;
+    const ProcessToken * prev;
+};
+
+std::atomic<const ProcessToken *> g_process_token{nullptr};
+
+}  // namespace
+
 const std::string & process_token() {
-    static pid_t pid = 0;
-    static std::string token;
-    if (pid != ::getpid()) {
-        pid = ::getpid();
+    const pid_t pid = ::getpid();
+    const ProcessToken * cur = g_process_token.load(std::memory_order_acquire);
+    while (cur == nullptr || cur->pid != pid) {
+        // First use in this process. Threads that race here each build a
+        // token; the first to publish it wins, and every thread returns that one.
         std::random_device rd;
         char buf[48];
         std::snprintf(buf, sizeof(buf), "%ld-%08x%08x", static_cast<long>(pid), rd(), rd());
-        token = buf;
+        const ProcessToken * mine = new ProcessToken{pid, buf, cur};
+        if (g_process_token.compare_exchange_strong(cur, mine, std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+            return mine->text;
+        }
+        delete mine;  // `cur` now holds the token another thread published
     }
-    return token;
+    return cur->text;
 }
 
 bool is_resource(const std::string & domain, int64_t code) {

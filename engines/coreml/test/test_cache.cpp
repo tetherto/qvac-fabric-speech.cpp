@@ -1082,6 +1082,157 @@ void case_failure_publication_race() {
     CHECK(!fs::exists(rec_path));
 }
 
+// A routine prune reads an expired failure record and decides to delete it.
+// Before it acts, a preparation of the same key fails again and replaces the
+// record. The prune must keep the replacement: it holds this process's
+// backoff, or (after a second process failed the same way) the
+// deterministic suppression. A key someone holds is skipped, not waited for.
+void case_prune_vs_fresh_failure_record() {
+    auto rejecting = [] {
+        cache::CompileResult r;
+        r.error = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+        return r;
+    };
+    // An expired transient record for the key of `a`: a compile failure eight days ago.
+    auto expired_record = [&](Env & env, const std::string & a) {
+        cache::PrepareInputs in = env.inputs(a);
+        in.now_s = now_s() - 8 * kDay;
+        PrepareOutcome o = cache::prepare(in);
+        CHECK(o.kind == PrepareOutcome::Kind::failed);
+        auto rec = failed::read(failed::record_path(env.layout().failed, o.key32));
+        CHECK(rec && failed::expired(*rec, now_s()));
+        return o.key32;
+    };
+    {
+        // The replacement is this process's own failure: its backoff survives.
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_compile_override = rejecting;
+        const std::string key = expired_record(env, a);
+        const std::string rec_path = failed::record_path(env.layout().failed, key);
+        CHECK(g_compiles == 1);
+        cache::PrunePolicy p = env.routine();
+        int scans = 0;
+        p.after_failed_scan = [&] {
+            ++scans;
+            CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);  // the expired record does not block
+        };
+        cache::PruneReport r = cache::prune(env.cache, p, env.catalog());
+        CHECK(scans == 1 && g_compiles == 2);
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted the fresh record");
+        auto rec = failed::read(rec_path);
+        CHECK(rec && !failed::expired(*rec, now_s()) && rec->process == failed::process_token());
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && g_compiles == 2);  // backing off: no third compile
+    }
+    {
+        // Two other processes fail the same way meanwhile: the second promotes
+        // the record, and the promotion survives the prune.
+        Env env;
+        const std::string a = env.source("a.gguf");
+        g_compile_override = rejecting;
+        const std::string key = expired_record(env, a);
+        const cache::Layout l = env.layout();
+        const std::string rec_path = failed::record_path(l.failed, key);
+        cache::PrunePolicy p = env.routine();
+        int scans = 0;
+        p.after_failed_scan = [&] {
+            ++scans;
+            for (int i = 0; i < 2; ++i) {
+                pid_t kid = spawn([&] {
+                    CHECK(env.prepare(a).kind == PrepareOutcome::Kind::failed);
+                    return 0;
+                });
+                CHECK(reap(kid) == 0);
+            }
+        };
+        cache::PruneReport r = cache::prune(env.cache, p, env.catalog());
+        CHECK(scans == 1);
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted the promoted record");
+        auto rec = failed::read(rec_path);
+        CHECK(rec && rec->cls == ErrorClass::deterministic && rec->attempts == 2);
+        const int compiles = g_compiles;
+        PrepareOutcome o = env.prepare(a);
+        CHECK(o.kind == PrepareOutcome::Kind::failed && o.error.cls == ErrorClass::deterministic &&
+              g_compiles == compiles);
+
+        // While the key is held, prune leaves its record alone and returns
+        // at once; the next prune deletes it.
+        cache::KeyLock held;
+        CHECK(cache::KeyLock::take(l, key, cache::KeyLock::Mode::exclusive, held) == cache::KeyLock::Result::ok);
+        r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK_MSG(r.failed == 0 && fs::exists(rec_path), "the prune deleted a record of a held key");
+        held.release();
+        r = cache::prune(env.cache, cache::PrunePolicy::all(), env.catalog());
+        CHECK(r.failed == 1 && !fs::exists(rec_path));
+    }
+}
+
+// The process token tells a retry in this process from another process's
+// failure. Threads of a new process that ask for it at the same moment (or
+// record failures for different keys at once) all see one complete token,
+// and it is that process's own: a child after fork never keeps its parent's.
+void case_process_token_first_use() {
+    TempDir td;
+    const std::string parent = failed::process_token();
+    auto well_formed = [](const std::string & tok) {
+        const std::string prefix = std::to_string(::getpid()) + "-";
+        return tok.size() == prefix.size() + 16 && tok.compare(0, prefix.size(), prefix) == 0;
+    };
+    CHECK(well_formed(parent));
+    constexpr int kRounds = 100;
+    constexpr int kThreads = 8;
+    int bad_rounds = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        // Even rounds ask for the token; odd rounds record two compile
+        // failures per key, which must stay transient (one process).
+        const bool via_records = round % 2 != 0;
+        const std::string dir = td / ("failed-" + std::to_string(round));
+        pid_t kid = spawn([&] {
+            std::atomic<int> waiting{0};
+            std::atomic<bool> go{false};
+            std::vector<std::string> got(kThreads);
+            std::vector<std::thread> threads;
+            const Error err = Error::transient("compiler rejected the model", "com.apple.CoreML", 3);
+            auto key_of = [](int i) { return std::string(31, 'a') + static_cast<char>('0' + i); };
+            for (int i = 0; i < kThreads; ++i) {
+                threads.emplace_back([&, i] {
+                    waiting.fetch_add(1);
+                    while (!go.load()) {
+                    }
+                    if (via_records) {
+                        for (int n = 0; n < 2; ++n) {
+                            failed::record(dir, key_of(i), failed::Stage::compile, err, "toy-dac", "TEST1", now_s());
+                        }
+                    } else {
+                        got[i] = failed::process_token();
+                    }
+                });
+            }
+            while (waiting.load() < kThreads) {
+            }
+            go.store(true);
+            for (std::thread & t : threads) t.join();
+            const std::string mine = failed::process_token();
+            CHECK_MSG(well_formed(mine), "'" + mine + "'");
+            CHECK(mine != parent);
+            for (int i = 0; i < kThreads; ++i) {
+                if (via_records) {
+                    auto rec = failed::read(failed::record_path(dir, key_of(i)));
+                    CHECK_MSG(rec && rec->process == mine && rec->attempts == 2 && rec->cls == ErrorClass::transient,
+                              rec ? "'" + rec->process + "' " + to_string(rec->cls) : std::string("no record"));
+                } else {
+                    CHECK_MSG(got[i] == mine, "'" + got[i] + "' vs '" + mine + "'");
+                }
+            }
+            return 0;
+        });
+        bad_rounds += reap(kid) != 0;
+    }
+    CHECK_MSG(bad_rounds == 0, std::to_string(bad_rounds) + " of " + std::to_string(kRounds) + " rounds");
+    CHECK(failed::process_token() == parent);
+}
+
 // An I/O error around the compile (the CompileFn reports stage prepare: a
 // missing package, a failed move or copy) stays transient however often other
 // processes repeat it; a compiler rejection still promotes.
@@ -1579,6 +1730,8 @@ int main(int argc, char ** argv) {
                          {"success-clears-failure", case_success_clears_failure},
                          {"failure-publication-race", case_failure_publication_race},
                          {"compile-io-failure-stays-transient", case_compile_io_failure_stays_transient},
+                         {"prune-vs-fresh-failure-record", case_prune_vs_fresh_failure_record},
+                         {"process-token-first-use", case_process_token_first_use},
                          {"resource-codes-never-promote", case_resource_codes_never_promote},
                          {"load-failure-per-function", case_load_failure_per_function},
                          {"deterministic-prepare-failure", case_deterministic_prepare_failure},

@@ -25,6 +25,15 @@ with extra padding frames retain host routing. See the
 [device encoder handoff](engines/parakeet/docs/backends.md#device-encoder-handoff)
 for routing, fallback and validation coverage.
 
+Parakeet TDT uses the native encoder beyond a standard Core ML sidecar's input
+capacity; short Core ML windows require an export with a validated seam policy.
+These standard TDT sidecars retain native weights even with
+`PARAKEET_COREML_ONLY=1`; incompatible encoder-less GGUFs fail at load time.
+Standard TDT push streams default to 30-second chunks and reject smaller explicit
+chunks to prevent phrase loss. Small PCM writes and final tail flushing remain
+supported; full TranscribePsy EU retains its separate streaming policy. See the
+[Parakeet streaming contract](engines/parakeet/docs/api.md).
+
 | Engine | Model families | Capabilities and limitations |
 |---|---|---|
 | [Whisper](docs/WHISPER.md) | tiny, base, small, medium, large v1/v2/v3, large-v3-turbo; Silero v5.1.2/v6.2.0 | ASR, multilingual-to-English translation, VAD, tinydiarize speaker turns; metadata-only memory fit from a model or its weightless description; `.en` checkpoints are English-only and turbo is intended for transcription; tiny/base/small/large-v3-turbo validated on WebGPU |
