@@ -31,7 +31,7 @@
     "runtime_weight_bytes": 108316032,
     "workspace_bytes": 0,
     "compile_peak_bytes": null,
-    "ane_compile_reserve_bytes": 398458880,
+    "ane_compile_reserve_bytes": 536870912,
     "load_peak_bytes": {
       "cpu_and_ane": null,
       "all": null,

@@ -259,9 +259,10 @@ Memory validation (M2, 24 GB, macOS 15.7.3, compute units `all`,
 calling thread while the sidecar was generated, compiled, loaded and warmed
 in the background from an empty cache. Over three runs the process footprint
 rose at most 229 MiB above the warm ggml baseline, against a charged envelope
-of 475 MiB. `ANECompilerService` peaked at 372 MiB during the cold Neural
-Engine compile, 3.6 times the 103 MiB `weight.bin`, so the template sets
-`ane_compile_reserve_bytes` to 380 MiB: the runtime starts a cold Neural
+of 475 MiB. `ANECompilerService` peaked at 360-497 MiB across four cold
+Neural Engine compiles, up to 4.8 times the 103 MiB `weight.bin` (well above
+the runtime's 1.6 times default), so the template sets
+`ane_compile_reserve_bytes` to 512 MiB: the runtime starts a cold Neural
 Engine load only while that much memory is available, and the DAC stays on
 ggml (state `deferred(memory)`) until it is.
 
