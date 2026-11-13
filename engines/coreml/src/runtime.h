@@ -178,7 +178,9 @@ public:
     void pool_add(PoolCore & p, const std::shared_ptr<SlotCore> & c);
     void pool_set_predicted(PoolCore & p, const std::vector<std::shared_ptr<SlotCore>> & cores);
     size_t pool_live(const PoolCore & p);
-    void on_model_released(const std::string & key);
+    // Instance `m` of `key` is being destroyed (its destructor, before its
+    // memory goes).
+    void on_model_released(const std::string & key, const SharedModel * m);
     // A pending release of instance `m` from pool `p` (drop_model_locked)
     // completed outside mu: its reference is gone.
     void on_pool_released(const std::weak_ptr<PoolCore> & p, const SharedModel * m);
@@ -228,6 +230,8 @@ private:
     // is released outside mu (a replacement is admitted only then),
     // whether or not another member or a Handle also counts it meanwhile.
     void drop_model_locked(SlotCore & c, Graveyard & gy);
+    // Retires the key of `m` process-wide: every instance of it, whoever owns
+    // it, and every load of it not started yet.
     void retire_model_locked(SharedModel & m, const std::string & reason, Graveyard & gy);
     void subscribe_load_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd, Graveyard & gy);
     void subscribe_prepare_locked(const std::shared_ptr<SlotCore> & c, Priority p, bool nd);
@@ -266,6 +270,8 @@ private:
     void publish(const std::shared_ptr<Job> & j, const std::shared_ptr<SharedModel> & m, bool loaded,
                  const std::optional<HintView> & hint);
     void fail(const std::shared_ptr<Job> & j, const Error & e, SlotState st = SlotState::failed);
+    // Ends job `j`, started or still queued: every live subscriber takes `st`.
+    void fail_locked(const std::shared_ptr<Job> & j, const Error & e, SlotState st, Graveyard & gy);
     void requeue(const std::shared_ptr<Job> & j);
     std::optional<HintView> record_hint(const Job & j, int64_t ms, bool warm);
     void write_stale(const std::string & path);
@@ -285,6 +291,11 @@ private:
         const SharedModel * id = nullptr;
     };
     std::unordered_map<std::string, RegEntry> registry_;
+    // Every published instance by model key, shareable or not (a stateful
+    // template has one per owner), identity only: retirement reaches each of
+    // them. An instance's destructor removes its entry under mu before its
+    // memory goes, so an identity read under mu is alive.
+    std::unordered_map<std::string, std::vector<SharedModel *>> instances_;
     std::unordered_map<std::string, std::string> retired_;
     std::vector<std::weak_ptr<SlotCore>> slots_;
     uint64_t seq_ = 0;
