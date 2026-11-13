@@ -10,8 +10,9 @@
 //            A production-geometry random GGUF: values per tensor inside the
 //            recorded range; tensors that are quantised (or f16/bf16) in the
 //            reference take the listed types in turn, the rest stay f32.
-//            Quantised with ggml's own quantizers. --set overrides a string
-//            metadata value (extraction sentinels).
+//            Quantised with ggml's own quantizers; --types takes only types
+//            ggml can both write and read back (twin_writes()). --set
+//            overrides a string metadata value (extraction sentinels).
 //   f32      <in.gguf> -o <out.gguf>
 //            An F32 copy dequantised by ggml (to_float): the exporter reference
 //            for quantised sources.
@@ -212,6 +213,29 @@ private:
     std::vector<ggml_tensor *> order_;
 };
 
+// The encodings `twin` writes: f32 and f16 itself, the others through
+// ggml_quantize_chunk(), which aborts on a type it has no encoder for. A
+// type qualifies when ggml-base both quantises it (from_float_ref) and reads
+// it back (to_float), so a twin is always a GGUF the generator and `f32` can
+// read. That leaves out f64 and q8_k (no encoder) and q8_1 (no decoder).
+bool twin_writes(ggml_type type) {
+    if (type == GGML_TYPE_F32 || type == GGML_TYPE_F16) return true;
+    const ggml_type_traits * tr = ggml_get_type_traits(type);
+    return tr && tr->from_float_ref && tr->to_float && !ggml_quantize_requires_imatrix(type);
+}
+
+// The --types names twin accepts, in ggml type order.
+std::string twin_type_names() {
+    std::string s;
+    for (int t = 0; t < GGML_TYPE_COUNT; ++t) {
+        const char * name = recipe::ggml_type_name_of(static_cast<uint32_t>(t));
+        if (std::strcmp(name, "?") == 0 || !twin_writes(static_cast<ggml_type>(t))) continue;
+        if (!s.empty()) s += ", ";
+        s += name;
+    }
+    return s;
+}
+
 std::vector<uint8_t> encode(ggml_type type, const std::vector<float> & v, int64_t ne0) {
     std::vector<uint8_t> out;
     const int64_t n = static_cast<int64_t>(v.size());
@@ -308,11 +332,7 @@ void set_meta(gguf_context * g, const json & e) {
 }
 
 int cmd_twin(const Args & a) {
-    std::ifstream in(a.need("--manifest"));
-    if (!in) die("cannot read the manifest");
-    const json m = json::parse(in, nullptr, false);
-    if (!m.is_object() || m.value("schema", 0) != 1) die("not a schema-1 reference-gguf.json");
-    const uint64_t seed = std::stoull(a.need("--seed"));
+    // Every --types entry is checked before anything is read or written.
     std::vector<ggml_type> types;
     {
         std::stringstream ss(a.need("--types"));
@@ -320,9 +340,17 @@ int cmd_twin(const Args & a) {
         while (std::getline(ss, t, ',')) {
             auto ty = recipe::ggml_type_from_name(t);
             if (!ty) die("unknown type " + t);
+            if (!twin_writes(static_cast<ggml_type>(*ty))) {
+                die("--types: cannot write " + t + " (supported: " + twin_type_names() + ")");
+            }
             types.push_back(static_cast<ggml_type>(*ty));
         }
     }
+    std::ifstream in(a.need("--manifest"));
+    if (!in) die("cannot read the manifest");
+    const json m = json::parse(in, nullptr, false);
+    if (!m.is_object() || m.value("schema", 0) != 1) die("not a schema-1 reference-gguf.json");
+    const uint64_t seed = std::stoull(a.need("--seed"));
     std::map<std::string, std::string> sets;
     if (auto it = a.opt.find("--set"); it != a.opt.end()) {
         for (const std::string & kv : it->second) {

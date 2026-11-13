@@ -306,6 +306,9 @@ struct PrunePolicy {
     std::vector<std::string> dead_paths;  // scoped
     std::optional<int64_t> now_s;         // tests
     std::string tmp_dir;                  // routine $TMPDIR sweep; "" -> $TMPDIR or /tmp
+    // Tests only: runs after the sweep's first read found a failure record to
+    // delete, before it takes the key's lock and reads the record again.
+    std::function<void()> after_failed_scan;
 
     static PrunePolicy routine(int64_t grace_s = 30LL * 24 * 3600);
     static PrunePolicy scoped(std::vector<std::string> dead_paths);

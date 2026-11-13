@@ -71,7 +71,8 @@ std::string record_path(const std::string & failed_dir, const std::string & key3
 std::optional<Record> read(const std::string & path);
 bool write(const std::string & path, const Record & r);  // atomic (temp + rename)
 
-// This process's token: changes after fork.
+// This process's token, the same for every thread; safe to call from several
+// threads at once, including the first call. A child after fork gets a new one.
 const std::string & process_token();
 
 // Codes that never promote (the resource list lives here).

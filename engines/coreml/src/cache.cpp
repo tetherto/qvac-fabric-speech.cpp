@@ -676,8 +676,15 @@ struct Job {
     // Under EX: steps 5-7. Returns the failing stage with the error.
     std::pair<Error, failed::Stage> generate(const std::string & key) {
         StagingGuard guard;
-        guard.dir = l.staging + "/" + key + "." + std::to_string(::getpid()) + "." + rand_hex();
-        const std::string pkg = guard.dir + "/qvac-coreml-" + key + ".mlpackage";
+        const std::string pid = std::to_string(::getpid());
+        const std::string nonce = rand_hex();
+        guard.dir = l.staging + "/" + key + "." + pid + "." + nonce;
+        // Core ML compiles into <user temp>/<package stem>.mlmodelc, which every
+        // process and cache directory shares, while the key lock covers only
+        // this cache directory: the stem is unique to this attempt so that
+        // concurrent prepares of the same key never meet there. The
+        // qvac-coreml- prefix lets routine prune sweep a killed compile's output.
+        const std::string pkg = guard.dir + "/qvac-coreml-" + key + "-" + pid + "-" + nonce + ".mlpackage";
         {
             std::error_code ec;
             fs::create_directories(guard.dir, ec);
@@ -1156,15 +1163,30 @@ struct Pruner {
         }
     }
 
+    // A record this library owns that the policy deletes: any in `all`, an
+    // expired one in `routine`.
+    bool stale_record(const std::string & pth) const {
+        const std::optional<failed::Record> r = failed::read(pth);
+        return r && c.owns(r->template_id) && (p.mode == PrunePolicy::Mode::all || failed::expired(*r, now));
+    }
+
+    // Generation writes and clears a key's failure records under the key's
+    // EX, and a loaded model holds the key's lease. So a record is deleted
+    // only under EX and after a second read: a replacement written since the
+    // scan (a fresh backoff, a promotion to deterministic) is kept. A held key
+    // is skipped, never waited for.
     void failed_records() {
         if (p.mode == PrunePolicy::Mode::scoped) return;
         for (const std::string & n : list_dir(l.failed)) {
+            // <key32>.json or <key32>.<fn_units_hash>.json; anything else has no key lock.
+            const std::string key = n.substr(0, 32);
+            if (!is_hex32(key) || n.size() <= 32 || n[32] != '.') continue;
             const std::string pth = l.failed + "/" + n;
-            const std::optional<failed::Record> r = failed::read(pth);
-            if (!r || !c.owns(r->template_id)) continue;
-            if (p.mode == PrunePolicy::Mode::all || failed::expired(*r, now)) {
-                if (::unlink(pth.c_str()) == 0) ++rep.failed;
-            }
+            if (!stale_record(pth)) continue;
+            if (p.after_failed_scan) p.after_failed_scan();
+            KeyLock ex;
+            if (KeyLock::take(l, key, KeyLock::Mode::exclusive, ex) != KeyLock::Result::ok) continue;  // in use
+            if (stale_record(pth) && ::unlink(pth.c_str()) == 0) ++rep.failed;
         }
     }
 

@@ -17,11 +17,14 @@ namespace QVAC_COREML_NS {
 namespace apple {
 
 // +[MLModel compileModelAtURL:completionHandler:], waited for synchronously.
-// Core ML leaves the bundle at $TMPDIR/<package stem>.mlmodelc
-// (CompileResult::tmp_output; the pipeline names packages
-// qvac-coreml-<key>.mlpackage, so routine prune's $TMPDIR sweep finds the
-// leftovers of a process killed here). It is moved to `mlmodelc_out` with
-// rename, or copied and removed when the two are on different volumes.
+// Core ML leaves the bundle at $TMPDIR/<package stem>.mlmodelc, or at
+// <package stem>_<UUID>.mlmodelc when that name is taken
+// (CompileResult::tmp_output). The pipeline names each attempt's package
+// qvac-coreml-<key>-<pid>-<random>.mlpackage: concurrent prepares of the same
+// key in other processes or cache directories never share an output, and
+// routine prune's $TMPDIR sweep finds the leftovers of a process killed
+// here. The bundle is moved to `mlmodelc_out` with rename, or copied and
+// removed when the two are on different volumes.
 //
 // Errors: a compile failure carries Core ML's NSError domain and code and
 // `stage` compile: transient, and a second failure with the same code from
