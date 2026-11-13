@@ -780,6 +780,63 @@ python engines/parakeet/scripts/export-sortformer-diarizer-coreml.py \
   --compile-dir engines/parakeet/models
 ```
 
+### Generated diarizers
+
+The library can also make the Nemotron 3 Diarization bundles itself, from the
+GGUF alone. macOS builds with `PARAKEET_COREML=ON` compile the Core ML
+generator (`PARAKEET_COREML_GENERATE`, default `ON` on macOS and `OFF` on iOS)
+and embed one template per capacity under
+`engines/parakeet/coreml-templates/nemotron-diar-f{358,745,1125}/`. A template
+is the exporter's weight-free Core ML program plus a recipe that says how
+every weight of `weight.bin` is computed from the GGUF's tensors:
+
+- most weights are the GGUF tensor cast to fp16, after ggml dequantises it;
+- each layer's `w_qkv` has its query rows scaled by `1/sqrt(head_width)`
+  (`slice`, `mul`, `concat`), as the exporter does;
+- the rotate-half matrix and the RoPE cos/sin tables of the capacity do not
+  depend on the weights and are stored in the template (`literals.bin`);
+- the compiler folded two constants of the layer-norm lowering (`zeros`,
+  `ones`) and the negated speaker-head weight (`neg`);
+- the negated speaker-head bias is an inline constant of the program, which a
+  `patch` writes into the spec.
+
+When a capacity has no adjacent bundle, the engine plans route `generate` for
+it if the GGUF matches the template (architecture `sortformer`, version `v3`,
+the template's hyperparameters, and every tensor's name and shape, with
+matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k), a cache directory is
+set (`CoremlOptions::cache_dir`, `QVAC_COREML_CACHE_DIR`, or the CLI's
+default), `generate` is not `never`, the OS is macOS 15 or later, and the
+resolved compute units are ones the template's memory envelope was validated
+for (`cpu_and_ane`). After the model has loaded, the runtime's prepare queue
+digests the source tensors, writes the package, compiles it with
+`MLModel.compileModelAtURL`, publishes it under
+`<cache_dir>/qvac-coreml-v1/artifacts/` and hands it to the load lane; the
+capacity then loads like an adjacent bundle. A later load of the same GGUF
+adopts the published bundle without generating it again (status route
+`cached`). Until a capacity is ready its passes run on ggml and the result
+reports `coreml_pending`.
+
+The generated `weight.bin` is byte-identical to what the exporter writes for
+the same GGUF dequantised to f32 (`qvac-coreml-tool f32`), and the spec is the
+exporter's. CI checks this on random twins of the model (extraction and
+cross-seed gates, `engines/coreml/python/coreml_template.py report`), on the
+real q8_0 GGUF (`coreml_template.py real`), and runs
+`test-nemotron-diarization-coreml-generated-parity` on diarizers generated
+from that GGUF.
+
+| Capacity | Generated `weight.bin` | Compile |
+|---:|---:|---:|
+| 358 | 199.3 MB | 0.56-0.62 s on an M2 |
+| 745 | 200.1 MB | |
+| 1125 | 200.8 MB | |
+
+`parakeet-fit-params` charges each generated capacity a call can load at its
+template's Core ML envelope (runtime weights, input and output buffers, and
+one generation or load transient, with a 1.25 margin) in the Core
+ML-inclusive verdict only. The route comes from the options and the GGUF,
+never from the cache, so the projection is the same before and after the first
+generation.
+
 Each capacity is a separate bundle of Float16 weights, about 190 MB for
 Nemotron 3 Diarization and 220 MB for Sortformer v2.1. A multifunction package
 would share the weights, but on macOS 15.3 Core ML refuses to select a function

@@ -266,7 +266,7 @@ jobs:
     needs: [runner_names, coreml_authorize]
     if: needs.coreml_authorize.outputs.allowed == 'true'
     runs-on: ${{ needs.runner_names.outputs.macos_arm64_gpu }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -295,11 +295,35 @@ jobs:
           cmake --build coreml-ggml-build -j4
           cmake --install coreml-ggml-build
 
+      # NVIDIA's Nemotron 3 Diarization q8_0 GGUF (107 MB) at a pinned
+      # revision and sha256, alone in its directory: no diarizer bundle sits
+      # beside it, so the engine generates the diarizers from the GGUF.
+      - name: Cache the Nemotron 3 Diarization q8_0 GGUF
+        id: nemotron-cache
+        uses: actions/cache@v4
+        with:
+          path: nemotron-generated
+          key: nemotron-3-diarization-q8_0-f667ed73aee57d40cc39428eb768b4fd87a0a29e
+
+      - name: Stage the Nemotron 3 Diarization q8_0 GGUF
+        if: steps.nemotron-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p nemotron-generated
+          curl -fL --retry 3 -o nemotron-generated/Nemotron-3-Diarization.q8_0.gguf \
+            https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.q8_0.gguf
+
+      - name: Verify the Nemotron 3 Diarization q8_0 GGUF
+        run: |
+          echo "08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1  nemotron-generated/Nemotron-3-Diarization.q8_0.gguf" | shasum -a 256 -c -
+          if ls nemotron-generated | grep -q -- '-diarizer-'; then
+            echo "::error::a diarizer bundle sits beside the staged GGUF"; exit 1
+          fi
+
       - name: Configure (PARAKEET_COREML=ON)
         env:
           FIXTURE_ROOT: ${{ inputs.fixture_root }}
         run: |
-          fixture_options=()
+          fixture_options=("-DPARAKEET_TEST_NEMOTRON_GENERATED_GGUF=$PWD/nemotron-generated/Nemotron-3-Diarization.q8_0.gguf")
           if [ -n "$FIXTURE_ROOT" ]; then
             fixture_options+=("-DPARAKEET_TEST_MODEL_DIR=$FIXTURE_ROOT/models"
                               "-DPARAKEET_TEST_AUDIO_DIR=$FIXTURE_ROOT/audio"
@@ -320,6 +344,41 @@ jobs:
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-runtime-results.xml \
             --require test-coreml-scheduler --require test-parakeet-coreml-route
+
+      # The generated diarizers on the device: an empty cache, the staged
+      # GGUF alone, and the Core ML / ggml parity gate on every capacity the
+      # sample covers. The test fails (never skips) unless every diarizer was
+      # generated.
+      - name: Test (generated Nemotron diarizers on the device, no skips)
+        run: |
+          ctest --test-dir build-coreml -R '^test-nemotron-diarization-coreml-generated-parity$' --no-tests=error \
+            --output-on-failure --timeout 1800 --output-junit coreml-generated-results.xml
+          python3 engines/parakeet/scripts/check-ctest-junit.py \
+            build-coreml/coreml-generated-results.xml \
+            --require test-nemotron-diarization-coreml-generated-parity
+
+      # Real-weights gate: for each Nemotron template, the unchanged exporter on
+      # the staged GGUF dequantised by ggml against the C++ generator on the
+      # GGUF itself, weight.bin blob by blob and the spec.
+      - name: Install the pinned coremltools venv
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          coreml_python="$(command -v python3.11 || command -v python3)"
+          "$coreml_python" -m venv .venv-coreml-templates
+          .venv-coreml-templates/bin/python -m pip install -r engines/parakeet/scripts/requirements-coreml.txt
+
+      - name: Real-weights gate (Nemotron templates on the staged q8_0)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          .venv-coreml-templates/bin/python -B engines/coreml/python/coreml_template.py \
+            --tool build-coreml/qvac-coreml-tool real \
+            --gguf nemotron-generated/Nemotron-3-Diarization.q8_0.gguf \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f358 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f745 \
+            --template-dir engines/parakeet/coreml-templates/nemotron-diar-f1125 \
+            --json nemotron-real-gate.json
 
       - name: Test (background sidecars on the device, no skips)
         if: inputs.fixture_root != ''

@@ -145,7 +145,8 @@ everything.
 | `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
 | `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. |
-| `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where warm-load hints are kept. Without it no hints are kept. |
+| `generate` | `background`, `never` | `background` generates a sidecar that has no adjacent bundle from the GGUF into `cache_dir`, on the runtime's background queue, when the library embeds a template that matches the GGUF (see [Generated sidecars](#generated-sidecars)). `never` turns generation off; adjacent bundles still load. |
+| `cache_dir` | `QVAC_COREML_CACHE_DIR`, else none | Where generated sidecars and warm-load hints are kept. Without it nothing is generated and no hints are kept. |
 | `strict_wait_ms` | unbounded | Upper bound on the wait under `use = require`. |
 | `memory_budget_bytes` | none | The memory budget the caller checked with `parakeet-fit-params`. When it is set, and the ggml-only fit passes but the fit including the Core ML sidecars does not, the sidecars are disabled for this engine and it runs on ggml. |
 
@@ -175,6 +176,7 @@ The `parakeet` CLI exposes the same controls:
 | `--coreml-wait MODE` | `none` (default), `construct` or `call` |
 | `--coreml-prewarm SCOPE` | `none`, `minimal`, `predicted` (default) or `all` |
 | `--coreml-compute-units U` | `all`, `cpu_and_ane`, `cpu_and_gpu` or `cpu_only` |
+| `--coreml-generate MODE` | `background` (default) or `never` |
 | `--coreml-cache-dir DIR` | default `QVAC_COREML_CACHE_DIR`, else `~/Library/Application Support/qvac-speech/coreml` |
 | `--coreml-status-json PATH` | writes the status JSON on exit; `-` writes to stdout |
 
@@ -188,6 +190,41 @@ benchmark measures the sidecar and not the ggml calls made while it loads.
 
 When `--coreml-use require` refuses a call, the CLI prints `error: <reason>`
 to stderr and exits with status 1.
+
+### Generated sidecars
+
+macOS builds with `PARAKEET_COREML=ON` also compile the Core ML generator
+(`PARAKEET_COREML_GENERATE`, default `ON` on macOS and `OFF` on iOS) and embed
+these templates in the library:
+
+| Template | Sidecar | Capacity |
+|---|---|---:|
+| `nemotron-diar-f358` | Nemotron 3 Diarization diarizer | 358 |
+| `nemotron-diar-f745` | Nemotron 3 Diarization diarizer | 745 |
+| `nemotron-diar-f1125` | Nemotron 3 Diarization diarizer | 1125 |
+
+When a capacity has no adjacent bundle, the engine generates it from the GGUF
+alone: it writes the package's weights from the GGUF's tensors (dequantised by
+ggml and cast to fp16), compiles the package on the device and publishes the
+result in `cache_dir`. A later load of the same GGUF finds it there. This runs
+on the runtime's background queue after the model has loaded; until the
+capacity is ready, diarization runs on ggml and reports `coreml_pending`. The
+generated bundle has the same weights, byte for byte, as the exporter's
+bundle for that GGUF.
+
+Generation needs macOS 15, a `cache_dir` (the CLI defaults to one) and
+`generate = background`. The GGUF must match the template: architecture
+`sortformer`, version `v3`, the template's hyperparameters, and every tensor's
+name and shape, with matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k. The
+templates are validated for the `cpu_and_ane` compute units (the diarizers'
+default), so another `compute_units` value turns generation off for them
+(status `unsupported`, reason `unvalidated_units`). An adjacent bundle always
+wins. `Engine::coreml_status_json()` reports `route: generated` for a bundle
+generated in this process, `cached` for one found in the cache, and
+`generation.supported` with the reason when generation is off. Each generated
+capacity takes about 200 MB in the cache. `parakeet-fit-params` charges the
+generated capacities' Core ML memory in the Core ML-inclusive verdict; see
+[docs/backends.md](docs/backends.md#generated-diarizers).
 
 ## Backend selection
 
