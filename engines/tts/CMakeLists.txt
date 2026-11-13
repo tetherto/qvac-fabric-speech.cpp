@@ -504,9 +504,12 @@ if (TTS_CPP_BUILD_LIBRARY)
         message(STATUS "tts-cpp: Core ML sidecars enabled (TTS_CPP_USE_COREML): Audio8 codec, Supertonic encoder/vector/vocoder, Chatterbox S3Gen stages, Pocket FlowLM step and Mimi decoder, CosyVoice3 stages, Parler DAC/optional decoder, MOSS stages, LavaSR denoiser/enhancer")
     endif()
     # Shared Core ML runtime (engines/coreml): compiled into libtts-cpp under its
-    # own namespace when TTS_CPP_COREML is on. No engine source uses it yet.
+    # own namespace when TTS_CPP_COREML is on. Parler's DAC loads through it and,
+    # with TTS_CPP_COREML_GENERATE (macOS default), is generated from the GGUF
+    # with the embedded template below.
     include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
-    qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML})
+    qvac_coreml_add_to(tts-cpp NAMESPACE tts_cpp_coreml PREFIX TTS_CPP ENABLE ${TTS_CPP_COREML}
+        TEMPLATES "${CMAKE_CURRENT_SOURCE_DIR}/coreml-templates/parler-dac-w128")
     target_link_libraries(tts-cpp PUBLIC ggml)
     find_package(Threads REQUIRED)
     target_link_libraries(tts-cpp PRIVATE Threads::Threads)
