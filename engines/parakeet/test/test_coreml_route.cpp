@@ -33,8 +33,12 @@
 //                         lease and reports "generated", then "cached" in the
 //                         next instance; a GGUF the template does not match,
 //                         unvalidated units or no cache directory give no
-//                         route; the generated envelope and route are the
-//                         same before and after generation (fit-stable)
+//                         route, and the first two a status-only slot that
+//                         status and the construction group report
+//                         (no_template, unsupported(unvalidated_units),
+//                         generation.reason unvalidated_units); the
+//                         generated envelope and route are the same before
+//                         and after generation (fit-stable)
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -854,18 +858,58 @@ void case_generated_sidecar() {
         CHECK(g_generated_loads == 1 && g_generated_leases == 1, "the load held the artifact's lease");
         CHECK(sidecars.status_json().find("\"generated\"") != std::string::npos, "status JSON");
 
-        // Unvalidated units and a mismatching GGUF give no route.
+        CHECK(sidecars.admit_generated(request_for(&probed[0], gguf)) && sidecars.slots().size() == 1,
+              "a generated route is admitted and left to the caller to register");
+        CHECK(sidecars.generation_status().supported, "a registered generated route keeps generation supported");
+
+        // Unvalidated units and a mismatching GGUF give no route, and a
+        // status-only slot that status and the construction group list.
         CoremlOptions gpu = opts;
         gpu.compute_units = "cpu_and_gpu";
         CoremlSidecars gpu_sidecars(gpu, m);
         CHECK(gpu_sidecars.plan(request_for(&probed[0], gguf)).route == pcm::Route::none &&
                   gpu_sidecars.plan(request_for(&probed[0], gguf)).reason == "unvalidated_units",
               "units the template was not validated for suppress generation");
+        CHECK(!gpu_sidecars.admit_generated(request_for(&probed[0], gguf)), "a suppressed route is not admitted");
+        CHECK(gpu_sidecars.slots().size() == 1 && gpu_sidecars.slots()[0]->spec().route == pcm::Route::none,
+              "it keeps a status-only slot");
+        CHECK(!gpu_sidecars.generation_status().supported &&
+                  gpu_sidecars.generation_status().reason == "unvalidated_units",
+              "every generated route suppressed for the units: generation reason unvalidated_units");
+        const std::string gpu_status = gpu_sidecars.status_json();
+        CHECK(gpu_status.find("\"generation\":{\"reason\":\"unvalidated_units\",\"supported\":false}") !=
+                  std::string::npos,
+              "status JSON: generation.reason unvalidated_units");
+        CHECK(gpu_status.find("\"stage\":\"diarizer-358\"") != std::string::npos &&
+                  gpu_status.find("\"state\":\"unsupported(unvalidated_units)\"") != std::string::npos,
+              "status JSON: the slot reports unsupported(unvalidated_units)");
+        gpu_sidecars.start();
+        const std::string gpu_group = gpu_sidecars.construction_json();
+        CHECK(gpu_group.find("\"slots\":[]") != std::string::npos &&
+                  gpu_group.find("\"skipped_route_none\":[{") != std::string::npos &&
+                  gpu_group.find("unsupported(unvalidated_units)") != std::string::npos,
+              "construction JSON: the suppressed slot is skipped, nothing is loaded");
+
         const std::vector<pcm::generation::Candidate> mismatch =
             pcm::generation::probe({"toy-stateless"}, other.string(), sidecars.resolved());
         CHECK(!mismatch.empty() && mismatch[0].available && !mismatch[0].matched, "another GGUF does not match");
-        CHECK(!mismatch.empty() && sidecars.plan(request_for(&mismatch[0], other)).none_state == pcm::SlotState::no_template,
+        if (mismatch.empty()) return;
+        CHECK(sidecars.plan(request_for(&mismatch[0], other)).none_state == pcm::SlotState::no_template,
               "a mismatching GGUF reports no_template");
+        CoremlSidecars other_sidecars(opts, m);
+        CHECK(!other_sidecars.admit_generated(request_for(&mismatch[0], other)), "a mismatching GGUF is not admitted");
+        CHECK(other_sidecars.generation_status().supported && other_sidecars.generation_status().reason.empty(),
+              "no_template is not a units suppression: generation stays supported");
+        const std::string other_status = other_sidecars.status_json();
+        CHECK(other_status.find("\"generation\":{\"reason\":null,\"supported\":true}") != std::string::npos &&
+                  other_status.find("\"state\":\"no_template\"") != std::string::npos,
+              "status JSON: the slot reports no_template");
+        other_sidecars.start();
+        const std::string other_group = other_sidecars.construction_json();
+        CHECK(other_group.find("\"slots\":[]") != std::string::npos &&
+                  other_group.find("\"skipped_route_none\":[{") != std::string::npos &&
+                  other_group.find("no_template") != std::string::npos,
+              "construction JSON: the no_template slot is skipped");
         CoremlOptions no_cache = opts;
         no_cache.cache_dir = "";
         CoremlSidecars no_cache_sidecars(no_cache, m);

@@ -15,6 +15,8 @@ constexpr const char * kWeightsFile = "/weights/weight.bin";
 // Default ane_compile_reserve_bytes: ANECompilerService peaked at about
 // 1.6x the weights compiling a 199 MB model.
 constexpr double kAneCompileReserveFactor = 1.6;
+// plan()'s reason for a generated route the resolved units are not validated for.
+constexpr const char * kUnvalidatedUnits = "unvalidated_units";
 
 uint64_t file_bytes(const std::string & path) {
     struct stat st {};
@@ -158,9 +160,20 @@ std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
         spec.ane_compile_reserve_bytes =
             plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
     }
+    if (request.generated != nullptr && !request.present) {
+        const bool unvalidated = plan.route == pcm::Route::none && plan.reason == kUnvalidatedUnits;
+        if (plan.route == pcm::Route::generate || unvalidated) ++generated_routes_;
+        if (unvalidated) ++unvalidated_routes_;
+    }
     auto slot = manager_->make_slot(std::move(spec), pcm::SlotPolicy::from(resolved_));
     entries_.push_back(Entry{slot, request.minimal});
     return slot;
+}
+
+bool CoremlSidecars::admit_generated(const SidecarRequest & request) {
+    if (plan(request).route == pcm::Route::generate) return true;
+    add(request);
+    return false;
 }
 
 pcm::GenerationStatus CoremlSidecars::generation_status() const {
@@ -175,6 +188,8 @@ pcm::GenerationStatus CoremlSidecars::generation_status() const {
         g.reason = "no_cache_dir";
     } else if (manager_->platform() != pcm::Platform::macos || !pcm::os_at_least(manager_->os_version(), 15, 0)) {
         g.reason = "os";
+    } else if (generated_routes_ > 0 && unvalidated_routes_ == generated_routes_) {
+        g.reason = kUnvalidatedUnits;
     } else {
         g.supported = true;
     }

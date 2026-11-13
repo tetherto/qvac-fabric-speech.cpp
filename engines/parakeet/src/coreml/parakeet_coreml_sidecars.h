@@ -111,8 +111,16 @@ public:
     // reported in status and listed as skipped in groups.
     std::shared_ptr<pcm::Slot> add(const SidecarRequest & request);
 
+    // For a template candidate of a stage with no adjacent bundle
+    // (`request.generated` set): true when plan() routes it to `generate`, and
+    // the caller registers it. Otherwise registers a status-only slot (state
+    // `no_template`, `unsupported(unvalidated_units)`, ...) so status and the
+    // groups' skipped lists show it, and returns false.
+    bool admit_generated(const SidecarRequest & request);
+
     // Whether this instance can generate sidecars, and why not (status
-    // "generation").
+    // "generation"). The reason is "unvalidated_units" once every generated
+    // route registered so far was suppressed for the resolved units.
     pcm::GenerationStatus generation_status() const;
 
     // Issues the construction group for the resolved prewarm scope; with
@@ -142,6 +150,10 @@ private:
     pcm::Resolved resolved_;
     std::shared_ptr<pcm::Manager> manager_;
     std::vector<Entry> entries_;
+    // Registered template candidates with a generated route: planned
+    // `generate`, or suppressed for the resolved units.
+    int generated_routes_ = 0;
+    int unvalidated_routes_ = 0;
     std::shared_ptr<pcm::Group> construction_;
 };
 

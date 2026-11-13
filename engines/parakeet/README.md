@@ -217,11 +217,16 @@ Generation needs macOS 15, a `cache_dir` (the CLI defaults to one) and
 `sortformer`, version `v3`, the template's hyperparameters, and every tensor's
 name and shape, with matrices in f32, f16, bf16, q8_0, q6_k, q5_k or q4_k. The
 templates are validated for the `cpu_and_ane` compute units (the diarizers'
-default), so another `compute_units` value turns generation off for them
-(status `unsupported`, reason `unvalidated_units`). An adjacent bundle always
-wins. `Engine::coreml_status_json()` reports `route: generated` for a bundle
-generated in this process, `cached` for one found in the cache, and
-`generation.supported` with the reason when generation is off. Each generated
+default), so another `compute_units` value turns generation off for them. An
+adjacent bundle always wins. `Engine::coreml_status_json()` reports
+`route: generated` for a bundle generated in this process, `cached` for one
+found in the cache, and `generation.supported` with the reason when generation
+is off. A capacity that is not generated keeps an entry with `route: none`,
+which the construction group lists under `skipped_route_none`: state
+`no_template` when the GGUF does not match the template, and
+`unsupported(unvalidated_units)` when the compute units are not validated.
+When every capacity is suppressed for its units, `generation.reason` is
+`unvalidated_units`. Each generated
 capacity takes about 200 MB in the cache. `parakeet-fit-params` charges the
 generated capacities' Core ML memory in the Core ML-inclusive verdict; see
 [docs/backends.md](docs/backends.md#generated-diarizers).

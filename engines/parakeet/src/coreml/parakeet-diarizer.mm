@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <dirent.h>
+#include <limits>
 #include <sys/stat.h>
 #include <cstdlib>
 #include <cstring>
@@ -619,14 +620,23 @@ std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & g
         probed = pcm::generation::probe(ids, gguf_path, sidecars.resolved());
         pcm::SourceStat source;
         pcm::generation::source_stat(gguf_path, source);
+        // A capacity that is not generated (no_template, unvalidated units,
+        // ...) keeps a status-only slot and is not served. It is in the
+        // minimal set when it is the smallest capacity of all, so the
+        // construction group lists it as skipped.
+        int smallest = std::numeric_limits<int>::max();
+        for (const CoremlDiarizers::Capacity & c : capacities) smallest = std::min(smallest, c.frames);
+        for (const CoremlDiarizerTemplate & t : templates) smallest = std::min(smallest, t.frames);
         for (size_t i = 0; i < templates.size() && i < probed.size(); ++i) {
             auto found = std::find_if(capacities.begin(), capacities.end(), [&](const CoremlDiarizers::Capacity & c) {
                 return c.frames == templates[i].frames;
             });
             if (found != capacities.end()) continue;  // an adjacent prebuilt bundle wins
             const CoremlDiarizers::Capacity c{templates[i].frames, false, &probed[i]};
-            const pcm::Plan plan = sidecars.plan(diarizer_request(gguf_path, c, source));
-            if (plan.route != pcm::Route::generate) {
+            SidecarRequest request = diarizer_request(gguf_path, c, source);
+            request.minimal = c.frames == smallest;
+            if (!sidecars.admit_generated(request)) {
+                const pcm::Plan plan = sidecars.plan(request);
                 PARAKEET_LOG_INFO("parakeet: no Core ML diarizer for %d frames is generated (%s: %s)\n",
                                   c.frames, probed[i].template_id.c_str(),
                                   probed[i].matched ? plan.reason.c_str() : probed[i].reason.c_str());
