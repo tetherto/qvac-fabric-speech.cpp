@@ -308,3 +308,30 @@ delivery on ggml and Core ML. See the [streaming API and measurement guide](engi
 Audio8 preserves separate CUDA F32 projection shapes during multi-token prefill
 for fused/separate numerical consistency. Decode and other weight types retain
 projection fusion; shared CUDA matmul routing is unchanged.
+
+### Sortformer Core ML reproduction preflight
+
+The `Sortformer Core ML preflight` workflow runs on same-repository pull requests
+that touch Parakeet or benchmark scripts, and supports manual dispatch. It uses
+the existing self-hosted authorization gate and the Apple GPU runner. Registry
+access requires `AWS_OIDC_ROLE_ARN` and `MODEL_S3_BUCKET`; missing access or model
+bundles fails the job rather than producing a skipped quality result.
+
+The preflight compares forced Metal, the published September 28 encoder bundles,
+and a freshly exported fp16 410-frame full diarizer from the same q8_0 GGUF.
+It streams `abcba` and `abcdba` at 1-second and 2-second chunk sizes, three fresh
+processes per case. The legacy bundles retain their published weights; their
+source precision may differ from the q8_0 GGUF. The new export is a diagnostic
+candidate, not a replacement for the distributed artifacts.
+
+Artifacts contain asset/audio/binary SHA-256 hashes, source revisions, export
+logs, commands, raw hypotheses, per-pass routing, per-run DER and medians. DER
+uses a 250 ms collar. Every network pass must match its requested Core ML or
+ggml arm; missing routing evidence or fallback fails the preflight. Quality
+scores are diagnostic and have no new pass threshold. This distinguishes
+routing or infrastructure failures from measured quality differences.
+
+The generic benchmark driver now computes `der_median` from every measured run
+and preserves `.der-runs.json` plus per-run hypothesis files. Any scoring failure
+leaves the median unset. The legacy `.hypothesis.jsonl` remains the last run's
+output, not a representative median hypothesis.
