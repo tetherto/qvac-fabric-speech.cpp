@@ -44,6 +44,19 @@ const Source * Recipe::find_source(std::string_view name) const {
     return nullptr;
 }
 
+const Literal * Recipe::find_literal(std::string_view id) const {
+    for (const Literal & l : literals) {
+        if (l.id == id) return &l;
+    }
+    return nullptr;
+}
+
+size_t Recipe::patch_count() const {
+    size_t n = 0;
+    for (const Item & it : items) n += it.kind == Item::Kind::patch ? 1 : 0;
+    return n;
+}
+
 // ---- ggml / gguf type tables -----------------------------------------------
 
 namespace {
@@ -327,11 +340,11 @@ ExprP parse_expr(Cursor & c, int depth = 0) {
 }
 
 // Ops of this generator version. Later generator versions add more.
-const std::set<std::string> kOps = {"t",    "f32",  "f64",     "f16",  "add",    "mul", "div",
-                                    "recip", "clip", "reshape", "permute", "take", "concat"};
+const std::set<std::string> kOps = {"t",    "f32",   "f64",  "f16",  "add",   "mul", "div",   "recip", "clip",
+                                    "reshape", "permute", "take", "concat", "slice", "neg", "zeros", "ones", "lit"};
 // Ops that exist in the language but belong to a later generator version.
-const std::set<std::string> kLaterOps = {"sub", "sqrt", "slice", "neg",    "zeros", "ones",   "lit",      "full", "tile",
-                                         "exp", "sin",  "cos",   "l2norm", "matmul", "meta_f", "meta_s", "provided"};
+const std::set<std::string> kLaterOps = {"sub", "sqrt", "full",   "tile",   "exp",
+                                         "sin", "cos",  "l2norm", "matmul", "meta_f", "meta_s", "provided"};
 
 std::string shape_str(const std::vector<int64_t> & s) {
     std::string o = "[";
@@ -615,6 +628,58 @@ private:
             e.shape = shape;
             return;
         }
+        if (op == "slice") {
+            if (e.args.size() != 4 && e.args.size() != 5) {
+                throw RecipeError(e.line, "slice() takes an array, an axis, begin, end and an optional step");
+            }
+            array(*e.args[0], "slice");
+            const std::vector<int64_t> & in = e.args[0]->shape;
+            const int64_t axis = integer(*e.args[1], "slice axis");
+            if (axis < 0 || axis >= static_cast<int64_t>(in.size())) throw RecipeError(e.line, "slice() axis out of range");
+            const int64_t begin = integer(*e.args[2], "slice begin");
+            const int64_t end = integer(*e.args[3], "slice end");
+            const int64_t step = e.args.size() == 5 ? integer(*e.args[4], "slice step") : 1;
+            if (begin < 0 || end <= begin || end > in[axis]) {
+                throw RecipeError(e.line, "slice() needs 0 <= begin < end <= " + std::to_string(in[axis]) + ", got [" +
+                                              std::to_string(begin) + ", " + std::to_string(end) + ")");
+            }
+            if (step < 1) throw RecipeError(e.line, "slice() step must be at least 1");
+            e.shape = in;
+            e.shape[axis] = (end - begin + step - 1) / step;
+            e.dtype = e.args[0]->dtype;
+            e.ulp = e.args[0]->ulp;
+            return;
+        }
+        if (op == "neg") {
+            arity(e, 1);
+            value(*e.args[0]);
+            e.dtype = e.args[0]->dtype;
+            e.shape = e.args[0]->shape;
+            e.ulp = e.args[0]->ulp;
+            return;
+        }
+        if (op == "zeros" || op == "ones") {
+            arity(e, 1);
+            const std::vector<int64_t> dims = int_list(*e.args[0], "zeros/ones dims");
+            if (dims.empty() || dims.size() > 8) throw RecipeError(e.line, op + "() needs 1 to 8 dims");
+            for (int64_t d : dims) {
+                if (d <= 0) throw RecipeError(e.line, op + "() dims must be positive");
+            }
+            (void) elements(dims, e.line);
+            e.dtype = DType::f32;
+            e.shape = dims;
+            return;
+        }
+        if (op == "lit") {
+            arity(e, 1);
+            const Expr & a = *e.args[0];
+            if (a.kind != Expr::Kind::string) throw RecipeError(e.line, "lit() takes a literal id string");
+            const Literal * l = r_.find_literal(a.text);
+            if (!l) throw RecipeError(e.line, "lit(\"" + a.text + "\") is not declared in template.json literals");
+            e.dtype = DType::f32;
+            e.shape = l->shape;
+            return;
+        }
         throw RecipeError(e.line, "unknown op " + op + "()");  // unreachable: kOps is exhaustive
     }
 
@@ -640,9 +705,35 @@ bool is_template_id(const std::string & s) {
 
 }  // namespace
 
-Recipe parse(std::string_view text) {
+namespace {
+
+std::string hex_of(const uint8_t * p, size_t n) {
+    static const char * digits = "0123456789abcdef";
+    std::string out(2 * n, '0');
+    for (size_t i = 0; i < n; ++i) {
+        out[2 * i] = digits[p[i] >> 4];
+        out[2 * i + 1] = digits[p[i] & 15];
+    }
+    return out;
+}
+
+}  // namespace
+
+Recipe parse(std::string_view text, const ParseContext & ctx) {
     const std::vector<Line> lines = logical_lines(text);
     Recipe r;
+    {
+        std::set<std::string> ids;
+        for (const Literal & l : ctx.literals) {
+            if (!ids.insert(l.id).second) throw RecipeError(0, "duplicate literal \"" + l.id + "\"");
+            if (l.shape.empty()) throw RecipeError(0, "literal \"" + l.id + "\" has no shape");
+            for (int64_t d : l.shape) {
+                if (d <= 0) throw RecipeError(0, "literal \"" + l.id + "\" dims must be positive");
+            }
+            if (!detail::element_count(l.shape)) throw RecipeError(0, "literal \"" + l.id + "\" " + too_many_elements(l.shape));
+        }
+        r.literals = ctx.literals;
+    }
     size_t i = 0;
     auto header = [&](const char * key) -> Cursor {
         if (i >= lines.size()) throw RecipeError(0, std::string("missing header line '") + key + "'");
@@ -692,6 +783,9 @@ Recipe parse(std::string_view text) {
     uint64_t running = milblob::HEADER_BYTES;  // where the next blob's metadata must start
     uint64_t data_end = milblob::HEADER_BYTES;
     uint32_t blobs = 0;
+    uint64_t patch_end = 0;  // the end of the previous patch in the spec
+    bool any_patch = false;
+    std::set<uint64_t> used_sites;
 
     for (; i < lines.size(); ++i) {
         Cursor c(lines[i]);
@@ -813,8 +907,65 @@ Recipe parse(std::string_view text) {
             continue;
         }
         if (kw == "patch") {
-            c.fail("patch lines are not in generator version " + std::to_string(GENERATOR_VERSION) +
-                   " (a later version adds them)");
+            seen_item = true;
+            c.sp();
+            Item it;
+            it.kind = Item::Kind::patch;
+            it.line = c.line();
+            it.offset = c.uint();
+            c.sp();
+            const std::string dt = c.word();
+            if (dt == "fp16") {
+                it.dtype = BlobType::fp16;
+            } else if (dt == "fp32") {
+                it.dtype = BlobType::fp32;
+            } else if (dt == "str") {
+                c.fail("patch str lines are not in generator version " + std::to_string(GENERATOR_VERSION) +
+                       " (a later version adds them)");
+            } else {
+                c.fail("patch dtype must be fp16 or fp32, got '" + dt + "'");
+            }
+            c.sp();
+            it.count = c.uint();
+            c.sp();
+            it.expr = parse_expr(c);
+            c.end();
+            checker.blob_top(*it.expr, it.dtype);
+            it.ulp = it.expr->ulp;
+            const int64_t n = elements(it.expr->shape, it.line);
+            if (static_cast<uint64_t>(n) != it.count) {
+                c.fail("patch declares " + std::to_string(it.count) + " elements, its expression has " +
+                       std::to_string(n) + " " + shape_str(it.expr->shape));
+            }
+            // count is a bounded element count, offset a literal of at most 19 digits: no wrap.
+            const uint64_t len = it.count * blob_type_size(it.dtype);
+            if (any_patch && it.offset < patch_end) {
+                c.fail("patch at spec offset " + std::to_string(it.offset) +
+                       " overlaps or precedes the previous patch (patch lines come in spec offset order)");
+            }
+            if (ctx.spec != nullptr) {
+                if (it.offset > ctx.spec_size || len > ctx.spec_size - it.offset) {
+                    c.fail("patch [" + std::to_string(it.offset) + ", " + std::to_string(it.offset + len) +
+                           ") lies outside the " + std::to_string(ctx.spec_size) + "-byte spec");
+                }
+                const PatchSite * site = nullptr;
+                for (const PatchSite & p : ctx.patches) {
+                    if (p.spec_offset == it.offset) site = &p;
+                }
+                if (site == nullptr) c.fail("patch at spec offset " + std::to_string(it.offset) + " has no template.json patches entry");
+                if (site->len != len) {
+                    c.fail("patch at spec offset " + std::to_string(it.offset) + " writes " + std::to_string(len) +
+                           " bytes, its template.json entry has len " + std::to_string(site->len));
+                }
+                if (hex_of(ctx.spec + it.offset, len) != site->sentinel_hex) {
+                    c.fail("the spec bytes at offset " + std::to_string(it.offset) + " are not the patch's sentinel");
+                }
+                used_sites.insert(it.offset);
+            }
+            any_patch = true;
+            patch_end = it.offset + len;
+            r.items.push_back(std::move(it));
+            continue;
         }
         c.fail("unknown line '" + kw + "'");
     }
@@ -826,6 +977,14 @@ Recipe parse(std::string_view text) {
     if (!milblob::valid_total(data_end, r.weight_bin_size)) {
         throw RecipeError(0, "weight_bin_size " + std::to_string(r.weight_bin_size) + " differs from the writer's " +
                                  std::to_string(milblob::align_up(data_end)));
+    }
+    if (ctx.spec != nullptr) {
+        for (const PatchSite & p : ctx.patches) {
+            if (!used_sites.count(p.spec_offset)) {
+                throw RecipeError(0, "template.json patch at spec offset " + std::to_string(p.spec_offset) +
+                                         " has no patch line");
+            }
+        }
     }
     return r;
 }
@@ -913,9 +1072,6 @@ void Template::init(bool hash_files) {
     }
     sha256_ = h.finish();
 
-    const TemplateFile * rf = file("recipe.txt");
-    recipe_ = parse(std::string_view(reinterpret_cast<const char *>(rf->data), rf->size));
-
     const TemplateFile * jf = file("template.json");
     const nlohmann::json j =
         nlohmann::json::parse(std::string(reinterpret_cast<const char *>(jf->data), jf->size), nullptr, false);
@@ -947,12 +1103,72 @@ void Template::init(bool hash_files) {
             info_.match_metadata_json = m->dump();
         }
     }
-    for (const char * k : {"patches", "provided", "literals"}) {
-        if (auto it = j.find(k); it != j.end() && !(it->is_array() && it->empty())) {
-            throw std::runtime_error(std::string("template.json: ") + k + " is not supported by generator version " +
-                                     std::to_string(GENERATOR_VERSION));
+    if (auto it = j.find("provided"); it != j.end() && !(it->is_array() && it->empty())) {
+        throw std::runtime_error("template.json: provided is not supported by generator version " +
+                                 std::to_string(GENERATOR_VERSION));
+    }
+    const TemplateFile * spec = file("model.mlmodel");
+    ParseContext ctx;
+    ctx.spec = spec->data;
+    ctx.spec_size = spec->size;
+    if (auto it = j.find("patches"); it != j.end()) {
+        if (!it->is_array()) throw std::runtime_error("template.json: patches must be an array");
+        for (const auto & p : *it) {
+            if (!p.is_object() || !p.contains("spec_offset") || !p["spec_offset"].is_number_unsigned() ||
+                !p.contains("len") || !p["len"].is_number_unsigned() || !p.contains("sentinel_hex") ||
+                !p["sentinel_hex"].is_string()) {
+                throw std::runtime_error("template.json: a patches entry needs spec_offset, len and sentinel_hex");
+            }
+            PatchSite site;
+            site.spec_offset = p["spec_offset"].get<uint64_t>();
+            site.len = p["len"].get<uint64_t>();
+            site.sentinel_hex = p["sentinel_hex"].get<std::string>();
+            if (site.len == 0 || site.sentinel_hex.size() != 2 * site.len) {
+                throw std::runtime_error("template.json: patch at spec offset " + std::to_string(site.spec_offset) +
+                                         " needs a sentinel_hex of 2 x len characters");
+            }
+            ctx.patches.push_back(std::move(site));
         }
     }
+    if (auto it = j.find("literals"); it != j.end()) {
+        if (!it->is_array()) throw std::runtime_error("template.json: literals must be an array");
+        const TemplateFile * lf = file("literals.bin");
+        for (const auto & l : *it) {
+            if (!l.is_object() || !l.contains("id") || !l["id"].is_string() || !l.contains("dtype") ||
+                !l["dtype"].is_string() || !l.contains("shape") || !l["shape"].is_array() || !l.contains("offset") ||
+                !l["offset"].is_number_unsigned()) {
+                throw std::runtime_error("template.json: a literals entry needs id, dtype, shape and offset");
+            }
+            Literal lit;
+            lit.id = l["id"].get<std::string>();
+            const std::string dt = l["dtype"].get<std::string>();
+            if (dt == "fp16") {
+                lit.dtype = BlobType::fp16;
+            } else if (dt == "fp32") {
+                lit.dtype = BlobType::fp32;
+            } else {
+                throw std::runtime_error("template.json: literal " + lit.id + " dtype must be fp16 or fp32");
+            }
+            for (const auto & d : l["shape"]) {
+                if (!d.is_number_unsigned() || d.get<uint64_t>() == 0 || d.get<uint64_t>() > detail::MAX_ELEMENTS) {
+                    throw std::runtime_error("template.json: literal " + lit.id + " dims must be positive integers");
+                }
+                lit.shape.push_back(static_cast<int64_t>(d.get<uint64_t>()));
+            }
+            lit.offset = l["offset"].get<uint64_t>();
+            const std::optional<uint64_t> n = detail::element_count(lit.shape);
+            if (lit.shape.empty() || !n) throw std::runtime_error("template.json: literal " + lit.id + " has a bad shape");
+            if (lf == nullptr) throw std::runtime_error("template.json: literal " + lit.id + " needs literals.bin");
+            const uint64_t bytes = *n * blob_type_size(lit.dtype);
+            if (lit.offset > lf->size || bytes > lf->size - lit.offset) {
+                throw std::runtime_error("template.json: literal " + lit.id + " lies outside literals.bin");
+            }
+            lit.data = lf->data + lit.offset;
+            ctx.literals.push_back(std::move(lit));
+        }
+    }
+    const TemplateFile * rf = file("recipe.txt");
+    recipe_ = parse(std::string_view(reinterpret_cast<const char *>(rf->data), rf->size), ctx);
     if (info_.id != recipe_.template_id) {
         throw std::runtime_error("template.json id '" + info_.id + "' differs from recipe template '" +
                                  recipe_.template_id + "'");
@@ -960,7 +1176,6 @@ void Template::init(bool hash_files) {
     if (info_.weight_bin_size != recipe_.weight_bin_size) {
         throw std::runtime_error("template.json weight_bin_size differs from the recipe's");
     }
-    const TemplateFile * spec = file("model.mlmodel");
     if (to_hex(spec->sha256) != recipe_.spec_sha256) {
         throw std::runtime_error("model.mlmodel sha256 differs from the recipe's spec_sha256");
     }

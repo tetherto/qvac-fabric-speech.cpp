@@ -448,14 +448,19 @@ private:
 
 struct RItem {
     bool let = false;
-    std::string text;   // let: "name = expr"; blob: the expression
-    std::string dtype;  // blob: fp16 | fp32
+    std::string text;   // let: "name = expr"; blob, patch: the expression
+    std::string dtype;  // blob, patch: fp16 | fp32
     uint64_t count = 0;
+    bool patch = false;
+    uint64_t spec_offset = 0;  // patch
 };
 
 inline RItem let_(const std::string & text) { return RItem{true, text, "", 0}; }
 inline RItem blob(const std::string & dtype, uint64_t count, const std::string & expr) {
     return RItem{false, expr, dtype, count};
+}
+inline RItem patch_(uint64_t spec_offset, const std::string & dtype, uint64_t count, const std::string & expr) {
+    return RItem{false, expr, dtype, count, true, spec_offset};
 }
 
 // A complete recipe with offsets, blob count and weight_bin_size filled in.
@@ -468,6 +473,11 @@ inline std::string recipe_text(const std::string & id, const std::string & spec_
     for (const RItem & it : items) {
         if (it.let) {
             body += "let " + it.text + "\n";
+            continue;
+        }
+        if (it.patch) {
+            body += "patch " + std::to_string(it.spec_offset) + " " + it.dtype + " " + std::to_string(it.count) + " " +
+                    it.text + "\n";
             continue;
         }
         body += "blob " + std::to_string(off) + " " + it.dtype + " " + std::to_string(it.count) + " " + it.text + "\n";
@@ -490,6 +500,7 @@ struct TemplateSpec {
     json match = json::object();  // {"architecture": ..., "metadata": {...}}
     std::string spec_bytes;       // model.mlmodel; default "fake-spec:<id>"
     json extra = json::object();  // merged into template.json
+    std::string literals_bin;     // written as literals.bin when non-empty
 };
 
 // Writes <dir> = {model.mlmodel, Manifest.json, recipe.txt, template.json} and
@@ -502,6 +513,7 @@ inline std::shared_ptr<const recipe::Template> make_template(const std::string &
     const std::string r = recipe_text(s.id, sha, s.decls, s.items, &wbs);
     write_bytes(dir + "/model.mlmodel", spec);
     write_bytes(dir + "/recipe.txt", r);
+    if (!s.literals_bin.empty()) write_bytes(dir + "/literals.bin", s.literals_bin);
     write_bytes(dir + "/Manifest.json",
                 R"({"fileFormatVersion":"1.0.0","itemInfoEntries":{},"rootModelIdentifier":"x"})");
     json t = {{"schema", 1},
