@@ -444,7 +444,7 @@ tokens and builds the vocoder's source excitation. With a reference WAV the
 cloning tokenizer stays on the CPU, where CAM++ runs on every backend. Weights
 go into the Hexagon repack buffer type. HTP multiplies only `f32`, `f16`,
 `q8_0` and `q4_0` weights, so the `bf16` flow is refused at load. It needs a
-`qvac-ext-ggml@speech` build with the Hexagon F32 flash attention, nearest
+fabric ggml build with the Hexagon F32 flash attention, nearest
 upscale, ELU, ABS, leaky ReLU, sin and cos kernels and the batched-matmul
 flattening.
 

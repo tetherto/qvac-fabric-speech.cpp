@@ -260,8 +260,8 @@ std::unique_ptr<Engine> Engine::create(const EngineOptions & opts_in) {
     // backend for stages the placement policy pins off the GPU, and the
     // per-stage assignments. The VAE gets its own dedicated backend (see
     // Vae::load) and also follows n_gpu_layers now that its snake / col2im_1d
-    // ops are validated on Metal, Vulkan, and Adreno OpenCL in the ggml-speech
-    // fork. The resolution itself lives in engine_backends.h (shared with the
+    // ops are validated on Metal, Vulkan, and Adreno OpenCL in the fabric
+    // ggml. The resolution itself lives in engine_backends.h (shared with the
     // memory-fit preflight so both agree by construction); the placement
     // policy in stage_placement.h (unit tested in test/test_acestep_units.cpp).
     //

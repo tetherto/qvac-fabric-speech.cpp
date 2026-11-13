@@ -24,7 +24,7 @@ acestep.cpp `convert.py`.
 
 | Asymmetry | Effect |
 |---|---|
-| ggml pin | QVAC links `ggml-speech` (`qvac-ext-ggml@speech`). acestep.cpp vendors its own ggml submodule with SNAKE and COL2IM_1D. Kernel-level equivalence is not claimed |
+| ggml pin | QVAC links the fabric ggml (`qvac-fabric` port, the `ggml/` tree of qvac-fabric-llm.cpp). acestep.cpp vendors its own ggml submodule with SNAKE and COL2IM_1D. Kernel-level equivalence is not claimed |
 | Process shape | QVAC: one `music-cli` process, lazy stage load/unload. acestep.cpp: `ace-lm` then `ace-synth`, each loading its modules |
 | LM size defaults | acestep.cpp README downloads 4B LM; this harness uses 0.6B so the weights are shared |
 | `timesignature` spelling | acestep.cpp documents the CoT field as a numerator (`"4"`). QVAC CLI examples use `"4/4"`. The manifest uses `"4"` for both |
