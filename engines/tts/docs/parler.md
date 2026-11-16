@@ -279,40 +279,46 @@ The test reads the process footprint every 2 ms and the slot's state every
 - the steady state (ready, Core ML decodes running, over the footprint just
   before the load) to the resident charge;
 - the whole run (over the warm ggml baseline) to the envelope;
-- `ANECompilerService` during the load to `ane_compile_reserve_bytes`.
+- `ANECompilerService`'s growth during the load (its peak less its size just
+  before the load) to `ane_compile_reserve_bytes`. The service is a
+  long-lived system process, so its absolute size includes whatever earlier
+  processes compiled: a shared CI runner read 322-821 MiB.
 
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
 host, rounded up to 1 MiB (`memory.measured` in `template.json`). Figures in
 MiB:
 
-| Phase | M2, macOS 27.2.1 (10 runs) | M4 Max, macOS 26.7.2 (CI, 6 runs) | Charged |
+| Phase | M2, macOS 27.2.1 (18 runs) | M4 Max, macOS 26.7.2 (CI, 12 runs) | Charged |
 |---|--:|--:|--:|
-| prepare: generation and compile | 436.1-440.4 | 276.1-438.5 | 551: `compile_peak_bytes` 327 on top of `generation_peak_bytes` 216 + 8 |
-| load and warm-up | 16.7-23.0 | 309.6-317.8 (warm-up 294.8-303.5) | 398: `load_peak_bytes.all` |
-| steady state, over the footprint before the load | 0 (5 runs) | 312.7-316.3 (3 runs) | 369.6: weights 103.3, I/O 0.8, quantizer copy 0.6, `workspace_bytes` 265 (1.25 x 211.6) |
-| whole run, over the warm ggml baseline | 453.0-462.7 | 589.1-751.3 | 1,150.8: the envelope |
-| `ANECompilerService` during the load | 397.9-505.7 | 487.4-501.8 | 633: `ane_compile_reserve_bytes` |
+| prepare: generation and compile | 435.8-441.6 | 273.1-438.5 | 552: `compile_peak_bytes` 328 on top of `generation_peak_bytes` 216 + 8 |
+| load and warm-up | 16.3-23.0 | 309.6-318.7 (warm-up 294.8-303.5) | 399: `load_peak_bytes.all` |
+| steady state, over the footprint before the load | 0 (13 runs) | 312.7-320.2 (9 runs) | 374.6: weights 103.3, I/O 0.8, quantizer copy 0.6, `workspace_bytes` 270 (1.25 x 215.5) |
+| whole run, over the warm ggml baseline | 453.0-463.9 | 589.1-752.7 | 1,158.3: the envelope |
+| `ANECompilerService` growth during the load | 114.5-303.0 (5 runs) | 1.4-2.8 (3 runs) | 379: `ane_compile_reserve_bytes` |
 
 - **M2.** `all` runs the program on the Neural Engine. Its weights do not
-  show in the process footprint, and the generation is the peak. The same M2
-  on macOS 15.7.3 peaked at 224-229 MiB over four runs (`ANECompilerService`
-  360-497 MiB). Those runs recorded no per-phase breakdown and move no
-  constant, but stay in `validated_for`.
-- **M4 Max.** `all` runs most of the program on the GPU (below). The first
-  prediction adds about 300 MiB, which stays resident: the prediction
-  workspace. The whole schedule takes 3.5 s there, so the process still
-  holds the generation's memory when the load starts (the M2 has returned it
-  by the time the sidecar is ready). Its whole run is therefore the prepare
-  plus the resident, which is the sum the envelope charges.
+  show in the process footprint, and the generation is the peak.
+  `ANECompilerService` grew most (303 MiB) in the run that found it nearly
+  idle (124 MiB), and 115-141 MiB in the runs that followed. The same M2 on
+  macOS 15.7.3 peaked at 224-229 MiB over four runs (`ANECompilerService`
+  360-497 MiB absolute). Those runs recorded no per-phase breakdown and
+  move no constant, but stay in `validated_for`.
+- **M4 Max.** `all` runs most of the program on the GPU (below), and only
+  the output stage on the Neural Engine, so `ANECompilerService` barely
+  grows. The first prediction adds about 300 MiB, which stays resident: the
+  prediction workspace. The whole schedule takes 3.5 s there, so the process
+  still holds the generation's memory when the load starts (the M2 has
+  returned it by the time the sidecar is ready). Its whole run is therefore
+  the prepare plus the resident, which is the sum the envelope charges.
 
-The envelope is 1,206,709,600 bytes (1,150.8 MiB), up from 475.4 MiB. With
-the M2's values alone it would be 819.6 MiB: the macOS 27 generation peak
-(440 MiB, against the 216 MiB of the template's generation estimate) causes
+The envelope is 1,214,573,920 bytes (1,158.3 MiB), up from 475.4 MiB. With
+the M2's values alone it would be 820.8 MiB: the macOS 27 generation peak
+(442 MiB, against the 216 MiB of the template's generation estimate) causes
 most of the rise, and the M4 Max's GPU working memory adds the remaining
-331 MiB. `validated_for` is matched on the compute units only, so every chip
-is charged the larger figure. A cold Neural Engine load starts only while
-633 MiB are available; until then the DAC stays on ggml (state
+337.5 MiB. `validated_for` is matched on the compute units only, so every
+chip is charged the larger figure. A cold Neural Engine load starts only
+while 379 MiB are available; until then the DAC stays on ggml (state
 `deferred(memory)`). Phones are not affected today: the runtime generates
 sidecars on macOS only, so on iOS the route is none and fit charges no Core
 ML envelope. Matching validation on the chip class, as well as the compute
