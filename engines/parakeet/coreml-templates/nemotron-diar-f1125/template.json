@@ -145,10 +145,10 @@
   "memory": {
     "runtime_weight_bytes": 401693056,
     "workspace_bytes": 167772160,
-    "compile_peak_bytes": null,
-    "ane_compile_reserve_bytes": null,
+    "compile_peak_bytes": 67108864,
+    "ane_compile_reserve_bytes": 738197504,
     "load_peak_bytes": {
-      "cpu_and_ane": null,
+      "cpu_and_ane": 83886080,
       "all": null,
       "cpu_and_gpu": null,
       "cpu_only": null
@@ -158,7 +158,7 @@
     "validated_for": [
       {
         "units": "cpu_and_ane",
-        "os": "15.7.3",
+        "os": "27.2.1",
         "chip": "M2"
       }
     ]
