@@ -177,8 +177,8 @@ public:
                                const std::string & description,
                                const StreamCallback & on_chunk);
 
-    // Best-effort cancel of an in-flight synthesize() on another thread;
-    // takes effect at the next decoder step.
+    // Best-effort cancel of an in-flight synthesize() or coreml_wait() on
+    // another thread; a synthesis stops at its next decoder step.
     void cancel();
 
     const EngineOptions & options() const;
@@ -196,9 +196,10 @@ public:
     // key, timings and error); "{}" in builds without TTS_CPP_COREML.
     std::string coreml_status() const;
     // Waits until the DAC sidecar is ready or has failed, or `timeout_ms`
-    // passes (< 0: no limit). True when it is ready. Returns false at once
-    // while nothing has requested the sidecar (prewarm none before the first
-    // synthesis) or it waits for memory (deferred).
+    // passes (< 0: no limit), or cancel() is called from another thread.
+    // True when it is ready. Returns false at once while nothing has
+    // requested the sidecar (prewarm none before the first synthesis) or it
+    // waits for memory (deferred).
     bool coreml_wait(int64_t timeout_ms = -1) const;
 
 private:

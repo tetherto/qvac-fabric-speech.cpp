@@ -357,7 +357,11 @@ std::string Engine::coreml_status() const {
 }
 
 bool Engine::coreml_wait(int64_t timeout_ms) const {
-    return pimpl_->dac_coreml && pimpl_->dac_coreml->wait(timeout_ms);
+    if (!pimpl_->dac_coreml) return false;
+    // Like a synthesis, the wait starts with a clear flag and ends early on
+    // Engine::cancel().
+    pimpl_->cancel_requested.store(false, std::memory_order_relaxed);
+    return pimpl_->dac_coreml->wait(timeout_ms, &pimpl_->cancel_requested);
 }
 
 bool Engine::decoder_on_coreml() const { return pimpl_->decoder.active(); }

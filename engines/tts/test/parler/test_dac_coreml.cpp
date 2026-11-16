@@ -34,9 +34,11 @@
 //     refused at attach (and throws under PARLER_COREML_STRICT).
 // TTS_CPP_COREML builds with --cache-dir and no sidecar next to --gguf (the
 // generated route, template parler-dac-w128, macOS 15 or later):
-//   * the DAC sidecar is generated from the GGUF into the cache, compiled and
-//     loaded (status route generated, ready); a second engine on the same GGUF
-//     adopts it (route cached) without generating again;
+//   * an Engine with the default wait (none) generates the DAC sidecar from
+//     the GGUF into the (empty) cache in the background; Engine::cancel()
+//     ends a coreml_wait(-1) early, and the next coreml_wait(-1) waits until
+//     it is compiled and loaded (route generated, ready); later owners of the
+//     same GGUF adopt it (route cached) without generating again;
 //   * the same --min-snr / --min-speech-snr gates as above on the generated
 //     sidecar (lowered under `all` only for the chips with a measured floor,
 //     see GENERATED_ALL_UNITS_FLOORS), and the Engine reports it per call;
@@ -767,6 +769,53 @@ void idle_slot_gates(parler_model & model, const std::string & gguf) {
     std::filesystem::remove_all(cache, ec);
 }
 
+// The value of the first "state" in a status JSON ("" when absent).
+std::string status_state(const std::string & status) {
+    const std::string key = "\"state\":\"";
+    const size_t at = status.find(key);
+    if (at == std::string::npos) return {};
+    const size_t begin = at + key.size();
+    return status.substr(begin, status.find('"', begin) - begin);
+}
+
+// The Engine's default wait (none) on an empty cache: construction returns
+// at once and the DAC sidecar is generated in the background.
+// Engine::coreml_wait(-1) blocks until it is ready, and Engine::cancel() from
+// another thread ends that wait early with false. A second coreml_wait(-1)
+// then waits the generation out, which leaves the artifact the gates below
+// adopt. Needs an empty cache: a sidecar that is ready at construction has
+// nothing to cancel.
+void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache_dir) {
+    fprintf(stderr, "Engine wait and cancel (cache %s)\n", cache_dir.c_str());
+    tts_cpp::parler::EngineOptions eo;
+    eo.model_gguf_path = gguf;
+    eo.default_description = "A calm voice.";
+    eo.coreml.cache_dir = cache_dir;
+    tts_cpp::parler::Engine engine(eo);
+    if (engine.coreml_wait(0)) {
+        fprintf(stderr, "  the sidecar is ready at construction (a populated cache): not run\n");
+        return;
+    }
+    static constexpr int CANCEL_AFTER_MS = 200;
+    std::thread canceller([&engine] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(CANCEL_AFTER_MS));
+        engine.cancel();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ready = engine.coreml_wait(-1);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    canceller.join();
+    const std::string state = status_state(engine.coreml_status());
+    check(!ready && ms >= CANCEL_AFTER_MS - 20 && ms < 2000 && state != "ready",
+          "Engine::cancel() ends coreml_wait(-1) after " + std::to_string((int) ms) + " ms (sidecar " + state +
+              (ready ? ", wait returned ready" : "") + ")");
+    const bool done = engine.coreml_wait(-1);
+    const std::string st = engine.coreml_status();
+    check(done && contains(st, "\"route\":\"generated\""),
+          "the next coreml_wait(-1) waits the generation out (" + status_state(st) + "): " +
+              st.substr(0, std::min<size_t>(st.size(), 200)));
+}
+
 void generated_gates(parler_model & model, const std::string & gguf, const std::string & cache_dir,
                      const std::string & ref_dir, double min_snr, double min_speech_snr) {
     fprintf(stderr, "generated sidecar gates (cache %s)\n", cache_dir.c_str());
@@ -782,6 +831,7 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
     check(route.route == "generate" && route.validated && route.envelope_bytes > 0,
           "route generate (" + route.route + " " + route.state + " " + route.reason + "), envelope " +
               std::to_string(route.envelope_bytes) + " bytes" + (route.validated ? ", validated" : ""));
+    engine_wait_cancel_gate(gguf, cache_dir);
     model.dac_sidecar.reset();
     model.dac_pending.reset();
     std::shared_ptr<parler_dac_coreml> dac;
