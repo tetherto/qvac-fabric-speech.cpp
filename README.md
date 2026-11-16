@@ -144,6 +144,11 @@ and records its Apache-2.0 provenance. For EU-sub Core ML deployment, the
 repository provides an encoder-stripping tool and decoder output-projection
 palettization with `--nbits-out`; see the
 [conversion guide](engines/parakeet/docs/models.md#transcribepsy).
+Full-EU Core ML export requires an F16 GGUF and macOS with Xcode for compilation.
+The [full-EU guide](engines/parakeet/docs/transcribepsy-eu-coreml.md#export-and-deployment)
+provides the conversion command and recommends explicit FP16 encoders/decoder
+as the baseline, with six-bit encoders for smaller deployments. It also documents
+the current eager route loading and duplicated weights, plus possible optimizations.
 
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and
