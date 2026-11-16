@@ -364,8 +364,9 @@ void case_cannot_serve_keeps_route() {
     for (int rc = 1; rc <= 7; ++rc) {
         CHECK(encode_prediction_failed(rc) == (rc >= 5), "rc 1-4 cannot serve, rc 5-7 failed prediction");
     }
-    CHECK(!encode_prediction_failed(0) && !encode_prediction_failed(101),
-          "success and the engine's CTC-head codes are not sidecar failures");
+    CHECK(!encode_prediction_failed(0) && !encode_prediction_failed(101) &&
+              !encode_prediction_failed(-10),
+          "success, non-finite features and the engine's CTC-head codes are not sidecar failures");
 
     // A real prediction failure on the same slot still retires it.
     const EncoderRoute last = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);

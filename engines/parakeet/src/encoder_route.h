@@ -158,8 +158,10 @@ private:
 //        capacity or window, I/O it cannot bind) and no prediction ran;
 //   5-7  the prediction failed (an error, a missing output, an output that
 //        does not fit).
-// Codes outside 1-7 come from the engine's own post-processing (the CTC head)
-// and are not a sidecar failure either.
+// Other codes come from the engine's own checks after the sidecar returned
+// and are not treated as a failed prediction either, so they never retire it:
+//   -10   the sidecar returned non-finite features;
+//   other the CTC projection on ggml failed (100 minus its return code).
 inline bool encode_prediction_failed(int rc) { return rc >= 5 && rc <= 7; }
 
 // Whether one dispatch can go to the held encoder.
