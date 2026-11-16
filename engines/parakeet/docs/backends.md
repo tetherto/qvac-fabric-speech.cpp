@@ -898,10 +898,10 @@ passes on the same host:
 | Host | Runs | Peak increment | Largest prepare | Largest load and warm | Largest resident step | Steady growth | `ANECompilerService` growth |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | M2, macOS 27.2.1 | 16 | 64.7-138.0 MiB | 64.8-86.1 MiB | 12.7-96.7 MiB | 6.6-108.8 MiB | 30.6-138.0 MiB | 280.0-557.1 MiB |
-| M4 Max, macOS 26.7.2 | 10 | 64.0-79.4 MiB | 63.6-84.4 MiB | 14.9-26.7 MiB | 5.9-24.9 MiB | 33.8-46.6 MiB | 279.9-419.9 MiB |
+| M4 Max, macOS 26.7.2 | 12 | 63.0-79.4 MiB | 63.6-84.4 MiB | 14.9-26.7 MiB | 5.9-24.9 MiB | 32.4-46.6 MiB | 279.9-615.3 MiB |
 
 The ranges are over runs, each run's largest value. Steady growth comes from
-the runs that recorded the settled footprint (12 on the M2, 4 on the M4 Max).
+the runs that recorded the settled footprint (12 on the M2, 6 on the M4 Max).
 The earlier runs recorded the footprint when each load started, which gives
 the resident steps of the first two capacities, and the compiler's growth is
 taken from its smallest size during their prepares, which all come before the
@@ -915,7 +915,7 @@ on both hosts, rounded up to 1 MiB (`memory.measured` in `template.json`):
 | prepare: `generation_peak_bytes` (9 MiB) + 8 MiB + `compile_peak_bytes` | 86.1 MiB (M2) | 108 MiB |
 | `load_peak_bytes.cpu_and_ane` | 96.7 MiB (M2) | 121 MiB |
 | resident part per capacity: `runtime_weight_bytes` + 2 x I/O (`workspace_bytes` 0) | 108.8 MiB (M2) | 137 MiB |
-| `ane_compile_reserve_bytes` | 557.1 MiB (M2) | 697 MiB |
+| `ane_compile_reserve_bytes` | 615.3 MiB (M4 Max) | 770 MiB |
 
 The first prepare and load of a process pay Core ML's start-up whichever
 capacity they are for, so every template records the same values. On
@@ -927,14 +927,13 @@ grew the footprint by 59-97 MiB a few seconds in, and most of that stayed.
 Because the next load starts as soon as a capacity is ready, a step also takes
 in the start of the next load, so the largest step (108.8 MiB) is an upper
 bound for one capacity; the steady growth of all three stayed within
-138.0 MiB. For
-`prewarm = all`, fit charges 3 x 137 + 121 = 532 MiB, against a largest
-measured peak increment of 138.0 MiB. The compiler is checked on its growth
-because a shared runner's `ANECompilerService` holds whatever earlier jobs
-left it (180-514 MiB before the loads on the M4 Max); its largest growth
-came on the M2, from a service holding 95 MiB. The reserve only gates cold
-loads at run time (they wait for that much available memory); it is not part
-of the fit charge.
+138.0 MiB. For `prewarm = all`, fit charges 3 x 137 + 121 = 532 MiB, against
+a largest measured peak increment of 138.0 MiB. The compiler is checked on its
+growth because a shared runner's `ANECompilerService` holds whatever earlier jobs
+left it (25-514 MiB before the loads on the M4 Max); its largest growth
+(615.3 MiB) came on the M4 Max from a service holding 25 MiB, close to a clean
+host. The reserve only gates cold loads at run time (they wait for that much
+available memory); it is not part of the fit charge.
 
 On the pinned diarization set (`abcba`, `abcdba`, 250 ms collar) the
 generated diarizers produce the same segments as the exporter's bundles, so
