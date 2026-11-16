@@ -652,10 +652,17 @@ jobs:
           .venv-parler-mini/bin/python engines/tts/scripts/parler/convert-to-gguf.py \
             --model-id parler-tts-mini-v1 --reference-repo "parler-tts/parler-tts-mini-v1@$rev" \
             --dtype q8_0 --out parler-mini/parler-mini-v1-q8_0.gguf
+          rm -rf parler-tts-mini-v1
+
+      # Checked on every run, whether the GGUF was just converted or restored
+      # from the cache.
+      - name: Check Parler mini q8_0
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
           shasum -a 256 parler-mini/parler-mini-v1-q8_0.gguf
           echo "e450872b4a1a0d8979970c2a804c508b9fdca2877ef9f94d03ee471991921f5f  parler-mini/parler-mini-v1-q8_0.gguf" \
             | shasum -a 256 -c -
-          rm -rf parler-tts-mini-v1
 
       # The generated Parler DAC sidecar on real weights:
       # - the real-weights gate: the C++ generator on the staged GGUF is
@@ -668,9 +675,15 @@ jobs:
       #   M4 Max, Core ML runs most of the program on the GPU under `all` and
       #   fuses the output stage's tanh into its convolution on the Neural
       #   Engine (51.3-51.8 dB); the test holds that chip to its recorded
-      #   50 dB floor (test_dac_coreml.cpp, docs/parler.md);
-      # - the same artifact's SNR per compute-unit policy (report only), so
-      #   the log records which path `all` takes on this host.
+      #   50 dB floor under `all` (test_dac_coreml.cpp, docs/parler.md) and
+      #   fails once the floor is no longer needed;
+      # - the same artifact's SNR per compute-unit policy, so the log records
+      #   which path `all` takes on this host; on a chip with a floor the
+      #   `cpu_and_ane` row is held to --min-snr (54 dB);
+      # - the memory schedule: ggml decodes while the sidecar is generated,
+      #   compiled, loaded and warmed into a second empty cache; the footprint
+      #   increment must stay within the envelope fit charges, measured here
+      #   for this runner's placement of `all`.
       # The binaries run directly and --require-coreml fails the step if a
       # Core ML gate would skip. The cache stays for the fit step below.
       - name: Test (Core ML Parler DAC generated sidecar, staged mini q8_0)
@@ -692,9 +705,10 @@ jobs:
           gguf=parler-mini/parler-mini-v1-q8_0.gguf
           "$py" engines/coreml/python/coreml_template.py --tool build/qvac-coreml-tool real \
             --template-dir engines/tts/coreml-templates/parler-dac-w128 --gguf "$gguf"
-          rm -rf parler-dac-cache
+          rm -rf parler-dac-cache parler-dac-memory
           ./build/test-parler-dac-coreml --gguf "$gguf" --cache-dir "$PWD/parler-dac-cache" \
-            --min-snr 54 --require-coreml --units-sweep
+            --memory-schedule "$PWD/parler-dac-memory" --min-snr 54 --require-coreml --units-sweep
+          rm -rf parler-dac-memory
 
       # fit is the same with an empty cache and with the cache the step above
       # populated, whose hints are also rewritten stale and non-stale. It runs
