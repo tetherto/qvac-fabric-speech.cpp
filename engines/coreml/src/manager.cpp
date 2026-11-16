@@ -356,7 +356,7 @@ Plan plan(const PlanInput & in, const Resolved & r) {
     }
     if (in.device_excluded) return none(SlotState::unsupported, "device");
     if (std::find(in.validated_units.begin(), in.validated_units.end(), in.units) == in.validated_units.end()) {
-        return none(SlotState::unsupported, "unvalidated_units");
+        return none(SlotState::unsupported, kUnvalidatedUnits);
     }
     Plan p;
     p.route = Route::generate;
