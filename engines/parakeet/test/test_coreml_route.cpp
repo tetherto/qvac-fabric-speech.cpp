@@ -377,6 +377,25 @@ void case_cannot_serve_keeps_route() {
     fs::remove_all(dir);
 }
 
+// A call whose every dispatch ran on Core ML always names a program: the one
+// the model picked for its dispatches (TranscribePsy EU picks per dispatch),
+// else the held route's label, else "coreml".
+void case_call_label() {
+    FakeEncoder enc;
+    const auto held = [&](const char * label) {
+        return EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&enc),
+                                    fake_describe(nullptr, 128), label, nullptr,
+                                    EncoderRoute::Ops{}, false);
+    };
+    CHECK(coreml_call_label(held(kFakeLabel)) == kFakeLabel, "the held route's label");
+    CHECK(coreml_call_label(held(kFakeLabel), "coreml-cpu") == "coreml-cpu",
+          "the program that ran wins over the route's label");
+    CHECK(coreml_call_label(held("")) == "coreml", "an unlabeled route reports coreml");
+    CHECK(coreml_call_label(EncoderRoute::ggml(), "coreml-cpu-gpu") == "coreml-cpu-gpu",
+          "a per-dispatch program without a held route is still reported");
+    CHECK(coreml_call_label(EncoderRoute::ggml()) == "coreml", "the label is never empty");
+}
+
 void case_owner_route() {
     FakeEncoder enc;
     enc.fail_at = 0;
@@ -760,6 +779,7 @@ int main() {
     case_tdt_plan_needs_validated_seams();
     case_window_k_failure_and_next_call();
     case_cannot_serve_keeps_route();
+    case_call_label();
     case_owner_route();
     case_strict_route();
     case_pending_route();

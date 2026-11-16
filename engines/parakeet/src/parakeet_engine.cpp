@@ -194,23 +194,30 @@ int decode_transducer(const ParakeetCtcModel & model,
 }  // namespace
 
 // Per-call encoder backend label and pending flag: "ggml" when no
-// dispatch ran on Core ML, the route's label when all did, "mixed" otherwise.
+// dispatch ran on Core ML, the Core ML program's label when all did, "mixed"
+// otherwise. TranscribePsy EU picks its program per dispatch and its route
+// only shaped the plan, so it reports the program that ran.
 template <class Result>
-void set_encoder_backend(Result & result, const EncoderRoute & route,
-                         int coreml_dispatches, int ggml_dispatches) {
+void set_encoder_backend(Result & result, const ParakeetCtcModel & model,
+                         const EncoderRoute & route, int coreml_dispatches,
+                         int ggml_dispatches) {
     if (coreml_dispatches == 0) {
         result.encoder_backend = "ggml";
     } else if (ggml_dispatches > 0) {
         result.encoder_backend = "mixed";
     } else {
-        result.encoder_backend = route.coreml_label();
+        result.encoder_backend = coreml_call_label(
+            route, model.model_variant == "transcribepsy-250m-eu"
+                       ? model_encoder_backend_name(model)
+                       : std::string());
     }
     result.coreml_pending = route.pending();
 }
 
 template <class Result>
-void set_encoder_backend(Result & result, const EncoderRoute & route, bool used_coreml) {
-    set_encoder_backend(result, route, used_coreml ? 1 : 0, used_coreml ? 0 : 1);
+void set_encoder_backend(Result & result, const ParakeetCtcModel & model,
+                         const EncoderRoute & route, bool used_coreml) {
+    set_encoder_backend(result, model, route, used_coreml ? 1 : 0, used_coreml ? 0 : 1);
 }
 
 // ── Long-form offline encoder windowing ───────────────────────────────────
@@ -1240,7 +1247,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         result.mel_frames = n_mel_frames;
         result.encoder_frames = offline.encoder_frames;
         result.encoder_used_coreml = false;
-        set_encoder_backend(result, route, false);
+        set_encoder_backend(result, pimpl_->model, route, false);
         return result;
     }
 
@@ -1287,7 +1294,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         result.mel_frames     = n_mel_frames;
         result.encoder_frames = 0;
         result.encoder_used_coreml = enc_out.used_coreml;
-        set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+        set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
         return result;
     }
 
@@ -1388,7 +1395,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     result.encoder_frames = enc_out.n_enc_frames;
     result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
     result.decoder_used_coreml = decoder_used_coreml;
-    set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
     return result;
 }
 
@@ -1570,7 +1577,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = T_enc;
     result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
-    set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
 
     const auto t_dec = clock::now();
 
@@ -1784,7 +1791,9 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
     result.encoder_used_coreml = dres.used_coreml;
-    if (route.holds() || route.pending()) set_encoder_backend(result, route, encoder_used_coreml);
+    if (route.holds() || route.pending()) {
+        set_encoder_backend(result, impl.model, route, encoder_used_coreml);
+    }
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;

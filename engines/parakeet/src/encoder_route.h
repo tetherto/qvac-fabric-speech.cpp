@@ -244,4 +244,15 @@ struct EncoderBackendTally {
     bool all_coreml() const { return coreml > 0 && ggml == 0; }
 };
 
+// The label of a call whose every dispatch ran on Core ML. A model that picks
+// its program per dispatch (TranscribePsy EU) passes the program that ran as
+// `dispatch_label`; otherwise the held route's label is used. Never empty:
+// "coreml" when neither names a program, as EncoderBackendTally::label() does.
+inline std::string coreml_call_label(const EncoderRoute & route,
+                                     const std::string & dispatch_label = {}) {
+    if (!dispatch_label.empty()) return dispatch_label;
+    if (!route.coreml_label().empty()) return route.coreml_label();
+    return "coreml";
+}
+
 }  // namespace parakeet
