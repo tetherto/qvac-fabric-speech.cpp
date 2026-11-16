@@ -33,6 +33,9 @@
 #include "hints.h"
 #include "qvac_coreml/manager.h"
 #endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <chrono>
 #include <cstdint>
@@ -150,7 +153,16 @@ constexpr uint64_t DAC_ENVELOPE = DAC_RESIDENT + DAC_PREPARE;  // margin 1.0: 95
 
 void template_charges(const parler_dac_route & r) {
     if (r.route != "generate" || r.compute_units != "all") {
-        fprintf(stderr, "template charges: not checked (route %s, units %s)\n", r.route.c_str(), r.compute_units.c_str());
+#if defined(TTS_CPP_USE_COREML) && defined(__APPLE__) && TARGET_OS_OSX
+        // A macOS Core ML build generates this GGUF's DAC under `all`, so a
+        // charge it cannot check is a failure, not a skip.
+        check(false, "template charges: route " + r.route +
+                         (r.reason.empty() ? std::string() : " (" + r.state + ": " + r.reason + ")") + ", units " +
+                         r.compute_units + "; expected route generate under all");
+#else
+        fprintf(stderr, "template charges: not checked (route %s, units %s; no generated route in this build)\n",
+                r.route.c_str(), r.compute_units.c_str());
+#endif
         return;
     }
     check(r.prepare_peak_bytes == DAC_PREPARE && r.load_peak_bytes == DAC_LOAD && r.workspace_bytes == DAC_WORKSPACE &&

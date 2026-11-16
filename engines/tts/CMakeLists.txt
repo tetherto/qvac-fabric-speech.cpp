@@ -1918,6 +1918,11 @@ if (TTS_CPP_BUILD_TESTS)
     tts_cpp_register_test(test-parler-dac-coreml LABEL "fixture"
         ARGS --gguf "${_tcb_parler_gguf}" --ref-dir "${_tcb_parler_ref}")
     set_property(TEST test-parler-dac-coreml PROPERTY SKIP_RETURN_CODE 77)
+    # The same binary's gates that need no model and no Core ML (waveform
+    # gate, parity floors, memory-schedule attribution and ANECompilerService
+    # growth), so every build runs them.
+    tts_cpp_register_test(test-parler-dac-coreml-self-test EXE test-parler-dac-coreml LABEL "unit"
+        ARGS --self-test)
 
     # The DAC's Core ML route never reads the cache, so fit is the same before
     # and after a generation, with and without warm hints. Checked on a twin of

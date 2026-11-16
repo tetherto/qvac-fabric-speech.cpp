@@ -1,10 +1,20 @@
 // Parler DAC on the Core ML sidecar (src/parler/dac_coreml.h).
 //
+//   test-parler-dac-coreml --self-test
 //   test-parler-dac-coreml --gguf MODEL.gguf [--fallback-gguf MODEL.gguf]
 //                          [--ref-dir parler-ref] [--min-snr 45] [--min-speech-snr 45]
 //                          [--cache-dir DIR [--units-sweep]] [--require-coreml]
 //
-// Every build (fake sidecars, no Core ML needed):
+// --self-test (no model, no Core ML; the ctest unit test
+// test-parler-dac-coreml-self-test, so every build runs it), and first in
+// every run with --gguf:
+//   * the HF-reference waveform gate (relative SNR for speech, bounded
+//     absolute error near silence);
+//   * the per-chip parity floor table: exact chip match, `all` only, never
+//     above --min-snr, expiry, which --units-sweep row is gated;
+//   * the memory schedule's attribution of footprint samples to phases, its
+//     one-failure-per-charge checks and ANECompilerService's growth.
+// Every build with --gguf (fake sidecars, ggml decodes, no Core ML needed):
 //   * the host quantizer the sidecar decodes from equals ggml's latent;
 //   * a sidecar that fails mid-range (on its second window) is retired once
 //     and the WHOLE range is redone on ggml -- bit-identical to a ggml-only
@@ -478,6 +488,15 @@ std::vector<int32_t> random_codes(const parler_hparams & hp, int n_frames, uint3
     std::vector<int32_t> codes((size_t) hp.dac_n_q * n_frames);
     for (int32_t & c : codes) c = code(rng);
     return codes;
+}
+
+// The gates that need no model and no Core ML: --self-test runs only these
+// (a unit test in every build); a run with --gguf runs them first.
+void model_free_gates() {
+    fprintf(stderr, "model-free gates\n");
+    waveform_quality_gates();
+    parity_floor_gates();
+    memory_schedule_gates();
 }
 
 bool decode(const parler_model & model, const std::vector<int32_t> & codes, int n_frames,
@@ -1025,7 +1044,7 @@ std::string status_state(const std::string & status) {
 // another thread ends that wait early with false. A second coreml_wait(-1)
 // then waits the generation out, which leaves the artifact the gates below
 // adopt. Needs an empty cache: a sidecar that is ready at construction has
-// nothing to cancel.
+// nothing to cancel, so a populated --cache-dir fails the gate.
 void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache_dir) {
     fprintf(stderr, "Engine wait and cancel (cache %s)\n", cache_dir.c_str());
     tts_cpp::parler::EngineOptions eo;
@@ -1034,7 +1053,8 @@ void engine_wait_cancel_gate(const std::string & gguf, const std::string & cache
     eo.coreml.cache_dir = cache_dir;
     tts_cpp::parler::Engine engine(eo);
     if (engine.coreml_wait(0)) {
-        fprintf(stderr, "  the sidecar is ready at construction (a populated cache): not run\n");
+        check(false, "Engine::cancel() ends coreml_wait(-1): the sidecar is ready at construction, so nothing is "
+                     "left to cancel (pass an empty --cache-dir)");
         return;
     }
     static constexpr int CANCEL_AFTER_MS = 200;
@@ -1376,7 +1396,8 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
-        if (a == "--gguf") gguf = next();
+        if (a == "--self-test") self_test = true;
+        else if (a == "--gguf") gguf = next();
         else if (a == "--fallback-gguf") fallback = next();
         else if (a == "--ref-dir") ref_dir = next();
         else if (a == "--min-snr") min_snr = std::atof(next().c_str());
@@ -1390,6 +1411,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "SKIP: no --gguf model (%s)\n", gguf.c_str());
         return 77;
     }
+    bool self_test = false;
     unsetenv(PARLER_COREML_STRICT_ENV);
     unsetenv(PARLER_COREML_DISABLE_ENV);
 
@@ -1399,10 +1421,13 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "FAIL: load %s: %s\n", gguf.c_str(), err.c_str());
         return 1;
     }
-    waveform_quality_gates();
-    parity_floor_gates();
-    memory_schedule_gates();
+    model_free_gates();
     fake_sidecar_gates(model);
+    if (self_test) {
+        model_free_gates();
+        fprintf(stderr, g_failures ? "FAILED (%d)\n" : "OK\n", g_failures);
+        return g_failures ? 1 : 0;
+    }
     pending_seam_gates(model);
 #ifdef TTS_CPP_USE_COREML
     idle_slot_gates(model, gguf);

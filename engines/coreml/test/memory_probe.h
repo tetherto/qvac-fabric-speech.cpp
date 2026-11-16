@@ -3,8 +3,9 @@
 // Probes for the overlapped memory schedules that validate a generated Core
 // ML sidecar's memory constants: this process's footprint, the resident size
 // of ANECompilerService, and that service's growth during this process's
-// loads. Header-only. The probes read 0 off macOS; ane_compiler_growth() is
-// portable, so its checks run in every build.
+// loads. Header-only. The probes read 0 off macOS. ane_compiler_growth() is
+// portable: the tts unit test test-parler-dac-coreml-self-test checks it in
+// every build, with no model.
 
 #include <algorithm>
 #include <cstdint>
