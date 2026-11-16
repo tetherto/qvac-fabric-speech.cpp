@@ -40,7 +40,18 @@ def exporter():
     return module
 
 
+def validate_wav_stems(wavs):
+    paths_by_stem = {}
+    for wav in wavs:
+        previous = paths_by_stem.get(wav.stem)
+        if previous is not None:
+            raise ValueError(f"Duplicate WAV stem {wav.stem!r}: {previous} and {wav}; "
+                             "use distinct filenames for every fixture")
+        paths_by_stem[wav.stem] = wav
+
+
 def prepare(args):
+    validate_wav_stems(args.wav)
     import os
     import torch
 

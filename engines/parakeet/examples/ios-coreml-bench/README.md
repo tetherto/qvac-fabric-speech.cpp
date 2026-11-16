@@ -239,10 +239,14 @@ $PYTHON engines/parakeet/test/test_route_probe_runtime.py
 
 The Python suite checks binary fixture serialization, precision-specific baseline
 matching, positive and negative gate-decision reports, valid-row cropping,
-adapter-scale selection, non-finite output rejection and loading reports. The
+adapter-scale selection, non-finite output rejection, loading reports and
+duplicate WAV stem rejection before preparation. Input WAVs must have distinct
+filename stems, even when they are in different directories. The
 native smoke suite builds `route_probe.mm` and generates tiny FP16/FP32 Core ML
 models, including a multifunction package and a route-input program. It checks
 saved prediction tensors, all five loading-only modes without fixture files,
-and rejection of truncated inputs. Native tests require macOS 15+ and Xcode
+and rejection of truncated inputs and malformed manifests. Prediction modes
+require a JSON object with a nonempty `fixtures` array; invalid manifests fail
+before any model is loaded. Native tests require macOS 15+ and Xcode
 tools; unsupported hosts exit with skip code 77. Both suites are registered in
 CTest and the existing Apple Core ML workflow lane.

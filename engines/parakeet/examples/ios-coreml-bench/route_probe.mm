@@ -43,10 +43,17 @@ void save_json(id value, NSString * path) {
     require(data && [data writeToFile:path options:NSDataWritingAtomic error:&error], error.description ?: @"JSON write failed");
 }
 
-NSDictionary * read_json(NSString * path) {
+NSDictionary * read_manifest(NSString * path) {
     NSData * data = [NSData dataWithContentsOfFile:path];
     require(data != nil, @"Missing fixture manifest");
-    return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSError * error = nil;
+    id manifest = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    require(manifest != nil && error == nil, @"Invalid fixture manifest JSON");
+    require([manifest isKindOfClass:NSDictionary.class], @"Fixture manifest root must be an object");
+    id fixtures = manifest[@"fixtures"];
+    require([fixtures isKindOfClass:NSArray.class] && [fixtures count] > 0,
+            @"Fixture manifest must contain a nonempty fixtures array");
+    return manifest;
 }
 
 MLModelConfiguration * configuration(NSString * function) {
@@ -218,7 +225,7 @@ void run_probe() {
         const bool loading = [kind hasPrefix:@"load-"];
         NSString * fixture_root = arguments.count == 5 ? arguments[4] :
             [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"fixtures"];
-        NSDictionary * manifest = loading ? nil : read_json([fixture_root stringByAppendingPathComponent:@"manifest.json"]);
+        NSDictionary * manifest = loading ? nil : read_manifest([fixture_root stringByAppendingPathComponent:@"manifest.json"]);
         for (NSString * route in routes_for_kind(kind)) {
             @autoreleasepool {
                 NSDictionary * record = probe_route(models, kind, route, manifest, fixture_root, output, retained);

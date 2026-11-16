@@ -136,6 +136,29 @@ class RouteProbeSmokeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid input fixture", result.stderr)
 
+    def test_invalid_manifests_fail_before_loading_models(self):
+        cases = (
+            (b'{"fixtures":[', "Invalid fixture manifest JSON"),
+            (b'[]', "Fixture manifest root must be an object"),
+            (b'{}', "nonempty fixtures array"),
+            (b'{"fixtures":[]}', "nonempty fixtures array"),
+            (b'{"fixtures":{}}', "nonempty fixtures array"),
+            (b'{"fixtures":null}', "nonempty fixtures array"),
+        )
+        for index, (contents, message) in enumerate(cases):
+            fixtures = self.root / f"invalid-manifest-{index}"
+            fixtures.mkdir()
+            (fixtures / "manifest.json").write_bytes(contents)
+            for models in ("fp16", "missing-models"):
+                with self.subTest(contents=contents, models=models):
+                    label = f"invalid-manifest-{index}-{models}"
+                    result = subprocess.run([str(self.binary), str(self.root / models), "separate", label, str(fixtures)],
+                        env={**os.environ, "QVAC_ROUTE_OUTPUT_DIR": str(self.root / "outputs")},
+                        capture_output=True, text=True, timeout=120)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse((self.root / "outputs" / label / "results.json").exists())
+
 
 if __name__ == "__main__":
     if not HAVE_RUNTIME:

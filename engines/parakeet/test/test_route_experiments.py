@@ -83,6 +83,21 @@ class RouteReportingTests(unittest.TestCase):
         self.fixture = write_fixture(self.fixtures)
         write_gate_weights(self.fixtures)
 
+    def test_prepare_rejects_duplicate_stems_before_loading_weights_or_writing_fixtures(self):
+        wavs = [self.root / "english/sample.wav", self.root / "french/sample.wav"]
+        original = self.fixtures / "sample.npz"
+        original.write_bytes(b"existing fixture")
+        before = {path.name: path.read_bytes() for path in self.fixtures.iterdir()}
+        with mock.patch.object(HARNESS, "exporter") as loader, \
+                mock.patch.object(HARNESS.subprocess, "run") as runner:
+            with self.assertRaisesRegex(ValueError, "Duplicate WAV stem 'sample'") as raised:
+                HARNESS.prepare(SimpleNamespace(wav=wavs, output=self.fixtures))
+            loader.assert_not_called()
+            runner.assert_not_called()
+        self.assertIn(str(wavs[0]), str(raised.exception))
+        self.assertIn(str(wavs[1]), str(raised.exception))
+        self.assertEqual({path.name: path.read_bytes() for path in self.fixtures.iterdir()}, before)
+
     def test_phone_serialization_preserves_shapes_valid_length_and_float32_values(self):
         output = self.root / "phone"
         HARNESS.main(["phone-fixtures", "--fixtures", str(self.fixtures), "--output", str(output)])
