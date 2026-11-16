@@ -29,7 +29,7 @@
   },
   "memory": {
     "runtime_weight_bytes": 108316032,
-    "workspace_bytes": 283115520,
+    "workspace_bytes": 311376000,
     "compile_peak_bytes": 343932928,
     "ane_compile_reserve_bytes": 397410304,
     "load_peak_bytes": {
@@ -38,8 +38,8 @@
       "cpu_and_gpu": null,
       "cpu_only": null
     },
-    "margin": 1.25,
-    "coreml_bound": "conservative",
+    "margin": 1.0,
+    "coreml_bound": "measured",
     "validated_for": [
       {
         "units": "all",
@@ -60,7 +60,8 @@
     "measured": {
       "margin": 1.25,
       "runs": 34,
-      "basis": "compile_peak_bytes, load_peak_bytes.all, workspace_bytes and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of generation to the end of the compile, the load and warm-up increment, the steady state over the footprint just before the load less the runtime weights, twice the I/O and the host quantizer copy, and ANECompilerService's growth during the load (its peak less its size just before the first load). The four macOS 15.7.3 runs recorded only the whole-run peak and ANECompilerService's absolute size; the workspace and the growth come from the runs that measured them"
+      "resident_bytes": 420478976,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers the prepare from the start of generation to the end of the compile; load_peak_bytes.all the load and warm-up increment; the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, runtime_weight_bytes being weight.bin's size) the steady state over the footprint just before the load, which under `all` on the M4 Max holds the GPU's copy of the weights and its working memory; and ane_compile_reserve_bytes ANECompilerService's growth during the load over its size before it. The four macOS 15.7.3 runs recorded only the whole-run peak and ANECompilerService's absolute size; the resident part and the growth come from the runs that measured them"
     }
   },
   "patches": [],
