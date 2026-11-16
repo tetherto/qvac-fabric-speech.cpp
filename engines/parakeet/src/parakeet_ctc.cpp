@@ -2079,8 +2079,10 @@ static void maybe_init_coreml_diarizers(const std::string & gguf_path,
     const std::vector<CoremlDiarizerTemplate> & templates =
         model.model_type == ParakeetModelType::NEMOTRON_DIARIZATION ? nemotron_diarizer_templates() : kNoTemplates;
     model.impl->coreml_diarizers = discover_coreml_diarizers(gguf_path, *model.impl->coreml, templates);
-    if (model.impl->coreml_diarizers) {
-        for (int capacity : model.impl->coreml_diarizers->capacities()) {
+    const std::vector<int> capacities =
+        model.impl->coreml_diarizers ? model.impl->coreml_diarizers->capacities() : std::vector<int>();
+    if (!capacities.empty()) {
+        for (int capacity : capacities) {
             const std::string path = coreml_diarizer_sidecar_path(gguf_path, capacity);
             if (path_is_directory(path)) {
                 PARAKEET_LOG_INFO("parakeet: Core ML diarizer available for %d frames at '%s'\n", capacity,

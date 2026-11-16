@@ -1,8 +1,12 @@
 #include "coreml/parakeet_coreml_sidecars.h"
 
+#include "parakeet_coreml_path.h"
+
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <chrono>
+#include <optional>
 #include <utility>
 
 namespace parakeet {
@@ -15,8 +19,6 @@ constexpr const char * kWeightsFile = "/weights/weight.bin";
 // Default ane_compile_reserve_bytes: ANECompilerService peaked at about
 // 1.6x the weights compiling a 199 MB model.
 constexpr double kAneCompileReserveFactor = 1.6;
-// plan()'s reason for a generated route the resolved units are not validated for.
-constexpr const char * kUnvalidatedUnits = "unvalidated_units";
 
 uint64_t file_bytes(const std::string & path) {
     struct stat st {};
@@ -136,9 +138,10 @@ pcm::Plan CoremlSidecars::plan(const SidecarRequest & request) const {
     return pcm::plan(plan_input(request, resolved_, *manager_), resolved_);
 }
 
-std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
+std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) { return add(request, plan(request)); }
+
+std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request, const pcm::Plan & plan) {
     const pcm::PlanInput in = plan_input(request, resolved_, *manager_);
-    const pcm::Plan plan = pcm::plan(in, resolved_);
 
     pcm::SlotSpec spec;
     spec.engine = kEngine;
@@ -161,19 +164,13 @@ std::shared_ptr<pcm::Slot> CoremlSidecars::add(const SidecarRequest & request) {
             plan.route == pcm::Route::prebuilt ? ane_compile_reserve_bytes(request.path, in.units) : 0;
     }
     if (request.generated != nullptr && !request.present) {
-        const bool unvalidated = plan.route == pcm::Route::none && plan.reason == kUnvalidatedUnits;
+        const bool unvalidated = plan.route == pcm::Route::none && plan.reason == pcm::kUnvalidatedUnits;
         if (plan.route == pcm::Route::generate || unvalidated) ++generated_routes_;
         if (unvalidated) ++unvalidated_routes_;
     }
     auto slot = manager_->make_slot(std::move(spec), pcm::SlotPolicy::from(resolved_));
     entries_.push_back(Entry{slot, request.minimal});
     return slot;
-}
-
-bool CoremlSidecars::admit_generated(const SidecarRequest & request) {
-    if (plan(request).route == pcm::Route::generate) return true;
-    add(request);
-    return false;
 }
 
 pcm::GenerationStatus CoremlSidecars::generation_status() const {
@@ -189,7 +186,7 @@ pcm::GenerationStatus CoremlSidecars::generation_status() const {
     } else if (manager_->platform() != pcm::Platform::macos || !pcm::os_at_least(manager_->os_version(), 15, 0)) {
         g.reason = "os";
     } else if (generated_routes_ > 0 && unvalidated_routes_ == generated_routes_) {
-        g.reason = kUnvalidatedUnits;
+        g.reason = pcm::kUnvalidatedUnits;
     } else {
         g.supported = true;
     }
@@ -250,6 +247,177 @@ std::vector<std::shared_ptr<pcm::Slot>> CoremlSidecars::slots() const {
     std::vector<std::shared_ptr<pcm::Slot>> out;
     out.reserve(entries_.size());
     for (const Entry & e : entries_) out.push_back(e.slot);
+    return out;
+}
+
+// ---- Diarizer capacities -------------------------------------------------
+
+std::vector<DiarizerCapacity> diarizer_capacities(const std::vector<int> & prebuilt,
+                                                  const std::vector<int> & template_frames,
+                                                  const std::vector<pcm::generation::Candidate> & probed) {
+    std::vector<DiarizerCapacity> out;
+    for (int frames : prebuilt) {
+        if (std::none_of(out.begin(), out.end(), [&](const DiarizerCapacity & c) { return c.frames == frames; })) {
+            out.push_back(DiarizerCapacity{frames, true, nullptr});
+        }
+    }
+    for (size_t i = 0; i < template_frames.size() && i < probed.size(); ++i) {
+        const int frames = template_frames[i];
+        // An adjacent prebuilt bundle wins; a capacity is listed once.
+        if (std::any_of(out.begin(), out.end(), [&](const DiarizerCapacity & c) { return c.frames == frames; })) {
+            continue;
+        }
+        out.push_back(DiarizerCapacity{frames, false, &probed[i]});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const DiarizerCapacity & a, const DiarizerCapacity & b) { return a.frames < b.frames; });
+    return out;
+}
+
+std::vector<pcm::generation::Candidate> probe_diarizer_templates(const CoremlSidecars & sidecars,
+                                                                 const std::string & gguf_path,
+                                                                 const std::vector<std::string> & template_ids) {
+    if (template_ids.empty()) return {};
+    if (!sidecars.resolved().enabled()) {
+        std::vector<pcm::generation::Candidate> unprobed(template_ids.size());
+        for (size_t i = 0; i < template_ids.size(); ++i) unprobed[i].template_id = template_ids[i];
+        return unprobed;
+    }
+    return pcm::generation::probe(template_ids, gguf_path, sidecars.resolved());
+}
+
+SidecarRequest diarizer_request(const std::string & gguf_path, const DiarizerCapacity & c, pcm::LoadFn load_fn,
+                                const pcm::SourceStat & source) {
+    SidecarRequest request;
+    request.stage = "diarizer-" + std::to_string(c.frames);
+    request.path = coreml_diarizer_sidecar_path(gguf_path, c.frames);
+    request.present = c.prebuilt;
+    request.stage_default = pcm::ComputeUnits::cpu_and_ane;
+    request.load_fn = load_fn;
+    request.geometry = {c.frames};
+    request.generated = c.prebuilt ? nullptr : c.generated;
+    request.source = source;
+    return request;
+}
+
+std::vector<CoremlDiarizerCharge> diarizer_fit_charges(const CoremlSidecars & sidecars, const std::string & gguf_path,
+                                                       const std::vector<DiarizerCapacity> & capacities) {
+    std::vector<CoremlDiarizerCharge> charges;
+    charges.reserve(capacities.size());
+    for (const DiarizerCapacity & c : capacities) {
+        CoremlDiarizerCharge charge;
+        charge.frames = c.frames;
+        const SidecarRequest request = diarizer_request(gguf_path, c, nullptr, pcm::SourceStat{});
+        if (request.generated != nullptr && sidecars.plan(request).route == pcm::Route::generate) {
+            const pcm::generation::TemplateMemory & memory = request.generated->memory;
+            const pcm::ComputeUnits units = sidecars.resolved().units_or(request.stage_default);
+            charge.generated = true;
+            charge.resident_bytes = pcm::generation::resident_bytes(memory);
+            charge.transient_bytes = pcm::generation::transient_bytes(memory, units);
+            charge.margin = memory.margin;
+        }
+        charges.push_back(charge);
+    }
+    return charges;
+}
+
+DiarizerSlots::DiarizerSlots(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
+                             CoremlSidecars & sidecars, pcm::LoadFn load_fn)
+    : strict_(sidecars.resolved().strict()) {
+    std::sort(capacities.begin(), capacities.end(),
+              [](const DiarizerCapacity & a, const DiarizerCapacity & b) { return a.frames < b.frames; });
+    pcm::SourceStat source;
+    if (std::any_of(capacities.begin(), capacities.end(), [](const DiarizerCapacity & c) {
+            return !c.prebuilt && c.generated != nullptr && c.generated->matched;
+        })) {
+        pcm::generation::source_stat(gguf_path, source);
+    }
+    bool minimal_served = false;
+    for (const DiarizerCapacity & c : capacities) {
+        SidecarRequest request = diarizer_request(gguf_path, c, load_fn, source);
+        const pcm::Plan plan = sidecars.plan(request);
+        const bool serves = c.prebuilt || plan.route == pcm::Route::generate;
+        // A status-only slot never loads; in the minimal set the construction
+        // group lists it as skipped.
+        request.minimal = !serves || !minimal_served;
+        minimal_served = minimal_served || serves;
+        capacities_.push_back(Capacity{c.frames, sidecars.add(request, plan), serves});
+    }
+}
+
+bool DiarizerSlots::covers(int frames) const {
+    if (frames <= 0) return false;
+    for (const Capacity & c : capacities_) {
+        if (c.frames >= frames && (strict_ || !pcm::is_terminal(c.slot->state()))) return true;
+    }
+    return false;
+}
+
+bool DiarizerSlots::prepare(int frames) const {
+    if (frames <= 0) return false;
+    for (const Capacity & c : capacities_) {
+        if (c.frames < frames || pcm::is_terminal(c.slot->state())) continue;
+        c.slot->request(pcm::Priority::current);
+        return c.slot->state() == pcm::SlotState::ready;
+    }
+    return false;
+}
+
+DiarizerPass DiarizerSlots::run(int frames, const Predict & predict) const {
+    DiarizerPass pass;
+    if (frames <= 0) return pass;
+    // Strict: why the covering capacities tried so far could not serve the pass.
+    std::optional<pcm::CoremlError> refused;
+    for (const Capacity & c : capacities_) {
+        if (c.frames < frames) continue;
+        // Strict acquisitions of a failed or status-only capacity throw;
+        // otherwise the capacity is skipped.
+        if (!strict_ && pcm::is_terminal(c.slot->state())) continue;
+        // One acquisition per pass (a chunk or block is the unit).
+        pcm::Acquired acquired;
+        try {
+            acquired = c.slot->acquire(pcm::Demand::now);
+        } catch (const pcm::CoremlError & error) {
+            // A failed capacity gives way to the next covering one; a timeout
+            // or a memory deferral refuses the pass at once.
+            if (!pcm::is_terminal(error.state)) throw;
+            if (!refused) refused = error;
+            continue;
+        }
+        if (!acquired.model) {
+            // Failed while this pass waited (wait = call): try the next capacity.
+            if (pcm::is_terminal(acquired.state)) continue;
+            pass.not_ready = true;
+            return pass;
+        }
+        pass.status = predict(acquired.model, c.frames);
+        if (pass.status != 0) {
+            const std::string reason = "prediction failed (rc=" + std::to_string(pass.status) + ")";
+            c.slot->retire(reason);
+            if (strict_) {
+                throw pcm::CoremlError("coreml: " + c.slot->spec().stage + " " + reason + " and Core ML is required",
+                                       pcm::SlotState::retired, pcm::ErrorClass::transient);
+            }
+        }
+        return pass;
+    }
+    if (refused) throw *refused;
+    return pass;
+}
+
+std::vector<int> DiarizerSlots::capacities() const {
+    std::vector<int> out;
+    for (const Capacity & c : capacities_) {
+        if (c.serves) out.push_back(c.frames);
+    }
+    return out;
+}
+
+std::vector<std::shared_ptr<pcm::Slot>> DiarizerSlots::status_only() const {
+    std::vector<std::shared_ptr<pcm::Slot>> out;
+    for (const Capacity & c : capacities_) {
+        if (!c.serves) out.push_back(c.slot);
+    }
     return out;
 }
 

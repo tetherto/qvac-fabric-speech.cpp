@@ -23,30 +23,22 @@ struct CoremlDiarizerCallStats {
     std::string label;   // Core ML label of the passes that ran on a sidecar
 };
 
-// The diarizer sidecars of one model, one runtime slot per capacity.
-// Each pass acquires the smallest covering capacity that has
-// not failed; while that capacity is still loading, run() returns kNoSidecar
-// and the pass runs on ggml. A load or prediction failure retires the
-// capacity for the process (quarantine), and later passes use the next
-// covering capacity or ggml. Under use = require a pass that a covering
-// capacity cannot serve (every covering capacity failed, a timeout, or a
-// failed prediction, which still retires the capacity) throws
-// pcm::CoremlError instead; a pass longer than every capacity runs on ggml.
+// The diarizer sidecars of one model, one runtime slot per capacity
+// (DiarizerSlots): each pass uses the smallest covering capacity that has
+// not failed; while that capacity is still loading, run() returns
+// kNoDiarizerSidecar and the pass runs on ggml. A load or prediction failure
+// retires the capacity for the process (quarantine), and later passes use the
+// next covering capacity or ggml. A template capacity that is not generated
+// keeps a status-only slot and never serves a pass. Under use = require a
+// pass that covering capacities cannot serve (every covering capacity failed
+// or is not generated, a timeout, or a failed prediction, which still retires
+// the capacity) throws pcm::CoremlError instead; a pass longer than every
+// capacity runs on ggml.
 class CoremlDiarizers {
 public:
-    // One capacity: an adjacent prebuilt bundle, or a template the runtime
-    // generates the bundle from (route generate), or both (prebuilt wins).
-    // `generated` is read only by the constructor.
-    struct Capacity {
-        int frames = 0;
-        bool prebuilt = false;
-        const pcm::generation::Candidate * generated = nullptr;
-    };
-
-    // Registers one slot per capacity with `sidecars`; the smallest capacity
-    // is in the minimal (construction) set.
-    CoremlDiarizers(std::string gguf_path, std::vector<int> capacities, CoremlSidecars & sidecars);
-    CoremlDiarizers(std::string gguf_path, std::vector<Capacity> capacities, CoremlSidecars & sidecars);
+    // Registers one slot per capacity with `sidecars` (DiarizerSlots).
+    CoremlDiarizers(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities,
+                    CoremlSidecars & sidecars);
     ~CoremlDiarizers();
     CoremlDiarizers(const CoremlDiarizers &) = delete;
     CoremlDiarizers & operator=(const CoremlDiarizers &) = delete;
@@ -61,6 +53,7 @@ public:
             const parakeet_coreml_rows * inputs, int n_inputs,
             const parakeet_coreml_rows_out * outputs, int n_outputs);
     std::string label();
+    // The capacities that can serve a pass: prebuilt, or generated.
     std::vector<int> capacities() const;
 
     // Engine calls are not concurrent (engine.h), so one tally per model.
@@ -87,8 +80,9 @@ struct CoremlDiarizerTemplate {
 const std::vector<CoremlDiarizerTemplate> & nemotron_diarizer_templates();
 
 // The diarizer capacities of a model: every adjacent prebuilt bundle, plus
-// every template in `templates` whose route is generate (it matches the GGUF
-// and this instance can generate). Null when there is none.
+// every template in `templates` with no adjacent bundle (diarizer_capacities):
+// generated when its route is generate (it matches the GGUF and this instance
+// can generate), a status-only slot otherwise. Null when there is none.
 std::unique_ptr<CoremlDiarizers> discover_coreml_diarizers(const std::string & gguf_path,
                                                            CoremlSidecars & sidecars,
                                                            const std::vector<CoremlDiarizerTemplate> & templates = {});

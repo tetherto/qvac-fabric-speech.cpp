@@ -100,17 +100,20 @@ struct CoremlDiarizerCharge {
 
 // The Core ML envelope of the generated capacities that calls in `ranges`
 // can load, selected over every capacity (prebuilt and generated) by
-// coreml_diarizer_loaded_capacities: the sum of their resident parts plus the
-// largest single transient (prepares and loads run one at a time), times the
-// largest margin among them. 0 when no generated capacity is loaded.
+// coreml_diarizer_loaded_capacities, or of every generated capacity when
+// `every_capacity` (prewarm = all loads them all at construction): the sum of
+// their resident parts plus the largest single transient (prepares and loads
+// run one at a time), times the largest margin among them. 0 when no
+// generated capacity is loaded.
 inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiarizerCharge> & capacities,
-                                                   const std::vector<CoremlFrameRange> & ranges) {
+                                                   const std::vector<CoremlFrameRange> & ranges,
+                                                   bool every_capacity = false) {
     using fitutil::sat_add;
     std::vector<int> sorted;
     sorted.reserve(capacities.size());
     for (const CoremlDiarizerCharge & c : capacities) sorted.push_back(c.frames);
     std::sort(sorted.begin(), sorted.end());
-    const std::vector<int> loaded = coreml_diarizer_loaded_capacities(sorted, ranges);
+    const std::vector<int> loaded = every_capacity ? sorted : coreml_diarizer_loaded_capacities(sorted, ranges);
     uint64_t resident = 0;
     uint64_t transient = 0;
     double margin = 1.0;
@@ -128,7 +131,9 @@ inline uint64_t coreml_generated_diarizer_envelope(const std::vector<CoremlDiari
 // verdict charged (it includes the prebuilt diarizer sidecars when the device
 // shares host memory); `encoder_envelope` is the encoder sidecar's envelope (0
 // with no route); `generated_diarizers` is the Core ML envelope of the
-// diarizer capacities on route generate (validated templates only). The
+// diarizer capacities on route generate (validated templates only).
+// `coreml.validated` holds when generated capacities are charged and nothing
+// else is: a prebuilt charge in the bytes is not a validated envelope. The
 // top-level `fits` is left as it is: prebuilt routes keep today's fit results
 // until their model's PR validates them, and a generated route never turns a
 // working ggml verdict into a refusal (memory-degrade resolves use = off).
@@ -149,7 +154,9 @@ inline void apply_coreml_verdicts(FitResult & r, uint64_t required, bool coreml_
     }
     r.coreml.disabled_reason.clear();
     r.coreml.bytes = sat_add(sat_add(diarizers, encoder_prebuilt ? encoder_envelope : 0), generated_diarizers);
-    r.coreml.validated = generated_diarizers > 0;
+    // Validated only when every charged byte comes from a validated template
+    // envelope: prebuilt sidecars keep today's unvalidated charge.
+    r.coreml.validated = generated_diarizers > 0 && diarizers == 0 && !encoder_prebuilt;
     r.coreml.fits = sat_add(r.ggml_required_bytes, r.coreml.bytes) <= r.device_free_bytes;
 }
 

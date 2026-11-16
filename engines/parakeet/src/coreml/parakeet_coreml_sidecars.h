@@ -17,6 +17,7 @@
 // Objective-C here, so the routing glue builds and is tested on every
 // platform with fake loaders.
 
+#include "coreml_fit.h"
 #include "encoder_route.h"
 #include "parakeet/coreml_options.h"
 #include "qvac_coreml/generation.h"
@@ -24,6 +25,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -112,13 +114,8 @@ public:
     // Registers a slot with the route plan() gives it; a `none` route is
     // reported in status and listed as skipped in groups.
     std::shared_ptr<pcm::Slot> add(const SidecarRequest & request);
-
-    // For a template candidate of a stage with no adjacent bundle
-    // (`request.generated` set): true when plan() routes it to `generate`, and
-    // the caller registers it. Otherwise registers a status-only slot (state
-    // `no_template`, `unsupported(unvalidated_units)`, ...) so status and the
-    // groups' skipped lists show it, and returns false.
-    bool admit_generated(const SidecarRequest & request);
+    // The same with `plan` = plan(request), when the caller has planned it.
+    std::shared_ptr<pcm::Slot> add(const SidecarRequest & request, const pcm::Plan & plan);
 
     // Whether this instance can generate sidecars, and why not (status
     // "generation"). The reason is "unvalidated_units" once every generated
@@ -157,6 +154,108 @@ private:
     int generated_routes_ = 0;
     int unvalidated_routes_ = 0;
     std::shared_ptr<pcm::Group> construction_;
+};
+
+// ---- Diarizer capacities -------------------------------------------------
+
+// One diarizer capacity of a model: an adjacent prebuilt bundle, or a
+// template the runtime can generate the bundle from (a prebuilt bundle wins).
+struct DiarizerCapacity {
+    int frames = 0;
+    bool prebuilt = false;
+    // The template probed against the GGUF (template capacities only). Read
+    // only while the capacity is planned or registered.
+    const pcm::generation::Candidate * generated = nullptr;
+};
+
+// The diarizer capacities of one model, ascending: every adjacent prebuilt
+// bundle (`prebuilt`), and every template capacity with no adjacent bundle
+// (`template_frames[i]`, probed as `probed[i]`). Discovery registers each of
+// them, and fit charges the template capacities that plan() routes to
+// generate (diarizer_fit_charges); both start from this list and plan the
+// same diarizer_request(), so they always choose the same capacities.
+std::vector<DiarizerCapacity> diarizer_capacities(const std::vector<int> & prebuilt,
+                                                  const std::vector<int> & template_frames,
+                                                  const std::vector<pcm::generation::Candidate> & probed);
+
+// The templates `template_ids` probed against `gguf_path`. With Core ML
+// disabled nothing is read: every candidate is unavailable, and plan() reports
+// the capacity disabled before it looks at the template.
+std::vector<pcm::generation::Candidate> probe_diarizer_templates(const CoremlSidecars & sidecars,
+                                                                 const std::string & gguf_path,
+                                                                 const std::vector<std::string> & template_ids);
+
+// The sidecar request of one diarizer capacity: stage diarizer-<frames>, the
+// adjacent bundle path, the stage default cpu_and_ane, the capacity as the
+// loader's geometry. `source` is the GGUF's stat tuple (route generate).
+SidecarRequest diarizer_request(const std::string & gguf_path, const DiarizerCapacity & c, pcm::LoadFn load_fn,
+                                const pcm::SourceStat & source);
+
+// Fit: one charge per capacity of `capacities`. A template capacity that plan()
+// routes to generate carries its template's unmargined resident and
+// transient parts for the resolved units; every other capacity is listed
+// uncharged, because a prebuilt one still shapes which capacities a range
+// loads (coreml_generated_diarizer_envelope).
+std::vector<CoremlDiarizerCharge> diarizer_fit_charges(const CoremlSidecars & sidecars, const std::string & gguf_path,
+                                                       const std::vector<DiarizerCapacity> & capacities);
+
+// DiarizerSlots::run's status when the pass runs on ggml.
+constexpr int kNoDiarizerSidecar = -1;
+
+// The outcome of one diarizer pass.
+struct DiarizerPass {
+    // 0: ran on Core ML; kNoDiarizerSidecar: ggml serves the pass; other
+    // values: the prediction failed and its capacity was retired.
+    int status = kNoDiarizerSidecar;
+    bool not_ready = false;  // ggml only because the covering capacity was still loading
+};
+
+// The runtime slots of one model's diarizer capacities, and which capacity
+// serves a pass. Every capacity gets a slot; a template capacity whose route
+// is not generate gets a status-only slot (no_template, unsupported(...),
+// disabled) that status and the construction group list but that never
+// serves a pass. A pass uses the smallest covering capacity that can serve
+// it; a load or prediction failure retires that capacity for the process.
+// Under use = require a pass that covering capacities cannot serve throws
+// pcm::CoremlError: every covering capacity failed or is status-only, a
+// timeout, or a failed prediction. A pass longer than every capacity runs on
+// ggml.
+class DiarizerSlots {
+public:
+    // Runs one prediction on a ready model of `capacity` frames; 0 on success.
+    using Predict = std::function<int(pcm::Handle & model, int capacity)>;
+
+    // Registers one slot per capacity. The smallest capacity that can serve
+    // a pass and every status-only capacity are in the minimal (construction)
+    // set; the others are requested by the pass that needs them, or by
+    // prewarm = all.
+    DiarizerSlots(const std::string & gguf_path, std::vector<DiarizerCapacity> capacities, CoremlSidecars & sidecars,
+                  pcm::LoadFn load_fn);
+
+    // A capacity that has not failed covers `frames` (independent of
+    // readiness). Under use = require every capacity covers, so run() refuses
+    // the pass rather than the caller falling back to ggml.
+    bool covers(int frames) const;
+    // Requests the covering capacity now; true when it is ready.
+    bool prepare(int frames) const;
+    // Runs `predict` on the smallest covering capacity that is ready (see the
+    // class comment for ggml and use = require).
+    DiarizerPass run(int frames, const Predict & predict) const;
+
+    bool strict() const { return strict_; }
+    // The capacities that can serve a pass: prebuilt, or route generate.
+    std::vector<int> capacities() const;
+    // The status-only slots of template capacities that are not generated.
+    std::vector<std::shared_ptr<pcm::Slot>> status_only() const;
+
+private:
+    struct Capacity {
+        int frames = 0;
+        std::shared_ptr<pcm::Slot> slot;
+        bool serves = false;  // prebuilt or route generate
+    };
+    bool strict_ = false;
+    std::vector<Capacity> capacities_;  // ascending
 };
 
 }  // namespace parakeet

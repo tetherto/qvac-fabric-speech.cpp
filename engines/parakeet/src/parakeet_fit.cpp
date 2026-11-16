@@ -198,40 +198,33 @@ uint64_t coreml_diarizer_bytes(const std::string & gguf_path,
 
 // The Nemotron diarizer capacities the engine would generate (route generate
 // from plan(): a matching template, a cache directory, generate != never,
-// macOS 15, validated units; never the cache's contents), charged at their
-// templates' Core ML envelope: the resident part of every capacity the
-// ranges can load plus one transient, with the templates' margin.
+// macOS 15, validated units; never the cache's contents), chosen by the same
+// diarizer_capacities() + plan() as discovery and charged at their templates'
+// Core ML envelope: the resident part of every capacity the ranges can load
+// (every generated capacity under prewarm = all) plus one transient, with
+// the templates' margin.
 uint64_t coreml_generated_diarizer_bytes(const FitOptions & opts, const std::vector<CoremlFrameRange> & ranges) {
 #ifdef PARAKEET_USE_COREML
     if (coreml_diarizers_disabled()) return 0;
     CoremlSidecars sidecars(opts.coreml);
+    // No capacity can route to generate (the probe would be wasted).
     if (!sidecars.generation_status().supported) return 0;
-    std::vector<CoremlDiarizerCharge> capacities;
+    std::vector<int> template_frames;
+    std::vector<std::string> template_ids;
+    for (const CoremlDiarizerTemplate & t : nemotron_diarizer_templates()) {
+        template_frames.push_back(t.frames);
+        template_ids.emplace_back(t.template_id);
+    }
+    std::vector<int> prebuilt;
     for (const CoremlDiarizerBundle & b : list_coreml_diarizer_bundles(opts.model_gguf_path)) {
-        capacities.push_back({b.capacity});
+        prebuilt.push_back(b.capacity);
     }
-    const std::vector<CoremlDiarizerTemplate> & templates = nemotron_diarizer_templates();
-    std::vector<std::string> ids;
-    for (const CoremlDiarizerTemplate & t : templates) ids.emplace_back(t.template_id);
     const std::vector<pcm::generation::Candidate> probed =
-        pcm::generation::probe(ids, opts.model_gguf_path, sidecars.resolved());
-    for (size_t i = 0; i < templates.size() && i < probed.size(); ++i) {
-        const int frames = templates[i].frames;
-        if (std::any_of(capacities.begin(), capacities.end(),
-                        [&](const CoremlDiarizerCharge & c) { return c.frames == frames; })) {
-            continue;  // an adjacent prebuilt bundle wins
-        }
-        SidecarRequest request;
-        request.present = false;
-        request.stage_default = pcm::ComputeUnits::cpu_and_ane;
-        request.generated = &probed[i];
-        if (sidecars.plan(request).route != pcm::Route::generate) continue;
-        const pcm::generation::TemplateMemory & memory = probed[i].memory;
-        const pcm::ComputeUnits units = sidecars.resolved().units_or(request.stage_default);
-        capacities.push_back({frames, true, pcm::generation::resident_bytes(memory),
-                              pcm::generation::transient_bytes(memory, units), memory.margin});
-    }
-    return coreml_generated_diarizer_envelope(capacities, ranges);
+        probe_diarizer_templates(sidecars, opts.model_gguf_path, template_ids);
+    const std::vector<CoremlDiarizerCharge> charges = diarizer_fit_charges(
+        sidecars, opts.model_gguf_path, diarizer_capacities(prebuilt, template_frames, probed));
+    return coreml_generated_diarizer_envelope(charges, ranges,
+                                              sidecars.resolved().prewarm == pcm::Prewarm::all);
 #else
     (void) opts;
     (void) ranges;

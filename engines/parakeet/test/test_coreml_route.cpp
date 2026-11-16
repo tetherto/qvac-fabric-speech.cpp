@@ -29,7 +29,10 @@
 //                         identical with no hint, a warm hint and a stale hint
 //   generated-envelope    the generated-diarizer fit charge: capacities a
 //                         range loads (prebuilt ones shape the selection),
-//                         resident sum + one transient, largest margin
+//                         resident sum + one transient, largest margin;
+//                         every generated capacity under prewarm = all
+//   verdicts-validated    coreml.validated only when every charged byte is
+//                         a generated envelope
 //   generated-sidecar     a stage with no adjacent bundle and a matching
 //                         template is generated into the cache (route
 //                         generate, fake compile), loads under the artifact's
@@ -43,6 +46,13 @@
 //                         generated envelope and route are the same before
 //                         and after generation (fit-stable); a
 //                         memory-degraded instance has no generate route
+//   diarizer-capacities   fit and discovery choose the same generated
+//                         capacities; a capacity that is not generated keeps
+//                         a status-only slot that never serves a pass, is
+//                         listed by the construction group (every capacity
+//                         when generation is off) and, under use = require,
+//                         refuses a pass it covers; a pass longer than every
+//                         capacity still runs on ggml
 
 #include "coreml/parakeet_coreml_sidecars.h"
 #include "coreml_fit.h"
@@ -55,6 +65,7 @@
 #include "gguf.h"
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <chrono>
@@ -825,6 +836,43 @@ void case_generated_diarizer_envelope() {
     // Saturates instead of wrapping.
     const std::vector<CoremlDiarizerCharge> huge = {gen(358, UINT64_MAX - 1, UINT64_MAX - 1, 1.25)};
     CHECK(coreml_generated_diarizer_envelope(huge, {{1, 358}}) == UINT64_MAX, "saturating arithmetic");
+
+    // prewarm = all loads every capacity at construction, whatever the calls
+    // need: every generated capacity is charged, prebuilt ones never are.
+    // (100 + 200 + 300 + max(30, 50, 40)) x 1.5 = 975.
+    auto all = [&](std::vector<CoremlFrameRange> ranges) {
+        return coreml_generated_diarizer_envelope(caps, ranges, /*every_capacity=*/true);
+    };
+    CHECK(all({{1, 358}}) == 975, "prewarm all: a short range still charges every generated capacity");
+    CHECK(all({}) == 975, "prewarm all: no ranges, every generated capacity");
+    CHECK(all({{1, 150}}) == 975, "prewarm all: a range only the prebuilt capacity covers");
+    CHECK(coreml_generated_diarizer_envelope({CoremlDiarizerCharge{200}}, {}, true) == 0,
+          "prewarm all: prebuilt capacities alone charge nothing");
+}
+
+// coreml.validated: true only when the charged bytes are all generated
+// envelopes. A prebuilt diarizer or encoder charge in the bytes is today's
+// unvalidated estimate.
+void case_coreml_verdicts_validated() {
+    auto verdict = [](uint64_t prebuilt_diarizers, bool encoder_prebuilt, uint64_t generated) {
+        FitResult r;
+        r.device_shares_host_memory = true;
+        r.device_free_bytes = uint64_t(1) << 40;
+        r.coreml_bytes = prebuilt_diarizers;
+        apply_coreml_verdicts(r, 1000 + prebuilt_diarizers, true, "", encoder_prebuilt, encoder_prebuilt ? 77 : 0,
+                              generated);
+        return r;
+    };
+    const FitResult generated_only = verdict(0, false, 500);
+    CHECK(generated_only.coreml.validated && generated_only.coreml.bytes == 500,
+          "validated: only generated capacities are charged");
+    const FitResult with_prebuilt = verdict(300, false, 500);
+    CHECK(!with_prebuilt.coreml.validated && with_prebuilt.coreml.bytes == 800,
+          "not validated: a prebuilt diarizer charge is in the bytes");
+    const FitResult with_encoder = verdict(0, true, 500);
+    CHECK(!with_encoder.coreml.validated && with_encoder.coreml.bytes == 577,
+          "not validated: a prebuilt encoder envelope is in the bytes");
+    CHECK(!verdict(0, false, 0).coreml.validated, "not validated: nothing generated is charged");
 }
 
 }  // namespace
@@ -963,8 +1011,6 @@ void case_generated_sidecar() {
         CHECK(g_generated_loads == 1 && g_generated_leases == 1, "the load held the artifact's lease");
         CHECK(sidecars.status_json().find("\"generated\"") != std::string::npos, "status JSON");
 
-        CHECK(sidecars.admit_generated(request_for(&probed[0], gguf)) && sidecars.slots().size() == 1,
-              "a generated route is admitted and left to the caller to register");
         CHECK(sidecars.generation_status().supported, "a registered generated route keeps generation supported");
 
         // Unvalidated units and a mismatching GGUF give no route, and a
@@ -975,9 +1021,9 @@ void case_generated_sidecar() {
         CHECK(gpu_sidecars.plan(request_for(&probed[0], gguf)).route == pcm::Route::none &&
                   gpu_sidecars.plan(request_for(&probed[0], gguf)).reason == "unvalidated_units",
               "units the template was not validated for suppress generation");
-        CHECK(!gpu_sidecars.admit_generated(request_for(&probed[0], gguf)), "a suppressed route is not admitted");
+        gpu_sidecars.add(request_for(&probed[0], gguf));
         CHECK(gpu_sidecars.slots().size() == 1 && gpu_sidecars.slots()[0]->spec().route == pcm::Route::none,
-              "it keeps a status-only slot");
+              "a suppressed route keeps a status-only slot");
         CHECK(!gpu_sidecars.generation_status().supported &&
                   gpu_sidecars.generation_status().reason == "unvalidated_units",
               "every generated route suppressed for the units: generation reason unvalidated_units");
@@ -1002,7 +1048,8 @@ void case_generated_sidecar() {
         CHECK(sidecars.plan(request_for(&mismatch[0], other)).none_state == pcm::SlotState::no_template,
               "a mismatching GGUF reports no_template");
         CoremlSidecars other_sidecars(opts, m);
-        CHECK(!other_sidecars.admit_generated(request_for(&mismatch[0], other)), "a mismatching GGUF is not admitted");
+        CHECK(other_sidecars.add(request_for(&mismatch[0], other))->spec().route == pcm::Route::none,
+              "a mismatching GGUF gets a status-only slot");
         CHECK(other_sidecars.generation_status().supported && other_sidecars.generation_status().reason.empty(),
               "no_template is not a units suppression: generation stays supported");
         const std::string other_status = other_sidecars.status_json();
@@ -1063,6 +1110,231 @@ void case_generated_sidecar() {
     pcm::generation::set_compile_override(nullptr);
     ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
 }
+
+// The diarizer capacities of a model: fit and discovery choose the same ones
+// (diarizer_capacities + plan); a template capacity that is not generated
+// keeps a status-only slot, which the construction group lists (every one of
+// them when generation is off), which never serves a pass, and which under
+// use = require refuses a pass it covers instead of letting it run on ggml.
+void case_diarizer_capacities() {
+    const fs::path dir = make_temp_dir("diarizers");
+    const fs::path templates = dir / "templates";
+    fs::create_directories(templates);
+    fs::copy(fs::path(QVAC_COREML_TOY_TEMPLATES) / "toy-stateless", templates / "toy-stateless");
+    {
+        std::ifstream in(templates / "toy-stateless" / "template.json");
+        std::string j((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string from = "\"validated_for\": []";
+        const size_t at = j.find(from);
+        CHECK(at != std::string::npos, "the toy template lists validated_for");
+        if (at == std::string::npos) return;
+        j.replace(at, from.size(), "\"validated_for\": [{\"units\": \"cpu_and_ane\", \"os\": \"test\", \"chip\": \"test\"}]");
+        write_text(templates / "toy-stateless" / "template.json", j);
+    }
+    ::setenv("QVAC_COREML_TEMPLATE_DIR", templates.c_str(), 1);
+    const fs::path gguf = dir / "m.gguf";
+    write_toy_gguf(gguf, "stateless", 1.0f);
+    const fs::path other = dir / "other.gguf";
+    write_toy_gguf(other, "multi", 1.0f);
+    pcm::generation::set_compile_override(&fake_compile);
+
+    pcm::Config cfg = fast_config();
+    cfg.platform = pcm::Platform::macos;
+    cfg.os = pcm::OsVersion{15, 7, 0};
+    auto m = pcm::Manager::create(cfg);
+
+    CoremlOptions base;
+    base.cache_dir = (dir / "cache").string();
+    const std::vector<int> template_frames = {358, 745, 1125};
+    const std::vector<std::string> ids(3, "toy-stateless");
+    const std::vector<int> prebuilt = {745};
+
+    struct Config {
+        const char * name;
+        CoremlOptions opts;
+        fs::path model;
+        std::vector<int> generated;  // capacities with route generate
+    };
+    std::vector<Config> configs;
+    configs.push_back({"validated units", base, gguf, {358, 1125}});
+    {
+        CoremlOptions o = base;
+        o.compute_units = "cpu_and_gpu";
+        configs.push_back({"unvalidated units", o, gguf, {}});
+    }
+    {
+        CoremlOptions o = base;
+        o.cache_dir = "";
+        configs.push_back({"no cache directory", o, gguf, {}});
+    }
+    {
+        CoremlOptions o = base;
+        o.generate = CoremlOptions::Generate::never;
+        configs.push_back({"generate never", o, gguf, {}});
+    }
+    configs.push_back({"a GGUF the template does not match", base, other, {}});
+
+    for (const Config & c : configs) {
+        const std::string what = std::string(c.name) + ": ";
+        CoremlSidecars fit_sidecars(c.opts, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(fit_sidecars, c.model.string(), ids);
+        const std::vector<DiarizerCapacity> capacities = diarizer_capacities(prebuilt, template_frames, probed);
+        CHECK(capacities.size() == 3 && capacities[1].prebuilt && !capacities[0].prebuilt && !capacities[2].prebuilt,
+              (what + "one capacity per frame count, the prebuilt bundle wins").c_str());
+        std::vector<int> charged;
+        for (const CoremlDiarizerCharge & charge :
+             diarizer_fit_charges(fit_sidecars, c.model.string(), capacities)) {
+            if (charge.generated) charged.push_back(charge.frames);
+        }
+        CoremlSidecars sidecars(c.opts, m);
+        const DiarizerSlots slots(c.model.string(), capacities, sidecars, &fake_load);
+        std::vector<int> registered;
+        for (const auto & slot : sidecars.slots()) {
+            if (slot->spec().route == pcm::Route::generate) registered.push_back(slot->spec().geometry.at(0));
+        }
+        CHECK(charged == c.generated, (what + "fit charges the expected generated capacities").c_str());
+        CHECK(registered == charged, (what + "discovery registers the capacities fit charges").c_str());
+        std::vector<int> serving = c.generated;
+        serving.push_back(745);
+        std::sort(serving.begin(), serving.end());
+        CHECK(slots.capacities() == serving, (what + "the serving capacities: prebuilt and generated").c_str());
+        CHECK(sidecars.slots().size() == 3 && slots.status_only().size() == 3 - serving.size(),
+              (what + "every other capacity keeps a status-only slot").c_str());
+    }
+
+    const auto predict_ok = [](int * seen) {
+        return [seen](pcm::Handle &, int capacity) {
+            *seen = capacity;
+            return 0;
+        };
+    };
+    const auto throws = [](const DiarizerSlots & slots, int frames, std::string * what) {
+        try {
+            slots.run(frames, [](pcm::Handle &, int) { return 0; });
+        } catch (const pcm::CoremlError & e) {
+            if (what != nullptr) *what = e.what();
+            return true;
+        }
+        return false;
+    };
+
+    // Unvalidated units: 358 and 1125 are status-only, 745 is prebuilt.
+    {
+        CoremlOptions o = base;
+        o.compute_units = "cpu_and_gpu";
+        CoremlSidecars probe_sidecars(o, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(probe_sidecars, gguf.string(), ids);
+        const std::vector<DiarizerCapacity> capacities = diarizer_capacities(prebuilt, template_frames, probed);
+
+        CoremlOptions require = o;
+        require.use = CoremlOptions::Use::require;
+        CoremlSidecars strict_sidecars(require, m);
+        const DiarizerSlots strict_slots(gguf.string(), capacities, strict_sidecars, &fake_load);
+        int seen = 0;
+        DiarizerPass pass;
+        bool threw = false;
+        try {
+            pass = strict_slots.run(300, predict_ok(&seen));
+        } catch (const pcm::CoremlError &) {
+            threw = true;
+        }
+        CHECK(!threw && pass.status == 0 && seen == 745,
+              "require: a status-only capacity gives way to the next covering one that serves");
+        std::string what;
+        CHECK(strict_slots.covers(800) && throws(strict_slots, 800, &what) &&
+                  what.find("unsupported(unvalidated_units)") != std::string::npos,
+              "require: a pass only a status-only capacity covers throws (unsupported(unvalidated_units))");
+        seen = 0;
+        threw = false;
+        try {
+            pass = strict_slots.run(2000, predict_ok(&seen));
+        } catch (const pcm::CoremlError &) {
+            threw = true;
+        }
+        CHECK(!threw && pass.status == kNoDiarizerSidecar && seen == 0,
+              "require: a pass longer than every capacity runs on ggml");
+
+        CoremlSidecars auto_sidecars(o, m);
+        const DiarizerSlots auto_slots(gguf.string(), capacities, auto_sidecars, &fake_load);
+        CHECK(!auto_slots.covers(800), "auto: a status-only capacity covers nothing");
+        threw = false;
+        seen = 0;
+        try {
+            pass = auto_slots.run(800, predict_ok(&seen));
+        } catch (const pcm::CoremlError &) {
+            threw = true;
+        }
+        CHECK(!threw && pass.status == kNoDiarizerSidecar && !pass.not_ready && seen == 0,
+              "auto: a pass only a status-only capacity covers runs on ggml, not pending");
+    }
+
+    // A GGUF the template does not match, no prebuilt: require refuses every
+    // pass a capacity covers (no_template).
+    {
+        CoremlOptions require = base;
+        require.use = CoremlOptions::Use::require;
+        CoremlSidecars sidecars(require, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, other.string(), ids);
+        const DiarizerSlots slots(other.string(), diarizer_capacities({}, template_frames, probed), sidecars,
+                                  &fake_load);
+        std::string what;
+        CHECK(slots.capacities().empty() && throws(slots, 300, &what) &&
+                  what.find("no_template") != std::string::npos,
+              "require: no_template capacities refuse the pass");
+    }
+
+    // Generation off for the whole instance: every template capacity keeps a
+    // status-only slot, and the construction group lists each one as skipped.
+    for (const char * reason : {"no_cache_dir", "generate=never"}) {
+        CoremlOptions o = base;
+        o.wait = CoremlOptions::Wait::construct;
+        if (std::string(reason) == "no_cache_dir") {
+            o.cache_dir = "";
+        } else {
+            o.generate = CoremlOptions::Generate::never;
+        }
+        CoremlSidecars sidecars(o, m);
+        CHECK(!sidecars.generation_status().supported && sidecars.generation_status().reason == reason,
+              "generation is off for the instance");
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, template_frames, probed), sidecars,
+                                  &fake_load);
+        sidecars.start();
+        const std::string group = sidecars.construction_json();
+        int listed = 0;
+        for (const char * stage : {"diarizer-358", "diarizer-745", "diarizer-1125"}) {
+            if (group.find(std::string("\"stage\":\"") + stage + "\"") != std::string::npos) ++listed;
+        }
+        CHECK(group.find("\"slots\":[]") != std::string::npos && listed == 3,
+              (std::string(reason) + ": the construction group lists every capacity under skipped_route_none").c_str());
+        CHECK(slots.status_only().size() == 3 && slots.status_only()[0]->status().reason == reason,
+              (std::string(reason) + ": the status-only slots say why").c_str());
+    }
+
+    // The smallest serving capacity is minimal even above a status-only one.
+    {
+        CoremlOptions o = base;
+        o.compute_units = "cpu_and_gpu";
+        o.wait = CoremlOptions::Wait::construct;
+        CoremlSidecars sidecars(o, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const DiarizerSlots slots(gguf.string(), diarizer_capacities(prebuilt, template_frames, probed), sidecars,
+                                  &fake_load);
+        const int loads = g_fake_loads.load();
+        sidecars.start();
+        const std::string group = sidecars.construction_json();
+        CHECK(g_fake_loads.load() == loads + 1 && group.find("\"stage\":\"diarizer-745\"") != std::string::npos,
+              "the construction group loads the smallest prebuilt capacity above the status-only ones");
+    }
+
+    pcm::generation::set_compile_override(nullptr);
+    ::unsetenv("QVAC_COREML_TEMPLATE_DIR");
+}
 #endif
 
 int main() {
@@ -1078,8 +1350,10 @@ int main() {
     case_options();
     case_fit_stable();
     case_generated_diarizer_envelope();
+    case_coreml_verdicts_validated();
 #if defined(QVAC_COREML_HAVE_GGML)
     case_generated_sidecar();
+    case_diarizer_capacities();
 #endif
     std::printf("test-parakeet-coreml-route: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

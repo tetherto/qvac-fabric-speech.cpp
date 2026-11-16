@@ -6,7 +6,8 @@
 // Core ML-inclusive total resolves Core ML off for memory; one with room for
 // both keeps generation on. An Engine on compute units the templates were not
 // validated for generates nothing, and every capacity keeps a status entry
-// that says so.
+// that says so; so does an Engine with generation off (generate = never).
+// With prewarm = all the charge covers every generated capacity.
 //
 // Usage: test-fit-coreml-generated-diarizers <model.gguf> <empty cache dir>
 // The GGUF's directory must hold no diarizer bundle. Never skips: every check
@@ -95,6 +96,15 @@ int main(int argc, char ** argv) {
     check(before.coreml.bytes > 0 && before.coreml.validated,
           "the generated capacities are charged, validated for the resolved units");
 
+    // prewarm = all loads every capacity at construction: the charge covers
+    // all of them, more than the capacities this workload's calls load.
+    parakeet::CoremlOptions every = coreml_options(cache);
+    every.prewarm = parakeet::CoremlOptions::Prewarm::all;
+    const parakeet::FitResult all = project(gguf, every);
+    print("prewarm all", all);
+    check(all.coreml.bytes > before.coreml.bytes && all.coreml.validated,
+          "prewarm all charges every generated capacity");
+
     // Generate every capacity (wait for construction, prewarm all).
     parakeet::CoremlOptions generate = coreml_options(cache);
     generate.wait = parakeet::CoremlOptions::Wait::construct;
@@ -129,9 +139,21 @@ int main(int argc, char ** argv) {
     check(count(unvalidated, "\"state\":\"unsupported(unvalidated_units)\"") == kCapacities &&
               count(unvalidated, "\"route\":\"none\"") == kCapacities,
           "every capacity reports unsupported(unvalidated_units), route none");
-    check(contains(gpu_group, "\"slots\":[]") && contains(gpu_group, "\"stage\":\"diarizer-358\"") &&
-              contains(gpu_group, "unsupported(unvalidated_units)"),
-          "the construction group loads nothing and lists the smallest capacity as skipped");
+    check(contains(gpu_group, "\"slots\":[]") && count(gpu_group, "\"stage\":\"diarizer-") == kCapacities &&
+              count(gpu_group, "unsupported(unvalidated_units)") == kCapacities,
+          "the construction group loads nothing and lists every capacity as skipped");
+
+    // Generation off for the instance: every capacity is still listed, with
+    // the reason.
+    parakeet::CoremlOptions never = coreml_options(cache);
+    never.generate = parakeet::CoremlOptions::Generate::never;
+    std::string never_group;
+    const std::string off = engine_status(gguf, never, &never_group);
+    check(contains(off, "\"generation\":{\"reason\":\"generate=never\",\"supported\":false}") &&
+              count(off, "\"stage\":\"diarizer-") == kCapacities,
+          "generate = never: generation off, every capacity keeps a status entry");
+    check(contains(never_group, "\"slots\":[]") && count(never_group, "\"stage\":\"diarizer-") == kCapacities,
+          "generate = never: the construction group lists every capacity as skipped");
 
     // A budget between the two totals: Core ML off for memory, before any load.
     parakeet::CoremlOptions tight = coreml_options(cache);
