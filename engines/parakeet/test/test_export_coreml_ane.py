@@ -7,6 +7,7 @@ export-decoder-coreml-ane.py against its scalar reference on random weights.
 """
 
 import importlib.util
+import platform
 import sys
 import tempfile
 import types
@@ -139,7 +140,22 @@ class EuEncoderTests(unittest.TestCase):
         torch.testing.assert_close(other, expected)
         self.assertGreater(float((other - english).abs().max()), 0.01)
 
-    @unittest.skipUnless(sys.platform == "darwin", "Core ML predictions require macOS")
+    def test_multifunction_predictions_skip_on_macos14(self):
+        spec = importlib.util.spec_from_file_location("ane_tests_macos14", __file__)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(platform, "mac_ver", return_value=("14.7.0", ("", "", ""), "")):
+            spec.loader.exec_module(module)
+        case = module.EuEncoderTests("test_multifunction_shares_weights_and_preserves_route_outputs")
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+
+    @unittest.skipUnless(sys.platform == "darwin" and int(platform.mac_ver()[0].split(".")[0]) >= 15,
+                         "Multifunction Core ML predictions require macOS 15+")
     def test_multifunction_shares_weights_and_preserves_route_outputs(self):
         import coremltools as ct
 
