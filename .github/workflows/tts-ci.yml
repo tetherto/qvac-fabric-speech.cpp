@@ -714,9 +714,12 @@ jobs:
       # per-phase table and fails when the prepare, the load and warm-up, the
       # steady state, the whole run or ANECompilerService's growth during the
       # load (not its absolute size, which includes what earlier jobs on this
-      # runner compiled) exceeds the template constant that charges it. Runs
-      # whenever the generated-sidecar step ran, so a parity failure does not
-      # hide it.
+      # runner compiled) exceeds the template constant that charges it. Each
+      # run also prints the service's size before the load and whether it was
+      # clean: on a dirty baseline the growth understates a cold compile on a
+      # clean host, so the reserve comes from the largest absolute size on the
+      # M2 (docs/parler.md). Runs whenever the generated-sidecar step ran, so a
+      # parity failure does not hide it.
       - name: Memory schedule (generated Parler DAC, overlapped, this runner)
         if: >-
           !cancelled() && runner.os == 'macOS' &&

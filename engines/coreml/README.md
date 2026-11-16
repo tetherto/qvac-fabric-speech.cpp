@@ -109,6 +109,59 @@ validation can hold each phase to its own constant.
 load. Tests replace the Core ML compile with
 `generation::set_compile_override`.
 
+### Measured memory constants
+
+`extract` writes a template's `memory` section with the defaults above,
+`margin` 1.25 and `coreml_bound: "conservative"`. A model's memory validation
+replaces them with measured constants. It runs an overlapped schedule:
+ggml work on the calling thread while the stage is generated, compiled,
+loaded and warmed in the background, sampling the process footprint and
+`ANECompilerService`'s size. `test-parler-dac-coreml --memory-schedule` is the
+Parler DAC's. Its constants follow this convention:
+
+- Each constant is 1.25 times the largest value measured over every run on
+  every host in `validated_for`, rounded up to 1 MiB:
+  - `compile_peak_bytes`: the prepare (from the start of generation to the end
+    of the compile, over the footprint just before generation), less
+    `generation_peak_bytes` and 8 MiB;
+  - `load_peak_bytes.<units>`: the load and warm-up, over the footprint just
+    before the load;
+  - the resident part (`runtime_weight_bytes` + 2 x I/O + `state_bytes` +
+    `workspace_bytes`): the steady state once ready, over the footprint just
+    before the load. `runtime_weight_bytes` stays the weights' size and
+    `workspace_bytes` takes the rest;
+  - `ane_compile_reserve_bytes`: below.
+- Each constant carries its own 1.25, so the envelope adds none: `margin` 1.0
+  and `coreml_bound: "measured"`. The runtime reads `margin`; `coreml_bound`
+  and `measured` are records.
+- `memory.measured` records the derivation: `margin` (the 1.25 each constant
+  carries), `runs` (how many runs the maxima cover), `resident_bytes` (the
+  measured resident part) and `basis` (what each constant covers and which
+  host set its maximum).
+- `validated_for` lists every measured host as `{units, os, chip}`. `plan()`
+  matches the units only, so every chip is charged the largest placement's
+  values.
+
+`ane_compile_reserve_bytes` is not part of the envelope. It is runtime
+admission: a cold Neural Engine load waits until that much memory is free.
+`ANECompilerService` is a long-lived system process (it runs as root under
+`aned`, so a test cannot restart it, and it does not exit when idle). A
+schedule measures it in two ways:
+
+- its **growth** during the load: its peak while loading, less its size just
+  before the first load. The schedule holds the growth to the reserve, since
+  on a shared host the absolute size includes what other processes compiled;
+- its **absolute** size while loading.
+
+A service that already holds memory from earlier compiles reuses it, so on
+such a dirty baseline the growth understates a cold compile on a clean host,
+where the growth is the whole size. The reserve is therefore 1.25 times the
+largest growth measured from a clean start (at most 32 MiB before the load,
+`ANE_COMPILER_CLEAN_BYTES` in `test/memory_probe.h`). Without clean starts,
+it is 1.25 times the largest absolute size on a host whose placement compiles
+the stage for the Neural Engine. Each run report prints the size before the
+load and whether that baseline was clean.
+
 ## Building the tests and the tool
 
 The portable tests and `qvac-coreml-tool` build on Linux and macOS (not on

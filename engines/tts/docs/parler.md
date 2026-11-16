@@ -240,7 +240,10 @@ or has failed; it returns false at once while nothing has requested the DAC
 `Engine::cancel()` also interrupts a call that waits for the sidecar
 (`wait = call` or `use = require`): the synthesis fails as cancelled. It
 ends a `coreml_wait()` in progress too, which then returns false; the
-sidecar keeps loading, and the next `coreml_wait()` waits for it again. With
+sidecar keeps loading, and the next `coreml_wait()` waits for it again. A
+wait never clears a cancel meant for a synthesis on another thread:
+`coreml_wait(0)` only polls, and a longer wait watches a flag of its own,
+which `cancel()` sets along with the synthesis's. With
 `prewarm = none` the constructor issues nothing, so `wait = construct` does
 not wait and `use = require` fails only when a call cannot be served.
 
@@ -283,32 +286,48 @@ The test reads the process footprint every 2 ms and the slot's state every
 - `ANECompilerService`'s growth during the load (its peak less its size just
   before the load) to `ane_compile_reserve_bytes`. The service is a
   long-lived system process, so its absolute size includes whatever earlier
-  processes compiled: a shared CI runner read 322-821 MiB.
+  processes compiled: a shared CI runner read 322-821 MiB. Each run prints
+  the service's size before the load and whether it was clean (at most
+  32 MiB): a service that already holds memory reuses it, so on such a
+  dirty baseline the growth understates a cold compile on a clean host.
 
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
 host, rounded up to 1 MiB (`memory.measured` in `template.json`), and the
 envelope applies no further margin. Figures in MiB:
 
-| Phase | M2, macOS 27.2.1 (18 runs) | M4 Max, macOS 26.7.2 (CI, 12 runs) | Charged |
+| Phase | M2, macOS 27.2.1 (27 runs) | M4 Max, macOS 26.7.2 (CI, 21 runs) | Charged |
 |---|--:|--:|--:|
-| prepare: generation and compile | 435.8-441.6 | 273.1-438.5 | 552: `compile_peak_bytes` 328 on top of `generation_peak_bytes` 216 + 8 |
-| load and warm-up | 16.3-23.0 | 309.6-318.7 (warm-up 294.8-303.5) | 399: `load_peak_bytes.all` |
-| steady state, over the footprint before the load | 0 (13 runs) | 312.7-320.2 (9 runs) | 401 (1.25 x 320.2): the weights 103.3, I/O 0.8 and `workspace_bytes` 297.0 |
-| whole run, over the warm ggml baseline | 453.0-463.9 | 589.1-752.7 | 953.6: the envelope, with the quantizer copy 0.6 |
-| `ANECompilerService` growth during the load | 114.5-303.0 (5 runs) | 1.4-2.8 (3 runs) | 379: `ane_compile_reserve_bytes` |
+| prepare: generation and compile | 435.6-441.6 | 273.1-438.5 | 552: `compile_peak_bytes` 328 on top of `generation_peak_bytes` 216 + 8 |
+| load and warm-up | 16.3-25.2 | 152.8-318.7 (warm-up 134.4-303.5) | 399: `load_peak_bytes.all` |
+| steady state, over the footprint before the load | 0 (22 runs) | 154.0-320.2 (18 runs) | 401 (1.25 x 320.2): the weights 103.3, I/O 0.8 and `workspace_bytes` 297.0 |
+| whole run, over the warm ggml baseline | 453.0-466.3 | 588.0-752.7 | 953.6: the envelope, with the quantizer copy 0.6 |
+| `ANECompilerService` before the load | 123.9-345.3 (14 runs, none clean) | 320.7-358.6 (12 runs, none clean) | |
+| `ANECompilerService` growth during the load | 104.3-303.0 (14 runs) | 1.4-2.8 (12 runs) | checked against the reserve |
+| `ANECompilerService` size while loading | 397.9-505.7 | 322.4-821.2 | 633 (1.25 x 505.7, M2): `ane_compile_reserve_bytes` |
+
+The runs without a figure in a row predate its measurement. On the M4 Max the
+first four CI jobs read 309.6-318.7 for the load and warm-up (steady state
+312.7-320.2), and the three later ones 152.8-246.9 (steady state
+154.0-246.9).
 
 - **M2.** `all` runs the program on the Neural Engine. Its weights do not
-  show in the process footprint, and the generation is the peak.
-  `ANECompilerService` grew most (303 MiB) in the run that found it nearly
-  idle (124 MiB), and 115-141 MiB in the runs that followed. The same M2 on
-  macOS 15.7.3 peaked at 224-229 MiB over four runs (`ANECompilerService`
-  360-497 MiB absolute). Those runs recorded no per-phase breakdown and
-  move no constant, but stay in `validated_for`.
+  show in the process footprint, and the generation is the peak. No run
+  found `ANECompilerService` clean: it runs as root under `aned`, so a test
+  cannot restart it, and it does not exit when idle. Before the load it
+  held 124-345 MiB, and while loading it stayed at 418-470 MiB whatever it
+  held, so its growth (104-303 MiB) is only what its leftovers did not
+  cover. On a clean host the growth is the whole size, so the reserve is
+  1.25 times the largest size measured while loading (505.7 MiB), not the
+  largest growth. The same M2 on macOS 15.7.3 peaked at 224-229 MiB over
+  four runs (`ANECompilerService` 360-497 MiB absolute). Those runs recorded
+  no per-phase breakdown and move no constant, but stay in `validated_for`.
 - **M4 Max.** `all` runs most of the program on the GPU (below), and only
   the output stage on the Neural Engine, so `ANECompilerService` barely
-  grows. The first prediction adds about 300 MiB, which stays resident: the
-  prediction workspace. The whole schedule takes 3.5 s there, so the process
+  grows (at most 2.8 MiB in every run that recorded its baseline); its size
+  there is what other jobs on the shared runner left, and sets no constant.
+  The first prediction adds 134-304 MiB (about 300 MiB in the first four
+  jobs), which stays resident: the prediction workspace. The whole schedule takes 3.5 s there, so the process
   still holds the generation's memory when the load starts (the M2 has
   returned it by the time the sidecar is ready). Its whole run is therefore
   the prepare plus the resident, which is the sum the envelope charges.
@@ -320,7 +339,7 @@ would be 656.6 MiB: the macOS 27 generation peak (442 MiB, against the
 the M4 Max's GPU resident adds the remaining 297.0 MiB, its
 `workspace_bytes`. `validated_for` is matched on the compute units only, so every
 chip is charged the larger figure. A cold Neural Engine load starts only
-while 379 MiB are available; until then the DAC stays on ggml (state
+while 633 MiB are available; until then the DAC stays on ggml (state
 `deferred(memory)`). Phones are not affected today: the runtime generates
 sidecars on macOS only, so on iOS the route is none and fit charges no Core
 ML envelope. Matching validation on the chip class, as well as the compute
