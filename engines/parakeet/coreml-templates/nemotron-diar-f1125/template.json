@@ -146,7 +146,7 @@
     "runtime_weight_bytes": 401693056,
     "workspace_bytes": 167772160,
     "compile_peak_bytes": 67108864,
-    "ane_compile_reserve_bytes": 738197504,
+    "ane_compile_reserve_bytes": 872415232,
     "load_peak_bytes": {
       "cpu_and_ane": 83886080,
       "all": null,
@@ -160,6 +160,11 @@
         "units": "cpu_and_ane",
         "os": "27.2.1",
         "chip": "M2"
+      },
+      {
+        "units": "cpu_and_ane",
+        "os": "26.7.2",
+        "chip": "M4 Max"
       }
     ]
   },

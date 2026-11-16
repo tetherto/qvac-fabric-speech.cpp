@@ -869,34 +869,42 @@ is the same before and after the first generation. `coreml.validated` is true
 only when every charged byte is a generated envelope; an adjacent bundle's
 charge is today's unvalidated estimate.
 
-The templates' memory envelope is validated for `cpu_and_ane` on an M2 with
-macOS 27.2.1 (`memory.validated_for`). The validation runs diarizer passes
-in a loop, on ggml until a capacity is ready and on Core ML after, while the
-runtime prepares (generates and compiles), loads and warms all three
-capacities in the background (`prewarm = all`, `wait = none`), and, for
-adjacent bundles, while they load. `nemotron-diarization-coreml-memory`
-(built with the Core ML tests) samples the process's `phys_footprint` every
-2 ms and `ANECompilerService` every 100 ms, from fresh process identities and
-paths so every Neural Engine load is cold.
-`scripts/check-coreml-memory-schedule.py` checks its reports against the
-templates: the peak increment against what fit charges, and each prepare, load
-and `ANECompilerService` peak against the constant the templates record. The
-Core ML lane of `parakeet-ci.yml` runs the generated schedule and the check on
-its macOS runner, so every change is measured on a second chip. On the M2,
-against a ggml-only run of the same passes (peak 233.0 MiB):
+The templates' memory envelope is validated for `cpu_and_ane` on two hosts
+(`memory.validated_for`): an M2 with macOS 27.2.1 and an M4 Max with macOS
+26.7.2 (the CI runner). The validation runs diarizer passes in a loop, on
+ggml until a capacity is ready and on Core ML after, while the runtime
+prepares (generates and compiles), loads and warms all three capacities in the
+background (`prewarm = all`, `wait = none`), and, for adjacent bundles, while
+they load. `nemotron-diarization-coreml-memory` (built with the Core ML tests)
+samples the process's `phys_footprint` every 2 ms and `ANECompilerService`
+every 100 ms, from fresh process identities and paths so every Neural Engine
+load is cold. `scripts/check-coreml-memory-schedule.py` checks its reports
+against the templates: the peak increment against what fit charges, and each
+prepare, load and `ANECompilerService` peak against the constant the templates
+record. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
+the check on its macOS runner. Increments are over a ggml-only run of the same
+passes on the same host (peak 233.0 MiB on the M2, 409.7 MiB on the M4 Max):
 
-| Schedule | Runs | Peak increment | Charged by fit |
-|---|---:|---:|---:|
-| generated (prepare and load overlapped with passes) | 3 | 86.9-135.5 MiB | 2216.8 MiB (`prewarm = all`) |
-| adjacent bundles (background load overlapped with passes) | 2 | 88.0-91.6 MiB | 921.7 MiB |
+| Host | Schedule | Runs | Peak increment | Charged by fit | Largest prepare | Largest load and warm | `ANECompilerService` peak |
+|---|---|---:|---:|---:|---:|---:|---:|
+| M2, macOS 27.2.1 | generated | 3 | 86.9-135.5 MiB | 2177.1 MiB | 74.5 MiB | 75.5 MiB | 649.6-663.3 MiB |
+| M2, macOS 27.2.1 | adjacent bundles | 2 | 88.0-91.6 MiB | 921.7 MiB | - | 56.9 MiB | 597.1-617.7 MiB |
+| M4 Max, macOS 26.7.2 | generated | 2 | 65.0-71.1 MiB | 2177.1 MiB | 74.1 MiB | 26.7 MiB | 747.8-797.2 MiB |
 
-The largest in-process increments, over every run and capacity: 74.5 MiB from
-the start of a prepare to the end of its compile (the first prepare of a
-process), 75.5 MiB during a load and warm. `ANECompilerService` peaked at
-663.3 MiB during the loads. The templates record `compile_peak_bytes` 64 MiB
-(so `generation_peak_bytes` + 8 MiB + `compile_peak_bytes` covers the
-measured prepare), `load_peak_bytes.cpu_and_ane` 80 MiB and
-`ane_compile_reserve_bytes` 704 MiB. The resident part stays at its
+(The M2 generated runs used templates whose fit charge was then 2216.8 MiB;
+2177.1 MiB is the charge with the recorded constants.) The prepare is measured
+from the start of a capacity's generation to the end of its compile; the first
+prepare and load of a process pay Core ML's start-up whichever capacity they
+are for, so every template records the largest value over both hosts:
+`compile_peak_bytes` 64 MiB (so `generation_peak_bytes` + 8 MiB +
+`compile_peak_bytes` covers the measured prepare), `load_peak_bytes.cpu_and_ane`
+80 MiB and `ane_compile_reserve_bytes` 832 MiB. The reserve is the M4 Max's
+peak: its `ANECompilerService` already held about 455 MiB before the loads
+(earlier tests in the same CI job) and grew by 291-345 MiB, while the M2's
+grew by 405-557 MiB from a smaller start. The reserve only gates cold loads at
+run time (they wait for that much available memory); it is not part of the
+fit charge, so the M2 fit is unchanged and an M2 cold load asks for 169 MiB
+more free memory than its own peak. The resident part stays at its
 conservative default (twice the weights plus 160 MiB per capacity): the
 Neural Engine holds the weights outside the process.
 
