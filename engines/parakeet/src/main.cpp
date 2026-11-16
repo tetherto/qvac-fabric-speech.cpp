@@ -1017,12 +1017,13 @@ static int parakeet_cli_run(int argc, char ** argv) {
         if (opts.verbose) {
             PARAKEET_LOG_INFO(
                 "[diarize] load=%.1fms audio=%.2fs samples=%zu@%dHz frames=%d num_spks=%d\n"
-                "[diarize] mel=%.1fms enc=%.1fms dec=%.1fms total=%.1fms RTF=%.3f segments=%zu\n",
+                "[diarize] mel=%.1fms enc=%.1fms dec=%.1fms total=%.1fms RTF=%.3f segments=%zu\n"
+                "[diarize] backend=%s pending=%d\n",
                 load_ms, audio_ms / 1000.0, samples.size(), sr,
                 diar.n_frames, diar.num_spks,
                 diar.preprocess_ms, diar.encoder_ms, diar.decode_ms,
                 diar.total_ms, diar.total_ms / audio_ms,
-                diar.segments.size());
+                diar.segments.size(), diar.encoder_backend.c_str(), diar.coreml_pending ? 1 : 0);
         }
         return 0;
     }
