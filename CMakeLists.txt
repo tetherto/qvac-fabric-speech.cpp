@@ -111,4 +111,14 @@ if (SPEECH_BUILD_TESTS)
     target_compile_features(test-moss-gpu-arm PRIVATE cxx_std_17)
     add_test(NAME test-moss-gpu-arm COMMAND $<TARGET_FILE:test-moss-gpu-arm>)
     set_property(TEST test-moss-gpu-arm PROPERTY LABELS unit)
+
+    # Shared Core ML runtime (engines/coreml): every engine library carries its
+    # own copy in its own namespace. test-coreml-link puts tts-cpp,
+    # qvac-parakeet and audiogen (and all three runtime copies) in one binary to
+    # catch duplicate symbols. Registered on Apple when TTS_CPP_COREML,
+    # PARAKEET_COREML and AUDIOGEN_COREML are all on.
+    if (APPLE)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/engines/coreml/qvac_coreml.cmake)
+        qvac_coreml_add_link_test(TARGETS tts-cpp qvac-parakeet audiogen-cpp)
+    endif()
 endif()

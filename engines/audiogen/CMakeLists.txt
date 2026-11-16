@@ -213,6 +213,11 @@ if (AUDIOGEN_BUILD_LIBRARY)
             ${AUDIOGEN_FOUNDATION_FRAMEWORK}
         )
     endif()
+    # Shared Core ML runtime (engines/coreml): compiled into libaudiogen-cpp
+    # under its own namespace when AUDIOGEN_COREML is on. No engine source uses
+    # it yet.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_to(audiogen-cpp NAMESPACE audiogen_coreml PREFIX AUDIOGEN ENABLE ${AUDIOGEN_COREML})
 
     set_target_properties(audiogen-cpp PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -302,6 +307,10 @@ if (AUDIOGEN_BUILD_TESTS)
         add_test(NAME ${target} COMMAND $<TARGET_FILE:${target}> ${ART_ARGS})
         set_property(TEST ${target} PROPERTY LABELS ${ART_LABEL})
     endfunction()
+
+    # Portable tests of the shared Core ML runtime (engines/coreml), Linux and macOS.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../coreml/qvac_coreml.cmake)
+    qvac_coreml_add_tests()
 
     add_executable(test-audiogen-parity-checks test/test_parity_checks.cpp)
     audiogen_register_test(test-audiogen-parity-checks)
