@@ -145,10 +145,10 @@
   "memory": {
     "runtime_weight_bytes": 398551424,
     "workspace_bytes": 167772160,
-    "compile_peak_bytes": 67108864,
-    "ane_compile_reserve_bytes": 872415232,
+    "compile_peak_bytes": 91226112,
+    "ane_compile_reserve_bytes": 1045430272,
     "load_peak_bytes": {
-      "cpu_and_ane": 83886080,
+      "cpu_and_ane": 99614720,
       "all": null,
       "cpu_and_gpu": null,
       "cpu_only": null
@@ -166,7 +166,12 @@
         "os": "26.7.2",
         "chip": "M4 Max"
       }
-    ]
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 7,
+      "basis": "compile_peak_bytes, load_peak_bytes.cpu_and_ane and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of a capacity's generation to the end of its compile, the load and warm increment, and ANECompilerService's resident size during the loads"
+    }
   },
   "prefer_ggml_on": [],
   "provided": [],

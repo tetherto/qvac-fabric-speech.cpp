@@ -885,26 +885,31 @@ record. The Core ML lane of `parakeet-ci.yml` runs the generated schedule and
 the check on its macOS runner. Increments are over a ggml-only run of the same
 passes on the same host (peak 233.0 MiB on the M2, 409.7 MiB on the M4 Max):
 
-| Host | Schedule | Runs | Peak increment | Charged by fit | Largest prepare | Largest load and warm | `ANECompilerService` peak |
-|---|---|---:|---:|---:|---:|---:|---:|
-| M2, macOS 27.2.1 | generated | 3 | 86.9-135.5 MiB | 2177.1 MiB | 74.5 MiB | 75.5 MiB | 649.6-663.3 MiB |
-| M2, macOS 27.2.1 | adjacent bundles | 2 | 88.0-91.6 MiB | 921.7 MiB | - | 56.9 MiB | 597.1-617.7 MiB |
-| M4 Max, macOS 26.7.2 | generated | 2 | 65.0-71.1 MiB | 2177.1 MiB | 74.1 MiB | 26.7 MiB | 747.8-797.2 MiB |
+| Host | Schedule | Runs | Peak increment | Largest prepare | Largest load and warm | `ANECompilerService` peak |
+|---|---|---:|---:|---:|---:|---:|
+| M2, macOS 27.2.1 | generated | 3 | 86.9-135.5 MiB | 64.8-74.5 MiB | 39.4-75.5 MiB | 649.6-663.3 MiB |
+| M2, macOS 27.2.1 | adjacent bundles | 2 | 88.0-91.6 MiB | - | 55.8-56.9 MiB | 597.1-617.7 MiB |
+| M4 Max, macOS 26.7.2 | generated | 4 | 64.6-79.4 MiB | 70.8-83.1 MiB | 17.7-26.7 MiB | 659.8-797.2 MiB |
 
-(The M2 generated runs used templates whose fit charge was then 2216.8 MiB;
-2177.1 MiB is the charge with the recorded constants.) The prepare is measured
-from the start of a capacity's generation to the end of its compile; the first
-prepare and load of a process pay Core ML's start-up whichever capacity they
-are for, so every template records the largest value over both hosts:
-`compile_peak_bytes` 64 MiB (so `generation_peak_bytes` + 8 MiB +
-`compile_peak_bytes` covers the measured prepare), `load_peak_bytes.cpu_and_ane`
-80 MiB and `ane_compile_reserve_bytes` 832 MiB. The reserve is the M4 Max's
-peak: its `ANECompilerService` already held about 455 MiB before the loads
-(earlier tests in the same CI job) and grew by 291-345 MiB, while the M2's
-grew by 405-557 MiB from a smaller start. The reserve only gates cold loads at
-run time (they wait for that much available memory); it is not part of the
-fit charge, so the M2 fit is unchanged and an M2 cold load asks for 169 MiB
-more free memory than its own peak. The resident part stays at its
+The ranges are over runs, each run's largest value. Fit charged 2177.1-2216.8
+MiB for the generated runs and 921.7 MiB for the adjacent bundles; the peak
+increments used at most 6.1 % and 9.9 % of those charges. The prepare is measured from the
+start of a capacity's generation to the end of its compile; the first prepare
+and load of a process pay Core ML's start-up whichever capacity they are for,
+so every template records the same values. Each recorded charge is 1.25 times
+the largest value measured over every run on both hosts (rounded up to 1 MiB,
+`memory.measured` in `template.json`): the prepare charge
+`generation_peak_bytes` + 8 MiB + `compile_peak_bytes` is 104 MiB (1.25 x
+83.1), `load_peak_bytes.cpu_and_ane` is 95 MiB (1.25 x 75.5) and
+`ane_compile_reserve_bytes` is 997 MiB (1.25 x 797.2). The margin is the
+plan's 1.25 applied to each measured stage; it covers the run-to-run spread
+of the largest stage on each host: the first prepare varied by 9.7 MiB on the
+M2 and 12.3 MiB on the M4 Max, and the compiler's per-run peak by 137 MiB on
+the M4 Max, whose `ANECompilerService` holds whatever earlier jobs left it
+(from 240 to 457 MiB before the loads; its growth during the loads was
+291-420 MiB, against 405-557 MiB on the M2). The reserve only gates cold
+loads at run time (they wait for that much available memory); it is not part
+of the fit charge. The resident part stays at its
 conservative default (twice the weights plus 160 MiB per capacity): the
 Neural Engine holds the weights outside the process.
 
