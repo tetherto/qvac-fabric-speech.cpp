@@ -29,12 +29,12 @@
   },
   "memory": {
     "runtime_weight_bytes": 108316032,
-    "workspace_bytes": 277872640,
-    "compile_peak_bytes": 342884352,
-    "ane_compile_reserve_bytes": 663748608,
+    "workspace_bytes": 283115520,
+    "compile_peak_bytes": 343932928,
+    "ane_compile_reserve_bytes": 397410304,
     "load_peak_bytes": {
       "cpu_and_ane": null,
-      "all": 417333248,
+      "all": 418381824,
       "cpu_and_gpu": null,
       "cpu_only": null
     },
@@ -59,8 +59,8 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 20,
-      "basis": "compile_peak_bytes, load_peak_bytes.all, workspace_bytes and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of generation to the end of the compile, the load and warm-up increment, the steady state over the footprint just before the load less the runtime weights, twice the I/O and the host quantizer copy, and ANECompilerService's resident size during the loads. The four macOS 15.7.3 runs recorded the whole-run peak and ANECompilerService only, and the workspace comes from the runs that measured the steady state from the load start"
+      "runs": 34,
+      "basis": "compile_peak_bytes, load_peak_bytes.all, workspace_bytes and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of generation to the end of the compile, the load and warm-up increment, the steady state over the footprint just before the load less the runtime weights, twice the I/O and the host quantizer copy, and ANECompilerService's growth during the load (its peak less its size just before the first load). The four macOS 15.7.3 runs recorded only the whole-run peak and ANECompilerService's absolute size; the workspace and the growth come from the runs that measured them"
     }
   },
   "patches": [],

@@ -132,17 +132,18 @@ int write_hints(const fs::path & cache, const std::string & units, bool stale) {
 // before the margin, and the envelope fit charges without the host quantizer
 // copy. Each measured constant is 1.25 x the largest value measured over
 // every overlapped generated-schedule run on the validated hosts, rounded up
-// to 1 MiB (template.json memory.measured): prepare 1.25 x 440.4 MiB (M2,
-// macOS 27.2.1), load and warm-up 1.25 x 317.8 MiB and workspace 1.25 x
-// 211.6 MiB (M4 Max, macOS 26.7.2, where `all` runs on the GPU). A change of
-// the template's memory changes these on purpose.
+// to 1 MiB (template.json memory.measured): prepare 1.25 x 441.6 MiB and the
+// compiler reserve 1.25 x 303.0 MiB of ANECompilerService growth (M2, macOS
+// 27.2.1); load and warm-up 1.25 x 318.7 MiB and workspace 1.25 x 215.5 MiB
+// (M4 Max, macOS 26.7.2, where `all` runs on the GPU). A change of the
+// template's memory changes these on purpose.
 constexpr uint64_t MIB = 1ull << 20;
 constexpr uint64_t DAC_WEIGHTS = 108316032;                    // weight.bin
 constexpr uint64_t DAC_IO = 2 * 393472;                        // latent, valid and pcm, twice
-constexpr uint64_t DAC_PREPARE = 551 * MIB;                    // generation_peak 216 + 8 + compile_peak 327
-constexpr uint64_t DAC_LOAD = 398 * MIB;                       // load_peak_bytes.all
-constexpr uint64_t DAC_WORKSPACE = 265 * MIB;                  // workspace_bytes
-constexpr uint64_t DAC_ANE_RESERVE = 633 * MIB;                // ane_compile_reserve_bytes
+constexpr uint64_t DAC_PREPARE = 552 * MIB;                    // generation_peak 216 + 8 + compile_peak 328
+constexpr uint64_t DAC_LOAD = 399 * MIB;                       // load_peak_bytes.all
+constexpr uint64_t DAC_WORKSPACE = 270 * MIB;                  // workspace_bytes
+constexpr uint64_t DAC_ANE_RESERVE = 379 * MIB;                // ane_compile_reserve_bytes
 constexpr uint64_t DAC_RESIDENT = DAC_WEIGHTS + DAC_IO + DAC_WORKSPACE;
 constexpr uint64_t DAC_ENVELOPE = (DAC_RESIDENT + DAC_PREPARE) / 4 * 5;  // x 1.25; the sum is a multiple of 4
 static_assert((DAC_RESIDENT + DAC_PREPARE) % 4 == 0, "the margin is exact");
