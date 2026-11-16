@@ -184,7 +184,7 @@ everything.
 
 | Field | Values (default first) | Meaning |
 |---|---|---|
-| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`); a pass longer than every capacity runs on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
+| `use` | `automatic`, `off`, `require` | `require` (also `PARAKEET_COREML_STRICT`) waits like `wait = call`, and throws an exception derived from `std::runtime_error` instead of running on ggml when a sidecar cannot serve the call: it failed to load or timed out, the input is longer than a fixed-capacity encoder (for example with long-form windowing disabled, or a standard TDT input or push-stream window past the sidecar's capacity, which is never split into Core ML windows), the sidecar rejects the shape, or a prediction fails. `stream_start` refuses a push stream whose windows (left context, chunk and lookahead) are longer than a fixed-capacity encoder, before any audio; with a 15 s standard TDT sidecar that is every offline TDT push stream, since those use 30 s chunks. A diarization pass throws when no diarizer capacity that covers it can serve it: each one failed, or is a template capacity that is not generated (`no_template`, `unsupported(...)`, or `disabled` with `generate = never`); a pass longer than every capacity runs on ggml. This changes `require` for a Nemotron 3 Diarization model with no adjacent bundles in a build that embeds the templates (see [Generated sidecars](#generated-sidecars)): with no `cache_dir` (the library's default) every pass of up to 1125 frames now throws `unsupported(no_cache_dir)`, where it used to run on ggml; set `cache_dir` to generate the capacities, or use `automatic`. Builds without the generator (`PARAKEET_COREML_GENERATE=OFF`, iOS) have no template capacities and still run those passes on ggml. Calls that never use a sidecar, such as model families or shapes without one, still run on ggml. |
 | `wait` | `none` on macOS and `call` on iOS; `construct` | `none` never blocks a call. `construct` makes the constructor wait for the construction group. `call` makes each call wait until its sidecar is ready or has failed. |
 | `prewarm` | `predicted`, `none`, `minimal`, `all` | Sidecars requested at construction. `minimal` is the encoder (and bypass encoder), or the smallest diarizer capacity for a diarization model. `predicted` requests the same at construction, and each call also requests what it needs. `all` requests every diarizer capacity. |
 | `compute_units` | the stage's own; `all`, `cpu_and_ane`, `cpu_and_gpu`, `cpu_only` | Also `PARAKEET_COREML_COMPUTE_UNITS`. Applies to the encoder, bypass-encoder, diarizer and TDT decoder sidecars. Unless the field is set, `PARAKEET_COREML_DECODER_COMPUTE_UNITS` overrides it for the TDT decoder. |
@@ -233,6 +233,19 @@ benchmark measures the sidecar and not the ggml calls made while it loads.
 
 When `--coreml-use require` refuses a call, the CLI prints `error: <reason>`
 to stderr and exits with status 1.
+
+With `--verbose`, a diarization run also prints where its passes ran:
+
+```text
+[diarize] backend=coreml-ane pending=0
+```
+
+`backend` is the call's `encoder_backend`: `ggml`, the Core ML label of the
+diarizer capacities that served it (`coreml-ane`, `coreml-all`,
+`coreml-cpu-gpu` or `coreml-cpu`), or `mixed` when some passes ran on Core ML
+and others on ggml. `pending=1` (`coreml_pending`) means at least one pass ran
+on ggml because the capacity that covers it was still being generated or
+loaded.
 
 ### Generated sidecars
 
