@@ -155,8 +155,8 @@ CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
 Pocket TTS, CosyVoice3 or prebuilt Parler-TTS sidecars present, `fit_params` returns `Error` with
 `coreml-memory-estimate-unavailable`; it cannot project Core ML resident memory.
 A generated Parler-TTS DAC is projected: fit adds its template's Core ML memory envelope,
-1,158 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
-runner, where `all` runs on the GPU). Phones are not affected today, since sidecars are generated
+954 MiB under `all` (1.25 times the largest values measured on an M2 and on the M4 Max CI
+runner, where `all` runs on the GPU, with no further margin). Phones are not affected today, since sidecars are generated
 on macOS only; see [Parler-TTS memory validation](docs/parler.md#generated-sidecar-and-background-loading).
 Re-export CosyVoice3 LM sidecars with the current exporter for correct cache
 feedback on macOS 15 and 26; see [CosyVoice3 Core ML](docs/cosyvoice3.md#core-ml-sidecars).

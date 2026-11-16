@@ -260,11 +260,12 @@ and reports it in `FitResult::coreml` (`route`, `bytes`, `validated`,
 `disabled_reason`, `ggml_only_fits`). The ggml DAC stays resident, since it
 serves every call until the sidecar is ready. The envelope is the sidecar's
 resident weights, I/O buffers, prediction workspace and the host quantizer
-copy, plus the larger of the generation and the load transients, with a
-1.25 margin. Its constants are measured (below) for the `all` compute units;
-other compute-unit policies are not generated until validated. The route
-never reads the cache, so fit is the same before and after the first
-generation.
+copy, plus the larger of the generation and the load transients. Each of
+its constants is measured with its own 1.25 margin (below) for the `all`
+compute units, so the envelope adds none (`margin` 1.0, `coreml_bound`
+`measured`). Other compute-unit policies are not generated until
+validated. The route never reads the cache, so fit is the same before and
+after the first generation.
 
 Memory validation (`test-parler-dac-coreml --memory-schedule DIR`, compute
 units `all`): ggml DAC decodes run on the calling thread while the sidecar is
@@ -286,15 +287,15 @@ The test reads the process footprint every 2 ms and the slot's state every
 
 Each run prints a per-phase table and a one-line JSON report. Each constant
 is 1.25 times the largest value measured over every run on every validated
-host, rounded up to 1 MiB (`memory.measured` in `template.json`). Figures in
-MiB:
+host, rounded up to 1 MiB (`memory.measured` in `template.json`), and the
+envelope applies no further margin. Figures in MiB:
 
 | Phase | M2, macOS 27.2.1 (18 runs) | M4 Max, macOS 26.7.2 (CI, 12 runs) | Charged |
 |---|--:|--:|--:|
 | prepare: generation and compile | 435.8-441.6 | 273.1-438.5 | 552: `compile_peak_bytes` 328 on top of `generation_peak_bytes` 216 + 8 |
 | load and warm-up | 16.3-23.0 | 309.6-318.7 (warm-up 294.8-303.5) | 399: `load_peak_bytes.all` |
-| steady state, over the footprint before the load | 0 (13 runs) | 312.7-320.2 (9 runs) | 374.6: weights 103.3, I/O 0.8, quantizer copy 0.6, `workspace_bytes` 270 (1.25 x 215.5) |
-| whole run, over the warm ggml baseline | 453.0-463.9 | 589.1-752.7 | 1,158.3: the envelope |
+| steady state, over the footprint before the load | 0 (13 runs) | 312.7-320.2 (9 runs) | 401 (1.25 x 320.2): the weights 103.3, I/O 0.8 and `workspace_bytes` 297.0 |
+| whole run, over the warm ggml baseline | 453.0-463.9 | 589.1-752.7 | 953.6: the envelope, with the quantizer copy 0.6 |
 | `ANECompilerService` growth during the load | 114.5-303.0 (5 runs) | 1.4-2.8 (3 runs) | 379: `ane_compile_reserve_bytes` |
 
 - **M2.** `all` runs the program on the Neural Engine. Its weights do not
@@ -312,11 +313,12 @@ MiB:
   returned it by the time the sidecar is ready). Its whole run is therefore
   the prepare plus the resident, which is the sum the envelope charges.
 
-The envelope is 1,214,573,920 bytes (1,158.3 MiB), up from 475.4 MiB. With
-the M2's values alone it would be 820.8 MiB: the macOS 27 generation peak
-(442 MiB, against the 216 MiB of the template's generation estimate) causes
-most of the rise, and the M4 Max's GPU working memory adds the remaining
-337.5 MiB. `validated_for` is matched on the compute units only, so every
+The envelope is 999,919,616 bytes (953.6 MiB), up from 475.4 MiB. With the
+M2's values alone (the template's weights and I/O as the resident part) it
+would be 656.6 MiB: the macOS 27 generation peak (442 MiB, against the
+216 MiB of the template's generation estimate) causes most of the rise, and
+the M4 Max's GPU resident adds the remaining 297.0 MiB, its
+`workspace_bytes`. `validated_for` is matched on the compute units only, so every
 chip is charged the larger figure. A cold Neural Engine load starts only
 while 379 MiB are available; until then the DAC stays on ggml (state
 `deferred(memory)`). Phones are not affected today: the runtime generates
