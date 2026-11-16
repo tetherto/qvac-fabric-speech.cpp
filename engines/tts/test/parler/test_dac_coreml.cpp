@@ -327,8 +327,9 @@ void parity_floor_gates() {
 //               qvac_coreml_memory::ane_compiler_growth), against
 //               ane_compile_reserve_bytes (when the units include the
 //               Neural Engine). The report prints the size before the load
-//               and whether that baseline was clean: a service that already
-//               held memory grows less than a clean one would.
+//               and labels that baseline clean, dirty (a service that already
+//               held memory grows less than a clean one would) or unknown (no
+//               sample before the load).
 // generate, compile, load and warm are also reported on their own, each over
 // the footprint just before that state began.
 enum class mem_phase { ggml, generate, compile, load, warm, ready };
@@ -479,11 +480,20 @@ void memory_schedule_gates() {
     check(growth({{800, false}, {700, true}}).growth == 0 && growth({}).growth == 0,
           "memory schedule: ANECompilerService shrinking or never sampled grows 0");
     const uint64_t clean = qvac_coreml_memory::ANE_COMPILER_CLEAN_BYTES;
+    using qvac_coreml_memory::AneBaseline;
+    const auto baseline = [&](const std::vector<AneSample> & s) {
+        return qvac_coreml_memory::ane_compiler_baseline(growth(s));
+    };
     check(qvac_coreml_memory::ane_compiler_clean_start(growth({{clean, false}, {clean + 500, true}})) &&
               !qvac_coreml_memory::ane_compiler_clean_start(growth({{clean + 1, false}, {clean + 500, true}})) &&
-              qvac_coreml_memory::ane_compiler_clean_start(growth({{900, true}})),
+              baseline({{clean + 1, false}, {clean + 500, true}}) == AneBaseline::dirty &&
+              baseline({{0, false}, {500, true}}) == AneBaseline::clean,
           "memory schedule: a baseline above 32 MiB before the load is reported dirty (its growth understates a clean "
           "start)");
+    check(baseline({{900, true}}) == AneBaseline::unknown && baseline({}) == AneBaseline::unknown &&
+              !qvac_coreml_memory::ane_compiler_clean_start(growth({{900, true}})) &&
+              std::string(qvac_coreml_memory::ane_baseline_name(AneBaseline::unknown)) == "unknown",
+          "memory schedule: no sample before the load is reported unknown, not clean");
     const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
                                              {160, P::ready}};
     const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
@@ -1327,7 +1337,15 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
 
     const mem_breakdown b = mem_breakdown_of(samples, base);
     const qvac_coreml_memory::AneGrowth ane = qvac_coreml_memory::ane_compiler_growth(ane_samples);
-    const bool clean_start = qvac_coreml_memory::ane_compiler_clean_start(ane);
+    const qvac_coreml_memory::AneBaseline baseline = qvac_coreml_memory::ane_compiler_baseline(ane);
+    const char * baseline_name = qvac_coreml_memory::ane_baseline_name(baseline);
+    char before_load[96];
+    if (baseline == qvac_coreml_memory::AneBaseline::unknown) {
+        std::snprintf(before_load, sizeof(before_load), "no sample before the load, an unknown baseline");
+    } else {
+        std::snprintf(before_load, sizeof(before_load), "before the load %.1f MiB, a %s baseline", mib(ane.before),
+                      baseline_name);
+    }
     uint64_t ane_peak = 0;
     for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
     const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
@@ -1343,38 +1361,40 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
             "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
             "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
-            "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (before the load %.1f, a "
-            "%s baseline; peak while loading %.1f, whole run %.1f)\n",
+            "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (%s; peak while loading "
+            "%.1f, whole run %.1f)\n",
             mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
             mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
             mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
-            mib(c.ane_reserve), mib(ane.before), clean_start ? "clean" : "dirty", mib(ane.peak), mib(ane_peak));
-    if (!clean_start) {
+            mib(c.ane_reserve), before_load, mib(ane.peak), mib(ane_peak));
+    if (baseline == qvac_coreml_memory::AneBaseline::dirty) {
         fprintf(stderr,
                 "    note: ANECompilerService held %.1f MiB before the load, so it reused memory of earlier compiles "
                 "and its growth understates a cold compile on a clean service\n",
                 mib(ane.before));
+    } else if (baseline == qvac_coreml_memory::AneBaseline::unknown) {
+        fprintf(stderr,
+                "    note: no ANECompilerService sample preceded the load, so its growth is its whole size while "
+                "loading\n");
     }
     fprintf(stderr,
             "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
             "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"steady_over_base\":%llu,\"workspace\":%llu,"
             "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_before_load\":%llu,"
-            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_clean_start\":%s,\"samples\":%zu}\n",
+            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"ane_compiler_baseline\":\"%s\",\"samples\":%zu}\n",
             host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
             (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
             (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
-            (unsigned long long) ane_peak, clean_start ? "true" : "false", samples.size());
+            (unsigned long long) ane_peak, baseline_name, samples.size());
     for (const std::string & f : mem_failures(b, ane.growth, c)) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
-                  "(envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB from %.1f MiB before the load "
-                  "(%s baseline; peak %.1f MiB)",
+                  "(envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB (%s; peak %.1f MiB)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
-                  route.compute_units.c_str(), mib(ane.growth), mib(ane.before), clean_start ? "clean" : "dirty",
-                  mib(ane_peak));
+                  route.compute_units.c_str(), mib(ane.growth), before_load, mib(ane_peak));
     check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.growth, c).empty(), line);
     model.dac_pending.reset();
 }

@@ -59,9 +59,10 @@ struct AneSample {
 };
 
 struct AneGrowth {
-    uint64_t before = 0;  // the last size sampled before the first load (0 when none precedes it)
-    uint64_t peak = 0;    // the largest size sampled while loading
-    uint64_t growth = 0;  // peak - before
+    uint64_t before = 0;      // the last size sampled before the first load (0 when none precedes it)
+    bool has_before = false;  // whether any sample precedes the first load
+    uint64_t peak = 0;        // the largest size sampled while loading
+    uint64_t growth = 0;      // peak - before
 };
 
 // ANECompilerService is a long-lived system process: its absolute size
@@ -69,10 +70,12 @@ struct AneGrowth {
 // runner reads hundreds of MiB more than a clean host. What this process's
 // cold loads add is its growth: the largest size sampled while loading, less
 // its last size sampled before the first load. On a clean host the growth
-// equals the absolute peak. A service that already holds memory reuses it
-// for the next compile, so on such a dirty baseline the growth understates
-// what the same compile needs on a clean service; a reserve derived from
-// growth must come from clean starts (or from the absolute peak).
+// equals the absolute peak. A service that already holds memory reuses it for
+// the next compile, so on such a dirty baseline the growth understates what
+// the same compile needs on a clean service; a reserve derived from growth
+// must come from clean starts (or from the absolute peak). The size is summed
+// over every instance on the host, so another process that compiles for the
+// Neural Engine during this process's load counts as growth too.
 inline AneGrowth ane_compiler_growth(const std::vector<AneSample> & samples) {
     AneGrowth g;
     bool loaded = false;
@@ -82,6 +85,7 @@ inline AneGrowth ane_compiler_growth(const std::vector<AneSample> & samples) {
             g.peak = std::max(g.peak, s.rss);
         } else if (!loaded) {
             g.before = s.rss;
+            g.has_before = true;
         }
     }
     g.growth = g.peak > g.before ? g.peak - g.before : 0;
@@ -93,9 +97,28 @@ inline AneGrowth ane_compiler_growth(const std::vector<AneSample> & samples) {
 // hundreds of MiB.
 constexpr uint64_t ANE_COMPILER_CLEAN_BYTES = 32ull << 20;
 
-// Whether a run's growth was measured from a clean service, so it stands for
-// a cold compile on a clean host. Reports print it next to the size before
-// the load, so a dirty baseline is visible.
-inline bool ane_compiler_clean_start(const AneGrowth & g) { return g.before <= ANE_COMPILER_CLEAN_BYTES; }
+// The service's state before the first load: clean (its growth stands for a
+// cold compile on a clean host), dirty (it already held memory, so its growth
+// understates one) or unknown (no sample before the load, so the growth is
+// its whole size while loading). Reports print it next to the size before the
+// load, so a dirty or missing baseline is visible.
+enum class AneBaseline { clean, dirty, unknown };
+
+inline AneBaseline ane_compiler_baseline(const AneGrowth & g) {
+    if (!g.has_before) return AneBaseline::unknown;
+    return g.before <= ANE_COMPILER_CLEAN_BYTES ? AneBaseline::clean : AneBaseline::dirty;
+}
+
+inline const char * ane_baseline_name(AneBaseline b) {
+    switch (b) {
+        case AneBaseline::clean: return "clean";
+        case AneBaseline::dirty: return "dirty";
+        case AneBaseline::unknown: break;
+    }
+    return "unknown";
+}
+
+// Whether a run's growth was measured from a clean service.
+inline bool ane_compiler_clean_start(const AneGrowth & g) { return ane_compiler_baseline(g) == AneBaseline::clean; }
 
 }  // namespace qvac_coreml_memory
