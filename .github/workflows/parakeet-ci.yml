@@ -368,6 +368,8 @@ jobs:
         run: |
           "$MOSAIC_PYTHON" engines/parakeet/test/test_coreml_padding_runtime.py
           "$MOSAIC_PYTHON" engines/parakeet/test/test_export_coreml_ane.py
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_route_experiments.py
+          "$MOSAIC_PYTHON" engines/parakeet/test/test_route_probe_runtime.py
       - name: Cache exact model, sidecar and audio fixtures
         id: mosaic-cache
         uses: actions/cache@v4
