@@ -15,6 +15,9 @@
 //                         the slot stays ready; with default windowing too,
 //                         since a standard TDT sidecar is never split into
 //                         Core ML windows
+//   strict-push-stream    with use = require, stream_start refuses a TDT push
+//                         stream whose windows are longer than the sidecar,
+//                         before any audio; use = automatic still starts it
 //   diarizer-pending      a diarizer capacity that is not ready -> kNoSidecar
 //                         -> ggml; ready after prewarm all -> Core ML
 //   coreml-only-full      PARAKEET_COREML_ONLY with a full GGUF keeps the ggml
@@ -255,6 +258,25 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
     const parakeet::EngineResult fits = strict_default.transcribe(wav);
     expect(fits.encoder_used_coreml && fits.encoder_backend.rfind("coreml-", 0) == 0,
            "strict-over-capacity: a call within capacity still runs on Core ML");
+
+    // Push streams: the offline TDT stream's 30 s chunk plus context is
+    // longer than the 15 s sidecar, so under require every full window would
+    // throw; stream_start refuses the stream before any audio.
+    threw = false;
+    try {
+        (void) strict_default.stream_start({}, [](const parakeet::StreamingSegment &) {});
+    } catch (const std::runtime_error & e) {
+        threw = has(e.what(), "push-stream windows") && has(e.what(), "Core ML is required");
+        std::printf("       strict stream_start threw: %s\n", e.what());
+    }
+    expect(threw, "strict-push-stream: stream_start refuses the stream, naming the window and capacity");
+    bool started = false;
+    try {
+        started = engine.stream_start({}, [](const parakeet::StreamingSegment &) {}) != nullptr;
+    } catch (const std::exception & e) {
+        std::printf("       automatic stream_start threw: %s\n", e.what());
+    }
+    expect(started, "strict-push-stream: use = automatic still starts the same stream");
 }
 
 int main(int argc, char ** argv) {

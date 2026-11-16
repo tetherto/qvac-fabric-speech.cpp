@@ -2977,6 +2977,19 @@ std::unique_ptr<StreamSession> Engine::stream_start(const StreamingOptions & req
     impl->left_context_samples    = sr * opts.left_context_ms / 1000;
     impl->right_lookahead_samples = sr * opts.right_lookahead_ms / 1000;
 
+    // Under use = require every full window has to run on the Core ML
+    // encoder. A stream whose windows it cannot serve (for example an offline
+    // TDT stream's 30 s chunk plus context against a 15 s sidecar) is refused
+    // here, before any audio, instead of at its first full window. Nemotron
+    // and Unified streams run their own cache-aware steps, not these windows.
+    if (!impl->nemotron_state && !impl->unified_state) {
+        const int window_samples = impl->left_context_samples + impl->chunk_samples +
+                                   impl->right_lookahead_samples;
+        model_coreml_check_stream_window(
+            pimpl_->model, 1 + window_samples / pimpl_->model.mel_cfg.hop_length,
+            &pimpl_->cancel_flag);
+    }
+
     impl->left_history.reserve(impl->left_context_samples);
     impl->pending.reserve(impl->chunk_samples + impl->right_lookahead_samples);
 

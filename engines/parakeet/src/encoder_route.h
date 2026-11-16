@@ -217,6 +217,25 @@ int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility
     return run_ggml();
 }
 
+// A push stream on a strict route (use = require): every full window is one
+// dispatch of `window_mel_frames`, and `eligibility` is what run_encoder
+// decides for it. When dispatch_on_route would refuse each full window, the
+// stream is refused before it starts; returns the reason, or "" when the
+// stream can run.
+inline std::string strict_stream_window_refusal(const EncoderRoute & route,
+                                                EncoderEligibility eligibility,
+                                                int window_mel_frames) {
+    if (eligibility != EncoderEligibility::cannot_serve || !route.usable() || !route.strict() ||
+        route.owner()) {
+        return {};
+    }
+    return "push-stream windows of " + std::to_string(window_mel_frames) +
+           " mel frames (left context, chunk and lookahead) are longer than the Core ML "
+           "encoder's fixed capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
+           " mel frames, so every full window would fail, and Core ML is required; use a "
+           "shorter chunk_ms or left_context_ms where the model allows it, or use = automatic";
+}
+
 // Per-call backend label: "ggml" when nothing ran on Core ML, the Core ML
 // label when everything did, "mixed" otherwise.
 struct EncoderBackendTally {

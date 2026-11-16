@@ -5371,6 +5371,25 @@ static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & mo
     return EncoderEligibility::coreml;
 }
 
+void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
+                                      const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl || !m.impl->coreml || !m.impl->coreml->resolved().strict()) return;
+    const EncoderRoute route = acquire_encoder_route(m, cancel);
+    // The same eligibility the window's run_encoder computes (every frame
+    // valid, no capture, no padding).
+    const EncoderEligibility eligibility = coreml_encoder_eligibility(
+        m, route, window_mel_frames, /*all_valid=*/true, /*capture_intermediates=*/false,
+        /*allow_coreml_padded=*/false);
+    const std::string reason = strict_stream_window_refusal(route, eligibility, window_mel_frames);
+    if (!reason.empty()) route.refuse("Engine::stream_start: " + reason, false);
+#else
+    (void) m;
+    (void) window_mel_frames;
+    (void) cancel;
+#endif
+}
+
 static int run_coreml_ctc_head(ParakeetCtcModel & model,
                                const std::vector<float> & encoder_out,
                                int n_frames,
