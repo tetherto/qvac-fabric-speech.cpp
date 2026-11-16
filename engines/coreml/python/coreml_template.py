@@ -835,10 +835,14 @@ def cmd_extract(a):
                 reuse = False
         if reuse:
             spec_bytes = old_spec.read_bytes()
-        else:
-            old_spec.write_bytes(spec_bytes)
         patch_sites = find_sites(spec_bytes, sentinels)
         literals_bin = extract_literals(existing.get("literals", []), blobs_a, blobs_b)
+        drafts = patch_drafts(sites, patch_sites, gguf_tensors(work / "twin-a.gguf")) if sites else []
+        # Every twin check (specs, layout, patch sites, literals) has passed.
+        # Nothing derived from the twins is written before this point, so a
+        # rejected extraction leaves the template's files as they were.
+        if not reuse:
+            old_spec.write_bytes(spec_bytes)
         new_manifest = pa["manifest"].read_text()
         old_manifest = out / "Manifest.json"
         if not (old_manifest.is_file() and manifest_equivalent(old_manifest.read_text(), new_manifest)):
@@ -862,7 +866,6 @@ def cmd_extract(a):
             (out / "literals.bin").write_bytes(data)
             j["literals"] = entries
         if sites:
-            drafts = patch_drafts(sites, patch_sites, gguf_tensors(work / "twin-a.gguf"))
             print(f"extract: {len(sites)} weight-dependent inline constant(s) become patch sites:", file=sys.stderr)
             for _, line, path in drafts:
                 print(f"  {line}   # {path}", file=sys.stderr)
