@@ -494,6 +494,27 @@ class ToyExtractTest(unittest.TestCase):
         self.assertEqual(snapshot(self.tdir), before)
 
     @NEEDS_TOY
+    def test_rejected_literal_writes_nothing(self):
+        # A literal declared on a weight blob depends on the weights, so the
+        # extraction is rejected after the specs compared equal. A stale
+        # model.mlmodel (a spec the exporter no longer writes, which a passing
+        # extraction would replace) must survive the rejection.
+        from coremltools.proto import Model_pb2
+
+        spec = Model_pb2.Model()
+        spec.ParseFromString((self.tdir / "model.mlmodel").read_bytes())
+        spec.description.metadata.userDefined["qvac.toy.stale"] = "1"
+        (self.tdir / "model.mlmodel").write_bytes(spec.SerializeToString(deterministic=True))
+        tj = json.loads((self.tdir / "template.json").read_text())
+        tj["literals"] = [{"id": "w1", "dtype": "fp16", "shape": [32, 8], "exporter_blob": 64}]
+        (self.tdir / "template.json").write_text(json.dumps(tj, indent=2) + "\n")
+        before = snapshot(self.tdir)
+        p = run_ctpl("extract", "--template-dir", self.tdir)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("depends on the weights", p.stderr)
+        self.assertEqual(snapshot(self.tdir), before)
+
+    @NEEDS_TOY
     def test_unchanged_reextraction_keeps_template_bytes(self):
         from coremltools.proto import Model_pb2
 
