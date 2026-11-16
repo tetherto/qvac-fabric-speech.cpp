@@ -21,6 +21,7 @@ constexpr int kThreads = 4;
 constexpr int kGpuLayers = 99;
 constexpr int kLiveMelFrames = 112;
 constexpr int kLongFormCacheFrames = 300;
+constexpr int kTemplateCapacities = 3;  // the embedded Nemotron templates: 358, 745 and 1125 frames
 constexpr double kMaximumProbabilityError = 0.02;
 constexpr double kMaximumProbabilityRelativeError = 0.003;
 constexpr double kMaximumEmbeddingRelativeError = 0.01;
@@ -134,7 +135,8 @@ bool run_case(const parakeet::ParakeetCtcModel & accelerated, const parakeet::Pa
 
 int largest_capacity(const parakeet::ParakeetCtcModel & model) {
 #ifdef PARAKEET_USE_COREML
-    const std::vector<int> capacities = parakeet::model_coreml_diarizers(model)->capacities();
+    const parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    const std::vector<int> capacities = diarizers ? diarizers->capacities() : std::vector<int>();
     return capacities.empty() ? 0 : capacities.back();
 #else
     (void) model;
@@ -144,7 +146,8 @@ int largest_capacity(const parakeet::ParakeetCtcModel & model) {
 
 bool has_sidecars(const parakeet::ParakeetCtcModel & model) {
 #ifdef PARAKEET_USE_COREML
-    return parakeet::model_coreml_diarizers(model) != nullptr;
+    const parakeet::CoremlDiarizers * diarizers = parakeet::model_coreml_diarizers(model);
+    return diarizers != nullptr && !diarizers->capacities().empty();
 #else
     (void) model;
     return false;
@@ -166,13 +169,19 @@ std::vector<Case> cases(const parakeet::ParakeetCtcModel & model, int mel_frames
     const int live_mel = std::min(mel_frames, kLiveMelFrames);
     const int live_cache = parakeet::nemotron_diarization_stream_state_frames();
     const int live_frames = live_cache + parakeet::nemotron_diarization_encoder_frames(model, live_mel);
-    return {
+    std::vector<Case> tests = {
         {"offline", mel_frames, 0, offline_frames <= capacity},
         {"live-chunk", live_mel, live_cache, live_frames <= capacity},
         {"long-form-block", mel_frames, kLongFormCacheFrames,
             kLongFormCacheFrames + offline_frames <= capacity},
         {"above-capacity", live_mel, capacity, false},
     };
+    // A block that fills the largest capacity, so only that capacity covers
+    // it and the pass predicts on it.
+    if (capacity > offline_frames) {
+        tests.push_back({"largest-capacity", mel_frames, capacity - offline_frames, true});
+    }
+    return tests;
 }
 
 int cache_rows_needed(const parakeet::ParakeetCtcModel & model) {
@@ -190,8 +199,9 @@ bool run_cases(const parakeet::ParakeetCtcModel & accelerated, const parakeet::P
 
 }
 
-// Every diarizer stage of the status JSON came from the generation cache.
-// Stage objects have sorted keys, so each starts at its "artifact_key".
+// Every diarizer stage of the status JSON came from the generation cache,
+// one per embedded template. Stage objects have sorted keys, so each starts
+// at its "artifact_key".
 bool every_diarizer_generated(const std::string & status) {
     const std::string start = "{\"artifact_key\"";
     int stages = 0;
@@ -206,7 +216,7 @@ bool every_diarizer_generated(const std::string & status) {
             return false;
         }
     }
-    return stages > 0;
+    return stages == kTemplateCapacities;
 }
 
 int main(int argc, char ** argv) {
