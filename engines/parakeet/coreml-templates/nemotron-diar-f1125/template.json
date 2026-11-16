@@ -143,18 +143,18 @@
     "main": 0
   },
   "memory": {
-    "runtime_weight_bytes": 401693056,
-    "workspace_bytes": 167772160,
-    "compile_peak_bytes": 91226112,
-    "ane_compile_reserve_bytes": 1045430272,
+    "runtime_weight_bytes": 124637912,
+    "workspace_bytes": 0,
+    "compile_peak_bytes": 95420416,
+    "ane_compile_reserve_bytes": 730857472,
     "load_peak_bytes": {
-      "cpu_and_ane": 99614720,
+      "cpu_and_ane": 126877696,
       "all": null,
       "cpu_and_gpu": null,
       "cpu_only": null
     },
-    "margin": 1.25,
-    "coreml_bound": "conservative",
+    "margin": 1.0,
+    "coreml_bound": "measured",
     "validated_for": [
       {
         "units": "cpu_and_ane",
@@ -169,8 +169,9 @@
     ],
     "measured": {
       "margin": 1.25,
-      "runs": 7,
-      "basis": "compile_peak_bytes, load_peak_bytes.cpu_and_ane and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of a capacity's generation to the end of its compile, the load and warm increment, and ANECompilerService's resident size during the loads"
+      "runs": 26,
+      "resident_bytes": 143654912,
+      "basis": "Each constant is 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB, so the envelope's own margin is 1.0: the prepare charge (generation_peak_bytes + 8 MiB + compile_peak_bytes) covers the prepare from the start of a capacity's generation to the end of its compile; load_peak_bytes.cpu_and_ane the load and warm increment; the resident part (runtime_weight_bytes + 2 x I/O + workspace_bytes, with workspace_bytes 0) the step in the process's settled footprint when a capacity becomes ready, which on cpu_and_ane holds no copy of the fp16 weights (the Neural Engine keeps them outside the process); and ane_compile_reserve_bytes ANECompilerService's growth during the loads over its size before them"
     }
   },
   "prefer_ggml_on": [],
