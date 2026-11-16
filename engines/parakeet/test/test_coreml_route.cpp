@@ -282,7 +282,22 @@ void case_tdt_plan_needs_validated_seams() {
     };
     const EncoderRoute standard = held(0);
     const EncoderRoute validated = held(kSeamContext);
-    constexpr CoremlShapeKind kTdt = CoremlShapeKind::fixed_validated_seams;
+
+    // The engine plans with the kind its model family maps to, so a change of
+    // that mapping is caught here, not only by the fixture tests.
+    const CoremlShapeKind kTdt = coreml_shape_kind_for(ParakeetModelType::TDT);
+    CHECK(kTdt == CoremlShapeKind::fixed_validated_seams,
+          "TDT plans fixed windows only with validated seams");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::CTC) == CoremlShapeKind::fixed &&
+              coreml_shape_kind_for(ParakeetModelType::RNNT) == CoremlShapeKind::fixed,
+          "CTC and RNN-T plan fixed windows");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::EOU) == CoremlShapeKind::exact,
+          "EOU plans exact-shape calls only");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::NEMOTRON) == CoremlShapeKind::none &&
+              coreml_shape_kind_for(ParakeetModelType::SORTFORMER) == CoremlShapeKind::none &&
+              coreml_shape_kind_for(ParakeetModelType::NEMOTRON_DIARIZATION) ==
+                  CoremlShapeKind::none,
+          "Nemotron and the diarizers have no long-form Core ML plan");
 
     CHECK(same_plan(routed_plan(standard, kLongMel, kTdt), ggml_plan(kLongMel)),
           "standard TDT sidecar: an oversized input keeps the ggml plan");
@@ -373,8 +388,9 @@ void case_cannot_serve_keeps_route() {
     for (int rc = 1; rc <= 7; ++rc) {
         CHECK(encode_prediction_failed(rc) == (rc >= 5), "rc 1-4 cannot serve, rc 5-7 failed prediction");
     }
-    CHECK(!encode_prediction_failed(0) && !encode_prediction_failed(101),
-          "success and the engine's CTC-head codes are not sidecar failures");
+    CHECK(!encode_prediction_failed(0) && !encode_prediction_failed(101) &&
+              !encode_prediction_failed(-10),
+          "success, non-finite features and the engine's CTC-head codes are not sidecar failures");
 
     // A real prediction failure on the same slot still retires it.
     const EncoderRoute last = route_from_acquired(slot->acquire(pcm::Demand::now), fake_ops(), 128);
@@ -384,6 +400,25 @@ void case_cannot_serve_keeps_route() {
     CHECK(run_call(last, 2).label == "mixed", "a failed prediction makes the call mixed");
     CHECK(slot->state() == pcm::SlotState::retired, "a failed prediction retires the slot");
     fs::remove_all(dir);
+}
+
+// A call whose every dispatch ran on Core ML always names a program: the one
+// the model picked for its dispatches (TranscribePsy EU picks per dispatch),
+// else the held route's label, else "coreml".
+void case_call_label() {
+    FakeEncoder enc;
+    const auto held = [&](const char * label) {
+        return EncoderRoute::coreml(reinterpret_cast<parakeet_coreml_context *>(&enc),
+                                    fake_describe(nullptr, 128), label, nullptr,
+                                    EncoderRoute::Ops{}, false);
+    };
+    CHECK(coreml_call_label(held(kFakeLabel)) == kFakeLabel, "the held route's label");
+    CHECK(coreml_call_label(held(kFakeLabel), "coreml-cpu") == "coreml-cpu",
+          "the program that ran wins over the route's label");
+    CHECK(coreml_call_label(held("")) == "coreml", "an unlabeled route reports coreml");
+    CHECK(coreml_call_label(EncoderRoute::ggml(), "coreml-cpu-gpu") == "coreml-cpu-gpu",
+          "a per-dispatch program without a held route is still reported");
+    CHECK(coreml_call_label(EncoderRoute::ggml()) == "coreml", "the label is never empty");
 }
 
 void case_owner_route() {
@@ -1035,6 +1070,7 @@ int main() {
     case_tdt_plan_needs_validated_seams();
     case_window_k_failure_and_next_call();
     case_cannot_serve_keeps_route();
+    case_call_label();
     case_owner_route();
     case_strict_route();
     case_pending_route();

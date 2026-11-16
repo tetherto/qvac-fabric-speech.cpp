@@ -32,11 +32,16 @@ struct CoremlOptions {
     // serve a call throws (an exception derived from std::runtime_error)
     // instead of falling back to ggml: a sidecar that failed to load or timed
     // out, an input longer than a fixed-capacity encoder (for example with
-    // long-form windowing disabled), a shape the sidecar rejects, or a failed
-    // prediction (which also retires the sidecar). A diarization pass throws
-    // when every diarizer capacity that covers it failed; a pass longer than
-    // every capacity runs on ggml. Calls the engine keeps on ggml by design (per-stage capture harnesses, model families or shapes
-    // with no sidecar) still run on ggml.
+    // long-form windowing disabled, or a standard TDT input past the
+    // sidecar's capacity, which is never split into Core ML windows), a
+    // shape the sidecar rejects, or a failed prediction (which also retires
+    // the sidecar). Engine::stream_start refuses a push stream whose windows
+    // are longer than a fixed-capacity encoder (every offline TDT push
+    // stream with a 15 s standard sidecar). A diarization pass throws when
+    // every diarizer capacity that covers it failed; a pass longer than
+    // every capacity runs on ggml. Calls the engine keeps on ggml by design
+    // (per-stage capture harnesses, model families or shapes with no
+    // sidecar) still run on ggml.
     Use use = Use::unset;
     Generate generate = Generate::unset;
     // none: never block (apart from the bounded wait on a warm hint).

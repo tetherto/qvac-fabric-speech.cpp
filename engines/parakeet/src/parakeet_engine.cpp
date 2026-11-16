@@ -194,23 +194,30 @@ int decode_transducer(const ParakeetCtcModel & model,
 }  // namespace
 
 // Per-call encoder backend label and pending flag: "ggml" when no
-// dispatch ran on Core ML, the route's label when all did, "mixed" otherwise.
+// dispatch ran on Core ML, the Core ML program's label when all did, "mixed"
+// otherwise. TranscribePsy EU picks its program per dispatch and its route
+// only shaped the plan, so it reports the program that ran.
 template <class Result>
-void set_encoder_backend(Result & result, const EncoderRoute & route,
-                         int coreml_dispatches, int ggml_dispatches) {
+void set_encoder_backend(Result & result, const ParakeetCtcModel & model,
+                         const EncoderRoute & route, int coreml_dispatches,
+                         int ggml_dispatches) {
     if (coreml_dispatches == 0) {
         result.encoder_backend = "ggml";
     } else if (ggml_dispatches > 0) {
         result.encoder_backend = "mixed";
     } else {
-        result.encoder_backend = route.coreml_label();
+        result.encoder_backend = coreml_call_label(
+            route, model.model_variant == "transcribepsy-250m-eu"
+                       ? model_encoder_backend_name(model)
+                       : std::string());
     }
     result.coreml_pending = route.pending();
 }
 
 template <class Result>
-void set_encoder_backend(Result & result, const EncoderRoute & route, bool used_coreml) {
-    set_encoder_backend(result, route, used_coreml ? 1 : 0, used_coreml ? 0 : 1);
+void set_encoder_backend(Result & result, const ParakeetCtcModel & model,
+                         const EncoderRoute & route, bool used_coreml) {
+    set_encoder_backend(result, model, route, used_coreml ? 1 : 0, used_coreml ? 0 : 1);
 }
 
 // ── Long-form offline encoder windowing ───────────────────────────────────
@@ -243,19 +250,11 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    CoremlShapeKind kind = CoremlShapeKind::none;
-    if (model.model_type == ParakeetModelType::TDT) {
-        kind = CoremlShapeKind::fixed_validated_seams;
-    } else if (model.model_type == ParakeetModelType::CTC ||
-               model.model_type == ParakeetModelType::RNNT) {
-        kind = CoremlShapeKind::fixed;
-    } else if (model.model_type == ParakeetModelType::EOU) {
-        kind = CoremlShapeKind::exact;
-    }
     // The capacity comes from the handle the unit acquired; with a null route
     // this is exactly the ggml-only plan.
     return choose_long_form_plan(normal, opts.long_form_window_frames,
-                                 opts.long_form_context_frames, kind, route.holds(),
+                                 opts.long_form_context_frames,
+                                 coreml_shape_kind_for(model.model_type), route.holds(),
                                  route.geometry().fixed_mel_frames,
                                  route.geometry().seam_context_frames,
                                  model.encoder_cfg.subsampling_factor, n_mel_frames);
@@ -1248,7 +1247,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         result.mel_frames = n_mel_frames;
         result.encoder_frames = offline.encoder_frames;
         result.encoder_used_coreml = false;
-        set_encoder_backend(result, route, false);
+        set_encoder_backend(result, pimpl_->model, route, false);
         return result;
     }
 
@@ -1295,7 +1294,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
         result.mel_frames     = n_mel_frames;
         result.encoder_frames = 0;
         result.encoder_used_coreml = enc_out.used_coreml;
-        set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+        set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
         return result;
     }
 
@@ -1396,7 +1395,7 @@ EngineResult Engine::transcribe_mel_impl(PrecomputedMel && precomputed, double p
     result.encoder_frames = enc_out.n_enc_frames;
     result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
     result.decoder_used_coreml = decoder_used_coreml;
-    set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
     return result;
 }
 
@@ -1578,7 +1577,7 @@ EngineResult Engine::transcribe_samples_stream(const float * samples,
     result.mel_frames     = n_mel_frames;
     result.encoder_frames = T_enc;
     result.encoder_used_coreml = enc_out.used_coreml && gate_used_coreml;
-    set_encoder_backend(result, route, coreml_dispatches, ggml_dispatches);
+    set_encoder_backend(result, pimpl_->model, route, coreml_dispatches, ggml_dispatches);
 
     const auto t_dec = clock::now();
 
@@ -1792,7 +1791,9 @@ static DiarizationResult engine_impl_diarize_helper(Engine::Impl & impl,
     result.num_spks       = dres.num_spks;
     result.frame_stride_s = dres.frame_stride_s;
     result.encoder_used_coreml = dres.used_coreml;
-    if (route.holds() || route.pending()) set_encoder_backend(result, route, encoder_used_coreml);
+    if (route.holds() || route.pending()) {
+        set_encoder_backend(result, impl.model, route, encoder_used_coreml);
+    }
     result.speaker_probs  = std::move(dres.speaker_probs);
     result.audio_samples  = n_samples;
     result.sample_rate    = sample_rate;
@@ -2975,6 +2976,19 @@ std::unique_ptr<StreamSession> Engine::stream_start(const StreamingOptions & req
     impl->chunk_samples           = sr * opts.chunk_ms / 1000;
     impl->left_context_samples    = sr * opts.left_context_ms / 1000;
     impl->right_lookahead_samples = sr * opts.right_lookahead_ms / 1000;
+
+    // Under use = require every full window has to run on the Core ML
+    // encoder. A stream whose windows it cannot serve (for example an offline
+    // TDT stream's 30 s chunk plus context against a 15 s sidecar) is refused
+    // here, before any audio, instead of at its first full window. Nemotron
+    // and Unified streams run their own cache-aware steps, not these windows.
+    if (!impl->nemotron_state && !impl->unified_state) {
+        const int window_samples = impl->left_context_samples + impl->chunk_samples +
+                                   impl->right_lookahead_samples;
+        model_coreml_check_stream_window(
+            pimpl_->model, 1 + window_samples / pimpl_->model.mel_cfg.hop_length,
+            &pimpl_->cancel_flag);
+    }
 
     impl->left_history.reserve(impl->left_context_samples);
     impl->pending.reserve(impl->chunk_samples + impl->right_lookahead_samples);

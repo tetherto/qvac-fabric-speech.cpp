@@ -8,6 +8,7 @@
 #include "ggml.h"
 #include "mel_preprocess.h"
 #include "parakeet/coreml_options.h"
+#include "parakeet_model_type.h"
 #include "sentencepiece_bpe.h"
 
 #include <atomic>
@@ -342,16 +343,6 @@ int run_nemotron_cache_aware_offline(
         int right_context_frames,
         std::atomic<bool> & cancel_flag,
         NemotronOfflineResult & result);
-
-enum class ParakeetModelType {
-    CTC,
-    RNNT,
-    TDT,
-    EOU,
-    NEMOTRON,
-    SORTFORMER,
-    NEMOTRON_DIARIZATION,
-};
 
 struct NemotronDiarizationConfig {
     int encoder_width = 0;
@@ -741,6 +732,14 @@ EncoderRoute acquire_encoder_route(ParakeetCtcModel & m,
 // The route only if the sidecar is ready now; requests nothing, never waits
 // (the ggml prewarm pass).
 EncoderRoute encoder_route_if_ready(ParakeetCtcModel & m);
+// Under use = require, refuses a push stream whose full windows
+// (`window_mel_frames` each) the encoder sidecar cannot serve: throws the
+// Core ML error each of those windows would throw, before any audio is fed.
+// Acquires the encoder route like a call does, so under require it waits for
+// the sidecar and throws when it failed. No-op with other use modes and on
+// builds without Core ML.
+void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
+                                      const std::atomic<bool> * cancel = nullptr);
 
 // Status and prewarm of the model's background sidecars (status JSON; "{}" on
 // builds without Core ML).

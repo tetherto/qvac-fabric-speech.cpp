@@ -12,7 +12,12 @@
 //                         fits runs on Core ML (a capacity miss never retires)
 //   strict-over-capacity  the same over-capacity call with use = require
 //                         throws instead of running on ggml, and
-//                         the slot stays ready
+//                         the slot stays ready; with default windowing too,
+//                         since a standard TDT sidecar is never split into
+//                         Core ML windows
+//   strict-push-stream    with use = require, stream_start refuses a TDT push
+//                         stream whose windows are longer than the sidecar,
+//                         before any audio; use = automatic still starts it
 //   diarizer-pending      a diarizer capacity that is not ready -> kNoSidecar
 //                         -> ggml; ready after prewarm all -> Core ML
 //   coreml-only-full      PARAKEET_COREML_ONLY with a full GGUF keeps the ggml
@@ -233,6 +238,45 @@ void case_capacity_miss(const std::string & gguf, const std::string & wav) {
     expect(threw, "strict-over-capacity: the call throws instead of running on ggml");
     expect(!has(strict_engine.coreml_status_json(), "\"retired\"") && strict_engine.encoder_on_coreml(),
            "strict-over-capacity: the encoder slot is still ready");
+
+    // Default windowing: a standard TDT sidecar (no validated seam context)
+    // is never split into Core ML windows, so the same input is still one
+    // dispatch the sidecar cannot serve.
+    parakeet::Engine strict_default(engine_options(gguf, strict));
+    expect(strict_default.encoder_on_coreml(),
+           "strict-over-capacity: default windowing, the standard TDT sidecar is ready");
+    threw = false;
+    try {
+        (void) strict_default.transcribe_samples(long_input.data(), (int) long_input.size(), rate);
+    } catch (const std::runtime_error & e) {
+        threw = has(e.what(), "Core ML is required");
+        std::printf("       strict default-windowing call threw: %s\n", e.what());
+    }
+    expect(threw, "strict-over-capacity: with default windowing the standard TDT call throws too");
+    expect(!has(strict_default.coreml_status_json(), "\"retired\"") && strict_default.encoder_on_coreml(),
+           "strict-over-capacity: default windowing leaves the encoder slot ready");
+    const parakeet::EngineResult fits = strict_default.transcribe(wav);
+    expect(fits.encoder_used_coreml && fits.encoder_backend.rfind("coreml-", 0) == 0,
+           "strict-over-capacity: a call within capacity still runs on Core ML");
+
+    // Push streams: the offline TDT stream's 30 s chunk plus context is
+    // longer than the 15 s sidecar, so under require every full window would
+    // throw; stream_start refuses the stream before any audio.
+    threw = false;
+    try {
+        (void) strict_default.stream_start({}, [](const parakeet::StreamingSegment &) {});
+    } catch (const std::runtime_error & e) {
+        threw = has(e.what(), "push-stream windows") && has(e.what(), "Core ML is required");
+        std::printf("       strict stream_start threw: %s\n", e.what());
+    }
+    expect(threw, "strict-push-stream: stream_start refuses the stream, naming the window and capacity");
+    bool started = false;
+    try {
+        started = engine.stream_start({}, [](const parakeet::StreamingSegment &) {}) != nullptr;
+    } catch (const std::exception & e) {
+        std::printf("       automatic stream_start threw: %s\n", e.what());
+    }
+    expect(started, "strict-push-stream: use = automatic still starts the same stream");
 }
 
 int main(int argc, char ** argv) {

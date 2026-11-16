@@ -158,8 +158,10 @@ private:
 //        capacity or window, I/O it cannot bind) and no prediction ran;
 //   5-7  the prediction failed (an error, a missing output, an output that
 //        does not fit).
-// Codes outside 1-7 come from the engine's own post-processing (the CTC head)
-// and are not a sidecar failure either.
+// Other codes come from the engine's own checks after the sidecar returned
+// and are not treated as a failed prediction either, so they never retire it:
+//   -10   the sidecar returned non-finite features;
+//   other the CTC projection on ggml failed (100 minus its return code).
 inline bool encode_prediction_failed(int rc) { return rc >= 5 && rc <= 7; }
 
 // Whether one dispatch can go to the held encoder.
@@ -217,6 +219,25 @@ int dispatch_on_route(const EncoderRoute & route, EncoderEligibility eligibility
     return run_ggml();
 }
 
+// A push stream on a strict route (use = require): every full window is one
+// dispatch of `window_mel_frames`, and `eligibility` is what run_encoder
+// decides for it. When dispatch_on_route would refuse each full window, the
+// stream is refused before it starts; returns the reason, or "" when the
+// stream can run.
+inline std::string strict_stream_window_refusal(const EncoderRoute & route,
+                                                EncoderEligibility eligibility,
+                                                int window_mel_frames) {
+    if (eligibility != EncoderEligibility::cannot_serve || !route.usable() || !route.strict() ||
+        route.owner()) {
+        return {};
+    }
+    return "push-stream windows of " + std::to_string(window_mel_frames) +
+           " mel frames (left context, chunk and lookahead) are longer than the Core ML "
+           "encoder's fixed capacity of " + std::to_string(route.geometry().fixed_mel_frames) +
+           " mel frames, so every full window would fail, and Core ML is required; use a "
+           "shorter chunk_ms or left_context_ms where the model allows it, or use = automatic";
+}
+
 // Per-call backend label: "ggml" when nothing ran on Core ML, the Core ML
 // label when everything did, "mixed" otherwise.
 struct EncoderBackendTally {
@@ -243,5 +264,16 @@ struct EncoderBackendTally {
     }
     bool all_coreml() const { return coreml > 0 && ggml == 0; }
 };
+
+// The label of a call whose every dispatch ran on Core ML. A model that picks
+// its program per dispatch (TranscribePsy EU) passes the program that ran as
+// `dispatch_label`; otherwise the held route's label is used. Never empty:
+// "coreml" when neither names a program, as EncoderBackendTally::label() does.
+inline std::string coreml_call_label(const EncoderRoute & route,
+                                     const std::string & dispatch_label = {}) {
+    if (!dispatch_label.empty()) return dispatch_label;
+    if (!route.coreml_label().empty()) return route.coreml_label();
+    return "coreml";
+}
 
 }  // namespace parakeet

@@ -343,7 +343,11 @@ struct ParakeetCtcModel::Impl {
     std::shared_ptr<pcm::Slot> bypass_slot;
     // Synchronous encoder sidecar that owns the encoder: loaded before
     // weight allocation when the GGUF has no encoder weights or
-    // PARAKEET_COREML_ONLY is set. Never a slot; a failure is an error.
+    // PARAKEET_COREML_ONLY is set, and kept only when it may own the encoder
+    // (coreml_can_own_encoder). Never a slot; a failure is an error. A
+    // standard TDT sidecar never owns it, so with PARAKEET_COREML_ONLY and a
+    // full GGUF it is not kept here: the encoder slot loads it in the
+    // background like any other sidecar.
     parakeet_coreml_context * ctx_coreml = nullptr;
     // TranscribePsy EU (model variant transcribepsy-250m-eu) is not on the
     // runtime: its programs load synchronously and are selected per dispatch
@@ -1897,6 +1901,11 @@ static bool path_is_directory(const std::string & path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+static bool path_is_regular_file(const std::string & path) {
+    struct stat st{};
+    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 static constexpr const char * kCoremlDecoderUnitsEnv = "PARAKEET_COREML_DECODER_COMPUTE_UNITS";
 
@@ -2034,6 +2043,19 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
     if (!path_is_directory(path)) {
         PARAKEET_LOG_WARN("parakeet: no Core ML encoder at '%s'\n", path.c_str());
+        return nullptr;
+    }
+    // A standard TDT sidecar owns the encoder only with a validated seam
+    // context, which only the fixed-window Neural Engine export provides
+    // (coreml_can_own_encoder). When the bundle's metadata shows another
+    // export, a load here would only be thrown away, so it is skipped: a
+    // full GGUF gets the background encoder slot and an encoder-less one is
+    // rejected, as after the load. A bundle without metadata is loaded to
+    // find out.
+    if (type == "tdt" && path_is_regular_file(path + "/metadata.json") &&
+        !parakeet_coreml_encoder_prefers_ane(path.c_str())) {
+        PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
+                          "weights are required for oversized inputs and push streaming\n");
         return nullptr;
     }
     // Synchronous on purpose: ownership fixes how the weights are
@@ -2708,7 +2730,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         if (impl->ctx_coreml != nullptr && !impl->coreml_owns_encoder) {
             // A sidecar that may not own the encoder stays an ordinary one:
             // the encoder slot loads it in the background like any full
-            // GGUF's, so it follows the resolved wait and use policy.
+            // GGUF's, so it follows the resolved wait and use policy. (A
+            // bundle whose metadata already rules ownership out is not
+            // loaded here at all.)
             parakeet_coreml_free(impl->ctx_coreml);
             impl->ctx_coreml = nullptr;
         }
@@ -5360,6 +5384,25 @@ static EncoderEligibility coreml_encoder_eligibility(const ParakeetCtcModel & mo
         return EncoderEligibility::cannot_serve;
     }
     return EncoderEligibility::coreml;
+}
+
+void model_coreml_check_stream_window(ParakeetCtcModel & m, int window_mel_frames,
+                                      const std::atomic<bool> * cancel) {
+#ifdef PARAKEET_USE_COREML
+    if (!m.impl || !m.impl->coreml || !m.impl->coreml->resolved().strict()) return;
+    const EncoderRoute route = acquire_encoder_route(m, cancel);
+    // The same eligibility the window's run_encoder computes (every frame
+    // valid, no capture, no padding).
+    const EncoderEligibility eligibility = coreml_encoder_eligibility(
+        m, route, window_mel_frames, /*all_valid=*/true, /*capture_intermediates=*/false,
+        /*allow_coreml_padded=*/false);
+    const std::string reason = strict_stream_window_refusal(route, eligibility, window_mel_frames);
+    if (!reason.empty()) route.refuse("Engine::stream_start: " + reason, false);
+#else
+    (void) m;
+    (void) window_mel_frames;
+    (void) cancel;
+#endif
 }
 
 static int run_coreml_ctc_head(ParakeetCtcModel & model,

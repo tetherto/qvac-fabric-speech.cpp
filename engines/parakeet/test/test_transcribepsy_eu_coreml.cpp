@@ -88,6 +88,11 @@ void check_api_routes(parakeet::Engine & engine, const std::vector<float> & pcm,
                        bool automatic) {
     const auto batch = engine.transcribe_samples(pcm.data(), (int) pcm.size(), kRate);
     require(batch.encoder_used_coreml && !batch.text.empty(), "batch encoder or gate fell back");
+    // The result names the program that ran (the model picks one per
+    // dispatch), the same one Engine::encoder_backend() reports.
+    require(batch.encoder_backend.rfind("coreml", 0) == 0 &&
+                batch.encoder_backend == engine.encoder_backend(),
+            "batch encoder_backend does not name the Core ML program that ran");
     const char * batch_override = std::getenv("PARAKEET_ANE_BATCH_DECODE");
     const bool forced = batch_override && std::string(batch_override) == "1" &&
         !std::getenv("PARAKEET_ANE_DECODE_HOST");
@@ -104,6 +109,8 @@ void check_api_routes(parakeet::Engine & engine, const std::vector<float> & pcm,
         });
     require(callbacks.encoder_used_coreml && !callbacks.text.empty(),
             "callback encoder or gate fell back");
+    require(callbacks.encoder_backend.rfind("coreml", 0) == 0,
+            "callback encoder_backend does not name a Core ML program");
     require(engine.encoder_backend() == "coreml-cpu" || engine.encoder_backend() == "coreml-cpu-gpu",
             "stateful callback did not use an FP32 Core ML backend");
     const auto fragmented = push(engine, pcm, 127, automatic);
