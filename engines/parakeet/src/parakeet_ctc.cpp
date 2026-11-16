@@ -343,7 +343,11 @@ struct ParakeetCtcModel::Impl {
     std::shared_ptr<pcm::Slot> bypass_slot;
     // Synchronous encoder sidecar that owns the encoder: loaded before
     // weight allocation when the GGUF has no encoder weights or
-    // PARAKEET_COREML_ONLY is set. Never a slot; a failure is an error.
+    // PARAKEET_COREML_ONLY is set, and kept only when it may own the encoder
+    // (coreml_can_own_encoder). Never a slot; a failure is an error. A
+    // standard TDT sidecar never owns it, so with PARAKEET_COREML_ONLY and a
+    // full GGUF it is not kept here: the encoder slot loads it in the
+    // background like any other sidecar.
     parakeet_coreml_context * ctx_coreml = nullptr;
     // TranscribePsy EU (model variant transcribepsy-250m-eu) is not on the
     // runtime: its programs load synchronously and are selected per dispatch

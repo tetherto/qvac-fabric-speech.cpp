@@ -6,8 +6,10 @@
 // Sortformer bypass encoder, and one per diarizer capacity. Slots load on the
 // runtime's load lane, in priority order, with memory admission for cold ANE
 // compiles; until a slot is ready its stage runs on ggml. The TDT decoder
-// bundle and an encoder that owns the encoder (encoder-less GGUF or
-// PARAKEET_COREML_ONLY) stay synchronous and are not slots.
+// bundle and an encoder sidecar that owns the encoder (an encoder-less GGUF,
+// or PARAKEET_COREML_ONLY when the sidecar may own it) stay synchronous and
+// are not slots. A standard TDT sidecar never owns the encoder, so with
+// PARAKEET_COREML_ONLY and a full GGUF it is an ordinary slot.
 //
 // Portable C++ against the runtime's namespace (QVAC_COREML_NS): no Core ML or
 // Objective-C here, so the routing glue builds and is tested on every
