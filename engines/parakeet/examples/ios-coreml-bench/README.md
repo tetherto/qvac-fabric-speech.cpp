@@ -226,3 +226,23 @@ flags. Pass an absolute model directory and the prepared phone-fixture directory
 as a fourth argument; set `QVAC_ROUTE_OUTPUT_DIR` to keep desktop outputs in the
 experiment directory. The native compute-plan query uses the selected function's
 configuration, which also permits placement inspection of non-default functions.
+
+### Route harness regression tests
+
+Using the pinned Core ML Python environment, run these tests from the repository
+root without downloading model checkpoints or connecting an iPhone:
+
+```bash
+$PYTHON engines/parakeet/test/test_route_experiments.py
+$PYTHON engines/parakeet/test/test_route_probe_runtime.py
+```
+
+The Python suite checks binary fixture serialization, precision-specific baseline
+matching, positive and negative gate-decision reports, valid-row cropping,
+adapter-scale selection, non-finite output rejection and loading reports. The
+native smoke suite builds `route_probe.mm` and generates tiny FP16/FP32 Core ML
+models, including a multifunction package and a route-input program. It checks
+saved prediction tensors, all five loading-only modes without fixture files,
+and rejection of truncated inputs. Native tests require macOS 15+ and Xcode
+tools; unsupported hosts exit with skip code 77. Both suites are registered in
+CTest and the existing Apple Core ML workflow lane.

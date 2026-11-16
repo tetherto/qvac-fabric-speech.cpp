@@ -112,6 +112,8 @@ also describes possible size and startup optimizations.
 An [experimental export harness](docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
 compares loading subsets, shared-weight multifunction packages and a route-input
 encoder; these prototypes are separate from runtime sidecar support.
+The [harness regression tests](examples/ios-coreml-bench/README.md#route-harness-regression-tests)
+cover reporting fixtures and native prediction/loading without ASR checkpoints.
 
 
 Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,
