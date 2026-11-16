@@ -79,6 +79,7 @@
 #include <sys/sysctl.h>
 #endif
 #include <memory>
+#include <optional>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -300,9 +301,12 @@ void parity_floor_gates() {
 //   load+warm   loading and the warm-up prediction: the peak over the
 //               footprint just before the load began, against
 //               load_peak_bytes for the resolved compute units;
-//   steady      ready, Core ML decodes running: the peak over the warm ggml
-//               baseline, against the resident charge (weights, 2 x I/O,
-//               workspace_bytes and the host quantizer copy);
+//   steady      ready, Core ML decodes running: the peak over the footprint
+//               just before the load began, against the resident charge
+//               (weights, 2 x I/O, workspace_bytes and the host quantizer
+//               copy). Generation memory the allocator still holds when the
+//               load begins is the prepare transient's, which the envelope
+//               charges next to the resident; the whole run checks the sum;
 //   whole run   the peak over the baseline, against the envelope fit charges;
 //   compiler    ANECompilerService's resident size while loading and warming,
 //               against ane_compile_reserve_bytes (when the units include
@@ -328,6 +332,7 @@ struct mem_sample {
 // Increments in bytes; the flags say which states were sampled.
 struct mem_breakdown {
     uint64_t prepare = 0, generate = 0, compile = 0, load = 0, warm = 0, load_warm = 0, steady = 0, total = 0;
+    uint64_t steady_over_base = 0;  // reported only
     bool generated = false, compiled = false, loaded = false, warmed = false, ready = false;
 };
 
@@ -341,17 +346,26 @@ mem_breakdown mem_breakdown_of(const std::vector<mem_sample> & samples, uint64_t
     const auto over = [](uint64_t v, uint64_t from) { return v > from ? v - from : (uint64_t) 0; };
     mem_breakdown b;
     uint64_t prev = base, phase_start = base, group_start = base;
+    // The footprint just before the first load: the steady state is measured
+    // from there, so generation memory the allocator still holds when the
+    // load begins counts as the prepare's, not as resident.
+    std::optional<uint64_t> load_start;
     mem_phase last = mem_phase::ggml;
     for (const mem_sample & s : samples) {
         if (s.phase != last) phase_start = prev;
         if (group(s.phase) != group(last)) group_start = prev;
+        if (group(s.phase) == 2 && !load_start) load_start = group_start;
         const uint64_t inc = over(s.footprint, phase_start);
         switch (s.phase) {
             case mem_phase::generate: b.generated = true; b.generate = std::max(b.generate, inc); break;
             case mem_phase::compile: b.compiled = true; b.compile = std::max(b.compile, inc); break;
             case mem_phase::load: b.loaded = true; b.load = std::max(b.load, inc); break;
             case mem_phase::warm: b.warmed = true; b.warm = std::max(b.warm, inc); break;
-            case mem_phase::ready: b.ready = true; b.steady = std::max(b.steady, over(s.footprint, base)); break;
+            case mem_phase::ready:
+                b.ready = true;
+                b.steady = std::max(b.steady, over(s.footprint, load_start.value_or(base)));
+                b.steady_over_base = std::max(b.steady_over_base, over(s.footprint, base));
+                break;
             case mem_phase::ggml: break;
         }
         if (group(s.phase) == 1) b.prepare = std::max(b.prepare, over(s.footprint, group_start));
@@ -409,25 +423,34 @@ void memory_schedule_gates() {
     const mem_breakdown b = mem_breakdown_of(run, 100);
     check(b.generate == 60 && b.compile == 10 && b.prepare == 70, "memory schedule: prepare = generate start to compile peak");
     check(b.load == 78 && b.warm == 20 && b.load_warm == 98, "memory schedule: load+warm = load start to warm-up peak");
-    check(b.steady == 95 && b.total == 100, "memory schedule: steady state and whole run over the baseline");
+    check(b.steady == 93 && b.steady_over_base == 95 && b.total == 100,
+          "memory schedule: steady state over the load start, whole run over the baseline");
     check(b.generated && b.compiled && b.loaded && b.warmed && b.ready, "memory schedule: every state sampled");
-    const mem_charges exact{70, 98, 95, 400, 100};
+    const mem_charges exact{70, 98, 93, 400, 100};
     check(mem_failures(b, 400, exact).empty(), "memory schedule: a run at every charge passes");
     const struct {
         mem_charges c;
         uint64_t ane;
         const char * stage;
     } over[] = {
-        {{69, 98, 95, 400, 100}, 400, "prepare"},          {{70, 97, 95, 400, 100}, 400, "load and warm-up"},
-        {{70, 98, 94, 400, 100}, 400, "steady state"},     {{70, 98, 95, 400, 99}, 400, "whole run"},
-        {{70, 98, 95, 400, 100}, 401, "ANECompilerService"},
+        {{69, 98, 93, 400, 100}, 400, "prepare"},          {{70, 97, 93, 400, 100}, 400, "load and warm-up"},
+        {{70, 98, 92, 400, 100}, 400, "steady state"},     {{70, 98, 93, 400, 99}, 400, "whole run"},
+        {{70, 98, 93, 400, 100}, 401, "ANECompilerService"},
     };
     for (const auto & o : over) {
         const std::vector<std::string> f = mem_failures(b, o.ane, o.c);
         check(f.size() == 1 && f[0].find(o.stage) != std::string::npos,
               std::string("memory schedule: one byte over the ") + o.stage + " charge fails");
     }
-    check(mem_failures(b, 999, {70, 98, 95, 0, 100}).empty(), "memory schedule: no compiler check without the Neural Engine");
+    check(mem_failures(b, 999, {70, 98, 93, 0, 100}).empty(), "memory schedule: no compiler check without the Neural Engine");
+    // Generation memory the allocator still holds when the load begins (the
+    // M4 Max runner's 3.5 s schedule) belongs to the prepare transient; the
+    // steady state charges only what the load and warm-up leave.
+    const std::vector<mem_sample> held = {{100, P::ggml},     {500, P::generate}, {510, P::compile},
+                                          {515, P::load},     {800, P::warm},     {810, P::ready}};
+    const mem_breakdown h = mem_breakdown_of(held, 100);
+    check(h.prepare == 410 && h.load_warm == 290 && h.steady == 300 && h.steady_over_base == 710 && h.total == 710,
+          "memory schedule: generation memory still held at the load is the prepare's, not the resident's");
     const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
                                              {160, P::ready}};
     const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
@@ -1227,25 +1250,25 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     const uint64_t other_resident = route.resident_bytes - route.workspace_bytes;
     const uint64_t workspace = b.steady > other_resident ? b.steady - other_resident : 0;
     fprintf(stderr,
-            "  memory (MiB; each phase over the footprint just before it began, steady and whole run over the "
-            "warm ggml baseline %.1f):\n"
+            "  memory (MiB; each phase over the footprint just before it began, steady over the footprint just "
+            "before the load, whole run over the warm ggml baseline %.1f):\n"
             "    prepare    %7.1f  charged %7.1f  (generate %.1f, compile %.1f)\n"
             "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
-            "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f)\n"
+            "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
             "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
             "    ANECompilerService while loading and warming %.1f, reserve %.1f (whole run %.1f)\n",
             mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
             mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
-            mib(route.workspace_bytes), mib(b.total), mib(c.envelope), mib(ane_load_peak.load()),
+            mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane_load_peak.load()),
             mib(c.ane_reserve), mib(ane_peak.load()));
     fprintf(stderr,
             "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
-            "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"workspace\":%llu,"
+            "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"steady_over_base\":%llu,\"workspace\":%llu,"
             "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_peak\":%llu,\"samples\":%zu}\n",
             host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
             (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
             (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
-            (unsigned long long) b.steady, (unsigned long long) workspace, (unsigned long long) b.total,
+            (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
             (unsigned long long) ane_load_peak.load(), (unsigned long long) ane_peak.load(), samples.size());
     for (const std::string & f : mem_failures(b, ane_load_peak.load(), c)) check(false, "memory schedule: " + f);
     char line[512];

@@ -102,6 +102,9 @@ Fit charges a generated stage with `generation::envelope_bytes(memory,
 units)`: resident (runtime weights, twice the function I/O, state,
 workspace) plus one transient (the larger of `generation_peak_bytes + 8 MiB +
 compile_peak_bytes` and the unit class's `load_peak`), times the margin.
+`resident_bytes`, `prepare_peak_bytes`, `load_peak_bytes` and
+`transient_bytes` return those parts before the margin, so a memory
+validation can hold each phase to its own constant.
 `ane_compile_reserve_bytes` gives the memory admission reserve of a cold ANE
 load. Tests replace the Core ML compile with
 `generation::set_compile_override`.
