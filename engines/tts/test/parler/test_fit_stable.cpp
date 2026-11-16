@@ -35,6 +35,7 @@
 #endif
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -127,6 +128,40 @@ int write_hints(const fs::path & cache, const std::string & units, bool stale) {
 }
 #endif
 
+// The parler-dac-w128 template's memory charges under `all` (the default),
+// before the margin, and the envelope fit charges without the host quantizer
+// copy. Each measured constant is 1.25 x the largest value measured over
+// every overlapped generated-schedule run on the validated hosts, rounded up
+// to 1 MiB (template.json memory.measured): prepare 1.25 x 440.4 MiB (M2,
+// macOS 27.2.1), load and warm-up 1.25 x 317.8 MiB and workspace 1.25 x
+// 211.6 MiB (M4 Max, macOS 26.7.2, where `all` runs on the GPU). A change of
+// the template's memory changes these on purpose.
+constexpr uint64_t MIB = 1ull << 20;
+constexpr uint64_t DAC_WEIGHTS = 108316032;                    // weight.bin
+constexpr uint64_t DAC_IO = 2 * 393472;                        // latent, valid and pcm, twice
+constexpr uint64_t DAC_PREPARE = 551 * MIB;                    // generation_peak 216 + 8 + compile_peak 327
+constexpr uint64_t DAC_LOAD = 398 * MIB;                       // load_peak_bytes.all
+constexpr uint64_t DAC_WORKSPACE = 265 * MIB;                  // workspace_bytes
+constexpr uint64_t DAC_ANE_RESERVE = 633 * MIB;                // ane_compile_reserve_bytes
+constexpr uint64_t DAC_RESIDENT = DAC_WEIGHTS + DAC_IO + DAC_WORKSPACE;
+constexpr uint64_t DAC_ENVELOPE = (DAC_RESIDENT + DAC_PREPARE) / 4 * 5;  // x 1.25; the sum is a multiple of 4
+static_assert((DAC_RESIDENT + DAC_PREPARE) % 4 == 0, "the margin is exact");
+
+void template_charges(const parler_dac_route & r) {
+    if (r.route != "generate" || r.compute_units != "all") {
+        fprintf(stderr, "template charges: not checked (route %s, units %s)\n", r.route.c_str(), r.compute_units.c_str());
+        return;
+    }
+    check(r.prepare_peak_bytes == DAC_PREPARE && r.load_peak_bytes == DAC_LOAD && r.workspace_bytes == DAC_WORKSPACE &&
+              r.resident_bytes == DAC_RESIDENT && r.ane_compile_reserve_bytes == DAC_ANE_RESERVE,
+          "template charges: prepare " + std::to_string(r.prepare_peak_bytes) + ", load " +
+              std::to_string(r.load_peak_bytes) + ", workspace " + std::to_string(r.workspace_bytes) + ", resident " +
+              std::to_string(r.resident_bytes) + ", compiler reserve " + std::to_string(r.ane_compile_reserve_bytes));
+    check(r.envelope_bytes == DAC_ENVELOPE && r.validated,
+          "template envelope " + std::to_string(r.envelope_bytes) + " bytes (expected " + std::to_string(DAC_ENVELOPE) +
+              "), validated for all");
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -165,6 +200,7 @@ int main(int argc, char ** argv) {
         return describe(tts_cpp::parler::fit_params(f));
     };
 
+    template_charges(parler_dac_plan_route(gguf, options_at(empty), 0));
     const std::string route0 = route_at(empty);
     const std::string fit0 = fit ? fit_at(empty) : std::string();
     fprintf(stderr, "route on an empty cache: %s\n", route0.c_str());

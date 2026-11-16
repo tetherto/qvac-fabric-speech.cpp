@@ -29,12 +29,12 @@
   },
   "memory": {
     "runtime_weight_bytes": 108316032,
-    "workspace_bytes": 0,
-    "compile_peak_bytes": null,
-    "ane_compile_reserve_bytes": 536870912,
+    "workspace_bytes": 277872640,
+    "compile_peak_bytes": 342884352,
+    "ane_compile_reserve_bytes": 663748608,
     "load_peak_bytes": {
       "cpu_and_ane": null,
-      "all": null,
+      "all": 417333248,
       "cpu_and_gpu": null,
       "cpu_only": null
     },
@@ -45,8 +45,23 @@
         "units": "all",
         "os": "15.7.3",
         "chip": "M2"
+      },
+      {
+        "units": "all",
+        "os": "27.2.1",
+        "chip": "M2"
+      },
+      {
+        "units": "all",
+        "os": "26.7.2",
+        "chip": "M4 Max"
       }
-    ]
+    ],
+    "measured": {
+      "margin": 1.25,
+      "runs": 20,
+      "basis": "compile_peak_bytes, load_peak_bytes.all, workspace_bytes and ane_compile_reserve_bytes are 1.25 x the largest value measured over every overlapped generated-schedule run on the validated_for hosts, rounded up to 1 MiB: the prepare (generation_peak_bytes + 8 MiB + compile_peak_bytes) from the start of generation to the end of the compile, the load and warm-up increment, the steady state over the footprint just before the load less the runtime weights, twice the I/O and the host quantizer copy, and ANECompilerService's resident size during the loads. The four macOS 15.7.3 runs recorded the whole-run peak and ANECompilerService only, and the workspace comes from the runs that measured the steady state from the load start"
+    }
   },
   "patches": [],
   "prefer_ggml_on": [],
