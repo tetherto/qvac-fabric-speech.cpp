@@ -1286,6 +1286,34 @@ void case_diarizer_capacities() {
               "require: no_template capacities refuse the pass");
     }
 
+    // No adjacent bundle and no cache directory (the library's default):
+    // under require every pass a template capacity covers throws, up to the
+    // largest capacity; a longer pass runs on ggml.
+    {
+        CoremlOptions require = base;
+        require.use = CoremlOptions::Use::require;
+        require.cache_dir = "";
+        CoremlSidecars sidecars(require, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const DiarizerSlots slots(gguf.string(), diarizer_capacities({}, template_frames, probed), sidecars,
+                                  &fake_load);
+        std::string what;
+        CHECK(throws(slots, 1, &what) && what.find("unsupported(no_cache_dir)") != std::string::npos &&
+                  throws(slots, 1125, nullptr),
+              "require, no cache directory: every pass up to the largest capacity throws (no_cache_dir)");
+        int seen = 0;
+        bool threw = false;
+        DiarizerPass pass;
+        try {
+            pass = slots.run(1126, predict_ok(&seen));
+        } catch (const pcm::CoremlError &) {
+            threw = true;
+        }
+        CHECK(!threw && pass.status == kNoDiarizerSidecar && seen == 0,
+              "require, no cache directory: a pass longer than every capacity runs on ggml");
+    }
+
     // Generation off for the whole instance (and Core ML off altogether):
     // every template capacity keeps a status-only slot, and the construction
     // group lists each one as skipped.
