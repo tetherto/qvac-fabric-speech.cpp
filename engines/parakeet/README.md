@@ -164,8 +164,12 @@ than a fixed capacity, runs that call on ggml and keeps the sidecar. Two loads
 still happen inside the constructor: the TDT decoder sidecar, and an encoder
 sidecar that owns the encoder (a GGUF without encoder weights, or
 `PARAKEET_COREML_ONLY`). A standard TDT sidecar without a validated seam
-policy never owns the encoder: with `PARAKEET_COREML_ONLY` it loads in the
-background like any other, and the GGUF keeps its encoder weights. Full TranscribePsy-250M-EU keeps its own Core ML
+policy never owns the encoder. With `PARAKEET_COREML_ONLY` and a full GGUF, the
+GGUF keeps its encoder weights and the sidecar loads in the background like any
+other; when the bundle's `metadata.json` shows it is not the fixed-window
+Neural Engine export, the constructor does not load it first (a bundle without
+metadata is loaded once in the constructor to read its seam context). An
+encoder-less GGUF with such a sidecar is rejected. Full TranscribePsy-250M-EU keeps its own Core ML
 programs outside this background runtime: its English, other-language and
 gate programs load in the constructor, its precise programs on first use, and
 a program that cannot serve a call falls back to ggml, also under

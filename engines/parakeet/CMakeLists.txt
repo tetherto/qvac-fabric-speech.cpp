@@ -3064,6 +3064,18 @@ if (PARAKEET_BUILD_TESTS)
         EXE      test-coreml-encoder-owner
         ARGS     "--standard-tdt" "${_qvp_tdt_q8_gguf}" "--wav" "${_qvp_jfk_wav}"
         REQUIRES "${_qvp_tdt_q8_gguf}" "${_qvp_tdt_coreml}" "${_qvp_jfk_wav}")
+    # Hermetic (a stub GGUF and stub bundle written by the test): a TDT
+    # sidecar whose metadata rules out encoder ownership is not loaded
+    # before weight allocation. Runs in the Core ML runtime step.
+    if (PARAKEET_COREML)
+        parakeet_register_test(test-coreml-encoder-owner-stub-tdt
+            LABEL    "unit"
+            EXE      test-coreml-encoder-owner
+            ARGS     "--stub-tdt-skip-load")
+        # parakeet_register_test keeps one label; this test has two.
+        set_tests_properties(test-coreml-encoder-owner-stub-tdt PROPERTIES
+            LABELS "unit;coreml-runtime")
+    endif()
 
     # Background Core ML sidecars on the device: a call whose
     # encoder is still loading runs on ggml with the use = off transcript; the

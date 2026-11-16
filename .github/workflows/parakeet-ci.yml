@@ -317,7 +317,8 @@ jobs:
             --output-on-failure --timeout 300 --output-junit coreml-runtime-results.xml
           python3 engines/parakeet/scripts/check-ctest-junit.py \
             build-coreml/coreml-runtime-results.xml \
-            --require test-coreml-scheduler --require test-parakeet-coreml-route
+            --require test-coreml-scheduler --require test-parakeet-coreml-route \
+            --require test-coreml-encoder-owner-stub-tdt
 
       - name: Test (background sidecars on the device, no skips)
         if: inputs.fixture_root != ''

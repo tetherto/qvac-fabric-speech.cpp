@@ -1897,6 +1897,11 @@ static bool path_is_directory(const std::string & path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+static bool path_is_regular_file(const std::string & path) {
+    struct stat st{};
+    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static constexpr const char * kCoremlOnlyEnv    = "PARAKEET_COREML_ONLY";
 static constexpr const char * kCoremlDecoderUnitsEnv = "PARAKEET_COREML_DECODER_COMPUTE_UNITS";
 
@@ -2034,6 +2039,19 @@ static parakeet_coreml_context * init_coreml_only_encoder(const gguf_context * g
     const std::string path = coreml_encoder_sidecar_path(gguf_path);
     if (!path_is_directory(path)) {
         PARAKEET_LOG_WARN("parakeet: no Core ML encoder at '%s'\n", path.c_str());
+        return nullptr;
+    }
+    // A standard TDT sidecar owns the encoder only with a validated seam
+    // context, which only the fixed-window Neural Engine export provides
+    // (coreml_can_own_encoder). When the bundle's metadata shows another
+    // export, a load here would only be thrown away, so it is skipped: a
+    // full GGUF gets the background encoder slot and an encoder-less one is
+    // rejected, as after the load. A bundle without metadata is loaded to
+    // find out.
+    if (type == "tdt" && path_is_regular_file(path + "/metadata.json") &&
+        !parakeet_coreml_encoder_prefers_ane(path.c_str())) {
+        PARAKEET_LOG_WARN("parakeet: TDT sidecar has no validated seam policy; native encoder "
+                          "weights are required for oversized inputs and push streaming\n");
         return nullptr;
     }
     // Synchronous on purpose: ownership fixes how the weights are
@@ -2697,7 +2715,9 @@ static int load_from_gguf_impl(const std::string & gguf_path,
         if (impl->ctx_coreml != nullptr && !impl->coreml_owns_encoder) {
             // A sidecar that may not own the encoder stays an ordinary one:
             // the encoder slot loads it in the background like any full
-            // GGUF's, so it follows the resolved wait and use policy.
+            // GGUF's, so it follows the resolved wait and use policy. (A
+            // bundle whose metadata already rules ownership out is not
+            // loaded here at all.)
             parakeet_coreml_free(impl->ctx_coreml);
             impl->ctx_coreml = nullptr;
         }
