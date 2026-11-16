@@ -8,9 +8,15 @@
 //   - prepare (digest, generate, compile) of a capacity while passes run,
 //     on ggml or on a capacity that is already ready;
 //   - load and warm of a capacity while passes run;
-// and compares the run's peak footprint with the Core ML bytes fit charges
-// for the same options, as an increment over a ggml-only run of the same
-// passes (--baseline-bytes, from --ggml-only).
+// and records the resident growth each capacity leaves behind: the settled
+// footprint (the median sample) from the moment the capacity is ready to the
+// moment the next one is (or the run ends), less the same level for the
+// capacity ready before it, or less the ggml-only run's peak for the first.
+// The steps add up to the run's steady growth over ggml. It also records
+// ANECompilerService's growth during the loads (its peak less its size when
+// the first load starts), and compares the run's peak footprint with the
+// Core ML bytes fit charges for the same options, as an increment over a
+// ggml-only run of the same passes (--baseline-bytes, from --ggml-only).
 //
 //   nemotron-diarization-coreml-memory --gguf M.gguf --wav A.wav --cache-dir DIR
 //       [--ggml-only] [--baseline-bytes N] [--passes-after-ready N] [--json OUT]
@@ -32,6 +38,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +57,7 @@ constexpr int kThreads = 4;
 constexpr int kGpuLayers = 99;
 constexpr int kCapacities[] = {358, 745, 1125};  // the embedded Nemotron templates
 constexpr double kMiB = 1048576.0;
+constexpr double kTraceSeconds = 0.1;  // the bucket of the report's footprint trace
 
 uint64_t footprint_now() {
     task_vm_info_data_t info{};
@@ -339,12 +347,53 @@ int main(int argc, char ** argv) {
         }
         return p;
     };
+    // The median footprint sample in [a, b), or the sample at `a` when the
+    // window holds none.
+    auto settled = [&](double a, double b) {
+        std::vector<uint64_t> v;
+        for (const Sample & s : samples) {
+            if (s.t >= a && s.t < b) v.push_back(s.footprint);
+        }
+        if (v.empty()) return at(a);
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    };
     uint64_t ane_peak = 0, ane_min = UINT64_MAX;
     for (const AneSample & s : ane) {
         ane_peak = std::max(ane_peak, s.rss);
         ane_min = std::min(ane_min, s.rss);
     }
     if (ane.empty()) ane_min = 0;
+    const std::vector<Segment> segments = segments_of(states, t_end);
+    // ANECompilerService before this process's first load: its last sample at
+    // or before the load starts (0 when it was not running).
+    double first_load = -1;
+    for (const Segment & seg : segments) {
+        if (seg.phase == "load" && (first_load < 0 || seg.t0 < first_load)) first_load = seg.t0;
+    }
+    uint64_t ane_before_loads = 0;
+    for (const AneSample & s : ane) {
+        if (first_load < 0 || s.t > first_load) break;
+        ane_before_loads = s.rss;
+    }
+    // Resident steps, in the order the loads end (a capacity is ready).
+    std::vector<size_t> ready;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (segments[i].phase == "load") ready.push_back(i);
+    }
+    std::sort(ready.begin(), ready.end(), [&](size_t a, size_t b) { return segments[a].t1 < segments[b].t1; });
+    std::map<size_t, std::pair<uint64_t, uint64_t>> level_step;  // segment -> (settled level, step)
+    uint64_t level = baseline, resident_max = 0;
+    for (size_t k = 0; k < ready.size(); ++k) {
+        const double from = segments[ready[k]].t1;
+        const double to = k + 1 < ready.size() ? segments[ready[k + 1]].t1 : t_end;
+        const uint64_t l = settled(from, to);
+        const uint64_t step = baseline > 0 && l > level ? l - level : 0;
+        level_step[ready[k]] = {l, step};
+        resident_max = std::max(resident_max, step);
+        level = l;
+    }
+    const uint64_t steady_increment = baseline > 0 && !ready.empty() && level > baseline ? level - baseline : 0;
 
     std::string json = "{";
     char buf[1024];
@@ -362,34 +411,60 @@ int main(int argc, char ** argv) {
     json += buf;
     bool first = true;
     uint64_t compile_inc = 0, load_inc = 0, generate_inc = 0, ane_load_peak = 0;
-    for (const Segment & seg : segments_of(states, t_end)) {
+    for (size_t i = 0; i < segments.size(); ++i) {
+        const Segment & seg = segments[i];
         const uint64_t before = at(seg.t0);
         const uint64_t p = std::max(before, peak_in(seg.t0, seg.t1));
         const uint64_t a = ane_in(seg.t0, seg.t1);
         const uint64_t inc = p - before;
         if (seg.phase == "compile") compile_inc = std::max(compile_inc, inc);
+        if (seg.phase == "generate") generate_inc = std::max(generate_inc, inc);
+        std::string load_fields;
         if (seg.phase == "load") {
             load_inc = std::max(load_inc, inc);
             ane_load_peak = std::max(ane_load_peak, a);
+            char extra[256];
+            std::snprintf(extra, sizeof(extra), ",\"settled_after_ready\":%llu,\"resident_increment\":%llu",
+                          (unsigned long long) level_step[i].first, (unsigned long long) level_step[i].second);
+            load_fields = extra;
         }
-        if (seg.phase == "generate") generate_inc = std::max(generate_inc, inc);
         std::snprintf(buf, sizeof(buf),
                       "%s{\"stage\":\"%s\",\"phase\":\"%s\",\"t0\":%.3f,\"t1\":%.3f,\"before\":%llu,\"peak\":%llu,"
-                      "\"increment\":%llu,\"ane_compiler_peak\":%llu}",
+                      "\"increment\":%llu,\"ane_compiler_peak\":%llu%s}",
                       first ? "" : ",", seg.stage.c_str(), seg.phase.c_str(), seg.t0, seg.t1,
                       (unsigned long long) before, (unsigned long long) p, (unsigned long long) inc,
-                      (unsigned long long) a);
+                      (unsigned long long) a, load_fields.c_str());
         json += buf;
         first = false;
     }
     const uint64_t increment = baseline > 0 && peak > baseline ? peak - baseline : 0;
+    const uint64_t ane_growth = ane_load_peak > ane_before_loads ? ane_load_peak - ane_before_loads : 0;
     std::snprintf(buf, sizeof(buf),
                   "],\"max_generate_increment\":%llu,\"max_compile_increment\":%llu,\"max_load_increment\":%llu,"
-                  "\"ane_compiler_peak_during_load\":%llu,\"peak_increment_over_baseline\":%llu,\"status\":",
+                  "\"max_resident_increment\":%llu,\"steady_increment_over_baseline\":%llu,"
+                  "\"ane_compiler_peak_during_load\":%llu,\"ane_compiler_before_loads\":%llu,"
+                  "\"ane_compiler_growth\":%llu,\"peak_increment_over_baseline\":%llu,\"trace\":[",
                   (unsigned long long) generate_inc, (unsigned long long) compile_inc,
-                  (unsigned long long) load_inc, (unsigned long long) ane_load_peak,
+                  (unsigned long long) load_inc, (unsigned long long) resident_max,
+                  (unsigned long long) steady_increment, (unsigned long long) ane_load_peak,
+                  (unsigned long long) ane_before_loads, (unsigned long long) ane_growth,
                   (unsigned long long) increment);
     json += buf;
+    // The footprint in kTraceSeconds buckets: [start, min, max].
+    first = true;
+    for (size_t i = 0; i < samples.size();) {
+        const double b0 = std::floor(samples[i].t / kTraceSeconds) * kTraceSeconds;
+        uint64_t lo = UINT64_MAX, hi = 0;
+        for (; i < samples.size() && samples[i].t < b0 + kTraceSeconds; ++i) {
+            lo = std::min(lo, samples[i].footprint);
+            hi = std::max(hi, samples[i].footprint);
+        }
+        std::snprintf(buf, sizeof(buf), "%s[%.1f,%llu,%llu]", first ? "" : ",", b0, (unsigned long long) lo,
+                      (unsigned long long) hi);
+        json += buf;
+        first = false;
+    }
+    json += "],\"status\":";
     json += status + "}";
     if (!json_out.empty()) {
         if (FILE * f = std::fopen(json_out.c_str(), "w")) {
@@ -403,9 +478,12 @@ int main(int argc, char ** argv) {
                 ggml_only ? "ggml-only" : "coreml", passes, coreml_passes, t_end, t_all_ready, peak / kMiB,
                 first_pass / kMiB, fr.coreml.bytes / kMiB, fr.coreml.validated ? 1 : 0);
     if (!ggml_only) {
-        std::printf("increments: generate %.1f MiB, compile %.1f MiB, load+warm %.1f MiB; "
-                    "ANECompilerService peak %.1f MiB (min %.1f)\n",
-                    generate_inc / kMiB, compile_inc / kMiB, load_inc / kMiB, ane_peak / kMiB, ane_min / kMiB);
+        std::printf("increments: generate %.1f MiB, compile %.1f MiB, load+warm %.1f MiB, largest resident step "
+                    "%.1f MiB (steady %.1f MiB over ggml); ANECompilerService peak %.1f MiB (min %.1f), %.1f MiB "
+                    "before the loads, growth %.1f MiB\n",
+                    generate_inc / kMiB, compile_inc / kMiB, load_inc / kMiB, resident_max / kMiB,
+                    steady_increment / kMiB, ane_peak / kMiB, ane_min / kMiB, ane_before_loads / kMiB,
+                    ane_growth / kMiB);
         std::printf("peak increment over the ggml-only baseline %.1f MiB, envelope %.1f MiB: %s\n",
                     increment / kMiB, fr.coreml.bytes / kMiB,
                     baseline == 0 ? "no baseline" : (increment <= fr.coreml.bytes ? "WITHIN" : "OVER"));
