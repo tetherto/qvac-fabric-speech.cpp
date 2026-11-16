@@ -1909,7 +1909,8 @@ if (TTS_CPP_BUILD_TESTS)
 
     add_executable(test-parler-dac-coreml test/parler/test_dac_coreml.cpp)
     target_link_libraries(test-parler-dac-coreml PRIVATE tts-cpp)
-    target_include_directories(test-parler-dac-coreml PRIVATE src)
+    # memory_probe.h: the shared probes of the Core ML memory schedules.
+    target_include_directories(test-parler-dac-coreml PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../coreml/test)
     if (TTS_CPP_COREML)
         target_compile_definitions(test-parler-dac-coreml PRIVATE TTS_CPP_USE_COREML)
     endif()

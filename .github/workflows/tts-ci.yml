@@ -712,9 +712,11 @@ jobs:
       # background, three times, each from a re-signed copy of the test and an
       # empty cache, so every Neural Engine load is cold. Each run prints its
       # per-phase table and fails when the prepare, the load and warm-up, the
-      # steady state, the whole run or ANECompilerService exceeds the template
-      # constant that charges it. Runs whenever the generated-sidecar step
-      # ran, so a parity failure does not hide it.
+      # steady state, the whole run or ANECompilerService's growth during the
+      # load (not its absolute size, which includes what earlier jobs on this
+      # runner compiled) exceeds the template constant that charges it. Runs
+      # whenever the generated-sidecar step ran, so a parity failure does not
+      # hide it.
       - name: Memory schedule (generated Parler DAC, overlapped, this runner)
         if: >-
           !cancelled() && runner.os == 'macOS' &&

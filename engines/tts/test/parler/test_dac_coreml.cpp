@@ -63,6 +63,7 @@
 #include "tts-cpp/parler/fit.h"
 #include "parler/internal.h"
 #include "coreml_sidecar_path.h"
+#include "memory_probe.h"
 #include "npy.h"
 #include "../test_env_portable.h"
 
@@ -75,7 +76,6 @@
 #include <thread>
 
 #if defined(__APPLE__)
-#include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
 #include <memory>
@@ -308,9 +308,11 @@ void parity_floor_gates() {
 //               load begins is the prepare transient's, which the envelope
 //               charges next to the resident; the whole run checks the sum;
 //   whole run   the peak over the baseline, against the envelope fit charges;
-//   compiler    ANECompilerService's resident size while loading and warming,
-//               against ane_compile_reserve_bytes (when the units include
-//               the Neural Engine).
+//   compiler    ANECompilerService's growth while loading and warming (its
+//               peak less its size just before the first load; see
+//               qvac_coreml_memory::ane_compiler_growth), against
+//               ane_compile_reserve_bytes (when the units include the
+//               Neural Engine).
 // generate, compile, load and warm are also reported on their own, each over
 // the footprint just before that state began.
 enum class mem_phase { ggml, generate, compile, load, warm, ready };
@@ -383,7 +385,7 @@ struct mem_charges {
 };
 
 // One line per charge the run exceeds, or per state it never sampled.
-std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_peak, const mem_charges & c) {
+std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_compiler_growth, const mem_charges & c) {
     std::vector<std::string> out;
     const std::pair<bool, const char *> states[] = {{b.generated, "generating"}, {b.compiled, "compiling"},
                                                     {b.loaded, "loading"},       {b.warmed, "warming"},
@@ -402,7 +404,7 @@ std::vector<std::string> mem_failures(const mem_breakdown & b, uint64_t ane_comp
     over("load and warm-up", b.load_warm, c.load);
     over("steady state (resident)", b.steady, c.resident);
     over("whole run (envelope)", b.total, c.envelope);
-    if (c.ane_reserve > 0) over("ANECompilerService (reserve)", ane_compiler_peak, c.ane_reserve);
+    if (c.ane_reserve > 0) over("ANECompilerService growth (reserve)", ane_compiler_growth, c.ane_reserve);
     return out;
 }
 
@@ -451,6 +453,15 @@ void memory_schedule_gates() {
     const mem_breakdown h = mem_breakdown_of(held, 100);
     check(h.prepare == 410 && h.load_warm == 290 && h.steady == 300 && h.steady_over_base == 710 && h.total == 710,
           "memory schedule: generation memory still held at the load is the prepare's, not the resident's");
+    using qvac_coreml_memory::AneSample;
+    const auto growth = [](const std::vector<AneSample> & s) { return qvac_coreml_memory::ane_compiler_growth(s); };
+    const auto g = growth({{700, false}, {650, false}, {900, true}, {1000, true}, {1200, false}});
+    check(g.before == 650 && g.peak == 1000 && g.growth == 350,
+          "memory schedule: ANECompilerService growth = peak while loading less the last size before the first load");
+    check(growth({{900, true}, {950, true}}).growth == 950,
+          "memory schedule: ANECompilerService growth without a sample before the load is its peak");
+    check(growth({{800, false}, {700, true}}).growth == 0 && growth({}).growth == 0,
+          "memory schedule: ANECompilerService shrinking or never sampled grows 0");
     const std::vector<mem_sample> no_warm = {{100, P::ggml}, {120, P::generate}, {130, P::compile}, {150, P::load},
                                              {160, P::ready}};
     const std::vector<std::string> f = mem_failures(mem_breakdown_of(no_warm, 100), 0, {1000, 1000, 1000, 0, 1000});
@@ -1154,27 +1165,6 @@ void generated_gates(parler_model & model, const std::string & gguf, const std::
     model.dac_pending.reset();
 }
 
-// This process's footprint (phys_footprint) and ANECompilerService's
-// resident size, for the memory schedule (see memory_schedule_gates).
-uint64_t footprint_now() {
-    task_vm_info_data_t info{};
-    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t) &info, &count) != KERN_SUCCESS) return 0;
-    return info.phys_footprint;
-}
-
-uint64_t ane_compiler_rss() {
-    uint64_t total = 0;
-    FILE * f = popen("ps -axo rss=,comm= 2>/dev/null", "r");
-    if (!f) return 0;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, "ANECompilerService")) total += (uint64_t) std::strtoull(line, nullptr, 10) * 1024;
-    }
-    pclose(f);
-    return total;
-}
-
 double mib(uint64_t bytes) { return bytes / 1048576.0; }
 
 // ggml decodes run in a loop on this thread while the DAC sidecar is
@@ -1199,27 +1189,26 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     model.dac_pending.reset();
     std::vector<float> pcm;
     for (int i = 0; i < 2; ++i) decode(model, codes, n_frames, pcm);  // warm the ggml arena
-    const uint64_t base = footprint_now();
+    const uint64_t base = qvac_coreml_memory::phys_footprint();
     std::atomic<bool> stop{false};
     std::atomic<int> phase{(int) mem_phase::ggml};
     std::atomic<const parler_dac_coreml *> watched{nullptr};
-    std::atomic<uint64_t> ane_peak{0}, ane_load_peak{0};
+    std::vector<qvac_coreml_memory::AneSample> ane_samples;
     std::vector<mem_sample> samples;
     samples.reserve(1 << 16);
     std::thread sampler([&] {
         for (int tick = 0; !stop.load(); ++tick) {
             const parler_dac_coreml * d = watched.load();
             if (d != nullptr && tick % 5 == 0) phase.store((int) mem_phase_of(status_state(d->status_json())));
-            samples.push_back({footprint_now(), (mem_phase) phase.load()});
+            samples.push_back({qvac_coreml_memory::phys_footprint(), (mem_phase) phase.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
     std::thread ane_sampler([&] {
         while (!stop.load()) {
-            const uint64_t a = ane_compiler_rss();
+            const uint64_t a = qvac_coreml_memory::ane_compiler_rss();
             const auto p = (mem_phase) phase.load();
-            if (a > ane_peak.load()) ane_peak.store(a);
-            if ((p == mem_phase::load || p == mem_phase::warm) && a > ane_load_peak.load()) ane_load_peak.store(a);
+            ane_samples.push_back({a, p == mem_phase::load || p == mem_phase::warm});
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
@@ -1243,6 +1232,9 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
     fprintf(stderr, "  status: %s\n", dac->status_json().c_str());
 
     const mem_breakdown b = mem_breakdown_of(samples, base);
+    const qvac_coreml_memory::AneGrowth ane = qvac_coreml_memory::ane_compiler_growth(ane_samples);
+    uint64_t ane_peak = 0;
+    for (const auto & a : ane_samples) ane_peak = std::max(ane_peak, a.rss);
     const mem_charges c{route.prepare_peak_bytes, route.load_peak_bytes, route.resident_bytes,
                         route.ane_compile_reserve_bytes, route.envelope_bytes};
     // The prediction workspace this run implies: the steady state above the
@@ -1256,28 +1248,31 @@ void memory_schedule(parler_model & model, const std::string & gguf, const std::
             "    load+warm  %7.1f  charged %7.1f  (load %.1f, warm-up %.1f)\n"
             "    steady     %7.1f  charged %7.1f  (workspace %.1f, charged %.1f; over the baseline %.1f)\n"
             "    whole run  %7.1f  charged %7.1f  (envelope, margin included)\n"
-            "    ANECompilerService while loading and warming %.1f, reserve %.1f (whole run %.1f)\n",
+            "    ANECompilerService growth while loading and warming %.1f, reserve %.1f (before the load %.1f, "
+            "peak while loading %.1f, whole run %.1f)\n",
             mib(base), mib(b.prepare), mib(c.prepare), mib(b.generate), mib(b.compile), mib(b.load_warm),
             mib(c.load), mib(b.load), mib(b.warm), mib(b.steady), mib(c.resident), mib(workspace),
-            mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane_load_peak.load()),
-            mib(c.ane_reserve), mib(ane_peak.load()));
+            mib(route.workspace_bytes), mib(b.steady_over_base), mib(b.total), mib(c.envelope), mib(ane.growth),
+            mib(c.ane_reserve), mib(ane.before), mib(ane.peak), mib(ane_peak));
     fprintf(stderr,
             "  memory report: {\"chip\":\"%s\",\"units\":\"%s\",\"base\":%llu,\"prepare\":%llu,\"generate\":%llu,"
             "\"compile\":%llu,\"load_warm\":%llu,\"load\":%llu,\"warm\":%llu,\"steady\":%llu,\"steady_over_base\":%llu,\"workspace\":%llu,"
-            "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_peak\":%llu,\"samples\":%zu}\n",
+            "\"total\":%llu,\"ane_compiler_load_peak\":%llu,\"ane_compiler_before_load\":%llu,"
+            "\"ane_compiler_growth\":%llu,\"ane_compiler_peak\":%llu,\"samples\":%zu}\n",
             host_chip().c_str(), route.compute_units.c_str(), (unsigned long long) base,
             (unsigned long long) b.prepare, (unsigned long long) b.generate, (unsigned long long) b.compile,
             (unsigned long long) b.load_warm, (unsigned long long) b.load, (unsigned long long) b.warm,
             (unsigned long long) b.steady, (unsigned long long) b.steady_over_base, (unsigned long long) workspace, (unsigned long long) b.total,
-            (unsigned long long) ane_load_peak.load(), (unsigned long long) ane_peak.load(), samples.size());
-    for (const std::string & f : mem_failures(b, ane_load_peak.load(), c)) check(false, "memory schedule: " + f);
+            (unsigned long long) ane.peak, (unsigned long long) ane.before, (unsigned long long) ane.growth,
+            (unsigned long long) ane_peak, samples.size());
+    for (const std::string & f : mem_failures(b, ane.growth, c)) check(false, "memory schedule: " + f);
     char line[512];
     std::snprintf(line, sizeof(line),
                   "overlapped schedule: %d ggml + %d Core ML calls in %.1f s; footprint base %.1f MiB, peak +%.1f MiB "
-                  "(envelope %.1f MiB, units %s); ANECompilerService peak %.1f MiB",
+                  "(envelope %.1f MiB, units %s); ANECompilerService grew %.1f MiB (peak %.1f MiB)",
                   ggml_calls, coreml_calls, secs, mib(base), mib(b.total), mib(route.envelope_bytes),
-                  route.compute_units.c_str(), mib(ane_peak.load()));
-    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane_load_peak.load(), c).empty(), line);
+                  route.compute_units.c_str(), mib(ane.growth), mib(ane_peak));
+    check(coreml_calls >= 5 && ggml_calls >= 1 && mem_failures(b, ane.growth, c).empty(), line);
     model.dac_pending.reset();
 }
 #endif
