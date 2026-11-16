@@ -1286,15 +1286,18 @@ void case_diarizer_capacities() {
               "require: no_template capacities refuse the pass");
     }
 
-    // Generation off for the whole instance: every template capacity keeps a
-    // status-only slot, and the construction group lists each one as skipped.
-    for (const char * reason : {"no_cache_dir", "generate=never"}) {
+    // Generation off for the whole instance (and Core ML off altogether):
+    // every template capacity keeps a status-only slot, and the construction
+    // group lists each one as skipped.
+    for (const char * reason : {"no_cache_dir", "generate=never", "use=off"}) {
         CoremlOptions o = base;
         o.wait = CoremlOptions::Wait::construct;
         if (std::string(reason) == "no_cache_dir") {
             o.cache_dir = "";
-        } else {
+        } else if (std::string(reason) == "generate=never") {
             o.generate = CoremlOptions::Generate::never;
+        } else {
+            o.use = CoremlOptions::Use::off;
         }
         CoremlSidecars sidecars(o, m);
         CHECK(!sidecars.generation_status().supported && sidecars.generation_status().reason == reason,
@@ -1313,6 +1316,33 @@ void case_diarizer_capacities() {
               (std::string(reason) + ": the construction group lists every capacity under skipped_route_none").c_str());
         CHECK(slots.status_only().size() == 3 && slots.status_only()[0]->status().reason == reason,
               (std::string(reason) + ": the status-only slots say why").c_str());
+    }
+
+    // The fit bytes of the generated capacities, by hand from the toy
+    // template's memory: weight.bin 4064 bytes (runtime weights the same),
+    // I/O (1 x 8 + 1 x 48) fp32 = 224 bytes, generation peak 12288 bytes,
+    // the compile and load peaks at their defaults, margin 1.25:
+    //   resident  = 4064 + 2 x 224 = 4512
+    //   transient = max(12288 + 8 MiB + 4064 / 2, 4064 / 4) = 8402928
+    // 358 and 1125 are generated; 745 is the prebuilt bundle, which this
+    // envelope does not charge.
+    {
+        CoremlSidecars sidecars(base, m);
+        const std::vector<pcm::generation::Candidate> probed =
+            probe_diarizer_templates(sidecars, gguf.string(), ids);
+        const std::vector<CoremlDiarizerCharge> charges =
+            diarizer_fit_charges(sidecars, gguf.string(), diarizer_capacities(prebuilt, template_frames, probed));
+        bool parts = charges.size() == 3;
+        for (const CoremlDiarizerCharge & c : charges) {
+            parts = parts && (c.frames == 745 ? !c.generated && c.resident_bytes == 0 && c.transient_bytes == 0
+                                              : c.generated && c.resident_bytes == 4512 &&
+                                                    c.transient_bytes == 8402928 && c.margin == 1.25);
+        }
+        CHECK(parts, "fit: each generated capacity carries its template's resident part, transient and margin");
+        CHECK(coreml_generated_diarizer_envelope(charges, {}, /*every_capacity=*/true) == 10514940,
+              "fit, prewarm all: ceil((2 x 4512 + 8402928) x 1.25) = 10514940 bytes");
+        CHECK(coreml_generated_diarizer_envelope(charges, {{1, 358}}) == 10509300,
+              "fit, calls up to 358 frames: ceil((4512 + 8402928) x 1.25) = 10509300 bytes");
     }
 
     // The smallest serving capacity is minimal even above a status-only one.
