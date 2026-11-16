@@ -243,19 +243,11 @@ LongFormPlan resolve_long_form_plan(const ParakeetCtcModel & model,
         return normal;
     }
 
-    CoremlShapeKind kind = CoremlShapeKind::none;
-    if (model.model_type == ParakeetModelType::TDT) {
-        kind = CoremlShapeKind::fixed_validated_seams;
-    } else if (model.model_type == ParakeetModelType::CTC ||
-               model.model_type == ParakeetModelType::RNNT) {
-        kind = CoremlShapeKind::fixed;
-    } else if (model.model_type == ParakeetModelType::EOU) {
-        kind = CoremlShapeKind::exact;
-    }
     // The capacity comes from the handle the unit acquired; with a null route
     // this is exactly the ggml-only plan.
     return choose_long_form_plan(normal, opts.long_form_window_frames,
-                                 opts.long_form_context_frames, kind, route.holds(),
+                                 opts.long_form_context_frames,
+                                 coreml_shape_kind_for(model.model_type), route.holds(),
                                  route.geometry().fixed_mel_frames,
                                  route.geometry().seam_context_frames,
                                  model.encoder_cfg.subsampling_factor, n_mel_frames);

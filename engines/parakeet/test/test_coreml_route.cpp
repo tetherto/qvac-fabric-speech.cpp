@@ -258,7 +258,22 @@ void case_tdt_plan_needs_validated_seams() {
     };
     const EncoderRoute standard = held(0);
     const EncoderRoute validated = held(kSeamContext);
-    constexpr CoremlShapeKind kTdt = CoremlShapeKind::fixed_validated_seams;
+
+    // The engine plans with the kind its model family maps to, so a change of
+    // that mapping is caught here, not only by the fixture tests.
+    const CoremlShapeKind kTdt = coreml_shape_kind_for(ParakeetModelType::TDT);
+    CHECK(kTdt == CoremlShapeKind::fixed_validated_seams,
+          "TDT plans fixed windows only with validated seams");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::CTC) == CoremlShapeKind::fixed &&
+              coreml_shape_kind_for(ParakeetModelType::RNNT) == CoremlShapeKind::fixed,
+          "CTC and RNN-T plan fixed windows");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::EOU) == CoremlShapeKind::exact,
+          "EOU plans exact-shape calls only");
+    CHECK(coreml_shape_kind_for(ParakeetModelType::NEMOTRON) == CoremlShapeKind::none &&
+              coreml_shape_kind_for(ParakeetModelType::SORTFORMER) == CoremlShapeKind::none &&
+              coreml_shape_kind_for(ParakeetModelType::NEMOTRON_DIARIZATION) ==
+                  CoremlShapeKind::none,
+          "Nemotron and the diarizers have no long-form Core ML plan");
 
     CHECK(same_plan(routed_plan(standard, kLongMel, kTdt), ggml_plan(kLongMel)),
           "standard TDT sidecar: an oversized input keeps the ggml plan");

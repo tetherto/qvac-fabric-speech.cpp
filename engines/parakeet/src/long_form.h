@@ -19,6 +19,8 @@
 // window-size resolver, and the seam trim + append) so they can be unit-tested
 // without loading a model (see test/test_long_form_windows.cpp).
 
+#include "parakeet_model_type.h"
+
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -450,6 +452,22 @@ enum class CoremlShapeKind {
                             // the ggml plan (resolve_coreml_tdt_shape_plan)
     exact,                  // EOU: exact-shape calls only; oversized input stays on ggml
 };
+
+// The shape contract each model family's encoder sidecar follows. Families
+// without a long-form Core ML plan (Nemotron, the diarizers) get `none`.
+inline CoremlShapeKind coreml_shape_kind_for(ParakeetModelType type) {
+    switch (type) {
+        case ParakeetModelType::TDT:
+            return CoremlShapeKind::fixed_validated_seams;
+        case ParakeetModelType::CTC:
+        case ParakeetModelType::RNNT:
+            return CoremlShapeKind::fixed;
+        case ParakeetModelType::EOU:
+            return CoremlShapeKind::exact;
+        default:
+            return CoremlShapeKind::none;
+    }
+}
 
 // Route-aware long-form choice. `normal` is the ggml
 // plan from resolve_long_form_plan_frames. The Core ML fixed-shape plan is

@@ -8,6 +8,7 @@
 #include "ggml.h"
 #include "mel_preprocess.h"
 #include "parakeet/coreml_options.h"
+#include "parakeet_model_type.h"
 #include "sentencepiece_bpe.h"
 
 #include <atomic>
@@ -342,16 +343,6 @@ int run_nemotron_cache_aware_offline(
         int right_context_frames,
         std::atomic<bool> & cancel_flag,
         NemotronOfflineResult & result);
-
-enum class ParakeetModelType {
-    CTC,
-    RNNT,
-    TDT,
-    EOU,
-    NEMOTRON,
-    SORTFORMER,
-    NEMOTRON_DIARIZATION,
-};
 
 struct NemotronDiarizationConfig {
     int encoder_width = 0;
