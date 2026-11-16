@@ -203,8 +203,11 @@ and no Python runs. The weights are byte-identical to the exporter's fp16
 export of the same GGUF, so a generated sidecar decodes exactly like the
 prebuilt one. Every quantization of a model shares one artifact, since the
 cache key covers only the DAC tensors (F32 in every tier); mini and Indic
-share the template (large-v1's DAC geometry is unverified, and a GGUF that
-does not match runs on ggml with state `no_template`).
+share the template. large-v1's Hugging Face `audio_encoder` config equals
+mini's (`dac_44khZ_8kbps`: latent 1024, 9 codebooks of 1024 entries, 86 Hz
+at 44.1 kHz), so it should share it too, but that stays unverified at the
+tensor level until a converted large-v1 GGUF is checked against the
+template. A GGUF that does not match runs on ggml with state `no_template`.
 
 The sidecar, generated or prebuilt, loads in the background. Until it is
 ready every DAC call decodes on ggml and `SynthesisResult::coreml_pending`
@@ -235,7 +238,9 @@ error and its class), and `Engine::coreml_wait(ms)` blocks until it is ready
 or has failed; it returns false at once while nothing has requested the DAC
 (`prewarm = none` before the first call) or its load waits for memory.
 `Engine::cancel()` also interrupts a call that waits for the sidecar
-(`wait = call` or `use = require`): the synthesis fails as cancelled. With
+(`wait = call` or `use = require`): the synthesis fails as cancelled. It
+ends a `coreml_wait()` in progress too, which then returns false; the
+sidecar keeps loading, and the next `coreml_wait()` waits for it again. With
 `prewarm = none` the constructor issues nothing, so `wait = construct` does
 not wait and `use = require` fails only when a call cannot be served.
 
@@ -263,14 +268,19 @@ reads the cache, so fit is the same before and after the first generation.
 Memory validation (M2, 24 GB, macOS 15.7.3, compute units `all`,
 `test-parler-dac-coreml --memory-schedule`): ggml DAC decodes ran on the
 calling thread while the sidecar was generated, compiled, loaded and warmed
-in the background from an empty cache. Over three runs the process footprint
+in the background from an empty cache. Over four runs the process footprint
 rose at most 229 MiB above the warm ggml baseline, against a charged envelope
-of 475 MiB. `ANECompilerService` peaked at 360-497 MiB across four cold
+of 475 MiB. `ANECompilerService` peaked at 360-497 MiB across those four cold
 Neural Engine compiles, up to 4.8 times the 103 MiB `weight.bin` (well above
 the runtime's 1.6 times default), so the template sets
 `ane_compile_reserve_bytes` to 512 MiB: the runtime starts a cold Neural
 Engine load only while that much memory is available, and the DAC stays on
-ggml (state `deferred(memory)`) until it is.
+ggml (state `deferred(memory)`) until it is. On macOS 27.2.1 (26B131) the
+same M2 measures a larger increment, 459-462 MiB over three runs
+(`ANECompilerService` 383-472 MiB): still inside the envelope, but by only
+14-16 MiB. CI runs the same schedule on its M4 Max, where `all` puts most of
+the program on the GPU (below), against the same envelope; `validated_for`
+still records only the M2 on macOS 15.7.3.
 
 Generated-sidecar accuracy (mini `q8_0`, compute units `all`, fp16, on an
 empty cache; the generated `weight.bin` is byte-identical to the exporter's
@@ -281,16 +291,24 @@ export of the same GGUF):
 | random codes, 265 frames (3 windows), vs ggml CPU | 56.2 dB | 1.7e-3 |
 | random codes, 42 frames (one partial window), vs ggml CPU | 56.4 dB | 1.2e-3 |
 | random codes, 1 frame, vs ggml CPU | 53.3 dB | 1.5e-3 |
+| HF reference `case0` (greedy codes, 4.9 s), vs the PyTorch fp32 wav (macOS 27.2.1) | 49.7 dB | 1.4e-3 |
 
 CI generates the sidecar from a staged `parler-mini-v1-q8_0.gguf` on every
-pull request and holds the multi-frame cases to 54 dB
-(`test-parler-dac-coreml --cache-dir DIR --min-snr 54 --require-coreml`),
-except on chips with a measured floor under `all` (below); a one-frame
-decode is held to 45 dB. With `--ref-dir`, the HF reference check uses
-`--min-speech-snr` (default 45 dB).
+pull request (`test-parler-dac-coreml --cache-dir DIR --memory-schedule DIR2
+--min-snr 54 --require-coreml --units-sweep`). Its runner is an Apple M4 Max,
+a chip with a recorded floor under `all` (below), so CI holds `all` to 50 dB
+and the same artifact under `cpu_and_ane` to 54 dB. The 54 dB gate under
+`all` on the M2 comes from the device run of the same command, not from CI.
+A one-frame decode is held to 45 dB. With `--ref-dir` (the `case0_*.npy`
+fixtures `scripts/parler/dump-reference.py` writes from the Hugging Face
+checkpoint), the HF reference check uses `--min-speech-snr` (default 45 dB).
+It runs only on a device with the fixtures, not in CI; the M2 (macOS 27.2.1)
+measures 49.7 dB.
 
 `--units-sweep` also prints the same artifact's SNR for every compute-unit
-policy (report only). Random codes, 265 / 42 / 1 frames, vs ggml CPU:
+policy. The rows are reported only, except that on a chip with a floor the
+`cpu_and_ane` row is held to `--min-snr`. Random codes, 265 / 42 / 1 frames,
+vs ggml CPU:
 
 | Host | `cpu_only` | `cpu_and_gpu` | `cpu_and_ane` | `all` |
 |---|--:|--:|--:|--:|
@@ -327,9 +345,13 @@ more accurate one. `specializationStrategy = fastPrediction` does not change
 the M4 Max figures. The template therefore keeps `all`, and the test holds
 the M4 Max to a recorded 50 dB floor under `all`
 (`GENERATED_ALL_UNITS_FLOORS` in `test/parler/test_dac_coreml.cpp`, keyed
-on `sysctl machdep.cpu.brand_string`). Every other chip is held to
-`--min-snr`. On the M4 Max, `cpu_and_ane` holds 54 dB at about twice the
-`all` window time.
+on `sysctl machdep.cpu.brand_string`, matched exactly). Every other chip is
+held to `--min-snr`. The floor expires: the test fails once every
+multi-frame case on a floored chip reaches `--min-snr`, so the row is
+removed. On the M4 Max the same artifact under `cpu_and_ane` holds 54 dB at
+about twice the `all` window time, but the engine does not generate for
+`cpu_and_ane`: compute-unit policies other than `all` are not generated
+until their memory envelope is validated (see the fit envelope above).
 
 | Environment | Effect |
 |---|---|

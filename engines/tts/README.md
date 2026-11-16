@@ -146,7 +146,9 @@ synthesis runs on the ggml DAC until it is ready. Its accuracy against the
 ggml DAC depends on how Core ML partitions it on the chip: 56 dB on an M2,
 where `all` runs it on the Neural Engine; 51 dB on an M4 Max, where `all`
 runs most of it on the GPU and the output stage on the Neural Engine. CI
-holds the M2 to 54 dB and the M4 Max to 50 dB. See
+runs on an M4 Max: it holds `all` to that chip's recorded 50 dB floor and
+the same sidecar under `cpu_and_ane` to 54 dB. The M2's 54 dB gate under
+`all` is checked by the device run, not by CI. See
 [Parler-TTS generated sidecar](docs/parler.md#generated-sidecar-and-background-loading).
 
 CosyVoice3 HiFT sidecars use FP32 for waveform parity. With enabled Chatterbox,
