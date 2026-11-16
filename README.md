@@ -149,6 +149,8 @@ The [full-EU guide](engines/parakeet/docs/transcribepsy-eu-coreml.md#export-and-
 provides the conversion command and recommends explicit FP16 encoders/decoder
 as the baseline, with six-bit encoders for smaller deployments. It also documents
 the current eager route loading and duplicated weights, plus possible optimizations.
+An [experimental route-sharing harness](engines/parakeet/docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+can measure those alternatives separately from the deployed runtime.
 
 MiniMax's full Core ML route is also exposed through its public C++ engine.
 Build with `AUDIOGEN_MINIMAX_COREML=ON` and supply both `coreml_profile_dir` and

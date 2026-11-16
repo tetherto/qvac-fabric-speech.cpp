@@ -109,6 +109,9 @@ command. The recommended full-EU baseline uses explicit FP16 encoders and decode
 six-bit encoders reduce deployment size with the documented quality trade-off.
 Fixed ANE routes currently load eagerly and duplicate trunk weights; the guide
 also describes possible size and startup optimizations.
+An [experimental export harness](docs/transcribepsy-eu-coreml.md#trying-route-sharing-exports)
+compares loading subsets, shared-weight multifunction packages and a route-input
+encoder; these prototypes are separate from runtime sidecar support.
 
 
 Optional Apple sidecars support eligible CTC, IndicConformer, Unified RNN-T,
